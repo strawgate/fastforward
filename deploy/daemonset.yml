@@ -1,0 +1,50 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: logfwd
+  namespace: collectors
+  labels:
+    app: logfwd
+spec:
+  selector:
+    matchLabels:
+      app: logfwd
+  template:
+    metadata:
+      labels:
+        app: logfwd
+    spec:
+      serviceAccountName: logfwd
+      containers:
+        - name: logfwd
+          image: logfwd:latest
+          imagePullPolicy: IfNotPresent
+          args:
+            - "--daemon"
+            - "--glob"
+            - "/var/log/containers/*log-generator*.log"
+            - "--endpoint"
+            - "http://log-verifier.monitoring.svc.cluster.local.:8080/insert/jsonline"
+            - "--collector"
+            - "logfwd"
+          resources:
+            requests:
+              cpu: "1"
+              memory: "1Gi"
+            limits:
+              cpu: "1"
+              memory: "1Gi"
+          volumeMounts:
+            - name: varlog
+              mountPath: /var/log
+              readOnly: true
+      volumes:
+        - name: varlog
+          hostPath:
+            path: /var/log
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: logfwd
+  namespace: collectors

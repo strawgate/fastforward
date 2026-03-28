@@ -1,0 +1,44 @@
+# Integration with VictoriaMetrics log-collectors-benchmark
+# Run from the memagent repo root:
+#   make -f deploy/Makefile bench-up-logfwd
+#   make -f deploy/Makefile bench-down-logfwd
+
+CLUSTER_NAME ?= log-collectors-bench
+
+build-logfwd:
+	docker build -t logfwd:latest .
+	kind load docker-image --name $(CLUSTER_NAME) logfwd:latest
+
+bench-up-logfwd: build-logfwd
+	kubectl create namespace collectors 2>/dev/null || true
+	kubectl apply -f deploy/daemonset.yml
+
+bench-down-logfwd:
+	kubectl delete -f deploy/daemonset.yml 2>/dev/null || true
+
+# Quick test: verify the daemon starts and connects
+test-logfwd:
+	kubectl logs -n collectors -l app=logfwd --tail=20
+
+# Full benchmark workflow (assumes VM benchmark repo is cloned at /tmp/vm-bench):
+#
+# 1. Start the VM benchmark infrastructure:
+#    cd /tmp/vm-bench && make bench-up-monitoring
+#
+# 2. Deploy all VM benchmark collectors:
+#    cd /tmp/vm-bench && make bench-up-collectors
+#
+# 3. Deploy our collector:
+#    make -f deploy/Makefile bench-up-logfwd
+#
+# 4. Start the log generator with ramp-up:
+#    cd /tmp/vm-bench && make bench-up-generator RAMP_UP_STEP=5 RAMP_UP_STEP_INTERVAL=1s GENERATOR_REPLICAS=10
+#
+# 5. Watch Grafana:
+#    kubectl port-forward -n monitoring svc/vms-grafana 3000:80
+#    Open http://localhost:3000 (admin/admin)
+#
+# 6. Cleanup:
+#    cd /tmp/vm-bench && make bench-down-generator
+#    make -f deploy/Makefile bench-down-logfwd
+#    cd /tmp/vm-bench && make bench-down-all

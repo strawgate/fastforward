@@ -1,0 +1,34 @@
+[package]
+name = "logfwd"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+dhat-heap = ["dhat"]  # enable with: cargo run --release --features dhat-heap
+
+[dependencies]
+memchr = "2"
+zstd = "0.13"
+xxhash-rust = { version = "0.8", features = ["xxh32", "xxh64"] }
+notify = "7"
+crossbeam-channel = "0.5"
+ureq = "3"
+dhat = { version = "0.3", optional = true }
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+rand = "0.9"
+tempfile = "3"
+
+[[bench]]
+name = "pipeline"
+harness = false
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+debug = true  # needed for flamegraphs and dhat to show source locations
+
+[profile.bench]
+inherits = "release"
