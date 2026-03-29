@@ -66,9 +66,19 @@ pub struct PipelineMetrics {
     pub transform_sql: String,
     pub transform_in: Arc<ComponentStats>,
     pub transform_out: Arc<ComponentStats>,
+    pub transform_errors: AtomicU64,
     /// (name, type, stats)
     pub outputs: Vec<(String, String, Arc<ComponentStats>)>,
     pub backpressure_stalls: AtomicU64,
+    // Batch-level metrics
+    pub batches_total: AtomicU64,
+    pub batch_rows_total: AtomicU64,
+    pub flush_by_size: AtomicU64,
+    pub flush_by_timeout: AtomicU64,
+    // Per-stage cumulative timing (nanoseconds)
+    pub scan_nanos_total: AtomicU64,
+    pub transform_nanos_total: AtomicU64,
+    pub output_nanos_total: AtomicU64,
 }
 
 impl PipelineMetrics {
@@ -79,8 +89,16 @@ impl PipelineMetrics {
             transform_sql: transform_sql.into(),
             transform_in: Arc::new(ComponentStats::new()),
             transform_out: Arc::new(ComponentStats::new()),
+            transform_errors: AtomicU64::new(0),
             outputs: Vec::new(),
             backpressure_stalls: AtomicU64::new(0),
+            batches_total: AtomicU64::new(0),
+            batch_rows_total: AtomicU64::new(0),
+            flush_by_size: AtomicU64::new(0),
+            flush_by_timeout: AtomicU64::new(0),
+            scan_nanos_total: AtomicU64::new(0),
+            transform_nanos_total: AtomicU64::new(0),
+            output_nanos_total: AtomicU64::new(0),
         }
     }
 
@@ -104,6 +122,14 @@ impl PipelineMetrics {
         self.outputs
             .push((name.into(), typ.into(), Arc::clone(&stats)));
         stats
+    }
+
+    /// Increment error counter on all outputs (used when a FanOut or single
+    /// sink fails — we don't know which one, so count it on all).
+    pub fn output_error(&self) {
+        for (_, _, stats) in &self.outputs {
+            stats.inc_errors();
+        }
     }
 }
 
@@ -248,15 +274,34 @@ impl DiagnosticsServer {
                 })
                 .collect();
 
+            let batches = pm.batches_total.load(Ordering::Relaxed);
+            let batch_rows = pm.batch_rows_total.load(Ordering::Relaxed);
+            let avg_rows = if batches > 0 {
+                batch_rows as f64 / batches as f64
+            } else {
+                0.0
+            };
+            let scan_s = pm.scan_nanos_total.load(Ordering::Relaxed) as f64 / 1e9;
+            let transform_s = pm.transform_nanos_total.load(Ordering::Relaxed) as f64 / 1e9;
+            let output_s = pm.output_nanos_total.load(Ordering::Relaxed) as f64 / 1e9;
+
             pipelines_json.push(format!(
-                r#"{{"name":"{}","inputs":[{}],"transform":{{"sql":"{}","lines_in":{},"lines_out":{},"filter_drop_rate":{:.3}}},"outputs":[{}]}}"#,
+                r#"{{"name":"{}","inputs":[{}],"transform":{{"sql":"{}","lines_in":{},"lines_out":{},"errors":{},"filter_drop_rate":{:.3}}},"outputs":[{}],"batches":{{"total":{},"avg_rows":{:.1},"flush_by_size":{},"flush_by_timeout":{}}},"stage_seconds":{{"scan":{:.6},"transform":{:.6},"output":{:.6}}}}}"#,
                 esc(&pm.name),
                 inputs_json.join(","),
                 esc(&pm.transform_sql),
                 lines_in,
                 lines_out,
+                pm.transform_errors.load(Ordering::Relaxed),
                 drop_rate,
                 outputs_json.join(","),
+                batches,
+                avg_rows,
+                pm.flush_by_size.load(Ordering::Relaxed),
+                pm.flush_by_timeout.load(Ordering::Relaxed),
+                scan_s,
+                transform_s,
+                output_s,
             ));
         }
 
@@ -368,6 +413,80 @@ impl DiagnosticsServer {
             }
         }
 
+        // Transform errors
+        out.push_str("\n# HELP logfwd_transform_errors_total SQL transform execution errors\n");
+        out.push_str("# TYPE logfwd_transform_errors_total counter\n");
+        for pm in &self.pipelines {
+            out.push_str(&format!(
+                "logfwd_transform_errors_total{{pipeline=\"{}\"}} {}\n",
+                esc(&pm.name),
+                pm.transform_errors.load(Ordering::Relaxed),
+            ));
+        }
+
+        // Batch metrics
+        out.push_str("\n# HELP logfwd_batches_total Total batches processed\n");
+        out.push_str("# TYPE logfwd_batches_total counter\n");
+        for pm in &self.pipelines {
+            out.push_str(&format!(
+                "logfwd_batches_total{{pipeline=\"{}\"}} {}\n",
+                esc(&pm.name),
+                pm.batches_total.load(Ordering::Relaxed),
+            ));
+        }
+
+        out.push_str("\n# HELP logfwd_batch_rows_total Total rows across all batches\n");
+        out.push_str("# TYPE logfwd_batch_rows_total counter\n");
+        for pm in &self.pipelines {
+            out.push_str(&format!(
+                "logfwd_batch_rows_total{{pipeline=\"{}\"}} {}\n",
+                esc(&pm.name),
+                pm.batch_rows_total.load(Ordering::Relaxed),
+            ));
+        }
+
+        // Flush reason
+        out.push_str("\n# HELP logfwd_flush_reason_total Batch flushes by trigger reason\n");
+        out.push_str("# TYPE logfwd_flush_reason_total counter\n");
+        for pm in &self.pipelines {
+            out.push_str(&format!(
+                "logfwd_flush_reason_total{{pipeline=\"{}\",reason=\"size\"}} {}\n",
+                esc(&pm.name),
+                pm.flush_by_size.load(Ordering::Relaxed),
+            ));
+            out.push_str(&format!(
+                "logfwd_flush_reason_total{{pipeline=\"{}\",reason=\"timeout\"}} {}\n",
+                esc(&pm.name),
+                pm.flush_by_timeout.load(Ordering::Relaxed),
+            ));
+        }
+
+        // Stage latency (cumulative seconds — divide by batches_total for avg)
+        out.push_str(
+            "\n# HELP logfwd_stage_seconds_total Cumulative time spent in each pipeline stage\n",
+        );
+        out.push_str("# TYPE logfwd_stage_seconds_total counter\n");
+        for pm in &self.pipelines {
+            let scan_s = pm.scan_nanos_total.load(Ordering::Relaxed) as f64 / 1e9;
+            let transform_s = pm.transform_nanos_total.load(Ordering::Relaxed) as f64 / 1e9;
+            let output_s = pm.output_nanos_total.load(Ordering::Relaxed) as f64 / 1e9;
+            out.push_str(&format!(
+                "logfwd_stage_seconds_total{{pipeline=\"{}\",stage=\"scan\"}} {:.6}\n",
+                esc(&pm.name),
+                scan_s,
+            ));
+            out.push_str(&format!(
+                "logfwd_stage_seconds_total{{pipeline=\"{}\",stage=\"transform\"}} {:.6}\n",
+                esc(&pm.name),
+                transform_s,
+            ));
+            out.push_str(&format!(
+                "logfwd_stage_seconds_total{{pipeline=\"{}\",stage=\"output\"}} {:.6}\n",
+                esc(&pm.name),
+                output_s,
+            ));
+        }
+
         // Backpressure stalls
         out.push_str(
             "\n# HELP logfwd_backpressure_stalls_total Times reader blocked on full channel\n",
@@ -441,6 +560,17 @@ mod tests {
         out.inc_bytes(30000);
         out.inc_errors();
         out.inc_errors();
+
+        // Batch-level metrics.
+        pm.batches_total.store(50, Ordering::Relaxed);
+        pm.batch_rows_total.store(4500, Ordering::Relaxed);
+        pm.flush_by_size.store(30, Ordering::Relaxed);
+        pm.flush_by_timeout.store(20, Ordering::Relaxed);
+        pm.scan_nanos_total.store(100_000_000, Ordering::Relaxed); // 0.1s
+        pm.transform_nanos_total
+            .store(500_000_000, Ordering::Relaxed); // 0.5s
+        pm.output_nanos_total.store(200_000_000, Ordering::Relaxed); // 0.2s
+        pm.transform_errors.store(3, Ordering::Relaxed);
 
         let mut server = DiagnosticsServer::new(&format!("127.0.0.1:{}", port));
         server.add_pipeline(Arc::new(pm));
@@ -561,9 +691,57 @@ mod tests {
             "body: {}",
             body,
         );
+
+        // New batch/stage metrics.
+        assert!(
+            body.contains(r#"logfwd_batches_total{pipeline="default"} 50"#),
+            "body: {}",
+            body,
+        );
+        assert!(
+            body.contains(r#"logfwd_batch_rows_total{pipeline="default"} 4500"#),
+            "body: {}",
+            body,
+        );
+        assert!(
+            body.contains(r#"logfwd_flush_reason_total{pipeline="default",reason="size"} 30"#),
+            "body: {}",
+            body,
+        );
+        assert!(
+            body.contains(r#"logfwd_flush_reason_total{pipeline="default",reason="timeout"} 20"#),
+            "body: {}",
+            body,
+        );
+        assert!(
+            body.contains(r#"logfwd_transform_errors_total{pipeline="default"} 3"#),
+            "body: {}",
+            body,
+        );
+        assert!(
+            body.contains(r#"logfwd_stage_seconds_total{pipeline="default",stage="scan"} 0.1"#),
+            "body: {}",
+            body,
+        );
+        assert!(
+            body.contains(
+                r#"logfwd_stage_seconds_total{pipeline="default",stage="transform"} 0.5"#
+            ),
+            "body: {}",
+            body,
+        );
+        assert!(
+            body.contains(r#"logfwd_stage_seconds_total{pipeline="default",stage="output"} 0.2"#),
+            "body: {}",
+            body,
+        );
+
         // Check HELP/TYPE metadata present.
         assert!(body.contains("# HELP logfwd_input_lines_total"));
         assert!(body.contains("# TYPE logfwd_input_lines_total counter"));
+        assert!(body.contains("# HELP logfwd_stage_seconds_total"));
+        assert!(body.contains("# HELP logfwd_batches_total"));
+        assert!(body.contains("# HELP logfwd_flush_reason_total"));
     }
 
     #[test]
@@ -580,6 +758,11 @@ mod tests {
         assert!(body.contains(r#""lines_total":1000"#), "body: {}", body);
         assert!(body.contains(r#""lines_in":1000"#), "body: {}", body);
         assert!(body.contains(r#""lines_out":900"#), "body: {}", body);
+        assert!(body.contains(r#""errors":3"#), "body: {}", body);
+        assert!(body.contains(r#""total":50"#), "body: {}", body);
+        assert!(body.contains(r#""avg_rows":90.0"#), "body: {}", body);
+        assert!(body.contains(r#""flush_by_size":30"#), "body: {}", body);
+        assert!(body.contains(r#""flush_by_timeout":20"#), "body: {}", body);
         assert!(body.contains(r#""version":"0.2.0""#), "body: {}", body);
     }
 
