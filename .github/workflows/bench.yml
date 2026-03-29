@@ -24,6 +24,8 @@ jobs:
           cache-on-failure: true
 
       - name: Run benchmarks
+        env:
+          CARGO_TERM_COLOR: never
         run: cargo bench -p logfwd-bench 2>&1 | tee bench_raw.txt
 
       - name: Parse results
@@ -32,30 +34,38 @@ jobs:
           import sys, re
           from collections import defaultdict
 
+          # Strip ANSI escape codes from criterion output
+          ansi_re = re.compile(r'\x1b\[[0-9;]*m')
+
           groups = defaultdict(list)
           current_name = None
+          in_change = False  # True when inside a "change:" block (skip those lines)
 
-          for line in sys.stdin:
-              line = line.rstrip()
+          for raw_line in sys.stdin:
+              line = ansi_re.sub('', raw_line).rstrip()
+
+              # Detect "change:" block — skip time/thrpt lines that follow it
+              if re.match(r'^\s+change:', line):
+                  in_change = True
+                  continue
 
               # Criterion prints the benchmark name on its own line, e.g.:
               #   scanner/scan_all_fields/1000
-              # followed by time/thrpt lines indented with spaces.
-              name_match = re.match(r'^(\S+/\S+)', line)
-              if name_match and 'time:' not in line and 'thrpt:' not in line:
+              #   transform/select_star
+              name_match = re.match(r'^(\w+/\S+)', line)
+              if name_match:
                   current_name = name_match.group(1)
+                  in_change = False
                   continue
 
-              if current_name is None:
+              if current_name is None or in_change:
                   continue
 
               # Parse: time:   [229.56 µs 230.07 µs 230.57 µs]
               time_match = re.search(r'time:\s+\[([\d.]+)\s+(ns|µs|ms|s)\s+([\d.]+)\s+(ns|µs|ms|s)\s+([\d.]+)\s+(ns|µs|ms|s)\]', line)
-              if time_match and 'change' not in line and '%' not in line:
+              if time_match:
                   median = float(time_match.group(3))
                   unit = time_match.group(4)
-
-                  # Also look for throughput on the next-ish line — store time for now
                   parts = current_name.split('/')
                   group = parts[0]
                   bench_name = '/'.join(parts[1:])
@@ -71,7 +81,7 @@ jobs:
 
               # Parse: thrpt:  [757.25 MiB/s 758.91 MiB/s 760.61 MiB/s]
               thrpt_match = re.search(r'thrpt:\s+\[[\d.]+ \S+ ([\d.]+) (\S+) [\d.]+ \S+\]', line)
-              if thrpt_match and 'change' not in line and '%' not in line:
+              if thrpt_match:
                   if groups:
                       last_group = list(groups.values())[-1]
                       if last_group:
