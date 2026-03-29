@@ -10,7 +10,10 @@
 //!
 //!   --lines N        Number of JSON log lines to generate (default: 5_000_000)
 //!   --agents A,B,C   Comma-separated agents to run (default: all available)
+//!   --scenarios S,S  Scenarios to run (default: passthrough)
+//!                    Available: passthrough, json_parse, filter
 //!   --markdown       Output results as markdown table
+//!   --json           Output structured JSON (for CI dashboards)
 //!   --no-download        Only use agents already on PATH (binary mode only)
 //!   --docker             Run agents in Docker containers with resource limits
 //!   --cpus N             CPU limit per container (default: 1, Docker mode only)
@@ -30,7 +33,7 @@ use std::process;
 
 use runner::{BenchContext, BenchResult, DockerLimits};
 
-use crate::agents::{Agent, all_agents};
+use crate::agents::{Agent, Scenario, all_agents};
 
 fn main() {
     let args = Args::parse();
@@ -191,40 +194,75 @@ fn main() {
         lines: args.lines,
     };
 
-    // Run benchmarks.
+    // Run benchmarks across all scenarios.
     let mut results: Vec<BenchResult> = Vec::new();
-    for resolved in &available {
-        let result = if let Some(image) = &resolved.image {
-            runner::run_agent_docker(resolved.agent, image, &ctx, &blackhole, &args.docker_limits)
-        } else if let Some(binary) = &resolved.binary {
-            runner::run_agent(resolved.agent, binary, &ctx, &blackhole)
-        } else {
-            Err("no binary or image available".to_string())
-        };
+    for scenario in &args.scenarios {
+        eprintln!(
+            "=== Scenario: {} ({}) ===",
+            scenario.name(),
+            scenario.description()
+        );
+        eprintln!();
 
-        match result {
-            Ok(r) => {
-                print_result_stderr(&r, args.lines);
-                results.push(r);
-            }
-            Err(e) => {
-                eprintln!("--- {} ---", resolved.agent.name());
-                eprintln!("  ERROR: {e}");
+        for resolved in &available {
+            // vlagent only supports passthrough (CLI-flag based, no transform support).
+            if *scenario != Scenario::Passthrough && resolved.agent.name() == "vlagent" {
+                eprintln!(
+                    "--- {} --- (skipped: {} not supported)",
+                    resolved.agent.name(),
+                    scenario.name()
+                );
                 eprintln!();
-                results.push(BenchResult {
-                    name: resolved.agent.name().to_string(),
-                    lines_done: 0,
-                    elapsed_ms: 0,
-                });
+                continue;
+            }
+
+            let result = if let Some(image) = &resolved.image {
+                runner::run_agent_docker(
+                    resolved.agent,
+                    image,
+                    &ctx,
+                    &blackhole,
+                    &args.docker_limits,
+                    *scenario,
+                )
+            } else if let Some(binary) = &resolved.binary {
+                runner::run_agent(resolved.agent, binary, &ctx, &blackhole, *scenario)
+            } else {
+                Err("no binary or image available".to_string())
+            };
+
+            match result {
+                Ok(r) => {
+                    print_result_stderr(&r, args.lines);
+                    results.push(r);
+                }
+                Err(e) => {
+                    eprintln!("--- {} ---", resolved.agent.name());
+                    eprintln!("  ERROR: {e}");
+                    eprintln!();
+                    results.push(BenchResult {
+                        name: resolved.agent.name().to_string(),
+                        scenario: *scenario,
+                        lines_done: 0,
+                        elapsed_ms: 0,
+                    });
+                }
             }
         }
     }
 
     // Output summary.
-    if args.markdown {
+    if args.json {
+        print_json(&results, args.lines, file_size, &args);
+    } else if args.markdown {
         print_markdown(&results, args.lines, file_size, &args);
     } else {
         print_table(&results, args.lines, file_size);
+    }
+
+    // Optionally write JSON to a file (can be combined with any output mode).
+    if let Some(ref json_path) = args.json_file {
+        write_json_file(&results, args.lines, file_size, &args, json_path);
     }
 
     // Profiling pass (logfwd only).
@@ -394,67 +432,214 @@ fn print_result_stderr(result: &BenchResult, total_lines: usize) {
 
 fn print_markdown(results: &[BenchResult], lines: usize, file_size: u64, args: &Args) {
     let mb = file_size as f64 / 1_048_576.0;
-    if args.docker {
-        println!(
-            "### Competitive Throughput ({lines} lines, {mb:.1} MB, Docker: {} CPU / {} RAM)\n",
-            args.docker_limits.cpus, args.docker_limits.memory
-        );
-    } else {
-        println!("### Competitive Throughput ({lines} lines, {mb:.1} MB)\n");
-    }
-    println!("| Agent | Time | Throughput |");
-    println!("|-------|-----:|-----------:|");
-    for r in results {
-        let rate = if r.lines_done == 0 && r.elapsed_ms == 0 {
-            "FAILED".to_string()
-        } else {
-            fmt_rate(lines, r.elapsed_ms)
-        };
-        println!("| {} | {}ms | {} |", r.name, r.elapsed_ms, rate);
-    }
 
-    if results.len() > 1 && results[0].elapsed_ms > 0 {
-        println!();
-        let base = &results[0];
-        for r in &results[1..] {
-            if r.elapsed_ms > 0 {
-                let ratio = r.elapsed_ms as f64 / base.elapsed_ms as f64;
-                println!(
-                    "> **{}** is **{:.1}x faster** than {}",
-                    base.name, ratio, r.name
-                );
+    // Group results by scenario.
+    for scenario in &args.scenarios {
+        let scenario_results: Vec<&BenchResult> =
+            results.iter().filter(|r| r.scenario == *scenario).collect();
+        if scenario_results.is_empty() {
+            continue;
+        }
+
+        if args.docker {
+            println!(
+                "### {} ({lines} lines, {mb:.1} MB, Docker: {} CPU / {} RAM)\n",
+                scenario.description(),
+                args.docker_limits.cpus,
+                args.docker_limits.memory
+            );
+        } else {
+            println!(
+                "### {} ({lines} lines, {mb:.1} MB)\n",
+                scenario.description()
+            );
+        }
+        println!("| Agent | Time | Throughput |");
+        println!("|-------|-----:|-----------:|");
+        for r in &scenario_results {
+            let rate = if r.lines_done == 0 && r.elapsed_ms == 0 {
+                "FAILED".to_string()
+            } else {
+                fmt_rate(lines, r.elapsed_ms)
+            };
+            println!("| {} | {}ms | {} |", r.name, r.elapsed_ms, rate);
+        }
+
+        if scenario_results.len() > 1 && scenario_results[0].elapsed_ms > 0 {
+            println!();
+            let base = scenario_results[0];
+            for r in &scenario_results[1..] {
+                if r.elapsed_ms > 0 {
+                    let ratio = r.elapsed_ms as f64 / base.elapsed_ms as f64;
+                    println!(
+                        "> **{}** is **{:.1}x faster** than {}",
+                        base.name, ratio, r.name
+                    );
+                }
             }
         }
+        println!();
+    }
+}
+
+fn print_json(results: &[BenchResult], lines: usize, file_size: u64, args: &Args) {
+    println!("{}", build_json_report(results, lines, file_size, args));
+}
+
+fn build_json_report(results: &[BenchResult], lines: usize, file_size: u64, args: &Args) -> String {
+    #[derive(serde::Serialize)]
+    struct JsonReport<'a> {
+        timestamp: String,
+        commit: String,
+        lines: usize,
+        file_size_bytes: u64,
+        docker: bool,
+        cpus: &'a str,
+        memory: &'a str,
+        results: &'a [BenchResult],
+    }
+
+    let commit = std::env::var("GITHUB_SHA")
+        .or_else(|_| {
+            std::process::Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        })
+        .unwrap_or_default();
+
+    let report = JsonReport {
+        timestamp: utc_timestamp(),
+        commit,
+        lines,
+        file_size_bytes: file_size,
+        docker: args.docker,
+        cpus: &args.docker_limits.cpus,
+        memory: &args.docker_limits.memory,
+        results,
+    };
+
+    serde_json::to_string_pretty(&report).unwrap()
+}
+
+/// Returns current UTC time as ISO 8601 string.
+fn utc_timestamp() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let dur = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = dur.as_secs();
+    // Manual UTC breakdown — no external crate needed.
+    let days = secs / 86400;
+    let time_secs = secs % 86400;
+    let h = time_secs / 3600;
+    let m = (time_secs % 3600) / 60;
+    let s = time_secs % 60;
+    // Days since 1970-01-01 → year/month/day.
+    let (y, mo, d) = days_to_ymd(days);
+    format!("{y:04}-{mo:02}-{d:02}T{h:02}:{m:02}:{s:02}Z")
+}
+
+fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
+    // Civil calendar conversion from days since epoch.
+    let mut y = 1970;
+    loop {
+        let yd = if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) {
+            366
+        } else {
+            365
+        };
+        if days < yd {
+            break;
+        }
+        days -= yd;
+        y += 1;
+    }
+    let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+    let mdays = [
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    let mut mo = 0;
+    for md in &mdays {
+        if days < *md {
+            break;
+        }
+        days -= md;
+        mo += 1;
+    }
+    (y, mo + 1, days + 1)
+}
+
+fn write_json_file(
+    results: &[BenchResult],
+    lines: usize,
+    file_size: u64,
+    args: &Args,
+    path: &std::path::Path,
+) {
+    let json = build_json_report(results, lines, file_size, args);
+    match std::fs::write(path, json) {
+        Ok(()) => eprintln!("JSON results written to {}", path.display()),
+        Err(e) => eprintln!("ERROR: failed to write JSON to {}: {e}", path.display()),
     }
 }
 
 fn print_table(results: &[BenchResult], lines: usize, file_size: u64) {
     let mb = file_size as f64 / 1_048_576.0;
-    println!("===========================================");
-    println!("  RESULTS ({lines} lines, {mb:.1} MB)");
-    println!("===========================================");
-    println!("  {:<16} {:>10} {:>20}", "Agent", "Time", "Throughput");
-    println!("  {:<16} {:>10} {:>20}", "-----", "----", "----------");
 
-    for r in results {
-        let rate = if r.lines_done == 0 && r.elapsed_ms == 0 {
-            "FAILED".to_string()
-        } else {
-            fmt_rate(lines, r.elapsed_ms)
-        };
-        println!("  {:<16} {:>8}ms {:>20}", r.name, r.elapsed_ms, rate);
-    }
-    println!("===========================================");
-
-    if results.len() > 1 && results[0].elapsed_ms > 0 {
-        println!();
-        let base = &results[0];
-        for r in &results[1..] {
-            if r.elapsed_ms > 0 {
-                let ratio = r.elapsed_ms as f64 / base.elapsed_ms as f64;
-                println!("  {} is {:.1}x vs {}", base.name, ratio, r.name);
+    // Collect unique scenarios from results.
+    let scenarios: Vec<Scenario> = {
+        let mut seen = Vec::new();
+        for r in results {
+            if !seen.contains(&r.scenario) {
+                seen.push(r.scenario);
             }
         }
+        seen
+    };
+
+    for scenario in &scenarios {
+        let scenario_results: Vec<&BenchResult> =
+            results.iter().filter(|r| r.scenario == *scenario).collect();
+
+        println!("===========================================");
+        println!("  {} ({lines} lines, {mb:.1} MB)", scenario.description());
+        println!("===========================================");
+        println!("  {:<16} {:>10} {:>20}", "Agent", "Time", "Throughput");
+        println!("  {:<16} {:>10} {:>20}", "-----", "----", "----------");
+
+        for r in &scenario_results {
+            let rate = if r.lines_done == 0 && r.elapsed_ms == 0 {
+                "FAILED".to_string()
+            } else {
+                fmt_rate(lines, r.elapsed_ms)
+            };
+            println!("  {:<16} {:>8}ms {:>20}", r.name, r.elapsed_ms, rate);
+        }
+        println!("===========================================");
+
+        if scenario_results.len() > 1 && scenario_results[0].elapsed_ms > 0 {
+            println!();
+            let base = scenario_results[0];
+            for r in &scenario_results[1..] {
+                if r.elapsed_ms > 0 {
+                    let ratio = r.elapsed_ms as f64 / base.elapsed_ms as f64;
+                    println!("  {} is {:.1}x vs {}", base.name, ratio, r.name);
+                }
+            }
+        }
+        println!();
     }
 }
 
@@ -465,7 +650,11 @@ fn print_table(results: &[BenchResult], lines: usize, file_size: u64) {
 struct Args {
     lines: usize,
     agents: Vec<String>,
+    scenarios: Vec<Scenario>,
     markdown: bool,
+    json: bool,
+    /// Write JSON results to a file (can be combined with --markdown).
+    json_file: Option<PathBuf>,
     no_download: bool,
     docker: bool,
     docker_limits: DockerLimits,
@@ -481,7 +670,10 @@ impl Args {
         let mut result = Args {
             lines: 5_000_000,
             agents: Vec::new(),
+            scenarios: Vec::new(),
             markdown: false,
+            json: false,
+            json_file: None,
             no_download: false,
             docker: false,
             docker_limits: DockerLimits::default(),
@@ -500,7 +692,32 @@ impl Args {
                     i += 1;
                     result.agents = args[i].split(',').map(|s| s.to_string()).collect();
                 }
+                "--scenarios" => {
+                    i += 1;
+                    result.scenarios = args[i]
+                        .split(',')
+                        .map(|s| {
+                            Scenario::from_name(s.trim()).unwrap_or_else(|| {
+                                eprintln!("Unknown scenario: {s}");
+                                eprintln!(
+                                    "Available: {}",
+                                    Scenario::all()
+                                        .iter()
+                                        .map(|s| s.name())
+                                        .collect::<Vec<_>>()
+                                        .join(", ")
+                                );
+                                process::exit(1);
+                            })
+                        })
+                        .collect();
+                }
                 "--markdown" => result.markdown = true,
+                "--json" => result.json = true,
+                "--json-file" => {
+                    i += 1;
+                    result.json_file = Some(PathBuf::from(&args[i]));
+                }
                 "--no-download" => result.no_download = true,
                 "--docker" => result.docker = true,
                 "--cpus" => {
@@ -525,7 +742,13 @@ impl Args {
                     eprintln!();
                     eprintln!("  --lines N            Lines to generate (default: 5000000)");
                     eprintln!("  --agents A,B,C       Agents to run (default: all)");
+                    eprintln!("  --scenarios S,S      Scenarios to run (default: passthrough)");
+                    eprintln!("                       Available: passthrough, json_parse, filter");
                     eprintln!("  --markdown           Output markdown table");
+                    eprintln!("  --json               Output structured JSON (for CI dashboards)");
+                    eprintln!(
+                        "  --json-file PATH     Write JSON results to file (combinable with --markdown)"
+                    );
                     eprintln!("  --no-download        Skip binary downloads");
                     eprintln!("  --docker             Run in Docker with resource limits");
                     eprintln!("  --cpus N             CPU limit per container (default: 1)");
@@ -538,6 +761,10 @@ impl Args {
                 }
             }
             i += 1;
+        }
+        // Default: passthrough only (backward compat).
+        if result.scenarios.is_empty() {
+            result.scenarios.push(Scenario::Passthrough);
         }
         result
     }
