@@ -52,7 +52,11 @@ pub fn parse_cri_line(line: &[u8]) -> Option<CriLine<'_>> {
         line.len()
     };
 
-    let flags = &line[sp2 + 1..if msg_start > sp2 + 1 { msg_start - 1 } else { line.len() }];
+    let flags = &line[sp2 + 1..if msg_start > sp2 + 1 {
+        msg_start - 1
+    } else {
+        line.len()
+    }];
     let is_full = flags == b"F";
 
     let message = if msg_start < line.len() {
@@ -138,12 +142,12 @@ where
             continue;
         }
 
-        if let Some(cri) = parse_cri_line(line) {
-            if let Some(complete_msg) = reassembler.feed(&cri) {
-                emit(complete_msg);
-                count += 1;
-                reassembler.reset();
-            }
+        if let Some(cri) = parse_cri_line(line)
+            && let Some(complete_msg) = reassembler.feed(&cri)
+        {
+            emit(complete_msg);
+            count += 1;
+            reassembler.reset();
         }
     }
 
@@ -179,12 +183,12 @@ pub fn process_cri_to_buf(
             continue;
         }
 
-        if let Some(cri) = parse_cri_line(line) {
-            if let Some(complete_msg) = reassembler.feed(&cri) {
-                write_json_line(complete_msg, json_prefix, out);
-                count += 1;
-                reassembler.reset();
-            }
+        if let Some(cri) = parse_cri_line(line)
+            && let Some(complete_msg) = reassembler.feed(&cri)
+        {
+            write_json_line(complete_msg, json_prefix, out);
+            count += 1;
+            reassembler.reset();
         }
     }
 
@@ -214,7 +218,8 @@ mod tests {
 
     #[test]
     fn test_parse_full_line() {
-        let line = b"2024-01-15T10:30:00.123456789Z stdout F {\"level\":\"INFO\",\"msg\":\"hello\"}";
+        let line =
+            b"2024-01-15T10:30:00.123456789Z stdout F {\"level\":\"INFO\",\"msg\":\"hello\"}";
         let cri = parse_cri_line(line).unwrap();
         assert_eq!(cri.timestamp, b"2024-01-15T10:30:00.123456789Z");
         assert_eq!(cri.stream, b"stdout");

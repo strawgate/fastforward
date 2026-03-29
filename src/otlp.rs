@@ -35,6 +35,7 @@ pub fn encode_varint(buf: &mut Vec<u8>, mut value: u64) {
 
 /// Compute encoded varint length without writing.
 #[inline(always)]
+#[allow(clippy::match_overlapping_arm)]
 pub const fn varint_len(value: u64) -> usize {
     match value {
         0..=0x7F => 1,
@@ -145,14 +146,15 @@ struct JsonFields<'a> {
 /// Field names we recognize (checked in order of likelihood).
 /// These cover the most common JSON log field names across ecosystems.
 const TIMESTAMP_KEYS: &[&[u8]] = &[
-    b"timestamp", b"time", b"ts", b"@timestamp", b"datetime", b"t",
+    b"timestamp",
+    b"time",
+    b"ts",
+    b"@timestamp",
+    b"datetime",
+    b"t",
 ];
-const LEVEL_KEYS: &[&[u8]] = &[
-    b"level", b"severity", b"log_level", b"loglevel", b"lvl",
-];
-const MESSAGE_KEYS: &[&[u8]] = &[
-    b"message", b"msg", b"body", b"log", b"text",
-];
+const LEVEL_KEYS: &[&[u8]] = &[b"level", b"severity", b"log_level", b"loglevel", b"lvl"];
+const MESSAGE_KEYS: &[&[u8]] = &[b"message", b"msg", b"body", b"log", b"text"];
 
 /// Extract known fields from a JSON line. Uses memchr to find quotes,
 /// then matches field names. No full JSON parse — just enough to find
@@ -215,23 +217,21 @@ fn extract_json_fields<'a>(line: &'a [u8]) -> JsonFields<'a> {
             }
             let val = &line[val_start..pos];
             // Trim trailing whitespace.
-            let trimmed_end = val.iter().rposition(|&b| b != b' ' && b != b'\t')
+            let trimmed_end = val
+                .iter()
+                .rposition(|&b| b != b' ' && b != b'\t')
                 .map(|i| i + 1)
                 .unwrap_or(0);
             &val[..trimmed_end]
         };
 
         // Match key against known field names.
-        let key_lower_first = if key.is_empty() { 0 } else { key[0] | 0x20 };
+        let _key_lower_first = if key.is_empty() { 0 } else { key[0] | 0x20 };
         // Check all field categories — a key starting with 't' could be
         // "timestamp" OR "text", so we check each category independently.
-        if fields.timestamp.is_none()
-            && TIMESTAMP_KEYS.iter().any(|k| key_eq_ignore_case(key, k))
-        {
+        if fields.timestamp.is_none() && TIMESTAMP_KEYS.iter().any(|k| key_eq_ignore_case(key, k)) {
             fields.timestamp = Some(value);
-        } else if fields.level.is_none()
-            && LEVEL_KEYS.iter().any(|k| key_eq_ignore_case(key, k))
-        {
+        } else if fields.level.is_none() && LEVEL_KEYS.iter().any(|k| key_eq_ignore_case(key, k)) {
             fields.level = Some(value);
         } else if fields.message.is_none()
             && MESSAGE_KEYS.iter().any(|k| key_eq_ignore_case(key, k))
@@ -341,7 +341,11 @@ fn parse_2digits(s: &[u8], off: usize) -> u8 {
 /// Days from 1970-01-01 to the given civil date. Algorithm from Howard Hinnant.
 fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
     let y = if month <= 2 { year - 1 } else { year };
-    let m = if month <= 2 { month as i64 + 9 } else { month as i64 - 3 };
+    let m = if month <= 2 {
+        month as i64 + 9
+    } else {
+        month as i64 - 3
+    };
     let era = y.div_euclid(400);
     let yoe = y.rem_euclid(400);
     let doy = (153 * m + 2) / 5 + day as i64 - 1;
@@ -394,7 +398,7 @@ pub fn encode_log_record(line: &[u8], observed_time_ns: u64, buf: &mut Vec<u8>) 
     // Parse severity.
     let (severity_num, severity_text) = fields
         .level
-        .map(|l| parse_severity(l))
+        .map(parse_severity)
         .unwrap_or((Severity::Unspecified, b"" as &[u8]));
 
     // Body: use message field if found, otherwise the full line.
@@ -486,6 +490,12 @@ pub struct BatchEncoder {
     out: Vec<u8>,
 }
 
+impl Default for BatchEncoder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BatchEncoder {
     pub fn new() -> Self {
         BatchEncoder {
@@ -514,9 +524,8 @@ impl BatchEncoder {
         let mut scope_logs_inner_size = 0usize;
         for &(start, end) in &self.record_ranges {
             let record_len = end - start;
-            scope_logs_inner_size += varint_len(((2u64) << 3) | 2)
-                + varint_len(record_len as u64)
-                + record_len;
+            scope_logs_inner_size +=
+                varint_len(((2u64) << 3) | 2) + varint_len(record_len as u64) + record_len;
         }
 
         let resource_logs_inner_size = bytes_field_size(2, scope_logs_inner_size);
@@ -589,9 +598,8 @@ impl BatchEncoder {
         let mut scope_logs_inner_size = 0usize;
         for &(start, end) in &self.record_ranges {
             let record_len = end - start;
-            scope_logs_inner_size += varint_len(((2u64) << 3) | 2)
-                + varint_len(record_len as u64)
-                + record_len;
+            scope_logs_inner_size +=
+                varint_len(((2u64) << 3) | 2) + varint_len(record_len as u64) + record_len;
         }
 
         let resource_logs_inner_size = bytes_field_size(2, scope_logs_inner_size);
@@ -649,7 +657,10 @@ mod tests {
         assert!(matches!(parse_severity(b"DEBUG").0, Severity::Debug));
         assert!(matches!(parse_severity(b"TRACE").0, Severity::Trace));
         assert!(matches!(parse_severity(b"FATAL").0, Severity::Fatal));
-        assert!(matches!(parse_severity(b"unknown").0, Severity::Unspecified));
+        assert!(matches!(
+            parse_severity(b"unknown").0,
+            Severity::Unspecified
+        ));
     }
 
     #[test]

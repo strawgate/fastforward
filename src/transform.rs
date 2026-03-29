@@ -4,8 +4,8 @@
 // execution plan, and executes it against Arrow RecordBatches from the scanner.
 
 use std::any::Any;
-use std::collections::hash_map::DefaultHasher;
 use std::collections::HashSet;
+use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
@@ -43,8 +43,8 @@ impl QueryAnalyzer {
     /// Parse the SQL and extract metadata about column usage.
     pub fn new(sql: &str) -> Result<Self, String> {
         let dialect = GenericDialect {};
-        let statements = Parser::parse_sql(&dialect, sql)
-            .map_err(|e| format!("SQL parse error: {e}"))?;
+        let statements =
+            Parser::parse_sql(&dialect, sql).map_err(|e| format!("SQL parse error: {e}"))?;
 
         if statements.len() != 1 {
             return Err("Expected exactly one SQL statement".to_string());
@@ -132,10 +132,10 @@ impl QueryAnalyzer {
 /// the raw JSON field name. E.g., `level_str` → `level`, `duration_ms_int` → `duration_ms`.
 fn strip_type_suffix(name: &str) -> String {
     for suffix in &["_str", "_int", "_float"] {
-        if let Some(base) = name.strip_suffix(suffix) {
-            if !base.is_empty() {
-                return base.to_string();
-            }
+        if let Some(base) = name.strip_suffix(suffix)
+            && !base.is_empty()
+        {
+            return base.to_string();
         }
     }
     name.to_string()
@@ -170,25 +170,26 @@ fn collect_column_refs(expr: &SqlExpr, cols: &mut HashSet<String>) {
         SqlExpr::UnaryOp { expr, .. } => {
             collect_column_refs(expr, cols);
         }
-        SqlExpr::Function(func) => {
-            match &func.args {
-                sqlast::FunctionArguments::List(arg_list) => {
-                    for arg in &arg_list.args {
-                        match arg {
-                            sqlast::FunctionArg::Unnamed(
-                                sqlast::FunctionArgExpr::Expr(e),
-                            ) => collect_column_refs(e, cols),
-                            sqlast::FunctionArg::Named { arg: sqlast::FunctionArgExpr::Expr(e), .. } => {
-                                collect_column_refs(e, cols);
-                            }
-                            _ => {}
+        SqlExpr::Function(func) => match &func.args {
+            sqlast::FunctionArguments::List(arg_list) => {
+                for arg in &arg_list.args {
+                    match arg {
+                        sqlast::FunctionArg::Unnamed(sqlast::FunctionArgExpr::Expr(e)) => {
+                            collect_column_refs(e, cols)
                         }
+                        sqlast::FunctionArg::Named {
+                            arg: sqlast::FunctionArgExpr::Expr(e),
+                            ..
+                        } => {
+                            collect_column_refs(e, cols);
+                        }
+                        _ => {}
                     }
                 }
-                sqlast::FunctionArguments::None => {}
-                sqlast::FunctionArguments::Subquery(_) => {}
             }
-        }
+            sqlast::FunctionArguments::None => {}
+            sqlast::FunctionArguments::Subquery(_) => {}
+        },
         SqlExpr::Nested(inner) => {
             collect_column_refs(inner, cols);
         }
@@ -289,7 +290,8 @@ impl ScalarUDFImpl for IntCastUdf {
             }
             ColumnarValue::Scalar(scalar) => {
                 // Convert scalar to single-element array, cast, convert back.
-                let array = scalar.to_array()
+                let array = scalar
+                    .to_array()
                     .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
                 let result = arrow::compute::cast(&array, &DataType::Int64)
                     .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
@@ -343,7 +345,8 @@ impl ScalarUDFImpl for FloatCastUdf {
                 Ok(ColumnarValue::Array(result))
             }
             ColumnarValue::Scalar(scalar) => {
-                let array = scalar.to_array()
+                let array = scalar
+                    .to_array()
                     .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
                 let result = arrow::compute::cast(&array, &DataType::Float64)
                     .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
@@ -564,8 +567,7 @@ mod tests {
     #[test]
     fn test_except() {
         let batch = make_test_batch();
-        let mut transform =
-            SqlTransform::new("SELECT * EXCEPT (status_str) FROM logs").unwrap();
+        let mut transform = SqlTransform::new("SELECT * EXCEPT (status_str) FROM logs").unwrap();
         let result = transform.execute(batch).unwrap();
         assert_eq!(result.num_rows(), 4);
         // status_str should be removed.
@@ -578,8 +580,7 @@ mod tests {
     #[test]
     fn test_computed() {
         let batch = make_test_batch();
-        let mut transform =
-            SqlTransform::new("SELECT *, 'prod' AS env FROM logs").unwrap();
+        let mut transform = SqlTransform::new("SELECT *, 'prod' AS env FROM logs").unwrap();
         let result = transform.execute(batch).unwrap();
         assert_eq!(result.num_rows(), 4);
         let env = result
@@ -658,9 +659,11 @@ mod tests {
 
     #[test]
     fn test_float_udf() {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("val_str", DataType::Utf8, true),
-        ]));
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "val_str",
+            DataType::Utf8,
+            true,
+        )]));
         let vals: ArrayRef = Arc::new(StringArray::from(vec![
             Some("3.14"),
             Some("not_float"),
@@ -668,8 +671,7 @@ mod tests {
         ]));
         let batch = RecordBatch::try_new(schema, vec![vals]).unwrap();
 
-        let mut transform =
-            SqlTransform::new("SELECT float(val_str) AS val_f FROM logs").unwrap();
+        let mut transform = SqlTransform::new("SELECT float(val_str) AS val_f FROM logs").unwrap();
         let result = transform.execute(batch).unwrap();
         let col = result
             .column_by_name("val_f")
@@ -702,8 +704,7 @@ mod tests {
 
     #[test]
     fn test_query_analyzer_except() {
-        let analyzer =
-            QueryAnalyzer::new("SELECT * EXCEPT (stack_trace_str) FROM logs").unwrap();
+        let analyzer = QueryAnalyzer::new("SELECT * EXCEPT (stack_trace_str) FROM logs").unwrap();
         assert!(analyzer.uses_select_star);
         assert_eq!(analyzer.except_fields, vec!["stack_trace_str"]);
     }

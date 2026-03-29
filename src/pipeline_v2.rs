@@ -5,8 +5,8 @@
 
 use std::io;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::config::{Format, InputConfig, InputType, OutputConfig, OutputType, PipelineConfig};
@@ -183,9 +183,9 @@ impl Pipeline {
                 .inputs
                 .iter()
                 .any(|i| i.json_buf.len() >= self.batch_target_bytes);
-            let time_ready =
-                had_data && !self.inputs.iter().all(|i| i.json_buf.is_empty())
-                    && last_flush.elapsed() >= self.batch_timeout;
+            let time_ready = had_data
+                && !self.inputs.iter().all(|i| i.json_buf.is_empty())
+                && last_flush.elapsed() >= self.batch_timeout;
 
             if size_ready || time_ready {
                 let mut combined = Vec::new();
@@ -198,13 +198,12 @@ impl Pipeline {
                 if !combined.is_empty() {
                     let batch = self.scanner.scan(&combined);
                     if batch.num_rows() > 0 {
-                        self.metrics
-                            .transform_in
-                            .inc_lines(batch.num_rows() as u64);
+                        self.metrics.transform_in.inc_lines(batch.num_rows() as u64);
 
-                        let result = self.transform.execute(batch).map_err(|e| {
-                            io::Error::new(io::ErrorKind::Other, format!("transform error: {e}"))
-                        })?;
+                        let result = self
+                            .transform
+                            .execute(batch)
+                            .map_err(|e| io::Error::other(format!("transform error: {e}")))?;
 
                         self.metrics
                             .transform_out
@@ -278,10 +277,7 @@ fn build_input_state(
 // Output construction
 // ---------------------------------------------------------------------------
 
-fn build_output_sink(
-    name: &str,
-    cfg: &OutputConfig,
-) -> Result<Box<dyn OutputSink>, String> {
+fn build_output_sink(name: &str, cfg: &OutputConfig) -> Result<Box<dyn OutputSink>, String> {
     match cfg.output_type {
         OutputType::Stdout => {
             let fmt = match cfg.format.as_ref() {
@@ -427,12 +423,7 @@ mod tests {
         let mut partial = Vec::new();
         let mut out = Vec::new();
 
-        accumulate_json_lines(
-            b"{\"a\":1}\n{\"b\":2}\n",
-            &mut partial,
-            &mut out,
-            &stats,
-        );
+        accumulate_json_lines(b"{\"a\":1}\n{\"b\":2}\n", &mut partial, &mut out, &stats);
 
         let result = String::from_utf8(out).unwrap();
         assert_eq!(result, "{\"a\":1}\n{\"b\":2}\n");
@@ -667,9 +658,6 @@ output:
             .transform_in
             .lines_total
             .load(Ordering::Relaxed);
-        assert!(
-            lines_in > 0,
-            "expected transform_in > 0, got {lines_in}"
-        );
+        assert!(lines_in > 0, "expected transform_in > 0, got {lines_in}");
     }
 }

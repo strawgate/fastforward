@@ -67,15 +67,16 @@ impl ChunkCompressor {
         // Compress directly into out_buf after the header.
         // Use bulk compress with our level — zstd internally reuses thread-local contexts.
         let payload_start = self.out_buf.len();
-        let compressed_payload = zstd::bulk::compress(raw, self.level)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        let compressed_payload = zstd::bulk::compress(raw, self.level).map_err(io::Error::other)?;
 
         let compressed_size = compressed_payload.len();
         self.out_buf.extend_from_slice(&compressed_payload);
 
         // Compute checksum over the compressed payload.
-        let checksum =
-            xxhash_rust::xxh32::xxh32(&self.out_buf[payload_start..payload_start + compressed_size], 0);
+        let checksum = xxhash_rust::xxh32::xxh32(
+            &self.out_buf[payload_start..payload_start + compressed_size],
+            0,
+        );
 
         // Fill in the header.
         self.out_buf[0..2].copy_from_slice(&MAGIC.to_le_bytes());
@@ -105,7 +106,10 @@ impl ChunkCompressor {
 /// Decompress and verify a compressed chunk (for testing / receiver side).
 pub fn decompress_chunk(data: &[u8]) -> io::Result<Vec<u8>> {
     if data.len() < HEADER_SIZE {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "chunk too small"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "chunk too small",
+        ));
     }
 
     let magic = u16::from_le_bytes([data[0], data[1]]);
@@ -127,7 +131,10 @@ pub fn decompress_chunk(data: &[u8]) -> io::Result<Vec<u8>> {
     let expected_checksum = u32::from_le_bytes([data[12], data[13], data[14], data[15]]);
 
     if data.len() < HEADER_SIZE + compressed_size {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "truncated payload"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "truncated payload",
+        ));
     }
 
     let payload = &data[HEADER_SIZE..HEADER_SIZE + compressed_size];

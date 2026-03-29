@@ -1,5 +1,5 @@
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
@@ -90,7 +90,8 @@ impl PipelineMetrics {
         typ: impl Into<String>,
     ) -> Arc<ComponentStats> {
         let stats = Arc::new(ComponentStats::new());
-        self.inputs.push((name.into(), typ.into(), Arc::clone(&stats)));
+        self.inputs
+            .push((name.into(), typ.into(), Arc::clone(&stats)));
         stats
     }
 
@@ -100,7 +101,8 @@ impl PipelineMetrics {
         typ: impl Into<String>,
     ) -> Arc<ComponentStats> {
         let stats = Arc::new(ComponentStats::new());
-        self.outputs.push((name.into(), typ.into(), Arc::clone(&stats)));
+        self.outputs
+            .push((name.into(), typ.into(), Arc::clone(&stats)));
         stats
     }
 }
@@ -164,11 +166,8 @@ impl DiagnosticsServer {
                 let resp = tiny_http::Response::from_string("not found")
                     .with_status_code(404)
                     .with_header(
-                        tiny_http::Header::from_bytes(
-                            &b"Content-Type"[..],
-                            &b"text/plain"[..],
-                        )
-                        .unwrap(),
+                        tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/plain"[..])
+                            .unwrap(),
                     );
                 request.respond(resp)?;
                 Ok(())
@@ -190,10 +189,7 @@ impl DiagnosticsServer {
         Ok(())
     }
 
-    fn serve_health(
-        &self,
-        request: tiny_http::Request,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    fn serve_health(&self, request: tiny_http::Request) -> Result<(), Box<dyn std::error::Error>> {
         let uptime = self.start_time.elapsed().as_secs();
         let body = format!(
             r#"{{"status":"ok","uptime_seconds":{},"version":"{}"}}"#,
@@ -278,10 +274,7 @@ impl DiagnosticsServer {
         Ok(())
     }
 
-    fn serve_metrics(
-        &self,
-        request: tiny_http::Request,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    fn serve_metrics(&self, request: tiny_http::Request) -> Result<(), Box<dyn std::error::Error>> {
         let mut out = String::with_capacity(2048);
 
         // Input lines
@@ -376,7 +369,9 @@ impl DiagnosticsServer {
         }
 
         // Backpressure stalls
-        out.push_str("\n# HELP logfwd_backpressure_stalls_total Times reader blocked on full channel\n");
+        out.push_str(
+            "\n# HELP logfwd_backpressure_stalls_total Times reader blocked on full channel\n",
+        );
         out.push_str("# TYPE logfwd_backpressure_stalls_total counter\n");
         for pm in &self.pipelines {
             out.push_str(&format!(
@@ -457,12 +452,14 @@ mod tests {
         use std::io::Write;
         use std::net::TcpStream;
 
-        let mut stream =
-            TcpStream::connect(format!("127.0.0.1:{}", port)).expect("connect failed");
+        let mut stream = TcpStream::connect(format!("127.0.0.1:{}", port)).expect("connect failed");
         stream
             .set_read_timeout(Some(std::time::Duration::from_secs(5)))
             .ok();
-        let req = format!("GET {} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n", path);
+        let req = format!(
+            "GET {} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+            path
+        );
         stream.write_all(req.as_bytes()).unwrap();
 
         let mut buf = Vec::new();
@@ -478,11 +475,7 @@ mod tests {
             .unwrap_or(0);
 
         // Split headers from body.
-        let body = text
-            .split("\r\n\r\n")
-            .nth(1)
-            .unwrap_or("")
-            .to_string();
+        let body = text.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
 
         (status, body)
     }
@@ -542,7 +535,9 @@ mod tests {
             body,
         );
         assert!(
-            body.contains(r#"logfwd_output_lines_total{pipeline="default",output="collector"} 900"#),
+            body.contains(
+                r#"logfwd_output_lines_total{pipeline="default",output="collector"} 900"#
+            ),
             "body: {}",
             body,
         );

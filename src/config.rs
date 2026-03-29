@@ -288,7 +288,10 @@ impl Config {
                     .map(String::from)
                     .unwrap_or_else(|| format!("#{i}"));
                 match output.output_type {
-                    OutputType::Otlp | OutputType::Http | OutputType::Elasticsearch | OutputType::Loki => {
+                    OutputType::Otlp
+                    | OutputType::Http
+                    | OutputType::Elasticsearch
+                    | OutputType::Loki => {
                         if output.endpoint.is_none() {
                             return Err(ConfigError::Validation(format!(
                                 "pipeline '{name}' output '{label}': {} output requires 'endpoint'",
@@ -416,11 +419,17 @@ storage:
         let pipe = &cfg.pipelines["default"];
         assert_eq!(pipe.inputs.len(), 1);
         assert_eq!(pipe.inputs[0].input_type, InputType::File);
-        assert_eq!(pipe.inputs[0].path.as_deref(), Some("/var/log/pods/**/*.log"));
+        assert_eq!(
+            pipe.inputs[0].path.as_deref(),
+            Some("/var/log/pods/**/*.log")
+        );
         assert_eq!(pipe.inputs[0].format, Some(Format::Cri));
         assert!(pipe.transform.as_ref().unwrap().contains("SELECT"));
         assert_eq!(pipe.outputs[0].output_type, OutputType::Otlp);
-        assert_eq!(pipe.outputs[0].endpoint.as_deref(), Some("otel-collector:4317"));
+        assert_eq!(
+            pipe.outputs[0].endpoint.as_deref(),
+            Some("otel-collector:4317")
+        );
         assert_eq!(cfg.server.diagnostics.as_deref(), Some("0.0.0.0:9090"));
         assert_eq!(cfg.storage.data_dir.as_deref(), Some("/var/lib/logfwd"));
     }
@@ -625,8 +634,7 @@ output:
             ("tcp", "listen: 0.0.0.0:514"),
             ("otlp", ""),
         ] {
-            let yaml =
-                format!("input:\n  type: {itype}\n  {extra}\noutput:\n  type: stdout\n");
+            let yaml = format!("input:\n  type: {itype}\n  {extra}\noutput:\n  type: stdout\n");
             Config::load_str(&yaml).unwrap_or_else(|e| panic!("failed for {itype}: {e}"));
         }
     }
