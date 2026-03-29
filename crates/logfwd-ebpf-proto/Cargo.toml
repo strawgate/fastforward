@@ -1,0 +1,15 @@
+[package]
+name = "logfwd-ebpf-proto"
+version = "0.1.0"
+edition = "2024"
+
+# This is a research prototype. The actual eBPF program would be compiled
+# separately for the BPF target using aya-ebpf. This crate contains:
+# - Shared types (common.rs) used by both kernel and userspace
+# - Design documentation (bpf/pipe_capture.rs)
+# - Userspace integration design (lib.rs)
+
+[dependencies]
+serde_json = "1"  # for test helpers only
+
+[dev-dependencies]
