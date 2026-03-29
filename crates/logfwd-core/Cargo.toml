@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 arrow = { workspace = true }
 crossbeam-channel = "0.5"
+gethostname = "1"
 opentelemetry = { workspace = true }
 memchr = "2"
 notify = "7"
