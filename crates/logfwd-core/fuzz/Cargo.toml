@@ -1,0 +1,30 @@
+[package]
+name = "logfwd-core-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+logfwd-core = { path = ".." }
+arrow = { version = "54", default-features = false }
+
+[workspace]
+
+[[bin]]
+name = "fuzz_format_parser"
+path = "fuzz_targets/format_parser.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_scanner"
+path = "fuzz_targets/scanner.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_pipe_event"
+path = "fuzz_targets/pipe_event.rs"
+doc = false
