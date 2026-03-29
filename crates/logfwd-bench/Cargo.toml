@@ -1,0 +1,17 @@
+[package]
+name = "logfwd-bench"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+logfwd-core = { path = "../logfwd-core" }
+logfwd-transform = { path = "../logfwd-transform" }
+logfwd-output = { path = "../logfwd-output" }
+arrow = { workspace = true }
+criterion = { version = "0.5", features = ["html_reports"] }
+memchr = "2"
+
+[[bench]]
+name = "pipeline"
+harness = false
