@@ -3,6 +3,7 @@ pub mod compress;
 pub mod config;
 pub mod cri;
 pub mod diagnostics;
+pub mod input;
 pub mod otlp;
 pub mod output;
 pub mod pipeline_v2;

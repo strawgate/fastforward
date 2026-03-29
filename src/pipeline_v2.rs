@@ -9,15 +9,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::config::{Format, InputConfig, InputType, OutputConfig, OutputType, PipelineConfig};
+use crate::config::{Format, InputConfig, InputType, PipelineConfig};
 use crate::cri::{self, CriReassembler};
 use crate::diagnostics::{ComponentStats, PipelineMetrics};
-use crate::output::{
-    BatchMetadata, Compression, FanOut, JsonLinesSink, OtlpProtocol, OtlpSink, OutputSink,
-    StdoutFormat, StdoutSink,
-};
+use crate::input::{FileInput, InputEvent, InputSource};
+use crate::output::{BatchMetadata, FanOut, OutputSink, build_output_sink};
 use crate::scanner::Scanner;
-use crate::tail::{FileTailer, TailConfig, TailEvent};
+use crate::tail::TailConfig;
 use crate::transform::SqlTransform;
 
 // ---------------------------------------------------------------------------
@@ -27,7 +25,7 @@ use crate::transform::SqlTransform;
 struct InputState {
     #[allow(dead_code)]
     name: String,
-    tailer: FileTailer,
+    source: Box<dyn InputSource>,
     format: Format,
     reassembler: CriReassembler,
     /// Buffer accumulating newline-delimited JSON for the scanner.
@@ -124,7 +122,7 @@ impl Pipeline {
             let mut had_data = false;
 
             for input in &mut self.inputs {
-                let events = input.tailer.poll()?;
+                let events = input.source.poll()?;
                 if events.is_empty() {
                     continue;
                 }
@@ -132,7 +130,7 @@ impl Pipeline {
 
                 for event in events {
                     match event {
-                        TailEvent::Data { bytes, .. } => {
+                        InputEvent::Data { bytes, .. } => {
                             input.stats.inc_bytes(bytes.len() as u64);
                             match input.format {
                                 Format::Cri => {
@@ -170,7 +168,7 @@ impl Pipeline {
                                 }
                             }
                         }
-                        TailEvent::Rotated { .. } | TailEvent::Truncated { .. } => {
+                        InputEvent::Rotated | InputEvent::Truncated => {
                             input.reassembler.reset();
                             input.partial_line.clear();
                         }
@@ -253,12 +251,12 @@ fn build_input_state(
                 read_buf_size: 256 * 1024,
                 ..Default::default()
             };
-            let tailer = FileTailer::new(&paths, tail_config)
+            let source = FileInput::new(name.to_string(), &paths, tail_config)
                 .map_err(|e| format!("input '{name}': failed to create tailer: {e}"))?;
 
             Ok(InputState {
                 name: name.to_string(),
-                tailer,
+                source: Box::new(source),
                 format,
                 reassembler: CriReassembler::new(2 * 1024 * 1024),
                 json_buf: Vec::with_capacity(4 * 1024 * 1024),
@@ -269,58 +267,6 @@ fn build_input_state(
         _ => Err(format!(
             "input '{name}': type {:?} not yet supported in v2 pipeline",
             cfg.input_type
-        )),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Output construction
-// ---------------------------------------------------------------------------
-
-fn build_output_sink(name: &str, cfg: &OutputConfig) -> Result<Box<dyn OutputSink>, String> {
-    match cfg.output_type {
-        OutputType::Stdout => {
-            let fmt = match cfg.format.as_ref() {
-                Some(Format::Json) => StdoutFormat::Json,
-                _ => StdoutFormat::Text,
-            };
-            Ok(Box::new(StdoutSink::new(name.to_string(), fmt)))
-        }
-        OutputType::Otlp => {
-            let endpoint = cfg
-                .endpoint
-                .as_ref()
-                .ok_or_else(|| format!("output '{name}': OTLP requires 'endpoint'"))?;
-            let protocol = match cfg.protocol.as_deref() {
-                Some("grpc") => OtlpProtocol::Grpc,
-                _ => OtlpProtocol::Http,
-            };
-            let compression = match cfg.compression.as_deref() {
-                Some("zstd") => Compression::Zstd,
-                Some("gzip") => Compression::Gzip,
-                _ => Compression::None,
-            };
-            Ok(Box::new(OtlpSink::new(
-                name.to_string(),
-                endpoint.clone(),
-                protocol,
-                compression,
-            )))
-        }
-        OutputType::Http => {
-            let endpoint = cfg
-                .endpoint
-                .as_ref()
-                .ok_or_else(|| format!("output '{name}': HTTP requires 'endpoint'"))?;
-            Ok(Box::new(JsonLinesSink::new(
-                name.to_string(),
-                endpoint.clone(),
-                vec![],
-            )))
-        }
-        _ => Err(format!(
-            "output '{name}': type {:?} not yet supported in v2 pipeline",
-            cfg.output_type
         )),
     }
 }
@@ -416,6 +362,7 @@ fn now_nanos() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{Format, OutputConfig, OutputType};
 
     #[test]
     fn test_accumulate_json_lines_basic() {
