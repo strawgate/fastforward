@@ -1,7 +1,6 @@
-# DataFusion v45 -- Agent Reference for logfwd
+# DataFusion v45 -- Agent Reference
 
 Non-obvious behavior, patterns extracted from source, and gotchas.
-Code examples reference `logfwd-transform/src/lib.rs` patterns.
 
 ---
 
@@ -47,16 +46,15 @@ Key insight: `ctx.sql()` calls `state.create_logical_plan(sql)` which re-parses
 and re-plans every time. There is **no cached plan** that goes stale when the
 schema changes. The table provider is looked up fresh during planning.
 
-### What logfwd does today (and why)
+### Best practice: reuse SessionContext
 
-logfwd currently creates a **new SessionContext per batch** (`SqlTransform::execute`
-in `lib.rs:572`). This is safe but wasteful -- UDFs get re-registered every call.
-A reuse pattern would:
+Creating a new SessionContext per batch is safe but wasteful -- UDFs get re-registered
+every call. A typical reuse pattern:
 1. Create `SessionContext` once at startup
 2. Register UDFs once
 3. `deregister_table("logs")` + `register_table("logs", ...)` per batch
 
-The cost savings: skip UDF registration (4 UDFs) and `SessionContext` allocation.
+The cost savings: skip UDF registration and `SessionContext` allocation.
 SQL parsing + optimization still runs per batch regardless.
 
 ---
@@ -105,7 +103,7 @@ technically optional -- but being explicit is clearer.
 let table = MemTable::try_new(schema, vec![vec![batch_a], vec![batch_b]])?;
 ```
 
-For logfwd's single-batch-per-call pattern, one partition with one batch is fine.
+For a single-batch-per-call pattern, one partition with one batch is fine.
 
 ---
 
@@ -132,16 +130,13 @@ Optional overrides (important ones):
 fn return_type_from_args(&self, args: ReturnTypeArgs) -> Result<ReturnInfo> { ... }
 ```
 
-logfwd's `GrokUdf` uses `return_type_from_args` because the struct fields depend
-on the pattern literal. `return_type` is a fallback that returns `Utf8`.
+A typical usage is a Grok UDF that uses `return_type_from_args` because the struct
+fields depend on the pattern literal. `return_type` is a fallback that returns `Utf8`.
 
-### Registration pattern from logfwd
+### Registration pattern
 
 ```rust
-ctx.register_udf(ScalarUDF::from(IntCastUdf::new()));
-ctx.register_udf(ScalarUDF::from(FloatCastUdf::new()));
-ctx.register_udf(ScalarUDF::from(RegexpExtractUdf::new()));
-ctx.register_udf(ScalarUDF::from(GrokUdf::new()));
+ctx.register_udf(ScalarUDF::from(MyCustomUdf::new()));
 ```
 
 `ScalarUDF::from(impl ScalarUDFImpl)` wraps the impl in an `Arc`. The
@@ -213,7 +208,7 @@ it means zero rows were produced. To get the schema of an empty result:
 let batches = df.collect().await?;
 match batches.len() {
     0 => {
-        // Re-plan to get schema (logfwd pattern):
+        // Re-plan to get schema:
         let df2 = ctx.sql(&sql).await?;
         let schema: SchemaRef = Arc::clone(df2.schema().inner());
         Ok(RecordBatch::new_empty(schema))
@@ -259,7 +254,7 @@ DataFusion's `ctx.sql()` and `df.collect()` are async. If you're already inside 
 tokio runtime, calling `Runtime::new().block_on(async { ctx.sql(...) })` panics
 with "Cannot start a runtime from within a runtime."
 
-**logfwd's workaround** (`lib.rs:566-571`):
+**Workaround when calling from synchronous context:**
 
 ```rust
 let rt = tokio::runtime::Builder::new_current_thread()
@@ -268,7 +263,7 @@ let rt = tokio::runtime::Builder::new_current_thread()
 rt.block_on(async { ... })
 ```
 
-This works because logfwd's `execute()` is called from a synchronous context.
+This works when the caller is in a synchronous context.
 If you're already inside an async context, just `.await` directly -- no nested runtime.
 
 **If you must bridge sync/async inside an existing runtime**, use
@@ -287,16 +282,16 @@ SELECT hostname FROM logs
 ```
 
 DataFusion fails at **planning time** (during `ctx.sql()`), not at execution.
-This is why logfwd pre-analyzes SQL with `QueryAnalyzer` and controls which
-columns the scanner emits.
+A best practice is to pre-analyze SQL and control which columns the upstream
+stage emits.
 
 ### Type coercion surprises
 
 - **String literals vs column types:** `WHERE status = 200` fails if `status` is Utf8.
-  You need `WHERE status = '200'` or `WHERE int(status) = 200`.
-- **NULL propagation:** `int('not_a_number')` returns NULL via safe cast, but
-  `CAST('not_a_number' AS INT)` returns an **error**. logfwd's `int()` UDF uses
-  `arrow::compute::cast` which does safe casting (returns NULL on failure).
+  You need `WHERE status = '200'` or `WHERE CAST(status AS INT) = 200`.
+- **NULL propagation:** A custom `int()` UDF using `arrow::compute::cast` does safe
+  casting (returns NULL on failure), whereas `CAST('not_a_number' AS INT)` returns
+  an **error**.
 - **Utf8 vs LargeUtf8:** Arrow has both. If your RecordBatch uses `LargeUtf8` but
   a UDF signature declares `Utf8`, you'll get a type mismatch. Use `DataType::Utf8`
   consistently or use `TypeSignature::Coercible` for flexibility.
@@ -340,51 +335,49 @@ stateless and allocation-light. Not a bottleneck for per-batch execution.
 **What to consider caching:**
 - The `LogicalPlan` could theoretically be cached and re-bound to a new table scan,
   but DataFusion's API doesn't expose a clean way to do this in v45.
-- `SessionContext` with UDFs pre-registered -- saves 4x `register_udf` per batch.
+- `SessionContext` with UDFs pre-registered -- saves Nx `register_udf` per batch.
 - The `tokio::Runtime` -- `Runtime::new()` is ~100us. Reuse if possible.
 
 **What you can't cache:**
 - Physical plans -- they reference specific table partitions / schemas.
 - `DataFrame` -- it holds a snapshot of the plan, not reusable across schema changes.
 
-### Cost breakdown for a typical logfwd batch
+### Cost breakdown for a typical per-batch SQL execution
 
 | Step | Cost | Cacheable? |
 |---|---|---|
 | `Runtime::new()` | ~100us | Yes -- reuse runtime |
 | `SessionContext::new()` | <1us | Yes -- reuse ctx |
-| `register_udf` x4 | ~4us | Yes -- register once |
+| `register_udf` xN | ~1us each | Yes -- register once |
 | `MemTable::try_new` | <1us | No -- new data each time |
 | `register_table` | <1us | No -- new schema possible |
 | `ctx.sql()` (parse+optimize) | ~200-500us | No (schema may change) |
 | `df.collect()` (execute) | proportional to data | No |
 
-**Bottom line:** For logfwd at 1M+ lines/sec in ~1000-row batches, the fixed overhead
-is ~300-600us per batch. The dominant cost is `collect()` (actual data processing).
+**Bottom line:** At high throughput in ~1000-row batches, the fixed overhead is
+~300-600us per batch. The dominant cost is `collect()` (actual data processing).
 Reusing `SessionContext` + `Runtime` saves ~100us per batch -- marginal but free.
 
-### Recommended pattern for logfwd
+### Recommended pattern: reusable SQL transform
 
 ```rust
 pub struct SqlTransform {
     ctx: SessionContext,
     rt: tokio::runtime::Runtime,
     user_sql: String,
-    // ...
 }
 
 impl SqlTransform {
-    pub fn new(sql: &str) -> Result<Self, String> {
+    pub fn new(sql: &str, udfs: Vec<ScalarUDF>) -> Result<Self, String> {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|e| format!("{e}"))?;
 
         let ctx = SessionContext::new();
-        ctx.register_udf(ScalarUDF::from(IntCastUdf::new()));
-        ctx.register_udf(ScalarUDF::from(FloatCastUdf::new()));
-        ctx.register_udf(ScalarUDF::from(RegexpExtractUdf::new()));
-        ctx.register_udf(ScalarUDF::from(GrokUdf::new()));
+        for udf in udfs {
+            ctx.register_udf(udf);
+        }
 
         Ok(Self { ctx, rt, user_sql: sql.to_string() })
     }

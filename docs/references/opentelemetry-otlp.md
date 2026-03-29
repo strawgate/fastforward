@@ -1,17 +1,15 @@
-# OpenTelemetry Rust SDK -- logfwd reference
+# OpenTelemetry Rust SDK -- Agent Reference
 
 Crate versions: `opentelemetry 0.31`, `opentelemetry_sdk 0.31` (feature `rt-tokio`),
 `opentelemetry-otlp 0.31` (features `http-proto`, `reqwest-client`).
 
-logfwd uses OTel for two distinct purposes:
+Covers two common OTel usage patterns:
 1. **Internal metrics export** -- push pipeline counters to an OTLP endpoint via the SDK.
-2. **OTLP log encoding** -- hand-encode `ExportLogsServiceRequest` protobuf for log output (does NOT use the SDK log exporter).
+2. **OTLP log encoding** -- hand-encode `ExportLogsServiceRequest` protobuf for log output (bypassing the SDK log exporter for performance).
 
 ---
 
 ## 1. MeterProvider + PeriodicReader
-
-Source: `crates/logfwd/src/main.rs` -- `build_meter_provider()`
 
 ### With endpoint configured
 
@@ -42,17 +40,17 @@ let provider = SdkMeterProvider::builder()
     .build();
 
 // IMPORTANT: the tokio runtime must outlive the provider.
-// logfwd leaks it intentionally:
+// One approach is to leak it (not recommended -- see tokio-async-patterns.md):
 std::mem::forget(rt);
 
-let meter = provider.meter("logfwd");
+let meter = provider.meter("my_service");
 ```
 
 ### No-op provider (no endpoint / validation mode)
 
 ```rust
 let provider = SdkMeterProvider::builder().build();
-let meter = provider.meter("logfwd");
+let meter = provider.meter("my_service");
 // Counters created from this meter are functional but never exported.
 // No tokio runtime needed.
 ```
@@ -61,17 +59,15 @@ let meter = provider.meter("logfwd");
 
 `PeriodicReader` spawns a tokio task. You must have an active tokio runtime context
 (`rt.enter()`) when calling `.build()` on the exporter and the reader. The runtime
-must stay alive for the lifetime of the provider -- logfwd uses `std::mem::forget(rt)`
-since it runs until process exit.
+must stay alive for the lifetime of the provider. A common pattern for long-running
+services is to share the main runtime rather than creating a dedicated one.
 
 ---
 
 ## 2. OTLP protobuf format (logs)
 
-Source: `crates/logfwd-core/src/otlp.rs`, `crates/logfwd-output/src/otlp_sink.rs`
-
-logfwd hand-encodes protobuf rather than using the SDK's log exporter. This avoids
-allocation and intermediate Rust structs on the hot path.
+Hand-encoding protobuf rather than using the SDK's log exporter avoids allocation
+and intermediate Rust structs on the hot path.
 
 ### Message nesting
 
@@ -116,7 +112,7 @@ KeyValue {
 }
 ```
 
-### Wire format primitives (`logfwd_core::otlp`)
+### Wire format primitives
 
 ```rust
 // tag = (field_number << 3) | wire_type
@@ -138,33 +134,31 @@ bytes_field_size(field_number, data_len) -> usize
 2. **Phase 2**: Compute sizes bottom-up (ScopeLogs inner size, ResourceLogs inner size, request size).
 3. **Phase 3**: Write final protobuf: `ExportLogsServiceRequest > ResourceLogs > ScopeLogs > [LogRecord...]`.
 
-This avoids back-patching length prefixes. The `BatchEncoder` struct reuses buffers across calls.
+This avoids back-patching length prefixes. A typical implementation reuses buffers across calls via a batch encoder struct.
 
 ---
 
 ## 3. Metric types and the dual-write pattern
 
-Source: `crates/logfwd-core/src/diagnostics.rs`
+### OTel metric types
 
-### OTel metric types used
-
-logfwd only uses `Counter<u64>`:
+The most commonly used type in pipelines is `Counter<u64>`:
 
 ```rust
 use opentelemetry::metrics::{Counter, Meter};
 
-let lines: Counter<u64> = meter.u64_counter("logfwd_input_lines").build();
+let lines: Counter<u64> = meter.u64_counter("input_lines").build();
 lines.add(n, &[KeyValue::new("pipeline", "main")]);
 ```
 
-Other available types (not currently used by logfwd):
+Other available types:
 - `Histogram<f64>` -- `meter.f64_histogram("name").build()` / `.record(value, &attrs)`
 - `Gauge<f64>` -- `meter.f64_gauge("name").build()` / `.record(value, &attrs)`
 - `UpDownCounter<i64>` -- for values that go up and down
 
 ### Dual-write pattern
 
-Every metric is written to **both** an `AtomicU64` and an OTel `Counter` on the hot path:
+A common pattern writes each metric to **both** an `AtomicU64` and an OTel `Counter` on the hot path:
 
 ```rust
 pub struct ComponentStats {
@@ -192,18 +186,6 @@ atomics). Pre-allocating `otel_attrs` as a `Vec<KeyValue>` avoids per-call alloc
 When no metrics endpoint is configured, the no-op provider makes `Counter::add()` a no-op
 (just a trait method that returns immediately).
 
-### Metrics emitted by logfwd
-
-Per-component (with `pipeline` + `input`/`output` label):
-- `logfwd_input_lines`, `logfwd_input_bytes`, `logfwd_input_errors`
-- `logfwd_output_lines`, `logfwd_output_bytes`, `logfwd_output_errors`
-
-Per-pipeline (with `pipeline` label):
-- `logfwd_batches`, `logfwd_batch_rows`
-- `logfwd_flush_by_size`, `logfwd_flush_by_timeout`
-- `logfwd_stage_scan_nanos`, `logfwd_stage_transform_nanos`, `logfwd_stage_output_nanos`
-- `logfwd_transform_errors`, `logfwd_backpressure_stalls`
-
 ---
 
 ## 4. OTLP HTTP vs gRPC
@@ -214,28 +196,24 @@ Per-pipeline (with `pipeline` label):
 |--------|-----------|-------------|
 | Logs | `POST /v1/logs` | `opentelemetry.proto.collector.logs.v1.LogsService/Export` |
 | Metrics | `POST /v1/metrics` | `opentelemetry.proto.collector.metrics.v1.MetricsService/Export` |
-| Traces | `POST /v1/traces` | (not used by logfwd) |
+| Traces | `POST /v1/traces` | `opentelemetry.proto.collector.trace.v1.TraceService/Export` |
 
 Default base: `http://localhost:4318` (HTTP), `http://localhost:4317` (gRPC).
 
 The SDK's `MetricExporter::builder().with_http().with_endpoint(url)` appends `/v1/metrics`
-automatically. For log output, logfwd constructs the full URL itself.
+automatically. For log output, you typically construct the full URL yourself.
 
 ### Content-Type headers
 
-```rust
-// logfwd sets these in otlp_sink.rs:
-match protocol {
-    OtlpProtocol::Http => "application/x-protobuf",
-    OtlpProtocol::Grpc => "application/grpc",
-}
 ```
-
-For HTTP+JSON (not used by logfwd): `application/json`.
+HTTP protobuf:  "application/x-protobuf"
+HTTP JSON:      "application/json"
+gRPC:           "application/grpc"
+```
 
 ### Compression
 
-logfwd supports zstd compression on log output:
+OTLP supports compression on log output:
 ```rust
 req = req.header("Content-Encoding", "zstd");
 ```
@@ -247,8 +225,6 @@ The SDK metric exporter handles its own compression config separately (via build
 ---
 
 ## 5. Shutdown
-
-Source: `crates/logfwd/src/main.rs` lines 319-325
 
 ```rust
 // After all pipelines finish:
@@ -264,5 +240,5 @@ if let Err(e) = meter_provider.shutdown() {
 - Returns `Err` if export fails or times out.
 - Blocks the calling thread until export completes (or times out).
 
-There is no equivalent shutdown needed for the hand-encoded log output -- `OtlpSink`
-sends synchronously via `ureq` on each `send_batch()` call.
+There is no equivalent shutdown needed for hand-encoded log output if it sends
+synchronously on each batch call.

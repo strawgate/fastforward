@@ -1,17 +1,7 @@
-# Tokio Async Patterns for logfwd Migration
+# Tokio Async Patterns
 
-Reference for migrating logfwd from sync (std::thread + crossbeam + polling loops)
+Reference for migrating a synchronous pipeline (std::thread + crossbeam + polling loops)
 to async (tokio). Covers non-obvious behavior, not basics.
-
-## Current State
-
-logfwd is mostly synchronous:
-- `Pipeline::run()` is a blocking poll loop on `std::thread`
-- `InputSource::poll()` returns `Vec<InputEvent>` synchronously
-- `OutputSink::send_batch()` does sync HTTP via `ureq`
-- Shutdown is `AtomicBool` checked each iteration
-- One tokio runtime exists solely for OTel metrics export (`build_meter_provider`)
-- Channels use `crossbeam-channel` (sync)
 
 ---
 
@@ -67,9 +57,9 @@ you deadlock the runtime. Tokio detects this and panics.
 **Fix:** If you need to call async from sync code that *might* be on a worker thread,
 use `Handle::current()` + `spawn` + a oneshot channel, or restructure to stay async.
 
-### logfwd-specific: the OTel runtime leak
+### Avoiding the OTel runtime leak pattern
 
-The current code creates a runtime for OTel and `mem::forget`s it:
+A common anti-pattern creates a separate runtime for OTel and `mem::forget`s it:
 ```rust
 let rt = tokio::runtime::Builder::new_multi_thread()
     .worker_threads(1)
@@ -81,8 +71,8 @@ let _guard = rt.enter();
 std::mem::forget(rt); // leaked so background export threads keep running
 ```
 
-After migration: OTel should share the main runtime. Pass a `Handle` to the
-metrics setup instead of creating a second runtime.
+Better approach: share the main runtime. Pass a `Handle` to the metrics setup
+instead of creating a second runtime.
 
 ---
 
@@ -133,15 +123,15 @@ while let Ok(item) = rx.try_recv() {
 }
 ```
 
-### Capacity sizing for logfwd
+### Capacity sizing for data pipelines
 
 Pipeline stages: input -> scanner -> transform -> output.
 
-- **Between input and scanner/transform:** 8-16 items. Each item is a `Vec<u8>`
-  (JSON buffer, typically 4MB). So 8 * 4MB = 32MB max buffered. This provides
-  backpressure -- if transform is slow, input pauses reading files.
+- **Between input and scanner/transform:** 8-16 items. Each item might be a `Vec<u8>`
+  buffer (typically 4MB). So 8 * 4MB = 32MB max buffered. This provides
+  backpressure -- if transform is slow, input pauses reading.
 
-- **Between transform and output:** 4-8 items. Output is the bottleneck (HTTP).
+- **Between transform and output:** 4-8 items. Output is often the bottleneck (HTTP).
   Smaller buffer here means faster drain on shutdown.
 
 - **General rule:** `2 * num_producers` is a reasonable starting point. Larger
@@ -191,7 +181,7 @@ root.cancel();
 assert!(child.is_cancelled()); // true
 ```
 
-### Ordered shutdown pattern for logfwd
+### Ordered shutdown pattern for pipelines
 
 Cancel stages in reverse order so upstream drains into downstream before
 downstream shuts down.
@@ -245,7 +235,7 @@ async fn transform_task(mut rx: mpsc::Receiver<Batch>, tx: mpsc::Sender<Batch>) 
 }
 ```
 
-This replaces the current `AtomicBool` shutdown flag.
+This pattern replaces the common `AtomicBool` shutdown flag approach.
 
 ---
 
@@ -373,9 +363,9 @@ Each `spawn_blocking` call:
 2. May spawn a new OS thread (pool grows to 512 by default)
 3. Context switches to the blocking thread and back
 
-For logfwd's hot path (scanner + transform), keep these on the async runtime
-using `tokio::task::spawn` or run inline. Only use `spawn_blocking` for the
-output HTTP calls during the transition period.
+For a pipeline's hot path (scanner + transform), keep these on the async runtime
+using `tokio::task::spawn` or run inline. Only use `spawn_blocking` for
+output HTTP calls during a transition period.
 
 ### Pool sizing
 
@@ -392,7 +382,7 @@ tokio::runtime::Builder::new_multi_thread()
 ### Calling async from sync code
 
 **Pattern: create a new runtime.** Use this at the boundary (e.g., `main()`,
-test functions, or a sync `OutputSink::send_batch` impl wrapping an async HTTP client).
+test functions, or a sync output method wrapping an async HTTP client).
 
 ```rust
 // In a sync context that is NOT on a tokio worker thread:
@@ -434,39 +424,26 @@ async fn main() {
 `Runtime::new()` panics if a tokio runtime is already active on the current thread.
 `block_on()` panics if called from an async context.
 
-**Migration strategy for logfwd:**
+**Typical migration strategy:**
 
 1. Add `#[tokio::main]` to `main()`. All code below runs in async context.
-2. Convert `Pipeline::run()` from a blocking loop to `async fn run()`.
-3. Replace `crossbeam-channel` with `tokio::sync::mpsc` one pipeline at a time.
-4. For output sinks still using `ureq` (sync HTTP), wrap in `spawn_blocking`.
-5. Later, replace `ureq` with `reqwest` (async-native) and drop `spawn_blocking`.
+2. Convert the main pipeline loop from blocking to `async fn run()`.
+3. Replace `crossbeam-channel` with `tokio::sync::mpsc` one stage at a time.
+4. For output sinks still using sync HTTP (e.g., `ureq`), wrap in `spawn_blocking`.
+5. Later, replace sync HTTP with an async client (e.g., `reqwest`) and drop `spawn_blocking`.
 6. Replace `AtomicBool` shutdown with `CancellationToken`.
 
-**Transition shim** -- wrapping a sync `OutputSink` for use in async code:
+**Transition shim** -- wrapping a sync output sink for use in async code:
 
 ```rust
-struct AsyncOutputBridge {
-    inner: Box<dyn OutputSink>,
-}
-
-impl AsyncOutputBridge {
-    async fn send_batch(&mut self, batch: RecordBatch, meta: BatchMetadata) -> io::Result<()> {
-        // Can't move &mut self into spawn_blocking. Use a channel or
-        // move the inner sink into the closure and back.
-        // Simpler: keep the sync sink on a dedicated thread with an mpsc channel.
-        todo!()
-    }
-}
-
-// Better pattern: dedicated writer thread
-fn spawn_output_thread(
-    mut sink: Box<dyn OutputSink>,
-    mut rx: tokio::sync::mpsc::Receiver<(RecordBatch, BatchMetadata)>,
+// Dedicated writer thread pattern
+fn spawn_output_thread<T: Send + 'static>(
+    mut sink: Box<dyn Sink<T>>,
+    mut rx: tokio::sync::mpsc::Receiver<T>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::task::spawn_blocking(move || {
-        while let Some((batch, meta)) = rx.blocking_recv() {
-            if let Err(e) = sink.send_batch(&batch, &meta) {
+        while let Some(item) = rx.blocking_recv() {
+            if let Err(e) = sink.send(item) {
                 eprintln!("output error: {e}");
             }
         }
@@ -516,8 +493,8 @@ let result = do_network_call(data).await;
 }
 ```
 
-**For logfwd:** prefer channels over shared mutexes. Pipeline stages
-communicate via mpsc, not shared state.
+**Best practice:** prefer channels over shared mutexes. Pipeline stages
+should communicate via mpsc, not shared state.
 
 ### Forgetting to .await a future
 
@@ -540,7 +517,7 @@ unused_must_use = "deny"
 ### CPU-heavy work on the async runtime
 
 ```rust
-// BUG: scanner/transform runs directly on async worker. Blocks other tasks.
+// BUG: CPU-bound work runs directly on async worker. Blocks other tasks.
 async fn process_pipeline(batch: Vec<u8>) {
     let record_batch = scanner.scan(&batch);       // CPU-bound, blocks worker
     let result = transform.execute(record_batch);   // CPU-bound, blocks worker
@@ -557,10 +534,9 @@ async fn process_pipeline(batch: Vec<u8>) {
 }
 ```
 
-For logfwd specifically: the scanner + SQL transform are CPU-bound and take
-microseconds to low milliseconds per batch. During migration, `spawn_blocking`
-is fine. Long-term, consider `tokio::task::spawn_blocking` for batches or a
-dedicated compute thread pool.
+CPU-bound pipeline stages (scanning, SQL transforms) typically take microseconds
+to low milliseconds per batch. During migration, `spawn_blocking` is fine.
+Long-term, consider a dedicated compute thread pool.
 
 ### Dropping a Runtime inside async
 

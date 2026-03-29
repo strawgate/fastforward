@@ -103,9 +103,9 @@ The `record_batch!` macro always marks fields `nullable=true`.
 | Memory overhead per element | 4 bytes (i32 offset) | 16 bytes (u128 view) |
 | Best for | small datasets, simple writes | large datasets, filtering, zero-copy references |
 
-**For logfwd**: StringViewArray is ideal for the StreamingBuilder because log lines
-can reference the original buffer without copying. Use `append_block` + `try_append_view`
-for zero-copy construction from a parsed buffer.
+**In a log processing pipeline**, StringViewArray is ideal for streaming builders because
+log lines can reference the original buffer without copying. Use `append_block` +
+`try_append_view` for zero-copy construction from a parsed buffer.
 
 ### Construction: simple
 
@@ -120,7 +120,7 @@ let arr = StringViewArray::from(vec![Some("hello"), None, Some("world")]);
 let arr: StringViewArray = vec![Some("a"), None, Some("c")].into_iter().collect();
 ```
 
-### Construction: zero-copy from existing buffer (critical for StreamingBuilder)
+### Construction: zero-copy from existing buffer
 
 ```rust
 use arrow_array::builder::StringViewBuilder;
@@ -128,7 +128,7 @@ use arrow_buffer::Buffer;
 
 let mut builder = StringViewBuilder::new();
 
-// Your raw data buffer (e.g., a parsed CRI log page)
+// Your raw data buffer (e.g., a parsed log page)
 let raw_bytes: &[u8] = b"helloworld_this_is_a_long_string";
 let block = builder.append_block(Buffer::from(raw_bytes));
 
@@ -209,9 +209,9 @@ Both write Arrow IPC format. The key differences:
 | Reader trait bound | `Read + Seek` | `Read` (no Seek) |
 | Footer | Yes -- contains block offsets for random access | No -- just EOS marker |
 | Random access | Yes, via `FileReader::set_index(n)` | No -- must read sequentially |
-| Use case | DiskQueue (random access to batches) | Streaming over network/pipe |
+| Use case | Disk-backed queues (random access to batches) | Streaming over network/pipe |
 
-**For logfwd DiskQueue**: Use `FileWriter`. The footer stores block offsets, so you can
+**For a disk-backed queue**, use `FileWriter`. The footer stores block offsets, so you can
 seek to batch N directly without scanning. This is critical for a disk-backed queue where
 you need to read batches by index.
 
@@ -387,7 +387,7 @@ let is_superset = new_schema.contains(&old_schema);
 let relabeled = batch.with_schema(new_schema).unwrap();
 ```
 
-### Handling schema mismatches in practice (logfwd pattern)
+### Handling schema mismatches in practice
 
 When batches arrive with evolving schemas (e.g., new fields appear):
 
@@ -554,7 +554,7 @@ free). In tight loops, use `schema_ref()`.
 
 ### StringViewBuilder block size for log lines
 
-For logfwd-style workloads (variable length log lines, many > 12 bytes):
+For log processing workloads (variable length log lines, many > 12 bytes):
 
 ```rust
 let mut builder = StringViewBuilder::new()
@@ -575,9 +575,9 @@ the buffers in the returned `RecordBatch` can point directly into the mmap regio
 // Uses FileReader with a Cursor<&[u8]> backed by mmap
 ```
 
-This is relevant for DiskQueue: if you mmap the IPC file, reads are zero-copy (the OS
-manages paging). The `FileReader` requires `Read + Seek`, which `Cursor<&[u8]>` provides
-over an mmap slice.
+This is relevant for disk-backed queues: if you mmap the IPC file, reads are zero-copy
+(the OS manages paging). The `FileReader` requires `Read + Seek`, which `Cursor<&[u8]>`
+provides over an mmap slice.
 
 ### Avoid re-encoding dictionaries
 
