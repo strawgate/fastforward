@@ -328,10 +328,10 @@ impl ColumnarBatchBuilder {
                 let cardinality = uniques.len();
 
                 // Adaptive encoding:
-                //   < 256 uniques → DictionaryArray<Int8>  (1 byte/row)
+                //   < 128 uniques → DictionaryArray<Int8>  (1 byte/row, i8 index max 127)
                 //   < 32768 uniques and < 50% of rows → DictionaryArray<Int16> (2 bytes/row)
                 //   else → plain StringArray
-                if cardinality < 256 {
+                if cardinality < 128 {
                     let mut builder = StringDictionaryBuilder::<Int8Type>::new();
                     let mut vi = 0;
                     for row in 0..num_rows {

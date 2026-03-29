@@ -42,46 +42,84 @@ pub(crate) trait ScanBuilder {
 
 impl ScanBuilder for IndexedBatchBuilder {
     #[inline(always)]
-    fn begin_batch(&mut self) { self.begin_batch(); }
+    fn begin_batch(&mut self) {
+        self.begin_batch();
+    }
     #[inline(always)]
-    fn begin_row(&mut self) { self.begin_row(); }
+    fn begin_row(&mut self) {
+        self.begin_row();
+    }
     #[inline(always)]
-    fn end_row(&mut self) { self.end_row(); }
+    fn end_row(&mut self) {
+        self.end_row();
+    }
     #[inline(always)]
-    fn resolve_field(&mut self, key: &[u8]) -> usize { self.resolve_field(key) }
+    fn resolve_field(&mut self, key: &[u8]) -> usize {
+        self.resolve_field(key)
+    }
     #[inline(always)]
-    fn append_str_by_idx(&mut self, idx: usize, value: &[u8]) { self.append_str_by_idx(idx, value); }
+    fn append_str_by_idx(&mut self, idx: usize, value: &[u8]) {
+        self.append_str_by_idx(idx, value);
+    }
     #[inline(always)]
-    fn append_int_by_idx(&mut self, idx: usize, value: &[u8]) { self.append_int_by_idx(idx, value); }
+    fn append_int_by_idx(&mut self, idx: usize, value: &[u8]) {
+        self.append_int_by_idx(idx, value);
+    }
     #[inline(always)]
-    fn append_float_by_idx(&mut self, idx: usize, value: &[u8]) { self.append_float_by_idx(idx, value); }
+    fn append_float_by_idx(&mut self, idx: usize, value: &[u8]) {
+        self.append_float_by_idx(idx, value);
+    }
     #[inline(always)]
-    fn append_null_by_idx(&mut self, idx: usize) { self.append_null_by_idx(idx); }
+    fn append_null_by_idx(&mut self, idx: usize) {
+        self.append_null_by_idx(idx);
+    }
     #[inline(always)]
-    fn append_raw(&mut self, line: &[u8]) { self.append_raw(line); }
+    fn append_raw(&mut self, line: &[u8]) {
+        self.append_raw(line);
+    }
 }
 
 impl ScanBuilder for ColumnarBatchBuilder {
     #[inline(always)]
-    fn begin_batch(&mut self) { self.begin_batch(); }
+    fn begin_batch(&mut self) {
+        self.begin_batch();
+    }
     #[inline(always)]
-    fn begin_row(&mut self) { self.begin_row(); }
+    fn begin_row(&mut self) {
+        self.begin_row();
+    }
     #[inline(always)]
-    fn end_row(&mut self) { self.end_row(); }
+    fn end_row(&mut self) {
+        self.end_row();
+    }
     #[inline(always)]
-    fn resolve_field(&mut self, key: &[u8]) -> usize { self.resolve_field(key) }
+    fn resolve_field(&mut self, key: &[u8]) -> usize {
+        self.resolve_field(key)
+    }
     #[inline(always)]
-    fn append_str_by_idx(&mut self, idx: usize, value: &[u8]) { self.append_str_by_idx(idx, value); }
+    fn append_str_by_idx(&mut self, idx: usize, value: &[u8]) {
+        self.append_str_by_idx(idx, value);
+    }
     #[inline(always)]
-    fn append_int_by_idx(&mut self, idx: usize, value: &[u8]) { self.append_int_by_idx(idx, value); }
+    fn append_int_by_idx(&mut self, idx: usize, value: &[u8]) {
+        self.append_int_by_idx(idx, value);
+    }
     #[inline(always)]
-    fn append_float_by_idx(&mut self, idx: usize, value: &[u8]) { self.append_float_by_idx(idx, value); }
+    fn append_float_by_idx(&mut self, idx: usize, value: &[u8]) {
+        self.append_float_by_idx(idx, value);
+    }
     #[inline(always)]
-    fn append_null_by_idx(&mut self, idx: usize) { self.append_null_by_idx(idx); }
+    fn append_null_by_idx(&mut self, idx: usize) {
+        self.append_null_by_idx(idx);
+    }
     #[inline(always)]
-    fn append_raw(&mut self, line: &[u8]) { self.append_raw(line); }
+    fn append_raw(&mut self, line: &[u8]) {
+        self.append_raw(line);
+    }
     #[inline(always)]
-    fn set_buffer(&mut self, buf: &[u8]) { self.set_buffer(buf); }
+    fn set_buffer(&mut self, buf: &[u8]) {
+        self.set_buffer(buf);
+    }
 }
 
 // ---------------------------------------------------------------------------

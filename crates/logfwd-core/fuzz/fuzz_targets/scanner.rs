@@ -48,6 +48,12 @@ fn make_pushdown_config() -> ScanConfig {
 }
 
 fuzz_target!(|data: &[u8]| {
+    // The builders use from_utf8_unchecked on values extracted from the input.
+    // Non-UTF-8 input would cause UB, so reject it early.
+    if std::str::from_utf8(data).is_err() {
+        return;
+    }
+
     // --- Scalar Scanner ---
     {
         let mut scanner = Scanner::new(make_extract_all_config(), 128);
