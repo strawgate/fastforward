@@ -22,7 +22,7 @@ use memchr::memchr;
 
 /// Encode a varint into buf at offset, return new offset.
 #[inline(always)]
-fn encode_varint(buf: &mut Vec<u8>, mut value: u64) {
+pub fn encode_varint(buf: &mut Vec<u8>, mut value: u64) {
     loop {
         if value < 0x80 {
             buf.push(value as u8);
@@ -35,7 +35,7 @@ fn encode_varint(buf: &mut Vec<u8>, mut value: u64) {
 
 /// Compute encoded varint length without writing.
 #[inline(always)]
-const fn varint_len(value: u64) -> usize {
+pub const fn varint_len(value: u64) -> usize {
     match value {
         0..=0x7F => 1,
         0..=0x3FFF => 2,
@@ -52,27 +52,27 @@ const fn varint_len(value: u64) -> usize {
 
 /// Write a protobuf tag (field_number + wire_type).
 #[inline(always)]
-fn encode_tag(buf: &mut Vec<u8>, field_number: u32, wire_type: u8) {
+pub fn encode_tag(buf: &mut Vec<u8>, field_number: u32, wire_type: u8) {
     encode_varint(buf, ((field_number as u64) << 3) | wire_type as u64);
 }
 
 /// Write a fixed64 field (tag + 8 bytes little-endian).
 #[inline(always)]
-fn encode_fixed64(buf: &mut Vec<u8>, field_number: u32, value: u64) {
+pub fn encode_fixed64(buf: &mut Vec<u8>, field_number: u32, value: u64) {
     encode_tag(buf, field_number, 1); // wire type 1 = 64-bit
     buf.extend_from_slice(&value.to_le_bytes());
 }
 
 /// Write a varint field (tag + varint value).
 #[inline(always)]
-fn encode_varint_field(buf: &mut Vec<u8>, field_number: u32, value: u64) {
+pub fn encode_varint_field(buf: &mut Vec<u8>, field_number: u32, value: u64) {
     encode_tag(buf, field_number, 0); // wire type 0 = varint
     encode_varint(buf, value);
 }
 
 /// Write a length-delimited field (tag + length + bytes).
 #[inline(always)]
-fn encode_bytes_field(buf: &mut Vec<u8>, field_number: u32, data: &[u8]) {
+pub fn encode_bytes_field(buf: &mut Vec<u8>, field_number: u32, data: &[u8]) {
     encode_tag(buf, field_number, 2); // wire type 2 = length-delimited
     encode_varint(buf, data.len() as u64);
     buf.extend_from_slice(data);
@@ -80,7 +80,7 @@ fn encode_bytes_field(buf: &mut Vec<u8>, field_number: u32, data: &[u8]) {
 
 /// Compute the encoded size of a length-delimited field (without writing).
 #[inline(always)]
-const fn bytes_field_size(field_number: u32, data_len: usize) -> usize {
+pub const fn bytes_field_size(field_number: u32, data_len: usize) -> usize {
     let tag_size = varint_len(((field_number as u64) << 3) | 2);
     let len_size = varint_len(data_len as u64);
     tag_size + len_size + data_len
@@ -103,7 +103,7 @@ pub enum Severity {
 
 /// Fast severity lookup from first byte + length. No string comparison needed.
 #[inline(always)]
-fn parse_severity(text: &[u8]) -> (Severity, &[u8]) {
+pub fn parse_severity(text: &[u8]) -> (Severity, &[u8]) {
     // Common patterns: "INFO", "WARN", "ERROR", "DEBUG", "TRACE", "FATAL"
     // Also: "info", "warn", "error", "debug", "trace", "fatal"
     if text.is_empty() {
@@ -263,7 +263,7 @@ fn key_eq_ignore_case(a: &[u8], b: &[u8]) -> bool {
 ///   2024-01-15T10:30:00.123456789Z
 ///   2024-01-15 10:30:00Z (space separator)
 /// Returns 0 on parse failure (observed_time will be used instead).
-fn parse_timestamp_nanos(ts: &[u8]) -> u64 {
+pub fn parse_timestamp_nanos(ts: &[u8]) -> u64 {
     if ts.len() < 19 {
         return 0; // too short for YYYY-MM-DDTHH:MM:SS
     }

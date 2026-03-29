@@ -1,0 +1,691 @@
+// transform.rs — DataFusion SQL transform layer.
+//
+// Takes a user's SQL string, analyzes it at startup, compiles a DataFusion
+// execution plan, and executes it against Arrow RecordBatches from the scanner.
+
+use std::any::Any;
+use std::collections::hash_map::DefaultHasher;
+use std::collections::HashSet;
+use std::hash::{Hash, Hasher};
+use std::sync::Arc;
+
+use arrow::datatypes::{DataType, SchemaRef};
+use arrow::record_batch::RecordBatch;
+
+use datafusion::datasource::MemTable;
+use datafusion::logical_expr::{
+    ColumnarValue, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature, Volatility,
+};
+use datafusion::prelude::*;
+
+use crate::scanner::ScanConfig;
+
+// Re-export sqlparser through datafusion.
+use datafusion::sql::sqlparser::ast::{
+    self as sqlast, Expr as SqlExpr, SelectItem, SetExpr, Statement, WildcardAdditionalOptions,
+};
+use datafusion::sql::sqlparser::dialect::GenericDialect;
+use datafusion::sql::sqlparser::parser::Parser;
+
+// ---------------------------------------------------------------------------
+// QueryAnalyzer
+// ---------------------------------------------------------------------------
+
+/// Parses SQL at startup, extracts column references and determines scan config.
+pub struct QueryAnalyzer {
+    pub user_sql: String,
+    pub referenced_columns: HashSet<String>,
+    pub uses_select_star: bool,
+    pub except_fields: Vec<String>,
+}
+
+impl QueryAnalyzer {
+    /// Parse the SQL and extract metadata about column usage.
+    pub fn new(sql: &str) -> Result<Self, String> {
+        let dialect = GenericDialect {};
+        let statements = Parser::parse_sql(&dialect, sql)
+            .map_err(|e| format!("SQL parse error: {e}"))?;
+
+        if statements.len() != 1 {
+            return Err("Expected exactly one SQL statement".to_string());
+        }
+
+        let stmt = &statements[0];
+        let mut referenced_columns = HashSet::new();
+        let mut uses_select_star = false;
+        let mut except_fields = Vec::new();
+
+        if let Statement::Query(query) = stmt {
+            if let SetExpr::Select(select) = query.body.as_ref() {
+                for item in &select.projection {
+                    match item {
+                        SelectItem::Wildcard(opts) => {
+                            uses_select_star = true;
+                            extract_except_fields(opts, &mut except_fields);
+                        }
+                        SelectItem::QualifiedWildcard(_, opts) => {
+                            uses_select_star = true;
+                            extract_except_fields(opts, &mut except_fields);
+                        }
+                        SelectItem::UnnamedExpr(expr) => {
+                            collect_column_refs(expr, &mut referenced_columns);
+                        }
+                        SelectItem::ExprWithAlias { expr, .. } => {
+                            collect_column_refs(expr, &mut referenced_columns);
+                        }
+                    }
+                }
+
+                // Walk WHERE clause for column references.
+                if let Some(ref selection) = select.selection {
+                    collect_column_refs(selection, &mut referenced_columns);
+                }
+            }
+        } else {
+            return Err("Only SELECT statements are supported".to_string());
+        }
+
+        Ok(QueryAnalyzer {
+            user_sql: sql.to_string(),
+            referenced_columns,
+            uses_select_star,
+            except_fields,
+        })
+    }
+
+    /// Generate ScanConfig for the scanner based on query analysis.
+    pub fn scan_config(&self) -> ScanConfig {
+        if self.uses_select_star {
+            // SELECT * — extract all fields.
+            ScanConfig {
+                wanted_fields: vec![],
+                extract_all: true,
+                keep_raw: true,
+            }
+        } else {
+            // Only extract referenced fields.
+            use crate::scanner::FieldSpec;
+            let wanted: Vec<FieldSpec> = self
+                .referenced_columns
+                .iter()
+                .map(|name| FieldSpec {
+                    name: name.clone(),
+                    aliases: vec![],
+                })
+                .collect();
+            ScanConfig {
+                wanted_fields: wanted,
+                extract_all: false,
+                keep_raw: false,
+            }
+        }
+    }
+}
+
+/// Extract EXCEPT field names from wildcard options.
+fn extract_except_fields(opts: &WildcardAdditionalOptions, out: &mut Vec<String>) {
+    if let Some(ref except) = opts.opt_except {
+        out.push(except.first_element.value.clone());
+        for ident in &except.additional_elements {
+            out.push(ident.value.clone());
+        }
+    }
+}
+
+/// Recursively collect column name references from a SQL expression.
+fn collect_column_refs(expr: &SqlExpr, cols: &mut HashSet<String>) {
+    match expr {
+        SqlExpr::Identifier(ident) => {
+            cols.insert(ident.value.clone());
+        }
+        SqlExpr::CompoundIdentifier(parts) => {
+            // e.g. logs.field — take the last part as the column name.
+            if let Some(last) = parts.last() {
+                cols.insert(last.value.clone());
+            }
+        }
+        SqlExpr::BinaryOp { left, right, .. } => {
+            collect_column_refs(left, cols);
+            collect_column_refs(right, cols);
+        }
+        SqlExpr::UnaryOp { expr, .. } => {
+            collect_column_refs(expr, cols);
+        }
+        SqlExpr::Function(func) => {
+            match &func.args {
+                sqlast::FunctionArguments::List(arg_list) => {
+                    for arg in &arg_list.args {
+                        match arg {
+                            sqlast::FunctionArg::Unnamed(
+                                sqlast::FunctionArgExpr::Expr(e),
+                            ) => collect_column_refs(e, cols),
+                            sqlast::FunctionArg::Named { arg: sqlast::FunctionArgExpr::Expr(e), .. } => {
+                                collect_column_refs(e, cols);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                sqlast::FunctionArguments::None => {}
+                sqlast::FunctionArguments::Subquery(_) => {}
+            }
+        }
+        SqlExpr::Nested(inner) => {
+            collect_column_refs(inner, cols);
+        }
+        SqlExpr::IsNull(e) | SqlExpr::IsNotNull(e) => {
+            collect_column_refs(e, cols);
+        }
+        SqlExpr::Between {
+            expr, low, high, ..
+        } => {
+            collect_column_refs(expr, cols);
+            collect_column_refs(low, cols);
+            collect_column_refs(high, cols);
+        }
+        SqlExpr::InList { expr, list, .. } => {
+            collect_column_refs(expr, cols);
+            for e in list {
+                collect_column_refs(e, cols);
+            }
+        }
+        SqlExpr::Case {
+            operand,
+            conditions,
+            results,
+            else_result,
+            ..
+        } => {
+            if let Some(op) = operand {
+                collect_column_refs(op, cols);
+            }
+            for c in conditions {
+                collect_column_refs(c, cols);
+            }
+            for r in results {
+                collect_column_refs(r, cols);
+            }
+            if let Some(e) = else_result {
+                collect_column_refs(e, cols);
+            }
+        }
+        SqlExpr::Cast { expr, .. } => {
+            collect_column_refs(expr, cols);
+        }
+        SqlExpr::Like { expr, pattern, .. } | SqlExpr::ILike { expr, pattern, .. } => {
+            collect_column_refs(expr, cols);
+            collect_column_refs(pattern, cols);
+        }
+        // Literals, wildcards, etc. — no column refs.
+        _ => {}
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Custom UDFs: int() and float()
+// ---------------------------------------------------------------------------
+
+/// UDF: int(col) — safe cast from Utf8 to Int64, returns NULL on failure.
+#[derive(Debug)]
+struct IntCastUdf {
+    signature: Signature,
+}
+
+impl IntCastUdf {
+    fn new() -> Self {
+        Self {
+            signature: Signature::exact(vec![DataType::Utf8], Volatility::Immutable),
+        }
+    }
+}
+
+impl ScalarUDFImpl for IntCastUdf {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn name(&self) -> &str {
+        "int"
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> datafusion::common::Result<DataType> {
+        Ok(DataType::Int64)
+    }
+
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion::common::Result<ColumnarValue> {
+        let arg = &args.args[0];
+        match arg {
+            ColumnarValue::Array(array) => {
+                // Safe cast: returns NULL on parse failure.
+                let result = arrow::compute::cast(array, &DataType::Int64)
+                    .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
+                Ok(ColumnarValue::Array(result))
+            }
+            ColumnarValue::Scalar(scalar) => {
+                // Convert scalar to single-element array, cast, convert back.
+                let array = scalar.to_array()
+                    .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
+                let result = arrow::compute::cast(&array, &DataType::Int64)
+                    .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
+                let scalar_val = datafusion::common::ScalarValue::try_from_array(&result, 0)?;
+                Ok(ColumnarValue::Scalar(scalar_val))
+            }
+        }
+    }
+}
+
+/// UDF: float(col) — safe cast from Utf8 to Float64, returns NULL on failure.
+#[derive(Debug)]
+struct FloatCastUdf {
+    signature: Signature,
+}
+
+impl FloatCastUdf {
+    fn new() -> Self {
+        Self {
+            signature: Signature::exact(vec![DataType::Utf8], Volatility::Immutable),
+        }
+    }
+}
+
+impl ScalarUDFImpl for FloatCastUdf {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn name(&self) -> &str {
+        "float"
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> datafusion::common::Result<DataType> {
+        Ok(DataType::Float64)
+    }
+
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion::common::Result<ColumnarValue> {
+        let arg = &args.args[0];
+        match arg {
+            ColumnarValue::Array(array) => {
+                let result = arrow::compute::cast(array, &DataType::Float64)
+                    .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
+                Ok(ColumnarValue::Array(result))
+            }
+            ColumnarValue::Scalar(scalar) => {
+                let array = scalar.to_array()
+                    .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
+                let result = arrow::compute::cast(&array, &DataType::Float64)
+                    .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
+                let scalar_val = datafusion::common::ScalarValue::try_from_array(&result, 0)?;
+                Ok(ColumnarValue::Scalar(scalar_val))
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SqlTransform
+// ---------------------------------------------------------------------------
+
+/// Manages a DataFusion context, compiles and caches plans, executes SQL
+/// transforms against Arrow RecordBatches.
+pub struct SqlTransform {
+    user_sql: String,
+    analyzer: QueryAnalyzer,
+    /// Schema fingerprint for cache invalidation.
+    schema_hash: u64,
+}
+
+impl SqlTransform {
+    /// Create a new SQL transform from a SQL string.
+    pub fn new(sql: &str) -> Result<Self, String> {
+        let analyzer = QueryAnalyzer::new(sql)?;
+
+        Ok(SqlTransform {
+            user_sql: sql.to_string(),
+            analyzer,
+            schema_hash: 0,
+        })
+    }
+
+    /// Execute the SQL transform on a RecordBatch.
+    ///
+    /// Creates a fresh DataFusion session, registers the batch as a MemTable
+    /// named "logs", runs the SQL, and returns the result.
+    ///
+    /// Schema changes (new fields in later batches) are handled automatically
+    /// since each call creates a new context matching the batch schema.
+    pub fn execute(&mut self, batch: RecordBatch) -> Result<RecordBatch, String> {
+        if batch.num_rows() == 0 {
+            return Ok(batch);
+        }
+
+        // Track schema hash for diagnostics / future caching.
+        let new_hash = hash_schema(batch.schema());
+        self.schema_hash = new_hash;
+
+        let sql = self.user_sql.clone();
+
+        // DataFusion requires async — use a minimal tokio runtime.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| format!("Failed to create tokio runtime: {e}"))?;
+
+        rt.block_on(async {
+            let ctx = SessionContext::new();
+
+            // Register custom UDFs.
+            ctx.register_udf(ScalarUDF::from(IntCastUdf::new()));
+            ctx.register_udf(ScalarUDF::from(FloatCastUdf::new()));
+
+            // Register the batch as a MemTable named "logs".
+            let schema = batch.schema();
+            let table = MemTable::try_new(schema, vec![vec![batch]])
+                .map_err(|e| format!("Failed to create MemTable: {e}"))?;
+            ctx.register_table("logs", Arc::new(table))
+                .map_err(|e| format!("Failed to register table: {e}"))?;
+
+            // Execute the SQL.
+            let df = ctx
+                .sql(&sql)
+                .await
+                .map_err(|e| format!("SQL execution error: {e}"))?;
+
+            let batches = df
+                .collect()
+                .await
+                .map_err(|e| format!("Failed to collect results: {e}"))?;
+
+            // Concat all result batches into one.
+            match batches.len() {
+                0 => {
+                    // Return an empty batch with the result schema.
+                    let df2 = ctx
+                        .sql(&sql)
+                        .await
+                        .map_err(|e| format!("SQL schema error: {e}"))?;
+                    let df_schema = df2.schema();
+                    Ok(RecordBatch::new_empty(Arc::clone(df_schema.inner())))
+                }
+                1 => Ok(batches.into_iter().next().unwrap()),
+                _ => {
+                    let schema = batches[0].schema();
+                    concat_batches(&schema, &batches)
+                        .map_err(|e| format!("Failed to concat batches: {e}"))
+                }
+            }
+        })
+    }
+
+    /// Get the ScanConfig for field pushdown.
+    pub fn scan_config(&self) -> ScanConfig {
+        self.analyzer.scan_config()
+    }
+
+    /// Get a reference to the query analyzer.
+    pub fn analyzer(&self) -> &QueryAnalyzer {
+        &self.analyzer
+    }
+}
+
+/// Concatenate multiple RecordBatches into one.
+fn concat_batches(
+    schema: &SchemaRef,
+    batches: &[RecordBatch],
+) -> Result<RecordBatch, arrow::error::ArrowError> {
+    arrow::compute::concat_batches(schema, batches)
+}
+
+/// Hash an Arrow schema for quick change detection.
+fn hash_schema(schema: SchemaRef) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    for field in schema.fields() {
+        field.name().hash(&mut hasher);
+        field.data_type().hash(&mut hasher);
+        field.is_nullable().hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow::array::{Array, ArrayRef, Float64Array, Int64Array, StringArray};
+    use arrow::datatypes::{Field, Schema};
+
+    /// Helper: build a simple test RecordBatch with level_str, msg_str, status_str columns.
+    fn make_test_batch() -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("level_str", DataType::Utf8, true),
+            Field::new("msg_str", DataType::Utf8, true),
+            Field::new("status_str", DataType::Utf8, true),
+        ]));
+        let level: ArrayRef = Arc::new(StringArray::from(vec![
+            Some("INFO"),
+            Some("ERROR"),
+            Some("DEBUG"),
+            Some("ERROR"),
+        ]));
+        let msg: ArrayRef = Arc::new(StringArray::from(vec![
+            Some("started"),
+            Some("disk full"),
+            Some("heartbeat"),
+            Some("oom killed"),
+        ]));
+        let status: ArrayRef = Arc::new(StringArray::from(vec![
+            Some("200"),
+            Some("500"),
+            Some("not_a_number"),
+            Some("503"),
+        ]));
+        RecordBatch::try_new(schema, vec![level, msg, status]).unwrap()
+    }
+
+    #[test]
+    fn test_simple_passthrough() {
+        let batch = make_test_batch();
+        let mut transform = SqlTransform::new("SELECT * FROM logs").unwrap();
+        let result = transform.execute(batch.clone()).unwrap();
+        assert_eq!(result.num_rows(), 4);
+        assert_eq!(result.num_columns(), 3);
+        // Verify data matches.
+        let level = result
+            .column_by_name("level_str")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(level.value(0), "INFO");
+        assert_eq!(level.value(3), "ERROR");
+    }
+
+    #[test]
+    fn test_filter() {
+        let batch = make_test_batch();
+        let mut transform =
+            SqlTransform::new("SELECT * FROM logs WHERE level_str = 'ERROR'").unwrap();
+        let result = transform.execute(batch).unwrap();
+        assert_eq!(result.num_rows(), 2);
+        let level = result
+            .column_by_name("level_str")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        for i in 0..result.num_rows() {
+            assert_eq!(level.value(i), "ERROR");
+        }
+        let msg = result
+            .column_by_name("msg_str")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(msg.value(0), "disk full");
+        assert_eq!(msg.value(1), "oom killed");
+    }
+
+    #[test]
+    fn test_except() {
+        let batch = make_test_batch();
+        let mut transform =
+            SqlTransform::new("SELECT * EXCEPT (status_str) FROM logs").unwrap();
+        let result = transform.execute(batch).unwrap();
+        assert_eq!(result.num_rows(), 4);
+        // status_str should be removed.
+        assert!(result.column_by_name("status_str").is_none());
+        // Other columns should remain.
+        assert!(result.column_by_name("level_str").is_some());
+        assert!(result.column_by_name("msg_str").is_some());
+    }
+
+    #[test]
+    fn test_computed() {
+        let batch = make_test_batch();
+        let mut transform =
+            SqlTransform::new("SELECT *, 'prod' AS env FROM logs").unwrap();
+        let result = transform.execute(batch).unwrap();
+        assert_eq!(result.num_rows(), 4);
+        let env = result
+            .column_by_name("env")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        for i in 0..4 {
+            assert_eq!(env.value(i), "prod");
+        }
+    }
+
+    #[test]
+    fn test_int_udf() {
+        let batch = make_test_batch();
+        let mut transform =
+            SqlTransform::new("SELECT int(status_str) AS status_int FROM logs").unwrap();
+        let result = transform.execute(batch).unwrap();
+        assert_eq!(result.num_rows(), 4);
+        let status = result
+            .column_by_name("status_int")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        assert_eq!(status.value(0), 200);
+        assert_eq!(status.value(1), 500);
+        assert!(status.is_null(2)); // "not_a_number" should be NULL
+        assert_eq!(status.value(3), 503);
+    }
+
+    #[test]
+    fn test_schema_evolution() {
+        let mut transform = SqlTransform::new("SELECT * FROM logs").unwrap();
+
+        // First batch: 2 columns.
+        let schema1 = Arc::new(Schema::new(vec![
+            Field::new("host_str", DataType::Utf8, true),
+            Field::new("level_str", DataType::Utf8, true),
+        ]));
+        let batch1 = RecordBatch::try_new(
+            schema1,
+            vec![
+                Arc::new(StringArray::from(vec!["web1", "web2"])) as ArrayRef,
+                Arc::new(StringArray::from(vec!["INFO", "ERROR"])) as ArrayRef,
+            ],
+        )
+        .unwrap();
+
+        let result1 = transform.execute(batch1).unwrap();
+        assert_eq!(result1.num_columns(), 2);
+        assert_eq!(result1.num_rows(), 2);
+
+        // Second batch: 3 columns (new field added).
+        let schema2 = Arc::new(Schema::new(vec![
+            Field::new("host_str", DataType::Utf8, true),
+            Field::new("level_str", DataType::Utf8, true),
+            Field::new("region_str", DataType::Utf8, true),
+        ]));
+        let batch2 = RecordBatch::try_new(
+            schema2,
+            vec![
+                Arc::new(StringArray::from(vec!["web3"])) as ArrayRef,
+                Arc::new(StringArray::from(vec!["WARN"])) as ArrayRef,
+                Arc::new(StringArray::from(vec!["us-east-1"])) as ArrayRef,
+            ],
+        )
+        .unwrap();
+
+        let result2 = transform.execute(batch2).unwrap();
+        assert_eq!(result2.num_columns(), 3);
+        assert_eq!(result2.num_rows(), 1);
+        assert!(result2.column_by_name("region_str").is_some());
+    }
+
+    #[test]
+    fn test_float_udf() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("val_str", DataType::Utf8, true),
+        ]));
+        let vals: ArrayRef = Arc::new(StringArray::from(vec![
+            Some("3.14"),
+            Some("not_float"),
+            Some("2.718"),
+        ]));
+        let batch = RecordBatch::try_new(schema, vec![vals]).unwrap();
+
+        let mut transform =
+            SqlTransform::new("SELECT float(val_str) AS val_f FROM logs").unwrap();
+        let result = transform.execute(batch).unwrap();
+        let col = result
+            .column_by_name("val_f")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        assert!((col.value(0) - 3.14).abs() < 1e-10);
+        assert!(col.is_null(1));
+        assert!((col.value(2) - 2.718).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_query_analyzer_column_refs() {
+        let analyzer =
+            QueryAnalyzer::new("SELECT level_str, msg_str FROM logs WHERE status_str = '500'")
+                .unwrap();
+        assert!(!analyzer.uses_select_star);
+        assert!(analyzer.referenced_columns.contains("level_str"));
+        assert!(analyzer.referenced_columns.contains("msg_str"));
+        assert!(analyzer.referenced_columns.contains("status_str"));
+    }
+
+    #[test]
+    fn test_query_analyzer_select_star() {
+        let analyzer = QueryAnalyzer::new("SELECT * FROM logs").unwrap();
+        assert!(analyzer.uses_select_star);
+        assert!(analyzer.except_fields.is_empty());
+    }
+
+    #[test]
+    fn test_query_analyzer_except() {
+        let analyzer =
+            QueryAnalyzer::new("SELECT * EXCEPT (stack_trace_str) FROM logs").unwrap();
+        assert!(analyzer.uses_select_star);
+        assert_eq!(analyzer.except_fields, vec!["stack_trace_str"]);
+    }
+}
