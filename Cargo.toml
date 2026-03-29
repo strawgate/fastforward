@@ -33,9 +33,12 @@ harness = false
 
 [profile.release]
 opt-level = 3
+debug = true  # needed for flamegraphs and dhat to show source locations
+
+[profile.production]
+inherits = "release"
 lto = "thin"
 codegen-units = 1
-debug = true  # needed for flamegraphs and dhat to show source locations
 
 [profile.bench]
 inherits = "release"
