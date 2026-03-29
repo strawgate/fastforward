@@ -42,4 +42,42 @@ mod tests {
         assert!(h.facilities.is_none());
         assert!(h.wanted_fields.is_none());
     }
+
+    #[test]
+    fn has_syslog_predicates_severity() {
+        let h = FilterHints {
+            max_severity: Some(4),
+            ..Default::default()
+        };
+        assert!(h.has_syslog_predicates());
+    }
+
+    #[test]
+    fn has_syslog_predicates_facilities() {
+        let h = FilterHints {
+            facilities: Some(vec![1, 16]),
+            ..Default::default()
+        };
+        assert!(h.has_syslog_predicates());
+    }
+
+    #[test]
+    fn has_syslog_predicates_both() {
+        let h = FilterHints {
+            max_severity: Some(3),
+            facilities: Some(vec![16]),
+            ..Default::default()
+        };
+        assert!(h.has_syslog_predicates());
+    }
+
+    #[test]
+    fn empty_facilities_vec_still_counts() {
+        // Some(vec![]) is "explicitly set to empty" — has_syslog_predicates is true
+        let h = FilterHints {
+            facilities: Some(vec![]),
+            ..Default::default()
+        };
+        assert!(h.has_syslog_predicates());
+    }
 }

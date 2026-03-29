@@ -164,10 +164,7 @@ impl QueryAnalyzer {
 
 /// Walk a WHERE clause AST and extract predicates that can be pushed down.
 /// Only extracts from top-level AND chains (not OR branches).
-fn extract_pushable_predicates(
-    expr: &SqlExpr,
-    hints: &mut logfwd_core::filter_hints::FilterHints,
-) {
+fn extract_pushable_predicates(expr: &SqlExpr, hints: &mut logfwd_core::filter_hints::FilterHints) {
     match expr {
         // AND: recurse into both sides
         SqlExpr::BinaryOp {
@@ -208,6 +205,10 @@ fn extract_pushable_predicates(
                         ("severity", sqlast::BinaryOperator::GtEq) => {
                             // N >= severity means severity <= N
                             hints.max_severity = Some(val);
+                        }
+                        ("severity", sqlast::BinaryOperator::Gt) if val > 0 => {
+                            // N > severity means severity < N, i.e. severity <= N-1
+                            hints.max_severity = Some(val - 1);
                         }
                         _ => {}
                     }
@@ -984,10 +985,8 @@ mod tests {
 
     #[test]
     fn test_filter_hints_combined_and() {
-        let a = QueryAnalyzer::new(
-            "SELECT * FROM logs WHERE severity <= 4 AND facility = 16",
-        )
-        .unwrap();
+        let a =
+            QueryAnalyzer::new("SELECT * FROM logs WHERE severity <= 4 AND facility = 16").unwrap();
         let h = a.filter_hints();
         assert_eq!(h.max_severity, Some(4));
         assert_eq!(h.facilities, Some(vec![16]));
@@ -996,10 +995,8 @@ mod tests {
     #[test]
     fn test_filter_hints_or_not_pushed() {
         // OR with non-pushable predicate — should NOT push severity
-        let a = QueryAnalyzer::new(
-            "SELECT * FROM logs WHERE severity <= 4 OR msg_str = 'error'",
-        )
-        .unwrap();
+        let a = QueryAnalyzer::new("SELECT * FROM logs WHERE severity <= 4 OR msg_str = 'error'")
+            .unwrap();
         let h = a.filter_hints();
         // The OR is at top level, not an AND chain — nothing should be pushed
         assert!(h.max_severity.is_none());
@@ -1016,10 +1013,9 @@ mod tests {
 
     #[test]
     fn test_filter_hints_field_pushdown() {
-        let a = QueryAnalyzer::new(
-            "SELECT hostname_str, message_str FROM logs WHERE severity <= 2",
-        )
-        .unwrap();
+        let a =
+            QueryAnalyzer::new("SELECT hostname_str, message_str FROM logs WHERE severity <= 2")
+                .unwrap();
         let h = a.filter_hints();
         assert_eq!(h.max_severity, Some(2));
         let mut fields = h.wanted_fields.unwrap();
@@ -1033,6 +1029,23 @@ mod tests {
     fn test_filter_hints_typed_column_stripped() {
         // severity_int in WHERE should strip to "severity" for pushdown
         let a = QueryAnalyzer::new("SELECT * FROM logs WHERE severity_int <= 4").unwrap();
+        let h = a.filter_hints();
+        assert_eq!(h.max_severity, Some(4));
+    }
+
+    #[test]
+    fn test_filter_hints_or_pushable_only_still_not_pushed() {
+        // OR of only pushable predicates still blocks pushdown
+        let a =
+            QueryAnalyzer::new("SELECT * FROM logs WHERE severity <= 4 OR severity <= 2").unwrap();
+        let h = a.filter_hints();
+        assert!(h.max_severity.is_none());
+    }
+
+    #[test]
+    fn test_filter_hints_reversed_gt() {
+        // "5 > severity" means severity < 5, i.e. severity <= 4
+        let a = QueryAnalyzer::new("SELECT * FROM logs WHERE 5 > severity").unwrap();
         let h = a.filter_hints();
         assert_eq!(h.max_severity, Some(4));
     }

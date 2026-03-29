@@ -182,8 +182,9 @@ int xdp_syslog_filter(struct xdp_md *ctx) {
         return XDP_PASS;
     }
 
-    /* Build compact event: pre-parsed metadata + payload prefix */
-    struct syslog_event evt;
+    /* Build compact event: pre-parsed metadata + payload prefix.
+     * Zero-init to avoid leaking stack data if copy loop exits early. */
+    struct syslog_event evt = {};
     evt.src_ip = ip->saddr;
     evt.src_port = __builtin_bswap16(udp->source);
     evt.facility = priority >> 3;

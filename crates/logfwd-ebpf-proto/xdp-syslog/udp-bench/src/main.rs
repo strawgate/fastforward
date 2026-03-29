@@ -72,6 +72,15 @@ fn parse_syslog_pri(buf: &[u8]) -> Option<SyslogMeta> {
 ///
 /// recvmmsg is the key syscall for high-throughput UDP — it pulls up to
 /// `batch_size` packets in a single syscall, amortizing the syscall overhead.
+///
+/// # Safety
+///
+/// - `fd` must be a valid, non-blocking socket file descriptor.
+/// - `bufs`, `iovecs`, and `msgvec` must all have the same length.
+/// - Each `bufs[i]` must have sufficient len/capacity and its buffer pointer
+///   must be valid for writes of up to `bufs[i].len()` bytes.
+/// - No concurrent mutation of `bufs`, `iovecs`, or `msgvec` may occur while
+///   the syscall is in progress.
 unsafe fn recvmmsg_batch(
     fd: i32,
     bufs: &mut [Vec<u8>],
@@ -260,6 +269,10 @@ fn run_generator(port: u16, count: u64, target_pps: u64) -> io::Result<()> {
                 std::thread::sleep(next_send - now);
             }
             next_send += interval;
+            // Reset if we've fallen behind significantly to avoid burst catch-up
+            if next_send + interval < Instant::now() {
+                next_send = Instant::now() + interval;
+            }
         }
 
         let sev = (sent % 8) as usize;
@@ -456,9 +469,11 @@ mod tests {
     }
 
     #[test]
-    fn parse_priority_zero_rejected() {
-        // <0> is technically kern.emerg but pri=0 is rejected per RFC strict mode
-        assert!(parse_syslog_pri(b"<0>test").is_some()); // pri=0 IS valid (kern.emerg)
+    fn parse_priority_zero_accepted() {
+        // <0> = kern.emerg, valid per RFC 5424
+        let m = parse_syslog_pri(b"<0>test").unwrap();
+        assert_eq!(m.facility, 0);
+        assert_eq!(m.severity, 0);
     }
 
     #[test]

@@ -155,7 +155,8 @@ def test_xdp_syslog():
         send_syslog(messages, TEST_PORT)
         send_syslog(messages, TEST_PORT)
 
-        # Non-syslog noise
+        # Non-syslog noise: invalid format on the listened port, and valid
+        # syslog on wrong port (verifies kernel routing, not XDP filtering)
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.sendto(b'not syslog', ('127.0.0.1', TEST_PORT))
         sock.sendto(b'<134>wrong port', ('127.0.0.1', TEST_PORT + 1))

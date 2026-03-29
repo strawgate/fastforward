@@ -11,7 +11,7 @@ to the data source as possible.
 
 ## Architecture
 
-```
+```text
 User SQL: SELECT * FROM logs WHERE severity <= 4 AND facility = 16
                     │
                     ▼
@@ -76,7 +76,7 @@ transform still runs the full query. This means:
 The XDP program reads predicates from BPF maps. When hints change, userspace
 updates the maps — no BPF program reload needed.
 
-```
+```text
 BPF map "config"[0] = max_severity (u64)
 BPF map "config"[1] = syslog_port (u64)
 BPF map "facility_filter" = hash set of allowed facilities

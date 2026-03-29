@@ -128,29 +128,30 @@ def read_ringbuf(rb_fd, rb_size):
     data_mm = mmap.mmap(rb_fd, 2 * rb_size, mmap.MAP_SHARED,
                         mmap.PROT_READ, offset=2 * PAGE_SIZE)
 
-    consumer_pos = struct.unpack('<Q', consumer_mm[:8])[0]
-    producer_pos = struct.unpack('<Q', producer_mm[:8])[0]
+    try:
+        consumer_pos = struct.unpack('<Q', consumer_mm[:8])[0]
+        producer_pos = struct.unpack('<Q', producer_mm[:8])[0]
 
-    events = []
-    pos = consumer_pos
-    while pos < producer_pos:
-        off = pos % rb_size
-        hdr = struct.unpack_from('<I', data_mm, off)[0]
-        entry_len = hdr & 0x0FFFFFFF
-        busy = (hdr >> 31) & 1
-        if busy or entry_len == 0:
-            break
-        aligned = (entry_len + 7) & ~7
-        discard = (hdr >> 30) & 1
-        if not discard:
-            data_off = (off + 8) % rb_size
-            events.append(data_mm[data_off:data_off + entry_len])
-        pos += 8 + aligned
+        events = []
+        pos = consumer_pos
+        while pos < producer_pos:
+            off = pos % rb_size
+            hdr = struct.unpack_from('<I', data_mm, off)[0]
+            entry_len = hdr & 0x0FFFFFFF
+            busy = (hdr >> 31) & 1
+            if busy or entry_len == 0:
+                break
+            aligned = (entry_len + 7) & ~7
+            discard = (hdr >> 30) & 1
+            if not discard:
+                data_off = (off + 8) % rb_size
+                events.append(data_mm[data_off:data_off + entry_len])
+            pos += 8 + aligned
 
-    # Advance consumer
-    consumer_mm[:8] = struct.pack('<Q', pos)
-
-    consumer_mm.close()
-    producer_mm.close()
-    data_mm.close()
-    return events
+        # Only advance consumer after successful processing
+        consumer_mm[:8] = struct.pack('<Q', pos)
+        return events
+    finally:
+        consumer_mm.close()
+        producer_mm.close()
+        data_mm.close()
