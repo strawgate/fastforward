@@ -6,7 +6,10 @@
 //!
 //! Usage:
 //!   udp-bench receive [--port 5514] [--severity 4] [--batch 64]
+//!   udp-bench receive-batch [--port 5514] [--severity 4] [--batch 64]
 //!   udp-bench generate [--port 5514] [--count 1000000] [--pps 0]
+
+mod syslog_parser;
 
 use std::env;
 use std::io;
@@ -277,6 +280,109 @@ fn run_generator(port: u16, count: u64, target_pps: u64) -> io::Result<()> {
     Ok(())
 }
 
+// ---- Batch receiver (SIMD parser) ----
+
+fn run_batch_receiver(port: u16, severity_threshold: u8, batch_size: usize) -> io::Result<()> {
+    let sock = UdpSocket::bind(format!("0.0.0.0:{}", port))?;
+    sock.set_nonblocking(true)?;
+    let fd = {
+        use std::os::unix::io::AsRawFd;
+        sock.as_raw_fd()
+    };
+
+    eprintln!("Listening on UDP port {} (BATCH PARSER), severity <= {}, batch size {}",
+              port, severity_threshold, batch_size);
+
+    // Contiguous buffer for all packets + per-packet length tracking
+    let mut bufs: Vec<Vec<u8>> = (0..batch_size).map(|_| vec![0u8; 2048]).collect();
+    let mut iovecs: Vec<libc::iovec> = vec![unsafe { std::mem::zeroed() }; batch_size];
+    let mut msgvec: Vec<libc::mmsghdr> = vec![unsafe { std::mem::zeroed() }; batch_size];
+
+    // Contiguous buffer for batch parsing
+    let mut concat_buf: Vec<u8> = Vec::with_capacity(batch_size * 256);
+    let mut packet_lens: Vec<usize> = Vec::with_capacity(batch_size);
+
+    let mut total_packets: u64 = 0;
+    let mut total_matched: u64 = 0;
+    let mut total_fields: u64 = 0;
+    let mut total_bytes: u64 = 0;
+
+    let start = Instant::now();
+    let mut last_report = start;
+    let mut interval_packets: u64 = 0;
+    let mut interval_matched: u64 = 0;
+
+    loop {
+        let n = unsafe { recvmmsg_batch(fd, &mut bufs, &mut iovecs, &mut msgvec)? };
+
+        if n == 0 {
+            let now = Instant::now();
+            if now.duration_since(last_report) >= Duration::from_secs(1) && total_packets > 0 {
+                let elapsed = now.duration_since(start).as_secs_f64();
+                let pps = interval_packets as f64 / now.duration_since(last_report).as_secs_f64();
+                let mps = interval_matched as f64 / now.duration_since(last_report).as_secs_f64();
+                let mb = (total_bytes as f64 / elapsed) / (1024.0 * 1024.0);
+                eprintln!(
+                    "[{:.1}s] {:.0} pps ({:.0} matched) | total: {} pkts, {} matched, {} fields | {:.1} MB/s",
+                    elapsed, pps, mps, total_packets, total_matched, total_fields, mb,
+                );
+                last_report = now;
+                interval_packets = 0;
+                interval_matched = 0;
+            }
+            std::thread::sleep(Duration::from_micros(100));
+            continue;
+        }
+
+        // Concatenate packets into contiguous buffer for SIMD batch parsing
+        concat_buf.clear();
+        packet_lens.clear();
+        for i in 0..n {
+            let len = msgvec[i].msg_len as usize;
+            concat_buf.extend_from_slice(&bufs[i][..len]);
+            packet_lens.push(len);
+            total_bytes += len as u64;
+        }
+
+        total_packets += n as u64;
+        interval_packets += n as u64;
+
+        // SIMD batch parse: parse all packets in one call
+        let batch = syslog_parser::parse_recvmmsg_batch(
+            &concat_buf, &packet_lens, severity_threshold,
+        );
+
+        let matched = batch.lines.len() as u64;
+        total_matched += matched;
+        interval_matched += matched;
+
+        // Count extracted fields to prevent dead-code elimination and
+        // simulate downstream work (feeding Arrow columns)
+        for line in &batch.lines {
+            total_fields += (!line.timestamp.is_empty()) as u64;
+            total_fields += (!line.hostname.is_empty()) as u64;
+            total_fields += (!line.app_name.is_empty()) as u64;
+            total_fields += (!line.pid.is_empty()) as u64;
+            total_fields += (!line.message.is_empty()) as u64;
+        }
+
+        let now = Instant::now();
+        if now.duration_since(last_report) >= Duration::from_secs(1) {
+            let elapsed = now.duration_since(start).as_secs_f64();
+            let pps = interval_packets as f64 / now.duration_since(last_report).as_secs_f64();
+            let mps = interval_matched as f64 / now.duration_since(last_report).as_secs_f64();
+            let mb = (total_bytes as f64 / elapsed) / (1024.0 * 1024.0);
+            eprintln!(
+                "[{:.1}s] {:.0} pps ({:.0} matched) | total: {} pkts, {} matched, {} fields | {:.1} MB/s",
+                elapsed, pps, mps, total_packets, total_matched, total_fields, mb,
+            );
+            last_report = now;
+            interval_packets = 0;
+            interval_matched = 0;
+        }
+    }
+}
+
 // ---- CLI ----
 
 fn main() -> io::Result<()> {
@@ -284,11 +390,9 @@ fn main() -> io::Result<()> {
 
     if args.len() < 2 {
         eprintln!("Usage:");
-        eprintln!("  udp-bench receive [--port 5514] [--severity 4] [--batch 64]");
-        eprintln!("  udp-bench generate [--port 5514] [--count 1000000] [--pps 0]");
-        eprintln!();
-        eprintln!("The receiver listens for UDP syslog, parses priority, filters by");
-        eprintln!("severity, and reports throughput. Compare with XDP filter path.");
+        eprintln!("  udp-bench receive       [--port 5514] [--severity 4] [--batch 64]  (per-packet scalar)");
+        eprintln!("  udp-bench receive-batch  [--port 5514] [--severity 4] [--batch 64]  (SIMD batch parser)");
+        eprintln!("  udp-bench generate       [--port 5514] [--count 1000000] [--pps 0]");
         std::process::exit(1);
     }
 
@@ -307,6 +411,12 @@ fn main() -> io::Result<()> {
             let batch: usize = get_arg("batch", "64").parse().unwrap();
             run_receiver(port, sev, batch)
         }
+        "receive-batch" => {
+            let port: u16 = get_arg("port", "5514").parse().unwrap();
+            let sev: u8 = get_arg("severity", "4").parse().unwrap();
+            let batch: usize = get_arg("batch", "64").parse().unwrap();
+            run_batch_receiver(port, sev, batch)
+        }
         "generate" => {
             let port: u16 = get_arg("port", "5514").parse().unwrap();
             let count: u64 = get_arg("count", "1000000").parse().unwrap();
@@ -314,7 +424,7 @@ fn main() -> io::Result<()> {
             run_generator(port, count, pps)
         }
         _ => {
-            eprintln!("Unknown mode: {}. Use 'receive' or 'generate'.", mode);
+            eprintln!("Unknown mode: {}. Use 'receive', 'receive-batch', or 'generate'.", mode);
             std::process::exit(1);
         }
     }
