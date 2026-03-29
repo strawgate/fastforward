@@ -737,6 +737,39 @@ impl OutputSink for FanOut {
 // Tests
 // ---------------------------------------------------------------------------
 
+/// Test helper: captures all sent batches for assertion.
+#[cfg(test)]
+pub struct CaptureSink {
+    name: String,
+    pub batches: Vec<RecordBatch>,
+}
+
+#[cfg(test)]
+impl CaptureSink {
+    pub fn new(name: &str) -> Self {
+        CaptureSink {
+            name: name.to_string(),
+            batches: Vec::new(),
+        }
+    }
+}
+
+#[cfg(test)]
+impl OutputSink for CaptureSink {
+    fn send_batch(&mut self, batch: &RecordBatch, _metadata: &BatchMetadata) -> io::Result<()> {
+        self.batches.push(batch.clone());
+        Ok(())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

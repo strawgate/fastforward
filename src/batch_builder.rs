@@ -409,7 +409,11 @@ impl BatchBuilder {
         }
 
         let schema = Arc::new(Schema::new(schema_fields));
-        RecordBatch::try_new(schema, arrays).expect("batch_builder: schema/array mismatch")
+        if arrays.is_empty() {
+            RecordBatch::new_empty(schema)
+        } else {
+            RecordBatch::try_new(schema, arrays).expect("batch_builder: schema/array mismatch")
+        }
     }
 
     /// Return the discovered field type map.

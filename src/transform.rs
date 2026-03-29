@@ -94,22 +94,28 @@ impl QueryAnalyzer {
     }
 
     /// Generate ScanConfig for the scanner based on query analysis.
+    ///
+    /// Column references in SQL use typed names (e.g., `level_str`) but the
+    /// scanner matches against raw JSON keys (e.g., `level`). Strip the type
+    /// suffix so field pushdown works correctly.
     pub fn scan_config(&self) -> ScanConfig {
         if self.uses_select_star {
-            // SELECT * — extract all fields.
             ScanConfig {
                 wanted_fields: vec![],
                 extract_all: true,
                 keep_raw: true,
             }
         } else {
-            // Only extract referenced fields.
             use crate::scanner::FieldSpec;
+            use std::collections::HashSet;
+            let mut seen = HashSet::new();
             let wanted: Vec<FieldSpec> = self
                 .referenced_columns
                 .iter()
+                .map(|name| strip_type_suffix(name))
+                .filter(|name| seen.insert(name.clone()))
                 .map(|name| FieldSpec {
-                    name: name.clone(),
+                    name,
                     aliases: vec![],
                 })
                 .collect();
@@ -120,6 +126,19 @@ impl QueryAnalyzer {
             }
         }
     }
+}
+
+/// Strip `_str`, `_int`, or `_float` suffix from a typed column name to get
+/// the raw JSON field name. E.g., `level_str` → `level`, `duration_ms_int` → `duration_ms`.
+fn strip_type_suffix(name: &str) -> String {
+    for suffix in &["_str", "_int", "_float"] {
+        if let Some(base) = name.strip_suffix(suffix) {
+            if !base.is_empty() {
+                return base.to_string();
+            }
+        }
+    }
+    name.to_string()
 }
 
 /// Extract EXCEPT field names from wildcard options.

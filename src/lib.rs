@@ -9,6 +9,7 @@ pub mod e2e_bench;
 pub mod otlp;
 pub mod output;
 pub mod pipeline;
+pub mod pipeline_v2;
 pub mod read_tuner;
 pub mod scanner;
 pub mod sender;
