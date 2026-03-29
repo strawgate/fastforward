@@ -654,6 +654,25 @@ mod tests {
         assert_eq!(ok.value(0), "true");
     }
 
+    #[test]
+    fn test_escape_heavy_multiline() {
+        // Multiple lines with varying numbers of escaped quotes
+        let mut input = Vec::new();
+        for i in 0..10 {
+            input.extend_from_slice(br#"{"f":""#);
+            for _ in 0..(1 + i) {
+                input.extend_from_slice(br#"\""#);
+            }
+            input.extend_from_slice(br#"","g":"ok"}"#);
+            input.push(b'\n');
+        }
+        let mut s = default_scanner(16);
+        let batch = s.scan(&input);
+        assert_eq!(batch.num_rows(), 10, "should have 10 rows");
+        assert!(batch.column_by_name("f_str").is_some());
+        assert!(batch.column_by_name("g_str").is_some());
+    }
+
     // -----------------------------------------------------------------------
     // ColumnarSimdScanner tests
     // -----------------------------------------------------------------------

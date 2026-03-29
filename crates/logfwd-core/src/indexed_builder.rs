@@ -5,6 +5,9 @@
 // - append_*_by_idx(idx, value) uses direct array access (no hash)
 // - u64 bitset tracks which fields are written per row (no iteration)
 // - end_row pads only unwritten fields via bit scan
+//
+// Supports unlimited fields: the first 64 use a fast u64 bitset,
+// fields 64+ use a per-field boolean flag.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -27,6 +30,9 @@ struct FieldColumns {
     has_str: bool,
     has_int: bool,
     has_float: bool,
+    /// Per-row write tracking for fields with index >= 64
+    /// (fields 0-63 use the u64 bitset instead).
+    written_this_row: bool,
 }
 
 impl FieldColumns {
@@ -39,6 +45,7 @@ impl FieldColumns {
             has_str: false,
             has_int: false,
             has_float: false,
+            written_this_row: false,
         }
     }
 
@@ -98,6 +105,7 @@ impl FieldColumns {
         self.has_str = false;
         self.has_int = false;
         self.has_float = false;
+        self.written_this_row = false;
     }
 }
 
@@ -112,9 +120,9 @@ pub struct IndexedBatchBuilder {
     row_count: usize,
     expected_rows: usize,
     keep_raw: bool,
-    /// Bitset: bit i set if field i was written this row. Supports up to 64 fields.
+    /// Bitset: bit i set if field i was written this row (fields 0-63 only).
     written_bits: u64,
-    /// Mask of all known fields (bit i set if field i exists).
+    /// Mask of all known fields with index < 64.
     field_mask: u64,
 }
 
@@ -155,18 +163,48 @@ impl IndexedBatchBuilder {
     #[inline(always)]
     pub fn begin_row(&mut self) {
         self.written_bits = 0;
+        // Reset overflow flags for fields >= 64
+        for fc in self.fields.iter_mut().skip(64) {
+            fc.written_this_row = false;
+        }
     }
 
     #[inline]
     pub fn end_row(&mut self) {
-        // Pad NULLs only for fields that were NOT written this row.
+        // Fast path: pad fields 0-63 via bitset scan.
         let mut missing = !self.written_bits & self.field_mask;
         while missing != 0 {
             let idx = missing.trailing_zeros() as usize;
             self.fields[idx].pad_null();
             missing &= missing - 1; // clear lowest set bit
         }
+        // Slow path: pad fields 64+ via per-field flag.
+        for fc in self.fields.iter_mut().skip(64) {
+            if !fc.written_this_row {
+                fc.pad_null();
+            }
+        }
         self.row_count += 1;
+    }
+
+    /// Check if a field was already written this row.
+    #[inline(always)]
+    fn is_written(&self, idx: usize) -> bool {
+        if idx < 64 {
+            self.written_bits & (1u64 << idx) != 0
+        } else {
+            self.fields[idx].written_this_row
+        }
+    }
+
+    /// Mark a field as written this row.
+    #[inline(always)]
+    fn mark_written(&mut self, idx: usize) {
+        if idx < 64 {
+            self.written_bits |= 1u64 << idx;
+        } else {
+            self.fields[idx].written_this_row = true;
+        }
     }
 
     /// Resolve a field name to an index. Call once per field per batch,
@@ -196,11 +234,10 @@ impl IndexedBatchBuilder {
 
     #[inline(always)]
     pub fn append_str_by_idx(&mut self, idx: usize, value: &[u8]) {
-        let bit = if idx < 64 { 1u64 << idx } else { 0 };
-        if self.written_bits & bit != 0 {
+        if self.is_written(idx) {
             return; // duplicate key
         }
-        self.written_bits |= bit;
+        self.mark_written(idx);
         let row = self.row_count;
         let fc = &mut self.fields[idx];
         fc.has_str = true;
@@ -216,11 +253,10 @@ impl IndexedBatchBuilder {
 
     #[inline(always)]
     pub fn append_int_by_idx(&mut self, idx: usize, value: &[u8]) {
-        let bit = if idx < 64 { 1u64 << idx } else { 0 };
-        if self.written_bits & bit != 0 {
+        if self.is_written(idx) {
             return;
         }
-        self.written_bits |= bit;
+        self.mark_written(idx);
         let row = self.row_count;
         let fc = &mut self.fields[idx];
         fc.has_int = true;
@@ -239,11 +275,10 @@ impl IndexedBatchBuilder {
 
     #[inline(always)]
     pub fn append_float_by_idx(&mut self, idx: usize, value: &[u8]) {
-        let bit = if idx < 64 { 1u64 << idx } else { 0 };
-        if self.written_bits & bit != 0 {
+        if self.is_written(idx) {
             return;
         }
-        self.written_bits |= bit;
+        self.mark_written(idx);
         let row = self.row_count;
         let fc = &mut self.fields[idx];
         fc.has_float = true;
@@ -262,11 +297,10 @@ impl IndexedBatchBuilder {
 
     #[inline(always)]
     pub fn append_null_by_idx(&mut self, idx: usize) {
-        let bit = if idx < 64 { 1u64 << idx } else { 0 };
-        if self.written_bits & bit != 0 {
+        if self.is_written(idx) {
             return;
         }
-        self.written_bits |= bit;
+        self.mark_written(idx);
         self.fields[idx].pad_null();
     }
 

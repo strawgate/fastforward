@@ -50,6 +50,8 @@ struct FieldCollector {
     has_str: bool,
     has_int: bool,
     has_float: bool,
+    /// Per-row write tracking for fields with index >= 64.
+    written_this_row: bool,
 }
 
 impl FieldCollector {
@@ -60,6 +62,7 @@ impl FieldCollector {
             has_str: false,
             has_int: false,
             has_float: false,
+            written_this_row: false,
         }
     }
 
@@ -68,6 +71,7 @@ impl FieldCollector {
         self.has_str = false;
         self.has_int = false;
         self.has_float = false;
+        self.written_this_row = false;
     }
 }
 
@@ -124,11 +128,34 @@ impl ColumnarBatchBuilder {
     #[inline(always)]
     pub fn begin_row(&mut self) {
         self.written_bits = 0;
+        for fc in self.fields.iter_mut().skip(64) {
+            fc.written_this_row = false;
+        }
     }
 
     #[inline(always)]
     pub fn end_row(&mut self) {
         self.row_count += 1;
+    }
+
+    /// Check if a field was already written this row.
+    #[inline(always)]
+    fn is_written(&self, idx: usize) -> bool {
+        if idx < 64 {
+            self.written_bits & (1u64 << idx) != 0
+        } else {
+            self.fields[idx].written_this_row
+        }
+    }
+
+    /// Mark a field as written this row.
+    #[inline(always)]
+    fn mark_written(&mut self, idx: usize) {
+        if idx < 64 {
+            self.written_bits |= 1u64 << idx;
+        } else {
+            self.fields[idx].written_this_row = true;
+        }
     }
 
     #[inline]
@@ -156,11 +183,10 @@ impl ColumnarBatchBuilder {
 
     #[inline(always)]
     pub fn append_str_by_idx(&mut self, idx: usize, value: &[u8]) {
-        let bit = if idx < 64 { 1u64 << idx } else { 0 };
-        if self.written_bits & bit != 0 {
+        if self.is_written(idx) {
             return;
         }
-        self.written_bits |= bit;
+        self.mark_written(idx);
         let offset = self.offset_of(value);
         let row = self.row_count;
         let fc = &mut self.fields[idx];
@@ -175,11 +201,10 @@ impl ColumnarBatchBuilder {
 
     #[inline(always)]
     pub fn append_int_by_idx(&mut self, idx: usize, value: &[u8]) {
-        let bit = if idx < 64 { 1u64 << idx } else { 0 };
-        if self.written_bits & bit != 0 {
+        if self.is_written(idx) {
             return;
         }
-        self.written_bits |= bit;
+        self.mark_written(idx);
         let offset = self.offset_of(value);
         let row = self.row_count;
         let fc = &mut self.fields[idx];
@@ -194,11 +219,10 @@ impl ColumnarBatchBuilder {
 
     #[inline(always)]
     pub fn append_float_by_idx(&mut self, idx: usize, value: &[u8]) {
-        let bit = if idx < 64 { 1u64 << idx } else { 0 };
-        if self.written_bits & bit != 0 {
+        if self.is_written(idx) {
             return;
         }
-        self.written_bits |= bit;
+        self.mark_written(idx);
         let offset = self.offset_of(value);
         let row = self.row_count;
         let fc = &mut self.fields[idx];
@@ -213,11 +237,10 @@ impl ColumnarBatchBuilder {
 
     #[inline(always)]
     pub fn append_null_by_idx(&mut self, idx: usize) {
-        let bit = if idx < 64 { 1u64 << idx } else { 0 };
-        if self.written_bits & bit != 0 {
+        if self.is_written(idx) {
             return;
         }
-        self.written_bits |= bit;
+        self.mark_written(idx);
         self.fields[idx].values.push(ValueRecord {
             row: self.row_count,
             offset: 0,

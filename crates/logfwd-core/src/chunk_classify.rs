@@ -100,6 +100,9 @@ impl ChunkIndex {
         let mut real_quotes = Vec::with_capacity(num_blocks);
         let mut in_string_vec = Vec::with_capacity(num_blocks);
         let mut in_string = false;
+        // Tracks whether the previous byte was an unescaped backslash
+        // inside a string — the next byte is escaped regardless of value.
+        let mut escaped_next = false;
         let mut i = 0;
 
         for _ in 0..num_blocks {
@@ -109,23 +112,31 @@ impl ChunkIndex {
                 if i >= len {
                     break;
                 }
+                if escaped_next {
+                    // Previous byte was an unescaped backslash inside a string.
+                    // This byte is escaped content regardless of what it is.
+                    escaped_next = false;
+                    if in_string {
+                        s_bits |= 1u64 << bit;
+                    }
+                    i += 1;
+                    continue;
+                }
                 if in_string {
-                    s_bits |= 1u64 << bit;
                     if buf[i] == b'\\' {
+                        s_bits |= 1u64 << bit;
+                        escaped_next = true;
                         i += 1;
-                        if i < len {
-                            i += 1;
-                            // next bit is also in string
-                            if bit + 1 < 64 {
-                                s_bits |= 1u64 << (bit + 1);
-                            }
-                        }
                         continue;
                     }
                     if buf[i] == b'"' {
+                        // Closing quote — NOT part of string interior.
                         q_bits |= 1u64 << bit;
                         in_string = false;
+                        i += 1;
+                        continue;
                     }
+                    s_bits |= 1u64 << bit;
                 } else if buf[i] == b'"' {
                     q_bits |= 1u64 << bit;
                     in_string = true;
@@ -229,9 +240,10 @@ impl ChunkIndex {
 }
 
 // ---------------------------------------------------------------------------
-// Escape detection (simdjson prefix_xor algorithm)
+// Escape detection (simdjson prefix_xor algorithm) — used by aarch64 SIMD path
 // ---------------------------------------------------------------------------
 
+#[cfg(target_arch = "aarch64")]
 #[inline]
 fn compute_real_quotes(quote_bits: u64, bs_bits: u64, prev_odd_backslash: &mut u64) -> u64 {
     if bs_bits == 0 && *prev_odd_backslash == 0 {
@@ -355,6 +367,7 @@ fn compute_real_quotes(quote_bits: u64, bs_bits: u64, prev_odd_backslash: &mut u
     quote_bits & !escaped
 }
 
+#[cfg(target_arch = "aarch64")]
 #[inline(always)]
 fn prefix_xor(mut bitmask: u64) -> u64 {
     bitmask ^= bitmask << 1;
@@ -537,10 +550,10 @@ mod tests {
         let buf = br#"{"A1":"\n\"","B":"x"}"#;
         let idx = ChunkIndex::new(buf);
         // Key "A1" at positions 1-4
-        let (k, after_k) = idx.scan_string(buf, 1).unwrap();
+        let (k, _after_k) = idx.scan_string(buf, 1).unwrap();
         assert_eq!(k, b"A1");
         // Value "\n\"" at positions 6-11
-        let (v, after_v) = idx.scan_string(buf, 6).unwrap();
+        let (v, _after_v) = idx.scan_string(buf, 6).unwrap();
         assert_eq!(v, b"\\n\\\"", "got: {:?}", std::str::from_utf8(v));
         // Key "B" should be findable after the comma
         let (k2, _) = idx.scan_string(buf, 13).unwrap();
@@ -576,7 +589,7 @@ mod tests {
 
         // Verify: real quotes should be at {1,3,5,29,31,33,35,36,38,40,42,43,45,47}
         // Key "a" at 1, closing at 3
-        let (k, ak) = idx.scan_string(buf, 1).unwrap();
+        let (k, _ak) = idx.scan_string(buf, 1).unwrap();
         assert_eq!(k, b"a", "key a");
 
         // Value string opens at 5, should close at 29
