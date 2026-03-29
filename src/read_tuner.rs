@@ -72,14 +72,10 @@ impl ReadTuner {
         }
     }
 
-    /// Get the current read buffer as an immutable slice (for processing after read).
+    /// Get the full internal buffer (for accessing data after read).
+    /// Use this with `&buf()[..n]` where `n` is the return value from `read()`.
     pub fn buf(&self) -> &[u8] {
-        let size = if self.settled {
-            self.best_size
-        } else {
-            self.candidates[self.current_idx].size
-        };
-        &self.buf[..size]
+        &self.buf
     }
 
     /// Get the current read buffer as a mutable slice (for read() calls).

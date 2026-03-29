@@ -3,7 +3,7 @@
 static ALLOC: dhat::Alloc = dhat::Alloc;
 
 use std::env;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -31,8 +31,14 @@ fn main() -> io::Result<()> {
         eprintln!("  --level <1-3>                    Zstd compression level (default: 1)");
         eprintln!("  --tail                           Live tail mode (follow file, Ctrl-C to stop)");
         eprintln!();
+        eprintln!("V2 pipeline (from YAML config):");
+        eprintln!("  logfwd --config <config.yaml> [--validate] [--dry-run]");
+        eprintln!();
         eprintln!("Daemon mode (for K8s DaemonSet):");
         eprintln!("  logfwd --daemon [--glob PATTERN] [--endpoint URL] [--collector NAME]");
+        eprintln!();
+        eprintln!("Blackhole OTLP collector (for benchmarks):");
+        eprintln!("  logfwd --blackhole [bind_addr]                  (default: 127.0.0.1:4318)");
         eprintln!();
         eprintln!("Generate synthetic data:");
         eprintln!("  logfwd --generate <num_lines> <output_file>");
@@ -52,6 +58,12 @@ fn main() -> io::Result<()> {
         } else {
             generate_log_file(num_lines, output)
         };
+    }
+
+    // Handle --blackhole mode: fake OTLP collector that accepts and discards
+    if args[1] == "--blackhole" {
+        let addr = args.get(2).map(|s| s.as_str()).unwrap_or("127.0.0.1:4318");
+        return run_blackhole(addr);
     }
 
     // Handle --e2e mode: end-to-end benchmark with per-stage timing
@@ -112,6 +124,27 @@ fn main() -> io::Result<()> {
         eprintln!();
         best.unwrap().print_report();
         return Ok(());
+    }
+
+    // Handle --config mode (v2 Arrow pipeline from YAML config)
+    if args[1] == "--config" {
+        if args.len() < 3 {
+            eprintln!("Usage: logfwd --config <config.yaml> [--validate] [--dry-run]");
+            std::process::exit(1);
+        }
+        let config_path = &args[2];
+        let validate_only = args.iter().any(|a| a == "--validate");
+        let dry_run = args.iter().any(|a| a == "--dry-run");
+
+        let config = logfwd::config::Config::load(config_path)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+
+        if validate_only {
+            eprintln!("Config OK: {} pipeline(s)", config.pipelines.len());
+            return Ok(());
+        }
+
+        return run_v2_pipelines(config, dry_run);
     }
 
     // Handle --daemon mode
@@ -325,6 +358,131 @@ fn main() -> io::Result<()> {
                 bar,
             );
         }
+    }
+
+    Ok(())
+}
+
+fn run_blackhole(addr: &str) -> io::Result<()> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    eprintln!("logfwd blackhole collector listening on {addr}");
+    eprintln!("  Accepts any POST, returns 200, counts bytes.");
+    eprintln!("  Ctrl-C to stop.");
+
+    let server = tiny_http::Server::http(addr)
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+
+    let total_requests = AtomicU64::new(0);
+    let total_bytes = AtomicU64::new(0);
+    let start = Instant::now();
+
+    // Stats reporter thread
+    let req_ref = &total_requests as *const AtomicU64 as usize;
+    let bytes_ref = &total_bytes as *const AtomicU64 as usize;
+    std::thread::spawn(move || {
+        let mut prev_bytes = 0u64;
+        let mut prev_reqs = 0u64;
+        loop {
+            std::thread::sleep(Duration::from_secs(1));
+            let reqs = unsafe { &*(req_ref as *const AtomicU64) }.load(Ordering::Relaxed);
+            let bytes = unsafe { &*(bytes_ref as *const AtomicU64) }.load(Ordering::Relaxed);
+            let d_reqs = reqs - prev_reqs;
+            let d_bytes = bytes - prev_bytes;
+            if d_reqs > 0 {
+                eprint!(
+                    "\r  {} reqs ({}/s) | {:.1} MB ({:.1} MB/s)    ",
+                    reqs,
+                    d_reqs,
+                    bytes as f64 / (1024.0 * 1024.0),
+                    d_bytes as f64 / (1024.0 * 1024.0),
+                );
+                io::stderr().flush().ok();
+            }
+            prev_reqs = reqs;
+            prev_bytes = bytes;
+        }
+    });
+
+    for mut request in server.incoming_requests() {
+        // Read the full body to simulate a real collector.
+        let content_len = request.body_length().unwrap_or(0);
+        let mut body = Vec::with_capacity(content_len);
+        request.as_reader().read_to_end(&mut body).ok();
+
+        total_bytes.fetch_add(body.len() as u64, Ordering::Relaxed);
+        total_requests.fetch_add(1, Ordering::Relaxed);
+
+        let resp = tiny_http::Response::from_string("{}")
+            .with_status_code(200)
+            .with_header(
+                tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+                    .unwrap(),
+            );
+        let _ = request.respond(resp);
+    }
+
+    let elapsed = start.elapsed().as_secs_f64();
+    let reqs = total_requests.load(Ordering::Relaxed);
+    let bytes = total_bytes.load(Ordering::Relaxed);
+    eprintln!(
+        "\nDone: {} requests, {:.1} MB in {:.1}s",
+        reqs,
+        bytes as f64 / (1024.0 * 1024.0),
+        elapsed,
+    );
+    Ok(())
+}
+
+fn run_v2_pipelines(config: logfwd::config::Config, dry_run: bool) -> io::Result<()> {
+    use logfwd::diagnostics::DiagnosticsServer;
+    use logfwd::pipeline_v2::Pipeline;
+
+    let shutdown = Arc::new(AtomicBool::new(false));
+
+    // Build pipelines.
+    let mut pipelines = Vec::new();
+    for (name, pipe_cfg) in &config.pipelines {
+        let pipeline = Pipeline::from_config(name, pipe_cfg)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        eprintln!("  pipeline '{}' ready", name);
+        pipelines.push(pipeline);
+    }
+
+    if dry_run {
+        eprintln!("Dry run: {} pipeline(s) constructed successfully", pipelines.len());
+        return Ok(());
+    }
+
+    // Start diagnostics server if configured.
+    let _diag_handle = if let Some(ref addr) = config.server.diagnostics {
+        let mut server = DiagnosticsServer::new(addr);
+        for p in &pipelines {
+            server.add_pipeline(Arc::clone(p.metrics()));
+        }
+        eprintln!("  diagnostics: http://{addr}");
+        Some(server.start())
+    } else {
+        None
+    };
+
+    eprintln!("logfwd v2 starting ({} pipeline(s))", pipelines.len());
+
+    // Run each pipeline on its own thread.
+    let mut handles = Vec::new();
+    let main_pipeline = pipelines.pop();
+
+    for mut pipeline in pipelines {
+        let sd = shutdown.clone();
+        handles.push(std::thread::spawn(move || pipeline.run(&sd)));
+    }
+
+    if let Some(mut main_pipe) = main_pipeline {
+        main_pipe.run(&shutdown)?;
+    }
+
+    for h in handles {
+        let _ = h.join();
     }
 
     Ok(())
