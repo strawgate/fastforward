@@ -28,6 +28,7 @@ pub struct FileIdentity {
 
 /// State tracked per tailed file.
 struct TailedFile {
+    #[allow(dead_code)]
     path: PathBuf,
     identity: FileIdentity,
     file: File,
@@ -40,18 +41,11 @@ struct TailedFile {
 pub enum TailEvent {
     /// New data available. The Vec is raw bytes read from the file.
     /// NOT necessarily aligned on line boundaries — the pipeline handles that.
-    Data {
-        path: PathBuf,
-        bytes: Vec<u8>,
-    },
+    Data { path: PathBuf, bytes: Vec<u8> },
     /// A file was rotated (old file at path replaced by new file).
-    Rotated {
-        path: PathBuf,
-    },
+    Rotated { path: PathBuf },
     /// A file was truncated (copytruncate rotation).
-    Truncated {
-        path: PathBuf,
-    },
+    Truncated { path: PathBuf },
 }
 
 /// Configuration for the file tailer.
@@ -96,12 +90,6 @@ fn compute_fingerprint(file: &mut File, max_bytes: usize) -> io::Result<u64> {
     Ok(xxhash_rust::xxh64::xxh64(&buf[..n], 0))
 }
 
-/// Get the (device, inode) for a path.
-fn get_dev_ino(path: &Path) -> io::Result<(u64, u64)> {
-    let meta = fs::metadata(path)?;
-    Ok((meta.dev(), meta.ino()))
-}
-
 /// Build a FileIdentity for a path.
 fn identify_file(path: &Path, fingerprint_bytes: usize) -> io::Result<FileIdentity> {
     let meta = fs::metadata(path)?;
@@ -139,20 +127,20 @@ impl FileTailer {
         let mut watcher = notify::recommended_watcher(move |res| {
             let _ = tx.send(res);
         })
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        .map_err(io::Error::other)?;
 
         // Watch the parent directories (not the files themselves).
         // This catches file creation, rename, and deletion events
         // that inotify/kqueue on the file itself would miss.
         let mut watched_dirs = std::collections::HashSet::new();
         for path in paths {
-            if let Some(parent) = path.parent() {
-                if watched_dirs.insert(parent.to_path_buf()) {
-                    use notify::Watcher;
-                    watcher
-                        .watch(parent, notify::RecursiveMode::NonRecursive)
-                        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-                }
+            if let Some(parent) = path.parent()
+                && watched_dirs.insert(parent.to_path_buf())
+            {
+                use notify::Watcher;
+                watcher
+                    .watch(parent, notify::RecursiveMode::NonRecursive)
+                    .map_err(io::Error::other)?;
             }
         }
 
@@ -168,10 +156,10 @@ impl FileTailer {
 
         // Open existing files.
         for path in paths {
-            if path.exists() {
-                if let Err(e) = tailer.open_file(path) {
-                    eprintln!("warn: could not open {}: {e}", path.display());
-                }
+            if path.exists()
+                && let Err(e) = tailer.open_file(path)
+            {
+                eprintln!("warn: could not open {}: {e}", path.display());
             }
         }
 
@@ -222,8 +210,7 @@ impl FileTailer {
 
         // Periodic full poll as safety net.
         let poll_interval = Duration::from_millis(self.config.poll_interval_ms);
-        let should_poll = something_changed
-            || self.last_poll.elapsed() >= poll_interval;
+        let should_poll = something_changed || self.last_poll.elapsed() >= poll_interval;
 
         if !should_poll {
             return Ok(events);
@@ -248,9 +235,7 @@ impl FileTailer {
                     // Identity changed — file was rotated or replaced.
                     // Check if it's inode reuse with different content (fingerprint mismatch)
                     // or a genuine rotation.
-                    events.push(TailEvent::Rotated {
-                        path: path.clone(),
-                    });
+                    events.push(TailEvent::Rotated { path: path.clone() });
 
                     // Re-open from the beginning.
                     let _ = self.files.remove(path);
@@ -394,10 +379,7 @@ mod tests {
 
         // Append more data.
         {
-            let mut f = fs::OpenOptions::new()
-                .append(true)
-                .open(&log_path)
-                .unwrap();
+            let mut f = fs::OpenOptions::new().append(true).open(&log_path).unwrap();
             writeln!(f, "line 3").unwrap();
             writeln!(f, "line 4").unwrap();
         }
@@ -566,10 +548,7 @@ mod tests {
 
         // Append new data.
         {
-            let mut f = fs::OpenOptions::new()
-                .append(true)
-                .open(&log_path)
-                .unwrap();
+            let mut f = fs::OpenOptions::new().append(true).open(&log_path).unwrap();
             writeln!(f, "new line 1").unwrap();
         }
 

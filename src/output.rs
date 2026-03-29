@@ -9,8 +9,8 @@ use arrow::record_batch::RecordBatch;
 
 use crate::compress::ChunkCompressor;
 use crate::otlp::{
-    bytes_field_size, encode_bytes_field, encode_fixed64, encode_tag, encode_varint,
-    encode_varint_field, parse_severity, parse_timestamp_nanos, varint_len, Severity,
+    Severity, bytes_field_size, encode_bytes_field, encode_fixed64, encode_tag, encode_varint,
+    encode_varint_field, parse_severity, parse_timestamp_nanos, varint_len,
 };
 
 // ---------------------------------------------------------------------------
@@ -341,7 +341,7 @@ impl OutputSink for JsonLinesSink {
         req = req.header("Content-Type", "application/x-ndjson");
 
         req.send(&self.batch_buf)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            .map_err(|e| io::Error::other(e.to_string()))?;
         Ok(())
     }
 
@@ -509,7 +509,7 @@ impl OutputSink for OtlpSink {
         }
 
         req.send(payload)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            .map_err(|e| io::Error::other(e.to_string()))?;
         Ok(())
     }
 
@@ -617,9 +617,7 @@ fn encode_row_as_log_record(
 
     // field 6: attributes — all remaining columns
     for (idx, field) in schema.fields().iter().enumerate() {
-        if Some(idx) == timestamp_col_idx
-            || Some(idx) == level_col_idx
-            || Some(idx) == body_col_idx
+        if Some(idx) == timestamp_col_idx || Some(idx) == level_col_idx || Some(idx) == body_col_idx
         {
             continue;
         }
@@ -634,12 +632,16 @@ fn encode_row_as_log_record(
 
         match type_suffix {
             "int" => {
-                let arr = batch.column(idx).as_primitive::<arrow::datatypes::Int64Type>();
+                let arr = batch
+                    .column(idx)
+                    .as_primitive::<arrow::datatypes::Int64Type>();
                 let v = arr.value(row);
                 encode_key_value_int(buf, field_name.as_bytes(), v);
             }
             "float" => {
-                let arr = batch.column(idx).as_primitive::<arrow::datatypes::Float64Type>();
+                let arr = batch
+                    .column(idx)
+                    .as_primitive::<arrow::datatypes::Float64Type>();
                 let v = arr.value(row);
                 encode_key_value_double(buf, field_name.as_bytes(), v);
             }
@@ -798,7 +800,10 @@ mod tests {
     fn test_parse_column_name() {
         assert_eq!(parse_column_name("status_int"), ("status", "int"));
         assert_eq!(parse_column_name("level_str"), ("level", "str"));
-        assert_eq!(parse_column_name("duration_ms_float"), ("duration_ms", "float"));
+        assert_eq!(
+            parse_column_name("duration_ms_float"),
+            ("duration_ms", "float")
+        );
         assert_eq!(parse_column_name("_raw"), ("_raw", ""));
         assert_eq!(parse_column_name("plain"), ("plain", ""));
     }
@@ -815,7 +820,11 @@ mod tests {
         let lines: Vec<&str> = output.trim().split('\n').collect();
         assert_eq!(lines.len(), 2);
         // First row: level=ERROR, status=500
-        assert!(lines[0].contains("\"level\":\"ERROR\""), "got: {}", lines[0]);
+        assert!(
+            lines[0].contains("\"level\":\"ERROR\""),
+            "got: {}",
+            lines[0]
+        );
         assert!(lines[0].contains("\"status\":500"), "got: {}", lines[0]);
         // Second row: level=INFO, status=200
         assert!(lines[1].contains("\"level\":\"INFO\""), "got: {}", lines[1]);
@@ -845,10 +854,7 @@ mod tests {
         // Also test FanOut trait dispatch works.
         let fanout_s1 = StdoutSink::new("f1".to_string(), StdoutFormat::Json);
         let fanout_s2 = StdoutSink::new("f2".to_string(), StdoutFormat::Json);
-        let mut fanout = FanOut::new(vec![
-            Box::new(fanout_s1),
-            Box::new(fanout_s2),
-        ]);
+        let mut fanout = FanOut::new(vec![Box::new(fanout_s1), Box::new(fanout_s2)]);
         // send_batch writes to real stdout, but should not error.
         let result = fanout.send_batch(&batch, &meta);
         assert!(result.is_ok());
@@ -868,7 +874,12 @@ mod tests {
         let status = Int64Array::from(vec![Some(500)]);
         let batch = RecordBatch::try_new(
             schema,
-            vec![Arc::new(ts), Arc::new(level), Arc::new(msg), Arc::new(status)],
+            vec![
+                Arc::new(ts),
+                Arc::new(level),
+                Arc::new(msg),
+                Arc::new(status),
+            ],
         )
         .unwrap();
 
@@ -894,9 +905,7 @@ mod tests {
     #[test]
     fn test_raw_passthrough() {
         // Build a batch with only _raw column (simulating no transforms).
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("_raw", DataType::Utf8, true),
-        ]));
+        let schema = Arc::new(Schema::new(vec![Field::new("_raw", DataType::Utf8, true)]));
         let raw = StringArray::from(vec![
             Some(r#"{"ts":"2024-01-15","msg":"hello"}"#),
             Some(r#"{"ts":"2024-01-15","msg":"world"}"#),
@@ -926,8 +935,7 @@ mod tests {
         ]));
         let raw = StringArray::from(vec![Some("original log line")]);
         let level = StringArray::from(vec![Some("INFO")]);
-        let batch =
-            RecordBatch::try_new(schema, vec![Arc::new(raw), Arc::new(level)]).unwrap();
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(raw), Arc::new(level)]).unwrap();
         let meta = make_metadata();
 
         let mut sink = StdoutSink::new("test".to_string(), StdoutFormat::Text);
@@ -962,9 +970,11 @@ mod tests {
 
     #[test]
     fn test_float_column_json() {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("duration_ms_float", DataType::Float64, true),
-        ]));
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "duration_ms_float",
+            DataType::Float64,
+            true,
+        )]));
         let dur = Float64Array::from(vec![Some(3.14)]);
         let batch = RecordBatch::try_new(schema, vec![Arc::new(dur)]).unwrap();
         let meta = make_metadata();

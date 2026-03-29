@@ -6,9 +6,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use arrow::array::{
-    ArrayRef, Float64Builder, Int64Builder, StringBuilder,
-};
+use arrow::array::{ArrayRef, Float64Builder, Int64Builder, StringBuilder};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 
@@ -69,17 +67,13 @@ pub fn parse_int_fast(bytes: &[u8]) -> Option<i64> {
     }
     let mut acc: i64 = 0;
     for &b in &bytes[start..] {
-        if b < b'0' || b > b'9' {
+        if !b.is_ascii_digit() {
             return None;
         }
         acc = acc.checked_mul(10)?;
         acc = acc.checked_add((b - b'0') as i64)?;
     }
-    if neg {
-        Some(-acc)
-    } else {
-        Some(acc)
-    }
+    if neg { Some(-acc) } else { Some(acc) }
 }
 
 /// Parse a byte slice as f64 using the standard library (adequate perf for v1).
@@ -189,7 +183,10 @@ impl BatchBuilder {
             fields: Vec::with_capacity(32),
             field_index: HashMap::with_capacity(32),
             raw_builder: if keep_raw {
-                Some(StringBuilder::with_capacity(expected_rows, expected_rows * 256))
+                Some(StringBuilder::with_capacity(
+                    expected_rows,
+                    expected_rows * 256,
+                ))
             } else {
                 None
             },
@@ -366,39 +363,32 @@ impl BatchBuilder {
 
         for fc in &mut self.fields {
             let name = unsafe { std::str::from_utf8_unchecked(&fc.name) };
-            let type_count =
-                fc.has_str as u8 + fc.has_int as u8 + fc.has_float as u8;
-            let multi = type_count > 1;
+            let type_count = fc.has_str as u8 + fc.has_int as u8 + fc.has_float as u8;
+            let _multi = type_count > 1;
 
             // Determine suffix: if single type, use plain name; if multi, use name_suffix.
-            let make_col_name = |suffix: &str| -> String {
-                if multi {
-                    format!("{}_{}", name, suffix)
-                } else {
-                    format!("{}_{}", name, suffix)
-                }
-            };
+            let make_col_name = |suffix: &str| -> String { format!("{}_{}", name, suffix) };
 
-            if fc.has_int {
-                if let Some(ref mut b) = fc.int_builder {
-                    let col_name = make_col_name("int");
-                    schema_fields.push(Field::new(&col_name, DataType::Int64, true));
-                    arrays.push(Arc::new(b.finish()) as ArrayRef);
-                }
+            if fc.has_int
+                && let Some(ref mut b) = fc.int_builder
+            {
+                let col_name = make_col_name("int");
+                schema_fields.push(Field::new(&col_name, DataType::Int64, true));
+                arrays.push(Arc::new(b.finish()) as ArrayRef);
             }
-            if fc.has_float {
-                if let Some(ref mut b) = fc.float_builder {
-                    let col_name = make_col_name("float");
-                    schema_fields.push(Field::new(&col_name, DataType::Float64, true));
-                    arrays.push(Arc::new(b.finish()) as ArrayRef);
-                }
+            if fc.has_float
+                && let Some(ref mut b) = fc.float_builder
+            {
+                let col_name = make_col_name("float");
+                schema_fields.push(Field::new(&col_name, DataType::Float64, true));
+                arrays.push(Arc::new(b.finish()) as ArrayRef);
             }
-            if fc.has_str {
-                if let Some(ref mut b) = fc.str_builder {
-                    let col_name = make_col_name("str");
-                    schema_fields.push(Field::new(&col_name, DataType::Utf8, true));
-                    arrays.push(Arc::new(b.finish()) as ArrayRef);
-                }
+            if fc.has_str
+                && let Some(ref mut b) = fc.str_builder
+            {
+                let col_name = make_col_name("str");
+                schema_fields.push(Field::new(&col_name, DataType::Utf8, true));
+                arrays.push(Arc::new(b.finish()) as ArrayRef);
             }
         }
 
@@ -451,7 +441,7 @@ impl BatchBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::array::{Array, Int64Array, Float64Array, StringArray};
+    use arrow::array::{Array, Float64Array, Int64Array, StringArray};
 
     #[test]
     fn test_parse_int_fast() {
@@ -499,7 +489,9 @@ mod tests {
         assert_eq!(host_arr.value(1), "web2");
 
         // status should be int-only → column "status_int"
-        let status_col = batch.column_by_name("status_int").expect("status_int column");
+        let status_col = batch
+            .column_by_name("status_int")
+            .expect("status_int column");
         let status_arr = status_col.as_any().downcast_ref::<Int64Array>().unwrap();
         assert_eq!(status_arr.value(0), 200);
         assert_eq!(status_arr.value(1), 404);
@@ -567,11 +559,21 @@ mod tests {
         let batch = bb.finish_batch();
         assert_eq!(batch.num_rows(), 2);
 
-        let a = batch.column_by_name("a_str").unwrap().as_any().downcast_ref::<StringArray>().unwrap();
+        let a = batch
+            .column_by_name("a_str")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
         assert_eq!(a.value(0), "hello");
         assert!(a.is_null(1));
 
-        let b = batch.column_by_name("b_str").unwrap().as_any().downcast_ref::<StringArray>().unwrap();
+        let b = batch
+            .column_by_name("b_str")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
         assert!(b.is_null(0));
         assert_eq!(b.value(1), "world");
     }

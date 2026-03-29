@@ -179,7 +179,12 @@ impl Scanner {
                 b't' | b'f' => {
                     // Boolean — store as string "true" / "false".
                     let start = pos;
-                    while pos < len && line[pos] != b',' && line[pos] != b'}' && line[pos] != b' ' && line[pos] != b'\t' {
+                    while pos < len
+                        && line[pos] != b','
+                        && line[pos] != b'}'
+                        && line[pos] != b' '
+                        && line[pos] != b'\t'
+                    {
                         pos += 1;
                     }
                     if wanted {
@@ -204,7 +209,13 @@ impl Scanner {
                         let c = line[pos];
                         if c == b'.' || c == b'e' || c == b'E' {
                             is_float = true;
-                        } else if c == b',' || c == b'}' || c == b' ' || c == b'\t' || c == b'\n' || c == b'\r' {
+                        } else if c == b','
+                            || c == b'}'
+                            || c == b' '
+                            || c == b'\t'
+                            || c == b'\n'
+                            || c == b'\r'
+                        {
                             break;
                         }
                         pos += 1;
@@ -339,20 +350,32 @@ mod tests {
         let batch = s.scan(input);
         assert_eq!(batch.num_rows(), 3);
 
-        let host = batch.column_by_name("host_str").unwrap()
-            .as_any().downcast_ref::<StringArray>().unwrap();
+        let host = batch
+            .column_by_name("host_str")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
         assert_eq!(host.value(0), "web1");
         assert_eq!(host.value(1), "web2");
         assert_eq!(host.value(2), "web3");
 
-        let status = batch.column_by_name("status_int").unwrap()
-            .as_any().downcast_ref::<Int64Array>().unwrap();
+        let status = batch
+            .column_by_name("status_int")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
         assert_eq!(status.value(0), 200);
         assert_eq!(status.value(1), 404);
         assert_eq!(status.value(2), 200);
 
-        let lat = batch.column_by_name("latency_float").unwrap()
-            .as_any().downcast_ref::<Float64Array>().unwrap();
+        let lat = batch
+            .column_by_name("latency_float")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
         assert!((lat.value(0) - 1.5).abs() < 1e-10);
     }
 
@@ -368,13 +391,21 @@ mod tests {
         assert!(batch.column_by_name("status_int").is_some());
         assert!(batch.column_by_name("status_str").is_some());
 
-        let int_col = batch.column_by_name("status_int").unwrap()
-            .as_any().downcast_ref::<Int64Array>().unwrap();
+        let int_col = batch
+            .column_by_name("status_int")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
         assert_eq!(int_col.value(0), 200);
         assert!(int_col.is_null(1));
 
-        let str_col = batch.column_by_name("status_str").unwrap()
-            .as_any().downcast_ref::<StringArray>().unwrap();
+        let str_col = batch
+            .column_by_name("status_str")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
         assert!(str_col.is_null(0));
         assert_eq!(str_col.value(1), "OK");
     }
@@ -388,13 +419,21 @@ mod tests {
         let batch = s.scan(input);
         assert_eq!(batch.num_rows(), 2);
 
-        let a = batch.column_by_name("a_str").unwrap()
-            .as_any().downcast_ref::<StringArray>().unwrap();
+        let a = batch
+            .column_by_name("a_str")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
         assert_eq!(a.value(0), "hello");
         assert!(a.is_null(1));
 
-        let b = batch.column_by_name("b_str").unwrap()
-            .as_any().downcast_ref::<StringArray>().unwrap();
+        let b = batch
+            .column_by_name("b_str")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
         assert!(b.is_null(0));
         assert_eq!(b.value(1), "world");
     }
@@ -408,8 +447,12 @@ mod tests {
         assert_eq!(batch.num_rows(), 1);
 
         // Nested object stored as string
-        let user = batch.column_by_name("user_str").unwrap()
-            .as_any().downcast_ref::<StringArray>().unwrap();
+        let user = batch
+            .column_by_name("user_str")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
         let val = user.value(0);
         assert!(val.contains("alice"));
         assert!(val.starts_with('{'));
@@ -417,12 +460,19 @@ mod tests {
 
     #[test]
     fn test_scan_config_pushdown() {
-        let input = br#"{"a":"1","b":"2","c":"3","d":"4","e":"5","f":"6","g":"7","h":"8","i":"9","j":"10"}
+        let input =
+            br#"{"a":"1","b":"2","c":"3","d":"4","e":"5","f":"6","g":"7","h":"8","i":"9","j":"10"}
 "#;
         let config = ScanConfig {
             wanted_fields: vec![
-                FieldSpec { name: "a".into(), aliases: vec![] },
-                FieldSpec { name: "c".into(), aliases: vec![] },
+                FieldSpec {
+                    name: "a".into(),
+                    aliases: vec![],
+                },
+                FieldSpec {
+                    name: "c".into(),
+                    aliases: vec![],
+                },
             ],
             extract_all: false,
             keep_raw: false,
@@ -444,8 +494,12 @@ mod tests {
         let input = [line.as_slice(), b"\n"].concat();
         let mut s = default_scanner(4);
         let batch = s.scan(&input);
-        let raw = batch.column_by_name("_raw").unwrap()
-            .as_any().downcast_ref::<StringArray>().unwrap();
+        let raw = batch
+            .column_by_name("_raw")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
         assert_eq!(raw.value(0), r#"{"msg":"hello"}"#);
     }
 
@@ -478,8 +532,12 @@ mod tests {
         let b2 = s.scan(input);
         assert_eq!(b2.num_rows(), 2);
 
-        let col = b2.column_by_name("x_int").unwrap()
-            .as_any().downcast_ref::<Int64Array>().unwrap();
+        let col = b2
+            .column_by_name("x_int")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
         assert_eq!(col.value(0), 1);
         assert_eq!(col.value(1), 2);
     }
@@ -492,12 +550,20 @@ mod tests {
         let batch = s.scan(input);
         assert_eq!(batch.num_rows(), 1);
 
-        let active = batch.column_by_name("active_str").unwrap()
-            .as_any().downcast_ref::<StringArray>().unwrap();
+        let active = batch
+            .column_by_name("active_str")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
         assert_eq!(active.value(0), "true");
 
-        let deleted = batch.column_by_name("deleted_str").unwrap()
-            .as_any().downcast_ref::<StringArray>().unwrap();
+        let deleted = batch
+            .column_by_name("deleted_str")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
         assert_eq!(deleted.value(0), "false");
 
         // "extra" with null — should exist but be null
@@ -513,8 +579,12 @@ mod tests {
 "#;
         let mut s = default_scanner(4);
         let batch = s.scan(input);
-        let col = batch.column_by_name("offset_int").unwrap()
-            .as_any().downcast_ref::<Int64Array>().unwrap();
+        let col = batch
+            .column_by_name("offset_int")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
         assert_eq!(col.value(0), -42);
     }
 
@@ -525,8 +595,12 @@ mod tests {
 "#;
         let mut s = default_scanner(4);
         let batch = s.scan(input);
-        let col = batch.column_by_name("msg_str").unwrap()
-            .as_any().downcast_ref::<StringArray>().unwrap();
+        let col = batch
+            .column_by_name("msg_str")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
         // Escapes are preserved (not decoded) — this is by design for speed.
         assert!(col.value(0).contains("\\\"world\\\""));
     }
