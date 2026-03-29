@@ -70,6 +70,39 @@ crates/logfwd-bench/     # Criterion micro-benchmarks
 - **No new dependencies** without explicit justification in the PR description. Prefer standard library or existing dependencies.
 - **No feature flags, backwards-compatibility shims, or speculative abstractions.** Write the simplest correct code.
 
+### Code Pattern Examples
+
+**Error handling — DO THIS:**
+```rust
+let value = parse(input).map_err(|e| Error::Parse { source: e, path: path.to_owned() })?;
+```
+**NOT THIS:**
+```rust
+let value = parse(input).unwrap(); // or .expect("should work")
+```
+
+**Hot path allocation — DO THIS:**
+```rust
+// Reuse a buffer across iterations
+buf.clear();
+write!(buf, "{}", record.timestamp)?;
+```
+**NOT THIS:**
+```rust
+// Allocates a new String every iteration
+let s = format!("{}", record.timestamp);
+```
+
+**Abstraction — DO THIS:**
+```rust
+fn encode_otlp(batch: &RecordBatch, buf: &mut Vec<u8>) -> Result<()> { ... }
+```
+**NOT THIS:**
+```rust
+trait Encoder { fn encode(&self, ...) -> Result<()>; }
+struct OtlpEncoder; // unnecessary indirection for a single implementation
+```
+
 ## Double-Check Your Work (Do Not Skip This)
 
 After writing your code and before committing, complete every item on this checklist:
