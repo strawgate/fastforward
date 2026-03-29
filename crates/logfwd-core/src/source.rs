@@ -62,9 +62,15 @@ pub struct BatchMetadata {
 /// Output produced by a [`Source`] on a successful [`Source::poll`].
 pub enum SourceOutput {
     /// Raw bytes, typically NDJSON, not yet parsed into Arrow.
-    Raw { json_lines: Vec<u8>, line_count: usize },
+    Raw {
+        json_lines: Vec<u8>,
+        line_count: usize,
+    },
     /// Pre-parsed Arrow [`RecordBatch`] with accompanying metadata.
-    Structured { batch: RecordBatch, metadata: BatchMetadata },
+    Structured {
+        batch: RecordBatch,
+        metadata: BatchMetadata,
+    },
     /// A source lifecycle event (rotation, truncation, EOF).
     Event(SourceEvent),
 }
@@ -133,22 +139,40 @@ mod tests {
 
     #[test]
     fn source_id_equal_ids_are_equal() {
-        let a = SourceId { id: 42, name: Arc::from("pipeline") };
-        let b = SourceId { id: 42, name: Arc::from("pipeline") };
+        let a = SourceId {
+            id: 42,
+            name: Arc::from("pipeline"),
+        };
+        let b = SourceId {
+            id: 42,
+            name: Arc::from("pipeline"),
+        };
         assert_eq!(a, b);
     }
 
     #[test]
     fn source_id_different_numeric_ids_not_equal() {
-        let a = SourceId { id: 1, name: Arc::from("x") };
-        let b = SourceId { id: 2, name: Arc::from("x") };
+        let a = SourceId {
+            id: 1,
+            name: Arc::from("x"),
+        };
+        let b = SourceId {
+            id: 2,
+            name: Arc::from("x"),
+        };
         assert_ne!(a, b);
     }
 
     #[test]
     fn source_id_different_names_not_equal() {
-        let a = SourceId { id: 1, name: Arc::from("foo") };
-        let b = SourceId { id: 1, name: Arc::from("bar") };
+        let a = SourceId {
+            id: 1,
+            name: Arc::from("foo"),
+        };
+        let b = SourceId {
+            id: 1,
+            name: Arc::from("bar"),
+        };
         assert_ne!(a, b);
     }
 
@@ -163,15 +187,24 @@ mod tests {
             h.finish()
         };
 
-        let a = SourceId { id: 99, name: Arc::from("auth") };
-        let b = SourceId { id: 99, name: Arc::from("auth") };
+        let a = SourceId {
+            id: 99,
+            name: Arc::from("auth"),
+        };
+        let b = SourceId {
+            id: 99,
+            name: Arc::from("auth"),
+        };
         assert_eq!(hash_of(&a), hash_of(&b));
     }
 
     #[test]
     fn source_id_usable_as_hashmap_key() {
         let mut map: HashMap<SourceId, &str> = HashMap::new();
-        let id = SourceId { id: 7, name: Arc::from("auth") };
+        let id = SourceId {
+            id: 7,
+            name: Arc::from("auth"),
+        };
         map.insert(id.clone(), "auth-logs");
         assert_eq!(map[&id], "auth-logs");
     }
@@ -198,14 +231,24 @@ mod tests {
             timestamp_ns: 0,
         };
         let json = serde_json::to_string(&cp).unwrap();
-        assert!(json.contains("\"source_id\":1"), "missing source_id: {json}");
-        assert!(json.contains("\"timestamp_ns\":0"), "missing timestamp_ns: {json}");
+        assert!(
+            json.contains("\"source_id\":1"),
+            "missing source_id: {json}"
+        );
+        assert!(
+            json.contains("\"timestamp_ns\":0"),
+            "missing timestamp_ns: {json}"
+        );
         assert!(json.contains("\"position\":"), "missing position: {json}");
     }
 
     #[test]
     fn source_checkpoint_empty_position_roundtrip() {
-        let cp = SourceCheckpoint { source_id: 0, position: vec![], timestamp_ns: 0 };
+        let cp = SourceCheckpoint {
+            source_id: 0,
+            position: vec![],
+            timestamp_ns: 0,
+        };
         let json = serde_json::to_string(&cp).unwrap();
         let restored: SourceCheckpoint = serde_json::from_str(&json).unwrap();
         assert_eq!(cp, restored);
