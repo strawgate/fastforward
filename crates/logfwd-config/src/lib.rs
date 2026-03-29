@@ -139,6 +139,11 @@ pub struct PipelineConfig {
 pub struct ServerConfig {
     pub diagnostics: Option<String>,
     pub log_level: Option<String>,
+    /// OTLP endpoint for metrics push (e.g. "http://localhost:4318").
+    /// If not set, OTLP push is disabled; /metrics scrape still works.
+    pub metrics_endpoint: Option<String>,
+    /// OTLP push interval in seconds. Default: 60.
+    pub metrics_interval_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]

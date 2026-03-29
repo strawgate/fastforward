@@ -9,6 +9,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use opentelemetry::metrics::Meter;
+
 use logfwd_config::{Format, InputConfig, InputType, PipelineConfig};
 use logfwd_core::diagnostics::{ComponentStats, PipelineMetrics};
 use logfwd_core::format::{CriParser, FormatParser, JsonParser, RawParser};
@@ -52,13 +54,13 @@ pub struct Pipeline {
 
 impl Pipeline {
     /// Construct a pipeline from parsed YAML config.
-    pub fn from_config(name: &str, config: &PipelineConfig) -> Result<Self, String> {
+    pub fn from_config(name: &str, config: &PipelineConfig, meter: &Meter) -> Result<Self, String> {
         let transform_sql = config.transform.as_deref().unwrap_or("SELECT * FROM logs");
         let transform = SqlTransform::new(transform_sql)?;
         let scan_config = transform.scan_config();
         let scanner = Scanner::new(scan_config, 8192);
 
-        let mut metrics = PipelineMetrics::new(name, transform_sql);
+        let mut metrics = PipelineMetrics::new(name, transform_sql, meter);
 
         // Build inputs (file only for now).
         let mut inputs = Vec::new();
@@ -151,11 +153,9 @@ impl Pipeline {
             if size_ready || time_ready {
                 // Track flush reason.
                 if size_ready {
-                    self.metrics.flush_by_size.fetch_add(1, Ordering::Relaxed);
+                    self.metrics.inc_flush_by_size();
                 } else {
-                    self.metrics
-                        .flush_by_timeout
-                        .fetch_add(1, Ordering::Relaxed);
+                    self.metrics.inc_flush_by_timeout();
                 }
 
                 let mut combined = Vec::new();
@@ -180,9 +180,7 @@ impl Pipeline {
                         let result = match self.transform.execute(batch) {
                             Ok(r) => r,
                             Err(e) => {
-                                self.metrics
-                                    .transform_errors
-                                    .fetch_add(1, Ordering::Relaxed);
+                                self.metrics.inc_transform_error();
                                 return Err(io::Error::other(format!("transform error: {e}")));
                             }
                         };
@@ -205,19 +203,12 @@ impl Pipeline {
                         let output_elapsed = t2.elapsed();
 
                         // Record batch-level metrics.
-                        self.metrics.batches_total.fetch_add(1, Ordering::Relaxed);
-                        self.metrics
-                            .batch_rows_total
-                            .fetch_add(num_rows, Ordering::Relaxed);
-                        self.metrics
-                            .scan_nanos_total
-                            .fetch_add(scan_elapsed.as_nanos() as u64, Ordering::Relaxed);
-                        self.metrics
-                            .transform_nanos_total
-                            .fetch_add(transform_elapsed.as_nanos() as u64, Ordering::Relaxed);
-                        self.metrics
-                            .output_nanos_total
-                            .fetch_add(output_elapsed.as_nanos() as u64, Ordering::Relaxed);
+                        self.metrics.record_batch(
+                            num_rows,
+                            scan_elapsed.as_nanos() as u64,
+                            transform_elapsed.as_nanos() as u64,
+                            output_elapsed.as_nanos() as u64,
+                        );
                     }
                 }
 
@@ -298,6 +289,10 @@ fn now_nanos() -> u64 {
 mod tests {
     use super::*;
     use logfwd_config::{Format, OutputConfig, OutputType};
+
+    fn test_meter() -> Meter {
+        opentelemetry::global::meter("test")
+    }
 
     #[test]
     fn test_build_output_sink_stdout() {
@@ -382,7 +377,7 @@ output:
         );
         let config = logfwd_config::Config::load_str(&yaml).unwrap();
         let pipe_cfg = &config.pipelines["default"];
-        let pipeline = Pipeline::from_config("default", pipe_cfg);
+        let pipeline = Pipeline::from_config("default", pipe_cfg, &test_meter());
         assert!(pipeline.is_ok(), "got: {:?}", pipeline.err());
     }
 
@@ -407,7 +402,7 @@ output:
         );
         let config = logfwd_config::Config::load_str(&yaml).unwrap();
         let pipe_cfg = &config.pipelines["default"];
-        let pipeline = Pipeline::from_config("default", pipe_cfg);
+        let pipeline = Pipeline::from_config("default", pipe_cfg, &test_meter());
         assert!(pipeline.is_ok(), "got: {:?}", pipeline.err());
     }
 
@@ -444,7 +439,7 @@ output:
         );
         let config = logfwd_config::Config::load_str(&yaml).unwrap();
         let pipe_cfg = &config.pipelines["default"];
-        let mut pipeline = Pipeline::from_config("default", pipe_cfg).unwrap();
+        let mut pipeline = Pipeline::from_config("default", pipe_cfg, &test_meter()).unwrap();
 
         // Use a very short batch timeout so the test flushes quickly.
         pipeline.batch_timeout = Duration::from_millis(10);
