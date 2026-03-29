@@ -149,6 +149,15 @@ impl Pipeline {
                 && last_flush.elapsed() >= self.batch_timeout;
 
             if size_ready || time_ready {
+                // Track flush reason.
+                if size_ready {
+                    self.metrics.flush_by_size.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    self.metrics
+                        .flush_by_timeout
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+
                 let mut combined = Vec::new();
                 for input in &mut self.inputs {
                     if !input.json_buf.is_empty() {
@@ -157,24 +166,58 @@ impl Pipeline {
                 }
 
                 if !combined.is_empty() {
+                    // Scan stage.
+                    let t0 = Instant::now();
                     let batch = self.scanner.scan(&combined);
-                    if batch.num_rows() > 0 {
-                        self.metrics.transform_in.inc_lines(batch.num_rows() as u64);
+                    let scan_elapsed = t0.elapsed();
 
-                        let result = self
-                            .transform
-                            .execute(batch)
-                            .map_err(|e| io::Error::other(format!("transform error: {e}")))?;
+                    if batch.num_rows() > 0 {
+                        let num_rows = batch.num_rows() as u64;
+                        self.metrics.transform_in.inc_lines(num_rows);
+
+                        // Transform stage.
+                        let t1 = Instant::now();
+                        let result = match self.transform.execute(batch) {
+                            Ok(r) => r,
+                            Err(e) => {
+                                self.metrics
+                                    .transform_errors
+                                    .fetch_add(1, Ordering::Relaxed);
+                                return Err(io::Error::other(format!("transform error: {e}")));
+                            }
+                        };
+                        let transform_elapsed = t1.elapsed();
 
                         self.metrics
                             .transform_out
                             .inc_lines(result.num_rows() as u64);
 
+                        // Output stage.
+                        let t2 = Instant::now();
                         let metadata = BatchMetadata {
                             resource_attrs: vec![],
                             observed_time_ns: now_nanos(),
                         };
-                        self.output.send_batch(&result, &metadata)?;
+                        if let Err(e) = self.output.send_batch(&result, &metadata) {
+                            self.metrics.output_error();
+                            return Err(e);
+                        }
+                        let output_elapsed = t2.elapsed();
+
+                        // Record batch-level metrics.
+                        self.metrics.batches_total.fetch_add(1, Ordering::Relaxed);
+                        self.metrics
+                            .batch_rows_total
+                            .fetch_add(num_rows, Ordering::Relaxed);
+                        self.metrics
+                            .scan_nanos_total
+                            .fetch_add(scan_elapsed.as_nanos() as u64, Ordering::Relaxed);
+                        self.metrics
+                            .transform_nanos_total
+                            .fetch_add(transform_elapsed.as_nanos() as u64, Ordering::Relaxed);
+                        self.metrics
+                            .output_nanos_total
+                            .fetch_add(output_elapsed.as_nanos() as u64, Ordering::Relaxed);
                     }
                 }
 
