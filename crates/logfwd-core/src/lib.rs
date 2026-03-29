@@ -5,5 +5,6 @@ pub mod diagnostics;
 pub mod format;
 pub mod input;
 pub mod otlp;
+pub mod s3_input;
 pub mod scanner;
 pub mod tail;

@@ -5,12 +5,15 @@ edition = "2024"
 
 [dependencies]
 arrow = { workspace = true }
+aws-config = { version = "1", default-features = false, features = ["default-https-client"] }
+aws-sdk-s3 = "1"
 crossbeam-channel = "0.5"
 opentelemetry = { workspace = true }
 memchr = "2"
 notify = "7"
 serde = { workspace = true }
 tiny_http = "0.12"
+tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
 xxhash-rust = { version = "0.8", features = ["xxh32", "xxh64"] }
 zstd = "0.13"
 

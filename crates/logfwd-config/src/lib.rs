@@ -60,6 +60,7 @@ pub enum InputType {
     Udp,
     Tcp,
     Otlp,
+    S3,
 }
 
 /// Recognised output types.
@@ -102,6 +103,12 @@ pub struct InputConfig {
     pub path: Option<String>,
     pub listen: Option<String>,
     pub format: Option<Format>,
+    /// S3 bucket name (required for `s3` input type).
+    pub bucket: Option<String>,
+    /// AWS region (e.g. `us-east-1`). Falls back to environment / instance metadata.
+    pub region: Option<String>,
+    /// Custom endpoint URL for S3-compatible stores (e.g. MinIO).
+    pub endpoint_url: Option<String>,
 }
 
 /// A single output destination.
@@ -283,6 +290,13 @@ impl Config {
                         }
                     }
                     InputType::Otlp => {}
+                    InputType::S3 => {
+                        if input.bucket.is_none() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': s3 input requires 'bucket'"
+                            )));
+                        }
+                    }
                 }
             }
 
@@ -638,9 +652,18 @@ output:
             ("udp", "listen: 0.0.0.0:514"),
             ("tcp", "listen: 0.0.0.0:514"),
             ("otlp", ""),
+            ("s3", "bucket: my-bucket"),
         ] {
             let yaml = format!("input:\n  type: {itype}\n  {extra}\noutput:\n  type: stdout\n");
             Config::load_str(&yaml).unwrap_or_else(|e| panic!("failed for {itype}: {e}"));
         }
+    }
+
+    #[test]
+    fn s3_requires_bucket() {
+        let yaml = "input:\n  type: s3\noutput:\n  type: stdout\n";
+        let err = Config::load_str(yaml).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("bucket"), "expected 'bucket' in error: {msg}");
     }
 }

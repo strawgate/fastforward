@@ -15,6 +15,7 @@ use logfwd_config::{Format, InputConfig, InputType, PipelineConfig};
 use logfwd_core::diagnostics::{ComponentStats, PipelineMetrics};
 use logfwd_core::format::{CriParser, FormatParser, JsonParser, RawParser};
 use logfwd_core::input::{FileInput, InputEvent, InputSource};
+use logfwd_core::s3_input::S3Input;
 use logfwd_core::scanner::Scanner;
 use logfwd_core::tail::TailConfig;
 use logfwd_output::{BatchMetadata, FanOut, OutputSink, build_output_sink};
@@ -258,6 +259,30 @@ fn build_input_state(
             };
             let source = FileInput::new(name.to_string(), &paths, tail_config)
                 .map_err(|e| format!("input '{name}': failed to create tailer: {e}"))?;
+
+            Ok(InputState {
+                name: name.to_string(),
+                source: Box::new(source),
+                parser: build_format_parser(&format),
+                json_buf: Vec::with_capacity(4 * 1024 * 1024),
+                stats,
+            })
+        }
+        InputType::S3 => {
+            let bucket = cfg
+                .bucket
+                .clone()
+                .ok_or_else(|| format!("input '{name}': s3 input requires 'bucket'"))?;
+            let prefix = cfg.path.clone();
+            let format = cfg.format.clone().unwrap_or(Format::Json);
+            let source = S3Input::new(
+                name.to_string(),
+                bucket,
+                prefix,
+                cfg.region.clone(),
+                cfg.endpoint_url.clone(),
+            )
+            .map_err(|e| format!("input '{name}': failed to create S3 input: {e}"))?;
 
             Ok(InputState {
                 name: name.to_string(),
