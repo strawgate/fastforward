@@ -152,9 +152,12 @@ pub struct K8sPodEntry {
 
 impl K8sPathTable {
     pub fn new(table_name: impl Into<String>) -> Self {
+        let table_name = table_name.into();
+        // Start with an empty batch so SQL queries don't fail with "table not found".
+        let empty = build_k8s_batch(&[]);
         K8sPathTable {
-            table_name: table_name.into(),
-            data: Arc::new(RwLock::new(None)),
+            table_name,
+            data: Arc::new(RwLock::new(Some(empty))),
         }
     }
 
@@ -167,15 +170,17 @@ impl K8sPathTable {
             }
         }
         entries.sort_by(|a, b| {
-            (&a.namespace, &a.pod_name, &a.container_name).cmp(&(
+            (&a.namespace, &a.pod_name, &a.pod_uid, &a.container_name).cmp(&(
                 &b.namespace,
                 &b.pod_name,
+                &b.pod_uid,
                 &b.container_name,
             ))
         });
         entries.dedup_by(|a, b| {
             a.namespace == b.namespace
                 && a.pod_name == b.pod_name
+                && a.pod_uid == b.pod_uid
                 && a.container_name == b.container_name
         });
 
@@ -354,12 +359,18 @@ fn read_csv_to_batch<R: io::Read>(reader: R) -> Result<RecordBatch, String> {
     let num_cols = headers.len();
     let mut columns: Vec<Vec<String>> = vec![Vec::new(); num_cols];
 
-    for result in csv_reader.records() {
+    for (row_idx, result) in csv_reader.records().enumerate() {
         let record = result.map_err(|e| format!("CSV parse error: {e}"))?;
+        if record.len() > num_cols {
+            return Err(format!(
+                "CSV row {} has {} fields, expected {} (header count)",
+                row_idx + 1,
+                record.len(),
+                num_cols,
+            ));
+        }
         for (i, field) in record.iter().enumerate() {
-            if i < num_cols {
-                columns[i].push(field.to_string());
-            }
+            columns[i].push(field.to_string());
         }
         // Pad missing columns with empty string.
         for col in columns.iter_mut().skip(record.len()) {
@@ -616,9 +627,11 @@ mod tests {
     // -- K8s path table -----------------------------------------------------
 
     #[test]
-    fn k8s_path_table_initially_empty() {
+    fn k8s_path_table_starts_with_empty_batch() {
         let table = K8sPathTable::new("k8s_pods");
-        assert!(table.snapshot().is_none());
+        let batch = table.snapshot().expect("should have empty batch");
+        assert_eq!(batch.num_rows(), 0);
+        assert_eq!(batch.num_columns(), 5); // log_path_prefix, namespace, pod_name, pod_uid, container_name
     }
 
     #[test]
@@ -884,7 +897,8 @@ mod tests {
         assert_eq!(tables[1].name(), "host_info");
         assert!(tables[1].snapshot().is_some());
         assert_eq!(tables[2].name(), "k8s_pods");
-        assert!(tables[2].snapshot().is_none()); // not loaded yet
+        let batch = tables[2].snapshot().expect("should have empty batch");
+        assert_eq!(batch.num_rows(), 0); // empty until update_from_paths
     }
 
     // -- Concurrent access --------------------------------------------------
