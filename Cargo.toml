@@ -7,16 +7,20 @@ edition = "2024"
 dhat-heap = ["dhat"]  # enable with: cargo run --release --features dhat-heap
 
 [dependencies]
-arrow = "54"
+arrow = { version = "54", default-features = false }
 crossbeam-channel = "0.5"
-datafusion = "45"
+datafusion = { version = "45", default-features = false, features = [
+    "string_expressions",
+    "unicode_expressions",
+    "recursive_protection",
+] }
 dhat = { version = "0.3", optional = true }
 memchr = "2"
 notify = "7"
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
 tiny_http = "0.12"
-ureq = "3"
+ureq = { version = "3", default-features = false, features = ["rustls"] }
 tokio = { version = "1", features = ["rt"] }
 xxhash-rust = { version = "0.8", features = ["xxh32", "xxh64"] }
 zstd = "0.13"
@@ -31,7 +35,7 @@ codegen-units = 1
 debug = true  # needed for flamegraphs and dhat to show source locations
 
 [profile.test]
-opt-level = 3
+opt-level = 1
 debug = true
 
 [profile.bench]
