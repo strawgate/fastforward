@@ -2088,6 +2088,7 @@ name = "logfwd-transform"
 version = "0.1.0"
 dependencies = [
  "arrow",
+ "bytes",
  "datafusion",
  "logfwd-core",
  "regex",

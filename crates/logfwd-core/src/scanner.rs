@@ -335,9 +335,9 @@ impl StreamingSimdScanner {
 mod tests {
     use super::*;
     use crate::scan_config::FieldSpec;
-    use arrow::array::{Array, Float64Array, Int64Array, StringArray};
+    use arrow::array::{Array, Int64Array, StringArray};
 
-    fn default_scanner(rows: usize) -> SimdScanner {
+    fn default_scanner(_rows: usize) -> SimdScanner {
         SimdScanner::new(ScanConfig::default())
     }
 
