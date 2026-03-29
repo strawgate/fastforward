@@ -8,6 +8,9 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
+use opentelemetry::metrics::MeterProvider;
+use opentelemetry_otlp::WithExportConfig;
+
 fn main() -> io::Result<()> {
     #[cfg(feature = "dhat-heap")]
     let _profiler = dhat::Profiler::new_heap();
@@ -177,13 +180,16 @@ fn run_blackhole(addr: &str) -> io::Result<()> {
 fn run_pipelines(config: logfwd_config::Config, dry_run: bool) -> io::Result<()> {
     use logfwd::pipeline::Pipeline;
     use logfwd_core::diagnostics::DiagnosticsServer;
-
     let shutdown = Arc::new(AtomicBool::new(false));
+
+    // Initialize OTel metrics.
+    let meter_provider = build_meter_provider(&config)?;
+    let meter = meter_provider.meter("logfwd");
 
     // Build pipelines.
     let mut pipelines = Vec::new();
     for (name, pipe_cfg) in &config.pipelines {
-        let pipeline = Pipeline::from_config(name, pipe_cfg).map_err(io::Error::other)?;
+        let pipeline = Pipeline::from_config(name, pipe_cfg, &meter).map_err(io::Error::other)?;
         eprintln!("  pipeline '{}' ready", name);
         pipelines.push(pipeline);
     }
@@ -227,7 +233,58 @@ fn run_pipelines(config: logfwd_config::Config, dry_run: bool) -> io::Result<()>
         let _ = h.join();
     }
 
+    // Flush any pending OTLP exports.
+    if let Err(e) = meter_provider.shutdown() {
+        eprintln!("warning: meter provider shutdown: {e}");
+    }
+
     Ok(())
+}
+
+/// Build an OTel MeterProvider. If `metrics_endpoint` is configured, adds a
+/// PeriodicReader that pushes metrics via OTLP HTTP. Otherwise returns a
+/// no-op provider (OTel counters still work, just nobody reads them).
+fn build_meter_provider(
+    config: &logfwd_config::Config,
+) -> io::Result<opentelemetry_sdk::metrics::SdkMeterProvider> {
+    use opentelemetry_sdk::metrics::SdkMeterProvider;
+
+    if let Some(ref endpoint) = config.server.metrics_endpoint {
+        let interval_secs = config.server.metrics_interval_secs.unwrap_or(60);
+
+        // Create a tokio runtime for the periodic OTLP export.
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_time()
+            .enable_io()
+            .build()
+            .map_err(|e| io::Error::other(format!("tokio runtime: {e}")))?;
+
+        // Build OTLP exporter + periodic reader inside the runtime context.
+        let _guard = rt.enter();
+
+        let otlp_exporter = opentelemetry_otlp::MetricExporter::builder()
+            .with_http()
+            .with_endpoint(endpoint)
+            .build()
+            .map_err(|e| io::Error::other(format!("OTLP metric exporter: {e}")))?;
+
+        let reader = opentelemetry_sdk::metrics::PeriodicReader::builder(otlp_exporter)
+            .with_interval(std::time::Duration::from_secs(interval_secs))
+            .build();
+
+        eprintln!("  metrics OTLP push: {endpoint} (every {interval_secs}s)");
+
+        // Leak the runtime so it lives for the process lifetime.
+        // The single worker thread is lightweight and we need it alive
+        // for the PeriodicReader's background export task.
+        std::mem::forget(rt);
+
+        Ok(SdkMeterProvider::builder().with_reader(reader).build())
+    } else {
+        // No OTLP endpoint — OTel counters still work (dual-write to atomics).
+        Ok(SdkMeterProvider::builder().build())
+    }
 }
 
 fn generate_json_log_file(num_lines: usize, output: &str) -> io::Result<()> {

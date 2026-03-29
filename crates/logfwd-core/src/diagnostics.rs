@@ -3,36 +3,59 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
+use opentelemetry::KeyValue;
+use opentelemetry::metrics::{Counter, Meter};
+
 // ---------------------------------------------------------------------------
 // Atomic stats structures (lock-free, hot-path friendly)
 // ---------------------------------------------------------------------------
 
-/// Stats for one component. Lock-free, readable from any thread.
+/// Stats for one component. Dual-write: atomics for /metrics + /api/pipelines,
+/// OTel counters for OTLP push. Both are lock-free on the hot path.
 pub struct ComponentStats {
     pub lines_total: AtomicU64,
     pub bytes_total: AtomicU64,
     pub errors_total: AtomicU64,
+    // OTel counters (for OTLP push)
+    otel_lines: Counter<u64>,
+    otel_bytes: Counter<u64>,
+    otel_errors: Counter<u64>,
+    otel_attrs: Vec<KeyValue>,
 }
 
 impl ComponentStats {
-    pub fn new() -> Self {
+    /// Create stats with OTel counters. `prefix` is e.g. "logfwd_input" or "logfwd_output".
+    pub fn with_meter(meter: &Meter, prefix: &str, attrs: Vec<KeyValue>) -> Self {
         Self {
             lines_total: AtomicU64::new(0),
             bytes_total: AtomicU64::new(0),
             errors_total: AtomicU64::new(0),
+            otel_lines: meter.u64_counter(format!("{prefix}_lines")).build(),
+            otel_bytes: meter.u64_counter(format!("{prefix}_bytes")).build(),
+            otel_errors: meter.u64_counter(format!("{prefix}_errors")).build(),
+            otel_attrs: attrs,
         }
+    }
+
+    /// Create stats without OTel (for tests and standalone use).
+    pub fn new() -> Self {
+        let noop = opentelemetry::global::meter("noop");
+        Self::with_meter(&noop, "noop", vec![])
     }
 
     pub fn inc_lines(&self, n: u64) {
         self.lines_total.fetch_add(n, Ordering::Relaxed);
+        self.otel_lines.add(n, &self.otel_attrs);
     }
 
     pub fn inc_bytes(&self, n: u64) {
         self.bytes_total.fetch_add(n, Ordering::Relaxed);
+        self.otel_bytes.add(n, &self.otel_attrs);
     }
 
     pub fn inc_errors(&self) {
         self.errors_total.fetch_add(1, Ordering::Relaxed);
+        self.otel_errors.add(1, &self.otel_attrs);
     }
 
     fn lines(&self) -> u64 {
@@ -58,7 +81,8 @@ impl Default for ComponentStats {
 // Pipeline-level metrics (shared between pipeline thread and diagnostics)
 // ---------------------------------------------------------------------------
 
-/// Stats for a full pipeline.
+/// Stats for a full pipeline. Dual-write: atomics for local endpoints,
+/// OTel counters for OTLP push.
 pub struct PipelineMetrics {
     pub name: String,
     /// (name, type, stats)
@@ -70,7 +94,7 @@ pub struct PipelineMetrics {
     /// (name, type, stats)
     pub outputs: Vec<(String, String, Arc<ComponentStats>)>,
     pub backpressure_stalls: AtomicU64,
-    // Batch-level metrics
+    // Batch-level metrics (atomics for local, OTel for push)
     pub batches_total: AtomicU64,
     pub batch_rows_total: AtomicU64,
     pub flush_by_size: AtomicU64,
@@ -79,17 +103,38 @@ pub struct PipelineMetrics {
     pub scan_nanos_total: AtomicU64,
     pub transform_nanos_total: AtomicU64,
     pub output_nanos_total: AtomicU64,
+    // OTel counters (for OTLP push)
+    meter: Meter,
+    otel_attrs: Vec<KeyValue>,
+    otel_transform_errors: Counter<u64>,
+    otel_batches: Counter<u64>,
+    otel_batch_rows: Counter<u64>,
+    otel_flush_by_size: Counter<u64>,
+    otel_flush_by_timeout: Counter<u64>,
+    otel_scan_nanos: Counter<u64>,
+    otel_transform_nanos: Counter<u64>,
+    otel_output_nanos: Counter<u64>,
+    otel_backpressure_stalls: Counter<u64>,
 }
 
 impl PipelineMetrics {
-    pub fn new(name: impl Into<String>, transform_sql: impl Into<String>) -> Self {
+    pub fn new(name: impl Into<String>, transform_sql: impl Into<String>, meter: &Meter) -> Self {
+        let name = name.into();
+        let attrs = vec![KeyValue::new("pipeline", name.clone())];
         Self {
-            name: name.into(),
-            inputs: Vec::new(),
             transform_sql: transform_sql.into(),
-            transform_in: Arc::new(ComponentStats::new()),
-            transform_out: Arc::new(ComponentStats::new()),
+            transform_in: Arc::new(ComponentStats::with_meter(
+                meter,
+                "logfwd_transform_in",
+                attrs.clone(),
+            )),
+            transform_out: Arc::new(ComponentStats::with_meter(
+                meter,
+                "logfwd_transform_out",
+                attrs.clone(),
+            )),
             transform_errors: AtomicU64::new(0),
+            inputs: Vec::new(),
             outputs: Vec::new(),
             backpressure_stalls: AtomicU64::new(0),
             batches_total: AtomicU64::new(0),
@@ -99,6 +144,18 @@ impl PipelineMetrics {
             scan_nanos_total: AtomicU64::new(0),
             transform_nanos_total: AtomicU64::new(0),
             output_nanos_total: AtomicU64::new(0),
+            otel_transform_errors: meter.u64_counter("logfwd_transform_errors").build(),
+            otel_batches: meter.u64_counter("logfwd_batches").build(),
+            otel_batch_rows: meter.u64_counter("logfwd_batch_rows").build(),
+            otel_flush_by_size: meter.u64_counter("logfwd_flush_by_size").build(),
+            otel_flush_by_timeout: meter.u64_counter("logfwd_flush_by_timeout").build(),
+            otel_scan_nanos: meter.u64_counter("logfwd_stage_scan_nanos").build(),
+            otel_transform_nanos: meter.u64_counter("logfwd_stage_transform_nanos").build(),
+            otel_output_nanos: meter.u64_counter("logfwd_stage_output_nanos").build(),
+            otel_backpressure_stalls: meter.u64_counter("logfwd_backpressure_stalls").build(),
+            meter: meter.clone(),
+            otel_attrs: attrs,
+            name,
         }
     }
 
@@ -107,9 +164,18 @@ impl PipelineMetrics {
         name: impl Into<String>,
         typ: impl Into<String>,
     ) -> Arc<ComponentStats> {
-        let stats = Arc::new(ComponentStats::new());
-        self.inputs
-            .push((name.into(), typ.into(), Arc::clone(&stats)));
+        let name = name.into();
+        let typ = typ.into();
+        let attrs = vec![
+            KeyValue::new("pipeline", self.name.clone()),
+            KeyValue::new("input", name.clone()),
+        ];
+        let stats = Arc::new(ComponentStats::with_meter(
+            &self.meter,
+            "logfwd_input",
+            attrs,
+        ));
+        self.inputs.push((name, typ, Arc::clone(&stats)));
         stats
     }
 
@@ -118,18 +184,65 @@ impl PipelineMetrics {
         name: impl Into<String>,
         typ: impl Into<String>,
     ) -> Arc<ComponentStats> {
-        let stats = Arc::new(ComponentStats::new());
-        self.outputs
-            .push((name.into(), typ.into(), Arc::clone(&stats)));
+        let name = name.into();
+        let typ = typ.into();
+        let attrs = vec![
+            KeyValue::new("pipeline", self.name.clone()),
+            KeyValue::new("output", name.clone()),
+        ];
+        let stats = Arc::new(ComponentStats::with_meter(
+            &self.meter,
+            "logfwd_output",
+            attrs,
+        ));
+        self.outputs.push((name, typ, Arc::clone(&stats)));
         stats
     }
 
-    /// Increment error counter on all outputs (used when a FanOut or single
-    /// sink fails — we don't know which one, so count it on all).
+    /// Increment error counter on all outputs.
     pub fn output_error(&self) {
         for (_, _, stats) in &self.outputs {
             stats.inc_errors();
         }
+    }
+
+    // -- Helper methods for dual-write (called from pipeline hot loop) --------
+
+    pub fn inc_transform_error(&self) {
+        self.transform_errors.fetch_add(1, Ordering::Relaxed);
+        self.otel_transform_errors.add(1, &self.otel_attrs);
+    }
+
+    pub fn inc_flush_by_size(&self) {
+        self.flush_by_size.fetch_add(1, Ordering::Relaxed);
+        self.otel_flush_by_size.add(1, &self.otel_attrs);
+    }
+
+    pub fn inc_flush_by_timeout(&self) {
+        self.flush_by_timeout.fetch_add(1, Ordering::Relaxed);
+        self.otel_flush_by_timeout.add(1, &self.otel_attrs);
+    }
+
+    pub fn record_batch(&self, rows: u64, scan_ns: u64, transform_ns: u64, output_ns: u64) {
+        self.batches_total.fetch_add(1, Ordering::Relaxed);
+        self.batch_rows_total.fetch_add(rows, Ordering::Relaxed);
+        self.scan_nanos_total.fetch_add(scan_ns, Ordering::Relaxed);
+        self.transform_nanos_total
+            .fetch_add(transform_ns, Ordering::Relaxed);
+        self.output_nanos_total
+            .fetch_add(output_ns, Ordering::Relaxed);
+
+        self.otel_batches.add(1, &self.otel_attrs);
+        self.otel_batch_rows.add(rows, &self.otel_attrs);
+        self.otel_scan_nanos.add(scan_ns, &self.otel_attrs);
+        self.otel_transform_nanos
+            .add(transform_ns, &self.otel_attrs);
+        self.otel_output_nanos.add(output_ns, &self.otel_attrs);
+    }
+
+    pub fn inc_backpressure_stall(&self) {
+        self.backpressure_stalls.fetch_add(1, Ordering::Relaxed);
+        self.otel_backpressure_stalls.add(1, &self.otel_attrs);
     }
 }
 
@@ -546,7 +659,12 @@ mod tests {
 
     /// Build a server with one pipeline pre-populated with known counter values.
     fn server_with_test_pipeline(port: u16) -> DiagnosticsServer {
-        let mut pm = PipelineMetrics::new("default", "SELECT * FROM logs WHERE level != 'DEBUG'");
+        let meter = opentelemetry::global::meter("test");
+        let mut pm = PipelineMetrics::new(
+            "default",
+            "SELECT * FROM logs WHERE level != 'DEBUG'",
+            &meter,
+        );
 
         let inp = pm.add_input("pod_logs", "file");
         inp.inc_lines(1000);
