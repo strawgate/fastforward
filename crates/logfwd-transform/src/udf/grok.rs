@@ -24,7 +24,7 @@
 
 use std::any::Any;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use arrow::array::{Array, ArrayRef, AsArray, StringBuilder, StructArray};
 use arrow::datatypes::{DataType, Field, Fields};
@@ -192,6 +192,8 @@ fn compile_grok(pattern: &str) -> Result<CompiledGrok, String> {
 #[derive(Debug)]
 pub struct GrokUdf {
     signature: Signature,
+    /// Compiled grok pattern cached after the first invocation (pattern is constant per SQL query).
+    compiled_grok: OnceLock<CompiledGrok>,
 }
 
 impl Default for GrokUdf {
@@ -207,6 +209,7 @@ impl GrokUdf {
                 TypeSignature::Exact(vec![DataType::Utf8, DataType::Utf8]),
                 Volatility::Immutable,
             ),
+            compiled_grok: OnceLock::new(),
         }
     }
 }
@@ -280,9 +283,16 @@ impl ScalarUDFImpl for GrokUdf {
             }
         };
 
-        // Compile grok pattern.
-        let compiled = compile_grok(&pattern_str)
-            .map_err(|e| datafusion::error::DataFusionError::Execution(format!("grok: {e}")))?;
+        // Get or compile the grok pattern (compiled once per UDF instance; pattern is constant per query).
+        let compiled = if let Some(c) = self.compiled_grok.get() {
+            c
+        } else {
+            let new_compiled = compile_grok(&pattern_str)
+                .map_err(|e| datafusion::error::DataFusionError::Execution(format!("grok: {e}")))?;
+            // Racing threads may both compile; only the first set wins. Use whichever is stored.
+            let _ = self.compiled_grok.set(new_compiled);
+            self.compiled_grok.get().unwrap()
+        };
 
         match input {
             ColumnarValue::Array(array) => {
