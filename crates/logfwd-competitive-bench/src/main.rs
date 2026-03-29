@@ -195,13 +195,7 @@ fn main() {
     let mut results: Vec<BenchResult> = Vec::new();
     for resolved in &available {
         let result = if let Some(image) = &resolved.image {
-            runner::run_agent_docker(
-                resolved.agent,
-                image,
-                &ctx,
-                &blackhole,
-                &args.docker_limits,
-            )
+            runner::run_agent_docker(resolved.agent, image, &ctx, &blackhole, &args.docker_limits)
         } else if let Some(binary) = &resolved.binary {
             runner::run_agent(resolved.agent, binary, &ctx, &blackhole)
         } else {
@@ -260,7 +254,9 @@ fn main() {
                                 Err(e) => eprintln!("  WARN: flamegraph generation failed: {e}"),
                             }
                         } else {
-                            eprintln!("  WARN: inferno not found, skipping flamegraph (cargo install inferno)");
+                            eprintln!(
+                                "  WARN: inferno not found, skipping flamegraph (cargo install inferno)"
+                            );
                         }
                     }
                     Err(e) => eprintln!("  WARN: perf profiling failed: {e}"),
@@ -288,7 +284,9 @@ fn main() {
                     eprintln!("  WARN: dhat binary not found at {dhat_binary}");
                 }
             } else {
-                eprintln!("  SKIP: --dhat-binary not set (build with: cargo build --release --features dhat-heap -p logfwd)");
+                eprintln!(
+                    "  SKIP: --dhat-binary not set (build with: cargo build --release --features dhat-heap -p logfwd)"
+                );
             }
 
             eprintln!();
@@ -533,7 +531,9 @@ impl Args {
                     eprintln!("  --cpus N             CPU limit per container (default: 1)");
                     eprintln!("  --memory N           Memory limit per container (default: 1g)");
                     eprintln!("  --profile DIR        Write CPU/memory profiles to DIR");
-                    eprintln!("  --dhat-binary PATH   logfwd binary built with --features dhat-heap");
+                    eprintln!(
+                        "  --dhat-binary PATH   logfwd binary built with --features dhat-heap"
+                    );
                     process::exit(1);
                 }
             }

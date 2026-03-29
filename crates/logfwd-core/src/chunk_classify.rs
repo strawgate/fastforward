@@ -26,7 +26,7 @@ impl ChunkIndex {
     #[cfg(target_arch = "aarch64")]
     pub fn new(buf: &[u8]) -> Self {
         let len = buf.len();
-        let num_blocks = (len + 63) / 64;
+        let num_blocks = len.div_ceil(64);
         let mut real_quotes = Vec::with_capacity(num_blocks);
         let mut in_string = Vec::with_capacity(num_blocks);
 
@@ -96,7 +96,7 @@ impl ChunkIndex {
     #[cfg(not(target_arch = "aarch64"))]
     pub fn new(buf: &[u8]) -> Self {
         let len = buf.len();
-        let num_blocks = (len + 63) / 64;
+        let num_blocks = len.div_ceil(64);
         let mut real_quotes = Vec::with_capacity(num_blocks);
         let mut in_string_vec = Vec::with_capacity(num_blocks);
         let mut in_string = false;
@@ -233,6 +233,7 @@ impl ChunkIndex {
 // ---------------------------------------------------------------------------
 
 #[inline]
+#[allow(dead_code)]
 fn compute_real_quotes(quote_bits: u64, bs_bits: u64, prev_odd_backslash: &mut u64) -> u64 {
     if bs_bits == 0 && *prev_odd_backslash == 0 {
         return quote_bits;
@@ -243,7 +244,7 @@ fn compute_real_quotes(quote_bits: u64, bs_bits: u64, prev_odd_backslash: &mut u
     // 1. Find starts of consecutive backslash runs.
     //    A "start" is a backslash NOT preceded by another backslash.
     let follows_bs = (bs_bits << 1) | *prev_odd_backslash;
-    let run_starts = bs_bits & !follows_bs;
+    let _run_starts = bs_bits & !follows_bs;
 
     // 2. Use prefix_xor on run starts to get alternating parity WITHIN runs.
     //    After prefix_xor, each run start toggles a running bit.
@@ -356,6 +357,7 @@ fn compute_real_quotes(quote_bits: u64, bs_bits: u64, prev_odd_backslash: &mut u
 }
 
 #[inline(always)]
+#[allow(dead_code)]
 fn prefix_xor(mut bitmask: u64) -> u64 {
     bitmask ^= bitmask << 1;
     bitmask ^= bitmask << 2;

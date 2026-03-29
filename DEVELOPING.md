@@ -77,11 +77,46 @@ The reader never blocks on network. If all sender threads are busy, the reader s
 
 **Read buffer tuner** (`read_tuner.rs`): Tests 8 read buffer sizes (32KB to 4MB) during the first few hundred reads, picks the one with highest throughput (bytes per nanosecond of read time).
 
+## Getting Started
+
+### Prerequisites
+
+The Rust toolchain is pinned via `rust-toolchain.toml` (stable, with clippy + rustfmt). Rustup will install it automatically on first `cargo` invocation.
+
+```bash
+# Required
+cargo install just taplo-cli cargo-deny
+
+# Optional (faster tests, profiling)
+cargo install cargo-nextest inferno sccache
+```
+
+### Task Runner
+
+All development tasks are available via [`just`](https://github.com/casey/just):
+
+```bash
+just --list        # Show all available recipes
+just ci            # Run full CI suite locally (lint + test)
+just lint          # Format check + clippy + TOML check + dependency audit
+just fmt           # Auto-format Rust code
+just test          # Run all tests
+```
+
+### Pre-commit Hook
+
+```bash
+just install-hooks   # Install git pre-commit hook (cargo fmt + clippy)
+just uninstall-hooks # Remove it
+```
+
+The hook runs `cargo fmt --check` and `cargo clippy` before each commit (~0.3s on warm cache).
+
 ## Fast Compilation & Testing
 
-Due to heavy dependencies like `datafusion` and `arrow`, compile times can be long.  To optimize your local workflow:
+Due to heavy dependencies like `datafusion` and `arrow`, compile times can be long. To optimize your local workflow:
 
-1. **Test with `cargo test` (no `--release` flag):** The `[profile.test]` in `Cargo.toml` is already configured to use `opt-level = 3` so tests execute quickly without incurring the massive compilation penalty of `release`'s LTO and single codegen unit.
+1. **Test with `cargo test` (no `--release` flag):** The `[profile.test]` uses the default dev profile (opt-level 0) so tests share compiled artifacts with `cargo clippy` and `cargo check`. This avoids a full recompile when switching between linting and testing.
 2. **Use `sccache`:** Caches Rust dependencies across builds.
    ```bash
    cargo install sccache
@@ -89,13 +124,66 @@ Due to heavy dependencies like `datafusion` and `arrow`, compile times can be lo
    ```
 3. **Use `cargo-nextest`:** Executes the test suite in parallel native processes, massively reducing test wall-clock time.
    ```bash
-   cargo install cargo-nextest
-   cargo nextest run
+   just nextest
    ```
+
+## CI
+
+CI runs on every push and PR to `master`. It mirrors what `just ci` runs locally:
+
+| Job | What it checks |
+|-----|---------------|
+| **Lint & Test (Linux)** | `cargo fmt`, `cargo clippy`, `taplo check`, `cargo deny`, typos, `cargo test`, `cargo check --release` — single job so clippy and test share compiled artifacts |
+| **Test (macOS)** | `cargo test` — catches platform-specific issues (kqueue vs inotify) |
+| **Actionlint** | Validates GitHub Actions workflow files |
+
+CI uses concurrency groups with `cancel-in-progress` to avoid wasted runs on rapid pushes. Rust build cache is only saved on `master` to prevent PR branches from polluting it.
+
+Nightly benchmarks run separately (see below) and post results as GitHub issues.
 
 ## Running Benchmarks
 
-### Local (no Docker, no K8s)
+### Criterion Micro-Benchmarks
+
+```bash
+just bench          # Run criterion benchmarks
+just bench-report   # Generate markdown summary
+```
+
+### Competitive Benchmarks
+
+Compare logfwd against vector, fluent-bit, filebeat, otelcol-contrib, and vlagent:
+
+```bash
+# Binary mode (local dev, downloads competitors automatically)
+just bench-competitive --lines 1000000
+
+# Docker mode (fair comparison with CPU/memory limits)
+just bench-competitive --lines 5000000 --docker --cpus 1 --memory 1g --markdown
+
+# Full Docker benchmark with CPU flamegraph + memory profiling
+just bench-docker
+```
+
+### Profiling
+
+**CPU flamegraph** (Linux, requires `perf` + `inferno`):
+```bash
+just bench-competitive --lines 5000000 --profile ./profiles
+# Produces profiles/flamegraph.svg
+```
+
+**Memory allocation profiling** (dhat-heap):
+```bash
+cargo build --release --features dhat-heap -p logfwd
+cp target/release/logfwd target/release/logfwd-dhat
+cargo build --release -p logfwd  # Rebuild clean binary
+
+just bench-competitive --lines 5000000 --profile ./profiles --dhat-binary ./target/release/logfwd-dhat
+# Produces profiles/dhat-heap.json — view at https://nnethercote.github.io/dh_view/dh_view.html
+```
+
+### Local Pipeline Benchmarks
 
 ```bash
 # Generate test data
@@ -107,19 +195,6 @@ Due to heavy dependencies like `datafusion` and `arrow`, compile times can be lo
 # End-to-end with CRI parsing and per-stage timing
 ./target/release/logfwd --e2e --wrap-cri /tmp/json.txt /tmp/cri.txt
 ./target/release/logfwd --e2e /tmp/cri.txt otlp-zstd
-```
-
-### Allocation Profiling
-
-```bash
-cargo run --release --features dhat-heap -- /tmp/json.txt --mode otlp --no-adaptive
-# Generates dhat-heap.json, viewable at https://nnethercote.github.io/dh_view/dh_view.html
-```
-
-### Criterion Micro-Benchmarks
-
-```bash
-cargo bench --bench pipeline
 ```
 
 ### VictoriaMetrics Benchmark (requires Docker + KIND)

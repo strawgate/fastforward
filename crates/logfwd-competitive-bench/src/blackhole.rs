@@ -21,9 +21,8 @@ pub struct Blackhole {
 impl Blackhole {
     /// Start a blackhole HTTP server on `addr`. Returns immediately.
     pub fn start(addr: &str) -> io::Result<Self> {
-        let server = Arc::new(
-            tiny_http::Server::http(addr).map_err(|e| io::Error::other(e.to_string()))?,
-        );
+        let server =
+            Arc::new(tiny_http::Server::http(addr).map_err(|e| io::Error::other(e.to_string()))?);
 
         let stats = Arc::new(BlackholeStats {
             lines: AtomicU64::new(0),

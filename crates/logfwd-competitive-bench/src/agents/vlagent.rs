@@ -135,7 +135,10 @@ users:
         // 3. Set KUBECONFIG env var.
         let kubeconfig_path = ctx.bench_dir.join("vlagent-kubeconfig");
         let mut env = HashMap::new();
-        env.insert("KUBECONFIG".to_string(), kubeconfig_path.to_string_lossy().to_string());
+        env.insert(
+            "KUBECONFIG".to_string(),
+            kubeconfig_path.to_string_lossy().to_string(),
+        );
 
         Ok(SetupState {
             env: Some(env),
@@ -148,7 +151,8 @@ users:
 /// Convert newline-delimited JSON to CRI log format.
 fn convert_to_cri(json_file: &Path, cri_file: &Path) -> std::io::Result<()> {
     let reader = BufReader::new(std::fs::File::open(json_file)?);
-    let mut writer = std::io::BufWriter::with_capacity(1024 * 1024, std::fs::File::create(cri_file)?);
+    let mut writer =
+        std::io::BufWriter::with_capacity(1024 * 1024, std::fs::File::create(cri_file)?);
 
     for (i, line) in reader.lines().enumerate() {
         let line = line?;

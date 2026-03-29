@@ -24,7 +24,6 @@ codegen-units = 1
 debug = true  # needed for flamegraphs and dhat to show source locations
 
 [profile.test]
-opt-level = 1
 debug = true
 
 [profile.bench]

@@ -21,9 +21,8 @@ pub struct FakeK8sApi {
 
 impl FakeK8sApi {
     pub fn start(addr: &str, config: FakeK8sConfig) -> Result<Self, String> {
-        let server = Arc::new(
-            tiny_http::Server::http(addr).map_err(|e| format!("fake K8s API: {e}"))?,
-        );
+        let server =
+            Arc::new(tiny_http::Server::http(addr).map_err(|e| format!("fake K8s API: {e}"))?);
 
         let srv = Arc::clone(&server);
         let handle = std::thread::spawn(move || serve(srv, config));
@@ -90,10 +89,7 @@ fn serve(server: Arc<tiny_http::Server>, cfg: FakeK8sConfig) {
 
     let node_path = format!("/api/v1/nodes/{}", cfg.node_name);
     let proxy_pods_path = format!("/api/v1/nodes/{}/proxy/pods", cfg.node_name);
-    let single_pod_path = format!(
-        "/api/v1/namespaces/{}/pods/{}",
-        cfg.namespace, cfg.pod_name
-    );
+    let single_pod_path = format!("/api/v1/namespaces/{}/pods/{}", cfg.namespace, cfg.pod_name);
     let single_ns_path = format!("/api/v1/namespaces/{}", cfg.namespace);
 
     for mut request in server.incoming_requests() {

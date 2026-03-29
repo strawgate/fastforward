@@ -145,11 +145,8 @@ pub fn run_agent_docker(
 
     // Agent-specific extra volumes (e.g., vlagent's /var/log/containers).
     for (host, container) in agent.docker_volumes(ctx) {
-        cmd.arg("-v").arg(format!(
-            "{}:{}",
-            host.display(),
-            container.display()
-        ));
+        cmd.arg("-v")
+            .arg(format!("{}:{}", host.display(), container.display()));
     }
 
     // Apply env vars from setup.
@@ -245,9 +242,12 @@ pub fn run_agent_perf(
     let mut cmd = Command::new("perf");
     cmd.arg("record")
         .arg("-g")
-        .arg("--call-graph").arg("dwarf,16384")
-        .arg("-F").arg("99")
-        .arg("-o").arg(&perf_data)
+        .arg("--call-graph")
+        .arg("dwarf,16384")
+        .arg("-F")
+        .arg("99")
+        .arg("-o")
+        .arg(&perf_data)
         .arg("--")
         .arg(binary)
         .args(agent.command(binary, &config_path, ctx).get_args());
@@ -287,7 +287,8 @@ pub fn generate_flamegraph(perf_data: &Path, output_dir: &Path) -> Result<PathBu
     // perf script | inferno-collapse-perf | inferno-flamegraph > flamegraph.svg
     let perf_script = Command::new("perf")
         .arg("script")
-        .arg("-i").arg(perf_data)
+        .arg("-i")
+        .arg(perf_data)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .spawn()
@@ -300,11 +301,12 @@ pub fn generate_flamegraph(perf_data: &Path, output_dir: &Path) -> Result<PathBu
         .spawn()
         .map_err(|e| format!("inferno-collapse-perf: {e}"))?;
 
-    let flamegraph_out = std::fs::File::create(&svg_path)
-        .map_err(|e| format!("create flamegraph.svg: {e}"))?;
+    let flamegraph_out =
+        std::fs::File::create(&svg_path).map_err(|e| format!("create flamegraph.svg: {e}"))?;
 
     let status = Command::new("inferno-flamegraph")
-        .arg("--title").arg("logfwd CPU profile")
+        .arg("--title")
+        .arg("logfwd CPU profile")
         .stdin(collapse.stdout.unwrap())
         .stdout(flamegraph_out)
         .stderr(std::process::Stdio::null())

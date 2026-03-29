@@ -45,9 +45,7 @@ pub fn download_and_extract(url: &str, binary_name: &str, bin_dir: &Path) -> io:
         let path = entry.path()?;
 
         // Match by filename — binary might be nested in a directory.
-        let matches = path
-            .file_name()
-            .is_some_and(|n| n == binary_name);
+        let matches = path.file_name().is_some_and(|n| n == binary_name);
 
         if matches {
             let mut buf = Vec::new();
