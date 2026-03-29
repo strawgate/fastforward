@@ -77,6 +77,22 @@ The reader never blocks on network. If all sender threads are busy, the reader s
 
 **Read buffer tuner** (`read_tuner.rs`): Tests 8 read buffer sizes (32KB to 4MB) during the first few hundred reads, picks the one with highest throughput (bytes per nanosecond of read time).
 
+## Fast Compilation & Testing
+
+Due to heavy dependencies like `datafusion` and `arrow`, compile times can be long.  To optimize your local workflow:
+
+1. **Test with `cargo test` (no `--release` flag):** The `[profile.test]` in `Cargo.toml` is already configured to use `opt-level = 3` so tests execute quickly without incurring the massive compilation penalty of `release`'s LTO and single codegen unit.
+2. **Use `sccache`:** Caches Rust dependencies across builds.
+   ```bash
+   cargo install sccache
+   export RUSTC_WRAPPER=sccache
+   ```
+3. **Use `cargo-nextest`:** Executes the test suite in parallel native processes, massively reducing test wall-clock time.
+   ```bash
+   cargo install cargo-nextest
+   cargo nextest run
+   ```
+
 ## Running Benchmarks
 
 ### Local (no Docker, no K8s)
