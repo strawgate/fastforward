@@ -35,6 +35,8 @@ jobs:
           sudo apt-get install -y -qq "linux-tools-$(uname -r)" linux-tools-generic
 
       - name: Build logfwd (release + dhat variant)
+        env:
+          RUSTFLAGS: "-Ctarget-cpu=x86-64-v3"
         run: |
           cargo build --release -p logfwd
           cargo build --release --features dhat-heap -p logfwd
@@ -50,7 +52,7 @@ jobs:
 
       - name: Build logfwd with PGO instrumentation
         env:
-          RUSTFLAGS: "-Cprofile-generate=/tmp/pgo-data"
+          RUSTFLAGS: "-Ctarget-cpu=x86-64-v3 -Cprofile-generate=/tmp/pgo-data"
         run: cargo build --release -p logfwd
 
       - name: Run training workload to generate PGO profiles
@@ -67,7 +69,7 @@ jobs:
 
       - name: Rebuild logfwd with PGO profile applied
         env:
-          RUSTFLAGS: "-Cprofile-use=/tmp/pgo-data/merged.profdata"
+          RUSTFLAGS: "-Ctarget-cpu=x86-64-v3 -Cprofile-use=/tmp/pgo-data/merged.profdata"
         run: |
           cargo build --release -p logfwd
           cp target/release/logfwd target/release/logfwd-pgo
@@ -77,6 +79,8 @@ jobs:
       # ---------------------------------------------------------------
 
       - name: Run criterion microbenchmarks
+        env:
+          RUSTFLAGS: "-Ctarget-cpu=x86-64-v3"
         run: just bench
 
       - name: Generate microbenchmark report
