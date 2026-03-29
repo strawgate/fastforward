@@ -29,7 +29,6 @@ use std::sync::Arc;
 use arrow::array::{Array, ArrayRef, AsArray, StringBuilder, StructArray};
 use arrow::datatypes::{DataType, Field, Fields};
 
-
 use datafusion::common::Result as DfResult;
 use datafusion::logical_expr::{
     ColumnarValue, ScalarFunctionArgs, ScalarUDFImpl, Signature, TypeSignature, Volatility,
@@ -51,7 +50,10 @@ fn builtin_patterns() -> HashMap<&'static str, &'static str> {
         "IPV6",
         r"\b(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}\b|\b(?:[0-9a-fA-F]{1,4}:){1,7}:|:(?::[0-9a-fA-F]{1,4}){1,7}\b",
     );
-    m.insert("IP", r"(?:\b(?:\d{1,3}\.){3}\d{1,3}\b|\b(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}\b)");
+    m.insert(
+        "IP",
+        r"(?:\b(?:\d{1,3}\.){3}\d{1,3}\b|\b(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}\b)",
+    );
     m.insert("MAC", r"\b[0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5}\b");
     m.insert("HOSTNAME", r"\b[a-zA-Z0-9](?:[a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)*\b");
 
@@ -75,17 +77,32 @@ fn builtin_patterns() -> HashMap<&'static str, &'static str> {
     m.insert("URI", r"\S+://\S+");
 
     // Identifiers
-    m.insert("UUID", r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}");
-    m.insert("EMAILADDRESS", r"\b[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}\b");
+    m.insert(
+        "UUID",
+        r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
+    );
+    m.insert(
+        "EMAILADDRESS",
+        r"\b[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}\b",
+    );
 
     // Timestamps
-    m.insert("TIMESTAMP_ISO8601", r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?");
+    m.insert(
+        "TIMESTAMP_ISO8601",
+        r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?",
+    );
     m.insert("DATE", r"\d{4}-\d{2}-\d{2}");
     m.insert("TIME", r"\d{2}:\d{2}:\d{2}(?:\.\d+)?");
 
     // Logging
-    m.insert("LOGLEVEL", r"\b(?:TRACE|DEBUG|INFO|WARN(?:ING)?|ERROR|FATAL|CRITICAL)\b");
-    m.insert("HTTPMETHOD", r"\b(?:GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS|CONNECT|TRACE)\b");
+    m.insert(
+        "LOGLEVEL",
+        r"\b(?:TRACE|DEBUG|INFO|WARN(?:ING)?|ERROR|FATAL|CRITICAL)\b",
+    );
+    m.insert(
+        "HTTPMETHOD",
+        r"\b(?:GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS|CONNECT|TRACE)\b",
+    );
     m.insert("STATUSCODE", r"\b[1-5]\d{2}\b");
 
     m
@@ -260,9 +277,8 @@ impl ScalarUDFImpl for GrokUdf {
         };
 
         // Compile grok pattern.
-        let compiled = compile_grok(&pattern_str).map_err(|e| {
-            datafusion::error::DataFusionError::Execution(format!("grok: {e}"))
-        })?;
+        let compiled = compile_grok(&pattern_str)
+            .map_err(|e| datafusion::error::DataFusionError::Execution(format!("grok: {e}")))?;
 
         match input {
             ColumnarValue::Array(array) => {
@@ -331,22 +347,20 @@ impl ScalarUDFImpl for GrokUdf {
                             .field_names
                             .iter()
                             .map(|name| match caps.name(name) {
-                                Some(m) => {
-                                    datafusion::common::ScalarValue::Utf8(Some(m.as_str().to_string()))
-                                }
+                                Some(m) => datafusion::common::ScalarValue::Utf8(Some(
+                                    m.as_str().to_string(),
+                                )),
                                 None => datafusion::common::ScalarValue::Utf8(None),
                             })
                             .collect();
                         Ok(ColumnarValue::Scalar(
-                            datafusion::common::ScalarValue::Struct(Arc::new(
-                                StructArray::from(
-                                    fields
-                                        .into_iter()
-                                        .zip(values)
-                                        .map(|(f, v)| (Arc::new(f), v.to_array().unwrap() as ArrayRef))
-                                        .collect::<Vec<_>>(),
-                                ),
-                            )),
+                            datafusion::common::ScalarValue::Struct(Arc::new(StructArray::from(
+                                fields
+                                    .into_iter()
+                                    .zip(values)
+                                    .map(|(f, v)| (Arc::new(f), v.to_array().unwrap() as ArrayRef))
+                                    .collect::<Vec<_>>(),
+                            ))),
                         ))
                     }
                     None => {
@@ -357,15 +371,13 @@ impl ScalarUDFImpl for GrokUdf {
                             .map(|_| datafusion::common::ScalarValue::Utf8(None))
                             .collect();
                         Ok(ColumnarValue::Scalar(
-                            datafusion::common::ScalarValue::Struct(Arc::new(
-                                StructArray::from(
-                                    fields
-                                        .into_iter()
-                                        .zip(values)
-                                        .map(|(f, v)| (Arc::new(f), v.to_array().unwrap() as ArrayRef))
-                                        .collect::<Vec<_>>(),
-                                ),
-                            )),
+                            datafusion::common::ScalarValue::Struct(Arc::new(StructArray::from(
+                                fields
+                                    .into_iter()
+                                    .zip(values)
+                                    .map(|(f, v)| (Arc::new(f), v.to_array().unwrap() as ArrayRef))
+                                    .collect::<Vec<_>>(),
+                            ))),
                         ))
                     }
                 }
@@ -388,8 +400,8 @@ mod tests {
         ctx.register_udf(ScalarUDF::from(GrokUdf::new()));
         // Also register int() for composition tests
         ctx.register_udf(ScalarUDF::from(crate::udf::RegexpExtractUdf::new()));
-        let table = datafusion::datasource::MemTable::try_new(batch.schema(), vec![vec![batch]])
-            .unwrap();
+        let table =
+            datafusion::datasource::MemTable::try_new(batch.schema(), vec![vec![batch]]).unwrap();
         ctx.register_table("logs", Arc::new(table)).unwrap();
         let df = ctx.sql(sql).await.unwrap();
         let batches = df.collect().await.unwrap();
@@ -413,8 +425,7 @@ mod tests {
 
     #[test]
     fn test_compile_grok_basic() {
-        let compiled =
-            compile_grok("%{WORD:method} %{URIPATH:path} %{NUMBER:status}").unwrap();
+        let compiled = compile_grok("%{WORD:method} %{URIPATH:path} %{NUMBER:status}").unwrap();
         assert_eq!(compiled.field_names, vec!["method", "path", "status"]);
         assert!(compiled.regex.is_match("GET /api/users 200"));
     }
