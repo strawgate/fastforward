@@ -139,8 +139,21 @@ fn cmd_config(args: &[String]) -> io::Result<()> {
     }
 
     let config_path = &args[2];
-    let validate_only = args.iter().any(|a| a == "--validate" || a == "--check");
-    let dry_run = args.iter().any(|a| a == "--dry-run");
+    let mut validate_only = false;
+    let mut dry_run = false;
+
+    // Parse flags after the config path — reject unknown flags.
+    for arg in &args[3..] {
+        match arg.as_str() {
+            "--validate" | "--check" => validate_only = true,
+            "--dry-run" => dry_run = true,
+            other => {
+                eprintln!("{}error{}: unknown flag: {other}", red(), reset());
+                eprintln!("  logfwd --config <config.yaml> [--validate] [--dry-run]");
+                std::process::exit(EXIT_CONFIG);
+            }
+        }
+    }
 
     let config = match logfwd_config::Config::load(config_path) {
         Ok(c) => c,
@@ -150,14 +163,9 @@ fn cmd_config(args: &[String]) -> io::Result<()> {
         }
     };
 
-    if validate_only {
-        eprintln!(
-            "{}config ok{}: {} pipeline(s)",
-            green(),
-            reset(),
-            config.pipelines.len(),
-        );
-        return Ok(());
+    if validate_only || dry_run {
+        // Both --validate and --dry-run build pipelines to catch SQL/wiring errors.
+        return validate_pipelines(&config, dry_run);
     }
 
     // Startup summary.
@@ -180,7 +188,7 @@ fn cmd_config(args: &[String]) -> io::Result<()> {
         );
     }
 
-    run_pipelines(config, dry_run)
+    run_pipelines(config)
 }
 
 fn cmd_blackhole(args: &[String]) -> io::Result<()> {
@@ -197,9 +205,18 @@ fn cmd_generate_json(args: &[String]) -> io::Result<()> {
         );
         std::process::exit(EXIT_CONFIG);
     }
-    let num_lines: usize = args[2]
-        .parse()
-        .map_err(|e| io::Error::other(format!("invalid num_lines '{}': {e}", args[2])))?;
+    let num_lines: usize = match args[2].parse() {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!(
+                "{}error{}: invalid num_lines '{}': {e}",
+                red(),
+                reset(),
+                args[2]
+            );
+            std::process::exit(EXIT_CONFIG);
+        }
+    };
     generate_json_log_file(num_lines, &args[3])
 }
 
@@ -207,7 +224,43 @@ fn cmd_generate_json(args: &[String]) -> io::Result<()> {
 // Pipeline runner
 // ---------------------------------------------------------------------------
 
-fn run_pipelines(config: logfwd_config::Config, dry_run: bool) -> io::Result<()> {
+/// Validate config by building all pipelines. Used by --validate and --dry-run.
+fn validate_pipelines(config: &logfwd_config::Config, dry_run: bool) -> io::Result<()> {
+    use logfwd::pipeline::Pipeline;
+
+    // Build a no-op meter for validation (no OTel export needed).
+    let meter_provider = opentelemetry_sdk::metrics::SdkMeterProvider::builder().build();
+    let meter = meter_provider.meter("logfwd");
+
+    let mut errors = 0;
+    for (name, pipe_cfg) in &config.pipelines {
+        match Pipeline::from_config(name, pipe_cfg, &meter) {
+            Ok(_) => {
+                eprintln!("  {}ready{}: {}{name}{}", green(), reset(), bold(), reset());
+            }
+            Err(e) => {
+                eprintln!("  {}error{}: pipeline '{name}': {e}", red(), reset());
+                errors += 1;
+            }
+        }
+    }
+
+    if errors > 0 {
+        eprintln!("\n{}validation failed{}: {errors} error(s)", red(), reset(),);
+        std::process::exit(EXIT_CONFIG);
+    }
+
+    let label = if dry_run { "dry run ok" } else { "config ok" };
+    eprintln!(
+        "{}{label}{}: {} pipeline(s)",
+        green(),
+        reset(),
+        config.pipelines.len(),
+    );
+    Ok(())
+}
+
+fn run_pipelines(config: logfwd_config::Config) -> io::Result<()> {
     use logfwd::pipeline::Pipeline;
     use logfwd_core::diagnostics::DiagnosticsServer;
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -227,16 +280,6 @@ fn run_pipelines(config: logfwd_config::Config, dry_run: bool) -> io::Result<()>
                 std::process::exit(EXIT_CONFIG);
             }
         }
-    }
-
-    if dry_run {
-        eprintln!(
-            "{}dry run ok{}: {} pipeline(s) constructed",
-            green(),
-            reset(),
-            pipelines.len(),
-        );
-        return Ok(());
     }
 
     let _diag_handle = if let Some(ref addr) = config.server.diagnostics {
