@@ -76,7 +76,7 @@ pub fn parse_int_fast(bytes: &[u8]) -> Option<i64> {
     if neg { Some(-acc) } else { Some(acc) }
 }
 
-/// Parse a byte slice as f64 using the standard library (adequate perf for v1).
+/// Parse a byte slice as f64 using the standard library.
 #[inline(always)]
 pub fn parse_float_fast(bytes: &[u8]) -> Option<f64> {
     // SAFETY: We only call this on bytes that look like a JSON number,
@@ -441,7 +441,7 @@ impl BatchBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::array::{Array, Float64Array, Int64Array, StringArray};
+    use arrow::array::{Array, Int64Array, StringArray};
 
     #[test]
     fn test_parse_int_fast() {
