@@ -1,19 +1,22 @@
 # logfwd
 
-A high-performance log forwarder written in Rust. Reads log files, parses CRI container format, encodes to OTLP protobuf or JSON lines, compresses, and ships to a remote endpoint.
+A high-performance log forwarder written in Rust. Reads log files, transforms with SQL (via Apache DataFusion), and ships to OTLP, HTTP, or stdout. Everything goes through Arrow RecordBatches.
 
 ## Performance
 
-Measured on Apple M-series (arm64), single core:
+Scanner + DataFusion component benchmarks (Apple M-series, single core):
 
-| Pipeline | Lines/sec | Notes |
-|----------|----------|-------|
-| CRI parse only | 26.4M | read + parse, no encoding |
-| JSON lines + zstd | 6.0M | newline-delimited JSON, compressed |
-| OTLP protobuf + zstd | 4.7M | full field extraction, compressed |
-| OTLP raw body + zstd | 5.3M | body = raw line, no JSON parse |
+| Stage | Lines/sec | Notes |
+|-------|----------|-------|
+| JSON scan → Arrow (13 fields) | 2.5M | full field extraction |
+| JSON scan → Arrow (3 fields, pushdown) | 2.9M | field pushdown |
+| DataFusion simple filter | ~12M | `WHERE level_str != 'DEBUG'` |
+| OTLP protobuf encode (from bytes) | 10M | v1 criterion bench |
 
-Validated end-to-end in the [VictoriaMetrics log-collectors-benchmark](https://github.com/VictoriaMetrics/log-collectors-benchmark) Kubernetes setup at ~1M lines/sec with CRI parse, JSON field injection, and HTTP POST to the log-verifier, matching vlagent's throughput on the same hardware.
+K8s benchmark (VictoriaMetrics log-collectors-benchmark, 0.25 cores):
+- logfwd: 108K lines/sec (432K/core)
+- vlagent: 65K lines/sec (260K/core)
+- logfwd 1.7x faster at same CPU
 
 ## Quick Start
 
@@ -24,43 +27,76 @@ cargo build --release
 # Generate test data
 ./target/release/logfwd --generate-json 5000000 /tmp/json_logs.txt
 
-# Benchmark (reads from file, no networking)
-./target/release/logfwd /tmp/json_logs.txt --mode otlp
+# Run from YAML config
+./target/release/logfwd --config config.yaml
 
-# End-to-end benchmark with CRI parsing
-./target/release/logfwd --e2e --wrap-cri /tmp/json_logs.txt /tmp/cri_logs.txt
-./target/release/logfwd --e2e /tmp/cri_logs.txt otlp-zstd
+# Validate config without running
+./target/release/logfwd --config config.yaml --validate
 
-# Live tail a file
-./target/release/logfwd /path/to/logfile --tail --mode otlp
+# Dry run: build pipelines, show schema, exit
+./target/release/logfwd --config config.yaml --dry-run
 
-# Run as Kubernetes DaemonSet daemon
-./target/release/logfwd --daemon --glob "/var/log/containers/*.log" --endpoint "http://host:8080/insert/jsonline"
+# Start a blackhole OTLP collector (for benchmarks)
+./target/release/logfwd --blackhole 127.0.0.1:4318
 ```
 
-## Output Modes
+## Configuration
 
-| Mode | Description |
-|------|-------------|
-| `passthrough` | Read + count lines, no encoding or compression |
-| `raw` | Compress raw newline-delimited bytes with zstd |
-| `otlp` | Parse JSON fields, encode as OTLP protobuf, compress |
+Simple (single pipeline):
+```yaml
+input:
+  type: file
+  path: /var/log/pods/**/*.log
+  format: cri
 
-## E2E Benchmark Modes
+transform: |
+  SELECT * FROM logs WHERE level_str != 'DEBUG'
 
-| Mode | Description |
-|------|-------------|
-| `cri-only` | CRI parse only, discard output |
-| `jsonlines` | CRI parse + JSON field injection |
-| `jsonlines-zstd` | Above + zstd compression |
-| `otlp` | CRI parse + OTLP protobuf (with JSON field extraction) |
-| `otlp-raw` | CRI parse + OTLP protobuf (raw line as body) |
-| `otlp-zstd` | OTLP with field extraction + zstd |
-| `otlp-raw-zstd` | OTLP raw body + zstd |
+output:
+  type: otlp
+  endpoint: http://otel-collector:4318
+
+server:
+  diagnostics: 0.0.0.0:9090
+```
+
+Advanced (multiple pipelines):
+```yaml
+pipelines:
+  app_logs:
+    inputs:
+      - name: pod_logs
+        type: file
+        path: /var/log/pods/**/*.log
+        format: cri
+    transform: |
+      SELECT * FROM logs WHERE level_str != 'DEBUG'
+    outputs:
+      - name: collector
+        type: otlp
+        endpoint: http://otel-collector:4318
+      - name: debug
+        type: stdout
+        format: json
+
+server:
+  diagnostics: 0.0.0.0:9090
+```
+
+## Output Types
+
+| Type | Status | Description |
+|------|--------|-------------|
+| `otlp` | Implemented | OTLP protobuf over HTTP |
+| `http` | Implemented | JSON lines over HTTP |
+| `stdout` | Implemented | JSON or text to stdout |
+| `elasticsearch` | Placeholder | Elasticsearch bulk API |
+| `loki` | Placeholder | Loki push API |
+| `parquet` | Placeholder | Parquet file output |
 
 ## Kubernetes Deployment
 
-See `deploy/` for DaemonSet manifests. Compatible with the [VictoriaMetrics log-collectors-benchmark](https://github.com/VictoriaMetrics/log-collectors-benchmark) for head-to-head comparison with vlagent, Vector, Fluent Bit, etc.
+See `deploy/` for DaemonSet manifests. Compatible with the [VictoriaMetrics log-collectors-benchmark](https://github.com/VictoriaMetrics/log-collectors-benchmark) for head-to-head comparison.
 
 ```bash
 # Build and load image into KIND
@@ -73,4 +109,4 @@ kubectl apply -f deploy/daemonset.yml
 
 ## Architecture
 
-See [DEVELOPING.md](DEVELOPING.md) for internal architecture details.
+See [DEVELOPING.md](DEVELOPING.md) for internal architecture and developer guide.

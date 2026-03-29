@@ -1,117 +1,68 @@
-# TODO: Agent Handoff — logfwd v2 Arrow Pipeline
+# TODO: logfwd
 
 ## What This Is
 
-logfwd is a high-performance log forwarder in Rust. We built the v1 prototype
-(file tailing → CRI parse → OTLP encode → compress → HTTP send) and validated
-it at 1.7x faster than VictoriaMetrics vlagent in their own K8s benchmark.
-
-We then designed and implemented the v2 architecture where **everything goes
-through Arrow RecordBatches**. The scanner, DataFusion SQL transform, and output
-sinks are all built and tested. They are NOT yet wired together into a unified
-pipeline.
+logfwd is a high-performance log forwarder in Rust. The v2 architecture is built
+and running: everything goes through Arrow RecordBatches, with DataFusion SQL
+transforms and pluggable output sinks.
 
 ## Current State
 
 ```
-96 tests passing, 19 source files, 8,621 lines
-Branch: v2-arrow-pipeline
+102 tests passing, 28 source files across 6 crates, ~9,000 lines
 ```
 
 ### What's Built and Working
 
-| Module | Lines | Tests | Status | Purpose |
-|--------|-------|-------|--------|---------|
-| scanner.rs | 533 | 11 | ✓ Complete | JSON→Arrow scanner, field pushdown |
-| batch_builder.rs | 574 | 5 | ✓ Complete | Typed column builders (str/int/float) |
-| transform.rs | 691 | 10 | ✓ Complete | DataFusion SQL, int()/float() UDFs |
-| output.rs | 945 | 8 | ✓ Complete | OutputSink trait, Stdout/JSON/OTLP/FanOut |
-| config.rs | 633 | 12 | ✓ Complete | YAML config parser |
-| diagnostics.rs | 602 | 5 | ✓ Complete | HTTP server: /health /metrics /api/pipelines |
-| dashboard.html | 138 | - | ✓ Complete | Embedded live pipeline visualizer |
-| cri.rs | 292 | 6 | ✓ Complete | CRI container log parser |
-| otlp.rs | 726 | 10 | ✓ Complete | Hand-rolled OTLP protobuf encoder |
-| chunk.rs | 307 | 5 | ✓ Complete | Double-buffer chunk accumulator |
-| compress.rs | 195 | 4 | ✓ Complete | zstd compression + wire format |
-| tail.rs | 618 | 5 | ✓ Complete | File tailer (notify + poll) |
-| daemon.rs | 345 | 2 | ✓ Working | K8s DaemonSet mode (v1 pipeline) |
-| pipeline.rs | 337 | 5 | ✓ Working | v1 chunk pipeline (for benchmarks) |
-| e2e_bench.rs | 241 | - | ✓ Working | v1 E2E benchmark harness |
-| tuner.rs | 570 | 5 | ✓ Working | Adaptive chunk size tuner |
-| read_tuner.rs | 211 | 2 | ✓ Working | Read buffer auto-tuner |
-| sender.rs | 105 | 1 | ✓ Working | HTTP sender (ureq) |
-| main.rs | 541 | - | ✓ Working | CLI entrypoint |
+| Crate | Module | Status | Purpose |
+|-------|--------|--------|---------|
+| logfwd | main.rs | ✓ Working | CLI: --config, --blackhole, --generate-json |
+| logfwd | pipeline.rs | ✓ Working | Unified pipeline: inputs → scan → transform → output |
+| logfwd-core | scanner.rs | ✓ Complete | JSON→Arrow scanner, field pushdown |
+| logfwd-core | batch_builder.rs | ✓ Complete | Typed column builders (str/int/float) |
+| logfwd-core | otlp.rs | ✓ Complete | Hand-rolled OTLP protobuf encoder |
+| logfwd-core | cri.rs | ✓ Complete | CRI container log parser |
+| logfwd-core | compress.rs | ✓ Complete | zstd compression + wire format |
+| logfwd-core | tail.rs | ✓ Complete | File tailer (notify + poll) |
+| logfwd-core | diagnostics.rs | ✓ Complete | HTTP server: /health /metrics /api/pipelines / |
+| logfwd-core | format.rs | ✓ Complete | FormatParser trait: CRI, JSON, Raw |
+| logfwd-core | input.rs | ✓ Complete | InputSource trait + FileInput |
+| logfwd-core | dashboard.html | ✓ Complete | Embedded live pipeline visualizer |
+| logfwd-config | lib.rs | ✓ Complete | YAML config parser (simple + advanced) |
+| logfwd-transform | lib.rs | ✓ Complete | DataFusion SQL, plan caching, schema evolution |
+| logfwd-transform | udf/ | ✓ Complete | UDFs: int(), float(), regexp_extract(), grok() |
+| logfwd-output | otlp_sink.rs | ✓ Complete | OTLP protobuf output from RecordBatch |
+| logfwd-output | json_lines.rs | ✓ Complete | JSON lines over HTTP |
+| logfwd-output | stdout.rs | ✓ Complete | Stdout output (JSON/text) |
+| logfwd-output | fanout.rs | ✓ Complete | Multi-output multiplexer |
+| logfwd-bench | pipeline.rs | ✓ Working | Criterion benchmarks |
 
 ### What's NOT Built Yet
 
-1. **The unified v2 pipeline** — the code that wires scanner → DataFusion → output sinks
-   together into a running pipeline driven by the YAML config. This is THE critical
-   missing piece.
-
-2. **Input abstraction** — currently the daemon has hardcoded file tailing. Need an
-   InputSource trait so file/UDP/TCP/OTLP inputs are pluggable.
-
-3. **The SQL rewriter** — translates bare column names to typed column names
+1. **The SQL rewriter** — translates bare column names to typed column names
    (e.g., `duration_ms` → `COALESCE(CAST(duration_ms_int AS VARCHAR), duration_ms_str)`).
-   The transform.rs currently executes SQL directly against the RecordBatch schema —
+   The transform currently executes SQL directly against the RecordBatch schema —
    which uses the `{field}_{type}` naming. Users shouldn't need to write `level_str`.
    The rewriter bridges user SQL → internal SQL.
+
+2. **Additional input sources** — only `FileInput` is implemented. Need `UdpInput`,
+   `TcpInput`, and `OtlpInput` to match the config's accepted input types.
+
+3. **Additional output sinks** — `elasticsearch`, `loki`, `parquet`, `file_out`
+   are defined in config but only have placeholder modules (not wired into
+   `build_output_sink`).
 
 4. **End-to-end acks / cursor tracking** — file read offset is advanced immediately,
    not after successful delivery. Need: committed_offset (acked) vs read_offset
    (current), configurable lead (how many unacked batches allowed).
 
-5. **Benchmarks of the new v2 path** — we have extensive v1 benchmarks but haven't
-   measured: scanner→Arrow throughput, DataFusion passthrough cost, OTLP-from-RecordBatch
-   cost, or the full v2 pipeline end-to-end.
+5. **Benchmarks of the full v2 path** — we have v1 benchmarks but haven't measured
+   the full pipeline end-to-end: file read → format parse → scanner → DataFusion
+   → output sink.
 
 ## What To Build Next (In Priority Order)
 
-### Priority 1: Wire the v2 Pipeline
-
-Create `/Users/bill.easton/repos/memagent/src/pipeline_v2.rs`:
-
-```rust
-/// The v2 pipeline: config → inputs → scanner → DataFusion → outputs
-pub struct Pipeline {
-    name: String,
-    inputs: Vec<Box<dyn InputSource>>,
-    scanner_config: ScanConfig,
-    transform: SqlTransform,
-    outputs: FanOut,
-    metrics: Arc<PipelineMetrics>,
-    batch_builder: BatchBuilder,
-}
-
-impl Pipeline {
-    pub fn from_config(name: &str, config: &PipelineConfig) -> Result<Self>;
-    pub fn run(&mut self) -> io::Result<()>;  // blocking main loop
-}
-```
-
-The run loop:
-```
-loop:
-    for each input:
-        poll() → Option<MessageBatch>
-        if data:
-            CRI parse (if format == cri)
-            scan_json_to_batch(buf, &scan_config, &mut batch_builder)
-            batch = batch_builder.finish_batch()
-            result = transform.execute(batch)
-            outputs.send_batch(&result, &metadata)
-            update metrics
-    if no data: sleep(poll_interval)
-```
-
-For the file input, reuse the existing tail.rs file tailer + cri.rs CRI parser.
-The CRI output goes into a json_batch buffer, which feeds the scanner.
-
-This should be straightforward — all the components exist, they just need plumbing.
-
-### Priority 2: The SQL Rewriter
-
-Create `/Users/bill.easton/repos/memagent/src/rewriter.rs`:
+### Priority 1: The SQL Rewriter
 
 The rewriter takes user-facing SQL and the current field type map (from the
 BatchBuilder's discovered fields) and produces internal SQL that DataFusion
@@ -121,7 +72,7 @@ can execute against the typed column schema.
 pub fn rewrite_sql(user_sql: &str, field_types: &FieldTypeMap) -> Result<String, String>;
 ```
 
-Rewrite rules (see docs/DATA_FUSION_PLAN_UPDATE.md for full details):
+Rewrite rules (see docs/SCANNER_AND_TRANSFORM_DESIGN.md for full details):
 
 1. Bare column in SELECT: `duration_ms` → `COALESCE(CAST(duration_ms_int AS VARCHAR), duration_ms_str) AS duration_ms`
 2. Bare column in WHERE with string literal: `level = 'ERROR'` → `level_str = 'ERROR'`
@@ -132,19 +83,8 @@ Rewrite rules (see docs/DATA_FUSION_PLAN_UPDATE.md for full details):
 7. `SELECT *` → expand to all fields with coalesced aliases
 8. Single-type field: `level` → `level_str AS level` (no coalesce needed)
 
-The FieldTypeMap is:
-```rust
-pub struct FieldTypeMap {
-    /// field_name → which typed columns exist (e.g., "status" → [Int, Str])
-    pub fields: HashMap<String, Vec<TypeTag>>,
-}
-```
-
-Populate it from the BatchBuilder after finish_batch() — the builder knows which
-typed columns were created.
-
 Use `sqlparser::parser::Parser` to parse the AST, walk and rewrite Expr nodes,
-then re-serialize to SQL string. This is ~500-800 lines.
+then re-serialize to SQL string.
 
 **Test against these SQL patterns:**
 ```sql
@@ -157,20 +97,18 @@ SELECT AVG(float(duration_ms)) FROM logs GROUP BY service
 SELECT * EXCEPT (a) REPLACE (upper(message) AS message) FROM logs
 ```
 
-### Priority 3: Benchmark the v2 Path
+### Priority 2: Benchmark the v2 Path
 
-Add to e2e_bench.rs or create a new benchmark:
+Add benchmarks for the full pipeline:
 
 ```
 Modes to benchmark:
   scan-only:          scanner → RecordBatch → discard
   scan+passthrough:   scanner → DataFusion "SELECT * FROM logs" → discard
   scan+filter:        scanner → DataFusion "WHERE level_str != 'DEBUG'" → discard
-  scan+filter+otlp:   scanner → DataFusion → OtlpSink (to /dev/null)
+  scan+filter+otlp:   scanner → DataFusion → OtlpSink (to blackhole)
   scan+filter+json:   scanner → DataFusion → StdoutSink (to /dev/null)
   full-pipeline:      file read → CRI → scanner → DataFusion → OtlpSink
-
-Test data: /tmp/vm_format_cri.txt (5M lines, 257 bytes/line, 10 variable fields)
 ```
 
 Performance targets:
@@ -179,101 +117,25 @@ Performance targets:
 - scan+filter+otlp: ≤700ns/line (1.4M lines/sec)
 - full-pipeline (no compression): ≤800ns/line (1.25M lines/sec)
 
-### Priority 4: Input Abstraction
+### Priority 3: Wire Remaining Output Sinks
 
-Create `/Users/bill.easton/repos/memagent/src/input.rs`:
+Implement `build_output_sink` support for the placeholder sinks:
+- Elasticsearch (bulk API)
+- Loki (push API)
+- Parquet (file-based)
+- FileOut (JSON/raw to file)
 
-```rust
-pub trait InputSource: Send {
-    fn poll(&mut self) -> io::Result<Option<InputBatch>>;
-    fn name(&self) -> &str;
-    fn stats(&self) -> &ComponentStats;
-}
+### Priority 4: Additional Input Sources
 
-pub enum InputBatch {
-    /// Raw bytes needing scanning (from file, UDP, TCP).
-    Raw { buf: Vec<u8>, format: Format },
-    /// Pre-structured (from OTLP input). Bypass scanner.
-    Structured { batch: RecordBatch },
-}
-```
-
-Implementations:
-- `FileInput` — wraps tail.rs + cri.rs + chunk accumulator
+Implement:
 - `UdpInput` — recvmmsg, syslog parsing
 - `TcpInput` — newline-framed stream
+- `OtlpInput` — receive OTLP over HTTP/gRPC, bypass scanner
 
 ### Priority 5: End-to-End Acks
 
-Update the pipeline to track:
-```rust
-struct CursorState {
-    committed_offset: u64,  // acked by all outputs
-    read_offset: u64,       // current read position
-    pending_batches: VecDeque<PendingBatch>,
-    max_pending: usize,     // configurable: how far ahead of committed
-}
-
-struct PendingBatch {
-    file_offset_start: u64,
-    file_offset_end: u64,
-    batch_id: u64,
-}
-```
-
-Reader pauses when `pending_batches.len() >= max_pending`.
-Output acks a batch_id → committed_offset advances.
-On crash: restart from committed_offset (re-send pending batches = duplicates, not loss).
-
-### Priority 6: New CLI / Main
-
-Update main.rs to support:
-```
-logfwd --config /etc/logfwd/config.yaml     # run from YAML config
-logfwd --config config.yaml --validate      # validate config, exit
-logfwd --config config.yaml --dry-run       # parse first batch, show schema, exit
-```
-
-Keep the existing CLI modes (--generate, --e2e, --tail, --daemon) for backwards
-compatibility and development benchmarking.
-
-## Architecture Summary
-
-```
-YAML Config
-    │
-    ▼
-┌─── Pipeline ──────────────────────────────────────────┐
-│                                                        │
-│  InputSource(s)                                        │
-│    │                                                   │
-│    ▼                                                   │
-│  CRI Parser (if format == cri)                         │
-│    │                                                   │
-│    ▼                                                   │
-│  Scanner (scanner.rs + batch_builder.rs)               │
-│    │  JSON bytes → Arrow RecordBatch                   │
-│    │  Typed columns: field_str, field_int, field_float │
-│    │  _raw column: original line bytes                 │
-│    ▼                                                   │
-│  SQL Rewriter (rewriter.rs) [NOT YET BUILT]            │
-│    │  user SQL → internal typed SQL                    │
-│    ▼                                                   │
-│  DataFusion (transform.rs)                             │
-│    │  Execute SQL on RecordBatch                       │
-│    │  Cached plan, schema evolution                    │
-│    ▼                                                   │
-│  OutputSink(s) (output.rs)                             │
-│    │  Serialize RecordBatch → OTLP/JSON/ES/Parquet     │
-│    │  FanOut to multiple sinks                         │
-│    ▼                                                   │
-│  Network / File / Stdout                               │
-│                                                        │
-│  Diagnostics Server (diagnostics.rs)                   │
-│    GET /health, /metrics, /api/pipelines, /            │
-│    Reads atomic counters from all components           │
-└────────────────────────────────────────────────────────┘
-```
+Track committed vs read offsets so that on crash, restart resumes from the
+last acknowledged position (duplicates, not loss).
 
 ## Key Design Decisions (Do Not Change)
 
@@ -294,7 +156,7 @@ YAML Config
 
 ## Performance Baselines (Measured)
 
-### v1 Pipeline (current daemon path)
+### v1 Pipeline (raw bytes path, no Arrow)
 ```
 VM-format data (257 bytes/line, 10 variable fields):
   jsonlines no compression:  14.5M lines/sec/core
@@ -318,66 +180,51 @@ scan → DataFusion filter → OTLP:          ~600ns/line  (1.7M lines/sec)
 full pipeline with file read + CRI:       ~800ns/line  (1.25M lines/sec)
 ```
 
-## Files You'll Likely Need to Read
-
-- `docs/ARCHITECTURE_V2.md` — full v2 architecture with YAML schema and diagrams
-- `docs/DATA_FUSION_PLAN_UPDATE.md` — detailed scanner/builder/transform design
-- `docs/research/logfwd-research-findings.md` — benchmark data from DataFusion prototypes
-- `docs/research/logfwd-plan.md` — phased build plan
-- `DEVELOPING.md` — developer guide for the existing codebase
-- `README.md` — user-facing documentation
-
 ## Testing
 
 ```bash
 # Run all tests
 cargo test
 
-# Run specific module tests
-cargo test scanner
-cargo test transform
-cargo test output
-cargo test config
-cargo test diagnostics
+# Run specific crate tests
+cargo test -p logfwd-core
+cargo test -p logfwd-transform
+cargo test -p logfwd-output
+cargo test -p logfwd-config
 
-# Run v1 benchmarks (still work)
+# Run criterion benchmarks
+cargo bench --bench pipeline
+
+# Generate test data
 ./target/release/logfwd --generate-json 5000000 /tmp/json.txt
-./target/release/logfwd /tmp/json.txt --mode otlp
-
-# Run v1 e2e benchmark with CRI parsing
-./target/release/logfwd --e2e --wrap-cri /tmp/json.txt /tmp/cri.txt
-./target/release/logfwd --e2e /tmp/cri.txt otlp-zstd
-
-# Generate VM-format test data (matches VictoriaMetrics benchmark)
-python3 -c "... (see e2e section in main.rs or use the script in the conversation)"
 ```
-
-## K8s Benchmark Environment
-
-The VictoriaMetrics benchmark infrastructure may still be running in KIND:
-```bash
-kind get clusters  # check for "log-collectors-bench"
-kubectl get pods -A  # check cluster state
-```
-
-The benchmark repo is at `/tmp/vm-bench`. Our DaemonSet manifest is at `deploy/daemonset.yml`.
-Both logfwd and vlagent were last tested at 250m CPU limits with the generator's
-panic removed (see `/tmp/vm-bench/log-generator/main.go` — we changed `panic` to `continue`).
 
 ## Dependencies
 
 ```toml
+# Workspace-level
 arrow = "54"
-datafusion = "45"
-tokio = { version = "1", features = ["rt"] }
-serde = { version = "1", features = ["derive"] }
-serde_yaml = "0.9"
-smallvec = { version = "1", features = ["union"] }
-tiny_http = "0.12"
-memchr = "2"
-zstd = "0.13"
-xxhash-rust = { version = "0.8", features = ["xxh32", "xxh64"] }
-notify = "7"
+opentelemetry = "0.31"
+opentelemetry_sdk = "0.31"
+opentelemetry-otlp = "0.31"
+serde = "1"
+
+# logfwd-core
 crossbeam-channel = "0.5"
-ureq = "3"
+memchr = "2"
+notify = "7"
+tiny_http = "0.12"
+xxhash-rust = "0.8"
+zstd = "0.13"
+
+# logfwd-transform
+datafusion = "45"
+regex (via UDFs)
+tokio = "1" (for DataFusion async, block_on only)
+
+# logfwd-output
+ureq = "3" (with rustls)
+
+# logfwd (binary)
+tokio = "1" (for OTel metrics exporter)
 ```

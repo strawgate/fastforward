@@ -3,7 +3,8 @@
 Findings from prototyping the DataFusion integration. All Python benchmarks
 (PyArrow 23.0.1 + DataFusion 52.3.0) validated directional claims. Rust
 scan_bench validated the scanner. The native Rust implementations now exist
-in `scanner.rs`, `batch_builder.rs`, and `transform.rs`.
+in `logfwd-core/src/scanner.rs`, `logfwd-core/src/batch_builder.rs`, and
+`logfwd-transform/src/lib.rs`.
 
 ## Key Numbers
 

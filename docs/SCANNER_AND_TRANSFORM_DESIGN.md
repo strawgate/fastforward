@@ -1,7 +1,8 @@
 # Scanner and Transform Design
 
 Design rationale for the Arrow-first pipeline. The implementations are in
-`scanner.rs`, `batch_builder.rs`, `transform.rs`, and `output.rs`.
+`logfwd-core/src/scanner.rs`, `logfwd-core/src/batch_builder.rs`,
+`logfwd-transform/src/lib.rs`, and `logfwd-output/src/`.
 
 ## Why Arrow-First, No Fast Path
 
@@ -18,7 +19,7 @@ Arrow construction is 93 ns. DataFusion passthrough is 85 ns. Combined: 178 ns
 on top of scanning. Not worth maintaining a separate fast path to save 178 ns
 when the total pipeline is 500-900 ns. One code path, one implementation per feature.
 
-## Scanner Design (scanner.rs)
+## Scanner Design (logfwd-core/src/scanner.rs)
 
 The scanner uses memchr to find JSON quotes, extracts key-value pairs, and
 writes values directly into BatchBuilder's Arrow column builders. No intermediate
@@ -35,7 +36,7 @@ Key performance choices:
 - **No per-line allocation**: All builders pre-allocated with capacity hints, reused
   via `begin_batch()`.
 
-## Typed Column Model (batch_builder.rs)
+## Typed Column Model (logfwd-core/src/batch_builder.rs)
 
 Each JSON field produces 1-3 Arrow columns based on observed value types:
 
@@ -54,10 +55,11 @@ and `status_str`, with NULLs in non-matching rows.
 
 Memory overhead of multi-typed columns: 1.03x (measured). Null bitmaps are 1 bit/row.
 
-## SQL Rewriter (NOT YET BUILT)
+## SQL Rewriter (not yet built)
 
-Translates user-facing SQL to internal typed-column SQL. Required because users
-write `level` but the RecordBatch has `level_str`.
+Planned component that will translate user-facing SQL to internal typed-column
+SQL. Required because users write `level` but the RecordBatch has `level_str`.
+Currently, SQL must reference the internal `{field}_{type}` column names directly.
 
 ### Rewrite Rules
 
@@ -117,7 +119,7 @@ Populated from BatchBuilder's discovered fields after `finish_batch()`.
 4. Cache plan for subsequent batches
 5. New field appears → extend FieldTypeMap, recompile plan (~1ms, rare)
 
-## Output Type Preservation (output.rs)
+## Output Type Preservation (logfwd-output/src/)
 
 Outputs read typed columns for correct serialization:
 
@@ -134,19 +136,19 @@ original JSON line directly (passthrough optimization).
 ## Buffer Lifecycle
 
 ```
-ChunkAccumulator yields OwnedChunk (read buffer)
+InputSource.poll() yields raw bytes
     ↓
-CRI parser → messages into json_batch buffer
+FormatParser (CRI/JSON/Raw) → newline-delimited JSON into json_buf
     ↓
-Scanner reads json_batch → writes into Arrow column builders
+Scanner reads json_buf → writes into Arrow column builders
     ↓
-OwnedChunk reclaimed here (Arrow builders own their data)
+Raw bytes released here (Arrow builders own their data)
     ↓
 BatchBuilder.finish_batch() → RecordBatch
     ↓
 DataFusion executes SQL on RecordBatch
     ↓
-Output sinks serialize from RecordBatch → network/file
+Output sinks serialize from RecordBatch → network/stdout
 ```
 
 The read buffer is released after Arrow column construction. DataFusion and
