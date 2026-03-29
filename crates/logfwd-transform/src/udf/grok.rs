@@ -24,7 +24,7 @@
 
 use std::any::Any;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use arrow::array::{Array, ArrayRef, AsArray, StringBuilder, StructArray};
 use arrow::datatypes::{DataType, Field, Fields};
@@ -189,9 +189,16 @@ fn compile_grok(pattern: &str) -> Result<CompiledGrok, String> {
 ///
 /// The pattern uses Logstash-style `%{PATTERN:name}` syntax. The return type
 /// is a Struct with one Utf8 field per named capture group.
+///
+/// The compiled grok pattern (regex + field names) is cached in the struct
+/// after the first compilation so repeated calls with the same pattern pay
+/// the compilation cost only once.
 #[derive(Debug)]
 pub struct GrokUdf {
     signature: Signature,
+    /// Cached compiled grok: stores `(pattern_string, compiled_grok)`.
+    /// Recompiled only when the pattern string changes.
+    cached_grok: Mutex<Option<(String, Arc<CompiledGrok>)>>,
 }
 
 impl Default for GrokUdf {
@@ -207,6 +214,25 @@ impl GrokUdf {
                 TypeSignature::Exact(vec![DataType::Utf8, DataType::Utf8]),
                 Volatility::Immutable,
             ),
+            cached_grok: Mutex::new(None),
+        }
+    }
+}
+
+impl GrokUdf {
+    /// Returns a cached `Arc<CompiledGrok>` for `pattern`, compiling it on first use
+    /// (or when the pattern changes).
+    fn get_or_compile_grok(&self, pattern: &str) -> DfResult<Arc<CompiledGrok>> {
+        let mut cache = self.cached_grok.lock().unwrap();
+        match &*cache {
+            Some((pat, compiled)) if pat == pattern => Ok(Arc::clone(compiled)),
+            _ => {
+                let compiled = Arc::new(compile_grok(pattern).map_err(|e| {
+                    datafusion::error::DataFusionError::Execution(format!("grok: {e}"))
+                })?);
+                *cache = Some((pattern.to_string(), Arc::clone(&compiled)));
+                Ok(compiled)
+            }
         }
     }
 }
@@ -235,12 +261,14 @@ impl ScalarUDFImpl for GrokUdf {
         &self,
         args: datafusion::logical_expr::ReturnTypeArgs,
     ) -> DfResult<datafusion::logical_expr::ReturnInfo> {
-        // If the pattern argument is a literal, extract field names and return Struct type.
+        // If the pattern argument is a literal, compile (or reuse from cache) and
+        // return the Struct type.  Populating the cache here means invoke_with_args
+        // will reuse the already-compiled pattern at execution time.
         if args.scalar_arguments.len() >= 2
             && let Some(datafusion::common::ScalarValue::Utf8(Some(pattern_str))) =
                 args.scalar_arguments[1]
-            && let Ok(compiled) = compile_grok(pattern_str)
         {
+            let compiled = self.get_or_compile_grok(pattern_str)?;
             let fields: Vec<Field> = compiled
                 .field_names
                 .iter()
@@ -280,9 +308,8 @@ impl ScalarUDFImpl for GrokUdf {
             }
         };
 
-        // Compile grok pattern.
-        let compiled = compile_grok(&pattern_str)
-            .map_err(|e| datafusion::error::DataFusionError::Execution(format!("grok: {e}")))?;
+        // Retrieve from cache or compile once and cache for subsequent calls.
+        let compiled = self.get_or_compile_grok(&pattern_str)?;
 
         match input {
             ColumnarValue::Array(array) => {
@@ -529,5 +556,40 @@ mod tests {
             .unwrap();
         assert_eq!(ip.value(0), "192.168.1.100");
         assert_eq!(ip.value(1), "10.0.0.1");
+    }
+
+    /// Verify that the compiled grok pattern is cached: a second `invoke_with_args`
+    /// call on the same UDF instance must reuse the cached `CompiledGrok`.
+    #[test]
+    fn test_grok_is_cached_across_invocations() {
+        use arrow::array::StringArray;
+        use datafusion::common::ScalarValue;
+        use datafusion::logical_expr::{ColumnarValue, ScalarFunctionArgs};
+
+        let udf = GrokUdf::new();
+        let pattern =
+            ColumnarValue::Scalar(ScalarValue::Utf8(Some("%{WORD:verb}".to_string())));
+
+        let make_args = |pattern: ColumnarValue| ScalarFunctionArgs {
+            args: vec![
+                ColumnarValue::Array(Arc::new(StringArray::from(vec![Some("GET")])) as _),
+                pattern,
+            ],
+            number_rows: 1,
+            return_type: &DataType::Utf8,
+        };
+
+        // First invocation — populates the cache.
+        udf.invoke_with_args(make_args(pattern.clone())).unwrap();
+
+        // Second invocation — must hit the cache.
+        udf.invoke_with_args(make_args(pattern.clone())).unwrap();
+
+        // Cache should hold the pattern.
+        let cached = udf.cached_grok.lock().unwrap();
+        assert!(cached.is_some());
+        let (cached_pat, compiled) = cached.as_ref().unwrap();
+        assert_eq!(cached_pat, "%{WORD:verb}");
+        assert_eq!(compiled.field_names, vec!["verb"]);
     }
 }

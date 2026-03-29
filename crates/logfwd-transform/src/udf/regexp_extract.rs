@@ -9,7 +9,7 @@
 //! ```
 
 use std::any::Any;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use arrow::array::{Array, AsArray, StringBuilder};
 use arrow::datatypes::DataType;
@@ -28,9 +28,15 @@ use regex::Regex;
 /// - `group_index`: 0 for full match, 1+ for capture groups (Int64)
 ///
 /// Returns NULL when the pattern doesn't match or the group index is out of range.
+///
+/// The compiled `Regex` is cached in the struct after the first invocation so
+/// repeated calls with the same pattern pay the compilation cost only once.
 #[derive(Debug)]
 pub struct RegexpExtractUdf {
     signature: Signature,
+    /// Cached compiled regex: stores `(pattern_string, compiled_regex)`.
+    /// Recompiled only when the pattern string changes.
+    cached_regex: Mutex<Option<(String, Regex)>>,
 }
 
 impl Default for RegexpExtractUdf {
@@ -46,6 +52,7 @@ impl RegexpExtractUdf {
                 TypeSignature::Exact(vec![DataType::Utf8, DataType::Utf8, DataType::Int64]),
                 Volatility::Immutable,
             ),
+            cached_regex: Mutex::new(None),
         }
     }
 }
@@ -90,13 +97,23 @@ impl ScalarUDFImpl for RegexpExtractUdf {
             }
         };
 
-        // Compile the regex once.
-        let re = Regex::new(&pattern_str).map_err(|e| {
-            datafusion::error::DataFusionError::Execution(format!(
-                "regexp_extract: invalid pattern '{}': {}",
-                pattern_str, e
-            ))
-        })?;
+        // Retrieve from cache or compile once and cache for subsequent calls.
+        let re = {
+            let mut cache = self.cached_regex.lock().unwrap();
+            match &*cache {
+                Some((pat, re)) if pat == &pattern_str => re.clone(),
+                _ => {
+                    let re = Regex::new(&pattern_str).map_err(|e| {
+                        datafusion::error::DataFusionError::Execution(format!(
+                            "regexp_extract: invalid pattern '{}': {}",
+                            pattern_str, e
+                        ))
+                    })?;
+                    *cache = Some((pattern_str.clone(), re.clone()));
+                    re
+                }
+            }
+        };
 
         // Extract group index.
         let idx = match group_idx {
@@ -284,5 +301,57 @@ mod tests {
             .unwrap();
         assert_eq!(dur.value(0), 15);
         assert_eq!(dur.value(1), 230);
+    }
+
+    /// Verify that the compiled regex is cached: the same `Regex` pointer should
+    /// be reused across two `invoke_with_args` calls on the same UDF instance.
+    #[test]
+    fn test_regex_is_cached_across_invocations() {
+        use arrow::array::StringArray;
+        use datafusion::common::ScalarValue;
+        use datafusion::logical_expr::{ColumnarValue, ScalarFunctionArgs};
+
+        let udf = RegexpExtractUdf::new();
+        let pattern = ColumnarValue::Scalar(ScalarValue::Utf8(Some(r"\d+".to_string())));
+        let group = ColumnarValue::Scalar(ScalarValue::Int64(Some(0)));
+
+        let make_args = |pattern: ColumnarValue, group: ColumnarValue| ScalarFunctionArgs {
+            args: vec![
+                ColumnarValue::Array(Arc::new(StringArray::from(vec![Some("abc 42 def")])) as _),
+                pattern,
+                group,
+            ],
+            number_rows: 1,
+            return_type: &DataType::Utf8,
+        };
+
+        // First invocation — populates the cache.
+        let r1 = udf
+            .invoke_with_args(make_args(pattern.clone(), group.clone()))
+            .unwrap();
+
+        // Second invocation with the same pattern — must hit the cache and return
+        // the same result.
+        let r2 = udf
+            .invoke_with_args(make_args(pattern.clone(), group.clone()))
+            .unwrap();
+
+        // Both calls should extract the same value.
+        let to_str = |cv: ColumnarValue| match cv {
+            ColumnarValue::Array(a) => a
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap()
+                .value(0)
+                .to_string(),
+            _ => panic!("expected array"),
+        };
+        assert_eq!(to_str(r1), "42");
+        assert_eq!(to_str(r2), "42");
+
+        // Cache should still hold the last pattern.
+        let cached = udf.cached_regex.lock().unwrap();
+        assert!(cached.is_some());
+        assert_eq!(cached.as_ref().unwrap().0, r"\d+");
     }
 }
