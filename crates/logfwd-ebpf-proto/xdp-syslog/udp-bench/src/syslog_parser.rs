@@ -83,12 +83,14 @@ pub fn parse_syslog_batch(buf: &[u8]) -> SyslogBatch<'_> {
 #[inline]
 fn parse_syslog_line(line: &[u8]) -> Option<SyslogLine<'_>> {
     // 1. Parse <PRI> — scalar, only 3-5 bytes
+    //    Require at least one digit, reject <>, enforce pri <= 191.
     if line.len() < 4 || line[0] != b'<' {
         return None;
     }
 
     let mut pri: u16 = 0;
     let mut i: usize = 1;
+    let mut has_digit = false;
     while i < line.len() && i <= 4 {
         let b = line[i];
         if b == b'>' {
@@ -98,10 +100,11 @@ fn parse_syslog_line(line: &[u8]) -> Option<SyslogLine<'_>> {
         if !b.is_ascii_digit() {
             return None;
         }
+        has_digit = true;
         pri = pri * 10 + (b - b'0') as u16;
         i += 1;
     }
-    if i <= 1 || line[i - 1] != b'>' {
+    if !has_digit || line[i - 1] != b'>' || pri > 191 {
         return None;
     }
 
@@ -109,9 +112,8 @@ fn parse_syslog_line(line: &[u8]) -> Option<SyslogLine<'_>> {
     let facility = (pri >> 3) as u8;
     let severity = (pri & 0x7) as u8;
 
-    // 2. Parse TIMESTAMP — BSD format "Mon DD HH:MM:SS" = 15 chars
-    //    Find the 3rd space (after "Mon DD HH:MM:SS ...")
-    //    We use memchr for each space — each is SIMD-accelerated.
+    // 2. Parse TIMESTAMP — BSD format "Mon DD HH:MM:SS" is fixed-width 15 bytes.
+    //    Use fixed slice to handle single-digit days with double spaces ("Jan  1").
     if rest.len() < 16 {
         return Some(SyslogLine {
             facility, severity,
@@ -120,16 +122,13 @@ fn parse_syslog_line(line: &[u8]) -> Option<SyslogLine<'_>> {
         });
     }
 
-    // Find spaces after timestamp fields. BSD timestamp has format:
-    // "Mon DD HH:MM:SS" with spaces at positions 3, 6
-    // The space after the timestamp is at position 15.
-    // But we want to be robust, so scan for spaces.
-    let sp1 = memchr(b' ', rest)?;           // after "Mon"
-    let sp2 = memchr(b' ', &rest[sp1 + 1..]).map(|o| sp1 + 1 + o)?; // after "DD"
-    let sp3 = memchr(b' ', &rest[sp2 + 1..]).map(|o| sp2 + 1 + o)?; // after "HH:MM:SS"
-
-    let timestamp = &rest[..sp3];
-    let after_ts = &rest[sp3 + 1..];
+    let timestamp = &rest[..15];
+    // Skip separator space after timestamp (position 15)
+    let after_ts = if rest.len() > 15 && rest[15] == b' ' {
+        &rest[16..]
+    } else {
+        &rest[15..]
+    };
 
     // 3. Parse HOSTNAME — up to next space
     let sp4 = memchr(b' ', after_ts)?;

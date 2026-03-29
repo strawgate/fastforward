@@ -68,7 +68,10 @@ def map_lookup(fd, key_bytes, val_size=8):
 
 
 def map_lookup_percpu(fd, key_bytes):
-    """Lookup a per-CPU value and return the sum across all CPUs."""
+    """Lookup a per-CPU value and return the sum across all CPUs.
+
+    Returns 0 only for ENOENT (key not found). Other errors propagate.
+    """
     ncpu = os.cpu_count() or 1
     k = ctypes.create_string_buffer(key_bytes)
     v = ctypes.create_string_buffer(8 * ncpu)
@@ -76,8 +79,11 @@ def map_lookup_percpu(fd, key_bytes):
         bpf(BPF_MAP_LOOKUP_ELEM,
             struct.pack('IQQI', fd, ctypes.addressof(k), ctypes.addressof(v), 0))
         return sum(struct.unpack_from('<Q', v.raw, i * 8)[0] for i in range(ncpu))
-    except OSError:
-        return 0
+    except OSError as e:
+        import errno as errno_mod
+        if e.errno == errno_mod.ENOENT:
+            return 0
+        raise
 
 
 def load_prog(prog_type, insns_bytes, log_size=512 * 1024):

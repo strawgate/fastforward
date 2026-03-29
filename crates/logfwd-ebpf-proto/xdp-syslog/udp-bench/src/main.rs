@@ -39,22 +39,25 @@ fn parse_syslog_pri(buf: &[u8]) -> Option<SyslogMeta> {
 
     let mut pri: u16 = 0;
     let mut i = 1;
+    let mut has_digit = false;
 
-    // Parse up to 3 digits
+    // Parse up to 3 digits — require at least one, reject <> and pri > 191
     while i < buf.len() && i <= 4 {
         let b = buf[i];
         if b == b'>' {
-            let facility = (pri >> 3) as u8;
-            let severity = (pri & 0x7) as u8;
+            if !has_digit || pri > 191 {
+                return None;
+            }
             return Some(SyslogMeta {
-                facility,
-                severity,
+                facility: (pri >> 3) as u8,
+                severity: (pri & 0x7) as u8,
                 pri_len: (i + 1) as u8,
             });
         }
         if !b.is_ascii_digit() {
             return None;
         }
+        has_digit = true;
         pri = pri * 10 + (b - b'0') as u16;
         i += 1;
     }
@@ -304,6 +307,7 @@ fn run_batch_receiver(port: u16, severity_threshold: u8, batch_size: usize) -> i
 
     let mut total_packets: u64 = 0;
     let mut total_matched: u64 = 0;
+    let mut total_parse_fail: u64 = 0;
     let mut total_fields: u64 = 0;
     let mut total_bytes: u64 = 0;
 
@@ -323,8 +327,8 @@ fn run_batch_receiver(port: u16, severity_threshold: u8, batch_size: usize) -> i
                 let mps = interval_matched as f64 / now.duration_since(last_report).as_secs_f64();
                 let mb = (total_bytes as f64 / elapsed) / (1024.0 * 1024.0);
                 eprintln!(
-                    "[{:.1}s] {:.0} pps ({:.0} matched) | total: {} pkts, {} matched, {} fields | {:.1} MB/s",
-                    elapsed, pps, mps, total_packets, total_matched, total_fields, mb,
+                    "[{:.1}s] {:.0} pps ({:.0} matched) | total: {} pkts, {} matched, {} failed, {} fields | {:.1} MB/s",
+                    elapsed, pps, mps, total_packets, total_matched, total_parse_fail, total_fields, mb,
                 );
                 last_report = now;
                 interval_packets = 0;
@@ -355,6 +359,7 @@ fn run_batch_receiver(port: u16, severity_threshold: u8, batch_size: usize) -> i
         let matched = batch.lines.len() as u64;
         total_matched += matched;
         interval_matched += matched;
+        total_parse_fail += batch.parse_errors as u64;
 
         // Count extracted fields to prevent dead-code elimination and
         // simulate downstream work (feeding Arrow columns)
@@ -373,8 +378,8 @@ fn run_batch_receiver(port: u16, severity_threshold: u8, batch_size: usize) -> i
             let mps = interval_matched as f64 / now.duration_since(last_report).as_secs_f64();
             let mb = (total_bytes as f64 / elapsed) / (1024.0 * 1024.0);
             eprintln!(
-                "[{:.1}s] {:.0} pps ({:.0} matched) | total: {} pkts, {} matched, {} fields | {:.1} MB/s",
-                elapsed, pps, mps, total_packets, total_matched, total_fields, mb,
+                "[{:.1}s] {:.0} pps ({:.0} matched) | total: {} pkts, {} matched, {} failed, {} fields | {:.1} MB/s",
+                elapsed, pps, mps, total_packets, total_matched, total_parse_fail, total_fields, mb,
             );
             last_report = now;
             interval_packets = 0;
@@ -444,10 +449,27 @@ mod tests {
 
     #[test]
     fn parse_priority_single_digit() {
-        let m = parse_syslog_pri(b"<0>test").unwrap();
+        let m = parse_syslog_pri(b"<1>test").unwrap();
         assert_eq!(m.facility, 0);
-        assert_eq!(m.severity, 0);
+        assert_eq!(m.severity, 1);
         assert_eq!(m.pri_len, 3);
+    }
+
+    #[test]
+    fn parse_priority_zero_rejected() {
+        // <0> is technically kern.emerg but pri=0 is rejected per RFC strict mode
+        assert!(parse_syslog_pri(b"<0>test").is_some()); // pri=0 IS valid (kern.emerg)
+    }
+
+    #[test]
+    fn parse_priority_empty_rejected() {
+        assert!(parse_syslog_pri(b"<>test").is_none()); // empty PRI
+    }
+
+    #[test]
+    fn parse_priority_over_191() {
+        assert!(parse_syslog_pri(b"<192>test").is_none()); // > 191
+        assert!(parse_syslog_pri(b"<999>test").is_none());
     }
 
     #[test]

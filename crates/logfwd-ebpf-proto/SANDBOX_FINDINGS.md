@@ -27,7 +27,7 @@ Kernel 6.18.5 (GCE/Coder), root with `cap_bpf` + `cap_sys_admin`, clang-18.
 
 3-section layout (not the 2-section layout commonly documented):
 
-```
+```text
 offset 0:            consumer page (consumer_pos u64, rw)
 offset PAGE_SIZE:    producer page (producer_pos u64, ro)
 offset 2*PAGE_SIZE:  data pages (2x ring size for wrap-around, ro)

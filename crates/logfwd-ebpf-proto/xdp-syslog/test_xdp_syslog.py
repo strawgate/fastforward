@@ -9,6 +9,7 @@ attaches to loopback, sends syslog traffic, and verifies filtering + events.
 import struct
 import os
 import socket
+import sysconfig
 import time
 import subprocess
 import sys
@@ -40,21 +41,29 @@ STAT_NAMES = ['packets_seen', 'syslog_matched', 'severity_dropped',
 SEV_NAMES = ['EMERG', 'ALERT', 'CRIT', 'ERR', 'WARN', 'NOTICE', 'INFO', 'DEBUG']
 
 
+def _bpf_include_path():
+    """Return the platform-specific include path for kernel headers."""
+    # Try multiarch path first (e.g. /usr/include/x86_64-linux-gnu)
+    multiarch = sysconfig.get_config_var('MULTIARCH')
+    if multiarch:
+        p = f'/usr/include/{multiarch}'
+        if os.path.isdir(p):
+            return p
+    # Fallback to generic
+    return '/usr/include'
+
+
 def load_xdp_from_elf(obj_path, map_fds):
     """Load XDP program from ELF, applying map fd relocations."""
     with open(obj_path, 'rb') as f:
         elf = ELFFile(f)
 
-        # Get program bytecode
         xdp_sec = elf.get_section_by_name('xdp')
         assert xdp_sec, "No 'xdp' section"
         prog = bytearray(xdp_sec.data())
 
-        # Get symbol table for relocation resolution
         symtab = elf.get_section_by_name('.symtab')
-        symbols = {sym.name: sym for sym in symtab.iter_symbols()} if symtab else {}
 
-        # Apply map relocations
         rel_sec = elf.get_section_by_name('.relxdp')
         if rel_sec:
             for rel in rel_sec.iter_relocations():
@@ -63,7 +72,6 @@ def load_xdp_from_elf(obj_path, map_fds):
                 if map_name not in map_fds:
                     raise ValueError(f"Unknown map: {map_name}")
                 off = rel['r_offset']
-                # Set src_reg = BPF_PSEUDO_MAP_FD (1), patch imm with fd
                 prog[off + 1] = (prog[off + 1] & 0x0F) | (1 << 4)
                 struct.pack_into('<i', prog, off + 4, map_fds[map_name])
 
@@ -76,6 +84,8 @@ def parse_syslog_event(data):
         return None
     src_ip, src_port, facility, severity, msg_len, captured_len, pri_len, _ = \
         struct.unpack_from('<IHBBHHHH', data, 0)
+    if captured_len > len(data) - 16:
+        return None
     payload = data[16:16 + captured_len]
     return {
         'src_ip': socket.inet_ntoa(struct.pack('<I', src_ip)),
@@ -94,12 +104,11 @@ def compile_xdp():
     obj = os.path.join(os.path.dirname(__file__), 'xdp_syslog.o')
     r = subprocess.run([
         'clang', '-O2', '-g', '-target', 'bpf',
-        '-I/usr/include/x86_64-linux-gnu',
+        f'-I{_bpf_include_path()}',
         '-Wall', '-Werror', '-c', src, '-o', obj,
     ], capture_output=True, text=True)
     if r.returncode != 0:
-        print(f"Compilation failed:\n{r.stderr}")
-        sys.exit(1)
+        raise RuntimeError(f"BPF compilation failed:\n{r.stderr}")
     return obj
 
 
@@ -113,27 +122,29 @@ def send_syslog(messages, port):
 def test_xdp_syslog():
     print("=== XDP Syslog Filter Test ===\n")
 
-    # Compile
     print("1. Compiling XDP program...")
     obj_path = compile_xdp()
 
-    # Create maps
-    print("2. Creating BPF maps...")
-    maps = {name: create_map(d['type'], d['key'], d['val'], d['max'])
-            for name, d in MAP_DEFS.items()}
-
-    # Configure: severity <= WARN (4), port 5514
-    TEST_PORT = 5514
-    map_update(maps['config'], struct.pack('I', CFG_SEVERITY_THRESHOLD), struct.pack('Q', 4))
-    map_update(maps['config'], struct.pack('I', CFG_SYSLOG_PORT), struct.pack('Q', TEST_PORT))
-
-    # Load and attach
-    print("3. Loading and attaching XDP...")
-    prog_fd = load_xdp_from_elf(obj_path, maps)
-    link_fd = attach_xdp(prog_fd, socket.if_nametoindex('lo'))
-    print(f"   Attached to lo (prog_fd={prog_fd}, link_fd={link_fd})")
-
+    maps = {}
+    prog_fd = None
+    link_fd = None
     try:
+        # Create maps
+        print("2. Creating BPF maps...")
+        maps = {name: create_map(d['type'], d['key'], d['val'], d['max'])
+                for name, d in MAP_DEFS.items()}
+
+        # Configure: severity <= WARN (4), port 5514
+        TEST_PORT = 5514
+        map_update(maps['config'], struct.pack('I', CFG_SEVERITY_THRESHOLD), struct.pack('Q', 4))
+        map_update(maps['config'], struct.pack('I', CFG_SYSLOG_PORT), struct.pack('Q', TEST_PORT))
+
+        # Load and attach
+        print("3. Loading and attaching XDP...")
+        prog_fd = load_xdp_from_elf(obj_path, maps)
+        link_fd = attach_xdp(prog_fd, socket.if_nametoindex('lo'))
+        print(f"   Attached to lo (prog_fd={prog_fd}, link_fd={link_fd})")
+
         # Send test traffic: 8 severities × 2 rounds + noise
         print("4. Sending syslog traffic...")
         messages = []
@@ -187,11 +198,12 @@ def test_xdp_syslog():
         print("   Stats: PASS")
 
     finally:
-        os.close(link_fd)
-
-    os.close(prog_fd)
-    for fd in maps.values():
-        os.close(fd)
+        if link_fd is not None:
+            os.close(link_fd)
+        if prog_fd is not None:
+            os.close(prog_fd)
+        for fd in maps.values():
+            os.close(fd)
 
     print(f"\n{'=' * 50}")
     print("ALL TESTS PASSED")

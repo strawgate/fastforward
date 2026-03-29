@@ -87,7 +87,7 @@ void inc_stat(__u32 idx) {
 static __attribute__((always_inline))
 __u64 get_config(__u32 idx, __u64 default_val) {
     __u64 *val = bpf_map_lookup_elem(&config, &idx);
-    return (val && *val != 0) ? *val : default_val;
+    return val ? *val : default_val;
 }
 
 /*
@@ -99,24 +99,22 @@ int parse_priority(const __u8 *data, const __u8 *end, __u16 *pri_len) {
     if (data + 3 > end || data[0] != '<')
         return -1;
 
-    int pri = 0;
-
-    if (data[1] == '>') { *pri_len = 2; return 0; }
+    /* Require at least one digit — reject "<>" */
     if (data[1] < '0' || data[1] > '9') return -1;
-    pri = data[1] - '0';
+    int pri = data[1] - '0';
 
     if (data + 3 > end) return -1;
-    if (data[2] == '>') { *pri_len = 3; return pri; }
+    if (data[2] == '>') { *pri_len = 3; return (pri <= 191) ? pri : -1; }
     if (data[2] < '0' || data[2] > '9') return -1;
     pri = pri * 10 + (data[2] - '0');
 
     if (data + 4 > end) return -1;
-    if (data[3] == '>') { *pri_len = 4; return pri; }
+    if (data[3] == '>') { *pri_len = 4; return (pri <= 191) ? pri : -1; }
     if (data[3] < '0' || data[3] > '9') return -1;
     pri = pri * 10 + (data[3] - '0');
 
     if (data + 5 > end) return -1;
-    if (data[4] == '>') { *pri_len = 5; return pri; }
+    if (data[4] == '>') { *pri_len = 5; return (pri <= 191) ? pri : -1; }
     return -1;
 }
 
@@ -140,6 +138,10 @@ int xdp_syslog_filter(struct xdp_md *ctx) {
     if ((void *)(ip + 1) > data_end || ip->protocol != IPPROTO_UDP)
         return XDP_PASS;
 
+    /* Skip IP fragments — only first fragment has a valid UDP header */
+    if (ip->frag_off & __builtin_bswap16(0x1FFF | 0x2000))
+        return XDP_PASS;
+
     __u32 ip_hlen = ip->ihl * 4;
     if (ip_hlen < 20 || ip_hlen > 60)
         return XDP_PASS;
@@ -154,12 +156,15 @@ int xdp_syslog_filter(struct xdp_md *ctx) {
 
     inc_stat(STAT_SYSLOG_MATCHED);
 
-    /* Syslog payload */
+    /* Syslog payload — clamp to bytes actually present in packet */
     __u8 *payload = (__u8 *)(udp + 1);
     __u16 udp_len = __builtin_bswap16(udp->len);
     if (udp_len < 8)
         return XDP_PASS;
     __u16 payload_len = udp_len - 8;
+    __u16 available = (__u16)((__u8 *)data_end - payload);
+    if (payload_len > available)
+        payload_len = available;
 
     /* Parse <priority> — the only in-kernel parsing we do */
     __u16 pri_len = 0;
