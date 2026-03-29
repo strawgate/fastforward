@@ -9,7 +9,7 @@
 //! ```
 
 use std::any::Any;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use arrow::array::{Array, AsArray, StringBuilder};
 use arrow::datatypes::DataType;
@@ -31,6 +31,8 @@ use regex::Regex;
 #[derive(Debug)]
 pub struct RegexpExtractUdf {
     signature: Signature,
+    /// Compiled regex cached after the first invocation (pattern is constant per SQL query).
+    compiled_regex: OnceLock<Regex>,
 }
 
 impl Default for RegexpExtractUdf {
@@ -46,6 +48,7 @@ impl RegexpExtractUdf {
                 TypeSignature::Exact(vec![DataType::Utf8, DataType::Utf8, DataType::Int64]),
                 Volatility::Immutable,
             ),
+            compiled_regex: OnceLock::new(),
         }
     }
 }
@@ -90,13 +93,20 @@ impl ScalarUDFImpl for RegexpExtractUdf {
             }
         };
 
-        // Compile the regex once.
-        let re = Regex::new(&pattern_str).map_err(|e| {
-            datafusion::error::DataFusionError::Execution(format!(
-                "regexp_extract: invalid pattern '{}': {}",
-                pattern_str, e
-            ))
-        })?;
+        // Get or compile the regex (compiled once per UDF instance; pattern is constant per query).
+        let re = if let Some(re) = self.compiled_regex.get() {
+            re
+        } else {
+            let new_re = Regex::new(&pattern_str).map_err(|e| {
+                datafusion::error::DataFusionError::Execution(format!(
+                    "regexp_extract: invalid pattern '{}': {}",
+                    pattern_str, e
+                ))
+            })?;
+            // Racing threads may both compile; only the first set wins. Use whichever is stored.
+            let _ = self.compiled_regex.set(new_re);
+            self.compiled_regex.get().unwrap()
+        };
 
         // Extract group index.
         let idx = match group_idx {
