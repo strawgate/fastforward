@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use arrow::array::{ArrayRef, Float64Builder, Int64Builder, StringBuilder};
 use arrow::datatypes::{DataType, Field, Schema};
-use arrow::record_batch::RecordBatch;
+use arrow::record_batch::{RecordBatch, RecordBatchOptions};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -474,11 +474,9 @@ impl BatchBuilder {
         }
 
         let schema = Arc::new(Schema::new(schema_fields));
-        if arrays.is_empty() {
-            RecordBatch::new_empty(schema)
-        } else {
-            RecordBatch::try_new(schema, arrays).expect("batch_builder: schema/array mismatch")
-        }
+        let opts = RecordBatchOptions::new().with_row_count(Some(self.row_count));
+        RecordBatch::try_new_with_options(schema, arrays, &opts)
+            .expect("batch_builder: schema/array mismatch")
     }
 
     /// Return the discovered field type map.

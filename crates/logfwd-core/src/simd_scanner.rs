@@ -10,188 +10,251 @@
 //
 // No DOM. No tape. No intermediate representation. Direct to Arrow.
 
-use crate::batch_builder::{BatchBuilder, parse_int_fast};
+use crate::batch_builder::parse_int_fast;
 use crate::chunk_classify::ChunkIndex;
+use crate::columnar_builder::ColumnarBatchBuilder;
+use crate::indexed_builder::IndexedBatchBuilder;
 use crate::scanner::ScanConfig;
 use arrow::record_batch::RecordBatch;
 use memchr::memchr;
 
-/// Chunk-level SIMD scanner — drop-in replacement for `Scanner`.
-pub struct SimdScanner {
-    builder: BatchBuilder,
-    config: ScanConfig,
+// ---------------------------------------------------------------------------
+// ScanBuilder trait — shared interface for index-based builders
+// ---------------------------------------------------------------------------
+
+/// Trait for builders that support index-based field access.
+///
+/// Both `IndexedBatchBuilder` and `ColumnarBatchBuilder` implement this,
+/// allowing the scan loop to be shared without code duplication.
+pub(crate) trait ScanBuilder {
+    fn begin_batch(&mut self);
+    fn begin_row(&mut self);
+    fn end_row(&mut self);
+    fn resolve_field(&mut self, key: &[u8]) -> usize;
+    fn append_str_by_idx(&mut self, idx: usize, value: &[u8]);
+    fn append_int_by_idx(&mut self, idx: usize, value: &[u8]);
+    fn append_float_by_idx(&mut self, idx: usize, value: &[u8]);
+    fn append_null_by_idx(&mut self, idx: usize);
+    fn append_raw(&mut self, line: &[u8]);
+    /// Set the input buffer pointer. Only needed for zero-copy builders.
+    fn set_buffer(&mut self, _buf: &[u8]) {}
 }
 
-impl SimdScanner {
-    pub fn new(config: ScanConfig, expected_rows: usize) -> Self {
-        SimdScanner {
-            builder: BatchBuilder::new(expected_rows, config.keep_raw),
-            config,
+impl ScanBuilder for IndexedBatchBuilder {
+    #[inline(always)]
+    fn begin_batch(&mut self) { self.begin_batch(); }
+    #[inline(always)]
+    fn begin_row(&mut self) { self.begin_row(); }
+    #[inline(always)]
+    fn end_row(&mut self) { self.end_row(); }
+    #[inline(always)]
+    fn resolve_field(&mut self, key: &[u8]) -> usize { self.resolve_field(key) }
+    #[inline(always)]
+    fn append_str_by_idx(&mut self, idx: usize, value: &[u8]) { self.append_str_by_idx(idx, value); }
+    #[inline(always)]
+    fn append_int_by_idx(&mut self, idx: usize, value: &[u8]) { self.append_int_by_idx(idx, value); }
+    #[inline(always)]
+    fn append_float_by_idx(&mut self, idx: usize, value: &[u8]) { self.append_float_by_idx(idx, value); }
+    #[inline(always)]
+    fn append_null_by_idx(&mut self, idx: usize) { self.append_null_by_idx(idx); }
+    #[inline(always)]
+    fn append_raw(&mut self, line: &[u8]) { self.append_raw(line); }
+}
+
+impl ScanBuilder for ColumnarBatchBuilder {
+    #[inline(always)]
+    fn begin_batch(&mut self) { self.begin_batch(); }
+    #[inline(always)]
+    fn begin_row(&mut self) { self.begin_row(); }
+    #[inline(always)]
+    fn end_row(&mut self) { self.end_row(); }
+    #[inline(always)]
+    fn resolve_field(&mut self, key: &[u8]) -> usize { self.resolve_field(key) }
+    #[inline(always)]
+    fn append_str_by_idx(&mut self, idx: usize, value: &[u8]) { self.append_str_by_idx(idx, value); }
+    #[inline(always)]
+    fn append_int_by_idx(&mut self, idx: usize, value: &[u8]) { self.append_int_by_idx(idx, value); }
+    #[inline(always)]
+    fn append_float_by_idx(&mut self, idx: usize, value: &[u8]) { self.append_float_by_idx(idx, value); }
+    #[inline(always)]
+    fn append_null_by_idx(&mut self, idx: usize) { self.append_null_by_idx(idx); }
+    #[inline(always)]
+    fn append_raw(&mut self, line: &[u8]) { self.append_raw(line); }
+    #[inline(always)]
+    fn set_buffer(&mut self, buf: &[u8]) { self.set_buffer(buf); }
+}
+
+// ---------------------------------------------------------------------------
+// Core scan loop — generic over any ScanBuilder
+// ---------------------------------------------------------------------------
+
+/// Scan a buffer of newline-delimited JSON into a builder.
+///
+/// 1. One SIMD pass classifies the entire buffer (~21 GiB/s)
+/// 2. Per-line extraction uses pre-computed bitmasks for O(1) string scanning
+#[inline(never)]
+fn scan_into<B: ScanBuilder>(buf: &[u8], config: &ScanConfig, builder: &mut B) {
+    let index = ChunkIndex::new(buf);
+    builder.set_buffer(buf);
+    builder.begin_batch();
+
+    let mut pos = 0;
+    let len = buf.len();
+
+    while pos < len {
+        let eol = match memchr(b'\n', &buf[pos..]) {
+            Some(offset) => pos + offset,
+            None => len,
+        };
+        let line_start = pos;
+        let line_end = eol;
+        if line_start < line_end {
+            scan_line(buf, line_start, line_end, &index, config, builder);
         }
+        pos = eol + 1;
+    }
+}
+
+/// Scan a single JSON line using the pre-computed chunk index.
+#[inline]
+fn scan_line<B: ScanBuilder>(
+    buf: &[u8],
+    start: usize,
+    end: usize,
+    index: &ChunkIndex,
+    config: &ScanConfig,
+    builder: &mut B,
+) {
+    builder.begin_row();
+
+    if config.keep_raw {
+        builder.append_raw(&buf[start..end]);
     }
 
-    /// Scan a buffer of newline-delimited JSON lines and return a RecordBatch.
-    ///
-    /// 1. One SIMD pass classifies the entire buffer (~21 GiB/s)
-    /// 2. Per-line extraction uses pre-computed bitmasks for O(1) string scanning
-    pub fn scan(&mut self, buf: &[u8]) -> RecordBatch {
-        // Stage 1: Classify entire buffer
-        let index = ChunkIndex::new(buf);
-
-        // Stage 2: Walk lines
-        self.builder.begin_batch();
-        let mut pos = 0;
-        let len = buf.len();
-
-        while pos < len {
-            let eol = match memchr(b'\n', &buf[pos..]) {
-                Some(offset) => pos + offset,
-                None => len,
-            };
-            let line_start = pos;
-            let line_end = eol;
-            if line_start < line_end {
-                self.scan_line(buf, line_start, line_end, &index);
-            }
-            pos = eol + 1;
-        }
-        self.builder.finish_batch()
+    let mut pos = skip_ws(buf, start, end);
+    if pos >= end || buf[pos] != b'{' {
+        builder.end_row();
+        return;
     }
+    pos += 1;
 
-    /// Scan a single JSON line using the pre-computed chunk index.
-    /// `buf` is the full buffer, `start..end` is the line within it.
-    #[inline]
-    fn scan_line(&mut self, buf: &[u8], start: usize, end: usize, index: &ChunkIndex) {
-        self.builder.begin_row();
-
-        if self.config.keep_raw {
-            self.builder.append_raw(&buf[start..end]);
+    loop {
+        pos = skip_ws(buf, pos, end);
+        if pos >= end || buf[pos] == b'}' {
+            break;
         }
 
-        let mut pos = skip_ws(buf, start, end);
-        if pos >= end || buf[pos] != b'{' {
-            self.builder.end_row();
-            return;
+        // --- Key ---
+        if buf[pos] != b'"' {
+            break;
+        }
+        let (key, after_key) = match index.scan_string(buf, pos) {
+            Some(r) => r,
+            None => break,
+        };
+        pos = after_key;
+
+        // --- Colon ---
+        pos = skip_ws(buf, pos, end);
+        if pos >= end || buf[pos] != b':' {
+            break;
         }
         pos += 1;
+        pos = skip_ws(buf, pos, end);
+        if pos >= end {
+            break;
+        }
 
-        loop {
-            pos = skip_ws(buf, pos, end);
-            if pos >= end || buf[pos] == b'}' {
-                break;
-            }
+        // --- Value ---
+        let wanted = config.is_wanted(key);
 
-            // --- Key ---
-            if buf[pos] != b'"' {
-                break;
-            }
-            let (key, after_key) = match index.scan_string(buf, pos) {
-                Some(r) => r,
-                None => break,
-            };
-            pos = after_key;
-
-            // --- Colon ---
-            pos = skip_ws(buf, pos, end);
-            if pos >= end || buf[pos] != b':' {
-                break;
-            }
-            pos += 1;
-            pos = skip_ws(buf, pos, end);
-            if pos >= end {
-                break;
-            }
-
-            // --- Value ---
-            let wanted = self.config.is_wanted(key);
-
-            let b = buf[pos];
-            match b {
-                b'"' => {
-                    let (val, after) = match index.scan_string(buf, pos) {
-                        Some(r) => r,
-                        None => break,
-                    };
-                    if wanted {
-                        self.builder.append_str(key, val);
-                    }
-                    pos = after;
+        let b = buf[pos];
+        match b {
+            b'"' => {
+                let (val, after) = match index.scan_string(buf, pos) {
+                    Some(r) => r,
+                    None => break,
+                };
+                if wanted {
+                    let idx = builder.resolve_field(key);
+                    builder.append_str_by_idx(idx, val);
                 }
-                b'{' | b'[' => {
-                    let val_start = pos;
-                    pos = index.skip_nested(buf, pos).min(end);
-                    if wanted {
-                        self.builder.append_str(key, &buf[val_start..pos]);
-                    }
+                pos = after;
+            }
+            b'{' | b'[' => {
+                let val_start = pos;
+                pos = index.skip_nested(buf, pos).min(end);
+                if wanted {
+                    let idx = builder.resolve_field(key);
+                    builder.append_str_by_idx(idx, &buf[val_start..pos]);
                 }
-                b't' | b'f' => {
-                    let val_start = pos;
-                    while pos < end
-                        && buf[pos] != b','
-                        && buf[pos] != b'}'
-                        && buf[pos] != b' '
-                        && buf[pos] != b'\t'
+            }
+            b't' | b'f' => {
+                let val_start = pos;
+                while pos < end
+                    && buf[pos] != b','
+                    && buf[pos] != b'}'
+                    && buf[pos] != b' '
+                    && buf[pos] != b'\t'
+                {
+                    pos += 1;
+                }
+                if wanted {
+                    let idx = builder.resolve_field(key);
+                    builder.append_str_by_idx(idx, &buf[val_start..pos]);
+                }
+            }
+            b'n' => {
+                pos += 4;
+                if pos > end {
+                    pos = end;
+                }
+                if wanted {
+                    let idx = builder.resolve_field(key);
+                    builder.append_null_by_idx(idx);
+                }
+            }
+            _ => {
+                // Number
+                let val_start = pos;
+                let mut is_float = false;
+                while pos < end {
+                    let c = buf[pos];
+                    if c == b'.' || c == b'e' || c == b'E' {
+                        is_float = true;
+                    } else if c == b','
+                        || c == b'}'
+                        || c == b' '
+                        || c == b'\t'
+                        || c == b'\n'
+                        || c == b'\r'
                     {
-                        pos += 1;
+                        break;
                     }
-                    if wanted {
-                        self.builder.append_str(key, &buf[val_start..pos]);
+                    pos += 1;
+                }
+                if wanted {
+                    let val = &buf[val_start..pos];
+                    let idx = builder.resolve_field(key);
+                    if is_float {
+                        builder.append_float_by_idx(idx, val);
+                    } else if parse_int_fast(val).is_some() {
+                        builder.append_int_by_idx(idx, val);
+                    } else {
+                        builder.append_float_by_idx(idx, val);
                     }
                 }
-                b'n' => {
-                    pos += 4;
-                    if pos > end {
-                        pos = end;
-                    }
-                    if wanted {
-                        self.builder.append_null(key);
-                    }
-                }
-                _ => {
-                    // Number
-                    let val_start = pos;
-                    let mut is_float = false;
-                    while pos < end {
-                        let c = buf[pos];
-                        if c == b'.' || c == b'e' || c == b'E' {
-                            is_float = true;
-                        } else if c == b','
-                            || c == b'}'
-                            || c == b' '
-                            || c == b'\t'
-                            || c == b'\n'
-                            || c == b'\r'
-                        {
-                            break;
-                        }
-                        pos += 1;
-                    }
-                    if wanted {
-                        let val = &buf[val_start..pos];
-                        if is_float {
-                            self.builder.append_float(key, val);
-                        } else if parse_int_fast(val).is_some() {
-                            self.builder.append_int(key, val);
-                        } else {
-                            self.builder.append_float(key, val);
-                        }
-                    }
-                }
-            }
-
-            // --- Comma ---
-            pos = skip_ws(buf, pos, end);
-            if pos < end && buf[pos] == b',' {
-                pos += 1;
             }
         }
 
-        self.builder.end_row();
+        // --- Comma ---
+        pos = skip_ws(buf, pos, end);
+        if pos < end && buf[pos] == b',' {
+            pos += 1;
+        }
     }
 
-    pub fn builder(&self) -> &BatchBuilder {
-        &self.builder
-    }
+    builder.end_row();
 }
 
 #[inline(always)]
@@ -203,6 +266,71 @@ fn skip_ws(buf: &[u8], mut pos: usize, end: usize) -> usize {
         }
     }
     pos
+}
+
+// ---------------------------------------------------------------------------
+// SimdScanner — default scanner using IndexedBatchBuilder (3x faster)
+// ---------------------------------------------------------------------------
+
+/// Chunk-level SIMD scanner — drop-in replacement for `Scanner`.
+///
+/// Uses `IndexedBatchBuilder` with bitset-tracked fields and direct
+/// index-based appends for ~3x faster builder performance vs HashMap lookup.
+pub struct SimdScanner {
+    builder: IndexedBatchBuilder,
+    config: ScanConfig,
+}
+
+impl SimdScanner {
+    pub fn new(config: ScanConfig, expected_rows: usize) -> Self {
+        SimdScanner {
+            builder: IndexedBatchBuilder::new(expected_rows, config.keep_raw),
+            config,
+        }
+    }
+
+    /// Scan a buffer of newline-delimited JSON lines and return a RecordBatch.
+    pub fn scan(&mut self, buf: &[u8]) -> RecordBatch {
+        scan_into(buf, &self.config, &mut self.builder);
+        self.builder.finish_batch()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ColumnarSimdScanner — zero-copy scanner with adaptive dictionary encoding
+// ---------------------------------------------------------------------------
+
+/// SIMD scanner using `ColumnarBatchBuilder` for zero-copy scanning
+/// and optional zstd-compressed Arrow IPC output.
+///
+/// During scanning, stores (offset, len) pointers into the input buffer
+/// instead of copying values. On finish, bulk-builds Arrow columns with
+/// adaptive dictionary encoding (Dict<Int8>/Dict<Int16>/plain StringArray
+/// based on runtime cardinality).
+pub struct ColumnarSimdScanner {
+    builder: ColumnarBatchBuilder,
+    config: ScanConfig,
+}
+
+impl ColumnarSimdScanner {
+    pub fn new(config: ScanConfig, expected_rows: usize) -> Self {
+        ColumnarSimdScanner {
+            builder: ColumnarBatchBuilder::new(expected_rows, config.keep_raw),
+            config,
+        }
+    }
+
+    /// Scan and return an uncompressed RecordBatch with adaptive dictionary encoding.
+    pub fn scan(&mut self, buf: &[u8]) -> RecordBatch {
+        scan_into(buf, &self.config, &mut self.builder);
+        self.builder.finish_batch(buf)
+    }
+
+    /// Scan and return zstd-compressed Arrow IPC bytes.
+    pub fn scan_compressed(&mut self, buf: &[u8]) -> Vec<u8> {
+        scan_into(buf, &self.config, &mut self.builder);
+        self.builder.finish_batch_compressed(buf)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -338,7 +466,12 @@ mod tests {
     fn test_scan_keep_raw() {
         let line = br#"{"msg":"hello"}"#;
         let input = [line.as_slice(), b"\n"].concat();
-        let mut s = default_scanner(4);
+        let config = ScanConfig {
+            wanted_fields: vec![],
+            extract_all: true,
+            keep_raw: true,
+        };
+        let mut s = SimdScanner::new(config, 4);
         let batch = s.scan(&input);
         let raw = batch
             .column_by_name("_raw")
@@ -519,5 +652,67 @@ mod tests {
             .downcast_ref::<StringArray>()
             .unwrap();
         assert_eq!(ok.value(0), "true");
+    }
+
+    // -----------------------------------------------------------------------
+    // ColumnarSimdScanner tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_columnar_scan_simple() {
+        let input = br#"{"host":"web1","status":200,"latency":1.5}
+{"host":"web2","status":404,"latency":0.3}
+"#;
+        let config = ScanConfig {
+            wanted_fields: vec![],
+            extract_all: true,
+            keep_raw: false,
+        };
+        let mut s = ColumnarSimdScanner::new(config, 4);
+        let batch = s.scan(input);
+        assert_eq!(batch.num_rows(), 2);
+        // Columnar builder uses dictionary encoding for low-cardinality strings,
+        // so we check via the column name and row count.
+        assert!(batch.column_by_name("host_str").is_some());
+        assert!(batch.column_by_name("status_int").is_some());
+        assert!(batch.column_by_name("latency_float").is_some());
+    }
+
+    #[test]
+    fn test_columnar_scan_compressed() {
+        let input = br#"{"level":"INFO","msg":"hello"}
+{"level":"WARN","msg":"world"}
+"#;
+        let config = ScanConfig {
+            wanted_fields: vec![],
+            extract_all: true,
+            keep_raw: false,
+        };
+        let mut s = ColumnarSimdScanner::new(config, 4);
+        let ipc_bytes = s.scan_compressed(input);
+        // Verify we got valid IPC data (starts with Arrow magic bytes)
+        assert!(!ipc_bytes.is_empty());
+        // Decompress and verify
+        let cursor = std::io::Cursor::new(ipc_bytes);
+        let reader = arrow::ipc::reader::StreamReader::try_new(cursor, None).unwrap();
+        let batches: Vec<_> = reader.into_iter().map(|r| r.unwrap()).collect();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].num_rows(), 2);
+    }
+
+    #[test]
+    fn test_columnar_batch_reuse() {
+        let input = br#"{"x":"a"}
+{"x":"b"}
+"#;
+        let config = ScanConfig {
+            wanted_fields: vec![],
+            extract_all: true,
+            keep_raw: false,
+        };
+        let mut s = ColumnarSimdScanner::new(config, 4);
+        let _b1 = s.scan(input);
+        let b2 = s.scan(input);
+        assert_eq!(b2.num_rows(), 2);
     }
 }

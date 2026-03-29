@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use arrow::array::{ArrayRef, Float64Builder, Int64Builder, StringBuilder};
 use arrow::datatypes::{DataType, Field, Schema};
-use arrow::record_batch::RecordBatch;
+use arrow::record_batch::{RecordBatch, RecordBatchOptions};
 
 use crate::batch_builder::{parse_float_fast, parse_int_fast};
 
@@ -312,10 +312,8 @@ impl IndexedBatchBuilder {
         }
 
         let schema = Arc::new(Schema::new(schema_fields));
-        if arrays.is_empty() {
-            RecordBatch::new_empty(schema)
-        } else {
-            RecordBatch::try_new(schema, arrays).expect("indexed_builder: schema/array mismatch")
-        }
+        let opts = RecordBatchOptions::new().with_row_count(Some(self.row_count));
+        RecordBatch::try_new_with_options(schema, arrays, &opts)
+            .expect("indexed_builder: schema/array mismatch")
     }
 }

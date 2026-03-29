@@ -13,7 +13,7 @@ use arrow::array::builder::StringDictionaryBuilder;
 use arrow::array::{ArrayRef, Float64Array, Int64Array, StringBuilder};
 use arrow::buffer::NullBuffer;
 use arrow::datatypes::{DataType, Field, Int8Type, Int16Type, Schema};
-use arrow::record_batch::RecordBatch;
+use arrow::record_batch::{RecordBatch, RecordBatchOptions};
 
 use crate::batch_builder::{parse_float_fast, parse_int_fast};
 
@@ -384,11 +384,9 @@ impl ColumnarBatchBuilder {
         }
 
         let schema = Arc::new(Schema::new(schema_fields));
-        if arrays.is_empty() {
-            RecordBatch::new_empty(schema)
-        } else {
-            RecordBatch::try_new(schema, arrays).expect("columnar_builder: schema/array mismatch")
-        }
+        let opts = RecordBatchOptions::new().with_row_count(Some(num_rows));
+        RecordBatch::try_new_with_options(schema, arrays, &opts)
+            .expect("columnar_builder: schema/array mismatch")
     }
 
     /// Bulk-build and compress to Arrow IPC format with zstd compression.

@@ -38,7 +38,7 @@ impl Default for ScanConfig {
         ScanConfig {
             wanted_fields: vec![],
             extract_all: true,
-            keep_raw: true,
+            keep_raw: false,
         }
     }
 }
@@ -492,7 +492,12 @@ mod tests {
     fn test_scan_keep_raw() {
         let line = br#"{"msg":"hello"}"#;
         let input = [line.as_slice(), b"\n"].concat();
-        let mut s = default_scanner(4);
+        let config = ScanConfig {
+            wanted_fields: vec![],
+            extract_all: true,
+            keep_raw: true,
+        };
+        let mut s = Scanner::new(config, 4);
         let batch = s.scan(&input);
         let raw = batch
             .column_by_name("_raw")
