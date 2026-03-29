@@ -6,8 +6,16 @@ on:
   pull_request:
     branches: [master]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
 jobs:
   check:
+    name: Lint & Test (Linux)
     runs-on: ubuntu-latest
     env:
       RUSTC_WRAPPER: ""
@@ -19,12 +27,67 @@ jobs:
           components: clippy, rustfmt
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+
+      # Install tools from pre-built binaries (not cargo install, which compiles from source).
+      - name: Install tools
+        run: |
+          curl -sSL https://just.systems/install.sh | bash -s -- --to /usr/local/bin
+          curl -sSL https://github.com/tamasfe/taplo/releases/latest/download/taplo-linux-x86_64.gz | gunzip > /usr/local/bin/taplo && chmod +x /usr/local/bin/taplo
+          DENY_URL=$(curl -sSL -o /dev/null -w '%{url_effective}' https://github.com/EmbarkStudios/cargo-deny/releases/latest) && \
+            DENY_VER=$(basename "$DENY_URL") && \
+            curl -sSL "https://github.com/EmbarkStudios/cargo-deny/releases/download/${DENY_VER}/cargo-deny-${DENY_VER}-x86_64-unknown-linux-musl.tar.gz" | tar xz -C /tmp && \
+            mv /tmp/cargo-deny-*/cargo-deny /usr/local/bin/
 
       - name: Format check
-        run: cargo fmt --check
+        run: just fmt-check
 
       - name: Clippy
-        run: cargo clippy -- -D warnings
+        run: just clippy
+
+      - name: TOML check
+        run: just toml-check
+
+      - name: Dependency audit
+        run: just deny
+
+      - name: Typos
+        uses: crate-ci/typos@v1
+
+      # Tests reuse clippy's compiled artifacts (same dev profile).
+      - name: Tests
+        run: just test
+
+      # Verify release profile compiles (catches LTO issues, etc.)
+      - name: Release check
+        run: cargo check --release
+
+  test-macos:
+    name: Test (macOS)
+    runs-on: macos-latest
+    env:
+      RUSTC_WRAPPER: ""
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/master' }}
 
       - name: Tests
         run: cargo test
+
+  actionlint:
+    name: Actionlint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install actionlint
+        run: bash <(curl -sSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+
+      - name: Run actionlint
+        run: ./actionlint
