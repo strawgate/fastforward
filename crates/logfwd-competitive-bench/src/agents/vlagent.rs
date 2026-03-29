@@ -10,6 +10,7 @@ use crate::fake_k8s::{FakeK8sApi, FakeK8sConfig};
 use crate::runner::{self, BenchContext};
 
 const VERSION: &str = "1.48.0";
+const DOCKER_IMAGE: &str = "victoriametrics/vlagent";
 const FAKE_K8S_PORT: u16 = 16443;
 const VLAGENT_PORT: u16 = 9429;
 const CONTAINER_ID: &str = "deadbeef0123456789abcdef";
@@ -28,6 +29,10 @@ impl Agent for Vlagent {
 
     fn binary_name(&self) -> &str {
         "vlagent-prod"
+    }
+
+    fn docker_image(&self) -> Option<String> {
+        Some(format!("{DOCKER_IMAGE}:v{VERSION}"))
     }
 
     fn download_url(&self, os: &str, arch: &str) -> Option<String> {

@@ -1,17 +1,22 @@
 //! Competitive benchmark harness: logfwd vs vector vs fluent-bit vs filebeat
 //! vs otelcol-contrib vs vlagent.
 //!
-//! Downloads competitor binaries into a temp directory, generates a JSON log
-//! file, then runs each agent against a blackhole HTTP sink and measures
-//! wall-clock throughput.
+//! Downloads competitor binaries (or pulls Docker images) into a temp directory,
+//! generates a JSON log file, then runs each agent against a blackhole HTTP sink
+//! and measures wall-clock throughput.
 //!
 //! Usage:
 //!   cargo run -p logfwd-competitive-bench --release -- [OPTIONS]
 //!
 //!   --lines N        Number of JSON log lines to generate (default: 5_000_000)
 //!   --agents A,B,C   Comma-separated agents to run (default: all available)
-//!   --markdown        Output results as markdown table
-//!   --no-download    Only use agents already on PATH
+//!   --markdown       Output results as markdown table
+//!   --no-download        Only use agents already on PATH (binary mode only)
+//!   --docker             Run agents in Docker containers with resource limits
+//!   --cpus N             CPU limit per container (default: 1, Docker mode only)
+//!   --memory N           Memory limit per container (default: 1g, Docker mode only)
+//!   --profile DIR        Write CPU flamegraph + memory profile to DIR
+//!   --dhat-binary PATH   logfwd binary built with --features dhat-heap
 
 mod agents;
 mod blackhole;
@@ -23,12 +28,17 @@ mod runner;
 use std::path::PathBuf;
 use std::process;
 
-use runner::{BenchContext, BenchResult};
+use runner::{BenchContext, BenchResult, DockerLimits};
 
 use crate::agents::{Agent, all_agents};
 
 fn main() {
     let args = Args::parse();
+
+    if args.docker && !runner::docker_available() {
+        eprintln!("ERROR: --docker requires Docker to be installed and running");
+        process::exit(1);
+    }
 
     let bench_dir = tempfile::tempdir().unwrap_or_else(|e| {
         eprintln!("ERROR: failed to create temp dir: {e}");
@@ -62,17 +72,56 @@ fn main() {
         selected
     };
 
-    // Resolve binaries: env override → PATH → download.
-    eprintln!("=== Resolving agent binaries ===");
-    let mut available: Vec<(&dyn Agent, PathBuf)> = Vec::new();
+    // Resolve agent binaries/images.
+    let mode_label = if args.docker { "docker" } else { "binary" };
+    eprintln!("=== Resolving agents ({mode_label} mode) ===");
+
+    let mut available: Vec<ResolvedAgent> = Vec::new();
     for agent in &agents {
-        match resolve_binary(agent, &bin_dir, args.no_download) {
-            Some(path) => {
-                eprintln!("  {:<14} {}", format!("{}:", agent.name()), path.display());
-                available.push((*agent, path));
+        if args.docker {
+            match resolve_docker(agent) {
+                Some(image) => {
+                    eprintln!("  {:<14} {}", format!("{}:", agent.name()), image);
+                    available.push(ResolvedAgent {
+                        agent: *agent,
+                        binary: None,
+                        image: Some(image),
+                    });
+                }
+                None => {
+                    // Fall back to binary mode for agents without Docker images (logfwd).
+                    match resolve_binary(agent, &bin_dir, args.no_download) {
+                        Some(path) => {
+                            eprintln!(
+                                "  {:<14} {} (binary, no Docker image)",
+                                format!("{}:", agent.name()),
+                                path.display()
+                            );
+                            available.push(ResolvedAgent {
+                                agent: *agent,
+                                binary: Some(path),
+                                image: None,
+                            });
+                        }
+                        None => {
+                            eprintln!("  {:<14} (skipped)", format!("{}:", agent.name()));
+                        }
+                    }
+                }
             }
-            None => {
-                eprintln!("  {:<14} (skipped)", format!("{}:", agent.name()));
+        } else {
+            match resolve_binary(agent, &bin_dir, args.no_download) {
+                Some(path) => {
+                    eprintln!("  {:<14} {}", format!("{}:", agent.name()), path.display());
+                    available.push(ResolvedAgent {
+                        agent: *agent,
+                        binary: Some(path),
+                        image: None,
+                    });
+                }
+                None => {
+                    eprintln!("  {:<14} (skipped)", format!("{}:", agent.name()));
+                }
             }
         }
     }
@@ -99,17 +148,17 @@ fn main() {
 
     // Start blackhole.
     let blackhole_addr = "127.0.0.1:19877";
-    let logfwd_bin = available
-        .iter()
-        .find(|(a, _)| a.name() == "logfwd")
-        .map(|(_, p)| p.clone());
-
-    let agent_names: Vec<_> = available.iter().map(|(a, _)| a.name()).collect();
+    let agent_names: Vec<_> = available.iter().map(|r| r.agent.name()).collect();
     eprintln!("=== Agents: {} ===", agent_names.join(","));
+    if args.docker {
+        eprintln!(
+            "=== Docker: --cpus {} --memory {} ===",
+            args.docker_limits.cpus, args.docker_limits.memory
+        );
+    }
     eprintln!("=== Blackhole sink: http://{blackhole_addr} ===");
     eprintln!();
 
-    // Start blackhole once, reuse for all agents.
     let blackhole = blackhole::Blackhole::start(blackhole_addr).unwrap_or_else(|e| {
         eprintln!("ERROR: failed to start blackhole: {e}");
         process::exit(1);
@@ -126,28 +175,50 @@ fn main() {
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
 
-    // Run benchmarks.
+    // In Docker on macOS, containers reach the host via host.docker.internal.
+    // On Linux with --network=host, localhost works directly.
+    let docker_blackhole_addr = if args.docker && cfg!(not(target_os = "linux")) {
+        blackhole_addr.replace("127.0.0.1", "host.docker.internal")
+    } else {
+        blackhole_addr.to_string()
+    };
+
     let ctx = BenchContext {
         bench_dir: bench_dir.path().to_path_buf(),
         data_file,
         blackhole_addr: blackhole_addr.to_string(),
+        docker_blackhole_addr,
         lines: args.lines,
-        logfwd_binary: logfwd_bin,
     };
 
+    // Run benchmarks.
     let mut results: Vec<BenchResult> = Vec::new();
-    for (agent, binary) in &available {
-        match runner::run_agent(*agent, binary, &ctx, &blackhole) {
-            Ok(result) => {
-                print_result_stderr(&result, args.lines);
-                results.push(result);
+    for resolved in &available {
+        let result = if let Some(image) = &resolved.image {
+            runner::run_agent_docker(
+                resolved.agent,
+                image,
+                &ctx,
+                &blackhole,
+                &args.docker_limits,
+            )
+        } else if let Some(binary) = &resolved.binary {
+            runner::run_agent(resolved.agent, binary, &ctx, &blackhole)
+        } else {
+            Err("no binary or image available".to_string())
+        };
+
+        match result {
+            Ok(r) => {
+                print_result_stderr(&r, args.lines);
+                results.push(r);
             }
             Err(e) => {
-                eprintln!("--- {} ---", agent.name());
+                eprintln!("--- {} ---", resolved.agent.name());
                 eprintln!("  ERROR: {e}");
                 eprintln!();
                 results.push(BenchResult {
-                    name: agent.name().to_string(),
+                    name: resolved.agent.name().to_string(),
                     lines_done: 0,
                     elapsed_ms: 0,
                 });
@@ -157,17 +228,102 @@ fn main() {
 
     // Output summary.
     if args.markdown {
-        print_markdown(&results, args.lines, file_size);
+        print_markdown(&results, args.lines, file_size, &args);
     } else {
         print_table(&results, args.lines, file_size);
+    }
+
+    // Profiling pass (logfwd only).
+    if let Some(ref profile_dir) = args.profile_dir {
+        std::fs::create_dir_all(profile_dir).unwrap_or_else(|e| {
+            eprintln!("ERROR: failed to create profile dir: {e}");
+            process::exit(1);
+        });
+
+        // Find the logfwd binary.
+        let logfwd_resolved = available.iter().find(|r| r.agent.name() == "logfwd");
+
+        if let Some(resolved) = logfwd_resolved.filter(|r| r.binary.is_some()) {
+            let binary = resolved.binary.as_ref().unwrap();
+            let logfwd_agent = resolved.agent;
+
+            eprintln!("=== Profiling logfwd ===");
+
+            // CPU profiling with perf (Linux only).
+            if runner::perf_available() {
+                eprintln!("--- CPU profile (perf record) ---");
+                match runner::run_agent_perf(logfwd_agent, binary, &ctx, &blackhole, profile_dir) {
+                    Ok(perf_data) => {
+                        if runner::inferno_available() {
+                            match runner::generate_flamegraph(&perf_data, profile_dir) {
+                                Ok(_) => {}
+                                Err(e) => eprintln!("  WARN: flamegraph generation failed: {e}"),
+                            }
+                        } else {
+                            eprintln!("  WARN: inferno not found, skipping flamegraph (cargo install inferno)");
+                        }
+                    }
+                    Err(e) => eprintln!("  WARN: perf profiling failed: {e}"),
+                }
+            } else {
+                eprintln!("  SKIP: perf not available (Linux only)");
+            }
+
+            // Memory profiling with dhat-heap.
+            if let Some(ref dhat_binary) = args.dhat_binary {
+                let dhat_path = PathBuf::from(dhat_binary);
+                if dhat_path.exists() {
+                    eprintln!("--- Memory profile (dhat-heap) ---");
+                    match runner::run_agent_dhat(
+                        logfwd_agent,
+                        &dhat_path,
+                        &ctx,
+                        &blackhole,
+                        profile_dir,
+                    ) {
+                        Ok(_) => {}
+                        Err(e) => eprintln!("  WARN: dhat profiling failed: {e}"),
+                    }
+                } else {
+                    eprintln!("  WARN: dhat binary not found at {dhat_binary}");
+                }
+            } else {
+                eprintln!("  SKIP: --dhat-binary not set (build with: cargo build --release --features dhat-heap -p logfwd)");
+            }
+
+            eprintln!();
+        } else {
+            eprintln!("WARN: logfwd binary not available, skipping profiling");
+        }
     }
 }
 
 // ---------------------------------------------------------------------------
-// Binary resolution
+// Agent resolution
 // ---------------------------------------------------------------------------
 
-fn resolve_binary(agent: &&dyn Agent, bin_dir: &std::path::Path, no_download: bool) -> Option<PathBuf> {
+struct ResolvedAgent<'a> {
+    agent: &'a dyn Agent,
+    binary: Option<PathBuf>,
+    image: Option<String>,
+}
+
+fn resolve_docker(agent: &&dyn Agent) -> Option<String> {
+    let image = agent.docker_image()?;
+    match runner::docker_pull(&image) {
+        Ok(()) => Some(image),
+        Err(e) => {
+            eprintln!("  {}: {e}", agent.name());
+            None
+        }
+    }
+}
+
+fn resolve_binary(
+    agent: &&dyn Agent,
+    bin_dir: &std::path::Path,
+    no_download: bool,
+) -> Option<PathBuf> {
     // Check env override.
     let env_var = agent.name().to_uppercase().replace('-', "_");
     if let Ok(val) = std::env::var(&env_var) {
@@ -238,9 +394,16 @@ fn print_result_stderr(result: &BenchResult, total_lines: usize) {
     eprintln!();
 }
 
-fn print_markdown(results: &[BenchResult], lines: usize, file_size: u64) {
+fn print_markdown(results: &[BenchResult], lines: usize, file_size: u64, args: &Args) {
     let mb = file_size as f64 / 1_048_576.0;
-    println!("### Competitive Throughput ({lines} lines, {mb:.1} MB)\n");
+    if args.docker {
+        println!(
+            "### Competitive Throughput ({lines} lines, {mb:.1} MB, Docker: {} CPU / {} RAM)\n",
+            args.docker_limits.cpus, args.docker_limits.memory
+        );
+    } else {
+        println!("### Competitive Throughput ({lines} lines, {mb:.1} MB)\n");
+    }
     println!("| Agent | Time | Throughput |");
     println!("|-------|-----:|-----------:|");
     for r in results {
@@ -252,7 +415,6 @@ fn print_markdown(results: &[BenchResult], lines: usize, file_size: u64) {
         println!("| {} | {}ms | {} |", r.name, r.elapsed_ms, rate);
     }
 
-    // Comparison ratios.
     if results.len() > 1 && results[0].elapsed_ms > 0 {
         println!();
         let base = &results[0];
@@ -307,6 +469,12 @@ struct Args {
     agents: Vec<String>,
     markdown: bool,
     no_download: bool,
+    docker: bool,
+    docker_limits: DockerLimits,
+    /// Directory to write CPU/memory profiles into.
+    profile_dir: Option<PathBuf>,
+    /// Path to a logfwd binary built with --features dhat-heap.
+    dhat_binary: Option<String>,
 }
 
 impl Args {
@@ -317,6 +485,10 @@ impl Args {
             agents: Vec::new(),
             markdown: false,
             no_download: false,
+            docker: false,
+            docker_limits: DockerLimits::default(),
+            profile_dir: None,
+            dhat_binary: None,
         };
 
         let mut i = 1;
@@ -332,9 +504,36 @@ impl Args {
                 }
                 "--markdown" => result.markdown = true,
                 "--no-download" => result.no_download = true,
+                "--docker" => result.docker = true,
+                "--cpus" => {
+                    i += 1;
+                    result.docker_limits.cpus = args[i].clone();
+                }
+                "--memory" => {
+                    i += 1;
+                    result.docker_limits.memory = args[i].clone();
+                }
+                "--profile" => {
+                    i += 1;
+                    result.profile_dir = Some(PathBuf::from(&args[i]));
+                }
+                "--dhat-binary" => {
+                    i += 1;
+                    result.dhat_binary = Some(args[i].clone());
+                }
                 other => {
                     eprintln!("Unknown argument: {other}");
-                    eprintln!("Usage: logfwd-competitive-bench [--lines N] [--agents a,b] [--markdown] [--no-download]");
+                    eprintln!("Usage: logfwd-competitive-bench [OPTIONS]");
+                    eprintln!();
+                    eprintln!("  --lines N            Lines to generate (default: 5000000)");
+                    eprintln!("  --agents A,B,C       Agents to run (default: all)");
+                    eprintln!("  --markdown           Output markdown table");
+                    eprintln!("  --no-download        Skip binary downloads");
+                    eprintln!("  --docker             Run in Docker with resource limits");
+                    eprintln!("  --cpus N             CPU limit per container (default: 1)");
+                    eprintln!("  --memory N           Memory limit per container (default: 1g)");
+                    eprintln!("  --profile DIR        Write CPU/memory profiles to DIR");
+                    eprintln!("  --dhat-binary PATH   logfwd binary built with --features dhat-heap");
                     process::exit(1);
                 }
             }

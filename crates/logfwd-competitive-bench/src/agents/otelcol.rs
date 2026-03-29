@@ -6,6 +6,7 @@ use crate::download::arch_alt;
 use crate::runner::BenchContext;
 
 const VERSION: &str = "0.148.0";
+const DOCKER_IMAGE: &str = "otel/opentelemetry-collector-contrib";
 
 pub struct Otelcol;
 
@@ -23,6 +24,10 @@ impl Agent for Otelcol {
         Some(format!(
             "https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v{VERSION}/otelcol-contrib_{VERSION}_{os}_{alt}.tar.gz"
         ))
+    }
+
+    fn docker_image(&self) -> Option<String> {
+        Some(format!("{DOCKER_IMAGE}:{VERSION}"))
     }
 
     fn write_config(&self, ctx: &BenchContext) -> Result<PathBuf, String> {

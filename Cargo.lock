@@ -2027,6 +2027,7 @@ name = "logfwd-competitive-bench"
 version = "0.1.0"
 dependencies = [
  "flate2",
+ "libc",
  "memchr",
  "serde",
  "serde_json",

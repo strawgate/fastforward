@@ -4,6 +4,9 @@ use std::process::Command;
 use super::{Agent, SetupState};
 use crate::runner::BenchContext;
 
+const VERSION: &str = "4.2.3";
+const DOCKER_IMAGE: &str = "fluent/fluent-bit";
+
 pub struct FluentBit;
 
 impl Agent for FluentBit {
@@ -25,6 +28,10 @@ impl Agent for FluentBit {
         // Return None — fluent-bit must be pre-installed or provided via env.
         // The install script (curl | sh) is not suitable for automated download.
         None
+    }
+
+    fn docker_image(&self) -> Option<String> {
+        Some(format!("{DOCKER_IMAGE}:{VERSION}"))
     }
 
     fn write_config(&self, ctx: &BenchContext) -> Result<PathBuf, String> {

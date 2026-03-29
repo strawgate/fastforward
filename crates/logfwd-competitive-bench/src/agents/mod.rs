@@ -27,7 +27,6 @@ pub struct SetupState {
     pub children: Vec<std::process::Child>,
 }
 
-
 /// A benchmark agent (logfwd, vector, filebeat, etc.).
 pub trait Agent {
     /// Short name used in output (e.g., "vector").
@@ -36,18 +35,39 @@ pub trait Agent {
     /// Name of the binary to search for on PATH.
     fn binary_name(&self) -> &str;
 
-    /// Download URL for this agent, or None if download isn't supported
-    /// (e.g., fluent-bit on macOS).
+    /// Download URL for this agent, or None if download isn't supported.
     fn download_url(&self, os: &str, arch: &str) -> Option<String>;
+
+    /// Docker image tag (e.g., "timberio/vector:0.54.0-debian").
+    /// Returns None if this agent doesn't support Docker mode.
+    fn docker_image(&self) -> Option<String> {
+        None
+    }
+
+    /// Command-line args for Docker mode. The runner handles `docker run`,
+    /// resource limits, network, and volume mounts — this just returns the
+    /// container entrypoint args.
+    fn docker_args(&self, config: &Path, ctx: &BenchContext) -> Vec<String> {
+        // Default: same as binary command args.
+        let cmd = self.command(Path::new("/unused"), config, ctx);
+        cmd.get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect()
+    }
+
+    /// Extra volume mounts for Docker mode, as (host_path, container_path) pairs.
+    /// The runner always mounts bench_dir → /bench.
+    fn docker_volumes(&self, _ctx: &BenchContext) -> Vec<(PathBuf, PathBuf)> {
+        Vec::new()
+    }
 
     /// Write a config file for this agent. Returns path to the config.
     fn write_config(&self, ctx: &BenchContext) -> Result<PathBuf, String>;
 
-    /// Build the Command to launch this agent.
+    /// Build the Command to launch this agent in binary mode.
     fn command(&self, binary: &Path, config: &Path, ctx: &BenchContext) -> Command;
 
     /// Optional pre-flight setup (e.g., fake K8s API for vlagent).
-    /// Returns state that will be passed to `teardown()`.
     fn setup(&self, _ctx: &BenchContext) -> Result<SetupState, String> {
         Ok(SetupState::default())
     }
@@ -58,7 +78,6 @@ pub trait Agent {
             let _ = child.kill();
             let _ = child.wait();
         }
-        // Handles drop automatically.
     }
 }
 

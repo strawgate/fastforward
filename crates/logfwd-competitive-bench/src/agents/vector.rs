@@ -5,6 +5,7 @@ use super::{Agent, SetupState};
 use crate::runner::BenchContext;
 
 const VERSION: &str = "0.54.0";
+const DOCKER_IMAGE: &str = "timberio/vector";
 
 pub struct Vector;
 
@@ -28,6 +29,10 @@ impl Agent for Vector {
         Some(format!(
             "https://github.com/vectordotdev/vector/releases/download/v{VERSION}/vector-{VERSION}-{target}.tar.gz"
         ))
+    }
+
+    fn docker_image(&self) -> Option<String> {
+        Some(format!("{DOCKER_IMAGE}:{VERSION}-debian"))
     }
 
     fn write_config(&self, ctx: &BenchContext) -> Result<PathBuf, String> {
@@ -54,6 +59,9 @@ sinks:
     framing:
       method: newline_delimited
     method: post
+    batch:
+      max_bytes: 1048576
+      timeout_secs: 1
 "#,
             data_dir = data_dir.display(),
             data_file = ctx.data_file.display(),

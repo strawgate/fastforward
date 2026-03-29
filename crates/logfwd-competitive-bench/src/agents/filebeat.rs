@@ -6,6 +6,7 @@ use crate::download::arch_alt;
 use crate::runner::BenchContext;
 
 const VERSION: &str = "8.17.0";
+const DOCKER_IMAGE: &str = "docker.elastic.co/beats/filebeat";
 
 pub struct Filebeat;
 
@@ -28,6 +29,10 @@ impl Agent for Filebeat {
         Some(format!(
             "https://artifacts.elastic.co/downloads/beats/filebeat/filebeat-{VERSION}-{os}-{fb_arch}.tar.gz"
         ))
+    }
+
+    fn docker_image(&self) -> Option<String> {
+        Some(format!("{DOCKER_IMAGE}:{VERSION}"))
     }
 
     fn write_config(&self, ctx: &BenchContext) -> Result<PathBuf, String> {
