@@ -1,0 +1,61 @@
+use std::io;
+use std::path::PathBuf;
+
+use crate::tail::{FileTailer, TailConfig, TailEvent};
+
+/// Events produced by an input source.
+pub enum InputEvent {
+    /// New data read from the source.
+    Data { bytes: Vec<u8> },
+    /// The underlying file was rotated (new inode).
+    Rotated,
+    /// The underlying file was truncated.
+    Truncated,
+}
+
+/// Trait for input sources that produce raw bytes.
+pub trait InputSource: Send {
+    /// Poll for new events. Returns empty vec if no new data.
+    fn poll(&mut self) -> io::Result<Vec<InputEvent>>;
+    /// Name of this input (from config).
+    fn name(&self) -> &str;
+}
+
+/// An input source backed by a `FileTailer`.
+pub struct FileInput {
+    name: String,
+    tailer: FileTailer,
+}
+
+impl FileInput {
+    /// Create a new `FileInput` wrapping a `FileTailer`.
+    pub fn new(name: String, paths: &[PathBuf], config: TailConfig) -> io::Result<Self> {
+        let tailer = FileTailer::new(paths, config)?;
+        Ok(FileInput { name, tailer })
+    }
+}
+
+impl InputSource for FileInput {
+    fn poll(&mut self) -> io::Result<Vec<InputEvent>> {
+        let tail_events = self.tailer.poll()?;
+        let mut events = Vec::with_capacity(tail_events.len());
+        for te in tail_events {
+            match te {
+                TailEvent::Data { bytes, .. } => {
+                    events.push(InputEvent::Data { bytes });
+                }
+                TailEvent::Rotated { .. } => {
+                    events.push(InputEvent::Rotated);
+                }
+                TailEvent::Truncated { .. } => {
+                    events.push(InputEvent::Truncated);
+                }
+            }
+        }
+        Ok(events)
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+}
