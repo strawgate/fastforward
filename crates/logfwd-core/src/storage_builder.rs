@@ -124,6 +124,12 @@ impl StorageBuilder {
         if self.check_dup(idx) {
             return;
         }
+        // StringArray requires valid UTF-8.  JSON is always UTF-8 in production;
+        // for fuzz / corrupted input we skip non-UTF-8 bytes rather than storing
+        // them and triggering UB later in finish_batch.
+        if std::str::from_utf8(value).is_err() {
+            return;
+        }
         let fc = &mut self.fields[idx];
         fc.has_str = true;
         fc.str_values.push((self.row_count, value.to_vec()));
@@ -173,8 +179,10 @@ impl StorageBuilder {
         let mut arrays: Vec<ArrayRef> = Vec::with_capacity(self.fields.len() + 1);
 
         for fc in &self.fields {
-            // SAFETY: field names are JSON keys, guaranteed valid UTF-8.
-            let name = unsafe { std::str::from_utf8_unchecked(&fc.name) };
+            // Field names come from JSON keys (valid UTF-8 in well-formed input).
+            // Use from_utf8_lossy so that fuzz inputs with arbitrary bytes are
+            // handled gracefully instead of triggering undefined behaviour.
+            let name = String::from_utf8_lossy(&fc.name);
 
             if fc.has_int {
                 let mut values = vec![0i64; num_rows];
@@ -217,9 +225,12 @@ impl StorageBuilder {
                 let mut vi = 0;
                 for row in 0..num_rows {
                     if vi < fc.str_values.len() && fc.str_values[vi].0 as usize == row {
-                        // SAFETY: JSON keys and values from the scanner are valid UTF-8 (ASCII subset).
-                        let s = unsafe { std::str::from_utf8_unchecked(&fc.str_values[vi].1) };
-                        builder.append_value(s);
+                        // String values come from the JSON input.  Use
+                        // from_utf8_lossy so that non-UTF-8 fuzz input is
+                        // handled safely (replacement characters) rather than
+                        // invoking undefined behaviour.
+                        let s = String::from_utf8_lossy(&fc.str_values[vi].1);
+                        builder.append_value(&*s);
                         vi += 1;
                     } else {
                         builder.append_null();
@@ -233,7 +244,7 @@ impl StorageBuilder {
         if self.keep_raw && !self.raw_values.is_empty() {
             let mut builder = StringBuilder::with_capacity(num_rows, num_rows * 128);
             for val in &self.raw_values {
-                builder.append_value(unsafe { std::str::from_utf8_unchecked(val) });
+                builder.append_value(&*String::from_utf8_lossy(val));
             }
             for _ in self.raw_values.len()..num_rows {
                 builder.append_null();
