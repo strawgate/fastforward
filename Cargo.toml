@@ -6,6 +6,7 @@ members = [
     "crates/logfwd-transform",
     "crates/logfwd-output",
     "crates/logfwd",
+    "crates/logfwd-bench",
 ]
 
 [workspace.dependencies]
