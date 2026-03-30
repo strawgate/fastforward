@@ -399,7 +399,9 @@ impl Pipeline {
         // through tx before exiting. We must join them *before* draining
         // rx so their final sends succeed (rx is still open).
         for h in input_handles {
-            let _ = h.join();
+            if let Err(e) = h.join() {
+                eprintln!("pipeline: input thread panicked: {e:?}");
+            }
         }
         // All tx clones are now dropped, so rx.recv() returns None after
         // the remaining buffered messages are consumed.
