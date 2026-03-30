@@ -12,4 +12,7 @@ RUN --mount=type=cache,target=/src/target \
 
 FROM gcr.io/distroless/cc-debian12:nonroot
 COPY --from=builder /logfwd /usr/local/bin/logfwd
+EXPOSE 9090
+# Health checks should be configured at the orchestrator level (e.g. k8s
+# liveness/readiness probes) since distroless images have no shell.
 ENTRYPOINT ["logfwd"]

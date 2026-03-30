@@ -2,4 +2,4 @@ target/
 .git/
 *.o
 profile.json.gz
-benches/
+bench/
