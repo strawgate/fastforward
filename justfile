@@ -71,6 +71,10 @@ build-pgo:
 bench:
     cargo bench -p logfwd-bench
 
+# Run memory usage benchmark at different event rates
+bench-memory:
+    cargo run --bin mem-bench -p logfwd-bench --release
+
 # Run competitive benchmarks (binary mode, local dev)
 bench-competitive *ARGS:
     cargo run -p logfwd-competitive-bench --release -- {{ARGS}}
