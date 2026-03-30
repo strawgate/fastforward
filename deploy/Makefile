@@ -11,10 +11,14 @@ build-logfwd:
 
 bench-up-logfwd: build-logfwd
 	kubectl create namespace collectors 2>/dev/null || true
+	kubectl apply -f deploy/configmap.yml
+	kubectl apply -f deploy/rbac.yml
 	kubectl apply -f deploy/daemonset.yml
 
 bench-down-logfwd:
 	kubectl delete -f deploy/daemonset.yml 2>/dev/null || true
+	kubectl delete -f deploy/rbac.yml 2>/dev/null || true
+	kubectl delete -f deploy/configmap.yml 2>/dev/null || true
 
 # Quick test: verify the daemon starts and connects
 test-logfwd:
