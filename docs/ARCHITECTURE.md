@@ -65,9 +65,9 @@ Type conflicts produce separate columns: `status_int` and `status_str` can coexi
 
 ## What's implemented vs stub
 
-**Implemented:** file input, CRI/JSON/Raw parsing, SIMD scanner, two builder backends, DataFusion SQL transforms, custom UDFs, enrichment (K8s path, host info, static labels), OTLP output, JSON lines output, stdout output, diagnostics server, OTel metrics.
+**Implemented:** file input, CRI/JSON/Raw parsing, SIMD scanner, two builder backends, DataFusion SQL transforms, custom UDFs (grok via `grok` crate, regexp_extract), enrichment (K8s path, host info, static labels), OTLP output, JSON lines output, stdout output, diagnostics server, OTel metrics, signal handling (SIGINT/SIGTERM via CancellationToken), graceful shutdown.
 
-**Not yet:** TCP/UDP/OTLP input, Elasticsearch/Loki/Parquet output, file offset checkpointing, disk queue, signal handling, graceful shutdown.
+**Not yet:** TCP/UDP/OTLP input, Elasticsearch/Loki/Parquet output, file offset checkpointing, disk queue, async pipeline.
 
 ## Historical research
 
