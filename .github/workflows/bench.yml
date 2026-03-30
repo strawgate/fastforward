@@ -119,10 +119,10 @@ jobs:
         env:
           RUSTFLAGS: "-Ctarget-cpu=x86-64-v3"
         run: |
-          # Run benchmarks, strip ANSI codes, keep only result lines.
+          # Run benchmarks, strip ANSI codes, keep only name + time + throughput lines.
           cargo bench -p logfwd-bench 2>&1 \
             | sed 's/\x1b\[[0-9;]*m//g' \
-            | grep -E '(^Benchmarking |^[a-z_/]|time:|thrpt:)' \
+            | grep -E '(^[a-z_/]+.*$|^\s+time:|^\s+thrpt:)' \
             > micro_raw.txt || true
 
           # Format as markdown.
