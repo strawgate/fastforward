@@ -142,8 +142,12 @@ logfwd --generate-json <n> <file>    Generate synthetic test data
 logfwd --version                     Print version
 ```
 
-## Architecture
+## Documentation
 
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for internal design.
-
-See [DEVELOPING.md](DEVELOPING.md) for development guide.
+| Guide | Description |
+|-------|-------------|
+| [docs/CONFIG_REFERENCE.md](docs/CONFIG_REFERENCE.md) | All YAML fields, input/output types, SQL transforms, UDFs, enrichment |
+| [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | Docker, Kubernetes DaemonSet, resource sizing, OTLP integration |
+| [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Common errors, diagnosing dropped data, /api/pipelines, debug mode |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Pipeline data flow, crate map, scanner internals |
+| [DEVELOPING.md](DEVELOPING.md) | Build, test, lint, bench commands; hard-won implementation notes |
