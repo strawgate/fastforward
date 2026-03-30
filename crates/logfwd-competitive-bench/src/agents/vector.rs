@@ -72,7 +72,10 @@ transforms:
 
         let cfg_path = ctx.bench_dir.join("vector.yaml");
         let config = format!(
-            r#"data_dir: "{data_dir}"
+            r#"api:
+  enabled: true
+  address: "127.0.0.1:8686"
+data_dir: "{data_dir}"
 sources:
   bench_in:
     type: file
@@ -107,6 +110,12 @@ sources:
         let mut cmd = Command::new(binary);
         cmd.arg("--config").arg(config).arg("--quiet");
         cmd
+    }
+
+    fn stats_url(&self) -> Option<String> {
+        // Vector exposes GraphQL at :8686/graphql, but parsing it is complex.
+        // The runner will fall back to procfs-based RSS/CPU collection.
+        None
     }
 
     fn setup(&self, _ctx: &BenchContext) -> Result<SetupState, String> {

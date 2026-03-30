@@ -80,6 +80,34 @@ pub struct SetupState {
     pub children: Vec<std::process::Child>,
 }
 
+/// A snapshot of runtime metrics collected during a benchmark run.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct AgentSample {
+    pub elapsed_sec: f64,
+    /// Resident set size in bytes (0 if unavailable).
+    #[serde(skip_serializing_if = "is_zero_u64")]
+    pub rss_bytes: u64,
+    /// CPU user time in milliseconds (cumulative).
+    #[serde(skip_serializing_if = "is_zero_u64")]
+    pub cpu_user_ms: u64,
+    /// CPU system time in milliseconds (cumulative).
+    #[serde(skip_serializing_if = "is_zero_u64")]
+    pub cpu_sys_ms: u64,
+    /// Lines/events processed (cumulative).
+    #[serde(skip_serializing_if = "is_zero_u64")]
+    pub events_total: u64,
+    /// Bytes ingested (cumulative).
+    #[serde(skip_serializing_if = "is_zero_u64")]
+    pub bytes_total: u64,
+    /// Output errors (cumulative).
+    #[serde(skip_serializing_if = "is_zero_u64")]
+    pub errors_total: u64,
+}
+
+fn is_zero_u64(v: &u64) -> bool {
+    *v == 0
+}
+
 /// A benchmark agent (logfwd, vector, filebeat, etc.).
 pub trait Agent {
     /// Short name used in output (e.g., "vector").
@@ -123,6 +151,18 @@ pub trait Agent {
     /// Optional pre-flight setup (e.g., fake K8s API for vlagent).
     fn setup(&self, _ctx: &BenchContext) -> Result<SetupState, String> {
         Ok(SetupState::default())
+    }
+
+    /// URL to poll for runtime stats, or None if this agent doesn't expose stats.
+    /// The bench harness polls this every second during the run.
+    fn stats_url(&self) -> Option<String> {
+        None
+    }
+
+    /// Parse agent-specific stats JSON into a common AgentSample.
+    /// The `body` is the HTTP response body from `stats_url()`.
+    fn parse_stats(&self, _body: &str) -> Option<AgentSample> {
+        None
     }
 
     /// Clean up after benchmark.

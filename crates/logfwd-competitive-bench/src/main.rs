@@ -436,6 +436,7 @@ fn run_one(
                 lines_done: 0,
                 elapsed_ms: 0,
                 iteration,
+                samples: Vec::new(),
             };
             write_jsonl(&r, jsonl_writer);
             results.push(r);
