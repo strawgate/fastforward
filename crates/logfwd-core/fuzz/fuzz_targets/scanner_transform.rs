@@ -26,6 +26,7 @@ fuzz_target!(|data: &[u8]| {
         wanted_fields: vec![],
         extract_all: true,
         keep_raw: false,
+        validate_utf8: false,
     });
     let batch = scanner.scan(data);
 

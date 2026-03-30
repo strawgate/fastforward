@@ -33,6 +33,7 @@ fuzz_target!(|data: &[u8]| {
         wanted_fields: vec![],
         extract_all: true,
         keep_raw: false,
+        validate_utf8: false,
     };
     let mut scanner = StreamingSimdScanner::new(config);
     let batch = scanner.scan(bytes::Bytes::copy_from_slice(data));
@@ -52,6 +53,7 @@ fuzz_target!(|data: &[u8]| {
         ],
         extract_all: false,
         keep_raw: false,
+        validate_utf8: false,
     };
     let mut scanner2 = StreamingSimdScanner::new(config2);
     let batch2 = scanner2.scan(bytes::Bytes::copy_from_slice(data));
