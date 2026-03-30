@@ -15,43 +15,66 @@ SIMD Scanner  ─per source─
     │  walks structural positions directly into Arrow columns
     │  injects _resource_* columns from source metadata
     ▼
-Arrow IPC segment (per-source, pre-transform)
-    │  written to local disk, uploaded to object storage
-    │  THIS is the ack point — source checkpoint advances here
+RecordBatch per source
     │
-    ├─→ real-time path: register as MemTable partitions
-    │   → SQL Transform (DataFusion + enrichment JOINs)
-    │   → output sinks (OTLP / JSON lines / HTTP / stdout)
+    ├─→ [if queue.mode: pre-transform] write Arrow IPC segment → ack source
     │
-    └─→ object storage: raw Arrow tables
-        queryable by DuckDB / Polars / Spark / DataFusion
+    ├─→ register as partitions of `logs` MemTable
+    │   (DataFusion concatenates partitions during query)
+    ▼
+SQL Transform (DataFusion)
+    │  user SQL: SELECT, WHERE, GROUP BY + UDFs
+    │  enrichment tables available via JOIN
+    │  _resource_* columns flow through like any other column
+    ▼
+Post-transform RecordBatch
+    │
+    ├─→ [if queue.mode: post-transform] write Arrow IPC segment → ack source
+    │
+    ▼
+Output Sinks (OTLP / JSON lines / HTTP / stdout)
+    │  in-memory fan-out via bounded channels
+    │  group rows by _resource_* columns for OTLP ResourceLogs
 ```
 
-## Pre-transform persistence
+## Persistence
 
-Storage is pre-transform, per-source Arrow IPC. Each source writes its
-own segments independently. This is the single persistence layer.
+Arrow IPC is the universal segment format. Every persistence point
+writes Arrow IPC File format with atomic seal, and every persistence
+point can target local disk or object storage (S3/GCS/Azure Blob).
 
-**Why pre-transform (not post):**
+**Queue mode is configurable per pipeline:**
 
-- Raw data is re-queryable. You can change the SQL transform and
-  re-process historical data.
-- No duplicate storage. The transform is stateless and re-runnable.
-- Arrow IPC on object storage integrates with the entire Arrow
-  ecosystem — any query engine can read your log segments directly.
-- For the common case (`SELECT * FROM logs`), pre-transform and
-  post-transform data are identical. No wasted storage.
+```yaml
+pipeline:
+  queue:
+    mode: pre-transform   # or post-transform, or none
+    storage: s3://my-bucket/logfwd/pipeline-a/
+    max_bytes: 10GB
+    max_age: 24h
+```
 
-**Enrichment tradeoff:** Enrichment data (K8s pod labels, annotations)
-is looked up at transform time, not stored with the raw data. On replay,
-enrichment reflects current state, not ingest-time state. The
-`_resource_*` columns (source identity: pod name, namespace) ARE stored
-and are always correct — only enrichment table data goes stale.
+**`pre-transform`:** Source segments are the queue. Each source writes
+its own Arrow IPC segments after scanning. Outputs replay from source
+segments and re-run the transform. Raw data is re-queryable with
+different SQL. One copy of data. Enrichment data may be stale on replay
+(`_resource_*` columns are always correct; enrichment table data
+reflects query-time state, not ingest-time).
+
+**`post-transform`:** Shared post-transform queue per pipeline.
+Transform runs once, result is persisted. All outputs share one queue
+with independent cursors. Enrichment baked in at ingest time — correct
+even on replay days later. Can't re-query with different SQL. Second
+copy of data (but usually smaller due to filtering).
+
+**`none` (default):** Pure in-memory fan-out. Transform runs once,
+RecordBatches passed to outputs via bounded channels. Batches drop on
+output failure. Lowest resource usage.
 
 ## End-to-end ack
 
-Sources must NOT acknowledge to their upstream until the Arrow IPC
-segment is durably written (fsync + rename). The ack chain:
+Sources must NOT acknowledge to their upstream until persistence
+confirms durability. The ack chain:
 
 ```
 Scanner produces RecordBatch
@@ -61,39 +84,37 @@ Scanner produces RecordBatch
   → Source advances checkpoint
 ```
 
-Ack latency is scanner + IPC write + fsync, typically 5-15ms. This is
-comparable to Kafka's acks=all (3-15ms). For network sources
-(TCP/HTTP/OTLP receiver), this is the HTTP response time.
+Ack latency is scanner + IPC write + fsync, typically 5-15ms. Comparable
+to Kafka's acks=all (3-15ms).
 
 **File sources** don't need the ack latency to be fast — the log file is
 already durable. The checkpoint just tracks the file offset.
 
-**Network sources** see the full ack latency. If the transform is slow
-(complex GROUP BY), the ack is slow — that's backpressure, and it's
-correct behavior.
+**Network sources** see the full ack latency as their response time.
+
+**When `queue.mode: none`:** No persistence, no ack-after-write. Source
+checkpoints advance after in-memory fan-out. Data can be lost on crash.
 
 ## Output delivery
 
-Outputs read from the pre-transform Arrow IPC segments, run the
-transform, and send. Each output tracks its position independently
-(segment + batch offset). A slow output falls behind in the segment
-list; it doesn't block other outputs or sources.
+**Real-time path (all modes):** Transform runs once per batch cycle,
+result fans out to all outputs via bounded channels.
 
-**Output cursor tracking:** Each output tracks `{ segment_id, batch_offset }`.
-Persisted to a JSON file on each ack. On restart, resume from last
-position.
+**Replay (when queue is enabled):** If an output falls behind or
+restarts, it replays from the queue. With `pre-transform` mode, replay
+re-runs the transform. With `post-transform` mode, replay reads
+transformed segments directly.
+
+**Cursor tracking:** Each output tracks `{ segment_id, batch_offset }`.
+Persisted on each ack. On restart, resume from last position.
 
 **Retention:** TTL (`max_segment_age`) + size (`max_disk_bytes`). When
-either limit is hit, oldest segments are evicted regardless of output
-cursor positions. Outputs that were pointing at evicted segments see a
-gap (tracked in `segments_dropped` metric).
+either limit is hit, oldest segments are evicted regardless of cursor
+positions. Outputs pointing at evicted segments see a gap (tracked in
+`segments_dropped` metric).
 
-**New output cursors:** Default to tail (skip history). Configurable
-`replay_from: oldest` per output.
-
-**Delivery semantics:** At-least-once. Crash-before-ack means
-re-delivery on restart. Monotonic `batch_id` enables optional downstream
-deduplication.
+**Delivery semantics:** At-least-once when queue is enabled.
+Best-effort when queue is `none`.
 
 ## Multi-source pipeline
 
@@ -144,24 +165,47 @@ can coexist.
 
 ## Arrow IPC segment format
 
-**Format:** Arrow IPC File format with atomic seal. Each source writes
-segments independently.
+**Format:** Arrow IPC File format with atomic seal.
 
 **Write path:** `FileWriter` writes to `.tmp` file. On seal:
 `finish()` (writes footer) → `fsync` → atomic `rename` to final path.
 Readers never see incomplete files.
 
 **Segment lifecycle:**
-1. Source scans data into RecordBatch
-2. `FileWriter` writes batch(es) to `.tmp` file
-3. At size threshold (64 MB) or time threshold: seal segment
-4. Upload to object storage (async, background)
-5. Delete local copy after upload confirmed (or retain per policy)
-6. On startup: delete orphaned `.tmp` files
+1. Pipeline writes batch(es) to `.tmp` file via `FileWriter`
+2. At size threshold (64 MB) or time threshold: seal segment
+3. On startup: delete orphaned `.tmp` files
 
-**Object storage:** Segments are uploaded to S3/GCS/Azure Blob after
-sealing. Object storage is the primary durability target. Local disk is
-a staging area.
+**Storage abstraction:** All persistence writes go through a
+`SegmentStore` trait with implementations for local filesystem and
+object storage (S3/GCS/Azure Blob). The same segment format and code
+path is used regardless of storage backend.
+
+## Deployment model
+
+logfwd scales by running more instances. One binary, one pipeline per
+instance. S3 is the coordination layer between instances.
+
+**Single instance:** Source → Scanner → Transform → Output, all in one
+process. Predicate pushdown works. In-memory fan-out. Simple.
+
+**Scaled out:** Multiple instances with different configs, sharing S3
+paths. Each instance is a full logfwd binary.
+
+```
+Instance A (edge collector):
+  file source → scanner → write Arrow IPC to s3://bucket/raw/
+
+Instance B (central processor):
+  s3 source (reads s3://bucket/raw/) → transform → output sinks
+  # or: → write to s3://bucket/transformed/ for another instance
+
+Instance C (dedicated sender):
+  s3 source (reads s3://bucket/transformed/) → output sinks
+```
+
+No custom RPC, no cluster coordination. Arrow IPC on S3 is the
+universal interface. Any instance can read any other's segments.
 
 ## Scanner architecture
 
@@ -223,8 +267,9 @@ stdout output, diagnostics server, OTel metrics, signal handling
 (SIGINT/SIGTERM via CancellationToken), graceful shutdown, async Sink
 trait.
 
-**Not yet:** async pipeline runtime, async Source trait, pre-transform
-Arrow IPC persistence, object storage upload, `_resource_*` column
-injection, OTLP resource grouping, output cursor tracking,
-TCP/UDP/OTLP input, Elasticsearch/Loki/Parquet output, file offset
-checkpointing, SQL rewriter.
+**Not yet:** async pipeline runtime, async Source trait, Arrow IPC
+persistence (pre/post-transform), SegmentStore abstraction (local +
+S3/GCS), object storage upload, `_resource_*` column injection, OTLP
+resource grouping, output cursor tracking, TCP/UDP/OTLP input,
+Elasticsearch/Loki/Parquet output, file offset checkpointing, SQL
+rewriter, S3 source (for scaled-out deployment).
