@@ -284,7 +284,13 @@ macro_rules! bench_scenario {
 
             group.bench_function("SIMD scanner", |b| {
                 let mut scanner = SimdScanner::new($config());
-                b.iter(|| black_box(scanner.scan(black_box(&data)).expect("bench: scan should not fail")))
+                b.iter(|| {
+                    black_box(
+                        scanner
+                            .scan(black_box(&data))
+                            .expect("bench: scan should not fail"),
+                    )
+                })
             });
 
             group.bench_function("sonic-rs DOM", |b| {

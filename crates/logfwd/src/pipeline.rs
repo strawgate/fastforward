@@ -50,6 +50,9 @@ pub struct Pipeline {
     batch_target_bytes: usize,
     batch_timeout: Duration,
     poll_interval: Duration,
+    /// Maximum bytes buffered per input (`json_buf`) before oldest lines are
+    /// dropped. Also passed to format parsers as the partial-line cap.
+    max_buffer_bytes: usize,
 }
 
 impl Pipeline {
@@ -62,6 +65,12 @@ impl Pipeline {
 
         let mut metrics = PipelineMetrics::new(name, transform_sql, meter);
 
+        // 0 in config means "no limit"; default is 64 MiB.
+        let max_buffer_bytes = match config.max_buffer_bytes {
+            Some(0) | None => 64 * 1024 * 1024,
+            Some(n) => n as usize,
+        };
+
         // Build inputs (file only for now).
         let mut inputs = Vec::new();
         for (i, input_cfg) in config.inputs.iter().enumerate() {
@@ -71,7 +80,12 @@ impl Pipeline {
                 .unwrap_or_else(|| format!("input_{i}"));
             let input_type_str = format!("{:?}", input_cfg.input_type).to_lowercase();
             let input_stats = metrics.add_input(&input_name, &input_type_str);
-            inputs.push(build_input_state(&input_name, input_cfg, input_stats)?);
+            inputs.push(build_input_state(
+                &input_name,
+                input_cfg,
+                input_stats,
+                max_buffer_bytes,
+            )?);
         }
 
         // Build outputs.
@@ -102,6 +116,7 @@ impl Pipeline {
             batch_target_bytes: 4 * 1024 * 1024,
             batch_timeout: Duration::from_millis(100),
             poll_interval: Duration::from_millis(10),
+            max_buffer_bytes,
         })
     }
 
@@ -138,6 +153,19 @@ impl Pipeline {
                             input.parser.reset();
                         }
                     }
+                }
+
+                // Collect partial-buffer overflows from the format parser.
+                let parser_overflow = input.parser.take_overflows();
+                if parser_overflow > 0 {
+                    self.metrics.inc_buffer_overflow(parser_overflow);
+                }
+
+                // Drop oldest complete JSON lines if the per-input buffer
+                // exceeds the configured limit.
+                let json_dropped = drop_oldest_to_fit(&mut input.json_buf, self.max_buffer_bytes);
+                if json_dropped > 0 {
+                    self.metrics.inc_buffer_overflow(json_dropped);
                 }
             }
 
@@ -233,11 +261,14 @@ impl Pipeline {
 // Input construction
 // ---------------------------------------------------------------------------
 
-fn build_format_parser(format: &Format) -> Box<dyn FormatParser> {
+fn build_format_parser(format: &Format, max_partial_bytes: usize) -> Box<dyn FormatParser> {
     match format {
-        Format::Cri => Box::new(CriParser::new(2 * 1024 * 1024)),
-        Format::Raw => Box::new(RawParser::new()),
-        _ => Box::new(JsonParser::new()),
+        Format::Cri => Box::new(CriParser::with_max_partial(
+            2 * 1024 * 1024,
+            max_partial_bytes,
+        )),
+        Format::Raw => Box::new(RawParser::with_max_partial(max_partial_bytes)),
+        _ => Box::new(JsonParser::with_max_partial(max_partial_bytes)),
     }
 }
 
@@ -245,6 +276,7 @@ fn build_input_state(
     name: &str,
     cfg: &InputConfig,
     stats: Arc<ComponentStats>,
+    max_buffer_bytes: usize,
 ) -> Result<InputState, String> {
     match cfg.input_type {
         InputType::File => {
@@ -266,7 +298,7 @@ fn build_input_state(
             Ok(InputState {
                 name: name.to_string(),
                 source: Box::new(source),
-                parser: build_format_parser(&format),
+                parser: build_format_parser(&format, max_buffer_bytes),
                 json_buf: Vec::with_capacity(4 * 1024 * 1024),
                 stats,
             })
@@ -283,6 +315,27 @@ fn now_nanos() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos() as u64
+}
+
+/// Drop the oldest complete JSON lines from `buf` until `buf.len() <= max_bytes`.
+///
+/// Lines are newline-terminated, so a clean boundary is found by scanning for
+/// the first `\n` at or after the excess point. Returns the number of bytes
+/// dropped (0 if no overflow).
+fn drop_oldest_to_fit(buf: &mut Vec<u8>, max_bytes: usize) -> u64 {
+    if buf.len() <= max_bytes {
+        return 0;
+    }
+    let excess = buf.len() - max_bytes;
+    // Find the next newline at or after the excess boundary.
+    let drop_to = match memchr::memchr(b'\n', &buf[excess..]) {
+        Some(rel) => excess + rel + 1,
+        // No newline found after the excess point — drop the whole buffer to
+        // prevent an unbounded accumulation of a single giant non-JSON line.
+        None => buf.len(),
+    };
+    buf.drain(..drop_to);
+    drop_to as u64
 }
 
 // ---------------------------------------------------------------------------
@@ -467,5 +520,90 @@ output:
             .lines_total
             .load(Ordering::Relaxed);
         assert!(lines_in > 0, "expected transform_in > 0, got {lines_in}");
+    }
+
+    // -- drop_oldest_to_fit unit tests ----------------------------------------
+
+    #[test]
+    fn drop_oldest_no_overflow() {
+        let mut buf = b"{\"a\":1}\n{\"b\":2}\n".to_vec();
+        let dropped = drop_oldest_to_fit(&mut buf, 100);
+        assert_eq!(dropped, 0);
+        assert_eq!(buf, b"{\"a\":1}\n{\"b\":2}\n");
+    }
+
+    #[test]
+    fn drop_oldest_aligns_to_newline() {
+        // buf = "{\"a\":1}\n{\"b\":2}\n" (16 bytes)
+        // max = 10 → excess = 6, first '\n' after byte 6 is at position 7
+        // so drop_to = 8 (include the newline).
+        let mut buf = b"{\"a\":1}\n{\"b\":2}\n".to_vec();
+        let dropped = drop_oldest_to_fit(&mut buf, 10);
+        assert_eq!(dropped, 8);
+        assert_eq!(buf, b"{\"b\":2}\n");
+    }
+
+    #[test]
+    fn drop_oldest_no_newline_drops_all() {
+        // No newline in the buffer at all — drop everything.
+        let mut buf = b"binary\x00garbage".to_vec();
+        let len = buf.len() as u64;
+        let dropped = drop_oldest_to_fit(&mut buf, 4);
+        assert_eq!(dropped, len);
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn pipeline_buffer_overflow_metric() {
+        use std::sync::atomic::Ordering;
+
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("test.log");
+
+        // Write enough JSON lines to trigger the very small buffer limit.
+        let mut data = String::new();
+        for i in 0..100 {
+            data.push_str(&format!(r#"{{"level":"INFO","msg":"hello {}"}}"#, i));
+            data.push('\n');
+        }
+        std::fs::write(&log_path, data.as_bytes()).unwrap();
+
+        let yaml = format!(
+            r#"
+input:
+  type: file
+  path: {}
+  format: json
+output:
+  type: stdout
+  format: json
+max_buffer_bytes: 50
+"#,
+            log_path.display()
+        );
+        let config = logfwd_config::Config::load_str(&yaml).unwrap();
+        let pipe_cfg = &config.pipelines["default"];
+        let mut pipeline = Pipeline::from_config("default", pipe_cfg, &test_meter()).unwrap();
+
+        pipeline.batch_timeout = Duration::from_millis(10);
+        pipeline.poll_interval = Duration::from_millis(5);
+
+        let shutdown = CancellationToken::new();
+        let sd_clone = shutdown.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(500));
+            sd_clone.cancel();
+        });
+
+        pipeline.run(&shutdown).unwrap();
+
+        let overflows = pipeline
+            .metrics
+            .buffer_overflow_total
+            .load(Ordering::Relaxed);
+        assert!(
+            overflows > 0,
+            "expected buffer_overflow_total > 0, got {overflows}"
+        );
     }
 }

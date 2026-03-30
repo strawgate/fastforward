@@ -131,6 +131,10 @@ pub struct PipelineConfig {
     pub transform: Option<String>,
     #[serde(default, deserialize_with = "deserialize_one_or_many")]
     pub outputs: Vec<OutputConfig>,
+    /// Maximum bytes buffered per input before oldest data is dropped.
+    /// Applies to both the per-input `json_buf` and the parser partial-line
+    /// buffer. Default: 64 MiB. Set to 0 to disable the limit (not recommended).
+    pub max_buffer_bytes: Option<u64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -165,6 +169,9 @@ struct RawConfig {
     input: Option<InputConfig>,
     transform: Option<String>,
     output: Option<OutputConfig>,
+    /// In simple mode this sets `max_buffer_bytes` on the auto-created
+    /// "default" pipeline. Ignored when `pipelines` is used.
+    max_buffer_bytes: Option<u64>,
 
     // Advanced form
     pipelines: Option<HashMap<String, PipelineConfig>>,
@@ -207,6 +214,7 @@ impl Config {
                     inputs: vec![input],
                     transform: raw.transform,
                     outputs: vec![output],
+                    max_buffer_bytes: raw.max_buffer_bytes,
                 };
                 let mut map = HashMap::new();
                 map.insert("default".to_string(), pipeline);

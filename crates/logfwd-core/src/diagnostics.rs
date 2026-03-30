@@ -116,6 +116,9 @@ pub struct PipelineMetrics {
     otel_transform_nanos: Counter<u64>,
     otel_output_nanos: Counter<u64>,
     otel_backpressure_stalls: Counter<u64>,
+    // Buffer overflow (json_buf + parser partial drops)
+    pub buffer_overflow_total: AtomicU64,
+    otel_buffer_overflow: Counter<u64>,
 }
 
 impl PipelineMetrics {
@@ -154,6 +157,8 @@ impl PipelineMetrics {
             otel_transform_nanos: meter.u64_counter("logfwd_stage_transform_nanos").build(),
             otel_output_nanos: meter.u64_counter("logfwd_stage_output_nanos").build(),
             otel_backpressure_stalls: meter.u64_counter("logfwd_backpressure_stalls").build(),
+            buffer_overflow_total: AtomicU64::new(0),
+            otel_buffer_overflow: meter.u64_counter("logfwd_buffer_overflow_total").build(),
             meter: meter.clone(),
             otel_attrs: attrs,
             name,
@@ -245,6 +250,13 @@ impl PipelineMetrics {
         self.backpressure_stalls.fetch_add(1, Ordering::Relaxed);
         self.otel_backpressure_stalls.add(1, &self.otel_attrs);
     }
+
+    /// Increment the buffer-overflow counter. Called when `json_buf` or a
+    /// parser partial buffer was trimmed to stay within `max_buffer_bytes`.
+    pub fn inc_buffer_overflow(&self, n: u64) {
+        self.buffer_overflow_total.fetch_add(n, Ordering::Relaxed);
+        self.otel_buffer_overflow.add(n, &self.otel_attrs);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -321,11 +333,9 @@ impl DiagnosticsServer {
         &self,
         request: tiny_http::Request,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let header = tiny_http::Header::from_bytes(
-            &b"Content-Type"[..],
-            &b"text/html; charset=utf-8"[..],
-        )
-        .map_err(|()| io::Error::other("invalid HTTP header"))?;
+        let header =
+            tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/html; charset=utf-8"[..])
+                .map_err(|()| io::Error::other("invalid HTTP header"))?;
         let resp = tiny_http::Response::from_string(DASHBOARD_HTML).with_header(header);
         request.respond(resp)?;
         Ok(())
@@ -337,9 +347,8 @@ impl DiagnosticsServer {
             r#"{{"status":"ok","uptime_seconds":{},"version":"{}"}}"#,
             uptime, VERSION,
         );
-        let header =
-            tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
-                .map_err(|()| io::Error::other("invalid HTTP header"))?;
+        let header = tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+            .map_err(|()| io::Error::other("invalid HTTP header"))?;
         let resp = tiny_http::Response::from_string(body).with_header(header);
         request.respond(resp)?;
         Ok(())
@@ -429,9 +438,8 @@ impl DiagnosticsServer {
             VERSION,
         );
 
-        let header =
-            tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
-                .map_err(|()| io::Error::other("invalid HTTP header"))?;
+        let header = tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+            .map_err(|()| io::Error::other("invalid HTTP header"))?;
         let resp = tiny_http::Response::from_string(body).with_header(header);
         request.respond(resp)?;
         Ok(())
