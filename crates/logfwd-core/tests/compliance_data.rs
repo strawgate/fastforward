@@ -461,7 +461,7 @@ fn compliance_cri_format() {
     let cri_input = b"2024-01-15T10:30:00.000000000Z stdout F {\"msg\":\"hello\"}\n";
     let mut parser = CriParser::new(2 * 1024 * 1024);
     let mut json_out = Vec::new();
-    let count = parser.process(cri_input, &mut json_out);
+    let (count, _) = parser.process(cri_input, &mut json_out);
     assert_eq!(count, 1, "CRI parser should emit 1 line");
 
     // The CRI parser emits the message portion as a line.
@@ -476,7 +476,7 @@ fn compliance_cri_partial_lines() {
     let cri_input = b"2024-01-15T10:30:00.000000000Z stdout P {\"msg\":\"hel\n2024-01-15T10:30:00.000000000Z stdout F lo\"}\n";
     let mut parser = CriParser::new(2 * 1024 * 1024);
     let mut json_out = Vec::new();
-    let count = parser.process(cri_input, &mut json_out);
+    let (count, _) = parser.process(cri_input, &mut json_out);
 
     // The partial + full should reassemble into one line.
     assert!(
@@ -498,7 +498,7 @@ fn compliance_raw_format() {
     let raw_input = b"This is a plain text log line\n";
     let mut parser = RawParser::new();
     let mut json_out = Vec::new();
-    let count = parser.process(raw_input, &mut json_out);
+    let (count, _) = parser.process(raw_input, &mut json_out);
     assert_eq!(count, 1, "RawParser should emit 1 line");
 
     // Now scan the wrapped JSON with keep_raw=false (the _raw field comes from

@@ -171,8 +171,11 @@ impl Pipeline {
                     match event {
                         InputEvent::Data { bytes, .. } => {
                             input.stats.inc_bytes(bytes.len() as u64);
-                            let n = input.parser.process(&bytes, &mut input.json_buf);
+                            let (n, parse_err) = input.parser.process(&bytes, &mut input.json_buf);
                             input.stats.inc_lines(n as u64);
+                            if parse_err > 0 {
+                                input.stats.inc_parse_errors(parse_err as u64);
+                            }
                         }
                         InputEvent::Rotated | InputEvent::Truncated => {
                             input.parser.reset();
@@ -210,6 +213,8 @@ impl Pipeline {
                     let batch = match self.scanner.scan(combined.into()) {
                         Ok(b) => b,
                         Err(e) => {
+                            self.metrics.inc_scan_error();
+                            self.metrics.inc_dropped_batch();
                             eprintln!("pipeline: scan error (batch dropped): {e}");
                             last_flush = Instant::now();
                             continue;
@@ -227,6 +232,7 @@ impl Pipeline {
                             Ok(r) => r,
                             Err(e) => {
                                 self.metrics.inc_transform_error();
+                                self.metrics.inc_dropped_batch();
                                 eprintln!("pipeline: transform error (batch dropped): {e}");
                                 last_flush = Instant::now();
                                 continue;
@@ -246,6 +252,7 @@ impl Pipeline {
                         };
                         if let Err(e) = self.output.send_batch(&result, &metadata) {
                             self.metrics.output_error();
+                            self.metrics.inc_dropped_batch();
                             eprintln!("pipeline: output error (batch dropped): {e}");
                             last_flush = Instant::now();
                             continue;
@@ -284,6 +291,8 @@ impl Pipeline {
             let batch = match self.scanner.scan(combined.into()) {
                 Ok(b) => b,
                 Err(e) => {
+                    self.metrics.inc_scan_error();
+                    self.metrics.inc_dropped_batch();
                     eprintln!("pipeline: scan error on shutdown flush (batch dropped): {e}");
                     return Ok(());
                 }
@@ -309,6 +318,7 @@ impl Pipeline {
                         };
                         if let Err(e) = self.output.send_batch(&result, &metadata) {
                             self.metrics.output_error();
+                            self.metrics.inc_dropped_batch();
                             eprintln!("pipeline: output error on shutdown flush: {e}");
                             return Ok(());
                         }
@@ -323,6 +333,7 @@ impl Pipeline {
                     }
                     Err(e) => {
                         self.metrics.inc_transform_error();
+                        self.metrics.inc_dropped_batch();
                         eprintln!("pipeline: transform error (batch dropped): {e}");
                     }
                 }
@@ -703,5 +714,15 @@ output:
         // At least one transform error must have been counted.
         let errors = pipeline.metrics.transform_errors.load(Ordering::Relaxed);
         assert!(errors > 0, "expected transform_errors > 0, got {errors}");
+
+        // Every failed transform must also increment the dropped-batches counter.
+        let dropped = pipeline
+            .metrics
+            .dropped_batches_total
+            .load(Ordering::Relaxed);
+        assert!(
+            dropped > 0,
+            "expected dropped_batches_total > 0, got {dropped}"
+        );
     }
 }
