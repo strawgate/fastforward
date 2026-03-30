@@ -1166,11 +1166,8 @@ output:
 
         // This must complete without deadlock. If the drain/join order is
         // wrong, this will hang and the test will time out.
-        let result = tokio::time::timeout(
-            Duration::from_secs(5),
-            pipeline.run_async(&shutdown),
-        )
-        .await;
+        let result =
+            tokio::time::timeout(Duration::from_secs(5), pipeline.run_async(&shutdown)).await;
 
         assert!(
             result.is_ok(),
@@ -1332,11 +1329,8 @@ output:
             sd.cancel();
         });
 
-        let result = tokio::time::timeout(
-            Duration::from_secs(2),
-            pipeline.run_async(&shutdown),
-        )
-        .await;
+        let result =
+            tokio::time::timeout(Duration::from_secs(2), pipeline.run_async(&shutdown)).await;
 
         assert!(result.is_ok(), "empty pipeline should shut down cleanly");
         assert!(result.unwrap().is_ok());
@@ -1371,11 +1365,8 @@ output:
         // Cancel immediately, before even starting.
         shutdown.cancel();
 
-        let result = tokio::time::timeout(
-            Duration::from_secs(2),
-            pipeline.run_async(&shutdown),
-        )
-        .await;
+        let result =
+            tokio::time::timeout(Duration::from_secs(2), pipeline.run_async(&shutdown)).await;
 
         assert!(result.is_ok(), "immediate shutdown must not hang");
         assert!(result.unwrap().is_ok(), "immediate shutdown must not error");
@@ -1438,7 +1429,10 @@ output:
             .transform_in
             .lines_total
             .load(Ordering::Relaxed);
-        assert!(lines_in > 0, "data should flow through transform despite output errors");
+        assert!(
+            lines_in > 0,
+            "data should flow through transform despite output errors"
+        );
     }
 
     /// Rapid repeated shutdown signals must not cause panics.
@@ -1484,11 +1478,8 @@ output:
             sd.cancel();
         });
 
-        let result = tokio::time::timeout(
-            Duration::from_secs(2),
-            pipeline.run_async(&shutdown),
-        )
-        .await;
+        let result =
+            tokio::time::timeout(Duration::from_secs(2), pipeline.run_async(&shutdown)).await;
 
         assert!(result.is_ok(), "repeated shutdown must not hang");
         assert!(result.unwrap().is_ok());
@@ -1603,13 +1594,13 @@ output:
             ft.cancel();
         });
 
-        let result = tokio::time::timeout(
-            Duration::from_secs(5),
-            pipeline.run_async(&shutdown),
-        )
-        .await;
+        let result =
+            tokio::time::timeout(Duration::from_secs(5), pipeline.run_async(&shutdown)).await;
 
-        assert!(result.is_ok(), "frozen output must not prevent shutdown (5s timeout)");
+        assert!(
+            result.is_ok(),
+            "frozen output must not prevent shutdown (5s timeout)"
+        );
         assert!(result.unwrap().is_ok());
     }
 
@@ -1671,11 +1662,8 @@ output:
             sd.cancel();
         });
 
-        let result = tokio::time::timeout(
-            Duration::from_secs(5),
-            pipeline.run_async(&shutdown),
-        )
-        .await;
+        let result =
+            tokio::time::timeout(Duration::from_secs(5), pipeline.run_async(&shutdown)).await;
 
         assert!(result.is_ok(), "concurrent write + shutdown must not hang");
         assert!(result.unwrap().is_ok());

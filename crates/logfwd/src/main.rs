@@ -333,9 +333,7 @@ async fn run_pipelines(config: logfwd_config::Config) -> io::Result<()> {
 
     for mut pipeline in pipelines {
         let sd = shutdown.clone();
-        handles.push(tokio::spawn(async move {
-            pipeline.run_async(&sd).await
-        }));
+        handles.push(tokio::spawn(async move { pipeline.run_async(&sd).await }));
     }
 
     if let Some(mut main_pipe) = main_pipeline {
