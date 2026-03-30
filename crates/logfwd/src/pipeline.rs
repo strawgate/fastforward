@@ -552,7 +552,12 @@ fn input_poll_loop(
         let should_send = input.json_buf.len() >= batch_target_bytes
             || (!input.json_buf.is_empty() && last_send.elapsed() >= batch_timeout);
         if should_send {
-            let data = std::mem::take(&mut input.json_buf);
+            // Swap in a pre-allocated buffer to avoid reallocation churn.
+            // The old buffer is sent to the consumer; the new one reuses
+            // the capacity from a fresh allocation (same size as the
+            // original pre-allocation in build_input_state).
+            let mut data = Vec::with_capacity(batch_target_bytes);
+            std::mem::swap(&mut input.json_buf, &mut data);
             if tx.blocking_send(data).is_err() {
                 break;
             }
@@ -986,7 +991,7 @@ output:
         let mut pipeline = Pipeline::from_config("default", pipe_cfg, &test_meter()).unwrap();
 
         // Use devnull output to avoid stdout noise in test.
-        pipeline = pipeline.with_output(Box::new(DevNullSink::new()));
+        pipeline = pipeline.with_output(Box::new(DevNullSink));
 
         pipeline.batch_timeout = Duration::from_millis(50);
 
@@ -1046,7 +1051,7 @@ output:
         let config = logfwd_config::Config::load_str(&yaml).unwrap();
         let pipe_cfg = &config.pipelines["default"];
         let mut pipeline = Pipeline::from_config("default", pipe_cfg, &test_meter()).unwrap();
-        pipeline = pipeline.with_output(Box::new(DevNullSink::new()));
+        pipeline = pipeline.with_output(Box::new(DevNullSink));
         pipeline.batch_timeout = Duration::from_millis(20);
 
         let shutdown = CancellationToken::new();
@@ -1239,7 +1244,7 @@ output:
         let config = logfwd_config::Config::load_str(&yaml).unwrap();
         let pipe_cfg = &config.pipelines["default"];
         let mut pipeline = Pipeline::from_config("default", pipe_cfg, &test_meter()).unwrap();
-        pipeline = pipeline.with_output(Box::new(DevNullSink::new()));
+        pipeline = pipeline.with_output(Box::new(DevNullSink));
         pipeline.batch_timeout = Duration::from_millis(20);
 
         let shutdown = CancellationToken::new();
@@ -1287,7 +1292,7 @@ output:
         let config = logfwd_config::Config::load_str(&yaml).unwrap();
         let pipe_cfg = &config.pipelines["default"];
         let mut pipeline = Pipeline::from_config("default", pipe_cfg, &test_meter()).unwrap();
-        pipeline = pipeline.with_output(Box::new(DevNullSink::new()));
+        pipeline = pipeline.with_output(Box::new(DevNullSink));
 
         let shutdown = CancellationToken::new();
         let sd = shutdown.clone();
@@ -1330,7 +1335,7 @@ output:
         let config = logfwd_config::Config::load_str(&yaml).unwrap();
         let pipe_cfg = &config.pipelines["default"];
         let mut pipeline = Pipeline::from_config("default", pipe_cfg, &test_meter()).unwrap();
-        pipeline = pipeline.with_output(Box::new(DevNullSink::new()));
+        pipeline = pipeline.with_output(Box::new(DevNullSink));
 
         let shutdown = CancellationToken::new();
         // Cancel immediately, before even starting.
@@ -1436,7 +1441,7 @@ output:
         let config = logfwd_config::Config::load_str(&yaml).unwrap();
         let pipe_cfg = &config.pipelines["default"];
         let mut pipeline = Pipeline::from_config("default", pipe_cfg, &test_meter()).unwrap();
-        pipeline = pipeline.with_output(Box::new(DevNullSink::new()));
+        pipeline = pipeline.with_output(Box::new(DevNullSink));
         pipeline.batch_timeout = Duration::from_millis(20);
 
         let shutdown = CancellationToken::new();
@@ -1490,7 +1495,7 @@ output:
         let config = logfwd_config::Config::load_str(&yaml).unwrap();
         let pipe_cfg = &config.pipelines["default"];
         let mut pipeline = Pipeline::from_config("default", pipe_cfg, &test_meter()).unwrap();
-        pipeline = pipeline.with_output(Box::new(DevNullSink::new()));
+        pipeline = pipeline.with_output(Box::new(DevNullSink));
         pipeline.batch_target_bytes = 1024; // Much smaller than the line
         pipeline.batch_timeout = Duration::from_millis(20);
 
@@ -1611,7 +1616,7 @@ output:
         let config = logfwd_config::Config::load_str(&yaml).unwrap();
         let pipe_cfg = &config.pipelines["default"];
         let mut pipeline = Pipeline::from_config("default", pipe_cfg, &test_meter()).unwrap();
-        pipeline = pipeline.with_output(Box::new(DevNullSink::new()));
+        pipeline = pipeline.with_output(Box::new(DevNullSink));
         pipeline.batch_timeout = Duration::from_millis(20);
 
         let shutdown = CancellationToken::new();
@@ -1652,24 +1657,15 @@ output:
     // Test sinks
     // -------------------------------------------------------------------
 
-    /// A sink that discards data but counts rows received.
-    struct DevNullSink {
-        rows_received: u64,
-    }
-
-    impl DevNullSink {
-        fn new() -> Self {
-            Self { rows_received: 0 }
-        }
-    }
+    /// A sink that discards all data.
+    struct DevNullSink;
 
     impl OutputSink for DevNullSink {
         fn send_batch(
             &mut self,
-            batch: &arrow::record_batch::RecordBatch,
+            _batch: &arrow::record_batch::RecordBatch,
             _metadata: &BatchMetadata,
         ) -> io::Result<()> {
-            self.rows_received += batch.num_rows() as u64;
             Ok(())
         }
         fn flush(&mut self) -> io::Result<()> {
