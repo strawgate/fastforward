@@ -157,65 +157,7 @@ impl Pipeline {
                     self.metrics.inc_flush_by_timeout();
                 }
 
-                let mut combined = Vec::new();
-                for input in &mut self.inputs {
-                    if !input.json_buf.is_empty() {
-                        combined.append(&mut input.json_buf);
-                    }
-                }
-
-                if !combined.is_empty() {
-                    // Scan stage.
-                    let t0 = Instant::now();
-                    let batch = match self.scanner.scan(combined.into()) {
-                        Ok(b) => b,
-                        Err(e) => {
-                            return Err(io::Error::other(format!("scan error: {e}")));
-                        }
-                    };
-                    let scan_elapsed = t0.elapsed();
-
-                    if batch.num_rows() > 0 {
-                        let num_rows = batch.num_rows() as u64;
-                        self.metrics.transform_in.inc_lines(num_rows);
-
-                        // Transform stage.
-                        let t1 = Instant::now();
-                        let result = match self.transform.execute_blocking(batch) {
-                            Ok(r) => r,
-                            Err(e) => {
-                                self.metrics.inc_transform_error();
-                                return Err(io::Error::other(format!("transform error: {e}")));
-                            }
-                        };
-                        let transform_elapsed = t1.elapsed();
-
-                        self.metrics
-                            .transform_out
-                            .inc_lines(result.num_rows() as u64);
-
-                        // Output stage.
-                        let t2 = Instant::now();
-                        let metadata = BatchMetadata {
-                            resource_attrs: vec![],
-                            observed_time_ns: now_nanos(),
-                        };
-                        if let Err(e) = self.output.send_batch(&result, &metadata) {
-                            self.metrics.output_error();
-                            return Err(e);
-                        }
-                        let output_elapsed = t2.elapsed();
-
-                        // Record batch-level metrics.
-                        self.metrics.record_batch(
-                            num_rows,
-                            scan_elapsed.as_nanos() as u64,
-                            transform_elapsed.as_nanos() as u64,
-                            output_elapsed.as_nanos() as u64,
-                        );
-                    }
-                }
-
+                self.flush_pending()?;
                 last_flush = Instant::now();
             }
 
@@ -224,7 +166,82 @@ impl Pipeline {
             }
         }
 
+        // Final flush: drain any data accumulated in json_buf since the last
+        // in-loop flush.  This prevents data loss when the CancellationToken
+        // fires between a poll and the flush-threshold check.
+        self.flush_pending()?;
         self.output.flush()?;
+        Ok(())
+    }
+
+    /// Drain all `json_buf` contents through scan → transform → output.
+    ///
+    /// Returns immediately (no-op) when every input buffer is empty.
+    /// Clears each buffer as it consumes it so subsequent calls are cheap.
+    fn flush_pending(&mut self) -> io::Result<()> {
+        let mut combined = Vec::new();
+        for input in &mut self.inputs {
+            if !input.json_buf.is_empty() {
+                combined.append(&mut input.json_buf);
+            }
+        }
+
+        if combined.is_empty() {
+            return Ok(());
+        }
+
+        // Scan stage.
+        let t0 = Instant::now();
+        let batch = match self.scanner.scan(combined.into()) {
+            Ok(b) => b,
+            Err(e) => {
+                return Err(io::Error::other(format!("scan error: {e}")));
+            }
+        };
+        let scan_elapsed = t0.elapsed();
+
+        if batch.num_rows() == 0 {
+            return Ok(());
+        }
+
+        let num_rows = batch.num_rows() as u64;
+        self.metrics.transform_in.inc_lines(num_rows);
+
+        // Transform stage.
+        let t1 = Instant::now();
+        let result = match self.transform.execute_blocking(batch) {
+            Ok(r) => r,
+            Err(e) => {
+                self.metrics.inc_transform_error();
+                return Err(io::Error::other(format!("transform error: {e}")));
+            }
+        };
+        let transform_elapsed = t1.elapsed();
+
+        self.metrics
+            .transform_out
+            .inc_lines(result.num_rows() as u64);
+
+        // Output stage.
+        let t2 = Instant::now();
+        let metadata = BatchMetadata {
+            resource_attrs: vec![],
+            observed_time_ns: now_nanos(),
+        };
+        if let Err(e) = self.output.send_batch(&result, &metadata) {
+            self.metrics.output_error();
+            return Err(e);
+        }
+        let output_elapsed = t2.elapsed();
+
+        // Record batch-level metrics.
+        self.metrics.record_batch(
+            num_rows,
+            scan_elapsed.as_nanos() as u64,
+            transform_elapsed.as_nanos() as u64,
+            output_elapsed.as_nanos() as u64,
+        );
+
         Ok(())
     }
 }
@@ -467,5 +484,77 @@ output:
             .lines_total
             .load(Ordering::Relaxed);
         assert!(lines_in > 0, "expected transform_in > 0, got {lines_in}");
+    }
+
+    /// Regression test: data that has been polled into `json_buf` but has not
+    /// yet crossed the size/timeout flush threshold must NOT be silently
+    /// discarded when the CancellationToken fires.  The shutdown path must
+    /// call `flush_pending` one final time so every buffered line is scanned,
+    /// transformed, and forwarded to the output sink.
+    #[test]
+    fn test_pipeline_run_shutdown_flush() {
+        use std::sync::atomic::Ordering;
+
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("shutdown_test.log");
+
+        // Write 10 JSON lines that will be polled into json_buf.
+        let mut data = String::new();
+        for i in 0..10 {
+            data.push_str(&format!(
+                r#"{{"level":"INFO","msg":"shutdown test {}","status":{}}}"#,
+                i,
+                200 + i
+            ));
+            data.push('\n');
+        }
+        std::fs::write(&log_path, data.as_bytes()).unwrap();
+
+        let yaml = format!(
+            r#"
+input:
+  type: file
+  path: {}
+  format: json
+output:
+  type: stdout
+  format: json
+"#,
+            log_path.display()
+        );
+        let config = logfwd_config::Config::load_str(&yaml).unwrap();
+        let pipe_cfg = &config.pipelines["default"];
+        let mut pipeline = Pipeline::from_config("default", pipe_cfg, &test_meter()).unwrap();
+
+        // Use a very long batch timeout and a huge size threshold so the data
+        // will NOT be flushed inside the poll loop.  It should only be flushed
+        // by the final shutdown flush after the loop exits.
+        pipeline.batch_timeout = Duration::from_secs(3600);
+        pipeline.batch_target_bytes = 1024 * 1024 * 1024;
+        pipeline.poll_interval = Duration::from_millis(5);
+
+        let shutdown = CancellationToken::new();
+        let sd_clone = shutdown.clone();
+
+        // Give the poll loop enough time to read the file into json_buf, then
+        // cancel.  200 ms is far more than enough for a local file read.
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            sd_clone.cancel();
+        });
+
+        let result = pipeline.run(&shutdown);
+        assert!(result.is_ok(), "got: {:?}", result.err());
+
+        // The shutdown flush must have processed all 10 lines.
+        let lines_in = pipeline
+            .metrics
+            .transform_in
+            .lines_total
+            .load(Ordering::Relaxed);
+        assert_eq!(
+            lines_in, 10,
+            "expected 10 lines flushed at shutdown, got {lines_in}"
+        );
     }
 }
