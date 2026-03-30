@@ -4,6 +4,17 @@
       "agents": [
         "logfwd"
       ],
+      "commit": "566f59769957451fc0bab2b4ed09f59920f779bd",
+      "date": "2026-03-30T19:18:33Z",
+      "id": "23762736788",
+      "scenarios": [
+        "passthrough"
+      ]
+    },
+    {
+      "agents": [
+        "logfwd"
+      ],
       "commit": "ecc68b9d6902e262019da16bc8bfcd762f78c538",
       "date": "2026-03-30T18:33:49Z",
       "id": "23760795580",
