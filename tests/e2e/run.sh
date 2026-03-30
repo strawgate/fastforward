@@ -74,6 +74,12 @@ echo "=== Phase 6: Verify ==="
 k port-forward -n "$NAMESPACE" svc/blackhole-receiver 14318:4318 &
 PF_PID=$!
 sleep 2
+if ! kill -0 "$PF_PID" 2>/dev/null; then
+    echo "FAIL: port-forward failed to stay running"
+    echo "--- blackhole-receiver pods ---"
+    k get pods -n "$NAMESPACE" -l app=blackhole-receiver -o wide 2>&1 || true
+    exit 1
+fi
 
 DEADLINE=$((SECONDS + TIMEOUT))
 while [ $SECONDS -lt $DEADLINE ]; do
