@@ -15,31 +15,94 @@ SIMD Scanner  ─per source─
     │  walks structural positions directly into Arrow columns
     │  injects _resource_* columns from source metadata
     ▼
-RecordBatch per source (partitions)
+Arrow IPC segment (per-source, pre-transform)
+    │  written to local disk, uploaded to object storage
+    │  THIS is the ack point — source checkpoint advances here
     │
-    ├─→ registered as partitions of `logs` MemTable
-    │   (DataFusion concatenates partitions during query)
-    ▼
-SQL Transform (DataFusion)
-    │  user SQL: SELECT, WHERE, GROUP BY + UDFs
-    │  enrichment tables available via JOIN
-    │  _resource_* columns flow through like any other column
-    ▼
-Post-transform RecordBatch
+    ├─→ real-time path: register as MemTable partitions
+    │   → SQL Transform (DataFusion + enrichment JOINs)
+    │   → output sinks (OTLP / JSON lines / HTTP / stdout)
     │
-    ▼
-Disk Queue (Arrow IPC Stream segments, one queue per pipeline)
-    │  all outputs share one queue with independent cursors
-    ▼
-Output Sinks (OTLP / JSON lines / HTTP / stdout)
-    │  group rows by _resource_* columns for OTLP ResourceLogs
-    │  independent cursor per output, at-least-once delivery
+    └─→ object storage: raw Arrow tables
+        queryable by DuckDB / Polars / Spark / DataFusion
 ```
+
+## Pre-transform persistence
+
+Storage is pre-transform, per-source Arrow IPC. Each source writes its
+own segments independently. This is the single persistence layer.
+
+**Why pre-transform (not post):**
+
+- Raw data is re-queryable. You can change the SQL transform and
+  re-process historical data.
+- No duplicate storage. The transform is stateless and re-runnable.
+- Arrow IPC on object storage integrates with the entire Arrow
+  ecosystem — any query engine can read your log segments directly.
+- For the common case (`SELECT * FROM logs`), pre-transform and
+  post-transform data are identical. No wasted storage.
+
+**Enrichment tradeoff:** Enrichment data (K8s pod labels, annotations)
+is looked up at transform time, not stored with the raw data. On replay,
+enrichment reflects current state, not ingest-time state. The
+`_resource_*` columns (source identity: pod name, namespace) ARE stored
+and are always correct — only enrichment table data goes stale.
+
+## End-to-end ack
+
+Sources must NOT acknowledge to their upstream until the Arrow IPC
+segment is durably written (fsync + rename). The ack chain:
+
+```
+Scanner produces RecordBatch
+  → FileWriter writes to .tmp
+  → fsync + rename (segment sealed)
+  → Ack source: "data through offset X is durable"
+  → Source advances checkpoint
+```
+
+Ack latency is scanner + IPC write + fsync, typically 5-15ms. This is
+comparable to Kafka's acks=all (3-15ms). For network sources
+(TCP/HTTP/OTLP receiver), this is the HTTP response time.
+
+**File sources** don't need the ack latency to be fast — the log file is
+already durable. The checkpoint just tracks the file offset.
+
+**Network sources** see the full ack latency. If the transform is slow
+(complex GROUP BY), the ack is slow — that's backpressure, and it's
+correct behavior.
+
+## Output delivery
+
+Outputs read from the pre-transform Arrow IPC segments, run the
+transform, and send. Each output tracks its position independently
+(segment + batch offset). A slow output falls behind in the segment
+list; it doesn't block other outputs or sources.
+
+**Output cursor tracking:** Each output tracks `{ segment_id, batch_offset }`.
+Persisted to a JSON file on each ack. On restart, resume from last
+position.
+
+**Retention:** TTL (`max_segment_age`) + size (`max_disk_bytes`). When
+either limit is hit, oldest segments are evicted regardless of output
+cursor positions. Outputs that were pointing at evicted segments see a
+gap (tracked in `segments_dropped` metric).
+
+**New output cursors:** Default to tail (skip history). Configurable
+`replay_from: oldest` per output.
+
+**Delivery semantics:** At-least-once. Crash-before-ack means
+re-delivery on restart. Monotonic `batch_id` enables optional downstream
+deduplication.
 
 ## Multi-source pipeline
 
-Each source scans independently and contributes its RecordBatch as a
-separate partition of the `logs` MemTable. This means:
+Each source scans independently and writes its own Arrow IPC segments.
+At transform time, the pipeline reads the latest segments from each
+source and registers them as partitions of the `logs` MemTable.
+DataFusion concatenates partitions during query execution.
+
+This means:
 
 - Each source can have a different `ScanConfig` (different wanted_fields
   from predicate pushdown)
@@ -47,10 +110,6 @@ separate partition of the `logs` MemTable. This means:
   merging (missing columns are null)
 - The StreamingBuilder's `Bytes` lifetime is per-source
 - A source with no data in a cycle contributes no partition
-
-The SQL transform sees all rows from all sources in one `logs` table.
-The result is a single RecordBatch that flows to the disk queue and all
-outputs.
 
 ## Resource metadata as columns
 
@@ -62,7 +121,7 @@ during scanning based on the source's configuration.
 This design:
 
 - Survives SQL transforms naturally (they're just columns)
-- Persists in the disk queue (columns in Arrow IPC segments)
+- Persists in the Arrow IPC segments (always correct, unlike enrichment)
 - Enables OTLP output to group rows by resource (group-by on
   `_resource_*` columns, one `ResourceLogs` per distinct combination)
 - Uses dictionary encoding for efficiency (same pod name on every row
@@ -82,6 +141,27 @@ This design:
 
 Type conflicts produce separate columns: `status_int` and `status_str`
 can coexist.
+
+## Arrow IPC segment format
+
+**Format:** Arrow IPC File format with atomic seal. Each source writes
+segments independently.
+
+**Write path:** `FileWriter` writes to `.tmp` file. On seal:
+`finish()` (writes footer) → `fsync` → atomic `rename` to final path.
+Readers never see incomplete files.
+
+**Segment lifecycle:**
+1. Source scans data into RecordBatch
+2. `FileWriter` writes batch(es) to `.tmp` file
+3. At size threshold (64 MB) or time threshold: seal segment
+4. Upload to object storage (async, background)
+5. Delete local copy after upload confirmed (or retain per policy)
+6. On startup: delete orphaned `.tmp` files
+
+**Object storage:** Segments are uploaded to S3/GCS/Azure Blob after
+sealing. Object storage is the primary durability target. Local disk is
+a staging area.
 
 ## Scanner architecture
 
@@ -103,53 +183,11 @@ The scan loop is generic over the `ScanBuilder` trait:
 
 - **`StorageBuilder`**: collects `(row, value)` records. Builds columns
   independently at `finish_batch`. Correct by construction. For
-  persistence.
+  persistence path (Arrow IPC segments).
 - **`StreamingBuilder`**: stores `(row, offset, len)` views into a
   `bytes::Bytes` buffer. Builds `StringViewArray` columns with zero
-  copies. 20% faster. For real-time hot path. Default in pipeline.
-
-## Disk queue
-
-Post-transform Arrow IPC Stream segments. One queue per pipeline, shared
-by all outputs with independent read cursors.
-
-**Format:** Arrow IPC File format with atomic seal. Segments are written
-to a `.tmp` file via `FileWriter`, then `fsync` + `rename` to the final
-path. Readers never see incomplete files — a file either exists (complete
-with footer) or doesn't. On startup, delete any `.tmp` files. The footer
-enables random-access cursor recovery (seek to batch N without scanning).
-
-**Segments:** Each segment is a complete IPC file (schema + N batches +
-footer). Written to `.tmp`, sealed via `finish()` + `fsync` + atomic
-`rename`. New segment started after sealing. Readers only open sealed
-segments (no locking needed). Footer provides batch count and offsets
-for random-access cursor recovery.
-
-**Retention:** TTL (`max_segment_age`) + size (`max_disk_bytes`). When
-either limit is hit, oldest segments are evicted regardless of cursor
-positions. Cursors pointing at deleted segments advance to the oldest
-surviving segment. Gaps are tracked in metrics (`segments_dropped`).
-
-**Delivery:** At-least-once, end-to-end. The ack chain flows backwards:
-
-```
-Disk queue seals segment (fsync + rename)
-  → Ack to source: "data through offset X is durable"
-  → Source advances checkpoint (file offset / Kafka offset / TCP ACK)
-```
-
-Sources must NOT acknowledge to their upstream until the disk queue
-confirms durability. This ensures no data is lost between source read
-and queue persistence. On crash, sources restart from their last
-checkpointed offset and re-deliver (at-least-once).
-
-Output delivery is a separate concern — outputs consume from the queue
-with their own at-least-once semantics (independent cursors, retry on
-failure). Monotonic `batch_id` in segment metadata enables optional
-downstream deduplication.
-
-**New output cursors:** Default to tail (skip history). Configurable
-`replay_from: oldest` per output for archival use cases.
+  copies. 20% faster. For real-time hot path when persistence is
+  disabled.
 
 ## Async pipeline
 
@@ -185,7 +223,8 @@ stdout output, diagnostics server, OTel metrics, signal handling
 (SIGINT/SIGTERM via CancellationToken), graceful shutdown, async Sink
 trait.
 
-**Not yet:** async pipeline runtime, async Source trait, disk queue,
-`_resource_*` column injection, OTLP resource grouping, TCP/UDP/OTLP
-input, Elasticsearch/Loki/Parquet output, file offset checkpointing,
-SQL rewriter.
+**Not yet:** async pipeline runtime, async Source trait, pre-transform
+Arrow IPC persistence, object storage upload, `_resource_*` column
+injection, OTLP resource grouping, output cursor tracking,
+TCP/UDP/OTLP input, Elasticsearch/Loki/Parquet output, file offset
+checkpointing, SQL rewriter.
