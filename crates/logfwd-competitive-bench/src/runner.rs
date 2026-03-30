@@ -65,6 +65,7 @@ pub fn run_agent(
     ctx: &BenchContext,
     blackhole: &Blackhole,
     scenario: Scenario,
+    iteration: usize,
 ) -> Result<BenchResult, String> {
     blackhole.reset();
 
@@ -129,7 +130,7 @@ pub fn run_agent(
         mode: "binary".to_string(),
         lines_done,
         elapsed_ms: elapsed.as_millis() as u64,
-        iteration: default_iteration(),
+        iteration,
         samples,
     })
 }
@@ -142,6 +143,7 @@ pub fn run_agent_docker(
     blackhole: &Blackhole,
     limits: &DockerLimits,
     scenario: Scenario,
+    iteration: usize,
 ) -> Result<BenchResult, String> {
     blackhole.reset();
 
@@ -252,7 +254,7 @@ pub fn run_agent_docker(
         mode: "docker".to_string(),
         lines_done,
         elapsed_ms: elapsed.as_millis() as u64,
-        iteration: default_iteration(),
+        iteration,
         samples: Vec::new(), // TODO: Docker sampling
     })
 }

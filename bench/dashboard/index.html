@@ -50,7 +50,7 @@
       <h2>All Runs</h2>
       <div class="card">
         <table id="runs-table">
-          <thead><tr><th>ID</th><th>Date</th><th>Commit</th><th>Type</th></tr></thead>
+          <thead><tr><th>ID</th><th>Type</th></tr></thead>
           <tbody></tbody>
         </table>
       </div>
@@ -257,8 +257,6 @@ async function main() {
 
       rowsHtml += `<tr>
         <td><a href="run.html?id=${id}">#${id}</a></td>
-        <td>--</td>
-        <td>--</td>
         <td>${types.map(t => '<span class="badge">' + t + '</span> ').join('')}</td>
       </tr>`;
     }

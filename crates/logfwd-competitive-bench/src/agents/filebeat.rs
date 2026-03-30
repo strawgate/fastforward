@@ -126,9 +126,20 @@ http.port: 5066
             }
             cur.as_u64().unwrap_or(0)
         };
+        let get_any = |candidates: &[&[&str]]| -> u64 {
+            candidates
+                .iter()
+                .map(|path| get(path))
+                .find(|value| *value > 0)
+                .unwrap_or(0)
+        };
+        let cpu_user_ms = get_any(&[&["beat", "cpu", "user", "time", "ms"]]);
+        let cpu_sys_ms = get_any(&[&["beat", "cpu", "system", "time", "ms"]]);
+        let cpu_total_ms = get_any(&[&["beat", "cpu", "total", "time", "ms"]]);
         Some(AgentSample {
             rss_bytes: get(&["beat", "memstats", "rss"]),
-            cpu_user_ms: get(&["beat", "cpu", "total", "ticks"]),
+            cpu_user_ms: cpu_user_ms.max(cpu_total_ms),
+            cpu_sys_ms,
             events_total: get(&["libbeat", "pipeline", "events", "total"]),
             errors_total: get(&["libbeat", "output", "events", "failed"]),
             ..Default::default()

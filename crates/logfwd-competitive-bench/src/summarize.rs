@@ -160,11 +160,10 @@ pub fn run(
     markdown: bool,
     gh_bench_file: Option<&Path>,
     dashboard_file: Option<&Path>,
-) {
+) -> Result<(), String> {
     let results = load_results(results_dir);
     if results.is_empty() {
-        eprintln!("No results found in {}", results_dir.display());
-        std::process::exit(1);
+        return Err(format!("No results found in {}", results_dir.display()));
     }
     eprintln!("Loaded {} individual run results", results.len());
 
@@ -189,6 +188,8 @@ pub fn run(
     if let Some(path) = dashboard_file {
         write_dashboard_json(&groups, &scenarios, path);
     }
+
+    Ok(())
 }
 
 fn print_markdown(groups: &[AggResult], scenarios: &[String]) {

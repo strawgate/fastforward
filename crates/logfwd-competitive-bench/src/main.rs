@@ -54,7 +54,11 @@ fn main() {
                     args.markdown,
                     args.gh_bench_file.as_deref(),
                     args.dashboard_file.as_deref(),
-                );
+                )
+                .unwrap_or_else(|e| {
+                    eprintln!("ERROR: {e}");
+                    process::exit(1);
+                });
                 return;
             }
             other => {
@@ -501,16 +505,15 @@ fn run_one(
 ) {
     let mode_label = if image.is_some() { "docker" } else { "binary" };
     let result = if let Some(img) = image {
-        runner::run_agent_docker(agent, img, ctx, blackhole, limits, scenario)
+        runner::run_agent_docker(agent, img, ctx, blackhole, limits, scenario, iteration)
     } else if let Some(bin) = binary {
-        runner::run_agent(agent, bin, ctx, blackhole, scenario)
+        runner::run_agent(agent, bin, ctx, blackhole, scenario, iteration)
     } else {
         return;
     };
 
     match result {
-        Ok(mut r) => {
-            r.iteration = iteration;
+        Ok(r) => {
             print_result_stderr(&r, total_lines);
             if let Some(w) = jsonl_writer
                 && let Ok(json) = serde_json::to_string(&r)
