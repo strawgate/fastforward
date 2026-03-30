@@ -343,6 +343,226 @@ impl Pipeline {
         self.output.flush()?;
         Ok(())
     }
+
+    /// Async pipeline loop. Input threads stay on OS threads; scanning,
+    /// transform, and output run in the async context with `select!`.
+    ///
+    /// Output uses `block_in_place` to avoid blocking the tokio runtime
+    /// while ureq sends HTTP requests. This overlaps input reading with
+    /// output sending across different batches.
+    pub async fn run_async(&mut self, shutdown: &CancellationToken) -> io::Result<()> {
+        // Spawn input threads. Each polls its source, parses format, and
+        // sends accumulated JSON lines through a bounded channel.
+        // Backpressure: when the channel is full, the input thread blocks.
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
+
+        let batch_target = self.batch_target_bytes;
+        let batch_timeout = self.batch_timeout;
+        let mut input_handles = Vec::new();
+        for input in self.inputs.drain(..) {
+            let tx = tx.clone();
+            let sd = shutdown.clone();
+            input_handles.push(std::thread::spawn(move || {
+                input_poll_loop(input, tx, sd, batch_target, batch_timeout);
+            }));
+        }
+        drop(tx); // Drop our copy so rx.recv() returns None when all inputs exit.
+
+        let mut json_buf = Vec::with_capacity(self.batch_target_bytes);
+        let mut flush_interval = tokio::time::interval(self.batch_timeout);
+        flush_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+        loop {
+            tokio::select! {
+                biased; // Check shutdown first.
+
+                _ = shutdown.cancelled() => {
+                    break;
+                }
+
+                msg = rx.recv() => {
+                    match msg {
+                        Some(data) => {
+                            json_buf.extend_from_slice(&data);
+                            // Flush if buffer is large enough.
+                            if json_buf.len() >= self.batch_target_bytes {
+                                self.metrics.inc_flush_by_size();
+                                self.flush_batch(&mut json_buf).await;
+                                flush_interval.reset();
+                            }
+                        }
+                        None => {
+                            // All input threads exited.
+                            break;
+                        }
+                    }
+                }
+
+                _ = flush_interval.tick() => {
+                    if !json_buf.is_empty() {
+                        self.metrics.inc_flush_by_timeout();
+                        self.flush_batch(&mut json_buf).await;
+                    }
+                }
+            }
+        }
+
+        // Drain: receive any remaining messages from input threads before
+        // they finish. This catches data that was in-flight when shutdown
+        // was signalled.
+        rx.close(); // Signal input threads to stop sending.
+        while let Some(data) = rx.recv().await {
+            json_buf.extend_from_slice(&data);
+        }
+
+        // Flush any remaining buffered data.
+        if !json_buf.is_empty() {
+            self.flush_batch(&mut json_buf).await;
+        }
+
+        // Wait for input threads to finish.
+        for h in input_handles {
+            let _ = h.join();
+        }
+
+        tokio::task::block_in_place(|| self.output.flush())?;
+        Ok(())
+    }
+
+    /// Scan + transform + output a batch of accumulated JSON lines.
+    async fn flush_batch(&mut self, json_buf: &mut Vec<u8>) {
+        let combined = std::mem::take(json_buf);
+        if combined.is_empty() {
+            return;
+        }
+
+        // Scan (fast, inline — 1-5ms per 4MB batch).
+        let t0 = Instant::now();
+        let batch = match self.scanner.scan(combined.into()) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("pipeline: scan error (batch dropped): {e}");
+                return;
+            }
+        };
+        let scan_elapsed = t0.elapsed();
+
+        if batch.num_rows() == 0 {
+            return;
+        }
+
+        let num_rows = batch.num_rows() as u64;
+        self.metrics.transform_in.inc_lines(num_rows);
+
+        // Transform (already async).
+        let t1 = Instant::now();
+        let result = match self.transform.execute(batch).await {
+            Ok(r) => r,
+            Err(e) => {
+                self.metrics.inc_transform_error();
+                eprintln!("pipeline: transform error (batch dropped): {e}");
+                return;
+            }
+        };
+        let transform_elapsed = t1.elapsed();
+        self.metrics
+            .transform_out
+            .inc_lines(result.num_rows() as u64);
+
+        // Output (block_in_place wraps the sync HTTP send).
+        let t2 = Instant::now();
+        let metadata = BatchMetadata {
+            resource_attrs: vec![],
+            observed_time_ns: now_nanos(),
+        };
+        if let Err(e) = tokio::task::block_in_place(|| self.output.send_batch(&result, &metadata)) {
+            self.metrics.output_error();
+            eprintln!("pipeline: output error (batch dropped): {e}");
+            return;
+        }
+        let output_elapsed = t2.elapsed();
+
+        self.metrics.record_batch(
+            num_rows,
+            scan_elapsed.as_nanos() as u64,
+            transform_elapsed.as_nanos() as u64,
+            output_elapsed.as_nanos() as u64,
+        );
+    }
+}
+
+/// Input polling loop for a dedicated OS thread. Reads from the source,
+/// parses format, and sends accumulated JSON lines through the channel.
+///
+/// Accumulates data in the input's `json_buf` across multiple poll cycles
+/// before sending. Sends when the buffer reaches `batch_target_bytes` or
+/// after `batch_timeout` of accumulated data, whichever comes first.
+/// This avoids flooding the channel with tiny fragments.
+fn input_poll_loop(
+    mut input: InputState,
+    tx: tokio::sync::mpsc::Sender<Vec<u8>>,
+    shutdown: CancellationToken,
+    batch_target_bytes: usize,
+    batch_timeout: Duration,
+) {
+    let mut last_send = Instant::now();
+
+    loop {
+        if shutdown.is_cancelled() {
+            break;
+        }
+
+        let events = match input.source.poll() {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("pipeline input: poll error: {e}");
+                std::thread::sleep(Duration::from_millis(100));
+                continue;
+            }
+        };
+
+        if events.is_empty() {
+            // No new data — but if we have buffered data and the timeout
+            // elapsed, send what we have (don't let data sit forever).
+            if !input.json_buf.is_empty() && last_send.elapsed() >= batch_timeout {
+                let data = std::mem::take(&mut input.json_buf);
+                if tx.blocking_send(data).is_err() {
+                    break;
+                }
+                last_send = Instant::now();
+            }
+            std::thread::sleep(Duration::from_millis(10));
+            continue;
+        }
+
+        for event in events {
+            match event {
+                InputEvent::Data { bytes, .. } => {
+                    input.stats.inc_bytes(bytes.len() as u64);
+                    let n = input.parser.process(&bytes, &mut input.json_buf);
+                    input.stats.inc_lines(n as u64);
+                }
+                InputEvent::Rotated | InputEvent::Truncated => {
+                    input.parser.reset();
+                }
+            }
+        }
+
+        // Send when buffer reaches target size.
+        if input.json_buf.len() >= batch_target_bytes {
+            let data = std::mem::take(&mut input.json_buf);
+            if tx.blocking_send(data).is_err() {
+                break;
+            }
+            last_send = Instant::now();
+        }
+    }
+
+    // Drain any remaining buffered data on shutdown.
+    if !input.json_buf.is_empty() {
+        let data = std::mem::take(&mut input.json_buf);
+        let _ = tx.blocking_send(data);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -724,5 +944,148 @@ output:
             dropped > 0,
             "expected dropped_batches_total > 0, got {dropped}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Async pipeline tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_async_pipeline_end_to_end() {
+        use std::sync::atomic::Ordering;
+
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("async_test.log");
+        let mut data = String::new();
+        for i in 0..100 {
+            data.push_str(&format!(
+                r#"{{"level":"INFO","msg":"async event {}","val":{}}}"#,
+                i, i
+            ));
+            data.push('\n');
+        }
+        std::fs::write(&log_path, data.as_bytes()).unwrap();
+
+        let yaml = format!(
+            r#"
+input:
+  type: file
+  path: "{}"
+  format: json
+output:
+  type: stdout
+  format: json
+"#,
+            log_path.display()
+        );
+
+        let config = logfwd_config::Config::load_str(&yaml).unwrap();
+        let pipe_cfg = &config.pipelines["default"];
+        let mut pipeline = Pipeline::from_config("default", pipe_cfg, &test_meter()).unwrap();
+
+        // Use devnull output to avoid stdout noise in test.
+        pipeline = pipeline.with_output(Box::new(DevNullSink));
+
+        pipeline.batch_timeout = Duration::from_millis(50);
+
+        let shutdown = CancellationToken::new();
+        let sd = shutdown.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            sd.cancel();
+        });
+
+        let result = pipeline.run_async(&shutdown).await;
+        assert!(
+            result.is_ok(),
+            "async pipeline should succeed: {:?}",
+            result.err()
+        );
+
+        let lines_in = pipeline
+            .metrics
+            .transform_in
+            .lines_total
+            .load(Ordering::Relaxed);
+        assert!(
+            lines_in >= 100,
+            "expected at least 100 lines through transform, got {lines_in}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_async_pipeline_shutdown_drains_data() {
+        use std::sync::atomic::Ordering;
+
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("drain_test.log");
+
+        // Write data
+        let mut data = String::new();
+        for i in 0..50 {
+            data.push_str(&format!(r#"{{"msg":"drain {}"}}"#, i));
+            data.push('\n');
+        }
+        std::fs::write(&log_path, data.as_bytes()).unwrap();
+
+        let yaml = format!(
+            r#"
+input:
+  type: file
+  path: "{}"
+  format: json
+output:
+  type: stdout
+  format: json
+"#,
+            log_path.display()
+        );
+
+        let config = logfwd_config::Config::load_str(&yaml).unwrap();
+        let pipe_cfg = &config.pipelines["default"];
+        let mut pipeline = Pipeline::from_config("default", pipe_cfg, &test_meter()).unwrap();
+        pipeline = pipeline.with_output(Box::new(DevNullSink));
+        pipeline.batch_timeout = Duration::from_millis(20);
+
+        let shutdown = CancellationToken::new();
+        let sd = shutdown.clone();
+
+        // Give enough time for data to be read and processed, then shutdown.
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            sd.cancel();
+        });
+
+        pipeline.run_async(&shutdown).await.unwrap();
+
+        // After shutdown, all data should have been drained.
+        let lines_in = pipeline
+            .metrics
+            .transform_in
+            .lines_total
+            .load(Ordering::Relaxed);
+        assert!(
+            lines_in >= 50,
+            "shutdown should drain all data, got {lines_in} lines (expected >= 50)"
+        );
+    }
+
+    /// A sink that discards all data. For async tests to avoid stdout noise.
+    struct DevNullSink;
+
+    impl OutputSink for DevNullSink {
+        fn send_batch(
+            &mut self,
+            _batch: &arrow::record_batch::RecordBatch,
+            _metadata: &BatchMetadata,
+        ) -> io::Result<()> {
+            Ok(())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+        fn name(&self) -> &str {
+            "devnull"
+        }
     }
 }

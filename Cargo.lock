@@ -2112,6 +2112,7 @@ dependencies = [
  "libc",
  "logfwd-config",
  "logfwd-core",
+ "tokio",
  "ureq",
 ]
 
