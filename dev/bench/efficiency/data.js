@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774894925821,
+  "lastUpdate": 1774895632258,
   "repoUrl": "https://github.com/strawgate/memagent",
   "entries": {
     "Efficiency": [
@@ -21,6 +21,34 @@ window.BENCHMARK_DATA = {
           "url": "https://github.com/strawgate/memagent/commit/9f3a39116174933a28f5fb6bef967c7c7c0aa352"
         },
         "date": 1774894925572,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "passthrough/logfwd (binary) ms/M-lines",
+            "value": 2000,
+            "unit": "ms",
+            "extra": "n=2"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "strawgate",
+            "username": "strawgate",
+            "email": "williamseaston@gmail.com"
+          },
+          "committer": {
+            "name": "strawgate",
+            "username": "strawgate",
+            "email": "williamseaston@gmail.com"
+          },
+          "id": "ecc68b9d6902e262019da16bc8bfcd762f78c538",
+          "message": "fix: Clean up micro benchmark output in issue body\n\nStrip ANSI escape codes and cargo compile output from criterion\nresults. Only keep benchmark result lines (time/throughput) and\nwrap in a markdown code block.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-30T18:24:31Z",
+          "url": "https://github.com/strawgate/memagent/commit/ecc68b9d6902e262019da16bc8bfcd762f78c538"
+        },
+        "date": 1774895631914,
         "tool": "customSmallerIsBetter",
         "benches": [
           {
