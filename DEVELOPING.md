@@ -25,6 +25,26 @@ RUSTFLAGS="-C target-cpu=native" cargo bench --bench scanner -p logfwd-core
 cd crates/logfwd-core && cargo +nightly fuzz run scanner -- -max_total_time=300
 ```
 
+## Compile caching with sccache (optional)
+
+[sccache](https://github.com/mozilla/sccache) can significantly speed up incremental Rust compilation by caching build artefacts. It is **not** required — all builds work without it.
+
+To enable it locally:
+
+```bash
+# Install sccache (once)
+cargo install sccache --locked
+
+# Enable for the current shell session
+export RUSTC_WRAPPER=sccache
+
+# Or add it permanently to your shell profile
+echo 'export RUSTC_WRAPPER=sccache' >> ~/.bashrc   # bash
+echo 'export RUSTC_WRAPPER=sccache' >> ~/.zshrc    # zsh
+```
+
+Do **not** add `rustc-wrapper = "sccache"` to `.cargo/config.toml` — that forces sccache on everyone, including CI and other contributors who don't have it installed, breaking their builds.
+
 ---
 
 ## Things that will bite you
