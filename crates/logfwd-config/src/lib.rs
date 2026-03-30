@@ -13,6 +13,23 @@ use std::fmt;
 use std::path::Path;
 
 // ---------------------------------------------------------------------------
+// Authentication configuration
+// ---------------------------------------------------------------------------
+
+/// Authentication configuration for output HTTP sinks.
+///
+/// Supports bearer tokens and arbitrary key/value header pairs.
+/// All values support `${ENV_VAR}` expansion at config-load time.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct AuthConfig {
+    /// Sets the `Authorization: Bearer <token>` header on every request.
+    pub bearer_token: Option<String>,
+    /// Additional HTTP headers to add to every request (e.g. `X-API-Key`).
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
+}
+
+// ---------------------------------------------------------------------------
 // Public error type
 // ---------------------------------------------------------------------------
 
@@ -117,6 +134,9 @@ pub struct OutputConfig {
     pub compression: Option<String>,
     pub format: Option<Format>,
     pub path: Option<String>,
+    /// Optional authentication for HTTP-based outputs.
+    #[serde(default)]
+    pub auth: Option<AuthConfig>,
 }
 
 // ---------------------------------------------------------------------------
@@ -697,5 +717,88 @@ output:
             let yaml = format!("input:\n  type: {itype}\n  {extra}\noutput:\n  type: stdout\n");
             Config::load_str(&yaml).unwrap_or_else(|e| panic!("failed for {itype}: {e}"));
         }
+    }
+
+    #[test]
+    fn auth_bearer_token() {
+        let yaml = r#"
+input:
+  type: file
+  path: /var/log/test.log
+output:
+  type: http
+  endpoint: http://localhost:9200
+  auth:
+    bearer_token: "my-secret-token"
+"#;
+        let cfg = Config::load_str(yaml).expect("auth bearer_token");
+        let pipe = &cfg.pipelines["default"];
+        let auth = pipe.outputs[0].auth.as_ref().expect("auth present");
+        assert_eq!(auth.bearer_token.as_deref(), Some("my-secret-token"));
+        assert!(auth.headers.is_empty());
+    }
+
+    #[test]
+    fn auth_custom_headers() {
+        let yaml = r#"
+input:
+  type: file
+  path: /var/log/test.log
+output:
+  type: http
+  endpoint: http://localhost:9200
+  auth:
+    headers:
+      X-API-Key: "supersecret"
+      X-Tenant: "acme"
+"#;
+        let cfg = Config::load_str(yaml).expect("auth custom headers");
+        let pipe = &cfg.pipelines["default"];
+        let auth = pipe.outputs[0].auth.as_ref().expect("auth present");
+        assert_eq!(auth.bearer_token, None);
+        assert_eq!(
+            auth.headers.get("X-API-Key").map(|s| s.as_str()),
+            Some("supersecret")
+        );
+        assert_eq!(
+            auth.headers.get("X-Tenant").map(|s| s.as_str()),
+            Some("acme")
+        );
+    }
+
+    #[test]
+    fn auth_env_var_bearer_token() {
+        // SAFETY: test is not run concurrently with other tests that modify this var.
+        unsafe { std::env::set_var("LOGFWD_TEST_TOKEN", "env-bearer-token") };
+        let yaml = r#"
+input:
+  type: file
+  path: /var/log/test.log
+output:
+  type: http
+  endpoint: http://localhost:9200
+  auth:
+    bearer_token: "${LOGFWD_TEST_TOKEN}"
+"#;
+        let cfg = Config::load_str(yaml).expect("auth env var bearer");
+        let pipe = &cfg.pipelines["default"];
+        let auth = pipe.outputs[0].auth.as_ref().expect("auth present");
+        assert_eq!(auth.bearer_token.as_deref(), Some("env-bearer-token"));
+        unsafe { std::env::remove_var("LOGFWD_TEST_TOKEN") };
+    }
+
+    #[test]
+    fn auth_absent_is_none() {
+        let yaml = r#"
+input:
+  type: file
+  path: /var/log/test.log
+output:
+  type: http
+  endpoint: http://localhost:9200
+"#;
+        let cfg = Config::load_str(yaml).expect("no auth");
+        let pipe = &cfg.pipelines["default"];
+        assert!(pipe.outputs[0].auth.is_none());
     }
 }
