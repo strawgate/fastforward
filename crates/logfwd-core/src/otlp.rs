@@ -843,4 +843,62 @@ mod verification {
         assert!(decoded_wire == wire_type, "wire type mismatch");
         assert!(decoded_field == field_number, "field number mismatch");
     }
+
+    /// Prove days_from_civil never panics and produces reasonable values
+    /// for all dates in the range [1970-01-01, 2100-12-31].
+    ///
+    /// Also verifies monotonicity: incrementing the day by 1 always
+    /// increments the result by 1 (within the same month).
+    #[kani::proof]
+    fn verify_days_from_civil() {
+        let year: i64 = kani::any();
+        let month: u32 = kani::any();
+        let day: u32 = kani::any();
+
+        kani::assume(year >= 1970 && year <= 2100);
+        kani::assume(month >= 1 && month <= 12);
+        kani::assume(day >= 1 && day <= 31);
+
+        let result = days_from_civil(year, month, day);
+
+        // Epoch (1970-01-01) must be day 0.
+        if year == 1970 && month == 1 && day == 1 {
+            assert!(result == 0, "epoch must be 0");
+        }
+
+        // All dates in [1970, 2100] must produce non-negative results.
+        assert!(result >= 0, "date before epoch in valid range");
+
+        // 2100-12-31 is about 47846 days after epoch.
+        assert!(result <= 50000, "date too far in future");
+
+        // Monotonicity within a month: day+1 → result+1.
+        if day < 28 {
+            let next = days_from_civil(year, month, day + 1);
+            assert!(next == result + 1, "days not monotonic within month");
+        }
+    }
+
+    /// Prove bytes_field_size matches actual encode_bytes_field output.
+    #[kani::proof]
+    #[kani::unwind(12)]
+    #[kani::solver(kissat)]
+    fn verify_bytes_field_size() {
+        let field_number: u32 = kani::any();
+        let data_len: usize = kani::any();
+        kani::assume(field_number > 0 && field_number <= 1000);
+        kani::assume(data_len <= 256);
+
+        let predicted = bytes_field_size(field_number, data_len);
+
+        // Create dummy data of the right length and encode
+        let data = vec![0u8; data_len];
+        let mut buf = Vec::new();
+        encode_bytes_field(&mut buf, field_number, &data);
+
+        assert!(
+            buf.len() == predicted,
+            "bytes_field_size disagrees with encode_bytes_field"
+        );
+    }
 }
