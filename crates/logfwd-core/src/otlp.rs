@@ -784,18 +784,12 @@ mod verification {
         // Property 2: all bytes except last have continuation bit
         let mut i = 0;
         while i < len - 1 {
-            assert!(
-                buf[i] & 0x80 != 0,
-                "non-last byte missing continuation bit"
-            );
+            assert!(buf[i] & 0x80 != 0, "non-last byte missing continuation bit");
             i += 1;
         }
 
         // Property 3: last byte has no continuation bit
-        assert!(
-            buf[len - 1] & 0x80 == 0,
-            "last byte has continuation bit"
-        );
+        assert!(buf[len - 1] & 0x80 == 0, "last byte has continuation bit");
 
         // Property 4: decode roundtrip
         let mut decoded: u64 = 0;

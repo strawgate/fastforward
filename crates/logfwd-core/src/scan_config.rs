@@ -149,7 +149,17 @@ mod verification {
         let bytes: [u8; 8] = kani::any();
         let len: usize = kani::any();
         kani::assume(len <= 8);
-        let _ = parse_int_fast(&bytes[..len]);
+        let input = &bytes[..len];
+        let _ = parse_int_fast(input);
+
+        // If parser accepts input, decimal re-encode/re-parse must roundtrip.
+        if let Some(n) = parse_int_fast(input) {
+            let decimal = n.to_string();
+            assert!(
+                parse_int_fast(decimal.as_bytes()) == Some(n),
+                "roundtrip parse mismatch"
+            );
+        }
     }
 
     /// Prove parse_int_fast correctly rejects overflow.
@@ -166,32 +176,16 @@ mod verification {
         let input = &bytes[..len];
         let result = parse_int_fast(input);
 
-        // If result is Some(n), verify n is a valid i64 representation
-        // of the input bytes.
-        if let Some(n) = result {
-            // Re-check: the input must be all ASCII digits (with optional leading minus)
-            let (neg, start) = if !input.is_empty() && input[0] == b'-' {
-                (true, 1usize)
+        let expected = core::str::from_utf8(input).ok().and_then(|s| {
+            if s.starts_with('+') {
+                None
             } else {
-                (false, 0usize)
-            };
-
-            // Must have at least one digit
-            assert!(start < input.len(), "Some returned for empty digit sequence");
-
-            // Verify all remaining bytes are digits
-            let mut i = start;
-            while i < input.len() {
-                assert!(input[i].is_ascii_digit(), "non-digit in accepted input");
-                i += 1;
+                s.parse::<i64>().ok()
             }
-
-            // Verify the sign is correct
-            if neg {
-                assert!(n <= 0, "negative input parsed as positive");
-            } else {
-                assert!(n >= 0, "positive input parsed as negative");
-            }
-        }
+        });
+        assert!(
+            result == expected,
+            "parse_int_fast diverges from reference parser"
+        );
     }
 }
