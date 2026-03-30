@@ -13,6 +13,8 @@ logfwd-core = { path = "../logfwd-core" }
 logfwd-transform = { path = "../logfwd-transform" }
 logfwd-output = { path = "../logfwd-output" }
 dhat = { version = "0.3", optional = true }
+tikv-jemallocator = { version = "0.6", features = ["stats"] }
+tikv-jemalloc-ctl = { version = "0.6", features = ["stats"] }
 libc = "0.2"
 memchr = "2"
 opentelemetry = { workspace = true }
