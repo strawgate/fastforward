@@ -387,6 +387,13 @@ impl Config {
                                 output_type_name(&output.output_type),
                             )));
                         }
+                        if let Some(ep) = &output.endpoint
+                            && let Err(msg) = validate_endpoint_url(ep)
+                        {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' output '{label}': {msg}",
+                            )));
+                        }
                     }
                     OutputType::FileOut => {
                         if output.path.is_none() {
@@ -423,6 +430,33 @@ fn output_type_name(t: &OutputType) -> &'static str {
         OutputType::FileOut => "file_out",
         OutputType::Parquet => "parquet",
     }
+}
+
+/// Validate that an endpoint URL has a recognised scheme and a non-empty host.
+///
+/// Accepts `http://` or `https://` followed by at least one character.
+/// Values that still contain unexpanded `${VAR}` placeholders are skipped
+/// so that the `expand_env_vars` behaviour is not broken.
+fn validate_endpoint_url(endpoint: &str) -> Result<(), String> {
+    // Defer validation for values that still contain unexpanded env var placeholders.
+    if endpoint.contains("${") {
+        return Ok(());
+    }
+    let rest = if let Some(r) = endpoint.strip_prefix("https://") {
+        r
+    } else if let Some(r) = endpoint.strip_prefix("http://") {
+        r
+    } else {
+        return Err(format!(
+            "endpoint '{endpoint}' has no recognised scheme; expected 'http://' or 'https://'"
+        ));
+    };
+    if rest.is_empty() {
+        return Err(format!(
+            "endpoint '{endpoint}' has no host after the scheme"
+        ));
+    }
+    Ok(())
 }
 
 /// Expand `${VAR}` references in `text` using the process environment.
@@ -497,7 +531,7 @@ transform: |
 
 output:
   type: otlp
-  endpoint: otel-collector:4317
+  endpoint: http://otel-collector:4317
   compression: zstd
 
 server:
@@ -521,7 +555,7 @@ storage:
         assert_eq!(pipe.outputs[0].output_type, OutputType::Otlp);
         assert_eq!(
             pipe.outputs[0].endpoint.as_deref(),
-            Some("otel-collector:4317")
+            Some("http://otel-collector:4317")
         );
         assert_eq!(cfg.server.diagnostics.as_deref(), Some("0.0.0.0:9090"));
         assert_eq!(cfg.storage.data_dir.as_deref(), Some("/var/lib/logfwd"));
@@ -546,7 +580,7 @@ pipelines:
     outputs:
       - name: collector
         type: otlp
-        endpoint: otel-collector:4317
+        endpoint: http://otel-collector:4317
         protocol: grpc
         compression: zstd
       - name: debug
@@ -573,7 +607,7 @@ server:
     fn env_var_substitution() {
         // SAFETY: this test is not run concurrently with other tests that
         // depend on the same environment variable.
-        unsafe { std::env::set_var("LOGFWD_TEST_ENDPOINT", "my-collector:4317") };
+        unsafe { std::env::set_var("LOGFWD_TEST_ENDPOINT", "http://my-collector:4317") };
         let yaml = r#"
 input:
   type: file
@@ -586,7 +620,7 @@ output:
         let pipe = &cfg.pipelines["default"];
         assert_eq!(
             pipe.outputs[0].endpoint.as_deref(),
-            Some("my-collector:4317")
+            Some("http://my-collector:4317")
         );
         unsafe { std::env::remove_var("LOGFWD_TEST_ENDPOINT") };
     }
@@ -730,7 +764,7 @@ output:
     fn all_output_types() {
         // Implemented output types should parse and validate successfully.
         for (otype, extra) in [
-            ("otlp", "endpoint: x:4317"),
+            ("otlp", "endpoint: http://x:4317"),
             ("http", "endpoint: http://x"),
             ("stdout", ""),
             ("file_out", "path: /tmp/out.log"),
@@ -853,5 +887,58 @@ output:
         let cfg = Config::load_str(yaml).expect("no auth");
         let pipe = &cfg.pipelines["default"];
         assert!(pipe.outputs[0].auth.is_none());
+    }
+
+    #[test]
+    fn validation_endpoint_missing_scheme() {
+        // Scheme-less endpoints must be rejected for both otlp and http outputs.
+        for otype in ["otlp", "http"] {
+            let yaml = format!(
+                "input:\n  type: file\n  path: /tmp/x.log\noutput:\n  type: {otype}\n  endpoint: collector:4317\n"
+            );
+            let result = Config::load_str(&yaml);
+            assert!(
+                result.is_err(),
+                "expected error for scheme-less endpoint with type '{otype}'"
+            );
+            let msg = result.unwrap_err().to_string();
+            assert!(
+                msg.contains("scheme"),
+                "error should mention 'scheme' for '{otype}': {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn validation_endpoint_valid_schemes() {
+        // Both http:// and https:// must be accepted for otlp and http outputs.
+        for (otype, scheme) in [
+            ("otlp", "http://"),
+            ("otlp", "https://"),
+            ("http", "http://"),
+            ("http", "https://"),
+        ] {
+            let yaml = format!(
+                "input:\n  type: file\n  path: /tmp/x.log\noutput:\n  type: {otype}\n  endpoint: {scheme}collector:4317\n"
+            );
+            Config::load_str(&yaml)
+                .unwrap_or_else(|e| panic!("scheme '{scheme}' should be valid for '{otype}': {e}"));
+        }
+    }
+
+    #[test]
+    fn validation_endpoint_unexpanded_env_var_skipped() {
+        // An endpoint whose value is still an unexpanded placeholder must not
+        // fail URL validation — the user may supply the value at runtime.
+        let yaml = r#"
+input:
+  type: file
+  path: /var/log/test.log
+output:
+  type: otlp
+  endpoint: ${LOGFWD_NONEXISTENT_ENDPOINT_VAR}
+"#;
+        // Should succeed (unexpanded placeholder passes through without error).
+        Config::load_str(yaml).expect("unexpanded env var in endpoint should not fail validation");
     }
 }
