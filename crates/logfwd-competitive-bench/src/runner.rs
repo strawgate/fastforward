@@ -567,15 +567,18 @@ fn procfs_stats(pid: u32) -> (u64, u64, u64) {
 
 #[cfg(target_os = "linux")]
 fn clock_ticks_per_second() -> u64 {
-    std::process::Command::new("getconf")
-        .arg("CLK_TCK")
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .and_then(|output| String::from_utf8(output.stdout).ok())
-        .and_then(|s| s.trim().parse::<u64>().ok())
-        .filter(|&v| v > 0)
-        .unwrap_or(100)
+    static TICKS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *TICKS.get_or_init(|| {
+        std::process::Command::new("getconf")
+            .arg("CLK_TCK")
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .and_then(|output| String::from_utf8(output.stdout).ok())
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .filter(|&v| v > 0)
+            .unwrap_or(100)
+    })
 }
 
 #[cfg(not(target_os = "linux"))]

@@ -422,7 +422,7 @@ fn write_dashboard_json(groups: &[AggResult], scenarios: &[String], path: &Path)
         "scenario_names": scenarios,
     });
 
-    let json = serde_json::to_string_pretty(&dashboard).unwrap();
+    let json = serde_json::to_string_pretty(&dashboard).expect("serialize dashboard JSON");
     match std::fs::write(path, &json) {
         Ok(()) => eprintln!("Dashboard JSON written to {}", path.display()),
         Err(e) => eprintln!("ERROR: write dashboard: {e}"),
@@ -437,7 +437,8 @@ fn write_dashboard_json(groups: &[AggResult], scenarios: &[String], path: &Path)
         "scenarios": scenarios,
     });
     let index_path = path.with_file_name("dashboard-index-entry.json");
-    let json = serde_json::to_string_pretty(&index_entry).unwrap();
+    let json =
+        serde_json::to_string_pretty(&index_entry).expect("serialize dashboard index entry JSON");
     match std::fs::write(&index_path, &json) {
         Ok(()) => eprintln!("Index entry written to {}", index_path.display()),
         Err(e) => eprintln!("ERROR: write index entry: {e}"),

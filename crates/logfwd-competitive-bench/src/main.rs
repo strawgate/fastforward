@@ -515,10 +515,15 @@ fn run_one(
     match result {
         Ok(r) => {
             print_result_stderr(&r, total_lines);
-            if let Some(w) = jsonl_writer
-                && let Ok(json) = serde_json::to_string(&r)
-            {
-                let _ = writeln!(w, "{json}");
+            if let Some(w) = jsonl_writer {
+                match serde_json::to_string(&r) {
+                    Ok(json) => {
+                        if let Err(e) = writeln!(w, "{json}") {
+                            eprintln!("WARN: failed writing JSONL result: {e}");
+                        }
+                    }
+                    Err(e) => eprintln!("WARN: failed to serialize benchmark result: {e}"),
+                }
             }
             results.push(r);
         }
