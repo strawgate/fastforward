@@ -83,6 +83,14 @@ fi
 
 DEADLINE=$((SECONDS + TIMEOUT))
 while [ $SECONDS -lt $DEADLINE ]; do
+    if ! kill -0 "$PF_PID" 2>/dev/null; then
+        echo ""
+        echo "FAIL: port-forward exited during verification loop (pid=$PF_PID)"
+        echo "--- blackhole-receiver pods ---"
+        k get pods -n "$NAMESPACE" -l app=blackhole-receiver -o wide 2>&1 || true
+        exit 1
+    fi
+
     STATS=$(curl --connect-timeout 1 --max-time 2 -sf http://localhost:14318/stats 2>/dev/null || echo '{}')
     LINES=$(echo "$STATS" | sed -n 's/.*"lines":\([0-9]*\).*/\1/p')
     LINES="${LINES:-0}"
