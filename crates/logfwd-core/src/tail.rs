@@ -247,10 +247,10 @@ impl FileTailer {
 
         for path in new_paths {
             // Watch the parent directory for future events.
-            if let Some(parent) = path.parent() {
-                if let Err(e) = self.watch_dir(parent) {
-                    eprintln!("warn: could not watch {}: {e}", parent.display());
-                }
+            if let Some(parent) = path.parent()
+                && let Err(e) = self.watch_dir(parent)
+            {
+                eprintln!("warn: could not watch {}: {e}", parent.display());
             }
 
             // Open the file (new files from glob discovery always read from the beginning).
@@ -470,7 +470,7 @@ mod tests {
             ..Default::default()
         };
 
-        let mut tailer = FileTailer::new(&[log_path.clone()], config).unwrap();
+        let mut tailer = FileTailer::new(std::slice::from_ref(&log_path), config).unwrap();
 
         // First poll should read existing content.
         std::thread::sleep(Duration::from_millis(50));
@@ -531,7 +531,7 @@ mod tests {
             poll_interval_ms: 10,
             ..Default::default()
         };
-        let mut tailer = FileTailer::new(&[log_path.clone()], config).unwrap();
+        let mut tailer = FileTailer::new(std::slice::from_ref(&log_path), config).unwrap();
 
         // Read initial data.
         std::thread::sleep(Duration::from_millis(50));
@@ -584,7 +584,7 @@ mod tests {
             poll_interval_ms: 10,
             ..Default::default()
         };
-        let mut tailer = FileTailer::new(&[log_path.clone()], config).unwrap();
+        let mut tailer = FileTailer::new(std::slice::from_ref(&log_path), config).unwrap();
 
         // Read initial data.
         std::thread::sleep(Duration::from_millis(50));
@@ -641,7 +641,7 @@ mod tests {
             poll_interval_ms: 10,
             ..Default::default()
         };
-        let mut tailer = FileTailer::new(&[log_path.clone()], config).unwrap();
+        let mut tailer = FileTailer::new(std::slice::from_ref(&log_path), config).unwrap();
 
         // First poll should get no data (started from end).
         std::thread::sleep(Duration::from_millis(50));
