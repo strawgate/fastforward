@@ -55,6 +55,18 @@ bench:
 bench-competitive *ARGS:
     cargo run -p logfwd-competitive-bench --release -- {{ARGS}}
 
+# Run competitive benchmarks with 3 iterations and JSONL output
+bench-competitive-full:
+    cargo build --release -p logfwd
+    LOGFWD=./target/release/logfwd cargo run -p logfwd-competitive-bench --release -- \
+        --lines 5000000 --mode binary \
+        --scenarios passthrough,json_parse,filter \
+        --iterations 3 --results-file results.jsonl --markdown
+
+# Summarize results from matrix benchmark cells
+bench-summarize *ARGS:
+    cargo run -p logfwd-competitive-bench --release -- summarize {{ARGS}}
+
 # Run competitive benchmarks in Docker with profiling
 bench-docker:
     cargo build --release -p logfwd

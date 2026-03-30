@@ -41,13 +41,19 @@ impl Default for DockerLimits {
     }
 }
 
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct BenchResult {
     pub name: String,
     pub scenario: Scenario,
     pub mode: String,
     pub lines_done: u64,
     pub elapsed_ms: u64,
+    #[serde(default = "default_iteration")]
+    pub iteration: usize,
+}
+
+fn default_iteration() -> usize {
+    1
 }
 
 /// Run a single agent benchmark in binary mode.
@@ -91,6 +97,7 @@ pub fn run_agent(
         mode: "binary".to_string(),
         lines_done,
         elapsed_ms: elapsed.as_millis() as u64,
+        iteration: 0,
     })
 }
 
@@ -212,6 +219,7 @@ pub fn run_agent_docker(
         mode: "docker".to_string(),
         lines_done,
         elapsed_ms: elapsed.as_millis() as u64,
+        iteration: 0,
     })
 }
 

@@ -14,7 +14,7 @@ use std::process::Command;
 use crate::runner::BenchContext;
 
 /// A benchmark scenario defining what work each agent does.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Scenario {
     /// Tail file → sink, no transforms. Measures raw I/O throughput.

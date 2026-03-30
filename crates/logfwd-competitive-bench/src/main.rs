@@ -27,7 +27,9 @@ mod datagen;
 mod download;
 mod fake_k8s;
 mod runner;
+mod summarize;
 
+use std::io::Write;
 use std::path::PathBuf;
 use std::process;
 
@@ -37,6 +39,24 @@ use crate::agents::{Agent, Scenario, all_agents};
 
 fn main() {
     let args = Args::parse();
+
+    // Handle subcommands.
+    if let Some(ref cmd) = args.subcommand {
+        match cmd.as_str() {
+            "summarize" => {
+                let dir = args.results_dir.as_ref().unwrap_or_else(|| {
+                    eprintln!("ERROR: summarize requires --results-dir DIR");
+                    process::exit(1);
+                });
+                summarize::run(dir, args.markdown, args.gh_bench_file.as_deref());
+                return;
+            }
+            other => {
+                eprintln!("Unknown subcommand: {other}");
+                process::exit(1);
+            }
+        }
+    }
 
     let needs_docker = args.docker || args.mode == "docker" || args.mode == "both";
     if needs_docker && !runner::docker_available() {
@@ -179,8 +199,18 @@ fn main() {
         lines: args.lines,
     };
 
+    // Open JSONL results file for per-run output.
+    let mut results_writer = args.results_file.as_ref().map(|p| {
+        let f = std::fs::File::create(p).unwrap_or_else(|e| {
+            eprintln!("ERROR: failed to create results file {}: {e}", p.display());
+            process::exit(1);
+        });
+        std::io::BufWriter::new(f)
+    });
+
     // Run benchmarks across all scenarios and modes.
     let mut results: Vec<BenchResult> = Vec::new();
+    let iterations = args.iterations.max(1);
     for scenario in &args.scenarios {
         eprintln!(
             "=== Scenario: {} ({}) ===",
@@ -201,41 +231,13 @@ fn main() {
                 continue;
             }
 
-            // Binary mode.
-            if let Some(binary) = resolved.binary.as_ref().filter(|_| run_binary) {
-                run_one(
-                    resolved.agent,
-                    Some(binary),
-                    None,
-                    &ctx,
-                    &blackhole,
-                    &args.docker_limits,
-                    *scenario,
-                    args.lines,
-                    &mut results,
-                );
-            }
+            for iter in 1..=iterations {
+                if iterations > 1 {
+                    eprintln!("--- iteration {iter}/{iterations} ---");
+                }
 
-            // Docker mode.
-            if let Some(image) = resolved.image.as_ref().filter(|_| run_docker) {
-                run_one(
-                    resolved.agent,
-                    None,
-                    Some(image.as_str()),
-                    &ctx,
-                    &blackhole,
-                    &args.docker_limits,
-                    *scenario,
-                    args.lines,
-                    &mut results,
-                );
-            } else if run_docker && !run_binary {
-                // Docker requested but no image — fall back to binary.
-                if let Some(binary) = &resolved.binary {
-                    eprintln!(
-                        "  WARN: no Docker image for {}, falling back to binary",
-                        resolved.agent.name()
-                    );
+                // Binary mode.
+                if let Some(binary) = resolved.binary.as_ref().filter(|_| run_binary) {
                     run_one(
                         resolved.agent,
                         Some(binary),
@@ -245,11 +247,58 @@ fn main() {
                         &args.docker_limits,
                         *scenario,
                         args.lines,
+                        iter,
                         &mut results,
+                        &mut results_writer,
                     );
+                }
+
+                // Docker mode.
+                if let Some(image) = resolved.image.as_ref().filter(|_| run_docker) {
+                    run_one(
+                        resolved.agent,
+                        None,
+                        Some(image.as_str()),
+                        &ctx,
+                        &blackhole,
+                        &args.docker_limits,
+                        *scenario,
+                        args.lines,
+                        iter,
+                        &mut results,
+                        &mut results_writer,
+                    );
+                } else if run_docker && !run_binary {
+                    // Docker requested but no image — fall back to binary.
+                    if let Some(binary) = &resolved.binary {
+                        if iter == 1 {
+                            eprintln!(
+                                "  WARN: no Docker image for {}, falling back to binary",
+                                resolved.agent.name()
+                            );
+                        }
+                        run_one(
+                            resolved.agent,
+                            Some(binary),
+                            None,
+                            &ctx,
+                            &blackhole,
+                            &args.docker_limits,
+                            *scenario,
+                            args.lines,
+                            iter,
+                            &mut results,
+                            &mut results_writer,
+                        );
+                    }
                 }
             }
         }
+    }
+
+    // Flush JSONL writer.
+    if let Some(ref mut w) = results_writer {
+        let _ = w.flush();
     }
 
     // Output summary.
@@ -351,7 +400,9 @@ fn run_one(
     limits: &DockerLimits,
     scenario: Scenario,
     total_lines: usize,
+    iteration: usize,
     results: &mut Vec<BenchResult>,
+    jsonl_writer: &mut Option<std::io::BufWriter<std::fs::File>>,
 ) {
     let mode_label = if image.is_some() { "docker" } else { "binary" };
     let result = if let Some(img) = image {
@@ -363,22 +414,36 @@ fn run_one(
     };
 
     match result {
-        Ok(r) => {
+        Ok(mut r) => {
+            r.iteration = iteration;
             print_result_stderr(&r, total_lines);
+            write_jsonl(&r, jsonl_writer);
             results.push(r);
         }
         Err(e) => {
             eprintln!("--- {} ({mode_label}) ---", agent.name());
             eprintln!("  ERROR: {e}");
             eprintln!();
-            results.push(BenchResult {
+            let r = BenchResult {
                 name: agent.name().to_string(),
                 scenario,
                 mode: mode_label.to_string(),
                 lines_done: 0,
                 elapsed_ms: 0,
-            });
+                iteration,
+            };
+            write_jsonl(&r, jsonl_writer);
+            results.push(r);
         }
+    }
+}
+
+/// Write a single result as a JSONL line to the results file.
+fn write_jsonl(result: &BenchResult, writer: &mut Option<std::io::BufWriter<std::fs::File>>) {
+    if let Some(w) = writer
+        && let Ok(json) = serde_json::to_string(result)
+    {
+        let _ = writeln!(w, "{json}");
     }
 }
 
@@ -755,6 +820,14 @@ struct Args {
     profile_dir: Option<PathBuf>,
     /// Path to a logfwd binary built with --features dhat-heap.
     dhat_binary: Option<String>,
+    /// Number of iterations per agent/scenario (default: 1).
+    iterations: usize,
+    /// Write per-run JSONL results to a file (one JSON object per line).
+    results_file: Option<PathBuf>,
+    /// Subcommand: "summarize" reads result files from matrix cells.
+    subcommand: Option<String>,
+    /// Directory containing result artifacts for summarize subcommand.
+    results_dir: Option<PathBuf>,
 }
 
 impl Args {
@@ -774,7 +847,16 @@ impl Args {
             docker_limits: DockerLimits::default(),
             profile_dir: None,
             dhat_binary: None,
+            iterations: 1,
+            results_file: None,
+            subcommand: None,
+            results_dir: None,
         };
+
+        // Check for subcommand as first non-flag argument.
+        if args.len() > 1 && !args[1].starts_with('-') {
+            result.subcommand = Some(args[1].clone());
+        }
 
         let mut i = 1;
         while i < args.len() {
@@ -844,6 +926,21 @@ impl Args {
                     i += 1;
                     result.dhat_binary = Some(args[i].clone());
                 }
+                "--iterations" => {
+                    i += 1;
+                    result.iterations = args[i].parse().expect("invalid --iterations value");
+                }
+                "--results-file" => {
+                    i += 1;
+                    result.results_file = Some(PathBuf::from(&args[i]));
+                }
+                "--results-dir" => {
+                    i += 1;
+                    result.results_dir = Some(PathBuf::from(&args[i]));
+                }
+                other if result.subcommand.is_some() && !other.starts_with('-') => {
+                    // Skip the subcommand itself (already parsed above).
+                }
                 other => {
                     eprintln!("Unknown argument: {other}");
                     eprintln!("Usage: logfwd-competitive-bench [OPTIONS]");
@@ -868,6 +965,11 @@ impl Args {
                     eprintln!(
                         "  --dhat-binary PATH   logfwd binary built with --features dhat-heap"
                     );
+                    eprintln!("  --iterations N       Iterations per agent/scenario (default: 1)");
+                    eprintln!("  --results-file PATH  Write per-run JSONL results");
+                    eprintln!();
+                    eprintln!("Subcommands:");
+                    eprintln!("  summarize --results-dir DIR  Aggregate results from matrix cells");
                     process::exit(1);
                 }
             }
