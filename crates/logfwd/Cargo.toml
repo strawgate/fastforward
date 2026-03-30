@@ -23,4 +23,6 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "tim
 tokio-util = { version = "0.7" }
 
 [dev-dependencies]
+arrow = { workspace = true }
 tempfile = "3"
+tiny_http = "0.12"
