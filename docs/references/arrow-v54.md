@@ -211,9 +211,10 @@ Both write Arrow IPC format. The key differences:
 | Random access | Yes, via `FileReader::set_index(n)` | No -- must read sequentially |
 | Use case | Disk-backed queues (random access to batches) | Streaming over network/pipe |
 
-**For a disk-backed queue**, use `FileWriter`. The footer stores block offsets, so you can
-seek to batch N directly without scanning. This is critical for a disk-backed queue where
-you need to read batches by index.
+**For a disk-backed queue**, use `FileWriter` with atomic seal (write to `.tmp` → `fsync`
+→ `rename`). The footer stores block offsets, so you can seek to batch N directly without
+scanning. Readers never see incomplete files — either the file exists (complete with footer)
+or it doesn't. Delete orphaned `.tmp` files on startup.
 
 ### Cargo features for compression
 

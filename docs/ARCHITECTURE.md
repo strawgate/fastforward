@@ -113,21 +113,39 @@ The scan loop is generic over the `ScanBuilder` trait:
 Post-transform Arrow IPC Stream segments. One queue per pipeline, shared
 by all outputs with independent read cursors.
 
-**Format:** Arrow IPC Stream (not File). Stream format is crash-safe
-(`StreamReader` recovers all complete batches from a truncated segment),
-append-friendly, and supports dictionary replacement across batches.
+**Format:** Arrow IPC File format with atomic seal. Segments are written
+to a `.tmp` file via `FileWriter`, then `fsync` + `rename` to the final
+path. Readers never see incomplete files — a file either exists (complete
+with footer) or doesn't. On startup, delete any `.tmp` files. The footer
+enables random-access cursor recovery (seek to batch N without scanning).
 
-**Segments:** Each segment is a complete IPC stream (schema + N batches +
-EOS). Sealed by size threshold or time threshold, then fsync'd. New
-segment started after sealing. Readers only open sealed segments.
+**Segments:** Each segment is a complete IPC file (schema + N batches +
+footer). Written to `.tmp`, sealed via `finish()` + `fsync` + atomic
+`rename`. New segment started after sealing. Readers only open sealed
+segments (no locking needed). Footer provides batch count and offsets
+for random-access cursor recovery.
 
 **Retention:** TTL (`max_segment_age`) + size (`max_disk_bytes`). When
 either limit is hit, oldest segments are evicted regardless of cursor
 positions. Cursors pointing at deleted segments advance to the oldest
 surviving segment. Gaps are tracked in metrics (`segments_dropped`).
 
-**Delivery:** At-least-once. Crash-before-ack means re-delivery on
-restart. Monotonic `batch_id` in segment metadata enables optional
+**Delivery:** At-least-once, end-to-end. The ack chain flows backwards:
+
+```
+Disk queue seals segment (fsync + rename)
+  → Ack to source: "data through offset X is durable"
+  → Source advances checkpoint (file offset / Kafka offset / TCP ACK)
+```
+
+Sources must NOT acknowledge to their upstream until the disk queue
+confirms durability. This ensures no data is lost between source read
+and queue persistence. On crash, sources restart from their last
+checkpointed offset and re-deliver (at-least-once).
+
+Output delivery is a separate concern — outputs consume from the queue
+with their own at-least-once semantics (independent cursors, retry on
+failure). Monotonic `batch_id` in segment metadata enables optional
 downstream deduplication.
 
 **New output cursors:** Default to tail (skip history). Configurable
