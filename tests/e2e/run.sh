@@ -15,6 +15,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 NO_DESTROY="${NO_DESTROY:-}"
 PF_PID=""
+CLUSTER_CREATED=0
 
 k() {
     kubectl --context "$KUBE_CONTEXT" "$@"
@@ -27,7 +28,11 @@ cleanup() {
     if [ -z "$NO_DESTROY" ]; then
         echo "--- Cleaning up ---"
         k delete namespace "$NAMESPACE" --ignore-not-found --wait=false 2>/dev/null || true
-        kind delete cluster --name "$CLUSTER_NAME" 2>/dev/null || true
+        if [ "$CLUSTER_CREATED" -eq 1 ]; then
+            kind delete cluster --name "$CLUSTER_NAME" 2>/dev/null || true
+        else
+            echo "Keeping pre-existing cluster: $CLUSTER_NAME"
+        fi
     else
         echo "--- NO_DESTROY set, skipping cleanup ---"
     fi
@@ -40,6 +45,7 @@ if kind get clusters 2>/dev/null | grep -q "^${CLUSTER_NAME}$"; then
 else
     echo "Creating cluster: $CLUSTER_NAME"
     kind create cluster --name "$CLUSTER_NAME" --wait 60s
+    CLUSTER_CREATED=1
 fi
 
 echo "=== Phase 2: Build and load image ==="
