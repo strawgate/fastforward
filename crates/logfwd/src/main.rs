@@ -81,7 +81,7 @@ async fn main() {
     }
 
     let result = match args[1].as_str() {
-        "--config" | "-c" => cmd_config(&args),
+        "--config" | "-c" => cmd_config(&args).await,
         "--blackhole" => cmd_blackhole(&args),
         "--generate-json" => cmd_generate_json(&args),
         other => {
@@ -136,7 +136,7 @@ fn print_usage() {
 // Commands
 // ---------------------------------------------------------------------------
 
-fn cmd_config(args: &[String]) -> io::Result<()> {
+async fn cmd_config(args: &[String]) -> io::Result<()> {
     if args.len() < 3 {
         eprintln!("{}error{}: --config requires a path", red(), reset(),);
         eprintln!("  logfwd --config <config.yaml> [--validate] [--dry-run]");
@@ -193,7 +193,7 @@ fn cmd_config(args: &[String]) -> io::Result<()> {
         );
     }
 
-    run_pipelines(config)
+    run_pipelines(config).await
 }
 
 fn cmd_blackhole(args: &[String]) -> io::Result<()> {
@@ -265,36 +265,29 @@ fn validate_pipelines(config: &logfwd_config::Config, dry_run: bool) -> io::Resu
     Ok(())
 }
 
-fn run_pipelines(config: logfwd_config::Config) -> io::Result<()> {
+async fn run_pipelines(config: logfwd_config::Config) -> io::Result<()> {
     use logfwd::pipeline::Pipeline;
     use logfwd_core::diagnostics::DiagnosticsServer;
     let shutdown = CancellationToken::new();
 
-    // Spawn a background thread that listens for SIGINT (Ctrl-C) and SIGTERM and
-    // cancels the token so all pipeline threads shut down gracefully.
+    // Listen for SIGINT (Ctrl-C) and SIGTERM to trigger graceful shutdown.
     let shutdown_for_signal = shutdown.clone();
-    std::thread::spawn(move || {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_io()
-            .build()
-            .expect("signal handler runtime");
-        rt.block_on(async {
-            #[cfg(unix)]
-            {
-                use tokio::signal::unix::{SignalKind, signal};
-                let mut sigterm =
-                    signal(SignalKind::terminate()).expect("failed to register SIGTERM handler");
-                tokio::select! {
-                    _ = tokio::signal::ctrl_c() => {}
-                    _ = sigterm.recv() => {}
-                }
+    tokio::spawn(async move {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{SignalKind, signal};
+            let mut sigterm =
+                signal(SignalKind::terminate()).expect("failed to register SIGTERM handler");
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = sigterm.recv() => {}
             }
-            #[cfg(not(unix))]
-            {
-                tokio::signal::ctrl_c().await.ok();
-            }
-            shutdown_for_signal.cancel();
-        });
+        }
+        #[cfg(not(unix))]
+        {
+            tokio::signal::ctrl_c().await.ok();
+        }
+        shutdown_for_signal.cancel();
     });
 
     let meter_provider = build_meter_provider(&config)?;
@@ -340,21 +333,24 @@ fn run_pipelines(config: logfwd_config::Config) -> io::Result<()> {
 
     for mut pipeline in pipelines {
         let sd = shutdown.clone();
-        handles.push(std::thread::spawn(move || pipeline.run(&sd)));
+        handles.push(tokio::spawn(async move {
+            if let Err(e) = pipeline.run_async(&sd).await {
+                eprintln!("pipeline error: {e}");
+            }
+        }));
     }
 
     if let Some(mut main_pipe) = main_pipeline {
-        let result = main_pipe.run(&shutdown);
-        // Cancel the token so all sibling threads stop when the main pipeline exits,
-        // whether it returned successfully or with an error.
+        let result = main_pipe.run_async(&shutdown).await;
+        // Always cancel + join siblings, even if main pipeline errored.
         shutdown.cancel();
         for h in handles {
-            let _ = h.join();
+            let _ = h.await;
         }
         result?;
     } else {
         for h in handles {
-            let _ = h.join();
+            let _ = h.await;
         }
     }
 
