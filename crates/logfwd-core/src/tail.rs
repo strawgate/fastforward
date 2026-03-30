@@ -250,10 +250,7 @@ impl FileTailer {
                     }
                     Ok(None) => {}
                     Err(e) => {
-                        eprintln!(
-                            "warn: error draining rotated file {}: {e}",
-                            path.display()
-                        );
+                        eprintln!("warn: error draining rotated file {}: {e}", path.display());
                     }
                 }
 
