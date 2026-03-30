@@ -2092,6 +2092,7 @@ dependencies = [
  "sonic-rs",
  "tempfile",
  "tiny_http",
+ "tokio",
  "xxhash-rust",
  "zstd",
 ]
