@@ -25,6 +25,48 @@ RUSTFLAGS="-C target-cpu=native" cargo bench --bench scanner -p logfwd-core
 cd crates/logfwd-core && cargo +nightly fuzz run scanner -- -max_total_time=300
 ```
 
+## Speeding up compilation
+
+DataFusion is a large dependency. Several things keep the dev loop fast:
+
+**Profile optimizations (already in `Cargo.toml`):**
+- `[profile.dev.package."*"]` and `[profile.test.package."*"]` set `opt-level = 3` for all
+  external crates. Heavy deps like DataFusion compile once at opt-level 3 and are cached
+  by Cargo — they only recompile when their version changes. Your own workspace code still
+  compiles at opt-level 0 (fast). Tests run faster too because the runtime code is optimised.
+- `debug = 1` (line-tables-only) in dev and test profiles reduces debug info and speeds up
+  linking significantly.
+
+**Faster linker (optional, Linux):**
+
+`lld` can cut linking time by 3–5×. Install and enable:
+
+```bash
+# Ubuntu / Debian
+sudo apt-get install -y lld
+```
+
+Then add a local override to `.cargo/config.toml` (not committed — machine-local):
+
+```toml
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-fuse-ld=lld"]
+```
+
+**`cargo nextest` (already in justfile):**
+
+```bash
+cargo install cargo-nextest
+just nextest   # Faster parallel test runner
+```
+
+**Target only the crate you changed:**
+
+```bash
+cargo test -p logfwd-core     # Skip recompiling the rest of the workspace
+cargo test -p logfwd-transform
+```
+
 ---
 
 ## Things that will bite you

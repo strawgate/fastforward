@@ -17,6 +17,16 @@ opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"] }
 opentelemetry-otlp = { version = "0.31", features = ["http-proto", "reqwest-client"] }
 serde = { version = "1", features = ["derive"] }
 
+[profile.dev]
+# Line tables only: enough for readable backtraces, much smaller than full debug info.
+debug = 1
+
+[profile.dev.package."*"]
+# Compile all external crates (including datafusion and arrow) at opt-level 3 in dev/test
+# builds. They are cached by cargo and only recompile on version bumps, so the higher
+# opt-level cost is paid once. This also makes tests run significantly faster.
+opt-level = 3
+
 [profile.release]
 opt-level = 3
 lto = "thin"
@@ -24,7 +34,12 @@ codegen-units = 1
 debug = true  # needed for flamegraphs and dhat to show source locations
 
 [profile.test]
-debug = true
+# Line tables only: enough for readable backtraces, much smaller than full debug info.
+debug = 1
+
+[profile.test.package."*"]
+# Same as profile.dev.package — optimized deps, cached, faster test execution.
+opt-level = 3
 
 [profile.bench]
 inherits = "release"

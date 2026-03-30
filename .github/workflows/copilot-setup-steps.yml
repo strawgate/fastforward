@@ -18,5 +18,8 @@ jobs:
       - name: Install just
         uses: taiki-e/install-action@just
 
-      - name: Fetch dependencies
-        run: cargo fetch
+      - name: Pre-compile dependencies
+        # Compile all workspace test artifacts without running them.
+        # This warms the Cargo compilation cache so agents skip the expensive
+        # first-time DataFusion/Arrow build during their own `cargo test` runs.
+        run: cargo test --no-run --workspace
