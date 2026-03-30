@@ -84,20 +84,33 @@ impl AggResult {
     }
 }
 
-fn load_results(dir: &Path) -> Vec<BenchResult> {
+fn load_results(dir: &Path) -> Result<Vec<BenchResult>, String> {
     let mut results = Vec::new();
     for path in walkdir(dir) {
-        if path.extension().is_some_and(|ext| ext == "jsonl")
-            && let Ok(file) = std::fs::File::open(&path)
-        {
-            for line in std::io::BufReader::new(file).lines().map_while(Result::ok) {
-                if let Ok(result) = serde_json::from_str::<BenchResult>(&line) {
-                    results.push(result);
-                }
-            }
+        if path.extension().is_none_or(|ext| ext != "jsonl") {
+            continue;
+        }
+        let file = std::fs::File::open(&path)
+            .map_err(|e| format!("failed to open {}: {e}", path.display()))?;
+        for (line_no, line) in std::io::BufReader::new(file).lines().enumerate() {
+            let line = line.map_err(|e| {
+                format!(
+                    "failed to read {} at line {}: {e}",
+                    path.display(),
+                    line_no + 1
+                )
+            })?;
+            let result = serde_json::from_str::<BenchResult>(&line).map_err(|e| {
+                format!(
+                    "failed to parse {} at line {}: {e}",
+                    path.display(),
+                    line_no + 1
+                )
+            })?;
+            results.push(result);
         }
     }
-    results
+    Ok(results)
 }
 
 fn walkdir(dir: &Path) -> Vec<std::path::PathBuf> {
@@ -161,7 +174,7 @@ pub fn run(
     gh_bench_file: Option<&Path>,
     dashboard_file: Option<&Path>,
 ) -> Result<(), String> {
-    let results = load_results(results_dir);
+    let results = load_results(results_dir)?;
     if results.is_empty() {
         return Err(format!("No results found in {}", results_dir.display()));
     }
@@ -225,17 +238,24 @@ fn print_markdown(groups: &[AggResult], scenarios: &[String]) {
             }
         }
         if sg.len() > 1 {
-            let base = sg[0];
+            let base = sg
+                .iter()
+                .max_by_key(|g| g.avg_elapsed_ms())
+                .copied()
+                .unwrap_or(sg[0]);
             let base_ms = base.avg_elapsed_ms();
             if base_ms > 0 {
                 println!();
-                for g in &sg[1..] {
+                for g in &sg {
+                    if g.name == base.name && g.mode == base.mode {
+                        continue;
+                    }
                     let g_ms = g.avg_elapsed_ms();
                     if g_ms > 0 {
-                        let ratio = g_ms as f64 / base_ms as f64;
+                        let ratio = base_ms as f64 / g_ms as f64;
                         println!(
                             "> **{}** is **{:.1}x faster** than {}",
-                            base.name, ratio, g.name
+                            g.name, ratio, base.name
                         );
                     }
                 }

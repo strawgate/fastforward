@@ -48,8 +48,13 @@ pub struct BenchResult {
     pub mode: String,
     pub lines_done: u64,
     pub elapsed_ms: u64,
+    /// Iteration index for repeated runs; defaults to `1` when omitted in input JSON.
     #[serde(default = "default_iteration")]
     pub iteration: usize,
+    /// Per-second resource and runtime samples collected during the run.
+    ///
+    /// Defaults to an empty vector when absent and is omitted from serialized
+    /// output when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub samples: Vec<AgentSample>,
 }
@@ -484,9 +489,13 @@ fn collect_samples(
     stop: &std::sync::atomic::AtomicBool,
 ) -> Vec<RawSample> {
     let mut samples = Vec::new();
+    let mut next_tick = Instant::now() + Duration::from_secs(1);
 
     while !stop.load(std::sync::atomic::Ordering::Relaxed) {
-        std::thread::sleep(Duration::from_secs(1));
+        let now = Instant::now();
+        if now < next_tick {
+            std::thread::sleep(next_tick - now);
+        }
         if stop.load(std::sync::atomic::Ordering::Relaxed) {
             break;
         }
@@ -515,6 +524,7 @@ fn collect_samples(
             },
             http_body,
         });
+        next_tick += Duration::from_secs(1);
     }
 
     samples
@@ -557,9 +567,15 @@ fn procfs_stats(pid: u32) -> (u64, u64, u64) {
 
 #[cfg(target_os = "linux")]
 fn clock_ticks_per_second() -> u64 {
-    // SAFETY: sysconf is thread-safe and does not require any preconditions.
-    let raw = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
-    if raw > 0 { raw as u64 } else { 100 }
+    std::process::Command::new("getconf")
+        .arg("CLK_TCK")
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(100)
 }
 
 #[cfg(not(target_os = "linux"))]

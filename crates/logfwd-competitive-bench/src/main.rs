@@ -897,7 +897,7 @@ fn detect_subcommand(args: &[String]) -> Option<(String, usize)> {
     args.iter()
         .enumerate()
         .skip(1)
-        .find(|(_, arg)| !arg.starts_with('-'))
+        .find(|(_, arg)| matches!(arg.as_str(), "summarize"))
         .map(|(idx, arg)| (arg.clone(), idx))
 }
 
