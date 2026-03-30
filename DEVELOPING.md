@@ -25,25 +25,25 @@ RUSTFLAGS="-C target-cpu=native" cargo bench --bench scanner -p logfwd-core
 cd crates/logfwd-core && cargo +nightly fuzz run scanner -- -max_total_time=300
 ```
 
-## Compile caching with sccache (optional)
+## Compile caching with sccache
 
-[sccache](https://github.com/mozilla/sccache) can significantly speed up incremental Rust compilation by caching build artefacts. It is **not** required — all builds work without it.
+[sccache](https://github.com/mozilla/sccache) caches Rust compilation artefacts to speed up builds. The project is configured to use it (`.cargo/config.toml` sets `rustc-wrapper = "sccache"`).
 
-To enable it locally:
+**CI and Copilot agents:** sccache is installed automatically — no action needed.
+
+**Local development:** install sccache once:
 
 ```bash
-# Install sccache (once)
 cargo install sccache --locked
-
-# Enable for the current shell session
-export RUSTC_WRAPPER=sccache
-
-# Or add it permanently to your shell profile
-echo 'export RUSTC_WRAPPER=sccache' >> ~/.bashrc   # bash
-echo 'export RUSTC_WRAPPER=sccache' >> ~/.zshrc    # zsh
 ```
 
-Do **not** add `rustc-wrapper = "sccache"` to `.cargo/config.toml` — that forces sccache on everyone, including CI and other contributors who don't have it installed, breaking their builds.
+After that, every `cargo build` / `cargo test` / `cargo clippy` will use the cache automatically via the project's `.cargo/config.toml`.
+
+To temporarily **disable** sccache (e.g. for debugging):
+
+```bash
+RUSTC_WRAPPER="" cargo build
+```
 
 ---
 

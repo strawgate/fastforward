@@ -6,11 +6,12 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    env:
-      RUSTC_WRAPPER: ""
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Install sccache
+        uses: mozilla-actions/sccache-action@v0.0.7
 
       - name: Set up Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
