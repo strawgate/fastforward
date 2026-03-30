@@ -51,6 +51,12 @@ jobs:
       - name: Dependency audit
         run: just deny
 
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Security audit
+        run: cargo audit --ignore RUSTSEC-2024-0437
+
       - name: Typos
         uses: crate-ci/typos@v1
 
@@ -90,6 +96,31 @@ jobs:
 
       - name: Release check
         run: cargo check --release
+
+  cross-compile-arm64:
+    name: Cross-compile check (ARM64)
+    runs-on: ubuntu-latest
+    env:
+      RUSTC_WRAPPER: ""
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+          key: aarch64-unknown-linux-gnu
+
+      - name: Install cross-compilation toolchain
+        run: sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu
+
+      - name: Cross-compile check
+        run: cargo check --target aarch64-unknown-linux-gnu
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
 
   test-macos:
     name: Test (macOS)
