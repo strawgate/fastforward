@@ -224,6 +224,7 @@ fn write_at_rate(path: &Path, eps: u64, stop: &AtomicBool, written: &AtomicU64) 
     let levels = ["INFO", "DEBUG", "WARN", "ERROR"];
     let interval = Duration::from_nanos(1_000_000_000 / eps.max(1));
     let mut next = Instant::now();
+    let mut last_flush = Instant::now();
     let mut count = 0u64;
 
     while !stop.load(Ordering::Relaxed) {
@@ -236,7 +237,12 @@ fn write_at_rate(path: &Path, eps: u64, stop: &AtomicBool, written: &AtomicU64) 
                 r#"{{"ts":"2024-01-01T00:00:{:02}Z","level":"{level}","msg":"bench","n":{count}}}"#,
                 count % 60,
             );
-            let _ = w.flush();
+            // Flush at most once per second so logfwd sees data promptly at low
+            // EPS without hammering syscalls at high EPS.
+            if now.duration_since(last_flush) >= Duration::from_secs(1) {
+                let _ = w.flush();
+                last_flush = now;
+            }
             count += 1;
             written.fetch_add(1, Ordering::Relaxed);
             next += interval;
