@@ -4,6 +4,7 @@
 mod fanout;
 mod json_lines;
 mod otlp_sink;
+pub mod sink;
 mod stdout;
 
 // Placeholder sinks — not yet wired into build_output_sink.
@@ -17,6 +18,7 @@ mod parquet;
 pub use fanout::FanOut;
 use json_lines::*;
 use otlp_sink::*;
+pub use sink::{SendResult, Sink};
 use stdout::*;
 
 use std::io::{self, Write};
