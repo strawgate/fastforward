@@ -103,7 +103,7 @@ impl ScalarUDFImpl for GrokUdf {
         self
     }
 
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "grok"
     }
 
@@ -247,8 +247,7 @@ impl ScalarUDFImpl for GrokUdf {
                         matches
                             .as_ref()
                             .and_then(|m| m.get(name))
-                            .map(|v| datafusion::common::ScalarValue::Utf8(Some(v.to_string())))
-                            .unwrap_or(datafusion::common::ScalarValue::Utf8(None))
+                            .map_or(datafusion::common::ScalarValue::Utf8(None), |v| datafusion::common::ScalarValue::Utf8(Some(v.to_string())))
                     })
                     .collect();
 

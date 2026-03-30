@@ -297,7 +297,7 @@ impl DiagnosticsServer {
         let route = path.split('?').next().unwrap_or(&path);
 
         match route {
-            "/" => self.serve_dashboard(request),
+            "/" => Self::serve_dashboard(request),
             "/health" => self.serve_health(request),
             "/api/pipelines" => self.serve_pipelines(request),
             // Prometheus /metrics removed — use OTLP metrics push instead.
@@ -318,7 +318,6 @@ impl DiagnosticsServer {
     // -- endpoint handlers --------------------------------------------------
 
     fn serve_dashboard(
-        &self,
         request: tiny_http::Request,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let resp = tiny_http::Response::from_string(DASHBOARD_HTML).with_header(
@@ -332,8 +331,7 @@ impl DiagnosticsServer {
     fn serve_health(&self, request: tiny_http::Request) -> Result<(), Box<dyn std::error::Error>> {
         let uptime = self.start_time.elapsed().as_secs();
         let body = format!(
-            r#"{{"status":"ok","uptime_seconds":{},"version":"{}"}}"#,
-            uptime, VERSION,
+            r#"{{"status":"ok","uptime_seconds":{uptime},"version":"{VERSION}"}}"#
         );
         let resp = tiny_http::Response::from_string(body).with_header(
             tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
@@ -565,7 +563,7 @@ mod tests {
         let _handle = server.start();
 
         // Give the server a moment to bind.
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        thread::sleep(std::time::Duration::from_millis(100));
 
         let (status, body) = http_get(port, "/health");
         assert_eq!(status, 200);
@@ -580,7 +578,7 @@ mod tests {
         let server = server_with_test_pipeline(port);
         let _handle = server.start();
 
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        thread::sleep(std::time::Duration::from_millis(100));
 
         let (status, body) = http_get(port, "/api/pipelines");
         assert_eq!(status, 200);
@@ -602,7 +600,7 @@ mod tests {
         let server = server_with_test_pipeline(port);
         let _handle = server.start();
 
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        thread::sleep(std::time::Duration::from_millis(100));
 
         let (status, _body) = http_get(port, "/nonexistent");
         assert_eq!(status, 404);

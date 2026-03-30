@@ -224,10 +224,7 @@ impl FileTailer {
                 continue;
             }
 
-            let current_identity = match identify_file(path, self.config.fingerprint_bytes) {
-                Ok(id) => id,
-                Err(_) => continue,
-            };
+            let Ok(current_identity) = identify_file(path, self.config.fingerprint_bytes) else { continue };
 
             if let Some(tailed) = self.files.get(path) {
                 // File exists and we're already tailing it.
@@ -276,10 +273,7 @@ impl FileTailer {
     /// Read ALL available new data from a file. Drains until read() returns 0.
     /// Returns None if no new data.
     fn read_new_data(&mut self, path: &Path) -> io::Result<Option<Vec<u8>>> {
-        let tailed = match self.files.get_mut(path) {
-            Some(t) => t,
-            None => return Ok(None),
-        };
+        let Some(tailed) = self.files.get_mut(path) else { return Ok(None) };
 
         // Check current file size.
         let meta = tailed.file.metadata()?;
@@ -433,7 +427,7 @@ mod tests {
         // Truncate and write new data (simulating copytruncate).
         {
             let f = File::create(&log_path).unwrap(); // truncates
-            let mut f = std::io::BufWriter::new(f);
+            let mut f = io::BufWriter::new(f);
             writeln!(f, "after truncate 1").unwrap();
             writeln!(f, "after truncate 2").unwrap();
         }

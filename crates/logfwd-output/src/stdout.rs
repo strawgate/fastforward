@@ -11,7 +11,7 @@ use super::{BatchMetadata, OutputSink, build_col_infos, str_value, write_row_jso
 
 /// Output format for StdoutSink.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StdoutFormat {
+pub(crate) enum StdoutFormat {
     Json,
     Text,
     /// Human-readable colored output for debugging/testing.
@@ -19,7 +19,7 @@ pub enum StdoutFormat {
 }
 
 /// Writes log records to stdout, one per line.
-pub struct StdoutSink {
+pub(crate) struct StdoutSink {
     name: String,
     format: StdoutFormat,
     buf: Vec<u8>,
@@ -27,7 +27,9 @@ pub struct StdoutSink {
 }
 
 impl StdoutSink {
-    pub fn new(name: String, format: StdoutFormat) -> Self {
+    pub(crate) fn new(name: String, format: StdoutFormat) -> Self {
+        // SAFETY: libc::isatty is safe to call with STDOUT_FILENO; it returns
+        // a non-zero value if the file descriptor refers to a terminal.
         let color = format == StdoutFormat::Console
             && std::env::var_os("NO_COLOR").is_none()
             && unsafe { libc::isatty(libc::STDOUT_FILENO) != 0 };
@@ -40,7 +42,7 @@ impl StdoutSink {
     }
 
     /// Write into an arbitrary `Write` destination (useful for testing).
-    pub fn write_batch_to<W: Write>(
+    pub(crate) fn write_batch_to<W: Write>(
         &mut self,
         batch: &RecordBatch,
         _metadata: &BatchMetadata,
@@ -114,7 +116,7 @@ impl StdoutSink {
                 if !col.is_null(row) {
                     let ts = str_value(col, row);
                     // Show just the time portion if it's a full ISO timestamp.
-                    let short = ts.find('T').map(|i| &ts[i + 1..]).unwrap_or(ts);
+                    let short = ts.find('T').map_or(ts, |i| &ts[i + 1..]);
                     if self.color {
                         self.buf.extend_from_slice(b"\x1b[2m");
                     }
@@ -142,7 +144,7 @@ impl StdoutSink {
                         self.buf.extend_from_slice(color.as_bytes());
                     }
                     // Pad to 5 chars for alignment.
-                    write!(self.buf, "{:<5}", level)?;
+                    write!(self.buf, "{level:<5}")?;
                     if self.color {
                         self.buf.extend_from_slice(b"\x1b[0m");
                     }
@@ -175,11 +177,11 @@ impl StdoutSink {
                     continue;
                 }
 
-                if !has_extra {
+                if has_extra {
+                    self.buf.push(b' ');
+                } else {
                     self.buf.extend_from_slice(b"  ");
                     has_extra = true;
-                } else {
-                    self.buf.push(b' ');
                 }
 
                 if self.color {

@@ -99,7 +99,7 @@ impl ChunkCompressor {
         if chunk.compressed_size == 0 {
             return 0.0;
         }
-        chunk.raw_size as f64 / chunk.compressed_size as f64
+        f64::from(chunk.raw_size) / f64::from(chunk.compressed_size)
     }
 }
 

@@ -229,7 +229,7 @@ impl StreamingBuilder {
             let name = String::from_utf8_lossy(&fc.name);
 
             if fc.has_int {
-                let col_name = format!("{}_int", name);
+                let col_name = format!("{name}_int");
                 let mut values = vec![0i64; num_rows];
                 let mut valid = vec![false; num_rows];
                 for &(row, v) in &fc.int_values {
@@ -247,7 +247,7 @@ impl StreamingBuilder {
             }
 
             if fc.has_float {
-                let col_name = format!("{}_float", name);
+                let col_name = format!("{name}_float");
                 let mut values = vec![0.0f64; num_rows];
                 let mut valid = vec![false; num_rows];
                 for &(row, v) in &fc.float_values {
@@ -265,7 +265,7 @@ impl StreamingBuilder {
             }
 
             if fc.has_str {
-                let col_name = format!("{}_str", name);
+                let col_name = format!("{name}_str");
                 let mut builder = StringViewBuilder::new();
                 let block = builder.append_block(arrow_buf.clone());
 

@@ -194,7 +194,7 @@ impl StorageBuilder {
                         valid[r] = true;
                     }
                 }
-                schema_fields.push(Field::new(format!("{}_int", name), DataType::Int64, true));
+                schema_fields.push(Field::new(format!("{name}_int"), DataType::Int64, true));
                 arrays.push(Arc::new(Int64Array::new(
                     values.into(),
                     Some(NullBuffer::from(valid)),
@@ -211,7 +211,7 @@ impl StorageBuilder {
                     }
                 }
                 schema_fields.push(Field::new(
-                    format!("{}_float", name),
+                    format!("{name}_float"),
                     DataType::Float64,
                     true,
                 ));
@@ -236,7 +236,7 @@ impl StorageBuilder {
                         builder.append_null();
                     }
                 }
-                schema_fields.push(Field::new(format!("{}_str", name), DataType::Utf8, true));
+                schema_fields.push(Field::new(format!("{name}_str"), DataType::Utf8, true));
                 arrays.push(Arc::new(builder.finish()) as ArrayRef);
             }
         }

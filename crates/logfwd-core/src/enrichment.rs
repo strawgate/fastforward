@@ -116,7 +116,7 @@ impl HostInfoTable {
 }
 
 impl EnrichmentTable for HostInfoTable {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "host_info"
     }
 
@@ -348,7 +348,7 @@ fn read_csv_to_batch<R: io::Read>(reader: R) -> Result<RecordBatch, String> {
         .headers()
         .map_err(|e| format!("CSV header error: {e}"))?
         .iter()
-        .map(|h| h.to_string())
+        .map(ToString::to_string)
         .collect();
 
     if headers.is_empty() {
@@ -503,7 +503,7 @@ fn read_jsonl_to_batch<R: io::BufRead>(reader: R) -> Result<RecordBatch, String>
         .map(|key| {
             let arr: StringArray = rows
                 .iter()
-                .map(|row| row.get(key).map(|s| s.as_str()))
+                .map(|row| row.get(key).map(String::as_str))
                 .collect();
             Arc::new(arr) as _
         })

@@ -9,13 +9,13 @@ use super::{BatchMetadata, OutputSink};
 // ---------------------------------------------------------------------------
 
 /// Sends log records to Elasticsearch.
-pub struct ElasticsearchSink {
+pub(crate) struct ElasticsearchSink {
     name: String,
     endpoint: String,
 }
 
 impl ElasticsearchSink {
-    pub fn new(name: String, endpoint: String) -> Self {
+    pub(crate) fn new(name: String, endpoint: String) -> Self {
         ElasticsearchSink { name, endpoint }
     }
 }

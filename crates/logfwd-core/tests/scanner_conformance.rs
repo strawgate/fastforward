@@ -311,7 +311,7 @@ fn assert_builders_consistent(input: &[u8]) {
     let mut streaming = StreamingSimdScanner::new(ScanConfig::default());
 
     let sb = storage.scan(input);
-    let stb = streaming.scan(bytes::Bytes::from(input.to_vec()));
+    let stb = streaming.scan(&bytes::Bytes::from(input.to_vec()));
 
     assert_eq!(
         sb.num_rows(),

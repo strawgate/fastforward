@@ -1,8 +1,4 @@
 [build]
 rustc-wrapper = "sccache"
 
-# Deny common mistakes in all builds (not just CI).
-[target.'cfg(all())']
-rustflags = [
-    "-Dclippy::dbg_macro",
-]
+# Lint configuration is managed via [workspace.lints] in Cargo.toml.

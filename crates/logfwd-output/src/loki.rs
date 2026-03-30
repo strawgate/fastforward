@@ -9,13 +9,13 @@ use super::{BatchMetadata, OutputSink};
 // ---------------------------------------------------------------------------
 
 /// Sends log records to Grafana Loki.
-pub struct LokiSink {
+pub(crate) struct LokiSink {
     name: String,
     endpoint: String,
 }
 
 impl LokiSink {
-    pub fn new(name: String, endpoint: String) -> Self {
+    pub(crate) fn new(name: String, endpoint: String) -> Self {
         LokiSink { name, endpoint }
     }
 }

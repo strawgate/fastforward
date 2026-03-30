@@ -9,13 +9,13 @@ use super::{BatchMetadata, OutputSink};
 // ---------------------------------------------------------------------------
 
 /// Writes log records to Parquet files.
-pub struct ParquetSink {
+pub(crate) struct ParquetSink {
     name: String,
     path: String,
 }
 
 impl ParquetSink {
-    pub fn new(name: String, path: String) -> Self {
+    pub(crate) fn new(name: String, path: String) -> Self {
         ParquetSink { name, path }
     }
 }

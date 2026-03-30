@@ -159,10 +159,7 @@ fn scan_line<B: ScanBuilder>(
         if buf[pos] != b'"' {
             break;
         }
-        let (key, after_key) = match index.scan_string(buf, pos) {
-            Some(r) => r,
-            None => break,
-        };
+        let Some((key, after_key)) = index.scan_string(buf, pos) else { break };
         pos = after_key;
         pos = skip_ws(buf, pos, end);
         if pos >= end || buf[pos] != b':' {
@@ -177,10 +174,7 @@ fn scan_line<B: ScanBuilder>(
         let wanted = config.is_wanted(key);
         match buf[pos] {
             b'"' => {
-                let (val, after) = match index.scan_string(buf, pos) {
-                    Some(r) => r,
-                    None => break,
-                };
+                let Some((val, after)) = index.scan_string(buf, pos) else { break };
                 if wanted {
                     let idx = builder.resolve_field(key);
                     builder.append_str_by_idx(idx, val);
@@ -327,12 +321,12 @@ impl StreamingSimdScanner {
             config,
         }
     }
-    pub fn scan(&mut self, buf: bytes::Bytes) -> RecordBatch {
+    pub fn scan(&mut self, buf: &bytes::Bytes) -> RecordBatch {
         if self.config.validate_utf8 {
-            std::str::from_utf8(&buf).expect("StreamingSimdScanner: input is not valid UTF-8");
+            std::str::from_utf8(buf).expect("StreamingSimdScanner: input is not valid UTF-8");
         }
-        self.builder.begin_batch(buf.clone());
-        scan_into(&buf, &self.config, &mut self.builder);
+        self.builder.begin_batch((*buf).clone());
+        scan_into(buf, &self.config, &mut self.builder);
         self.builder.finish_batch()
     }
 }
@@ -545,7 +539,7 @@ mod tests {
     #[test]
     fn test_streaming_simple() {
         let mut s = StreamingSimdScanner::new(ScanConfig::default());
-        let batch = s.scan(bytes::Bytes::from_static(
+        let batch = s.scan(&bytes::Bytes::from_static(
             b"{\"host\":\"web1\",\"status\":200}\n{\"host\":\"web2\"}\n",
         ));
         assert_eq!(batch.num_rows(), 2);
@@ -554,8 +548,8 @@ mod tests {
     #[test]
     fn test_streaming_reuse() {
         let mut s = StreamingSimdScanner::new(ScanConfig::default());
-        let _ = s.scan(bytes::Bytes::from_static(b"{\"x\":\"a\"}\n"));
-        let b = s.scan(bytes::Bytes::from_static(b"{\"x\":\"b\"}\n"));
+        let _ = s.scan(&bytes::Bytes::from_static(b"{\"x\":\"a\"}\n"));
+        let b = s.scan(&bytes::Bytes::from_static(b"{\"x\":\"b\"}\n"));
         assert_eq!(b.num_rows(), 1);
     }
 
@@ -588,7 +582,7 @@ mod tests {
             ..ScanConfig::default()
         };
         let batch = StreamingSimdScanner::new(config)
-            .scan(bytes::Bytes::from_static(b"{\"msg\":\"hello\"}\n"));
+            .scan(&bytes::Bytes::from_static(b"{\"msg\":\"hello\"}\n"));
         assert_eq!(batch.num_rows(), 1);
     }
 
@@ -599,6 +593,6 @@ mod tests {
             validate_utf8: true,
             ..ScanConfig::default()
         };
-        StreamingSimdScanner::new(config).scan(bytes::Bytes::from_static(b"{\"msg\":\"\xFF\"}\n"));
+        StreamingSimdScanner::new(config).scan(&bytes::Bytes::from_static(b"{\"msg\":\"\xFF\"}\n"));
     }
 }

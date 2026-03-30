@@ -28,3 +28,37 @@ debug = true
 
 [profile.bench]
 inherits = "release"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "warn"
+unreachable_pub = "warn"
+unused_qualifications = "warn"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+# Allow noisy style lints
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+doc_markdown = "allow"
+too_many_lines = "allow"
+similar_names = "allow"
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+# Allow lints that conflict with performance-critical code
+inline_always = "allow"
+cast_precision_loss = "allow"
+# Allow lints that would require many low-value changes
+many_single_char_names = "allow"
+struct_excessive_bools = "allow"
+cast_possible_wrap = "allow"
+# Restriction lints (cherry-picked)
+undocumented_unsafe_blocks = "warn"
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+rest_pat_in_fully_bound_structs = "warn"
+# Cargo lints
+cargo = { level = "warn", priority = -1 }
+multiple_crate_versions = "allow"

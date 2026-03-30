@@ -23,6 +23,8 @@ const EXIT_RUNTIME: i32 = 2;
 // ---------------------------------------------------------------------------
 
 fn use_color() -> bool {
+    // SAFETY: libc::isatty is safe to call with STDERR_FILENO; it returns
+    // a non-zero value if the file descriptor refers to a terminal.
     env::var_os("NO_COLOR").is_none() && unsafe { libc::isatty(libc::STDERR_FILENO) != 0 }
 }
 
@@ -165,7 +167,8 @@ fn cmd_config(args: &[String]) -> io::Result<()> {
 
     if validate_only || dry_run {
         // Both --validate and --dry-run build pipelines to catch SQL/wiring errors.
-        return validate_pipelines(&config, dry_run);
+        validate_pipelines(&config, dry_run);
+        return Ok(());
     }
 
     // Startup summary.
@@ -188,11 +191,11 @@ fn cmd_config(args: &[String]) -> io::Result<()> {
         );
     }
 
-    run_pipelines(config)
+    run_pipelines(&config)
 }
 
 fn cmd_blackhole(args: &[String]) -> io::Result<()> {
-    let addr = args.get(2).map(|s| s.as_str()).unwrap_or("127.0.0.1:4318");
+    let addr = args.get(2).map_or("127.0.0.1:4318", String::as_str);
     run_blackhole(addr)
 }
 
@@ -225,7 +228,7 @@ fn cmd_generate_json(args: &[String]) -> io::Result<()> {
 // ---------------------------------------------------------------------------
 
 /// Validate config by building all pipelines. Used by --validate and --dry-run.
-fn validate_pipelines(config: &logfwd_config::Config, dry_run: bool) -> io::Result<()> {
+fn validate_pipelines(config: &logfwd_config::Config, dry_run: bool) {
     use logfwd::pipeline::Pipeline;
 
     // Build a no-op meter for validation (no OTel export needed).
@@ -257,10 +260,9 @@ fn validate_pipelines(config: &logfwd_config::Config, dry_run: bool) -> io::Resu
         reset(),
         config.pipelines.len(),
     );
-    Ok(())
 }
 
-fn run_pipelines(config: logfwd_config::Config) -> io::Result<()> {
+fn run_pipelines(config: &logfwd_config::Config) -> io::Result<()> {
     use logfwd::pipeline::Pipeline;
     use logfwd_core::diagnostics::DiagnosticsServer;
     let shutdown = CancellationToken::new();
@@ -292,7 +294,7 @@ fn run_pipelines(config: logfwd_config::Config) -> io::Result<()> {
         });
     });
 
-    let meter_provider = build_meter_provider(&config)?;
+    let meter_provider = build_meter_provider(config)?;
     let meter = meter_provider.meter("logfwd");
 
     let mut pipelines = Vec::new();
@@ -506,7 +508,7 @@ fn build_meter_provider(
             .map_err(|e| io::Error::other(format!("OTLP metric exporter: {e}")))?;
 
         let reader = opentelemetry_sdk::metrics::PeriodicReader::builder(otlp_exporter)
-            .with_interval(std::time::Duration::from_secs(interval_secs))
+            .with_interval(Duration::from_secs(interval_secs))
             .build();
 
         eprintln!(
@@ -555,7 +557,7 @@ fn generate_json_log_file(num_lines: usize, output: &str) -> io::Result<()> {
         let path = paths[i % 5];
         let id = 10000 + (i * 7) % 90000;
         let dur = 1 + (i * 13) % 500;
-        let rid = format!("{:016x}", (i as u64).wrapping_mul(0x517cc1b727220a95));
+        let rid = format!("{:016x}", (i as u64).wrapping_mul(0x517c_c1b7_2722_0a95));
 
         write!(
             writer,

@@ -49,7 +49,7 @@ fn format_time(ns: f64) -> String {
     } else if ns >= 1_000.0 {
         format!("{:.1} us", ns / 1_000.0)
     } else {
-        format!("{:.0} ns", ns)
+        format!("{ns:.0} ns")
     }
 }
 
@@ -69,15 +69,14 @@ fn format_rate(ns: f64, count: u64) -> String {
     } else if rate >= 1_000.0 {
         format!("{:.0}K lines/s", rate / 1_000.0)
     } else {
-        format!("{:.0} lines/s", rate)
+        format!("{rate:.0} lines/s")
     }
 }
 
 fn main() {
     let criterion_dir = std::env::args()
         .nth(1)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("target/criterion"));
+        .map_or_else(|| PathBuf::from("target/criterion"), PathBuf::from);
 
     if !criterion_dir.exists() {
         eprintln!(
@@ -109,8 +108,7 @@ fn main() {
                     .rsplit('/')
                     .next()
                     .and_then(|s| s.parse::<u64>().ok())
-                    .map(|n| format_rate(b.median_ns, n))
-                    .unwrap_or_else(|| "—".to_string()),
+                    .map_or_else(|| "—".to_string(), |n| format_rate(b.median_ns, n)),
             };
             println!("| {} | {} | {} | {} |", b.name, time, range, tp);
         }
@@ -150,7 +148,7 @@ fn collect_results(dir: &PathBuf, groups: &mut BTreeMap<String, Vec<BenchResult>
             .throughput
             .as_ref()
             .and_then(|v| v.get("Bytes"))
-            .and_then(|v| v.as_u64());
+            .and_then(serde_json::Value::as_u64);
 
         groups
             .entry(bench.group_id.clone())
@@ -167,10 +165,7 @@ fn collect_results(dir: &PathBuf, groups: &mut BTreeMap<String, Vec<BenchResult>
 
 /// Recursively find all `new/benchmark.json` files under a directory.
 fn find_bench_files(dir: &PathBuf, results: &mut Vec<PathBuf>) {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {

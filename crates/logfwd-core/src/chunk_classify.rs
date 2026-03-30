@@ -53,12 +53,11 @@ impl ChunkIndex {
             };
             let real_q = compute_real_quotes(quote_bits, bs_bits, &mut prev_odd_backslash);
 
-            #[cfg(test)]
-            if cfg!(feature = "debug_bitmask") {
-                eprintln!(
-                    "block {block_idx}: offset={offset} quotes=0x{quote_bits:016x} bs=0x{bs_bits:016x} real=0x{real_q:016x}"
-                );
-            }
+            // debug_bitmask feature: set in Cargo.toml to enable bitmask debug output.
+            #[cfg(all(test, feature = "debug_bitmask"))]
+            eprintln!(
+                "block {block_idx}: offset={offset} quotes=0x{quote_bits:016x} bs=0x{bs_bits:016x} real=0x{real_q:016x}"
+            );
 
             // String interior mask: everything BETWEEN unescaped quotes.
             // prefix_xor toggles at each quote.
@@ -109,6 +108,8 @@ impl ChunkIndex {
         }
         let len = self.real_quotes.len();
         for b in (block + 1)..len {
+            // SAFETY: `b` iterates over `(block+1)..len` where `len = self.real_quotes.len()`,
+            // so `b < self.real_quotes.len()` is always true.
             let bits = unsafe { *self.real_quotes.get_unchecked(b) };
             if bits != 0 {
                 return Some((b << 6) + bits.trailing_zeros() as usize);
@@ -194,8 +195,9 @@ fn compute_real_quotes(quote_bits: u64, bs_bits: u64, prev_odd_backslash: &mut u
     //
     // 1. Find starts of consecutive backslash runs.
     //    A "start" is a backslash NOT preceded by another backslash.
-    let follows_bs = (bs_bits << 1) | *prev_odd_backslash;
-    let _run_starts = bs_bits & !follows_bs;
+    //    follows_bs = (bs_bits << 1) | *prev_odd_backslash
+    //    run_starts = bs_bits & !follows_bs
+    //    (Not used below; the direct iteration approach is used instead.)
 
     // 2. Use prefix_xor on run starts to get alternating parity WITHIN runs.
     //    After prefix_xor, each run start toggles a running bit.
@@ -285,7 +287,7 @@ fn compute_real_quotes(quote_bits: u64, bs_bits: u64, prev_odd_backslash: &mut u
     }
 
     while b != 0 {
-        let pos = b.trailing_zeros() as u64;
+        let pos = u64::from(b.trailing_zeros());
         b &= !(1u64 << pos);
 
         // This backslash escapes the next position
@@ -302,7 +304,7 @@ fn compute_real_quotes(quote_bits: u64, bs_bits: u64, prev_odd_backslash: &mut u
     // If position 63 is a backslash AND it's not itself escaped, carry forward.
     let last_is_bs = (bs_bits >> 63) & 1 == 1;
     let last_is_escaped = (escaped >> 63) & 1 == 1;
-    *prev_odd_backslash = if last_is_bs && !last_is_escaped { 1 } else { 0 };
+    *prev_odd_backslash = u64::from(last_is_bs && !last_is_escaped);
 
     quote_bits & !escaped
 }
@@ -345,7 +347,7 @@ fn find_quotes_and_backslashes(data: &[u8; 64]) -> (u64, u64) {
 fn find_char_mask(data: &[u8; 64], needle: u8) -> u64 {
     let mut bits: u64 = 0;
     for (i, &byte) in data.iter().enumerate() {
-        bits |= ((byte == needle) as u64) << i;
+        bits |= u64::from(byte == needle) << i;
     }
     bits
 }

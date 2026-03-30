@@ -58,7 +58,7 @@ impl ScalarUDFImpl for RegexpExtractUdf {
         self
     }
 
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "regexp_extract"
     }
 
@@ -99,8 +99,7 @@ impl ScalarUDFImpl for RegexpExtractUdf {
         } else {
             let new_re = Regex::new(&pattern_str).map_err(|e| {
                 datafusion::error::DataFusionError::Execution(format!(
-                    "regexp_extract: invalid pattern '{}': {}",
-                    pattern_str, e
+                    "regexp_extract: invalid pattern '{pattern_str}': {e}",
                 ))
             })?;
             // Racing threads may both compile; only the first set wins. Use whichever is stored.

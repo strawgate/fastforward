@@ -267,8 +267,7 @@ impl Config {
                 let label = input
                     .name
                     .as_deref()
-                    .map(String::from)
-                    .unwrap_or_else(|| format!("#{i}"));
+                    .map_or_else(|| format!("#{i}"), String::from);
                 match input.input_type {
                     InputType::File => {
                         if input.path.is_none() {
@@ -292,8 +291,7 @@ impl Config {
                 let label = output
                     .name
                     .as_deref()
-                    .map(String::from)
-                    .unwrap_or_else(|| format!("#{i}"));
+                    .map_or_else(|| format!("#{i}"), String::from);
                 match output.output_type {
                     OutputType::Otlp
                     | OutputType::Http
@@ -354,14 +352,13 @@ fn expand_env_vars(text: &str) -> String {
                 }
                 var_name.push(c);
             }
-            match std::env::var(&var_name) {
-                Ok(val) => result.push_str(&val),
-                Err(_) => {
-                    // Leave the placeholder intact if the var is not set.
-                    result.push_str("${");
-                    result.push_str(&var_name);
-                    result.push('}');
-                }
+            if let Ok(val) = std::env::var(&var_name) {
+                result.push_str(&val);
+            } else {
+                // Leave the placeholder intact if the var is not set.
+                result.push_str("${");
+                result.push_str(&var_name);
+                result.push('}');
             }
         } else {
             result.push(ch);

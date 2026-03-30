@@ -167,7 +167,8 @@ impl Pipeline {
                 if !combined.is_empty() {
                     // Scan stage.
                     let t0 = Instant::now();
-                    let batch = self.scanner.scan(combined.into());
+                    let combined_bytes = combined.into();
+                    let batch = self.scanner.scan(&combined_bytes);
                     let scan_elapsed = t0.elapsed();
 
                     if batch.num_rows() > 0 {

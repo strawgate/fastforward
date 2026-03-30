@@ -19,7 +19,7 @@ pub use fanout::FanOut;
 pub use json_lines::JsonLinesSink;
 pub use otlp_sink::{OtlpProtocol, OtlpSink};
 pub use sink::{SendResult, Sink};
-use stdout::*;
+use stdout::{StdoutFormat, StdoutSink};
 
 use std::io::{self, Write};
 
@@ -82,6 +82,16 @@ pub(crate) struct ColInfo {
     type_suffix: String,
 }
 
+/// Priority for column type suffix deduplication: int > float > str > untyped.
+fn type_priority(suffix: &str) -> u8 {
+    match suffix {
+        "int" => 3,
+        "float" => 2,
+        "str" => 1,
+        _ => 0,
+    }
+}
+
 /// Build a de-duplicated ordered list of columns for JSON output.
 /// When the same field_name appears multiple times (e.g. status_int and
 /// status_str), prefer int > float > str.
@@ -100,14 +110,6 @@ pub(crate) fn build_col_infos(batch: &RecordBatch) -> Vec<ColInfo> {
     }
     // De-duplicate: for each field_name keep the best-typed column.
     // Priority: int > float > str > untyped
-    fn type_priority(suffix: &str) -> u8 {
-        match suffix {
-            "int" => 3,
-            "float" => 2,
-            "str" => 1,
-            _ => 0,
-        }
-    }
     // Use a stable sort + dedup to keep the highest-priority for each name.
     infos.sort_by(|a, b| {
         a.field_name
@@ -156,12 +158,12 @@ pub(crate) fn write_row_json(batch: &RecordBatch, row: usize, cols: &[ColInfo], 
                 let arr = arr.as_primitive::<arrow::datatypes::Int64Type>();
                 let v = arr.value(row);
                 // Write integer directly; no quotes in JSON.
-                let _ = Write::write_fmt(out, format_args!("{}", v));
+                let _ = Write::write_fmt(out, format_args!("{v}"));
             }
             "float" => {
                 let arr = arr.as_primitive::<arrow::datatypes::Float64Type>();
                 let v = arr.value(row);
-                let _ = Write::write_fmt(out, format_args!("{}", v));
+                let _ = Write::write_fmt(out, format_args!("{v}"));
             }
             _ => {
                 // str or untyped — treat as string (Utf8 or Utf8View)

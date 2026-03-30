@@ -64,18 +64,11 @@ impl QueryAnalyzer {
             if let SetExpr::Select(select) = query.body.as_ref() {
                 for item in &select.projection {
                     match item {
-                        SelectItem::Wildcard(opts) => {
+                        SelectItem::Wildcard(opts) | SelectItem::QualifiedWildcard(_, opts) => {
                             uses_select_star = true;
                             extract_except_fields(opts, &mut except_fields);
                         }
-                        SelectItem::QualifiedWildcard(_, opts) => {
-                            uses_select_star = true;
-                            extract_except_fields(opts, &mut except_fields);
-                        }
-                        SelectItem::UnnamedExpr(expr) => {
-                            collect_column_refs(expr, &mut referenced_columns);
-                        }
-                        SelectItem::ExprWithAlias { expr, .. } => {
+                        SelectItem::UnnamedExpr(expr) | SelectItem::ExprWithAlias { expr, .. } => {
                             collect_column_refs(expr, &mut referenced_columns);
                         }
                     }
@@ -183,14 +176,11 @@ fn extract_pushable_predicates(expr: &SqlExpr, hints: &mut logfwd_core::filter_h
                 let col_base = strip_type_suffix(&col);
                 if let Some(val) = expr_as_u8_literal(right) {
                     match (col_base.as_str(), op) {
-                        ("severity", sqlast::BinaryOperator::LtEq) => {
+                        ("severity", sqlast::BinaryOperator::LtEq | sqlast::BinaryOperator::Eq) => {
                             tighten_max_severity(&mut hints.max_severity, val);
                         }
                         ("severity", sqlast::BinaryOperator::Lt) if val > 0 => {
                             tighten_max_severity(&mut hints.max_severity, val - 1);
-                        }
-                        ("severity", sqlast::BinaryOperator::Eq) => {
-                            tighten_max_severity(&mut hints.max_severity, val);
                         }
                         ("facility", sqlast::BinaryOperator::Eq) => {
                             tighten_facilities(&mut hints.facilities, vec![val]);
@@ -309,17 +299,15 @@ fn collect_column_refs(expr: &SqlExpr, cols: &mut HashSet<String>) {
             collect_column_refs(left, cols);
             collect_column_refs(right, cols);
         }
-        SqlExpr::UnaryOp { expr, .. } => {
+        SqlExpr::UnaryOp { expr, .. } | SqlExpr::Cast { expr, .. } => {
             collect_column_refs(expr, cols);
         }
         SqlExpr::Function(func) => match &func.args {
             sqlast::FunctionArguments::List(arg_list) => {
                 for arg in &arg_list.args {
                     match arg {
-                        sqlast::FunctionArg::Unnamed(sqlast::FunctionArgExpr::Expr(e)) => {
-                            collect_column_refs(e, cols)
-                        }
-                        sqlast::FunctionArg::Named {
+                        sqlast::FunctionArg::Unnamed(sqlast::FunctionArgExpr::Expr(e))
+                        | sqlast::FunctionArg::Named {
                             arg: sqlast::FunctionArgExpr::Expr(e),
                             ..
                         } => {
@@ -329,8 +317,7 @@ fn collect_column_refs(expr: &SqlExpr, cols: &mut HashSet<String>) {
                     }
                 }
             }
-            sqlast::FunctionArguments::None => {}
-            sqlast::FunctionArguments::Subquery(_) => {}
+            sqlast::FunctionArguments::None | sqlast::FunctionArguments::Subquery(_) => {}
         },
         SqlExpr::Nested(inner) => {
             collect_column_refs(inner, cols);
@@ -371,9 +358,6 @@ fn collect_column_refs(expr: &SqlExpr, cols: &mut HashSet<String>) {
                 collect_column_refs(e, cols);
             }
         }
-        SqlExpr::Cast { expr, .. } => {
-            collect_column_refs(expr, cols);
-        }
         SqlExpr::Like { expr, pattern, .. } | SqlExpr::ILike { expr, pattern, .. } => {
             collect_column_refs(expr, cols);
             collect_column_refs(pattern, cols);
@@ -406,7 +390,7 @@ impl ScalarUDFImpl for IntCastUdf {
         self
     }
 
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "int"
     }
 
@@ -463,7 +447,7 @@ impl ScalarUDFImpl for FloatCastUdf {
         self
     }
 
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "float"
     }
 
@@ -558,7 +542,7 @@ impl SqlTransform {
         }
 
         // Track schema hash for diagnostics / future caching.
-        let new_hash = hash_schema(batch.schema());
+        let new_hash = hash_schema(&batch.schema());
         self.schema_hash = new_hash;
 
         let sql = self.user_sql.clone();
@@ -568,8 +552,8 @@ impl SqlTransform {
         // Register custom UDFs.
         ctx.register_udf(ScalarUDF::from(IntCastUdf::new()));
         ctx.register_udf(ScalarUDF::from(FloatCastUdf::new()));
-        ctx.register_udf(ScalarUDF::from(crate::udf::RegexpExtractUdf::new()));
-        ctx.register_udf(ScalarUDF::from(crate::udf::GrokUdf::new()));
+        ctx.register_udf(ScalarUDF::from(udf::RegexpExtractUdf::new()));
+        ctx.register_udf(ScalarUDF::from(udf::GrokUdf::new()));
 
         // Register the batch as a MemTable named "logs".
         let schema = batch.schema();
@@ -660,7 +644,7 @@ fn concat_batches(
 }
 
 /// Hash an Arrow schema for quick change detection.
-fn hash_schema(schema: SchemaRef) -> u64 {
+fn hash_schema(schema: &SchemaRef) -> u64 {
     let mut hasher = DefaultHasher::new();
     for field in schema.fields() {
         field.name().hash(&mut hasher);

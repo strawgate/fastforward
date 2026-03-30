@@ -81,7 +81,7 @@ pub fn parse_int_fast(bytes: &[u8]) -> Option<i64> {
                 return None;
             }
             acc = acc.checked_mul(10)?;
-            acc = acc.checked_sub((b - b'0') as i64)?;
+            acc = acc.checked_sub(i64::from(b - b'0'))?;
         }
         Some(acc)
     } else {
@@ -90,7 +90,7 @@ pub fn parse_int_fast(bytes: &[u8]) -> Option<i64> {
                 return None;
             }
             acc = acc.checked_mul(10)?;
-            acc = acc.checked_add((b - b'0') as i64)?;
+            acc = acc.checked_add(i64::from(b - b'0'))?;
         }
         Some(acc)
     }

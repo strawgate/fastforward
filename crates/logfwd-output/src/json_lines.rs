@@ -42,7 +42,7 @@ impl JsonLinesSink {
             return false;
         }
         // Simple heuristic: if the only non-null column is _raw, passthrough.
-        for field in schema.fields().iter() {
+        for field in schema.fields() {
             if field.name() == "_raw" {
                 continue;
             }

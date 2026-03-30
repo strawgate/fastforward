@@ -40,13 +40,13 @@ pub const fn varint_len(value: u64) -> usize {
     match value {
         0..=0x7F => 1,
         0..=0x3FFF => 2,
-        0..=0x1FFFFF => 3,
-        0..=0xFFFFFFF => 4,
-        0..=0x7FFFFFFFF => 5,
-        0..=0x3FFFFFFFFFF => 6,
-        0..=0x1FFFFFFFFFFFF => 7,
-        0..=0xFFFFFFFFFFFFFF => 8,
-        0..=0x7FFFFFFFFFFFFFFF => 9,
+        0..=0x001F_FFFF => 3,
+        0..=0x0FFF_FFFF => 4,
+        0..=0x0007_FFFF_FFFF => 5,
+        0..=0x03FF_FFFF_FFFF => 6,
+        0..=0x0001_FFFF_FFFF_FFFF => 7,
+        0..=0x00FF_FFFF_FFFF_FFFF => 8,
+        0..=0x7FFF_FFFF_FFFF_FFFF => 9,
         _ => 10,
     }
 }
@@ -54,7 +54,7 @@ pub const fn varint_len(value: u64) -> usize {
 /// Write a protobuf tag (field_number + wire_type).
 #[inline(always)]
 pub fn encode_tag(buf: &mut Vec<u8>, field_number: u32, wire_type: u8) {
-    encode_varint(buf, ((field_number as u64) << 3) | wire_type as u64);
+    encode_varint(buf, (u64::from(field_number) << 3) | u64::from(wire_type));
 }
 
 /// Write a fixed64 field (tag + 8 bytes little-endian).
@@ -163,7 +163,7 @@ const MESSAGE_KEYS: &[&[u8]] = &[b"message", b"msg", b"body", b"log", b"text"];
 /// Handles: `{"timestamp":"...","level":"...","message":"...",...}`
 /// Does NOT handle: nested objects as values, escaped quotes in keys.
 /// (Log lines rarely have escaped quotes in field names.)
-fn extract_json_fields<'a>(line: &'a [u8]) -> JsonFields<'a> {
+fn extract_json_fields(line: &[u8]) -> JsonFields<'_> {
     let mut fields = JsonFields {
         full_line: line,
         ..Default::default()
@@ -220,8 +220,7 @@ fn extract_json_fields<'a>(line: &'a [u8]) -> JsonFields<'a> {
             let trimmed_end = val
                 .iter()
                 .rposition(|&b| b != b' ' && b != b'\t')
-                .map(|i| i + 1)
-                .unwrap_or(0);
+                .map_or(0, |i| i + 1);
             &val[..trimmed_end]
         };
 
@@ -268,12 +267,12 @@ pub fn parse_timestamp_nanos(ts: &[u8]) -> u64 {
         return 0; // too short for YYYY-MM-DDTHH:MM:SS
     }
 
-    let year = parse_4digits(ts, 0) as i64;
-    let month = parse_2digits(ts, 5) as u32;
-    let day = parse_2digits(ts, 8) as u32;
-    let hour = parse_2digits(ts, 11) as u64;
-    let min = parse_2digits(ts, 14) as u64;
-    let sec = parse_2digits(ts, 17) as u64;
+    let year = i64::from(parse_4digits(ts, 0));
+    let month = u32::from(parse_2digits(ts, 5));
+    let day = u32::from(parse_2digits(ts, 8));
+    let hour = u64::from(parse_2digits(ts, 11));
+    let min = u64::from(parse_2digits(ts, 14));
+    let sec = u64::from(parse_2digits(ts, 17));
 
     if year == 0 || month == 0 || month > 12 || day == 0 || day > 31 {
         return 0;
@@ -299,7 +298,7 @@ pub fn parse_timestamp_nanos(ts: &[u8]) -> u64 {
         if frac_digits > 0 {
             let mut frac_val = 0u64;
             for &b in &ts[frac_start..frac_end.min(frac_start + 9)] {
-                frac_val = frac_val * 10 + (b - b'0') as u64;
+                frac_val = frac_val * 10 + u64::from(b - b'0');
             }
             // Pad or truncate to 9 digits (nanoseconds).
             for _ in frac_digits..9 {
@@ -322,7 +321,7 @@ fn parse_4digits(s: &[u8], off: usize) -> u16 {
     if !a.is_ascii_digit() || !b.is_ascii_digit() || !c.is_ascii_digit() || !d.is_ascii_digit() {
         return 0;
     }
-    (a - b'0') as u16 * 1000 + (b - b'0') as u16 * 100 + (c - b'0') as u16 * 10 + (d - b'0') as u16
+    u16::from(a - b'0') * 1000 + u16::from(b - b'0') * 100 + u16::from(c - b'0') * 10 + u16::from(d - b'0')
 }
 
 /// Parse 2 ASCII digits at offset.
@@ -342,15 +341,15 @@ fn parse_2digits(s: &[u8], off: usize) -> u8 {
 fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
     let y = if month <= 2 { year - 1 } else { year };
     let m = if month <= 2 {
-        month as i64 + 9
+        i64::from(month) + 9
     } else {
-        month as i64 - 3
+        i64::from(month) - 3
     };
     let era = y.div_euclid(400);
     let yoe = y.rem_euclid(400);
-    let doy = (153 * m + 2) / 5 + day as i64 - 1;
+    let doy = (153 * m + 2) / 5 + i64::from(day) - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146097 + doe - 719468
+    era * 146_097 + doe - 719_468
 }
 
 // --- OTLP LogRecord encoder ---
@@ -398,8 +397,7 @@ pub fn encode_log_record(line: &[u8], observed_time_ns: u64, buf: &mut Vec<u8>) 
     // Parse severity.
     let (severity_num, severity_text) = fields
         .level
-        .map(parse_severity)
-        .unwrap_or((Severity::Unspecified, b"" as &[u8]));
+        .map_or((Severity::Unspecified, b"" as &[u8]), parse_severity);
 
     // Body: use message field if found, otherwise the full line.
     let body = fields.message.unwrap_or(fields.full_line);
