@@ -148,6 +148,10 @@ pub struct FileTailer {
     watcher: notify::RecommendedWatcher,
     /// Directories currently registered with the notify watcher.
     watched_dirs: HashSet<PathBuf>,
+    /// Saved offsets for files evicted from the open-file LRU cache.
+    /// When a file is re-opened after eviction, we seek to the saved offset
+    /// to avoid duplicating or losing data.
+    evicted_offsets: HashMap<PathBuf, u64>,
     /// Channel receiving filesystem events from the watcher.
     fs_events: crossbeam_channel::Receiver<notify::Result<notify::Event>>,
     /// Last time we did a full poll scan.
@@ -192,6 +196,7 @@ impl FileTailer {
             fs_events: rx,
             last_poll: Instant::now(),
             last_glob_rescan: Instant::now(),
+            evicted_offsets: HashMap::new(),
         };
 
         // Open existing files.
@@ -272,11 +277,15 @@ impl FileTailer {
     }
 
     /// Open and start tailing a file. If start_from_end is true, seeks to EOF.
+    /// If the file was previously evicted from the LRU cache, restores the
+    /// saved offset so reads resume where they left off.
     fn open_file(&mut self, path: &Path) -> io::Result<()> {
         let identity = identify_file(path, self.config.fingerprint_bytes)?;
         let mut file = File::open(path)?;
 
-        let offset = if self.config.start_from_end {
+        let offset = if let Some(saved) = self.evicted_offsets.remove(path) {
+            file.seek(SeekFrom::Start(saved))?
+        } else if self.config.start_from_end {
             file.seek(SeekFrom::End(0))?
         } else {
             0
@@ -404,18 +413,42 @@ impl FileTailer {
             }
         }
 
-        // Remove entries for files that no longer exist on disk.
+        // Remove entries for files that have been unlinked (nlink == 0).
+        // Using nlink instead of !path.exists() avoids data loss: on Unix a
+        // file can be unlinked while the FD is still open, so the path
+        // disappears but unread data remains readable through the FD.
         let deleted: Vec<PathBuf> = self
             .files
-            .keys()
-            .filter(|path| !path.exists())
-            .cloned()
+            .iter()
+            .filter(|(_, tailed)| {
+                tailed
+                    .file
+                    .metadata()
+                    .map(|m| m.nlink() == 0)
+                    .unwrap_or(true)
+            })
+            .map(|(path, _)| path.clone())
             .collect();
-        for path in deleted {
-            self.files.remove(&path);
+        for path in &deleted {
+            // Drain any remaining data before closing the FD.
+            match self.read_new_data(path) {
+                Ok(Some(data)) => {
+                    events.push(TailEvent::Data {
+                        path: path.clone(),
+                        bytes: data,
+                    });
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    eprintln!("warn: error draining deleted file {}: {e}", path.display());
+                }
+            }
+            self.files.remove(path);
         }
 
         // Evict least-recently-read files when over the open-file limit.
+        // Save each evicted file's offset so it can resume from the correct
+        // position when re-opened on a future glob rescan.
         if self.files.len() > self.config.max_open_files {
             let mut by_age: Vec<(PathBuf, Instant)> = self
                 .files
@@ -425,7 +458,9 @@ impl FileTailer {
             by_age.sort_by_key(|(_, last_read)| *last_read);
             let to_remove = self.files.len() - self.config.max_open_files;
             for (path, _) in by_age.into_iter().take(to_remove) {
-                self.files.remove(&path);
+                if let Some(evicted) = self.files.remove(&path) {
+                    self.evicted_offsets.insert(path, evicted.offset);
+                }
             }
         }
 
