@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>logfwd Benchmarks</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>logfwd competitive benchmarks</h1>
+      <p>Nightly throughput comparison across log forwarders</p>
+      <div class="header-links">
+        <a href="https://github.com/strawgate/memagent">Repository</a>
+        <a href="https://github.com/strawgate/memagent/actions/workflows/bench.yml">Run Benchmark</a>
+        <a href="dev/bench/">Throughput Charts (auto)</a>
+      </div>
+    </div>
+
+    <div id="loading" class="loading">Loading dashboard data</div>
+    <div id="error" class="error" style="display:none"></div>
+    <div id="content" style="display:none">
+
+      <div class="card" id="latest-section">
+        <h2>Latest Run</h2>
+        <div id="latest-meta" style="margin-bottom:12px; font-size:13px; color:var(--text-muted)"></div>
+        <table>
+          <thead>
+            <tr>
+              <th>Scenario</th>
+              <th>Agent</th>
+              <th class="num">Lines/sec</th>
+              <th class="num">Avg Time</th>
+              <th class="num">Iterations</th>
+            </tr>
+          </thead>
+          <tbody id="latest-table-body"></tbody>
+        </table>
+      </div>
+
+      <div class="card">
+        <h2>Throughput by Scenario</h2>
+        <div id="bar-charts" class="chart-grid"></div>
+      </div>
+
+      <div class="card">
+        <h2>Throughput Trends</h2>
+        <div id="trend-charts" class="chart-grid"></div>
+      </div>
+
+      <div class="card">
+        <h2>All Runs</h2>
+        <div id="runs-list"></div>
+      </div>
+
+    </div>
+  </div>
+
+  <script>
+    // Per-agent colors — consistent across all charts.
+    const AGENT_COLORS = {
+      'logfwd':     { line: 'rgb(37, 99, 235)',  bg: 'rgba(37, 99, 235, 0.3)' },
+      'vector':     { line: 'rgb(124, 58, 237)', bg: 'rgba(124, 58, 237, 0.3)' },
+      'fluent-bit': { line: 'rgb(5, 150, 105)',  bg: 'rgba(5, 150, 105, 0.3)' },
+      'filebeat':   { line: 'rgb(217, 119, 6)',  bg: 'rgba(217, 119, 6, 0.3)' },
+      'otelcol':    { line: 'rgb(220, 38, 38)',  bg: 'rgba(220, 38, 38, 0.3)' },
+      'vlagent':    { line: 'rgb(100, 116, 139)',bg: 'rgba(100, 116, 139, 0.3)' },
+    };
+    const DEFAULT_COLOR = { line: 'rgb(156, 163, 175)', bg: 'rgba(156, 163, 175, 0.3)' };
+
+    function agentColor(name) { return AGENT_COLORS[name] || DEFAULT_COLOR; }
+
+    const isDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+    const gridColor = isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)';
+    const textColor = isDark ? '#8b949e' : '#656d76';
+    Chart.defaults.color = textColor;
+    Chart.defaults.borderColor = gridColor;
+
+    async function fetchJSON(url) {
+      const resp = await fetch(url);
+      if (!resp.ok) throw new Error(`Failed to load ${url}: ${resp.status}`);
+      return resp.json();
+    }
+
+    function formatDate(dateStr) {
+      const d = new Date(dateStr);
+      return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+    }
+
+    function formatLPS(val) {
+      if (val >= 1e6) return (val / 1e6).toFixed(2) + 'M';
+      if (val >= 1e3) return (val / 1e3).toFixed(0) + 'K';
+      return val.toFixed(0);
+    }
+
+    async function init() {
+      const loadingEl = document.getElementById('loading');
+      const errorEl = document.getElementById('error');
+      const contentEl = document.getElementById('content');
+
+      try {
+        const index = await fetchJSON('data/index.json');
+        const runs = index.runs || [];
+        if (runs.length === 0) {
+          loadingEl.style.display = 'none';
+          errorEl.textContent = 'No benchmark runs yet. Trigger a benchmark from GitHub Actions.';
+          errorEl.style.display = 'block';
+          return;
+        }
+
+        // Load all run data.
+        const runDataMap = {};
+        await Promise.all(runs.map(async (run) => {
+          try {
+            runDataMap[run.id] = await fetchJSON(`data/runs/${run.id}.json`);
+          } catch (e) { console.warn(`Failed to load run ${run.id}:`, e); }
+        }));
+
+        const latest = runs[0];
+        const latestData = runDataMap[latest.id];
+
+        renderLatest(latest, latestData);
+        renderBarCharts(latestData);
+        renderTrends(runs, runDataMap);
+        renderRunsList(runs);
+
+        loadingEl.style.display = 'none';
+        contentEl.style.display = 'block';
+      } catch (e) {
+        loadingEl.style.display = 'none';
+        errorEl.textContent = 'Failed to load dashboard data: ' + e.message;
+        errorEl.style.display = 'block';
+      }
+    }
+
+    function renderLatest(run, data) {
+      const metaEl = document.getElementById('latest-meta');
+      metaEl.innerHTML = `
+        <span class="badge">commit: ${(run.commit || '').substring(0, 8)}</span>
+        &mdash; ${formatDate(run.date)}
+        &mdash; <a href="run.html?id=${run.id}" style="color:var(--accent)">View details</a>
+      `;
+
+      const tbody = document.getElementById('latest-table-body');
+      if (!data || !data.scenarios) {
+        tbody.innerHTML = '<tr><td colspan="5">No data available</td></tr>';
+        return;
+      }
+
+      let html = '';
+      for (const scenario of (data.scenario_names || Object.keys(data.scenarios))) {
+        const agents = data.scenarios[scenario];
+        if (!agents) continue;
+
+        // Find fastest agent in this scenario.
+        let maxLps = 0;
+        for (const m of Object.values(agents)) {
+          if (m.avg_lps > maxLps) maxLps = m.avg_lps;
+        }
+
+        for (const [agent, m] of Object.entries(agents)) {
+          const isWinner = m.avg_lps === maxLps;
+          html += `<tr>
+            <td>${scenario}</td>
+            <td class="${isWinner ? 'winner' : ''}">${agent}</td>
+            <td class="num ${isWinner ? 'winner' : ''}">${formatLPS(m.avg_lps)} lines/sec</td>
+            <td class="num">${m.avg_ms}ms</td>
+            <td class="num">${m.iterations}</td>
+          </tr>`;
+        }
+      }
+      tbody.innerHTML = html;
+    }
+
+    function renderBarCharts(data) {
+      const container = document.getElementById('bar-charts');
+      if (!data || !data.scenarios) return;
+
+      for (const scenario of (data.scenario_names || Object.keys(data.scenarios))) {
+        const agents = data.scenarios[scenario];
+        if (!agents) continue;
+
+        const div = document.createElement('div');
+        div.className = 'chart-container';
+        div.innerHTML = `<h3>${scenario}</h3><canvas></canvas>`;
+        container.appendChild(div);
+
+        const labels = Object.keys(agents);
+        const values = labels.map(a => agents[a].avg_lps);
+        const colors = labels.map(a => agentColor(a));
+
+        new Chart(div.querySelector('canvas'), {
+          type: 'bar',
+          data: {
+            labels,
+            datasets: [{
+              label: 'Lines/sec',
+              data: values,
+              backgroundColor: colors.map(c => c.bg),
+              borderColor: colors.map(c => c.line),
+              borderWidth: 2,
+            }],
+          },
+          options: {
+            responsive: true,
+            indexAxis: 'y',
+            plugins: {
+              legend: { display: false },
+              tooltip: {
+                callbacks: {
+                  label: (ctx) => `${formatLPS(ctx.parsed.x)} lines/sec`,
+                },
+              },
+            },
+            scales: {
+              x: { title: { display: true, text: 'Lines/sec' }, grid: { color: gridColor } },
+              y: { grid: { display: false } },
+            },
+          },
+        });
+      }
+    }
+
+    function renderTrends(runs, runDataMap) {
+      const container = document.getElementById('trend-charts');
+
+      // Collect all scenarios across all runs.
+      const scenarioSet = new Set();
+      for (const run of runs) {
+        const data = runDataMap[run.id];
+        if (data && data.scenarios) {
+          for (const s of Object.keys(data.scenarios)) scenarioSet.add(s);
+        }
+      }
+
+      if (scenarioSet.size === 0) {
+        container.innerHTML = '<p style="color:var(--text-muted)">Not enough data for trends yet.</p>';
+        return;
+      }
+
+      for (const scenario of scenarioSet) {
+        const div = document.createElement('div');
+        div.className = 'chart-container';
+        div.innerHTML = `<h3>${scenario}</h3><canvas></canvas>`;
+        container.appendChild(div);
+
+        // Collect all agents that appear in this scenario.
+        const agentSet = new Set();
+        for (const run of runs) {
+          const data = runDataMap[run.id];
+          if (data && data.scenarios && data.scenarios[scenario]) {
+            for (const a of Object.keys(data.scenarios[scenario])) agentSet.add(a);
+          }
+        }
+
+        // Build time-series (oldest first).
+        const sortedRuns = [...runs].reverse();
+        const labels = [];
+        for (const run of sortedRuns) {
+          const d = new Date(run.date);
+          labels.push(d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }));
+        }
+
+        const datasets = [];
+        for (const agent of agentSet) {
+          const c = agentColor(agent);
+          const data = sortedRuns.map(run => {
+            const rd = runDataMap[run.id];
+            if (rd && rd.scenarios && rd.scenarios[scenario] && rd.scenarios[scenario][agent]) {
+              return rd.scenarios[scenario][agent].avg_lps;
+            }
+            return null;
+          });
+          datasets.push({
+            label: agent,
+            data,
+            borderColor: c.line,
+            backgroundColor: c.bg,
+            borderWidth: 2,
+            pointRadius: 4,
+            pointHoverRadius: 6,
+            tension: 0.1,
+            fill: false,
+            spanGaps: true,
+          });
+        }
+
+        new Chart(div.querySelector('canvas'), {
+          type: 'line',
+          data: { labels, datasets },
+          options: {
+            responsive: true,
+            interaction: { intersect: false, mode: 'index' },
+            plugins: {
+              tooltip: {
+                callbacks: {
+                  label: (ctx) => `${ctx.dataset.label}: ${ctx.parsed.y != null ? formatLPS(ctx.parsed.y) : 'N/A'} lines/sec`,
+                },
+              },
+              legend: { position: 'top' },
+            },
+            scales: {
+              y: { title: { display: true, text: 'Lines/sec' }, beginAtZero: false, grid: { color: gridColor } },
+              x: { grid: { display: false }, ticks: { maxRotation: 45, font: { size: 11 } } },
+            },
+          },
+        });
+      }
+    }
+
+    function renderRunsList(runs) {
+      const container = document.getElementById('runs-list');
+      let html = '';
+      for (const run of runs) {
+        html += `
+          <a class="run-item" href="run.html?id=${run.id}">
+            <div class="run-meta">
+              <div><span class="badge">commit: ${(run.commit || '').substring(0, 8)}</span></div>
+              <div class="date">${formatDate(run.date)} &mdash; Run #${run.id}</div>
+            </div>
+            <div class="run-scenarios">
+              ${(run.scenarios || []).map(s => `<span class="scenario-tag">${s}</span>`).join('')}
+              ${(run.agents || []).map(a => `<span class="scenario-tag">${a}</span>`).join('')}
+            </div>
+          </a>`;
+      }
+      container.innerHTML = html;
+    }
+
+    init();
+  </script>
+</body>
+</html>

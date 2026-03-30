@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Run Details - logfwd Benchmarks</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+  <div class="container">
+    <a href="index.html" class="back-link">&larr; Back to overview</a>
+
+    <div class="header">
+      <h1>Run Details</h1>
+      <p id="run-subtitle">Loading...</p>
+    </div>
+
+    <div id="loading" class="loading">Loading run data</div>
+    <div id="error" class="error" style="display:none"></div>
+    <div id="content" style="display:none">
+
+      <div class="run-header" id="run-header"></div>
+
+      <div class="scenario-tabs" id="scenario-tabs"></div>
+
+      <div class="card" id="bar-card">
+        <h2>Throughput Comparison</h2>
+        <div class="chart-container" style="border:none;box-shadow:none;padding:0">
+          <canvas id="bar-chart"></canvas>
+        </div>
+      </div>
+
+      <div class="card" id="detail-card">
+        <h2>Detailed Results</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Scenario</th>
+              <th>Agent</th>
+              <th>Mode</th>
+              <th class="num">Avg Lines/sec</th>
+              <th class="num">Avg Time</th>
+              <th class="num">Stddev</th>
+              <th class="num">Iterations</th>
+              <th class="num">Per-run LPS</th>
+            </tr>
+          </thead>
+          <tbody id="detail-table-body"></tbody>
+        </table>
+      </div>
+
+      <div class="card">
+        <h2>Artifacts</h2>
+        <p style="color:var(--text-muted); font-size:14px;">
+          CPU flamegraph, dhat-heap profile, and per-cell results are available as workflow artifacts.
+          <a id="artifacts-link" href="#" style="color:var(--accent)">View on GitHub Actions</a>
+        </p>
+      </div>
+
+    </div>
+  </div>
+
+  <script>
+    const AGENT_COLORS = {
+      'logfwd':     { line: 'rgb(37, 99, 235)',  bg: 'rgba(37, 99, 235, 0.3)' },
+      'vector':     { line: 'rgb(124, 58, 237)', bg: 'rgba(124, 58, 237, 0.3)' },
+      'fluent-bit': { line: 'rgb(5, 150, 105)',  bg: 'rgba(5, 150, 105, 0.3)' },
+      'filebeat':   { line: 'rgb(217, 119, 6)',  bg: 'rgba(217, 119, 6, 0.3)' },
+      'otelcol':    { line: 'rgb(220, 38, 38)',  bg: 'rgba(220, 38, 38, 0.3)' },
+      'vlagent':    { line: 'rgb(100, 116, 139)',bg: 'rgba(100, 116, 139, 0.3)' },
+    };
+    const DEFAULT_COLOR = { line: 'rgb(156, 163, 175)', bg: 'rgba(156, 163, 175, 0.3)' };
+    function agentColor(name) { return AGENT_COLORS[name] || DEFAULT_COLOR; }
+
+    const isDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+    const gridColor = isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)';
+    const textColor = isDark ? '#8b949e' : '#656d76';
+    Chart.defaults.color = textColor;
+    Chart.defaults.borderColor = gridColor;
+
+    let runData = null;
+    let activeScenario = null;
+    let barChart = null;
+
+    async function fetchJSON(url) {
+      const resp = await fetch(url);
+      if (!resp.ok) throw new Error(`Failed to load ${url}: ${resp.status}`);
+      return resp.json();
+    }
+
+    function formatDate(dateStr) {
+      const d = new Date(dateStr);
+      return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+    }
+
+    function formatLPS(val) {
+      if (val >= 1e6) return (val / 1e6).toFixed(2) + 'M';
+      if (val >= 1e3) return (val / 1e3).toFixed(0) + 'K';
+      return val.toFixed(0);
+    }
+
+    function getRunId() {
+      return new URLSearchParams(window.location.search).get('id');
+    }
+
+    async function init() {
+      const loadingEl = document.getElementById('loading');
+      const errorEl = document.getElementById('error');
+      const contentEl = document.getElementById('content');
+      const runId = getRunId();
+
+      if (!runId) {
+        loadingEl.style.display = 'none';
+        errorEl.textContent = 'No run ID specified. Use ?id=<run-id>';
+        errorEl.style.display = 'block';
+        return;
+      }
+
+      try {
+        runData = await fetchJSON(`data/runs/${runId}.json`);
+        document.title = `Run #${runId} - logfwd Benchmarks`;
+        document.getElementById('run-subtitle').textContent = `Run #${runId} - ${formatDate(runData.date)}`;
+        document.getElementById('artifacts-link').href = `https://github.com/strawgate/memagent/actions/runs/${runId}`;
+
+        renderHeader();
+        renderScenarioTabs();
+        renderAll();
+
+        loadingEl.style.display = 'none';
+        contentEl.style.display = 'block';
+      } catch (e) {
+        loadingEl.style.display = 'none';
+        errorEl.textContent = 'Failed to load run data: ' + e.message;
+        errorEl.style.display = 'block';
+      }
+    }
+
+    function renderHeader() {
+      document.getElementById('run-header').innerHTML = `
+        <div class="stat">
+          <div class="stat-label">Commit</div>
+          <div class="stat-value"><code>${runData.commit || 'unknown'}</code></div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">Date</div>
+          <div class="stat-value">${formatDate(runData.date)}</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">Run ID</div>
+          <div class="stat-value"><a href="https://github.com/strawgate/memagent/actions/runs/${runData.id}" style="color:var(--accent)">#${runData.id}</a></div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">Agents</div>
+          <div class="stat-value">${(runData.agents || []).join(', ')}</div>
+        </div>
+      `;
+    }
+
+    function renderScenarioTabs() {
+      const tabs = document.getElementById('scenario-tabs');
+      const scenarios = runData.scenario_names || Object.keys(runData.scenarios || {});
+      let html = '<button class="scenario-tab active" data-scenario="all">All</button>';
+      for (const s of scenarios) {
+        html += `<button class="scenario-tab" data-scenario="${s}">${s}</button>`;
+      }
+      tabs.innerHTML = html;
+      tabs.addEventListener('click', (e) => {
+        const btn = e.target.closest('.scenario-tab');
+        if (!btn) return;
+        tabs.querySelectorAll('.scenario-tab').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        activeScenario = btn.dataset.scenario === 'all' ? null : btn.dataset.scenario;
+        renderAll();
+      });
+    }
+
+    function getFilteredScenarios() {
+      const result = [];
+      const scenarios = runData.scenario_names || Object.keys(runData.scenarios || {});
+      for (const scenario of scenarios) {
+        if (activeScenario && scenario !== activeScenario) continue;
+        const agents = runData.scenarios[scenario];
+        if (agents) result.push({ scenario, agents });
+      }
+      return result;
+    }
+
+    function renderAll() {
+      const filtered = getFilteredScenarios();
+      renderBarChart(filtered);
+      renderDetailTable(filtered);
+    }
+
+    function renderBarChart(filtered) {
+      if (barChart) barChart.destroy();
+      const canvas = document.getElementById('bar-chart');
+
+      // Build labels and datasets: one group per scenario, one bar per agent.
+      const agentSet = new Set();
+      for (const { agents } of filtered) {
+        for (const a of Object.keys(agents)) agentSet.add(a);
+      }
+
+      const labels = filtered.map(f => f.scenario);
+      const datasets = [];
+      for (const agent of agentSet) {
+        const c = agentColor(agent);
+        datasets.push({
+          label: agent,
+          data: filtered.map(f => f.agents[agent] ? f.agents[agent].avg_lps : null),
+          backgroundColor: c.bg,
+          borderColor: c.line,
+          borderWidth: 2,
+        });
+      }
+
+      barChart = new Chart(canvas, {
+        type: 'bar',
+        data: { labels, datasets },
+        options: {
+          responsive: true,
+          interaction: { intersect: false, mode: 'index' },
+          plugins: {
+            tooltip: {
+              callbacks: {
+                label: (ctx) => `${ctx.dataset.label}: ${ctx.parsed.y != null ? formatLPS(ctx.parsed.y) : 'N/A'} lines/sec`,
+              },
+            },
+            legend: { position: 'top' },
+          },
+          scales: {
+            y: { title: { display: true, text: 'Lines/sec' }, beginAtZero: true, grid: { color: gridColor } },
+            x: { grid: { display: false } },
+          },
+        },
+      });
+    }
+
+    function renderDetailTable(filtered) {
+      const tbody = document.getElementById('detail-table-body');
+      let html = '';
+      for (const { scenario, agents } of filtered) {
+        // Find winner.
+        let maxLps = 0;
+        for (const m of Object.values(agents)) {
+          if (m.avg_lps > maxLps) maxLps = m.avg_lps;
+        }
+
+        for (const [agent, m] of Object.entries(agents)) {
+          const isWinner = m.avg_lps === maxLps;
+          const lpsStr = m.lps ? m.lps.map(v => formatLPS(v)).join(', ') : '-';
+          html += `<tr>
+            <td>${scenario}</td>
+            <td class="${isWinner ? 'winner' : ''}">${agent}</td>
+            <td>${m.mode || 'binary'}</td>
+            <td class="num ${isWinner ? 'winner' : ''}">${formatLPS(m.avg_lps)}</td>
+            <td class="num">${m.avg_ms}ms</td>
+            <td class="num">${m.stddev_ms || 0}ms</td>
+            <td class="num">${m.iterations}</td>
+            <td class="num" style="font-size:11px">${lpsStr}</td>
+          </tr>`;
+        }
+      }
+      tbody.innerHTML = html || '<tr><td colspan="8" style="color:var(--text-muted)">No data</td></tr>';
+    }
+
+    init();
+  </script>
+</body>
+</html>
