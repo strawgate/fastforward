@@ -29,6 +29,10 @@ proptest = "1"
 sonic-rs = "0.5"
 tempfile = "3"
 
+[lints.rust.unexpected_cfgs]
+level = "warn"
+check-cfg = ['cfg(kani)']
+
 [features]
 debug_bitmask = []
 
