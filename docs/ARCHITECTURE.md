@@ -378,7 +378,7 @@ graceful shutdown, compliance test suite, jemalloc allocator.
 - File offset checkpointing
 
 *Schema:*
-- `_resource_*` column injection
+- `_resource_*` column injection (planned; see "Resource metadata as columns (planned)")
 - Timestamp type migration (string → `Timestamp(ns, UTC)`)
 - Adaptive dictionary encoding
 - OTLP resource grouping in exporter

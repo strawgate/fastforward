@@ -36,7 +36,7 @@ logfwd as receivers (produce RecordBatch) or exporters (consume RecordBatch).
 
 ### ClickHouse ArrowStream
 
-```text
+```http
 # Export (receive Arrow from ClickHouse):
 POST http://host:8123/?query=SELECT+*+FROM+table+FORMAT+ArrowStream
 → response body is Arrow IPC stream bytes
@@ -51,7 +51,7 @@ ArrowStream stable since ~2020.
 
 ### Elasticsearch ES|QL
 
-```text
+```http
 POST /_query?format=arrow
 { "query": "FROM logs | WHERE level == 'ERROR' | LIMIT 100" }
 → response body is Arrow IPC stream bytes
