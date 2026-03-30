@@ -17,10 +17,13 @@ pub struct ComponentStats {
     pub lines_total: AtomicU64,
     pub bytes_total: AtomicU64,
     pub errors_total: AtomicU64,
+    /// Lines that failed format parsing (e.g. malformed CRI lines).
+    pub parse_errors_total: AtomicU64,
     // OTel counters (for OTLP push)
     otel_lines: Counter<u64>,
     otel_bytes: Counter<u64>,
     otel_errors: Counter<u64>,
+    otel_parse_errors: Counter<u64>,
     otel_attrs: Vec<KeyValue>,
 }
 
@@ -31,9 +34,11 @@ impl ComponentStats {
             lines_total: AtomicU64::new(0),
             bytes_total: AtomicU64::new(0),
             errors_total: AtomicU64::new(0),
+            parse_errors_total: AtomicU64::new(0),
             otel_lines: meter.u64_counter(format!("{prefix}_lines")).build(),
             otel_bytes: meter.u64_counter(format!("{prefix}_bytes")).build(),
             otel_errors: meter.u64_counter(format!("{prefix}_errors")).build(),
+            otel_parse_errors: meter.u64_counter(format!("{prefix}_parse_errors")).build(),
             otel_attrs: attrs,
         }
     }
@@ -59,6 +64,11 @@ impl ComponentStats {
         self.otel_errors.add(1, &self.otel_attrs);
     }
 
+    pub fn inc_parse_errors(&self, n: u64) {
+        self.parse_errors_total.fetch_add(n, Ordering::Relaxed);
+        self.otel_parse_errors.add(n, &self.otel_attrs);
+    }
+
     fn lines(&self) -> u64 {
         self.lines_total.load(Ordering::Relaxed)
     }
@@ -69,6 +79,10 @@ impl ComponentStats {
 
     fn errors(&self) -> u64 {
         self.errors_total.load(Ordering::Relaxed)
+    }
+
+    fn parse_errors(&self) -> u64 {
+        self.parse_errors_total.load(Ordering::Relaxed)
     }
 }
 
@@ -100,6 +114,10 @@ pub struct PipelineMetrics {
     pub batch_rows_total: AtomicU64,
     pub flush_by_size: AtomicU64,
     pub flush_by_timeout: AtomicU64,
+    /// Batches that were dropped due to scan, transform, or output errors.
+    pub dropped_batches_total: AtomicU64,
+    /// Batches that failed the scan stage specifically.
+    pub scan_errors_total: AtomicU64,
     // Per-stage cumulative timing (nanoseconds)
     pub scan_nanos_total: AtomicU64,
     pub transform_nanos_total: AtomicU64,
@@ -115,6 +133,8 @@ pub struct PipelineMetrics {
     otel_batch_rows: Counter<u64>,
     otel_flush_by_size: Counter<u64>,
     otel_flush_by_timeout: Counter<u64>,
+    otel_dropped_batches: Counter<u64>,
+    otel_scan_errors: Counter<u64>,
     otel_scan_nanos: Counter<u64>,
     otel_transform_nanos: Counter<u64>,
     otel_output_nanos: Counter<u64>,
@@ -145,6 +165,8 @@ impl PipelineMetrics {
             batch_rows_total: AtomicU64::new(0),
             flush_by_size: AtomicU64::new(0),
             flush_by_timeout: AtomicU64::new(0),
+            dropped_batches_total: AtomicU64::new(0),
+            scan_errors_total: AtomicU64::new(0),
             scan_nanos_total: AtomicU64::new(0),
             transform_nanos_total: AtomicU64::new(0),
             output_nanos_total: AtomicU64::new(0),
@@ -154,6 +176,8 @@ impl PipelineMetrics {
             otel_batch_rows: meter.u64_counter("logfwd_batch_rows").build(),
             otel_flush_by_size: meter.u64_counter("logfwd_flush_by_size").build(),
             otel_flush_by_timeout: meter.u64_counter("logfwd_flush_by_timeout").build(),
+            otel_dropped_batches: meter.u64_counter("logfwd_dropped_batches").build(),
+            otel_scan_errors: meter.u64_counter("logfwd_scan_errors").build(),
             otel_scan_nanos: meter.u64_counter("logfwd_stage_scan_nanos").build(),
             otel_transform_nanos: meter.u64_counter("logfwd_stage_transform_nanos").build(),
             otel_output_nanos: meter.u64_counter("logfwd_stage_output_nanos").build(),
@@ -250,6 +274,19 @@ impl PipelineMetrics {
     pub fn inc_backpressure_stall(&self) {
         self.backpressure_stalls.fetch_add(1, Ordering::Relaxed);
         self.otel_backpressure_stalls.add(1, &self.otel_attrs);
+    }
+
+    /// Increment the dropped-batches counter. Call whenever a batch is
+    /// discarded due to a scan, transform, or output error.
+    pub fn inc_dropped_batch(&self) {
+        self.dropped_batches_total.fetch_add(1, Ordering::Relaxed);
+        self.otel_dropped_batches.add(1, &self.otel_attrs);
+    }
+
+    /// Increment the scan-errors counter. Call when `scanner.scan()` fails.
+    pub fn inc_scan_error(&self) {
+        self.scan_errors_total.fetch_add(1, Ordering::Relaxed);
+        self.otel_scan_errors.add(1, &self.otel_attrs);
     }
 }
 
@@ -416,12 +453,13 @@ impl DiagnosticsServer {
                 .iter()
                 .map(|(name, typ, stats)| {
                     format!(
-                        r#"{{"name":"{}","type":"{}","lines_total":{},"bytes_total":{},"errors":{}}}"#,
+                        r#"{{"name":"{}","type":"{}","lines_total":{},"bytes_total":{},"errors":{},"parse_errors":{}}}"#,
                         esc(name),
                         esc(typ),
                         stats.lines(),
                         stats.bytes(),
                         stats.errors(),
+                        stats.parse_errors(),
                     )
                 })
                 .collect();
@@ -461,7 +499,7 @@ impl DiagnosticsServer {
             let output_s = pm.output_nanos_total.load(Ordering::Relaxed) as f64 / 1e9;
 
             pipelines_json.push(format!(
-                r#"{{"name":"{}","inputs":[{}],"transform":{{"sql":"{}","lines_in":{},"lines_out":{},"errors":{},"filter_drop_rate":{:.3}}},"outputs":[{}],"batches":{{"total":{},"avg_rows":{:.1},"flush_by_size":{},"flush_by_timeout":{}}},"stage_seconds":{{"scan":{:.6},"transform":{:.6},"output":{:.6}}}}}"#,
+                r#"{{"name":"{}","inputs":[{}],"transform":{{"sql":"{}","lines_in":{},"lines_out":{},"errors":{},"filter_drop_rate":{:.3}}},"outputs":[{}],"batches":{{"total":{},"avg_rows":{:.1},"flush_by_size":{},"flush_by_timeout":{},"dropped_batches_total":{},"scan_errors_total":{}}},"stage_seconds":{{"scan":{:.6},"transform":{:.6},"output":{:.6}}}}}"#,
                 esc(&pm.name),
                 inputs_json.join(","),
                 esc(&pm.transform_sql),
@@ -474,6 +512,8 @@ impl DiagnosticsServer {
                 avg_rows,
                 pm.flush_by_size.load(Ordering::Relaxed),
                 pm.flush_by_timeout.load(Ordering::Relaxed),
+                pm.dropped_batches_total.load(Ordering::Relaxed),
+                pm.scan_errors_total.load(Ordering::Relaxed),
                 scan_s,
                 transform_s,
                 output_s,
@@ -574,6 +614,8 @@ mod tests {
         pm.batch_rows_total.store(4500, Ordering::Relaxed);
         pm.flush_by_size.store(30, Ordering::Relaxed);
         pm.flush_by_timeout.store(20, Ordering::Relaxed);
+        pm.dropped_batches_total.store(5, Ordering::Relaxed);
+        pm.scan_errors_total.store(2, Ordering::Relaxed);
         pm.scan_nanos_total.store(100_000_000, Ordering::Relaxed); // 0.1s
         pm.transform_nanos_total
             .store(500_000_000, Ordering::Relaxed); // 0.5s
@@ -679,10 +721,29 @@ mod tests {
         assert!(body.contains(r#""flush_by_size":30"#), "body: {}", body);
         assert!(body.contains(r#""flush_by_timeout":20"#), "body: {}", body);
         assert!(
+            body.contains(r#""dropped_batches_total":5"#),
+            "body: {}",
+            body
+        );
+        assert!(body.contains(r#""scan_errors_total":2"#), "body: {}", body);
+        assert!(body.contains(r#""parse_errors":0"#), "body: {}", body);
+        assert!(
             body.contains(&format!(r#""version":"{}""#, env!("CARGO_PKG_VERSION"))),
             "body: {}",
             body
         );
+    }
+
+    #[test]
+    fn test_component_stats_parse_errors() {
+        let stats = ComponentStats::new();
+        assert_eq!(stats.parse_errors_total.load(Ordering::Relaxed), 0);
+
+        stats.inc_parse_errors(3);
+        assert_eq!(stats.parse_errors_total.load(Ordering::Relaxed), 3);
+
+        stats.inc_parse_errors(2);
+        assert_eq!(stats.parse_errors_total.load(Ordering::Relaxed), 5);
     }
 
     #[test]

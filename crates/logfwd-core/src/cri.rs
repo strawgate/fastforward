@@ -126,12 +126,18 @@ impl CriReassembler {
 /// Process a chunk of CRI-formatted log data. Parses each CRI line, reassembles
 /// partials, and calls `emit` with each complete log message.
 ///
-/// Returns the number of complete lines emitted.
-pub fn process_cri_chunk<F>(chunk: &[u8], reassembler: &mut CriReassembler, mut emit: F) -> usize
+/// Returns `(lines_ok, parse_errors)` where `parse_errors` is the number of
+/// non-empty lines that could not be parsed as valid CRI format.
+pub fn process_cri_chunk<F>(
+    chunk: &[u8],
+    reassembler: &mut CriReassembler,
+    mut emit: F,
+) -> (usize, usize)
 where
     F: FnMut(&[u8]),
 {
     let mut count = 0;
+    let mut errors = 0;
     let mut line_start = 0;
 
     for pos in memchr::memchr_iter(b'\n', chunk) {
@@ -142,16 +148,19 @@ where
             continue;
         }
 
-        if let Some(cri) = parse_cri_line(line)
-            && let Some(complete_msg) = reassembler.feed(&cri)
-        {
-            emit(complete_msg);
-            count += 1;
-            reassembler.reset();
+        match parse_cri_line(line) {
+            Some(cri) => {
+                if let Some(complete_msg) = reassembler.feed(&cri) {
+                    emit(complete_msg);
+                    count += 1;
+                    reassembler.reset();
+                }
+            }
+            None => errors += 1,
         }
     }
 
-    count
+    (count, errors)
 }
 
 /// Process CRI data and write extracted messages directly into an output buffer.
@@ -165,14 +174,16 @@ where
 ///   Example: `Some(b"\"kubernetes.pod_name\":\"my-pod\",")` turns
 ///   `{"msg":"hi"}` into `{"kubernetes.pod_name":"my-pod","msg":"hi"}`
 ///
-/// Returns the number of complete lines written.
+/// Returns `(lines_ok, parse_errors)` where `parse_errors` is the number of
+/// non-empty lines that could not be parsed as valid CRI format.
 pub fn process_cri_to_buf(
     chunk: &[u8],
     reassembler: &mut CriReassembler,
     json_prefix: Option<&[u8]>,
     out: &mut Vec<u8>,
-) -> usize {
+) -> (usize, usize) {
     let mut count = 0;
+    let mut errors = 0;
     let mut line_start = 0;
 
     for pos in memchr::memchr_iter(b'\n', chunk) {
@@ -183,16 +194,19 @@ pub fn process_cri_to_buf(
             continue;
         }
 
-        if let Some(cri) = parse_cri_line(line)
-            && let Some(complete_msg) = reassembler.feed(&cri)
-        {
-            write_json_line(complete_msg, json_prefix, out);
-            count += 1;
-            reassembler.reset();
+        match parse_cri_line(line) {
+            Some(cri) => {
+                if let Some(complete_msg) = reassembler.feed(&cri) {
+                    write_json_line(complete_msg, json_prefix, out);
+                    count += 1;
+                    reassembler.reset();
+                }
+            }
+            None => errors += 1,
         }
     }
 
-    count
+    (count, errors)
 }
 
 /// Write a single message into the output buffer with optional JSON prefix injection.
@@ -269,13 +283,41 @@ mod tests {
                        2024-01-15T10:30:02Z stderr F line three\n";
         let mut reassembler = CriReassembler::new(1024 * 1024);
         let mut lines = Vec::new();
-        let count = process_cri_chunk(chunk, &mut reassembler, |msg| {
+        let (count, errors) = process_cri_chunk(chunk, &mut reassembler, |msg| {
             lines.push(msg.to_vec());
         });
         assert_eq!(count, 3);
+        assert_eq!(errors, 0);
         assert_eq!(lines[0], b"line one");
         assert_eq!(lines[1], b"line two");
         assert_eq!(lines[2], b"line three");
+    }
+
+    #[test]
+    fn test_process_chunk_parse_errors() {
+        // Mix of valid and invalid CRI lines.
+        let chunk = b"not-a-cri-line\n\
+                       2024-01-15T10:30:00Z stdout F valid line\n\
+                       also-invalid\n";
+        let mut reassembler = CriReassembler::new(1024 * 1024);
+        let mut lines = Vec::new();
+        let (count, errors) = process_cri_chunk(chunk, &mut reassembler, |msg| {
+            lines.push(msg.to_vec());
+        });
+        assert_eq!(count, 1);
+        assert_eq!(errors, 2);
+        assert_eq!(lines[0], b"valid line");
+    }
+
+    #[test]
+    fn test_process_cri_to_buf_parse_errors() {
+        let chunk = b"not-a-cri-line\n\
+                       2024-01-15T10:30:00Z stdout F {\"msg\":\"ok\"}\n";
+        let mut reassembler = CriReassembler::new(1024 * 1024);
+        let mut out = Vec::new();
+        let (count, errors) = process_cri_to_buf(chunk, &mut reassembler, None, &mut out);
+        assert_eq!(count, 1);
+        assert_eq!(errors, 1);
     }
 
     #[test]
