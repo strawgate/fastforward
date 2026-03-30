@@ -6,12 +6,12 @@
 //
 // For the persistence path: scan → build → compress → disk.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use arrow::array::{ArrayRef, Float64Array, Int64Array, StringBuilder};
+use arrow::array::{ArrayRef, Float64Array, Int64Array, StringDictionaryBuilder, StringBuilder};
 use arrow::buffer::NullBuffer;
-use arrow::datatypes::{DataType, Field, Schema};
+use arrow::datatypes::{DataType, Field, Int16Type, Int8Type, Schema};
 use arrow::error::ArrowError;
 use arrow::record_batch::{RecordBatch, RecordBatchOptions};
 
@@ -222,23 +222,81 @@ impl StorageBuilder {
                 )) as ArrayRef);
             }
             if fc.has_str {
-                let mut builder = StringBuilder::with_capacity(num_rows, num_rows * 16);
-                let mut vi = 0;
-                for row in 0..num_rows {
-                    if vi < fc.str_values.len() && fc.str_values[vi].0 as usize == row {
-                        // String values come from the JSON input.  Use
-                        // from_utf8_lossy so that non-UTF-8 fuzz input is
-                        // handled safely (replacement characters) rather than
-                        // invoking undefined behaviour.
-                        let s = String::from_utf8_lossy(&fc.str_values[vi].1);
-                        builder.append_value(&*s);
-                        vi += 1;
-                    } else {
-                        builder.append_null();
+                // Count unique values to select the most compact encoding.
+                let unique_count: usize = fc
+                    .str_values
+                    .iter()
+                    .map(|(_, v)| v.as_slice())
+                    .collect::<HashSet<&[u8]>>()
+                    .len();
+
+                let col_name = format!("{}_str", name);
+
+                if unique_count < 128 {
+                    // Very low cardinality — Int8 dictionary keys (1 byte/row).
+                    let mut builder = StringDictionaryBuilder::<Int8Type>::new();
+                    let mut vi = 0;
+                    for row in 0..num_rows {
+                        if vi < fc.str_values.len() && fc.str_values[vi].0 as usize == row {
+                            let s = String::from_utf8_lossy(&fc.str_values[vi].1);
+                            builder.append_value(&*s);
+                            vi += 1;
+                        } else {
+                            builder.append_null();
+                        }
                     }
+                    schema_fields.push(Field::new(
+                        col_name,
+                        DataType::Dictionary(
+                            Box::new(DataType::Int8),
+                            Box::new(DataType::Utf8),
+                        ),
+                        true,
+                    ));
+                    arrays.push(Arc::new(builder.finish()) as ArrayRef);
+                } else if unique_count < 32768 && unique_count * 2 < num_rows {
+                    // Moderate cardinality and dictionary is smaller than 50% of
+                    // rows — Int16 dictionary keys (2 bytes/row).
+                    let mut builder = StringDictionaryBuilder::<Int16Type>::new();
+                    let mut vi = 0;
+                    for row in 0..num_rows {
+                        if vi < fc.str_values.len() && fc.str_values[vi].0 as usize == row {
+                            let s = String::from_utf8_lossy(&fc.str_values[vi].1);
+                            builder.append_value(&*s);
+                            vi += 1;
+                        } else {
+                            builder.append_null();
+                        }
+                    }
+                    schema_fields.push(Field::new(
+                        col_name,
+                        DataType::Dictionary(
+                            Box::new(DataType::Int16),
+                            Box::new(DataType::Utf8),
+                        ),
+                        true,
+                    ));
+                    arrays.push(Arc::new(builder.finish()) as ArrayRef);
+                } else {
+                    // High cardinality or near-unique — plain UTF-8 string.
+                    let mut builder = StringBuilder::with_capacity(num_rows, num_rows * 16);
+                    let mut vi = 0;
+                    for row in 0..num_rows {
+                        if vi < fc.str_values.len() && fc.str_values[vi].0 as usize == row {
+                            // String values come from the JSON input.  Use
+                            // from_utf8_lossy so that non-UTF-8 fuzz input is
+                            // handled safely (replacement characters) rather than
+                            // invoking undefined behaviour.
+                            let s = String::from_utf8_lossy(&fc.str_values[vi].1);
+                            builder.append_value(&*s);
+                            vi += 1;
+                        } else {
+                            builder.append_null();
+                        }
+                    }
+                    schema_fields.push(Field::new(col_name, DataType::Utf8, true));
+                    arrays.push(Arc::new(builder.finish()) as ArrayRef);
                 }
-                schema_fields.push(Field::new(format!("{}_str", name), DataType::Utf8, true));
-                arrays.push(Arc::new(builder.finish()) as ArrayRef);
             }
         }
 
@@ -263,7 +321,24 @@ impl StorageBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::array::{Array, StringArray};
+    use arrow::array::{Array, DictionaryArray, StringArray};
+    use arrow::datatypes::Int8Type;
+
+    /// Returns the string value at `row` for a column that may be either a
+    /// `DictionaryArray<Int8Type>` (low-cardinality path) or a plain
+    /// `StringArray` (high-cardinality path).
+    fn str_value<'a>(col: &'a dyn Array, row: usize) -> &'a str {
+        if let Some(dict) = col.as_any().downcast_ref::<DictionaryArray<Int8Type>>() {
+            let key = dict.keys().value(row) as usize;
+            return dict
+                .values()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap()
+                .value(key);
+        }
+        col.as_any().downcast_ref::<StringArray>().unwrap().value(row)
+    }
 
     #[test]
     fn test_basic() {
@@ -281,16 +356,8 @@ mod tests {
         b.end_row();
         let batch = b.finish_batch().unwrap();
         assert_eq!(batch.num_rows(), 2);
-        assert_eq!(
-            batch
-                .column_by_name("host_str")
-                .unwrap()
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .unwrap()
-                .value(0),
-            "web1"
-        );
+        let host_col = batch.column_by_name("host_str").unwrap();
+        assert_eq!(str_value(host_col.as_ref(), 0), "web1");
         assert_eq!(
             batch
                 .column_by_name("status_int")
@@ -397,5 +464,96 @@ mod tests {
         b.begin_batch();
         let batch = b.finish_batch().unwrap();
         assert_eq!(batch.num_rows(), 0);
+    }
+
+    /// Verify that a single repeated value (cardinality = 1) is stored as an
+    /// `Int8` dictionary — the primary motivating case from the issue
+    /// (`level` column with one unique value).
+    #[test]
+    fn test_adaptive_encoding_int8_dict() {
+        let mut b = StorageBuilder::new(false);
+        b.begin_batch();
+        let lvl = b.resolve_field(b"level");
+        for _ in 0..10 {
+            b.begin_row();
+            b.append_str_by_idx(lvl, b"info");
+            b.end_row();
+        }
+        let batch = b.finish_batch().unwrap();
+        let col = batch.column_by_name("level_str").unwrap();
+        // Must be an Int8 dictionary, not a plain StringArray.
+        assert_eq!(
+            col.data_type(),
+            &DataType::Dictionary(Box::new(DataType::Int8), Box::new(DataType::Utf8))
+        );
+        // All rows must read back as "info" via the dictionary.
+        let dict = col
+            .as_any()
+            .downcast_ref::<DictionaryArray<Int8Type>>()
+            .unwrap();
+        let values = dict
+            .values()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        for i in 0..10 {
+            let key = dict.keys().value(i) as usize;
+            assert_eq!(values.value(key), "info");
+        }
+    }
+
+    /// Verify that a high-cardinality field (every row has a unique value) is
+    /// stored as plain UTF-8 rather than a dictionary.
+    #[test]
+    fn test_adaptive_encoding_plain_string() {
+        let mut b = StorageBuilder::new(false);
+        b.begin_batch();
+        let msg = b.resolve_field(b"msg");
+        // 200 unique values — each row different, cardinality == num_rows.
+        for i in 0u32..200 {
+            b.begin_row();
+            b.append_str_by_idx(msg, format!("msg-{i}").as_bytes());
+            b.end_row();
+        }
+        let batch = b.finish_batch().unwrap();
+        let col = batch.column_by_name("msg_str").unwrap();
+        // Must be a plain StringArray.
+        assert_eq!(col.data_type(), &DataType::Utf8);
+        let sa = col.as_any().downcast_ref::<StringArray>().unwrap();
+        assert_eq!(sa.value(0), "msg-0");
+        assert_eq!(sa.value(199), "msg-199");
+    }
+
+    /// Verify that a moderate-cardinality field where unique < 32 768 and
+    /// unique < 50 % of rows is stored as an Int16 dictionary.
+    #[test]
+    fn test_adaptive_encoding_int16_dict() {
+        use arrow::array::DictionaryArray;
+        use arrow::datatypes::Int16Type;
+
+        let mut b = StorageBuilder::new(false);
+        b.begin_batch();
+        let svc = b.resolve_field(b"svc");
+        // 130 unique values across 1000 rows: 130 < 32 768 and 130*2 < 1000.
+        let num_rows = 1000usize;
+        let num_unique = 130usize;
+        for i in 0..num_rows {
+            b.begin_row();
+            let s = format!("svc-{}", i % num_unique);
+            b.append_str_by_idx(svc, s.as_bytes());
+            b.end_row();
+        }
+        let batch = b.finish_batch().unwrap();
+        let col = batch.column_by_name("svc_str").unwrap();
+        assert_eq!(
+            col.data_type(),
+            &DataType::Dictionary(Box::new(DataType::Int16), Box::new(DataType::Utf8))
+        );
+        let dict = col
+            .as_any()
+            .downcast_ref::<DictionaryArray<Int16Type>>()
+            .unwrap();
+        // Dictionary should have exactly 130 unique entries.
+        assert_eq!(dict.values().len(), num_unique);
     }
 }
