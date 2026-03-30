@@ -1,41 +1,97 @@
 # Architecture
 
+## Core principle
+
+The pipeline is generic Arrow tables in, Arrow tables out. The core
+knows nothing about OTel, logs, metrics, or any specific data model.
+It moves RecordBatches between receivers, processors, and exporters.
+
+OTel semantics (OTLP encoding, severity mapping, trace context,
+`_resource_*` grouping) are optional features implemented as specific
+receiver/exporter types. You could use this pipeline to process CSV
+files into Parquet on S3 with no OTel involvement.
+
 ## Data flow
 
-```
-Sources (file / TCP / UDP / OTLP receiver)
+```text
+Receivers (produce RecordBatch)
+    │  file scanner, Arrow IPC reader, ES|QL client,
+    │  ClickHouse query, Arrow Flight, OTLP decoder, CSV/JSON/Parquet
     │
-    │  each source produces Bytes independently
+    │  each receiver produces RecordBatch independently
     ▼
-Format Parser (CRI / JSON / Raw)  ─per source─
-    │  strips CRI timestamp/stream prefix, accumulates NDJSON
-    ▼
-SIMD Scanner  ─per source─
-    │  one pass classifies entire buffer via ChunkIndex
-    │  walks structural positions directly into Arrow columns
-    │  injects _resource_* columns from source metadata
-    ▼
-RecordBatch per source
+RecordBatch per receiver
     │
     ├─→ [if queue.mode: pre-transform] write Arrow IPC segment → ack source
     │
-    ├─→ register as partitions of `logs` MemTable
+    ├─→ register as partitions of MemTable
     │   (DataFusion concatenates partitions during query)
     ▼
-SQL Transform (DataFusion)
+SQL Processor (DataFusion)
     │  user SQL: SELECT, WHERE, GROUP BY + UDFs
     │  enrichment tables available via JOIN
-    │  _resource_* columns flow through like any other column
+    │  all columns flow through — no special treatment
     ▼
 Post-transform RecordBatch
     │
     ├─→ [if queue.mode: post-transform] write Arrow IPC segment → ack source
     │
     ▼
-Output Sinks (OTLP / JSON lines / HTTP / stdout)
+Exporters (consume RecordBatch)
+    │  Arrow IPC files, ClickHouse ArrowStream, Arrow Flight,
+    │  Parquet, OTLP, JSON lines, stdout
     │  in-memory fan-out via bounded channels
-    │  group rows by _resource_* columns for OTLP ResourceLogs
 ```
+
+## Receivers
+
+Receivers produce Arrow RecordBatches from external sources. Each
+receiver type handles its own protocol and serialization.
+
+| Receiver | Protocol | Input format |
+|----------|----------|-------------|
+| `file` | Local filesystem | CRI / JSON / Raw → SIMD scanner → Arrow |
+| `arrow_ipc` | Local / S3 / HTTP | Arrow IPC stream or file |
+| `parquet` | Local / S3 | Parquet → Arrow (via DataFusion) |
+| `clickhouse` | HTTP | `SELECT ... FORMAT ArrowStream` |
+| `elasticsearch` | HTTP | ES\|QL `?format=arrow` |
+| `arrow_flight` | gRPC | Flight `DoGet` / `DoPut` |
+| `influxdb` | gRPC | Flight SQL query → Arrow |
+| `otlp` | gRPC / HTTP | Protobuf → Arrow conversion |
+| `csv` | Local / S3 / HTTP | CSV → Arrow (via `arrow-csv`) |
+| `json` | Local / S3 / HTTP | JSON → Arrow (via `arrow-json`) |
+| `kafka` | Kafka protocol | Arrow IPC or Avro message bytes |
+
+Receivers can produce data lazily — handing off raw bytes that convert
+to Arrow on demand (when a processor needs columnar access).
+
+## Exporters
+
+Exporters consume Arrow RecordBatches and write to external systems.
+
+| Exporter | Protocol | Output format |
+|----------|----------|--------------|
+| `arrow_ipc` | Local / S3 | Arrow IPC stream (`.arrows`) or file (`.arrow`) |
+| `parquet` | Local / S3 | Parquet (better compression for cold storage) |
+| `clickhouse` | HTTP | `INSERT ... FORMAT ArrowStream` |
+| `arrow_flight` | gRPC | Flight `DoPut` / `DoExchange` |
+| `otlp` | gRPC / HTTP | Arrow → Protobuf, group by `_resource_*` |
+| `json_lines` | HTTP / file | Arrow → NDJSON |
+| `stdout` | stdio | Human-readable table |
+| `kafka` | Kafka protocol | Arrow IPC as message bytes |
+
+## Processors
+
+Processors transform RecordBatches. The primary processor is DataFusion
+SQL, but the interface is just `RecordBatch → RecordBatch`.
+
+| Processor | Description |
+|-----------|-------------|
+| `sql` | DataFusion SQL: SELECT, WHERE, JOIN, GROUP BY, UDFs |
+| `filter` | Row-level filtering (shorthand for `WHERE` clause) |
+| `route` | Content-based routing to different exporters |
+| `batch` | Combine small batches into larger ones |
+| `fanout` | Duplicate to multiple downstream processors/exporters |
 
 ## Persistence
 
@@ -132,12 +188,12 @@ This means:
 - The StreamingBuilder's `Bytes` lifetime is per-source
 - A source with no data in a cycle contributes no partition
 
-## Resource metadata as columns
+## Resource metadata as columns (planned)
 
-Source identity and resource attributes are carried as `_resource_*`
+Source identity and resource attributes will be carried as `_resource_*`
 prefixed columns (e.g., `_resource_k8s_pod_name`,
-`_resource_k8s_namespace`, `_resource_service_name`). These are injected
-during scanning based on the source's configuration.
+`_resource_k8s_namespace`, `_resource_service_name`). These will be
+injected during scanning based on the source's configuration (#153).
 
 This design:
 
@@ -233,18 +289,36 @@ The scan loop is generic over the `ScanBuilder` trait:
   copies. 20% faster. For real-time hot path when persistence is
   disabled.
 
+## Design constraints
+
+- **Disk queue before batching:** `disk_queue → batch`, never
+  `batch → disk_queue`. The batcher is ephemeral; persistence must
+  come first so crash recovery replays from the queue.
+- **Dictionary compaction after redaction:** Arrow `filter()` doesn't
+  remove unreferenced dictionary values. Any redaction/masking must
+  compact dictionaries before export to prevent data leaks.
+- **Separate runtimes for data and observability:** Never share a
+  single-threaded tokio runtime between the data pipeline and its own
+  internal telemetry. On a single-core machine this deadlocks.
+- **Admission control before allocation:** Limit inbound data *before*
+  reading/deserializing it (semaphore on receiver accept), not after.
+  Post-allocation limiting is too late — the memory is already used.
+
 ## Async pipeline
 
-The pipeline runs on a tokio multi-thread runtime. Key components:
+The pipeline runs on a tokio multi-thread runtime with a `select!`
+loop. Input reading runs on dedicated OS threads; scanning, transform,
+and output run in the async context.
 
-- **Sources** implement `async fn run(&mut self, ctx: &mut SourceContext)`
-  (Arroyo-style source-owns-loop). File sources wrap FileTailer via
-  `spawn_blocking`.
-- **Scanner** runs on `spawn_blocking` (pure CPU, ~4MB per call).
+- **Input threads** poll sources on dedicated OS threads, send parsed
+  JSON lines through bounded `tokio::sync::mpsc` channels (capacity 16).
+  Backpressure: `blocking_send` suspends the input thread when full.
+- **Scanner** runs via `block_in_place` (CPU-bound, ~1-5ms per 4MB).
 - **Transform** is `async fn execute()` (DataFusion is natively async).
-- **Sinks** implement `async fn send_batch()`. HTTP-based sinks use
-  async `reqwest` for connection pooling and timeouts.
-- **Shutdown** via `CancellationToken` (already implemented).
+- **Output** uses `block_in_place` to wrap sync HTTP sends (ureq).
+  Will be replaced with async reqwest (#252).
+- **Shutdown** via `CancellationToken`. Drain order: drain channel
+  before joining input threads to prevent deadlock.
 
 ## Crate map
 
@@ -259,17 +333,52 @@ The pipeline runs on a tokio multi-thread runtime. Key components:
 
 ## What's implemented vs not yet
 
-**Implemented:** file input, CRI/JSON/Raw parsing, SIMD scanner, two
-builder backends (StreamingBuilder default), DataFusion SQL transforms
-(async), custom UDFs (grok, regexp_extract, int, float), enrichment
-(K8s path, host info, static labels), OTLP output, JSON lines output,
-stdout output, diagnostics server, OTel metrics, signal handling
-(SIGINT/SIGTERM via CancellationToken), graceful shutdown, async Sink
-trait.
+**Implemented:** file receiver (CRI/JSON/Raw parsing, SIMD scanner),
+two builder backends (StreamingBuilder default), async pipeline
+runtime with bounded channels and select! loop (#221), DataFusion SQL
+processor (async), custom UDFs (grok, regexp_extract, int, float,
+geo_lookup), enrichment (K8s path, host info, static labels), OTLP
+exporter, JSON lines exporter, stdout exporter, diagnostics server,
+OTel metrics, signal handling (SIGINT/SIGTERM via CancellationToken),
+graceful shutdown, compliance test suite, jemalloc allocator.
 
-**Not yet:** async pipeline runtime, async Source trait, Arrow IPC
-persistence (pre/post-transform), SegmentStore abstraction (local +
-S3/GCS), object storage upload, `_resource_*` column injection, OTLP
-resource grouping, output cursor tracking, TCP/UDP/OTLP input,
-Elasticsearch/Loki/Parquet output, file offset checkpointing, SQL
-rewriter, S3 source (for scaled-out deployment).
+**Not yet:**
+
+*Pipeline core:*
+- Receiver / Processor / Exporter trait abstractions
+- Ack/Nack context stack for end-to-end delivery tracking (#231)
+- Byte-aware backpressure (#232)
+- Control/data channel separation (#233)
+- Async HTTP client replacing ureq (#252)
+- Thread-per-core `!Send` local execution
+- Component registration via `linkme::distributed_slice`
+
+*Receivers:*
+- Arrow IPC (local / S3 / HTTP)
+- ClickHouse (`SELECT ... FORMAT ArrowStream`)
+- Elasticsearch ES|QL (`?format=arrow`)
+- Arrow Flight (gRPC `DoPut`)
+- Parquet (local / S3)
+- OTLP (protobuf → Arrow)
+- CSV / JSON files
+- Kafka (Arrow IPC message bytes)
+- TCP / UDP / syslog
+
+*Exporters:*
+- Arrow IPC files (local / S3, `.arrows` / `.arrow`)
+- Parquet files (local / S3)
+- ClickHouse (`INSERT ... FORMAT ArrowStream`)
+- Arrow Flight (gRPC `DoPut`)
+- Kafka (Arrow IPC message bytes)
+
+*Persistence:*
+- Arrow IPC segment store (pre/post-transform queue)
+- SegmentStore trait (local + S3/GCS backends)
+- Output cursor tracking
+- File offset checkpointing
+
+*Schema:*
+- `_resource_*` column injection (planned; see "Resource metadata as columns (planned)")
+- Timestamp type migration (string → `Timestamp(ns, UTC)`)
+- Adaptive dictionary encoding
+- OTLP resource grouping in exporter
