@@ -68,7 +68,7 @@ jobs:
           RUSTFLAGS="-Ctarget-cpu=x86-64-v3 -Cprofile-generate=/tmp/pgo-data" \
             cargo build --release -p logfwd
           LOGFWD=./target/release/logfwd cargo run -p logfwd-competitive-bench --release -- \
-            --lines 1000000 --mode binary --scenarios passthrough
+            --lines 500000 --agents logfwd --mode binary --scenarios passthrough --no-download
           PROFDATA=$(find "$(rustc --print sysroot)" -name llvm-profdata -type f | head -1)
           if [ -n "$PROFDATA" ] && "$PROFDATA" merge -output=/tmp/pgo-data/merged.profdata /tmp/pgo-data/*.profraw 2>/dev/null; then
             RUSTFLAGS="-Ctarget-cpu=x86-64-v3 -Cprofile-use=/tmp/pgo-data/merged.profdata" \
