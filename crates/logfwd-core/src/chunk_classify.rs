@@ -929,3 +929,98 @@ mod tests {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Kani formal verification proofs
+// ---------------------------------------------------------------------------
+
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    /// Prove prefix_xor computes the correct running XOR for ALL u64 inputs.
+    ///
+    /// Property: output bit i = XOR of input bits 0..=i.
+    /// Verified exhaustively — covers all 2^64 possible inputs via symbolic
+    /// execution (Kani encodes this as a SAT problem, no enumeration needed).
+    #[kani::proof]
+    fn verify_prefix_xor() {
+        let input: u64 = kani::any();
+        let result = prefix_xor(input);
+
+        // Verify against naive bit-by-bit computation.
+        let mut expected: u64 = 0;
+        let mut running = false;
+        let mut i = 0u32;
+        while i < 64 {
+            if (input >> i) & 1 == 1 {
+                running = !running;
+            }
+            if running {
+                expected |= 1u64 << i;
+            }
+            i += 1;
+        }
+
+        assert!(result == expected, "prefix_xor mismatch");
+    }
+
+    /// Prove compute_real_quotes correctly identifies unescaped quotes
+    /// for ALL possible (quote_bits, bs_bits, carry) combinations.
+    ///
+    /// Properties verified:
+    /// 1. Result is a submask of quote_bits (only real quotes are returned)
+    /// 2. Result matches a naive byte-by-byte escape oracle
+    /// 3. Carry output is correct (position 63 escapes into next block)
+    ///
+    /// This is the most critical proof in the codebase — if escape detection
+    /// is wrong, the scanner silently misparses every JSON string containing
+    /// backslashes.
+    #[kani::proof]
+    #[kani::unwind(65)]
+    #[kani::solver(kissat)]
+    fn verify_compute_real_quotes() {
+        let quote_bits: u64 = kani::any();
+        let bs_bits: u64 = kani::any();
+        let prev_carry: u64 = kani::any();
+        kani::assume(prev_carry <= 1);
+
+        let mut carry = prev_carry;
+        let result = compute_real_quotes(quote_bits, bs_bits, &mut carry);
+
+        // Property 1: result only contains quote positions.
+        assert!(
+            result & !quote_bits == 0,
+            "result contains bits that aren't quotes"
+        );
+
+        // Property 2: matches naive escape oracle.
+        // Walk positions 0..63, tracking whether each is escaped.
+        let mut escaped_naive: u64 = 0;
+        let mut prev_was_unescaped_bs = prev_carry == 1;
+
+        let mut pos = 0u32;
+        while pos < 64 {
+            let is_bs = (bs_bits >> pos) & 1 == 1;
+            if prev_was_unescaped_bs {
+                escaped_naive |= 1u64 << pos;
+                prev_was_unescaped_bs = false;
+            } else if is_bs {
+                prev_was_unescaped_bs = true;
+            } else {
+                prev_was_unescaped_bs = false;
+            }
+            pos += 1;
+        }
+
+        let expected = quote_bits & !escaped_naive;
+        assert!(
+            result == expected,
+            "compute_real_quotes disagrees with naive oracle"
+        );
+
+        // Property 3: carry is correct.
+        let expected_carry: u64 = if prev_was_unescaped_bs { 1 } else { 0 };
+        assert!(carry == expected_carry, "carry mismatch");
+    }
+}
