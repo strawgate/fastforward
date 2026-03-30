@@ -17,8 +17,6 @@ jobs:
   build:
     name: Build (${{ matrix.artifact }})
     runs-on: ${{ matrix.os }}
-    env:
-      RUSTC_WRAPPER: ""
     strategy:
       fail-fast: false
       matrix:
@@ -39,6 +37,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: mozilla-actions/sccache-action@v0.0.7
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -58,6 +58,8 @@ jobs:
       - name: Build (cross)
         if: matrix.use_cross == true
         run: cross build --release --bin logfwd --target ${{ matrix.target }}
+        env:
+          RUSTC_WRAPPER: ""
 
       - name: Build (cargo)
         if: matrix.use_cross != true
