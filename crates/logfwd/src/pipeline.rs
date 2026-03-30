@@ -529,7 +529,10 @@ fn input_poll_loop(
     batch_timeout: Duration,
     poll_interval: Duration,
 ) {
-    let mut last_send = Instant::now();
+    // Track when the buffer first became non-empty, not when we last
+    // sent. This ensures batch_timeout measures "time since first data
+    // arrived in this batch", preventing tiny flushes after idle periods.
+    let mut buffered_since: Option<Instant> = None;
 
     loop {
         if shutdown.is_cancelled() {
@@ -548,6 +551,10 @@ fn input_poll_loop(
         if events.is_empty() {
             std::thread::sleep(poll_interval);
         } else {
+            // Track when this batch started accumulating.
+            if !input.json_buf.is_empty() && buffered_since.is_none() {
+                buffered_since = Some(Instant::now());
+            }
             for event in events {
                 match event {
                     InputEvent::Data { bytes, .. } => {
@@ -560,11 +567,19 @@ fn input_poll_loop(
                     }
                 }
             }
+            // Set buffered_since after processing if buffer was empty before.
+            if buffered_since.is_none() && !input.json_buf.is_empty() {
+                buffered_since = Some(Instant::now());
+            }
         }
 
-        // Send when buffer reaches target size OR timeout elapsed.
+        // Send when buffer reaches target size OR timeout since first
+        // data in this batch has elapsed.
+        let timeout_elapsed = buffered_since
+            .map(|t| t.elapsed() >= batch_timeout)
+            .unwrap_or(false);
         let should_send = input.json_buf.len() >= batch_target_bytes
-            || (!input.json_buf.is_empty() && last_send.elapsed() >= batch_timeout);
+            || (!input.json_buf.is_empty() && timeout_elapsed);
         if should_send {
             // Swap in a pre-allocated buffer to avoid reallocation churn.
             // The old buffer is sent to the consumer; the new one reuses
@@ -575,7 +590,7 @@ fn input_poll_loop(
             if tx.blocking_send(data).is_err() {
                 break;
             }
-            last_send = Instant::now();
+            buffered_since = None;
         }
     }
 
