@@ -597,7 +597,7 @@ fn compliance_numeric_string_not_coerced() {
 #[test]
 fn compliance_mixed_type_across_rows() {
     // Same field as int, float, string, bool, null across multiple rows.
-    let input = b"{\"v\":42}\n{\"v\":3.14}\n{\"v\":\"text\"}\n{\"v\":true}\n{\"v\":null}\n";
+    let input = b"{\"v\":42}\n{\"v\":1.23}\n{\"v\":\"text\"}\n{\"v\":true}\n{\"v\":null}\n";
     assert_both_scanners(input, |batch| {
         assert_eq!(batch.num_rows(), 5);
 
@@ -606,7 +606,7 @@ fn compliance_mixed_type_across_rows() {
 
         // Row 1: float
         let f = get_float(batch, "v_float", 1).expect("v_float row 1");
-        assert!((f - 3.14).abs() < 1e-10);
+        assert!((f - 1.23).abs() < 1e-10);
 
         // Row 2: string "text"
         assert_eq!(get_str(batch, "v_str", 2), Some("text".to_string()));
