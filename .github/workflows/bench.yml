@@ -118,7 +118,21 @@ jobs:
       - name: Run criterion microbenchmarks
         env:
           RUSTFLAGS: "-Ctarget-cpu=x86-64-v3"
-        run: cargo bench -p logfwd-bench 2>&1 | tee micro_body.md || true
+        run: |
+          # Run benchmarks, strip ANSI codes, keep only result lines.
+          cargo bench -p logfwd-bench 2>&1 \
+            | sed 's/\x1b\[[0-9;]*m//g' \
+            | grep -E '(^Benchmarking |^[a-z_/]|time:|thrpt:)' \
+            > micro_raw.txt || true
+
+          # Format as markdown.
+          {
+            echo "### Criterion Microbenchmarks"
+            echo ""
+            echo '```'
+            cat micro_raw.txt
+            echo '```'
+          } > micro_body.md
 
       - name: Upload micro results
         uses: actions/upload-artifact@v4
