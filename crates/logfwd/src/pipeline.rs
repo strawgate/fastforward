@@ -129,6 +129,12 @@ impl Pipeline {
         })
     }
 
+    /// Replace the output sink. Useful for injecting a test sink.
+    pub fn with_output(mut self, output: Box<dyn OutputSink>) -> Self {
+        self.output = output;
+        self
+    }
+
     pub fn metrics(&self) -> &Arc<PipelineMetrics> {
         &self.metrics
     }

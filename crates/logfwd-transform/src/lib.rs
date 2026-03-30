@@ -515,6 +515,8 @@ pub struct SqlTransform {
     schema_hash: u64,
     /// Enrichment tables registered alongside `logs` in each DataFusion session.
     enrichment_tables: Vec<Arc<dyn logfwd_core::enrichment::EnrichmentTable>>,
+    /// Optional geo-IP database for the `geo_lookup()` UDF.
+    geo_database: Option<Arc<dyn logfwd_core::enrichment::GeoDatabase>>,
 }
 
 impl SqlTransform {
@@ -527,7 +529,13 @@ impl SqlTransform {
             analyzer,
             schema_hash: 0,
             enrichment_tables: Vec::new(),
+            geo_database: None,
         })
+    }
+
+    /// Set the geo-IP database for the `geo_lookup()` UDF.
+    pub fn set_geo_database(&mut self, db: Arc<dyn logfwd_core::enrichment::GeoDatabase>) {
+        self.geo_database = Some(db);
     }
 
     /// Add an enrichment table that will be registered in each DataFusion
@@ -573,6 +581,11 @@ impl SqlTransform {
         ctx.register_udf(ScalarUDF::from(FloatCastUdf::new()));
         ctx.register_udf(ScalarUDF::from(crate::udf::RegexpExtractUdf::new()));
         ctx.register_udf(ScalarUDF::from(crate::udf::GrokUdf::new()));
+        if let Some(ref db) = self.geo_database {
+            ctx.register_udf(ScalarUDF::from(
+                crate::udf::geo_lookup::GeoLookupUdf::new(Arc::clone(db)),
+            ));
+        }
 
         // Register the batch as a MemTable named "logs".
         let schema = batch.schema();
