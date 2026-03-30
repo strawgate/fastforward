@@ -10,7 +10,10 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 logfwd-core = { path = ".." }
+logfwd-transform = { path = "../../logfwd-transform" }
+logfwd-output = { path = "../../logfwd-output" }
 arrow = { version = "54", default-features = false }
+bytes = "1"
 
 [workspace]
 
@@ -27,4 +30,29 @@ doc = false
 [[bin]]
 name = "fuzz_pipe_event"
 path = "fuzz_targets/pipe_event.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_streaming_scanner"
+path = "fuzz_targets/streaming_scanner.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_scanner_consistency"
+path = "fuzz_targets/scanner_consistency.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_chunk_index"
+path = "fuzz_targets/chunk_index.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_scanner_sink"
+path = "fuzz_targets/scanner_sink.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_scanner_transform"
+path = "fuzz_targets/scanner_transform.rs"
 doc = false

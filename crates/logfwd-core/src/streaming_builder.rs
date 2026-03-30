@@ -158,6 +158,12 @@ impl StreamingBuilder {
             return;
         }
         self.written_bits |= bit;
+        // StringViewArray requires valid UTF-8.  JSON is always UTF-8 in
+        // production; for fuzz / corrupted input we skip non-UTF-8 bytes so
+        // that append_view_unchecked is never called on invalid bytes.
+        if std::str::from_utf8(value).is_err() {
+            return;
+        }
         let offset = self.offset_of(value);
         let fc = &mut self.fields[idx];
         fc.has_str = true;
@@ -217,8 +223,10 @@ impl StreamingBuilder {
         let mut arrays: Vec<ArrayRef> = Vec::with_capacity(self.fields.len());
 
         for fc in &self.fields {
-            // SAFETY: field names are JSON keys, guaranteed valid UTF-8.
-            let name = unsafe { std::str::from_utf8_unchecked(&fc.name) };
+            // Field names come from JSON keys (valid UTF-8 in well-formed input).
+            // Use from_utf8_lossy so that fuzz inputs with arbitrary bytes are
+            // handled gracefully instead of triggering undefined behaviour.
+            let name = String::from_utf8_lossy(&fc.name);
 
             if fc.has_int {
                 let col_name = format!("{}_int", name);

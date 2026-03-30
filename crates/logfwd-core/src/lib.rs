@@ -1,4 +1,4 @@
-pub(crate) mod chunk_classify;
+pub mod chunk_classify;
 pub mod compress;
 pub mod cri;
 pub mod diagnostics;
