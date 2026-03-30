@@ -8,7 +8,7 @@ logfwd is a high-performance log forwarder written in Rust. It reads logs from m
 
 ## Tech Stack
 
-- **Language:** Rust (stable toolchain, no unsafe; tokio runtime in pipeline components)
+- **Language:** Rust (stable toolchain, no unsafe)
 - **Data format:** Apache Arrow RecordBatches
 - **SQL engine:** Apache DataFusion
 - **Serialization:** Hand-rolled protobuf (OTLP), serde (JSON/YAML)
@@ -62,7 +62,7 @@ crates/logfwd-bench/     # Criterion benchmarks
 
 ## What NOT to Do
 
-- Do not introduce additional async runtimes beyond the project-standard tokio runtime
+- Do not introduce ad-hoc runtimes; use the project's tokio runtime (see docs/ARCHITECTURE.md)
 - Do not add dependencies without justification
 - Do not refactor code that isn't related to the task at hand
 - Do not skip running `just ci` before committing
