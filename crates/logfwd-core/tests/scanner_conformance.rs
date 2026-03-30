@@ -1,3 +1,4 @@
+#![allow(clippy::collapsible_if)]
 //! Scanner conformance test suite.
 //!
 //! Proves the SIMD scanner produces identical Arrow output to the scalar scanner

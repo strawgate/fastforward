@@ -1,3 +1,4 @@
+pub mod checkpoint;
 pub mod chunk_classify;
 pub mod compress;
 pub mod cri;
