@@ -75,6 +75,17 @@ pub enum OutputType {
     Parquet,
 }
 
+/// TLS settings for output endpoints.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct TlsConfig {
+    /// Allow plain-text `http://` endpoints (for dev/testing only).
+    ///
+    /// Set to `true` to suppress the error when an endpoint uses `http://`
+    /// instead of `https://`.  **Do not use in production.**
+    #[serde(default)]
+    pub insecure: bool,
+}
+
 /// Recognised log formats.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -117,6 +128,9 @@ pub struct OutputConfig {
     pub compression: Option<String>,
     pub format: Option<Format>,
     pub path: Option<String>,
+    /// TLS settings (e.g. `insecure: true` for dev/testing).
+    #[serde(default)]
+    pub tls: TlsConfig,
 }
 
 // ---------------------------------------------------------------------------
@@ -303,6 +317,16 @@ impl Config {
                             return Err(ConfigError::Validation(format!(
                                 "pipeline '{name}' output '{label}': {} output requires 'endpoint'",
                                 output_type_name(&output.output_type),
+                            )));
+                        }
+                        if let Some(ep) = &output.endpoint
+                            && ep.starts_with("http://")
+                            && !output.tls.insecure
+                        {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' output '{label}': endpoint uses \
+                                 plaintext http://; use https:// or set \
+                                 tls.insecure: true for dev/testing",
                             )));
                         }
                     }
@@ -619,9 +643,9 @@ output:
     fn all_output_types() {
         for (otype, extra) in [
             ("otlp", "endpoint: x:4317"),
-            ("http", "endpoint: http://x"),
-            ("elasticsearch", "endpoint: http://x"),
-            ("loki", "endpoint: http://x"),
+            ("http", "endpoint: https://x"),
+            ("elasticsearch", "endpoint: https://x"),
+            ("loki", "endpoint: https://x"),
             ("stdout", ""),
             ("file_out", "path: /tmp/out.log"),
             ("parquet", "path: /tmp/out.parquet"),
@@ -644,5 +668,54 @@ output:
             let yaml = format!("input:\n  type: {itype}\n  {extra}\noutput:\n  type: stdout\n");
             Config::load_str(&yaml).unwrap_or_else(|e| panic!("failed for {itype}: {e}"));
         }
+    }
+
+    #[test]
+    fn validation_http_endpoint_rejected() {
+        // A plain http:// endpoint must be rejected by default.
+        let yaml = r#"
+input:
+  type: file
+  path: /var/log/test.log
+output:
+  type: otlp
+  endpoint: http://collector:4318
+"#;
+        let err = Config::load_str(yaml).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("plaintext http://"),
+            "expected TLS error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn tls_insecure_allows_http_endpoint() {
+        // tls.insecure: true must suppress the http:// error.
+        let yaml = r#"
+input:
+  type: file
+  path: /var/log/test.log
+output:
+  type: otlp
+  endpoint: http://collector:4318
+  tls:
+    insecure: true
+"#;
+        Config::load_str(yaml).expect("tls.insecure: true should allow http:// endpoint");
+    }
+
+    #[test]
+    fn https_endpoint_accepted_without_tls_override() {
+        // https:// must be accepted without any tls config.
+        let yaml = r#"
+input:
+  type: file
+  path: /var/log/test.log
+output:
+  type: otlp
+  endpoint: https://collector:4318
+"#;
+        Config::load_str(yaml).expect("https:// endpoint should be accepted");
     }
 }
