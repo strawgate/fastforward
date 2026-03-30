@@ -321,11 +321,9 @@ impl DiagnosticsServer {
         &self,
         request: tiny_http::Request,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let header = tiny_http::Header::from_bytes(
-            &b"Content-Type"[..],
-            &b"text/html; charset=utf-8"[..],
-        )
-        .map_err(|()| io::Error::other("invalid HTTP header"))?;
+        let header =
+            tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/html; charset=utf-8"[..])
+                .map_err(|()| io::Error::other("invalid HTTP header"))?;
         let resp = tiny_http::Response::from_string(DASHBOARD_HTML).with_header(header);
         request.respond(resp)?;
         Ok(())
@@ -337,9 +335,8 @@ impl DiagnosticsServer {
             r#"{{"status":"ok","uptime_seconds":{},"version":"{}"}}"#,
             uptime, VERSION,
         );
-        let header =
-            tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
-                .map_err(|()| io::Error::other("invalid HTTP header"))?;
+        let header = tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+            .map_err(|()| io::Error::other("invalid HTTP header"))?;
         let resp = tiny_http::Response::from_string(body).with_header(header);
         request.respond(resp)?;
         Ok(())
@@ -429,9 +426,8 @@ impl DiagnosticsServer {
             VERSION,
         );
 
-        let header =
-            tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
-                .map_err(|()| io::Error::other("invalid HTTP header"))?;
+        let header = tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+            .map_err(|()| io::Error::other("invalid HTTP header"))?;
         let resp = tiny_http::Response::from_string(body).with_header(header);
         request.respond(resp)?;
         Ok(())
