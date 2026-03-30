@@ -72,10 +72,7 @@ transforms:
 
         let cfg_path = ctx.bench_dir.join("vector.yaml");
         let config = format!(
-            r#"api:
-  enabled: true
-  address: "127.0.0.1:8686"
-data_dir: "{data_dir}"
+            r#"data_dir: "{data_dir}"
 sources:
   bench_in:
     type: file
