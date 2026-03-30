@@ -13,6 +13,7 @@ use std::sync::Arc;
 use arrow::array::{ArrayRef, Float64Array, Int64Array, StringViewBuilder};
 use arrow::buffer::{Buffer, NullBuffer};
 use arrow::datatypes::{DataType, Field, Schema};
+use arrow::error::ArrowError;
 use arrow::record_batch::{RecordBatch, RecordBatchOptions};
 
 use crate::scan_config::{parse_float_fast, parse_int_fast};
@@ -215,7 +216,7 @@ impl StreamingBuilder {
     ///
     /// The resulting RecordBatch shares the input buffer via Bytes reference
     /// counting — no string data is copied.
-    pub fn finish_batch(&self) -> RecordBatch {
+    pub fn finish_batch(&self) -> Result<RecordBatch, ArrowError> {
         let num_rows = self.row_count as usize;
         let arrow_buf = Buffer::from(self.buf.clone());
 
@@ -292,7 +293,6 @@ impl StreamingBuilder {
         let schema = Arc::new(Schema::new(schema_fields));
         let opts = RecordBatchOptions::new().with_row_count(Some(num_rows));
         RecordBatch::try_new_with_options(schema, arrays, &opts)
-            .expect("streaming_builder: schema/array mismatch")
     }
 }
 
@@ -321,7 +321,7 @@ mod tests {
         b.append_int_by_idx(idx_age, b"42");
         b.end_row();
 
-        let batch = b.finish_batch();
+        let batch = b.finish_batch().unwrap();
         assert_eq!(batch.num_rows(), 1);
         assert!(batch.column_by_name("name_str").is_some());
         assert!(batch.column_by_name("age_int").is_some());
@@ -342,7 +342,7 @@ mod tests {
         b.append_str_by_idx(idx, &buf[6..11]); // "world"
         b.end_row();
 
-        let batch = b.finish_batch();
+        let batch = b.finish_batch().unwrap();
         assert_eq!(batch.num_rows(), 2);
         // The values should be correct even though they're views into the buffer
         let col = batch
@@ -372,7 +372,7 @@ mod tests {
         b.append_str_by_idx(idx_b, &buf[2..4]);
         b.end_row();
 
-        let batch = b.finish_batch();
+        let batch = b.finish_batch().unwrap();
         assert_eq!(batch.num_rows(), 2);
         let a = batch.column_by_name("a_str").unwrap();
         assert!(!a.is_null(0));
@@ -395,7 +395,7 @@ mod tests {
         b.append_str_by_idx(idx, &buf[5..11]); // "second" — should be ignored
         b.end_row();
 
-        let batch = b.finish_batch();
+        let batch = b.finish_batch().unwrap();
         let col = batch
             .column_by_name("val_str")
             .unwrap()
@@ -410,7 +410,7 @@ mod tests {
         let buf = bytes::Bytes::from_static(b"");
         let mut b = StreamingBuilder::new();
         b.begin_batch(buf);
-        let batch = b.finish_batch();
+        let batch = b.finish_batch().unwrap();
         assert_eq!(batch.num_rows(), 0);
     }
 
@@ -425,14 +425,14 @@ mod tests {
         b.begin_row();
         b.append_str_by_idx(idx, &data1[0..5]);
         b.end_row();
-        let b1 = b.finish_batch();
+        let b1 = b.finish_batch().unwrap();
         assert_eq!(b1.num_rows(), 1);
 
         b.begin_batch(data2.clone());
         b.begin_row();
         b.append_str_by_idx(idx, &data2[0..5]);
         b.end_row();
-        let b2 = b.finish_batch();
+        let b2 = b.finish_batch().unwrap();
         assert_eq!(b2.num_rows(), 1);
     }
 
@@ -447,7 +447,7 @@ mod tests {
         b.append_float_by_idx(idx, b"3.14");
         b.end_row();
 
-        let batch = b.finish_batch();
+        let batch = b.finish_batch().unwrap();
         let col = batch
             .column_by_name("lat_float")
             .unwrap()
