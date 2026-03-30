@@ -10,7 +10,7 @@ Conversion is lazy — a receiver that accepts protobuf or JSON hands off
 the raw bytes, and conversion to Arrow only happens when a processor
 needs columnar access.
 
-```
+```rust
 enum PipelineData {
     RawBytes(Bytes),           // cheap to clone, no deserialization yet
     Arrow(RecordBatch),        // columnar, ready for SQL
@@ -43,7 +43,7 @@ frame when data passes through it. When an exporter succeeds or fails,
 it calls ack or nack, and the stack unwinds back through the pipeline,
 notifying each interested node.
 
-```
+```rust
 struct Frame {
     interests: Interests,   // bitflags: ACKS | NACKS
     route: RouteData,       // callback data, timestamps, output port

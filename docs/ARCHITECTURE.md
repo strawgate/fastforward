@@ -13,7 +13,7 @@ files into Parquet on S3 with no OTel involvement.
 
 ## Data flow
 
-```
+```text
 Receivers (produce RecordBatch)
     │  file scanner, Arrow IPC reader, ES|QL client,
     │  ClickHouse query, Arrow Flight, OTLP decoder, CSV/JSON/Parquet
@@ -188,12 +188,12 @@ This means:
 - The StreamingBuilder's `Bytes` lifetime is per-source
 - A source with no data in a cycle contributes no partition
 
-## Resource metadata as columns
+## Resource metadata as columns (planned)
 
-Source identity and resource attributes are carried as `_resource_*`
+Source identity and resource attributes will be carried as `_resource_*`
 prefixed columns (e.g., `_resource_k8s_pod_name`,
-`_resource_k8s_namespace`, `_resource_service_name`). These are injected
-during scanning based on the source's configuration.
+`_resource_k8s_namespace`, `_resource_service_name`). These will be
+injected during scanning based on the source's configuration (#153).
 
 This design:
 
@@ -306,16 +306,19 @@ The scan loop is generic over the `ScanBuilder` trait:
 
 ## Async pipeline
 
-The pipeline runs on a tokio multi-thread runtime. Key components:
+The pipeline runs on a tokio multi-thread runtime with a `select!`
+loop. Input reading runs on dedicated OS threads; scanning, transform,
+and output run in the async context.
 
-- **Sources** implement `async fn run(&mut self, ctx: &mut SourceContext)`
-  (Arroyo-style source-owns-loop). File sources wrap FileTailer via
-  `spawn_blocking`.
-- **Scanner** runs on `spawn_blocking` (pure CPU, ~4MB per call).
+- **Input threads** poll sources on dedicated OS threads, send parsed
+  JSON lines through bounded `tokio::sync::mpsc` channels (capacity 16).
+  Backpressure: `blocking_send` suspends the input thread when full.
+- **Scanner** runs via `block_in_place` (CPU-bound, ~1-5ms per 4MB).
 - **Transform** is `async fn execute()` (DataFusion is natively async).
-- **Sinks** implement `async fn send_batch()`. HTTP-based sinks use
-  async `reqwest` for connection pooling and timeouts.
-- **Shutdown** via `CancellationToken` (already implemented).
+- **Output** uses `block_in_place` to wrap sync HTTP sends (ureq).
+  Will be replaced with async reqwest (#252).
+- **Shutdown** via `CancellationToken`. Drain order: drain channel
+  before joining input threads to prevent deadlock.
 
 ## Crate map
 
@@ -331,20 +334,22 @@ The pipeline runs on a tokio multi-thread runtime. Key components:
 ## What's implemented vs not yet
 
 **Implemented:** file receiver (CRI/JSON/Raw parsing, SIMD scanner),
-two builder backends (StreamingBuilder default), DataFusion SQL
+two builder backends (StreamingBuilder default), async pipeline
+runtime with bounded channels and select! loop (#221), DataFusion SQL
 processor (async), custom UDFs (grok, regexp_extract, int, float,
 geo_lookup), enrichment (K8s path, host info, static labels), OTLP
 exporter, JSON lines exporter, stdout exporter, diagnostics server,
 OTel metrics, signal handling (SIGINT/SIGTERM via CancellationToken),
-graceful shutdown, async Sink trait, compliance test suite.
+graceful shutdown, compliance test suite, jemalloc allocator.
 
 **Not yet:**
 
 *Pipeline core:*
-- Async pipeline runtime with bounded channels
 - Receiver / Processor / Exporter trait abstractions
-- Ack/Nack context stack for end-to-end delivery tracking
-- Backpressure (channel + receiver + processor levels)
+- Ack/Nack context stack for end-to-end delivery tracking (#231)
+- Byte-aware backpressure (#232)
+- Control/data channel separation (#233)
+- Async HTTP client replacing ureq (#252)
 - Thread-per-core `!Send` local execution
 - Component registration via `linkme::distributed_slice`
 

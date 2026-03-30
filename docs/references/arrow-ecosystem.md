@@ -19,7 +19,7 @@ logfwd as receivers (produce RecordBatch) or exporters (consume RecordBatch).
 
 | System | Receive | Export | Protocol | Notes |
 |--------|:-------:|:------:|----------|-------|
-| Elasticsearch ES\|QL | ✓ | — | HTTP `?format=arrow` | Experimental (ES 8.15+). Export only. Ingestion requires NDJSON bulk. |
+| Elasticsearch ES\|QL | ✓ | — | HTTP `?format=arrow` | Experimental (ES 8.15+). We can receive (query) Arrow from ES, but ES cannot ingest Arrow — writing to ES requires NDJSON bulk. |
 | GreptimeDB | ✓ | ✓ | Arrow Flight DoPut + OTel-Arrow | Production for metrics signal. |
 | Kafka | ✓ | ✓ | Arrow IPC as message bytes | DIY via `rdkafka` + `arrow-ipc`. No standard schema registry support. |
 | PostgreSQL | ✓ | ✓ | Flight SQL adapter (alpha) or ADBC (FFI) | Flight SQL adapter is 0.1.0. ADBC requires FFI to C driver. |
@@ -36,7 +36,7 @@ logfwd as receivers (produce RecordBatch) or exporters (consume RecordBatch).
 
 ### ClickHouse ArrowStream
 
-```
+```text
 # Export (receive Arrow from ClickHouse):
 POST http://host:8123/?query=SELECT+*+FROM+table+FORMAT+ArrowStream
 → response body is Arrow IPC stream bytes
@@ -51,7 +51,7 @@ ArrowStream stable since ~2020.
 
 ### Elasticsearch ES|QL
 
-```
+```text
 POST /_query?format=arrow
 { "query": "FROM logs | WHERE level == 'ERROR' | LIMIT 100" }
 → response body is Arrow IPC stream bytes

@@ -41,7 +41,7 @@ just bench     # Criterion micro-benchmarks
 
 ## Code Style
 
-- No async runtime — purely blocking, high-throughput design
+- Async pipeline on tokio multi-thread runtime — use `block_in_place` for sync IO, `spawn_blocking` for heavy CPU
 - No per-line heap allocations in hot paths (scanner, CRI parser, OTLP encoder, compress)
 - No unnecessary abstractions or trait indirection
 - Follow existing patterns in surrounding code exactly

@@ -135,7 +135,7 @@ memory). inotify queue overflow is handled by the poll-based safety net
 (tailer re-scans every 250ms regardless of inotify). The notify crate's
 crossbeam channel is unbounded but each event is ~100 bytes.
 
-### Async pipeline (future)
+### Async pipeline
 
 Bounded `tokio::sync::mpsc` channels between stages. Channel capacity
 controls backpressure naturally — `send().await` parks the task when
