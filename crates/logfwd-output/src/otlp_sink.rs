@@ -190,7 +190,7 @@ impl OutputSink for OtlpSink {
 }
 
 /// Pre-downcast array variant for an attribute column.
-enum AttrArray<'a> {
+pub(crate) enum AttrArray<'a> {
     Str(&'a dyn Array),
     Int(&'a PrimitiveArray<Int64Type>),
     Float(&'a PrimitiveArray<Float64Type>),
@@ -200,18 +200,18 @@ enum AttrArray<'a> {
 ///
 /// Built once in [`encode_batch`] before the per-row loop to avoid
 /// re-scanning the schema and re-downcasting arrays on every row.
-pub(crate) struct BatchColumns<'a> {
+pub struct BatchColumns<'a> {
     /// Downcast array for the timestamp column (e.g. "2024-01-15T10:30:00Z").
-    timestamp_col: Option<(usize, &'a dyn Array)>,
+    pub timestamp_col: Option<(usize, &'a dyn Array)>,
     /// Downcast array for the level/severity column (e.g. "ERROR").
-    level_col: Option<(usize, &'a dyn Array)>,
+    pub level_col: Option<(usize, &'a dyn Array)>,
     /// Downcast array for the primary message/body column.
-    body_col: Option<(usize, &'a dyn Array)>,
+    pub body_col: Option<(usize, &'a dyn Array)>,
     /// Downcast array for the `_raw` column, used as a per-row body
     /// fallback when `body_col` is null for that row.
-    raw_col: Option<(usize, &'a dyn Array)>,
+    pub raw_col: Option<(usize, &'a dyn Array)>,
     /// Non-special attribute columns: (field_name, pre-downcast array).
-    attribute_cols: Vec<(String, AttrArray<'a>)>,
+    pub attribute_cols: Vec<(String, AttrArray<'a>)>,
 }
 
 /// Scan the batch schema once and resolve column roles and downcast arrays.
@@ -271,20 +271,8 @@ pub(crate) fn resolve_batch_columns(batch: &RecordBatch) -> BatchColumns<'_> {
         let col_name = field.name().as_str();
         let (field_name, type_suffix) = parse_column_name(col_name);
         let attr = match type_suffix {
-            "int" => {
-                if let Some(arr) = batch.column(idx).as_primitive_opt::<Int64Type>() {
-                    AttrArray::Int(arr)
-                } else {
-                    AttrArray::Str(batch.column(idx).as_ref())
-                }
-            }
-            "float" => {
-                if let Some(arr) = batch.column(idx).as_primitive_opt::<Float64Type>() {
-                    AttrArray::Float(arr)
-                } else {
-                    AttrArray::Str(batch.column(idx).as_ref())
-                }
-            }
+            "int" => if let Some(arr) = batch.column(idx).as_primitive_opt::<Int64Type>() { AttrArray::Int(arr) } else { AttrArray::Str(batch.column(idx).as_ref()) },
+            "float" => if let Some(arr) = batch.column(idx).as_primitive_opt::<Float64Type>() { AttrArray::Float(arr) } else { AttrArray::Str(batch.column(idx).as_ref()) },
             _ => AttrArray::Str(batch.column(idx).as_ref()),
         };
         attribute_cols.push((field_name.to_string(), attr));

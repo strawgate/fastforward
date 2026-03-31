@@ -46,9 +46,7 @@ impl JsonLinesSink {
             if field.name() == "_raw" {
                 continue;
             }
-            let Ok(idx) = schema.index_of(field.name()) else {
-                continue;
-            };
+            let idx = schema.index_of(field.name()).unwrap();
             if batch.column(idx).null_count() < batch.num_rows() {
                 return false;
             }
@@ -66,18 +64,10 @@ impl JsonLinesSink {
 
         if Self::is_raw_passthrough(batch) {
             // Fast path: memcpy _raw values directly.
-            let idx = match batch.schema().index_of("_raw") {
-                Ok(idx) => idx,
-                Err(_) => {
-                    // Fallback to normal serialization if _raw is missing
-                    let cols = build_col_infos(batch);
-                    for row in 0..num_rows {
-                        write_row_json(batch, row, &cols, &mut self.batch_buf);
-                        self.batch_buf.push(b'\n');
-                    }
-                    return;
-                }
-            };
+            let idx = batch
+                .schema()
+                .index_of("_raw")
+                .expect("_raw column missing");
             let col = batch.column(idx);
             for row in 0..num_rows {
                 if !col.is_null(row) {

@@ -17,6 +17,7 @@ use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
+use logfwd_competitive_bench::stats::procfs_stats;
 
 /// EPS levels tested by the benchmark.
 pub const DEFAULT_EPS_LEVELS: &[u64] = &[1, 10, 100, 1_000, 10_000, 100_000];
@@ -132,25 +133,24 @@ fn run_single_rate(
     // Measurement window: sample RSS and CPU every SAMPLE_INTERVAL_MS.
     let mut rss_samples: Vec<u64> = Vec::new();
     let mut cpu_samples: Vec<f64> = Vec::new();
-    let mut prev: Option<(u64, Instant)> = None; // (proc_ticks, wall_time)
+    let mut prev: Option<(u64, Instant)> = None; // (total_ms, wall_time)
 
     let deadline = Instant::now() + Duration::from_secs(MEASURE_SECS);
     while Instant::now() < deadline {
-        if let Some(rss) = read_rss_kb(pid) {
-            rss_samples.push(rss);
-        }
+        let (rss_bytes, user_ms, system_ms) = procfs_stats(pid);
+        let total_ms = user_ms + system_ms;
+        rss_samples.push(rss_bytes / 1024);
 
-        if let Some(ticks) = read_proc_ticks(pid) {
-            let now = Instant::now();
-            if let Some((prev_ticks, prev_time)) = prev {
-                let delta_ticks = ticks.saturating_sub(prev_ticks);
-                let delta_secs = now.duration_since(prev_time).as_secs_f64();
-                // CLK_TCK is 100 Hz on Linux (the standard value).
-                let cpu_pct = (delta_ticks as f64 / 100.0) / delta_secs * 100.0;
+        let now = Instant::now();
+        if let Some((prev_ms, prev_time)) = prev {
+            let delta_ms = total_ms.saturating_sub(prev_ms);
+            let delta_wall_ms = now.duration_since(prev_time).as_secs_f64() * 1000.0;
+            if delta_wall_ms > 0.0 {
+                let cpu_pct = (delta_ms as f64 / delta_wall_ms) * 100.0;
                 cpu_samples.push(cpu_pct);
             }
-            prev = Some((ticks, now));
         }
+        prev = Some((total_ms, now));
 
         std::thread::sleep(Duration::from_millis(SAMPLE_INTERVAL_MS));
     }
@@ -258,40 +258,6 @@ fn write_at_rate(path: &Path, eps: u64, stop: &AtomicBool, written: &AtomicU64) 
     }
 }
 
-// ---------------------------------------------------------------------------
-// Linux /proc helpers
-// ---------------------------------------------------------------------------
-
-/// Read RSS from `/proc/{pid}/status` (KiB).
-/// Returns `None` if the process has exited or the file cannot be parsed.
-fn read_rss_kb(pid: u32) -> Option<u64> {
-    let content = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
-    for line in content.lines() {
-        if let Some(rest) = line.strip_prefix("VmRSS:") {
-            return rest.split_whitespace().next()?.parse().ok();
-        }
-    }
-    None
-}
-
-/// Read cumulative CPU ticks (utime + stime) from `/proc/{pid}/stat`.
-/// Returns `None` if the process has exited or the file cannot be parsed.
-fn read_proc_ticks(pid: u32) -> Option<u64> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    // The format is: `pid (comm) state ppid ... utime stime ...`
-    // The process name (comm) may contain spaces and parentheses, so we find
-    // the *last* ')' to locate the end of the comm field.
-    let after_name = stat.rfind(')')?;
-    let mut fields = stat[after_name + 2..].split_whitespace();
-    // Skip: state(0) ppid(1) pgrp(2) session(3) tty_nr(4) tpgid(5)
-    //        flags(6) minflt(7) cminflt(8) majflt(9) cmajflt(10)
-    for _ in 0..11 {
-        fields.next()?;
-    }
-    let utime: u64 = fields.next()?.parse().ok()?;
-    let stime: u64 = fields.next()?.parse().ok()?;
-    Some(utime + stime)
-}
 
 // ---------------------------------------------------------------------------
 // Output formatters
