@@ -75,7 +75,7 @@ pub fn prefix_xor(mut bitmask: u64) -> u64 {
 /// These are "raw" — quotes may be escaped, structural characters may be
 /// inside strings. Use [`StreamingClassifier::process_block`] to produce
 /// escape-aware, string-masked bitmasks.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RawBlockMasks {
     pub newline: u64,
     pub space: u64,
@@ -454,6 +454,23 @@ pub fn find_structural_chars(block: &[u8; 64]) -> RawBlockMasks {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn simd_eq_scalar(
+            block in (any::<[u8; 32]>(), any::<[u8; 32]>()).prop_map(|(a, b)| {
+                let mut res = [0u8; 64];
+                res[..32].copy_from_slice(&a);
+                res[32..].copy_from_slice(&b);
+                res
+            })
+        ) {
+            let scalar = find_structural_chars_scalar(&block);
+            let simd = find_structural_chars(&block);
+            prop_assert_eq!(scalar, simd);
+        }
+    }
 
     #[test]
     fn scalar_detects_all_chars() {
