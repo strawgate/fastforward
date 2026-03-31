@@ -82,7 +82,7 @@ receiving, flat-to-star for sending.
 A sequential scanner consumes them. They never mix.
 
 **Why:** SIMD is embarrassingly parallel WITHIN a 64-byte block —
-every byte compared independently against 10 needles. But parsing
+every byte compared independently against 9 needles. But parsing
 is inherently sequential — the meaning of a comma depends on
 whether we're inside a string. These are fundamentally different
 parallelism profiles.

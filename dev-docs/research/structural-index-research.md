@@ -81,7 +81,7 @@ is viable BUT needs careful design:
 
 **Recommended architecture:**
 
-```
+```text
 logfwd-arrow (has SIMD, produces StructuralIndex)
   StructuralIndex::new(buf) → runs SIMD, produces bitmask data
   StructuralIndex is a plain struct (no trait, no vtable)
@@ -239,7 +239,7 @@ Cheap — one AND + NOT per bitmask per block (~7 operations for 7
 non-quote/backslash chars). Confirmed by benchmark: Stage 4 adds
 only ~12µs total for all masking + line extraction combined.
 
-## 6. Recommendations
+## 7. Recommendations
 
 1. **Use streaming per-block processing** (like simdjson). Don't
    materialize all bitmask vectors. Zero heap allocation for bitmasks.
