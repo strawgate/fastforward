@@ -115,3 +115,91 @@ breaker, dead letter queue, WAL). Research in progress.
 - Datadog TLA+: datadoghq.com/blog/engineering/formal-modeling-and-simulation/
 - AWS formal methods: queue.acm.org/detail.cfm?id=3712057
 - Kani feature support: model-checking.github.io/kani/rust-feature-support.html
+
+## Shipper State Machine Research (2026-03-31)
+
+Analyzed Vector, Fluent Bit, OTel Collector, Filebeat, and Fluentd.
+
+### Critical Finding: Two-Layer State Model
+
+All five production systems use a **two-layer** model, not a single
+pipeline state machine:
+
+**Layer A: Pipeline lifecycle**
+```
+STARTING → RUNNING → DRAINING → STOPPED
+             ↕
+           DEGRADED (secondary output active)
+           PAUSED (backpressure from downstream)
+```
+
+**Layer B: Per-batch lifecycle**
+```
+STAGED → QUEUED → DISPATCHED → DELIVERED
+                    ↕
+                  RETRYING (attempt count + backoff timer)
+                    ↓
+                  REJECTED (permanent error → dead letter / drop)
+```
+
+FLUSHING is a per-batch state (DISPATCHED), not a pipeline state.
+The pipeline can be RUNNING while batches are independently in
+DISPATCHED, RETRYING, or REJECTED states.
+
+### States We Were Missing
+
+| State | Who uses it | Why it matters |
+|-------|-------------|---------------|
+| RETRYING | All 5 | Retry with backoff, attempt counting |
+| DEGRADED | Fluentd, OTel | Secondary output after threshold |
+| PAUSED | Fluent Bit | Input paused when memory limit hit |
+| STARTING | OTel | Startup order differs from shutdown |
+| Per-batch states | All 5 | Batches have independent lifecycles |
+
+### Error Recovery We Were Missing
+
+| Pattern | Who uses it |
+|---------|-------------|
+| Permanent vs transient errors | Vector, OTel, Fluentd |
+| Secondary/fallback output | Fluentd |
+| Throttle-aware retry (429) | OTel Collector |
+| Partial batch success | OTel Collector |
+| Chunk takeback (failed → back to queue) | Fluentd |
+
+### Startup/Shutdown Ordering (OTel pattern)
+
+- **Start**: reverse topological (exporters before receivers)
+- **Shutdown**: topological (receivers before exporters)
+Ensures downstream is ready before upstream sends, and upstream
+stops before downstream drains.
+
+### Backpressure Strategies
+
+| Strategy | Who |
+|----------|-----|
+| Channel block (default) | Vector, OTel, Filebeat |
+| Drop newest | Vector |
+| Drop oldest | Fluentd |
+| Memory → disk overflow | Vector, Fluent Bit |
+| Input pause/resume | Fluent Bit |
+
+### Impact on FlushMachine Design
+
+The FlushMachine should NOT model per-batch lifecycle — that's a
+separate `BatchTracker`. The FlushMachine models pipeline lifecycle
+only:
+
+```rust
+// Pipeline lifecycle (Kani-verifiable)
+pub enum PipelineState { Starting, Running, Draining, Stopped }
+
+// Per-batch lifecycle (separate tracker)
+pub enum BatchState { Queued, Dispatched, Retrying(u32), Delivered, Rejected }
+
+// Backpressure state (input-level)
+pub enum InputState { Active, Paused, Shutdown, Done }
+```
+
+This matches how Vector (EventStatus per event), OTel Collector
+(dispatched items list), and Fluentd (stage/queue/dequeued pools)
+all separate batch tracking from pipeline lifecycle.
