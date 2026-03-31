@@ -825,8 +825,10 @@ mod tests {
 mod verification {
     use super::*;
 
-    /// Prove find_char_mask is correct for ALL inputs.
-    /// Bit i is set iff block[i] == needle.
+    /// Correctness: bit i is set iff block[i] == needle, for any
+    /// 64-byte block and any needle. Checks one arbitrary position per
+    /// run — the function is a simple loop so correctness at one
+    /// arbitrary position implies correctness at all.
     #[kani::proof]
     #[kani::unwind(65)]
     #[kani::solver(kissat)]
@@ -841,7 +843,9 @@ mod verification {
         assert_eq!(bit_set, block[pos] == needle);
     }
 
-    /// Prove find_structural_chars_scalar matches find_char_mask for each character.
+    /// Consistency: find_structural_chars_scalar matches find_char_mask
+    /// for the quote character. Only checks one of 10 characters — all
+    /// use identical match-arm logic.
     #[kani::proof]
     #[kani::unwind(65)]
     #[kani::solver(kissat)]
@@ -853,7 +857,8 @@ mod verification {
         assert_eq!(raw.quote, find_char_mask(&block, b'"'));
     }
 
-    /// Prove process_block never panics.
+    /// Crash-freedom: process_block never panics for any combination
+    /// of 10 arbitrary u64 bitmasks and any block_len 0..=64.
     #[kani::proof]
     fn verify_process_block_no_panic() {
         let raw = RawBlockMasks {
@@ -874,7 +879,7 @@ mod verification {
         let _ = classifier.process_block(&raw, block_len);
     }
 
-    /// Prove process_block masks out bits beyond block_len.
+    /// Tail masking: no bits set beyond block_len in any output field.
     #[kani::proof]
     fn verify_process_block_tail_mask() {
         let raw = RawBlockMasks {
@@ -901,7 +906,10 @@ mod verification {
         assert_eq!(p.comma & tail_mask, 0);
     }
 
-    /// Prove: characters marked as inside strings are never in structural output.
+    /// String exclusion: structural characters (space, comma, colon,
+    /// braces) never overlap with in_string mask. Only covers the
+    /// no-backslash case — with escapes, the exclusion is verified
+    /// by the compositional proof below.
     #[kani::proof]
     fn verify_in_string_exclusion() {
         let raw = RawBlockMasks {

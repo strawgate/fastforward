@@ -321,6 +321,53 @@ mod tests {
     }
 
     #[test]
+    fn days_from_civil_matches_chrono() {
+        use chrono::NaiveDate;
+        let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+
+        // Test a spread of dates across the valid range
+        for (y, m, d) in [
+            (1970, 1, 1),
+            (1970, 1, 2),
+            (1970, 12, 31),
+            (2000, 2, 29), // leap day
+            (2024, 1, 15),
+            (2024, 6, 30),
+            (2100, 12, 31),
+        ] {
+            let our_days = days_from_civil(y, m, d);
+            let chrono_days = (NaiveDate::from_ymd_opt(y as i32, m, d).unwrap() - epoch).num_days();
+            assert_eq!(
+                our_days, chrono_days as i64,
+                "mismatch for {y}-{m:02}-{d:02}: ours={our_days}, chrono={chrono_days}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_timestamp_matches_chrono() {
+        use chrono::NaiveDateTime;
+        let cases = [
+            b"2024-01-15T10:30:00Z" as &[u8],
+            b"2000-02-29T00:00:00Z",
+            b"2099-12-31T23:59:59Z",
+        ];
+        for ts in cases {
+            let our_nanos = parse_timestamp_nanos(ts);
+            let s = std::str::from_utf8(ts).unwrap().trim_end_matches('Z');
+            let chrono_nanos = NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S")
+                .unwrap()
+                .and_utc()
+                .timestamp_nanos_opt()
+                .unwrap() as u64;
+            assert_eq!(
+                our_nanos, chrono_nanos,
+                "timestamp mismatch for {s}: ours={our_nanos}, chrono={chrono_nanos}"
+            );
+        }
+    }
+
+    #[test]
     fn parse_timestamp_epoch_returns_zero() {
         // Unix epoch (1970-01-01T00:00:00Z) returns 0, which is also
         // the sentinel for "parse failed". This is a known limitation
@@ -445,12 +492,15 @@ mod verification {
     }
 
     /// Prove days_from_civil never panics and produces reasonable values
-    /// for all dates in the range [1970-01-01, 2100-12-31].
+    /// Oracle proof: days_from_civil matches a naive year/month
+    /// iteration for all valid dates in [1970, 2100].
     ///
-    /// Also verifies monotonicity: incrementing the day by 1 always
-    /// increments the result by 1 (within the same month).
+    /// Uses a completely different algorithm (cumulative day counting)
+    /// from the Hinnant formula. Kani can't use chrono, so this naive
+    /// oracle serves as the Kani-compatible reference. A chrono-based
+    /// oracle test below covers the same property in test mode.
     #[kani::proof]
-    fn verify_days_from_civil() {
+    fn verify_days_from_civil_oracle() {
         let year: i64 = kani::any();
         let month: u32 = kani::any();
         let day: u32 = kani::any();
@@ -461,22 +511,35 @@ mod verification {
 
         let result = days_from_civil(year, month, day);
 
-        // Epoch (1970-01-01) must be day 0.
-        if year == 1970 && month == 1 && day == 1 {
-            assert!(result == 0, "epoch must be 0");
+        let oracle = naive_days_from_epoch(year, month, day);
+        assert!(
+            result == oracle,
+            "days_from_civil disagrees with naive oracle"
+        );
+    }
+
+    fn naive_days_from_epoch(year: i64, month: u32, day: u32) -> i64 {
+        let mut days: i64 = 0;
+        let mut y = 1970i64;
+        while y < year {
+            days += if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) {
+                366
+            } else {
+                365
+            };
+            y += 1;
         }
-
-        // All dates in [1970, 2100] must produce non-negative results.
-        assert!(result >= 0, "date before epoch in valid range");
-
-        // 2100-12-31 is about 47846 days after epoch.
-        assert!(result <= 50000, "date too far in future");
-
-        // Monotonicity within a month: day+1 → result+1.
-        if day < 28 {
-            let next = days_from_civil(year, month, day + 1);
-            assert!(next == result + 1, "days not monotonic within month");
+        let month_days: [i64; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+        let mut m = 1u32;
+        while m < month {
+            let mut d = month_days[(m - 1) as usize];
+            if m == 2 && year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) {
+                d += 1;
+            }
+            days += d;
+            m += 1;
         }
+        days + day as i64 - 1
     }
 
     /// Prove bytes_field_size matches actual encode_bytes_field output.
