@@ -668,8 +668,16 @@ fn get_process_metrics() -> Option<(u64, u64, u64)> {
     let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
 
     // Fallback to defaults if sysconf fails.
-    let ticks_per_sec = if ticks_per_sec > 0 { ticks_per_sec as u64 } else { 100 };
-    let page_size = if page_size > 0 { page_size as u64 } else { 4096 };
+    let ticks_per_sec = if ticks_per_sec > 0 {
+        ticks_per_sec as u64
+    } else {
+        100
+    };
+    let page_size = if page_size > 0 {
+        page_size as u64
+    } else {
+        4096
+    };
 
     let user_ms = (utime_ticks * 1000) / ticks_per_sec;
     let sys_ms = (stime_ticks * 1000) / ticks_per_sec;
