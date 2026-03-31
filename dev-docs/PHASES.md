@@ -68,7 +68,7 @@ Extract run_async decisions into pure state machine in core.
 5b: PipelineMachine<S, C> lifecycle    ✅ DONE
     Starting → Running → Draining → Stopped
     Ordered ACK via BatchId (not checkpoint values)
-    6 Kani proofs, 14 unit tests
+    5 Kani proofs, 15 unit tests
 
 5c: Wire into pipeline.rs              → TODO
     PipelineMachine<_, u64> for file byte offsets

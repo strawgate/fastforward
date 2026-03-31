@@ -10,7 +10,7 @@
 use alloc::collections::BTreeMap;
 use core::marker::PhantomData;
 
-use super::{AckReceipt, BatchId, BatchTicket, Queued, SourceId};
+use super::{AckReceipt, BatchId, BatchTicket, Queued, Sending, SourceId};
 
 // ---------------------------------------------------------------------------
 // Pipeline lifecycle typestate markers
@@ -99,19 +99,33 @@ impl<C> Default for PipelineMachine<Starting, C> {
 impl<C: Clone> PipelineMachine<Running, C> {
     /// Create a new batch ticket for the given source.
     ///
+    /// Assigns a `BatchId` but does NOT register the batch in the machine's
+    /// tracking. The batch enters in-flight tracking only when
+    /// [`begin_send`](Self::begin_send) is called. If the Queued ticket is
+    /// dropped (e.g., error during preparation), nothing is orphaned.
+    ///
     /// The checkpoint value is opaque — the pipeline stores it and commits
-    /// it when all prior batches for this source are acked. Checkpoint
-    /// validation (contiguity, monotonicity) is the input plugin's concern.
+    /// it when all prior batches for this source are acked.
     pub fn create_batch(&mut self, source: SourceId, checkpoint: C) -> BatchTicket<Queued, C> {
         let id = BatchId(self.next_batch_id);
         self.next_batch_id += 1;
-
-        self.in_flight
-            .entry(source)
-            .or_default()
-            .insert(id, checkpoint.clone());
-
         BatchTicket::new(id, source, checkpoint)
+    }
+
+    /// Register a batch as in-flight and begin sending.
+    ///
+    /// This is the point where the pipeline takes ownership — after this
+    /// call, the batch MUST be acked, rejected, or failed (retry). Dropping
+    /// a Sending ticket is a bug (warned by `#[must_use]`).
+    ///
+    /// Consumes the Queued ticket, returns a Sending ticket.
+    pub fn begin_send(&mut self, ticket: BatchTicket<Queued, C>) -> BatchTicket<Sending, C> {
+        self.in_flight
+            .entry(ticket.source())
+            .or_default()
+            .insert(ticket.id(), ticket.checkpoint().clone());
+
+        ticket.begin_send()
     }
 
     /// Apply an AckReceipt and advance the committed checkpoint if possible.
@@ -318,14 +332,17 @@ mod tests {
 
         let t1 = running.create_batch(src, 1000u64);
         let t2 = running.create_batch(src, 2000u64);
-        assert_eq!(running.in_flight_count(), 2);
+        assert_eq!(running.in_flight_count(), 0); // not yet sent
 
-        let sending1 = t1.begin_send();
+        let sending1 = running.begin_send(t1);
+        assert_eq!(running.in_flight_count(), 1); // t1 now in-flight
+        let sending2 = running.begin_send(t2);
+        assert_eq!(running.in_flight_count(), 2); // both in-flight
+
         let advance = running.apply_ack(sending1.ack());
         assert!(advance.advanced);
         assert_eq!(advance.checkpoint, Some(1000));
 
-        let sending2 = t2.begin_send();
         let advance = running.apply_ack(sending2.ack());
         assert_eq!(advance.checkpoint, Some(2000));
 
@@ -346,9 +363,9 @@ mod tests {
         let t2 = running.create_batch(src, 2000u64);
         let t3 = running.create_batch(src, 3000u64);
 
-        let s1 = t1.begin_send();
-        let s2 = t2.begin_send();
-        let s3 = t3.begin_send();
+        let s1 = running.begin_send(t1);
+        let s2 = running.begin_send(t2);
+        let s3 = running.begin_send(t3);
 
         // Ack batch 3 first — checkpoint should NOT advance
         let advance = running.apply_ack(s3.ack());
@@ -372,11 +389,11 @@ mod tests {
         let src = SourceId(0);
 
         let t1 = running.create_batch(src, 1000u64);
-        let s1 = t1.begin_send();
+        let s1 = running.begin_send(t1);
         let requeued = s1.fail();
         assert_eq!(requeued.attempts(), 1);
 
-        let s1_retry = requeued.begin_send();
+        let s1_retry = running.begin_send(requeued);
         let advance = running.apply_ack(s1_retry.ack());
         assert_eq!(advance.checkpoint, Some(1000));
     }
@@ -390,8 +407,8 @@ mod tests {
         let ta = running.create_batch(src_a, 500u64);
         let tb = running.create_batch(src_b, 800u64);
 
-        let sa = ta.begin_send();
-        let sb = tb.begin_send();
+        let sa = running.begin_send(ta);
+        let sb = running.begin_send(tb);
 
         // Ack source B first
         let advance_b = running.apply_ack(sb.ack());
@@ -411,7 +428,7 @@ mod tests {
         let src = SourceId(0);
 
         let t1 = running.create_batch(src, 1000u64);
-        let s1 = t1.begin_send();
+        let s1 = running.begin_send(t1);
 
         let mut draining = running.begin_drain();
         assert!(!draining.is_drained());
@@ -430,7 +447,7 @@ mod tests {
         let src = SourceId(0);
 
         let t1 = running.create_batch(src, 1000u64);
-        let s1 = t1.begin_send();
+        let s1 = running.begin_send(t1);
 
         let advance = running.apply_ack(s1.reject());
         assert_eq!(advance.checkpoint, Some(1000));
@@ -445,9 +462,9 @@ mod tests {
         let t2 = running.create_batch(src, 2000u64);
         let t3 = running.create_batch(src, 3000u64);
 
-        let s1 = t1.begin_send();
-        let s2 = t2.begin_send();
-        let s3 = t3.begin_send();
+        let s1 = running.begin_send(t1);
+        let s2 = running.begin_send(t2);
+        let s3 = running.begin_send(t3);
 
         running.apply_ack(s2.reject());
         running.apply_ack(s3.ack());
@@ -463,7 +480,7 @@ mod tests {
         let src = SourceId(0);
 
         let t1 = running.create_batch(src, 1000u64);
-        let _s1 = t1.begin_send();
+        let _s1 = running.begin_send(t1);
 
         let draining = running.begin_drain();
         assert!(!draining.is_drained());
@@ -497,7 +514,7 @@ mod tests {
         let mut sending = alloc::vec::Vec::new();
         for i in 0..100u64 {
             let t = running.create_batch(src, (i + 1) * 100);
-            sending.push(t.begin_send());
+            sending.push(running.begin_send(t));
         }
         assert_eq!(running.in_flight_count(), 100);
 
@@ -518,7 +535,7 @@ mod tests {
         let src = SourceId(0);
 
         let t1 = running.create_batch(src, ());
-        let s1 = t1.begin_send();
+        let s1 = running.begin_send(t1);
         let advance = running.apply_ack(s1.ack());
         assert!(advance.advanced);
         assert_eq!(advance.checkpoint, Some(()));
@@ -534,8 +551,8 @@ mod tests {
         let t1 = running.create_batch(src, "s=abc;i=1");
         let t2 = running.create_batch(src, "s=abc;i=2");
 
-        let s1 = t1.begin_send();
-        let s2 = t2.begin_send();
+        let s1 = running.begin_send(t1);
+        let s2 = running.begin_send(t2);
 
         running.apply_ack(s1.ack());
         let advance = running.apply_ack(s2.ack());
@@ -548,7 +565,7 @@ mod tests {
         let src = SourceId(0);
 
         let t1 = running.create_batch(src, 1000u64);
-        let s1 = t1.begin_send();
+        let s1 = running.begin_send(t1);
         running.apply_ack(s1.ack());
 
         // Fabricate a duplicate ack (same batch_id)
@@ -563,6 +580,27 @@ mod tests {
         // Should not advance — spurious ack ignored
         assert!(!advance.advanced);
         assert_eq!(advance.checkpoint, Some(1000));
+    }
+
+    #[test]
+    fn dropped_queued_ticket_does_not_wedge() {
+        let mut running = new_running();
+        let src = SourceId(0);
+
+        // Create a batch but drop the ticket without sending
+        let _dropped = running.create_batch(src, 1000u64);
+        // Ticket dropped here — not in in_flight, nothing orphaned
+
+        // Create and complete another batch
+        let t2 = running.create_batch(src, 2000u64);
+        let s2 = running.begin_send(t2);
+        running.apply_ack(s2.ack());
+
+        // Pipeline can drain and stop — not wedged
+        assert_eq!(running.in_flight_count(), 0);
+        let draining = running.begin_drain();
+        assert!(draining.is_drained());
+        assert!(draining.stop().is_ok());
     }
 }
 
@@ -590,9 +628,9 @@ mod verification {
         let t2 = running.create_batch(src, cp2);
         let t3 = running.create_batch(src, cp3);
 
-        let s1 = t1.begin_send();
-        let s2 = t2.begin_send();
-        let s3 = t3.begin_send();
+        let s1 = running.begin_send(t1);
+        let s2 = running.begin_send(t2);
+        let s3 = running.begin_send(t3);
 
         // Ack in arbitrary order (all 6 permutations)
         let order: u8 = kani::any_where(|&o: &u8| o < 6);
@@ -628,8 +666,8 @@ mod verification {
         let t1 = running.create_batch(src, cp1);
         let t2 = running.create_batch(src, cp2);
 
-        let s1 = t1.begin_send();
-        let s2 = t2.begin_send();
+        let s1 = running.begin_send(t1);
+        let s2 = running.begin_send(t2);
 
         running.apply_ack(s1.ack());
         running.apply_ack(s2.ack());
@@ -648,7 +686,7 @@ mod verification {
 
         let cp: u64 = kani::any();
         let t1 = running.create_batch(src, cp);
-        let s1 = t1.begin_send();
+        let s1 = running.begin_send(t1);
 
         let mut draining = running.begin_drain();
         draining.apply_ack(s1.ack());
@@ -672,8 +710,8 @@ mod verification {
 
         let ta = running.create_batch(src_a, cp_a);
         let tb = running.create_batch(src_b, cp_b);
-        let sa = ta.begin_send();
-        let sb = tb.begin_send();
+        let sa = running.begin_send(ta);
+        let sb = running.begin_send(tb);
 
         // Ack B only
         running.apply_ack(sb.ack());
@@ -695,7 +733,7 @@ mod verification {
 
         let cp: u64 = kani::any();
         let t1 = running.create_batch(src, cp);
-        let s1 = t1.begin_send();
+        let s1 = running.begin_send(t1);
         let receipt = s1.ack();
 
         let a1 = running.apply_ack(receipt);
@@ -753,7 +791,8 @@ mod proptests {
                 match action {
                     Action::Create { source, checkpoint } => {
                         let ticket = running.create_batch(SourceId(source), checkpoint);
-                        sending.entry(source).or_default().push(ticket.begin_send());
+                        let s = running.begin_send(ticket);
+                        sending.entry(source).or_default().push(s);
                     }
                     Action::Ack { source } => {
                         if let Some(queue) = sending.get_mut(&source) {
@@ -768,7 +807,7 @@ mod proptests {
                             if !queue.is_empty() {
                                 let s = queue.remove(0);
                                 let requeued = s.fail();
-                                queue.push(requeued.begin_send());
+                                queue.push(running.begin_send(requeued));
                             }
                         }
                     }
@@ -805,7 +844,7 @@ mod proptests {
             let mut tickets = alloc::vec::Vec::new();
             for i in 0..n {
                 let t = running.create_batch(src, checkpoints[i]);
-                tickets.push(t.begin_send());
+                tickets.push(running.begin_send(t));
             }
             let expected_final = checkpoints[n - 1];
 
@@ -847,7 +886,7 @@ mod proptests {
             let mut sending = alloc::vec::Vec::new();
             for i in 0..n {
                 let t = running.create_batch(src, checkpoints[i]);
-                sending.push(t.begin_send());
+                sending.push(running.begin_send(t));
             }
 
             let mut draining = running.begin_drain();
@@ -886,7 +925,8 @@ mod proptests {
                     let cp = checkpoints[cp_idx % checkpoints.len()];
                     cp_idx += 1;
                     let ticket = running.create_batch(src, cp);
-                    sending_queues.entry(src_id).or_default().push(ticket.begin_send());
+                    let s = running.begin_send(ticket);
+                    sending_queues.entry(src_id).or_default().push(s);
                     expected_checkpoints.insert(src_id, cp);
                 }
             }
@@ -903,7 +943,7 @@ mod proptests {
                         0..=6 => { running.apply_ack(s.ack()); }
                         7..=8 => {
                             let requeued = s.fail();
-                            let retried = requeued.begin_send();
+                            let retried = running.begin_send(requeued);
                             running.apply_ack(retried.ack());
                         }
                         _ => { running.apply_ack(s.reject()); }

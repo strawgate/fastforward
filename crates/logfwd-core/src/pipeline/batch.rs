@@ -1,17 +1,21 @@
 //! Typestate batch ticket — compile-time state machine for batch lifecycle.
 //!
 //! Each batch flows through: Queued → Sending → Acked/Rejected.
+//!
+//! A Queued ticket is a lightweight token — the pipeline does NOT track it.
+//! Dropping a Queued ticket is safe (nothing is orphaned). The pipeline
+//! takes ownership at `begin_send`, after which the batch MUST be acked,
+//! rejected, or failed. This matches the industry pattern where tracking
+//! begins at the point of ownership transfer to the pipeline.
+//!
 //! State transitions consume `self`, making it impossible to:
 //! - ACK a batch twice (self consumed on `.ack()`)
-//! - Send a batch without first queuing it
-//! - Drop a batch without explicitly acking or rejecting it
+//! - Send a batch without first registering it (`begin_send` on machine)
 //!
 //! The checkpoint type `C` is opaque to the pipeline — each input source
 //! defines what a checkpoint means (byte offset for files, partition offset
 //! for Kafka, cursor string for journald, etc.). The pipeline stores and
 //! forwards checkpoints without interpreting them.
-//!
-//! The Rust compiler proves these properties — no runtime checks needed.
 
 use core::marker::PhantomData;
 
