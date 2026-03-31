@@ -178,12 +178,28 @@ mod tests {
 mod verification {
     use super::*;
 
-    /// Prove NewlineFramer never panics for any 32-byte input.
+    /// Prove NewlineFramer never panics and satisfies basic structural
+    /// correctness properties for any 32-byte input.
+    ///
+    /// Properties:
+    /// 1. Line count never exceeds MAX_LINES_PER_FRAME
+    /// 2. remainder_offset never exceeds the input length
     #[kani::proof]
     #[kani::unwind(34)]
     fn verify_newline_framer_no_panic() {
         let input: [u8; 32] = kani::any();
-        let _ = NewlineFramer.frame(&input);
+        let output = NewlineFramer.frame(&input);
+
+        // Correctness: line count is bounded by the maximum.
+        assert!(
+            output.count <= MAX_LINES_PER_FRAME,
+            "line count exceeds MAX_LINES_PER_FRAME"
+        );
+        // Correctness: remainder never points past the end of the input.
+        assert!(
+            output.remainder_offset <= input.len(),
+            "remainder_offset past end of input"
+        );
     }
 
     /// Prove NewlineFramer line ranges are valid sub-ranges of input.

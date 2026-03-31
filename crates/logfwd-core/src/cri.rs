@@ -380,12 +380,26 @@ mod tests {
 mod verification {
     use super::*;
 
-    /// Prove parse_cri_line never panics for any 32-byte input.
+    /// Prove parse_cri_line never panics and satisfies a basic correctness
+    /// property for any 32-byte input.
+    ///
+    /// Property: if Some is returned, the message field cannot be longer than
+    /// the entire input (no buffer overrun from an out-of-bounds slice).
     #[kani::proof]
     #[kani::unwind(34)]
     fn verify_parse_cri_line_no_panic() {
         let input: [u8; 32] = kani::any();
-        let _ = parse_cri_line(&input);
+        let result = parse_cri_line(&input);
+
+        // Correctness: if parse succeeds, the message slice must be bounded
+        // by the input length.  A bug that returned a slice past the input end
+        // would be caught here.
+        if let Some(cri) = result {
+            assert!(
+                cri.message.len() < input.len(),
+                "message slice exceeds input length"
+            );
+        }
     }
 
     /// Prove parse_cri_line semantic correctness: if it returns Some,

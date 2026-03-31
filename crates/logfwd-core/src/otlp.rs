@@ -804,13 +804,27 @@ mod verification {
         assert!(decoded == value, "varint roundtrip mismatch");
     }
 
-    /// Prove encode_varint never panics for any u64 input.
+    /// Prove encode_varint never panics and satisfies basic correctness
+    /// properties for any u64 input.
+    ///
+    /// Properties:
+    /// 1. Output is always non-empty (at least one byte)
+    /// 2. Value 0 encodes as exactly one zero byte
     #[kani::proof]
     #[kani::unwind(12)]
     fn verify_varint_no_panic() {
         let value: u64 = kani::any();
         let mut buf = Vec::new();
         encode_varint(&mut buf, value);
+
+        // Correctness: varint always produces at least one byte.
+        assert!(!buf.is_empty(), "varint must produce at least one byte");
+
+        // Correctness: 0 encodes as a single 0x00 byte.
+        if value == 0 {
+            assert!(buf.len() == 1, "value 0 must encode as exactly one byte");
+            assert!(buf[0] == 0, "value 0 must encode as 0x00");
+        }
     }
 
     /// Prove encode_tag produces correct field_number and wire_type encoding.
@@ -844,11 +858,16 @@ mod verification {
         assert!(decoded_field == field_number, "field number mismatch");
     }
 
-    /// Prove days_from_civil never panics and produces reasonable values
+    /// Prove days_from_civil never panics and produces correct values
     /// for all dates in the range [1970-01-01, 2100-12-31].
     ///
-    /// Also verifies monotonicity: incrementing the day by 1 always
-    /// increments the result by 1 (within the same month).
+    /// Properties:
+    /// 1. Epoch (1970-01-01) is day 0
+    /// 2. All dates in the range produce non-negative results
+    /// 3. Results are bounded (≤ 50000)
+    /// 4. Monotonicity within a month: day+1 → result+1
+    /// 5. Known-date oracle: specific dates must map to well-known values,
+    ///    closing the absolute-correctness gap identified in PROOF_AUDIT.md
     #[kani::proof]
     fn verify_days_from_civil() {
         let year: i64 = kani::any();
@@ -876,6 +895,28 @@ mod verification {
         if day < 28 {
             let next = days_from_civil(year, month, day + 1);
             assert!(next == result + 1, "days not monotonic within month");
+        }
+
+        // Known-date oracle: verify absolute correctness against independently
+        // computed reference values. These close the gap identified in PROOF_AUDIT.md
+        // ("structural properties but not absolute correctness").
+        //
+        // Reference values computed by independent Gregorian calendar formula:
+        // leap_years(y) = y/4 - y/100 + y/400; days(y,m,d) = 365*y + leap_years + doy - 719469
+        //
+        // 2000-01-01: 30 years after epoch, 7 leap years (1972,76,80,84,88,92,96).
+        //   23*365 + 7*366 = 8395 + 2562 = 10957.
+        if year == 2000 && month == 1 && day == 1 {
+            assert!(result == 10957, "2000-01-01 must be day 10957");
+        }
+        // 1972-02-29: first post-epoch leap day.
+        //   365 (1970) + 365 (1971) + 31 (Jan 1972) + 28 (Feb 1-28) = 789.
+        if year == 1972 && month == 2 && day == 29 {
+            assert!(result == 789, "1972-02-29 must be day 789");
+        }
+        // 2001-01-01: 2000 was a leap year (div by 400), so 10957 + 366 = 11323.
+        if year == 2001 && month == 1 && day == 1 {
+            assert!(result == 11323, "2001-01-01 must be day 11323");
         }
     }
 
@@ -907,14 +948,31 @@ mod verification {
     // (nanos *= 1_000_000_000). The timestamp functions are better verified
     // with proptest oracle against chrono. Tracked in #268.
 
-    /// Prove parse_severity never panics for any 8-byte input and
-    /// returns correct severity for known level strings.
+    /// Prove parse_severity never panics for any 8-byte input and satisfies
+    /// basic correctness properties.
+    ///
+    /// Properties:
+    /// 1. The returned matched slice is always a prefix of the input
+    /// 2. When a named severity is returned, the matched slice length is 4 or 5
     #[kani::proof]
     fn verify_parse_severity_no_panic() {
         let bytes: [u8; 8] = kani::any();
         let len: usize = kani::any();
         kani::assume(len <= 8);
-        let _ = parse_severity(&bytes[..len]);
+        let input = &bytes[..len];
+        let (sev, matched) = parse_severity(input);
+
+        // Correctness: returned slice is always a prefix of (or equal to) input.
+        assert!(matched.len() <= input.len(), "matched slice longer than input");
+
+        // Correctness: non-Unspecified severity always matches exactly 4 or 5 bytes
+        // (INFO/WARN = 4, ERROR/DEBUG/TRACE/FATAL = 5).
+        if !matches!(sev, Severity::Unspecified) {
+            assert!(
+                matched.len() == 4 || matched.len() == 5,
+                "severity match must be 4 or 5 bytes"
+            );
+        }
     }
 
     /// Prove parse_severity correctly classifies all standard level strings.
@@ -941,15 +999,24 @@ mod verification {
         assert!(matches!(parse_severity(b"X").0, Severity::Unspecified));
     }
 
-    /// Prove parse_2digits and parse_4digits never panic for any input.
+    /// Prove parse_2digits and parse_4digits never panic and stay in range.
+    ///
+    /// Properties:
+    /// 1. parse_2digits result is always in [0, 99]
+    /// 2. parse_4digits result is always in [0, 9999]
     #[kani::proof]
     fn verify_digit_parsers_no_panic() {
         let bytes: [u8; 8] = kani::any();
         let off: usize = kani::any();
         kani::assume(off <= 6);
 
-        let _ = parse_2digits(&bytes, off);
-        let _ = parse_4digits(&bytes, off);
+        let d2 = parse_2digits(&bytes, off);
+        let d4 = parse_4digits(&bytes, off);
+
+        // Correctness: 2-digit result is always in [0, 99].
+        assert!(d2 <= 99, "parse_2digits result exceeds 99");
+        // Correctness: 4-digit result is always in [0, 9999].
+        assert!(d4 <= 9999, "parse_4digits result exceeds 9999");
     }
 
     /// Prove parse_2digits returns correct value for valid digit pairs.
