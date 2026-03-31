@@ -11,6 +11,7 @@ crossbeam-channel = "0.5"
 csv = "1"
 gethostname = "1"
 glob = "0.3"
+libc = "0.2"
 memchr = "2"
 notify = "7"
 opentelemetry = { workspace = true }

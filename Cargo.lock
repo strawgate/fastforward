@@ -2037,6 +2037,7 @@ dependencies = [
  "csv",
  "gethostname",
  "glob",
+ "libc",
  "logfwd-core",
  "memchr",
  "notify",

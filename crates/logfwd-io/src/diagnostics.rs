@@ -622,10 +622,7 @@ impl DiagnosticsServer {
 // Process-level metrics (RSS, CPU)
 // ---------------------------------------------------------------------------
 
-/// Returns (rss_bytes, uptime_ms, 0) for the current process.
-///
-/// Note: `uptime_ms` is wall-clock uptime, not CPU time. sysinfo doesn't
-/// expose raw CPU milliseconds; `run_time()` returns seconds since launch.
+/// Returns (rss_bytes, cpu_user_ms, cpu_sys_ms) for the current process.
 fn process_metrics() -> (u64, u64, u64) {
     use sysinfo::{Pid, ProcessesToUpdate, System};
 
@@ -633,15 +630,50 @@ fn process_metrics() -> (u64, u64, u64) {
     let mut sys = System::new();
     sys.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
 
-    match sys.process(pid) {
-        Some(proc) => {
-            let rss = proc.memory();
-            // sysinfo doesn't expose raw CPU time; run_time is wall-clock uptime.
-            let uptime_ms = proc.run_time() * 1000;
-            (rss, uptime_ms, 0)
-        }
-        None => (0, 0, 0),
+    let rss = match sys.process(pid) {
+        Some(proc) => proc.memory(),
+        None => 0,
+    };
+
+    let (cpu_user_ms, cpu_sys_ms) = get_cpu_times().unwrap_or((0, 0));
+
+    (rss, cpu_user_ms, cpu_sys_ms)
+}
+
+/// Reads /proc/self/stat to get utime and stime and converts them to milliseconds.
+fn get_cpu_times() -> Option<(u64, u64)> {
+    use std::fs;
+
+    let stat = fs::read_to_string("/proc/self/stat").ok()?;
+    // Field 14 is utime, field 15 is stime.
+    // They are space-separated, but the second field (comm) can contain spaces
+    // and is enclosed in parentheses.
+    let last_paren = stat.rfind(')')?;
+    let after_comm = &stat[last_paren + 1..];
+    let mut parts = after_comm.split_whitespace();
+
+    // The fields in /proc/self/stat are:
+    // 1: pid
+    // 2: (comm)
+    // -- after_comm starts here --
+    // 3: state (parts[0])
+    // 4: ppid (parts[1])
+    // ...
+    // 14: utime (parts[11])
+    // 15: stime (parts[12])
+    let utime_ticks: u64 = parts.nth(11)?.parse().ok()?;
+    let stime_ticks: u64 = parts.next()?.parse().ok()?;
+
+    let ticks_per_sec = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+    if ticks_per_sec <= 0 {
+        return None;
     }
+    let ticks_per_sec = ticks_per_sec as u64;
+
+    let user_ms = (utime_ticks * 1000) / ticks_per_sec;
+    let sys_ms = (stime_ticks * 1000) / ticks_per_sec;
+
+    Some((user_ms, sys_ms))
 }
 
 /// Minimal JSON-string escaping (backslash, double-quote, control chars).
