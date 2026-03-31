@@ -32,15 +32,15 @@ use logfwd_config::{AuthConfig, Format, OutputConfig, OutputType};
 // HTTP retry helper
 // ---------------------------------------------------------------------------
 
-/// Returns `true` if the ureq error is transient and worth retrying.
-///
-/// Transient errors are: HTTP 429 Too Many Requests, 5xx server errors, and
-/// network/transport failures (I/O, host not found, connection failed, timeout).
 /// Maximum number of retry attempts for transient HTTP failures.
 pub(crate) const HTTP_MAX_RETRIES: u32 = 3;
 /// Initial retry delay in milliseconds; doubles on each subsequent attempt.
 pub(crate) const HTTP_RETRY_INITIAL_DELAY_MS: u64 = 100;
 
+/// Returns `true` if the ureq error is transient and worth retrying.
+///
+/// Transient errors are: HTTP 429 Too Many Requests, 5xx server errors, and
+/// network/transport failures (I/O, host not found, connection failed, timeout).
 pub(crate) fn is_transient_error(e: &ureq::Error) -> bool {
     match e {
         ureq::Error::StatusCode(status) => *status == 429 || *status >= 500,
