@@ -107,6 +107,8 @@ function drawSparkline(canvas, data, color) {
   });
 }
 
+const DATA_BASE = 'https://raw.githubusercontent.com/strawgate/memagent/bench-data';
+
 async function loadJSON(url) {
   try { const r = await fetch(url); if (!r.ok) return null; return await r.json(); }
   catch { return null; }
@@ -114,17 +116,17 @@ async function loadJSON(url) {
 
 async function main() {
   chartColors();
-  const index = await loadJSON('data/index.json');
+  const index = await loadJSON(DATA_BASE + '/index.json');
   if (!index) {
-    document.getElementById('loading').textContent = 'No data/index.json found.';
+    document.getElementById('loading').textContent = 'No data found.';
     return;
   }
 
   const rateRunIds = index.rate_runs || [];
   const criterionRunIds = index.criterion_runs || [];
 
-  const rateRuns = (await Promise.all(rateRunIds.map(id => loadJSON('data/rate-runs/' + id + '.json')))).filter(Boolean);
-  const criterionRuns = (await Promise.all(criterionRunIds.map(id => loadJSON('data/criterion-runs/' + id + '.json')))).filter(Boolean);
+  const rateRuns = (await Promise.all(rateRunIds.map(id => loadJSON(DATA_BASE + '/rate-runs/' + id + '.json')))).filter(Boolean);
+  const criterionRuns = (await Promise.all(criterionRunIds.map(id => loadJSON(DATA_BASE + '/criterion-runs/' + id + '.json')))).filter(Boolean);
 
   if (rateRuns.length === 0 && criterionRuns.length === 0) {
     document.getElementById('loading').textContent = 'No development data available.';

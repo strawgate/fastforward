@@ -53,9 +53,8 @@ jobs:
         run: |
           mkdir -p book/book/bench
           cp -r bench/dashboard/* book/book/bench/ 2>/dev/null || true
-          # Create empty data dirs so the dashboard loads without errors.
-          mkdir -p book/book/bench/data/runs book/book/bench/data/rate-runs book/book/bench/data/criterion-runs
-          echo '{"runs":[]}' > book/book/bench/data/index.json
+          # Data is served live from the bench-data branch via raw.githubusercontent.com
+          # — nothing to copy here.
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
