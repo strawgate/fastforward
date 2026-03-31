@@ -1047,17 +1047,86 @@ mod verification {
             "real_quotes not submask of quotes"
         );
 
-        // Structural chars must not overlap with in_string
+        // All string-masked fields must not overlap with in_string
         assert_eq!(p.space & p.in_string, 0);
         assert_eq!(p.comma & p.in_string, 0);
         assert_eq!(p.colon & p.in_string, 0);
+        assert_eq!(p.open_brace & p.in_string, 0);
+        assert_eq!(p.close_brace & p.in_string, 0);
+        assert_eq!(p.open_bracket & p.in_string, 0);
+        assert_eq!(p.close_bracket & p.in_string, 0);
 
-        // Tail masking: no bits beyond block_len
+        // Tail masking: no bits beyond block_len in any output field
         if block_len < 64 {
             let tail = !((1u64 << block_len) - 1);
             assert_eq!(p.newline & tail, 0);
+            assert_eq!(p.space & tail, 0);
             assert_eq!(p.real_quotes & tail, 0);
+            assert_eq!(p.in_string & tail, 0);
             assert_eq!(p.comma & tail, 0);
+            assert_eq!(p.colon & tail, 0);
+            assert_eq!(p.open_brace & tail, 0);
+            assert_eq!(p.close_brace & tail, 0);
+            assert_eq!(p.open_bracket & tail, 0);
+            assert_eq!(p.close_bracket & tail, 0);
         }
+    }
+
+    /// Correctness: next_quote returns the first real quote at or after
+    /// pos. If None, no real quotes exist at or after pos.
+    /// Adapted from agent audit (feat/kani-audit-and-verification).
+    #[kani::proof]
+    #[kani::unwind(65)]
+    fn verify_next_quote_correct() {
+        let buf: [u8; 64] = kani::any();
+        let (idx, _) = StructuralIndex::new(&buf);
+        let pos: usize = kani::any_where(|&p: &usize| p < 64);
+
+        let result = idx.next_quote(pos);
+
+        if let Some(q) = result {
+            assert!(q >= pos && q < 64);
+            // It's a real quote
+            assert!((idx.real_quotes[q >> 6] >> (q & 63)) & 1 == 1);
+            // No real quote between pos and q
+            let mut i = pos;
+            while i < q {
+                assert!((idx.real_quotes[i >> 6] >> (i & 63)) & 1 == 0);
+                i += 1;
+            }
+        } else {
+            // No real quotes at or after pos
+            let mut i = pos;
+            while i < 64 {
+                assert!((idx.real_quotes[i >> 6] >> (i & 63)) & 1 == 0);
+                i += 1;
+            }
+        }
+    }
+
+    /// Correctness: is_in_string is true iff an odd number of real
+    /// quotes precede this position AND the position itself is not a quote.
+    /// Adapted from agent audit (feat/kani-audit-and-verification).
+    #[kani::proof]
+    #[kani::unwind(65)]
+    fn verify_is_in_string_correct() {
+        let buf: [u8; 64] = kani::any();
+        let (idx, _) = StructuralIndex::new(&buf);
+        let pos: usize = kani::any_where(|&p: &usize| p < 64);
+
+        let in_string = idx.is_in_string(pos);
+
+        let mut quote_count: u32 = 0;
+        let mut i = 0;
+        while i < pos {
+            if (idx.real_quotes[i >> 6] >> (i & 63)) & 1 == 1 {
+                quote_count += 1;
+            }
+            i += 1;
+        }
+
+        let is_quote = (idx.real_quotes[pos >> 6] >> (pos & 63)) & 1 == 1;
+        let expected = (quote_count % 2 == 1) && !is_quote;
+        assert_eq!(in_string, expected);
     }
 }

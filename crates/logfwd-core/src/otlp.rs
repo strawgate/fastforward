@@ -179,7 +179,11 @@ pub fn parse_timestamp_nanos(ts: &[u8]) -> u64 {
         return 0;
     }
 
-    // Days from Unix epoch (1970-01-01) to the given date.
+    // Reject years that would overflow u64 nanos (year > ~584 from epoch)
+    if year > 2554 {
+        return 0;
+    }
+
     let days = days_from_civil(year, month, day);
     if days < 0 {
         return 0;
