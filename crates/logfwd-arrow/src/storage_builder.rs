@@ -107,7 +107,10 @@ impl StorageBuilder {
 
     #[inline(always)]
     pub fn end_row(&mut self) {
-        self.row_count += 1;
+        self.row_count = self
+            .row_count
+            .checked_add(1)
+            .expect("row_count overflow: batch exceeds u32::MAX rows");
     }
 
     #[inline]
