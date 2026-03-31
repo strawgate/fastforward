@@ -634,11 +634,14 @@ fn input_poll_loop(
 // Input construction
 // ---------------------------------------------------------------------------
 
+/// Default maximum line size for format parsers (2 MiB).
+const DEFAULT_MAX_LINE_SIZE: usize = 2 * 1024 * 1024;
+
 fn build_format_parser(format: &Format) -> Box<dyn FormatParser> {
     match format {
-        Format::Cri => Box::new(CriParser::new(2 * 1024 * 1024)),
-        Format::Raw => Box::new(RawParser::new(2 * 1024 * 1024)),
-        _ => Box::new(JsonParser::new(2 * 1024 * 1024)),
+        Format::Cri => Box::new(CriParser::new(DEFAULT_MAX_LINE_SIZE)),
+        Format::Raw => Box::new(RawParser::new(DEFAULT_MAX_LINE_SIZE)),
+        _ => Box::new(JsonParser::new(DEFAULT_MAX_LINE_SIZE)),
     }
 }
 
