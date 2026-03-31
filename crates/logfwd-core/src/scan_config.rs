@@ -3,9 +3,12 @@
 // Defines ScanConfig and FieldSpec, used by all scanner implementations
 // (SimdScanner, StreamingSimdScanner) and the SQL transform layer.
 
+use alloc::{string::String, vec, vec::Vec};
 /// Specification for a single field to extract.
 pub struct FieldSpec {
+    /// Primary field name.
     pub name: String,
+    /// Alternative names that map to this field.
     pub aliases: Vec<String>,
 }
 
@@ -101,7 +104,7 @@ pub fn parse_int_fast(bytes: &[u8]) -> Option<i64> {
 pub fn parse_float_fast(bytes: &[u8]) -> Option<f64> {
     // SAFETY: We only call this on bytes that look like a JSON number,
     // which is always valid ASCII.
-    let s = std::str::from_utf8(bytes).ok()?;
+    let s = core::str::from_utf8(bytes).ok()?;
     s.parse::<f64>().ok()
 }
 

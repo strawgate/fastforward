@@ -4,11 +4,11 @@ use arrow::array::{Array, AsArray, PrimitiveArray};
 use arrow::datatypes::{DataType, Float64Type, Int64Type};
 use arrow::record_batch::RecordBatch;
 
-use logfwd_core::compress::ChunkCompressor;
 use logfwd_core::otlp::{
     Severity, bytes_field_size, encode_bytes_field, encode_fixed64, encode_tag, encode_varint,
     encode_varint_field, parse_severity, parse_timestamp_nanos, varint_len,
 };
+use logfwd_io::compress::ChunkCompressor;
 
 use super::{
     BatchMetadata, Compression, HTTP_MAX_RETRIES, HTTP_RETRY_INITIAL_DELAY_MS, OutputSink,

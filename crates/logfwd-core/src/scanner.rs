@@ -79,7 +79,7 @@ pub trait ScanBuilder {
 #[inline(never)]
 pub fn scan_into<B: ScanBuilder>(buf: &[u8], config: &ScanConfig, builder: &mut B) {
     debug_assert!(
-        std::str::from_utf8(buf).is_ok(),
+        core::str::from_utf8(buf).is_ok(),
         "Scanner input must be valid UTF-8"
     );
     let (index, line_ranges) = StructuralIndex::new(buf);

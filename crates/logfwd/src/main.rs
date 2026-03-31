@@ -276,7 +276,7 @@ async fn run_pipelines(
     base_path: Option<&std::path::Path>,
 ) -> io::Result<()> {
     use logfwd::pipeline::Pipeline;
-    use logfwd_core::diagnostics::DiagnosticsServer;
+    use logfwd_io::diagnostics::DiagnosticsServer;
     let shutdown = CancellationToken::new();
 
     // Listen for SIGINT (Ctrl-C) and SIGTERM to trigger graceful shutdown.
@@ -616,7 +616,7 @@ fn generate_json_log_file(num_lines: usize, output: &str) -> io::Result<()> {
 /// Returns `None` if the stats are unavailable (e.g. the epoch refresh fails).
 /// This function is passed to [`DiagnosticsServer`] so the `/api/pipelines`
 /// endpoint can expose live allocator metrics.
-fn jemalloc_stats() -> Option<logfwd_core::diagnostics::MemoryStats> {
+fn jemalloc_stats() -> Option<logfwd_io::diagnostics::MemoryStats> {
     use tikv_jemalloc_ctl::{epoch, stats};
 
     // Refresh the epoch so subsequent reads reflect current allocator state.
@@ -626,7 +626,7 @@ fn jemalloc_stats() -> Option<logfwd_core::diagnostics::MemoryStats> {
     let allocated = stats::allocated::mib().ok()?.read().ok()?;
     let active = stats::active::mib().ok()?.read().ok()?;
 
-    Some(logfwd_core::diagnostics::MemoryStats {
+    Some(logfwd_io::diagnostics::MemoryStats {
         resident,
         allocated,
         active,
