@@ -81,6 +81,10 @@ impl FormatParser for JsonParser {
 // ---------------------------------------------------------------------------
 
 /// Wraps each line as `{"_raw":"<escaped>"}\n`.
+///
+/// Ensures the output is valid UTF-8 NDJSON even if the input contains
+/// invalid UTF-8 sequences, by replacing them with the Unicode replacement
+/// character (U+FFFD).
 #[derive(Default)]
 pub struct RawParser {
     partial: Vec<u8>,
@@ -106,25 +110,37 @@ impl FormatParser for RawParser {
 
             if !line.is_empty() {
                 out.extend_from_slice(b"{\"_raw\":\"");
-                for &b in line {
-                    match b {
-                        b'"' => out.extend_from_slice(b"\\\""),
-                        b'\\' => out.extend_from_slice(b"\\\\"),
-                        b'\n' => out.extend_from_slice(b"\\n"),
-                        b'\r' => out.extend_from_slice(b"\\r"),
-                        b'\t' => out.extend_from_slice(b"\\t"),
-                        b if b < 0x20 => {
-                            // Escape control characters per RFC 8259.
-                            let _ = std::io::Write::write_fmt(out, format_args!("\\u{:04x}", b));
+                
+                // Resilient UTF-8 and JSON escaping loop.
+                let mut current = line;
+                while !current.is_empty() {
+                    match std::str::from_utf8(current) {
+                        Ok(valid) => {
+                            // Entire remaining line is valid UTF-8.
+                            escape_json_string(valid.as_bytes(), out);
+                            break;
                         }
-                        b if b >= 0x80 => {
-                            // Non-ASCII byte — not valid UTF-8 on its own; emit
-                            // the Unicode replacement character to keep JSON valid.
+                        Err(e) => {
+                            // Part of the line is valid.
+                            let (valid, rest) = current.split_at(e.valid_up_to());
+                            escape_json_string(valid, out);
+                            
+                            // Emit replacement character for the invalid sequence.
                             out.extend_from_slice(b"\\ufffd");
+                            
+                            // Skip the invalid byte(s).
+                            if let Some(error_len) = e.error_len() {
+                                current = &rest[error_len..];
+                            } else {
+                                // Incomplete sequence at end of line (but we know this is a full line).
+                                // This shouldn't really happen with memchr_iter unless the line ends 
+                                // with a partial sequence.
+                                break;
+                            }
                         }
-                        _ => out.push(b),
                     }
                 }
+                
                 out.extend_from_slice(b"\"}\n");
                 count += 1;
             }
@@ -142,6 +158,24 @@ impl FormatParser for RawParser {
 
     fn reset(&mut self) {
         self.partial.clear();
+    }
+}
+
+/// Escapes characters that have special meaning in JSON strings.
+/// Assumes `input` is valid UTF-8.
+fn escape_json_string(input: &[u8], out: &mut Vec<u8>) {
+    for &b in input {
+        match b {
+            b'"' => out.extend_from_slice(b"\\\""),
+            b'\\' => out.extend_from_slice(b"\\\\"),
+            b'\n' => out.extend_from_slice(b"\\n"),
+            b'\r' => out.extend_from_slice(b"\\r"),
+            b'\t' => out.extend_from_slice(b"\\t"),
+            b if b < 0x20 => {
+                let _ = std::io::Write::write_fmt(out, format_args!("\\u{:04x}", b));
+            }
+            _ => out.push(b),
+        }
     }
 }
 
@@ -261,6 +295,18 @@ mod tests {
             s.contains(r#"{"_raw":"has \"quotes\" and \\backslash"}"#),
             "got: {s}"
         );
+    }
+
+    #[test]
+    fn raw_utf8_emojis() {
+        let mut parser = RawParser::new();
+        let mut out = Vec::new();
+        let (n, _) = parser.process("Emoji 🦀 and 🚀\n".as_bytes(), &mut out);
+        assert_eq!(n, 1);
+        let s = String::from_utf8(out).expect("output should be valid UTF-8");
+        assert!(s.contains("Emoji 🦀 and 🚀"), "got: {s}");
+        let v: serde_json::Value = serde_json::from_str(s.trim_end()).expect("must be valid JSON");
+        assert_eq!(v["_raw"], "Emoji 🦀 and 🚀");
     }
 
     #[test]
