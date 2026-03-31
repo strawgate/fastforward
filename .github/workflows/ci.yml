@@ -14,18 +14,45 @@ permissions:
   contents: read
 
 jobs:
-  lint:
-    name: Lint
+  # -------------------------------------------------------------------
+  # Lint + Test: clippy compiles dev, test reuses those artifacts
+  # -------------------------------------------------------------------
+  lint-test:
+    name: Lint + Test (Linux)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: mozilla-actions/sccache-action@v0.0.7
-
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+      - uses: extractions/setup-just@dd310ad5a97d8e7b41793f8ef055398d51ad4de6 # v2
 
+      # Fast checks (no compilation).
+      - name: Format check
+        run: just fmt-check
+      - name: Typos
+        uses: crate-ci/typos@v1
+
+      # Clippy compiles dev profile — test reuses those artifacts.
+      - name: Clippy
+        run: just clippy
+      - name: Tests
+        run: just test
+
+  # -------------------------------------------------------------------
+  # Release build + audits: independent from dev compilation
+  # -------------------------------------------------------------------
+  release-audit:
+    name: Release + Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mozilla-actions/sccache-action@v0.0.7
+      - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/master' }}
@@ -38,63 +65,7 @@ jobs:
             curl -sSL "https://github.com/EmbarkStudios/cargo-deny/releases/download/${DENY_VER}/cargo-deny-${DENY_VER}-x86_64-unknown-linux-musl.tar.gz" | tar xz -C /tmp && \
             mv /tmp/cargo-deny-*/cargo-deny /usr/local/bin/
 
-      - uses: extractions/setup-just@dd310ad5a97d8e7b41793f8ef055398d51ad4de6 # v2
-
-      - name: Format check
-        run: just fmt-check
-
-      - name: Clippy
-        run: just clippy
-
-      - name: TOML check
-        run: just toml-check
-
-      - name: Dependency audit
-        run: just deny
-
-      - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
-
-      - name: Security audit
-        run: cargo audit --ignore RUSTSEC-2024-0437
-
-      - name: Typos
-        uses: crate-ci/typos@v1
-
-  test-linux:
-    name: Test (Linux)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: mozilla-actions/sccache-action@v0.0.7
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/master' }}
-
-      - uses: extractions/setup-just@dd310ad5a97d8e7b41793f8ef055398d51ad4de6 # v2
-
-      - name: Tests
-        run: just test
-
-  release-check:
-    name: Release build check
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: mozilla-actions/sccache-action@v0.0.7
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/master' }}
-
-      # PRs: just check (fast). Master: full build + cache binaries for bench.
+      # Release check (PRs) or full build + cache (master).
       - name: Release check
         if: github.ref != 'refs/heads/master'
         run: cargo check --release
@@ -119,6 +90,16 @@ jobs:
         with:
           path: cached-bench-binaries
           key: bench-binaries-${{ github.sha }}
+
+      # Audits don't need compilation — runs while release check finishes.
+      - name: TOML check
+        run: taplo check
+      - name: Dependency audit
+        run: cargo deny check
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: Security audit
+        run: cargo audit --ignore RUSTSEC-2024-0437
 
   cross-compile-arm64:
     name: Cross-compile check (ARM64)
