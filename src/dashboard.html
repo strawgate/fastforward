@@ -143,6 +143,13 @@ MiniChart.prototype.render=function(){
   var mn=0,mx=Math.max.apply(null,vals)*1.15;
   if(mx<0.001)mx=1;if(mx===mn)mx=mn+1;
 
+  // Fixed time window: right edge = now, left edge = now - MAX_AGE_MS.
+  // Data fills in from the right; empty space on the left until full.
+  var tMax=now,tMin=now-MAX_AGE_MS,tRange=MAX_AGE_MS;
+
+  // Helper: time -> x pixel
+  function tx(t){return PAD_L+((t-tMin)/tRange)*cw}
+
   // Grid + Y labels
   ctx.textAlign="right";ctx.textBaseline="middle";
   var monoFont="9px "+getComputedStyle(document.body).getPropertyValue("--mono");
@@ -156,46 +163,44 @@ MiniChart.prototype.render=function(){
     ctx.fillText(this.fmtVal(yv),PAD_L-4,gy);
   }
 
-  // X-axis time labels
+  // X-axis time labels (fixed positions relative to "now")
   ctx.textAlign="center";ctx.textBaseline="top";ctx.fillStyle="#475569";ctx.font=monoFont;
-  var tMin=data[0].t,tMax=data[data.length-1].t,tRange=tMax-tMin;
-  if(tRange>0){
-    var ticks=[10,30,60,120,300];
-    for(var ti=0;ti<ticks.length;ti++){
-      var ago=ticks[ti]*1000;
-      if(ago>tRange*1.1)continue;
-      var tx=PAD_L+((tMax-ago-tMin)/tRange)*cw;
-      if(tx<PAD_L+20||tx>w-PAD_R-10)continue;
-      ctx.fillText(ticks[ti]<60?ticks[ti]+"s":Math.floor(ticks[ti]/60)+"m",tx,PAD_T+ch+2);
-    }
-    ctx.fillText("now",PAD_L+cw,PAD_T+ch+2);
+  var ticks=[10,30,60,120,300];
+  for(var ti=0;ti<ticks.length;ti++){
+    var agoMs=ticks[ti]*1000;
+    var lx=tx(now-agoMs);
+    if(lx<PAD_L+15||lx>w-PAD_R-20)continue;
+    ctx.fillText(ticks[ti]<60?ticks[ti]+"s":Math.floor(ticks[ti]/60)+"m",lx,PAD_T+ch+2);
   }
+  ctx.fillText("now",PAD_L+cw,PAD_T+ch+2);
 
-  // Line
+  // Line — data fills in from the right
   ctx.beginPath();
+  var started=false;
   for(var i=0;i<data.length;i++){
-    var x=PAD_L+(tRange>0?((data[i].t-tMin)/tRange)*cw:i/(data.length-1)*cw);
+    var x=tx(data[i].t);
     var y=PAD_T+ch-((data[i].v-mn)/(mx-mn))*ch;
     y=Math.max(PAD_T,Math.min(PAD_T+ch,y));
-    if(i===0)ctx.moveTo(x,y);else ctx.lineTo(x,y);
+    if(!started){ctx.moveTo(x,y);started=true}else{ctx.lineTo(x,y)}
   }
   ctx.strokeStyle=this.color;ctx.lineWidth=1.5;ctx.stroke();
 
-  // Fill
-  ctx.lineTo(PAD_L+(tRange>0?cw:cw),PAD_T+ch);
-  ctx.lineTo(PAD_L,PAD_T+ch);ctx.closePath();
+  // Fill under the line
+  var firstX=tx(data[0].t),lastX=tx(data[data.length-1].t);
+  ctx.lineTo(lastX,PAD_T+ch);
+  ctx.lineTo(firstX,PAD_T+ch);ctx.closePath();
   var grad=ctx.createLinearGradient(0,PAD_T,0,PAD_T+ch);
   grad.addColorStop(0,this.color+"30");grad.addColorStop(1,this.color+"05");
   ctx.fillStyle=grad;ctx.fill();
 
-  // Hover
-  if(this._mouseX>=PAD_L&&this._mouseX<=PAD_L+cw&&data.length>1){
-    var hFrac=(this._mouseX-PAD_L)/cw;
-    var hTime=tMin+hFrac*tRange;
+  // Hover — only over the data region
+  var dataLeft=tx(data[0].t),dataRight=tx(data[data.length-1].t);
+  if(this._mouseX>=dataLeft-5&&this._mouseX<=dataRight+5&&data.length>1){
+    var hTime=tMin+((this._mouseX-PAD_L)/cw)*tRange;
     var best=0,bestDist=Infinity;
     for(var i=0;i<data.length;i++){var d=Math.abs(data[i].t-hTime);if(d<bestDist){bestDist=d;best=i}}
     var pt=data[best];
-    var px=PAD_L+((pt.t-tMin)/tRange)*cw;
+    var px=tx(pt.t);
     var py=PAD_T+ch-((pt.v-mn)/(mx-mn))*ch;
     py=Math.max(PAD_T,Math.min(PAD_T+ch,py));
     // Crosshair
