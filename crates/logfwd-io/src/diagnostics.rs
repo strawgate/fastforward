@@ -715,6 +715,10 @@ fn esc(s: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
+            '\x00'..='\x1f' => {
+                use std::fmt::Write;
+                write!(out, "\\u{:04x}", c as u32).expect("write to String is infallible");
+            }
             _ => out.push(c),
         }
     }
@@ -1080,5 +1084,40 @@ mod tests {
         let (status, body) = http_get(port, "/ready");
         assert_eq!(status, 503, "body: {}", body);
         assert!(body.contains(r#""status":"not_ready""#), "body: {}", body);
+    }
+
+    #[test]
+    fn test_esc_control_chars() {
+        assert_eq!(esc("hello\0world"), "hello\\u0000world");
+        assert_eq!(esc("tab\tnewline\nreturn\r"), "tab\\tnewline\\nreturn\\r");
+        assert_eq!(esc("bell\x07"), "bell\\u0007");
+        assert_eq!(esc("escape\x1b"), "escape\\u001b");
+    }
+
+    #[test]
+    fn test_pipelines_endpoint_escaping() {
+        let port = free_port();
+        let meter = opentelemetry::global::meter("test");
+        // Control character in pipeline name.
+        let pm = PipelineMetrics::new("pipe\x01line", "SELECT * FROM logs", &meter);
+
+        let mut server = DiagnosticsServer::new(&format!("127.0.0.1:{}", port));
+        server.add_pipeline(Arc::new(pm));
+        let _handle = server.start();
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        let (status, body) = http_get(port, "/api/pipelines");
+        assert_eq!(status, 200);
+        // The name should be escaped as "pipe\u0001line".
+        assert!(
+            body.contains(r#""name":"pipe\u0001line""#),
+            "body: {}",
+            body
+        );
+
+        // Check that the overall JSON is valid (can be parsed).
+        let _v: serde_json::Value =
+            serde_json::from_str(&body).expect("invalid JSON output from /api/pipelines");
     }
 }
