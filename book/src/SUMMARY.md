@@ -26,6 +26,7 @@
 - [Pipeline Design](./architecture/pipeline.md)
 - [SIMD Scanner](./architecture/scanner.md)
 - [Performance](./architecture/performance.md)
+- [Benchmarks Dashboard](/bench/)
 
 # Development
 

@@ -53,9 +53,64 @@ jobs:
         run: |
           mkdir -p book/book/bench
           cp -r bench/dashboard/* book/book/bench/ 2>/dev/null || true
-          # Create empty data dirs so the dashboard loads without errors.
+          # Create empty data dirs so the dashboard loads without errors
+          # if there is no prior data to restore.
           mkdir -p book/book/bench/data/runs book/book/bench/data/rate-runs book/book/bench/data/criterion-runs
           echo '{"runs":[]}' > book/book/bench/data/index.json
+
+      # Restore benchmark data from the most recent bench workflow run
+      # so that docs deploys don't wipe out accumulated benchmark results.
+      - name: Restore benchmark data from prior deploy
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Download the latest pages artifact from a bench workflow run.
+          BENCH_WORKFLOW_ID=$(gh api repos/${{ github.repository }}/actions/workflows/bench.yml --jq '.id' 2>/dev/null || echo "")
+          if [ -z "$BENCH_WORKFLOW_ID" ]; then
+            echo "No bench workflow found, skipping data restore"
+            exit 0
+          fi
+
+          # Find the latest successful bench run.
+          RUN_ID=$(gh api "repos/${{ github.repository }}/actions/workflows/${BENCH_WORKFLOW_ID}/runs?status=success&per_page=1" \
+            --jq '.workflow_runs[0].id' 2>/dev/null || echo "")
+          if [ -z "$RUN_ID" ]; then
+            echo "No successful bench runs found, skipping data restore"
+            exit 0
+          fi
+
+          echo "Restoring bench data from workflow run $RUN_ID"
+
+          # Download the bench summary artifact which contains the dashboard data.
+          ARTIFACT_NAME="bench-summary-$(gh api "repos/${{ github.repository }}/actions/runs/${RUN_ID}" --jq '.run_number' 2>/dev/null || echo "latest")"
+          gh run download "$RUN_ID" -n "$ARTIFACT_NAME" -D bench-restore/ 2>/dev/null || true
+
+          # If we got a dashboard-data.json, update the data directory.
+          if [ -f bench-restore/dashboard-data.json ]; then
+            # Parse the run ID from the data file.
+            DATA_RUN_ID=$(python3 -c "import json; print(json.load(open('bench-restore/dashboard-data.json'))['id'])" 2>/dev/null || echo "")
+            if [ -n "$DATA_RUN_ID" ]; then
+              cp bench-restore/dashboard-data.json "book/book/bench/data/runs/${DATA_RUN_ID}.json"
+
+              # Update index.json.
+              python3 -c "
+          import json
+          index_path = 'book/book/bench/data/index.json'
+          with open(index_path) as f:
+              index = json.load(f)
+          with open('bench-restore/dashboard-data.json') as f:
+              data = json.load(f)
+          entry = {'id': data['id'], 'date': data.get('date', ''), 'commit': data.get('commit', '')}
+          index['runs'] = [r for r in index['runs'] if r.get('id') != entry['id']]
+          index['runs'].append(entry)
+          with open(index_path, 'w') as f:
+              json.dump(index, f, indent=2)
+          "
+              echo "Restored bench data for run $DATA_RUN_ID"
+            fi
+          fi
+          rm -rf bench-restore/
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
