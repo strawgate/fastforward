@@ -880,5 +880,92 @@ mod proptests {
             let stopped = draining.stop().ok().expect("should be drained");
             prop_assert_eq!(*stopped.final_offsets().get(&src).unwrap(), offset);
         }
+
+        /// Multi-source pipeline simulation: create, send, mixed outcomes.
+        /// Verifies that the state machine correctly tracks independent
+        /// sources through a realistic interleaved workload.
+        #[test]
+        fn multi_source_simulation(
+            num_sources in 1..4usize,
+            batches_per_source in 2..8usize,
+            batch_sizes in proptest::collection::vec(1..5000u64, 1..32),
+            outcomes in proptest::collection::vec(0..10u32, 1..32),
+        ) {
+            let machine = PipelineMachine::new();
+            let mut running = machine.start();
+
+            // Track per-source expected final offset
+            let mut expected_offsets: alloc::collections::BTreeMap<u32, u64> = alloc::collections::BTreeMap::new();
+            let mut sending_queues: alloc::collections::BTreeMap<u32, alloc::vec::Vec<super::super::BatchTicket<super::super::Sending>>> = alloc::collections::BTreeMap::new();
+
+            let n = batches_per_source.min(batch_sizes.len() / num_sources.max(1));
+            if n == 0 { return Ok(()); }
+
+            // Phase 1: Create batches across all sources
+            let mut size_idx = 0;
+            for src_id in 0..num_sources as u32 {
+                let src = SourceId(src_id);
+                let mut offset = 0u64;
+                for _ in 0..n {
+                    let sz = batch_sizes[size_idx % batch_sizes.len()];
+                    size_idx += 1;
+                    let end = offset + sz;
+                    let ticket = running.create_batch(src, offset, end);
+                    sending_queues.entry(src_id).or_default().push(ticket.begin_send());
+                    offset = end;
+                }
+                expected_offsets.insert(src_id, offset);
+            }
+
+            // Phase 2: Process outcomes (ack, fail+retry, reject)
+            let mut outcome_idx = 0;
+            for src_id in 0..num_sources as u32 {
+                let queue = sending_queues.get_mut(&src_id).unwrap();
+                while !queue.is_empty() {
+                    let s = queue.remove(0);
+                    let outcome = outcomes[outcome_idx % outcomes.len()];
+                    outcome_idx += 1;
+
+                    match outcome % 10 {
+                        0..=6 => {
+                            // Ack (70% of the time)
+                            running.apply_ack(s.ack());
+                        }
+                        7..=8 => {
+                            // Fail and retry (20%)
+                            let requeued = s.fail();
+                            let retried = requeued.begin_send();
+                            running.apply_ack(retried.ack());
+                        }
+                        _ => {
+                            // Reject (10%)
+                            running.apply_ack(s.reject());
+                        }
+                    }
+                }
+            }
+
+            // Phase 3: Verify all offsets reached expected values
+            for src_id in 0..num_sources as u32 {
+                let expected = expected_offsets[&src_id];
+                let actual = running.committed_offset(SourceId(src_id));
+                prop_assert_eq!(actual, expected,
+                    "source {} committed {} != expected {}", src_id, actual, expected);
+            }
+
+            // Phase 4: Drain and stop
+            prop_assert_eq!(running.in_flight_count(), 0);
+            let draining = running.begin_drain();
+            prop_assert!(draining.is_drained());
+            let stopped = draining.stop().ok().expect("should be drained");
+
+            for src_id in 0..num_sources as u32 {
+                let expected = expected_offsets[&src_id];
+                prop_assert_eq!(
+                    *stopped.final_offsets().get(&SourceId(src_id)).unwrap(),
+                    expected
+                );
+            }
+        }
     }
 }
