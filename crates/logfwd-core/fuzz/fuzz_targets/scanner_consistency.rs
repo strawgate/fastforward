@@ -20,10 +20,10 @@ use std::collections::BTreeSet;
 
 fuzz_target!(|data: &[u8]| {
     let mut storage_scanner = SimdScanner::new(ScanConfig::default());
-    let storage_batch = storage_scanner.scan(data);
+    let Ok(storage_batch) = storage_scanner.scan(data) else { return; };
 
     let mut streaming_scanner = StreamingSimdScanner::new(ScanConfig::default());
-    let streaming_batch = streaming_scanner.scan(bytes::Bytes::copy_from_slice(data));
+    let Ok(streaming_batch) = streaming_scanner.scan(bytes::Bytes::copy_from_slice(data)) else { return; };
 
     // Row counts must match.
     assert_eq!(

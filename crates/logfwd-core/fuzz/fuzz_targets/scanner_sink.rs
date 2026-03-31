@@ -22,7 +22,7 @@ fuzz_target!(|data: &[u8]| {
         keep_raw: false,
         validate_utf8: false,
     });
-    let batch = scanner.scan(data);
+    let Ok(batch) = scanner.scan(data) else { return; };
 
     let metadata = BatchMetadata {
         resource_attrs: vec![],

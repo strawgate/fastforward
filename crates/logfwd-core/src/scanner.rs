@@ -13,15 +13,49 @@ use memchr::memchr;
 // ScanBuilder trait — shared interface for both builders
 // ---------------------------------------------------------------------------
 
+/// Trait for building columnar output from scanned JSON fields.
+///
+/// Implementors receive field-level callbacks as the scanner walks JSON
+/// objects. The call sequence per batch is:
+///
+/// ```text
+/// begin_batch()
+///   begin_row()
+///     resolve_field(key) → idx
+///     append_str_by_idx(idx, value)   // or int, float, null
+///     ...more fields...
+///   end_row()
+///   ...more rows...
+/// // caller invokes finish on the implementor directly
+/// ```
+///
+/// - `resolve_field`: maps a field name to a column index. Must be stable
+///   within a batch (same key → same index). May create new columns.
+/// - `append_*_by_idx`: stores a typed value at the current row for the
+///   given column index. Byte slices are borrowed from the input buffer.
+/// - `append_raw`: stores the entire unparsed line (if `keep_raw` is set).
+/// - First-write-wins: if a key appears twice in one row, the first value
+///   is kept and subsequent writes are silently ignored.
+///
+/// Implementations live in `logfwd-arrow` (`StorageBuilder`, `StreamingBuilder`).
 pub trait ScanBuilder {
+    /// Initialize state for a new batch.
     fn begin_batch(&mut self);
+    /// Start a new row.
     fn begin_row(&mut self);
+    /// Finish the current row.
     fn end_row(&mut self);
+    /// Resolve a field name to a column index.
     fn resolve_field(&mut self, key: &[u8]) -> usize;
+    /// Append a string value at the given column index.
     fn append_str_by_idx(&mut self, idx: usize, value: &[u8]);
+    /// Append an integer value (as raw ASCII digits) at the given column index.
     fn append_int_by_idx(&mut self, idx: usize, value: &[u8]);
+    /// Append a float value (as raw ASCII) at the given column index.
     fn append_float_by_idx(&mut self, idx: usize, value: &[u8]);
+    /// Record a null value at the given column index.
     fn append_null_by_idx(&mut self, idx: usize);
+    /// Store the raw unparsed line (only called when `keep_raw` is set).
     fn append_raw(&mut self, line: &[u8]);
 }
 

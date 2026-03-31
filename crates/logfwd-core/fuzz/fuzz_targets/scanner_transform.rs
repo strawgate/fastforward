@@ -28,7 +28,7 @@ fuzz_target!(|data: &[u8]| {
         keep_raw: false,
         validate_utf8: false,
     });
-    let batch = scanner.scan(data);
+    let Ok(batch) = scanner.scan(data) else { return; };
 
     // SELECT * passes every column through DataFusion unchanged.
     if let Ok(mut transform) = SqlTransform::new("SELECT * FROM logs") {

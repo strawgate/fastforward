@@ -57,7 +57,7 @@ fuzz_target!(|data: &[u8]| {
 
     // --- Full scanner pipeline (uses ChunkIndex internally) ---
     let mut scanner = SimdScanner::new(ScanConfig::default());
-    let batch = scanner.scan(data);
+    let Ok(batch) = scanner.scan(data) else { return; };
     let num_rows = batch.num_rows();
     let schema = batch.schema();
     for col_idx in 0..batch.num_columns() {
