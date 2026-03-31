@@ -413,7 +413,7 @@ mod tests {
         let t1 = running.create_batch(src, 0, 1000).expect("valid batch");
         let s1 = t1.begin_send();
         let requeued = s1.fail(); // Transient failure
-        assert_eq!(requeued.attempts, 1);
+        assert_eq!(requeued.attempts(), 1);
 
         // Retry — the batch is still in-flight tracking
         let s1_retry = requeued.begin_send();

@@ -44,32 +44,64 @@ pub struct Sending;
 /// ```
 #[must_use = "batch tickets must be explicitly acked, rejected, or requeued — dropping loses data"]
 pub struct BatchTicket<S> {
-    /// Unique batch ID.
-    pub id: BatchId,
-    /// Which source produced this batch.
-    pub source: SourceId,
-    /// Byte offset where this batch starts in the source.
-    pub start_offset: u64,
-    /// Byte offset where this batch ends in the source.
-    pub end_offset: u64,
-    /// Number of send attempts (starts at 0, incremented on fail→requeue).
-    pub attempts: u32,
-    /// Typestate marker.
+    id: BatchId,
+    source: SourceId,
+    start_offset: u64,
+    end_offset: u64,
+    attempts: u32,
     _state: PhantomData<S>,
 }
 
+impl<S> BatchTicket<S> {
+    /// Unique batch ID.
+    pub fn id(&self) -> BatchId {
+        self.id
+    }
+    /// Which source produced this batch.
+    pub fn source(&self) -> SourceId {
+        self.source
+    }
+    /// Byte offset where this batch starts in the source.
+    pub fn start_offset(&self) -> u64 {
+        self.start_offset
+    }
+    /// Byte offset where this batch ends in the source.
+    pub fn end_offset(&self) -> u64 {
+        self.end_offset
+    }
+    /// Number of send attempts (starts at 0, incremented on fail→requeue).
+    pub fn attempts(&self) -> u32 {
+        self.attempts
+    }
+}
+
 /// Proof that a batch was acknowledged. Returned by `ack()` and `reject()`.
-/// The pipeline uses this to advance the source's committed offset.
+/// Fields are crate-private to prevent fabrication of receipts.
 #[must_use = "AckReceipt must be passed to apply_ack to advance the committed offset"]
 pub struct AckReceipt {
-    /// Which batch was acked (used for in-flight tracking lookup).
-    pub batch_id: BatchId,
+    pub(crate) batch_id: BatchId,
+    pub(crate) source: SourceId,
+    pub(crate) end_offset: u64,
+    pub(crate) delivered: bool,
+}
+
+impl AckReceipt {
+    /// Which batch was acked.
+    pub fn batch_id(&self) -> BatchId {
+        self.batch_id
+    }
     /// Which source to advance.
-    pub source: SourceId,
+    pub fn source(&self) -> SourceId {
+        self.source
+    }
     /// Offset to commit (end_offset of the acked batch).
-    pub end_offset: u64,
+    pub fn end_offset(&self) -> u64 {
+        self.end_offset
+    }
     /// Whether this was a successful delivery or a permanent rejection.
-    pub delivered: bool,
+    pub fn delivered(&self) -> bool {
+        self.delivered
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -78,7 +110,9 @@ pub struct AckReceipt {
 
 impl BatchTicket<Queued> {
     /// Create a new batch ticket from a source read.
-    pub fn new(id: BatchId, source: SourceId, start_offset: u64, end_offset: u64) -> Self {
+    ///
+    /// Crate-private: only `PipelineMachine::create_batch` should call this.
+    pub(crate) fn new(id: BatchId, source: SourceId, start_offset: u64, end_offset: u64) -> Self {
         BatchTicket {
             id,
             source,
