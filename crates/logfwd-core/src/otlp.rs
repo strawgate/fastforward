@@ -130,8 +130,10 @@ fn eq_ignore_case_match(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x | 0x20 == y | 0x20)
 }
 
-/// Case-insensitive 4-byte comparison. Uses |0x20 which is correct for
-/// ASCII letters (our severity strings are all letters).
+/// Case-insensitive 4-byte comparison. Uses `|0x20` which maps uppercase
+/// ASCII letters to lowercase. This is NOT a general case-fold — it has
+/// collisions for non-letters (e.g., `@` |0x20 = `` ` ``). Safe here because
+/// the comparison targets ("INFO", "WARN") are all ASCII letters.
 #[inline(always)]
 fn eq_ignore_case_4(a: &[u8], b: &[u8]) -> bool {
     a[0] | 0x20 == b[0] | 0x20
@@ -162,10 +164,16 @@ fn eq_ignore_case_5(a: &[u8], b: &[u8]) -> bool {
 ///   2024-01-15T10:30:00.123Z
 ///   2024-01-15T10:30:00.123456789Z
 ///   2024-01-15 10:30:00Z (space separator)
-/// Returns 0 on parse failure (observed_time will be used instead).
-pub fn parse_timestamp_nanos(ts: &[u8]) -> u64 {
+///
+/// Returns `None` on parse failure. Callers typically fall back to
+/// `observed_time_ns`. Note: `Some(0)` is a valid result for exactly
+/// 1970-01-01T00:00:00Z (Unix epoch).
+///
+/// Fractional seconds beyond 9 digits (nanosecond precision) are
+/// truncated — this is intentional as OTLP uses nanoseconds.
+pub fn parse_timestamp_nanos(ts: &[u8]) -> Option<u64> {
     if ts.len() < 19 {
-        return 0; // too short for YYYY-MM-DDTHH:MM:SS
+        return None;
     }
 
     let year = parse_4digits(ts, 0) as i64;
@@ -176,17 +184,17 @@ pub fn parse_timestamp_nanos(ts: &[u8]) -> u64 {
     let sec = parse_2digits(ts, 17) as u64;
 
     if year == 0 || month == 0 || month > 12 || day == 0 || day > 31 {
-        return 0;
+        return None;
     }
 
     // Reject years that would overflow u64 nanos (year > ~584 from epoch)
     if year > 2554 {
-        return 0;
+        return None;
     }
 
     let days = days_from_civil(year, month, day);
     if days < 0 {
-        return 0;
+        return None;
     }
 
     let mut nanos = (days as u64) * 86400 + hour * 3600 + min * 60 + sec;
@@ -213,7 +221,7 @@ pub fn parse_timestamp_nanos(ts: &[u8]) -> u64 {
         }
     }
 
-    nanos
+    Some(nanos)
 }
 
 /// Parse 4 ASCII digits at offset. Returns 0 on non-digit.
@@ -271,7 +279,7 @@ mod tests {
     #[test]
     fn test_parse_timestamp() {
         let ts = b"2024-01-15T10:30:00Z";
-        let nanos = parse_timestamp_nanos(ts);
+        let nanos = parse_timestamp_nanos(ts).unwrap();
         // 2024-01-15 10:30:00 UTC
         // Expected: 1705314600 seconds * 1e9
         assert_eq!(nanos, 1_705_314_600_000_000_000);
@@ -280,14 +288,14 @@ mod tests {
     #[test]
     fn test_parse_timestamp_fractional() {
         let ts = b"2024-01-15T10:30:00.123Z";
-        let nanos = parse_timestamp_nanos(ts);
+        let nanos = parse_timestamp_nanos(ts).unwrap();
         assert_eq!(nanos, 1_705_314_600_123_000_000);
     }
 
     #[test]
     fn test_parse_timestamp_nanos_precision() {
         let ts = b"2024-01-15T10:30:00.123456789Z";
-        let nanos = parse_timestamp_nanos(ts);
+        let nanos = parse_timestamp_nanos(ts).unwrap();
         assert_eq!(nanos, 1_705_314_600_123_456_789);
     }
 
@@ -381,7 +389,7 @@ mod tests {
             b"2099-12-31T23:59:59Z",
         ];
         for ts in cases {
-            let our_nanos = parse_timestamp_nanos(ts);
+            let our_nanos = parse_timestamp_nanos(ts).unwrap();
             let s = std::str::from_utf8(ts).unwrap().trim_end_matches('Z');
             let chrono_nanos = NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S")
                 .unwrap()
@@ -400,14 +408,14 @@ mod tests {
         // Unix epoch (1970-01-01T00:00:00Z) returns 0, which is also
         // the sentinel for "parse failed". This is a known limitation
         // documented in the audit — callers use observed_time as fallback.
-        assert_eq!(parse_timestamp_nanos(b"1970-01-01T00:00:00Z"), 0);
+        assert_eq!(parse_timestamp_nanos(b"1970-01-01T00:00:00Z"), Some(0));
     }
 
     #[test]
     fn parse_timestamp_invalid_returns_zero() {
-        assert_eq!(parse_timestamp_nanos(b"not a timestamp"), 0);
-        assert_eq!(parse_timestamp_nanos(b""), 0);
-        assert_eq!(parse_timestamp_nanos(b"2024"), 0);
+        assert_eq!(parse_timestamp_nanos(b"not a timestamp"), None);
+        assert_eq!(parse_timestamp_nanos(b""), None);
+        assert_eq!(parse_timestamp_nanos(b"2024"), None);
     }
 }
 
@@ -779,11 +787,11 @@ mod verification {
 
         // Unix epoch returns 0 (sentinel — documented limitation)
         let epoch = b"1970-01-01T00:00:00Z____________";
-        assert!(parse_timestamp_nanos(&epoch[..20]) == 0);
+        assert!(parse_timestamp_nanos(&epoch[..20]) == Some(0));
 
         // Pre-epoch returns 0
         let pre = b"1969-12-31T23:59:59Z____________";
-        assert!(parse_timestamp_nanos(&pre[..20]) == 0);
+        assert!(parse_timestamp_nanos(&pre[..20]) == None);
     }
 
     /// Prove encode_bytes_field content correctness: tag + length + exact data.
@@ -854,11 +862,10 @@ mod verification {
         let len: usize = kani::any_where(|&l: &usize| l >= 19 && l <= 24);
         let result = parse_timestamp_nanos(&ts[..len]);
 
-        // If it parsed successfully, the result must be non-negative
-        // (we already checked year ≥ 1970 returns non-negative days)
-        // The only exception is epoch (1970-01-01T00:00:00) which returns 0
-        // Result is always a valid u64 (can't overflow because we bounded year ≤ 9999)
-        assert!(result <= 9999 * 366 * 86400 * 1_000_000_000u64 || result == 0);
+        // If it parsed successfully, the result must be bounded
+        if let Some(nanos) = result {
+            assert!(nanos <= 2554 * 366 * 86400 * 1_000_000_000u64);
+        }
     }
 
     /// Prove parse_timestamp_nanos validates month/day ranges.
@@ -866,18 +873,18 @@ mod verification {
     fn verify_parse_timestamp_rejects_invalid_dates() {
         // Month 0
         let ts = b"2024-00-15T10:30:00Z";
-        assert!(parse_timestamp_nanos(ts) == 0);
+        assert!(parse_timestamp_nanos(ts) == None);
 
         // Month 13
         let ts = b"2024-13-15T10:30:00Z";
-        assert!(parse_timestamp_nanos(ts) == 0);
+        assert!(parse_timestamp_nanos(ts) == None);
 
         // Day 0
         let ts = b"2024-01-00T10:30:00Z";
-        assert!(parse_timestamp_nanos(ts) == 0);
+        assert!(parse_timestamp_nanos(ts) == None);
 
         // Day 32
         let ts = b"2024-01-32T10:30:00Z";
-        assert!(parse_timestamp_nanos(ts) == 0);
+        assert!(parse_timestamp_nanos(ts) == None);
     }
 }
