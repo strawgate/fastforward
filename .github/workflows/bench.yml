@@ -299,9 +299,6 @@ jobs:
   summarize:
     runs-on: ubuntu-latest
     needs: [build, bench, rate-bench, micro]
-    environment:
-      name: github-pages
-      url: ${{ steps.deploy.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
 
@@ -413,6 +410,7 @@ jobs:
           path: _site
 
       - name: Deploy to GitHub Pages
+        if: github.ref == 'refs/heads/master'
         id: deploy
         uses: actions/deploy-pages@v4
 
@@ -446,7 +444,7 @@ jobs:
             RATE="---
 
           ### Rate-Ingest Benchmark
-          See [development dashboard](${{ steps.deploy.outputs.page_url }}development.html) for full results."
+          See [development dashboard](https://strawgate.com/memagent/development.html) for full results."
           fi
 
           TITLE="Benchmark results ${DATE} (${COMMIT})"
@@ -456,7 +454,7 @@ jobs:
           **Commit:** \`${COMMIT}\` on \`master\`
           **Runner:** \`ubuntu-latest\` (matrix: agent x scenario)
           **Iterations:** ${{ env.ITERATIONS }} per cell
-          **Dashboard:** ${{ steps.deploy.outputs.page_url }}
+          **Dashboard:** https://strawgate.com/memagent/
 
           ---
 
