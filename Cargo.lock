@@ -1944,6 +1944,7 @@ dependencies = [
  "logfwd-arrow",
  "logfwd-config",
  "logfwd-core",
+ "logfwd-io",
  "logfwd-output",
  "logfwd-test-utils",
  "logfwd-transform",
@@ -1976,6 +1977,7 @@ dependencies = [
  "criterion",
  "logfwd-arrow",
  "logfwd-core",
+ "logfwd-io",
  "logfwd-output",
  "logfwd-transform",
  "memchr",
@@ -2015,24 +2017,35 @@ dependencies = [
  "bytes",
  "chrono",
  "criterion",
+ "logfwd-arrow",
+ "logfwd-io",
+ "logfwd-test-utils",
+ "memchr",
+ "memmap2",
+ "proptest",
+ "sonic-rs",
+ "tempfile",
+ "wide",
+]
+
+[[package]]
+name = "logfwd-io"
+version = "0.1.0"
+dependencies = [
+ "arrow",
  "crossbeam-channel",
  "csv",
  "gethostname",
  "glob",
- "logfwd-arrow",
- "logfwd-test-utils",
+ "logfwd-core",
  "memchr",
- "memmap2",
  "notify",
  "opentelemetry",
- "proptest",
  "serde",
  "serde_json",
- "sonic-rs",
  "sysinfo",
  "tempfile",
  "tiny_http",
- "wide",
  "xxhash-rust",
  "zstd",
 ]
@@ -2045,6 +2058,7 @@ dependencies = [
  "libc",
  "logfwd-config",
  "logfwd-core",
+ "logfwd-io",
  "ureq",
 ]
 
@@ -2069,6 +2083,7 @@ dependencies = [
  "grok",
  "logfwd-arrow",
  "logfwd-core",
+ "logfwd-io",
  "maxminddb",
  "regex",
  "tokio",

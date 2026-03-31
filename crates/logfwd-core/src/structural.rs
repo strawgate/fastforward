@@ -15,6 +15,7 @@
 // Kani-provable specification.
 
 // ---------------------------------------------------------------------------
+use alloc::vec::Vec;
 // Escape detection (simdjson prefix_xor algorithm)
 // ---------------------------------------------------------------------------
 
@@ -81,15 +82,25 @@ pub fn prefix_xor(mut bitmask: u64) -> u64 {
 /// escape-aware, string-masked bitmasks.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RawBlockMasks {
+    /// `\n` positions.
     pub newline: u64,
+    /// Space positions.
     pub space: u64,
+    /// `"` positions.
     pub quote: u64,
+    /// `\` positions.
     pub backslash: u64,
+    /// `,` positions.
     pub comma: u64,
+    /// `:` positions.
     pub colon: u64,
+    /// `{` positions.
     pub open_brace: u64,
+    /// `}` positions.
     pub close_brace: u64,
+    /// `[` positions.
     pub open_bracket: u64,
+    /// `]` positions.
     pub close_bracket: u64,
 }
 
@@ -143,6 +154,7 @@ pub struct StreamingClassifier {
 }
 
 impl StreamingClassifier {
+    /// Create a new classifier with zero initial state.
     pub fn new() -> Self {
         Self {
             prev_odd_backslash: 0,

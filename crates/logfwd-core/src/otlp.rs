@@ -19,6 +19,8 @@
 
 // --- Protobuf wire format helpers ---
 
+use alloc::vec::Vec;
+
 /// Encode a varint into buf at offset, return new offset.
 #[inline(always)]
 pub fn encode_varint(buf: &mut Vec<u8>, mut value: u64) {
@@ -92,12 +94,19 @@ pub const fn bytes_field_size(field_number: u32, data_len: usize) -> usize {
 #[repr(u8)]
 #[derive(Clone, Copy, Debug)]
 pub enum Severity {
+    /// No severity specified.
     Unspecified = 0,
+    /// TRACE level.
     Trace = 1,
+    /// DEBUG level.
     Debug = 5,
+    /// INFO level.
     Info = 9,
+    /// WARN level.
     Warn = 13,
+    /// ERROR level.
     Error = 17,
+    /// FATAL level.
     Fatal = 21,
 }
 
@@ -390,7 +399,7 @@ mod tests {
         ];
         for ts in cases {
             let our_nanos = parse_timestamp_nanos(ts).unwrap();
-            let s = std::str::from_utf8(ts).unwrap().trim_end_matches('Z');
+            let s = core::str::from_utf8(ts).unwrap().trim_end_matches('Z');
             let chrono_nanos = NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S")
                 .unwrap()
                 .and_utc()
