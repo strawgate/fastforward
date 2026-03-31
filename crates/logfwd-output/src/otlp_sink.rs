@@ -169,7 +169,7 @@ impl OutputSink for OtlpSink {
         };
 
         // Retry with exponential backoff for transient failures.
-        // 4 total attempts: 1 initial + 3 retries; delays: 100ms → 200ms → 400ms.
+        // 1 initial attempt + up to 3 retries (4 total maximum); delays: 100ms → 200ms → 400ms.
         // Note: the full encoded payload is retransmitted on each attempt.
         // For large batches this multiplies bandwidth; this is acceptable as a
         // temporary measure until SinkDriver (#319) handles retries externally.
