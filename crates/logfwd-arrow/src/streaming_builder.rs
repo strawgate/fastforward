@@ -112,7 +112,17 @@ impl StreamingBuilder {
 
     /// Start a new batch. Takes ownership of the input buffer via Bytes
     /// (zero-copy if converted from Vec via `Bytes::from(vec)`).
+    ///
+    /// # Panics (debug builds)
+    /// Debug-asserts that `buf.len()` fits in a u32, because string-view
+    /// offsets are stored as u32.  Buffers larger than 4 GiB would produce
+    /// silently truncated offsets without this guard.
     pub fn begin_batch(&mut self, buf: bytes::Bytes) {
+        debug_assert!(
+            buf.len() <= u32::MAX as usize,
+            "StreamingBuilder buffer too large for u32 offsets ({} bytes)",
+            buf.len()
+        );
         self.buf = buf;
         self.row_count = 0;
         for fc in &mut self.fields {
@@ -150,7 +160,9 @@ impl StreamingBuilder {
     /// than `offset_from` to avoid that API's stricter UB preconditions.
     ///
     /// # Panics (debug builds)
-    /// Debug-asserts that `value` lies entirely within `self.buf`.
+    /// Debug-asserts that `value` lies entirely within `self.buf`, and that
+    /// the computed byte offset fits in a u32.  A buffer larger than 4 GiB
+    /// would cause the offset to silently truncate without this guard.
     #[inline(always)]
     fn offset_of(&self, value: &[u8]) -> u32 {
         let base = self.buf.as_ptr() as usize;
@@ -159,7 +171,12 @@ impl StreamingBuilder {
             ptr >= base && ptr + value.len() <= base + self.buf.len(),
             "value must be within buffer bounds"
         );
-        (ptr - base) as u32
+        let offset = ptr - base;
+        debug_assert!(
+            offset <= u32::MAX as usize,
+            "StreamingBuilder buffer offset exceeds u32::MAX ({offset} bytes)"
+        );
+        offset as u32
     }
 
     #[inline(always)]
