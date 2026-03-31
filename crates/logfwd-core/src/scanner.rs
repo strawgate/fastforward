@@ -118,7 +118,7 @@ fn scan_line<B: ScanBuilder>(
         if buf[pos] != b'"' {
             break;
         }
-        let (key, after_key) = match index.scan_string(buf, pos) {
+        let (key, after_key) = match index.scan_string(buf, pos, end) {
             Some(r) => r,
             None => break,
         };
@@ -136,7 +136,7 @@ fn scan_line<B: ScanBuilder>(
         let wanted = config.is_wanted(key);
         match buf[pos] {
             b'"' => {
-                let (val, after) = match index.scan_string(buf, pos) {
+                let (val, after) = match index.scan_string(buf, pos, end) {
                     Some(r) => r,
                     None => break,
                 };
@@ -148,7 +148,7 @@ fn scan_line<B: ScanBuilder>(
             }
             b'{' | b'[' => {
                 let s = pos;
-                pos = index.skip_nested(buf, pos).min(end);
+                pos = index.skip_nested(buf, pos, end);
                 if wanted {
                     let idx = builder.resolve_field(key);
                     builder.append_str_by_idx(idx, &buf[s..pos]);

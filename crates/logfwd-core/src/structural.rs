@@ -330,27 +330,46 @@ impl StructuralIndex {
         (self.in_string[block] >> bit) & 1 == 1
     }
 
-    /// Scan a JSON string starting at `pos` (pointing to opening `"`).
+    /// Scan a JSON string starting at `pos` (pointing to opening `"`),
+    /// bounded by `end`. Returns None if the closing quote is not found
+    /// before `end`, preventing cross-line reads on malformed input (#368).
     #[inline(always)]
-    pub fn scan_string<'a>(&self, buf: &'a [u8], pos: usize) -> Option<(&'a [u8], usize)> {
+    pub fn scan_string<'a>(
+        &self,
+        buf: &'a [u8],
+        pos: usize,
+        end: usize,
+    ) -> Option<(&'a [u8], usize)> {
         debug_assert!(pos < buf.len() && buf[pos] == b'"');
         let start = pos + 1;
         if let Some(close) = self.next_quote(start) {
-            Some((&buf[start..close], close + 1))
+            if close < end {
+                Some((&buf[start..close], close + 1))
+            } else {
+                None // closing quote is beyond the line boundary
+            }
         } else {
             None
         }
     }
 
-    /// Skip a nested JSON object/array starting at `pos`.
+    /// Skip a nested JSON object/array starting at `pos`, bounded by `end`.
+    /// Tracks delimiter kind — `{` must close with `}`, `[` with `]`.
+    /// Returns `end` on mismatch instead of desynchronizing (#369).
     #[inline]
-    pub fn skip_nested(&self, buf: &[u8], mut pos: usize) -> usize {
-        let len = buf.len();
-        let mut depth: u32 = 0;
-        while pos < len {
+    pub fn skip_nested(&self, buf: &[u8], mut pos: usize, end: usize) -> usize {
+        // Small stack for delimiter tracking. Max nesting 32 levels — deeper
+        // nesting in a single NDJSON line is pathological.
+        let mut opener_stack = [0u8; 32];
+        let mut depth: usize = 0;
+
+        while pos < end {
             let b = buf[pos];
             match b {
                 b'{' | b'[' if !self.is_in_string(pos) => {
+                    if depth < 32 {
+                        opener_stack[depth] = b;
+                    }
                     depth += 1;
                     pos += 1;
                 }
@@ -359,14 +378,25 @@ impl StructuralIndex {
                         return pos;
                     }
                     depth -= 1;
+                    // Check delimiter match
+                    if depth < 32 {
+                        let expected_close = if opener_stack[depth] == b'{' {
+                            b'}'
+                        } else {
+                            b']'
+                        };
+                        if b != expected_close {
+                            return end; // mismatch — bail to line end
+                        }
+                    }
                     pos += 1;
                     if depth == 0 {
                         return pos;
                     }
                 }
-                b'"' if !self.is_in_string(pos) => match self.scan_string(buf, pos) {
+                b'"' if !self.is_in_string(pos) => match self.scan_string(buf, pos, end) {
                     Some((_, after)) => pos = after,
-                    None => return len,
+                    None => return end,
                 },
                 _ => pos += 1,
             }

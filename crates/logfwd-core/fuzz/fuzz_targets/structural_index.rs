@@ -36,7 +36,7 @@ fuzz_target!(|data: &[u8]| {
 
         // scan_string is only meaningful when starting at a `"` byte.
         if data[i] == b'"' {
-            if let Some((val, after)) = index.scan_string(data, i) {
+            if let Some((val, after)) = index.scan_string(data, i, data.len()) {
                 // Returned slice must be a valid sub-slice of `data`.
                 assert!(after <= data.len(), "scan_string: after={after} > len={}", data.len());
                 let val_start = val.as_ptr() as usize;
@@ -50,7 +50,7 @@ fuzz_target!(|data: &[u8]| {
 
         // skip_nested is only meaningful for `{` or `[`.
         if data[i] == b'{' || data[i] == b'[' {
-            let end = index.skip_nested(data, i);
+            let end = index.skip_nested(data, i, data.len());
             assert!(end <= data.len(), "skip_nested: end={end} > len={}", data.len());
         }
     }
