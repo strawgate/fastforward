@@ -26,6 +26,7 @@
 ///
 /// Contract: result is always a submask of `quote_bits` (can only remove
 /// quotes, never add them).
+use alloc::vec::Vec;
 #[inline]
 #[cfg_attr(kani, kani::ensures(|result: &u64| *result & !quote_bits == 0))]
 pub fn compute_real_quotes(quote_bits: u64, bs_bits: u64, prev_odd_backslash: &mut u64) -> u64 {

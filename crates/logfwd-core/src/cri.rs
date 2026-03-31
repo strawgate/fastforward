@@ -13,6 +13,7 @@
 //! until an "F" chunk arrives, then emit the combined line.
 
 /// Parsed CRI log line. References point into the original byte slice (zero-copy).
+use alloc::vec::Vec;
 #[derive(Debug)]
 pub struct CriLine<'a> {
     /// The RFC3339Nano timestamp bytes.

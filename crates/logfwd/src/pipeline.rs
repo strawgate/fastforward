@@ -14,10 +14,10 @@ use logfwd_arrow::scanner::StreamingSimdScanner as Scanner;
 use logfwd_config::{
     EnrichmentConfig, Format, GeoDatabaseFormat, InputConfig, InputType, PipelineConfig,
 };
-use logfwd_core::diagnostics::{ComponentStats, PipelineMetrics};
-use logfwd_core::format::{CriParser, FormatParser, JsonParser, RawParser};
-use logfwd_core::input::{FileInput, InputEvent, InputSource};
-use logfwd_core::tail::TailConfig;
+use logfwd_io::diagnostics::{ComponentStats, PipelineMetrics};
+use logfwd_io::format::{CriParser, FormatParser, JsonParser, RawParser};
+use logfwd_io::input::{FileInput, InputEvent, InputSource};
+use logfwd_io::tail::TailConfig;
 use logfwd_output::{BatchMetadata, FanOut, OutputSink, build_output_sink};
 use logfwd_transform::SqlTransform;
 use tokio_util::sync::CancellationToken;
@@ -64,7 +64,7 @@ impl Pipeline {
         for enrichment in &config.enrichment {
             match enrichment {
                 EnrichmentConfig::GeoDatabase(geo_cfg) => {
-                    let db: Arc<dyn logfwd_core::enrichment::GeoDatabase> = match geo_cfg.format {
+                    let db: Arc<dyn logfwd_io::enrichment::GeoDatabase> = match geo_cfg.format {
                         GeoDatabaseFormat::Mmdb => {
                             let mmdb = logfwd_transform::udf::geo_lookup::MmdbDatabase::open(
                                 &geo_cfg.path,

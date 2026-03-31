@@ -29,6 +29,7 @@
 /// F "!"       → Complete("hello world!")
 /// F "simple"  → Complete("simple")  // zero-copy fast path
 /// ```
+use alloc::vec::Vec;
 pub struct CriAggregator {
     pending: Vec<u8>,
     max_message_size: usize,
@@ -115,7 +116,7 @@ mod tests {
             AggregateResult::Complete(out) => {
                 assert_eq!(out, b"hello world");
                 // Verify zero-copy: output points to the same memory as input
-                assert!(std::ptr::eq(out.as_ptr(), msg.as_ptr()));
+                assert!(core::ptr::eq(out.as_ptr(), msg.as_ptr()));
             }
             AggregateResult::Pending => panic!("expected Complete"),
         }
