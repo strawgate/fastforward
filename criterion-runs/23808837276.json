@@ -1,0 +1,139 @@
+{
+  "id": "23808837276",
+  "date": "2026-03-31T16:58:30Z",
+  "commit": "2dd1778",
+  "benchmarks": {
+    "cri/parse_only/1000": {
+      "mean_ns": 28045.396941217063,
+      "throughput": {
+        "Bytes": 116284
+      }
+    },
+    "cri/parse_only/10000": {
+      "mean_ns": 291556.31311459217,
+      "throughput": {
+        "Bytes": 1162840
+      }
+    },
+    "cri/parse_reassemble/1000": {
+      "mean_ns": 5922391.207777778,
+      "throughput": {
+        "Bytes": 116284
+      }
+    },
+    "cri/parse_reassemble/10000": {
+      "mean_ns": 376100863.28,
+      "throughput": {
+        "Bytes": 1162840
+      }
+    },
+    "transform/select_star": {
+      "mean_ns": 383619.7467627133,
+      "throughput": {
+        "Elements": 10000
+      }
+    },
+    "transform/regexp_extract": {
+      "mean_ns": 7091935.976501644,
+      "throughput": {
+        "Elements": 10000
+      }
+    },
+    "transform/projection_computed": {
+      "mean_ns": 377327.60644420295,
+      "throughput": {
+        "Elements": 10000
+      }
+    },
+    "transform/grok_parse": {
+      "mean_ns": 17949188.88767644,
+      "throughput": {
+        "Elements": 10000
+      }
+    },
+    "transform/where_filter": {
+      "mean_ns": 662266.2568176154,
+      "throughput": {
+        "Elements": 10000
+      }
+    },
+    "output/null_sink": {
+      "mean_ns": 0.03899404334526002,
+      "throughput": {
+        "Elements": 10000
+      }
+    },
+    "end_to_end/scan_grok_filter_capture": {
+      "mean_ns": 23427531.57440182,
+      "throughput": {
+        "Elements": 10000
+      }
+    },
+    "end_to_end/scan_filter_capture": {
+      "mean_ns": 8377038.615707004,
+      "throughput": {
+        "Elements": 10000
+      }
+    },
+    "end_to_end/scan_passthrough_capture": {
+      "mean_ns": 8088249.678246717,
+      "throughput": {
+        "Elements": 10000
+      }
+    },
+    "scanner/scan_all_fields/1000": {
+      "mean_ns": 762523.243099449,
+      "throughput": {
+        "Bytes": 183084
+      }
+    },
+    "scanner/scan_all_fields/10000": {
+      "mean_ns": 7596034.714285714,
+      "throughput": {
+        "Bytes": 1830840
+      }
+    },
+    "scanner/scan_all_fields/100000": {
+      "mean_ns": 87946892.23,
+      "throughput": {
+        "Bytes": 18308400
+      }
+    },
+    "scanner/scan_3_fields/1000": {
+      "mean_ns": 376474.5546361062,
+      "throughput": {
+        "Bytes": 183084
+      }
+    },
+    "scanner/scan_3_fields/10000": {
+      "mean_ns": 3703380.8014285695,
+      "throughput": {
+        "Bytes": 1830840
+      }
+    },
+    "scanner/scan_3_fields/100000": {
+      "mean_ns": 36756675.9,
+      "throughput": {
+        "Bytes": 18308400
+      }
+    },
+    "compress/zstd_level1/1000": {
+      "mean_ns": 132008.55019053136,
+      "throughput": {
+        "Bytes": 183084
+      }
+    },
+    "compress/zstd_level1/10000": {
+      "mean_ns": 1012462.4565625095,
+      "throughput": {
+        "Bytes": 1830840
+      }
+    },
+    "compress/zstd_level1/100000": {
+      "mean_ns": 9835669.383333327,
+      "throughput": {
+        "Bytes": 18308400
+      }
+    }
+  }
+}

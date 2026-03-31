@@ -1,0 +1,201 @@
+{
+  "agents": [
+    "filebeat",
+    "logfwd",
+    "otelcol",
+    "vector",
+    "vlagent"
+  ],
+  "commit": "2dd177884c491cb39bc3c69eeb9d8a626e12b21a",
+  "date": "2026-03-31T17:22:18Z",
+  "id": "23808837276",
+  "scenario_names": [
+    "filter",
+    "json_parse",
+    "passthrough"
+  ],
+  "scenarios": {
+    "filter": {
+      "filebeat": {
+        "avg_lps": 32678,
+        "avg_ms": 76539,
+        "iterations": 3,
+        "lines_done": 2501111,
+        "lps": [
+          31203.367633302154,
+          33540.64855295979,
+          33396.70922592019
+        ],
+        "mode": "binary",
+        "stddev_ms": 3153
+      },
+      "logfwd": {
+        "avg_lps": 493097,
+        "avg_ms": 5070,
+        "iterations": 6,
+        "lines_done": 2500000,
+        "lps": [
+          531462.5850340136,
+          499600.3197442047,
+          531462.5850340136,
+          471342.383107089,
+          471342.383107089,
+          462620.281273131
+        ],
+        "mode": "binary",
+        "stddev_ms": 314
+      },
+      "otelcol": {
+        "avg_lps": 0,
+        "avg_ms": 120036,
+        "iterations": 3,
+        "lines_done": 0,
+        "lps": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "mode": "binary",
+        "stddev_ms": 2
+      },
+      "vector": {
+        "avg_lps": 118153,
+        "avg_ms": 21159,
+        "iterations": 3,
+        "lines_done": 2500000,
+        "lps": [
+          114547.53722794961,
+          119474.31302270011,
+          120609.80316480123
+        ],
+        "mode": "binary",
+        "stddev_ms": 585
+      }
+    },
+    "json_parse": {
+      "filebeat": {
+        "avg_lps": 50112,
+        "avg_ms": 99816,
+        "iterations": 3,
+        "lines_done": 5002002,
+        "lps": [
+          51283.05715251945,
+          52262.100103468816,
+          47098.222021320675
+        ],
+        "mode": "binary",
+        "stddev_ms": 5599
+      },
+      "logfwd": {
+        "avg_lps": 884330,
+        "avg_ms": 5654,
+        "iterations": 6,
+        "lines_done": 5000000,
+        "lps": [
+          925240.562546262,
+          876424.1893076248,
+          891901.5340706386,
+          876577.840112202,
+          876424.1893076248,
+          861474.8449345279
+        ],
+        "mode": "binary",
+        "stddev_ms": 138
+      },
+      "otelcol": {
+        "avg_lps": 0,
+        "avg_ms": 120034,
+        "iterations": 3,
+        "lines_done": 0,
+        "lps": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "mode": "binary",
+        "stddev_ms": 1
+      },
+      "vector": {
+        "avg_lps": 207305,
+        "avg_ms": 24119,
+        "iterations": 3,
+        "lines_done": 5000000,
+        "lps": [
+          201954.92366103886,
+          208785.70235510272,
+          211407.55147773877
+        ],
+        "mode": "binary",
+        "stddev_ms": 573
+      }
+    },
+    "passthrough": {
+      "filebeat": {
+        "avg_lps": 52237,
+        "avg_ms": 95751,
+        "iterations": 3,
+        "lines_done": 5001764,
+        "lps": [
+          54561.789664274336,
+          51522.85110985219,
+          50776.89441246053
+        ],
+        "mode": "binary",
+        "stddev_ms": 3593
+      },
+      "logfwd": {
+        "avg_lps": 892220,
+        "avg_ms": 5604,
+        "iterations": 6,
+        "lines_done": 5000000,
+        "lps": [
+          942151.874882231,
+          942507.0688030161,
+          908430.2325581396,
+          846883.4688346883,
+          861474.8449345279,
+          861474.8449345279
+        ],
+        "mode": "binary",
+        "stddev_ms": 267
+      },
+      "otelcol": {
+        "avg_lps": 0,
+        "avg_ms": 120026,
+        "iterations": 3,
+        "lines_done": 0,
+        "lps": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "mode": "binary",
+        "stddev_ms": 1
+      },
+      "vector": {
+        "avg_lps": 241663,
+        "avg_ms": 20690,
+        "iterations": 3,
+        "lines_done": 5000000,
+        "lps": [
+          237766.89333777165,
+          243664.7173489279,
+          243640.97066562716
+        ],
+        "mode": "binary",
+        "stddev_ms": 293
+      },
+      "vlagent": {
+        "avg_lps": 14680,
+        "avg_ms": 18116,
+        "iterations": 1,
+        "lines_done": 265937,
+        "lps": [
+          14679.67542503864
+        ],
+        "mode": "binary",
+        "stddev_ms": 0
+      }
+    }
+  }
+}
