@@ -26,7 +26,7 @@ and WASM (SIMD128). Scalar fallback on other targets.
 Our pattern: load 64 bytes, compare against needle, extract u64 bitmask.
 
 ```rust
-use wide::{u8x32, CmpEq};
+use wide::u8x16;
 
 /// Detect one character in a 64-byte block. Returns u64 bitmask.
 #[inline(always)]
@@ -34,7 +34,7 @@ fn mask64(block: &[u8; 64], needle: u8) -> u64 {
     let n = u8x32::splat(needle);
     let lo = u8x32::from(*<&[u8; 32]>::try_from(&block[..32]).unwrap());
     let hi = u8x32::from(*<&[u8; 32]>::try_from(&block[32..]).unwrap());
-    (lo.cmp_eq(n).to_bitmask() as u64) | ((hi.cmp_eq(n).to_bitmask() as u64) << 32)
+    (lo.simd_eq(n).to_bitmask() as u64) | ((hi.simd_eq(n).to_bitmask() as u64) << 32)
 }
 
 /// Detect all 10 structural characters. One function, all platforms.
@@ -95,9 +95,9 @@ let needle = u8x32::splat(b'"');
 
 ### Comparison
 ```rust
-use wide::CmpEq;  // trait import needed
+// simd_eq is an inherent method, no trait import needed
 
-let mask = data.cmp_eq(needle);  // returns u8x32 (0xFF matched, 0x00 not)
+let mask = data.simd_eq(needle);  // returns u8x32 (0xFF matched, 0x00 not)
 ```
 
 ### Bitmask extraction
@@ -124,7 +124,7 @@ hand-rolled intrinsics.
 
 On x86_64 + AVX2:
 ```
-wide:   u8x32::cmp_eq() → _mm256_cmpeq_epi8 → vpcmpeqb
+wide:   u8x32::simd_eq() → _mm256_cmpeq_epi8 → vpcmpeqb
 hand:   _mm256_cmpeq_epi8() → vpcmpeqb
 ```
 Same instruction, same registers, same codegen.
