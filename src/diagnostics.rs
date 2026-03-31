@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
@@ -118,6 +119,11 @@ pub struct DiagnosticsServer {
     pipelines: Vec<Arc<PipelineMetrics>>,
     start_time: Instant,
     bind_addr: String,
+    config_yaml: String,
+    config_path: String,
+    /// Previous CPU time reading for delta computation (diagnostics thread only).
+    prev_cpu_us: Cell<u64>,
+    prev_cpu_instant: Cell<Instant>,
 }
 
 impl DiagnosticsServer {
@@ -126,7 +132,16 @@ impl DiagnosticsServer {
             pipelines: Vec::new(),
             start_time: Instant::now(),
             bind_addr: bind_addr.to_string(),
+            config_yaml: String::new(),
+            config_path: String::new(),
+            prev_cpu_us: Cell::new(0),
+            prev_cpu_instant: Cell::new(Instant::now()),
         }
+    }
+
+    pub fn set_config(&mut self, path: &str, yaml: &str) {
+        self.config_path = path.to_string();
+        self.config_yaml = yaml.to_string();
     }
 
     pub fn add_pipeline(&mut self, metrics: Arc<PipelineMetrics>) {
@@ -159,6 +174,8 @@ impl DiagnosticsServer {
             "/" => self.serve_dashboard(request),
             "/health" => self.serve_health(request),
             "/api/pipelines" => self.serve_pipelines(request),
+            "/api/system" => self.serve_system(request),
+            "/api/config" => self.serve_config(request),
             "/metrics" => self.serve_metrics(request),
             _ => {
                 let resp = tiny_http::Response::from_string("not found")
@@ -271,6 +288,48 @@ impl DiagnosticsServer {
             VERSION,
         );
 
+        let resp = tiny_http::Response::from_string(body).with_header(
+            tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+        );
+        request.respond(resp)?;
+        Ok(())
+    }
+
+    fn serve_system(
+        &self,
+        request: tiny_http::Request,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let uptime = self.start_time.elapsed().as_secs();
+        let pid = std::process::id();
+        let sys = collect_system_stats(&self.prev_cpu_us, &self.prev_cpu_instant);
+
+        let body = format!(
+            r#"{{"uptime_seconds":{},"version":"{}","pid":{},"cpu_percent":{},"rss_bytes":{},"num_threads":{},"disk_read_bytes":{},"disk_write_bytes":{}}}"#,
+            uptime,
+            VERSION,
+            pid,
+            format_f64(sys.cpu_percent),
+            sys.rss_bytes,
+            sys.num_threads,
+            sys.disk_read_bytes,
+            sys.disk_write_bytes,
+        );
+        let resp = tiny_http::Response::from_string(body).with_header(
+            tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+        );
+        request.respond(resp)?;
+        Ok(())
+    }
+
+    fn serve_config(
+        &self,
+        request: tiny_http::Request,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let body = format!(
+            r#"{{"path":"{}","raw_yaml":"{}"}}"#,
+            esc(&self.config_path),
+            esc(&self.config_yaml),
+        );
         let resp = tiny_http::Response::from_string(body).with_header(
             tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
         );
@@ -412,6 +471,99 @@ fn esc(s: &str) -> String {
         }
     }
     out
+}
+
+fn format_f64(v: f64) -> String {
+    if v.is_nan() || v.is_infinite() {
+        "null".to_string()
+    } else {
+        format!("{:.1}", v)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// System stats (platform-specific, no new deps)
+// ---------------------------------------------------------------------------
+
+struct SystemStats {
+    cpu_percent: f64,
+    rss_bytes: u64,
+    num_threads: u64,
+    disk_read_bytes: u64,
+    disk_write_bytes: u64,
+}
+
+/// Collect system stats using getrusage (macOS + Linux).
+/// CPU% is computed as delta since last call.
+fn collect_system_stats(prev_cpu_us: &Cell<u64>, prev_cpu_instant: &Cell<Instant>) -> SystemStats {
+    let mut stats = SystemStats {
+        cpu_percent: 0.0,
+        rss_bytes: 0,
+        num_threads: 0,
+        disk_read_bytes: 0,
+        disk_write_bytes: 0,
+    };
+
+    #[cfg(unix)]
+    {
+        // getrusage for CPU time and RSS
+        unsafe {
+            let mut usage: libc::rusage = std::mem::zeroed();
+            if libc::getrusage(libc::RUSAGE_SELF, &mut usage) == 0 {
+                // CPU time in microseconds
+                let cpu_us = (usage.ru_utime.tv_sec as u64) * 1_000_000
+                    + (usage.ru_utime.tv_usec as u64)
+                    + (usage.ru_stime.tv_sec as u64) * 1_000_000
+                    + (usage.ru_stime.tv_usec as u64);
+
+                let prev = prev_cpu_us.get();
+                let prev_instant = prev_cpu_instant.get();
+                let wall_us = prev_instant.elapsed().as_micros() as u64;
+
+                if prev > 0 && wall_us > 0 {
+                    let delta_cpu = cpu_us.saturating_sub(prev);
+                    stats.cpu_percent = delta_cpu as f64 / wall_us as f64 * 100.0;
+                }
+
+                prev_cpu_us.set(cpu_us);
+                prev_cpu_instant.set(Instant::now());
+
+                // RSS: on macOS ru_maxrss is bytes, on Linux it's KB
+                #[cfg(target_os = "macos")]
+                {
+                    stats.rss_bytes = usage.ru_maxrss as u64;
+                }
+                #[cfg(target_os = "linux")]
+                {
+                    stats.rss_bytes = (usage.ru_maxrss as u64) * 1024;
+                }
+            }
+        }
+    }
+
+    // Linux-specific: /proc/self for threads and disk I/O
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
+            for line in status.lines() {
+                if let Some(rest) = line.strip_prefix("Threads:") {
+                    stats.num_threads = rest.trim().parse().unwrap_or(0);
+                }
+            }
+        }
+        if let Ok(io) = std::fs::read_to_string("/proc/self/io") {
+            for line in io.lines() {
+                if let Some(rest) = line.strip_prefix("read_bytes: ") {
+                    stats.disk_read_bytes = rest.trim().parse().unwrap_or(0);
+                }
+                if let Some(rest) = line.strip_prefix("write_bytes: ") {
+                    stats.disk_write_bytes = rest.trim().parse().unwrap_or(0);
+                }
+            }
+        }
+    }
+
+    stats
 }
 
 // ---------------------------------------------------------------------------
@@ -598,5 +750,50 @@ mod tests {
 
         let (status, _body) = http_get(port, "/nonexistent");
         assert_eq!(status, 404);
+    }
+
+    #[test]
+    fn test_system_endpoint() {
+        let port = free_port();
+        let server = server_with_test_pipeline(port);
+        let _handle = server.start();
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        let (status, body) = http_get(port, "/api/system");
+        assert_eq!(status, 200);
+        assert!(body.contains(r#""uptime_seconds":"#), "body: {}", body);
+        assert!(body.contains(r#""pid":"#), "body: {}", body);
+        assert!(body.contains(r#""rss_bytes":"#), "body: {}", body);
+        assert!(body.contains(r#""cpu_percent":"#), "body: {}", body);
+    }
+
+    #[test]
+    fn test_config_endpoint() {
+        let port = free_port();
+        let mut server = server_with_test_pipeline(port);
+        server.set_config("/etc/logfwd/test.yaml", "input:\n  type: file\n  path: /tmp/x.log\n");
+        let _handle = server.start();
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        let (status, body) = http_get(port, "/api/config");
+        assert_eq!(status, 200);
+        assert!(body.contains(r#""path":"/etc/logfwd/test.yaml""#), "body: {}", body);
+        assert!(body.contains("raw_yaml"), "body: {}", body);
+        assert!(body.contains("file"), "body: {}", body);
+    }
+
+    #[test]
+    fn test_config_endpoint_empty() {
+        let port = free_port();
+        let server = server_with_test_pipeline(port);
+        let _handle = server.start();
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        let (status, body) = http_get(port, "/api/config");
+        assert_eq!(status, 200);
+        assert!(body.contains(r#""path":"""#), "body: {}", body);
     }
 }

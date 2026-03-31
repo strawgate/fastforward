@@ -1986,6 +1986,7 @@ dependencies = [
  "crossbeam-channel",
  "datafusion",
  "dhat",
+ "libc",
  "memchr",
  "notify",
  "rand 0.9.2",

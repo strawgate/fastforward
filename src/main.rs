@@ -136,7 +136,8 @@ fn main() -> io::Result<()> {
         let validate_only = args.iter().any(|a| a == "--validate");
         let dry_run = args.iter().any(|a| a == "--dry-run");
 
-        let config = logfwd::config::Config::load(config_path)
+        let config_yaml = std::fs::read_to_string(config_path)?;
+        let config = logfwd::config::Config::load_str(&config_yaml)
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
 
         if validate_only {
@@ -144,7 +145,7 @@ fn main() -> io::Result<()> {
             return Ok(());
         }
 
-        return run_v2_pipelines(config, dry_run);
+        return run_v2_pipelines(config, config_path, &config_yaml, dry_run);
     }
 
     // Handle --daemon mode
@@ -434,7 +435,7 @@ fn run_blackhole(addr: &str) -> io::Result<()> {
     Ok(())
 }
 
-fn run_v2_pipelines(config: logfwd::config::Config, dry_run: bool) -> io::Result<()> {
+fn run_v2_pipelines(config: logfwd::config::Config, config_path: &str, config_yaml: &str, dry_run: bool) -> io::Result<()> {
     use logfwd::diagnostics::DiagnosticsServer;
     use logfwd::pipeline_v2::Pipeline;
 
@@ -457,6 +458,7 @@ fn run_v2_pipelines(config: logfwd::config::Config, dry_run: bool) -> io::Result
     // Start diagnostics server if configured.
     let _diag_handle = if let Some(ref addr) = config.server.diagnostics {
         let mut server = DiagnosticsServer::new(addr);
+        server.set_config(config_path, config_yaml);
         for p in &pipelines {
             server.add_pipeline(Arc::clone(p.metrics()));
         }

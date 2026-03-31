@@ -2,136 +2,612 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>logfwd dashboard</title>
 <style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
-         background: #0d1117; color: #c9d1d9; padding: 24px; }
-  h1 { font-size: 20px; margin-bottom: 16px; color: #58a6ff; }
-  h2 { font-size: 16px; margin: 16px 0 8px; color: #8b949e; }
-  .pipeline { background: #161b22; border: 1px solid #30363d; border-radius: 6px;
-              padding: 16px; margin-bottom: 16px; }
-  .pipeline-name { font-size: 18px; font-weight: 600; margin-bottom: 12px; color: #f0f6fc; }
-  table { width: 100%; border-collapse: collapse; margin-bottom: 12px; }
-  th, td { text-align: left; padding: 6px 12px; border-bottom: 1px solid #21262d; font-size: 13px; }
-  th { color: #8b949e; font-weight: 500; }
-  td { color: #c9d1d9; }
-  .num { text-align: right; font-variant-numeric: tabular-nums; }
-  .transform { background: #1c2333; border-radius: 4px; padding: 10px 14px; margin-bottom: 12px; }
-  .transform code { color: #79c0ff; font-size: 13px; }
-  .meta { font-size: 12px; color: #484f58; margin-top: 16px; }
-  .err { color: #f85149; }
-  .ok { color: #3fb950; }
-  #status { font-size: 12px; color: #484f58; position: fixed; top: 8px; right: 16px; }
+:root {
+  --bg: #0b0e14;
+  --panel: #151922;
+  --border: #1e2533;
+  --accent: #3b82f6;
+  --accent-dim: #1d4ed8;
+  --green: #22c55e;
+  --amber: #f59e0b;
+  --red: #ef4444;
+  --text: #e2e8f0;
+  --text2: #94a3b8;
+  --text3: #64748b;
+  --mono: 'SF Mono', 'Cascadia Code', 'Fira Code', 'Menlo', monospace;
+  --sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+html, body { height:100%; }
+body { font-family:var(--sans); background:var(--bg); color:var(--text); font-size:13px; overflow-x:hidden; }
+
+/* Top bar */
+.topbar { display:flex; align-items:center; gap:16px; padding:10px 20px; border-bottom:1px solid var(--border); background:var(--panel); position:sticky; top:0; z-index:100; }
+.topbar h1 { font-size:15px; font-weight:700; color:var(--accent); letter-spacing:0.5px; white-space:nowrap; }
+.topbar .tabs { display:flex; gap:2px; }
+.topbar .tab { padding:6px 14px; border-radius:6px; cursor:pointer; color:var(--text3); font-size:12px; font-weight:500; transition:all .15s; user-select:none; }
+.topbar .tab:hover { color:var(--text2); background:rgba(255,255,255,.04); }
+.topbar .tab.active { color:var(--text); background:rgba(59,130,246,.12); }
+.topbar .spacer { flex:1; }
+.topbar .status { font-size:11px; color:var(--text3); display:flex; align-items:center; gap:6px; }
+.topbar .dot { width:7px; height:7px; border-radius:50%; }
+.topbar .dot.ok { background:var(--green); box-shadow:0 0 6px var(--green); }
+.topbar .dot.err { background:var(--red); box-shadow:0 0 6px var(--red); }
+
+/* Status ribbon */
+.ribbon { display:flex; gap:24px; padding:8px 20px; border-bottom:1px solid var(--border); background:rgba(21,25,34,.7); font-size:11px; color:var(--text3); flex-wrap:wrap; }
+.ribbon .item { display:flex; align-items:center; gap:6px; }
+.ribbon .val { color:var(--text2); font-family:var(--mono); font-weight:500; }
+
+/* Tab content */
+.tab-content { display:none; padding:16px 20px; }
+.tab-content.active { display:block; }
+
+/* Panel */
+.panel { background:var(--panel); border:1px solid var(--border); border-radius:8px; padding:14px 16px; margin-bottom:14px; }
+.panel-title { font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:0.8px; color:var(--text3); margin-bottom:10px; }
+
+/* Charts grid */
+.charts-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(320px, 1fr)); gap:14px; margin-bottom:14px; }
+.chart-panel { background:var(--panel); border:1px solid var(--border); border-radius:8px; padding:12px 14px; }
+.chart-header { display:flex; justify-content:space-between; align-items:baseline; margin-bottom:8px; }
+.chart-label { font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:0.5px; color:var(--text3); }
+.chart-value { font-size:18px; font-weight:700; font-family:var(--mono); color:var(--text); }
+.chart-unit { font-size:11px; color:var(--text3); margin-left:3px; font-weight:400; }
+canvas.chart { width:100%; height:100px; display:block; border-radius:4px; }
+
+/* Pipeline cards */
+.pipeline-card { background:var(--panel); border:1px solid var(--border); border-radius:8px; padding:16px; margin-bottom:14px; }
+.pipeline-name { font-size:15px; font-weight:700; color:var(--text); margin-bottom:14px; display:flex; align-items:center; gap:8px; }
+.pipeline-name .badge { font-size:10px; font-weight:600; padding:2px 7px; border-radius:10px; background:rgba(59,130,246,.15); color:var(--accent); }
+
+/* Flow diagram */
+.flow { display:flex; align-items:center; gap:0; padding:16px 8px; overflow-x:auto; margin-bottom:14px; }
+.flow-node { flex-shrink:0; padding:10px 14px; border-radius:8px; border:1.5px solid; text-align:center; min-width:100px; position:relative; }
+.flow-node .fn-label { font-size:10px; font-weight:600; text-transform:uppercase; letter-spacing:0.5px; margin-bottom:2px; }
+.flow-node .fn-name { font-size:12px; font-weight:600; color:var(--text); }
+.flow-node .fn-stat { font-size:11px; font-family:var(--mono); color:var(--text2); margin-top:3px; }
+.flow-node.input { border-color:var(--green); background:rgba(34,197,94,.06); }
+.flow-node.input .fn-label { color:var(--green); }
+.flow-node.transform { border-color:var(--accent); background:rgba(59,130,246,.06); }
+.flow-node.transform .fn-label { color:var(--accent); }
+.flow-node.output { border-color:#a855f7; background:rgba(168,85,247,.06); }
+.flow-node.output .fn-label { color:#a855f7; }
+.flow-arrow { flex-shrink:0; width:32px; display:flex; align-items:center; justify-content:center; color:var(--text3); font-size:16px; }
+
+/* Stats table */
+table { width:100%; border-collapse:collapse; }
+th, td { text-align:left; padding:7px 10px; border-bottom:1px solid var(--border); font-size:12px; }
+th { color:var(--text3); font-weight:500; font-size:11px; text-transform:uppercase; letter-spacing:0.5px; }
+td { color:var(--text2); }
+td.num { text-align:right; font-family:var(--mono); font-variant-numeric:tabular-nums; }
+td.err { color:var(--red); }
+td.ok { color:var(--green); }
+
+/* SQL display */
+.sql-block { background:#0d1117; border:1px solid var(--border); border-radius:6px; padding:10px 14px; font-family:var(--mono); font-size:12px; color:#79c0ff; line-height:1.5; white-space:pre-wrap; word-break:break-word; margin-bottom:10px; }
+
+/* Config tab */
+.yaml-block { background:#0d1117; border:1px solid var(--border); border-radius:6px; padding:14px 16px; font-family:var(--mono); font-size:12px; line-height:1.6; white-space:pre-wrap; word-break:break-word; overflow-x:auto; max-height:70vh; overflow-y:auto; }
+.yaml-block .yk { color:#79c0ff; }
+.yaml-block .yv { color:var(--green); }
+.yaml-block .yn { color:var(--amber); }
+.yaml-block .yc { color:var(--text3); font-style:italic; }
+.yaml-block .yp { color:#a855f7; }
+
+/* Responsive */
+@media (max-width: 700px) {
+  .charts-grid { grid-template-columns:1fr; }
+  .flow { flex-wrap:wrap; gap:8px; }
+  .flow-arrow { width:auto; }
+}
 </style>
 </head>
 <body>
-<h1>logfwd diagnostics</h1>
-<div id="status">connecting...</div>
-<div id="root"></div>
-<div class="meta" id="meta"></div>
+
+<div class="topbar">
+  <h1>logfwd</h1>
+  <div class="tabs">
+    <div class="tab active" data-tab="overview">Overview</div>
+    <div class="tab" data-tab="pipelines">Pipelines</div>
+    <div class="tab" data-tab="config">Config</div>
+  </div>
+  <div class="spacer"></div>
+  <div class="status">
+    <span class="dot" id="statusDot"></span>
+    <span id="statusText">connecting...</span>
+  </div>
+</div>
+
+<div class="ribbon" id="ribbon"></div>
+
+<!-- Overview Tab -->
+<div class="tab-content active" id="tab-overview">
+  <div class="charts-grid" id="chartsGrid"></div>
+  <div id="pipelineSummaries"></div>
+</div>
+
+<!-- Pipelines Tab -->
+<div class="tab-content" id="tab-pipelines">
+  <div id="pipelineDetails"></div>
+</div>
+
+<!-- Config Tab -->
+<div class="tab-content" id="tab-config">
+  <div class="panel">
+    <div class="panel-title">Configuration</div>
+    <div id="configContent"><span style="color:var(--text3)">Loading...</span></div>
+  </div>
+</div>
+
 <script>
-(function() {
-  var prev = null;
-  var prevTime = null;
+(function(){
+"use strict";
 
-  function fmt(n) {
-    if (n == null) return "-";
-    if (n >= 1e9) return (n / 1e9).toFixed(2) + " G";
-    if (n >= 1e6) return (n / 1e6).toFixed(2) + " M";
-    if (n >= 1e3) return (n / 1e3).toFixed(1) + " K";
-    return String(n);
+// =========================================================================
+// Ring buffer for time-series data
+// =========================================================================
+function RingBuffer(cap) {
+  this.cap = cap;
+  this.buf = [];
+  this.head = 0;
+  this.len = 0;
+}
+RingBuffer.prototype.push = function(v) {
+  if (this.len < this.cap) {
+    this.buf.push(v);
+    this.len++;
+  } else {
+    this.buf[this.head] = v;
+  }
+  this.head = (this.head + 1) % this.cap;
+};
+RingBuffer.prototype.toArray = function() {
+  if (this.len < this.cap) return this.buf.slice();
+  return this.buf.slice(this.head).concat(this.buf.slice(0, this.head));
+};
+RingBuffer.prototype.last = function() {
+  if (this.len === 0) return null;
+  var i = (this.head - 1 + this.cap) % this.cap;
+  return this.buf[i];
+};
+
+// =========================================================================
+// Mini chart renderer
+// =========================================================================
+var chartRegistry = {};
+
+function MiniChart(canvasId, opts) {
+  this.canvas = document.getElementById(canvasId);
+  this.ctx = this.canvas.getContext("2d");
+  this.ring = new RingBuffer(opts.maxPoints || 300);
+  this.color = opts.color || "#3b82f6";
+  this.label = opts.label || "";
+  this.unit = opts.unit || "";
+  this.yMin = opts.yMin != null ? opts.yMin : 0;
+  this.yMax = opts.yMax || null;
+  this.lastVal = null;
+  chartRegistry[canvasId] = this;
+}
+
+MiniChart.prototype.add = function(val) {
+  this.ring.push({ t: Date.now(), v: val });
+  this.lastVal = val;
+};
+
+MiniChart.prototype.render = function() {
+  var c = this.canvas, ctx = this.ctx;
+  var dpr = window.devicePixelRatio || 1;
+  var w = c.offsetWidth, h = c.offsetHeight;
+  c.width = w * dpr; c.height = h * dpr;
+  ctx.scale(dpr, dpr);
+
+  var data = this.ring.toArray();
+  if (data.length < 2) {
+    ctx.fillStyle = "#1e2533";
+    ctx.fillRect(0, 0, w, h);
+    ctx.fillStyle = "#64748b";
+    ctx.font = "11px sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("waiting for data...", w/2, h/2);
+    return;
   }
 
-  function rate(cur, prevVal, dt) {
-    if (prevVal == null || dt <= 0) return "-";
-    var r = (cur - prevVal) / dt;
-    return fmt(Math.round(r)) + "/s";
+  // Compute Y range
+  var vals = data.map(function(d){ return d.v; });
+  var mn = this.yMin, mx = this.yMax;
+  if (mx === null) {
+    mx = Math.max.apply(null, vals) * 1.15;
+    if (mx === mn) mx = mn + 1;
   }
 
-  function findPrev(name) {
-    if (!prev) return null;
-    for (var i = 0; i < prev.pipelines.length; i++) {
-      if (prev.pipelines[i].name === name) return prev.pipelines[i];
+  // Background
+  ctx.fillStyle = "#0d1117";
+  ctx.fillRect(0, 0, w, h);
+
+  // Grid lines
+  ctx.strokeStyle = "#1e2533";
+  ctx.lineWidth = 0.5;
+  for (var g = 0; g < 4; g++) {
+    var gy = h - (h * (g / 3));
+    ctx.beginPath(); ctx.moveTo(0, gy); ctx.lineTo(w, gy); ctx.stroke();
+  }
+
+  // Y-axis labels
+  ctx.fillStyle = "#475569";
+  ctx.font = "9px " + getComputedStyle(document.body).getPropertyValue("--mono");
+  ctx.textAlign = "left";
+  for (var g = 0; g <= 3; g++) {
+    var yv = mn + (mx - mn) * (g / 3);
+    var gy = h - (h * (g / 3)) - 2;
+    ctx.fillText(fmtCompact(yv), 3, gy > 10 ? gy : 10);
+  }
+
+  // Line + fill
+  var padL = 0, padR = 0;
+  var dw = (w - padL - padR) / (data.length - 1);
+
+  ctx.beginPath();
+  for (var i = 0; i < data.length; i++) {
+    var x = padL + i * dw;
+    var y = h - ((data[i].v - mn) / (mx - mn)) * h;
+    if (y < 0) y = 0; if (y > h) y = h;
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+  ctx.strokeStyle = this.color;
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+
+  // Fill
+  ctx.lineTo(padL + (data.length - 1) * dw, h);
+  ctx.lineTo(padL, h);
+  ctx.closePath();
+  var grad = ctx.createLinearGradient(0, 0, 0, h);
+  grad.addColorStop(0, this.color + "30");
+  grad.addColorStop(1, this.color + "05");
+  ctx.fillStyle = grad;
+  ctx.fill();
+};
+
+// =========================================================================
+// Formatting helpers
+// =========================================================================
+function fmt(n) {
+  if (n == null) return "-";
+  if (n >= 1e9) return (n/1e9).toFixed(2) + " G";
+  if (n >= 1e6) return (n/1e6).toFixed(2) + " M";
+  if (n >= 1e3) return (n/1e3).toFixed(1) + " K";
+  return String(Math.round(n));
+}
+function fmtCompact(n) {
+  if (n >= 1e9) return (n/1e9).toFixed(1) + "G";
+  if (n >= 1e6) return (n/1e6).toFixed(1) + "M";
+  if (n >= 1e3) return (n/1e3).toFixed(0) + "K";
+  if (n >= 1) return n.toFixed(0);
+  if (n >= 0.01) return n.toFixed(2);
+  return n.toFixed(0);
+}
+function fmtBytes(b) {
+  if (b >= 1073741824) return (b/1073741824).toFixed(1) + " GB";
+  if (b >= 1048576) return (b/1048576).toFixed(1) + " MB";
+  if (b >= 1024) return (b/1024).toFixed(1) + " KB";
+  return b + " B";
+}
+function fmtRate(cur, prev, dt) {
+  if (prev == null || dt <= 0) return "-";
+  return fmt((cur - prev) / dt) + "/s";
+}
+function fmtDuration(s) {
+  if (s >= 86400) return Math.floor(s/86400) + "d " + Math.floor((s%86400)/3600) + "h";
+  if (s >= 3600) return Math.floor(s/3600) + "h " + Math.floor((s%3600)/60) + "m";
+  if (s >= 60) return Math.floor(s/60) + "m " + Math.floor(s%60) + "s";
+  return s + "s";
+}
+function esc(s) {
+  var d = document.createElement("div");
+  d.appendChild(document.createTextNode(s));
+  return d.innerHTML;
+}
+function pct(n, d) { return d > 0 ? (n / d * 100).toFixed(1) : "0.0"; }
+
+// =========================================================================
+// State
+// =========================================================================
+var state = {
+  prev: null,
+  prevTime: null,
+  prevSystem: null,
+  charts: {},
+  configLoaded: false,
+  configYaml: null,
+};
+
+var CHART_DEFS = [
+  { id: "c_lps",   label: "Lines / sec",    unit: "/s",  color: "#3b82f6" },
+  { id: "c_bps",   label: "Bytes / sec",    unit: "/s",  color: "#8b5cf6" },
+  { id: "c_errs",  label: "Errors / sec",   unit: "/s",  color: "#ef4444" },
+  { id: "c_cpu",   label: "CPU",            unit: "%",   color: "#f59e0b" },
+  { id: "c_rss",   label: "Memory (RSS)",   unit: "",    color: "#22c55e" },
+  { id: "c_disk",  label: "Disk Read / sec",unit: "/s",  color: "#06b6d4" },
+];
+
+// =========================================================================
+// Init charts
+// =========================================================================
+function initCharts() {
+  var grid = document.getElementById("chartsGrid");
+  grid.innerHTML = "";
+  CHART_DEFS.forEach(function(def) {
+    var div = document.createElement("div");
+    div.className = "chart-panel";
+    div.innerHTML =
+      '<div class="chart-header"><span class="chart-label">' + esc(def.label) + '</span>' +
+      '<span class="chart-value" id="' + def.id + '_val">-</span></div>' +
+      '<canvas class="chart" id="' + def.id + '"></canvas>';
+    grid.appendChild(div);
+    state.charts[def.id] = new MiniChart(def.id, { color: def.color, label: def.label, unit: def.unit, maxPoints: 300 });
+  });
+}
+
+// =========================================================================
+// Tab switching
+// =========================================================================
+document.querySelectorAll(".tab").forEach(function(tab) {
+  tab.addEventListener("click", function() {
+    document.querySelectorAll(".tab").forEach(function(t){ t.classList.remove("active"); });
+    document.querySelectorAll(".tab-content").forEach(function(c){ c.classList.remove("active"); });
+    tab.classList.add("active");
+    document.getElementById("tab-" + tab.dataset.tab).classList.add("active");
+    if (tab.dataset.tab === "config" && !state.configLoaded) loadConfig();
+    renderAllCharts();
+  });
+});
+
+// =========================================================================
+// Render
+// =========================================================================
+function setStatus(ok) {
+  var dot = document.getElementById("statusDot");
+  var txt = document.getElementById("statusText");
+  dot.className = "dot " + (ok ? "ok" : "err");
+  txt.textContent = ok ? "live" : "disconnected";
+}
+
+function renderRibbon(pipe, sys) {
+  var items = [];
+  if (sys) {
+    items.push('<div class="item">Uptime <span class="val">' + fmtDuration(sys.uptime_seconds) + '</span></div>');
+    items.push('<div class="item">Version <span class="val">' + esc(sys.version || "-") + '</span></div>');
+    if (sys.cpu_percent != null) items.push('<div class="item">CPU <span class="val">' + sys.cpu_percent.toFixed(1) + '%</span></div>');
+    if (sys.rss_bytes != null) items.push('<div class="item">RSS <span class="val">' + fmtBytes(sys.rss_bytes) + '</span></div>');
+    if (sys.pid) items.push('<div class="item">PID <span class="val">' + sys.pid + '</span></div>');
+    if (sys.num_threads) items.push('<div class="item">Threads <span class="val">' + sys.num_threads + '</span></div>');
+  }
+  if (pipe && pipe.pipelines) {
+    items.push('<div class="item">Pipelines <span class="val">' + pipe.pipelines.length + '</span></div>');
+    var totalIn = 0, totalOut = 0;
+    pipe.pipelines.forEach(function(p) {
+      totalIn += p.transform.lines_in || 0;
+      totalOut += p.transform.lines_out || 0;
+    });
+    items.push('<div class="item">Total lines <span class="val">' + fmt(totalIn) + '</span></div>');
+  }
+  document.getElementById("ribbon").innerHTML = items.join("");
+}
+
+function renderPipelineSummaries(data, dt) {
+  if (!data || !data.pipelines) return;
+  var html = "";
+  data.pipelines.forEach(function(p) {
+    var pp = findPrev(p.name);
+    html += '<div class="pipeline-card">';
+    html += '<div class="pipeline-name">' + esc(p.name) + ' <span class="badge">' + p.inputs.length + ' in / ' + p.outputs.length + ' out</span></div>';
+    // Flow diagram
+    html += '<div class="flow">';
+    p.inputs.forEach(function(inp, i) {
+      if (i > 0) html += '<div class="flow-arrow"></div>';
+      html += '<div class="flow-node input"><div class="fn-label">input</div><div class="fn-name">' + esc(inp.name) + '</div><div class="fn-stat">' + fmt(inp.lines_total) + ' lines</div></div>';
+    });
+    html += '<div class="flow-arrow">\u2192</div>';
+    html += '<div class="flow-node transform"><div class="fn-label">transform</div><div class="fn-name">SQL</div><div class="fn-stat">' + fmt(p.transform.lines_in) + ' \u2192 ' + fmt(p.transform.lines_out) + '</div><div class="fn-stat" style="color:var(--amber)">drop ' + (p.transform.filter_drop_rate * 100).toFixed(1) + '%</div></div>';
+    html += '<div class="flow-arrow">\u2192</div>';
+    p.outputs.forEach(function(out, i) {
+      if (i > 0) html += '<div class="flow-arrow"></div>';
+      var errCls = out.errors > 0 ? "color:var(--red)" : "";
+      html += '<div class="flow-node output"><div class="fn-label">output</div><div class="fn-name">' + esc(out.name) + '</div><div class="fn-stat">' + fmt(out.lines_total) + ' lines</div>' + (out.errors > 0 ? '<div class="fn-stat" style="' + errCls + '">' + out.errors + ' errors</div>' : '') + '</div>';
+    });
+    html += '</div>';
+    // SQL
+    if (p.transform && p.transform.sql) {
+      html += '<div class="sql-block">' + esc(p.transform.sql) + '</div>';
     }
-    return null;
+    html += '</div>';
+  });
+  document.getElementById("pipelineSummaries").innerHTML = html;
+}
+
+function renderPipelineDetails(data, dt) {
+  if (!data || !data.pipelines) return;
+  var html = "";
+  data.pipelines.forEach(function(p) {
+    var pp = findPrev(p.name);
+    html += '<div class="pipeline-card">';
+    html += '<div class="pipeline-name">' + esc(p.name) + '</div>';
+
+    // Inputs table
+    html += '<div class="panel"><div class="panel-title">Inputs</div><table><tr><th>Name</th><th>Type</th><th style="text-align:right">Lines</th><th style="text-align:right">Bytes</th><th style="text-align:right">Rate</th><th style="text-align:right">Errors</th></tr>';
+    p.inputs.forEach(function(inp) {
+      var pinp = pp ? findComponent(pp.inputs, inp.name) : null;
+      html += '<tr><td>' + esc(inp.name) + '</td><td>' + esc(inp.type) + '</td>';
+      html += '<td class="num">' + fmt(inp.lines_total) + '</td>';
+      html += '<td class="num">' + fmtBytes(inp.bytes_total) + '</td>';
+      html += '<td class="num">' + fmtRate(inp.lines_total, pinp ? pinp.lines_total : null, dt) + '</td>';
+      html += '<td class="num ' + (inp.errors > 0 ? 'err' : 'ok') + '">' + inp.errors + '</td></tr>';
+    });
+    html += '</table></div>';
+
+    // Transform
+    html += '<div class="panel"><div class="panel-title">Transform</div>';
+    html += '<div class="sql-block">' + esc(p.transform.sql || "SELECT * FROM logs") + '</div>';
+    html += '<table><tr><th>Lines In</th><th>Lines Out</th><th>Drop Rate</th></tr>';
+    html += '<tr><td class="num">' + fmt(p.transform.lines_in) + '</td><td class="num">' + fmt(p.transform.lines_out) + '</td><td class="num">' + (p.transform.filter_drop_rate * 100).toFixed(1) + '%</td></tr>';
+    html += '</table></div>';
+
+    // Outputs table
+    html += '<div class="panel"><div class="panel-title">Outputs</div><table><tr><th>Name</th><th>Type</th><th style="text-align:right">Lines</th><th style="text-align:right">Bytes</th><th style="text-align:right">Rate</th><th style="text-align:right">Errors</th></tr>';
+    p.outputs.forEach(function(out) {
+      var pout = pp ? findComponent(pp.outputs, out.name) : null;
+      html += '<tr><td>' + esc(out.name) + '</td><td>' + esc(out.type) + '</td>';
+      html += '<td class="num">' + fmt(out.lines_total) + '</td>';
+      html += '<td class="num">' + fmtBytes(out.bytes_total) + '</td>';
+      html += '<td class="num">' + fmtRate(out.lines_total, pout ? pout.lines_total : null, dt) + '</td>';
+      html += '<td class="num ' + (out.errors > 0 ? 'err' : 'ok') + '">' + out.errors + '</td></tr>';
+    });
+    html += '</table></div>';
+
+    html += '</div>';
+  });
+  document.getElementById("pipelineDetails").innerHTML = html;
+}
+
+function findPrev(name) {
+  if (!state.prev || !state.prev.pipelines) return null;
+  for (var i = 0; i < state.prev.pipelines.length; i++) {
+    if (state.prev.pipelines[i].name === name) return state.prev.pipelines[i];
+  }
+  return null;
+}
+function findComponent(arr, name) {
+  if (!arr) return null;
+  for (var i = 0; i < arr.length; i++) {
+    if (arr[i].name === name) return arr[i];
+  }
+  return null;
+}
+
+function renderAllCharts() {
+  Object.keys(state.charts).forEach(function(id) {
+    state.charts[id].render();
+  });
+}
+
+function updateCharts(pipe, sys, dt) {
+  var c = state.charts;
+  // Lines/sec
+  if (pipe && state.prev && dt > 0) {
+    var totalIn = 0, prevIn = 0;
+    pipe.pipelines.forEach(function(p){ totalIn += p.transform.lines_in || 0; });
+    state.prev.pipelines.forEach(function(p){ prevIn += p.transform.lines_in || 0; });
+    var lps = (totalIn - prevIn) / dt;
+    c.c_lps.add(Math.max(0, lps));
+    document.getElementById("c_lps_val").innerHTML = fmt(lps) + '<span class="chart-unit">/s</span>';
+
+    var totalBytes = 0, prevBytes = 0;
+    pipe.pipelines.forEach(function(p){ p.inputs.forEach(function(i){ totalBytes += i.bytes_total || 0; }); });
+    state.prev.pipelines.forEach(function(p){ p.inputs.forEach(function(i){ prevBytes += i.bytes_total || 0; }); });
+    var bps = (totalBytes - prevBytes) / dt;
+    c.c_bps.add(Math.max(0, bps));
+    document.getElementById("c_bps_val").innerHTML = fmtBytes(bps) + '<span class="chart-unit">/s</span>';
+
+    var totalErrs = 0, prevErrs = 0;
+    pipe.pipelines.forEach(function(p){ p.outputs.forEach(function(o){ totalErrs += o.errors || 0; }); });
+    state.prev.pipelines.forEach(function(p){ p.outputs.forEach(function(o){ prevErrs += o.errors || 0; }); });
+    var eps = (totalErrs - prevErrs) / dt;
+    c.c_errs.add(Math.max(0, eps));
+    document.getElementById("c_errs_val").innerHTML = fmt(eps) + '<span class="chart-unit">/s</span>';
   }
 
-  function render(data) {
+  // System stats
+  if (sys) {
+    if (sys.cpu_percent != null) {
+      c.c_cpu.add(sys.cpu_percent);
+      document.getElementById("c_cpu_val").innerHTML = sys.cpu_percent.toFixed(1) + '<span class="chart-unit">%</span>';
+    }
+    if (sys.rss_bytes != null) {
+      c.c_rss.add(sys.rss_bytes);
+      document.getElementById("c_rss_val").innerHTML = fmtBytes(sys.rss_bytes);
+    }
+    if (sys.disk_read_bytes != null && state.prevSystem && dt > 0) {
+      var dr = (sys.disk_read_bytes - (state.prevSystem.disk_read_bytes || 0)) / dt;
+      c.c_disk.add(Math.max(0, dr));
+      document.getElementById("c_disk_val").innerHTML = fmtBytes(dr) + '<span class="chart-unit">/s</span>';
+    }
+  }
+
+  renderAllCharts();
+}
+
+// =========================================================================
+// Config tab
+// =========================================================================
+function loadConfig() {
+  fetch("/api/config").then(function(r){ return r.json(); }).then(function(data) {
+    state.configLoaded = true;
+    state.configYaml = data.raw_yaml || "";
+    var el = document.getElementById("configContent");
+    if (data.path) {
+      el.innerHTML = '<div style="margin-bottom:10px;font-size:11px;color:var(--text3)">Source: <span style="color:var(--text2);font-family:var(--mono)">' + esc(data.path) + '</span></div>';
+    } else {
+      el.innerHTML = '';
+    }
+    el.innerHTML += '<div class="yaml-block">' + highlightYaml(data.raw_yaml || "(no config)") + '</div>';
+  }).catch(function() {
+    document.getElementById("configContent").innerHTML = '<span style="color:var(--text3)">Could not load config (endpoint not available)</span>';
+    state.configLoaded = true;
+  });
+}
+
+function highlightYaml(yaml) {
+  return esc(yaml).replace(/^(\s*)([\w._-]+)(:)/gm, function(m, ws, key, colon) {
+    return ws + '<span class="yk">' + key + '</span>' + colon;
+  }).replace(/:\s+(&quot;[^]*?&quot;|'[^]*?')/g, function(m, val) {
+    return ': <span class="yv">' + val + '</span>';
+  }).replace(/:\s+(\d+(?:\.\d+)?)\s*$/gm, function(m, num) {
+    return ': <span class="yn">' + num + '</span>';
+  }).replace(/:\s+(true|false)\s*$/gm, function(m, b) {
+    return ': <span class="yn">' + b + '</span>';
+  }).replace(/(#.*)$/gm, function(m, comment) {
+    return '<span class="yc">' + comment + '</span>';
+  }).replace(/(\|)/g, '<span class="yp">$1</span>');
+}
+
+// =========================================================================
+// Polling
+// =========================================================================
+function poll() {
+  var pipeP = fetch("/api/pipelines").then(function(r){ return r.json(); });
+  var sysP = fetch("/api/system").then(function(r){ return r.json(); }).catch(function(){ return null; });
+
+  Promise.all([pipeP, sysP]).then(function(results) {
+    var pipe = results[0], sys = results[1];
+    setStatus(true);
+
     var now = Date.now();
-    var dt = prevTime ? (now - prevTime) / 1000 : 0;
-    var html = "";
-    for (var i = 0; i < data.pipelines.length; i++) {
-      var p = data.pipelines[i];
-      var pp = findPrev(p.name);
-      html += '<div class="pipeline"><div class="pipeline-name">' + esc(p.name) + '</div>';
+    var dt = state.prevTime ? (now - state.prevTime) / 1000 : 0;
 
-      // Inputs
-      html += '<h2>Inputs</h2><table><tr><th>Name</th><th>Type</th><th class="num">Lines</th><th class="num">Bytes</th><th class="num">Rate</th><th class="num">Errors</th></tr>';
-      for (var j = 0; j < p.inputs.length; j++) {
-        var inp = p.inputs[j];
-        var pinp = pp && pp.inputs[j] ? pp.inputs[j] : null;
-        var errCls = inp.errors > 0 ? "num err" : "num ok";
-        html += '<tr><td>' + esc(inp.name) + '</td><td>' + esc(inp.type) + '</td>'
-          + '<td class="num">' + fmt(inp.lines_total) + '</td>'
-          + '<td class="num">' + fmt(inp.bytes_total) + '</td>'
-          + '<td class="num">' + rate(inp.lines_total, pinp ? pinp.lines_total : null, dt) + '</td>'
-          + '<td class="' + errCls + '">' + inp.errors + '</td></tr>';
-      }
-      html += '</table>';
+    renderRibbon(pipe, sys);
+    updateCharts(pipe, sys, dt);
+    renderPipelineSummaries(pipe, dt);
+    renderPipelineDetails(pipe, dt);
 
-      // Transform
-      html += '<h2>Transform</h2><div class="transform"><code>' + esc(p.transform.sql) + '</code><br>'
-        + '<span style="font-size:12px;color:#8b949e">in: ' + fmt(p.transform.lines_in)
-        + ' &rarr; out: ' + fmt(p.transform.lines_out)
-        + ' (drop ' + (p.transform.filter_drop_rate * 100).toFixed(1) + '%)</span></div>';
+    state.prev = pipe;
+    state.prevTime = now;
+    state.prevSystem = sys;
+  }).catch(function() {
+    setStatus(false);
+  });
+}
 
-      // Outputs
-      html += '<h2>Outputs</h2><table><tr><th>Name</th><th>Type</th><th class="num">Lines</th><th class="num">Bytes</th><th class="num">Rate</th><th class="num">Errors</th></tr>';
-      for (var j = 0; j < p.outputs.length; j++) {
-        var out = p.outputs[j];
-        var pout = pp && pp.outputs[j] ? pp.outputs[j] : null;
-        var errCls = out.errors > 0 ? "num err" : "num ok";
-        html += '<tr><td>' + esc(out.name) + '</td><td>' + esc(out.type) + '</td>'
-          + '<td class="num">' + fmt(out.lines_total) + '</td>'
-          + '<td class="num">' + fmt(out.bytes_total) + '</td>'
-          + '<td class="num">' + rate(out.lines_total, pout ? pout.lines_total : null, dt) + '</td>'
-          + '<td class="' + errCls + '">' + out.errors + '</td></tr>';
-      }
-      html += '</table></div>';
-    }
-    document.getElementById("root").innerHTML = html;
-    if (data.system) {
-      document.getElementById("meta").textContent =
-        "uptime " + data.system.uptime_seconds + "s | version " + data.system.version;
-    }
-    prev = data;
-    prevTime = now;
-  }
+// =========================================================================
+// Boot
+// =========================================================================
+initCharts();
+poll();
+setInterval(poll, 2000);
 
-  function esc(s) {
-    var d = document.createElement("div");
-    d.appendChild(document.createTextNode(s));
-    return d.innerHTML;
-  }
-
-  function poll() {
-    var xhr = new XMLHttpRequest();
-    xhr.open("GET", "/api/pipelines");
-    xhr.onload = function() {
-      if (xhr.status === 200) {
-        document.getElementById("status").textContent = "live";
-        try { render(JSON.parse(xhr.responseText)); } catch(e) {}
-      }
-    };
-    xhr.onerror = function() {
-      document.getElementById("status").textContent = "disconnected";
-    };
-    xhr.send();
-  }
-
-  poll();
-  setInterval(poll, 1000);
 })();
 </script>
 </body>

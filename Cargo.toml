@@ -11,6 +11,7 @@ arrow = "54"
 crossbeam-channel = "0.5"
 datafusion = "45"
 dhat = { version = "0.3", optional = true }
+libc = "0.2"
 memchr = "2"
 notify = "7"
 serde = { version = "1", features = ["derive"] }
