@@ -12,7 +12,7 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 use logfwd_core::scan_config::ScanConfig;
-use logfwd_core::scanner::{SimdScanner, StreamingSimdScanner};
+use logfwd_arrow::scanner::{SimdScanner, StreamingSimdScanner};
 
 use arrow::array::{Array, AsArray};
 use arrow::datatypes::DataType;
@@ -20,10 +20,10 @@ use std::collections::BTreeSet;
 
 fuzz_target!(|data: &[u8]| {
     let mut storage_scanner = SimdScanner::new(ScanConfig::default());
-    let storage_batch = storage_scanner.scan(data);
+    let Ok(storage_batch) = storage_scanner.scan(data) else { return; };
 
     let mut streaming_scanner = StreamingSimdScanner::new(ScanConfig::default());
-    let streaming_batch = streaming_scanner.scan(bytes::Bytes::copy_from_slice(data));
+    let Ok(streaming_batch) = streaming_scanner.scan(bytes::Bytes::copy_from_slice(data)) else { return; };
 
     // Row counts must match.
     assert_eq!(

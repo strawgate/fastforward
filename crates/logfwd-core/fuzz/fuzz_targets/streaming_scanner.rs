@@ -11,7 +11,7 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 use logfwd_core::scan_config::ScanConfig;
-use logfwd_core::scanner::StreamingSimdScanner;
+use logfwd_arrow::scanner::StreamingSimdScanner;
 
 fn validate_batch(batch: &arrow::record_batch::RecordBatch, label: &str) {
     let num_rows = batch.num_rows();
@@ -36,7 +36,7 @@ fuzz_target!(|data: &[u8]| {
         validate_utf8: false,
     };
     let mut scanner = StreamingSimdScanner::new(config);
-    let batch = scanner.scan(bytes::Bytes::copy_from_slice(data));
+    let Ok(batch) = scanner.scan(bytes::Bytes::copy_from_slice(data)) else { return; };
     validate_batch(&batch, "streaming_extract_all");
 
     // Field pushdown mode.
@@ -56,6 +56,6 @@ fuzz_target!(|data: &[u8]| {
         validate_utf8: false,
     };
     let mut scanner2 = StreamingSimdScanner::new(config2);
-    let batch2 = scanner2.scan(bytes::Bytes::copy_from_slice(data));
+    let Ok(batch2) = scanner2.scan(bytes::Bytes::copy_from_slice(data)) else { return; };
     validate_batch(&batch2, "streaming_pushdown");
 });
