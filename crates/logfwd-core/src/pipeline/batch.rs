@@ -26,10 +26,9 @@ pub struct BatchId(pub u64);
 pub struct Queued;
 /// Batch is being sent to output sinks.
 pub struct Sending;
-/// Batch was successfully delivered.
-pub struct Delivered;
-/// Batch was permanently rejected (non-retriable error).
-pub struct Rejected;
+// Note: Delivered/Rejected are not typestate markers — ack()/reject()
+// return AckReceipt (a proof value), consuming the Sending ticket.
+// The state machine has only two ticket states: Queued and Sending.
 
 /// A batch ticket tracking the lifecycle of a data batch.
 ///
@@ -61,6 +60,7 @@ pub struct BatchTicket<S> {
 
 /// Proof that a batch was acknowledged. Returned by `ack()` and `reject()`.
 /// The pipeline uses this to advance the source's committed offset.
+#[must_use = "AckReceipt must be passed to apply_ack to advance the committed offset"]
 pub struct AckReceipt {
     /// Which batch was acked (used for in-flight tracking lookup).
     pub batch_id: BatchId,
@@ -285,6 +285,7 @@ mod verification {
 
     /// Multiple fail→retry cycles preserve identity and increment attempts.
     #[kani::proof]
+    #[kani::unwind(7)]
     fn verify_retry_sequence() {
         let id = BatchId(kani::any());
         let source = SourceId(kani::any());

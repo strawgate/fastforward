@@ -75,7 +75,9 @@ Extract run_async decisions into pure state machine in core.
     Replace ad-hoc offset tracking with PipelineMachine
     BatchTicket replaces implicit batch lifecycle
 
-5d: proptest random event sequences    → TODO
+5d: proptest random event sequences    ✅ DONE
+    3 property tests: offset monotonicity, final offset,
+    drain completion — random action sequences
 ```
 
 ## Phase 6: proptest state machines + CI hardening (#271)

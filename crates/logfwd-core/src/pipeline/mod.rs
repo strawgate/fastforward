@@ -14,5 +14,10 @@
 mod batch;
 mod lifecycle;
 
-pub use batch::*;
-pub use lifecycle::*;
+// Batch ticket types
+pub use batch::{AckReceipt, BatchId, BatchTicket, Queued, Sending, SourceId};
+
+// Pipeline lifecycle types
+pub use lifecycle::{
+    CommitAdvance, Draining, PipelineMachine, Running, Starting, Stopped,
+};

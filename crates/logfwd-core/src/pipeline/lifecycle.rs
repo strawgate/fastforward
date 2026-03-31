@@ -96,12 +96,20 @@ impl PipelineMachine<Running> {
     /// Create a new batch ticket for the given source.
     ///
     /// Assigns a unique BatchId and registers it in the in-flight set.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `end_offset <= start_offset`.
     pub fn create_batch(
         &mut self,
         source: SourceId,
         start_offset: u64,
         end_offset: u64,
     ) -> BatchTicket<Queued> {
+        assert!(
+            end_offset > start_offset,
+            "end_offset ({end_offset}) must be > start_offset ({start_offset})"
+        );
         let id = BatchId(self.next_batch_id);
         self.next_batch_id += 1;
 
@@ -140,6 +148,11 @@ impl PipelineMachine<Running> {
     }
 
     /// Number of in-flight batches across all sources.
+    ///
+    /// Includes batches that have been `fail()`ed and requeued — the
+    /// machine considers them in-flight until `apply_ack` is called with
+    /// a successful `AckReceipt`. Use this for backpressure (e.g. limit
+    /// concurrent sends) but note that retrying batches are counted.
     pub fn in_flight_count(&self) -> usize {
         self.in_flight.values().map(|m| m.len()).sum()
     }
@@ -223,16 +236,19 @@ impl PipelineMachine<Draining> {
 
     /// All batches drained — transition to Stopped.
     ///
-    /// Panics if there are still in-flight or pending batches.
-    pub fn stop(self) -> PipelineMachine<Stopped> {
-        debug_assert!(self.is_drained(), "cannot stop with in-flight batches");
-        PipelineMachine {
+    /// Returns `Err(self)` if there are still in-flight or pending batches,
+    /// preventing silent data loss in release builds.
+    pub fn stop(self) -> Result<PipelineMachine<Stopped>, Self> {
+        if !self.is_drained() {
+            return Err(self);
+        }
+        Ok(PipelineMachine {
             next_batch_id: self.next_batch_id,
             committed: self.committed,
             in_flight: BTreeMap::new(),
             pending_acks: BTreeMap::new(),
             _state: PhantomData,
-        }
+        })
     }
 
     /// Number of in-flight batches across all sources.
@@ -292,7 +308,7 @@ mod tests {
         // Drain and stop
         let draining = running.begin_drain();
         assert!(draining.is_drained());
-        let stopped = draining.stop();
+        let stopped = draining.stop().ok().expect("should be drained");
         assert_eq!(*stopped.final_offsets().get(&src).unwrap(), 2000);
     }
 
@@ -383,7 +399,7 @@ mod tests {
         assert_eq!(advance.new_offset, 1000);
         assert!(draining.is_drained());
 
-        let stopped = draining.stop();
+        let stopped = draining.stop().ok().expect("should be drained");
         assert_eq!(*stopped.final_offsets().get(&src).unwrap(), 1000);
     }
 
@@ -423,6 +439,41 @@ mod tests {
         // All three resolved — offset should be at 3000
         assert_eq!(advance.new_offset, 3000);
         assert_eq!(running.in_flight_count(), 0);
+    }
+
+    #[test]
+    fn stop_before_drained_returns_err() {
+        let machine = PipelineMachine::new();
+        let mut running = machine.start();
+        let src = SourceId(0);
+
+        let t1 = running.create_batch(src, 0, 1000);
+        let _s1 = t1.begin_send();
+
+        let draining = running.begin_drain();
+        assert!(!draining.is_drained());
+
+        // stop() returns Err because there's still an in-flight batch
+        let draining = draining.stop().err().expect("should fail: not drained");
+        assert_eq!(draining.in_flight_count(), 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "end_offset")]
+    fn create_batch_rejects_zero_size() {
+        let machine = PipelineMachine::new();
+        let mut running = machine.start();
+        // end_offset == start_offset should panic
+        let _ = running.create_batch(SourceId(0), 100, 100);
+    }
+
+    #[test]
+    #[should_panic(expected = "end_offset")]
+    fn create_batch_rejects_inverted() {
+        let machine = PipelineMachine::new();
+        let mut running = machine.start();
+        // end_offset < start_offset should panic
+        let _ = running.create_batch(SourceId(0), 200, 100);
     }
 
     #[test]
@@ -564,7 +615,7 @@ mod verification {
         draining.apply_ack(s1.ack());
 
         assert!(draining.is_drained());
-        let stopped = draining.stop();
+        let stopped = draining.stop().ok().expect("should be drained");
         assert_eq!(*stopped.final_offsets().get(&src).unwrap(), end);
     }
 
@@ -595,6 +646,57 @@ mod verification {
         // Now ack A
         running.apply_ack(sa.ack());
         assert_eq!(running.committed_offset(src_a), end_a);
+    }
+
+    /// Duplicate ack (same batch acked twice) does not regress offset.
+    #[kani::proof]
+    #[kani::unwind(3)]
+    fn verify_duplicate_ack_harmless() {
+        let machine = PipelineMachine::new();
+        let mut running = machine.start();
+        let src = SourceId(0);
+
+        let end: u64 = kani::any_where(|&x: &u64| x > 0 && x <= 1000);
+        let t1 = running.create_batch(src, 0, end);
+        let s1 = t1.begin_send();
+        let receipt = s1.ack();
+
+        // Legitimate ack
+        let a1 = running.apply_ack(receipt);
+        assert_eq!(a1.new_offset, end);
+
+        // Fabricate a duplicate receipt (same batch_id + source + end_offset)
+        let duplicate = AckReceipt {
+            batch_id: BatchId(0),
+            source: src,
+            end_offset: end,
+            delivered: true,
+        };
+        let a2 = running.apply_ack(duplicate);
+
+        // Offset must not regress
+        assert!(a2.new_offset >= a1.new_offset);
+        // And should still equal end (no spurious advancement)
+        assert_eq!(a2.new_offset, end);
+    }
+
+    /// stop() on a fully-drained machine preserves offsets.
+    #[kani::proof]
+    #[kani::unwind(3)]
+    fn verify_stop_preserves_offsets() {
+        let machine = PipelineMachine::new();
+        let mut running = machine.start();
+        let src = SourceId(0);
+
+        let end: u64 = kani::any_where(|&x: &u64| x > 0 && x <= 1000);
+        let t1 = running.create_batch(src, 0, end);
+        let s1 = t1.begin_send();
+        running.apply_ack(s1.ack());
+
+        let draining = running.begin_drain();
+        assert!(draining.is_drained());
+        let stopped = draining.stop().ok().expect("should be drained");
+        assert_eq!(*stopped.final_offsets().get(&src).unwrap(), end);
     }
 }
 
@@ -775,7 +877,7 @@ mod proptests {
             }
 
             prop_assert!(draining.is_drained());
-            let stopped = draining.stop();
+            let stopped = draining.stop().ok().expect("should be drained");
             prop_assert_eq!(*stopped.final_offsets().get(&src).unwrap(), offset);
         }
     }
