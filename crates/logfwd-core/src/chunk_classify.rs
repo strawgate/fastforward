@@ -189,8 +189,13 @@ impl ChunkIndex {
 // Escape detection (simdjson prefix_xor algorithm)
 // ---------------------------------------------------------------------------
 
+/// Compute unescaped quote positions from quote and backslash bitmasks.
+///
+/// `quote_bits` and `bs_bits` encode positions of `"` and `\` in a 64-byte
+/// block (bit `i` corresponds to byte `i`). `prev_odd_backslash` carries
+/// whether the previous block ended with an unescaped trailing backslash.
+/// Returns a bitmask of quote positions that are not escaped.
 #[inline]
-#[allow(dead_code)]
 pub fn compute_real_quotes(quote_bits: u64, bs_bits: u64, prev_odd_backslash: &mut u64) -> u64 {
     if bs_bits == 0 && *prev_odd_backslash == 0 {
         return quote_bits;
@@ -313,8 +318,10 @@ pub fn compute_real_quotes(quote_bits: u64, bs_bits: u64, prev_odd_backslash: &m
     quote_bits & !escaped
 }
 
+/// Compute an XOR prefix mask over all bits in `bitmask`.
+///
+/// Output bit `i` is the XOR of input bits in `0..=i`.
 #[inline(always)]
-#[allow(dead_code)]
 pub fn prefix_xor(mut bitmask: u64) -> u64 {
     bitmask ^= bitmask << 1;
     bitmask ^= bitmask << 2;
