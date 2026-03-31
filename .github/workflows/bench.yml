@@ -379,6 +379,7 @@ jobs:
         run: |
           SITE_DIR=_site
           BENCH_DIR="$SITE_DIR/bench"
+          export BENCH_DIR
           RUN_ID="${{ github.run_id }}"
           mkdir -p "$SITE_DIR"
 
@@ -395,6 +396,36 @@ jobs:
           # Dashboard data lives under /bench/data/.
           mkdir -p "$BENCH_DIR/data/runs" "$BENCH_DIR/data/rate-runs" "$BENCH_DIR/data/criterion-runs"
 
+          # Preserve historical bench data from the live site so this deploy
+          # accumulates runs rather than replacing them.
+          BASE_URL="https://strawgate.com/memagent/bench/data"
+          curl -sf "${BASE_URL}/index.json" -o "$BENCH_DIR/data/index.json" \
+            || echo '{"runs":[]}' > "$BENCH_DIR/data/index.json"
+
+          python3 - <<'PYEOF'
+          import json, subprocess, os
+
+          base = "https://strawgate.com/memagent/bench/data"
+          bench_dir = os.environ["BENCH_DIR"]
+
+          with open(f"{bench_dir}/data/index.json") as f:
+              index = json.load(f)
+
+          downloaded = 0
+          for run in index.get("runs", []):
+              run_id = run.get("id", "")
+              if not run_id:
+                  continue
+              for subdir in ("runs", "rate-runs", "criterion-runs"):
+                  url = f"{base}/{subdir}/{run_id}.json"
+                  dest = f"{bench_dir}/data/{subdir}/{run_id}.json"
+                  result = subprocess.run(["curl", "-sf", url, "-o", dest], capture_output=True)
+                  if result.returncode == 0:
+                      downloaded += 1
+
+          print(f"Preserved {downloaded} historical bench data files")
+          PYEOF
+
           # Add current run's competitive data.
           if [ -f dashboard-data.json ]; then
             cp dashboard-data.json "$BENCH_DIR/data/runs/${RUN_ID}.json"
@@ -410,7 +441,7 @@ jobs:
             cp micro/criterion-data.json "$BENCH_DIR/data/criterion-runs/${RUN_ID}.json"
           fi
 
-          # Update index.json.
+          # Update index.json — read the preserved index, add the current run entry.
           python3 -c "
           import json
           index_path = '$BENCH_DIR/data/index.json'
