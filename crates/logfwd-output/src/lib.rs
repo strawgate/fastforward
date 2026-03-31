@@ -7,14 +7,6 @@ mod otlp_sink;
 pub mod sink;
 mod stdout;
 
-// Placeholder sinks — not yet wired into build_output_sink.
-#[allow(dead_code)]
-mod elasticsearch;
-#[allow(dead_code)]
-mod loki;
-#[allow(dead_code)]
-mod parquet;
-
 pub use fanout::FanOut;
 pub use json_lines::JsonLinesSink;
 pub use otlp_sink::{OtlpProtocol, OtlpSink};
