@@ -40,36 +40,35 @@ env:
 
 jobs:
   # -------------------------------------------------------------------
-  # Build logfwd (release + dhat) and bench harness — unblocks matrix
+  # Restore pre-built binaries from CI cache (built on master push)
   # -------------------------------------------------------------------
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: mozilla-actions/sccache-action@v0.0.7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+
+      - name: Restore bench binaries from CI cache
+        id: cache-restore
+        uses: actions/cache/restore@v4
         with:
-          cache-on-failure: true
+          path: cached-bench-binaries
+          key: bench-binaries-${{ github.sha }}
+          restore-keys: bench-binaries-
 
-      - name: Build release + bench harness
-        env:
-          RUSTFLAGS: "-Ctarget-cpu=x86-64-v3"
+      - name: Verify binaries restored
         run: |
-          cargo build --release -p logfwd
-          cargo build --release -p logfwd-competitive-bench
-          cargo build --release --features dhat-heap -p logfwd
-          cp target/release/logfwd target/release/logfwd-dhat
-          cargo build --release -p logfwd
+          if [ ! -f cached-bench-binaries/logfwd ]; then
+            echo "::error::No cached binaries found. CI must run on master first."
+            exit 1
+          fi
+          chmod +x cached-bench-binaries/*
+          echo "Using cached binaries:"
+          ls -lh cached-bench-binaries/
 
-      - name: Upload binaries
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: bench-binaries
-          path: |
-            target/release/logfwd
-            target/release/logfwd-dhat
-            target/release/logfwd-competitive-bench
+          path: cached-bench-binaries/
           retention-days: 1
 
   # -------------------------------------------------------------------

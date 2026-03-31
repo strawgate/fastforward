@@ -94,8 +94,31 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/master' }}
 
+      # PRs: just check (fast). Master: full build + cache binaries for bench.
       - name: Release check
+        if: github.ref != 'refs/heads/master'
         run: cargo check --release
+
+      - name: Release build + cache bench binaries
+        if: github.ref == 'refs/heads/master'
+        env:
+          RUSTFLAGS: "-Ctarget-cpu=x86-64-v3"
+        run: |
+          cargo build --release -p logfwd -p logfwd-competitive-bench
+          cargo build --release --features dhat-heap -p logfwd
+          cp target/release/logfwd target/release/logfwd-dhat
+          cargo build --release -p logfwd
+          mkdir -p cached-bench-binaries
+          cp target/release/logfwd cached-bench-binaries/
+          cp target/release/logfwd-dhat cached-bench-binaries/
+          cp target/release/logfwd-competitive-bench cached-bench-binaries/
+
+      - name: Cache bench binaries
+        if: github.ref == 'refs/heads/master'
+        uses: actions/cache/save@v4
+        with:
+          path: cached-bench-binaries
+          key: bench-binaries-${{ github.sha }}
 
   cross-compile-arm64:
     name: Cross-compile check (ARM64)
