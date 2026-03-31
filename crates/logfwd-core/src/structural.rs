@@ -541,9 +541,9 @@ mod tests {
 
     #[test]
     fn classifier_handles_escapes() {
-        // {"k":"val\"ue"}  — escaped quote should not close the string
+        // {"k":"val\"ues"}  — escaped quote should not close the string
         let mut buf = [b' '; 64];
-        let json = br#"{"k":"val\"ue"}"#;
+        let json = br#"{"k":"val\"ues"}"#;
         buf[..json.len()].copy_from_slice(json);
         let block: &[u8; 64] = &buf;
 
