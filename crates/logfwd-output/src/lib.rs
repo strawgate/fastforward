@@ -184,7 +184,11 @@ pub(crate) fn write_row_json(batch: &RecordBatch, row: usize, cols: &[ColInfo], 
             "float" => {
                 let arr = arr.as_primitive::<arrow::datatypes::Float64Type>();
                 let v = arr.value(row);
-                let _ = Write::write_fmt(out, format_args!("{}", v));
+                if v.is_finite() {
+                    let _ = Write::write_fmt(out, format_args!("{}", v));
+                } else {
+                    out.extend_from_slice(b"null");
+                }
             }
             _ => {
                 // str or untyped — treat as string (Utf8 or Utf8View)
@@ -539,7 +543,12 @@ mod tests {
             DataType::Float64,
             true,
         )]));
-        let dur = Float64Array::from(vec![Some(3.25)]);
+        let dur = Float64Array::from(vec![
+            Some(3.25),
+            Some(f64::INFINITY),
+            Some(f64::NEG_INFINITY),
+            Some(f64::NAN),
+        ]);
         let batch = RecordBatch::try_new(schema, vec![Arc::new(dur)]).unwrap();
         let meta = make_metadata();
 
@@ -547,7 +556,13 @@ mod tests {
         let mut out: Vec<u8> = Vec::new();
         sink.write_batch_to(&batch, &meta, &mut out).unwrap();
         let output = String::from_utf8(out).unwrap();
-        assert!(output.contains("\"duration_ms\":3.25"), "got: {}", output);
+        let lines: Vec<&str> = output.trim().split('\n').collect();
+        assert_eq!(lines.len(), 4);
+        assert!(lines[0].contains("\"duration_ms\":3.25"), "got: {}", lines[0]);
+        // Non-finite values (inf, -inf, nan) must be emitted as null to be valid JSON.
+        assert!(lines[1].contains("\"duration_ms\":null"), "got: {}", lines[1]);
+        assert!(lines[2].contains("\"duration_ms\":null"), "got: {}", lines[2]);
+        assert!(lines[3].contains("\"duration_ms\":null"), "got: {}", lines[3]);
     }
 
     #[test]
