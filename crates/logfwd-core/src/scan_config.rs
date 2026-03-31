@@ -130,3 +130,96 @@ mod tests {
         assert_eq!(parse_float_fast(b"abc"), None);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Kani formal verification proofs
+// ---------------------------------------------------------------------------
+
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    /// Prove parse_int_fast never panics for any 8-byte input.
+    #[kani::proof]
+    #[kani::unwind(10)]
+    #[kani::solver(kissat)]
+    fn verify_parse_int_fast_no_panic_8bytes() {
+        let bytes: [u8; 8] = kani::any();
+        let len: usize = kani::any();
+        kani::assume(len <= 8);
+        let input = &bytes[..len];
+        let _ = parse_int_fast(input);
+
+        // If parser accepts input, decimal re-encode/re-parse must roundtrip.
+        if let Some(n) = parse_int_fast(input) {
+            let decimal = n.to_string();
+            assert!(
+                parse_int_fast(decimal.as_bytes()) == Some(n),
+                "roundtrip parse mismatch"
+            );
+        }
+    }
+
+    /// Prove parse_int_fast matches a reference i128 oracle for all
+    /// inputs up to 20 bytes.
+    ///
+    /// The oracle independently parses the input as i128, then checks:
+    /// - If the input is valid digits (optional minus + ASCII digits)
+    ///   AND the value fits in i64 → parse_int_fast must return Some(value)
+    /// - If the input is invalid or overflows i64 → parse_int_fast must
+    ///   return None
+    ///
+    /// This is a full behavioral equivalence proof, not just overflow
+    /// detection.
+    #[kani::proof]
+    #[kani::unwind(22)]
+    #[kani::solver(kissat)]
+    fn verify_parse_int_fast_vs_oracle() {
+        let bytes: [u8; 20] = kani::any();
+        let len: usize = kani::any();
+        kani::assume(len <= 20);
+
+        let input = &bytes[..len];
+        let result = parse_int_fast(input);
+
+        // Reference oracle: parse as i128 to detect i64 overflow
+        let expected = parse_int_oracle(input);
+
+        assert!(result == expected, "parse_int_fast disagrees with oracle");
+    }
+
+    /// Reference parser using i128 to avoid overflow.
+    /// Returns the same result parse_int_fast should return.
+    fn parse_int_oracle(bytes: &[u8]) -> Option<i64> {
+        if bytes.is_empty() {
+            return None;
+        }
+        let (neg, start) = if bytes[0] == b'-' {
+            (true, 1usize)
+        } else {
+            (false, 0usize)
+        };
+        if start >= bytes.len() {
+            return None;
+        }
+        let mut acc: i128 = 0;
+        let mut i = start;
+        while i < bytes.len() {
+            let b = bytes[i];
+            if !b.is_ascii_digit() {
+                return None;
+            }
+            acc = acc * 10 + (b - b'0') as i128;
+            i += 1;
+        }
+        if neg {
+            acc = -acc;
+        }
+        // Check i64 bounds
+        if acc < i64::MIN as i128 || acc > i64::MAX as i128 {
+            None
+        } else {
+            Some(acc as i64)
+        }
+    }
+}

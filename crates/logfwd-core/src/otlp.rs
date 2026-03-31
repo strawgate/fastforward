@@ -735,3 +735,316 @@ mod tests {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Kani formal verification proofs
+// ---------------------------------------------------------------------------
+
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    /// Prove varint_len matches encode_varint output length for ALL u64 values.
+    ///
+    /// This is the foundational wire format proof — if these disagree,
+    /// protobuf message size calculations are wrong and payloads are corrupt.
+    #[kani::proof]
+    #[kani::unwind(12)] // varint loop: max 10 iterations + overhead
+    #[kani::solver(kissat)]
+    fn verify_varint_len_matches_encode() {
+        let value: u64 = kani::any();
+        let mut buf = Vec::new();
+        encode_varint(&mut buf, value);
+        assert!(
+            buf.len() == varint_len(value),
+            "varint_len disagrees with encode_varint"
+        );
+    }
+
+    /// Prove encode_varint produces valid protobuf varint format for ALL u64.
+    ///
+    /// Properties:
+    /// 1. Length is 1-10 bytes
+    /// 2. All bytes except the last have the continuation bit (0x80) set
+    /// 3. The last byte does NOT have the continuation bit set
+    /// 4. Decoding the varint gives back the original value
+    #[kani::proof]
+    #[kani::unwind(12)]
+    #[kani::solver(kissat)]
+    fn verify_varint_format_and_roundtrip() {
+        let value: u64 = kani::any();
+        let mut buf = Vec::new();
+        encode_varint(&mut buf, value);
+
+        let len = buf.len();
+
+        // Property 1: length is 1-10
+        assert!(len >= 1 && len <= 10, "varint length out of range");
+
+        // Property 2: all bytes except last have continuation bit
+        let mut i = 0;
+        while i < len - 1 {
+            assert!(buf[i] & 0x80 != 0, "non-last byte missing continuation bit");
+            i += 1;
+        }
+
+        // Property 3: last byte has no continuation bit
+        assert!(buf[len - 1] & 0x80 == 0, "last byte has continuation bit");
+
+        // Property 4: decode roundtrip
+        let mut decoded: u64 = 0;
+        let mut shift: u32 = 0;
+        let mut j = 0;
+        while j < len {
+            let byte = buf[j] as u64;
+            decoded |= (byte & 0x7F) << shift;
+            shift += 7;
+            j += 1;
+        }
+        assert!(decoded == value, "varint roundtrip mismatch");
+    }
+
+    /// Prove encode_varint never panics for any u64 input.
+    #[kani::proof]
+    #[kani::unwind(12)]
+    fn verify_varint_no_panic() {
+        let value: u64 = kani::any();
+        let mut buf = Vec::new();
+        encode_varint(&mut buf, value);
+    }
+
+    /// Prove encode_tag produces correct field_number and wire_type encoding.
+    #[kani::proof]
+    #[kani::unwind(12)]
+    fn verify_encode_tag() {
+        let field_number: u32 = kani::any();
+        let wire_type: u8 = kani::any();
+        kani::assume(field_number > 0);
+        kani::assume(field_number <= 0x1FFFFFFF); // max protobuf field number
+        kani::assume(wire_type <= 5); // valid wire types: 0-5
+
+        let mut buf = Vec::new();
+        encode_tag(&mut buf, field_number, wire_type);
+
+        // Decode the tag varint
+        let mut tag_value: u64 = 0;
+        let mut shift: u32 = 0;
+        let mut i = 0;
+        while i < buf.len() {
+            let byte = buf[i] as u64;
+            tag_value |= (byte & 0x7F) << shift;
+            shift += 7;
+            i += 1;
+        }
+
+        // Verify field_number and wire_type
+        let decoded_wire = (tag_value & 0x7) as u8;
+        let decoded_field = (tag_value >> 3) as u32;
+        assert!(decoded_wire == wire_type, "wire type mismatch");
+        assert!(decoded_field == field_number, "field number mismatch");
+    }
+
+    /// Prove days_from_civil never panics and produces reasonable values
+    /// for all dates in the range [1970-01-01, 2100-12-31].
+    ///
+    /// Also verifies monotonicity: incrementing the day by 1 always
+    /// increments the result by 1 (within the same month).
+    #[kani::proof]
+    fn verify_days_from_civil() {
+        let year: i64 = kani::any();
+        let month: u32 = kani::any();
+        let day: u32 = kani::any();
+
+        kani::assume(year >= 1970 && year <= 2100);
+        kani::assume(month >= 1 && month <= 12);
+        kani::assume(day >= 1 && day <= 31);
+
+        let result = days_from_civil(year, month, day);
+
+        // Epoch (1970-01-01) must be day 0.
+        if year == 1970 && month == 1 && day == 1 {
+            assert!(result == 0, "epoch must be 0");
+        }
+
+        // All dates in [1970, 2100] must produce non-negative results.
+        assert!(result >= 0, "date before epoch in valid range");
+
+        // 2100-12-31 is about 47846 days after epoch.
+        assert!(result <= 50000, "date too far in future");
+
+        // Monotonicity within a month: day+1 → result+1.
+        if day < 28 {
+            let next = days_from_civil(year, month, day + 1);
+            assert!(next == result + 1, "days not monotonic within month");
+        }
+    }
+
+    /// Prove bytes_field_size matches actual encode_bytes_field output.
+    #[kani::proof]
+    #[kani::unwind(12)]
+    #[kani::solver(kissat)]
+    fn verify_bytes_field_size() {
+        let field_number: u32 = kani::any();
+        let data_len: usize = kani::any();
+        kani::assume(field_number > 0 && field_number <= 1000);
+        kani::assume(data_len <= 256);
+
+        let predicted = bytes_field_size(field_number, data_len);
+
+        // Create dummy data of the right length and encode
+        let data = vec![0u8; data_len];
+        let mut buf = Vec::new();
+        encode_bytes_field(&mut buf, field_number, &data);
+
+        assert!(
+            buf.len() == predicted,
+            "bytes_field_size disagrees with encode_bytes_field"
+        );
+    }
+
+    // NOTE: parse_timestamp_nanos proofs deferred — Kani has trouble with
+    // div_euclid/rem_euclid in days_from_civil and large u64 multiplications
+    // (nanos *= 1_000_000_000). The timestamp functions are better verified
+    // with proptest oracle against chrono. Tracked in #268.
+
+    /// Prove parse_severity never panics for any 8-byte input and
+    /// returns correct severity for known level strings.
+    #[kani::proof]
+    fn verify_parse_severity_no_panic() {
+        let bytes: [u8; 8] = kani::any();
+        let len: usize = kani::any();
+        kani::assume(len <= 8);
+        let _ = parse_severity(&bytes[..len]);
+    }
+
+    /// Prove parse_severity correctly classifies all standard level strings.
+    #[kani::proof]
+    fn verify_parse_severity_known_values() {
+        // Uppercase
+        assert!(matches!(parse_severity(b"INFO").0, Severity::Info));
+        assert!(matches!(parse_severity(b"WARN").0, Severity::Warn));
+        assert!(matches!(parse_severity(b"ERROR").0, Severity::Error));
+        assert!(matches!(parse_severity(b"DEBUG").0, Severity::Debug));
+        assert!(matches!(parse_severity(b"TRACE").0, Severity::Trace));
+        assert!(matches!(parse_severity(b"FATAL").0, Severity::Fatal));
+
+        // Lowercase
+        assert!(matches!(parse_severity(b"info").0, Severity::Info));
+        assert!(matches!(parse_severity(b"warn").0, Severity::Warn));
+        assert!(matches!(parse_severity(b"error").0, Severity::Error));
+        assert!(matches!(parse_severity(b"debug").0, Severity::Debug));
+        assert!(matches!(parse_severity(b"trace").0, Severity::Trace));
+        assert!(matches!(parse_severity(b"fatal").0, Severity::Fatal));
+
+        // Empty / unknown
+        assert!(matches!(parse_severity(b"").0, Severity::Unspecified));
+        assert!(matches!(parse_severity(b"X").0, Severity::Unspecified));
+    }
+
+    /// Prove parse_2digits and parse_4digits never panic for any input.
+    #[kani::proof]
+    fn verify_digit_parsers_no_panic() {
+        let bytes: [u8; 8] = kani::any();
+        let off: usize = kani::any();
+        kani::assume(off <= 6);
+
+        let _ = parse_2digits(&bytes, off);
+        let _ = parse_4digits(&bytes, off);
+    }
+
+    /// Prove parse_2digits returns correct value for valid digit pairs.
+    #[kani::proof]
+    fn verify_parse_2digits_correct() {
+        let a: u8 = kani::any();
+        let b: u8 = kani::any();
+        kani::assume(a >= b'0' && a <= b'9');
+        kani::assume(b >= b'0' && b <= b'9');
+        let bytes = [a, b];
+        let result = parse_2digits(&bytes, 0);
+        let expected = (a - b'0') * 10 + (b - b'0');
+        assert!(result == expected, "parse_2digits value mismatch");
+    }
+
+    /// Prove parse_4digits returns correct value for valid digit quads.
+    #[kani::proof]
+    fn verify_parse_4digits_correct() {
+        let a: u8 = kani::any();
+        let b: u8 = kani::any();
+        let c: u8 = kani::any();
+        let d: u8 = kani::any();
+        kani::assume(a >= b'0' && a <= b'9');
+        kani::assume(b >= b'0' && b <= b'9');
+        kani::assume(c >= b'0' && c <= b'9');
+        kani::assume(d >= b'0' && d <= b'9');
+        let bytes = [a, b, c, d];
+        let result = parse_4digits(&bytes, 0);
+        let expected = (a - b'0') as u16 * 1000
+            + (b - b'0') as u16 * 100
+            + (c - b'0') as u16 * 10
+            + (d - b'0') as u16;
+        assert!(result == expected, "parse_4digits value mismatch");
+    }
+
+    /// Prove key_eq_ignore_case matches to_ascii_lowercase for ASCII letter
+    /// inputs. The function uses |0x20 which is a fast approximation of
+    /// case-folding that's correct for ASCII letters but NOT for arbitrary
+    /// bytes (e.g., '@' |0x20 = '`', not '@'). Since JSON field keys are
+    /// ASCII alphanumeric, this is correct for our use case.
+    #[kani::proof]
+    fn verify_key_eq_ignore_case_ascii_letters() {
+        let a: [u8; 2] = kani::any();
+        let b: [u8; 2] = kani::any();
+
+        // Constrain to ASCII letters (the domain where this function is used)
+        kani::assume(a[0].is_ascii_alphabetic() && a[1].is_ascii_alphabetic());
+        kani::assume(b[0].is_ascii_alphabetic() && b[1].is_ascii_alphabetic());
+
+        let result = key_eq_ignore_case(&a, &b);
+
+        // Oracle: true ASCII case-insensitive comparison
+        let expected = a[0].to_ascii_lowercase() == b[0].to_ascii_lowercase()
+            && a[1].to_ascii_lowercase() == b[1].to_ascii_lowercase();
+
+        assert!(
+            result == expected,
+            "key_eq_ignore_case diverges from ascii_lowercase on letter inputs"
+        );
+    }
+
+    /// Prove encode_fixed64 produces exactly tag + 8 LE bytes.
+    #[kani::proof]
+    #[kani::unwind(12)]
+    fn verify_encode_fixed64() {
+        let field_number: u32 = kani::any();
+        let value: u64 = kani::any();
+        kani::assume(field_number > 0 && field_number <= 1000);
+
+        let mut buf = Vec::new();
+        encode_fixed64(&mut buf, field_number, value);
+
+        // Tag + 8 bytes
+        let tag_len = varint_len(((field_number as u64) << 3) | 1);
+        assert!(buf.len() == tag_len + 8, "fixed64 size wrong");
+
+        // Last 8 bytes are the value in little-endian
+        let val_bytes = &buf[tag_len..];
+        let decoded = u64::from_le_bytes(val_bytes.try_into().unwrap());
+        assert!(decoded == value, "fixed64 value mismatch");
+    }
+
+    /// Prove encode_varint_field produces tag + varint value.
+    #[kani::proof]
+    #[kani::unwind(12)]
+    fn verify_encode_varint_field() {
+        let field_number: u32 = kani::any();
+        let value: u64 = kani::any();
+        kani::assume(field_number > 0 && field_number <= 1000);
+
+        let mut buf = Vec::new();
+        encode_varint_field(&mut buf, field_number, value);
+
+        let tag_len = varint_len(((field_number as u64) << 3) | 0);
+        let val_len = varint_len(value);
+        assert!(buf.len() == tag_len + val_len, "varint_field size wrong");
+    }
+}
