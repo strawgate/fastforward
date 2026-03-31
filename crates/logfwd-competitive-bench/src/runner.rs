@@ -333,7 +333,8 @@ pub fn run_agent_perf(
         .spawn()
         .map_err(|e| format!("failed to spawn perf record: {e}"))?;
 
-    let _lines_done = wait_blackhole_done(blackhole, ctx.lines, Duration::from_secs(120));
+    let (_lines_done, _timed_out) =
+        wait_blackhole_done(blackhole, ctx.lines, Duration::from_secs(120));
     let elapsed = start.elapsed();
 
     kill_and_wait(&mut child);
@@ -420,7 +421,8 @@ pub fn run_agent_dhat(
         .spawn()
         .map_err(|e| format!("failed to spawn dhat binary: {e}"))?;
 
-    let _lines_done = wait_blackhole_done(blackhole, ctx.lines, Duration::from_secs(120));
+    let (_lines_done, _timed_out) =
+        wait_blackhole_done(blackhole, ctx.lines, Duration::from_secs(120));
     let elapsed = start.elapsed();
 
     // dhat writes its output on clean exit, so send SIGTERM first.
