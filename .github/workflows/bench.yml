@@ -343,44 +343,45 @@ jobs:
         with:
           mdbook-version: latest
 
-      - name: Build site (docs + dashboard)
+      - name: Build site (docs at root, dashboard at /bench/)
         run: |
           SITE_DIR=_site
+          BENCH_DIR="$SITE_DIR/bench"
           RUN_ID="${{ github.run_id }}"
           mkdir -p "$SITE_DIR"
 
-          # Build mdBook docs.
+          # Build mdBook docs at site root.
           if [ -f book/book.toml ]; then
             mdbook build book
             cp -r book/book/* "$SITE_DIR/" 2>/dev/null || true
           fi
 
-          # Copy dashboard files (overlay on top of docs).
-          cp -r bench/dashboard/* "$SITE_DIR/" 2>/dev/null || true
+          # Copy dashboard files into /bench/.
+          mkdir -p "$BENCH_DIR"
+          cp -r bench/dashboard/* "$BENCH_DIR/" 2>/dev/null || true
 
-          # Download existing dashboard data from previous deployments (if any).
-          # We store cumulative data in the site itself under data/.
-          mkdir -p "$SITE_DIR/data/runs" "$SITE_DIR/data/rate-runs" "$SITE_DIR/data/criterion-runs"
+          # Dashboard data lives under /bench/data/.
+          mkdir -p "$BENCH_DIR/data/runs" "$BENCH_DIR/data/rate-runs" "$BENCH_DIR/data/criterion-runs"
 
           # Add current run's competitive data.
           if [ -f dashboard-data.json ]; then
-            cp dashboard-data.json "$SITE_DIR/data/runs/${RUN_ID}.json"
+            cp dashboard-data.json "$BENCH_DIR/data/runs/${RUN_ID}.json"
           fi
 
           # Add rate-bench data.
           if [ -f rate-results/rate-bench-result.json ]; then
-            cp rate-results/rate-bench-result.json "$SITE_DIR/data/rate-runs/${RUN_ID}.json"
+            cp rate-results/rate-bench-result.json "$BENCH_DIR/data/rate-runs/${RUN_ID}.json"
           fi
 
           # Add criterion data.
           if [ -f micro/criterion-data.json ]; then
-            cp micro/criterion-data.json "$SITE_DIR/data/criterion-runs/${RUN_ID}.json"
+            cp micro/criterion-data.json "$BENCH_DIR/data/criterion-runs/${RUN_ID}.json"
           fi
 
           # Update index.json.
           python3 -c "
           import json
-          index_path = '$SITE_DIR/data/index.json'
+          index_path = '$BENCH_DIR/data/index.json'
           try:
               with open(index_path) as f:
                   index = json.load(f)
@@ -444,7 +445,7 @@ jobs:
             RATE="---
 
           ### Rate-Ingest Benchmark
-          See [development dashboard](https://strawgate.com/memagent/development.html) for full results."
+          See [development dashboard](https://strawgate.com/memagent/bench/development.html) for full results."
           fi
 
           TITLE="Benchmark results ${DATE} (${COMMIT})"
@@ -454,7 +455,7 @@ jobs:
           **Commit:** \`${COMMIT}\` on \`master\`
           **Runner:** \`ubuntu-latest\` (matrix: agent x scenario)
           **Iterations:** ${{ env.ITERATIONS }} per cell
-          **Dashboard:** https://strawgate.com/memagent/
+          **Dashboard:** https://strawgate.com/memagent/bench/
 
           ---
 
