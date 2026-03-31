@@ -143,16 +143,10 @@ MiniChart.prototype.render=function(){
   var mn=0,mx=Math.max.apply(null,vals)*1.15;
   if(mx<0.001)mx=1;if(mx===mn)mx=mn+1;
 
-  // Adaptive time window: starts at 10s, grows with data, caps at MAX_AGE_MS.
-  // Right edge = now. Left edge = max(now - 10s, oldest data point), clamped to MAX_AGE_MS.
+  // Adaptive time window: starts at 10s, grows smoothly with data, caps at 5min.
+  // Add 20% headroom so the line doesn't touch the left edge.
   var dataAge=now-data[0].t;
-  var windowMs=Math.max(10000,Math.min(dataAge*1.1,MAX_AGE_MS));
-  // Snap to nice boundaries: 10s, 30s, 1m, 2m, 5m
-  if(windowMs<=10000)windowMs=10000;
-  else if(windowMs<=30000)windowMs=30000;
-  else if(windowMs<=60000)windowMs=60000;
-  else if(windowMs<=120000)windowMs=120000;
-  else windowMs=MAX_AGE_MS;
+  var windowMs=Math.max(10000,Math.min(dataAge*1.2,MAX_AGE_MS));
   var tMax=now,tMin=now-windowMs,tRange=windowMs;
 
   // Helper: time -> x pixel
