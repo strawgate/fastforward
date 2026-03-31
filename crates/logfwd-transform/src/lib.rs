@@ -105,7 +105,7 @@ impl QueryAnalyzer {
 
     /// Generate ScanConfig for the scanner based on query analysis.
     ///
-    /// Column references in SQL use typed names (e.g., `level_str`) but the
+    /// Column references in SQL use typed names (e.g., `level$str`) but the
     /// scanner matches against raw JSON keys (e.g., `level`). Strip the type
     /// suffix so field pushdown works correctly.
     pub fn scan_config(&self) -> ScanConfig {
@@ -273,10 +273,10 @@ fn expr_as_u8_literal(expr: &SqlExpr) -> Option<u8> {
     }
 }
 
-/// Strip `_str`, `_int`, or `_float` suffix from a typed column name to get
-/// the raw JSON field name. E.g., `level_str` → `level`, `duration_ms_int` → `duration_ms`.
+/// Strip `$str`, `$int`, or `$float` suffix from a typed column name to get
+/// the raw JSON field name. E.g., `level$str` → `level`, `duration_ms$int` → `duration_ms`.
 fn strip_type_suffix(name: &str) -> String {
-    for suffix in &["_str", "_int", "_float"] {
+    for suffix in &["$str", "$int", "$float"] {
         if let Some(base) = name.strip_suffix(suffix)
             && !base.is_empty()
         {
@@ -703,12 +703,12 @@ mod tests {
     use arrow::array::{Array, ArrayRef, Float64Array, Int64Array, StringArray};
     use arrow::datatypes::{Field, Schema};
 
-    /// Helper: build a simple test RecordBatch with level_str, msg_str, status_str columns.
+    /// Helper: build a simple test RecordBatch with level$str, msg$str, status$str columns.
     fn make_test_batch() -> RecordBatch {
         let schema = Arc::new(Schema::new(vec![
-            Field::new("level_str", DataType::Utf8, true),
-            Field::new("msg_str", DataType::Utf8, true),
-            Field::new("status_str", DataType::Utf8, true),
+            Field::new("level$str", DataType::Utf8, true),
+            Field::new("msg$str", DataType::Utf8, true),
+            Field::new("status$str", DataType::Utf8, true),
         ]));
         let level: ArrayRef = Arc::new(StringArray::from(vec![
             Some("INFO"),
@@ -740,7 +740,7 @@ mod tests {
         assert_eq!(result.num_columns(), 3);
         // Verify data matches.
         let level = result
-            .column_by_name("level_str")
+            .column_by_name("level$str")
             .unwrap()
             .as_any()
             .downcast_ref::<StringArray>()
@@ -753,11 +753,11 @@ mod tests {
     fn test_filter() {
         let batch = make_test_batch();
         let mut transform =
-            SqlTransform::new("SELECT * FROM logs WHERE level_str = 'ERROR'").unwrap();
+            SqlTransform::new("SELECT * FROM logs WHERE level$str = 'ERROR'").unwrap();
         let result = transform.execute_blocking(batch).unwrap();
         assert_eq!(result.num_rows(), 2);
         let level = result
-            .column_by_name("level_str")
+            .column_by_name("level$str")
             .unwrap()
             .as_any()
             .downcast_ref::<StringArray>()
@@ -766,7 +766,7 @@ mod tests {
             assert_eq!(level.value(i), "ERROR");
         }
         let msg = result
-            .column_by_name("msg_str")
+            .column_by_name("msg$str")
             .unwrap()
             .as_any()
             .downcast_ref::<StringArray>()
@@ -778,14 +778,14 @@ mod tests {
     #[test]
     fn test_except() {
         let batch = make_test_batch();
-        let mut transform = SqlTransform::new("SELECT * EXCEPT (status_str) FROM logs").unwrap();
+        let mut transform = SqlTransform::new("SELECT * EXCEPT (status$str) FROM logs").unwrap();
         let result = transform.execute_blocking(batch).unwrap();
         assert_eq!(result.num_rows(), 4);
-        // status_str should be removed.
-        assert!(result.column_by_name("status_str").is_none());
+        // status$str should be removed.
+        assert!(result.column_by_name("status$str").is_none());
         // Other columns should remain.
-        assert!(result.column_by_name("level_str").is_some());
-        assert!(result.column_by_name("msg_str").is_some());
+        assert!(result.column_by_name("level$str").is_some());
+        assert!(result.column_by_name("msg$str").is_some());
     }
 
     #[test]
@@ -809,7 +809,7 @@ mod tests {
     fn test_int_udf() {
         let batch = make_test_batch();
         let mut transform =
-            SqlTransform::new("SELECT int(status_str) AS status_int FROM logs").unwrap();
+            SqlTransform::new("SELECT int(status$str) AS status_int FROM logs").unwrap();
         let result = transform.execute_blocking(batch).unwrap();
         assert_eq!(result.num_rows(), 4);
         let status = result
@@ -830,8 +830,8 @@ mod tests {
 
         // First batch: 2 columns.
         let schema1 = Arc::new(Schema::new(vec![
-            Field::new("host_str", DataType::Utf8, true),
-            Field::new("level_str", DataType::Utf8, true),
+            Field::new("host$str", DataType::Utf8, true),
+            Field::new("level$str", DataType::Utf8, true),
         ]));
         let batch1 = RecordBatch::try_new(
             schema1,
@@ -848,9 +848,9 @@ mod tests {
 
         // Second batch: 3 columns (new field added).
         let schema2 = Arc::new(Schema::new(vec![
-            Field::new("host_str", DataType::Utf8, true),
-            Field::new("level_str", DataType::Utf8, true),
-            Field::new("region_str", DataType::Utf8, true),
+            Field::new("host$str", DataType::Utf8, true),
+            Field::new("level$str", DataType::Utf8, true),
+            Field::new("region$str", DataType::Utf8, true),
         ]));
         let batch2 = RecordBatch::try_new(
             schema2,
@@ -865,24 +865,24 @@ mod tests {
         let result2 = transform.execute_blocking(batch2).unwrap();
         assert_eq!(result2.num_columns(), 3);
         assert_eq!(result2.num_rows(), 1);
-        assert!(result2.column_by_name("region_str").is_some());
+        assert!(result2.column_by_name("region$str").is_some());
     }
 
     #[test]
     fn test_float_udf() {
         let schema = Arc::new(Schema::new(vec![Field::new(
-            "val_str",
+            "val$str",
             DataType::Utf8,
             true,
         )]));
         let vals: ArrayRef = Arc::new(StringArray::from(vec![
             Some("3.25"),
-            Some("not_float"),
+            Some("not$float"),
             Some("2.125"),
         ]));
         let batch = RecordBatch::try_new(schema, vec![vals]).unwrap();
 
-        let mut transform = SqlTransform::new("SELECT float(val_str) AS val_f FROM logs").unwrap();
+        let mut transform = SqlTransform::new("SELECT float(val$str) AS val_f FROM logs").unwrap();
         let result = transform.execute_blocking(batch).unwrap();
         let col = result
             .column_by_name("val_f")
@@ -898,12 +898,12 @@ mod tests {
     #[test]
     fn test_query_analyzer_column_refs() {
         let analyzer =
-            QueryAnalyzer::new("SELECT level_str, msg_str FROM logs WHERE status_str = '500'")
+            QueryAnalyzer::new("SELECT level$str, msg$str FROM logs WHERE status$str = '500'")
                 .unwrap();
         assert!(!analyzer.uses_select_star);
-        assert!(analyzer.referenced_columns.contains("level_str"));
-        assert!(analyzer.referenced_columns.contains("msg_str"));
-        assert!(analyzer.referenced_columns.contains("status_str"));
+        assert!(analyzer.referenced_columns.contains("level$str"));
+        assert!(analyzer.referenced_columns.contains("msg$str"));
+        assert!(analyzer.referenced_columns.contains("status$str"));
     }
 
     #[test]
@@ -1038,7 +1038,7 @@ mod tests {
     #[test]
     fn test_filter_hints_or_not_pushed() {
         // OR with non-pushable predicate — should NOT push severity
-        let a = QueryAnalyzer::new("SELECT * FROM logs WHERE severity <= 4 OR msg_str = 'error'")
+        let a = QueryAnalyzer::new("SELECT * FROM logs WHERE severity <= 4 OR msg$str = 'error'")
             .unwrap();
         let h = a.filter_hints();
         // The OR is at top level, not an AND chain — nothing should be pushed
@@ -1057,7 +1057,7 @@ mod tests {
     #[test]
     fn test_filter_hints_field_pushdown() {
         let a =
-            QueryAnalyzer::new("SELECT hostname_str, message_str FROM logs WHERE severity <= 2")
+            QueryAnalyzer::new("SELECT hostname$str, message$str FROM logs WHERE severity <= 2")
                 .unwrap();
         let h = a.filter_hints();
         assert_eq!(h.max_severity, Some(2));
@@ -1070,8 +1070,8 @@ mod tests {
 
     #[test]
     fn test_filter_hints_typed_column_stripped() {
-        // severity_int in WHERE should strip to "severity" for pushdown
-        let a = QueryAnalyzer::new("SELECT * FROM logs WHERE severity_int <= 4").unwrap();
+        // severity$int in WHERE should strip to "severity" for pushdown
+        let a = QueryAnalyzer::new("SELECT * FROM logs WHERE severity$int <= 4").unwrap();
         let h = a.filter_hints();
         assert_eq!(h.max_severity, Some(4));
     }

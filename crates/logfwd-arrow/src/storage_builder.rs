@@ -203,7 +203,7 @@ impl StorageBuilder {
                         valid[r] = true;
                     }
                 }
-                schema_fields.push(Field::new(format!("{}_int", name), DataType::Int64, true));
+                schema_fields.push(Field::new(format!("{}$int", name), DataType::Int64, true));
                 arrays.push(Arc::new(Int64Array::new(
                     values.into(),
                     Some(NullBuffer::from(valid)),
@@ -220,7 +220,7 @@ impl StorageBuilder {
                     }
                 }
                 schema_fields.push(Field::new(
-                    format!("{}_float", name),
+                    format!("{}$float", name),
                     DataType::Float64,
                     true,
                 ));
@@ -245,7 +245,7 @@ impl StorageBuilder {
                         builder.append_null();
                     }
                 }
-                schema_fields.push(Field::new(format!("{}_str", name), DataType::Utf8, true));
+                schema_fields.push(Field::new(format!("{}$str", name), DataType::Utf8, true));
                 arrays.push(Arc::new(builder.finish()) as ArrayRef);
             }
         }
@@ -291,7 +291,7 @@ mod tests {
         assert_eq!(batch.num_rows(), 2);
         assert_eq!(
             batch
-                .column_by_name("host_str")
+                .column_by_name("host$str")
                 .unwrap()
                 .as_any()
                 .downcast_ref::<StringArray>()
@@ -301,7 +301,7 @@ mod tests {
         );
         assert_eq!(
             batch
-                .column_by_name("status_int")
+                .column_by_name("status$int")
                 .unwrap()
                 .as_any()
                 .downcast_ref::<Int64Array>()
@@ -325,7 +325,7 @@ mod tests {
         b.end_row();
         let batch = b.finish_batch().unwrap();
         assert_eq!(batch.num_rows(), 2);
-        let ac = batch.column_by_name("a_str").unwrap();
+        let ac = batch.column_by_name("a$str").unwrap();
         assert!(!ac.is_null(0));
         assert!(ac.is_null(1));
     }
@@ -342,8 +342,8 @@ mod tests {
         b.append_str_by_idx(idx, b"OK");
         b.end_row();
         let batch = b.finish_batch().unwrap();
-        assert!(batch.column_by_name("status_int").is_some());
-        assert!(batch.column_by_name("status_str").is_some());
+        assert!(batch.column_by_name("status$int").is_some());
+        assert!(batch.column_by_name("status$str").is_some());
     }
 
     #[test]
@@ -371,7 +371,7 @@ mod tests {
         b.end_row();
         let batch = b.finish_batch().unwrap();
         assert_eq!(batch.num_rows(), 3);
-        let ac = batch.column_by_name("a_str").unwrap();
+        let ac = batch.column_by_name("a$str").unwrap();
         assert!(!ac.is_null(0));
         assert!(ac.is_null(1));
         assert!(!ac.is_null(2));
@@ -389,7 +389,7 @@ mod tests {
         let batch = b.finish_batch().unwrap();
         assert_eq!(
             batch
-                .column_by_name("a_int")
+                .column_by_name("a$int")
                 .unwrap()
                 .as_any()
                 .downcast_ref::<Int64Array>()
@@ -434,6 +434,6 @@ mod tests {
         // Must not panic and must produce a valid batch.
         let batch = b.finish_batch().unwrap();
         assert_eq!(batch.num_rows(), 1);
-        assert!(batch.column_by_name("field64_int").is_some());
+        assert!(batch.column_by_name("field64$int").is_some());
     }
 }

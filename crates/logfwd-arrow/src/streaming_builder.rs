@@ -250,7 +250,7 @@ impl StreamingBuilder {
             let name = String::from_utf8_lossy(&fc.name);
 
             if fc.has_int {
-                let col_name = format!("{}_int", name);
+                let col_name = format!("{}$int", name);
                 let mut values = vec![0i64; num_rows];
                 let mut valid = vec![false; num_rows];
                 for &(row, v) in &fc.int_values {
@@ -268,7 +268,7 @@ impl StreamingBuilder {
             }
 
             if fc.has_float {
-                let col_name = format!("{}_float", name);
+                let col_name = format!("{}$float", name);
                 let mut values = vec![0.0f64; num_rows];
                 let mut valid = vec![false; num_rows];
                 for &(row, v) in &fc.float_values {
@@ -286,7 +286,7 @@ impl StreamingBuilder {
             }
 
             if fc.has_str {
-                let col_name = format!("{}_str", name);
+                let col_name = format!("{}$str", name);
                 let mut builder = StringViewBuilder::new();
                 let block = builder.append_block(arrow_buf.clone());
 
@@ -341,8 +341,8 @@ mod tests {
 
         let batch = b.finish_batch().unwrap();
         assert_eq!(batch.num_rows(), 1);
-        assert!(batch.column_by_name("name_str").is_some());
-        assert!(batch.column_by_name("age_int").is_some());
+        assert!(batch.column_by_name("name$str").is_some());
+        assert!(batch.column_by_name("age$int").is_some());
     }
 
     #[test]
@@ -364,7 +364,7 @@ mod tests {
         assert_eq!(batch.num_rows(), 2);
         // The values should be correct even though they're views into the buffer
         let col = batch
-            .column_by_name("msg_str")
+            .column_by_name("msg$str")
             .unwrap()
             .as_any()
             .downcast_ref::<arrow::array::StringViewArray>()
@@ -392,10 +392,10 @@ mod tests {
 
         let batch = b.finish_batch().unwrap();
         assert_eq!(batch.num_rows(), 2);
-        let a = batch.column_by_name("a_str").unwrap();
+        let a = batch.column_by_name("a$str").unwrap();
         assert!(!a.is_null(0));
         assert!(a.is_null(1));
-        let b_col = batch.column_by_name("b_str").unwrap();
+        let b_col = batch.column_by_name("b$str").unwrap();
         assert!(b_col.is_null(0));
         assert!(!b_col.is_null(1));
     }
@@ -415,7 +415,7 @@ mod tests {
 
         let batch = b.finish_batch().unwrap();
         let col = batch
-            .column_by_name("val_str")
+            .column_by_name("val$str")
             .unwrap()
             .as_any()
             .downcast_ref::<arrow::array::StringViewArray>()
@@ -467,7 +467,7 @@ mod tests {
 
         let batch = b.finish_batch().unwrap();
         let col = batch
-            .column_by_name("lat_float")
+            .column_by_name("lat$float")
             .unwrap()
             .as_any()
             .downcast_ref::<Float64Array>()
@@ -506,6 +506,6 @@ mod tests {
         // Must not panic and must produce a valid batch.
         let batch = b.finish_batch().unwrap();
         assert_eq!(batch.num_rows(), 1);
-        assert!(batch.column_by_name("field64_str").is_some());
+        assert!(batch.column_by_name("field64$str").is_some());
     }
 }

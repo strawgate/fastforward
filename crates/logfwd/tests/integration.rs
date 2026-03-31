@@ -173,7 +173,7 @@ input:
   type: file
   path: {}
   format: json
-transform: "SELECT * FROM logs WHERE level_str = 'ERROR'"
+transform: "SELECT * FROM logs WHERE level$str = 'ERROR'"
 output:
   type: stdout
   format: json
@@ -452,9 +452,9 @@ fn test_enrichment_join() {
     // CSV columns use plain names (no `_str` suffix); scanner columns use the
     // `{field}_{type}` convention.  The alias brings the enriched column into
     // the logfwd naming scheme for downstream compatibility.
-    let sql = "SELECT l.service_str, l.message_str, t.team AS team_str \
+    let sql = "SELECT l.service$str, l.message$str, t.team AS team_str \
                FROM logs l \
-               JOIN teams t ON l.service_str = t.service";
+               JOIN teams t ON l.service$str = t.service";
     let mut transform = SqlTransform::new(sql).expect("SQL parse failed");
     transform
         .add_enrichment_table(csv_table)

@@ -122,9 +122,9 @@ impl std::fmt::Display for ComplianceReport {
 
 /// Extract sequence IDs from captured batches and check correctness.
 ///
-/// Looks for the `sequence_id_int` column (the scanner's typed naming
+/// Looks for the `sequence_id$int` column (the scanner's typed naming
 /// convention for integer fields). Optionally filters by `source_id` when
-/// `source_id_str` is present in the schema and `source_id` is not empty.
+/// `source_id$str` is present in the schema and `source_id` is not empty.
 fn verify_batches(
     batches: &[RecordBatch],
     expected_count: usize,
@@ -133,10 +133,10 @@ fn verify_batches(
     let mut all_ids: Vec<i64> = Vec::new();
 
     for batch in batches {
-        // Find the sequence_id column (scanner produces sequence_id_int for integers).
-        let seq_col = batch.column_by_name("sequence_id_int");
+        // Find the sequence_id column (scanner produces sequence_id$int for integers).
+        let seq_col = batch.column_by_name("sequence_id$int");
         if seq_col.is_none() {
-            // Batch has no sequence_id_int column; all rows are malformed
+            // Batch has no sequence_id$int column; all rows are malformed
             // from the compliance perspective.
             continue;
         }
@@ -144,11 +144,11 @@ fn verify_batches(
         let seq_arr = seq_col
             .as_any()
             .downcast_ref::<Int64Array>()
-            .expect("sequence_id_int should be Int64");
+            .expect("sequence_id$int should be Int64");
 
         // Optional source_id filter.
         let source_filter: Option<Vec<bool>> = if !source_id.is_empty() {
-            batch.column_by_name("source_id_str").map(|col| {
+            batch.column_by_name("source_id$str").map(|col| {
                 (0..batch.num_rows())
                     .map(|row| {
                         if col.is_null(row) {
@@ -349,7 +349,7 @@ input:
   type: file
   path: {}
   format: json
-transform: "SELECT * FROM logs WHERE level_str = 'ERROR'"
+transform: "SELECT * FROM logs WHERE level$str = 'ERROR'"
 output:
   type: stdout
   format: json
@@ -362,11 +362,11 @@ output:
     // ERROR lines are the odd-numbered sequence_ids (1, 3, 5, ...).
     let mut all_ids: Vec<i64> = Vec::new();
     for batch in &batches {
-        if let Some(seq_col) = batch.column_by_name("sequence_id_int") {
+        if let Some(seq_col) = batch.column_by_name("sequence_id$int") {
             let seq_arr = seq_col
                 .as_any()
                 .downcast_ref::<Int64Array>()
-                .expect("sequence_id_int should be Int64");
+                .expect("sequence_id$int should be Int64");
             for row in 0..batch.num_rows() {
                 if !seq_arr.is_null(row) {
                     all_ids.push(seq_arr.value(row));
@@ -403,8 +403,8 @@ output:
     );
 }
 
-/// Transform select: generate 10,000 lines, project only sequence_id_int
-/// and message_str. Verify correct columns and zero gaps.
+/// Transform select: generate 10,000 lines, project only sequence_id$int
+/// and message$str. Verify correct columns and zero gaps.
 #[test]
 fn compliance_transform_select() {
     let dir = tempfile::tempdir().unwrap();
@@ -419,7 +419,7 @@ input:
   type: file
   path: {}
   format: json
-transform: "SELECT sequence_id_int, message_str FROM logs"
+transform: "SELECT sequence_id$int, message$str FROM logs"
 output:
   type: stdout
   format: json
@@ -434,12 +434,12 @@ output:
         let schema = batch.schema();
         let col_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
         assert!(
-            col_names.contains(&"sequence_id_int"),
-            "expected sequence_id_int column, got: {col_names:?}"
+            col_names.contains(&"sequence_id$int"),
+            "expected sequence_id$int column, got: {col_names:?}"
         );
         assert!(
-            col_names.contains(&"message_str"),
-            "expected message_str column, got: {col_names:?}"
+            col_names.contains(&"message$str"),
+            "expected message$str column, got: {col_names:?}"
         );
         assert_eq!(
             col_names.len(),

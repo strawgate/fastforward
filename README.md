@@ -86,7 +86,7 @@ pipelines:
 
 ## SQL Column Naming
 
-All JSON fields are automatically suffixed with their type (`_str`, `_int`, `_float`) to ensure schema stability. 
+All JSON fields are automatically suffixed with their type (`$str`, `$int`, `$float`) to ensure schema stability.
 
 ```sql
 -- Filter by level

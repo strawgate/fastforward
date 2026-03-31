@@ -191,7 +191,7 @@ mod tests {
         assert_eq!(batch.num_rows(), 2);
         assert_eq!(
             batch
-                .column_by_name("host_str")
+                .column_by_name("host$str")
                 .unwrap()
                 .as_any()
                 .downcast_ref::<StringArray>()
@@ -201,7 +201,7 @@ mod tests {
         );
         assert_eq!(
             batch
-                .column_by_name("status_int")
+                .column_by_name("status$int")
                 .unwrap()
                 .as_any()
                 .downcast_ref::<Int64Array>()
@@ -215,8 +215,8 @@ mod tests {
         let batch = default_scanner(4)
             .scan(b"{\"s\":200}\n{\"s\":\"OK\"}\n")
             .unwrap();
-        assert!(batch.column_by_name("s_int").is_some());
-        assert!(batch.column_by_name("s_str").is_some());
+        assert!(batch.column_by_name("s$int").is_some());
+        assert!(batch.column_by_name("s$str").is_some());
     }
     #[test]
     fn test_missing_fields() {
@@ -224,7 +224,7 @@ mod tests {
             .scan(b"{\"a\":\"hello\"}\n{\"b\":\"world\"}\n")
             .unwrap();
         assert_eq!(batch.num_rows(), 2);
-        let a = batch.column_by_name("a_str").unwrap();
+        let a = batch.column_by_name("a$str").unwrap();
         assert!(!a.is_null(0));
         assert!(a.is_null(1));
     }
@@ -238,7 +238,7 @@ mod tests {
             .unwrap();
         assert!(
             batch
-                .column_by_name("u_str")
+                .column_by_name("u$str")
                 .unwrap()
                 .as_any()
                 .downcast_ref::<StringArray>()
@@ -264,8 +264,8 @@ mod tests {
 "#,
             )
             .unwrap();
-        assert!(batch.column_by_name("a_str").is_some());
-        assert!(batch.column_by_name("b_str").is_none());
+        assert!(batch.column_by_name("a$str").is_some());
+        assert!(batch.column_by_name("b$str").is_none());
     }
     #[test]
     fn test_keep_raw() {
@@ -294,7 +294,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             batch
-                .column_by_name("a_str")
+                .column_by_name("a$str")
                 .unwrap()
                 .as_any()
                 .downcast_ref::<StringArray>()
@@ -308,7 +308,7 @@ mod tests {
         let batch = default_scanner(4).scan(b"{\"a\":1,\"a\":2}\n").unwrap();
         assert_eq!(
             batch
-                .column_by_name("a_int")
+                .column_by_name("a$int")
                 .unwrap()
                 .as_any()
                 .downcast_ref::<Int64Array>()
@@ -322,7 +322,7 @@ mod tests {
         let batch = default_scanner(4)
             .scan(b"{\"big\":99999999999999999999}\n")
             .unwrap();
-        assert!(batch.column_by_name("big_float").is_some());
+        assert!(batch.column_by_name("big$float").is_some());
     }
     #[test]
     fn test_empty_object() {
@@ -338,7 +338,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             batch
-                .column_by_name("tags_str")
+                .column_by_name("tags$str")
                 .unwrap()
                 .as_any()
                 .downcast_ref::<StringArray>()
@@ -357,7 +357,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             batch
-                .column_by_name("ok_str")
+                .column_by_name("ok$str")
                 .unwrap()
                 .as_any()
                 .downcast_ref::<StringArray>()
@@ -376,7 +376,7 @@ mod tests {
             .unwrap();
         assert!(
             batch
-                .column_by_name("msg_str")
+                .column_by_name("msg$str")
                 .unwrap()
                 .as_any()
                 .downcast_ref::<StringArray>()
@@ -404,7 +404,7 @@ mod tests {
             ))
             .unwrap();
         assert_eq!(batch.num_rows(), 2);
-        assert!(batch.column_by_name("host_str").is_some());
+        assert!(batch.column_by_name("host$str").is_some());
     }
     #[test]
     fn test_streaming_reuse() {

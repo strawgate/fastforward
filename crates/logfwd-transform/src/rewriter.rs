@@ -52,13 +52,13 @@ pub type FieldTypeMap = HashMap<String, FieldTypes>;
 
 /// Build a [`FieldTypeMap`] from an Arrow [`Schema`].
 ///
-/// Scans column names for the `_str`, `_int`, and `_float` suffixes and
+/// Scans column names for the `$str`, `$int`, and `$float` suffixes and
 /// groups them by their bare field name.
 ///
 /// # Example
 ///
-/// A schema with columns `level_str`, `status_int`, `status_str`,
-/// `latency_ms_float` produces:
+/// A schema with columns `level$str`, `status$int`, `status$str`,
+/// `latency_ms$float` produces:
 /// ```text
 /// { "level"      => { has_str: true, has_int: false, has_float: false },
 ///   "status"     => { has_str: true, has_int: true,  has_float: false },
@@ -68,11 +68,11 @@ pub fn field_type_map_from_schema(schema: &Schema) -> FieldTypeMap {
     let mut map: FieldTypeMap = HashMap::new();
     for field in schema.fields() {
         let name = field.name().as_str();
-        if let Some(base) = name.strip_suffix("_str").filter(|b| !b.is_empty()) {
+        if let Some(base) = name.strip_suffix("$str").filter(|b| !b.is_empty()) {
             map.entry(base.to_string()).or_default().has_str = true;
-        } else if let Some(base) = name.strip_suffix("_int").filter(|b| !b.is_empty()) {
+        } else if let Some(base) = name.strip_suffix("$int").filter(|b| !b.is_empty()) {
             map.entry(base.to_string()).or_default().has_int = true;
-        } else if let Some(base) = name.strip_suffix("_float").filter(|b| !b.is_empty()) {
+        } else if let Some(base) = name.strip_suffix("$float").filter(|b| !b.is_empty()) {
             map.entry(base.to_string()).or_default().has_float = true;
         }
     }
@@ -85,7 +85,7 @@ pub fn field_type_map_from_schema(schema: &Schema) -> FieldTypeMap {
 
 /// Rewrite user-friendly SQL to typed-column SQL.
 ///
-/// Translates bare field references (columns without a `_str`/`_int`/`_float`
+/// Translates bare field references (columns without a `$str`/`$int`/`$float`
 /// suffix) to their typed equivalents when the field is known in `fields`.
 /// Columns that already carry a type suffix or are not in `fields` are left
 /// unchanged.
@@ -197,33 +197,33 @@ fn build_select_coalesce(base: &str, ft: &FieldTypes) -> SqlExpr {
         // int + str: COALESCE(CAST(x_int AS VARCHAR), x_str)
         (true, _, true) => {
             let cast_int = make_cast(
-                SqlExpr::Identifier(Ident::new(format!("{base}_int"))),
+                SqlExpr::Identifier(Ident::new(format!("{base}$int"))),
                 sqlast::DataType::Varchar(None),
             );
-            let str_col = SqlExpr::Identifier(Ident::new(format!("{base}_str")));
+            let str_col = SqlExpr::Identifier(Ident::new(format!("{base}$str")));
             make_coalesce(vec![cast_int, str_col])
         }
-        // int only: CAST(x_int AS VARCHAR)
+        // int only: CAST(x$int AS VARCHAR)
         (true, _, false) => make_cast(
-            SqlExpr::Identifier(Ident::new(format!("{base}_int"))),
+            SqlExpr::Identifier(Ident::new(format!("{base}$int"))),
             sqlast::DataType::Varchar(None),
         ),
-        // float + str: COALESCE(CAST(x_float AS VARCHAR), x_str)
+        // float + str: COALESCE(CAST(x$float AS VARCHAR), x$str)
         (false, true, true) => {
             let cast_float = make_cast(
-                SqlExpr::Identifier(Ident::new(format!("{base}_float"))),
+                SqlExpr::Identifier(Ident::new(format!("{base}$float"))),
                 sqlast::DataType::Varchar(None),
             );
-            let str_col = SqlExpr::Identifier(Ident::new(format!("{base}_str")));
+            let str_col = SqlExpr::Identifier(Ident::new(format!("{base}$str")));
             make_coalesce(vec![cast_float, str_col])
         }
-        // float only: CAST(x_float AS VARCHAR)
+        // float only: CAST(x$float AS VARCHAR)
         (false, true, false) => make_cast(
-            SqlExpr::Identifier(Ident::new(format!("{base}_float"))),
+            SqlExpr::Identifier(Ident::new(format!("{base}$float"))),
             sqlast::DataType::Varchar(None),
         ),
-        // str only: x_str
-        (false, false, true) => SqlExpr::Identifier(Ident::new(format!("{base}_str"))),
+        // str only: x$str
+        (false, false, true) => SqlExpr::Identifier(Ident::new(format!("{base}$str"))),
         // No known variants — leave bare (shouldn't occur with a valid FieldTypeMap).
         (false, false, false) => SqlExpr::Identifier(Ident::new(base.to_string())),
     }
@@ -282,7 +282,7 @@ fn rewrite_expr(expr: SqlExpr, fields: &FieldTypeMap) -> SqlExpr {
                     if let Some(ft) = fields.get(&ident.value) {
                         if ft.has_str {
                             Box::new(SqlExpr::Identifier(Ident::new(format!(
-                                "{}_str",
+                                "{}$str",
                                 ident.value
                             ))))
                         } else {
@@ -337,12 +337,12 @@ fn rewrite_expr(expr: SqlExpr, fields: &FieldTypeMap) -> SqlExpr {
                     if let Some(ft) = fields.get(&ident.value) {
                         if ft.has_int {
                             Box::new(SqlExpr::Identifier(Ident::new(format!(
-                                "{}_int",
+                                "{}$int",
                                 ident.value
                             ))))
                         } else if ft.has_float {
                             Box::new(SqlExpr::Identifier(Ident::new(format!(
-                                "{}_float",
+                                "{}$float",
                                 ident.value
                             ))))
                         } else {
@@ -389,17 +389,17 @@ fn try_rewrite_col_by_literal(
         if let Some(ft) = fields.get(&ident.value) {
             let base = &ident.value;
             match literal_expr {
-                // String literal → use _str variant (Rule 2)
+                // String literal → use $str variant (Rule 2)
                 SqlExpr::Value(
                     sqlast::Value::SingleQuotedString(_) | sqlast::Value::DoubleQuotedString(_),
-                ) if ft.has_str => Some(SqlExpr::Identifier(Ident::new(format!("{base}_str")))),
+                ) if ft.has_str => Some(SqlExpr::Identifier(Ident::new(format!("{base}$str")))),
 
-                // Numeric literal → prefer _int, fall back to _float (Rule 3)
+                // Numeric literal → prefer $int, fall back to $float (Rule 3)
                 SqlExpr::Value(sqlast::Value::Number(_, _)) => {
                     if ft.has_int {
-                        Some(SqlExpr::Identifier(Ident::new(format!("{base}_int"))))
+                        Some(SqlExpr::Identifier(Ident::new(format!("{base}$int"))))
                     } else if ft.has_float {
-                        Some(SqlExpr::Identifier(Ident::new(format!("{base}_float"))))
+                        Some(SqlExpr::Identifier(Ident::new(format!("{base}$float"))))
                     } else {
                         None
                     }
@@ -423,11 +423,11 @@ fn try_rewrite_col_by_literal(
 fn build_int_coalesce(base: &str, ft: &FieldTypes) -> SqlExpr {
     let mut args: Vec<SqlExpr> = Vec::new();
     if ft.has_int {
-        args.push(SqlExpr::Identifier(Ident::new(format!("{base}_int"))));
+        args.push(SqlExpr::Identifier(Ident::new(format!("{base}$int"))));
     }
     if ft.has_str {
         args.push(make_try_cast(
-            SqlExpr::Identifier(Ident::new(format!("{base}_str"))),
+            SqlExpr::Identifier(Ident::new(format!("{base}$str"))),
             sqlast::DataType::BigInt(None),
         ));
     }
@@ -542,10 +542,10 @@ mod tests {
         use arrow::datatypes::{DataType, Field, Schema};
 
         let schema = Schema::new(vec![
-            Field::new("level_str", DataType::Utf8, true),
-            Field::new("status_int", DataType::Int64, true),
-            Field::new("status_str", DataType::Utf8, true),
-            Field::new("latency_ms_float", DataType::Float64, true),
+            Field::new("level$str", DataType::Utf8, true),
+            Field::new("status$int", DataType::Int64, true),
+            Field::new("status$str", DataType::Utf8, true),
+            Field::new("latency_ms$float", DataType::Float64, true),
         ]);
         let m = field_type_map_from_schema(&schema);
 
@@ -565,17 +565,17 @@ mod tests {
     #[test]
     fn test_passthrough_typed_columns() {
         let fields = map(&[("level", true, false, false)]);
-        // `level_str` already has the suffix — must not be double-rewritten.
-        let sql = "SELECT level_str FROM logs WHERE level_str = 'ERROR'";
+        // `level$str` already has the suffix — must not be double-rewritten.
+        let sql = "SELECT level$str FROM logs WHERE level$str = 'ERROR'";
         let out = rewrite_sql(sql, &fields).unwrap();
-        // The column name has a suffix so it's not in FieldTypeMap as "level_str"
+        // The column name has a suffix so it's not in FieldTypeMap as "level$str"
         // (the map only contains "level"). The query should be unchanged.
         assert!(
-            out.contains("level_str"),
+            out.contains("level$str"),
             "typed column should be preserved: {out}"
         );
         assert!(
-            !out.contains("level_str_str"),
+            !out.contains("level$str$str"),
             "double-suffixing must not occur: {out}"
         );
     }
@@ -587,8 +587,8 @@ mod tests {
         let fields = map(&[("level", true, false, false)]);
         let out = rewrite_sql("SELECT * FROM logs WHERE level = 'ERROR'", &fields).unwrap();
         assert!(
-            out.contains("level_str"),
-            "bare string comparison should use _str: {out}"
+            out.contains("level$str"),
+            "bare string comparison should use $str: {out}"
         );
         assert!(
             !out.contains("level ="),
@@ -600,7 +600,7 @@ mod tests {
     fn test_where_string_ne() {
         let fields = map(&[("level", true, false, false)]);
         let out = rewrite_sql("SELECT * FROM logs WHERE level != 'DEBUG'", &fields).unwrap();
-        assert!(out.contains("level_str"), "{out}");
+        assert!(out.contains("level$str"), "{out}");
     }
 
     #[test]
@@ -608,7 +608,7 @@ mod tests {
         // `'ERROR' = level` — column is on the right side.
         let fields = map(&[("level", true, false, false)]);
         let out = rewrite_sql("SELECT * FROM logs WHERE 'ERROR' = level", &fields).unwrap();
-        assert!(out.contains("level_str"), "{out}");
+        assert!(out.contains("level$str"), "{out}");
     }
 
     // --- Rule 3: WHERE numeric comparison ---
@@ -617,22 +617,22 @@ mod tests {
     fn test_where_numeric_gt() {
         let fields = map(&[("status", false, true, false)]);
         let out = rewrite_sql("SELECT * FROM logs WHERE status > 400", &fields).unwrap();
-        assert!(out.contains("status_int"), "{out}");
+        assert!(out.contains("status$int"), "{out}");
     }
 
     #[test]
     fn test_where_numeric_lte() {
         let fields = map(&[("status", false, true, false)]);
         let out = rewrite_sql("SELECT * FROM logs WHERE status <= 200", &fields).unwrap();
-        assert!(out.contains("status_int"), "{out}");
+        assert!(out.contains("status$int"), "{out}");
     }
 
     #[test]
     fn test_where_numeric_falls_back_to_float() {
-        // No _int variant available — should fall back to _float.
+        // No $int variant available — should fall back to $float.
         let fields = map(&[("latency", false, false, true)]);
         let out = rewrite_sql("SELECT * FROM logs WHERE latency > 1.5", &fields).unwrap();
-        assert!(out.contains("latency_float"), "{out}");
+        assert!(out.contains("latency$float"), "{out}");
     }
 
     // --- Rule 2+3 combined via AND ---
@@ -648,8 +648,8 @@ mod tests {
             &fields,
         )
         .unwrap();
-        assert!(out.contains("level_str"), "{out}");
-        assert!(out.contains("status_int"), "{out}");
+        assert!(out.contains("level$str"), "{out}");
+        assert!(out.contains("status$int"), "{out}");
     }
 
     // --- IN list ---
@@ -662,7 +662,7 @@ mod tests {
             &fields,
         )
         .unwrap();
-        assert!(out.contains("level_str"), "{out}");
+        assert!(out.contains("level$str"), "{out}");
     }
 
     // --- Rule 1: bare column in SELECT ---
@@ -671,10 +671,10 @@ mod tests {
     fn test_select_bare_str_only() {
         let fields = map(&[("level", true, false, false)]);
         let out = rewrite_sql("SELECT level FROM logs", &fields).unwrap();
-        // str-only field → just x_str AS x
-        assert!(out.contains("level_str"), "{out}");
+        // str-only field → just x$str AS x
+        assert!(out.contains("level$str"), "{out}");
         assert!(
-            out.contains("AS level") || out.contains("level_str AS level"),
+            out.contains("AS level") || out.contains("level$str AS level"),
             "{out}"
         );
     }
@@ -683,21 +683,21 @@ mod tests {
     fn test_select_bare_int_and_str() {
         let fields = map(&[("status", true, true, false)]);
         let out = rewrite_sql("SELECT status FROM logs", &fields).unwrap();
-        // int+str → COALESCE(CAST(status_int AS VARCHAR), status_str) AS status
+        // int+str → COALESCE(CAST(status$int AS VARCHAR), status$str) AS status
         assert!(
             out.contains("COALESCE") || out.contains("coalesce"),
             "{out}"
         );
-        assert!(out.contains("status_int"), "{out}");
-        assert!(out.contains("status_str"), "{out}");
+        assert!(out.contains("status$int"), "{out}");
+        assert!(out.contains("status$str"), "{out}");
     }
 
     #[test]
     fn test_select_bare_int_only() {
         let fields = map(&[("count", false, true, false)]);
         let out = rewrite_sql("SELECT count FROM logs", &fields).unwrap();
-        // int-only → CAST(count_int AS VARCHAR) AS count
-        assert!(out.contains("count_int"), "{out}");
+        // int-only → CAST(count$int AS VARCHAR) AS count
+        assert!(out.contains("count$int"), "{out}");
         assert!(out.contains("CAST") || out.contains("cast"), "{out}");
     }
 
@@ -715,13 +715,13 @@ mod tests {
     fn test_int_udf_rewrite_int_and_str() {
         let fields = map(&[("duration_ms", true, true, false)]);
         let out = rewrite_sql("SELECT int(duration_ms) AS d FROM logs", &fields).unwrap();
-        // → COALESCE(duration_ms_int, TRY_CAST(duration_ms_str AS BIGINT)) AS d
+        // → COALESCE(duration_ms$int, TRY_CAST(duration_ms$str AS BIGINT)) AS d
         assert!(
             out.contains("COALESCE") || out.contains("coalesce"),
             "{out}"
         );
-        assert!(out.contains("duration_ms_int"), "{out}");
-        assert!(out.contains("duration_ms_str"), "{out}");
+        assert!(out.contains("duration_ms$int"), "{out}");
+        assert!(out.contains("duration_ms$str"), "{out}");
         assert!(
             out.to_uppercase().contains("BIGINT"),
             "expected BIGINT in: {out}"
@@ -732,16 +732,16 @@ mod tests {
     fn test_int_udf_rewrite_int_only() {
         let fields = map(&[("duration_ms", false, true, false)]);
         let out = rewrite_sql("SELECT int(duration_ms) AS d FROM logs", &fields).unwrap();
-        // int-only: just duration_ms_int (no TRY_CAST needed)
-        assert!(out.contains("duration_ms_int"), "{out}");
+        // int-only: just duration_ms$int (no TRY_CAST needed)
+        assert!(out.contains("duration_ms$int"), "{out}");
     }
 
     #[test]
     fn test_int_udf_rewrite_str_only() {
         let fields = map(&[("duration_ms", true, false, false)]);
         let out = rewrite_sql("SELECT int(duration_ms) AS d FROM logs", &fields).unwrap();
-        // str-only: TRY_CAST(duration_ms_str AS BIGINT)
-        assert!(out.contains("duration_ms_str"), "{out}");
+        // str-only: TRY_CAST(duration_ms$str AS BIGINT)
+        assert!(out.contains("duration_ms$str"), "{out}");
         assert!(
             out.to_uppercase().contains("BIGINT"),
             "expected BIGINT in: {out}"
@@ -757,7 +757,7 @@ mod tests {
         let sql = "SELECT unknown_col FROM logs WHERE unknown_col = 'foo'";
         let out = rewrite_sql(sql, &fields).unwrap();
         assert!(out.contains("unknown_col"), "{out}");
-        assert!(!out.contains("unknown_col_str"), "{out}");
+        assert!(!out.contains("unknown_col$str"), "{out}");
     }
 
     // --- Parse error propagation ---

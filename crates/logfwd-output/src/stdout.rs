@@ -99,9 +99,9 @@ impl StdoutSink {
         let fields = schema.fields();
 
         // Find well-known columns by name (with or without type suffix).
-        let ts_idx = find_col(fields, &["timestamp_str", "timestamp"]);
-        let level_idx = find_col(fields, &["level_str", "level"]);
-        let msg_idx = find_col(fields, &["message_str", "message", "msg_str", "msg"]);
+        let ts_idx = find_col(fields, &["timestamp$str", "timestamp"]);
+        let level_idx = find_col(fields, &["level$str", "level"]);
+        let msg_idx = find_col(fields, &["message$str", "message", "msg$str", "msg"]);
 
         let cols = build_col_infos(batch);
 
@@ -162,18 +162,25 @@ impl StdoutSink {
             let mut has_extra = false;
             for col in &cols {
                 // Skip the well-known columns and _raw.
-                if Some(col.idx) == ts_idx
-                    || Some(col.idx) == level_idx
-                    || Some(col.idx) == msg_idx
-                    || col.field_name == "_raw"
-                {
+                let is_well_known = col.variants.iter().any(|(idx, _)| {
+                    Some(*idx) == ts_idx || Some(*idx) == level_idx || Some(*idx) == msg_idx
+                });
+                if is_well_known || col.field_name == "_raw" {
                     continue;
                 }
 
-                let arr = batch.column(col.idx);
-                if arr.is_null(row) {
-                    continue;
+                // Find the first variant (by priority) that is not null for this row.
+                let mut best_variant = None;
+                for (idx, suffix) in &col.variants {
+                    if !batch.column(*idx).is_null(row) {
+                        best_variant = Some((*idx, suffix.as_str()));
+                        break;
+                    }
                 }
+
+                let Some((idx, suffix)) = best_variant else {
+                    continue;
+                };
 
                 if !has_extra {
                     self.buf.extend_from_slice(b"  ");
@@ -188,7 +195,8 @@ impl StdoutSink {
                 self.buf.extend_from_slice(col.field_name.as_bytes());
                 self.buf.push(b'=');
 
-                match col.type_suffix.as_str() {
+                let arr = batch.column(idx);
+                match suffix {
                     "int" => {
                         let arr = arr.as_primitive::<arrow::datatypes::Int64Type>();
                         write!(self.buf, "{}", arr.value(row))?;

@@ -80,11 +80,11 @@ pub trait OutputSink: Send {
 
 /// Parse a typed column name into (field_name, type_suffix).
 ///
-/// "duration_ms_int" -> ("duration_ms", "int")
-/// "level_str"       -> ("level", "str")
+/// "duration_ms$int" -> ("duration_ms", "int")
+/// "level$str"       -> ("level", "str")
 /// "_raw"            -> ("_raw", "")
 pub fn parse_column_name(col_name: &str) -> (&str, &str) {
-    if let Some(pos) = col_name.rfind('_') {
+    if let Some(pos) = col_name.rfind('$') {
         let suffix = &col_name[pos + 1..];
         if suffix == "str" || suffix == "int" || suffix == "float" {
             return (&col_name[..pos], suffix);
@@ -97,31 +97,38 @@ pub fn parse_column_name(col_name: &str) -> (&str, &str) {
 // JSON serialization helpers (shared by StdoutSink and JsonLinesSink)
 // ---------------------------------------------------------------------------
 
-/// Describes one output column: its index in the RecordBatch, the field name
-/// (with type suffix stripped), the type suffix, and the Arrow data type.
+/// Describes one output logical field: its name, and the list of Arrow column
+/// indices and their type suffixes that contribute to this field.
 pub(crate) struct ColInfo {
-    idx: usize,
     field_name: String,
-    type_suffix: String,
+    variants: Vec<(usize, String)>,
+    /// Minimum original column index among all variants, used for stable sorting.
+    min_idx: usize,
 }
 
-/// Build a de-duplicated ordered list of columns for JSON output.
-/// When the same field_name appears multiple times (e.g. status_int and
-/// status_str), prefer int > float > str.
+/// Build a grouped list of columns for JSON output.
+/// When the same field_name appears multiple times (e.g. status$int and
+/// status$str), they are grouped under the same logical field.
 pub(crate) fn build_col_infos(batch: &RecordBatch) -> Vec<ColInfo> {
+    use std::collections::BTreeMap;
     let schema = batch.schema();
-    let mut infos: Vec<ColInfo> = Vec::new();
-    // Collect all columns.
+    // Use BTreeMap to group by field_name while maintaining some order.
+    let mut groups: BTreeMap<String, Vec<(usize, String)>> = BTreeMap::new();
+    let mut min_indices: BTreeMap<String, usize> = BTreeMap::new();
+
     for (idx, field) in schema.fields().iter().enumerate() {
         let name = field.name().as_str();
         let (field_name, type_suffix) = parse_column_name(name);
-        infos.push(ColInfo {
-            idx,
-            field_name: field_name.to_string(),
-            type_suffix: type_suffix.to_string(),
-        });
+        groups
+            .entry(field_name.to_string())
+            .or_default()
+            .push((idx, type_suffix.to_string()));
+        min_indices
+            .entry(field_name.to_string())
+            .and_modify(|m| *m = (*m).min(idx))
+            .or_insert(idx);
     }
-    // De-duplicate: for each field_name keep the best-typed column.
+
     // Priority: int > float > str > untyped
     fn type_priority(suffix: &str) -> u8 {
         match suffix {
@@ -131,15 +138,23 @@ pub(crate) fn build_col_infos(batch: &RecordBatch) -> Vec<ColInfo> {
             _ => 0,
         }
     }
-    // Use a stable sort + dedup to keep the highest-priority for each name.
-    infos.sort_by(|a, b| {
-        a.field_name
-            .cmp(&b.field_name)
-            .then_with(|| type_priority(&b.type_suffix).cmp(&type_priority(&a.type_suffix)))
-    });
-    infos.dedup_by(|a, b| a.field_name == b.field_name);
-    // Re-sort by original column index to maintain stable output order.
-    infos.sort_by_key(|c| c.idx);
+
+    let mut infos: Vec<ColInfo> = groups
+        .into_iter()
+        .map(|(field_name, mut variants)| {
+            // Sort variants by priority within each field.
+            variants.sort_by(|a, b| type_priority(&b.1).cmp(&type_priority(&a.1)));
+            let min_idx = min_indices[&field_name];
+            ColInfo {
+                field_name,
+                variants,
+                min_idx,
+            }
+        })
+        .collect();
+
+    // Re-sort by original minimum column index to maintain stable output order.
+    infos.sort_by_key(|c| c.min_idx);
     infos
 }
 
@@ -160,10 +175,19 @@ pub(crate) fn write_row_json(batch: &RecordBatch, row: usize, cols: &[ColInfo], 
     out.push(b'{');
     let mut first = true;
     for col in cols {
-        let arr = batch.column(col.idx);
-        if arr.is_null(row) {
-            continue;
+        // Find the first variant (by priority) that is not null for this row.
+        let mut best_variant = None;
+        for (idx, suffix) in &col.variants {
+            if !batch.column(*idx).is_null(row) {
+                best_variant = Some((*idx, suffix.as_str()));
+                break;
+            }
         }
+
+        let Some((idx, suffix)) = best_variant else {
+            continue;
+        };
+
         if !first {
             out.push(b',');
         }
@@ -174,7 +198,8 @@ pub(crate) fn write_row_json(batch: &RecordBatch, row: usize, cols: &[ColInfo], 
         out.push(b'"');
         out.push(b':');
         // Value — type-aware
-        match col.type_suffix.as_str() {
+        let arr = batch.column(idx);
+        match suffix {
             "int" => {
                 let arr = arr.as_primitive::<arrow::datatypes::Int64Type>();
                 let v = arr.value(row);
@@ -354,8 +379,8 @@ mod tests {
 
     fn make_test_batch() -> RecordBatch {
         let schema = Arc::new(Schema::new(vec![
-            Field::new("level_str", DataType::Utf8, true),
-            Field::new("status_int", DataType::Int64, true),
+            Field::new("level$str", DataType::Utf8, true),
+            Field::new("status$int", DataType::Int64, true),
         ]));
         let level = StringArray::from(vec![Some("ERROR"), Some("INFO")]);
         let status = Int64Array::from(vec![Some(500), Some(200)]);
@@ -371,10 +396,10 @@ mod tests {
 
     #[test]
     fn test_parse_column_name() {
-        assert_eq!(parse_column_name("status_int"), ("status", "int"));
-        assert_eq!(parse_column_name("level_str"), ("level", "str"));
+        assert_eq!(parse_column_name("status$int"), ("status", "int"));
+        assert_eq!(parse_column_name("level$str"), ("level", "str"));
         assert_eq!(
-            parse_column_name("duration_ms_float"),
+            parse_column_name("duration_ms$float"),
             ("duration_ms", "float")
         );
         assert_eq!(parse_column_name("_raw"), ("_raw", ""));
@@ -436,10 +461,10 @@ mod tests {
     #[test]
     fn test_otlp_encoding() {
         let schema = Arc::new(Schema::new(vec![
-            Field::new("timestamp_str", DataType::Utf8, true),
-            Field::new("level_str", DataType::Utf8, true),
-            Field::new("message_str", DataType::Utf8, true),
-            Field::new("status_int", DataType::Int64, true),
+            Field::new("timestamp$str", DataType::Utf8, true),
+            Field::new("level$str", DataType::Utf8, true),
+            Field::new("message$str", DataType::Utf8, true),
+            Field::new("status$int", DataType::Int64, true),
         ]));
         let ts = StringArray::from(vec![Some("2024-01-15T10:30:00Z")]);
         let level = StringArray::from(vec![Some("ERROR")]);
@@ -505,7 +530,7 @@ mod tests {
     fn test_stdout_text_format() {
         let schema = Arc::new(Schema::new(vec![
             Field::new("_raw", DataType::Utf8, true),
-            Field::new("level_str", DataType::Utf8, true),
+            Field::new("level$str", DataType::Utf8, true),
         ]));
         let raw = StringArray::from(vec![Some("original log line")]);
         let level = StringArray::from(vec![Some("INFO")]);
@@ -521,10 +546,10 @@ mod tests {
 
     #[test]
     fn test_type_preference_dedup() {
-        // When both status_int and status_str exist, int should win.
+        // When both status$int and status$str exist, int should win.
         let schema = Arc::new(Schema::new(vec![
-            Field::new("status_str", DataType::Utf8, true),
-            Field::new("status_int", DataType::Int64, true),
+            Field::new("status$str", DataType::Utf8, true),
+            Field::new("status$int", DataType::Int64, true),
         ]));
         let status_s = StringArray::from(vec![Some("500")]);
         let status_i = Int64Array::from(vec![Some(500)]);
@@ -545,7 +570,7 @@ mod tests {
     #[test]
     fn test_float_column_json() {
         let schema = Arc::new(Schema::new(vec![Field::new(
-            "duration_ms_float",
+            "duration_ms$float",
             DataType::Float64,
             true,
         )]));
@@ -706,12 +731,12 @@ mod tests {
 
     #[test]
     fn test_otlp_type_mismatch_no_panic() {
-        // Column named "count_int" but actually contains strings.
+        // Column named "count$int" but actually contains strings.
         // Before the fix this would panic in as_primitive::<Int64Type>().
         // After the fix it falls through to AttrArray::Str.
         let schema = Arc::new(Schema::new(vec![
-            Field::new("count_int", DataType::Utf8, true),
-            Field::new("message_str", DataType::Utf8, true),
+            Field::new("count$int", DataType::Utf8, true),
+            Field::new("message$str", DataType::Utf8, true),
         ]));
         let count = StringArray::from(vec![Some("high")]);
         let msg = StringArray::from(vec![Some("something happened")]);
@@ -734,9 +759,9 @@ mod tests {
 
     #[test]
     fn test_otlp_real_int_column_encoded() {
-        // Column named "status_str" but actually Int64: should be encoded as int attr.
+        // Column named "status$str" but actually Int64: should be encoded as int attr.
         let schema = Arc::new(Schema::new(vec![Field::new(
-            "status_str",
+            "status$str",
             DataType::Int64,
             true,
         )]));
