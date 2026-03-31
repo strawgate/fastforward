@@ -539,3 +539,186 @@ mod verification {
         assert_eq!(running.committed_offset(src_a), end_a);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Proptest: random event sequences
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    /// Actions that can happen in a pipeline.
+    #[derive(Debug, Clone)]
+    enum Action {
+        /// Create a new batch on a source with given size.
+        Create { source: u32, size: u64 },
+        /// Ack the oldest sending batch for a source.
+        Ack { source: u32 },
+        /// Fail (retry) the oldest sending batch for a source.
+        Fail { source: u32 },
+        /// Reject the oldest sending batch for a source.
+        Reject { source: u32 },
+    }
+
+    fn action_strategy() -> impl Strategy<Value = Action> {
+        prop_oneof![
+            // Bias toward create + ack (common path)
+            3 => (0..3u32, 1..10000u64).prop_map(|(s, sz)| Action::Create { source: s, size: sz }),
+            3 => (0..3u32).prop_map(|s| Action::Ack { source: s }),
+            1 => (0..3u32).prop_map(|s| Action::Fail { source: s }),
+            1 => (0..3u32).prop_map(|s| Action::Reject { source: s }),
+        ]
+    }
+
+    proptest! {
+        /// Random event sequences maintain offset monotonicity.
+        #[test]
+        fn offset_never_decreases(actions in proptest::collection::vec(action_strategy(), 1..50)) {
+            let machine = PipelineMachine::new();
+            let mut running = machine.start();
+
+            // Track per-source state
+            let mut source_offsets: alloc::collections::BTreeMap<u32, u64> = alloc::collections::BTreeMap::new();
+            // Batches in Sending state, keyed by source
+            let mut sending: alloc::collections::BTreeMap<u32, alloc::vec::Vec<super::super::BatchTicket<super::super::Sending>>> = alloc::collections::BTreeMap::new();
+
+            for action in actions {
+                match action {
+                    Action::Create { source, size } => {
+                        let src = SourceId(source);
+                        let start = source_offsets.get(&source).copied().unwrap_or(0);
+                        // Use running create_batch offset as the next write position
+                        let end = start + size;
+                        *source_offsets.entry(source).or_insert(0) = end;
+                        let ticket = running.create_batch(src, start, end);
+                        let s = ticket.begin_send();
+                        sending.entry(source).or_default().push(s);
+                    }
+                    Action::Ack { source } => {
+                        if let Some(queue) = sending.get_mut(&source) {
+                            if !queue.is_empty() {
+                                let s = queue.remove(0);
+                                let old = running.committed_offset(SourceId(source));
+                                let advance = running.apply_ack(s.ack());
+                                // Offset never decreases
+                                prop_assert!(advance.new_offset >= old,
+                                    "offset decreased: {} -> {}", old, advance.new_offset);
+                            }
+                        }
+                    }
+                    Action::Fail { source } => {
+                        if let Some(queue) = sending.get_mut(&source) {
+                            if !queue.is_empty() {
+                                let s = queue.remove(0);
+                                let requeued = s.fail();
+                                // Re-send immediately
+                                let s2 = requeued.begin_send();
+                                queue.push(s2);
+                            }
+                        }
+                    }
+                    Action::Reject { source } => {
+                        if let Some(queue) = sending.get_mut(&source) {
+                            if !queue.is_empty() {
+                                let s = queue.remove(0);
+                                let old = running.committed_offset(SourceId(source));
+                                let advance = running.apply_ack(s.reject());
+                                prop_assert!(advance.new_offset >= old,
+                                    "offset decreased on reject: {} -> {}", old, advance.new_offset);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        /// After all batches acked, committed offset equals highest end_offset.
+        #[test]
+        fn all_acked_reaches_final(
+            num_batches in 1..20usize,
+            batch_sizes in proptest::collection::vec(1..5000u64, 1..20),
+            ack_order_seed in proptest::collection::vec(0..1000u32, 1..20),
+        ) {
+            let n = num_batches.min(batch_sizes.len()).min(ack_order_seed.len());
+            if n == 0 { return Ok(()); }
+
+            let machine = PipelineMachine::new();
+            let mut running = machine.start();
+            let src = SourceId(0);
+
+            // Create N batches with contiguous offsets
+            let mut tickets = alloc::vec::Vec::new();
+            let mut offset = 0u64;
+            for i in 0..n {
+                let end = offset + batch_sizes[i];
+                let t = running.create_batch(src, offset, end);
+                tickets.push(t.begin_send());
+                offset = end;
+            }
+            let expected_final = offset;
+
+            // Ack in shuffled order (use seed to create permutation)
+            let mut indices: alloc::vec::Vec<usize> = (0..n).collect();
+            // Simple Fisher-Yates with deterministic seeds
+            for i in (1..indices.len()).rev() {
+                let j = ack_order_seed[i % ack_order_seed.len()] as usize % (i + 1);
+                indices.swap(i, j);
+            }
+
+            // We need to ack by pulling from the tickets vec in permuted order.
+            // Since we can't index-remove efficiently, collect into a map.
+            let mut ticket_map: alloc::collections::BTreeMap<usize, super::super::BatchTicket<super::super::Sending>> = alloc::collections::BTreeMap::new();
+            for (i, t) in tickets.into_iter().enumerate() {
+                ticket_map.insert(i, t);
+            }
+
+            for &idx in &indices {
+                if let Some(t) = ticket_map.remove(&idx) {
+                    running.apply_ack(t.ack());
+                }
+            }
+
+            prop_assert_eq!(running.committed_offset(src), expected_final,
+                "committed {} != expected {} after acking all {} batches",
+                running.committed_offset(src), expected_final, n);
+            prop_assert_eq!(running.in_flight_count(), 0);
+        }
+
+        /// Drain completes after all in-flight batches are acked.
+        #[test]
+        fn drain_completes(
+            num_batches in 1..10usize,
+            batch_sizes in proptest::collection::vec(1..2000u64, 1..10),
+        ) {
+            let n = num_batches.min(batch_sizes.len());
+            if n == 0 { return Ok(()); }
+
+            let machine = PipelineMachine::new();
+            let mut running = machine.start();
+            let src = SourceId(0);
+
+            let mut sending = alloc::vec::Vec::new();
+            let mut offset = 0u64;
+            for i in 0..n {
+                let end = offset + batch_sizes[i];
+                let t = running.create_batch(src, offset, end);
+                sending.push(t.begin_send());
+                offset = end;
+            }
+
+            let mut draining = running.begin_drain();
+            prop_assert!(!draining.is_drained() || sending.is_empty());
+
+            // Ack all during drain
+            for s in sending {
+                draining.apply_ack(s.ack());
+            }
+
+            prop_assert!(draining.is_drained());
+            let stopped = draining.stop();
+            prop_assert_eq!(*stopped.final_offsets().get(&src).unwrap(), offset);
+        }
+    }
+}
