@@ -1,8 +1,10 @@
-use std::cell::Cell;
+use std::cell::RefCell;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
+
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
 // ---------------------------------------------------------------------------
 // Atomic stats structures (lock-free, hot-path friendly)
@@ -121,9 +123,9 @@ pub struct DiagnosticsServer {
     bind_addr: String,
     config_yaml: String,
     config_path: String,
-    /// Previous CPU time reading for delta computation (diagnostics thread only).
-    prev_cpu_us: Cell<u64>,
-    prev_cpu_instant: Cell<Instant>,
+    /// sysinfo System handle — refreshed on the diagnostics thread only.
+    sys: RefCell<System>,
+    pid: Pid,
 }
 
 impl DiagnosticsServer {
@@ -134,8 +136,8 @@ impl DiagnosticsServer {
             bind_addr: bind_addr.to_string(),
             config_yaml: String::new(),
             config_path: String::new(),
-            prev_cpu_us: Cell::new(0),
-            prev_cpu_instant: Cell::new(Instant::now()),
+            sys: RefCell::new(System::new()),
+            pid: Pid::from_u32(std::process::id()),
         }
     }
 
@@ -300,19 +302,59 @@ impl DiagnosticsServer {
         request: tiny_http::Request,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let uptime = self.start_time.elapsed().as_secs();
-        let pid = std::process::id();
-        let sys = collect_system_stats(&self.prev_cpu_us, &self.prev_cpu_instant);
+        let pid_u32 = std::process::id();
+
+        // Refresh only our process (minimal cost).
+        let refresh = ProcessRefreshKind::everything();
+        {
+            let mut sys = self.sys.borrow_mut();
+            sys.refresh_processes_specifics(
+                ProcessesToUpdate::Some(&[self.pid]),
+                true,
+                refresh,
+            );
+        }
+
+        let sys = self.sys.borrow();
+        let proc_info = sys.process(self.pid);
+
+        // Process metrics
+        let cpu_pct = proc_info.map(|p| p.cpu_usage()).unwrap_or(0.0);
+        let rss_bytes = proc_info.map(|p| p.memory()).unwrap_or(0);
+        let virt_bytes = proc_info.map(|p| p.virtual_memory()).unwrap_or(0);
+        let disk_read = proc_info.map(|p| p.disk_usage().read_bytes).unwrap_or(0);
+        let disk_written = proc_info.map(|p| p.disk_usage().written_bytes).unwrap_or(0);
+
+        // FD count (platform-specific, lightweight)
+        let fd_count = get_fd_count();
+        let fd_limit = get_fd_limit();
+
+        // System info — refresh memory + CPU list if not yet populated
+        if sys.total_memory() == 0 {
+            drop(sys);
+            {
+                let mut sys_mut = self.sys.borrow_mut();
+                sys_mut.refresh_memory();
+                sys_mut.refresh_cpu_list(sysinfo::CpuRefreshKind::nothing());
+            }
+        } else {
+            drop(sys);
+        }
+        let sys = self.sys.borrow();
+        let total_memory = sys.total_memory();
+        let cpu_count = sys.cpus().len();
+        let hostname = System::host_name().unwrap_or_default();
+        let os_name = System::long_os_version().unwrap_or_default();
+        let arch = std::env::consts::ARCH;
 
         let body = format!(
-            r#"{{"uptime_seconds":{},"version":"{}","pid":{},"cpu_percent":{},"rss_bytes":{},"num_threads":{},"disk_read_bytes":{},"disk_write_bytes":{}}}"#,
-            uptime,
-            VERSION,
-            pid,
-            format_f64(sys.cpu_percent),
-            sys.rss_bytes,
-            sys.num_threads,
-            sys.disk_read_bytes,
-            sys.disk_write_bytes,
+            r#"{{"uptime_seconds":{},"version":"{}","pid":{},"cpu_percent":{},"cpu_count":{},"rss_bytes":{},"virtual_bytes":{},"total_memory_bytes":{},"fd_count":{},"fd_limit":{},"disk_read_bytes":{},"disk_write_bytes":{},"hostname":"{}","os":"{}","arch":"{}"}}"#,
+            uptime, VERSION, pid_u32,
+            format_f64(cpu_pct as f64), cpu_count,
+            rss_bytes, virt_bytes, total_memory,
+            format_opt_u64(fd_count), format_opt_u64(fd_limit),
+            disk_read, disk_written,
+            esc(&hostname), esc(&os_name), arch,
         );
         let resp = tiny_http::Response::from_string(body).with_header(
             tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
@@ -481,89 +523,57 @@ fn format_f64(v: f64) -> String {
     }
 }
 
-// ---------------------------------------------------------------------------
-// System stats (platform-specific, no new deps)
-// ---------------------------------------------------------------------------
-
-struct SystemStats {
-    cpu_percent: f64,
-    rss_bytes: u64,
-    num_threads: u64,
-    disk_read_bytes: u64,
-    disk_write_bytes: u64,
+fn format_opt_u64(v: Option<u64>) -> String {
+    match v {
+        Some(n) => n.to_string(),
+        None => "null".to_string(),
+    }
 }
 
-/// Collect system stats using getrusage (macOS + Linux).
-/// CPU% is computed as delta since last call.
-fn collect_system_stats(prev_cpu_us: &Cell<u64>, prev_cpu_instant: &Cell<Instant>) -> SystemStats {
-    let mut stats = SystemStats {
-        cpu_percent: 0.0,
-        rss_bytes: 0,
-        num_threads: 0,
-        disk_read_bytes: 0,
-        disk_write_bytes: 0,
-    };
+// ---------------------------------------------------------------------------
+// FD count and limit (lightweight, no sysinfo needed)
+// ---------------------------------------------------------------------------
 
-    #[cfg(unix)]
-    {
-        // getrusage for CPU time and RSS
-        unsafe {
-            let mut usage: libc::rusage = std::mem::zeroed();
-            if libc::getrusage(libc::RUSAGE_SELF, &mut usage) == 0 {
-                // CPU time in microseconds
-                let cpu_us = (usage.ru_utime.tv_sec as u64) * 1_000_000
-                    + (usage.ru_utime.tv_usec as u64)
-                    + (usage.ru_stime.tv_sec as u64) * 1_000_000
-                    + (usage.ru_stime.tv_usec as u64);
-
-                let prev = prev_cpu_us.get();
-                let prev_instant = prev_cpu_instant.get();
-                let wall_us = prev_instant.elapsed().as_micros() as u64;
-
-                if prev > 0 && wall_us > 0 {
-                    let delta_cpu = cpu_us.saturating_sub(prev);
-                    stats.cpu_percent = delta_cpu as f64 / wall_us as f64 * 100.0;
-                }
-
-                prev_cpu_us.set(cpu_us);
-                prev_cpu_instant.set(Instant::now());
-
-                // RSS: on macOS ru_maxrss is bytes, on Linux it's KB
-                #[cfg(target_os = "macos")]
-                {
-                    stats.rss_bytes = usage.ru_maxrss as u64;
-                }
-                #[cfg(target_os = "linux")]
-                {
-                    stats.rss_bytes = (usage.ru_maxrss as u64) * 1024;
-                }
-            }
-        }
-    }
-
-    // Linux-specific: /proc/self for threads and disk I/O
+/// Count open file descriptors for this process.
+fn get_fd_count() -> Option<u64> {
     #[cfg(target_os = "linux")]
     {
-        if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
-            for line in status.lines() {
-                if let Some(rest) = line.strip_prefix("Threads:") {
-                    stats.num_threads = rest.trim().parse().unwrap_or(0);
-                }
-            }
-        }
-        if let Ok(io) = std::fs::read_to_string("/proc/self/io") {
-            for line in io.lines() {
-                if let Some(rest) = line.strip_prefix("read_bytes: ") {
-                    stats.disk_read_bytes = rest.trim().parse().unwrap_or(0);
-                }
-                if let Some(rest) = line.strip_prefix("write_bytes: ") {
-                    stats.disk_write_bytes = rest.trim().parse().unwrap_or(0);
-                }
+        std::fs::read_dir("/proc/self/fd")
+            .ok()
+            .map(|entries| entries.count() as u64)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // Use proc_pidinfo to get FD count on macOS.
+        // Fallback: count via lsof-style approach isn't worth it.
+        // The /dev/fd trick works on macOS too.
+        std::fs::read_dir("/dev/fd")
+            .ok()
+            .map(|entries| entries.count() as u64)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        None
+    }
+}
+
+/// Get the soft FD limit (ulimit -n).
+fn get_fd_limit() -> Option<u64> {
+    #[cfg(unix)]
+    {
+        unsafe {
+            let mut rlim: libc::rlimit = std::mem::zeroed();
+            if libc::getrlimit(libc::RLIMIT_NOFILE, &mut rlim) == 0 {
+                Some(rlim.rlim_cur as u64)
+            } else {
+                None
             }
         }
     }
-
-    stats
+    #[cfg(not(unix))]
+    {
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------

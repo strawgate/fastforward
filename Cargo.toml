@@ -13,6 +13,7 @@ datafusion = "45"
 dhat = { version = "0.3", optional = true }
 libc = "0.2"
 memchr = "2"
+sysinfo = { version = "0.35", default-features = false, features = ["system"] }
 notify = "7"
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
