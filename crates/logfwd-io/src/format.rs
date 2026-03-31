@@ -74,7 +74,8 @@ impl FormatParser for JsonParser {
         if start < bytes.len() {
             let remaining = self.max_line_size.saturating_sub(self.partial.len());
             let to_add = bytes[start..].len().min(remaining);
-            self.partial.extend_from_slice(&bytes[start..start + to_add]);
+            self.partial
+                .extend_from_slice(&bytes[start..start + to_add]);
         }
         (count, 0)
     }
@@ -147,7 +148,8 @@ impl FormatParser for RawParser {
         if start < bytes.len() {
             let remaining = self.max_line_size.saturating_sub(self.partial.len());
             let to_add = bytes[start..].len().min(remaining);
-            self.partial.extend_from_slice(&bytes[start..start + to_add]);
+            self.partial
+                .extend_from_slice(&bytes[start..start + to_add]);
         }
         (count, 0)
     }
@@ -216,7 +218,8 @@ impl FormatParser for CriParser {
         if start < bytes.len() {
             let remaining = limit.saturating_sub(self.partial.len());
             let to_add = bytes[start..].len().min(remaining);
-            self.partial.extend_from_slice(&bytes[start..start + to_add]);
+            self.partial
+                .extend_from_slice(&bytes[start..start + to_add]);
         }
 
         (total_lines, total_errors)
