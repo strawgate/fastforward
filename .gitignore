@@ -1,3 +1,6 @@
 /target
 *.json
 build
+# Playwright MCP artifacts
+.playwright-mcp/
+*.png
