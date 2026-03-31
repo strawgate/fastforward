@@ -22,6 +22,36 @@ const EXIT_OK: i32 = 0;
 const EXIT_CONFIG: i32 = 1;
 const EXIT_RUNTIME: i32 = 2;
 
+#[derive(Debug)]
+enum CliError {
+    Config(String),
+    Runtime(io::Error),
+}
+
+impl CliError {
+    fn exit_code(&self) -> i32 {
+        match self {
+            Self::Config(_) => EXIT_CONFIG,
+            Self::Runtime(_) => EXIT_RUNTIME,
+        }
+    }
+}
+
+impl std::fmt::Display for CliError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Config(msg) => write!(f, "{msg}"),
+            Self::Runtime(err) => write!(f, "{err}"),
+        }
+    }
+}
+
+impl From<io::Error> for CliError {
+    fn from(value: io::Error) -> Self {
+        Self::Runtime(value)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Color support (respects NO_COLOR, checks stderr TTY)
 // ---------------------------------------------------------------------------
@@ -99,7 +129,7 @@ async fn main_inner() -> i32 {
         Ok(_) => EXIT_OK,
         Err(e) => {
             eprintln!("{}error{}: {e}", red(), reset());
-            EXIT_RUNTIME
+            e.exit_code()
         }
     }
 }
@@ -143,11 +173,11 @@ fn print_usage() {
 // Commands
 // ---------------------------------------------------------------------------
 
-async fn cmd_config(args: &[String]) -> io::Result<()> {
+async fn cmd_config(args: &[String]) -> Result<(), CliError> {
     if args.len() < 3 {
         eprintln!("{}error{}: --config requires a path", red(), reset(),);
         eprintln!("  logfwd --config <config.yaml> [--validate] [--dry-run]");
-        return Err(io::Error::new(io::ErrorKind::Other, "missing config path"));
+        return Err(CliError::Config("missing config path".to_owned()));
     }
 
     let config_path = &args[2];
@@ -162,7 +192,7 @@ async fn cmd_config(args: &[String]) -> io::Result<()> {
             other => {
                 eprintln!("{}error{}: unknown flag: {other}", red(), reset());
                 eprintln!("  logfwd --config <config.yaml> [--validate] [--dry-run]");
-                return Err(io::Error::new(io::ErrorKind::Other, "unknown flag"));
+                return Err(CliError::Config(format!("unknown flag: {other}")));
             }
         }
     }
@@ -170,7 +200,7 @@ async fn cmd_config(args: &[String]) -> io::Result<()> {
     let config = match logfwd_config::Config::load(config_path) {
         Ok(c) => c,
         Err(e) => {
-            return Err(io::Error::new(io::ErrorKind::Other, e.to_string()));
+            return Err(CliError::Config(e.to_string()));
         }
     };
 
@@ -204,27 +234,27 @@ async fn cmd_config(args: &[String]) -> io::Result<()> {
     run_pipelines(config, base_path).await
 }
 
-fn cmd_blackhole(args: &[String]) -> io::Result<()> {
+fn cmd_blackhole(args: &[String]) -> Result<(), CliError> {
     let addr = args.get(2).map(|s| s.as_str()).unwrap_or("127.0.0.1:4318");
-    run_blackhole(addr)
+    run_blackhole(addr).map_err(CliError::Runtime)
 }
 
-fn cmd_generate_json(args: &[String]) -> io::Result<()> {
+fn cmd_generate_json(args: &[String]) -> Result<(), CliError> {
     if args.len() < 4 {
         eprintln!(
             "{}error{}: --generate-json requires <num_lines> <output_file>",
             red(),
             reset(),
         );
-        return Err(io::Error::new(io::ErrorKind::Other, "missing arguments"));
+        return Err(CliError::Config("missing arguments".to_owned()));
     }
     let num_lines: usize = match args[2].parse() {
         Ok(n) => n,
         Err(e) => {
-            return Err(io::Error::new(io::ErrorKind::Other, format!("invalid num_lines: {e}")));
+            return Err(CliError::Config(format!("invalid num_lines: {e}")));
         }
     };
-    generate_json_log_file(num_lines, &args[3])
+    generate_json_log_file(num_lines, &args[3]).map_err(CliError::Runtime)
 }
 
 // ---------------------------------------------------------------------------
@@ -236,7 +266,7 @@ fn validate_pipelines(
     config: &logfwd_config::Config,
     dry_run: bool,
     base_path: Option<&std::path::Path>,
-) -> io::Result<()> {
+) -> Result<(), CliError> {
     use logfwd::pipeline::Pipeline;
 
     // Build a no-op meter for validation (no OTel export needed).
@@ -257,7 +287,9 @@ fn validate_pipelines(
     }
 
     if errors > 0 {
-        return Err(io::Error::new(io::ErrorKind::Other, format!("{errors} error(s) during validation")));
+        return Err(CliError::Config(format!(
+            "{errors} error(s) during validation"
+        )));
     }
 
     let label = if dry_run { "dry run ok" } else { "config ok" };
@@ -273,7 +305,7 @@ fn validate_pipelines(
 async fn run_pipelines(
     config: logfwd_config::Config,
     base_path: Option<&std::path::Path>,
-) -> io::Result<()> {
+) -> Result<(), CliError> {
     use logfwd::pipeline::Pipeline;
     use logfwd_io::diagnostics::DiagnosticsServer;
     let shutdown = CancellationToken::new();
@@ -287,13 +319,17 @@ async fn run_pipelines(
         .frequency(999)
         .blocklist(&["libc", "libgcc", "pthread", "vdso"])
         .build()
-        .unwrap();
+        .map_err(|e| {
+            CliError::Runtime(io::Error::other(format!(
+                "failed to initialize pprof profiler: {e}"
+            )))
+        })?;
 
     let shutdown_for_signal = shutdown.clone();
     tokio::spawn(async move {
         #[cfg(feature = "dhat-heap")]
         let _profiler_to_drop = profiler;
-        
+
         #[cfg(feature = "cpu-profiling")]
         let _pprof_to_drop = pprof_guard;
 
@@ -311,7 +347,7 @@ async fn run_pipelines(
         {
             tokio::signal::ctrl_c().await.ok();
         }
-        
+
         #[cfg(feature = "cpu-profiling")]
         {
             if let Ok(report) = _pprof_to_drop.report().build() {
@@ -324,7 +360,7 @@ async fn run_pipelines(
         #[cfg(feature = "dhat-heap")]
         drop(_profiler_to_drop);
 
-        std::process::exit(0);
+        shutdown_for_signal.cancel();
     });
 
     let meter_provider = build_meter_provider(&config)?;
@@ -338,7 +374,7 @@ async fn run_pipelines(
                 pipelines.push(pipeline);
             }
             Err(e) => {
-                return Err(io::Error::new(io::ErrorKind::Other, format!("pipeline '{name}': {e}")));
+                return Err(CliError::Config(format!("pipeline '{name}': {e}")));
             }
         }
     }
@@ -392,7 +428,9 @@ async fn run_pipelines(
         }
         result?;
         if had_sibling_error {
-            return Err(io::Error::other("one or more sibling pipelines failed"));
+            return Err(CliError::Runtime(io::Error::other(
+                "one or more sibling pipelines failed",
+            )));
         }
     } else {
         let mut had_error = false;
@@ -410,7 +448,9 @@ async fn run_pipelines(
             }
         }
         if had_error {
-            return Err(io::Error::other("one or more pipelines failed"));
+            return Err(CliError::Runtime(io::Error::other(
+                "one or more pipelines failed",
+            )));
         }
     }
 
@@ -462,7 +502,8 @@ fn run_blackhole(addr: &str) -> io::Result<()> {
         let mut prev_bytes = 0u64;
         loop {
             std::thread::sleep(Duration::from_secs(1));
-            let reqs = reqs_clone.load(Ordering::Relaxed);            let lines = lines_clone.load(Ordering::Relaxed);
+            let reqs = reqs_clone.load(Ordering::Relaxed);
+            let lines = lines_clone.load(Ordering::Relaxed);
             let bytes = bytes_clone.load(Ordering::Relaxed);
             let d_lines = lines - prev_lines;
             let d_bytes = bytes - prev_bytes;
