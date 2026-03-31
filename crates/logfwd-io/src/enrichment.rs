@@ -4,6 +4,7 @@
 //! Each provider produces an Arrow RecordBatch representing a lookup table.
 //! The SqlTransform registers these as MemTables so users can JOIN against them.
 
+use std::collections::HashSet;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
@@ -362,6 +363,16 @@ fn read_csv_to_batch<R: io::Read>(reader: R) -> Result<RecordBatch, String> {
 
     if headers.is_empty() {
         return Err("CSV has no columns".to_string());
+    }
+
+    let mut seen = HashSet::with_capacity(headers.len());
+    for h in &headers {
+        if h.is_empty() {
+            return Err("CSV has an empty header name".to_string());
+        }
+        if !seen.insert(h) {
+            return Err(format!("CSV has duplicate header name: {h}"));
+        }
     }
 
     // Read all rows into column-oriented vecs.
@@ -816,6 +827,24 @@ mod tests {
         let table = CsvFileTable::new("t", "/fake");
         let result = table.load_from_reader(&b""[..]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn csv_empty_header_fails() {
+        let csv_data = b"host,,team\nweb-1,alice,platform\n";
+        let table = CsvFileTable::new("t", "/fake");
+        let result = table.load_from_reader(&csv_data[..]);
+        let err = result.err().expect("empty header should return Err");
+        assert!(err.contains("empty header name"));
+    }
+
+    #[test]
+    fn csv_duplicate_header_fails() {
+        let csv_data = b"host,host\nweb-1,web-2\n";
+        let table = CsvFileTable::new("t", "/fake");
+        let result = table.load_from_reader(&csv_data[..]);
+        let err = result.err().expect("duplicate header should return Err");
+        assert!(err.contains("duplicate header name"));
     }
 
     #[test]
