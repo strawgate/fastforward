@@ -104,26 +104,50 @@ pub enum Severity {
 /// Fast severity lookup from first byte + length. No string comparison needed.
 #[inline(always)]
 pub fn parse_severity(text: &[u8]) -> (Severity, &[u8]) {
-    // Common patterns: "INFO", "WARN", "ERROR", "DEBUG", "TRACE", "FATAL"
-    // Also: "info", "warn", "error", "debug", "trace", "fatal"
-    if text.is_empty() {
-        return (Severity::Unspecified, text);
-    }
-    let (sev, len) = match (text[0] | 0x20, text.len()) {
-        // lowercase first byte
-        (b't', n) if n >= 5 && (text[1] | 0x20) == b'r' => (Severity::Trace, 5),
-        (b'd', n) if n >= 5 && (text[1] | 0x20) == b'e' => (Severity::Debug, 5),
-        (b'i', n) if n >= 4 => (Severity::Info, 4),
-        (b'w', n) if n >= 4 => (Severity::Warn, 4),
-        (b'e', n) if n >= 5 => (Severity::Error, 5),
-        (b'f', n) if n >= 5 => (Severity::Fatal, 5),
-        _ => (Severity::Unspecified, 0),
+    // Exact case-insensitive match against the 6 standard severity strings.
+    // Previous version used prefix matching (e.g., any string starting with
+    // "I" matched INFO) which caused false positives like "INVALID" → Info.
+    let sev = match text.len() {
+        4 if eq_ignore_case_4(text, b"INFO") => Severity::Info,
+        4 if eq_ignore_case_4(text, b"WARN") => Severity::Warn,
+        5 if eq_ignore_case_5(text, b"DEBUG") => Severity::Debug,
+        5 if eq_ignore_case_5(text, b"TRACE") => Severity::Trace,
+        5 if eq_ignore_case_5(text, b"ERROR") => Severity::Error,
+        5 if eq_ignore_case_5(text, b"FATAL") => Severity::Fatal,
+        _ => Severity::Unspecified,
     };
-    if len > 0 {
-        (sev, &text[..len])
-    } else {
+    if matches!(sev, Severity::Unspecified) {
         (Severity::Unspecified, text)
+    } else {
+        (sev, text)
     }
+}
+
+/// Case-insensitive variable-length comparison for ASCII letters.
+/// Used by Kani proofs to verify parse_severity only matches standard levels.
+#[cfg(kani)]
+fn eq_ignore_case_match(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x | 0x20 == y | 0x20)
+}
+
+/// Case-insensitive 4-byte comparison. Uses |0x20 which is correct for
+/// ASCII letters (our severity strings are all letters).
+#[inline(always)]
+fn eq_ignore_case_4(a: &[u8], b: &[u8]) -> bool {
+    a[0] | 0x20 == b[0] | 0x20
+        && a[1] | 0x20 == b[1] | 0x20
+        && a[2] | 0x20 == b[2] | 0x20
+        && a[3] | 0x20 == b[3] | 0x20
+}
+
+/// Case-insensitive 5-byte comparison.
+#[inline(always)]
+fn eq_ignore_case_5(a: &[u8], b: &[u8]) -> bool {
+    a[0] | 0x20 == b[0] | 0x20
+        && a[1] | 0x20 == b[1] | 0x20
+        && a[2] | 0x20 == b[2] | 0x20
+        && a[3] | 0x20 == b[3] | 0x20
+        && a[4] | 0x20 == b[4] | 0x20
 }
 
 // JSON field extraction (extract_json_fields, JsonFields, key_eq_ignore_case)
@@ -604,10 +628,10 @@ mod verification {
         assert!(matches!(parse_severity(b"X").0, Severity::Unspecified));
     }
 
-    /// Prove parse_severity handles mixed case via |0x20 on first two bytes.
+    /// Prove parse_severity handles mixed case and rejects false positives.
     #[kani::proof]
     fn verify_parse_severity_mixed_case() {
-        // Mixed case should match (|0x20 folds to lowercase)
+        // Mixed case matches (|0x20 folds to lowercase)
         assert!(matches!(parse_severity(b"Info").0, Severity::Info));
         assert!(matches!(parse_severity(b"Warn").0, Severity::Warn));
         assert!(matches!(parse_severity(b"Error").0, Severity::Error));
@@ -615,9 +639,40 @@ mod verification {
         assert!(matches!(parse_severity(b"Trace").0, Severity::Trace));
         assert!(matches!(parse_severity(b"Fatal").0, Severity::Fatal));
 
-        // Severity text slice should be the correct length
-        assert_eq!(parse_severity(b"INFO extra").1, b"INFO");
-        assert_eq!(parse_severity(b"error stuff").1, b"error");
+        // Exact length required — no prefix matching
+        assert!(matches!(
+            parse_severity(b"INFORMATION").0,
+            Severity::Unspecified
+        ));
+        assert!(matches!(
+            parse_severity(b"WARNING").0,
+            Severity::Unspecified
+        ));
+        assert!(matches!(parse_severity(b"TRAMP").0, Severity::Unspecified));
+        assert!(matches!(parse_severity(b"INF").0, Severity::Unspecified));
+    }
+
+    /// Prove parse_severity ONLY returns non-Unspecified for the 6
+    /// standard level strings (any case). No false positives.
+    #[kani::proof]
+    fn verify_parse_severity_no_false_positives() {
+        let bytes: [u8; 8] = kani::any();
+        let len: usize = kani::any_where(|&l: &usize| l <= 8);
+        let text = &bytes[..len];
+        let (sev, _) = parse_severity(text);
+
+        if !matches!(sev, Severity::Unspecified) {
+            // Must be exactly one of the 6 standard levels
+            assert!(
+                eq_ignore_case_match(text, b"TRACE")
+                    || eq_ignore_case_match(text, b"DEBUG")
+                    || eq_ignore_case_match(text, b"INFO")
+                    || eq_ignore_case_match(text, b"WARN")
+                    || eq_ignore_case_match(text, b"ERROR")
+                    || eq_ignore_case_match(text, b"FATAL"),
+                "matched a non-standard level"
+            );
+        }
     }
 
     /// Prove parse_2digits and parse_4digits never panic for any input.
