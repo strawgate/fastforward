@@ -59,6 +59,8 @@ function chartColors() {
 
 function gridColor() { return isDark() ? '#30363d' : '#e5e7eb'; }
 
+const DATA_BASE = 'https://raw.githubusercontent.com/strawgate/memagent/bench-data';
+
 async function loadJSON(url) {
   try { const r = await fetch(url); if (!r.ok) return null; return await r.json(); }
   catch { return null; }
@@ -80,9 +82,9 @@ async function main() {
 
   document.getElementById('breadcrumb-title').textContent = 'Run #' + runId;
 
-  const run = await loadJSON('data/runs/' + runId + '.json');
+  const run = await loadJSON(DATA_BASE + '/runs/' + runId + '.json');
   if (!run) {
-    document.getElementById('loading').textContent = 'Could not load run ' + runId + '. File data/runs/' + runId + '.json not found.';
+    document.getElementById('loading').textContent = 'Could not load run ' + runId + '.';
     return;
   }
 

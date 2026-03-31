@@ -53,46 +53,8 @@ jobs:
         run: |
           mkdir -p book/book/bench
           cp -r bench/dashboard/* book/book/bench/ 2>/dev/null || true
-
-          # Preserve existing bench run data from the live site so that a docs
-          # deploy never wipes historical benchmark results.
-          BENCH_DATA="book/book/bench/data"
-          BASE_URL="https://strawgate.com/memagent/bench/data"
-          mkdir -p "$BENCH_DATA/runs" "$BENCH_DATA/rate-runs" "$BENCH_DATA/criterion-runs"
-
-          # Download the current index — fall back to empty if the site is not up yet.
-          curl -sf "${BASE_URL}/index.json" -o "$BENCH_DATA/index.json" \
-            || echo '{"runs":[]}' > "$BENCH_DATA/index.json"
-
-          # Download every run data file referenced in the index so the
-          # dashboard can still render history after the docs redeploy.
-          python3 - <<'PYEOF'
-          import json, subprocess, os, sys
-
-          base = os.environ.get("BASE_URL", "https://strawgate.com/memagent/bench/data")
-          bench_data = os.environ.get("BENCH_DATA", "book/book/bench/data")
-
-          with open(f"{bench_data}/index.json") as f:
-              index = json.load(f)
-
-          downloaded = 0
-          for run in index.get("runs", []):
-              run_id = run.get("id", "")
-              if not run_id:
-                  continue
-              for subdir in ("runs", "rate-runs", "criterion-runs"):
-                  url = f"{base}/{subdir}/{run_id}.json"
-                  dest = f"{bench_data}/{subdir}/{run_id}.json"
-                  os.makedirs(os.path.dirname(dest), exist_ok=True)
-                  result = subprocess.run(["curl", "-sf", url, "-o", dest], capture_output=True)
-                  if result.returncode == 0:
-                      downloaded += 1
-
-          print(f"Preserved {downloaded} bench data files from live site")
-          PYEOF
-        env:
-          BASE_URL: https://strawgate.com/memagent/bench/data
-          BENCH_DATA: book/book/bench/data
+          # Data is served live from the bench-data branch via raw.githubusercontent.com
+          # — nothing to copy here.
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3

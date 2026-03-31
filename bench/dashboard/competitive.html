@@ -65,6 +65,8 @@ function chartColors() {
   Chart.defaults.borderColor = dark ? '#30363d' : '#d0d7de';
 }
 
+const DATA_BASE = 'https://raw.githubusercontent.com/strawgate/memagent/bench-data';
+
 async function loadJSON(url) {
   try { const r = await fetch(url); if (!r.ok) return null; return r.json(); }
   catch { return null; }
@@ -72,9 +74,9 @@ async function loadJSON(url) {
 
 async function main() {
   chartColors();
-  const index = await loadJSON('data/index.json');
+  const index = await loadJSON(DATA_BASE + '/index.json');
   if (!index) {
-    document.getElementById('loading').textContent = 'No data/index.json found.';
+    document.getElementById('loading').textContent = 'No data found.';
     return;
   }
 
@@ -84,7 +86,7 @@ async function main() {
     return;
   }
 
-  const allRuns = (await Promise.all(runIds.map(id => loadJSON('data/runs/' + id + '.json')))).filter(Boolean);
+  const allRuns = (await Promise.all(runIds.map(id => loadJSON(DATA_BASE + '/runs/' + id + '.json')))).filter(Boolean);
   if (allRuns.length === 0) {
     document.getElementById('loading').textContent = 'Could not load any run data.';
     return;

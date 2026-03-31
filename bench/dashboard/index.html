@@ -104,6 +104,8 @@ function drawSparkline(canvas, data, color) {
   });
 }
 
+const DATA_BASE = 'https://raw.githubusercontent.com/strawgate/memagent/bench-data';
+
 async function loadJSON(url) {
   try { const r = await fetch(url); if (!r.ok) return null; return r.json(); }
   catch { return null; }
@@ -111,9 +113,9 @@ async function loadJSON(url) {
 
 async function main() {
   chartDefaults();
-  const index = await loadJSON('data/index.json');
+  const index = await loadJSON(DATA_BASE + '/index.json');
   if (!index) {
-    document.getElementById('loading').textContent = 'No data available. Place data/index.json to get started.';
+    document.getElementById('loading').textContent = 'No data available.';
     return;
   }
 
@@ -122,13 +124,13 @@ async function main() {
   const criterionRuns = index.criterion_runs || [];
 
   // Load latest of each type
-  const latestRun = runs.length ? await loadJSON('data/runs/' + runs[runs.length - 1] + '.json') : null;
-  const latestRate = rateRuns.length ? await loadJSON('data/rate-runs/' + rateRuns[rateRuns.length - 1] + '.json') : null;
-  const latestCriterion = criterionRuns.length ? await loadJSON('data/criterion-runs/' + criterionRuns[criterionRuns.length - 1] + '.json') : null;
+  const latestRun = runs.length ? await loadJSON(DATA_BASE + '/runs/' + runs[runs.length - 1] + '.json') : null;
+  const latestRate = rateRuns.length ? await loadJSON(DATA_BASE + '/rate-runs/' + rateRuns[rateRuns.length - 1] + '.json') : null;
+  const latestCriterion = criterionRuns.length ? await loadJSON(DATA_BASE + '/criterion-runs/' + criterionRuns[criterionRuns.length - 1] + '.json') : null;
 
   // Load a few recent runs for sparklines
   const recentRunIds = runs.slice(-10);
-  const recentRuns = (await Promise.all(recentRunIds.map(id => loadJSON('data/runs/' + id + '.json')))).filter(Boolean);
+  const recentRuns = (await Promise.all(recentRunIds.map(id => loadJSON(DATA_BASE + '/runs/' + id + '.json')))).filter(Boolean);
 
   document.getElementById('loading').style.display = 'none';
   document.getElementById('content').style.display = '';
