@@ -116,7 +116,14 @@ impl BatchTicket<Sending> {
     }
 
     /// Batch delivery failed with a transient error (will retry).
-    /// Consumes the Sending ticket, returns a Queued ticket for requeue.
+    /// Consumes the `BatchTicket<Sending>`, returns `BatchTicket<Queued>` for requeue.
+    ///
+    /// Retry correlation is preserved: `BatchId` is unchanged, so `PipelineMachine`
+    /// continues tracking the same logical batch in `in_flight`. Only `attempts`
+    /// is incremented for each fail→requeue transition.
+    ///
+    /// There is currently no built-in maximum attempt limit in `BatchTicket::fail`;
+    /// retry termination policy is intentionally left to upstream runtime logic.
     pub fn fail(self) -> BatchTicket<Queued> {
         BatchTicket {
             id: self.id,
