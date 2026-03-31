@@ -342,18 +342,44 @@ impl DiagnosticsServer {
         }
         let sys = self.sys.borrow();
         let total_memory = sys.total_memory();
+        let available_memory = sys.available_memory();
+        let used_memory = sys.used_memory();
+        let total_swap = sys.total_swap();
+        let used_swap = sys.used_swap();
+        let global_cpu = sys.global_cpu_usage();
         let cpu_count = sys.cpus().len();
         let hostname = System::host_name().unwrap_or_default();
         let os_name = System::long_os_version().unwrap_or_default();
         let arch = std::env::consts::ARCH;
 
+        // cgroup limits (K8s pod limits)
+        let cgroup = sys.cgroup_limits();
+        let cgroup_mem_max = cgroup.as_ref().map(|c| c.total_memory);
+        let cgroup_mem_cur = cgroup.as_ref().and_then(|c| {
+            // rss_bytes is our process; cgroup current is the whole pod
+            Some(rss_bytes) // use process RSS as approximation
+        });
+
         let body = format!(
-            r#"{{"uptime_seconds":{},"version":"{}","pid":{},"cpu_percent":{},"cpu_count":{},"rss_bytes":{},"virtual_bytes":{},"total_memory_bytes":{},"fd_count":{},"fd_limit":{},"disk_read_bytes":{},"disk_write_bytes":{},"hostname":"{}","os":"{}","arch":"{}"}}"#,
+            concat!(
+                r#"{{"uptime_seconds":{},"version":"{}","pid":{},"#,
+                r#""cpu_percent":{},"global_cpu_percent":{},"cpu_count":{},"#,
+                r#""rss_bytes":{},"virtual_bytes":{},"#,
+                r#""total_memory_bytes":{},"available_memory_bytes":{},"used_memory_bytes":{},"#,
+                r#""total_swap_bytes":{},"used_swap_bytes":{},"#,
+                r#""fd_count":{},"fd_limit":{},"#,
+                r#""disk_read_bytes":{},"disk_write_bytes":{},"#,
+                r#""cgroup_memory_limit":{},"#,
+                r#""hostname":"{}","os":"{}","arch":"{}"}}"#,
+            ),
             uptime, VERSION, pid_u32,
-            format_f64(cpu_pct as f64), cpu_count,
-            rss_bytes, virt_bytes, total_memory,
+            format_f64(cpu_pct as f64), format_f64(global_cpu as f64), cpu_count,
+            rss_bytes, virt_bytes,
+            total_memory, available_memory, used_memory,
+            total_swap, used_swap,
             format_opt_u64(fd_count), format_opt_u64(fd_limit),
             disk_read, disk_written,
+            format_opt_u64(cgroup_mem_max),
             esc(&hostname), esc(&os_name), arch,
         );
         let resp = tiny_http::Response::from_string(body).with_header(

@@ -29,7 +29,7 @@ body{font-family:var(--sans);background:var(--bg);color:var(--t1);font-size:13px
 .bar-meta{font-size:11px;color:var(--t4);font-family:var(--mono)}
 
 main{max-width:1200px;margin:0 auto;padding:16px 20px}
-.heading{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:1px;color:var(--t4);margin:16px 0 8px}
+.heading{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:1px;color:var(--t3);margin:16px 0 8px}
 .heading:first-child{margin-top:0}
 
 /* System info - compact grid */
@@ -39,14 +39,14 @@ main{max-width:1200px;margin:0 auto;padding:16px 20px}
 .sys-val{font-size:12px;font-family:var(--mono);color:var(--t2);font-variant-numeric:tabular-nums}
 
 /* Charts */
-.chart-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:10px;margin-bottom:16px}
+.chart-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:16px}
 .chart-card{background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:10px 12px;position:relative}
 .chart-head{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px}
-.chart-label{font-size:10px;text-transform:uppercase;letter-spacing:.6px;color:var(--t4);font-weight:600}
+.chart-label{font-size:10px;text-transform:uppercase;letter-spacing:.6px;color:var(--t3);font-weight:600}
 .chart-val{font-family:var(--mono);font-variant-numeric:tabular-nums;font-weight:700;font-size:16px;color:var(--t1);text-align:right}
 .chart-val .u{font-size:10px;color:var(--t3);font-weight:400;margin-left:2px}
 .chart-val .lim{font-size:10px;color:var(--t4);font-weight:400;margin-left:4px}
-canvas.ch{width:100%;height:90px;display:block;border-radius:4px}
+canvas.ch{width:100%;height:120px;display:block;border-radius:4px}
 
 /* Pipeline */
 .pipe-flow{display:flex;align-items:stretch;gap:2px;padding:4px 0;overflow-x:auto}
@@ -54,7 +54,7 @@ canvas.ch{width:100%;height:90px;display:block;border-radius:4px}
 .pipe-conn svg{width:28px;height:14px}
 .pipe-conn line{stroke:var(--border2);stroke-width:1.5}
 .pipe-conn polygon{fill:var(--border2)}
-.pn{flex:1;min-width:130px;max-width:240px;background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:10px 12px;cursor:pointer;transition:all .15s}
+.pn{flex:1;min-width:130px;background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:10px 12px;cursor:pointer;transition:all .15s}
 .pn:hover{border-color:var(--t4);background:var(--card2)}
 .pn.sel{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent)}
 .pn-type{font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;margin-bottom:3px}
@@ -81,6 +81,7 @@ canvas.ch{width:100%;height:90px;display:block;border-radius:4px}
 .cfg-src{font-size:11px;color:var(--t4);margin-bottom:6px}
 .cfg-src b{color:var(--t3);font-weight:500;font-family:var(--mono)}
 
+@media(max-width:1000px){.chart-grid{grid-template-columns:repeat(2,1fr)}}
 @media(max-width:700px){.chart-grid{grid-template-columns:1fr}.sys-grid{grid-template-columns:1fr 1fr}.pipe-flow{flex-direction:column}}
 </style>
 </head>
@@ -226,7 +227,7 @@ function drawChart(id,color,fmtY){
   var c=document.getElementById('ch_'+id);if(!c||!c.offsetWidth)return;
   var ctx=c.getContext('2d'),dpr=devicePixelRatio||1,w=c.offsetWidth,h=c.offsetHeight;
   c.width=w*dpr;c.height=h*dpr;ctx.scale(dpr,dpr);
-  var PL=36,PR=4,PB=14,PT=2,cw=w-PL-PR,ch=h-PT-PB;
+  var PL=40,PR=6,PB=16,PT=4,cw=w-PL-PR,ch=h-PT-PB;
   var now=Date.now(),raw=ring(id).arr();
   var data=[];for(var i=0;i<raw.length;i++)if(raw[i].t>=now-MAX_AGE)data.push(raw[i]);
   // Background
@@ -234,7 +235,8 @@ function drawChart(id,color,fmtY){
   if(data.length<2){ctx.fillStyle='#374151';ctx.font='10px sans-serif';ctx.textAlign='center';ctx.fillText('waiting\u2026',w/2,h/2);return}
   var vals=data.map(function(d){return d.v}),mn=0,mx=Math.max.apply(null,vals)*1.2;
   if(mx<.001)mx=1;if(mx<=mn)mx=mn+1;
-  var age=now-data[0].t,win=Math.max(10000,Math.min(age*1.2,MAX_AGE)),t0=now-win;
+  // Window: right edge = now, left edge grows with data age. Min 10s.
+  var age=now-data[0].t,win=Math.max(10000,Math.min(age,MAX_AGE)),t0=now-win;
   function tx(t){return PL+Math.max(0,((t-t0)/win)*cw)}
   function ty(v){return PT+ch-((v-mn)/(mx-mn))*ch}
   var mf='9px '+getComputedStyle(document.body).getPropertyValue('--mono');
@@ -248,7 +250,7 @@ function drawChart(id,color,fmtY){
   // X labels
   ctx.textAlign='center';ctx.textBaseline='top';ctx.fillStyle='#4b5563';ctx.font=mf;
   [10,30,60,120,300].forEach(function(s){var x=tx(now-s*1000);if(x>PL+18&&x<w-PR-16)ctx.fillText(s<60?s+'s':Math.floor(s/60)+'m',x,PT+ch+2)});
-  if(cw>60)ctx.fillText('now',PL+cw,PT+ch+2);
+  if(cw>60)ctx.fillText('now',PL+cw-10,PT+ch+2);
   // Line
   ctx.beginPath();
   for(var i=0;i<data.length;i++){var x=tx(data[i].t),y=Math.max(PT,Math.min(PT+ch,ty(data[i].v)));i?ctx.lineTo(x,y):ctx.moveTo(x,y)}
@@ -278,7 +280,7 @@ function snapRate(k,v){var now=Date.now(),p=prevSnap[k],dt=prevTime?(now-prevTim
 
 var chartDefs=[
   {id:'lps',label:'Lines / sec',color:'#3b82f6',fv:fmtC},
-  {id:'bps',label:'Throughput',color:'#8b5cf6',fv:fmtBC},
+  {id:'bps',label:'Input Bytes',color:'#8b5cf6',fv:fmtBC},
   {id:'err',label:'Errors / sec',color:'#ef4444',fv:fmtC},
   {id:'cpu',label:'Process CPU',color:'#f59e0b',fv:fmtC},
   {id:'rss',label:'Memory (RSS)',color:'#10b981',fv:fmtBC},
@@ -296,10 +298,10 @@ return {
     if(s.hostname)r.push(['Hostname',s.hostname]);
     if(s.os)r.push(['OS',s.os]);
     if(s.arch)r.push(['Arch',s.arch]);
-    if(s.cpu_count)r.push(['Cores',String(s.cpu_count)]);
-    if(s.total_memory_bytes)r.push(['Memory',fmtB(s.total_memory_bytes)]);
-    if(s.rss_bytes)r.push(['RSS',fmtB(s.rss_bytes)]);
-    if(s.fd_count!=null)r.push(['FDs',s.fd_count+(s.fd_limit!=null?' / '+fmt(s.fd_limit):'')]);
+    if(s.cpu_count)r.push(['CPU',s.cpu_count+' cores'+(s.global_cpu_percent!=null?' \u00b7 '+s.global_cpu_percent.toFixed(0)+'% system':'')]);
+    if(s.total_memory_bytes)r.push(['Memory',fmtB(s.used_memory_bytes||0)+' / '+fmtB(s.total_memory_bytes)+' used']);
+    if(s.total_swap_bytes>0)r.push(['Swap',fmtB(s.used_swap_bytes||0)+' / '+fmtB(s.total_swap_bytes)]);
+    if(s.cgroup_memory_limit)r.push(['cgroup limit',fmtB(s.cgroup_memory_limit)]);
     if(s.pid)r.push(['PID',String(s.pid)]);
     return r;
   },
