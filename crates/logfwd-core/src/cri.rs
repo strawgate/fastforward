@@ -97,10 +97,10 @@ impl CriReassembler {
         if cri.is_full {
             if self.partial_buf.is_empty() {
                 // Common fast path: complete line, no partials pending.
-                // We can't return a reference to cri.message because it borrows
-                // something else. Copy into partial_buf and return that.
+                // Enforce max_line_size even on single F lines.
                 self.partial_buf.clear();
-                self.partial_buf.extend_from_slice(cri.message);
+                let to_add = cri.message.len().min(self.max_line_size);
+                self.partial_buf.extend_from_slice(&cri.message[..to_add]);
             } else {
                 // Append the final chunk to the partial buffer.
                 let remaining = self.max_line_size.saturating_sub(self.partial_buf.len());
@@ -346,11 +346,10 @@ mod tests {
 mod verification {
     use super::*;
 
-    /// Prove CriReassembler::feed respects max_line_size.
-    /// Output of a partial + full sequence never exceeds the configured max.
+    /// Prove CriReassembler::feed respects max_line_size for P+F sequences.
     /// Uses fixed 8-byte messages — Kani explores all 2^64 byte values.
     #[kani::proof]
-    fn verify_reassembler_respects_max_size() {
+    fn verify_reassembler_respects_max_size_pf() {
         let max_size: usize = kani::any();
         kani::assume(max_size >= 1 && max_size <= 32);
 
@@ -373,7 +372,31 @@ mod verification {
             message: &msg2,
         };
         if let Some(output) = r.feed(&full) {
-            assert!(output.len() <= max_size, "output exceeds max_line_size");
+            assert!(output.len() <= max_size, "P+F output exceeds max_line_size");
+        }
+    }
+
+    /// Prove CriReassembler::feed respects max_line_size for F-only lines
+    /// (the fast path where no partials are pending).
+    #[kani::proof]
+    fn verify_reassembler_respects_max_size_f_only() {
+        let max_size: usize = kani::any();
+        kani::assume(max_size >= 1 && max_size <= 32);
+
+        let mut r = CriReassembler::new(max_size);
+
+        let msg: [u8; 8] = kani::any();
+        let full = CriLine {
+            timestamp: b"ts",
+            stream: b"out",
+            is_full: true,
+            message: &msg,
+        };
+        if let Some(output) = r.feed(&full) {
+            assert!(
+                output.len() <= max_size,
+                "F-only output exceeds max_line_size"
+            );
         }
     }
 
