@@ -117,6 +117,11 @@ impl FormatParser for RawParser {
                             // Escape control characters per RFC 8259.
                             let _ = std::io::Write::write_fmt(out, format_args!("\\u{:04x}", b));
                         }
+                        b if b >= 0x80 => {
+                            // Non-ASCII byte — not valid UTF-8 on its own; emit
+                            // the Unicode replacement character to keep JSON valid.
+                            out.extend_from_slice(b"\\ufffd");
+                        }
                         _ => out.push(b),
                     }
                 }
@@ -256,6 +261,53 @@ mod tests {
             s.contains(r#"{"_raw":"has \"quotes\" and \\backslash"}"#),
             "got: {s}"
         );
+    }
+
+    #[test]
+    fn raw_non_utf8_bytes_produce_valid_json() {
+        // Lone byte 0x80 (not valid UTF-8 on its own).
+        let mut parser = RawParser::new();
+        let mut out = Vec::new();
+        let (n, errors) = parser.process(b"hello\x80world\n", &mut out);
+        assert_eq!(n, 1);
+        assert_eq!(errors, 0);
+        let s = String::from_utf8(out).expect("output should be valid UTF-8");
+        assert_eq!(s, "{\"_raw\":\"hello\\ufffdworld\"}\n", "got: {s}");
+        let v: serde_json::Value =
+            serde_json::from_str(s.trim_end()).expect("output must be valid JSON");
+        assert_eq!(v["_raw"], "hello\u{fffd}world");
+
+        // 0xFF — single byte that can never appear in valid UTF-8.
+        let mut parser = RawParser::new();
+        let mut out = Vec::new();
+        let (n, _) = parser.process(b"a\xffb\n", &mut out);
+        assert_eq!(n, 1);
+        let s = String::from_utf8(out).expect("0xFF case: output should be valid UTF-8");
+        let v: serde_json::Value =
+            serde_json::from_str(s.trim_end()).expect("0xFF case: output must be valid JSON");
+        assert_eq!(v["_raw"], "a\u{fffd}b");
+
+        // Incomplete two-byte sequence: 0xC2 without a following continuation byte.
+        let mut parser = RawParser::new();
+        let mut out = Vec::new();
+        let (n, _) = parser.process(b"x\xc2z\n", &mut out);
+        assert_eq!(n, 1);
+        let s = String::from_utf8(out).expect("0xC2 case: output should be valid UTF-8");
+        let v: serde_json::Value =
+            serde_json::from_str(s.trim_end()).expect("0xC2 case: output must be valid JSON");
+        // Each non-ASCII byte is replaced independently.
+        assert_eq!(v["_raw"], "x\u{fffd}z");
+
+        // Overlong / invalid sequence: 0xC0 0x80 (classic null-byte exploit).
+        let mut parser = RawParser::new();
+        let mut out = Vec::new();
+        let (n, _) = parser.process(b"a\xc0\x80b\n", &mut out);
+        assert_eq!(n, 1);
+        let s = String::from_utf8(out).expect("0xC0 0x80 case: output should be valid UTF-8");
+        let v: serde_json::Value =
+            serde_json::from_str(s.trim_end()).expect("0xC0 0x80 case: output must be valid JSON");
+        // Both non-ASCII bytes replaced.
+        assert_eq!(v["_raw"], "a\u{fffd}\u{fffd}b");
     }
 
     #[test]
