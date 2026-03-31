@@ -42,6 +42,7 @@ impl Default for RegexpExtractUdf {
 }
 
 impl RegexpExtractUdf {
+    /// Create a new `RegexpExtractUdf` instance ready to be registered with DataFusion.
     pub fn new() -> Self {
         Self {
             signature: Signature::new(

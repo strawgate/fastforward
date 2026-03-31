@@ -91,6 +91,7 @@ impl Default for HostInfoTable {
 }
 
 impl HostInfoTable {
+    /// Create a new host-info table that exposes hostname, OS, and CPU info.
     pub fn new() -> Self {
         let hostname = gethostname::gethostname().to_string_lossy().into_owned();
         let os_type = std::env::consts::OS.to_string();
@@ -143,14 +144,21 @@ pub struct K8sPathTable {
 /// One parsed K8s pod entry from a CRI log path.
 #[derive(Debug, Clone)]
 pub struct K8sPodEntry {
+    /// Prefix of the CRI log path for this pod (e.g. `/var/log/pods/ns_pod-name_uid/container/`).
     pub log_path_prefix: String,
+    /// Kubernetes namespace.
     pub namespace: String,
+    /// Pod name.
     pub pod_name: String,
+    /// Pod UID.
     pub pod_uid: String,
+    /// Container name within the pod.
     pub container_name: String,
 }
 
 impl K8sPathTable {
+    /// Create a new K8s path enrichment table with the given DataFusion table name.
+    /// The table is populated by scanning `/var/log/pods/` at query time.
     pub fn new(table_name: impl Into<String>) -> Self {
         let table_name = table_name.into();
         // Start with an empty batch so SQL queries don't fail with "table not found".
@@ -325,6 +333,7 @@ impl CsvFileTable {
         self.load_from_reader(io::BufReader::new(file))
     }
 
+    /// Return the filesystem path of the CSV file backing this table.
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -415,6 +424,8 @@ pub struct JsonLinesFileTable {
 }
 
 impl JsonLinesFileTable {
+    /// Create a new enrichment table backed by a JSON Lines file at `path`.
+    /// The file is loaded into memory when the table is first queried.
     pub fn new(table_name: impl Into<String>, path: impl Into<PathBuf>) -> Self {
         JsonLinesFileTable {
             table_name: table_name.into(),

@@ -27,8 +27,11 @@ pub struct CompressedChunk {
 /// 12      4     xxhash32 of compressed payload
 /// ```
 pub const HEADER_SIZE: usize = 16;
+/// Two-byte magic value identifying a logfwd compressed chunk (`"LF"`).
 pub const MAGIC: u16 = 0x4C46; // "LF"
+/// Wire format version for compressed chunks.
 pub const VERSION: u8 = 1;
+/// Flag bit indicating the payload is compressed with zstd.
 pub const FLAG_ZSTD: u8 = 0x01;
 
 /// Chunk compressor with reusable zstd context.
@@ -40,6 +43,8 @@ pub struct ChunkCompressor {
 }
 
 impl ChunkCompressor {
+    /// Create a new compressor with the given zstd compression level (1–22).
+    /// Level 1 gives the best speed with reasonable compression ratio.
     pub fn new(level: i32) -> io::Result<Self> {
         Ok(ChunkCompressor {
             compressor: zstd::bulk::Compressor::new(level)?,

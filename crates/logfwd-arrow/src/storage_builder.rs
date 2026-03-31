@@ -79,6 +79,8 @@ pub struct StorageBuilder {
 }
 
 impl StorageBuilder {
+    /// Create a new `StorageBuilder`. If `keep_raw` is true, the raw input
+    /// line is stored in a `_raw` string column alongside the parsed fields.
     pub fn new(keep_raw: bool) -> Self {
         StorageBuilder {
             fields: Vec::with_capacity(32),
@@ -91,6 +93,7 @@ impl StorageBuilder {
         }
     }
 
+    /// Reset internal state and prepare for a new batch.
     pub fn begin_batch(&mut self) {
         self.row_count = 0;
         for fc in &mut self.fields {
@@ -100,12 +103,17 @@ impl StorageBuilder {
     }
 
     #[inline(always)]
+    /// Start a new row: reset the duplicate-write tracking bitmask.
     pub fn begin_row(&mut self) {
         self.written_bits = 0;
         self.written_overflow_bits.clear();
     }
 
     #[inline(always)]
+    /// Finalise the current row by incrementing the row counter.
+    ///
+    /// # Panics
+    /// Panics if the row count would exceed `u32::MAX`.
     pub fn end_row(&mut self) {
         self.row_count = self
             .row_count
@@ -114,6 +122,7 @@ impl StorageBuilder {
     }
 
     #[inline]
+    /// Resolve a field name to its column index, creating the column on first use.
     pub fn resolve_field(&mut self, key: &[u8]) -> usize {
         if let Some(&idx) = self.field_index.get(key) {
             return idx;
@@ -130,6 +139,8 @@ impl StorageBuilder {
     }
 
     #[inline(always)]
+    /// Append a UTF-8 string value at column `idx` for the current row.
+    /// Non-UTF-8 bytes are silently skipped (correct for well-formed JSON).
     pub fn append_str_by_idx(&mut self, idx: usize, value: &[u8]) {
         if self.check_dup(idx) {
             return;
@@ -146,6 +157,8 @@ impl StorageBuilder {
     }
 
     #[inline(always)]
+    /// Parse `value` as a signed 64-bit integer and store it at column `idx`.
+    /// Non-numeric bytes are silently ignored (the field will be null).
     pub fn append_int_by_idx(&mut self, idx: usize, value: &[u8]) {
         if self.check_dup(idx) {
             return;
@@ -158,6 +171,8 @@ impl StorageBuilder {
     }
 
     #[inline(always)]
+    /// Parse `value` as a 64-bit float and store it at column `idx`.
+    /// Non-numeric bytes are silently ignored (the field will be null).
     pub fn append_float_by_idx(&mut self, idx: usize, value: &[u8]) {
         if self.check_dup(idx) {
             return;
@@ -170,6 +185,7 @@ impl StorageBuilder {
     }
 
     #[inline(always)]
+    /// Record a null value at column `idx` (used for first-write-wins dedup tracking).
     pub fn append_null_by_idx(&mut self, idx: usize) {
         // Mark as written so duplicate keys are detected.
         // Null values are implicit (absence of a record = null at finish_batch).
@@ -177,12 +193,18 @@ impl StorageBuilder {
     }
 
     #[inline]
+    /// Store the raw unparsed line in the `_raw` column (no-op if `keep_raw` is false).
     pub fn append_raw(&mut self, line: &[u8]) {
         if self.keep_raw {
             self.raw_values.push(line.to_vec());
         }
     }
 
+    /// Materialise all accumulated rows into a `RecordBatch`.
+    ///
+    /// Builds each Arrow column independently from its `(row, value)` records,
+    /// filling gaps with nulls. Resets internal state so the builder can be
+    /// reused for the next batch.
     pub fn finish_batch(&mut self) -> Result<RecordBatch, ArrowError> {
         let num_rows = self.row_count as usize;
         let mut schema_fields: Vec<Field> = Vec::with_capacity(self.fields.len() + 1);

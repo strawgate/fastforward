@@ -37,6 +37,7 @@ pub struct JsonParser {
 }
 
 impl JsonParser {
+    /// Create a new JSON passthrough parser.
     pub fn new() -> Self {
         Self::default()
     }
@@ -87,6 +88,7 @@ pub struct RawParser {
 }
 
 impl RawParser {
+    /// Create a new raw-line parser that wraps each line in `{"_raw":"..."}`.
     pub fn new() -> Self {
         Self::default()
     }
@@ -153,6 +155,8 @@ pub struct CriParser {
 }
 
 impl CriParser {
+    /// Create a new CRI format parser. `max_line_size` limits the total byte
+    /// length of a reassembled multi-part CRI message before truncation.
     pub fn new(max_line_size: usize) -> Self {
         CriParser {
             reassembler: CriReassembler::new(max_line_size),

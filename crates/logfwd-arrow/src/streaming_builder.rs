@@ -99,6 +99,10 @@ impl Default for StreamingBuilder {
 }
 
 impl StreamingBuilder {
+    /// Create a new `StreamingBuilder` with pre-allocated field capacity.
+    /// Call [`begin_batch`] before scanning each buffer.
+    ///
+    /// [`begin_batch`]: StreamingBuilder::begin_batch
     pub fn new() -> Self {
         StreamingBuilder {
             fields: Vec::with_capacity(32),
@@ -131,12 +135,17 @@ impl StreamingBuilder {
     }
 
     #[inline(always)]
+    /// Start a new row: reset the duplicate-write tracking bitmask.
     pub fn begin_row(&mut self) {
         self.written_bits = 0;
         self.written_overflow_bits.clear();
     }
 
     #[inline(always)]
+    /// Finalise the current row by incrementing the row counter.
+    ///
+    /// # Panics
+    /// Panics if the row count would exceed `u32::MAX`.
     pub fn end_row(&mut self) {
         self.row_count = self
             .row_count
@@ -145,6 +154,7 @@ impl StreamingBuilder {
     }
 
     #[inline]
+    /// Resolve a field name to its column index, creating the column on first use.
     pub fn resolve_field(&mut self, key: &[u8]) -> usize {
         if let Some(&idx) = self.field_index.get(key) {
             return idx;
@@ -183,6 +193,8 @@ impl StreamingBuilder {
     }
 
     #[inline(always)]
+    /// Store a zero-copy string view at column `idx` pointing into the input buffer.
+    /// Non-UTF-8 bytes are silently skipped (correct for well-formed JSON).
     pub fn append_str_by_idx(&mut self, idx: usize, value: &[u8]) {
         if check_dup_bits(&mut self.written_bits, &mut self.written_overflow_bits, idx) {
             return;
@@ -201,6 +213,7 @@ impl StreamingBuilder {
     }
 
     #[inline(always)]
+    /// Parse `value` as a signed 64-bit integer and store it at column `idx`.
     pub fn append_int_by_idx(&mut self, idx: usize, value: &[u8]) {
         if check_dup_bits(&mut self.written_bits, &mut self.written_overflow_bits, idx) {
             return;
@@ -213,6 +226,7 @@ impl StreamingBuilder {
     }
 
     #[inline(always)]
+    /// Parse `value` as a 64-bit float and store it at column `idx`.
     pub fn append_float_by_idx(&mut self, idx: usize, value: &[u8]) {
         if check_dup_bits(&mut self.written_bits, &mut self.written_overflow_bits, idx) {
             return;
@@ -225,6 +239,7 @@ impl StreamingBuilder {
     }
 
     #[inline(always)]
+    /// Record a null value at column `idx` (used for first-write-wins dedup tracking).
     pub fn append_null_by_idx(&mut self, idx: usize) {
         // Nulls are represented by gaps — no value record needed.
         // But mark as written for duplicate-key detection.

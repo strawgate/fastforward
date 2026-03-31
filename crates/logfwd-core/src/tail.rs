@@ -21,8 +21,11 @@ use std::time::{Duration, Instant};
 /// Survives renames. Detects inode reuse via fingerprint mismatch.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct FileIdentity {
+    /// Device ID of the filesystem containing the file.
     pub device: u64,
+    /// Inode number of the file.
     pub inode: u64,
+    /// xxhash64 of the first N bytes of the file. Detects inode reuse after rotation.
     pub fingerprint: u64,
 }
 
@@ -41,11 +44,22 @@ struct TailedFile {
 pub enum TailEvent {
     /// New data available. The Vec is raw bytes read from the file.
     /// NOT necessarily aligned on line boundaries — the pipeline handles that.
-    Data { path: PathBuf, bytes: Vec<u8> },
+    Data {
+        /// Absolute path to the file that produced this data.
+        path: PathBuf,
+        /// Raw bytes read from the file. Not aligned on line boundaries.
+        bytes: Vec<u8>,
+    },
     /// A file was rotated (old file at path replaced by new file).
-    Rotated { path: PathBuf },
+    Rotated {
+        /// Path of the file that was rotated away.
+        path: PathBuf,
+    },
     /// A file was truncated (copytruncate rotation).
-    Truncated { path: PathBuf },
+    Truncated {
+        /// Path of the file that was truncated.
+        path: PathBuf,
+    },
 }
 
 /// Configuration for the file tailer.

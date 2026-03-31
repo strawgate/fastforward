@@ -7,7 +7,10 @@ use crate::tail::{FileTailer, TailConfig, TailEvent};
 /// Events produced by an input source.
 pub enum InputEvent {
     /// New data read from the source.
-    Data { bytes: Vec<u8> },
+    Data {
+        /// Raw bytes read from the source. Not necessarily line-aligned.
+        bytes: Vec<u8>,
+    },
     /// The underlying file was rotated (new inode).
     Rotated,
     /// The underlying file was truncated.

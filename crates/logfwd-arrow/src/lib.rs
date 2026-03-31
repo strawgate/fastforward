@@ -5,7 +5,13 @@
 //! (persistence path), plus scanner wrapper types that produce `RecordBatch`.
 
 pub mod scanner;
+/// Self-contained persistence builder: collects `(row, value)` records
+/// and bulk-builds Arrow columns at [`finish_batch`] time.
+///
+/// [`finish_batch`]: StorageBuilder::finish_batch
 pub mod storage_builder;
+/// Zero-copy hot-path builder: stores string values as `StringViewArray`
+/// views directly into the input buffer for maximum throughput.
 pub mod streaming_builder;
 
 pub(crate) const MAX_INLINE_BITS: usize = u64::BITS as usize;

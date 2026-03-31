@@ -94,6 +94,8 @@ pub struct CriReassembler {
 }
 
 impl CriReassembler {
+    /// Create a new reassembler. `max_line_size` sets the maximum total
+    /// size of a reassembled multi-part CRI message before truncation.
     pub fn new(max_line_size: usize) -> Self {
         CriReassembler {
             partial_buf: Vec::new(),

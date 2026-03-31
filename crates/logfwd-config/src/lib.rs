@@ -36,8 +36,11 @@ pub struct AuthConfig {
 /// Errors that can occur while loading or validating configuration.
 #[derive(Debug)]
 pub enum ConfigError {
+    /// I/O error reading the configuration file.
     Io(std::io::Error),
+    /// YAML parse error in the configuration file.
     Yaml(serde_yaml::Error),
+    /// Semantic validation error (e.g. missing required field).
     Validation(String),
 }
 
@@ -73,9 +76,13 @@ impl From<serde_yaml::Error> for ConfigError {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InputType {
+    /// Tail log files matched by a glob pattern.
     File,
+    /// Receive logs over UDP.
     Udp,
+    /// Receive logs over TCP.
     Tcp,
+    /// Receive OTLP log records over gRPC or HTTP.
     Otlp,
 }
 
@@ -83,12 +90,19 @@ pub enum InputType {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OutputType {
+    /// OTLP protobuf over HTTP or gRPC.
     Otlp,
+    /// Newline-delimited JSON over HTTP.
     Http,
+    /// Elasticsearch bulk API.
     Elasticsearch,
+    /// Grafana Loki push API.
     Loki,
+    /// Print to stdout in JSON or text format.
     Stdout,
+    /// Write to local files.
     FileOut,
+    /// Write Parquet files.
     Parquet,
 }
 
@@ -96,11 +110,17 @@ pub enum OutputType {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Format {
+    /// CRI (Container Runtime Interface) container log format.
     Cri,
+    /// Newline-delimited JSON.
     Json,
+    /// logfmt key=value pairs.
     Logfmt,
+    /// Syslog (RFC 5424 / RFC 3164).
     Syslog,
+    /// Treat each line as a raw string wrapped in `{"_raw":"..."}`.
     Raw,
+    /// Detect format automatically from the first bytes of each file.
     Auto,
     /// Human-readable colored console output for debugging/testing.
     Console,
@@ -116,10 +136,13 @@ pub struct InputConfig {
     /// Optional friendly name (used in multi-input pipelines).
     pub name: Option<String>,
     #[serde(rename = "type")]
+    /// Input type selector (file, udp, tcp, otlp).
     pub input_type: InputType,
     /// File glob or listen address, depending on `input_type`.
     pub path: Option<String>,
+    /// Listen address for network inputs (e.g. "0.0.0.0:514" for UDP syslog).
     pub listen: Option<String>,
+    /// Expected log format; `None` means auto-detect.
     pub format: Option<Format>,
     /// Maximum number of file descriptors to keep open simultaneously.
     /// Applies only to `file` inputs. Defaults to 1024 when not set.
@@ -129,13 +152,20 @@ pub struct InputConfig {
 /// A single output destination.
 #[derive(Debug, Clone, Deserialize)]
 pub struct OutputConfig {
+    /// Optional friendly name shown in diagnostics and logs.
     pub name: Option<String>,
     #[serde(rename = "type")]
+    /// Output type selector (otlp, http, elasticsearch, etc.).
     pub output_type: OutputType,
+    /// Remote endpoint URL (e.g. "http://otel-collector:4318" for OTLP HTTP).
     pub endpoint: Option<String>,
+    /// Transport protocol override (e.g. "grpc" for OTLP gRPC).
     pub protocol: Option<String>,
+    /// Compression algorithm (e.g. "zstd", "gzip").
     pub compression: Option<String>,
+    /// Output format, where applicable (e.g. `json` for stdout).
     pub format: Option<Format>,
+    /// Local filesystem path for file-based outputs.
     pub path: Option<String>,
     /// Optional authentication for HTTP-based outputs.
     #[serde(default)]
@@ -196,9 +226,12 @@ pub enum EnrichmentConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct PipelineConfig {
     #[serde(default, deserialize_with = "deserialize_one_or_many")]
+    /// Input sources for this pipeline. At least one is required.
     pub inputs: Vec<InputConfig>,
+    /// Optional DataFusion SQL query applied to each batch (e.g. `SELECT * FROM logs WHERE level_str = 'ERROR'`).
     pub transform: Option<String>,
     #[serde(default, deserialize_with = "deserialize_one_or_many")]
+    /// Output destinations. At least one is required.
     pub outputs: Vec<OutputConfig>,
     /// Enrichment sources (e.g. geo-IP databases).
     #[serde(default)]
@@ -209,9 +242,12 @@ pub struct PipelineConfig {
 // Server / Storage
 // ---------------------------------------------------------------------------
 
+/// Server-wide settings: diagnostics endpoint, log level, and OTel metrics push.
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct ServerConfig {
+    /// Bind address for the diagnostics HTTP server (e.g. "127.0.0.1:9090").
     pub diagnostics: Option<String>,
+    /// Log level filter (e.g. "info", "debug", "warn"). Default: "info".
     pub log_level: Option<String>,
     /// OTLP endpoint for metrics push (e.g. "http://localhost:4318").
     /// If not set, OTLP push is disabled.
@@ -220,8 +256,10 @@ pub struct ServerConfig {
     pub metrics_interval_secs: Option<u64>,
 }
 
+/// Persistent storage settings (checkpoint directory).
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct StorageConfig {
+    /// Directory for checkpoint files and other persistent state. Defaults to `~/.logfwd` or `/var/lib/logfwd` for root.
     pub data_dir: Option<String>,
 }
 
@@ -251,8 +289,11 @@ struct RawConfig {
 /// Fully resolved configuration.
 #[derive(Debug, Clone)]
 pub struct Config {
+    /// Named pipelines, keyed by pipeline name.
     pub pipelines: HashMap<String, PipelineConfig>,
+    /// Server-wide configuration (diagnostics, logging, metrics).
     pub server: ServerConfig,
+    /// Storage configuration (checkpoint directory).
     pub storage: StorageConfig,
 }
 

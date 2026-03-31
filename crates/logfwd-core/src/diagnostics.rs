@@ -14,8 +14,11 @@ use opentelemetry::metrics::{Counter, Meter};
 /// Stats for one component. Dual-write: atomics for /api/pipelines,
 /// OTel counters for OTLP push. Both are lock-free on the hot path.
 pub struct ComponentStats {
+    /// Total log lines processed by this component.
     pub lines_total: AtomicU64,
+    /// Total bytes processed by this component.
     pub bytes_total: AtomicU64,
+    /// Total I/O or send errors encountered.
     pub errors_total: AtomicU64,
     /// Lines that failed format parsing (e.g. malformed CRI lines).
     pub parse_errors_total: AtomicU64,
@@ -49,21 +52,25 @@ impl ComponentStats {
         Self::with_meter(&noop, "noop", vec![])
     }
 
+    /// Increment the line counter by `n` (both atomic and OTel).
     pub fn inc_lines(&self, n: u64) {
         self.lines_total.fetch_add(n, Ordering::Relaxed);
         self.otel_lines.add(n, &self.otel_attrs);
     }
 
+    /// Increment the byte counter by `n` (both atomic and OTel).
     pub fn inc_bytes(&self, n: u64) {
         self.bytes_total.fetch_add(n, Ordering::Relaxed);
         self.otel_bytes.add(n, &self.otel_attrs);
     }
 
+    /// Increment the error counter by 1 (both atomic and OTel).
     pub fn inc_errors(&self) {
         self.errors_total.fetch_add(1, Ordering::Relaxed);
         self.otel_errors.add(1, &self.otel_attrs);
     }
 
+    /// Increment the parse-error counter by `n` (both atomic and OTel).
     pub fn inc_parse_errors(&self, n: u64) {
         self.parse_errors_total.fetch_add(n, Ordering::Relaxed);
         self.otel_parse_errors.add(n, &self.otel_attrs);
@@ -99,28 +106,41 @@ impl Default for ComponentStats {
 /// Stats for a full pipeline. Dual-write: atomics for local endpoints,
 /// OTel counters for OTLP push.
 pub struct PipelineMetrics {
+    /// Human-readable pipeline name (from config).
     pub name: String,
     /// (name, type, stats)
     pub inputs: Vec<(String, String, Arc<ComponentStats>)>,
+    /// SQL transform string, stored for display in diagnostics.
     pub transform_sql: String,
+    /// Stats for data entering the SQL transform stage.
     pub transform_in: Arc<ComponentStats>,
+    /// Stats for data leaving the SQL transform stage.
     pub transform_out: Arc<ComponentStats>,
+    /// Count of batches that failed the SQL transform.
     pub transform_errors: AtomicU64,
     /// (name, type, stats)
     pub outputs: Vec<(String, String, Arc<ComponentStats>)>,
+    /// Count of times the pipeline stalled due to a full output channel.
     pub backpressure_stalls: AtomicU64,
     // Batch-level metrics (atomics for local, OTel for push)
+    /// Total number of batches processed.
     pub batches_total: AtomicU64,
+    /// Total number of rows across all batches.
     pub batch_rows_total: AtomicU64,
+    /// Batches flushed because the row count hit the batch size limit.
     pub flush_by_size: AtomicU64,
+    /// Batches flushed because the flush interval timer fired.
     pub flush_by_timeout: AtomicU64,
     /// Batches that were dropped due to scan, transform, or output errors.
     pub dropped_batches_total: AtomicU64,
     /// Batches that failed the scan stage specifically.
     pub scan_errors_total: AtomicU64,
     // Per-stage cumulative timing (nanoseconds)
+    /// Cumulative nanoseconds spent in the scanner stage.
     pub scan_nanos_total: AtomicU64,
+    /// Cumulative nanoseconds spent in the SQL transform stage.
     pub transform_nanos_total: AtomicU64,
+    /// Cumulative nanoseconds spent in the output stage.
     pub output_nanos_total: AtomicU64,
     /// Unix timestamp (nanoseconds) of the last successfully processed batch.
     /// Zero means no batch has been processed yet.
@@ -142,6 +162,9 @@ pub struct PipelineMetrics {
 }
 
 impl PipelineMetrics {
+    /// Create a new `PipelineMetrics` instance with OTel counters registered
+    /// against `meter`. `name` is the pipeline name; `transform_sql` is stored
+    /// verbatim for display.
     pub fn new(name: impl Into<String>, transform_sql: impl Into<String>, meter: &Meter) -> Self {
         let name = name.into();
         let attrs = vec![KeyValue::new("pipeline", name.clone())];
@@ -188,6 +211,8 @@ impl PipelineMetrics {
         }
     }
 
+    /// Register a new input component and return its `ComponentStats`.
+    /// `name` is the input name; `typ` is the input type string (e.g. "file").
     pub fn add_input(
         &mut self,
         name: impl Into<String>,
@@ -208,6 +233,8 @@ impl PipelineMetrics {
         stats
     }
 
+    /// Register a new output component and return its `ComponentStats`.
+    /// `name` is the output name; `typ` is the output type string (e.g. "otlp").
     pub fn add_output(
         &mut self,
         name: impl Into<String>,
@@ -237,21 +264,25 @@ impl PipelineMetrics {
 
     // -- Helper methods for dual-write (called from pipeline hot loop) --------
 
+    /// Increment the transform-error counter by 1.
     pub fn inc_transform_error(&self) {
         self.transform_errors.fetch_add(1, Ordering::Relaxed);
         self.otel_transform_errors.add(1, &self.otel_attrs);
     }
 
+    /// Record a batch flushed due to reaching the size threshold.
     pub fn inc_flush_by_size(&self) {
         self.flush_by_size.fetch_add(1, Ordering::Relaxed);
         self.otel_flush_by_size.add(1, &self.otel_attrs);
     }
 
+    /// Record a batch flushed due to the timeout interval.
     pub fn inc_flush_by_timeout(&self) {
         self.flush_by_timeout.fetch_add(1, Ordering::Relaxed);
         self.otel_flush_by_timeout.add(1, &self.otel_attrs);
     }
 
+    /// Record timing and row count for one completed batch cycle.
     pub fn record_batch(&self, rows: u64, scan_ns: u64, transform_ns: u64, output_ns: u64) {
         self.batches_total.fetch_add(1, Ordering::Relaxed);
         self.batch_rows_total.fetch_add(rows, Ordering::Relaxed);
@@ -271,6 +302,7 @@ impl PipelineMetrics {
         self.otel_output_nanos.add(output_ns, &self.otel_attrs);
     }
 
+    /// Record one backpressure stall (output channel was full).
     pub fn inc_backpressure_stall(&self) {
         self.backpressure_stalls.fetch_add(1, Ordering::Relaxed);
         self.otel_backpressure_stalls.add(1, &self.otel_attrs);
@@ -324,6 +356,8 @@ pub struct DiagnosticsServer {
 }
 
 impl DiagnosticsServer {
+    /// Create a new diagnostics server that will bind to `bind_addr`
+    /// (e.g. "127.0.0.1:9090") when started.
     pub fn new(bind_addr: &str) -> Self {
         Self {
             pipelines: Vec::new(),
@@ -333,6 +367,8 @@ impl DiagnosticsServer {
         }
     }
 
+    /// Register a pipeline's metrics so they appear in the `/api/pipelines`
+    /// and `/metrics` responses.
     pub fn add_pipeline(&mut self, metrics: Arc<PipelineMetrics>) {
         self.pipelines.push(metrics);
     }

@@ -93,12 +93,19 @@ pub const fn bytes_field_size(field_number: u32, data_len: usize) -> usize {
 #[repr(u8)]
 #[derive(Clone, Copy, Debug)]
 pub enum Severity {
+    /// Severity level is unspecified or unknown.
     Unspecified = 0,
+    /// Trace-level severity (very verbose debugging).
     Trace = 1,
+    /// Debug-level severity.
     Debug = 5,
+    /// Informational messages.
     Info = 9,
+    /// Warning conditions.
     Warn = 13,
+    /// Error conditions.
     Error = 17,
+    /// Fatal conditions (application cannot continue).
     Fatal = 21,
 }
 
@@ -497,6 +504,7 @@ impl Default for BatchEncoder {
 }
 
 impl BatchEncoder {
+    /// Create a new OTLP batch encoder with empty internal buffers.
     pub fn new() -> Self {
         BatchEncoder {
             records_buf: Vec::with_capacity(1024 * 1024),

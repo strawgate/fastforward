@@ -87,6 +87,7 @@ impl Default for GrokUdf {
 }
 
 impl GrokUdf {
+    /// Create a new `GrokUdf` instance ready to be registered with DataFusion.
     pub fn new() -> Self {
         Self {
             signature: Signature::new(

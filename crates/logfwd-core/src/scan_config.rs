@@ -5,7 +5,9 @@
 
 /// Specification for a single field to extract.
 pub struct FieldSpec {
+    /// The primary field name (e.g. "level", "msg", "status").
     pub name: String,
+    /// Alternative names for this field (mapped to the same column).
     pub aliases: Vec<String>,
 }
 

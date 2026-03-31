@@ -1,3 +1,10 @@
+//! DataFusion SQL transform layer for logfwd.
+//!
+//! Takes a user SQL string, analyses it at startup to extract column references
+//! for predicate pushdown, then executes the compiled plan against Arrow
+//! `RecordBatch` values produced by the scanner.  Custom UDFs (`grok`,
+//! `regexp_extract`, `int`, `float`, `geo_lookup`) are registered per-session.
+
 // transform.rs — DataFusion SQL transform layer.
 //
 // Takes a user's SQL string, analyzes it at startup, compiles a DataFusion
@@ -20,7 +27,10 @@ use datafusion::prelude::*;
 
 use logfwd_core::scan_config::ScanConfig;
 
+/// SQL rewriter that rewrites untyped column references to the typed
+/// `{field}_{type}` naming convention expected by the scanner builders.
 pub mod rewriter;
+/// Custom DataFusion UDFs: `grok`, `regexp_extract`, `int`, `float`, `geo_lookup`.
 pub mod udf;
 
 pub use rewriter::{FieldTypeMap, FieldTypes, field_type_map_from_schema, rewrite_sql};
@@ -38,9 +48,13 @@ use datafusion::sql::sqlparser::parser::Parser;
 
 /// Parses SQL at startup, extracts column references and determines scan config.
 pub struct QueryAnalyzer {
+    /// The original SQL string as supplied by the user.
     pub user_sql: String,
+    /// All column names referenced in the query (SELECT, WHERE, JOIN, etc.).
     pub referenced_columns: HashSet<String>,
+    /// True when the query contains `SELECT *` or `SELECT table.*`.
     pub uses_select_star: bool,
+    /// Column names listed in `SELECT * EXCEPT (...)` clauses.
     pub except_fields: Vec<String>,
     /// The WHERE clause AST, if present. Used for predicate pushdown extraction.
     where_clause: Option<SqlExpr>,
