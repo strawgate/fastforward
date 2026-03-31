@@ -200,7 +200,7 @@ enum AttrArray<'a> {
 ///
 /// Built once in [`encode_batch`] before the per-row loop to avoid
 /// re-scanning the schema and re-downcasting arrays on every row.
-struct BatchColumns<'a> {
+pub(crate) struct BatchColumns<'a> {
     /// Downcast array for the timestamp column (e.g. "2024-01-15T10:30:00Z").
     timestamp_col: Option<(usize, &'a dyn Array)>,
     /// Downcast array for the level/severity column (e.g. "ERROR").
@@ -215,7 +215,7 @@ struct BatchColumns<'a> {
 }
 
 /// Scan the batch schema once and resolve column roles and downcast arrays.
-fn resolve_batch_columns(batch: &RecordBatch) -> BatchColumns<'_> {
+pub(crate) fn resolve_batch_columns(batch: &RecordBatch) -> BatchColumns<'_> {
     let schema = batch.schema();
     let mut timestamp_col: Option<(usize, &dyn Array)> = None;
     let mut level_col: Option<(usize, &dyn Array)> = None;

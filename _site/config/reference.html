@@ -1,0 +1,778 @@
+<!DOCTYPE HTML>
+<html lang="en" class="navy sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Config Reference - logfwd</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="Fast log forwarder with SQL transforms">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon-de23e50b.svg">
+        <link rel="shortcut icon" href="../favicon-8114d1fc.png">
+        <link rel="stylesheet" href="../css/variables-8adf115d.css">
+        <link rel="stylesheet" href="../css/general-2459343d.css">
+        <link rel="stylesheet" href="../css/chrome-ae938929.css">
+        <link rel="stylesheet" href="../css/print-9e4910d8.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../fonts/fonts-9644e21d.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="mdbook-highlight-css" href="../highlight-493f70e1.css">
+        <link rel="stylesheet" id="mdbook-tomorrow-night-css" href="../tomorrow-night-4c0ae647.css">
+        <link rel="stylesheet" id="mdbook-ayu-highlight-css" href="../ayu-highlight-3fdfc3ac.css">
+
+        <!-- Custom theme stylesheets -->
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "../";
+            const default_light_theme = "navy";
+            const default_dark_theme = "navy";
+            window.path_to_searchindex_js = "../searchindex-3f53ebf0.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="../toc-9b7bee13.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="mdbook-body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('navy')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="mdbook-sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("mdbook-sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="mdbook-sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="../toc.html"></iframe>
+            </noscript>
+            <div id="mdbook-sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="mdbook-page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="mdbook-menu-bar-hover-placeholder"></div>
+                <div id="mdbook-menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="mdbook-sidebar-toggle" class="icon-button" for="mdbook-sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="mdbook-sidebar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M0 96C0 78.3 14.3 64 32 64H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32C14.3 128 0 113.7 0 96zM0 256c0-17.7 14.3-32 32-32H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32c-17.7 0-32-14.3-32-32zM448 416c0 17.7-14.3 32-32 32H32c-17.7 0-32-14.3-32-32s14.3-32 32-32H416c17.7 0 32 14.3 32 32z"/></svg></span>
+                        </label>
+                        <button id="mdbook-theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="mdbook-theme-list">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M371.3 367.1c27.3-3.9 51.9-19.4 67.2-42.9L600.2 74.1c12.6-19.5 9.4-45.3-7.6-61.2S549.7-4.4 531.1 9.6L294.4 187.2c-24 18-38.2 46.1-38.4 76.1L371.3 367.1zm-19.6 25.4l-116-104.4C175.9 290.3 128 339.6 128 400c0 3.9 .2 7.8 .6 11.6c1.8 17.5-10.2 36.4-27.8 36.4H96c-17.7 0-32 14.3-32 32s14.3 32 32 32H240c61.9 0 112-50.1 112-112c0-2.5-.1-5-.2-7.5z"/></svg></span>
+                        </button>
+                        <ul id="mdbook-theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-ayu">Ayu</button></li>
+                        </ul>
+                        <button id="mdbook-search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="mdbook-searchbar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M416 208c0 45.9-14.9 88.3-40 122.7L502.6 457.4c12.5 12.5 12.5 32.8 0 45.3s-32.8 12.5-45.3 0L330.7 376c-34.4 25.2-76.8 40-122.7 40C93.1 416 0 322.9 0 208S93.1 0 208 0S416 93.1 416 208zM208 352c79.5 0 144-64.5 144-144s-64.5-144-144-144S64 128.5 64 208s64.5 144 144 144z"/></svg></span>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">logfwd</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <span class=fa-svg id="print-button"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M128 0C92.7 0 64 28.7 64 64v96h64V64H354.7L384 93.3V160h64V93.3c0-17-6.7-33.3-18.7-45.3L400 18.7C388 6.7 371.7 0 354.7 0H128zM384 352v32 64H128V384 368 352H384zm64 32h32c17.7 0 32-14.3 32-32V256c0-35.3-28.7-64-64-64H64c-35.3 0-64 28.7-64 64v96c0 17.7 14.3 32 32 32H64v64c0 35.3 28.7 64 64 64H384c35.3 0 64-28.7 64-64V384zm-16-88c-13.3 0-24-10.7-24-24s10.7-24 24-24s24 10.7 24 24s-10.7 24-24 24z"/></svg></span>
+                        </a>
+                        <a href="https://github.com/strawgate/memagent" title="Git repository" aria-label="Git repository">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 496 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M165.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3zm44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM244.8 8C106.1 8 0 113.3 0 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C428.2 457.8 496 362.9 496 252 496 113.3 383.5 8 244.8 8zM97.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9 1.6 2.3 4.3 3.3 5.6 2.3 1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"/></svg></span>
+                        </a>
+                        <a href="https://github.com/strawgate/memagent/edit/master/src/config/reference.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                            <span class=fa-svg id="git-edit-button"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M421.7 220.3l-11.3 11.3-22.6 22.6-205 205c-6.6 6.6-14.8 11.5-23.8 14.1L30.8 511c-8.4 2.5-17.5 .2-23.7-6.1S-1.5 489.7 1 481.2L38.7 353.1c2.6-9 7.5-17.2 14.1-23.8l205-205 22.6-22.6 11.3-11.3 33.9 33.9 62.1 62.1 33.9 33.9zM96 353.9l-9.3 9.3c-.9 .9-1.6 2.1-2 3.4l-25.3 86 86-25.3c1.3-.4 2.5-1.1 3.4-2l9.3-9.3H112c-8.8 0-16-7.2-16-16V353.9zM453.3 19.3l39.4 39.4c25 25 25 65.5 0 90.5l-14.5 14.5-22.6 22.6-11.3 11.3-33.9-33.9-62.1-62.1L314.3 67.7l11.3-11.3 22.6-22.6 14.5-14.5c25-25 65.5-25 90.5 0z"/></svg></span>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="mdbook-search-wrapper" class="hidden">
+                    <form id="mdbook-searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="mdbook-searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="mdbook-searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <span class=fa-svg id="fa-spin"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M304 48c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zm0 416c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zM48 304c26.5 0 48-21.5 48-48s-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48zm464-48c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zM142.9 437c18.7-18.7 18.7-49.1 0-67.9s-49.1-18.7-67.9 0s-18.7 49.1 0 67.9s49.1 18.7 67.9 0zm0-294.2c18.7-18.7 18.7-49.1 0-67.9S93.7 56.2 75 75s-18.7 49.1 0 67.9s49.1 18.7 67.9 0zM369.1 437c18.7 18.7 49.1 18.7 67.9 0s18.7-49.1 0-67.9s-49.1-18.7-67.9 0s-18.7 49.1 0 67.9z"/></svg></span>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="mdbook-searchresults-outer" class="searchresults-outer hidden">
+                        <div id="mdbook-searchresults-header" class="searchresults-header"></div>
+                        <ul id="mdbook-searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('mdbook-sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('mdbook-sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#mdbook-sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="mdbook-content" class="content">
+                    <main>
+                        <h1 id="configuration-reference"><a class="header" href="#configuration-reference">Configuration Reference</a></h1>
+<p>logfwd is configured with a YAML file passed via <code>--config &lt;path&gt;</code>.</p>
+<h2 id="overview"><a class="header" href="#overview">Overview</a></h2>
+<p>logfwd supports two layout styles:</p>
+<ul>
+<li><strong>Simple</strong> — single pipeline with top-level <code>input</code>, <code>transform</code>, and <code>output</code> keys.</li>
+<li><strong>Advanced</strong> — multiple named pipelines under a <code>pipelines</code> map.</li>
+</ul>
+<p>Environment variables are expanded using <code>${VAR}</code> syntax anywhere in the file. If a
+variable is not set the placeholder is left as-is.</p>
+<hr>
+<h2 id="simple-layout"><a class="header" href="#simple-layout">Simple layout</a></h2>
+<pre><code class="language-yaml">input:
+  type: file
+  path: /var/log/app/*.log
+  format: json
+
+transform: SELECT level_str, msg_str, status_int FROM logs WHERE status_int &gt;= 400
+
+output:
+  type: otlp
+  endpoint: otel-collector:4317
+  compression: zstd
+
+server:
+  diagnostics: 0.0.0.0:9090
+  log_level: info
+</code></pre>
+<h2 id="advanced-layout"><a class="header" href="#advanced-layout">Advanced layout</a></h2>
+<pre><code class="language-yaml">pipelines:
+  errors:
+    inputs:
+      - name: pod_logs
+        type: file
+        path: /var/log/pods/**/*.log
+        format: cri
+    transform: SELECT * FROM logs WHERE level_str = 'ERROR'
+    outputs:
+      - type: otlp
+        endpoint: otel-collector:4317
+
+  debug:
+    inputs:
+      - type: file
+        path: /var/log/pods/**/*.log
+        format: cri
+    outputs:
+      - type: stdout
+        format: json
+
+server:
+  diagnostics: 0.0.0.0:9090
+</code></pre>
+<p>The two layouts cannot be mixed: specifying both <code>input</code>/<code>output</code> at the top level and
+a <code>pipelines</code> map is a validation error.</p>
+<hr>
+<h2 id="input-configuration"><a class="header" href="#input-configuration">Input configuration</a></h2>
+<p>Each pipeline requires at least one input. Use a single mapping for one input or a
+YAML sequence for multiple inputs.</p>
+<h3 id="common-fields"><a class="header" href="#common-fields">Common fields</a></h3>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Field</th><th>Type</th><th>Required</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>type</code></td><td>string</td><td>Yes</td><td>Input type. See <a href="#input-types">Input types</a>.</td></tr>
+<tr><td><code>name</code></td><td>string</td><td>No</td><td>Friendly name shown in diagnostics.</td></tr>
+<tr><td><code>format</code></td><td>string</td><td>No</td><td>Log format. See <a href="#formats">Formats</a>. Defaults to <code>auto</code>.</td></tr>
+</tbody>
+</table>
+</div>
+<h3 id="file-input"><a class="header" href="#file-input"><code>file</code> input</a></h3>
+<p>Tail one or more log files that match a glob pattern.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Field</th><th>Type</th><th>Required</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>path</code></td><td>string</td><td>Yes</td><td>Glob pattern, e.g. <code>/var/log/pods/**/*.log</code>.</td></tr>
+</tbody>
+</table>
+</div>
+<pre><code class="language-yaml">input:
+  type: file
+  path: /var/log/pods/**/*.log
+  format: cri
+</code></pre>
+<h3 id="udp-input-not-yet-implemented"><a class="header" href="#udp-input-not-yet-implemented"><code>udp</code> input <em>(not yet implemented)</em></a></h3>
+<p>Listen for log lines on a UDP socket.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Field</th><th>Type</th><th>Required</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>listen</code></td><td>string</td><td>Yes</td><td><code>host:port</code>, e.g. <code>0.0.0.0:514</code>.</td></tr>
+</tbody>
+</table>
+</div>
+<pre><code class="language-yaml">input:
+  type: udp
+  listen: 0.0.0.0:514
+  format: syslog
+</code></pre>
+<h3 id="tcp-input-not-yet-implemented"><a class="header" href="#tcp-input-not-yet-implemented"><code>tcp</code> input <em>(not yet implemented)</em></a></h3>
+<p>Accept log lines on a TCP socket.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Field</th><th>Type</th><th>Required</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>listen</code></td><td>string</td><td>Yes</td><td><code>host:port</code>, e.g. <code>0.0.0.0:5140</code>.</td></tr>
+</tbody>
+</table>
+</div>
+<pre><code class="language-yaml">input:
+  type: tcp
+  listen: 0.0.0.0:5140
+  format: json
+</code></pre>
+<h3 id="otlp-input-not-yet-implemented"><a class="header" href="#otlp-input-not-yet-implemented"><code>otlp</code> input <em>(not yet implemented)</em></a></h3>
+<p>Receive OTLP log records from another agent or SDK.</p>
+<p>No extra fields required; the listen address will be configurable in a future release.</p>
+<hr>
+<h2 id="input-types"><a class="header" href="#input-types">Input types</a></h2>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Value</th><th>Status</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>file</code></td><td>Implemented</td><td>Tail files matching a glob pattern.</td></tr>
+<tr><td><code>udp</code></td><td>Planned</td><td>Receive log lines over UDP.</td></tr>
+<tr><td><code>tcp</code></td><td>Planned</td><td>Accept log lines over TCP.</td></tr>
+<tr><td><code>otlp</code></td><td>Planned</td><td>Receive OTLP logs.</td></tr>
+</tbody>
+</table>
+</div>
+<hr>
+<h2 id="formats"><a class="header" href="#formats">Formats</a></h2>
+<p>The <code>format</code> field controls how raw bytes from the input are parsed into log records.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Value</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>auto</code></td><td>Auto-detect (default). Tries CRI first, then JSON, then raw.</td></tr>
+<tr><td><code>cri</code></td><td>CRI container log format (<code>&lt;timestamp&gt; &lt;stream&gt; &lt;flags&gt; &lt;message&gt;</code>). Multi-line log reassembly via the <code>P</code> partial flag is supported.</td></tr>
+<tr><td><code>json</code></td><td>Newline-delimited JSON. Each line must be a single JSON object.</td></tr>
+<tr><td><code>raw</code></td><td>Treat each line as an opaque string stored in <code>_raw_str</code>.</td></tr>
+<tr><td><code>logfmt</code></td><td>Key=value pairs (e.g. <code>level=info msg="hello"</code>). <em>Not yet implemented.</em></td></tr>
+<tr><td><code>syslog</code></td><td>RFC 5424 syslog. <em>Not yet implemented.</em></td></tr>
+<tr><td><code>console</code></td><td>Human-readable coloured output for interactive debugging. Output mode only.</td></tr>
+</tbody>
+</table>
+</div>
+<hr>
+<h2 id="output-configuration"><a class="header" href="#output-configuration">Output configuration</a></h2>
+<p>Each pipeline requires at least one output.</p>
+<h3 id="common-fields-1"><a class="header" href="#common-fields-1">Common fields</a></h3>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Field</th><th>Type</th><th>Required</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>type</code></td><td>string</td><td>Yes</td><td>Output type. See <a href="#output-types">Output types</a>.</td></tr>
+<tr><td><code>name</code></td><td>string</td><td>No</td><td>Friendly name shown in diagnostics.</td></tr>
+</tbody>
+</table>
+</div>
+<h3 id="otlp-output"><a class="header" href="#otlp-output"><code>otlp</code> output</a></h3>
+<p>Send log records as OTLP protobuf to an OpenTelemetry collector.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Field</th><th>Type</th><th>Required</th><th>Default</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>endpoint</code></td><td>string</td><td>Yes</td><td>—</td><td>Collector address, e.g. <code>otel-collector:4317</code> (gRPC) or <code>http://otel-collector:4318</code> (HTTP).</td></tr>
+<tr><td><code>protocol</code></td><td>string</td><td>No</td><td><code>http</code></td><td><code>http</code> or <code>grpc</code>.</td></tr>
+<tr><td><code>compression</code></td><td>string</td><td>No</td><td>none</td><td><code>zstd</code> to compress the request body.</td></tr>
+</tbody>
+</table>
+</div>
+<pre><code class="language-yaml">output:
+  type: otlp
+  endpoint: otel-collector:4317
+  protocol: grpc
+  compression: zstd
+</code></pre>
+<h3 id="http-output"><a class="header" href="#http-output"><code>http</code> output</a></h3>
+<p>POST log records as newline-delimited JSON to an HTTP endpoint.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Field</th><th>Type</th><th>Required</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>endpoint</code></td><td>string</td><td>Yes</td><td>Full URL, e.g. <code>http://ingest.example.com/logs</code>.</td></tr>
+<tr><td><code>compression</code></td><td>string</td><td>No</td><td><code>zstd</code> to compress the request body.</td></tr>
+</tbody>
+</table>
+</div>
+<pre><code class="language-yaml">output:
+  type: http
+  endpoint: http://ingest.example.com/logs
+  compression: zstd
+</code></pre>
+<h3 id="stdout-output"><a class="header" href="#stdout-output"><code>stdout</code> output</a></h3>
+<p>Print records to standard output for local debugging.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Field</th><th>Type</th><th>Required</th><th>Default</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>format</code></td><td>string</td><td>No</td><td><code>json</code></td><td><code>json</code> (newline-delimited JSON) or <code>console</code> (coloured text).</td></tr>
+</tbody>
+</table>
+</div>
+<pre><code class="language-yaml">output:
+  type: stdout
+  format: console
+</code></pre>
+<h3 id="elasticsearch-output-stub"><a class="header" href="#elasticsearch-output-stub"><code>elasticsearch</code> output <em>(stub)</em></a></h3>
+<p>Ship to Elasticsearch via the bulk API. Not yet functional.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Field</th><th>Type</th><th>Required</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>endpoint</code></td><td>string</td><td>Yes</td><td>Elasticsearch base URL.</td></tr>
+</tbody>
+</table>
+</div>
+<h3 id="loki-output-stub"><a class="header" href="#loki-output-stub"><code>loki</code> output <em>(stub)</em></a></h3>
+<p>Push to Grafana Loki. Not yet functional.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Field</th><th>Type</th><th>Required</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>endpoint</code></td><td>string</td><td>Yes</td><td>Loki push URL.</td></tr>
+</tbody>
+</table>
+</div>
+<h3 id="file_out-output-partial"><a class="header" href="#file_out-output-partial"><code>file_out</code> output <em>(partial)</em></a></h3>
+<p>Write records to a file.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Field</th><th>Type</th><th>Required</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>path</code></td><td>string</td><td>Yes</td><td>Destination file path.</td></tr>
+</tbody>
+</table>
+</div>
+<h3 id="parquet-output-stub"><a class="header" href="#parquet-output-stub"><code>parquet</code> output <em>(stub)</em></a></h3>
+<p>Write records to Parquet files. Not yet functional.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Field</th><th>Type</th><th>Required</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>path</code></td><td>string</td><td>Yes</td><td>Destination file path.</td></tr>
+</tbody>
+</table>
+</div>
+<hr>
+<h2 id="output-types"><a class="header" href="#output-types">Output types</a></h2>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Value</th><th>Status</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>otlp</code></td><td>Implemented</td><td>OTLP protobuf over HTTP or gRPC.</td></tr>
+<tr><td><code>http</code></td><td>Implemented</td><td>JSON lines over HTTP POST.</td></tr>
+<tr><td><code>stdout</code></td><td>Implemented</td><td>Print to stdout (JSON or coloured text).</td></tr>
+<tr><td><code>elasticsearch</code></td><td>Stub</td><td>Elasticsearch bulk API.</td></tr>
+<tr><td><code>loki</code></td><td>Stub</td><td>Grafana Loki push API.</td></tr>
+<tr><td><code>file_out</code></td><td>Partial</td><td>Write to a file.</td></tr>
+<tr><td><code>parquet</code></td><td>Stub</td><td>Write Parquet files.</td></tr>
+</tbody>
+</table>
+</div>
+<hr>
+<h2 id="sql-transform"><a class="header" href="#sql-transform">SQL transform</a></h2>
+<p>The optional <code>transform</code> field contains a DataFusion SQL query that is applied to every
+Arrow <code>RecordBatch</code> produced by the scanner. The source table is always named <code>logs</code>.</p>
+<pre><code class="language-yaml">transform: SELECT level_str, msg_str, status_int FROM logs WHERE status_int &gt;= 400
+</code></pre>
+<p>Multi-line SQL is supported with YAML block scalars:</p>
+<pre><code class="language-yaml">transform: |
+  SELECT
+    level_str,
+    msg_str,
+    regexp_extract(msg_str, 'request_id=([a-f0-9-]+)', 1) AS request_id_str,
+    status_int
+  FROM logs
+  WHERE level_str IN ('ERROR', 'WARN')
+    AND status_int &gt;= 400
+</code></pre>
+<h3 id="column-naming-convention"><a class="header" href="#column-naming-convention">Column naming convention</a></h3>
+<p>The scanner maps each JSON field to one or more typed Arrow columns following the
+<code>{field}_{type}</code> naming convention:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>JSON value type</th><th>Arrow column type</th><th>Column name pattern</th><th>Example</th></tr>
+</thead>
+<tbody>
+<tr><td>String</td><td>StringArray</td><td><code>{field}_str</code></td><td><code>level_str</code></td></tr>
+<tr><td>Integer</td><td>Int64Array</td><td><code>{field}_int</code></td><td><code>status_int</code></td></tr>
+<tr><td>Float</td><td>Float64Array</td><td><code>{field}_float</code></td><td><code>latency_ms_float</code></td></tr>
+<tr><td>Boolean</td><td>StringArray (<code>"true"</code>/<code>"false"</code>)</td><td><code>{field}_str</code></td><td><code>enabled_str</code></td></tr>
+<tr><td>Null</td><td>null in all type columns</td><td>—</td><td>—</td></tr>
+<tr><td>Object / Array</td><td>StringArray (raw JSON)</td><td><code>{field}_str</code></td><td><code>metadata_str</code></td></tr>
+</tbody>
+</table>
+</div>
+<p>When a field contains mixed types across rows, separate columns are emitted:
+<code>status_int</code> and <code>status_str</code> can coexist in the same batch.</p>
+<p>Special columns added by the scanner:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Column</th><th>Type</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>_file_str</code></td><td>string</td><td>Absolute path of the source file (file inputs only).</td></tr>
+<tr><td><code>_raw_str</code></td><td>string</td><td>Original JSON line (only when <code>keep_raw: true</code>).</td></tr>
+<tr><td><code>_time_ns_int</code></td><td>int64</td><td>Timestamp from CRI header in nanoseconds (CRI inputs only).</td></tr>
+<tr><td><code>_stream_str</code></td><td>string</td><td>CRI stream name (<code>stdout</code>/<code>stderr</code>).</td></tr>
+</tbody>
+</table>
+</div>
+<h3 id="built-in-udfs"><a class="header" href="#built-in-udfs">Built-in UDFs</a></h3>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Function</th><th>Signature</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>int(expr)</code></td><td><code>int(any) → int64</code></td><td>Cast any value to int64. Returns NULL on failure.</td></tr>
+<tr><td><code>float(expr)</code></td><td><code>float(any) → float64</code></td><td>Cast any value to float64. Returns NULL on failure.</td></tr>
+<tr><td><code>grok(pattern, input)</code></td><td><code>grok(utf8, utf8) → utf8</code></td><td>Apply a Grok pattern to <code>input</code> and return the first capture as JSON.</td></tr>
+<tr><td><code>regexp_extract(input, pattern, group)</code></td><td><code>regexp_extract(utf8, utf8, int64) → utf8</code></td><td>Return capture group <code>group</code> from a regex match.</td></tr>
+</tbody>
+</table>
+</div>
+<p>Examples:</p>
+<pre><code class="language-sql">-- Cast a string column to int
+SELECT int(status_str) AS status_int FROM logs
+
+-- Extract a field with Grok
+SELECT grok('%{IP:client} %{WORD:method} %{URIPATHPARAM:path}', msg_str) AS parsed_str FROM logs
+
+-- Extract a named group with regex
+SELECT regexp_extract(msg_str, 'user=([a-z]+)', 1) AS user_str FROM logs
+
+-- Type-cast from environment-injected string
+SELECT float(duration_str) AS duration_ms_float FROM logs
+</code></pre>
+<hr>
+<h2 id="enrichment-tables"><a class="header" href="#enrichment-tables">Enrichment tables</a></h2>
+<p>Enrichment tables are made available as SQL tables that can be joined in the transform
+query. They are declared under the top-level <code>enrichment</code> key.</p>
+<pre><code class="language-yaml">enrichment:
+  k8s:
+    type: k8s_path
+
+  host:
+    type: host_info
+
+  labels:
+    type: static
+    fields:
+      environment: production
+      region: us-east-1
+</code></pre>
+<h3 id="k8s_path-enrichment"><a class="header" href="#k8s_path-enrichment"><code>k8s_path</code> enrichment</a></h3>
+<p>Parses Kubernetes pod log paths (e.g.
+<code>/var/log/pods/&lt;namespace&gt;_&lt;pod&gt;_&lt;uid&gt;/&lt;container&gt;/</code>) to extract metadata.</p>
+<pre><code class="language-sql">SELECT l.level_str, l.msg_str, k.namespace, k.pod_name, k.container_name
+FROM logs l
+JOIN k8s k ON l._file_str = k.log_path_prefix
+</code></pre>
+<p>Columns exposed by <code>k8s</code>:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Column</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>log_path_prefix</code></td><td>Directory prefix used as join key.</td></tr>
+<tr><td><code>namespace</code></td><td>Kubernetes namespace.</td></tr>
+<tr><td><code>pod_name</code></td><td>Pod name.</td></tr>
+<tr><td><code>pod_uid</code></td><td>Pod UID.</td></tr>
+<tr><td><code>container_name</code></td><td>Container name.</td></tr>
+</tbody>
+</table>
+</div>
+<h3 id="host_info-enrichment"><a class="header" href="#host_info-enrichment"><code>host_info</code> enrichment</a></h3>
+<p>Exposes the hostname of the machine running logfwd.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Column</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>hostname</code></td><td>System hostname.</td></tr>
+</tbody>
+</table>
+</div>
+<h3 id="static-enrichment"><a class="header" href="#static-enrichment"><code>static</code> enrichment</a></h3>
+<p>A table with one row containing user-defined label columns.</p>
+<pre><code class="language-yaml">enrichment:
+  labels:
+    type: static
+    fields:
+      environment: production
+      cluster: us-east-1
+      tier: backend
+</code></pre>
+<pre><code class="language-sql">SELECT l.*, lbl.environment, lbl.cluster
+FROM logs l CROSS JOIN labels lbl
+</code></pre>
+<hr>
+<h2 id="server-configuration"><a class="header" href="#server-configuration">Server configuration</a></h2>
+<p>The optional <code>server</code> block controls the diagnostics server and observability settings.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Field</th><th>Type</th><th>Default</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>diagnostics</code></td><td>string</td><td>none</td><td><code>host:port</code> to listen for HTTP diagnostics. Exposes <code>/metrics</code> and <code>/api/pipelines</code>.</td></tr>
+<tr><td><code>log_level</code></td><td>string</td><td><code>info</code></td><td>Log verbosity. One of <code>error</code>, <code>warn</code>, <code>info</code>, <code>debug</code>, <code>trace</code>.</td></tr>
+<tr><td><code>metrics_endpoint</code></td><td>string</td><td>none</td><td>OTLP endpoint for periodic metrics push, e.g. <code>http://otel-collector:4318</code>.</td></tr>
+<tr><td><code>metrics_interval_secs</code></td><td>integer</td><td><code>60</code></td><td>Push interval for OTLP metrics in seconds.</td></tr>
+</tbody>
+</table>
+</div>
+<pre><code class="language-yaml">server:
+  diagnostics: 0.0.0.0:9090
+  log_level: info
+  metrics_endpoint: http://otel-collector:4318
+  metrics_interval_secs: 30
+</code></pre>
+<hr>
+<h2 id="storage-configuration"><a class="header" href="#storage-configuration">Storage configuration</a></h2>
+<p>The optional <code>storage</code> block controls where logfwd persists state (checkpoints, disk
+queue).</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Field</th><th>Type</th><th>Default</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>data_dir</code></td><td>string</td><td>none</td><td>Directory for state files. Created if it does not exist.</td></tr>
+</tbody>
+</table>
+</div>
+<pre><code class="language-yaml">storage:
+  data_dir: /var/lib/logfwd
+</code></pre>
+<hr>
+<h2 id="environment-variable-substitution"><a class="header" href="#environment-variable-substitution">Environment variable substitution</a></h2>
+<p>Any value in the config file can reference an environment variable with <code>${VAR}</code>:</p>
+<pre><code class="language-yaml">output:
+  type: otlp
+  endpoint: ${OTEL_COLLECTOR_ADDR}
+
+server:
+  metrics_endpoint: ${METRICS_PUSH_URL}
+</code></pre>
+<p>If the variable is not set, the placeholder is left as-is (no error).</p>
+<hr>
+<h2 id="complete-example"><a class="header" href="#complete-example">Complete example</a></h2>
+<pre><code class="language-yaml">pipelines:
+  app:
+    inputs:
+      - name: pod_logs
+        type: file
+        path: /var/log/pods/**/*.log
+        format: cri
+    transform: |
+      SELECT
+        l.level_str,
+        l.msg_str,
+        l.status_int,
+        k.namespace,
+        k.pod_name,
+        k.container_name,
+        lbl.environment
+      FROM logs l
+      LEFT JOIN k8s k ON l._file_str = k.log_path_prefix
+      CROSS JOIN labels lbl
+      WHERE l.level_str IN ('ERROR', 'WARN')
+        OR l.status_int &gt;= 500
+    outputs:
+      - name: collector
+        type: otlp
+        endpoint: ${OTEL_ENDPOINT}
+        protocol: grpc
+        compression: zstd
+      - name: debug
+        type: stdout
+        format: console
+
+enrichment:
+  k8s:
+    type: k8s_path
+  labels:
+    type: static
+    fields:
+      environment: ${ENVIRONMENT}
+      cluster: ${CLUSTER_NAME}
+
+server:
+  diagnostics: 0.0.0.0:9090
+  log_level: info
+  metrics_endpoint: ${OTEL_ENDPOINT}
+  metrics_interval_secs: 60
+
+storage:
+  data_dir: /var/lib/logfwd
+</code></pre>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../getting-started/first-pipeline.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
+                            </a>
+
+                            <a rel="next prefetch" href="../config/inputs.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../getting-started/first-pipeline.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
+                    </a>
+
+                    <a rel="next prefetch" href="../config/inputs.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
+                    </a>
+            </nav>
+
+        </div>
+
+        <template id=fa-eye><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M288 32c-80.8 0-145.5 36.8-192.6 80.6C48.6 156 17.3 208 2.5 243.7c-3.3 7.9-3.3 16.7 0 24.6C17.3 304 48.6 356 95.4 399.4C142.5 443.2 207.2 480 288 480s145.5-36.8 192.6-80.6c46.8-43.5 78.1-95.4 93-131.1c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C433.5 68.8 368.8 32 288 32zM432 256c0 79.5-64.5 144-144 144s-144-64.5-144-144s64.5-144 144-144s144 64.5 144 144zM288 192c0 35.3-28.7 64-64 64c-11.5 0-22.3-3-31.6-8.4c-.2 2.8-.4 5.5-.4 8.4c0 53 43 96 96 96s96-43 96-96s-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6z"/></svg></span></template>
+        <template id=fa-eye-slash><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M38.8 5.1C28.4-3.1 13.3-1.2 5.1 9.2S-1.2 34.7 9.2 42.9l592 464c10.4 8.2 25.5 6.3 33.7-4.1s6.3-25.5-4.1-33.7L525.6 386.7c39.6-40.6 66.4-86.1 79.9-118.4c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C465.5 68.8 400.8 32 320 32c-68.2 0-125 26.3-169.3 60.8L38.8 5.1zM223.1 149.5C248.6 126.2 282.7 112 320 112c79.5 0 144 64.5 144 144c0 24.9-6.3 48.3-17.4 68.7L408 294.5c5.2-11.8 8-24.8 8-38.5c0-53-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6c0 10.2-2.4 19.8-6.6 28.3l-90.3-70.8zm223.1 298L373 389.9c-16.4 6.5-34.3 10.1-53 10.1c-79.5 0-144-64.5-144-144c0-6.9 .5-13.6 1.4-20.2L83.1 161.5C60.3 191.2 44 220.8 34.5 243.7c-3.3 7.9-3.3 16.7 0 24.6c14.9 35.7 46.2 87.7 93 131.1C174.5 443.2 239.2 480 320 480c47.8 0 89.9-12.9 126.2-32.5z"/></svg></span></template>
+        <template id=fa-copy><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M502.6 70.63l-61.25-61.25C435.4 3.371 427.2 0 418.7 0H255.1c-35.35 0-64 28.66-64 64l.0195 256C192 355.4 220.7 384 256 384h192c35.2 0 64-28.8 64-64V93.25C512 84.77 508.6 76.63 502.6 70.63zM464 320c0 8.836-7.164 16-16 16H255.1c-8.838 0-16-7.164-16-16L239.1 64.13c0-8.836 7.164-16 16-16h128L384 96c0 17.67 14.33 32 32 32h47.1V320zM272 448c0 8.836-7.164 16-16 16H63.1c-8.838 0-16-7.164-16-16L47.98 192.1c0-8.836 7.164-16 16-16H160V128H63.99c-35.35 0-64 28.65-64 64l.0098 256C.002 483.3 28.66 512 64 512h192c35.2 0 64-28.8 64-64v-32h-47.1L272 448z"/></svg></span></template>
+        <template id=fa-play><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 384 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M73 39c-14.8-9.1-33.4-9.4-48.5-.9S0 62.6 0 80V432c0 17.4 9.4 33.4 24.5 41.9s33.7 8.1 48.5-.9L361 297c14.3-8.7 23-24.2 23-41s-8.7-32.2-23-41L73 39z"/></svg></span></template>
+        <template id=fa-clock-rotate-left><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M75 75L41 41C25.9 25.9 0 36.6 0 57.9V168c0 13.3 10.7 24 24 24H134.1c21.4 0 32.1-25.9 17-41l-30.8-30.8C155 85.5 203 64 256 64c106 0 192 86 192 192s-86 192-192 192c-40.8 0-78.6-12.7-109.7-34.4c-14.5-10.1-34.4-6.6-44.6 7.9s-6.6 34.4 7.9 44.6C151.2 495 201.7 512 256 512c141.4 0 256-114.6 256-256S397.4 0 256 0C185.3 0 121.3 28.7 75 75zm181 53c-13.3 0-24 10.7-24 24V256c0 6.4 2.5 12.5 7 17l72 72c9.4 9.4 24.6 9.4 33.9 0s9.4-24.6 0-33.9l-65-65V152c0-13.3-10.7-24-24-24z"/></svg></span></template>
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="../elasticlunr-ef4e11c1.min.js"></script>
+        <script src="../mark-09e88c2c.min.js"></script>
+        <script src="../searcher-c2a407aa.js"></script>
+
+        <script src="../clipboard-1626706a.min.js"></script>
+        <script src="../highlight-abc7f01d.js"></script>
+        <script src="../book-a0b12cfe.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+
+    </div>
+    </body>
+</html>

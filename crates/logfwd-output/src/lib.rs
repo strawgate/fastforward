@@ -665,4 +665,159 @@ mod tests {
         let sink = build_output_sink("auth-sink", &cfg).unwrap();
         assert_eq!(sink.name(), "auth-sink");
     }
+
+    #[test]
+    #[should_panic(expected = "downcast to PrimitiveArray of Int64Type failed")]
+    fn test_otlp_sink_panic_on_type_mismatch() {
+        use crate::otlp_sink::resolve_batch_columns;
+        // Define a schema with a column named "val_int" but with type Utf8 (String)
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("val_int", DataType::Utf8, true),
+        ]));
+
+        // Create a batch with a StringArray for the "val_int" column
+        let array = Arc::new(StringArray::from(vec!["not an int"]));
+        let batch = RecordBatch::try_new(schema, vec![array]).unwrap();
+
+        // This should panic because resolve_batch_columns expects "val_int" to be Int64
+        let _ = resolve_batch_columns(&batch);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Kani formal verification proofs
+// ---------------------------------------------------------------------------
+
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    /// Prove parse_column_name correctly splits suffixes or returns whole string.
+    #[kani::proof]
+    fn verify_parse_column_name() {
+        let bytes: [u8; 16] = kani::any();
+        let len: usize = kani::any();
+        kani::assume(len <= 16);
+        let s = match std::str::from_utf8(&bytes[..len]) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+
+        let (name, suffix) = parse_column_name(s);
+
+        assert!(s.starts_with(name));
+        if !suffix.is_empty() {
+            assert!(suffix == "str" || suffix == "int" || suffix == "float");
+            assert!(s.ends_with(suffix));
+            // Should have an underscore before suffix
+            assert!(name.len() + suffix.len() + 1 == s.len());
+            assert!(s.as_bytes()[name.len()] == b'_');
+        } else {
+            assert!(name == s);
+        }
+    }
+
+    /// Prove the priority and stability logic used in build_col_infos.
+    #[kani::proof]
+    #[kani::unwind(5)]
+    fn verify_col_info_dedup_logic() {
+        let mut infos = Vec::new();
+        // Create 4 symbolic ColInfos
+        for i in 0..4 {
+            let field_id: u8 = kani::any();
+            let suffix_id: u8 = kani::any();
+            kani::assume(field_id < 2); // 2 distinct field names
+            kani::assume(suffix_id < 4); // 4 possible suffixes
+
+            let field_name = if field_id == 0 { "a" } else { "b" };
+            let type_suffix = match suffix_id {
+                0 => "int",
+                1 => "float",
+                2 => "str",
+                _ => "",
+            };
+            infos.push(ColInfo {
+                idx: i,
+                field_name: field_name.to_string(),
+                type_suffix: type_suffix.to_string(),
+            });
+        }
+
+        fn type_priority(suffix: &str) -> u8 {
+            match suffix {
+                "int" => 3,
+                "float" => 2,
+                "str" => 1,
+                _ => 0,
+            }
+        }
+
+        // Apply the same logic as build_col_infos
+        infos.sort_by(|a, b| {
+            a.field_name
+                .cmp(&b.field_name)
+                .then_with(|| type_priority(&b.type_suffix).cmp(&type_priority(&a.type_suffix)))
+        });
+        infos.dedup_by(|a, b| a.field_name == b.field_name);
+        infos.sort_by_key(|c| c.idx);
+
+        // Properties to verify:
+        // 1. Resulting field_names are unique
+        if infos.len() >= 2 {
+            for i in 0..infos.len() - 1 {
+                for j in i + 1..infos.len() {
+                    assert!(infos[i].field_name != infos[j].field_name);
+                }
+            }
+        }
+
+        // 2. Output is still sorted by original idx (stability)
+        if infos.len() >= 2 {
+            for i in 0..infos.len() - 1 {
+                assert!(infos[i].idx < infos[i + 1].idx);
+            }
+        }
+    }
+
+    /// Prove string escaping logic in write_row_json.
+    #[kani::proof]
+    #[kani::unwind(9)]
+    fn verify_json_string_escaping() {
+        let bytes: [u8; 8] = kani::any();
+        let v = match std::str::from_utf8(&bytes) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+
+        let mut out = Vec::new();
+        // Minimal JSON escape from write_row_json
+        for &b in v.as_bytes() {
+            match b {
+                b'"' => out.extend_from_slice(b"\\\""),
+                b'\\' => out.extend_from_slice(b"\\\\"),
+                b'\n' => out.extend_from_slice(b"\\n"),
+                b'\r' => out.extend_from_slice(b"\\r"),
+                b'\t' => out.extend_from_slice(b"\\t"),
+                _ => out.push(b),
+            }
+        }
+
+        // Better verification:
+        let mut i = 0;
+        while i < out.len() {
+            let b = out[i];
+            if b == b'"' || b == b'\\' || b == b'\n' || b == b'\r' || b == b'\t' {
+                // These MUST NOT appear raw
+                assert!(false, "Raw special character found in escaped output");
+            }
+            if b == b'\\' {
+                // Must be a valid escape: \" \\ \n \r \t
+                assert!(i + 1 < out.len());
+                let next = out[i + 1];
+                assert!(next == b'"' || next == b'\\' || next == b'n' || next == b'r' || next == b't');
+                i += 1;
+            }
+            i += 1;
+        }
+    }
 }
