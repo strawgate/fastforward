@@ -43,10 +43,10 @@ impl StaticTable {
     /// Create from key-value pairs.
     ///
     /// Returns an error if `labels` is empty (a table with no columns is
-    /// meaningless) or if building the Arrow batch fails.  The batch error
-    /// path is unreachable in practice — `RecordBatch::try_new` only fails
-    /// when the schema field count differs from the column count, but here
-    /// both are derived from the same `labels` slice so they always agree.
+    /// meaningless) or if building the Arrow batch fails (e.g. schema/column
+    /// count mismatch).  Both schema and columns are derived from the same
+    /// `labels` slice, so the batch error path is not expected to trigger in
+    /// practice, but the error is propagated for defensive correctness.
     ///
     /// The error type is `String` for consistency with the rest of this module
     /// (all enrichment loaders use `Result<_, String>`).
