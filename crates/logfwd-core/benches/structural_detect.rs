@@ -87,7 +87,7 @@ fn unified_scan_scalar(data: &[u8; 64]) -> UnifiedBlock {
     let mut backslash_bits: u64 = 0;
     let mut comma_bits: u64 = 0;
 
-    for (i, b) in data.iter().enumerate().take(64) {
+    for (i, b) in data.iter().enumerate() {
         let b = *b;
         let bit = 1u64 << i;
         if b == b'\n' {
@@ -147,7 +147,7 @@ fn framing_scan_scalar(data: &[u8; 64]) -> (u64, u64) {
     let mut newline_bits: u64 = 0;
     let mut space_bits: u64 = 0;
 
-    for (i, b) in data.iter().enumerate().take(64) {
+    for (i, b) in data.iter().enumerate() {
         let b = *b;
         let bit = 1u64 << i;
         if b == b'\n' {
@@ -165,7 +165,7 @@ fn classify_scan_scalar(data: &[u8; 64]) -> (u64, u64) {
     let mut quote_bits: u64 = 0;
     let mut backslash_bits: u64 = 0;
 
-    for (i, b) in data.iter().enumerate().take(64) {
+    for (i, b) in data.iter().enumerate() {
         let b = *b;
         let bit = 1u64 << i;
         if b == b'"' {

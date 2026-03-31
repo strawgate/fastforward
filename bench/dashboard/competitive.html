@@ -85,7 +85,8 @@ async function main() {
     return;
   }
 
-  const runIds = (index.competitive_runs || index.runs || []).map(runId).filter(Boolean).map(String);
+  // bench-data index is newest-first; reverse to oldest->newest for downstream logic
+  const runIds = (index.competitive_runs || index.runs || []).map(runId).filter(Boolean).map(String).reverse();
   if (runIds.length === 0) {
     document.getElementById('loading').textContent = 'No competitive runs found.';
     return;

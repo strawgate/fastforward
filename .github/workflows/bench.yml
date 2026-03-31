@@ -381,7 +381,10 @@ jobs:
           GIT_COMMITTER_NAME: github-actions[bot]
           GIT_COMMITTER_EMAIL: github-actions[bot]@users.noreply.github.com
         run: |
-          git fetch origin bench-data
+          git fetch origin bench-data || {
+            echo "::warning::bench-data branch not found; skipping data commit"
+            exit 0
+          }
           git worktree add /tmp/bench-data origin/bench-data -b bench-data-push
 
           cd /tmp/bench-data
@@ -419,10 +422,11 @@ jobs:
           if os.path.exists(entry_path):
               with open(entry_path) as f:
                   entry = json.load(f)
-              index["runs"] = [r for r in index["runs"] if r.get("id") != entry.get("id")]
-              index["runs"].append(entry)
-              index["runs"].sort(key=lambda r: r.get("date", ""), reverse=True)
-              index["runs"] = index["runs"][:90]
+              entry_id = entry.get("id", "")
+              if entry_id:
+                  index["runs"] = [r for r in index["runs"] if (r.get("id") if isinstance(r, dict) else r) != entry_id]
+                  index["runs"].insert(0, entry_id)
+                  index["runs"] = index["runs"][:90]
 
           # Record rate-run id.
           if os.path.exists(f"rate-runs/{run_id}.json"):

@@ -125,7 +125,8 @@ async function main() {
   }
 
   const runEntries = index.competitive_runs || index.runs || [];
-  const runs = runEntries.map(runId).filter(Boolean).map(String);
+  // bench-data index is newest-first; normalize to oldest->newest for downstream logic
+  const runs = runEntries.map(runId).filter(Boolean).map(String).reverse();
   const rateRuns = index.rate_runs || [];
   const criterionRuns = index.criterion_runs || [];
 
