@@ -592,7 +592,7 @@ mod tests {
         // Drain with nothing in flight
         let draining = running.begin_drain();
         assert!(draining.is_drained());
-        let _stopped = draining.stop();
+        assert!(draining.stop().is_ok());
     }
 
     #[test]
