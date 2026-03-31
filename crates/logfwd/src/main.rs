@@ -63,21 +63,25 @@ fn reset() -> &'static str {
 // Entry point
 // ---------------------------------------------------------------------------
 
-#[tokio::main]
-async fn main() {
-    #[cfg(feature = "dhat-heap")]
-    let _profiler = dhat::Profiler::new_heap();
+fn main() {
+    let code = main_inner();
+    if code != 0 {
+        std::process::exit(code);
+    }
+}
 
+#[tokio::main]
+async fn main_inner() -> i32 {
     let args: Vec<String> = env::args().collect();
 
     if args.len() < 2 || args.iter().any(|a| a == "--help" || a == "-h") {
         print_usage();
-        std::process::exit(EXIT_OK);
+        return EXIT_OK;
     }
 
     if args.iter().any(|a| a == "--version" || a == "-V") {
         println!("logfwd {VERSION}");
-        std::process::exit(EXIT_OK);
+        return EXIT_OK;
     }
 
     let result = match args[1].as_str() {
@@ -87,13 +91,16 @@ async fn main() {
         other => {
             eprintln!("{}error{}: unknown command: {other}", red(), reset());
             eprintln!("Run {}logfwd --help{} for usage.", bold(), reset());
-            std::process::exit(EXIT_CONFIG);
+            return EXIT_CONFIG;
         }
     };
 
-    if let Err(e) = result {
-        eprintln!("{}error{}: {e}", red(), reset());
-        std::process::exit(EXIT_RUNTIME);
+    match result {
+        Ok(_) => EXIT_OK,
+        Err(e) => {
+            eprintln!("{}error{}: {e}", red(), reset());
+            EXIT_RUNTIME
+        }
     }
 }
 
@@ -140,7 +147,7 @@ async fn cmd_config(args: &[String]) -> io::Result<()> {
     if args.len() < 3 {
         eprintln!("{}error{}: --config requires a path", red(), reset(),);
         eprintln!("  logfwd --config <config.yaml> [--validate] [--dry-run]");
-        std::process::exit(EXIT_CONFIG);
+        return Err(io::Error::new(io::ErrorKind::Other, "missing config path"));
     }
 
     let config_path = &args[2];
@@ -155,7 +162,7 @@ async fn cmd_config(args: &[String]) -> io::Result<()> {
             other => {
                 eprintln!("{}error{}: unknown flag: {other}", red(), reset());
                 eprintln!("  logfwd --config <config.yaml> [--validate] [--dry-run]");
-                std::process::exit(EXIT_CONFIG);
+                return Err(io::Error::new(io::ErrorKind::Other, "unknown flag"));
             }
         }
     }
@@ -163,8 +170,7 @@ async fn cmd_config(args: &[String]) -> io::Result<()> {
     let config = match logfwd_config::Config::load(config_path) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("{}error{}: {e}", red(), reset());
-            std::process::exit(EXIT_CONFIG);
+            return Err(io::Error::new(io::ErrorKind::Other, e.to_string()));
         }
     };
 
@@ -210,18 +216,12 @@ fn cmd_generate_json(args: &[String]) -> io::Result<()> {
             red(),
             reset(),
         );
-        std::process::exit(EXIT_CONFIG);
+        return Err(io::Error::new(io::ErrorKind::Other, "missing arguments"));
     }
     let num_lines: usize = match args[2].parse() {
         Ok(n) => n,
         Err(e) => {
-            eprintln!(
-                "{}error{}: invalid num_lines '{}': {e}",
-                red(),
-                reset(),
-                args[2]
-            );
-            std::process::exit(EXIT_CONFIG);
+            return Err(io::Error::new(io::ErrorKind::Other, format!("invalid num_lines: {e}")));
         }
     };
     generate_json_log_file(num_lines, &args[3])
@@ -257,8 +257,7 @@ fn validate_pipelines(
     }
 
     if errors > 0 {
-        eprintln!("\n{}validation failed{}: {errors} error(s)", red(), reset(),);
-        std::process::exit(EXIT_CONFIG);
+        return Err(io::Error::new(io::ErrorKind::Other, format!("{errors} error(s) during validation")));
     }
 
     let label = if dry_run { "dry run ok" } else { "config ok" };
@@ -280,8 +279,24 @@ async fn run_pipelines(
     let shutdown = CancellationToken::new();
 
     // Listen for SIGINT (Ctrl-C) and SIGTERM to trigger graceful shutdown.
+    #[cfg(feature = "dhat-heap")]
+    let profiler = dhat::Profiler::new_heap();
+
+    #[cfg(feature = "cpu-profiling")]
+    let pprof_guard = pprof::ProfilerGuardBuilder::default()
+        .frequency(999)
+        .blocklist(&["libc", "libgcc", "pthread", "vdso"])
+        .build()
+        .unwrap();
+
     let shutdown_for_signal = shutdown.clone();
     tokio::spawn(async move {
+        #[cfg(feature = "dhat-heap")]
+        let _profiler_to_drop = profiler;
+        
+        #[cfg(feature = "cpu-profiling")]
+        let _pprof_to_drop = pprof_guard;
+
         #[cfg(unix)]
         {
             use tokio::signal::unix::{SignalKind, signal};
@@ -296,7 +311,20 @@ async fn run_pipelines(
         {
             tokio::signal::ctrl_c().await.ok();
         }
-        shutdown_for_signal.cancel();
+        
+        #[cfg(feature = "cpu-profiling")]
+        {
+            if let Ok(report) = _pprof_to_drop.report().build() {
+                if let Ok(file) = std::fs::File::create("flamegraph.svg") {
+                    let _ = report.flamegraph(file);
+                }
+            }
+        }
+
+        #[cfg(feature = "dhat-heap")]
+        drop(_profiler_to_drop);
+
+        std::process::exit(0);
     });
 
     let meter_provider = build_meter_provider(&config)?;
@@ -310,8 +338,7 @@ async fn run_pipelines(
                 pipelines.push(pipeline);
             }
             Err(e) => {
-                eprintln!("  {}error{}: pipeline '{name}': {e}", red(), reset(),);
-                std::process::exit(EXIT_CONFIG);
+                return Err(io::Error::new(io::ErrorKind::Other, format!("pipeline '{name}': {e}")));
             }
         }
     }
@@ -435,8 +462,7 @@ fn run_blackhole(addr: &str) -> io::Result<()> {
         let mut prev_bytes = 0u64;
         loop {
             std::thread::sleep(Duration::from_secs(1));
-            let reqs = reqs_clone.load(Ordering::Relaxed);
-            let lines = lines_clone.load(Ordering::Relaxed);
+            let reqs = reqs_clone.load(Ordering::Relaxed);            let lines = lines_clone.load(Ordering::Relaxed);
             let bytes = bytes_clone.load(Ordering::Relaxed);
             let d_lines = lines - prev_lines;
             let d_bytes = bytes - prev_bytes;

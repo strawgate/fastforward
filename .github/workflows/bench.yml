@@ -312,16 +312,19 @@ jobs:
           path: bin
       - run: chmod +x bin/*
 
+      - name: Build logfwd with profiling
+        run: |
+          cargo build --release --features dhat-heap,cpu-profiling -p logfwd
+          cp target/release/logfwd bin/logfwd-prof
+
       - name: Run profiling pass
         run: |
-          mkdir -p profiles
           bin/logfwd-competitive-bench \
             --lines ${{ env.LINES }} \
             --agents logfwd \
             --scenarios passthrough \
             --mode binary \
-            --profile ./profiles \
-            --dhat-binary ./bin/logfwd-dhat
+            --dhat-binary ./bin/logfwd-prof
         env:
           LOGFWD: ./bin/logfwd
 
@@ -329,7 +332,9 @@ jobs:
         if: always()
         with:
           name: logfwd-profiles
-          path: profiles/
+          path: |
+            dhat-heap.json
+            flamegraph.svg
           retention-days: 30
 
   # -------------------------------------------------------------------
