@@ -516,7 +516,7 @@ fn compliance_raw_format() {
     let batch = scanner.scan(raw_input).unwrap();
     assert_eq!(batch.num_rows(), 1);
     assert_eq!(
-        get_str(&batch, "_raw$str", 0),
+        get_str(&batch, "_raw", 0),
         Some("This is a plain text log line".to_string())
     );
 }

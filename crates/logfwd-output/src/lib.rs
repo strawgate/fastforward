@@ -871,7 +871,7 @@ mod write_row_json_tests {
     #[test]
     fn basic_string_field() {
         let batch = make_batch(vec![(
-            "msg_str",
+            "msg$str",
             Arc::new(StringArray::from(vec!["hello"])),
         )]);
         let json = render(&batch, 0);
@@ -881,7 +881,7 @@ mod write_row_json_tests {
 
     #[test]
     fn integer_field() {
-        let batch = make_batch(vec![("status_int", Arc::new(Int64Array::from(vec![200])))]);
+        let batch = make_batch(vec![("status$int", Arc::new(Int64Array::from(vec![200])))]);
         let json = render(&batch, 0);
         let v: serde_json::Value = serde_json::from_str(&json).expect("must be valid JSON");
         assert_eq!(v["status"], 200);
@@ -890,7 +890,7 @@ mod write_row_json_tests {
     #[test]
     fn float_field() {
         let batch = make_batch(vec![(
-            "duration_float",
+            "duration$float",
             Arc::new(Float64Array::from(vec![3.14])),
         )]);
         let json = render(&batch, 0);
@@ -901,7 +901,7 @@ mod write_row_json_tests {
     #[test]
     fn null_values_skipped() {
         let batch = make_batch(vec![(
-            "msg_str",
+            "msg$str",
             Arc::new(StringArray::from(vec![Some("hello"), None])),
         )]);
         let json0 = render(&batch, 0);
@@ -913,7 +913,7 @@ mod write_row_json_tests {
     #[test]
     fn string_escaping_quotes_and_backslash() {
         let batch = make_batch(vec![(
-            "msg_str",
+            "msg$str",
             Arc::new(StringArray::from(vec![r#"say "hello" and \ more"#])),
         )]);
         let json = render(&batch, 0);
@@ -925,7 +925,7 @@ mod write_row_json_tests {
     fn string_escaping_control_chars() {
         // Null byte and other control chars must be \uXXXX escaped
         let input = "before\x00after\x01\x1f";
-        let batch = make_batch(vec![("msg_str", Arc::new(StringArray::from(vec![input])))]);
+        let batch = make_batch(vec![("msg$str", Arc::new(StringArray::from(vec![input])))]);
         let json = render(&batch, 0);
         // Must be valid JSON
         let v: serde_json::Value =
@@ -936,7 +936,7 @@ mod write_row_json_tests {
     #[test]
     fn string_escaping_newline_tab_cr() {
         let batch = make_batch(vec![(
-            "msg_str",
+            "msg$str",
             Arc::new(StringArray::from(vec!["line1\nline2\ttab\rreturn"])),
         )]);
         let json = render(&batch, 0);
@@ -947,7 +947,7 @@ mod write_row_json_tests {
     #[test]
     fn float_infinity_nan_emit_null() {
         let batch = make_batch(vec![(
-            "val_float",
+            "val$float",
             Arc::new(Float64Array::from(vec![
                 f64::INFINITY,
                 f64::NEG_INFINITY,
@@ -974,9 +974,9 @@ mod write_row_json_tests {
     #[test]
     fn multiple_fields_valid_json() {
         let batch = make_batch(vec![
-            ("level_str", Arc::new(StringArray::from(vec!["INFO"]))),
-            ("status_int", Arc::new(Int64Array::from(vec![200]))),
-            ("duration_float", Arc::new(Float64Array::from(vec![1.5]))),
+            ("level$str", Arc::new(StringArray::from(vec!["INFO"]))),
+            ("status$int", Arc::new(Int64Array::from(vec![200]))),
+            ("duration$float", Arc::new(Float64Array::from(vec![1.5]))),
         ]);
         let json = render(&batch, 0);
         let v: serde_json::Value = serde_json::from_str(&json).expect("must be valid JSON");

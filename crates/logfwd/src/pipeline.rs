@@ -1841,8 +1841,8 @@ mod format_integration_tests {
         let mut scanner = SimdScanner::new(config);
         let batch = scanner.scan(input).unwrap();
         assert_eq!(batch.num_rows(), 2);
-        assert!(batch.schema().field_with_name("level_str").is_ok());
-        assert!(batch.schema().field_with_name("msg_str").is_ok());
+        assert!(batch.schema().field_with_name("level$str").is_ok());
+        assert!(batch.schema().field_with_name("msg$str").is_ok());
     }
 
     /// Raw format: lines captured as _raw when keep_raw is true.
@@ -1880,7 +1880,7 @@ mod format_integration_tests {
         let mut scanner = SimdScanner::new(config);
         let batch = scanner.scan(&out).unwrap();
         assert_eq!(batch.num_rows(), 1);
-        assert!(batch.schema().field_with_name("level_str").is_ok());
+        assert!(batch.schema().field_with_name("level$str").is_ok());
     }
 
     /// Mixed: CRI P+F → scanner produces correct fields.
