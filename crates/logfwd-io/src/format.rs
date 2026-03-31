@@ -169,6 +169,8 @@ pub struct CriParser {
     reassembler: CriReassembler,
     /// Bytes from the previous chunk that did not end with a newline.
     partial: Vec<u8>,
+    /// True when bytes were dropped because outer partial exceeded limit.
+    partial_overflowed: bool,
     /// Max line size for both reassembler and the outer partial buffer.
     /// Outer buffer limit is slightly larger to account for CRI envelope
     /// overhead (timestamp, stream, flags).
@@ -180,6 +182,7 @@ impl CriParser {
         CriParser {
             reassembler: CriReassembler::new(max_line_size),
             partial: Vec::new(),
+            partial_overflowed: false,
             max_line_size,
         }
     }
@@ -205,10 +208,19 @@ impl FormatParser for CriParser {
                 let remaining = limit.saturating_sub(self.partial.len());
                 let to_add = chunk.len().min(remaining);
                 self.partial.extend_from_slice(&chunk[..to_add]);
-                let (n, err) =
-                    cri::process_cri_to_buf(&self.partial, &mut self.reassembler, None, out);
-                self.partial.clear();
-                (n, err)
+                if to_add < chunk.len() {
+                    self.partial_overflowed = true;
+                }
+                if self.partial_overflowed {
+                    self.partial.clear();
+                    self.partial_overflowed = false;
+                    (0, 1)
+                } else {
+                    let (n, err) =
+                        cri::process_cri_to_buf(&self.partial, &mut self.reassembler, None, out);
+                    self.partial.clear();
+                    (n, err)
+                }
             };
             total_lines += n;
             total_errors += err;
@@ -220,6 +232,9 @@ impl FormatParser for CriParser {
             let to_add = bytes[start..].len().min(remaining);
             self.partial
                 .extend_from_slice(&bytes[start..start + to_add]);
+            if to_add < bytes[start..].len() {
+                self.partial_overflowed = true;
+            }
         }
 
         (total_lines, total_errors)
@@ -228,6 +243,7 @@ impl FormatParser for CriParser {
     fn reset(&mut self) {
         self.reassembler.reset();
         self.partial.clear();
+        self.partial_overflowed = false;
     }
 }
 
@@ -428,5 +444,24 @@ mod tests {
         parser.process(&large_data, &mut out);
         // Outer partial buffer must be capped.
         assert!(parser.partial.len() <= 1024 + 128);
+    }
+
+    #[test]
+    fn cri_overflowed_partial_then_newline_counts_error_and_recovers() {
+        let mut parser = CriParser::new(64);
+        let mut out = Vec::new();
+
+        // Fill outer partial beyond its cap with no newline.
+        let oversized = vec![b'x'; 300];
+        assert_eq!(parser.process(&oversized, &mut out), (0, 0));
+
+        // Next chunk starts with newline (terminating dropped oversized line),
+        // then contains a valid CRI line that must still parse.
+        let next = b"\n2024-01-15T10:30:00Z stdout F {\"ok\":true}\n";
+        let (n, errors) = parser.process(next, &mut out);
+        assert_eq!(n, 1);
+        assert_eq!(errors, 1);
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains("\"ok\":true"), "got: {s}");
     }
 }
