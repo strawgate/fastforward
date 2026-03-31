@@ -1,7 +1,6 @@
 pub mod aggregator;
 pub mod byte_search;
 pub mod checkpoint;
-pub mod chunk_classify;
 pub mod compress;
 pub mod cri;
 pub mod diagnostics;
@@ -13,4 +12,6 @@ pub mod input;
 pub mod otlp;
 pub mod scan_config;
 pub mod scanner;
+/// Streaming SIMD structural character detection (replaces chunk_classify).
+pub mod structural;
 pub mod tail;

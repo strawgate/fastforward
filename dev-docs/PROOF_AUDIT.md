@@ -1,27 +1,57 @@
 # Kani Proof Audit
 
-33 proofs as of 2026-03-30. For each: what it proves, what it
+36 proofs as of 2026-03-31. For each: what it proves, what it
 DOESN'T prove, and the gap between proof and real usage.
 
-## chunk_classify.rs (2 proofs)
+## structural.rs (7 proofs)
 
 ### verify_prefix_xor
 **Proves:** Output matches naive running-XOR oracle for ALL u64 inputs.
-**Doesn't prove:** How prefix_xor is composed into ChunkIndex::new().
+**Doesn't prove:** How prefix_xor is composed into StreamingClassifier::process_block().
 **Gap:** None for the function itself. The composition with
 compute_real_quotes is proven separately. The composition of both
-into ChunkIndex::new (multi-block chaining) is NOT proven.
+into StreamingClassifier::process_block (multi-block chaining) is NOT proven.
 
 ### verify_compute_real_quotes
 **Proves:** Matches naive byte-by-byte escape oracle for ALL
 (quote_bits, bs_bits, carry) triples. Three properties: submask,
 oracle match, carry correctness.
 **Doesn't prove:** Multi-block chaining (carry propagation across
-multiple calls to compute_real_quotes). That's the ChunkIndex::new
+multiple calls to compute_real_quotes). That's the StreamingClassifier::process_block
 composition, which is tested by proptest but not Kani-proven.
-**Gap:** A bug in how ChunkIndex::new calls compute_real_quotes
+**Gap:** A bug in how StreamingClassifier::process_block calls compute_real_quotes
 in a loop would not be caught. The function itself is exhaustively
 correct.
+
+### verify_find_char_mask_correct
+**Proves:** For any 64-byte block and any needle byte, bit i is set
+iff block[i] == needle. Checks one arbitrary position per run.
+**Gap:** Checks one position per proof run, not all 64. But the
+function is a simple loop — correctness at one arbitrary position
+implies correctness at all positions.
+
+### verify_structural_scalar_consistent
+**Proves:** `find_structural_chars_scalar` matches `find_char_mask`
+for the quote character on any 64-byte block.
+**Gap:** Only checks one character (quote). The other 9 are identical
+logic paths in the match statement.
+
+### verify_process_block_no_panic
+**Proves:** `process_block` never panics for any combination of 10
+arbitrary u64 bitmasks and any block_len 0..=64.
+**Gap:** No-panic only, not correctness.
+
+### verify_process_block_tail_mask
+**Proves:** No bits set beyond `block_len` in output for any inputs
+with block_len < 64.
+**Gap:** Correctness of the tail masking only. Doesn't verify the
+bitmask content is correct.
+
+### verify_in_string_exclusion
+**Proves:** Structural characters (space, comma, colon, braces) never
+overlap with in_string mask when there are no escapes.
+**Gap:** Only covers the no-backslash case (bs_bits = 0). With
+escapes, the exclusion property is harder to verify exhaustively.
 
 ## scan_config.rs (2 proofs)
 
@@ -224,7 +254,7 @@ caught a real bug (F fast path wasn't enforcing max_line_size).
 ## Summary of gaps
 
 ### GAPS THAT MATTER:
-1. **ChunkIndex multi-block composition** — we prove each function
+1. **StructuralIndex multi-block composition** — we prove each function
    but not the loop that chains them. proptest covers this.
 2. **days_from_civil absolute correctness** — we prove structural
    properties but not "day N is actually correct." Need chrono oracle.
