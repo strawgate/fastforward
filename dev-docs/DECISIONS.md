@@ -84,3 +84,33 @@ live in logfwd-arrow behind a `CharDetector` trait.
 unsafe. Kani proves the scalar path. proptest verifies SIMD matches
 scalar. Performance comes from SIMD at runtime; correctness is proven
 on the scalar path.
+
+## Unified StructuralIndex (not separate framing + classification)
+
+**Decision:** One SIMD pass produces bitmasks for ALL structural
+characters. ChunkIndex becomes StructuralIndex detecting 9 chars:
+`\n`, space, `"`, `\`, `,`, `:`, `{`, `}`, `[`.
+
+**Why:** Benchmarked on 2026-03-30 (NEON, ~760KB NDJSON):
+- 2 chars (current ChunkIndex): 63µs / 12 GiB/s
+- 5 chars (unified): 141µs / 5.4 GiB/s
+- 9 chars (full structural): 256µs / 3.0 GiB/s
+- Scaling is linear at ~28µs per character
+
+The 9-char pass at 3 GiB/s gives 11x headroom over our 1M lines/sec
+target. This eliminates the separate memchr newline pass, makes CRI
+field extraction a bitmask lookup, and makes CSV/TSV support free.
+
+**Alternative considered:** Separate passes (memchr for newlines,
+ChunkIndex for quotes/backslashes). This is the current design at
+7.9 GiB/s combined. Faster per-character, but the second data load
+is wasted since the bytes are already in registers.
+
+**Key insight:** SIMD loads are the expensive part. Once data is in
+registers, additional `cmpeq` + `movemask` comparisons are cheap.
+Adding 7 more character detections to the existing 2-char pass only
+costs ~3x, while detecting 4.5x more characters.
+
+**Provability:** Scalar fallback in core is proven by Kani. SIMD
+backends in logfwd-arrow are tested against the scalar oracle via
+proptest. See #313 for benchmark code.
