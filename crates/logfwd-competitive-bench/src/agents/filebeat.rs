@@ -136,6 +136,22 @@ http.port: 5066
         let cpu_user_ms = get_any(&[&["beat", "cpu", "user", "time", "ms"]]);
         let cpu_sys_ms = get_any(&[&["beat", "cpu", "system", "time", "ms"]]);
         let cpu_total_ms = get_any(&[&["beat", "cpu", "total", "time", "ms"]]);
+        // Some Filebeat versions report ticks instead of ms; convert with HZ=100.
+        let cpu_user_ms = if cpu_user_ms > 0 {
+            cpu_user_ms
+        } else {
+            get(&["beat", "cpu", "user", "ticks"]) * 1000 / 100
+        };
+        let cpu_sys_ms = if cpu_sys_ms > 0 {
+            cpu_sys_ms
+        } else {
+            get(&["beat", "cpu", "system", "ticks"]) * 1000 / 100
+        };
+        let cpu_total_ms = if cpu_total_ms > 0 {
+            cpu_total_ms
+        } else {
+            get(&["beat", "cpu", "total", "ticks"]) * 1000 / 100
+        };
         let cpu_user_ms = if cpu_user_ms > 0 {
             cpu_user_ms
         } else if cpu_total_ms > 0 && cpu_sys_ms > 0 {

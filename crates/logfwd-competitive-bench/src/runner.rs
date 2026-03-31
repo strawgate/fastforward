@@ -582,6 +582,7 @@ fn clock_ticks_per_second() -> u64 {
 }
 
 #[cfg(not(target_os = "linux"))]
+#[allow(dead_code)]
 fn clock_ticks_per_second() -> u64 {
     100
 }

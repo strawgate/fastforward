@@ -100,6 +100,8 @@ jobs:
           if [ -n "$PROFDATA" ] && "$PROFDATA" merge -output=/tmp/pgo-data/merged.profdata /tmp/pgo-data/*.profraw 2>/dev/null; then
             RUSTFLAGS="-Ctarget-cpu=x86-64-v3 -Cprofile-use=/tmp/pgo-data/merged.profdata" \
               cargo build --release -p logfwd
+          else
+            echo "::warning::PGO profile merge failed; using standard release build"
           fi
 
           LOGFWD=./target/release/logfwd ./target/release/logfwd-competitive-bench \
@@ -231,6 +233,8 @@ jobs:
       - name: Scrape criterion JSON results
         run: |
           # Extract estimates from criterion's JSON output.
+          export BENCH_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          export BENCH_COMMIT="$(git rev-parse --short HEAD)"
           python3 -c "
           import json, os, glob
 
@@ -255,8 +259,8 @@ jobs:
 
           output = {
               'id': os.environ.get('GITHUB_RUN_ID', 'local'),
-              'date': '$(date -u +%Y-%m-%dT%H:%M:%SZ)',
-              'commit': '$(git rev-parse --short HEAD)',
+              'date': os.environ.get('BENCH_DATE', ''),
+              'commit': os.environ.get('BENCH_COMMIT', ''),
               'benchmarks': results
           }
           with open('criterion-data.json', 'w') as f:
