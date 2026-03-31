@@ -7,462 +7,350 @@
 <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3/dist/cdn.min.js"></script>
 <style>
 :root {
-  --bg: #0a0d12; --card: #12151c; --card2: #161b25; --border: #1c2233;
-  --accent: #3b82f6; --ok: #10b981; --warn: #f59e0b; --err: #ef4444; --purple: #a78bfa;
-  --t1: #e2e8f0; --t2: #94a3b8; --t3: #64748b; --t4: #475569;
-  --mono: 'SF Mono','Cascadia Code','Fira Code','Menlo',monospace;
-  --sans: -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
-  --r: 8px;
+  --bg:#0a0d12; --card:#12151c; --card2:#181d28; --border:#1c2233; --border2:#252d40;
+  --accent:#3b82f6; --ok:#10b981; --warn:#f59e0b; --err:#ef4444; --purple:#a78bfa;
+  --t1:#e2e8f0; --t2:#94a3b8; --t3:#64748b; --t4:#475569;
+  --mono:'SF Mono','Cascadia Code','Fira Code','Menlo',monospace;
+  --sans:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+  --r:8px;
 }
-* { margin:0; padding:0; box-sizing:border-box }
-body { font-family:var(--sans); background:var(--bg); color:var(--t1); font-size:13px; line-height:1.4 }
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:var(--sans);background:var(--bg);color:var(--t1);font-size:13px;line-height:1.4}
 
-/* === Status bar === */
-.bar { display:flex; align-items:center; gap:16px; padding:8px 20px; background:var(--card); border-bottom:1px solid var(--border); position:sticky; top:0; z-index:50 }
-.bar-brand { font-size:14px; font-weight:700; color:var(--accent); letter-spacing:.5px }
-.bar .spacer { flex:1 }
-.bar-stat { font-size:11px; color:var(--t3); display:flex; align-items:center; gap:5px; white-space:nowrap; font-variant-numeric:tabular-nums }
-.bar-stat b { color:var(--t2); font-weight:600; font-family:var(--mono) }
-.health { display:inline-flex; align-items:center; gap:6px; padding:3px 10px 3px 8px; border-radius:20px; font-size:11px; font-weight:600 }
-.health .dot { width:8px; height:8px; border-radius:50% }
-.health-ok { background:rgba(16,185,129,.1); color:var(--ok) }
-.health-ok .dot { background:var(--ok); box-shadow:0 0 8px var(--ok) }
-.health-err { background:rgba(239,68,68,.1); color:var(--err) }
-.health-err .dot { background:var(--err); box-shadow:0 0 8px var(--err) }
-.health-off { background:rgba(100,116,139,.1); color:var(--t3) }
-.health-off .dot { background:var(--t3) }
+/* Bar */
+.bar{display:flex;align-items:center;gap:14px;padding:8px 20px;background:var(--card);border-bottom:1px solid var(--border);position:sticky;top:0;z-index:50}
+.bar h1{font-size:14px;font-weight:700;color:var(--accent);letter-spacing:.5px}
+.spacer{flex:1}
+.pill{display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:20px;font-size:11px;font-weight:600}
+.pill .dot{width:7px;height:7px;border-radius:50%}
+.pill-ok{background:rgba(16,185,129,.08);color:var(--ok)}.pill-ok .dot{background:var(--ok);box-shadow:0 0 6px var(--ok)}
+.pill-err{background:rgba(239,68,68,.08);color:var(--err)}.pill-err .dot{background:var(--err);box-shadow:0 0 6px var(--err)}
+.pill-off{background:rgba(100,116,139,.08);color:var(--t4)}.pill-off .dot{background:var(--t4)}
+.bar-meta{font-size:11px;color:var(--t4);font-family:var(--mono)}
 
-/* === Main layout === */
-main { max-width:1200px; margin:0 auto; padding:16px 20px }
-.section { margin-bottom:20px }
-.section-head { font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:1px; color:var(--t4); margin-bottom:10px }
+main{max-width:1200px;margin:0 auto;padding:16px 20px}
+.heading{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:1px;color:var(--t4);margin:16px 0 8px}
+.heading:first-child{margin-top:0}
 
-/* === Pipeline diagram === */
-.pipe-flow { display:flex; align-items:stretch; gap:2px; padding:8px 0; overflow-x:auto }
-.pipe-conn { display:flex; align-items:center; padding:0 4px; color:var(--t4) }
-.pipe-conn svg { width:32px; height:16px }
-.pipe-conn line { stroke:var(--t4); stroke-width:1.5 }
-.pipe-conn polygon { fill:var(--t4) }
-.pipe-node { flex:1; min-width:140px; max-width:260px; background:var(--card); border:1px solid var(--border); border-radius:var(--r); padding:12px 14px; cursor:pointer; transition:border-color .15s, background .15s; position:relative }
-.pipe-node:hover { border-color:var(--t4); background:var(--card2) }
-.pipe-node.selected { border-color:var(--accent); background:rgba(59,130,246,.05) }
-.pipe-node .pn-type { font-size:9px; font-weight:700; text-transform:uppercase; letter-spacing:1px; margin-bottom:4px }
-.pipe-node .pn-name { font-size:13px; font-weight:600; color:var(--t1); margin-bottom:6px }
-.pipe-node .pn-stats { display:flex; flex-direction:column; gap:2px }
-.pipe-node .pn-stat { font-size:11px; font-family:var(--mono); color:var(--t3); font-variant-numeric:tabular-nums; display:flex; justify-content:space-between }
-.pipe-node .pn-stat b { color:var(--t2); font-weight:500 }
-.pn-type.inp { color:var(--ok) } .pn-type.xfm { color:var(--accent) } .pn-type.out { color:var(--purple) }
-.pipe-node.inp-border { border-left:3px solid var(--ok) }
-.pipe-node.xfm-border { border-left:3px solid var(--accent) }
-.pipe-node.out-border { border-left:3px solid var(--purple) }
+/* System info - compact grid */
+.sys-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(145px,1fr));gap:6px;margin-bottom:16px}
+.sys-item{background:var(--card);border:1px solid var(--border);border-radius:6px;padding:6px 10px}
+.sys-label{font-size:9px;text-transform:uppercase;letter-spacing:.6px;color:var(--t4)}
+.sys-val{font-size:12px;font-family:var(--mono);color:var(--t2);font-variant-numeric:tabular-nums}
 
-/* === Detail panel (click-to-expand below diagram) === */
-.detail { background:var(--card); border:1px solid var(--border); border-radius:var(--r); padding:16px; margin-top:8px; margin-bottom:12px }
-.detail-title { font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.8px; color:var(--t4); margin-bottom:8px }
-.detail-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(160px,1fr)); gap:8px; margin-bottom:12px }
-.detail-kv { font-size:12px }
-.detail-kv .dk-label { color:var(--t4); font-size:10px; text-transform:uppercase; letter-spacing:.5px }
-.detail-kv .dk-val { color:var(--t2); font-family:var(--mono); font-variant-numeric:tabular-nums }
+/* Charts */
+.chart-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:10px;margin-bottom:16px}
+.chart-card{background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:10px 12px;position:relative}
+.chart-head{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px}
+.chart-label{font-size:10px;text-transform:uppercase;letter-spacing:.6px;color:var(--t4);font-weight:600}
+.chart-val{font-family:var(--mono);font-variant-numeric:tabular-nums;font-weight:700;font-size:16px;color:var(--t1);text-align:right}
+.chart-val .u{font-size:10px;color:var(--t3);font-weight:400;margin-left:2px}
+.chart-val .lim{font-size:10px;color:var(--t4);font-weight:400;margin-left:4px}
+canvas.ch{width:100%;height:90px;display:block;border-radius:4px}
 
-/* === Metric cards === */
-.metrics { display:grid; grid-template-columns:repeat(auto-fill,minmax(155px,1fr)); gap:10px }
-.mc { background:var(--card); border:1px solid var(--border); border-radius:var(--r); padding:10px 12px; cursor:pointer; transition:border-color .15s }
-.mc:hover { border-color:var(--t4) }
-.mc.expanded { border-color:var(--accent) }
-.mc-label { font-size:10px; text-transform:uppercase; letter-spacing:.5px; color:var(--t4); margin-bottom:4px }
-.mc-row { display:flex; align-items:flex-end; gap:8px }
-.mc-val { font-size:20px; font-weight:700; font-family:var(--mono); color:var(--t1); font-variant-numeric:tabular-nums; line-height:1; white-space:nowrap }
-.mc-unit { font-size:11px; color:var(--t3); font-weight:400; white-space:nowrap }
-.mc-lim { font-size:10px; color:var(--t4); font-family:var(--mono); white-space:nowrap }
-canvas.spark { width:100%; height:32px; display:block; margin-top:6px; border-radius:3px }
+/* Pipeline */
+.pipe-flow{display:flex;align-items:stretch;gap:2px;padding:4px 0;overflow-x:auto}
+.pipe-conn{display:flex;align-items:center;padding:0 3px;color:var(--t4)}
+.pipe-conn svg{width:28px;height:14px}
+.pipe-conn line{stroke:var(--border2);stroke-width:1.5}
+.pipe-conn polygon{fill:var(--border2)}
+.pn{flex:1;min-width:130px;max-width:240px;background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:10px 12px;cursor:pointer;transition:all .15s}
+.pn:hover{border-color:var(--t4);background:var(--card2)}
+.pn.sel{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent)}
+.pn-type{font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;margin-bottom:3px}
+.pn-name{font-size:13px;font-weight:600;margin-bottom:5px}
+.pn-row{display:flex;justify-content:space-between;font-size:11px;line-height:1.5;font-variant-numeric:tabular-nums}
+.pn-row span{color:var(--t4)}.pn-row b{color:var(--t2);font-weight:500;font-family:var(--mono)}
+.inp .pn-type{color:var(--ok)}.inp{border-left:3px solid var(--ok)}
+.xfm .pn-type{color:var(--accent)}.xfm{border-left:3px solid var(--accent)}
+.out .pn-type{color:var(--purple)}.out{border-left:3px solid var(--purple)}
 
-/* === Expanded chart === */
-.chart-expand { background:var(--card); border:1px solid var(--border); border-radius:var(--r); padding:12px; margin-top:10px; margin-bottom:10px }
-canvas.chart-full { width:100%; height:120px; display:block; border-radius:4px }
-.chart-tip { position:absolute; background:rgba(10,13,18,.95); border:1px solid var(--border); border-radius:4px; padding:4px 8px; font:11px var(--mono); color:var(--t1); pointer-events:none; z-index:10; white-space:nowrap }
+/* Inspector panel */
+.inspector{background:var(--card2);border:1px solid var(--accent);border-radius:var(--r);margin:8px 0 16px;padding:16px;box-shadow:0 4px 24px rgba(0,0,0,.3)}
+.insp-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}
+.insp-title{font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.8px;color:var(--accent)}
+.insp-close{background:none;border:1px solid var(--border);border-radius:4px;color:var(--t3);font-size:11px;padding:2px 8px;cursor:pointer}
+.insp-close:hover{color:var(--t1);border-color:var(--t3)}
+.insp-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:8px}
+.insp-kv .ik-l{font-size:9px;text-transform:uppercase;letter-spacing:.5px;color:var(--t4)}
+.insp-kv .ik-v{font-size:13px;font-family:var(--mono);color:var(--t2);font-variant-numeric:tabular-nums}
+.sql-box{background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:10px 14px;font:12px/1.5 var(--mono);color:#79c0ff;white-space:pre-wrap;margin-bottom:10px}
 
-/* === Collapsible sections === */
-details { margin-bottom:10px }
-details summary { font-size:12px; color:var(--t3); cursor:pointer; padding:10px 14px; background:var(--card); border:1px solid var(--border); border-radius:var(--r); list-style:none; display:flex; align-items:center; gap:8px; user-select:none }
-details summary::-webkit-details-marker { display:none }
-details summary::before { content:'\25B8'; font-size:10px; transition:transform .15s }
-details[open] summary::before { transform:rotate(90deg) }
-details summary:hover { background:var(--card2) }
-details .details-body { padding:12px 14px; background:var(--card); border:1px solid var(--border); border-top:none; border-radius:0 0 var(--r) var(--r) }
-details[open] summary { border-radius:var(--r) var(--r) 0 0 }
-.kv-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(180px,1fr)); gap:6px }
-.kv { font-size:12px }
-.kv-l { color:var(--t4); font-size:10px; text-transform:uppercase; letter-spacing:.5px }
-.kv-v { color:var(--t2); font-family:var(--mono) }
-.yaml { background:var(--bg); border:1px solid var(--border); border-radius:6px; padding:12px 14px; font:12px/1.6 var(--mono); white-space:pre-wrap; overflow:auto; max-height:50vh; color:var(--t2) }
+/* Config */
+.yaml{background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:12px 14px;font:12px/1.6 var(--mono);white-space:pre-wrap;overflow:auto;max-height:40vh;color:var(--t2)}
+.cfg-src{font-size:11px;color:var(--t4);margin-bottom:6px}
+.cfg-src b{color:var(--t3);font-weight:500;font-family:var(--mono)}
 
-/* === Tables === */
-table { width:100%; border-collapse:collapse; table-layout:fixed }
-th,td { text-align:left; padding:6px 10px; border-bottom:1px solid var(--border); font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
-th { color:var(--t4); font-weight:500; font-size:10px; text-transform:uppercase; letter-spacing:.5px }
-td { color:var(--t2) }
-.r { text-align:right; font-family:var(--mono); font-variant-numeric:tabular-nums }
-.err-text { color:var(--err) }
-.ok-text { color:var(--ok) }
-
-@media(max-width:700px) { .metrics { grid-template-columns:1fr 1fr } .pipe-flow { flex-direction:column } }
+@media(max-width:700px){.chart-grid{grid-template-columns:1fr}.sys-grid{grid-template-columns:1fr 1fr}.pipe-flow{flex-direction:column}}
 </style>
 </head>
 
 <body x-data="app()" x-init="start()">
 
-<!-- Status bar -->
 <div class="bar">
-  <span class="bar-brand">logfwd</span>
-  <div :class="'health '+(connected?(totalErrors>0?'health-err':'health-ok'):'health-off')">
+  <h1>logfwd</h1>
+  <div :class="'pill '+(connected?(totalErrors>0?'pill-err':'pill-ok'):'pill-off')">
     <span class="dot"></span>
     <span x-text="connected?(totalErrors>0?totalErrors+' errors':'healthy'):'disconnected'"></span>
   </div>
   <div class="spacer"></div>
-  <div class="bar-stat"><b x-text="fmtRate(lpsNow)"></b>/s in</div>
-  <div class="bar-stat"><b x-text="sys.cpu_percent!=null?sys.cpu_percent.toFixed(1)+'%':'-'"></b> cpu</div>
-  <div class="bar-stat"><b x-text="fmtB(sys.rss_bytes)"></b> rss</div>
-  <div class="bar-stat" x-text="fmtDur(sys.uptime_seconds)"></div>
+  <span class="bar-meta" x-text="'v'+(sys.version||'?')+' \u00b7 '+fmtDur(sys.uptime_seconds)"></span>
 </div>
 
 <main>
 
-  <!-- Pipeline diagrams -->
-  <template x-for="(p,pi) in pipes" :key="p.name">
-    <div class="section">
-      <div class="section-head" x-text="'Pipeline: '+p.name"></div>
-      <div class="pipe-flow">
-        <!-- Inputs -->
-        <template x-for="(inp,ii) in p.inputs" :key="inp.name">
-          <div style="display:contents">
-            <div class="pipe-conn" x-show="ii>0"><svg viewBox="0 0 32 16"><line x1="0" y1="8" x2="24" y2="8"/><polygon points="24,4 32,8 24,12"/></svg></div>
-            <div class="pipe-node inp-border" :class="sel===pi+'_i'+ii&&'selected'" @click="toggle(pi+'_i'+ii,{type:'input',cfg:inp,stats:inp})">
-              <div class="pn-type inp">Input</div>
-              <div class="pn-name" x-text="inp.name"></div>
-              <div class="pn-stats">
-                <div class="pn-stat"><span>lines</span><b x-text="fmt(inp.lines_total)"></b></div>
-                <div class="pn-stat"><span>bytes</span><b x-text="fmtB(inp.bytes_total)"></b></div>
-                <div class="pn-stat"><span>rate</span><b x-text="compRate(inp,'lines_total')"></b></div>
-              </div>
-            </div>
-          </div>
-        </template>
-        <!-- Arrow -->
-        <div class="pipe-conn"><svg viewBox="0 0 32 16"><line x1="0" y1="8" x2="24" y2="8"/><polygon points="24,4 32,8 24,12"/></svg></div>
-        <!-- Transform -->
-        <div class="pipe-node xfm-border" :class="sel===pi+'_t'&&'selected'" @click="toggle(pi+'_t',{type:'transform',sql:p.transform.sql,stats:{lines_in:p.transform.lines_in,lines_out:p.transform.lines_out,drop:p.transform.filter_drop_rate}})">
-          <div class="pn-type xfm">Transform</div>
-          <div class="pn-name">SQL</div>
-          <div class="pn-stats">
-            <div class="pn-stat"><span>in</span><b x-text="fmt(p.transform.lines_in)"></b></div>
-            <div class="pn-stat"><span>out</span><b x-text="fmt(p.transform.lines_out)"></b></div>
-            <div class="pn-stat"><span>drop</span><b x-text="(p.transform.filter_drop_rate*100).toFixed(1)+'%'" :style="p.transform.filter_drop_rate>.1?'color:var(--warn)':''"></b></div>
+<!-- System -->
+<div class="heading">System</div>
+<div class="sys-grid" x-show="sys.hostname||sys.pid">
+  <template x-for="s in sysItems" :key="s[0]">
+    <div class="sys-item"><div class="sys-label" x-text="s[0]"></div><div class="sys-val" x-text="s[1]"></div></div>
+  </template>
+</div>
+
+<!-- Metrics -->
+<div class="heading">Metrics</div>
+<div class="chart-grid">
+  <template x-for="m in chartDefs" :key="m.id">
+    <div class="chart-card">
+      <div class="chart-head">
+        <span class="chart-label" x-text="m.label"></span>
+        <span class="chart-val" x-html="chartVals[m.id]||'&ndash;'"></span>
+      </div>
+      <canvas class="ch" :id="'ch_'+m.id"></canvas>
+    </div>
+  </template>
+</div>
+
+<!-- Pipelines -->
+<template x-for="(p,pi) in pipes" :key="p.name">
+<div>
+  <div class="heading" x-text="'Pipeline: '+p.name"></div>
+  <div class="pipe-flow">
+    <template x-for="(inp,ii) in p.inputs" :key="inp.name">
+      <div style="display:contents">
+        <div class="pipe-conn" x-show="ii>0"><svg viewBox="0 0 28 14"><line x1="0" y1="7" x2="20" y2="7"/><polygon points="20,3 28,7 20,11"/></svg></div>
+        <div class="pn inp" :class="sel===pi+'i'+ii&&'sel'" @click="pick(pi+'i'+ii,'input',inp)">
+          <div class="pn-type">Input</div>
+          <div class="pn-name" x-text="inp.name"></div>
+          <div class="pn-row"><span>lines</span><b x-text="fmt(inp.lines_total)"></b></div>
+          <div class="pn-row"><span>bytes</span><b x-text="fmtB(inp.bytes_total)"></b></div>
+          <div class="pn-row"><span>rate</span><b x-text="cRate(inp,'lines_total')"></b></div>
+        </div>
+      </div>
+    </template>
+    <div class="pipe-conn"><svg viewBox="0 0 28 14"><line x1="0" y1="7" x2="20" y2="7"/><polygon points="20,3 28,7 20,11"/></svg></div>
+    <div class="pn xfm" :class="sel===pi+'t'&&'sel'" @click="pick(pi+'t','transform',{sql:p.transform.sql,lines_in:p.transform.lines_in,lines_out:p.transform.lines_out,drop:p.transform.filter_drop_rate})">
+      <div class="pn-type">Transform</div>
+      <div class="pn-name">SQL</div>
+      <div class="pn-row"><span>in</span><b x-text="fmt(p.transform.lines_in)"></b></div>
+      <div class="pn-row"><span>out</span><b x-text="fmt(p.transform.lines_out)"></b></div>
+      <div class="pn-row"><span>drop</span><b x-text="(p.transform.filter_drop_rate*100).toFixed(1)+'%'" :style="p.transform.filter_drop_rate>.05&&'color:var(--warn)'"></b></div>
+    </div>
+    <div class="pipe-conn"><svg viewBox="0 0 28 14"><line x1="0" y1="7" x2="20" y2="7"/><polygon points="20,3 28,7 20,11"/></svg></div>
+    <template x-for="(out,oi) in p.outputs" :key="out.name">
+      <div style="display:contents">
+        <div class="pipe-conn" x-show="oi>0"><svg viewBox="0 0 28 14"><line x1="0" y1="7" x2="20" y2="7"/><polygon points="20,3 28,7 20,11"/></svg></div>
+        <div class="pn out" :class="sel===pi+'o'+oi&&'sel'" @click="pick(pi+'o'+oi,'output',out)">
+          <div class="pn-type">Output</div>
+          <div class="pn-name" x-text="out.name"></div>
+          <div class="pn-row"><span>lines</span><b x-text="fmt(out.lines_total)"></b></div>
+          <div class="pn-row"><span>bytes</span><b x-text="fmtB(out.bytes_total)"></b></div>
+          <div class="pn-row"><span>errors</span><b x-text="out.errors" :style="out.errors>0&&'color:var(--err)'"></b></div>
+        </div>
+      </div>
+    </template>
+  </div>
+  <!-- Inspector -->
+  <template x-if="selData&&sel&&sel.startsWith(String(pi))">
+    <div class="inspector" x-transition.opacity>
+      <div class="insp-header">
+        <span class="insp-title" x-text="selType+' \u2014 '+(selData.name||'SQL')"></span>
+        <button class="insp-close" @click="sel=null;selData=null">&times; close</button>
+      </div>
+      <template x-if="selType==='transform'">
+        <div>
+          <div class="sql-box" x-text="selData.sql||'SELECT * FROM logs'"></div>
+          <div class="insp-grid">
+            <div class="insp-kv"><div class="ik-l">Lines In</div><div class="ik-v" x-text="fmt(selData.lines_in)"></div></div>
+            <div class="insp-kv"><div class="ik-l">Lines Out</div><div class="ik-v" x-text="fmt(selData.lines_out)"></div></div>
+            <div class="insp-kv"><div class="ik-l">Drop Rate</div><div class="ik-v" x-text="(selData.drop*100).toFixed(1)+'%'"></div></div>
           </div>
         </div>
-        <!-- Arrow -->
-        <div class="pipe-conn"><svg viewBox="0 0 32 16"><line x1="0" y1="8" x2="24" y2="8"/><polygon points="24,4 32,8 24,12"/></svg></div>
-        <!-- Outputs -->
-        <template x-for="(out,oi) in p.outputs" :key="out.name">
-          <div style="display:contents">
-            <div class="pipe-conn" x-show="oi>0"><svg viewBox="0 0 32 16"><line x1="0" y1="8" x2="24" y2="8"/><polygon points="24,4 32,8 24,12"/></svg></div>
-            <div class="pipe-node out-border" :class="sel===pi+'_o'+oi&&'selected'" @click="toggle(pi+'_o'+oi,{type:'output',cfg:out,stats:out})">
-              <div class="pn-type out">Output</div>
-              <div class="pn-name" x-text="out.name"></div>
-              <div class="pn-stats">
-                <div class="pn-stat"><span>lines</span><b x-text="fmt(out.lines_total)"></b></div>
-                <div class="pn-stat"><span>bytes</span><b x-text="fmtB(out.bytes_total)"></b></div>
-                <div class="pn-stat"><span>errors</span><b x-text="out.errors" :style="out.errors>0?'color:var(--err)':''"></b></div>
-              </div>
-            </div>
-          </div>
-        </template>
-      </div>
-      <!-- Detail panel (expanded when node clicked) -->
-      <template x-if="selData&&sel.startsWith(String(pi))">
-        <div class="detail" x-transition.opacity>
-          <div class="detail-title" x-text="selData.type+' details'"></div>
-          <!-- Transform detail -->
-          <template x-if="selData.type==='transform'">
-            <div>
-              <div class="yaml" style="margin-bottom:10px;max-height:6em" x-text="selData.sql||'SELECT * FROM logs'"></div>
-              <div class="detail-grid">
-                <div class="detail-kv"><div class="dk-label">Lines In</div><div class="dk-val" x-text="fmt(selData.stats.lines_in)"></div></div>
-                <div class="detail-kv"><div class="dk-label">Lines Out</div><div class="dk-val" x-text="fmt(selData.stats.lines_out)"></div></div>
-                <div class="detail-kv"><div class="dk-label">Drop Rate</div><div class="dk-val" x-text="(selData.stats.drop*100).toFixed(1)+'%'"></div></div>
-              </div>
-            </div>
-          </template>
-          <!-- Input/Output detail -->
-          <template x-if="selData.type!=='transform'">
-            <div class="detail-grid">
-              <template x-for="[k,v] in detailKV(selData)" :key="k">
-                <div class="detail-kv"><div class="dk-label" x-text="k"></div><div class="dk-val" x-text="v"></div></div>
-              </template>
-            </div>
-          </template>
+      </template>
+      <template x-if="selType==='input'">
+        <div class="insp-grid">
+          <div class="insp-kv"><div class="ik-l">Name</div><div class="ik-v" x-text="selData.name"></div></div>
+          <div class="insp-kv"><div class="ik-l">Type</div><div class="ik-v" x-text="selData.type"></div></div>
+          <div class="insp-kv"><div class="ik-l">Lines</div><div class="ik-v" x-text="fmt(selData.lines_total)"></div></div>
+          <div class="insp-kv"><div class="ik-l">Bytes</div><div class="ik-v" x-text="fmtB(selData.bytes_total)"></div></div>
+          <div class="insp-kv"><div class="ik-l">Errors</div><div class="ik-v" x-text="selData.errors"></div></div>
+        </div>
+      </template>
+      <template x-if="selType==='output'">
+        <div class="insp-grid">
+          <div class="insp-kv"><div class="ik-l">Name</div><div class="ik-v" x-text="selData.name"></div></div>
+          <div class="insp-kv"><div class="ik-l">Type</div><div class="ik-v" x-text="selData.type"></div></div>
+          <div class="insp-kv"><div class="ik-l">Lines</div><div class="ik-v" x-text="fmt(selData.lines_total)"></div></div>
+          <div class="insp-kv"><div class="ik-l">Bytes</div><div class="ik-v" x-text="fmtB(selData.bytes_total)"></div></div>
+          <div class="insp-kv"><div class="ik-l">Errors</div><div class="ik-v" x-text="selData.errors" :style="selData.errors>0&&'color:var(--err)'"></div></div>
         </div>
       </template>
     </div>
   </template>
+</div>
+</template>
 
-  <!-- Metric sparkline cards -->
-  <div class="section">
-    <div class="section-head">Metrics</div>
-    <div class="metrics">
-      <template x-for="m in metricDefs" :key="m.id">
-        <div class="mc" :class="expandedChart===m.id&&'expanded'" @click="expandedChart=expandedChart===m.id?null:m.id">
-          <div class="mc-label" x-text="m.label"></div>
-          <div class="mc-row">
-            <span class="mc-val" x-text="metricVals[m.id]||'-'"></span>
-            <span class="mc-unit" x-text="m.unit||''"></span>
-            <span class="mc-lim" x-show="metricLims[m.id]" x-text="metricLims[m.id]||''"></span>
-          </div>
-          <canvas class="spark" :id="'sp_'+m.id"></canvas>
-        </div>
-      </template>
-    </div>
-    <!-- Expanded chart -->
-    <div class="chart-expand" x-show="expandedChart" x-transition.opacity style="position:relative">
-      <canvas class="chart-full" id="chartFull"></canvas>
-      <div class="chart-tip" id="chartTip" style="display:none"></div>
-    </div>
-  </div>
-
-  <!-- System info -->
-  <details x-show="sys.hostname">
-    <summary>
-      System
-      <span style="color:var(--t4);font-size:11px" x-text="[sys.hostname,sys.os,sys.arch,sys.cpu_count?sys.cpu_count+' cores':'',sys.total_memory_bytes?fmtB(sys.total_memory_bytes):''].filter(Boolean).join(' \u00b7 ')"></span>
-    </summary>
-    <div class="details-body">
-      <div class="kv-grid">
-        <template x-for="item in sysItems" :key="item[0]">
-          <div class="kv"><div class="kv-l" x-text="item[0]"></div><div class="kv-v" x-text="item[1]"></div></div>
-        </template>
-      </div>
-    </div>
-  </details>
-
-  <!-- Config -->
-  <details>
-    <summary>
-      Config
-      <span style="color:var(--t4);font-size:11px" x-text="cfgPath||''"></span>
-    </summary>
-    <div class="details-body" x-init="$el.__loaded||loadConfig()">
-      <div class="yaml" x-html="cfgHtml||'loading...'"></div>
-    </div>
-  </details>
+<!-- Config -->
+<div class="heading">Config</div>
+<div style="margin-bottom:16px">
+  <div class="cfg-src" x-show="cfgPath">Source: <b x-text="cfgPath"></b></div>
+  <div class="yaml" x-html="cfgHtml||'loading\u2026'"></div>
+</div>
 
 </main>
 
 <script>
 function app(){
-  var MAX_AGE=5*60*1000,POLL=2000;
+var MAX_AGE=5*60*1000,POLL=2000;
 
-  // -- Ring buffer --
-  function Ring(n){this.d=[];this.n=n}
-  Ring.prototype.push=function(v){this.d.push(v);if(this.d.length>this.n)this.d.shift()};
-  Ring.prototype.arr=function(){return this.d};
+// Ring buffer
+function Ring(n){this.d=[];this.n=n}
+Ring.prototype.push=function(v){this.d.push(v);if(this.d.length>this.n)this.d.shift()};
+Ring.prototype.arr=function(){return this.d};
 
-  // -- Sparkline + full chart engine --
-  var rings={};
-  function ensureRing(id){if(!rings[id])rings[id]=new Ring(150);return rings[id]}
+// Chart engine - proper charts with axes
+var rings={};
+function ring(id){if(!rings[id])rings[id]=new Ring(150);return rings[id]}
 
-  function drawSpark(id,color){
-    var c=document.getElementById('sp_'+id);if(!c)return;
-    var ctx=c.getContext('2d'),dpr=devicePixelRatio||1,w=c.offsetWidth,h=c.offsetHeight;
-    if(!w)return;
-    c.width=w*dpr;c.height=h*dpr;ctx.scale(dpr,dpr);
-    var data=ensureRing(id).arr(),now=Date.now();
-    ctx.fillStyle='#0a0d12';ctx.fillRect(0,0,w,h);
-    if(data.length<2){
-      // Draw a flat line at bottom so empty charts aren't invisible
-      ctx.strokeStyle=color+'40';ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(0,h-1);ctx.lineTo(w,h-1);ctx.stroke();
-      return;
-    }
-    var vals=data.map(function(d){return d.v}),mn=0,mx=Math.max.apply(null,vals)*1.15;
-    if(mx<.001)mx=1;if(mx<=mn)mx=mn+1;
-    var age=now-data[0].t,win=Math.max(10000,Math.min(age*1.2,MAX_AGE));
-    ctx.beginPath();
-    for(var i=0;i<data.length;i++){
-      var x=((data[i].t-(now-win))/win)*w,y=h-((data[i].v-mn)/(mx-mn))*h;
-      y=Math.max(0,Math.min(h,y));x=Math.max(0,x);
-      i?ctx.lineTo(x,y):ctx.moveTo(x,y);
-    }
-    ctx.strokeStyle=color;ctx.lineWidth=1.5;ctx.stroke();
-    ctx.lineTo(w,h);ctx.lineTo(((data[0].t-(now-win))/win)*w,h);ctx.closePath();
-    var g=ctx.createLinearGradient(0,0,0,h);g.addColorStop(0,color+'25');g.addColorStop(1,color+'05');ctx.fillStyle=g;ctx.fill();
+function drawChart(id,color,fmtY){
+  var c=document.getElementById('ch_'+id);if(!c||!c.offsetWidth)return;
+  var ctx=c.getContext('2d'),dpr=devicePixelRatio||1,w=c.offsetWidth,h=c.offsetHeight;
+  c.width=w*dpr;c.height=h*dpr;ctx.scale(dpr,dpr);
+  var PL=36,PR=4,PB=14,PT=2,cw=w-PL-PR,ch=h-PT-PB;
+  var now=Date.now(),raw=ring(id).arr();
+  var data=[];for(var i=0;i<raw.length;i++)if(raw[i].t>=now-MAX_AGE)data.push(raw[i]);
+  // Background
+  ctx.fillStyle='#0c0f16';ctx.fillRect(0,0,w,h);
+  if(data.length<2){ctx.fillStyle='#374151';ctx.font='10px sans-serif';ctx.textAlign='center';ctx.fillText('waiting\u2026',w/2,h/2);return}
+  var vals=data.map(function(d){return d.v}),mn=0,mx=Math.max.apply(null,vals)*1.2;
+  if(mx<.001)mx=1;if(mx<=mn)mx=mn+1;
+  var age=now-data[0].t,win=Math.max(10000,Math.min(age*1.2,MAX_AGE)),t0=now-win;
+  function tx(t){return PL+Math.max(0,((t-t0)/win)*cw)}
+  function ty(v){return PT+ch-((v-mn)/(mx-mn))*ch}
+  var mf='9px '+getComputedStyle(document.body).getPropertyValue('--mono');
+  // Y grid + labels
+  ctx.font=mf;ctx.textAlign='right';ctx.textBaseline='middle';
+  for(var g=0;g<=3;g++){
+    var f=g/3,gy=PT+ch-ch*f;
+    ctx.strokeStyle='#1a1f2e';ctx.lineWidth=.5;ctx.beginPath();ctx.moveTo(PL,gy);ctx.lineTo(w-PR,gy);ctx.stroke();
+    ctx.fillStyle='#4b5563';ctx.fillText((fmtY||fmtC)(mn+(mx-mn)*f),PL-3,gy);
   }
+  // X labels
+  ctx.textAlign='center';ctx.textBaseline='top';ctx.fillStyle='#4b5563';ctx.font=mf;
+  [10,30,60,120,300].forEach(function(s){var x=tx(now-s*1000);if(x>PL+18&&x<w-PR-16)ctx.fillText(s<60?s+'s':Math.floor(s/60)+'m',x,PT+ch+2)});
+  if(cw>60)ctx.fillText('now',PL+cw,PT+ch+2);
+  // Line
+  ctx.beginPath();
+  for(var i=0;i<data.length;i++){var x=tx(data[i].t),y=Math.max(PT,Math.min(PT+ch,ty(data[i].v)));i?ctx.lineTo(x,y):ctx.moveTo(x,y)}
+  ctx.strokeStyle=color;ctx.lineWidth=1.5;ctx.stroke();
+  // Fill
+  var last=tx(data[data.length-1].t),first=tx(data[0].t);
+  ctx.lineTo(last,PT+ch);ctx.lineTo(first,PT+ch);ctx.closePath();
+  var gr=ctx.createLinearGradient(0,PT,0,PT+ch);gr.addColorStop(0,color+'28');gr.addColorStop(1,color+'04');ctx.fillStyle=gr;ctx.fill();
+}
 
-  function drawFull(id,color,fv){
-    var c=document.getElementById('chartFull');if(!c)return;
-    var ctx=c.getContext('2d'),dpr=devicePixelRatio||1,w=c.offsetWidth,h=c.offsetHeight;
-    if(!w)return;
-    c.width=w*dpr;c.height=h*dpr;ctx.scale(dpr,dpr);
-    var PL=42,PR=8,PB=18,PT=6,cw=w-PL-PR,ch=h-PT-PB;
-    var data=ensureRing(id).arr(),now=Date.now(),cut=now-MAX_AGE;
-    var d=[];for(var i=0;i<data.length;i++)if(data[i].t>=cut)d.push(data[i]);
-    ctx.fillStyle='#0a0d12';ctx.fillRect(0,0,w,h);
-    if(d.length<2){ctx.fillStyle='#475569';ctx.font='11px sans-serif';ctx.textAlign='center';ctx.fillText('waiting\u2026',w/2,h/2);return}
-    var vals=d.map(function(p){return p.v}),mn=0,mx=Math.max.apply(null,vals)*1.15;
-    if(mx<.001)mx=1;if(mx<=mn)mx=mn+1;
-    var age=now-d[0].t,win=Math.max(10000,Math.min(age*1.2,MAX_AGE)),t0=now-win;
-    function tx(t){return PL+((t-t0)/win)*cw}
-    function ty(v){return PT+ch-((v-mn)/(mx-mn))*ch}
-    var mf='9px '+getComputedStyle(document.body).getPropertyValue('--mono');
-    // Y grid
-    ctx.font=mf;ctx.textAlign='right';ctx.textBaseline='middle';
-    for(var g=0;g<=4;g++){var f=g/4,gy=PT+ch-ch*f;ctx.strokeStyle='#1c2233';ctx.lineWidth=.5;ctx.beginPath();ctx.moveTo(PL,gy);ctx.lineTo(w-PR,gy);ctx.stroke();ctx.fillStyle='#475569';ctx.fillText((fv||fmtC)(mn+(mx-mn)*f),PL-4,gy)}
-    // X labels
-    ctx.textAlign='center';ctx.textBaseline='top';ctx.fillStyle='#475569';ctx.font=mf;
-    [10,30,60,120,300].forEach(function(s){var x=tx(now-s*1000);if(x>PL+20&&x<w-PR-20)ctx.fillText(s<60?s+'s':Math.floor(s/60)+'m',x,PT+ch+3)});
-    ctx.fillText('now',PL+cw-4,PT+ch+3);
-    // Line
-    ctx.beginPath();
-    for(var i=0;i<d.length;i++){var x=tx(d[i].t),y=Math.max(PT,Math.min(PT+ch,ty(d[i].v)));i?ctx.lineTo(x,y):ctx.moveTo(x,y)}
-    ctx.strokeStyle=color;ctx.lineWidth=1.5;ctx.stroke();
-    // Fill
-    ctx.lineTo(tx(d[d.length-1].t),PT+ch);ctx.lineTo(tx(d[0].t),PT+ch);ctx.closePath();
-    var gr=ctx.createLinearGradient(0,PT,0,PT+ch);gr.addColorStop(0,color+'30');gr.addColorStop(1,color+'05');ctx.fillStyle=gr;ctx.fill();
-  }
+// Formatters
+function fmt(n){if(n==null)return'-';if(n>=1e9)return(n/1e9).toFixed(1)+'G';if(n>=1e6)return(n/1e6).toFixed(1)+'M';if(n>=1e3)return(n/1e3).toFixed(1)+'K';return String(Math.round(n))}
+function fmtC(n){if(n>=1e6)return(n/1e6).toFixed(1)+'M';if(n>=1e3)return(n/1e3).toFixed(0)+'K';if(n>=1)return n.toFixed(0);return n<.01?'0':n.toFixed(1)}
+function fmtB(b){if(b==null||b===0)return'-';if(b>=1073741824)return(b/1073741824).toFixed(1)+' GB';if(b>=1048576)return(b/1048576).toFixed(1)+' MB';if(b>=1024)return(b/1024).toFixed(1)+' KB';return b+' B'}
+function fmtBC(b){if(b>=1073741824)return(b/1073741824).toFixed(1)+'G';if(b>=1048576)return(b/1048576).toFixed(0)+'M';if(b>=1024)return(b/1024).toFixed(0)+'K';return Math.round(b)+''}
+function fmtDur(s){if(s==null)return'';if(s>=86400)return Math.floor(s/86400)+'d '+Math.floor((s%86400)/3600)+'h';if(s>=3600)return Math.floor(s/3600)+'h '+Math.floor((s%3600)/60)+'m';if(s>=60)return Math.floor(s/60)+'m '+Math.floor(s%60)+'s';return s+'s'}
+function hlYaml(y){var e=document.createElement('div');e.textContent=y;var s=e.innerHTML;
+  s=s.replace(/(#.*)$/gm,'<i style="color:var(--t4)">$1</i>');
+  s=s.replace(/^(\s*)([\w._-]+)(:)/gm,'$1<span style="color:var(--accent)">$2</span>$3');
+  s=s.replace(/:\s+(\d+(?:\.\d+)?)\s*$/gm,': <span style="color:var(--warn)">$1</span>');
+  s=s.replace(/:\s+(true|false)\s*$/gm,': <span style="color:var(--warn)">$1</span>');
+  return s;}
 
-  // -- Formatters --
-  function fmt(n){if(n==null)return'-';if(n>=1e9)return(n/1e9).toFixed(2)+'G';if(n>=1e6)return(n/1e6).toFixed(2)+'M';if(n>=1e3)return(n/1e3).toFixed(1)+'K';return String(Math.round(n))}
-  function fmtC(n){if(n>=1e9)return(n/1e9).toFixed(1)+'G';if(n>=1e6)return(n/1e6).toFixed(1)+'M';if(n>=1e3)return(n/1e3).toFixed(0)+'K';if(n>=1)return n.toFixed(0);return n<.01?'0':n.toFixed(2)}
-  function fmtB(b){if(b==null||b===0)return'-';if(b>=1073741824)return(b/1073741824).toFixed(1)+' GB';if(b>=1048576)return(b/1048576).toFixed(1)+' MB';if(b>=1024)return(b/1024).toFixed(1)+' KB';return b+' B'}
-  function fmtBC(b){if(b>=1073741824)return(b/1073741824).toFixed(1)+'G';if(b>=1048576)return(b/1048576).toFixed(0)+'M';if(b>=1024)return(b/1024).toFixed(0)+'K';return Math.round(b)+''}
-  function fmtRate(n){return n==null?'-':fmt(n)}
-  function fmtDur(s){if(s==null)return'';if(s>=86400)return Math.floor(s/86400)+'d '+Math.floor((s%86400)/3600)+'h';if(s>=3600)return Math.floor(s/3600)+'h '+Math.floor((s%3600)/60)+'m';if(s>=60)return Math.floor(s/60)+'m '+Math.floor(s%60)+'s';return s+'s'}
-  function hlYaml(y){var el=document.createElement('div');el.textContent=y;var s=el.innerHTML;s=s.replace(/(#.*)$/gm,'<i style="color:var(--t4)">$1</i>');s=s.replace(/^(\s*)([\w._-]+)(:)/gm,'$1<span style="color:var(--accent)">$2</span>$3');s=s.replace(/:\s+(\d+(?:\.\d+)?)\s*$/gm,': <span style="color:var(--warn)">$1</span>');s=s.replace(/:\s+(true|false)\s*$/gm,': <span style="color:var(--warn)">$1</span>');return s}
+// Rate tracking with EMA
+var prevSnap={},prevTime=null,ema={};
+function snapRate(k,v){var now=Date.now(),p=prevSnap[k],dt=prevTime?(now-prevTime)/1000:0;prevSnap[k]=v;if(p==null||dt<=0)return null;var r=Math.max(0,(v-p)/dt);ema[k]=ema[k]==null?r:ema[k]*.7+r*.3;return ema[k]}
 
-  // Rate tracking with exponential moving average to smooth jitter
-  var prevSnap={},prevTime=null,emaRates={};
-  function snapRate(key,cur){
-    var now=Date.now(),prev=prevSnap[key],dt=prevTime?(now-prevTime)/1000:0;
-    prevSnap[key]=cur;
-    if(prev==null||dt<=0)return null;
-    var raw=Math.max(0,(cur-prev)/dt);
-    // EMA with alpha=0.3 (smooths over ~3 samples)
-    if(emaRates[key]==null)emaRates[key]=raw;
-    else emaRates[key]=emaRates[key]*0.7+raw*0.3;
-    return emaRates[key];
-  }
+var chartDefs=[
+  {id:'lps',label:'Lines / sec',color:'#3b82f6',fv:fmtC},
+  {id:'bps',label:'Throughput',color:'#8b5cf6',fv:fmtBC},
+  {id:'err',label:'Errors / sec',color:'#ef4444',fv:fmtC},
+  {id:'cpu',label:'Process CPU',color:'#f59e0b',fv:fmtC},
+  {id:'rss',label:'Memory (RSS)',color:'#10b981',fv:fmtBC},
+  {id:'fds',label:'File Descriptors',color:'#06b6d4',fv:fmtC},
+];
 
-  var metricDefs=[
-    {id:'lps',label:'Lines/sec',color:'#3b82f6',unit:'/s',fv:fmtC},
-    {id:'bps',label:'Throughput',color:'#8b5cf6',unit:'/s',fv:fmtBC},
-    {id:'err',label:'Errors/sec',color:'#ef4444',unit:'/s',fv:fmtC},
-    {id:'cpu',label:'CPU',color:'#f59e0b',unit:'%',fv:fmtC},
-    {id:'rss',label:'Memory',color:'#10b981',unit:'',fv:fmtBC},
-    {id:'fds',label:'File Descriptors',color:'#06b6d4',unit:'',fv:fmtC},
-  ];
+return {
+  connected:false,sys:{},pipes:[],sel:null,selData:null,selType:'',
+  chartDefs:chartDefs,chartVals:{},totalErrors:0,
+  cfgPath:'',cfgHtml:null,
+  fmt:fmt,fmtB:fmtB,fmtDur:fmtDur,
 
-  return {
-    connected:false, sys:{}, pipes:[], sel:null, selData:null, expandedChart:null,
-    metricDefs:metricDefs, metricVals:{}, metricLims:{},
-    lpsNow:null, totalErrors:0,
-    cfgPath:'', cfgHtml:null,
+  get sysItems(){
+    var s=this.sys,r=[];
+    if(s.hostname)r.push(['Hostname',s.hostname]);
+    if(s.os)r.push(['OS',s.os]);
+    if(s.arch)r.push(['Arch',s.arch]);
+    if(s.cpu_count)r.push(['Cores',String(s.cpu_count)]);
+    if(s.total_memory_bytes)r.push(['Memory',fmtB(s.total_memory_bytes)]);
+    if(s.rss_bytes)r.push(['RSS',fmtB(s.rss_bytes)]);
+    if(s.fd_count!=null)r.push(['FDs',s.fd_count+(s.fd_limit!=null?' / '+fmt(s.fd_limit):'')]);
+    if(s.pid)r.push(['PID',String(s.pid)]);
+    return r;
+  },
 
-    // Expose formatters
-    fmt:fmt,fmtB:fmtB,fmtDur:fmtDur,fmtRate:fmtRate,
+  pick(id,type,data){if(this.sel===id){this.sel=null;this.selData=null}else{this.sel=id;this.selType=type;this.selData=data}},
 
-    get sysItems(){
-      var s=this.sys,items=[];
-      if(s.hostname)items.push(['Hostname',s.hostname]);
-      if(s.os)items.push(['OS',s.os]);
-      if(s.arch)items.push(['Architecture',s.arch]);
-      if(s.cpu_count)items.push(['CPU Cores',s.cpu_count]);
-      if(s.total_memory_bytes)items.push(['Total Memory',fmtB(s.total_memory_bytes)]);
-      if(s.fd_limit!=null)items.push(['FD Limit',fmt(s.fd_limit)]);
-      if(s.pid)items.push(['PID',s.pid]);
-      if(s.version)items.push(['Version',s.version]);
-      return items;
-    },
+  cRate(obj,f){var k='c_'+(obj.name||'?')+'_'+f,v=snapRate(k,obj[f]||0);return v!=null?fmt(v)+'/s':'-'},
 
-    toggle(id,data){this.sel=this.sel===id?null:id;this.selData=this.sel?data:null},
+  start(){var self=this;this.poll();setInterval(function(){self.poll()},POLL)},
 
-    detailKV(d){
-      var items=[];
-      if(!d)return items;
-      var s=d.stats||{},c=d.cfg||{};
-      if(c.type)items.push(['Type',c.type]);
-      if(c.name)items.push(['Name',c.name]);
-      if(s.lines_total!=null)items.push(['Lines',fmt(s.lines_total)]);
-      if(s.bytes_total!=null)items.push(['Bytes',fmtB(s.bytes_total)]);
-      if(s.errors!=null)items.push(['Errors',String(s.errors)]);
-      return items;
-    },
+  poll(){
+    var self=this;
+    Promise.all([
+      fetch('/api/pipelines').then(function(r){return r.json()}),
+      fetch('/api/system').then(function(r){return r.json()}).catch(function(){return null})
+    ]).then(function(r){
+      self.connected=true;
+      if(r[1])self.sys=r[1];
+      if(r[0]&&r[0].pipelines)self.pipes=r[0].pipelines;
+      self.updateMetrics(r[0],r[1]);
+      prevTime=Date.now();
+      if(!self.cfgHtml)self.loadConfig();
+      self.$nextTick(function(){chartDefs.forEach(function(m){drawChart(m.id,m.color,m.fv)})});
+    }).catch(function(){self.connected=false});
+  },
 
-    compRate(obj,field){
-      var k='comp_'+(obj.name||'?')+'_'+field;
-      var now=Date.now(),cur=obj[field]||0,prev=prevSnap[k],dt=prevTime?(now-prevTime)/1000:0;
-      prevSnap[k]=cur;
-      if(prev==null||dt<=0)return'-';
-      var raw=Math.max(0,(cur-prev)/dt);
-      if(emaRates[k]==null)emaRates[k]=raw;else emaRates[k]=emaRates[k]*0.7+raw*0.3;
-      return fmt(emaRates[k])+'/s';
-    },
-
-    start(){
-      var self=this;
-      this.poll();
-      setInterval(function(){self.poll()},POLL);
-    },
-
-    poll(){
-      var self=this;
-      Promise.all([
-        fetch('/api/pipelines').then(function(r){return r.json()}),
-        fetch('/api/system').then(function(r){return r.json()}).catch(function(){return null})
-      ]).then(function(r){
-        self.connected=true;
-        var pipe=r[0],sys=r[1];
-        if(sys)self.sys=sys;
-        if(pipe&&pipe.pipelines)self.pipes=pipe.pipelines;
-        self.updateMetrics(pipe,sys);
-        prevTime=Date.now();
-        self.$nextTick(function(){self.drawAllSparks()});
-      }).catch(function(){self.connected=false});
-    },
-
-    updateMetrics(pipe,sys){
-      var mv=this.metricVals,ml=this.metricLims;
-      // Pipeline rates
-      if(pipe&&pipe.pipelines){
-        var tli=0,tbi=0,tei=0;
-        pipe.pipelines.forEach(function(p){tli+=p.transform.lines_in||0;p.inputs.forEach(function(i){tbi+=i.bytes_total||0});p.outputs.forEach(function(o){tei+=o.errors||0})});
-        var lps=snapRate('_lps',tli),bps=snapRate('_bps',tbi),eps=snapRate('_eps',tei);
-        this.lpsNow=lps;
-        this.totalErrors=tei;
-        if(lps!=null){ensureRing('lps').push({t:Date.now(),v:lps});mv.lps=fmt(lps)}
-        if(bps!=null){ensureRing('bps').push({t:Date.now(),v:bps});mv.bps=fmtB(bps)}
-        if(eps!=null){ensureRing('err').push({t:Date.now(),v:eps});mv.err=fmt(eps)}
-      }
-      if(sys){
-        if(sys.cpu_percent!=null){ensureRing('cpu').push({t:Date.now(),v:sys.cpu_percent});mv.cpu=sys.cpu_percent.toFixed(1);ml.cpu=sys.cpu_count?'/ '+sys.cpu_count+' cores':''}
-        if(sys.rss_bytes){ensureRing('rss').push({t:Date.now(),v:sys.rss_bytes});mv.rss=fmtB(sys.rss_bytes);ml.rss=sys.total_memory_bytes?'/ '+fmtB(sys.total_memory_bytes):''}
-        if(sys.fd_count!=null){ensureRing('fds').push({t:Date.now(),v:sys.fd_count});mv.fds=String(sys.fd_count);ml.fds=sys.fd_limit!=null?'/ '+fmt(sys.fd_limit):''}
-      }
-    },
-
-    drawAllSparks(){
-      var self=this;
-      metricDefs.forEach(function(m){drawSpark(m.id,m.color)});
-      if(this.expandedChart){
-        var def=metricDefs.find(function(m){return m.id===self.expandedChart});
-        if(def)drawFull(def.id,def.color,def.fv);
-      }
-    },
-
-    loadConfig(){
-      var self=this;
-      fetch('/api/config').then(function(r){return r.json()}).then(function(d){
-        self.cfgPath=d.path||'';
-        self.cfgHtml=hlYaml(d.raw_yaml||'(no config)');
-      }).catch(function(){self.cfgHtml='<span style="color:var(--t4)">could not load config</span>'});
+  updateMetrics(pipe,sys){
+    var cv=this.chartVals;
+    if(pipe&&pipe.pipelines){
+      var tl=0,tb=0,te=0;
+      pipe.pipelines.forEach(function(p){tl+=p.transform.lines_in||0;p.inputs.forEach(function(i){tb+=i.bytes_total||0});p.outputs.forEach(function(o){te+=o.errors||0})});
+      this.totalErrors=te;
+      var lps=snapRate('_l',tl),bps=snapRate('_b',tb),eps=snapRate('_e',te);
+      if(lps!=null){ring('lps').push({t:Date.now(),v:lps});cv.lps=fmt(lps)+'<span class="u">/s</span>'}
+      if(bps!=null){ring('bps').push({t:Date.now(),v:bps});cv.bps=fmtB(bps)+'<span class="u">/s</span>'}
+      if(eps!=null){ring('err').push({t:Date.now(),v:eps});cv.err=fmt(eps)+'<span class="u">/s</span>'}
     }
-  };
+    if(sys){
+      if(sys.cpu_percent!=null){ring('cpu').push({t:Date.now(),v:sys.cpu_percent});cv.cpu=sys.cpu_percent.toFixed(1)+'<span class="u">%</span>'+(sys.cpu_count?'<span class="lim">/ '+sys.cpu_count+' cores</span>':'')}
+      if(sys.rss_bytes){ring('rss').push({t:Date.now(),v:sys.rss_bytes});cv.rss=fmtB(sys.rss_bytes)+(sys.total_memory_bytes?'<span class="lim">/ '+fmtB(sys.total_memory_bytes)+'</span>':'')}
+      if(sys.fd_count!=null){ring('fds').push({t:Date.now(),v:sys.fd_count});cv.fds=sys.fd_count+(sys.fd_limit!=null?'<span class="lim">/ '+fmt(sys.fd_limit)+'</span>':'')}
+    }
+  },
+
+  loadConfig(){
+    var self=this;
+    fetch('/api/config').then(function(r){return r.json()}).then(function(d){
+      self.cfgPath=d.path||'';self.cfgHtml=hlYaml(d.raw_yaml||'(no config)');
+    }).catch(function(){self.cfgHtml='<span style="color:var(--t4)">could not load</span>'});
+  }
+};
 }
 </script>
 </body>
