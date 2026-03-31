@@ -241,7 +241,9 @@ impl StructuralIndex {
             let block_len = remaining.min(64);
 
             let block: [u8; 64] = if remaining >= 64 {
-                buf[offset..offset + 64].try_into().expect("offset aligned to 64-byte block")
+                buf[offset..offset + 64]
+                    .try_into()
+                    .expect("offset aligned to 64-byte block")
             } else {
                 let mut padded = [b' '; 64];
                 padded[..remaining].copy_from_slice(&buf[offset..]);
