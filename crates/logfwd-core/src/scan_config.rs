@@ -5,8 +5,11 @@
 
 /// Specification for a single field to extract.
 use alloc::{string::String, vec, vec::Vec};
+/// Specification for a single field to extract.
 pub struct FieldSpec {
+    /// Primary field name.
     pub name: String,
+    /// Alternative names that map to this field.
     pub aliases: Vec<String>,
 }
 

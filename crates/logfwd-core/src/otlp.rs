@@ -19,8 +19,9 @@
 
 // --- Protobuf wire format helpers ---
 
-/// Encode a varint into buf at offset, return new offset.
 use alloc::vec::Vec;
+
+/// Encode a varint into buf at offset, return new offset.
 #[inline(always)]
 pub fn encode_varint(buf: &mut Vec<u8>, mut value: u64) {
     loop {
@@ -93,12 +94,19 @@ pub const fn bytes_field_size(field_number: u32, data_len: usize) -> usize {
 #[repr(u8)]
 #[derive(Clone, Copy, Debug)]
 pub enum Severity {
+    /// No severity specified.
     Unspecified = 0,
+    /// TRACE level.
     Trace = 1,
+    /// DEBUG level.
     Debug = 5,
+    /// INFO level.
     Info = 9,
+    /// WARN level.
     Warn = 13,
+    /// ERROR level.
     Error = 17,
+    /// FATAL level.
     Fatal = 21,
 }
 

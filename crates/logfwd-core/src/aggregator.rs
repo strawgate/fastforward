@@ -30,6 +30,7 @@
 /// F "simple"  → Complete("simple")  // zero-copy fast path
 /// ```
 use alloc::vec::Vec;
+/// CRI partial line aggregator. Merges P/F lines into complete messages.
 pub struct CriAggregator {
     pending: Vec<u8>,
     max_message_size: usize,

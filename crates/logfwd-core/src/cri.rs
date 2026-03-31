@@ -15,6 +15,7 @@
 /// Parsed CRI log line. References point into the original byte slice (zero-copy).
 use alloc::vec::Vec;
 #[derive(Debug)]
+/// Parsed CRI log line fields.
 pub struct CriLine<'a> {
     /// The RFC3339Nano timestamp bytes.
     pub timestamp: &'a [u8],
@@ -95,6 +96,7 @@ pub struct CriReassembler {
 }
 
 impl CriReassembler {
+    /// Create a new reassembler with the given max line size.
     pub fn new(max_line_size: usize) -> Self {
         CriReassembler {
             partial_buf: Vec::new(),
