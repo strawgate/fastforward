@@ -151,24 +151,18 @@ impl StreamingClassifier {
     /// `block_len` is the number of valid bytes in this block (64 for full
     /// blocks, less for the tail block). Bits beyond `block_len` are masked out.
     pub fn process_block(&mut self, raw: &RawBlockMasks, block_len: usize) -> ProcessedBlock {
-        // Stage 2: escape handling
         let real_q = compute_real_quotes(raw.quote, raw.backslash, &mut self.prev_odd_backslash);
-
-        // Stage 3: string interior mask
         let raw_string_bits = prefix_xor(real_q) ^ self.prev_in_string;
 
-        // Carry for next block
         self.prev_in_string = if (raw_string_bits >> 63) & 1 == 1 {
             u64::MAX
         } else {
             0
         };
 
-        // Exclude quote positions from string interior
         let in_string = raw_string_bits & !real_q;
         let not_in_string = !in_string;
 
-        // Tail mask
         let mask = if block_len >= 64 {
             u64::MAX
         } else {
@@ -176,7 +170,8 @@ impl StreamingClassifier {
         };
 
         ProcessedBlock {
-            newline: raw.newline & mask, // newlines are always structural
+            // Newlines don't get string-masked — they're always structural in NDJSON
+            newline: raw.newline & mask,
             space: raw.space & not_in_string & mask,
             real_quotes: real_q & mask,
             in_string: in_string & mask,
@@ -208,13 +203,12 @@ impl Default for StreamingClassifier {
 
 /// Pre-computed structural classification for a buffer.
 ///
-/// Built by running `StreamingClassifier` + `find_structural_chars` over
-/// the entire buffer. Stores only `real_quotes` and `in_string` bitmasks
-/// (needed for random-access by the scanner). Newline positions are
-/// extracted during construction and returned separately.
-///
-/// This replaces `ChunkIndex` with identical API but uses `wide`-based
-/// portable SIMD instead of hand-rolled platform intrinsics.
+/// Detects 10 structural characters in one SIMD pass but only stores
+/// `real_quotes` and `in_string` — the two bitmasks the scanner needs
+/// for random-access `scan_string`/`skip_nested`. All other bitmasks
+/// (newlines, spaces, commas, etc.) are consumed during construction
+/// and don't need to persist. This keeps memory at ~2 × (buf_len/64)
+/// u64s instead of 10×.
 pub struct StructuralIndex {
     real_quotes: Vec<u64>,
     in_string: Vec<u64>,
@@ -256,7 +250,6 @@ impl StructuralIndex {
             real_quotes.push(processed.real_quotes);
             in_string_vec.push(processed.in_string);
 
-            // Extract line ranges from newline bitmask
             let mut nl = processed.newline;
             while nl != 0 {
                 let bit_pos = nl.trailing_zeros() as usize;
@@ -269,7 +262,6 @@ impl StructuralIndex {
             }
         }
 
-        // Trailing content after last newline
         if line_start < len {
             line_ranges.push((line_start, len));
         }
@@ -415,9 +407,10 @@ use wide::u8x16;
 
 /// Extract a u64 bitmask for one needle across a 64-byte block.
 ///
-/// Uses `wide::u8x16` (16 bytes per vector) — 4 loads per block.
-/// On aarch64 this maps to NEON, on x86_64 to SSE2. Portable across
-/// all platforms `wide` supports (NEON, AVX2, SSE2, WASM, scalar).
+/// Uses `wide::u8x16` (4 × 16-byte loads) because u8x16 maps to a single
+/// native register on both NEON (128-bit) and SSE2 (128-bit). u8x32 would
+/// silently degrade to 2× u8x16 on aarch64 since NEON has no 256-bit ops.
+/// The `wide` crate handles platform dispatch at compile time.
 #[inline(always)]
 fn mask64(block: &[u8; 64], needle: u8) -> u64 {
     let n = u8x16::splat(needle);
