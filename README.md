@@ -26,7 +26,7 @@ You can try `logfwd` locally using its built-in test data generator and "blackho
    ```yaml
    input:
      type: file
-     path: /absolute/path/to/logs.json  # Note: Requires absolute paths
+     path: logs.json  # paths may be relative to this config file
      format: json
 
    transform: |

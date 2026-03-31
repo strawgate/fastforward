@@ -21,6 +21,7 @@ To process these efficiently in Arrow's strictly-typed `RecordBatch` format with
 ## Example
 
 Given this JSON:
+
 ```json
 {"timestamp":"2024-01-15T10:30:00Z", "level":"INFO", "status":200, "duration":1.5}
 ```
