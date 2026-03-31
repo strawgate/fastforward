@@ -3,7 +3,6 @@
 // Defines ScanConfig and FieldSpec, used by all scanner implementations
 // (SimdScanner, StreamingSimdScanner) and the SQL transform layer.
 
-/// Specification for a single field to extract.
 use alloc::{string::String, vec, vec::Vec};
 /// Specification for a single field to extract.
 pub struct FieldSpec {
