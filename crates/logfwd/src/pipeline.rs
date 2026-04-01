@@ -1195,7 +1195,10 @@ output:
 
         assert_eq!(rx.recv().await, Some(vec![1]));
         assert_eq!(rx.recv().await, Some(vec![2]));
-        assert!(handle.join().unwrap().is_ok(), "blocking send should succeed");
+        assert!(
+            handle.join().unwrap().is_ok(),
+            "blocking send should succeed"
+        );
     }
 
     /// Shutdown with a slow output must still drain all buffered data.
