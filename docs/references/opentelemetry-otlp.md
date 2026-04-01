@@ -1,7 +1,7 @@
 # OpenTelemetry Rust SDK -- Agent Reference
 
 Crate versions: `opentelemetry 0.31`, `opentelemetry_sdk 0.31` (feature `rt-tokio`),
-`opentelemetry-otlp 0.31` (features `http-proto`, `reqwest-client`).
+`opentelemetry-otlp 0.31` (`default-features = false`, features `http-proto`, `reqwest-client`, `trace`, `metrics`).
 
 Covers two common OTel usage patterns:
 1. **Internal metrics export** -- push pipeline counters to an OTLP endpoint via the SDK.

@@ -21,6 +21,7 @@ use super::{
 
 /// OTLP transport protocol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum OtlpProtocol {
     Grpc,
     Http,
@@ -33,7 +34,7 @@ pub struct OtlpSink {
     protocol: OtlpProtocol,
     compression: Compression,
     headers: Vec<(String, String)>,
-    pub encoder_buf: Vec<u8>,
+    pub(crate) encoder_buf: Vec<u8>,
     compress_buf: Vec<u8>,
     compressor: Option<ChunkCompressor>,
     http_agent: ureq::Agent,
@@ -161,7 +162,13 @@ impl OutputSink for OtlpSink {
                     &self.encoder_buf
                 }
             }
-            Compression::Gzip | Compression::None => &self.encoder_buf,
+            Compression::Gzip => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "OTLP gzip compression is not yet implemented",
+                ));
+            }
+            Compression::None => &self.encoder_buf,
         };
 
         let content_type = match self.protocol {

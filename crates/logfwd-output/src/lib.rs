@@ -15,7 +15,7 @@ mod loki;
 #[allow(dead_code)]
 mod parquet;
 
-pub use fanout::FanOut;
+pub use fanout::{FanOut, FanOutError};
 pub use json_lines::JsonLinesSink;
 pub use otlp_sink::{OtlpProtocol, OtlpSink};
 use stdout::*;
@@ -275,7 +275,11 @@ pub fn build_output_sink(name: &str, cfg: &OutputConfig) -> Result<Box<dyn Outpu
             };
             let compression = match cfg.compression.as_deref() {
                 Some("zstd") => Compression::Zstd,
-                Some("gzip") => Compression::Gzip,
+                Some("gzip") => {
+                    return Err(format!(
+                        "output '{name}': OTLP does not support 'gzip' compression yet"
+                    ));
+                }
                 _ => Compression::None,
             };
             Ok(Box::new(OtlpSink::new(
@@ -349,7 +353,7 @@ impl OutputSink for CaptureSink {
 mod tests {
     use super::*;
     use arrow::array::{Float64Array, Int64Array, StringArray};
-    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::datatypes::{Field, Schema};
     use std::sync::Arc;
 
     fn make_test_batch() -> RecordBatch {
@@ -433,6 +437,48 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    struct AlwaysFailSink {
+        name: &'static str,
+    }
+
+    impl OutputSink for AlwaysFailSink {
+        fn send_batch(
+            &mut self,
+            _batch: &RecordBatch,
+            _metadata: &BatchMetadata,
+        ) -> io::Result<()> {
+            Err(io::Error::other(format!("{} failed", self.name)))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn name(&self) -> &str {
+            self.name
+        }
+    }
+
+    #[test]
+    fn test_fanout_error_reports_failed_sink_names() {
+        let batch = make_test_batch();
+        let meta = make_metadata();
+        let mut fanout = FanOut::new(vec![
+            Box::new(AlwaysFailSink { name: "sink-a" }),
+            Box::new(AlwaysFailSink { name: "sink-b" }),
+        ]);
+
+        let err = fanout
+            .send_batch(&batch, &meta)
+            .expect_err("fanout should fail");
+        let fanout_err = err
+            .get_ref()
+            .and_then(|inner| inner.downcast_ref::<FanOutError>())
+            .expect("fanout should wrap failures in FanOutError");
+
+        assert_eq!(fanout_err.failed_sinks(), ["sink-a", "sink-b"]);
+    }
+
     #[test]
     fn test_otlp_encoding() {
         let schema = Arc::new(Schema::new(vec![
@@ -474,6 +520,22 @@ mod tests {
         assert!(!sink.encoder_buf.is_empty());
         // First byte should be tag for field 1 (ResourceLogs), wire type 2 = 0x0A
         assert_eq!(sink.encoder_buf[0], 0x0A);
+    }
+
+    #[test]
+    fn test_otlp_gzip_send_batch_returns_error() {
+        let batch = make_test_batch();
+        let meta = make_metadata();
+        let mut sink = OtlpSink::new(
+            "test-otlp".to_string(),
+            "http://localhost:4318".to_string(),
+            OtlpProtocol::Http,
+            Compression::Gzip,
+            vec![],
+        );
+
+        let err = sink.send_batch(&batch, &meta).unwrap_err();
+        assert!(err.to_string().contains("gzip"), "got: {err}");
     }
 
     #[test]
@@ -590,6 +652,25 @@ mod tests {
         };
         let sink = build_output_sink("otel", &cfg).unwrap();
         assert_eq!(sink.name(), "otel");
+    }
+
+    #[test]
+    fn test_build_output_sink_otlp_rejects_gzip() {
+        let cfg = OutputConfig {
+            name: Some("otel".to_string()),
+            output_type: OutputType::Otlp,
+            endpoint: Some("http://localhost:4318".to_string()),
+            protocol: Some("http".to_string()),
+            compression: Some("gzip".to_string()),
+            format: None,
+            path: None,
+            auth: None,
+        };
+        let err = match build_output_sink("otel", &cfg) {
+            Ok(_) => panic!("expected gzip OTLP compression to be rejected"),
+            Err(err) => err,
+        };
+        assert!(err.contains("gzip"), "got: {err}");
     }
 
     #[test]
@@ -820,7 +901,7 @@ mod tests {
 mod write_row_json_tests {
     use super::*;
     use arrow::array::{Float64Array, Int64Array, StringArray};
-    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::datatypes::{Field, Schema};
     use arrow::record_batch::RecordBatch;
     use std::sync::Arc;
 
@@ -864,13 +945,14 @@ mod write_row_json_tests {
 
     #[test]
     fn float_field() {
+        let expected = std::f64::consts::PI;
         let batch = make_batch(vec![(
             "duration_float",
-            Arc::new(Float64Array::from(vec![3.14])),
+            Arc::new(Float64Array::from(vec![expected])),
         )]);
         let json = render(&batch, 0);
         let v: serde_json::Value = serde_json::from_str(&json).expect("must be valid JSON");
-        assert!((v["duration"].as_f64().unwrap() - 3.14).abs() < 0.001);
+        assert!((v["duration"].as_f64().unwrap() - expected).abs() < 0.001);
     }
 
     #[test]
