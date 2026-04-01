@@ -9,6 +9,7 @@ use std::alloc::System;
 #[global_allocator]
 static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
@@ -42,14 +43,29 @@ output:
     let mut pipeline = Pipeline::from_config("default", pipe_cfg, &test_meter(), None).unwrap();
     pipeline.set_batch_timeout(Duration::from_millis(10));
 
-    // The pipeline reads the file quickly but the tailer thread stays alive
-    // polling for new data. Cancel after 5 seconds — enough for the file to
-    // be fully processed on any hardware, short enough for CI.
     let shutdown = CancellationToken::new();
     let sd = shutdown.clone();
+    let metrics = Arc::clone(pipeline.metrics());
+    let expected = row_count as u64;
+
+    // Cancel as soon as all expected rows are processed, or after 30s safety timeout.
+    // This makes the test data-driven, not time-driven.
     std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_secs(5));
-        sd.cancel();
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            if metrics.batch_rows_total.load(Ordering::Relaxed) >= expected {
+                // All rows processed — give a brief moment for output flush,
+                // then cancel.
+                std::thread::sleep(Duration::from_millis(100));
+                sd.cancel();
+                return;
+            }
+            if std::time::Instant::now() > deadline {
+                sd.cancel();
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
     });
 
     let reg = Region::new(&GLOBAL);

@@ -11,12 +11,12 @@ use std::alloc::System;
 #[global_allocator]
 static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use logfwd::pipeline::Pipeline;
 use logfwd_config::Config;
-use logfwd_output::NullSink;
 use tokio_util::sync::CancellationToken;
 
 fn test_meter() -> opentelemetry::metrics::Meter {
@@ -62,13 +62,24 @@ output:
 
     let shutdown = CancellationToken::new();
     let sd = shutdown.clone();
+    let metrics = Arc::clone(pipeline.metrics());
+    let expected_rows = 50_000_u64;
 
-    // Safety timeout: cancel after 10 seconds. The pipeline reads the
-    // entire file (~6MB) in <1 second on any hardware, then exits when
-    // the tailer reports no more data. This timeout prevents hangs.
+    // Cancel as soon as all rows are processed, not on a fixed timer.
     std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_secs(10));
-        sd.cancel();
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            if metrics.batch_rows_total.load(Ordering::Relaxed) >= expected_rows {
+                std::thread::sleep(Duration::from_millis(100));
+                sd.cancel();
+                return;
+            }
+            if std::time::Instant::now() > deadline {
+                sd.cancel();
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
     });
 
     // Run the pipeline and measure total allocations.
