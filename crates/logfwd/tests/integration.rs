@@ -329,11 +329,16 @@ output:
 
     pipeline.run(&sd_write).expect("pipeline.run failed");
 
-    // The pipeline struct is consumed by run_for; use the shutdown-based variant
-    // above instead.  We cannot inspect metrics here directly because the pipeline
-    // is dropped after run() returns.  The assertion is therefore behavioural:
-    // if pipeline.run() returns Ok(()) without panicking, both the pre-rotation
-    // and post-rotation reads completed successfully.
+    // Verify that all 10 lines (5 pre-rotation + 5 post-rotation) were processed.
+    let lines_in = pipeline
+        .metrics()
+        .transform_in
+        .lines_total
+        .load(Ordering::Relaxed);
+    assert_eq!(
+        lines_in, 10,
+        "expected 10 lines (5 pre-rotation + 5 post-rotation), got {lines_in}"
+    );
 }
 
 // ---------------------------------------------------------------------------
