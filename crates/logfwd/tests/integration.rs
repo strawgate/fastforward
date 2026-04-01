@@ -11,8 +11,8 @@
 //!      applicable, on captured output.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use logfwd::pipeline::Pipeline;
@@ -234,7 +234,10 @@ fn test_http_output_sends_to_server() {
         for mut request in server_clone.incoming_requests() {
             count_clone.fetch_add(1, Ordering::Relaxed);
             let mut body = String::new();
-            request.as_reader().read_to_string(&mut body).expect("failed to read request body");
+            request
+                .as_reader()
+                .read_to_string(&mut body)
+                .expect("failed to read request body");
             bodies_clone.lock().unwrap().push(body);
             let _ = request.respond(tiny_http::Response::from_string("{}").with_status_code(200));
         }
@@ -272,11 +275,11 @@ output:
     assert!(reqs >= 1, "expected at least 1 HTTP request, got {reqs}");
 
     let responses = received_bodies.lock().unwrap();
-    let total_lines: usize = responses
-        .iter()
-        .map(|body| body.lines().count())
-        .sum();
-    assert_eq!(total_lines, 5, "expected 5 lines across all HTTP requests, got {total_lines}");
+    let total_lines: usize = responses.iter().map(|body| body.lines().count()).sum();
+    assert_eq!(
+        total_lines, 5,
+        "expected 5 lines across all HTTP requests, got {total_lines}"
+    );
 
     server.unblock();
 }
