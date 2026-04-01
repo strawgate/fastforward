@@ -18,7 +18,7 @@ just bench-udp
 just bench-otlp
 
 # All scenarios
-just bench-all
+just bench-pipelines
 ```
 
 ## Scenarios
