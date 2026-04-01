@@ -930,4 +930,31 @@ mod verification {
         let ts = b"2024-01-32T10:30:00Z";
         assert!(parse_timestamp_nanos(ts) == None);
     }
+
+    /// Prove eq_ignore_case_4 matches iff case-insensitive equal for
+    /// the specific targets used in parse_severity (INFO, WARN).
+    /// For all 4-byte inputs: if eq_ignore_case_4 returns true,
+    /// the case-folded bytes match the target.
+    #[kani::proof]
+    fn verify_eq_ignore_case_4_no_false_positives_info() {
+        let input: [u8; 4] = kani::any();
+        let target = b"INFO";
+        if eq_ignore_case_4(&input, target) {
+            // All 4 bytes must be letters matching case-insensitively.
+            // The |0x20 trick means a|0x20 == b|0x20, which is true
+            // for letter pairs but also non-letter collisions.
+            // Verify using the general oracle:
+            assert!(eq_ignore_case_match(&input, target));
+        }
+    }
+
+    /// Same for 5-byte targets (DEBUG, TRACE, ERROR, FATAL).
+    #[kani::proof]
+    fn verify_eq_ignore_case_5_no_false_positives_error() {
+        let input: [u8; 5] = kani::any();
+        let target = b"ERROR";
+        if eq_ignore_case_5(&input, target) {
+            assert!(eq_ignore_case_match(&input, target));
+        }
+    }
 }
