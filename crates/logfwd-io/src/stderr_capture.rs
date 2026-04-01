@@ -187,13 +187,7 @@ fn reader_loop(read_fd: i32, orig_fd: i32, state: &CaptureState) {
             return;
         }
 
-        let n = unsafe {
-            libc::read(
-                read_fd,
-                buf.as_mut_ptr().cast::<libc::c_void>(),
-                buf.len(),
-            )
-        };
+        let n = unsafe { libc::read(read_fd, buf.as_mut_ptr().cast::<libc::c_void>(), buf.len()) };
 
         match n.cmp(&0) {
             std::cmp::Ordering::Greater => {
