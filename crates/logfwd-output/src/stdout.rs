@@ -74,7 +74,7 @@ impl StdoutSink {
                     let cols = build_col_infos(batch);
                     for row in 0..num_rows {
                         self.buf.clear();
-                        write_row_json(batch, row, &cols, &mut self.buf);
+                        write_row_json(batch, row, &cols, &mut self.buf)?;
                         self.buf.push(b'\n');
                         dest.write_all(&self.buf)?;
                     }
@@ -84,7 +84,7 @@ impl StdoutSink {
                 let cols = build_col_infos(batch);
                 for row in 0..num_rows {
                     self.buf.clear();
-                    write_row_json(batch, row, &cols, &mut self.buf);
+                    write_row_json(batch, row, &cols, &mut self.buf)?;
                     self.buf.push(b'\n');
                     dest.write_all(&self.buf)?;
                 }
