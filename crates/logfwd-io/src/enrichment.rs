@@ -511,8 +511,7 @@ fn read_jsonl_to_batch<R: io::BufRead>(reader: R) -> Result<RecordBatch, String>
 
         let mut row = BTreeMap::new();
         for (k, v) in obj {
-            if !key_set.contains(&k) {
-                key_set.insert(k.clone());
+            if key_set.insert(k.clone()) {
                 all_keys.push(k.clone());
             }
             // Stringify all values.
