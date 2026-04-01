@@ -2108,6 +2108,7 @@ version = "0.1.0"
 dependencies = [
  "arrow",
  "bytes",
+ "dhat",
  "logfwd-core",
  "stats_alloc",
 ]
@@ -2229,6 +2230,7 @@ dependencies = [
  "arrow",
  "bytes",
  "datafusion",
+ "dhat",
  "grok",
  "logfwd-arrow",
  "logfwd-core",
