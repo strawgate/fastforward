@@ -2,6 +2,8 @@
 # Intentional partial strings in test data and example error messages.
 hel = "hel"
 leve = "leve"
+# CSS class prefix for pipeline nodes in the dashboard.
+pn = "pn"
 
 [files]
 extend-exclude = [

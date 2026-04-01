@@ -22,6 +22,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Build dashboard
+        run: cd dashboard && npm ci && npm run build
+
       - uses: mozilla-actions/sccache-action@v0.0.7
 
       - uses: dtolnay/rust-toolchain@stable
@@ -70,6 +79,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Build dashboard
+        run: cd dashboard && npm ci && npm run build
+
       - uses: mozilla-actions/sccache-action@v0.0.7
 
       - uses: dtolnay/rust-toolchain@stable
@@ -90,6 +108,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Build dashboard
+        run: cd dashboard && npm ci && npm run build
+
       - uses: mozilla-actions/sccache-action@v0.0.7
 
       - uses: dtolnay/rust-toolchain@stable
@@ -107,6 +134,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Build dashboard
+        run: cd dashboard && npm ci && npm run build
 
       - uses: mozilla-actions/sccache-action@v0.0.7
 
@@ -136,6 +172,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Build dashboard
+        run: cd dashboard && npm ci && npm run build
+
       - uses: mozilla-actions/sccache-action@v0.0.7
 
       - uses: dtolnay/rust-toolchain@stable
@@ -146,24 +191,6 @@ jobs:
 
       - name: Tests
         run: cargo test
-
-  dashboard-check:
-    name: Dashboard freshness
-    if: github.event_name == 'push' || github.event.pull_request.draft == false
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: npm
-          cache-dependency-path: dashboard/package-lock.json
-
-      - uses: extractions/setup-just@dd310ad5a97d8e7b41793f8ef055398d51ad4de6 # v2
-
-      - name: Verify dashboard.html is up to date
-        run: just dashboard-check
 
   actionlint:
     name: Actionlint
