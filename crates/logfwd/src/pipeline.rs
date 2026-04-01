@@ -19,7 +19,7 @@ use logfwd_core::cri::parse_cri_line;
 use logfwd_io::diagnostics::{ComponentStats, PipelineMetrics};
 use logfwd_io::input::{FileInput, InputEvent, InputSource};
 use logfwd_io::tail::TailConfig;
-use logfwd_output::{BatchMetadata, FanOut, OutputSink, build_output_sink};
+use logfwd_output::{BatchMetadata, FanOut, FanOutError, OutputSink, build_output_sink};
 use logfwd_transform::SqlTransform;
 use tokio_util::sync::CancellationToken;
 
@@ -96,6 +96,12 @@ impl Pipeline {
                                 })?;
                             Arc::new(mmdb)
                         }
+                        _ => {
+                            return Err(format!(
+                                "unsupported geo database format: {:?}",
+                                geo_cfg.format
+                            ));
+                        }
                     };
                     if geo_cfg.refresh_interval.is_some() {
                         eprintln!(
@@ -134,9 +140,9 @@ impl Pipeline {
                 }
                 // Try to canonicalize for better error reporting/stability, but don't fail if it doesn't exist yet (glob)
                 if let Ok(abs_path) = std::fs::canonicalize(&path) {
-                    resolved_cfg.path = Some(abs_path.to_string_lossy().to_string());
+                    resolved_cfg.path = Some(abs_path.to_string_lossy().into_owned());
                 } else {
-                    resolved_cfg.path = Some(path.to_string_lossy().to_string());
+                    resolved_cfg.path = Some(path.to_string_lossy().into_owned());
                 }
             }
 
@@ -234,8 +240,17 @@ impl Pipeline {
         for input in self.inputs.drain(..) {
             let tx = tx.clone();
             let sd = shutdown.clone();
+            let metrics = Arc::clone(&self.metrics);
             input_handles.push(std::thread::spawn(move || {
-                input_poll_loop(input, tx, sd, batch_target, batch_timeout, poll_interval);
+                input_poll_loop(
+                    input,
+                    tx,
+                    metrics,
+                    sd,
+                    batch_target,
+                    batch_timeout,
+                    poll_interval,
+                );
             }));
         }
         drop(tx); // Drop our copy so rx.recv() returns None when all inputs exit.
@@ -246,7 +261,7 @@ impl Pipeline {
 
         loop {
             tokio::select! {
-                _ = shutdown.cancelled() => {
+                () = shutdown.cancelled() => {
                     break;
                 }
 
@@ -361,7 +376,16 @@ impl Pipeline {
             observed_time_ns: now_nanos(),
         };
         if let Err(e) = tokio::task::block_in_place(|| self.output.send_batch(&result, &metadata)) {
-            self.metrics.output_error();
+            if let Some(fanout_error) = e
+                .get_ref()
+                .and_then(|inner| inner.downcast_ref::<FanOutError>())
+            {
+                for failed_sink in fanout_error.failed_sinks() {
+                    self.metrics.output_error(failed_sink);
+                }
+            } else {
+                self.metrics.output_error(self.output.name());
+            }
             self.metrics.inc_dropped_batch();
             eprintln!("pipeline: output error (batch dropped): {e}");
             return;
@@ -387,6 +411,7 @@ impl Pipeline {
 fn input_poll_loop(
     mut input: InputState,
     tx: tokio::sync::mpsc::Sender<Vec<u8>>,
+    metrics: Arc<PipelineMetrics>,
     shutdown: CancellationToken,
     batch_target_bytes: usize,
     batch_timeout: Duration,
@@ -485,6 +510,7 @@ fn input_poll_loop(
                             agg.reset();
                         }
                     }
+                    _ => {}
                 }
             }
             // Set buffered_since after processing if buffer was empty before.
@@ -495,9 +521,7 @@ fn input_poll_loop(
 
         // Send when buffer reaches target size OR timeout since first
         // data in this batch has elapsed.
-        let timeout_elapsed = buffered_since
-            .map(|t| t.elapsed() >= batch_timeout)
-            .unwrap_or(false);
+        let timeout_elapsed = buffered_since.is_some_and(|t| t.elapsed() >= batch_timeout);
         let should_send =
             input.buf.len() >= batch_target_bytes || (!input.buf.is_empty() && timeout_elapsed);
         if should_send {
@@ -507,7 +531,7 @@ fn input_poll_loop(
             // original pre-allocation in build_input_state).
             let mut data = Vec::with_capacity(batch_target_bytes);
             std::mem::swap(&mut input.buf, &mut data);
-            if tx.blocking_send(data).is_err() {
+            if blocking_send_with_backpressure_metric(&tx, &metrics, data).is_err() {
                 break;
             }
             buffered_since = None;
@@ -517,7 +541,24 @@ fn input_poll_loop(
     // Drain any remaining buffered data on shutdown.
     if !input.buf.is_empty() {
         let data = std::mem::take(&mut input.buf);
-        let _ = tx.blocking_send(data);
+        let _ = blocking_send_with_backpressure_metric(&tx, &metrics, data);
+    }
+}
+
+fn blocking_send_with_backpressure_metric(
+    tx: &tokio::sync::mpsc::Sender<Vec<u8>>,
+    metrics: &PipelineMetrics,
+    data: Vec<u8>,
+) -> Result<(), tokio::sync::mpsc::error::SendError<Vec<u8>>> {
+    match tx.try_send(data) {
+        Ok(()) => Ok(()),
+        Err(tokio::sync::mpsc::error::TrySendError::Full(data)) => {
+            metrics.inc_backpressure_stall();
+            tx.blocking_send(data)
+        }
+        Err(tokio::sync::mpsc::error::TrySendError::Closed(data)) => {
+            Err(tokio::sync::mpsc::error::SendError(data))
+        }
     }
 }
 
@@ -540,9 +581,7 @@ fn extract_cri_messages(
 ) {
     let mut pos = 0;
     while pos < input.len() {
-        let eol = memchr::memchr(b'\n', &input[pos..])
-            .map(|o| pos + o)
-            .unwrap_or(input.len());
+        let eol = memchr::memchr(b'\n', &input[pos..]).map_or(input.len(), |o| pos + o);
         let line = &input[pos..eol];
         if let Some(cri) = parse_cri_line(line) {
             match aggregator.feed(cri.message, cri.is_full) {
@@ -632,9 +671,41 @@ fn now_nanos() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io;
+    use std::sync::atomic::Ordering;
+
     use logfwd_config::{Format, OutputConfig, OutputType};
     use logfwd_test_utils::sinks::{DevNullSink, FailingSink, FrozenSink, SlowSink};
     use logfwd_test_utils::test_meter;
+
+    struct NamedSink<T> {
+        name: &'static str,
+        inner: T,
+    }
+
+    impl<T> NamedSink<T> {
+        fn new(name: &'static str, inner: T) -> Self {
+            Self { name, inner }
+        }
+    }
+
+    impl<T: OutputSink> OutputSink for NamedSink<T> {
+        fn send_batch(
+            &mut self,
+            batch: &arrow::record_batch::RecordBatch,
+            metadata: &BatchMetadata,
+        ) -> io::Result<()> {
+            self.inner.send_batch(batch, metadata)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.inner.flush()
+        }
+
+        fn name(&self) -> &str {
+            self.name
+        }
+    }
 
     #[test]
     fn test_build_output_sink_stdout() {
@@ -1137,6 +1208,43 @@ output:
         );
     }
 
+    #[tokio::test]
+    async fn test_blocking_send_records_backpressure_stall() {
+        use std::sync::atomic::Ordering;
+
+        let meter = test_meter();
+        let metrics = Arc::new(PipelineMetrics::new("test", "SELECT * FROM logs", &meter));
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1);
+
+        tx.try_send(vec![1]).unwrap();
+
+        let tx2 = tx.clone();
+        let metrics2 = Arc::clone(&metrics);
+        let handle = std::thread::spawn(move || {
+            blocking_send_with_backpressure_metric(&tx2, &metrics2, vec![2])
+        });
+
+        for _ in 0..50 {
+            if metrics.backpressure_stalls.load(Ordering::Relaxed) > 0 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        assert_eq!(
+            metrics.backpressure_stalls.load(Ordering::Relaxed),
+            1,
+            "full channel should increment backpressure_stalls before blocking"
+        );
+
+        assert_eq!(rx.recv().await, Some(vec![1]));
+        assert_eq!(rx.recv().await, Some(vec![2]));
+        assert!(
+            handle.join().unwrap().is_ok(),
+            "blocking send should succeed"
+        );
+    }
+
     /// Shutdown with a slow output must still drain all buffered data.
     /// The output takes 50ms per batch, but shutdown should wait for
     /// the drain to complete rather than dropping data.
@@ -1334,8 +1442,6 @@ output:
     /// and processing continues.
     #[tokio::test(flavor = "multi_thread")]
     async fn test_async_output_errors_do_not_crash() {
-        use std::sync::atomic::Ordering;
-
         let dir = tempfile::tempdir().unwrap();
         let log_path = dir.path().join("output_err.log");
 
@@ -1390,6 +1496,86 @@ output:
         assert!(
             lines_in > 0,
             "data should flow through transform despite output errors"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_async_fanout_output_errors_only_increment_failing_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("fanout_output_err.log");
+
+        let mut data = String::new();
+        for i in 0..100 {
+            data.push_str(&format!(r#"{{"err":{i}}}"#));
+            data.push('\n');
+        }
+        std::fs::write(&log_path, data.as_bytes()).unwrap();
+
+        let yaml = format!(
+            r#"
+pipelines:
+  default:
+    inputs:
+      - type: file
+        path: "{}"
+        format: json
+    outputs:
+      - type: stdout
+        format: json
+        name: healthy-a
+      - type: stdout
+        format: json
+        name: failing
+      - type: stdout
+        format: json
+        name: healthy-b
+"#,
+            log_path.display()
+        );
+
+        let config = logfwd_config::Config::load_str(&yaml).unwrap();
+        let pipe_cfg = &config.pipelines["default"];
+        let mut pipeline = Pipeline::from_config("default", pipe_cfg, &test_meter(), None).unwrap();
+        pipeline = pipeline.with_output(Box::new(FanOut::new(vec![
+            Box::new(NamedSink::new("healthy-a", DevNullSink)),
+            Box::new(NamedSink::new("failing", FailingSink::new(3))),
+            Box::new(NamedSink::new("healthy-b", DevNullSink)),
+        ])));
+        pipeline.batch_timeout = Duration::from_millis(20);
+
+        let shutdown = CancellationToken::new();
+        let sd = shutdown.clone();
+
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            sd.cancel();
+        });
+
+        let result = pipeline.run_async(&shutdown).await;
+        assert!(
+            result.is_ok(),
+            "fanout output errors should not crash pipeline"
+        );
+
+        let dropped = pipeline
+            .metrics
+            .dropped_batches_total
+            .load(Ordering::Relaxed);
+        assert!(
+            dropped > 0,
+            "expected dropped_batches_total > 0, got {dropped}"
+        );
+
+        let output_errors: Vec<_> = pipeline
+            .metrics
+            .outputs
+            .iter()
+            .map(|(name, _, stats)| (name.as_str(), stats.errors_total.load(Ordering::Relaxed)))
+            .collect();
+
+        assert_eq!(
+            output_errors,
+            vec![("healthy-a", 0), ("failing", dropped), ("healthy-b", 0)]
         );
     }
 
@@ -1562,6 +1748,165 @@ output:
         assert!(result.unwrap().is_ok());
     }
 
+    /// SlowSink: verify that batch timeout flushes fire when the output
+    /// is slow, and that the pipeline continues processing all data.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_async_slow_output_flush_by_timeout() {
+        use std::sync::atomic::Ordering;
+
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("slow_timeout.log");
+
+        // Write enough data that multiple batches will be produced.
+        let mut data = String::new();
+        for i in 0..100 {
+            data.push_str(&format!(r#"{{"msg":"timeout {}"}}"#, i));
+            data.push('\n');
+        }
+        std::fs::write(&log_path, data.as_bytes()).unwrap();
+
+        let yaml = format!(
+            r#"
+input:
+  type: file
+  path: "{}"
+  format: json
+output:
+  type: stdout
+  format: json
+"#,
+            log_path.display()
+        );
+
+        let config = logfwd_config::Config::load_str(&yaml).unwrap();
+        let pipe_cfg = &config.pipelines["default"];
+        let mut pipeline = Pipeline::from_config("default", pipe_cfg, &test_meter(), None).unwrap();
+
+        // Slow output with a small delay. Combined with a short batch_timeout
+        // and large batch_target_bytes, this forces flushes by timeout rather
+        // than by size.
+        pipeline = pipeline.with_output(Box::new(SlowSink {
+            delay: Duration::from_millis(10),
+        }));
+        pipeline.batch_timeout = Duration::from_millis(30);
+        pipeline.batch_target_bytes = 1024 * 1024; // 1 MB — far larger than our data
+
+        let shutdown = CancellationToken::new();
+        let sd = shutdown.clone();
+
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(600)).await;
+            sd.cancel();
+        });
+
+        pipeline.run_async(&shutdown).await.unwrap();
+
+        let lines_in = pipeline
+            .metrics
+            .transform_in
+            .lines_total
+            .load(Ordering::Relaxed);
+        assert!(
+            lines_in >= 100,
+            "slow output: pipeline should process all data, got {lines_in} (expected >= 100)"
+        );
+
+        let batches = pipeline.metrics.batches_total.load(Ordering::Relaxed);
+        assert!(
+            batches > 0,
+            "slow output: at least one batch should succeed, got {batches}"
+        );
+
+        let by_timeout = pipeline.metrics.flush_by_timeout.load(Ordering::Relaxed);
+        assert!(
+            by_timeout > 0,
+            "slow output: at least one flush should be by timeout, got {by_timeout}"
+        );
+    }
+
+    /// FrozenSink: verify that a frozen output causes dropped batches
+    /// and output errors to be tracked in metrics while the pipeline
+    /// still exits cleanly when released.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_async_frozen_output_tracks_metrics() {
+        use std::sync::atomic::Ordering;
+
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("frozen_metrics.log");
+
+        let mut data = String::new();
+        for i in 0..20 {
+            data.push_str(&format!(r#"{{"msg":"frozen {}"}}"#, i));
+            data.push('\n');
+        }
+        std::fs::write(&log_path, data.as_bytes()).unwrap();
+
+        let yaml = format!(
+            r#"
+input:
+  type: file
+  path: "{}"
+  format: json
+output:
+  type: stdout
+  format: json
+"#,
+            log_path.display()
+        );
+
+        let config = logfwd_config::Config::load_str(&yaml).unwrap();
+        let pipe_cfg = &config.pipelines["default"];
+        let mut pipeline = Pipeline::from_config("default", pipe_cfg, &test_meter(), None).unwrap();
+
+        let freeze_token = CancellationToken::new();
+        pipeline = pipeline.with_output(Box::new(FrozenSink {
+            release: freeze_token.clone(),
+        }));
+        pipeline.batch_timeout = Duration::from_millis(20);
+
+        let shutdown = CancellationToken::new();
+        let sd = shutdown.clone();
+        let ft = freeze_token.clone();
+
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            sd.cancel();
+            // Release the frozen sink so the block_in_place call returns.
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            ft.cancel();
+        });
+
+        let result =
+            tokio::time::timeout(Duration::from_secs(5), pipeline.run_async(&shutdown)).await;
+
+        assert!(
+            result.is_ok(),
+            "frozen output: pipeline must exit within timeout"
+        );
+        assert!(result.unwrap().is_ok());
+
+        // With a frozen output, the input side should still have ingested
+        // data (the input thread reads independently of the output).
+        let lines_in = pipeline
+            .metrics
+            .transform_in
+            .lines_total
+            .load(Ordering::Relaxed);
+        let output_nanos = pipeline.metrics.output_nanos_total.load(Ordering::Relaxed);
+
+        // The frozen sink blocks in send_batch, so output_nanos should
+        // reflect time spent waiting. At least some data should have
+        // reached the transform stage.
+        assert!(
+            lines_in > 0,
+            "frozen output: some lines should reach transform, got {lines_in}"
+        );
+        assert!(
+            output_nanos > 0,
+            "frozen output: output stage should record nonzero time, got {output_nanos}"
+        );
+    }
+
     /// Concurrent shutdown and data arrival: data written to the file
     /// after shutdown is signalled should not cause panics or hangs.
     #[tokio::test(flavor = "multi_thread")]
@@ -1706,15 +2051,13 @@ mod extract_cri_tests {
 
 #[cfg(test)]
 mod remainder_tests {
-    use super::*;
-
     /// Simulate splitting input at every possible byte position
     /// and verify we get the same output regardless of split point.
     #[test]
     #[allow(unused_assignments)]
     fn partial_line_handling_split_anywhere() {
         let full_input = b"{\"a\":1}\n{\"b\":2}\n{\"c\":3}\n";
-        let stats = Arc::new(ComponentStats::new());
+        let _stats = Arc::new(ComponentStats::new());
 
         for split_at in 1..full_input.len() {
             let chunk1 = &full_input[..split_at];
@@ -1811,7 +2154,7 @@ mod remainder_tests {
         combined.extend_from_slice(read2);
         if let Some(pos) = memchr::memrchr(b'\n', &combined) {
             if pos + 1 < combined.len() {
-                remainder = combined[pos + 1..].to_vec();
+                let _remainder_tail = combined[pos + 1..].to_vec();
                 combined.truncate(pos + 1);
             }
             buf.extend_from_slice(&combined);
