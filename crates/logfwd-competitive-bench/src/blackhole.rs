@@ -109,7 +109,10 @@ fn count_lines(body: &[u8], url: &str) -> u64 {
     if url.contains("/v1/logs") {
         // OTLP JSON: count exact logRecords from nested arrays when possible.
         // Falls back to lightweight body-key scanning or newline-based estimates.
-        let otlp_count = count_otlp_log_records(body).max(count_otlp_body_keys(body));
+        let otlp_count = match count_otlp_log_records(body) {
+            0 => count_otlp_body_keys(body),
+            n => n,
+        };
         if otlp_count > 0 {
             return otlp_count;
         }
