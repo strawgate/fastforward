@@ -53,6 +53,8 @@ pub struct Pipeline {
     batch_target_bytes: usize,
     batch_timeout: Duration,
     poll_interval: Duration,
+    /// Static OTLP resource attributes (e.g. `service.name`) emitted with every batch.
+    resource_attrs: Vec<(String, String)>,
 }
 
 impl Pipeline {
@@ -152,8 +154,8 @@ impl Pipeline {
                 .clone()
                 .unwrap_or_else(|| format!("output_{i}"));
             let output_type_str = format!("{:?}", output_cfg.output_type).to_lowercase();
-            let _output_stats = metrics.add_output(&output_name, &output_type_str);
-            sinks.push(build_output_sink(&output_name, output_cfg)?);
+            let output_stats = metrics.add_output(&output_name, &output_type_str);
+            sinks.push(build_output_sink(&output_name, output_cfg, output_stats)?);
         }
 
         let output: Box<dyn OutputSink> = if sinks.len() == 1 {
@@ -161,6 +163,14 @@ impl Pipeline {
         } else {
             Box::new(FanOut::new(sinks))
         };
+
+        // Convert resource_attrs HashMap to a sorted Vec for deterministic output.
+        let mut resource_attrs: Vec<(String, String)> = config
+            .resource_attrs
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        resource_attrs.sort_unstable_by(|a, b| a.0.cmp(&b.0));
 
         Ok(Pipeline {
             name: name.to_string(),
@@ -172,6 +182,7 @@ impl Pipeline {
             batch_target_bytes: 4 * 1024 * 1024,
             batch_timeout: Duration::from_millis(100),
             poll_interval: Duration::from_millis(10),
+            resource_attrs,
         })
     }
 
@@ -361,7 +372,7 @@ impl Pipeline {
         // Output (block_in_place wraps the sync HTTP send).
         let t2 = Instant::now();
         let metadata = BatchMetadata {
-            resource_attrs: vec![],
+            resource_attrs: self.resource_attrs.clone(),
             observed_time_ns: now_nanos(),
         };
         if let Err(e) = tokio::task::block_in_place(|| self.output.send_batch(&result, &metadata)) {
@@ -599,6 +610,11 @@ fn build_input_state(
                 .listen
                 .as_ref()
                 .ok_or_else(|| format!("input '{name}': udp input requires 'listen'"))?;
+            if matches!(cfg.format, Some(Format::Cri | Format::Auto)) {
+                return Err(format!(
+                    "input '{name}': CRI/auto format is not supported for UDP inputs (CRI is a file-based container log format)"
+                ));
+            }
             let source = logfwd_io::udp_input::UdpInput::new(name, addr)
                 .map_err(|e| format!("input '{name}': failed to bind UDP {addr}: {e}"))?;
             let format = cfg.format.clone().unwrap_or(Format::Json);
@@ -610,6 +626,11 @@ fn build_input_state(
                 .listen
                 .as_ref()
                 .ok_or_else(|| format!("input '{name}': tcp input requires 'listen'"))?;
+            if matches!(cfg.format, Some(Format::Cri | Format::Auto)) {
+                return Err(format!(
+                    "input '{name}': CRI/auto format is not supported for TCP inputs (CRI is a file-based container log format)"
+                ));
+            }
             let source = logfwd_io::tcp_input::TcpInput::new(name, addr)
                 .map_err(|e| format!("input '{name}': failed to bind TCP {addr}: {e}"))?;
             let format = cfg.format.clone().unwrap_or(Format::Json);
@@ -653,6 +674,7 @@ mod tests {
     use std::sync::atomic::Ordering;
 
     use logfwd_config::{Format, OutputConfig, OutputType};
+    use logfwd_io::diagnostics::ComponentStats;
     use logfwd_test_utils::sinks::{DevNullSink, FailingSink, FrozenSink, SlowSink};
     use logfwd_test_utils::test_meter;
 
@@ -697,7 +719,7 @@ mod tests {
             path: None,
             auth: None,
         };
-        let sink = build_output_sink("test", &cfg).unwrap();
+        let sink = build_output_sink("test", &cfg, Arc::new(ComponentStats::new())).unwrap();
         assert_eq!(sink.name(), "test");
     }
 
@@ -713,7 +735,7 @@ mod tests {
             path: None,
             auth: None,
         };
-        let sink = build_output_sink("otel", &cfg).unwrap();
+        let sink = build_output_sink("otel", &cfg, Arc::new(ComponentStats::new())).unwrap();
         assert_eq!(sink.name(), "otel");
     }
 
@@ -729,7 +751,7 @@ mod tests {
             path: None,
             auth: None,
         };
-        let sink = build_output_sink("es", &cfg).unwrap();
+        let sink = build_output_sink("es", &cfg, Arc::new(ComponentStats::new())).unwrap();
         assert_eq!(sink.name(), "es");
     }
 
@@ -745,7 +767,7 @@ mod tests {
             path: None,
             auth: None,
         };
-        let result = build_output_sink("bad", &cfg);
+        let result = build_output_sink("bad", &cfg, Arc::new(ComponentStats::new()));
         assert!(result.is_err());
         let err = result.err().unwrap();
         assert!(err.contains("endpoint"), "got: {err}");
