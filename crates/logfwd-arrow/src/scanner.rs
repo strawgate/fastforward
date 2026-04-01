@@ -6,8 +6,8 @@
 
 use arrow::error::ArrowError;
 use arrow::record_batch::RecordBatch;
-use logfwd_core::scan_config::ScanConfig;
 use logfwd_core::json_scanner::scan_streaming;
+use logfwd_core::scan_config::ScanConfig;
 use logfwd_core::scanner::ScanBuilder;
 
 use crate::storage_builder::StorageBuilder;
