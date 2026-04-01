@@ -16,9 +16,9 @@ spec:
       automountServiceAccountToken: false
       tolerations:
         - operator: Exists
-      securityContext:
-        seccompProfile:
-          type: RuntimeDefault
+      # Log collection requires root to read /var/log/pods (owned by root).
+      # Production deployments should use supplementalGroups to grant access
+      # to the log directory without running as root.
       containers:
         - name: logfwd
           image: logfwd:e2e
@@ -26,9 +26,6 @@ spec:
           args: ["--config", "/etc/logfwd/config.yaml"]
           securityContext:
             allowPrivilegeEscalation: false
-            runAsNonRoot: true
-            runAsUser: 65532
-            runAsGroup: 65532
             readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
