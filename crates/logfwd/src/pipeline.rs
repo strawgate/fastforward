@@ -96,7 +96,12 @@ impl Pipeline {
                                 })?;
                             Arc::new(mmdb)
                         }
-                        _ => return Err(format!("unsupported geo database format: {:?}", geo_cfg.format)),
+                        _ => {
+                            return Err(format!(
+                                "unsupported geo database format: {:?}",
+                                geo_cfg.format
+                            ));
+                        }
                     };
                     if geo_cfg.refresh_interval.is_some() {
                         eprintln!(
@@ -497,8 +502,7 @@ fn input_poll_loop(
 
         // Send when buffer reaches target size OR timeout since first
         // data in this batch has elapsed.
-        let timeout_elapsed = buffered_since
-            .is_some_and(|t| t.elapsed() >= batch_timeout);
+        let timeout_elapsed = buffered_since.is_some_and(|t| t.elapsed() >= batch_timeout);
         let should_send =
             input.buf.len() >= batch_target_bytes || (!input.buf.is_empty() && timeout_elapsed);
         if should_send {
@@ -541,8 +545,7 @@ fn extract_cri_messages(
 ) {
     let mut pos = 0;
     while pos < input.len() {
-        let eol = memchr::memchr(b'\n', &input[pos..])
-            .map_or(input.len(), |o| pos + o);
+        let eol = memchr::memchr(b'\n', &input[pos..]).map_or(input.len(), |o| pos + o);
         let line = &input[pos..eol];
         if let Some(cri) = parse_cri_line(line) {
             match aggregator.feed(cri.message, cri.is_full) {

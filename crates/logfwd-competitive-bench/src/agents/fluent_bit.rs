@@ -126,13 +126,22 @@ impl Agent for FluentBit {
         let mut errors = 0u64;
         if let Some(inputs) = v.get("input").and_then(|v| v.as_object()) {
             for plugin in inputs.values() {
-                records += plugin.get("records").and_then(serde_json::Value::as_u64).unwrap_or(0);
-                bytes += plugin.get("bytes").and_then(serde_json::Value::as_u64).unwrap_or(0);
+                records += plugin
+                    .get("records")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0);
+                bytes += plugin
+                    .get("bytes")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0);
             }
         }
         if let Some(outputs) = v.get("output").and_then(|v| v.as_object()) {
             for plugin in outputs.values() {
-                errors += plugin.get("errors").and_then(serde_json::Value::as_u64).unwrap_or(0);
+                errors += plugin
+                    .get("errors")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0);
             }
         }
         Some(AgentSample {

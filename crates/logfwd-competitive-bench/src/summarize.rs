@@ -436,9 +436,10 @@ fn write_dual_gh_bench(groups: &[AggResult], path: &Path) {
         Err(e) => eprintln!("ERROR: write gh-bench: {e}"),
     }
 
-    let smaller_path = path.with_file_name(
-        path.file_stem().map_or_else(|| "gh-bench-efficiency.json".to_string(), |s| format!("{}-efficiency.json", s.to_string_lossy())),
-    );
+    let smaller_path = path.with_file_name(path.file_stem().map_or_else(
+        || "gh-bench-efficiency.json".to_string(),
+        |s| format!("{}-efficiency.json", s.to_string_lossy()),
+    ));
     let json = serde_json::to_string_pretty(&smaller).expect("serialize efficiency gh-bench JSON");
     match std::fs::write(&smaller_path, &json) {
         Ok(()) => eprintln!(

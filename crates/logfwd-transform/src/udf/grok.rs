@@ -250,7 +250,9 @@ impl ScalarUDFImpl for GrokUdf {
                         matches
                             .as_ref()
                             .and_then(|m| m.get(name))
-                            .map_or(datafusion::common::ScalarValue::Utf8(None), |v| datafusion::common::ScalarValue::Utf8(Some(v.to_string())))
+                            .map_or(datafusion::common::ScalarValue::Utf8(None), |v| {
+                                datafusion::common::ScalarValue::Utf8(Some(v.to_string()))
+                            })
                     })
                     .collect();
 

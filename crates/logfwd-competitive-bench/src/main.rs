@@ -1021,7 +1021,10 @@ impl Args {
                         eprintln!("ERROR: --agents requires a value");
                         process::exit(1);
                     }
-                    result.agents = args[i].split(',').map(std::string::ToString::to_string).collect();
+                    result.agents = args[i]
+                        .split(',')
+                        .map(std::string::ToString::to_string)
+                        .collect();
                 }
                 "--scenarios" => {
                     i += 1;

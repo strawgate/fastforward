@@ -343,7 +343,8 @@ impl Config {
             for (i, input) in pipe.inputs.iter().enumerate() {
                 let label = input
                     .name
-                    .as_deref().map_or_else(|| format!("#{i}"), String::from);
+                    .as_deref()
+                    .map_or_else(|| format!("#{i}"), String::from);
                 match input.input_type {
                     InputType::File => {
                         if input.path.is_none() {
@@ -366,7 +367,8 @@ impl Config {
             for (i, output) in pipe.outputs.iter().enumerate() {
                 let label = output
                     .name
-                    .as_deref().map_or_else(|| format!("#{i}"), String::from);
+                    .as_deref()
+                    .map_or_else(|| format!("#{i}"), String::from);
 
                 // Reject placeholder output types that are not yet implemented.
                 match output.output_type {

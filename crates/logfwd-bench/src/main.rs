@@ -82,7 +82,8 @@ fn main() {
     }
 
     let criterion_dir = args
-        .get(1).map_or_else(|| PathBuf::from("target/criterion"), PathBuf::from);
+        .get(1)
+        .map_or_else(|| PathBuf::from("target/criterion"), PathBuf::from);
 
     if !criterion_dir.exists() {
         eprintln!(
@@ -113,7 +114,8 @@ fn main() {
                     .name
                     .rsplit('/')
                     .next()
-                    .and_then(|s| s.parse::<u64>().ok()).map_or_else(|| "—".to_string(), |n| format_rate(b.median_ns, n)),
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .map_or_else(|| "—".to_string(), |n| format_rate(b.median_ns, n)),
             };
             println!("| {} | {} | {} | {} |", b.name, time, range, tp);
         }
