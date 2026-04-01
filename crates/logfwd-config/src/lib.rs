@@ -468,11 +468,18 @@ fn expand_env_vars(text: &str) -> String {
         if ch == '$' && chars.peek() == Some(&'{') {
             chars.next(); // consume '{'
             let mut var_name = String::new();
+            let mut found_close = false;
             for c in chars.by_ref() {
                 if c == '}' {
+                    found_close = true;
                     break;
                 }
                 var_name.push(c);
+            }
+            if !found_close {
+                result.push_str("${");
+                result.push_str(&var_name);
+                continue;
             }
             match std::env::var(&var_name) {
                 Ok(val) => result.push_str(&val),
@@ -641,6 +648,18 @@ output:
             pipe.outputs[0].endpoint.as_deref(),
             Some("${LOGFWD_NONEXISTENT_VAR_12345}")
         );
+    }
+
+    #[test]
+    fn unterminated_env_var_preserved_as_is() {
+        // SAFETY: this test is not run concurrently with other tests that
+        // depend on the same environment variable.
+        unsafe { std::env::set_var("LOGFWD_TEST_UNTERMINATED", "http://should-not-expand") };
+        assert_eq!(
+            expand_env_vars("endpoint: ${LOGFWD_TEST_UNTERMINATED"),
+            "endpoint: ${LOGFWD_TEST_UNTERMINATED"
+        );
+        unsafe { std::env::remove_var("LOGFWD_TEST_UNTERMINATED") };
     }
 
     #[test]
