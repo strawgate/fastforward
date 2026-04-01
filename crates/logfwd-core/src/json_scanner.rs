@@ -29,6 +29,7 @@ struct StoredBitmasks<'a> {
 /// consumed on the fly.
 #[inline(never)]
 pub fn scan_streaming<B: ScanBuilder>(buf: &[u8], config: &ScanConfig, builder: &mut B) {
+    builder.begin_batch();
     if buf.is_empty() {
         return;
     }
@@ -100,7 +101,6 @@ pub fn scan_streaming<B: ScanBuilder>(buf: &[u8], config: &ScanConfig, builder: 
     };
 
     // Phase 2: Scan each line using stored bitmasks for quote/nested lookups.
-    builder.begin_batch();
     for (start, end) in line_ranges {
         scan_line(buf, start, end, &bitmasks, config, builder);
     }
@@ -121,7 +121,7 @@ fn scan_line<B: ScanBuilder>(
     }
 
     // Find the opening '{' using bitmasks
-    let mut pos = next_non_ws(buf, start, end);
+    let mut pos = skip_whitespace(buf, start, end);
     if pos >= end || buf[pos] != b'{' {
         builder.end_row();
         return;
@@ -130,7 +130,7 @@ fn scan_line<B: ScanBuilder>(
 
     // Parse key-value pairs
     loop {
-        pos = next_non_ws(buf, pos, end);
+        pos = skip_whitespace(buf, pos, end);
         if pos >= end || buf[pos] == b'}' {
             break;
         }
@@ -148,14 +148,14 @@ fn scan_line<B: ScanBuilder>(
         pos = key_end + 1;
 
         // Expect colon
-        pos = next_non_ws(buf, pos, end);
+        pos = skip_whitespace(buf, pos, end);
         if pos >= end || buf[pos] != b':' {
             break;
         }
         pos += 1;
 
         // Parse value
-        pos = next_non_ws(buf, pos, end);
+        pos = skip_whitespace(buf, pos, end);
         if pos >= end {
             break;
         }
@@ -185,8 +185,11 @@ fn scan_line<B: ScanBuilder>(
                 }
             }
             b't' => {
-                // Validate true (#515)
-                if pos + 4 <= end && &buf[pos..pos + 4] == b"true" {
+                // Validate true + delimiter (#515)
+                if pos + 4 <= end
+                    && &buf[pos..pos + 4] == b"true"
+                    && (pos + 4 >= end || is_json_delimiter(buf[pos + 4]))
+                {
                     if wanted {
                         let idx = builder.resolve_field(key);
                         builder.append_str_by_idx(idx, &buf[pos..pos + 4]);
@@ -197,8 +200,11 @@ fn scan_line<B: ScanBuilder>(
                 }
             }
             b'f' => {
-                // Validate false (#515)
-                if pos + 5 <= end && &buf[pos..pos + 5] == b"false" {
+                // Validate false + delimiter (#515)
+                if pos + 5 <= end
+                    && &buf[pos..pos + 5] == b"false"
+                    && (pos + 5 >= end || is_json_delimiter(buf[pos + 5]))
+                {
                     if wanted {
                         let idx = builder.resolve_field(key);
                         builder.append_str_by_idx(idx, &buf[pos..pos + 5]);
@@ -209,8 +215,11 @@ fn scan_line<B: ScanBuilder>(
                 }
             }
             b'n' => {
-                // Validate null (#515)
-                if pos + 4 <= end && &buf[pos..pos + 4] == b"null" {
+                // Validate null + delimiter (#515)
+                if pos + 4 <= end
+                    && &buf[pos..pos + 4] == b"null"
+                    && (pos + 4 >= end || is_json_delimiter(buf[pos + 4]))
+                {
                     if wanted {
                         let idx = builder.resolve_field(key);
                         builder.append_null_by_idx(idx);
@@ -250,7 +259,7 @@ fn scan_line<B: ScanBuilder>(
         }
 
         // Skip comma between fields
-        pos = next_non_ws(buf, pos, end);
+        pos = skip_whitespace(buf, pos, end);
         if pos < end && buf[pos] == b',' {
             pos += 1;
         }
@@ -290,7 +299,7 @@ fn next_quote(from: usize, end: usize, blocks: &StoredBitmasks<'_>) -> Option<us
 
 /// Find the next non-whitespace position using space bitmask.
 #[inline]
-fn next_non_ws(buf: &[u8], mut pos: usize, end: usize) -> usize {
+fn skip_whitespace(buf: &[u8], mut pos: usize, end: usize) -> usize {
     while pos < end {
         match buf[pos] {
             b' ' | b'\t' | b'\r' => {
@@ -362,6 +371,12 @@ fn skip_nested(buf: &[u8], mut pos: usize, end: usize, blocks: &StoredBitmasks<'
     pos
 }
 
+/// Check if a byte is a JSON value delimiter.
+#[inline(always)]
+fn is_json_delimiter(b: u8) -> bool {
+    matches!(b, b',' | b'}' | b']' | b' ' | b'\t' | b'\r' | b'\n')
+}
+
 /// Skip a bare value (used for malformed tokens).
 #[inline]
 fn skip_bare_value(buf: &[u8], mut pos: usize, end: usize) -> usize {
@@ -388,18 +403,20 @@ mod tests {
     /// Minimal ScanBuilder for testing — captures fields as strings.
     struct TestBuilder {
         rows: Vec<Vec<(String, String)>>,
+        raws: Vec<Option<String>>,
         current_row: Vec<(String, String)>,
         field_names: Vec<String>,
-        raw: Option<String>,
+        current_raw: Option<String>,
     }
 
     impl TestBuilder {
         fn new() -> Self {
             Self {
                 rows: Vec::new(),
+                raws: Vec::new(),
                 current_row: Vec::new(),
                 field_names: Vec::new(),
-                raw: None,
+                current_raw: None,
             }
         }
     }
@@ -408,10 +425,11 @@ mod tests {
         fn begin_batch(&mut self) {}
         fn begin_row(&mut self) {
             self.current_row.clear();
-            self.raw = None;
+            self.current_raw = None;
         }
         fn end_row(&mut self) {
             self.rows.push(self.current_row.clone());
+            self.raws.push(self.current_raw.take());
         }
         fn resolve_field(&mut self, name: &[u8]) -> usize {
             let name_str = core::str::from_utf8(name).unwrap().to_string();
@@ -444,7 +462,7 @@ mod tests {
             self.current_row.push((name, "null".to_string()));
         }
         fn append_raw(&mut self, val: &[u8]) {
-            self.raw = Some(alloc::string::String::from_utf8_lossy(val).to_string());
+            self.current_raw = Some(alloc::string::String::from_utf8_lossy(val).to_string());
         }
     }
 
@@ -582,6 +600,43 @@ mod tests {
 
         assert_eq!(builder.rows.len(), 1);
         assert!(builder.rows[0].iter().any(|(k, v)| k == "a" && v == "b"));
+        assert_eq!(builder.raws[0].as_deref(), Some(r#"{"a":"b"}"#));
+    }
+
+    #[test]
+    fn keep_raw_non_json_captures_content() {
+        let buf = b"hello world\n";
+        let config = ScanConfig {
+            keep_raw: true,
+            ..ScanConfig::default()
+        };
+        let mut builder = TestBuilder::new();
+        scan_streaming(buf, &config, &mut builder);
+
+        assert_eq!(builder.rows.len(), 1);
+        assert_eq!(builder.raws[0].as_deref(), Some("hello world"));
+    }
+
+    #[test]
+    fn rejects_truex_suffix() {
+        let buf = br#"{"x":truex}"#;
+        let config = ScanConfig::default();
+        let mut builder = TestBuilder::new();
+        scan_streaming(buf, &config, &mut builder);
+
+        assert_eq!(builder.rows.len(), 1);
+        assert!(builder.rows[0].is_empty());
+    }
+
+    #[test]
+    fn rejects_nullified_suffix() {
+        let buf = br#"{"x":nullified}"#;
+        let config = ScanConfig::default();
+        let mut builder = TestBuilder::new();
+        scan_streaming(buf, &config, &mut builder);
+
+        assert_eq!(builder.rows.len(), 1);
+        assert!(builder.rows[0].is_empty());
     }
 }
 
@@ -593,17 +648,17 @@ mod tests {
 mod verification {
     use super::*;
 
-    /// next_non_ws returns a position in [start, end].
+    /// skip_whitespace returns a position in [start, end].
     /// If result < end, the byte at result is NOT whitespace.
     #[kani::proof]
     #[kani::unwind(17)]
-    fn verify_next_non_ws() {
+    fn verify_skip_whitespace() {
         let buf: [u8; 16] = kani::any();
         let start: usize = kani::any();
         let end: usize = kani::any();
         kani::assume(start <= end && end <= 16);
 
-        let result = next_non_ws(&buf, start, end);
+        let result = skip_whitespace(&buf, start, end);
 
         assert!(result >= start && result <= end);
         if result < end {
@@ -628,34 +683,28 @@ mod verification {
         let mut i = start;
         while i < result {
             let b = buf[i];
-            assert!(
-                b != b',' && b != b'}' && b != b' ' && b != b'\t' && b != b'\r' && b != b'\n'
-            );
+            assert!(b != b',' && b != b'}' && b != b' ' && b != b'\t' && b != b'\r' && b != b'\n');
             i += 1;
         }
     }
 
-    /// trim_ws produces a subslice — result length <= input length.
+    /// trim_whitespace produces a subslice — result length <= input length.
     #[kani::proof]
     #[kani::unwind(9)]
-    fn verify_trim_ws() {
+    fn verify_trim_whitespace() {
         let buf: [u8; 8] = kani::any();
         let len: usize = kani::any_where(|&l: &usize| l <= 8);
         let input = &buf[..len];
-        let result = trim_ws(input);
+        let result = trim_whitespace(input);
 
         assert!(result.len() <= input.len());
 
         // First byte of result (if any) is not whitespace
         if !result.is_empty() {
             let first = result[0];
-            assert!(
-                first != b' ' && first != b'\t' && first != b'\r' && first != b'\n'
-            );
+            assert!(first != b' ' && first != b'\t' && first != b'\r' && first != b'\n');
             let last = result[result.len() - 1];
-            assert!(
-                last != b' ' && last != b'\t' && last != b'\r' && last != b'\n'
-            );
+            assert!(last != b' ' && last != b'\t' && last != b'\r' && last != b'\n');
         }
     }
 
