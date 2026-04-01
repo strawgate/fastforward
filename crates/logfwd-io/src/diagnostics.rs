@@ -322,6 +322,9 @@ pub struct DiagnosticsServer {
     /// Optional callback that returns a snapshot of allocator memory stats.
     /// Set this to expose jemalloc (or any allocator) metrics on `/api/pipelines`.
     memory_stats_fn: Option<fn() -> Option<MemoryStats>>,
+    /// Raw YAML config text for the /api/config endpoint.
+    config_yaml: String,
+    config_path: String,
 }
 
 impl DiagnosticsServer {
@@ -331,7 +334,15 @@ impl DiagnosticsServer {
             start_time: Instant::now(),
             bind_addr: bind_addr.to_string(),
             memory_stats_fn: None,
+            config_yaml: String::new(),
+            config_path: String::new(),
         }
+    }
+
+    /// Store the raw config YAML and file path for the /api/config endpoint.
+    pub fn set_config(&mut self, path: &str, yaml: &str) {
+        self.config_path = path.to_string();
+        self.config_yaml = yaml.to_string();
     }
 
     pub fn add_pipeline(&mut self, metrics: Arc<PipelineMetrics>) {
@@ -374,6 +385,7 @@ impl DiagnosticsServer {
             "/ready" => self.serve_ready(request),
             "/api/pipelines" => self.serve_pipelines(request),
             "/api/stats" => self.serve_stats(request),
+            "/api/config" => self.serve_config(request),
             // Prometheus /metrics removed — use OTLP metrics push instead.
             // The /api/pipelines endpoint provides the same data as JSON.
             _ => {
@@ -508,6 +520,22 @@ impl DiagnosticsServer {
             mem_json,
         );
 
+        let header = tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+            .map_err(|()| io::Error::other("invalid HTTP header"))?;
+        let resp = tiny_http::Response::from_string(body).with_header(header);
+        request.respond(resp)?;
+        Ok(())
+    }
+
+    fn serve_config(
+        &self,
+        request: tiny_http::Request,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let body = format!(
+            r#"{{"path":"{}","raw_yaml":"{}"}}"#,
+            esc(&self.config_path),
+            esc(&self.config_yaml),
+        );
         let header = tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
             .map_err(|()| io::Error::other("invalid HTTP header"))?;
         let resp = tiny_http::Response::from_string(body).with_header(header);
