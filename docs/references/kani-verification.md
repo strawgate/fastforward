@@ -163,9 +163,24 @@ fn verify_with_stubbed_random() {
 ```
 
 Common stubbing reasons:
-- **Unsupported features** (inline assembly, system calls)
-- **Performance** (replace expensive code with simpler equivalent)
-- **Compositional reasoning** (replace verified code with contract)
+- **Unsupported features** (inline assembly, system calls, OS-level randomness)
+- **Performance** (replace expensive computation with lookup table or simpler equivalent)
+- **Compositional reasoning** (replace verified code with contract via `stub_verified`)
+
+**Performance stubbing** -- replace expensive functions with precomputed results:
+
+```rust
+const FACT: [u64; 21] = [1, 1, 2, 6, 24, 120, 720, /* ... */];
+
+#[cfg(kani)]
+fn stub_factorial(n: u64) -> Option<u64> {
+    if (n as usize) < FACT.len() { Some(FACT[n as usize]) } else { None }
+}
+
+#[kani::proof]
+#[kani::stub(factorial, stub_factorial)]
+fn verify_choose() { /* ... */ }
+```
 
 **Stubbing foreign (FFI) functions** is also supported:
 
@@ -301,6 +316,57 @@ struct MyVec<T> {
 }
 ```
 
+### `kani::slice::any_slice_of_array` -- variable-length slices
+
+The standard pattern for verifying code that takes `&[T]` without heap allocation:
+
+```rust
+const MAX_SIZE: usize = 32;
+let arr: [u8; MAX_SIZE] = kani::any();
+let slice: &[u8] = kani::slice::any_slice_of_array(&arr);
+// slice is a symbolic sub-slice: any start..end within arr
+```
+
+This avoids `Vec` (which scales poorly in Kani) while still exploring all
+possible slice lengths from 0 to MAX_SIZE.
+
+### `kani::PointerGenerator` -- bounded pointer verification
+
+For verifying unsafe pointer operations, create a bounded allocation:
+
+```rust
+#[kani::proof_for_contract(<*const u8>::offset)]
+fn check_ptr_offset() {
+    const BUF_SIZE: usize = 200;
+    let mut generator = kani::PointerGenerator::<BUF_SIZE>::new();
+    let test_ptr: *const u8 = generator.any_in_bounds().ptr;
+    let count: isize = kani::any();
+    unsafe { test_ptr.offset(count); }
+}
+```
+
+### Input space partitioning
+
+For types where full symbolic exploration is intractable (e.g., `u64 * u64`),
+partition the input space with macros:
+
+```rust
+macro_rules! generate_mul_harness {
+    ($name:ident, $min:expr, $max:expr) => {
+        #[kani::proof_for_contract(u32::unchecked_mul)]
+        fn $name() {
+            let a: u32 = kani::any();
+            let b: u32 = kani::any();
+            kani::assume(a >= $min && a <= $max);
+            kani::assume(b >= $min && b <= $max);
+            unsafe { a.unchecked_mul(b); }
+        }
+    }
+}
+generate_mul_harness!(mul_small, 0, 1000);
+generate_mul_harness!(mul_large, u32::MAX - 1000, u32::MAX);
+```
+
 ### `kani::cover!()` -- reachability checking
 
 `kani::cover!(condition, "description")` checks whether a condition CAN be
@@ -373,6 +439,39 @@ fn gcd(mut max: u8, mut min: u8) -> u8 {
 - `#[kani::recursion]` -- required on recursive functions with contracts
 - Multiple requires/ensures clauses are joined with `&&`
 
+### `old()` in ensures clauses
+
+Capture pre-call state for mutation verification:
+
+```rust
+#[kani::ensures(|result: &Option<T>| old(self.is_empty()) || result.is_some())]
+#[kani::ensures(|result: &Option<T>| self.is_empty() || self.len() == old(self.len()) - 1)]
+fn pop(&mut self) -> Option<T> { ... }
+```
+
+Rules for `old()`:
+- It is **syntax, not a function** -- an AST rewrite that evaluates the expression
+  before the function call
+- Nested `old(old(...))` is prohibited
+- Cannot reference local variables: `old(x)` where `x` is local is invalid
+- Complex expressions are fine: `old({ let x = self.is_empty(); x })`
+
+### `kani::modifies` semantics
+
+Without explicit `modifies`, Kani infers the write set from `&mut` arguments.
+During `stub_verified` usage, ALL reachable mutable memory becomes nondeterministic
+("havocked"). With explicit `modifies`, you restrict what gets havocked:
+
+```rust
+#[kani::modifies(&mut self.len)]
+#[kani::modifies(&mut self.buf[self.len])]
+fn push(&mut self, val: T) { ... }
+```
+
+**If you forget `modifies` on a function with `&mut self`:** during `stub_verified`,
+the entire mutable state is replaced with nondeterministic values, causing false
+positives or making postconditions unprovable.
+
 ### Verifying contracts
 
 ```rust
@@ -404,6 +503,9 @@ fn verify_token_bucket_new() {
 
 `stub_verified` replaces each call to `gcd` with its proven contract abstraction.
 This collapses potentially 68+ recursive unrollings into a single check+assume.
+
+**Breaking change (v0.66):** `stub_verified` now requires a corresponding
+`proof_for_contract` harness to exist. Without one, Kani reports an error.
 
 ### Contracts for external functions (double-stub trick)
 
@@ -521,8 +623,8 @@ Supports raw pointers, references, and slices for specifying modified memory.
 
 ### Loop contract limitations
 
-- Supported: `while`, `loop`, `for` (over arrays, slices, Vec, Range, iterators)
-- Not supported: `while let` loops
+- Supported: `while`, `loop`, `for` (over arrays, slices, Vec, Range, iterators),
+  `while let` (v0.66+)
 - Kani does **not** check loop termination -- non-terminating loops with valid
   invariants may produce unsound results
 - Loop contracts must be side-effect free
@@ -929,10 +1031,42 @@ unwinding is not modeled. Use MIRI for testing unwinding-related resource safety
 
 ### Floating point over-approximation
 
-`sin()`, `cos()`, `sqrt()` return nondeterministic values in [-1, 1] or [0, ∞).
-This preserves soundness but may cause spurious failures. Stub with tighter
-approximations if needed, but be aware this can introduce unsoundness on
-different platforms.
+Basic float ops (+, -, *, /, comparisons) are bit-precise. But `sin()`, `cos()`,
+`sqrt()` return nondeterministic values in [-1, 1] or [0, ∞). This preserves
+soundness but may cause spurious failures. f16 and f128 fully supported since
+v0.61. As of v0.59, no overflow reporting for operations producing +/-Infinity.
+
+### Rust Analyzer compatibility
+
+Rust Analyzer doesn't know about the `kani` crate. Use this workaround to avoid
+false errors in your IDE:
+
+```rust
+#[cfg_attr(not(rust_analyzer), cfg(kani))]
+mod verification {
+    #[cfg_attr(not(rust_analyzer), kani::proof)]
+    fn verify_something() { /* ... */ }
+}
+```
+
+### Cargo.toml metadata for Kani
+
+Set default flags for all harnesses in a crate:
+
+```toml
+[package.metadata.kani.flags]
+default-unwind = "1"  # force explicit unwind bounds everywhere
+
+[workspace.metadata.kani.flags]
+default-unwind = "1"  # workspace-wide
+```
+
+Also add `check-cfg` to suppress unknown-cfg warnings:
+
+```toml
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+```
 
 ---
 
@@ -978,6 +1112,10 @@ cargo kani -Z concrete-playback --concrete-playback=print
 # Performance / debugging
 cargo kani --visualize                        # generate HTML trace
 cargo kani --cbmc-args --unwindset label:N    # per-loop unwind override
+
+# Source coverage analysis (detect vacuous proofs)
+cargo kani --coverage -Z source-coverage --harness <name>
+# Output: file_path, line_number, FULL|NONE
 
 # Safety sweep (v0.64+)
 cargo kani autoharness --prove-safety-only    # auto-generate memory safety proofs
