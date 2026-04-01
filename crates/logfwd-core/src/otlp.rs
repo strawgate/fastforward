@@ -931,10 +931,14 @@ mod verification {
         assert!(parse_timestamp_nanos(ts) == None);
     }
 
-    /// Prove eq_ignore_case_4 matches iff case-insensitive equal for
-    /// the specific targets used in parse_severity (INFO, WARN).
-    /// For all 4-byte inputs: if eq_ignore_case_4 returns true,
-    /// the case-folded bytes match the target.
+    /// Documentation proof for eq_ignore_case_4 with parse_severity target INFO.
+    ///
+    /// Note: this checks eq_ignore_case_4 against eq_ignore_case_match, which
+    /// also uses the same `|0x20` normalization trick. That means
+    /// verify_eq_ignore_case_4_no_false_positives_info is useful as an
+    /// executable example, but it does not independently rule out all
+    /// non-letter collisions beyond what verify_parse_severity_no_false_positives
+    /// already proves for parse_severity.
     #[kani::proof]
     fn verify_eq_ignore_case_4_no_false_positives_info() {
         let input: [u8; 4] = kani::any();
@@ -948,7 +952,12 @@ mod verification {
         }
     }
 
-    /// Same for 5-byte targets (DEBUG, TRACE, ERROR, FATAL).
+    /// Documentation proof for eq_ignore_case_5 with parse_severity target ERROR.
+    ///
+    /// As with verify_eq_ignore_case_4_no_false_positives_info, the oracle
+    /// eq_ignore_case_match uses `|0x20`, so this proof is primarily
+    /// documentation/example coverage and overlaps with
+    /// verify_parse_severity_no_false_positives for parse_severity.
     #[kani::proof]
     fn verify_eq_ignore_case_5_no_false_positives_error() {
         let input: [u8; 5] = kani::any();
