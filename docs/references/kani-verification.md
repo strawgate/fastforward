@@ -1,6 +1,7 @@
 # Kani Rust Verifier -- Agent Reference
 
-Version: `kani-verifier 0.56+` (syncs monthly with Rust nightly)
+Version: `kani-verifier 0.56+` (syncs monthly with Rust nightly; contracts
+and loop contracts enabled by default since v0.62)
 
 Kani is an open-source bounded model checker for Rust that translates Rust MIR
 into a SAT/SMT formula via CBMC. It proves safety and correctness properties
@@ -238,7 +239,25 @@ pub struct Config {
 All fields must implement `kani::Arbitrary`. Use `#[cfg_attr(kani, ...)]` because
 the `kani` crate is only available during verification.
 
+### `#[safety_constraint]` attribute (v0.55+)
+
+Constrain derived `Arbitrary` values inline on struct fields, avoiding a manual
+`impl`:
+
+```rust
+#[cfg_attr(kani, derive(kani::Arbitrary, kani::Invariant))]
+struct Ratio {
+    numerator: u32,
+    #[safety_constraint(*denominator != 0)]
+    denominator: u32,
+}
+```
+
 ### Manual Arbitrary implementation
+
+For types with complex invariants that can't be expressed with
+`#[safety_constraint]`. Fix structural/layout fields to valid constants and
+make state fields symbolic:
 
 ```rust
 #[cfg(kani)]
@@ -278,6 +297,48 @@ struct MyVec<T> {
     capacity: usize,
 }
 ```
+
+### `kani::cover!()` -- reachability checking
+
+`kani::cover!(condition, "description")` checks whether a condition CAN be
+satisfied by any input. It does NOT fail verification -- instead, Kani reports
+each cover as SATISFIED or UNSATISFIABLE in the output.
+
+Use `cover!()` selectively for two purposes:
+
+**1. Guard against vacuous proofs** -- verify assumptions don't eliminate all
+interesting inputs:
+
+```rust
+#[kani::proof]
+fn verify_parser() {
+    let buf: [u8; 8] = kani::any();
+    let result = parse(&buf);
+    assert!(result.is_ok() || result.is_err()); // trivially true!
+
+    // These covers prove the proof is not vacuous
+    kani::cover!(result.is_ok(), "at least one input parses successfully");
+    kani::cover!(result.is_err(), "at least one input causes an error");
+}
+```
+
+**2. Verify code path reachability** -- confirm edge cases are exercised:
+
+```rust
+kani::cover!(count > 0, "iterator yields at least one match");
+kani::cover!(count > 1, "iterator yields multiple matches");
+kani::cover!(count == 0, "iterator yields nothing when no matches");
+```
+
+**When to add covers:**
+- After any `kani::assume()` call -- verify interesting paths survive
+- For proofs with complex logic where vacuity is non-obvious
+- When the proof has no `kani::assume()` but uses constrained types
+
+**When covers are unnecessary:**
+- Proofs with fully unconstrained symbolic inputs and no assumptions
+- `proof_for_contract` harnesses (Kani auto-checks contract satisfiability)
+- Trivial crash-freedom proofs (only checking no-panic)
 
 ---
 
@@ -691,7 +752,133 @@ Based on s2n-quic patterns and Kani's documented capabilities.
 
 ---
 
-## 12. Common Gotchas
+## 12. Best Practices
+
+Patterns proven effective in production Kani deployments across multiple
+large-scale Rust projects.
+
+### Symbolic exploration of orderings
+
+When verifying that a property holds regardless of operation order (e.g., ACK
+permutations, event sequences), use `kani::any()` to symbolically pick from all
+permutations instead of hardcoding specific orderings:
+
+```rust
+// BAD: only tests one ordering
+let (first, second, third) = (s3.ack(), s2.ack(), s1.ack());
+
+// GOOD: symbolically explores all 6 orderings
+let order: u8 = kani::any_where(|&o: &u8| o < 6);
+let (first, second, third) = match order {
+    0 => (s1.ack(), s2.ack(), s3.ack()),
+    1 => (s1.ack(), s3.ack(), s2.ack()),
+    2 => (s2.ack(), s1.ack(), s3.ack()),
+    3 => (s2.ack(), s3.ack(), s1.ack()),
+    4 => (s3.ack(), s1.ack(), s2.ack()),
+    _ => (s3.ack(), s2.ack(), s1.ack()),
+};
+```
+
+For N > 4 items, consider using a symbolic Fisher-Yates shuffle or define an
+operation enum with `#[derive(kani::Arbitrary)]` and apply symbolic sequences.
+
+### Independent oracles
+
+Don't trust internal state as the oracle for correctness. Instead, build an
+independent reference from the raw input:
+
+```rust
+// WEAK: trusts iter.remaining_bits (computed by the code under test)
+let expected = iter.remaining_bits;
+
+// STRONG: independently compute expected from the buffer
+let mut expected: u64 = 0;
+let mut i = 0;
+while i < buf.len() {
+    if is_structural(buf[i]) { expected |= 1u64 << i; }
+    i += 1;
+}
+```
+
+### Edge coverage for range-producing functions
+
+When a function partitions input into ranges (line splitting, tokenization),
+verify the full partition -- not just the ranges themselves:
+
+1. Bytes **inside** ranges satisfy expected properties
+2. Bytes **between** ranges (gaps) are all delimiters
+3. Bytes **before** the first range are all delimiters
+4. Bytes **after** the last range are all delimiters
+5. If no ranges exist, **all** bytes are delimiters
+
+### `any_where()` vs `assume()` -- when to prefer which
+
+- **`kani::any_where(predicate)`** -- when the constraint is intrinsic to a
+  single value's meaning. Keeps generation and filtering co-located.
+- **`kani::any()` + `kani::assume()`** -- when constraints span multiple
+  variables (e.g., `assume(start <= end)` after generating both), or depend on
+  program state computed after generation.
+
+Anti-pattern: `assume()` placed far from the corresponding `any()` call. The
+farther apart they are, the higher the risk of accidentally over-constraining
+or forgetting the constraint exists.
+
+### Solver selection
+
+Start with the default (cadical). If a proof takes > 10 seconds, try kissat.
+Production benchmarks show kissat is fastest for 47% of slow harnesses, with
+speedups up to 265x. For arithmetic-heavy proofs, try z3 or bitwuzla.
+
+Mix solvers per-harness based on empirical measurement -- there's no universal
+best solver.
+
+### Performance pitfalls
+
+What makes Kani slow (in order of impact):
+
+1. **Multiplication/division on wide types** -- bit-blasting 64-bit multiply
+   creates enormous SAT formulas. Partition input ranges if needed.
+2. **Deep call chains without contracts** -- each function layer multiplies
+   state space. Use `stub_verified` to break chains.
+3. **Large unwind bounds** -- each increment roughly doubles formula size.
+   Keep inputs small (8-16 bytes) for complex proofs.
+4. **Nondeterministic heap allocations** -- `Vec<kani::any()>` scales poorly.
+   Use fixed-size arrays or `BoundedArbitrary`.
+
+### What to prove vs test vs fuzz
+
+| Technique | Best for | Limitation |
+|-----------|----------|------------|
+| **Kani** | Exhaustive verification of bounded inputs; unsafe code; algorithmic correctness of pure functions | Slow on wide types, no concurrency, no heap-heavy code |
+| **Proptest/fuzzing** | End-to-end integration; real-world inputs; heap-intensive code; concurrency | Incomplete coverage; misses rare corner cases |
+| **Miri** | UB detection; concurrency; real allocator behavior | Only checks specific test inputs, not exhaustive |
+
+Decision: if the function is pure, bounded, and critical -- prove it with Kani.
+If it's stateful, heap-heavy, or async -- test with proptest and fuzz. For
+unsafe code, do both: Kani for bounded correctness + Miri for UB detection.
+
+### Autoharness and `--prove-safety-only` (v0.64+)
+
+For a quick automated safety sweep of an entire crate without handwriting proofs:
+
+```bash
+cargo kani autoharness --prove-safety-only
+```
+
+Kani auto-derives `Arbitrary` for function parameters and generates harnesses.
+Combined with `--prove-safety-only`, it checks only memory safety (no debug
+assertions), providing a low-effort baseline. Use regex patterns to filter:
+
+```bash
+cargo kani autoharness --include-pattern "parse_.*"
+```
+
+This is valuable for initial triage -- identify which functions need deeper
+manual proofs, and which are already memory-safe by construction.
+
+---
+
+## 13. Common Gotchas
 
 ### Vacuous proofs from over-constraining
 
@@ -746,7 +933,7 @@ different platforms.
 
 ---
 
-## 13. Feature Support Summary
+## 14. Feature Support Summary
 
 ### Fully supported
 Macros, modules, functions, structs, enums, unions, traits, generics, closures,
@@ -767,7 +954,7 @@ type coercions, destructors, UnsafeCell, PhantomData, some intrinsics.
 
 ---
 
-## 14. Command-Line Quick Reference
+## 15. Command-Line Quick Reference
 
 ```bash
 # Basic verification
@@ -789,13 +976,17 @@ cargo kani -Z concrete-playback --concrete-playback=print
 cargo kani --visualize                        # generate HTML trace
 cargo kani --cbmc-args --unwindset label:N    # per-loop unwind override
 
+# Safety sweep (v0.64+)
+cargo kani autoharness --prove-safety-only    # auto-generate memory safety proofs
+cargo kani autoharness --include-pattern "parse_.*"  # filter by regex
+
 # Concrete playback
 cargo kani playback -Z concrete-playback -- <test_name>
 ```
 
 ---
 
-## 15. Real-World Examples
+## 16. Real-World Examples
 
 ### Firecracker (AWS) -- VMM verification
 - Verified virtio descriptor chain parser for all possible guest memory
