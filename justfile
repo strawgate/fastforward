@@ -25,10 +25,10 @@ test:
 nextest:
     cargo nextest run
 
-# Lint everything: format, clippy, TOML, deny
+# Lint everything: format, clippy, TOML, deny (matches CI Lint job)
 lint: fmt-check clippy toml-check deny
 
-# Full CI suite: lint + test
+# Full CI suite: lint + test (run before pushing)
 ci: lint test
 
 # Check TOML formatting (Cargo.toml, etc.)
@@ -45,21 +45,11 @@ deny:
 
 # Build the diagnostics dashboard (Preact + TypeScript → single HTML file)
 # Requires Node.js. Output: crates/logfwd-io/src/dashboard.html
-# The built file is committed, so this is only needed when editing dashboard/ source.
+# Must run before cargo build/test/clippy (CI does this automatically).
 dashboard:
     cd dashboard && npm install --prefer-offline && npm run build
 
-# Verify committed dashboard.html matches source (for CI)
-dashboard-check:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    cp crates/logfwd-io/src/dashboard.html /tmp/dashboard-before.html
-    just dashboard
-    if ! diff -q crates/logfwd-io/src/dashboard.html /tmp/dashboard-before.html >/dev/null 2>&1; then
-        echo "ERROR: dashboard.html is stale. Run 'just dashboard' and commit the result."
-        exit 1
-    fi
-    echo "dashboard.html is up to date"
+
 
 # Build release binary
 build:
