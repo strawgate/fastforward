@@ -27,6 +27,8 @@ pub struct FramedInput {
     format: FormatProcessor,
     remainder: Vec<u8>,
     out_buf: Vec<u8>,
+    /// Spare buffer swapped in when out_buf is emitted, preserving capacity
+    /// across polls without allocating.
     spare_buf: Vec<u8>,
     stats: Arc<ComponentStats>,
 }
@@ -101,11 +103,11 @@ impl InputSource for FramedInput {
                     self.stats.inc_lines(line_count as u64);
 
                     if !self.out_buf.is_empty() {
-                        // Reuse buffers to avoid per-event allocations.
-                        self.spare_buf.clear();
+                        // Take out_buf's content, swap in spare_buf's capacity
+                        // for next iteration. No allocation — the 64KB bounces
+                        // between the two buffers.
+                        let data = std::mem::take(&mut self.out_buf);
                         std::mem::swap(&mut self.out_buf, &mut self.spare_buf);
-                        let mut data = Vec::new();
-                        std::mem::swap(&mut self.spare_buf, &mut data);
                         result_events.push(InputEvent::Data { bytes: data });
                     }
                 }
