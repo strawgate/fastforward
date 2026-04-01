@@ -470,11 +470,18 @@ fn expand_env_vars(text: &str) -> String {
         if ch == '$' && chars.peek() == Some(&'{') {
             chars.next(); // consume '{'
             let mut var_name = String::new();
+            let mut found_close = false;
             for c in chars.by_ref() {
                 if c == '}' {
+                    found_close = true;
                     break;
                 }
                 var_name.push(c);
+            }
+            if !found_close {
+                result.push_str("${");
+                result.push_str(&var_name);
+                continue;
             }
             match std::env::var(&var_name) {
                 Ok(val) => result.push_str(&val),
@@ -642,6 +649,14 @@ output:
         assert_eq!(
             pipe.outputs[0].endpoint.as_deref(),
             Some("${LOGFWD_NONEXISTENT_VAR_12345}")
+        );
+    }
+
+    #[test]
+    fn unterminated_env_var_preserved_as_is() {
+        assert_eq!(
+            expand_env_vars("endpoint: ${LOGFWD_TEST_UNTERMINATED"),
+            "endpoint: ${LOGFWD_TEST_UNTERMINATED"
         );
     }
 
