@@ -410,6 +410,9 @@ fn input_poll_loop(
     batch_timeout: Duration,
     poll_interval: Duration,
 ) {
+    // Track when the buffer first became non-empty, not when we last
+    // sent. This ensures batch_timeout measures "time since first data
+    // arrived in this batch", preventing tiny flushes after idle periods.
     let mut buffered_since: Option<Instant> = None;
 
     loop {
@@ -417,6 +420,9 @@ fn input_poll_loop(
             break;
         }
 
+        // FramedInput handles newline framing, remainder management, and
+        // format processing (CRI/Auto/passthrough). Events arriving here
+        // contain scanner-ready bytes.
         let events = match input.source.poll() {
             Ok(e) => e,
             Err(e) => {
@@ -432,8 +438,6 @@ fn input_poll_loop(
             if !input.buf.is_empty() && buffered_since.is_none() {
                 buffered_since = Some(Instant::now());
             }
-            // FramedInput handles framing, remainder management, and format
-            // processing — events contain scanner-ready bytes.
             for event in events {
                 if let InputEvent::Data { bytes } = event {
                     input.buf.extend_from_slice(&bytes);
@@ -444,6 +448,8 @@ fn input_poll_loop(
             }
         }
 
+        // Send when buffer reaches target size OR timeout since first
+        // data in this batch has elapsed.
         let timeout_elapsed = buffered_since.is_some_and(|t| t.elapsed() >= batch_timeout);
         let should_send =
             input.buf.len() >= batch_target_bytes || (!input.buf.is_empty() && timeout_elapsed);
@@ -457,6 +463,7 @@ fn input_poll_loop(
         }
     }
 
+    // Drain any remaining buffered data on shutdown.
     if !input.buf.is_empty() {
         let data = std::mem::take(&mut input.buf);
         let _ = blocking_send_with_backpressure_metric(&tx, &metrics, data);
@@ -1916,125 +1923,6 @@ output:
     }
 }
 
-// CRI extraction tests moved to logfwd-io/src/format.rs
-// Remainder handling tests moved to logfwd-io/src/framed.rs
-
-#[cfg(test)]
-mod remainder_tests {
-    use super::*;
-    /// Simulate splitting input at every possible byte position
-    /// and verify we get the same output regardless of split point.
-    #[test]
-    #[allow(unused_assignments)]
-    fn partial_line_handling_split_anywhere() {
-        let full_input = b"{\"a\":1}\n{\"b\":2}\n{\"c\":3}\n";
-        let _stats = Arc::new(ComponentStats::new());
-
-        for split_at in 1..full_input.len() {
-            let chunk1 = &full_input[..split_at];
-            let chunk2 = &full_input[split_at..];
-
-            let mut buf = Vec::new();
-            let mut remainder: Vec<u8> = Vec::new();
-
-            // Process chunk1
-            let mut combined = remainder.clone();
-            combined.extend_from_slice(chunk1);
-            if let Some(pos) = memchr::memrchr(b'\n', &combined) {
-                if pos + 1 < combined.len() {
-                    remainder = combined[pos + 1..].to_vec();
-                    combined.truncate(pos + 1);
-                } else {
-                    remainder.clear();
-                }
-                buf.extend_from_slice(&combined);
-            } else {
-                remainder = combined;
-            }
-
-            // Process chunk2
-            let mut combined2 = remainder.clone();
-            combined2.extend_from_slice(chunk2);
-            if let Some(pos) = memchr::memrchr(b'\n', &combined2) {
-                if pos + 1 < combined2.len() {
-                    remainder = combined2[pos + 1..].to_vec();
-                    combined2.truncate(pos + 1);
-                } else {
-                    remainder.clear();
-                }
-                buf.extend_from_slice(&combined2);
-            } else {
-                remainder = combined2;
-            }
-
-            let result = String::from_utf8(buf).unwrap();
-            let lines: Vec<&str> = result
-                .trim()
-                .split('\n')
-                .filter(|l| !l.is_empty())
-                .collect();
-            assert_eq!(
-                lines.len(),
-                3,
-                "split at {split_at}: expected 3 lines, got {} from {:?}",
-                lines.len(),
-                lines
-            );
-        }
-    }
-
-    /// Verify that input with no newlines at all stays in remainder.
-    #[test]
-    #[allow(unused_variables)]
-    fn no_newline_all_remainder() {
-        let input = b"partial line without newline";
-        let mut remainder: Vec<u8> = Vec::new();
-
-        let mut combined = remainder.clone();
-        combined.extend_from_slice(input);
-        if memchr::memrchr(b'\n', &combined).is_none() {
-            remainder = combined;
-        }
-
-        assert_eq!(remainder, input);
-    }
-
-    /// Verify consecutive reads merge correctly across boundaries.
-    #[test]
-    fn remainder_merges_with_next_read() {
-        // Read 1: "hello " (no newline)
-        // Read 2: "world\n" (has newline)
-        // Should produce one line: "hello world"
-        let read1 = b"hello ";
-        let read2 = b"world\n";
-
-        let mut buf = Vec::new();
-        let mut remainder: Vec<u8> = Vec::new();
-
-        // Read 1
-        let mut combined = remainder.clone();
-        combined.extend_from_slice(read1);
-        if memchr::memrchr(b'\n', &combined).is_none() {
-            remainder = combined;
-            combined = Vec::new();
-        }
-        buf.extend_from_slice(&combined);
-
-        // Read 2
-        let mut combined = std::mem::take(&mut remainder);
-        combined.extend_from_slice(read2);
-        if let Some(pos) = memchr::memrchr(b'\n', &combined) {
-            if pos + 1 < combined.len() {
-                let _remainder_tail = combined[pos + 1..].to_vec();
-                combined.truncate(pos + 1);
-            }
-            buf.extend_from_slice(&combined);
-        }
-
-        assert_eq!(String::from_utf8(buf).unwrap().trim(), "hello world");
-    }
-}
-
 #[cfg(test)]
 mod format_integration_tests {
     use super::*;
@@ -2266,5 +2154,3 @@ mod proptest_pipeline {
         }
     }
 }
-
-// Remainder cap test moved to logfwd-io/src/framed.rs::remainder_capped_at_max

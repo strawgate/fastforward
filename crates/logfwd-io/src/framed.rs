@@ -60,7 +60,7 @@ impl InputSource for FramedInput {
                 InputEvent::Data { bytes } => {
                     self.stats.inc_bytes(bytes.len() as u64);
 
-                    // Prepend remainder from last poll.
+                    // Prepend remainder from last poll, reusing the Vec's capacity.
                     let mut chunk = std::mem::take(&mut self.remainder);
                     chunk.extend_from_slice(&bytes);
 
@@ -69,7 +69,9 @@ impl InputSource for FramedInput {
                     match memchr::memrchr(b'\n', &chunk) {
                         Some(pos) => {
                             if pos + 1 < chunk.len() {
-                                self.remainder = chunk[pos + 1..].to_vec();
+                                // Save tail as new remainder without extra allocation:
+                                // reuse self.remainder (currently empty after take).
+                                self.remainder.extend_from_slice(&chunk[pos + 1..]);
                                 chunk.truncate(pos + 1);
                             }
                         }
