@@ -27,6 +27,7 @@ pub struct FramedInput {
     format: FormatProcessor,
     remainder: Vec<u8>,
     out_buf: Vec<u8>,
+    spare_buf: Vec<u8>,
     stats: Arc<ComponentStats>,
 }
 
@@ -41,6 +42,7 @@ impl FramedInput {
             format,
             remainder: Vec::new(),
             out_buf: Vec::with_capacity(64 * 1024),
+            spare_buf: Vec::with_capacity(64 * 1024),
             stats,
         }
     }
@@ -69,9 +71,13 @@ impl InputSource for FramedInput {
                     match memchr::memrchr(b'\n', &chunk) {
                         Some(pos) => {
                             if pos + 1 < chunk.len() {
-                                // Save tail as new remainder without extra allocation:
-                                // reuse self.remainder (currently empty after take).
-                                self.remainder.extend_from_slice(&chunk[pos + 1..]);
+                                // Move tail to remainder without allocating.
+                                self.remainder = chunk.split_off(pos + 1);
+                                if self.remainder.len() > MAX_REMAINDER_BYTES {
+                                    self.stats.inc_parse_errors(1);
+                                    self.remainder.clear();
+                                    self.format.reset();
+                                }
                                 chunk.truncate(pos + 1);
                             }
                         }
@@ -81,6 +87,7 @@ impl InputSource for FramedInput {
                             if self.remainder.len() > MAX_REMAINDER_BYTES {
                                 self.stats.inc_parse_errors(1);
                                 self.remainder.clear();
+                                self.format.reset();
                             }
                             continue;
                         }
@@ -94,9 +101,10 @@ impl InputSource for FramedInput {
                     self.stats.inc_lines(line_count as u64);
 
                     if !self.out_buf.is_empty() {
-                        // Swap to preserve out_buf capacity for next poll.
-                        let mut data = Vec::with_capacity(self.out_buf.capacity());
-                        std::mem::swap(&mut self.out_buf, &mut data);
+                        // Reuse buffers to avoid per-event allocations.
+                        self.spare_buf.clear();
+                        std::mem::swap(&mut self.out_buf, &mut self.spare_buf);
+                        let data = std::mem::take(&mut self.spare_buf);
                         result_events.push(InputEvent::Data { bytes: data });
                     }
                 }
@@ -232,6 +240,28 @@ mod tests {
 
         let events = framed.poll().unwrap();
         assert!(collect_data(events).is_empty());
+        assert_eq!(
+            stats
+                .parse_errors_total
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+    }
+
+    #[test]
+    fn tail_after_newline_is_capped_at_max() {
+        let stats = make_stats();
+        let mut chunk = b"ok\n".to_vec();
+        chunk.extend(vec![b'x'; MAX_REMAINDER_BYTES + 1]);
+        let source = MockSource::from_chunks(vec![&chunk]);
+        let mut framed = FramedInput::new(
+            Box::new(source),
+            FormatProcessor::Passthrough,
+            Arc::clone(&stats),
+        );
+
+        let events = framed.poll().unwrap();
+        assert_eq!(collect_data(events), b"ok\n");
         assert_eq!(
             stats
                 .parse_errors_total

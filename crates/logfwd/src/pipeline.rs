@@ -492,13 +492,48 @@ fn blocking_send_with_backpressure_metric(
 // ---------------------------------------------------------------------------
 
 /// Build a format processor from the config format.
-fn make_format(format: &Format, stats: &Arc<ComponentStats>) -> FormatProcessor {
+fn make_format(
+    name: &str,
+    input_type: InputType,
+    format: &Format,
+    stats: &Arc<ComponentStats>,
+) -> Result<FormatProcessor, String> {
     const CRI_MAX_MESSAGE: usize = 2 * 1024 * 1024;
-    match format {
+    let proc = match format {
         Format::Cri => FormatProcessor::cri(CRI_MAX_MESSAGE, Arc::clone(stats)),
         Format::Auto => FormatProcessor::auto(CRI_MAX_MESSAGE, Arc::clone(stats)),
-        _ => FormatProcessor::Passthrough,
+        Format::Json | Format::Raw => FormatProcessor::Passthrough,
+        unsupported => {
+            return Err(format!(
+                "input '{name}': format {:?} is not supported for {:?} inputs",
+                unsupported, input_type
+            ));
+        }
+    };
+    Ok(proc)
+}
+
+fn validate_input_format(name: &str, input_type: InputType, format: &Format) -> Result<(), String> {
+    match input_type {
+        InputType::Generator | InputType::Otlp => {
+            if !matches!(format, Format::Json) {
+                return Err(format!(
+                    "input '{name}': format {:?} is not supported for {:?} inputs (expected json)",
+                    format, input_type
+                ));
+            }
+        }
+        InputType::Udp | InputType::Tcp => {
+            if matches!(format, Format::Cri | Format::Auto) {
+                return Err(format!(
+                    "input '{name}': CRI/auto format is not supported for {:?} inputs (CRI is a file-based container log format)",
+                    input_type
+                ));
+            }
+        }
+        _ => {}
     }
+    Ok(())
 }
 
 fn build_input_state(
@@ -528,6 +563,7 @@ fn build_input_state(
                 FileInput::new(name.to_string(), &[PathBuf::from(path)], tail_config)
             }
             .map_err(|e| format!("input '{name}': failed to create tailer: {e}"))?;
+            validate_input_format(name, InputType::File, &format)?;
             (Box::new(source), format, 4 * 1024 * 1024)
         }
         InputType::Generator => {
@@ -546,31 +582,31 @@ fn build_input_state(
                 total_events: 0,
                 ..Default::default()
             };
+            let format = cfg.format.clone().unwrap_or(Format::Json);
+            validate_input_format(name, InputType::Generator, &format)?;
             let source = GeneratorInput::new(name, config);
-            (Box::new(source), Format::Json, 4 * 1024 * 1024)
+            (Box::new(source), format, 4 * 1024 * 1024)
         }
         InputType::Otlp => {
             let addr = cfg
                 .listen
                 .as_ref()
                 .ok_or_else(|| format!("input '{name}': otlp input requires 'listen'"))?;
+            let format = cfg.format.clone().unwrap_or(Format::Json);
+            validate_input_format(name, InputType::Otlp, &format)?;
             let source = logfwd_io::otlp_receiver::OtlpReceiverInput::new(name, addr)
                 .map_err(|e| format!("input '{name}': failed to start OTLP receiver: {e}"))?;
-            (Box::new(source), Format::Json, 4 * 1024 * 1024)
+            (Box::new(source), format, 4 * 1024 * 1024)
         }
         InputType::Udp => {
             let addr = cfg
                 .listen
                 .as_ref()
                 .ok_or_else(|| format!("input '{name}': udp input requires 'listen'"))?;
-            if matches!(cfg.format, Some(Format::Cri | Format::Auto)) {
-                return Err(format!(
-                    "input '{name}': CRI/auto format is not supported for UDP inputs (CRI is a file-based container log format)"
-                ));
-            }
             let source = logfwd_io::udp_input::UdpInput::new(name, addr)
                 .map_err(|e| format!("input '{name}': failed to bind UDP {addr}: {e}"))?;
             let format = cfg.format.clone().unwrap_or(Format::Json);
+            validate_input_format(name, InputType::Udp, &format)?;
             (Box::new(source), format, 1024 * 1024)
         }
         InputType::Tcp => {
@@ -578,14 +614,10 @@ fn build_input_state(
                 .listen
                 .as_ref()
                 .ok_or_else(|| format!("input '{name}': tcp input requires 'listen'"))?;
-            if matches!(cfg.format, Some(Format::Cri | Format::Auto)) {
-                return Err(format!(
-                    "input '{name}': CRI/auto format is not supported for TCP inputs (CRI is a file-based container log format)"
-                ));
-            }
             let source = logfwd_io::tcp_input::TcpInput::new(name, addr)
                 .map_err(|e| format!("input '{name}': failed to bind TCP {addr}: {e}"))?;
             let format = cfg.format.clone().unwrap_or(Format::Json);
+            validate_input_format(name, InputType::Tcp, &format)?;
             (Box::new(source), format, 4 * 1024 * 1024)
         }
         _ => {
@@ -597,7 +629,7 @@ fn build_input_state(
     };
 
     // Wrap the raw transport with framing + format processing.
-    let format_proc = make_format(&format, &stats);
+    let format_proc = make_format(name, cfg.input_type.clone(), &format, &stats)?;
     let framed = FramedInput::new(raw_source, format_proc, Arc::clone(&stats));
 
     Ok(InputState {

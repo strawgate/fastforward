@@ -15,6 +15,7 @@ use std::sync::Arc;
 /// - `Passthrough`: lines are already scanner-ready (JSON, Raw)
 /// - `Cri`: parse CRI container log format, extract message body
 /// - `Auto`: try CRI, fall through to passthrough on parse failure
+#[non_exhaustive]
 pub enum FormatProcessor {
     Passthrough,
     Cri {
@@ -94,11 +95,13 @@ fn extract_cri_messages(
                 }
                 AggregateResult::Pending => {}
             }
-        } else if !line.is_empty() {
-            if passthrough_on_fail {
+        } else {
+            // Break any pending CRI aggregation at parse/fallback boundaries.
+            aggregator.reset();
+            if !line.is_empty() && passthrough_on_fail {
                 out.extend_from_slice(line);
                 out.push(b'\n');
-            } else {
+            } else if !line.is_empty() {
                 stats.inc_parse_errors(1);
             }
         }
@@ -182,6 +185,19 @@ mod tests {
         let mut out = Vec::new();
         proc.process_lines(input, &mut out);
         assert_eq!(out, b"{\"msg\":\"cri\"}\n");
+    }
+
+    #[test]
+    fn auto_malformed_line_resets_pending_state() {
+        let stats = make_stats();
+        let mut proc = FormatProcessor::auto(2 * 1024 * 1024, stats);
+        let mut out = Vec::new();
+
+        proc.process_lines(b"2024-01-15T10:30:00Z stdout P hello \n", &mut out);
+        proc.process_lines(b"not a cri line\n", &mut out);
+        proc.process_lines(b"2024-01-15T10:30:00Z stdout F world\n", &mut out);
+
+        assert_eq!(out, b"not a cri line\nworld\n");
     }
 
     #[test]
