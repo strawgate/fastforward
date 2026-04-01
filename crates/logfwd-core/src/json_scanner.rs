@@ -4,340 +4,348 @@
 // Processes structural positions from StructuralIter sequentially —
 // no stored bitmask vectors, no random-access lookups.
 //
-// The scanner is a state machine that expects this pattern:
-//   { "key" : value , "key" : value , ... }
-// where value is one of: "string", number, true, false, null, {nested}, [array]
+// Line boundaries are found first (newline bitmask), then each line
+// is scanned independently. Within a line, the scanner iterates
+// through structural positions sequentially.
 
 use crate::scan_config::{ScanConfig, parse_int_fast};
 use crate::scanner::ScanBuilder;
-use crate::structural_iter::{StructuralIter, StructuralKind};
+use crate::structural::{ProcessedBlock, StreamingClassifier, find_structural_chars};
 
 /// Scan an NDJSON buffer using streaming structural iteration.
 ///
-/// Zero heap allocation for bitmask storage. All structural positions
-/// are consumed on the fly from 64-byte block bitmasks.
+/// Zero heap allocation for bitmask storage. Line boundaries and
+/// structural positions are extracted from 64-byte block bitmasks
+/// consumed on the fly.
 #[inline(never)]
 pub fn scan_streaming<B: ScanBuilder>(buf: &[u8], config: &ScanConfig, builder: &mut B) {
     if buf.is_empty() {
         return;
     }
 
-    let mut iter = StructuralIter::new(buf);
-    builder.begin_batch();
+    // Phase 1: Find line boundaries and collect per-block processed bitmasks.
+    // We need the bitmasks for Phase 2, so store ProcessedBlock per block.
+    // This is ~80 bytes per 64-byte block = 1.25x buffer size in stack-like
+    // storage. For a 4MB batch that's ~80KB — acceptable.
+    let len = buf.len();
+    let num_blocks = len.div_ceil(64);
 
-    // Process the buffer as a stream of structural positions.
-    // Newlines delimit lines. Between newlines, parse JSON objects.
-    while let Some(sp) = iter.advance() {
-        match sp.kind {
-            StructuralKind::Newline => {
-                continue;
+    // Use a Vec for the block bitmasks. This is the ONE allocation —
+    // all bitmask storage. No per-character vectors.
+    let mut blocks = alloc::vec::Vec::with_capacity(num_blocks);
+    let mut line_ranges = alloc::vec::Vec::new();
+    let mut line_start: usize = 0;
+    let mut classifier = StreamingClassifier::new();
+
+    for block_idx in 0..num_blocks {
+        let offset = block_idx * 64;
+        let remaining = len - offset;
+        let block_len = remaining.min(64);
+
+        let block: [u8; 64] = if remaining >= 64 {
+            buf[offset..offset + 64].try_into().expect("64-byte block")
+        } else {
+            let mut padded = [b' '; 64];
+            padded[..remaining].copy_from_slice(&buf[offset..]);
+            padded
+        };
+
+        let raw = find_structural_chars(&block);
+        let processed = classifier.process_block(&raw, block_len);
+
+        // Extract line boundaries from newline bitmask
+        let mut nl = processed.newline;
+        while nl != 0 {
+            let bit_pos = nl.trailing_zeros() as usize;
+            let abs_pos = offset + bit_pos;
+            if abs_pos > line_start || config.keep_raw {
+                line_ranges.push((line_start, abs_pos));
             }
-            StructuralKind::OpenBrace => {
-                // Start of a JSON object — parse it
-                scan_json_object(buf, &mut iter, sp.pos, config, builder);
-            }
-            _ => {
-                // Non-object line start — skip to next newline
-                continue;
-            }
+            line_start = abs_pos + 1;
+            nl &= nl - 1;
         }
+
+        blocks.push(processed);
     }
 
     // Handle final line without trailing newline
-    // (scan_json_object already called end_row if it parsed anything)
+    if line_start < len {
+        line_ranges.push((line_start, len));
+    }
+
+    // Phase 2: Scan each line using per-block bitmasks.
+    builder.begin_batch();
+    for (start, end) in line_ranges {
+        scan_line(buf, start, end, &blocks, config, builder);
+    }
 }
 
-/// Parse a single JSON object from the structural position stream.
-/// Returns the byte position after the object (or line end).
-fn scan_json_object<B: ScanBuilder>(
+/// Scan a single JSON line using pre-computed block bitmasks.
+fn scan_line<B: ScanBuilder>(
     buf: &[u8],
-    iter: &mut StructuralIter<'_>,
-    open_brace_pos: usize,
+    start: usize,
+    end: usize,
+    blocks: &[ProcessedBlock],
     config: &ScanConfig,
     builder: &mut B,
-) -> usize {
+) {
     builder.begin_row();
     if config.keep_raw {
-        // We'll need to find the line end for raw — scan ahead or defer
-        // For now, raw is set when we find the newline/end
+        builder.append_raw(&buf[start..end]);
     }
 
+    // Find the opening '{' using bitmasks
+    let mut pos = next_non_ws(buf, start, end);
+    if pos >= end || buf[pos] != b'{' {
+        builder.end_row();
+        return;
+    }
+    pos += 1;
+
+    // Parse key-value pairs
     loop {
-        // Expect: quote (key start) or close brace (end of object)
-        let sp = match iter.advance() {
-            Some(sp) => sp,
-            None => {
-                // Buffer ended mid-object
-                if config.keep_raw {
-                    builder.append_raw(&buf[open_brace_pos..buf.len()]);
-                }
-                builder.end_row();
-                return buf.len();
-            }
+        pos = next_non_ws(buf, pos, end);
+        if pos >= end || buf[pos] == b'}' {
+            break;
+        }
+        if buf[pos] != b'"' {
+            break;
+        }
+
+        // Scan key string using quote bitmask
+        let key_start = pos + 1;
+        let key_end = match next_quote(pos + 1, end, blocks) {
+            Some(p) => p,
+            None => break,
         };
+        let key = &buf[key_start..key_end];
+        pos = key_end + 1;
 
-        match sp.kind {
-            StructuralKind::Newline => {
-                // Line ended — finalize row
-                if config.keep_raw {
-                    builder.append_raw(&buf[open_brace_pos..sp.pos]);
-                }
-                builder.end_row();
-                return sp.pos + 1;
-            }
-            StructuralKind::CloseBrace => {
-                // Object ended — find the newline to set raw, then finalize
-                // Consume positions until newline or end
-                loop {
-                    match iter.advance() {
-                        Some(nl) if nl.kind == StructuralKind::Newline => {
-                            if config.keep_raw {
-                                builder.append_raw(&buf[open_brace_pos..nl.pos]);
-                            }
-                            builder.end_row();
-                            return nl.pos + 1;
-                        }
-                        Some(_) => continue, // skip trailing content
-                        None => {
-                            if config.keep_raw {
-                                builder.append_raw(&buf[open_brace_pos..buf.len()]);
-                            }
-                            builder.end_row();
-                            return buf.len();
-                        }
-                    }
-                }
-            }
-            StructuralKind::Quote => {
-                // Key start — read key, then colon, then value
-                let key_start = sp.pos + 1;
+        // Expect colon
+        pos = next_non_ws(buf, pos, end);
+        if pos >= end || buf[pos] != b':' {
+            break;
+        }
+        pos += 1;
 
-                // Next structural must be closing quote of key
-                let close_quote = match iter.advance() {
-                    Some(sp) if sp.kind == StructuralKind::Quote => sp.pos,
-                    Some(sp) if sp.kind == StructuralKind::Newline => {
-                        if config.keep_raw {
-                            builder.append_raw(&buf[open_brace_pos..sp.pos]);
-                        }
-                        builder.end_row();
-                        return sp.pos + 1;
-                    }
-                    _ => {
-                        builder.end_row();
-                        return buf.len();
-                    }
+        // Parse value
+        pos = next_non_ws(buf, pos, end);
+        if pos >= end {
+            break;
+        }
+
+        let wanted = config.is_wanted(key);
+        match buf[pos] {
+            b'"' => {
+                // String value
+                let val_start = pos + 1;
+                let val_end = match next_quote(pos + 1, end, blocks) {
+                    Some(p) => p,
+                    None => break,
                 };
-                let key = &buf[key_start..close_quote];
-
-                // Expect colon
-                match iter.advance() {
-                    Some(sp) if sp.kind == StructuralKind::Colon => {}
-                    Some(sp) if sp.kind == StructuralKind::Newline => {
-                        if config.keep_raw {
-                            builder.append_raw(&buf[open_brace_pos..sp.pos]);
-                        }
-                        builder.end_row();
-                        return sp.pos + 1;
-                    }
-                    _ => {
-                        builder.end_row();
-                        return buf.len();
-                    }
+                if wanted {
+                    let idx = builder.resolve_field(key);
+                    builder.append_str_by_idx(idx, &buf[val_start..val_end]);
                 }
-
-                let wanted = config.is_wanted(key);
-
-                // Now read the value — peek at next structural to determine type
-                let value_sp = match iter.advance() {
-                    Some(sp) => sp,
-                    None => {
-                        builder.end_row();
-                        return buf.len();
-                    }
-                };
-
-                match value_sp.kind {
-                    StructuralKind::Newline => {
-                        if config.keep_raw {
-                            builder.append_raw(&buf[open_brace_pos..value_sp.pos]);
-                        }
-                        builder.end_row();
-                        return value_sp.pos + 1;
-                    }
-                    StructuralKind::Quote => {
-                        // String value — next quote is the closing one
-                        let val_start = value_sp.pos + 1;
-                        let close = match iter.advance() {
-                            Some(sp) if sp.kind == StructuralKind::Quote => sp.pos,
-                            Some(sp) if sp.kind == StructuralKind::Newline => {
-                                if config.keep_raw {
-                                    builder.append_raw(&buf[open_brace_pos..sp.pos]);
-                                }
-                                builder.end_row();
-                                return sp.pos + 1;
-                            }
-                            _ => {
-                                builder.end_row();
-                                return buf.len();
-                            }
-                        };
-                        if wanted {
-                            let idx = builder.resolve_field(key);
-                            builder.append_str_by_idx(idx, &buf[val_start..close]);
-                        }
-                    }
-                    StructuralKind::OpenBrace | StructuralKind::OpenBracket => {
-                        // Nested object/array — skip by tracking depth
-                        let nested_start = value_sp.pos;
-                        let mut depth: u32 = 1;
-                        let mut nested_end = value_sp.pos + 1;
-                        while depth > 0 {
-                            match iter.advance() {
-                                Some(sp) => {
-                                    nested_end = sp.pos + 1;
-                                    match sp.kind {
-                                        StructuralKind::OpenBrace | StructuralKind::OpenBracket => {
-                                            depth += 1;
-                                        }
-                                        StructuralKind::CloseBrace
-                                        | StructuralKind::CloseBracket => {
-                                            depth -= 1;
-                                        }
-                                        StructuralKind::Newline => {
-                                            // Malformed — newline inside nested
-                                            if config.keep_raw {
-                                                builder.append_raw(&buf[open_brace_pos..sp.pos]);
-                                            }
-                                            builder.end_row();
-                                            return sp.pos + 1;
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                                None => break,
-                            }
-                        }
-                        if wanted {
-                            let idx = builder.resolve_field(key);
-                            builder.append_str_by_idx(idx, &buf[nested_start..nested_end]);
-                        }
-                    }
-                    StructuralKind::Comma | StructuralKind::CloseBrace => {
-                        // The next structural after colon is a comma or brace —
-                        // the bare value is between the colon and this delimiter.
-                        // We need to find where the colon was... the value bytes
-                        // are between (colon_pos+1) and value_sp.pos.
-                        // We know colon was at close_quote + skip_ws... approximate
-                        // by scanning backwards from value_sp.pos.
-                        let val_end = value_sp.pos;
-                        let val_start = close_quote + 2; // after ": "
-                        let val = trim_ws(&buf[val_start..val_end]);
-
-                        if wanted && !val.is_empty() {
-                            dispatch_bare_value(key, val, builder);
-                        }
-
-                        // If this was a close brace, the object is ending
-                        if value_sp.kind == StructuralKind::CloseBrace {
-                            // Find newline to finalize
-                            loop {
-                                match iter.advance() {
-                                    Some(nl) if nl.kind == StructuralKind::Newline => {
-                                        if config.keep_raw {
-                                            builder.append_raw(&buf[open_brace_pos..nl.pos]);
-                                        }
-                                        builder.end_row();
-                                        return nl.pos + 1;
-                                    }
-                                    Some(_) => continue,
-                                    None => {
-                                        if config.keep_raw {
-                                            builder.append_raw(&buf[open_brace_pos..buf.len()]);
-                                        }
-                                        builder.end_row();
-                                        return buf.len();
-                                    }
-                                }
-                            }
-                        }
-                        // Comma — continue to next key
-                        continue;
-                    }
-                    _ => {
-                        // Unexpected structural — skip
-                    }
-                }
-
-                // After value, expect comma or close brace
-                // (might already have been consumed if value was bare)
+                pos = val_end + 1;
             }
-            StructuralKind::Comma => {
-                // Between fields — continue
-                continue;
+            b'{' | b'[' => {
+                // Nested object/array — skip using bitmasks
+                let nested_start = pos;
+                pos = skip_nested(buf, pos, end, blocks);
+                if wanted {
+                    let idx = builder.resolve_field(key);
+                    builder.append_str_by_idx(idx, &buf[nested_start..pos]);
+                }
+            }
+            b't' => {
+                // Validate true (#515)
+                if pos + 4 <= end && &buf[pos..pos + 4] == b"true" {
+                    if wanted {
+                        let idx = builder.resolve_field(key);
+                        builder.append_str_by_idx(idx, &buf[pos..pos + 4]);
+                    }
+                    pos += 4;
+                } else {
+                    pos = skip_bare_value(buf, pos, end);
+                }
+            }
+            b'f' => {
+                // Validate false (#515)
+                if pos + 5 <= end && &buf[pos..pos + 5] == b"false" {
+                    if wanted {
+                        let idx = builder.resolve_field(key);
+                        builder.append_str_by_idx(idx, &buf[pos..pos + 5]);
+                    }
+                    pos += 5;
+                } else {
+                    pos = skip_bare_value(buf, pos, end);
+                }
+            }
+            b'n' => {
+                // Validate null (#515)
+                if pos + 4 <= end && &buf[pos..pos + 4] == b"null" {
+                    if wanted {
+                        let idx = builder.resolve_field(key);
+                        builder.append_null_by_idx(idx);
+                    }
+                    pos += 4;
+                } else {
+                    pos = skip_bare_value(buf, pos, end);
+                }
             }
             _ => {
-                // Unexpected structural position — skip
-                continue;
+                // Number
+                let num_start = pos;
+                let mut is_float = false;
+                while pos < end {
+                    let c = buf[pos];
+                    if c == b'.' || c == b'e' || c == b'E' {
+                        is_float = true;
+                        pos += 1;
+                    } else if c == b',' || c == b'}' || c == b' ' || c == b'\t' || c == b'\r' {
+                        break;
+                    } else {
+                        pos += 1;
+                    }
+                }
+                if wanted {
+                    let idx = builder.resolve_field(key);
+                    let val = &buf[num_start..pos];
+                    if is_float {
+                        builder.append_float_by_idx(idx, val);
+                    } else if parse_int_fast(val).is_some() {
+                        builder.append_int_by_idx(idx, val);
+                    } else {
+                        builder.append_float_by_idx(idx, val);
+                    }
+                }
             }
+        }
+
+        // Skip comma between fields
+        pos = next_non_ws(buf, pos, end);
+        if pos < end && buf[pos] == b',' {
+            pos += 1;
         }
     }
+    builder.end_row();
 }
 
-/// Dispatch a bare value (number, boolean, null) to the builder.
-fn dispatch_bare_value<B: ScanBuilder>(key: &[u8], val: &[u8], builder: &mut B) {
-    let idx = builder.resolve_field(key);
-    match val.first() {
-        Some(b'n') => {
-            // Validate null
-            if val == b"null" {
-                builder.append_null_by_idx(idx);
-            }
-            // else: malformed — skip (#515)
-        }
-        Some(b't') => {
-            if val == b"true" {
-                builder.append_str_by_idx(idx, val);
-            }
-        }
-        Some(b'f') => {
-            if val == b"false" {
-                builder.append_str_by_idx(idx, val);
-            }
-        }
-        Some(b'-' | b'0'..=b'9') => {
-            let is_float = val.iter().any(|&c| c == b'.' || c == b'e' || c == b'E');
-            if is_float {
-                builder.append_float_by_idx(idx, val);
-            } else if parse_int_fast(val).is_some() {
-                builder.append_int_by_idx(idx, val);
-            } else {
-                builder.append_float_by_idx(idx, val);
-            }
-        }
-        _ => {
-            // Unknown bare value — skip
-        }
-    }
-}
+// ---------------------------------------------------------------------------
+// Bitmask-accelerated helpers
+// ---------------------------------------------------------------------------
 
-/// Trim ASCII whitespace from both ends of a byte slice.
+/// Find the next unescaped quote at or after `from`, bounded by `end`.
+/// Uses per-block real_quotes bitmask for O(1) per-block lookup.
 #[inline]
-fn trim_ws(mut s: &[u8]) -> &[u8] {
-    while let Some((&b, rest)) = s.split_first() {
-        if matches!(b, b' ' | b'\t' | b'\r' | b'\n') {
-            s = rest;
+fn next_quote(from: usize, end: usize, blocks: &[ProcessedBlock]) -> Option<usize> {
+    let mut pos = from;
+    while pos < end {
+        let block = pos >> 6;
+        let bit = pos & 63;
+        if block < blocks.len() {
+            let mask = blocks[block].real_quotes >> bit;
+            if mask != 0 {
+                let found = pos + mask.trailing_zeros() as usize;
+                if found < end {
+                    return Some(found);
+                }
+                return None;
+            }
+            // No quotes in rest of this block — skip to next
+            pos = (block + 1) << 6;
         } else {
-            break;
+            return None;
         }
     }
-    while let Some((&b, rest)) = s.split_last() {
-        if matches!(b, b' ' | b'\t' | b'\r' | b'\n') {
-            s = rest;
-        } else {
-            break;
+    None
+}
+
+/// Find the next non-whitespace position using space bitmask.
+#[inline]
+fn next_non_ws(buf: &[u8], mut pos: usize, end: usize) -> usize {
+    while pos < end {
+        match buf[pos] {
+            b' ' | b'\t' | b'\r' => {
+                pos += 1;
+            }
+            _ => return pos,
         }
     }
-    s
+    pos
+}
+
+/// Skip a nested object/array using brace/bracket bitmasks.
+#[inline]
+fn skip_nested(buf: &[u8], mut pos: usize, end: usize, blocks: &[ProcessedBlock]) -> usize {
+    let mut depth: u32 = 0;
+    let mut opener_stack = [0u8; 32];
+
+    while pos < end {
+        let block = pos >> 6;
+        let bit = pos & 63;
+        if block >= blocks.len() {
+            break;
+        }
+
+        let p = &blocks[block];
+        // Check if this position is a structural character (not in string)
+        let mask = 1u64 << bit;
+        let b = buf[pos];
+
+        match b {
+            b'{' | b'[' if (p.open_brace | p.open_bracket) & mask != 0 => {
+                if depth < 32 {
+                    opener_stack[depth as usize] = b;
+                }
+                depth += 1;
+                pos += 1;
+            }
+            b'}' | b']' if (p.close_brace | p.close_bracket) & mask != 0 => {
+                if depth == 0 {
+                    return pos;
+                }
+                depth -= 1;
+                if depth < 32 {
+                    let expected = if opener_stack[depth as usize] == b'{' {
+                        b'}'
+                    } else {
+                        b']'
+                    };
+                    if b != expected {
+                        return end; // mismatch
+                    }
+                }
+                pos += 1;
+                if depth == 0 {
+                    return pos;
+                }
+            }
+            b'"' if p.real_quotes & mask != 0 => {
+                // Skip string
+                pos += 1;
+                match next_quote(pos, end, blocks) {
+                    Some(close) => pos = close + 1,
+                    None => return end,
+                }
+            }
+            _ => pos += 1,
+        }
+    }
+    pos
+}
+
+/// Skip a bare value (used for malformed tokens).
+#[inline]
+fn skip_bare_value(buf: &[u8], mut pos: usize, end: usize) -> usize {
+    while pos < end {
+        match buf[pos] {
+            b',' | b'}' | b' ' | b'\t' | b'\r' | b'\n' => return pos,
+            _ => pos += 1,
+        }
+    }
+    pos
 }
 
 // ---------------------------------------------------------------------------
@@ -475,20 +483,17 @@ mod tests {
 
     #[test]
     fn validates_null_token() {
-        // #515: "nul" should not be accepted as null
         let buf = br#"{"x":nul}"#;
         let config = ScanConfig::default();
         let mut builder = TestBuilder::new();
         scan_streaming(buf, &config, &mut builder);
 
         assert_eq!(builder.rows.len(), 1);
-        // "nul" is not "null" — should be skipped, not emitted as null
         assert!(builder.rows[0].is_empty());
     }
 
     #[test]
     fn validates_boolean_token() {
-        // #515: "turkey" should not be accepted as true
         let buf = br#"{"x":turkey}"#;
         let config = ScanConfig::default();
         let mut builder = TestBuilder::new();
@@ -524,5 +529,32 @@ mod tests {
         let row = &builder.rows[0];
         assert!(row.iter().any(|(k, v)| k == "tags" && v == r#"["a","b"]"#));
         assert!(row.iter().any(|(k, v)| k == "x" && v == "int:1"));
+    }
+
+    #[test]
+    fn raw_non_json_lines() {
+        let buf = b"plain text line 1\nplain text line 2\n";
+        let config = ScanConfig {
+            keep_raw: true,
+            ..ScanConfig::default()
+        };
+        let mut builder = TestBuilder::new();
+        scan_streaming(buf, &config, &mut builder);
+
+        assert_eq!(builder.rows.len(), 2);
+    }
+
+    #[test]
+    fn keep_raw_with_json() {
+        let buf = br#"{"a":"b"}"#;
+        let config = ScanConfig {
+            keep_raw: true,
+            ..ScanConfig::default()
+        };
+        let mut builder = TestBuilder::new();
+        scan_streaming(buf, &config, &mut builder);
+
+        assert_eq!(builder.rows.len(), 1);
+        assert!(builder.rows[0].iter().any(|(k, v)| k == "a" && v == "b"));
     }
 }
