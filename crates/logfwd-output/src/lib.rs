@@ -104,13 +104,11 @@ pub fn parse_column_name(col_name: &str) -> (&str, &str) {
 /// struct groups them so the output picks the first non-null variant per row,
 /// preserving type fidelity (integers stay unquoted, strings stay quoted).
 pub struct ColInfo {
-    /// Index of the primary (highest-priority) column — used for output ordering.
-    primary_idx: usize,
     /// Base field name with type suffix stripped (e.g. "status" from "status_int").
-    field_name: String,
+    pub field_name: String,
     /// All column variants for this field, ordered by type priority (Int64 first).
     /// Each entry is (column_index, data_type).
-    variants: Vec<(usize, DataType)>,
+    pub variants: Vec<(usize, DataType)>,
 }
 
 /// Priority for Arrow DataTypes when multiple columns exist for the same field.
@@ -147,7 +145,6 @@ pub fn build_col_infos(batch: &RecordBatch) -> Vec<ColInfo> {
         } else {
             seen.insert(field_name.clone(), groups.len());
             groups.push(ColInfo {
-                primary_idx: idx,
                 field_name,
                 variants: vec![(idx, dt)],
             });
@@ -203,14 +200,14 @@ fn write_json_value(arr: &dyn Array, row: usize, out: &mut Vec<u8>) {
     match arr.data_type() {
         DataType::Int64 => {
             let v = arr.as_primitive::<arrow::datatypes::Int64Type>().value(row);
-            let _ = Write::write_fmt(out, format_args!("{v}"));
+            out.extend_from_slice(itoa::Buffer::new().format(v).as_bytes());
         }
         DataType::Float64 => {
             let v = arr
                 .as_primitive::<arrow::datatypes::Float64Type>()
                 .value(row);
             if v.is_finite() {
-                let _ = Write::write_fmt(out, format_args!("{v}"));
+                out.extend_from_slice(ryu::Buffer::new().format_finite(v).as_bytes());
             } else {
                 out.extend_from_slice(b"null");
             }

@@ -163,11 +163,13 @@ impl StdoutSink {
             // Remaining fields as key=value pairs (dim).
             let mut has_extra = false;
             for col in &cols {
-                // Skip the well-known columns and _raw.
-                if Some(col.primary_idx) == ts_idx
-                    || Some(col.primary_idx) == level_idx
-                    || Some(col.primary_idx) == msg_idx
-                    || col.field_name == "_raw"
+                // Skip the well-known columns and _raw. Check ALL variant
+                // indices — find_col may have matched a different variant
+                // (e.g. message_str vs message_int).
+                if col.field_name == "_raw"
+                    || col.variants.iter().any(|(idx, _)| {
+                        Some(*idx) == ts_idx || Some(*idx) == level_idx || Some(*idx) == msg_idx
+                    })
                 {
                     continue;
                 }
@@ -198,12 +200,16 @@ impl StdoutSink {
                 // Dispatch on Arrow DataType, not column name suffix.
                 match arr.data_type() {
                     DataType::Int64 => {
-                        let arr = arr.as_primitive::<arrow::datatypes::Int64Type>();
-                        write!(self.buf, "{}", arr.value(row))?;
+                        let v = arr.as_primitive::<arrow::datatypes::Int64Type>().value(row);
+                        self.buf
+                            .extend_from_slice(itoa::Buffer::new().format(v).as_bytes());
                     }
                     DataType::Float64 => {
-                        let arr = arr.as_primitive::<arrow::datatypes::Float64Type>();
-                        write!(self.buf, "{}", arr.value(row))?;
+                        let v = arr
+                            .as_primitive::<arrow::datatypes::Float64Type>()
+                            .value(row);
+                        self.buf
+                            .extend_from_slice(ryu::Buffer::new().format_finite(v).as_bytes());
                     }
                     _ => {
                         self.buf.extend_from_slice(str_value(arr, row).as_bytes());
