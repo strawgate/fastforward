@@ -484,7 +484,14 @@ mod verification {
                 assert!(p.newline & mask == 0);
             }
             StructuralKind::OpenBracket => {
-                // Fallthrough — no assertion on open_bracket (it's the else branch)
+                assert!(p.open_bracket & mask != 0);
+                assert!(p.real_quotes & mask == 0);
+                assert!(p.comma & mask == 0);
+                assert!(p.colon & mask == 0);
+                assert!(p.close_brace & mask == 0);
+                assert!(p.open_brace & mask == 0);
+                assert!(p.newline & mask == 0);
+                assert!(p.close_bracket & mask == 0);
             }
         }
     }
