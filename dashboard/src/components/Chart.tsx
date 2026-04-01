@@ -83,6 +83,16 @@ export function Chart({ series }: Props) {
       ],
       scales: {
         x: { min: now - win, max: now },
+        y: {
+          range: (_u, dataMin, dataMax) => {
+            const [yMin, yMax] = series.yRange ?? [0, 100];
+            // Use the configured range as minimum, but expand if data exceeds it.
+            return [
+              Math.min(yMin, dataMin ?? 0),
+              Math.max(yMax, (dataMax ?? 0) * 1.1),
+            ];
+          },
+        },
       },
       series: [
         {},

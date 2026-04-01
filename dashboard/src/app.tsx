@@ -22,18 +22,20 @@ export interface MetricSeries {
   unit: string;
   limit?: string;
   fmtAxis?: (v: number) => string;
+  /** Minimum Y-axis range [min, max]. Auto-scales beyond this. */
+  yRange?: [number, number];
 }
 
 const rates = new RateTracker();
 
 function createSeries(): MetricSeries[] {
   return [
-    { id: "lps", label: "Lines / sec", color: "#3b82f6", ring: new RingBuffer(), value: "-", unit: "/s", fmtAxis: fmtCompact },
-    { id: "bps", label: "Input Bytes", color: "#8b5cf6", ring: new RingBuffer(), value: "-", unit: "/s", fmtAxis: fmtBytesCompact },
-    { id: "err", label: "Errors / sec", color: "#ef4444", ring: new RingBuffer(), value: "-", unit: "/s", fmtAxis: fmtCompact },
-    { id: "cpu", label: "Process CPU", color: "#f59e0b", ring: new RingBuffer(), value: "-", unit: "%", fmtAxis: (v) => v.toFixed(1) },
-    { id: "mem", label: "Memory", color: "#10b981", ring: new RingBuffer(), value: "-", unit: "", fmtAxis: fmtBytesCompact },
-    { id: "lat", label: "Batch Latency", color: "#06b6d4", ring: new RingBuffer(), value: "-", unit: "ms", fmtAxis: (v) => v.toFixed(1) },
+    { id: "lps", label: "Lines / sec", color: "#3b82f6", ring: new RingBuffer(), value: "-", unit: "/s", fmtAxis: fmtCompact, yRange: [0, 1000] },
+    { id: "bps", label: "Input Bytes", color: "#8b5cf6", ring: new RingBuffer(), value: "-", unit: "/s", fmtAxis: fmtBytesCompact, yRange: [0, 102400] },
+    { id: "err", label: "Errors / sec", color: "#ef4444", ring: new RingBuffer(), value: "-", unit: "/s", fmtAxis: fmtCompact, yRange: [0, 10] },
+    { id: "cpu", label: "Process CPU", color: "#f59e0b", ring: new RingBuffer(), value: "-", unit: "%", fmtAxis: (v) => v.toFixed(1), yRange: [0, 10] },
+    { id: "mem", label: "Memory", color: "#10b981", ring: new RingBuffer(), value: "-", unit: "", fmtAxis: fmtBytesCompact, yRange: [0, 67108864] },
+    { id: "lat", label: "Batch Latency", color: "#06b6d4", ring: new RingBuffer(), value: "-", unit: "ms", fmtAxis: (v) => v.toFixed(1), yRange: [0, 100] },
   ];
 }
 
