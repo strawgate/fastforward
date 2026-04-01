@@ -89,7 +89,7 @@ impl OutputSink for FanOut {
         }
     }
 
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "fanout"
     }
 }
