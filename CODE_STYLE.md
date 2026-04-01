@@ -11,10 +11,10 @@ All crates inherit via `[lints] workspace = true`. Do not add per-crate lint
 overrides — adjust the workspace config instead.
 
 - **clippy::pedantic** is warn-level with selective allows for noisy lints.
-- **clippy::unwrap_used** is warn-level. Use `?`, `.expect("reason")`, or
-  `unwrap_or` in production code. `unwrap()` is acceptable only in tests
-  and truly impossible cases.
-- **unsafe_code** is warn-level globally. logfwd-core overrides to `forbid`.
+- **No `.unwrap()` in production paths.** Use `?`, `.expect("reason")`, or
+  `unwrap_or`. CI runs `clippy -- -D warnings`, so any clippy warning is
+  a build failure.
+- **unsafe_code** is `forbid` in logfwd-core. Other crates allow it sparingly.
   Every `unsafe` block must have a `// SAFETY:` comment.
 - **overflow-checks** are enabled in release builds.
 
