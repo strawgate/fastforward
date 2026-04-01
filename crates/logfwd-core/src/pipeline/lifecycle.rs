@@ -743,17 +743,16 @@ mod verification {
         assert_eq!(a2.checkpoint, Some(cp));
     }
 
-    /// Reverse-order ACK with 4 batches: acking in order 4,3,2,1 still
-    /// produces the correct final checkpoint (cp4).
+    /// Symbolic-order ACK with 4 batches: all 24 permutations produce
+    /// the correct final checkpoint (cp4).
     ///
-    /// This extends the 3-batch proof to verify the ordered-ack tracking
-    /// handles a deeper pending-ACK queue correctly. The worst case for
-    /// the BTreeMap-based tracking is when ALL batches arrive in reverse
-    /// order — every ack goes through the pending path before the final
-    /// one triggers a full commit advance.
+    /// Extends the 3-batch proof (all 6 permutations) to 4 batches,
+    /// symbolically exploring all orderings via kani::any(). Verifies
+    /// the BTreeMap-based pending-ACK queue handles arbitrary depth
+    /// and ordering correctly.
     #[kani::proof]
     #[kani::unwind(5)]
-    fn verify_reverse_order_ack_4_batches() {
+    fn verify_symbolic_order_ack_4_batches() {
         let mut running: PipelineMachine<Running, u64> =
             PipelineMachine::<Starting, u64>::new().start();
         let src = SourceId(0);
@@ -773,24 +772,50 @@ mod verification {
         let s3 = running.begin_send(t3);
         let s4 = running.begin_send(t4);
 
-        // Ack in reverse order — worst case for pending-ACK queue
-        let a4 = running.apply_ack(s4.ack());
-        assert!(!a4.advanced, "s4 alone should not advance checkpoint");
+        // Symbolically explore all 24 orderings (s2n-quic pattern)
+        let order: u8 = kani::any_where(|&o: &u8| o < 24);
+        let (r_a, r_b, r_c, r_d) = match order {
+            0 => (s1.ack(), s2.ack(), s3.ack(), s4.ack()),
+            1 => (s1.ack(), s2.ack(), s4.ack(), s3.ack()),
+            2 => (s1.ack(), s3.ack(), s2.ack(), s4.ack()),
+            3 => (s1.ack(), s3.ack(), s4.ack(), s2.ack()),
+            4 => (s1.ack(), s4.ack(), s2.ack(), s3.ack()),
+            5 => (s1.ack(), s4.ack(), s3.ack(), s2.ack()),
+            6 => (s2.ack(), s1.ack(), s3.ack(), s4.ack()),
+            7 => (s2.ack(), s1.ack(), s4.ack(), s3.ack()),
+            8 => (s2.ack(), s3.ack(), s1.ack(), s4.ack()),
+            9 => (s2.ack(), s3.ack(), s4.ack(), s1.ack()),
+            10 => (s2.ack(), s4.ack(), s1.ack(), s3.ack()),
+            11 => (s2.ack(), s4.ack(), s3.ack(), s1.ack()),
+            12 => (s3.ack(), s1.ack(), s2.ack(), s4.ack()),
+            13 => (s3.ack(), s1.ack(), s4.ack(), s2.ack()),
+            14 => (s3.ack(), s2.ack(), s1.ack(), s4.ack()),
+            15 => (s3.ack(), s2.ack(), s4.ack(), s1.ack()),
+            16 => (s3.ack(), s4.ack(), s1.ack(), s2.ack()),
+            17 => (s3.ack(), s4.ack(), s2.ack(), s1.ack()),
+            18 => (s4.ack(), s1.ack(), s2.ack(), s3.ack()),
+            19 => (s4.ack(), s1.ack(), s3.ack(), s2.ack()),
+            20 => (s4.ack(), s2.ack(), s1.ack(), s3.ack()),
+            21 => (s4.ack(), s2.ack(), s3.ack(), s1.ack()),
+            22 => (s4.ack(), s3.ack(), s1.ack(), s2.ack()),
+            _ => (s4.ack(), s3.ack(), s2.ack(), s1.ack()),
+        };
+
+        running.apply_ack(r_a);
         assert_eq!(running.in_flight_count(), 3);
-
-        let a3 = running.apply_ack(s3.ack());
-        assert!(!a3.advanced, "s3+s4 pending should not advance");
+        running.apply_ack(r_b);
         assert_eq!(running.in_flight_count(), 2);
-
-        let a2 = running.apply_ack(s2.ack());
-        assert!(!a2.advanced, "s2+s3+s4 pending should not advance");
+        running.apply_ack(r_c);
         assert_eq!(running.in_flight_count(), 1);
+        let a4 = running.apply_ack(r_d);
 
-        // Acking s1 should trigger full commit advance through all 4
-        let a1 = running.apply_ack(s1.ack());
-        assert!(a1.advanced, "s1 should trigger full advance");
-        assert_eq!(a1.checkpoint, Some(cp4));
+        // After all 4 acked in any order, checkpoint must be cp4
+        assert_eq!(a4.checkpoint, Some(cp4));
         assert_eq!(running.in_flight_count(), 0);
+
+        // Verify interesting orderings are reachable
+        kani::cover!(order == 0, "in-order ack");
+        kani::cover!(order == 23, "fully reversed ack");
     }
 }
 

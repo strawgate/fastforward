@@ -537,17 +537,32 @@ mod verification {
     /// 3. No structural position is skipped (yielded count ==
     ///    popcount of merged structural bitmask)
     /// 4. advance() returns None after all positions are yielded
+    /// 5. Each yielded position is actually a structural byte in the buffer
     ///
     /// Uses 8-byte input (1 block, padded to 64) to keep the proof
     /// tractable while exercising the full load_block + advance pipeline.
     #[kani::proof]
     #[kani::unwind(66)]
+    #[kani::solver(kissat)]
     fn verify_advance_yields_all_structural() {
         let buf: [u8; 8] = kani::any();
         let mut iter = StructuralIter::new(&buf);
 
         // Capture initial merged structural bitmask before advance mutates it
         let expected_bits = iter.remaining_bits;
+
+        // Independent oracle: count structural bytes in the buffer directly
+        let mut oracle_count: usize = 0;
+        let mut b = 0;
+        while b < 8 {
+            match buf[b] {
+                b'"' | b',' | b':' | b'{' | b'}' | b'[' | b']' | b'\n' => {
+                    oracle_count += 1;
+                }
+                _ => {}
+            }
+            b += 1;
+        }
 
         let mut yielded_bits: u64 = 0;
         let mut prev_pos: Option<usize> = None;
@@ -567,6 +582,19 @@ mod verification {
                     if let Some(p) = prev_pos {
                         assert!(sp.pos > p, "not strictly ascending");
                     }
+                    // Property 5: the byte at this position is structural
+                    let byte = buf[sp.pos];
+                    assert!(
+                        byte == b'"'
+                            || byte == b','
+                            || byte == b':'
+                            || byte == b'{'
+                            || byte == b'}'
+                            || byte == b'['
+                            || byte == b']'
+                            || byte == b'\n',
+                        "yielded non-structural byte"
+                    );
                     prev_pos = Some(sp.pos);
                     count += 1;
                 }
@@ -579,5 +607,10 @@ mod verification {
         assert_eq!(yielded_bits, expected_bits, "missed structural positions");
         // Iterator is exhausted
         assert!(iter.advance().is_none(), "advance returned extra position");
+
+        // Guard against vacuous proof
+        kani::cover!(count > 0, "at least one structural byte yielded");
+        kani::cover!(count > 3, "multiple structural bytes yielded");
+        kani::cover!(count == 0, "no structural bytes in buffer");
     }
 }

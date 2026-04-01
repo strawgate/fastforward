@@ -1246,8 +1246,10 @@ mod verification {
     ///    except for the newline byte that separates them)
     /// 3. No newlines appear inside any range's content
     /// 4. Every non-newline byte belongs to exactly one range
+    /// 5. Bytes before the first range and after the last range are all newlines
     #[kani::proof]
     #[kani::unwind(66)]
+    #[kani::solver(kissat)]
     fn verify_line_ranges_valid() {
         let buf: [u8; 8] = kani::any();
         let (_, line_ranges) = StructuralIndex::new(&buf);
@@ -1265,6 +1267,16 @@ mod verification {
         // line_ranges length is bounded: at most newline_count + 1
         // (each newline splits into at most one more range)
         assert!(line_ranges.len() <= newline_count + 1);
+
+        // Property 5a: bytes before the first range are all newlines
+        if !line_ranges.is_empty() {
+            let (first_start, _) = line_ranges[0];
+            let mut pre = 0;
+            while pre < first_start {
+                assert!(buf[pre] == b'\n', "non-newline before first range");
+                pre += 1;
+            }
+        }
 
         // Verify each range
         let mut range_idx = 0;
@@ -1294,5 +1306,29 @@ mod verification {
             }
             range_idx += 1;
         }
+
+        // Property 5b: bytes after the last range are all newlines
+        if !line_ranges.is_empty() {
+            let (_, last_end) = line_ranges[line_ranges.len() - 1];
+            let mut post = last_end;
+            while post < 8 {
+                assert!(buf[post] == b'\n', "non-newline after last range");
+                post += 1;
+            }
+        }
+
+        // Property 4 (completeness): if no ranges, all bytes must be newlines
+        if line_ranges.is_empty() {
+            let mut all_nl = 0;
+            while all_nl < 8 {
+                assert!(buf[all_nl] == b'\n', "non-newline byte with no ranges");
+                all_nl += 1;
+            }
+        }
+
+        // Guard against vacuous proof
+        kani::cover!(line_ranges.len() > 1, "multiple line ranges");
+        kani::cover!(line_ranges.is_empty(), "no ranges (all newlines)");
+        kani::cover!(newline_count == 0, "no newlines in buffer");
     }
 }

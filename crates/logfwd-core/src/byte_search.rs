@@ -234,5 +234,10 @@ mod verification {
             i += 1;
         }
         assert_eq!(count, expected, "iterator missed or duplicated positions");
+
+        // Guard against vacuous proof: verify interesting paths are reachable
+        kani::cover!(count > 0, "iterator yields at least one match");
+        kani::cover!(count > 1, "iterator yields multiple matches");
+        kani::cover!(count == 0, "iterator yields nothing when no matches");
     }
 }
