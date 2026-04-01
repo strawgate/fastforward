@@ -296,21 +296,6 @@ macro_rules! bench_scenario {
                 })
             });
 
-            group.bench_function("streaming scanner", |b| {
-                use logfwd_arrow::storage_builder::StorageBuilder;
-                let config = $config();
-                let mut builder = StorageBuilder::new(config.keep_raw);
-                b.iter(|| {
-                    builder.begin_batch();
-                    logfwd_core::json_scanner::scan_streaming(
-                        black_box(&data),
-                        &config,
-                        &mut builder,
-                    );
-                    black_box(builder.finish_batch().expect("bench: batch build failed"))
-                })
-            });
-
             group.bench_function("sonic-rs DOM", |b| {
                 b.iter(|| black_box(sonic_rs_parse(black_box(&data))))
             });
