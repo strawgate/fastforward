@@ -500,11 +500,10 @@ fn input_poll_loop(
                                     input.buf.extend_from_slice(&chunk);
                                 }
                                 _ => {
-                                    eprintln!(
-                                        "pipeline: unsupported input format {:?}, treating as raw",
+                                    unreachable!(
+                                        "unsupported format should be rejected in build_input_state: {:?}",
                                         input.format
                                     );
-                                    input.buf.extend_from_slice(&chunk);
                                 }
                             }
                             let line_count = memchr::memchr_iter(b'\n', &chunk).count();
@@ -626,6 +625,12 @@ fn build_input_state(
                 .as_ref()
                 .ok_or_else(|| format!("input '{name}': file input requires 'path'"))?;
             let format = cfg.format.clone().unwrap_or(Format::Auto);
+            if matches!(format, Format::Logfmt | Format::Syslog | Format::Console) {
+                return Err(format!(
+                    "input '{name}': format {:?} is not yet supported",
+                    format
+                ));
+            }
             let tail_config = TailConfig {
                 start_from_end: false,
                 poll_interval_ms: 50,

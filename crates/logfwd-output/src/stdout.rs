@@ -208,8 +208,12 @@ impl StdoutSink {
                         let v = arr
                             .as_primitive::<arrow::datatypes::Float64Type>()
                             .value(row);
-                        self.buf
-                            .extend_from_slice(ryu::Buffer::new().format_finite(v).as_bytes());
+                        if v.is_finite() {
+                            self.buf
+                                .extend_from_slice(ryu::Buffer::new().format_finite(v).as_bytes());
+                        } else {
+                            self.buf.extend_from_slice(b"null");
+                        }
                     }
                     _ => {
                         self.buf.extend_from_slice(str_value(arr, row).as_bytes());
