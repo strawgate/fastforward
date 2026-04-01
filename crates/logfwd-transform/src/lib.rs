@@ -585,15 +585,20 @@ impl SqlTransform {
         self.ensure_context();
         let ctx = self.ctx.as_ref().expect("context just ensured");
 
-        // Swap the `logs` table: deregister previous, register new batch.
-        let _ = ctx.deregister_table("logs");
+        // Swap the `logs` table: build new table first, then deregister + register.
+        // Building the MemTable before deregistering ensures that on error we
+        // don't leave the context without a `logs` table.
         let schema = batch.schema();
         let table = MemTable::try_new(schema, vec![vec![batch]])
             .map_err(|e| format!("Failed to create MemTable: {e}"))?;
+        let _ = ctx.deregister_table("logs");
         ctx.register_table("logs", Arc::new(table))
             .map_err(|e| format!("Failed to register table: {e}"))?;
 
-        // Swap enrichment tables (snapshots may change between batches).
+        // Swap enrichment tables whose snapshots have changed.
+        // If snapshot() returns None (table not loaded yet), deregister the
+        // stale table — queries referencing it will fail with a clear error
+        // rather than silently returning stale data.
         for et in &self.enrichment_tables {
             let _ = ctx.deregister_table(et.name());
             if let Some(snapshot) = et.snapshot() {
@@ -1132,5 +1137,93 @@ mod tests {
                 .unwrap();
         let h = a.filter_hints();
         assert_eq!(h.facilities, Some(vec![4])); // intersection
+    }
+
+    // -----------------------------------------------------------------------
+    // Multi-batch context caching tests
+    // -----------------------------------------------------------------------
+
+    /// Verify that cached SessionContext doesn't leak data between batches.
+    /// Batch 1 and batch 2 have different data — a WHERE filter on batch 2
+    /// should never return rows from batch 1.
+    #[test]
+    fn test_cached_context_no_data_leakage() {
+        let mut transform =
+            SqlTransform::new("SELECT host_str FROM logs WHERE host_str = 'web2'").unwrap();
+
+        // Batch 1: only web1.
+        let batch1 = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new(
+                "host_str",
+                DataType::Utf8,
+                true,
+            )])),
+            vec![Arc::new(StringArray::from(vec!["web1", "web1"])) as ArrayRef],
+        )
+        .unwrap();
+
+        let result1 = transform.execute_blocking(batch1).unwrap();
+        assert_eq!(result1.num_rows(), 0, "batch 1 should match nothing");
+
+        // Batch 2: has web2.
+        let batch2 = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new(
+                "host_str",
+                DataType::Utf8,
+                true,
+            )])),
+            vec![Arc::new(StringArray::from(vec!["web2", "web3"])) as ArrayRef],
+        )
+        .unwrap();
+
+        let result2 = transform.execute_blocking(batch2).unwrap();
+        assert_eq!(result2.num_rows(), 1, "batch 2 should match one row");
+
+        // Batch 3: no web2 again — verify old data from batch 2 is gone.
+        let batch3 = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new(
+                "host_str",
+                DataType::Utf8,
+                true,
+            )])),
+            vec![Arc::new(StringArray::from(vec!["web4"])) as ArrayRef],
+        )
+        .unwrap();
+
+        let result3 = transform.execute_blocking(batch3).unwrap();
+        assert_eq!(
+            result3.num_rows(),
+            0,
+            "batch 3 should not contain leftover data from batch 2"
+        );
+    }
+
+    /// Verify that many consecutive batches on the same SqlTransform work correctly.
+    /// This exercises the deregister/register cycle repeatedly.
+    #[test]
+    fn test_cached_context_many_batches() {
+        let mut transform =
+            SqlTransform::new("SELECT * FROM logs").unwrap();
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("n_int", DataType::Int64, true),
+        ]));
+
+        for i in 0..20 {
+            let batch = RecordBatch::try_new(
+                Arc::clone(&schema),
+                vec![Arc::new(Int64Array::from(vec![i as i64])) as ArrayRef],
+            )
+            .unwrap();
+
+            let result = transform.execute_blocking(batch).unwrap();
+            assert_eq!(result.num_rows(), 1);
+            let col = result
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap();
+            assert_eq!(col.value(0), i as i64, "batch {i} has wrong value");
+        }
     }
 }
