@@ -347,12 +347,19 @@ mod tests {
                 },
             );
             let events = generator.poll().unwrap();
-            if let Some(InputEvent::Data { bytes }) = events.into_iter().next() {
-                let text = String::from_utf8(bytes).unwrap();
-                for (i, line) in text.trim().lines().enumerate() {
-                    serde_json::from_str::<serde_json::Value>(line)
-                        .unwrap_or_else(|e| panic!("invalid JSON at event {i} (offset={offset}): {e}\n{line}"));
+            assert_eq!(events.len(), 1, "poll() must produce exactly one Data event (offset={offset})");
+            match &events[0] {
+                InputEvent::Data { bytes } => {
+                    assert!(!bytes.is_empty(), "generator produced empty data (offset={offset})");
+                    let text = String::from_utf8(bytes.clone()).unwrap();
+                    let line_count = text.trim().lines().count();
+                    assert!(line_count >= 1, "expected at least 1 JSON line, got 0 (offset={offset})");
+                    for (i, line) in text.trim().lines().enumerate() {
+                        serde_json::from_str::<serde_json::Value>(line)
+                            .unwrap_or_else(|e| panic!("invalid JSON at event {i} (offset={offset}): {e}\n{line}"));
+                    }
                 }
+                _ => panic!("unexpected event variant"),
             }
         });
     }
@@ -373,12 +380,19 @@ mod tests {
                 },
             );
             let events = generator.poll().unwrap();
-            if let Some(InputEvent::Data { bytes }) = events.into_iter().next() {
-                let text = String::from_utf8(bytes).unwrap();
-                for (i, line) in text.trim().lines().enumerate() {
-                    serde_json::from_str::<serde_json::Value>(line)
-                        .unwrap_or_else(|e| panic!("invalid JSON at event {i} (offset={offset}): {e}\n{line}"));
+            assert_eq!(events.len(), 1, "poll() must produce exactly one Data event (offset={offset})");
+            match &events[0] {
+                InputEvent::Data { bytes } => {
+                    assert!(!bytes.is_empty(), "generator produced empty data (offset={offset})");
+                    let text = String::from_utf8(bytes.clone()).unwrap();
+                    let line_count = text.trim().lines().count();
+                    assert!(line_count >= 1, "expected at least 1 JSON line, got 0 (offset={offset})");
+                    for (i, line) in text.trim().lines().enumerate() {
+                        serde_json::from_str::<serde_json::Value>(line)
+                            .unwrap_or_else(|e| panic!("invalid JSON at event {i} (offset={offset}): {e}\n{line}"));
+                    }
                 }
+                _ => panic!("unexpected event variant"),
             }
         });
     }
@@ -400,5 +414,44 @@ mod tests {
         assert_eq!(input.events_generated(), 20);
         let _ = input.poll().unwrap();
         assert_eq!(input.events_generated(), 25);
+    }
+
+    #[test]
+    fn generator_respects_total_events() {
+        let mut input = GeneratorInput::new(
+            "test",
+            GeneratorConfig {
+                batch_size: 7, // not a divisor of 50 — exercises partial-batch logic
+                total_events: 50,
+                ..Default::default()
+            },
+        );
+
+        let mut total_lines = 0u64;
+        loop {
+            let events = input.poll().unwrap();
+            if events.is_empty() {
+                break;
+            }
+            for event in &events {
+                match event {
+                    InputEvent::Data { bytes } => {
+                        let text = String::from_utf8_lossy(bytes);
+                        total_lines += text.trim().lines().count() as u64;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        assert_eq!(
+            total_lines, 50,
+            "expected exactly 50 events, got {total_lines}"
+        );
+        assert_eq!(input.events_generated(), 50);
+
+        // Subsequent polls must return empty.
+        let events = input.poll().unwrap();
+        assert!(events.is_empty(), "poll after completion must be empty");
     }
 }

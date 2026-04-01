@@ -3,6 +3,8 @@
 
 use std::io;
 use std::net::UdpSocket;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use socket2::{Domain, Protocol, Socket, Type};
 
@@ -21,35 +23,70 @@ pub struct UdpInput {
     name: String,
     socket: UdpSocket,
     buf: Vec<u8>,
+    /// Actual kernel receive buffer size after SO_RCVBUF was applied.
+    actual_recv_buf: usize,
+    /// Counter for detected drops (ENOBUFS or similar errors).
+    drops_detected: Arc<AtomicU64>,
 }
 
 impl UdpInput {
     /// Bind to `addr` (e.g. "0.0.0.0:514" for syslog).
     pub fn new(name: impl Into<String>, addr: &str) -> io::Result<Self> {
+        let parsed_addr: std::net::SocketAddr = addr.parse().map_err(io::Error::other)?;
+        let domain = if parsed_addr.is_ipv4() {
+            Domain::IPV4
+        } else {
+            Domain::IPV6
+        };
+
         // Use socket2 to create the socket so we can tune SO_RCVBUF *before*
         // any datagrams arrive.
-        let sock2 = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
+        let sock2 = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
+
+        // Bind before setting buffer — ensures the socket is valid.
+        sock2.bind(&parsed_addr.into())?;
+
         // Tune kernel receive buffer to reduce packet loss under load.
         let _ = sock2.set_recv_buffer_size(RECV_BUF_SIZE); // best-effort
+
+        // Read back actual buffer size — the OS may cap it.
+        let actual_recv_buf = sock2.recv_buffer_size().unwrap_or(0);
+
         sock2.set_nonblocking(true)?;
-        sock2.bind(
-            &addr
-                .parse::<std::net::SocketAddr>()
-                .map_err(io::Error::other)?
-                .into(),
-        )?;
+
         let socket: UdpSocket = sock2.into();
 
         Ok(Self {
             name: name.into(),
             socket,
             buf: vec![0u8; MAX_UDP_PAYLOAD],
+            actual_recv_buf,
+            drops_detected: Arc::new(AtomicU64::new(0)),
         })
     }
 
     /// Returns the local address this socket is bound to.
     pub fn local_addr(&self) -> io::Result<std::net::SocketAddr> {
         self.socket.local_addr()
+    }
+
+    /// Returns the actual kernel receive buffer size (as reported by
+    /// `getsockopt`). Useful for diagnostics — compare with `RECV_BUF_SIZE`
+    /// to see if the OS capped the requested value.
+    pub fn recv_buffer_size(&self) -> usize {
+        self.actual_recv_buf
+    }
+
+    /// Returns the number of detected drop events (ENOBUFS / similar errors
+    /// observed during `recv`). This is a lower bound — the kernel may drop
+    /// packets silently without signalling ENOBUFS.
+    pub fn drops_detected(&self) -> u64 {
+        self.drops_detected.load(Ordering::Relaxed)
+    }
+
+    /// Returns a clone of the drops counter for external monitoring.
+    pub fn drops_counter(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.drops_detected)
     }
 }
 
@@ -64,7 +101,10 @@ impl InputSource for UdpInput {
         loop {
             // `recv` is cheaper than `recv_from` — we don't need the source addr.
             match self.socket.recv(&mut self.buf) {
-                Ok(0) => {} // no data in this datagram, loop again
+                Ok(0) => {
+                    // Zero-length datagram — valid in UDP. Nothing to append,
+                    // just continue draining.
+                }
                 Ok(n) => {
                     let data = &self.buf[..n];
                     let out = total.get_or_insert_with(|| Vec::with_capacity(4096));
@@ -80,6 +120,14 @@ impl InputSource for UdpInput {
                 // port-unreachable cached by the kernel). Treat it like
                 // WouldBlock — there is simply no data right now.
                 Err(e) if e.kind() == io::ErrorKind::ConnectionRefused => break,
+                // ENOBUFS: kernel ran out of buffer space — a drop signal.
+                Err(ref e)
+                    if e.raw_os_error() == Some(libc::ENOBUFS)
+                        || e.raw_os_error() == Some(libc::ENOMEM) =>
+                {
+                    self.drops_detected.fetch_add(1, Ordering::Relaxed);
+                    // Continue draining — there may be more datagrams queued.
+                }
                 Err(e) => return Err(e),
             }
         }
@@ -103,7 +151,7 @@ mod tests {
     #[test]
     fn receives_datagrams() {
         let mut input = UdpInput::new("test", "127.0.0.1:0").unwrap();
-        let addr = input.socket.local_addr().unwrap();
+        let addr = input.local_addr().unwrap();
 
         let sender = StdSocket::bind("127.0.0.1:0").unwrap();
         sender.send_to(b"hello world\n", addr).unwrap();
@@ -124,7 +172,7 @@ mod tests {
     #[test]
     fn adds_trailing_newline_to_bare_datagram() {
         let mut input = UdpInput::new("test", "127.0.0.1:0").unwrap();
-        let addr = input.socket.local_addr().unwrap();
+        let addr = input.local_addr().unwrap();
 
         let sender = StdSocket::bind("127.0.0.1:0").unwrap();
         // No trailing newline — input must add one.
@@ -142,7 +190,7 @@ mod tests {
     #[test]
     fn handles_multi_line_datagram() {
         let mut input = UdpInput::new("test", "127.0.0.1:0").unwrap();
-        let addr = input.socket.local_addr().unwrap();
+        let addr = input.local_addr().unwrap();
 
         let sender = StdSocket::bind("127.0.0.1:0").unwrap();
         sender.send_to(b"line1\nline2\nline3\n", addr).unwrap();
@@ -168,5 +216,115 @@ mod tests {
     fn buffer_is_max_udp_payload_size() {
         let input = UdpInput::new("test", "127.0.0.1:0").unwrap();
         assert_eq!(input.buf.len(), 65507);
+    }
+
+    #[test]
+    fn udp_recv_buffer_size() {
+        // Verify SO_RCVBUF was actually applied by reading it back.
+        let input = UdpInput::new("test", "127.0.0.1:0").unwrap();
+        let actual = input.recv_buffer_size();
+        // The OS may double the requested value (Linux does this) or cap it,
+        // but it should be at least something reasonable (> 64 KB).
+        assert!(
+            actual >= 65536,
+            "expected recv buffer >= 64KB, got {actual}"
+        );
+    }
+
+    #[test]
+    fn udp_high_volume() {
+        // Send 10000 datagrams rapidly, verify at least 90% arrive.
+        let mut input = UdpInput::new("test", "127.0.0.1:0").unwrap();
+        let addr = input.local_addr().unwrap();
+
+        let sender = StdSocket::bind("127.0.0.1:0").unwrap();
+        for i in 0u32..10_000 {
+            let msg = format!("seq:{i}\n");
+            // send_to can fail transiently on localhost; ignore errors.
+            let _ = sender.send_to(msg.as_bytes(), addr);
+        }
+
+        // Give the OS time to deliver.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        // Drain all available datagrams.
+        let mut all_bytes = Vec::new();
+        for _ in 0..20 {
+            for event in input.poll().unwrap() {
+                if let InputEvent::Data { bytes } = event {
+                    all_bytes.extend_from_slice(&bytes);
+                }
+            }
+        }
+        let text = String::from_utf8_lossy(&all_bytes);
+        let mut received = 0u32;
+        for i in 0u32..10_000 {
+            if text.contains(&format!("seq:{i}\n")) {
+                received += 1;
+            }
+        }
+        assert!(
+            received >= 9_000,
+            "expected at least 9000/10000 datagrams on localhost, got {received}"
+        );
+    }
+
+    #[test]
+    fn udp_empty_datagram() {
+        // Sending a 0-byte datagram must not panic.
+        let mut input = UdpInput::new("test", "127.0.0.1:0").unwrap();
+        let addr = input.local_addr().unwrap();
+
+        let sender = StdSocket::bind("127.0.0.1:0").unwrap();
+        sender.send_to(b"", addr).unwrap();
+        // Also send a real datagram after so we know poll drained.
+        sender.send_to(b"after\n", addr).unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        let events = input.poll().unwrap();
+        // Should not panic. The empty datagram produces no output bytes,
+        // but the "after" datagram should arrive.
+        let mut all = Vec::new();
+        for event in events {
+            if let InputEvent::Data { bytes } = event {
+                all.extend_from_slice(&bytes);
+            }
+        }
+        let text = String::from_utf8_lossy(&all);
+        assert!(
+            text.contains("after"),
+            "expected 'after' datagram, got: {text}"
+        );
+    }
+
+    #[test]
+    fn udp_socket_is_nonblocking() {
+        let input = UdpInput::new("test", "127.0.0.1:0").unwrap();
+        // Verify by attempting a recv on an empty socket — it should return
+        // WouldBlock immediately, not block.
+        let start = std::time::Instant::now();
+        let result = input.socket.recv(&mut [0u8; 1]);
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < std::time::Duration::from_millis(100),
+            "recv took {elapsed:?}, expected non-blocking return"
+        );
+        assert!(
+            result.is_err(),
+            "expected WouldBlock error on empty non-blocking socket"
+        );
+        assert_eq!(
+            result.unwrap_err().kind(),
+            io::ErrorKind::WouldBlock,
+            "expected WouldBlock"
+        );
+    }
+
+    #[test]
+    fn drops_detected_starts_at_zero() {
+        let input = UdpInput::new("test", "127.0.0.1:0").unwrap();
+        assert_eq!(input.drops_detected(), 0);
     }
 }
