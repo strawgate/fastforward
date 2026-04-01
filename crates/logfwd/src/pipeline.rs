@@ -53,6 +53,8 @@ pub struct Pipeline {
     batch_target_bytes: usize,
     batch_timeout: Duration,
     poll_interval: Duration,
+    /// Static OTLP resource attributes (e.g. `service.name`) emitted with every batch.
+    resource_attrs: Vec<(String, String)>,
 }
 
 impl Pipeline {
@@ -162,6 +164,14 @@ impl Pipeline {
             Box::new(FanOut::new(sinks))
         };
 
+        // Convert resource_attrs HashMap to a sorted Vec for deterministic output.
+        let mut resource_attrs: Vec<(String, String)> = config
+            .resource_attrs
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        resource_attrs.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+
         Ok(Pipeline {
             name: name.to_string(),
             inputs,
@@ -172,6 +182,7 @@ impl Pipeline {
             batch_target_bytes: 4 * 1024 * 1024,
             batch_timeout: Duration::from_millis(100),
             poll_interval: Duration::from_millis(10),
+            resource_attrs,
         })
     }
 
@@ -361,7 +372,7 @@ impl Pipeline {
         // Output (block_in_place wraps the sync HTTP send).
         let t2 = Instant::now();
         let metadata = BatchMetadata {
-            resource_attrs: vec![],
+            resource_attrs: self.resource_attrs.clone(),
             observed_time_ns: now_nanos(),
         };
         if let Err(e) = tokio::task::block_in_place(|| self.output.send_batch(&result, &metadata)) {

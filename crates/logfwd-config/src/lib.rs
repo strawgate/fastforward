@@ -215,6 +215,19 @@ pub struct PipelineConfig {
     /// Enrichment sources (e.g. geo-IP databases).
     #[serde(default)]
     pub enrichment: Vec<EnrichmentConfig>,
+    /// Static OTLP resource attributes emitted with every batch.
+    ///
+    /// These are added to the OTLP `Resource.attributes` field and are
+    /// recommended by the OTLP spec for every exported signal.
+    ///
+    /// ```yaml
+    /// resource_attrs:
+    ///   service.name: my-service
+    ///   service.version: "1.0"
+    ///   deployment.environment: production
+    /// ```
+    #[serde(default)]
+    pub resource_attrs: HashMap<String, String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -249,6 +262,9 @@ struct RawConfig {
     input: Option<InputConfig>,
     transform: Option<String>,
     output: Option<OutputConfig>,
+    /// Static OTLP resource attributes for the simple-form default pipeline.
+    #[serde(default)]
+    resource_attrs: HashMap<String, String>,
 
     // Advanced form
     pipelines: Option<HashMap<String, PipelineConfig>>,
@@ -292,6 +308,7 @@ impl Config {
                     transform: raw.transform,
                     outputs: vec![output],
                     enrichment: Vec::new(),
+                    resource_attrs: raw.resource_attrs,
                 };
                 let mut map = HashMap::new();
                 map.insert("default".to_string(), pipeline);
@@ -1005,5 +1022,85 @@ output:
 "#;
         // Should succeed (unexpanded placeholder passes through without error).
         Config::load_str(yaml).expect("unexpanded env var in endpoint should not fail validation");
+    }
+
+    #[test]
+    fn resource_attrs_simple_form() {
+        let yaml = r#"
+input:
+  type: file
+  path: /var/log/app.log
+
+output:
+  type: otlp
+  endpoint: http://otel-collector:4317
+
+resource_attrs:
+  service.name: my-service
+  service.version: "1.2.3"
+  deployment.environment: production
+"#;
+        let cfg = Config::load_str(yaml).expect("should parse simple config with resource_attrs");
+        let pipe = &cfg.pipelines["default"];
+        assert_eq!(
+            pipe.resource_attrs.get("service.name").map(String::as_str),
+            Some("my-service")
+        );
+        assert_eq!(
+            pipe.resource_attrs
+                .get("service.version")
+                .map(String::as_str),
+            Some("1.2.3")
+        );
+        assert_eq!(
+            pipe.resource_attrs
+                .get("deployment.environment")
+                .map(String::as_str),
+            Some("production")
+        );
+    }
+
+    #[test]
+    fn resource_attrs_advanced_form() {
+        let yaml = r#"
+pipelines:
+  app_logs:
+    resource_attrs:
+      service.name: advanced-service
+      deployment.environment: staging
+    inputs:
+      - type: file
+        path: /var/log/app.log
+    outputs:
+      - type: otlp
+        endpoint: http://otel-collector:4317
+"#;
+        let cfg = Config::load_str(yaml).expect("should parse advanced config with resource_attrs");
+        let pipe = &cfg.pipelines["app_logs"];
+        assert_eq!(
+            pipe.resource_attrs.get("service.name").map(String::as_str),
+            Some("advanced-service")
+        );
+        assert_eq!(
+            pipe.resource_attrs
+                .get("deployment.environment")
+                .map(String::as_str),
+            Some("staging")
+        );
+    }
+
+    #[test]
+    fn resource_attrs_absent_is_empty() {
+        let yaml = r#"
+input:
+  type: file
+  path: /var/log/app.log
+output:
+  type: otlp
+  endpoint: http://otel-collector:4317
+"#;
+        let cfg = Config::load_str(yaml).expect("should parse config without resource_attrs");
+        let pipe = &cfg.pipelines["default"];
+        assert!(pipe.resource_attrs.is_empty());
     }
 }
