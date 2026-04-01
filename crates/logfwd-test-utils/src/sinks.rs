@@ -174,17 +174,20 @@ mod tests {
         let meta = dummy_metadata();
 
         // Release the token from another thread after a short delay.
+        let release_delay = Duration::from_millis(100);
         let t = token.clone();
         let handle = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(100));
+            std::thread::sleep(release_delay);
             t.cancel();
         });
 
         let start = std::time::Instant::now();
         assert!(sink.send_batch(&batch, &meta).is_ok());
+        // Allow 20% scheduling jitter below the release delay.
+        let min_expected = release_delay * 80 / 100;
         assert!(
-            start.elapsed() >= Duration::from_millis(80),
-            "FrozenSink should block until released, but only {:?} elapsed",
+            start.elapsed() >= min_expected,
+            "FrozenSink should block until released, but only {:?} elapsed (expected >= {min_expected:?})",
             start.elapsed()
         );
         handle.join().expect("release thread should not panic");
