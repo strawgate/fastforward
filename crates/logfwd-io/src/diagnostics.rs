@@ -327,6 +327,8 @@ pub struct DiagnosticsServer {
     config_path: String,
     /// Lazy stderr capture — activated on first /api/logs request.
     stderr: crate::stderr_capture::StderrCapture,
+    /// Server-side metric history (1 hour, reducing precision).
+    history: Arc<crate::metric_history::MetricHistory>,
 }
 
 impl DiagnosticsServer {
@@ -339,6 +341,7 @@ impl DiagnosticsServer {
             config_yaml: String::new(),
             config_path: String::new(),
             stderr: crate::stderr_capture::StderrCapture::new(),
+            history: Arc::new(crate::metric_history::MetricHistory::new()),
         }
     }
 
@@ -367,6 +370,22 @@ impl DiagnosticsServer {
     pub fn start(self) -> io::Result<JoinHandle<()>> {
         let server = tiny_http::Server::http(&self.bind_addr)
             .map_err(|e| io::Error::other(e.to_string()))?;
+
+        // Background metric sampler — records pipeline + process metrics
+        // every 2s into the history buffer, regardless of dashboard activity.
+        let sampler_pipelines = self.pipelines.clone();
+        let sampler_history = Arc::clone(&self.history);
+        let sampler_mem_fn = self.memory_stats_fn;
+        thread::Builder::new()
+            .name("metric-sampler".into())
+            .spawn(move || {
+                loop {
+                    thread::sleep(std::time::Duration::from_secs(2));
+                    sample_metrics(&sampler_pipelines, &sampler_history, sampler_mem_fn);
+                }
+            })
+            .ok();
+
         Ok(thread::spawn(move || {
             for request in server.incoming_requests() {
                 let _ = self.handle_request(request);
@@ -390,6 +409,7 @@ impl DiagnosticsServer {
             "/api/stats" => self.serve_stats(request),
             "/api/config" => self.serve_config(request),
             "/api/logs" => self.serve_logs(request),
+            "/api/history" => self.serve_history(request),
             // Prometheus /metrics removed — use OTLP metrics push instead.
             // The /api/pipelines endpoint provides the same data as JSON.
             _ => {
@@ -540,6 +560,18 @@ impl DiagnosticsServer {
             esc(&self.config_path),
             esc(&self.config_yaml),
         );
+        let header = tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+            .map_err(|()| io::Error::other("invalid HTTP header"))?;
+        let resp = tiny_http::Response::from_string(body).with_header(header);
+        request.respond(resp)?;
+        Ok(())
+    }
+
+    fn serve_history(
+        &self,
+        request: tiny_http::Request,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let body = self.history.to_json();
         let header = tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
             .map_err(|()| io::Error::other("invalid HTTP header"))?;
         let resp = tiny_http::Response::from_string(body).with_header(header);
@@ -711,7 +743,7 @@ fn get_process_metrics_linux() -> Option<(u64, u64, u64)> {
 fn get_process_metrics_unix() -> Option<(u64, u64, u64)> {
     unsafe {
         let mut usage: libc::rusage = std::mem::zeroed();
-        if libc::getrusage(libc::RUSAGE_SELF, &mut usage) != 0 {
+        if libc::getrusage(libc::RUSAGE_SELF, &raw mut usage) != 0 {
             return None;
         }
         let user_ms =
@@ -820,6 +852,59 @@ fn now_nanos() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos() as u64
+}
+
+// ---------------------------------------------------------------------------
+// Background metric sampler
+// ---------------------------------------------------------------------------
+
+/// Sample all pipeline + process metrics into the history buffer.
+/// Called every 2s by the background sampler thread.
+fn sample_metrics(
+    pipelines: &[Arc<PipelineMetrics>],
+    history: &crate::metric_history::MetricHistory,
+    memory_fn: Option<fn() -> Option<MemoryStats>>,
+) {
+    let mut input_lines: u64 = 0;
+    let mut input_bytes: u64 = 0;
+    let mut output_lines: u64 = 0;
+    let mut output_errors: u64 = 0;
+    let mut scan_ns: u64 = 0;
+    let mut transform_ns: u64 = 0;
+    let mut output_ns: u64 = 0;
+
+    for pm in pipelines {
+        for (_, _, s) in &pm.inputs {
+            input_lines += s.lines();
+            input_bytes += s.bytes();
+        }
+        for (_, _, s) in &pm.outputs {
+            output_lines += s.lines();
+            output_errors += s.errors();
+        }
+        scan_ns += pm.scan_nanos_total.load(Ordering::Relaxed);
+        transform_ns += pm.transform_nanos_total.load(Ordering::Relaxed);
+        output_ns += pm.output_nanos_total.load(Ordering::Relaxed);
+    }
+
+    history.record("input_lines", input_lines as f64);
+    history.record("input_bytes", input_bytes as f64);
+    history.record("output_lines", output_lines as f64);
+    history.record("output_errors", output_errors as f64);
+    history.record("scan_sec", scan_ns as f64 / 1e9);
+    history.record("transform_sec", transform_ns as f64 / 1e9);
+    history.record("output_sec", output_ns as f64 / 1e9);
+
+    if let Some((rss, cpu_user, cpu_sys)) = process_metrics() {
+        history.record("rss_bytes", rss as f64);
+        history.record("cpu_user_ms", cpu_user as f64);
+        history.record("cpu_sys_ms", cpu_sys as f64);
+    }
+
+    if let Some(m) = memory_fn.and_then(|f| f()) {
+        history.record("mem_allocated", m.allocated as f64);
+        history.record("mem_resident", m.resident as f64);
+    }
 }
 
 // ---------------------------------------------------------------------------
