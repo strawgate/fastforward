@@ -234,8 +234,17 @@ impl Pipeline {
         for input in self.inputs.drain(..) {
             let tx = tx.clone();
             let sd = shutdown.clone();
+            let metrics = Arc::clone(&self.metrics);
             input_handles.push(std::thread::spawn(move || {
-                input_poll_loop(input, tx, sd, batch_target, batch_timeout, poll_interval);
+                input_poll_loop(
+                    input,
+                    tx,
+                    metrics,
+                    sd,
+                    batch_target,
+                    batch_timeout,
+                    poll_interval,
+                );
             }));
         }
         drop(tx); // Drop our copy so rx.recv() returns None when all inputs exit.
@@ -387,6 +396,7 @@ impl Pipeline {
 fn input_poll_loop(
     mut input: InputState,
     tx: tokio::sync::mpsc::Sender<Vec<u8>>,
+    metrics: Arc<PipelineMetrics>,
     shutdown: CancellationToken,
     batch_target_bytes: usize,
     batch_timeout: Duration,
@@ -507,7 +517,7 @@ fn input_poll_loop(
             // original pre-allocation in build_input_state).
             let mut data = Vec::with_capacity(batch_target_bytes);
             std::mem::swap(&mut input.buf, &mut data);
-            if tx.blocking_send(data).is_err() {
+            if blocking_send_with_backpressure_metric(&tx, &metrics, data).is_err() {
                 break;
             }
             buffered_since = None;
@@ -517,7 +527,24 @@ fn input_poll_loop(
     // Drain any remaining buffered data on shutdown.
     if !input.buf.is_empty() {
         let data = std::mem::take(&mut input.buf);
-        let _ = tx.blocking_send(data);
+        let _ = blocking_send_with_backpressure_metric(&tx, &metrics, data);
+    }
+}
+
+fn blocking_send_with_backpressure_metric(
+    tx: &tokio::sync::mpsc::Sender<Vec<u8>>,
+    metrics: &PipelineMetrics,
+    data: Vec<u8>,
+) -> Result<(), tokio::sync::mpsc::error::SendError<Vec<u8>>> {
+    match tx.try_send(data) {
+        Ok(()) => Ok(()),
+        Err(tokio::sync::mpsc::error::TrySendError::Full(data)) => {
+            metrics.inc_backpressure_stall();
+            tx.blocking_send(data)
+        }
+        Err(tokio::sync::mpsc::error::TrySendError::Closed(data)) => {
+            Err(tokio::sync::mpsc::error::SendError(data))
+        }
     }
 }
 
@@ -1135,6 +1162,40 @@ output:
             result.unwrap().is_ok(),
             "pipeline should complete successfully"
         );
+    }
+
+    #[tokio::test]
+    async fn test_blocking_send_records_backpressure_stall() {
+        use std::sync::atomic::Ordering;
+
+        let meter = test_meter();
+        let metrics = Arc::new(PipelineMetrics::new("test", "SELECT * FROM logs", &meter));
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1);
+
+        tx.try_send(vec![1]).unwrap();
+
+        let tx2 = tx.clone();
+        let metrics2 = Arc::clone(&metrics);
+        let handle = std::thread::spawn(move || {
+            blocking_send_with_backpressure_metric(&tx2, &metrics2, vec![2])
+        });
+
+        for _ in 0..50 {
+            if metrics.backpressure_stalls.load(Ordering::Relaxed) > 0 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        assert_eq!(
+            metrics.backpressure_stalls.load(Ordering::Relaxed),
+            1,
+            "full channel should increment backpressure_stalls before blocking"
+        );
+
+        assert_eq!(rx.recv().await, Some(vec![1]));
+        assert_eq!(rx.recv().await, Some(vec![2]));
+        assert!(handle.join().unwrap().is_ok(), "blocking send should succeed");
     }
 
     /// Shutdown with a slow output must still drain all buffered data.
