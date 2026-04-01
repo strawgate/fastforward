@@ -231,7 +231,12 @@ fn write_json_value(arr: &dyn Array, row: usize, out: &mut Vec<u8>) -> io::Resul
 /// For fields backed by multiple typed columns (e.g. `status_int` + `status_str`),
 /// the first non-null variant is used — no data is silently dropped. Type dispatch
 /// uses the Arrow DataType, not the column name suffix.
-pub fn write_row_json(batch: &RecordBatch, row: usize, cols: &[ColInfo], out: &mut Vec<u8>) -> io::Result<()> {
+pub fn write_row_json(
+    batch: &RecordBatch,
+    row: usize,
+    cols: &[ColInfo],
+    out: &mut Vec<u8>,
+) -> io::Result<()> {
     out.push(b'{');
     let mut first = true;
     for col in cols {
