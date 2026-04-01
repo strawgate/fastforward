@@ -184,7 +184,7 @@ pub(crate) fn write_row_json(batch: &RecordBatch, row: usize, cols: &[ColInfo], 
             }
         }
 
-        let Some((idx, suffix)) = best_variant else {
+        let Some((idx, best_suffix)) = best_variant else {
             continue;
         };
 
@@ -199,7 +199,7 @@ pub(crate) fn write_row_json(batch: &RecordBatch, row: usize, cols: &[ColInfo], 
         out.push(b':');
         // Value — type-aware
         let arr = batch.column(idx);
-        match suffix {
+        match best_suffix {
             "int" => {
                 let arr = arr.as_primitive::<arrow::datatypes::Int64Type>();
                 let v = arr.value(row);

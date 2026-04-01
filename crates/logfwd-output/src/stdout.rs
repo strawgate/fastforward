@@ -178,7 +178,7 @@ impl StdoutSink {
                     }
                 }
 
-                let Some((idx, _suffix)) = best_variant else {
+                let Some((idx, best_suffix)) = best_variant else {
                     continue;
                 };
 
@@ -196,7 +196,7 @@ impl StdoutSink {
                 self.buf.push(b'=');
 
                 let arr = batch.column(idx);
-                match _suffix {
+                match best_suffix {
                     "int" => {
                         let arr = arr.as_primitive::<arrow::datatypes::Int64Type>();
                         write!(self.buf, "{}", arr.value(row))?;

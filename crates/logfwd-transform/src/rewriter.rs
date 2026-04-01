@@ -769,3 +769,15 @@ mod tests {
         assert!(result.is_err());
     }
 }
+#[cfg(test)]
+mod debug_tests {
+    use super::*;
+    #[test]
+    fn print_rewritten_sql() {
+        let mut map = FieldTypeMap::new();
+        map.insert("level".to_string(), FieldTypes { has_str: true, has_int: false, has_float: false });
+        let sql = "SELECT level FROM logs WHERE level = 'ERROR'";
+        let rewritten = rewrite_sql(sql, &map).unwrap();
+        println!("REWRITTEN: {}", rewritten);
+    }
+}
