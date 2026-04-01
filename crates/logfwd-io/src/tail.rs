@@ -1252,8 +1252,14 @@ mod tests {
         assert_eq!(checkpoints.len(), 1, "one file should be checkpointed");
 
         let (fingerprint, path, offset) = &checkpoints[0];
-        assert_eq!(path, &log_path, "checkpoint path must match the tailed file");
-        assert!(*fingerprint != 0, "fingerprint should be non-zero for a non-empty file");
+        assert_eq!(
+            path, &log_path,
+            "checkpoint path must match the tailed file"
+        );
+        assert!(
+            *fingerprint != 0,
+            "fingerprint should be non-zero for a non-empty file"
+        );
         assert!(*offset > 0, "offset should be > 0 after reading data");
     }
 }
