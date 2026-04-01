@@ -330,10 +330,11 @@ fn skip_nested(buf: &[u8], mut pos: usize, end: usize, blocks: &StoredBitmasks<'
 
         match b {
             b'{' | b'[' if (blocks.open_brace[block] | blocks.open_bracket[block]) & mask != 0 => {
-                if depth < MAX_TRACKED_DEPTH {
-                    opener_stack[depth as usize] = b;
+                if depth == MAX_TRACKED_DEPTH {
+                    return end; // fail closed when opener stack capacity is exceeded
                 }
-                depth = depth.saturating_add(1);
+                opener_stack[depth as usize] = b;
+                depth += 1;
                 pos += 1;
             }
             b'}' | b']'

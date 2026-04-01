@@ -299,8 +299,9 @@ macro_rules! bench_scenario {
             group.bench_function("streaming scanner", |b| {
                 use logfwd_arrow::storage_builder::StorageBuilder;
                 let config = $config();
+                let mut builder = StorageBuilder::new(config.keep_raw);
                 b.iter(|| {
-                    let mut builder = StorageBuilder::new(config.keep_raw);
+                    builder.begin_batch();
                     logfwd_core::json_scanner::scan_streaming(
                         black_box(&data),
                         &config,

@@ -114,9 +114,10 @@ impl<'a> StructuralIter<'a> {
         let block_len = remaining.min(64);
 
         let block: [u8; 64] = if remaining >= 64 {
-            self.buf[self.block_offset..self.block_offset + 64]
-                .try_into()
-                .expect("64-byte block")
+            debug_assert!(remaining >= 64);
+            let mut block = [0u8; 64];
+            block.copy_from_slice(&self.buf[self.block_offset..self.block_offset + 64]);
+            block
         } else {
             let mut padded = [b' '; 64];
             padded[..remaining].copy_from_slice(&self.buf[self.block_offset..]);
@@ -214,9 +215,11 @@ impl<'a> StructuralIter<'a> {
             }
             // Count leading spaces
             let non_space = (!space_at_and_after).trailing_zeros() as usize;
-            let result = from + non_space;
-            if result < self.len {
-                return result;
+            if non_space < 64 - bit {
+                let result = from + non_space;
+                if result < self.len {
+                    return result;
+                }
             }
         }
 
