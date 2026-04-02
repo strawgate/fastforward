@@ -243,6 +243,11 @@ async fn cmd_blackhole(args: &[String]) -> Result<(), CliError> {
         .get(2)
         .map_or("127.0.0.1:4318", std::string::String::as_str);
 
+    // Validate addr looks like host:port — reject anything that could inject YAML.
+    if !addr.contains(':') || addr.contains('\n') || addr.contains(' ') {
+        return Err(CliError::Config(format!("invalid bind address: {addr}")));
+    }
+
     let yaml = format!(
         "input:\n  type: otlp\n  listen: {addr}\noutput:\n  type: null\nserver:\n  diagnostics: 127.0.0.1:9090\n"
     );
@@ -250,7 +255,7 @@ async fn cmd_blackhole(args: &[String]) -> Result<(), CliError> {
         .map_err(|e| CliError::Config(format!("internal config error: {e}")))?;
 
     eprintln!(
-        "{}logfwd blackhole{} listening on {}{addr}{}",
+        "{}logfwd blackhole{} starting on {}{addr}{}",
         bold(),
         reset(),
         bold(),
