@@ -546,7 +546,9 @@ mod verification {
     ///
     /// This is the foundational wire format proof — if these disagree,
     /// protobuf message size calculations are wrong and payloads are corrupt.
+    /// Uses stub for varint_len (contract verified) to test compositional property.
     #[kani::proof]
+    #[kani::stub_verified(varint_len)]
     #[kani::unwind(12)] // varint loop: max 10 iterations + overhead
     #[kani::solver(kissat)]
     fn verify_varint_len_matches_encode() {
@@ -694,7 +696,10 @@ mod verification {
     }
 
     /// Prove bytes_field_size matches actual encode_bytes_field output.
+    /// Uses stubs for size prediction functions (contracts verified).
     #[kani::proof]
+    #[kani::stub_verified(varint_len)]
+    #[kani::stub_verified(bytes_field_size)]
     #[kani::unwind(12)]
     #[kani::solver(kissat)]
     fn verify_bytes_field_size() {
@@ -781,7 +786,10 @@ mod verification {
 
     /// Prove parse_severity ONLY returns non-Unspecified for the 6
     /// standard level strings (any case). No false positives.
+    /// Uses stubs for case-insensitive comparison functions (contracts verified).
     #[kani::proof]
+    #[kani::stub_verified(eq_ignore_case_4)]
+    #[kani::stub_verified(eq_ignore_case_5)]
     fn verify_parse_severity_no_false_positives() {
         let bytes: [u8; 8] = kani::any();
         let len: usize = kani::any_where(|&l: &usize| l <= 8);
@@ -1116,7 +1124,9 @@ mod verification {
 
     /// Prove hex_decode roundtrip: for any 16-byte array, hex-encoding then
     /// decoding yields the original bytes.
+    /// Uses stub for hex_nibble (contract already verified) to simplify proof.
     #[kani::proof]
+    #[kani::stub_verified(hex_nibble)]
     #[kani::unwind(17)] // 16 bytes + 1
     fn verify_hex_decode_roundtrip() {
         let original: [u8; 16] = kani::any();
