@@ -182,6 +182,18 @@ impl OutputSink for OtlpSink {
             OtlpProtocol::Http => "application/x-protobuf",
         };
 
+        // For gRPC, prepend the 5-byte length-prefixed frame header required by the
+        // gRPC wire protocol. Note: ureq uses HTTP/1.1; a true gRPC endpoint requires
+        // HTTP/2. Use a reverse proxy (e.g. Envoy) or `protocol: http` when the
+        // collector does not accept HTTP/1.1 upgrades.
+        let grpc_buf: Vec<u8>;
+        let payload: &[u8] = if self.protocol == OtlpProtocol::Grpc {
+            grpc_buf = grpc_frame(payload);
+            &grpc_buf
+        } else {
+            payload
+        };
+
         // Retry with exponential backoff for transient failures.
         // 1 initial attempt + up to HTTP_MAX_RETRIES retries; delays: 100ms → 200ms → 400ms.
         // Note: the full encoded payload is retransmitted on each attempt.
@@ -540,6 +552,22 @@ fn encode_key_value_double(buf: &mut Vec<u8>, key: &[u8], value: f64) {
     encode_fixed64(buf, 4, value.to_bits());
 }
 
+/// Wrap a protobuf payload in a gRPC length-prefixed message frame.
+///
+/// gRPC wire format (per the [gRPC over HTTP/2 specification](https://grpc.io/docs/what-is-grpc/core-concepts/)):
+/// ```text
+/// [1 byte: compressed flag (0x00 = not compressed)]
+/// [4 bytes: big-endian message length]
+/// [N bytes: protobuf message]
+/// ```
+fn grpc_frame(payload: &[u8]) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(5 + payload.len());
+    buf.push(0x00); // compressed flag: not compressed
+    buf.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    buf.extend_from_slice(payload);
+    buf
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -701,5 +729,29 @@ mod tests {
             !contains_bytes(&sink.encoder_buf, &probe),
             "invalid trace_id should not produce field 9"
         );
+    }
+
+    #[test]
+    fn grpc_frame_prepends_five_byte_header() {
+        let proto_payload = [0x0a, 0x02, 0x08, 0x01];
+        let framed = grpc_frame(&proto_payload);
+        assert_eq!(framed.len(), 5 + proto_payload.len());
+        assert_eq!(framed[0], 0x00, "compressed flag must be 0x00");
+        let msg_len = u32::from_be_bytes(framed[1..5].try_into().unwrap());
+        assert_eq!(
+            msg_len as usize,
+            proto_payload.len(),
+            "length field must match payload length"
+        );
+        assert_eq!(&framed[5..], &proto_payload, "payload bytes must follow header");
+    }
+
+    #[test]
+    fn grpc_frame_empty_payload() {
+        let framed = grpc_frame(&[]);
+        assert_eq!(framed.len(), 5);
+        assert_eq!(framed[0], 0x00, "compressed flag must be 0x00");
+        let msg_len = u32::from_be_bytes(framed[1..5].try_into().unwrap());
+        assert_eq!(msg_len, 0, "length field must be zero for empty payload");
     }
 }
