@@ -451,7 +451,10 @@ impl OnceFactory {
 
 impl sink::SinkFactory for OnceFactory {
     fn create(&self) -> io::Result<Box<dyn sink::Sink>> {
-        let mut guard = self.inner.lock().unwrap();
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|_| io::Error::other("OnceFactory mutex poisoned"))?;
         match guard.take() {
             Some(s) => Ok(Box::new(SyncSinkAdapter::new(s))),
             None => Err(io::Error::other(
@@ -462,6 +465,10 @@ impl sink::SinkFactory for OnceFactory {
 
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn is_single_use(&self) -> bool {
+        true
     }
 }
 

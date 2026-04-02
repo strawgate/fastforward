@@ -206,11 +206,15 @@ impl Pipeline {
             Arc::new(OnceFactory::new(fanout_name, Box::new(FanOut::new(sinks))))
         };
 
-        let pool = OutputWorkerPool::new(
-            factory,
-            4,                       // max_workers: TODO add to PipelineConfig (#700)
-            Duration::from_secs(30), // idle_timeout: TODO add to PipelineConfig (#700)
-        );
+        // Single-use factories (OnceFactory wrapping a sync sink) can only
+        // create one worker and that worker must never idle-expire — if it
+        // exits, create() returns an error and the output stops permanently.
+        let (max_workers, idle_timeout) = if factory.is_single_use() {
+            (1, Duration::MAX) // never idle-expire the sole worker
+        } else {
+            (4, Duration::from_secs(30)) // TODO: make configurable (#700)
+        };
+        let pool = OutputWorkerPool::new(factory, max_workers, idle_timeout);
 
         // Convert resource_attrs HashMap to a sorted Vec for deterministic output.
         let mut resource_attrs: Vec<(String, String)> = config

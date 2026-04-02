@@ -204,11 +204,27 @@ impl OutputWorkerPool {
             // Clone sender to avoid holding &mut self across await.
             let tx = front.tx.clone();
             // send().await blocks until the channel has space.
-            let _ = tx.send(msg).await;
+            if let Err(mpsc::error::SendError(WorkerMsg::Work(item))) = tx.send(msg).await {
+                // Rare race: worker closed its channel between clone and send.
+                // Reject explicitly rather than silently dropping.
+                let _ = self.ack_tx.send(AckItem {
+                    tickets: item.tickets,
+                    success: false,
+                });
+            }
+            return;
         }
-        // If workers is empty (e.g. max_workers=0 edge case, which we
-        // asserted against), the item is silently dropped here. The
-        // assert in new() prevents this from ever happening.
+
+        // No workers available and spawn failed — reject the item explicitly.
+        // This can happen when a single-use factory is exhausted (OnceFactory
+        // after its first worker exits). Silently dropping would lose the ack.
+        if let WorkerMsg::Work(item) = msg {
+            eprintln!("worker_pool: no workers available, rejecting batch");
+            let _ = self.ack_tx.send(AckItem {
+                tickets: item.tickets,
+                success: false,
+            });
+        }
     }
 
     /// Try to receive any pending ack items without blocking.
@@ -232,10 +248,12 @@ impl OutputWorkerPool {
     /// 3. **Force**: cancel any tasks still running after the timeout.
     pub async fn drain(&mut self, graceful_timeout: Duration) {
         // Phase 1 — signal all workers.
-        // Take the workers vec so we can drop the Senders after signalling.
+        // Use try_send to avoid blocking if a worker's channel is full (e.g.,
+        // it is stuck in send_batch). Dropping the Sender below also signals
+        // EOF, so workers that miss the Shutdown message will still exit.
         let workers = std::mem::take(&mut self.workers);
         for handle in &workers {
-            let _ = handle.tx.send(WorkerMsg::Shutdown).await;
+            let _ = handle.tx.try_send(WorkerMsg::Shutdown);
         }
         drop(workers); // Release all Senders → workers see channel closed.
 
@@ -255,10 +273,28 @@ impl OutputWorkerPool {
         {
             eprintln!(
                 "worker_pool: drain timeout ({graceful_timeout:?}); \
-                 aborting remaining workers"
+                 cancelling workers"
             );
-            // Phase 3 — cancel remaining.
+            // Phase 3 — fire cancellation token so workers notice at their
+            // next select! poll (after their current send_batch() returns).
+            // Give a brief window for in-flight batches to complete and send
+            // AckItems before we force-abort — per-batch timeout in
+            // process_item() is 60 s, so 5 s here catches most cases where
+            // the network hung after the batch was already sent.
             self.cancel.cancel();
+            let _ = tokio::time::timeout(Duration::from_secs(5), async {
+                while let Some(res) = self.join_set.join_next().await {
+                    if let Err(e) = res {
+                        if e.is_panic() {
+                            eprintln!("worker_pool: worker panicked: {e:?}");
+                        }
+                    }
+                }
+            })
+            .await;
+            // Any tasks still alive after the second window are truly stuck;
+            // abort them. AckItems for their in-flight batches are lost —
+            // callers must treat a forced drain as a hard failure.
             self.join_set.shutdown().await;
         }
         // After this point all workers have exited and sent their final acks.
@@ -510,9 +546,18 @@ mod kani_proofs {
         let outcome = dispatch_step(&states[..n], max_workers);
 
         // Guard against vacuous proofs: confirm all three arms are reachable.
-        kani::cover!(matches!(outcome, DispatchOutcome::SentToIndex(_)), "SentToIndex path reachable");
-        kani::cover!(matches!(outcome, DispatchOutcome::SpawnNew), "SpawnNew path reachable");
-        kani::cover!(matches!(outcome, DispatchOutcome::WaitOnFront), "WaitOnFront path reachable");
+        kani::cover!(
+            matches!(outcome, DispatchOutcome::SentToIndex(_)),
+            "SentToIndex path reachable"
+        );
+        kani::cover!(
+            matches!(outcome, DispatchOutcome::SpawnNew),
+            "SpawnNew path reachable"
+        );
+        kani::cover!(
+            matches!(outcome, DispatchOutcome::WaitOnFront),
+            "WaitOnFront path reachable"
+        );
 
         match outcome {
             DispatchOutcome::SentToIndex(i) => {
@@ -562,7 +607,10 @@ mod kani_proofs {
         let outcome = dispatch_step(&states[..n], max_workers);
 
         // Guard: confirm MRU path (SentToIndex) is reachable under these inputs.
-        kani::cover!(matches!(outcome, DispatchOutcome::SentToIndex(_)), "SentToIndex reachable in picks_first proof");
+        kani::cover!(
+            matches!(outcome, DispatchOutcome::SentToIndex(_)),
+            "SentToIndex reachable in picks_first proof"
+        );
 
         if let DispatchOutcome::SentToIndex(i) = outcome {
             // All workers before i must be Full or Closed.
@@ -624,7 +672,10 @@ mod kani_proofs {
         let outcome = dispatch_step(&states[..n], max_workers);
 
         // Guard: WaitOnFront must be reachable (not vacuously avoided).
-        kani::cover!(matches!(outcome, DispatchOutcome::WaitOnFront), "WaitOnFront reachable in wait_only_at_capacity proof");
+        kani::cover!(
+            matches!(outcome, DispatchOutcome::WaitOnFront),
+            "WaitOnFront reachable in wait_only_at_capacity proof"
+        );
 
         if matches!(outcome, DispatchOutcome::WaitOnFront) {
             assert_eq!(active, max_workers);
@@ -649,6 +700,9 @@ mod kani_proofs {
     fn verify_empty_pool_triggers_spawn() {
         let max_workers: usize = kani::any();
         kani::assume(max_workers >= 1);
+        // Guard: ensure max_workers=1 AND max_workers>1 are both reachable.
+        kani::cover!(max_workers == 1, "single-worker capacity exercised");
+        kani::cover!(max_workers > 1, "multi-worker capacity exercised");
         let outcome = dispatch_step(&[], max_workers);
         assert_eq!(outcome, DispatchOutcome::SpawnNew);
     }

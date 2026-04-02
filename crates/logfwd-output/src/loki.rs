@@ -186,12 +186,16 @@ impl LokiAsyncSink {
             }
             labels.sort_unstable_by(|a, b| a.0.cmp(&b.0));
 
-            // Build stream key from sorted labels.
-            let stream_key = labels
-                .iter()
-                .map(|(k, v)| format!("{k}={v}"))
-                .collect::<Vec<_>>()
-                .join(",");
+            // Build stream key as a JSON array of [key, value] pairs.
+            // This is unambiguous even when label values contain commas or `=`,
+            // which the previous `k=v,...` encoding could not represent losslessly.
+            let stream_key = {
+                let pairs: Vec<String> = labels
+                    .iter()
+                    .map(|(k, v)| format!("[\"{}\",\"{}\"]", escape_json(k), escape_json(v)))
+                    .collect();
+                format!("[{}]", pairs.join(","))
+            };
 
             // --- Log line ---
             let mut log_line = Vec::new();
@@ -218,11 +222,11 @@ impl LokiAsyncSink {
         for (stream_key, entries) in stream_map.iter_mut() {
             sort_and_dedup_timestamps(entries);
 
-            // Parse stream_key back into label map.
+            // Parse stream_key (JSON array of [key, value] pairs) back into label map.
             let mut labels_map: HashMap<String, String> = static_labels.iter().cloned().collect();
-            for pair in stream_key.split(',').filter(|s| !s.is_empty()) {
-                if let Some((k, v)) = pair.split_once('=') {
-                    labels_map.insert(k.to_string(), v.to_string());
+            if let Ok(pairs) = serde_json::from_str::<Vec<[String; 2]>>(stream_key.as_str()) {
+                for [k, v] in pairs {
+                    labels_map.insert(k, v);
                 }
             }
 

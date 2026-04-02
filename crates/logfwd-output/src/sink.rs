@@ -81,6 +81,17 @@ pub trait SinkFactory: Send + Sync + 'static {
 
     /// Human-readable name for logging.
     fn name(&self) -> &str;
+
+    /// Returns `true` if the factory wraps a non-replicable resource (e.g. a
+    /// pre-built sync sink) and can successfully call `create()` at most once.
+    ///
+    /// When `true`, the worker pool must use `max_workers = 1` and should set
+    /// a very long (or infinite) idle timeout so the sole worker is never
+    /// evicted — because if it exits, `create()` will return an error and the
+    /// output permanently stops.
+    fn is_single_use(&self) -> bool {
+        false
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -127,6 +138,8 @@ impl Sink for SyncSinkAdapter {
     }
 
     fn shutdown(&mut self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
-        Box::pin(async { Ok(()) })
+        // Flush buffered data before the worker exits. Sync sinks that buffer
+        // (e.g. file sinks) would silently lose the last batch without this.
+        Box::pin(async move { tokio::task::block_in_place(|| self.inner.flush()) })
     }
 }

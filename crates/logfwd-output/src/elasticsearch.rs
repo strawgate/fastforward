@@ -329,11 +329,11 @@ struct ElasticsearchConfig {
 /// Async Elasticsearch sink using reqwest.
 ///
 /// Implements the [`super::sink::Sink`] trait for use with `OutputWorkerPool`.
-/// Each worker owns one instance; the `Arc<reqwest::Client>` inside the factory
-/// is shared so HTTP/2 connection multiplexing applies across workers.
+/// Each worker owns its own `reqwest::Client` so idle worker shutdown drops
+/// its connection pool immediately rather than keeping it alive via a shared Arc.
 pub struct ElasticsearchAsyncSink {
     config: Arc<ElasticsearchConfig>,
-    client: Arc<reqwest::Client>,
+    client: reqwest::Client,
     name: String,
     batch_buf: Vec<u8>,
     stats: Arc<ComponentStats>,
@@ -343,7 +343,7 @@ impl ElasticsearchAsyncSink {
     fn new(
         name: String,
         config: Arc<ElasticsearchConfig>,
-        client: Arc<reqwest::Client>,
+        client: reqwest::Client,
         stats: Arc<ComponentStats>,
     ) -> Self {
         ElasticsearchAsyncSink {
@@ -381,11 +381,13 @@ impl ElasticsearchAsyncSink {
         );
 
         let cols = build_col_infos(batch);
-        let has_timestamp_col = batch
-            .schema()
-            .fields()
+        // Check normalized JSON output names (field_name strips type suffixes like
+        // `_str`/`_int`), not raw Arrow field names. A column `@timestamp_str` is
+        // serialized as `@timestamp`, so we must check the normalized name to avoid
+        // injecting a duplicate timestamp key into the document.
+        let has_timestamp_col = cols
             .iter()
-            .any(|f| f.name() == "@timestamp" || f.name() == "_timestamp");
+            .any(|c| c.field_name == "@timestamp" || c.field_name == "_timestamp");
 
         for row in 0..num_rows {
             self.batch_buf.extend_from_slice(action_bytes);
@@ -570,12 +572,12 @@ impl super::sink::Sink for ElasticsearchAsyncSink {
 
 /// Creates `ElasticsearchAsyncSink` instances for the output worker pool.
 ///
-/// Each factory holds a shared `Arc<reqwest::Client>` so all workers from
-/// this factory share one HTTP/2 connection pool.
+/// Each call to `create()` builds a fresh `reqwest::Client` for the new worker.
+/// This means idle workers release their connection pool when they exit rather
+/// than keeping it alive through a shared `Arc`.
 pub struct ElasticsearchSinkFactory {
     name: String,
     config: Arc<ElasticsearchConfig>,
-    client: Arc<reqwest::Client>,
     stats: Arc<ComponentStats>,
 }
 
@@ -594,11 +596,6 @@ impl ElasticsearchSinkFactory {
         compress: bool,
         stats: Arc<ComponentStats>,
     ) -> io::Result<Self> {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .map_err(io::Error::other)?;
-
         let parsed_headers = headers
             .into_iter()
             .map(|(k, v)| {
@@ -618,18 +615,25 @@ impl ElasticsearchSinkFactory {
                 headers: parsed_headers,
                 compress,
             }),
-            client: Arc::new(client),
             stats,
         })
+    }
+
+    fn build_client() -> io::Result<reqwest::Client> {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .map_err(io::Error::other)
     }
 }
 
 impl super::sink::SinkFactory for ElasticsearchSinkFactory {
     fn create(&self) -> io::Result<Box<dyn super::sink::Sink>> {
+        let client = Self::build_client()?;
         Ok(Box::new(ElasticsearchAsyncSink::new(
             self.name.clone(),
             Arc::clone(&self.config),
-            Arc::clone(&self.client),
+            client,
             Arc::clone(&self.stats),
         )))
     }
@@ -806,5 +810,186 @@ mod tests {
 
         sink.serialize_batch(&batch).expect("serialize failed");
         assert!(sink.batch_buf.is_empty());
+    }
+
+    // --- is_leap_year ---
+
+    #[test]
+    fn leap_year_divisible_by_400() {
+        assert!(is_leap_year(1600));
+        assert!(is_leap_year(2000));
+        assert!(is_leap_year(2400));
+    }
+
+    #[test]
+    fn not_leap_year_divisible_by_100_not_400() {
+        assert!(!is_leap_year(1700));
+        assert!(!is_leap_year(1800));
+        assert!(!is_leap_year(1900));
+        assert!(!is_leap_year(2100));
+    }
+
+    #[test]
+    fn leap_year_divisible_by_4_not_100() {
+        assert!(is_leap_year(2024));
+        assert!(is_leap_year(2020));
+        assert!(is_leap_year(1996));
+    }
+
+    #[test]
+    fn not_leap_year_not_divisible_by_4() {
+        assert!(!is_leap_year(2023));
+        assert!(!is_leap_year(2019));
+        assert!(!is_leap_year(1999));
+    }
+
+    // --- format_unix_timestamp_utc ---
+
+    #[test]
+    fn timestamp_epoch_is_1970_01_01() {
+        assert_eq!(format_unix_timestamp_utc(0), "1970-01-01T00:00:00");
+    }
+
+    #[test]
+    fn timestamp_one_second() {
+        assert_eq!(format_unix_timestamp_utc(1), "1970-01-01T00:00:01");
+    }
+
+    #[test]
+    fn timestamp_one_day() {
+        assert_eq!(format_unix_timestamp_utc(86400), "1970-01-02T00:00:00");
+    }
+
+    #[test]
+    fn timestamp_y2k() {
+        // 2000-01-01T00:00:00 UTC = 946684800
+        assert_eq!(format_unix_timestamp_utc(946684800), "2000-01-01T00:00:00");
+    }
+
+    #[test]
+    fn timestamp_leap_day_2000() {
+        // 2000-02-29T00:00:00 UTC = 951782400
+        assert_eq!(format_unix_timestamp_utc(951782400), "2000-02-29T00:00:00");
+    }
+
+    #[test]
+    fn timestamp_non_leap_year_march() {
+        // 2001-03-01T00:00:00 UTC = 983404800 (2001 is not a leap year)
+        assert_eq!(format_unix_timestamp_utc(983404800), "2001-03-01T00:00:00");
+    }
+
+    #[test]
+    fn timestamp_mid_of_day() {
+        // 1970-01-01T12:34:56 = 45296
+        assert_eq!(format_unix_timestamp_utc(45296), "1970-01-01T12:34:56");
+    }
+
+    #[test]
+    fn timestamp_end_of_year() {
+        // 1970-12-31T23:59:59 = 31535999
+        assert_eq!(format_unix_timestamp_utc(31535999), "1970-12-31T23:59:59");
+    }
+
+    // --- parse_bulk_response: edge cases ---
+
+    #[test]
+    fn parse_bulk_response_empty_items_array() {
+        let stats = Arc::new(ComponentStats::default());
+        let sink = ElasticsearchSink::new(
+            "test".to_string(),
+            "http://localhost:9200".to_string(),
+            "logs".to_string(),
+            vec![],
+            stats,
+        );
+        let response = br#"{"took":0,"errors":false,"items":[]}"#;
+        sink.parse_bulk_response(response)
+            .expect("empty items should succeed");
+    }
+
+    #[test]
+    fn parse_bulk_response_malformed_json_without_errors_true_is_ok() {
+        // The implementation uses fast-path memchr for "errors":true.
+        // Malformed JSON that doesn't contain that string is treated as success.
+        let stats = Arc::new(ComponentStats::default());
+        let sink = ElasticsearchSink::new(
+            "test".to_string(),
+            "http://localhost:9200".to_string(),
+            "logs".to_string(),
+            vec![],
+            stats,
+        );
+        sink.parse_bulk_response(b"not valid json")
+            .expect("no errors:true → treated as ok");
+    }
+
+    #[test]
+    fn parse_bulk_response_malformed_json_after_errors_true_returns_err() {
+        // If "errors":true is present but the full JSON parse fails, return an error.
+        let stats = Arc::new(ComponentStats::default());
+        let sink = ElasticsearchSink::new(
+            "test".to_string(),
+            "http://localhost:9200".to_string(),
+            "logs".to_string(),
+            vec![],
+            stats,
+        );
+        sink.parse_bulk_response(b"\"errors\":true {{{malformed")
+            .expect_err("malformed JSON after errors:true should error");
+    }
+
+    #[test]
+    fn parse_bulk_response_errors_false_does_not_error() {
+        let stats = Arc::new(ComponentStats::default());
+        let sink = ElasticsearchSink::new(
+            "test".to_string(),
+            "http://localhost:9200".to_string(),
+            "logs".to_string(),
+            vec![],
+            stats,
+        );
+        // errors:false means success even if items have non-200 status
+        let response = br#"{"took":1,"errors":false,"items":[{"index":{"_id":"1","status":200}}]}"#;
+        sink.parse_bulk_response(response)
+            .expect("errors:false must succeed");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Kani proofs
+// ---------------------------------------------------------------------------
+
+#[cfg(kani)]
+mod kani_proofs {
+    use super::*;
+
+    /// Prove is_leap_year satisfies all four cases of the Gregorian calendar rule
+    /// exhaustively for every possible u32 year value.
+    #[kani::proof]
+    fn verify_is_leap_year_gregorian_rules() {
+        let y: u32 = kani::any();
+
+        kani::cover!(is_leap_year(y), "at least one leap year found");
+        kani::cover!(!is_leap_year(y), "at least one non-leap year found");
+
+        // Rule 1: divisible by 400 → always leap
+        if y % 400 == 0 {
+            assert!(is_leap_year(y), "div by 400 must be leap: {y}");
+        }
+        // Rule 2: divisible by 100 but not 400 → not leap
+        if y % 100 == 0 && y % 400 != 0 {
+            assert!(
+                !is_leap_year(y),
+                "div by 100 but not 400 must not be leap: {y}"
+            );
+        }
+        // Rule 3: divisible by 4 but not 100 → leap
+        if y % 4 == 0 && y % 100 != 0 {
+            assert!(is_leap_year(y), "div by 4 but not 100 must be leap: {y}");
+        }
+        // Rule 4: not divisible by 4 → not leap
+        if y % 4 != 0 {
+            assert!(!is_leap_year(y), "not div by 4 must not be leap: {y}");
+        }
     }
 }
