@@ -244,7 +244,7 @@ impl OutputSink for OtlpSink {
         loop {
             match build_req().send(payload) {
                 Ok(_) => {
-                    self.stats.inc_lines(batch.num_rows() as u64);
+                    // inc_lines is counted by the pipeline; only track bytes here.
                     self.stats.inc_bytes(self.encoder_buf.len() as u64);
                     return Ok(());
                 }

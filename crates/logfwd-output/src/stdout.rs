@@ -28,6 +28,9 @@ pub struct StdoutSink {
     format: StdoutFormat,
     buf: Vec<u8>,
     color: bool,
+    // Stored for API consistency with other sinks; byte tracking on stdout is
+    // not currently wired up.
+    #[allow(dead_code)]
     stats: Arc<ComponentStats>,
 }
 
@@ -247,7 +250,8 @@ impl OutputSink for StdoutSink {
     fn send_batch(&mut self, batch: &RecordBatch, metadata: &BatchMetadata) -> io::Result<()> {
         let mut stdout = io::stdout().lock();
         self.write_batch_to(batch, metadata, &mut stdout)?;
-        self.stats.inc_lines(batch.num_rows() as u64);
+        // Line counting is done once by the pipeline (PipelineMetrics::inc_output_success).
+        // Sinks must not also call inc_lines or the counter is doubled.
         Ok(())
     }
 
