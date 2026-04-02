@@ -15,7 +15,7 @@ use logfwd_arrow::scanner::StreamingSimdScanner as Scanner;
 use logfwd_config::{
     EnrichmentConfig, Format, GeoDatabaseFormat, InputConfig, InputType, PipelineConfig,
 };
-use logfwd_core::pipeline::SourceId;
+use logfwd_core::pipeline::{PipelineMachine, Running, SourceId};
 use logfwd_io::diagnostics::{ComponentStats, PipelineMetrics};
 use logfwd_io::format::FormatProcessor;
 use logfwd_io::framed::FramedInput;
@@ -75,6 +75,9 @@ pub struct Pipeline {
     poll_interval: Duration,
     /// Static OTLP resource attributes (e.g. `service.name`) emitted with every batch.
     resource_attrs: Vec<(String, String)>,
+    /// Batch lifecycle state machine. Option because begin_drain() consumes self.
+    /// Some during run_async, None only after shutdown drain transition.
+    machine: Option<PipelineMachine<Running, u64>>,
 }
 
 impl Pipeline {
@@ -203,6 +206,7 @@ impl Pipeline {
             batch_timeout: Duration::from_millis(100),
             poll_interval: Duration::from_millis(10),
             resource_attrs,
+            machine: Some(PipelineMachine::new().start()),
         })
     }
 
@@ -365,9 +369,9 @@ impl Pipeline {
 
     /// Scan + transform + output a batch of accumulated JSON lines.
     ///
-    /// Accepts checkpoint metadata alongside the data. Currently checkpoints
-    /// are cleared but not acted on — PipelineMachine integration (#586) will
-    /// create BatchTickets from them.
+    /// Creates BatchTickets from checkpoint metadata for each contributing
+    /// file source. Tickets are Queued before scan/transform (safe to drop
+    /// on error), then begin_send after (must ack or reject).
     async fn flush_batch(
         &mut self,
         scan_buf: &mut Vec<u8>,
@@ -376,14 +380,26 @@ impl Pipeline {
         if scan_buf.is_empty() {
             return;
         }
-        // Clear checkpoints for this batch. Will be used by #586 to create
-        // BatchTickets for checkpoint tracking.
-        let _checkpoints = std::mem::take(batch_checkpoints);
+
+        let checkpoints = std::mem::take(batch_checkpoints);
+
         // Swap in a pre-allocated buffer to avoid losing the capacity
         // of the original scan_buf (which was created with
         // Vec::with_capacity(batch_target_bytes)).
         let mut combined = Vec::with_capacity(self.batch_target_bytes);
         std::mem::swap(scan_buf, &mut combined);
+
+        // Create Queued tickets (one per contributing file source).
+        // These are lightweight — NOT tracked by the machine yet.
+        // Safe to drop on scan/transform error.
+        let tickets = if let Some(ref mut machine) = self.machine {
+            checkpoints
+                .into_iter()
+                .map(|(sid, offset)| machine.create_batch(sid, offset.0))
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
 
         // Scan (CPU-bound, ~1-5ms per 4MB batch). block_in_place tells
         // tokio to move other tasks off this worker while scanning.
@@ -391,6 +407,7 @@ impl Pipeline {
         let batch = match tokio::task::block_in_place(|| self.scanner.scan(combined.into())) {
             Ok(b) => b,
             Err(e) => {
+                // Queued tickets dropped here — safe, not tracked by machine.
                 self.metrics.inc_scan_error();
                 self.metrics.inc_dropped_batch();
                 eprintln!("pipeline: scan error (batch dropped): {e}");
@@ -399,7 +416,22 @@ impl Pipeline {
         };
         let scan_elapsed = t0.elapsed();
 
+        // begin_send all tickets — machine now tracks them, MUST ack or reject.
+        let sending: Vec<_> = if let Some(ref mut machine) = self.machine {
+            tickets
+                .into_iter()
+                .map(|t| machine.begin_send(t))
+                .collect()
+        } else {
+            // No machine (shouldn't happen during normal run). Drop tickets.
+            drop(tickets);
+            Vec::new()
+        };
+
+        // Handle zero-row scan results. Still ack tickets — the input bytes
+        // were consumed. Without this, filtered data causes infinite re-read.
         if batch.num_rows() == 0 {
+            self.ack_all_tickets(sending, true);
             return;
         }
 
@@ -414,6 +446,8 @@ impl Pipeline {
                 self.metrics.inc_transform_error();
                 self.metrics.inc_dropped_batch();
                 eprintln!("pipeline: transform error (batch dropped): {e}");
+                // Reject tickets — transform failed, data not delivered.
+                self.ack_all_tickets(sending, false);
                 return;
             }
         };
@@ -422,29 +456,53 @@ impl Pipeline {
             .transform_out
             .inc_lines(result.num_rows() as u64);
 
+        // Handle zero-row transform results (SQL WHERE filtered all rows).
+        // Still ack — data was processed, just not forwarded.
+        if result.num_rows() == 0 {
+            self.ack_all_tickets(sending, true);
+            // Still record batch timing for observability.
+            self.metrics.record_batch(
+                num_rows,
+                scan_elapsed.as_nanos() as u64,
+                transform_elapsed.as_nanos() as u64,
+                0,
+            );
+            return;
+        }
+
         // Output (block_in_place wraps the sync HTTP send).
         let t2 = Instant::now();
         let metadata = BatchMetadata {
             resource_attrs: self.resource_attrs.clone(),
             observed_time_ns: now_nanos(),
         };
-        if let Err(e) = tokio::task::block_in_place(|| self.output.send_batch(&result, &metadata)) {
-            if let Some(fanout_error) = e
-                .get_ref()
-                .and_then(|inner| inner.downcast_ref::<FanOutError>())
-            {
-                for failed_sink in fanout_error.failed_sinks() {
-                    self.metrics.output_error(failed_sink);
+        let output_ok =
+            match tokio::task::block_in_place(|| self.output.send_batch(&result, &metadata)) {
+                Ok(()) => true,
+                Err(e) => {
+                    if let Some(fanout_error) = e
+                        .get_ref()
+                        .and_then(|inner| inner.downcast_ref::<FanOutError>())
+                    {
+                        for failed_sink in fanout_error.failed_sinks() {
+                            self.metrics.output_error(failed_sink);
+                        }
+                    } else {
+                        self.metrics.output_error(self.output.name());
+                    }
+                    self.metrics.inc_dropped_batch();
+                    eprintln!("pipeline: output error (batch dropped): {e}");
+                    false
                 }
-            } else {
-                self.metrics.output_error(self.output.name());
-            }
-            self.metrics.inc_dropped_batch();
-            eprintln!("pipeline: output error (batch dropped): {e}");
-            return;
-        }
+            };
         let output_elapsed = t2.elapsed();
-        self.metrics.inc_output_success(num_rows);
+
+        // Ack or reject all tickets based on output result.
+        self.ack_all_tickets(sending, output_ok);
+
+        if output_ok {
+            self.metrics.inc_output_success(num_rows);
+        }
 
         self.metrics.record_batch(
             num_rows,
@@ -452,6 +510,26 @@ impl Pipeline {
             transform_elapsed.as_nanos() as u64,
             output_elapsed.as_nanos() as u64,
         );
+    }
+
+    /// Ack or reject all Sending tickets and apply receipts to the machine.
+    fn ack_all_tickets(
+        &mut self,
+        tickets: Vec<logfwd_core::pipeline::BatchTicket<logfwd_core::pipeline::Sending, u64>>,
+        success: bool,
+    ) {
+        let Some(ref mut machine) = self.machine else {
+            return;
+        };
+        for ticket in tickets {
+            let receipt = if success {
+                ticket.ack()
+            } else {
+                ticket.reject()
+            };
+            let _advance = machine.apply_ack(receipt);
+            // TODO (#588): if advance.advanced, persist checkpoint via CheckpointStore
+        }
     }
 }
 
