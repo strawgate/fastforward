@@ -116,9 +116,11 @@ impl<C: Clone> PipelineMachine<Running, C> {
     ///
     /// This is the point where the pipeline takes ownership — after this
     /// call, the batch MUST be acked, rejected, or failed (retry). Dropping
-    /// a Sending ticket is a bug (warned by `#[must_use]`).
+    /// the returned `Sending` ticket without calling `ack()`, `reject()`, or
+    /// `fail()` leaves the batch permanently in_flight, blocking drain.
     ///
     /// Consumes the Queued ticket, returns a Sending ticket.
+    #[must_use = "Sending ticket must be acked, rejected, or failed — dropping blocks drain forever"]
     pub fn begin_send(&mut self, ticket: BatchTicket<Queued, C>) -> BatchTicket<Sending, C> {
         self.in_flight
             .entry(ticket.source())
