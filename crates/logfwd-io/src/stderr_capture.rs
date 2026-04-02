@@ -173,8 +173,17 @@ fn reader_loop(read_fd: i32, orig_fd: i32, state: &CaptureState) {
         let n =
             unsafe { libc::read(read_fd, buf.as_mut_ptr().cast::<libc::c_void>(), buf.len()) };
 
-        if n <= 0 {
-            // EOF or error — pipe write end closed (process exiting).
+        if n < 0 {
+            // EINTR: signal interrupted the read — retry.
+            let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+            if errno == libc::EINTR {
+                continue;
+            }
+            // Any other error: pipe broken or process exiting.
+            break;
+        }
+        if n == 0 {
+            // EOF — write end of pipe was closed (process exiting).
             break;
         }
 
