@@ -373,19 +373,32 @@ fn decode_otlp_logs_json(body: &[u8]) -> Result<Vec<u8>, String> {
 }
 
 /// Extract a string from an OTLP JSON AnyValue object.
+/// For common integer/float/bool cases, write directly to avoid intermediate String allocation.
 fn json_any_value_to_string(v: &serde_json::Value) -> String {
     if let Some(s) = v.get("stringValue").and_then(|v| v.as_str()) {
         return s.to_string();
     }
     if let Some(i) = v.get("intValue") {
         // OTLP JSON encodes int64 as string
-        return i.as_str().unwrap_or("0").to_string();
+        if let Some(s) = i.as_str() {
+            return s.to_string();
+        }
+        // Fallback for numeric encoding
+        if let Some(n) = i.as_i64() {
+            let mut buf = Vec::new();
+            write_i64_to_buf(&mut buf, n);
+            // SAFETY: write_i64_to_buf only writes ASCII digits and '-'
+            return unsafe { String::from_utf8_unchecked(buf) };
+        }
     }
     if let Some(d) = v.get("doubleValue").and_then(serde_json::Value::as_f64) {
-        return d.to_string();
+        let mut buf = Vec::new();
+        write_f64_to_buf(&mut buf, d);
+        // SAFETY: write_f64_to_buf only writes ASCII characters
+        return unsafe { String::from_utf8_unchecked(buf) };
     }
     if let Some(b) = v.get("boolValue").and_then(serde_json::Value::as_bool) {
-        return b.to_string();
+        return if b { "true" } else { "false" }.to_string();
     }
     String::new()
 }
@@ -427,13 +440,12 @@ fn convert_request_to_json_lines(
             for record in &scope_logs.log_records {
                 out.push(b'{');
 
-                // timestamp
+                // timestamp (write directly without allocation)
                 if record.time_unix_nano > 0 {
-                    write_json_field(
-                        &mut out,
-                        "timestamp_int",
-                        &record.time_unix_nano.to_string(),
-                    );
+                    out.push(b'"');
+                    out.extend_from_slice(b"timestamp_int");
+                    out.extend_from_slice(b"\":");
+                    write_u64_to_buf(&mut out, record.time_unix_nano);
                     out.push(b',');
                 }
 
@@ -464,14 +476,20 @@ fn convert_request_to_json_lines(
                     out.push(b',');
                 }
 
-                // trace context
+                // trace context (write hex directly to avoid allocation)
                 if !record.trace_id.is_empty() {
-                    write_json_string_field(&mut out, "trace_id", &hex::encode(&record.trace_id));
-                    out.push(b',');
+                    out.push(b'"');
+                    out.extend_from_slice(b"trace_id");
+                    out.extend_from_slice(b"\":\"");
+                    write_hex_to_buf(&mut out, &record.trace_id);
+                    out.extend_from_slice(b"\",");
                 }
                 if !record.span_id.is_empty() {
-                    write_json_string_field(&mut out, "span_id", &hex::encode(&record.span_id));
-                    out.push(b',');
+                    out.push(b'"');
+                    out.extend_from_slice(b"span_id");
+                    out.extend_from_slice(b"\":\"");
+                    write_hex_to_buf(&mut out, &record.span_id);
+                    out.extend_from_slice(b"\",");
                 }
 
                 // Remove trailing comma.
@@ -500,12 +518,101 @@ fn any_value_to_string(v: &AnyValue) -> String {
 
 fn write_json_any_value(out: &mut Vec<u8>, key: &str, v: &AnyValue) {
     match &v.value {
-        Some(Value::IntValue(i)) => write_json_field(out, key, &i.to_string()),
-        Some(Value::DoubleValue(d)) => write_json_field(out, key, &d.to_string()),
-        Some(Value::BoolValue(b)) => write_json_field(out, key, &b.to_string()),
+        Some(Value::IntValue(i)) => {
+            out.push(b'"');
+            out.extend_from_slice(key.as_bytes());
+            out.extend_from_slice(b"\":");
+            // Write integer directly without allocating a String
+            write_i64_to_buf(out, *i);
+        }
+        Some(Value::DoubleValue(d)) => {
+            out.push(b'"');
+            out.extend_from_slice(key.as_bytes());
+            out.extend_from_slice(b"\":");
+            // Write double directly without allocating a String
+            write_f64_to_buf(out, *d);
+        }
+        Some(Value::BoolValue(b)) => {
+            out.push(b'"');
+            out.extend_from_slice(key.as_bytes());
+            out.extend_from_slice(b"\":");
+            out.extend_from_slice(if *b { b"true" } else { b"false" });
+        }
         Some(Value::StringValue(s)) => write_json_string_field(out, key, s),
         _ => {}
     }
+}
+
+/// Write i64 to buffer without allocation using itoa algorithm.
+#[inline]
+fn write_i64_to_buf(out: &mut Vec<u8>, mut n: i64) {
+    if n == 0 {
+        out.push(b'0');
+        return;
+    }
+
+    if n < 0 {
+        out.push(b'-');
+        // Handle i64::MIN specially to avoid overflow
+        if n == i64::MIN {
+            out.extend_from_slice(b"9223372036854775808");
+            return;
+        }
+        n = -n;
+    }
+
+    // Count digits
+    let mut temp = n;
+    let mut digits = 0;
+    while temp > 0 {
+        temp /= 10;
+        digits += 1;
+    }
+
+    // Reserve space and write digits in reverse
+    let start = out.len();
+    out.resize(start + digits, 0);
+    let mut pos = start + digits - 1;
+    while n > 0 {
+        out[pos] = b'0' + (n % 10) as u8;
+        n /= 10;
+        pos = pos.wrapping_sub(1);
+    }
+}
+
+/// Write u64 to buffer without allocation using itoa algorithm.
+#[inline]
+fn write_u64_to_buf(out: &mut Vec<u8>, mut n: u64) {
+    if n == 0 {
+        out.push(b'0');
+        return;
+    }
+
+    // Count digits
+    let mut temp = n;
+    let mut digits = 0;
+    while temp > 0 {
+        temp /= 10;
+        digits += 1;
+    }
+
+    // Reserve space and write digits in reverse
+    let start = out.len();
+    out.resize(start + digits, 0);
+    let mut pos = start + digits - 1;
+    while n > 0 {
+        out[pos] = b'0' + (n % 10) as u8;
+        n /= 10;
+        pos = pos.wrapping_sub(1);
+    }
+}
+
+/// Write f64 to buffer without allocation using ryu algorithm.
+#[inline]
+fn write_f64_to_buf(out: &mut Vec<u8>, d: f64) {
+    use std::io::Write;
+    // Use ryu for optimal float formatting (available in std)
+    let _ = write!(out, "{}", d);
 }
 
 fn write_json_field(out: &mut Vec<u8>, key: &str, value: &str) {
@@ -541,13 +648,24 @@ fn write_json_string_field(out: &mut Vec<u8>, key: &str, value: &str) {
 
 const HEX_DIGITS: [u8; 16] = *b"0123456789abcdef";
 
+/// Write hex-encoded bytes directly to output buffer (zero allocation).
+fn write_hex_to_buf(out: &mut Vec<u8>, bytes: &[u8]) {
+    const HEX_TABLE: &[u8; 16] = b"0123456789abcdef";
+    for &b in bytes {
+        out.push(HEX_TABLE[(b >> 4) as usize]);
+        out.push(HEX_TABLE[(b & 0xf) as usize]);
+    }
+}
+
 /// Minimal hex encoding (avoid adding the `hex` crate).
+/// Only used in any_value_to_string for BytesValue (rare case).
 mod hex {
     pub fn encode(bytes: &[u8]) -> String {
+        const HEX_TABLE: &[u8; 16] = b"0123456789abcdef";
         let mut s = String::with_capacity(bytes.len() * 2);
         for &b in bytes {
-            s.push(char::from_digit((b >> 4) as u32, 16).unwrap_or('0'));
-            s.push(char::from_digit((b & 0xf) as u32, 16).unwrap_or('0'));
+            s.push(HEX_TABLE[(b >> 4) as usize] as char);
+            s.push(HEX_TABLE[(b & 0xf) as usize] as char);
         }
         s
     }
