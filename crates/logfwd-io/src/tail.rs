@@ -1274,7 +1274,10 @@ mod tests {
         let offsets = tailer.file_offsets();
         assert_eq!(offsets.len(), 1, "should have one file");
         let (sid, byte_off) = &offsets[0];
-        assert_ne!(sid.0, 0, "fingerprint should be non-zero for file with content");
+        assert_ne!(
+            sid.0, 0,
+            "fingerprint should be non-zero for file with content"
+        );
         assert!(byte_off.0 > 0, "offset should be > 0 after reading data");
     }
 
@@ -1326,7 +1329,10 @@ mod tests {
         let offsets = tailer.file_offsets();
         assert_eq!(offsets.len(), 2, "should have two files");
         let sids: Vec<_> = offsets.iter().map(|(s, _)| s.0).collect();
-        assert_ne!(sids[0], sids[1], "distinct files should have distinct fingerprints");
+        assert_ne!(
+            sids[0], sids[1],
+            "distinct files should have distinct fingerprints"
+        );
     }
 
     #[test]

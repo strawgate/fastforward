@@ -339,7 +339,8 @@ impl Pipeline {
                         batch_checkpoints.insert(sid, offset);
                     }
                     if scan_buf.len() >= self.batch_target_bytes {
-                        self.flush_batch(&mut scan_buf, &mut batch_checkpoints).await;
+                        self.flush_batch(&mut scan_buf, &mut batch_checkpoints)
+                            .await;
                     }
                 }
                 ChannelMsg::PathUpdate(updates) => {
@@ -360,7 +361,8 @@ impl Pipeline {
 
         // Flush any remaining buffered data.
         if !scan_buf.is_empty() {
-            self.flush_batch(&mut scan_buf, &mut batch_checkpoints).await;
+            self.flush_batch(&mut scan_buf, &mut batch_checkpoints)
+                .await;
         }
 
         // Transition machine: Running → Draining → Stopped.
@@ -437,10 +439,7 @@ impl Pipeline {
 
         // begin_send all tickets — machine now tracks them, MUST ack or reject.
         let sending: Vec<_> = if let Some(ref mut machine) = self.machine {
-            tickets
-                .into_iter()
-                .map(|t| machine.begin_send(t))
-                .collect()
+            tickets.into_iter().map(|t| machine.begin_send(t)).collect()
         } else {
             // No machine (shouldn't happen during normal run). Drop tickets.
             drop(tickets);
@@ -632,8 +631,7 @@ fn input_poll_loop(
             let checkpoints = input.source.checkpoint_data();
 
             // Detect new sources and send PathUpdate before first Data.
-            let current_sources: HashSet<SourceId> =
-                checkpoints.iter().map(|(s, _)| *s).collect();
+            let current_sources: HashSet<SourceId> = checkpoints.iter().map(|(s, _)| *s).collect();
             if current_sources != known_sources {
                 let new_sources: Vec<SourceId> = current_sources
                     .difference(&known_sources)
@@ -647,11 +645,8 @@ fn input_poll_loop(
                         .filter(|(s, _)| new_sources.contains(s))
                         .collect();
                     if !paths.is_empty() {
-                        let _ = blocking_send_channel_msg(
-                            &tx,
-                            &metrics,
-                            ChannelMsg::PathUpdate(paths),
-                        );
+                        let _ =
+                            blocking_send_channel_msg(&tx, &metrics, ChannelMsg::PathUpdate(paths));
                     }
                 }
                 known_sources = current_sources;
