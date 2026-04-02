@@ -57,7 +57,7 @@ See `dev-docs/CODE_STYLE.md` for style preferences enforced during review.
 
 ## Architecture
 
-See `dev-docs/DECISIONS.md` for settled architecture decisions.
+See `dev-docs/DESIGN.md` for settled architecture decisions.
 Don't reopen a settled question without new evidence.
 
 ## Key Commands
