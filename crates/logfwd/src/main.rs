@@ -215,26 +215,6 @@ async fn cmd_config(args: &[String]) -> Result<(), CliError> {
         return validate_pipelines(&config, dry_run, base_path);
     }
 
-    // Startup summary.
-    eprintln!("{}logfwd{} {}v{VERSION}{}", bold(), reset(), dim(), reset(),);
-    for (name, pipe_cfg) in &config.pipelines {
-        let n_in = pipe_cfg.inputs.len();
-        let n_out = pipe_cfg.outputs.len();
-        let sql = pipe_cfg
-            .transform
-            .as_deref()
-            .unwrap_or("SELECT * FROM logs");
-        eprintln!(
-            "  {}pipeline{} {}{name}{}: {n_in} input(s) {dim}-> {sql} ->{r} {n_out} output(s)",
-            dim(),
-            reset(),
-            bold(),
-            reset(),
-            dim = dim(),
-            r = reset(),
-        );
-    }
-
     run_pipelines(config, base_path, config_path, &config_yaml).await
 }
 
@@ -328,6 +308,35 @@ fn validate_pipelines(
     Ok(())
 }
 
+fn input_label(i: &logfwd_config::InputConfig) -> String {
+    use logfwd_config::InputType;
+    match i.input_type {
+        InputType::File => format!("file  {}", i.path.as_deref().unwrap_or("*")),
+        InputType::Tcp => format!("tcp   {}", i.listen.as_deref().unwrap_or(":514")),
+        InputType::Udp => format!("udp   {}", i.listen.as_deref().unwrap_or(":514")),
+        InputType::Otlp => format!("otlp  {}", i.listen.as_deref().unwrap_or(":4318")),
+        InputType::Generator => "generator".to_string(),
+        _ => "unknown".to_string(),
+    }
+}
+
+fn output_label(o: &logfwd_config::OutputConfig) -> String {
+    use logfwd_config::OutputType;
+    match o.output_type {
+        OutputType::Otlp => format!("otlp  {}", o.endpoint.as_deref().unwrap_or("")),
+        OutputType::Http => format!("http  {}", o.endpoint.as_deref().unwrap_or("")),
+        OutputType::Elasticsearch => format!("elasticsearch  {}", o.endpoint.as_deref().unwrap_or("")),
+        OutputType::Loki => format!("loki  {}", o.endpoint.as_deref().unwrap_or("")),
+        OutputType::TcpOut => format!("tcp   {}", o.endpoint.as_deref().unwrap_or("")),
+        OutputType::UdpOut => format!("udp   {}", o.endpoint.as_deref().unwrap_or("")),
+        OutputType::FileOut => format!("file  {}", o.path.as_deref().unwrap_or("")),
+        OutputType::Parquet => format!("parquet  {}", o.path.as_deref().unwrap_or("")),
+        OutputType::Stdout => "stdout".to_string(),
+        OutputType::Null => "null".to_string(),
+        _ => "unknown".to_string(),
+    }
+}
+
 async fn run_pipelines(
     config: logfwd_config::Config,
     base_path: Option<&std::path::Path>,
@@ -398,7 +407,6 @@ async fn run_pipelines(
     for (name, pipe_cfg) in &config.pipelines {
         match Pipeline::from_config(name, pipe_cfg, &meter, base_path) {
             Ok(pipeline) => {
-                eprintln!("  {}ready{}: {}{name}{}", green(), reset(), bold(), reset());
                 pipelines.push(pipeline);
             }
             Err(e) => {
@@ -407,7 +415,7 @@ async fn run_pipelines(
         }
     }
 
-    let _diag_handle = if let Some(ref addr) = config.server.diagnostics {
+    let diag_handle = if let Some(ref addr) = config.server.diagnostics {
         let mut server = DiagnosticsServer::new(addr);
         server.set_config(config_path, config_yaml);
         for p in &pipelines {
@@ -416,17 +424,45 @@ async fn run_pipelines(
         #[cfg(unix)]
         server.set_memory_stats_fn(jemalloc_stats);
         let handle = server.start()?;
-        eprintln!("  {}diagnostics{}: http://{addr}", dim(), reset());
-        Some(handle)
+        Some((handle, addr.clone()))
     } else {
         None
     };
 
+    eprintln!("{}logfwd{} {}v{VERSION}{}", bold(), reset(), dim(), reset());
+
+    // Print startup summary after everything is ready.
+    for (name, pipe_cfg) in &config.pipelines {
+        eprintln!();
+        eprintln!("  {}✓{}  {}{name}{}", green(), reset(), bold(), reset());
+        for input in &pipe_cfg.inputs {
+            eprintln!("     {}in{}   {}", dim(), reset(), input_label(input));
+        }
+        if let Some(sql) = pipe_cfg.transform.as_deref() {
+            let sql = sql.trim();
+            let first_line = sql.lines().next().unwrap_or(sql);
+            let truncated = if first_line.chars().count() > 100 {
+                format!("{}…", first_line.chars().take(100).collect::<String>())
+            } else {
+                first_line.to_string()
+            };
+            eprintln!("     {}sql{}  {truncated}", dim(), reset());
+        }
+        for output in &pipe_cfg.outputs {
+            eprintln!("     {}out{}  {}", dim(), reset(), output_label(output));
+        }
+    }
+    if let Some((_, ref addr)) = diag_handle {
+        eprintln!();
+        eprintln!("  {}dashboard{}  http://{addr}", bold(), reset());
+    }
+    eprintln!();
+    let n = pipelines.len();
     eprintln!(
-        "{}logfwd running{} ({} pipeline(s))",
+        "{}ready{} · {n} pipeline{}",
         green(),
         reset(),
-        pipelines.len(),
+        if n == 1 { "" } else { "s" },
     );
 
     let mut handles = Vec::new();
