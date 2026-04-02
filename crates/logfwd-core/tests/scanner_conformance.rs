@@ -93,71 +93,92 @@ fn assert_values_correct(input: &[u8]) {
             if val.is_str() {
                 let expected = val.as_str().unwrap();
                 // With suffix-on-conflict: single-type fields use bare name,
-                // conflict fields use suffixed name. Try both.
-                let suffixed = format!("{}_str", key_str);
-                let col_name = if batch.column_by_name(&suffixed).is_some() {
-                    suffixed
-                } else {
-                    key_str.to_string()
-                };
-                if let Some(col) = batch.column_by_name(&col_name)
-                    && let Some(arr) = col.as_any().downcast_ref::<StringArray>()
-                    && !arr.is_null(row)
-                {
-                    let actual = arr.value(row);
-                    // Our scanner preserves escape sequences (raw bytes),
-                    // sonic-rs unescapes them. So we compare the sonic-rs
-                    // unescaped value against our raw bytes — they should
-                    // differ only by escape processing.
-                    // For strings without escapes, they must be identical.
-                    if !actual.contains('\\') {
-                        assert_eq!(
-                            actual,
-                            expected,
-                            "String value mismatch at {col_name}[{row}].\nExpected: {expected:?}\nActual: {actual:?}\nInput: {:?}",
+                // conflict fields use suffixed name. Try suffixed first so that
+                // a conflict batch (which has both bare-int and suffixed-str cols)
+                // resolves to the typed column.
+                let col = batch
+                    .column_by_name(&format!("{key_str}_str"))
+                    .or_else(|| batch.column_by_name(key_str));
+                if let Some(col) = col {
+                    let arr = col.as_any().downcast_ref::<StringArray>().unwrap_or_else(|| {
+                        panic!(
+                            "Expected StringArray for key '{key_str}' at row {row} but got {:?}.\nInput: {:?}",
+                            col.data_type(),
                             String::from_utf8_lossy(line)
-                        );
+                        )
+                    });
+                    if !arr.is_null(row) {
+                        let actual = arr.value(row);
+                        // Our scanner preserves escape sequences (raw bytes),
+                        // sonic-rs unescapes them. For strings without escapes
+                        // the values must be identical.
+                        if !actual.contains('\\') {
+                            assert_eq!(
+                                actual,
+                                expected,
+                                "String value mismatch at '{key_str}'[{row}].\nExpected: {expected:?}\nActual: {actual:?}\nInput: {:?}",
+                                String::from_utf8_lossy(line)
+                            );
+                        }
                     }
                 }
             } else if val.is_i64() {
                 let expected = val.as_i64().unwrap();
-                let suffixed = format!("{}_int", key_str);
-                let col_name = if batch.column_by_name(&suffixed).is_some() {
-                    suffixed
-                } else {
-                    key_str.to_string()
-                };
-                if let Some(col) = batch.column_by_name(&col_name)
-                    && let Some(arr) = col.as_any().downcast_ref::<Int64Array>()
-                    && !arr.is_null(row)
-                {
-                    assert_eq!(
-                        arr.value(row),
-                        expected,
-                        "Int value mismatch at {col_name}[{row}].\nInput: {:?}",
-                        String::from_utf8_lossy(line)
-                    );
+                let col = batch
+                    .column_by_name(&format!("{key_str}_int"))
+                    .or_else(|| batch.column_by_name(key_str));
+                if let Some(col) = col {
+                    let arr = col.as_any().downcast_ref::<Int64Array>().unwrap_or_else(|| {
+                        panic!(
+                            "Expected Int64Array for key '{key_str}' at row {row} but got {:?}.\nInput: {:?}",
+                            col.data_type(),
+                            String::from_utf8_lossy(line)
+                        )
+                    });
+                    if !arr.is_null(row) {
+                        assert_eq!(
+                            arr.value(row),
+                            expected,
+                            "Int value mismatch at '{key_str}'[{row}].\nInput: {:?}",
+                            String::from_utf8_lossy(line)
+                        );
+                    }
                 }
             } else if val.is_f64() {
                 let expected = val.as_f64().unwrap();
-                let suffixed = format!("{}_float", key_str);
-                let col_name = if batch.column_by_name(&suffixed).is_some() {
-                    suffixed
-                } else {
-                    key_str.to_string()
-                };
-                if let Some(col) = batch.column_by_name(&col_name)
-                    && let Some(arr) = col.as_any().downcast_ref::<Float64Array>()
-                    && !arr.is_null(row)
-                {
-                    let actual = arr.value(row);
-                    assert!(
-                        actual == expected
-                            || (actual - expected).abs() < 1e-6
-                            || (actual.is_nan() && expected.is_nan()),
-                        "Float value mismatch at {col_name}[{row}]: expected={expected}, actual={actual}.\nInput: {:?}",
-                        String::from_utf8_lossy(line)
-                    );
+                let col = batch
+                    .column_by_name(&format!("{key_str}_float"))
+                    .or_else(|| batch.column_by_name(key_str));
+                if let Some(col) = col {
+                    if let Some(arr) = col.as_any().downcast_ref::<Float64Array>() {
+                        if !arr.is_null(row) {
+                            let actual = arr.value(row);
+                            assert!(
+                                actual == expected
+                                    || (actual - expected).abs() < 1e-6
+                                    || (actual.is_nan() && expected.is_nan()),
+                                "Float value mismatch at '{key_str}'[{row}]: expected={expected}, actual={actual}.\nInput: {:?}",
+                                String::from_utf8_lossy(line)
+                            );
+                        }
+                    } else if let Some(arr) = col.as_any().downcast_ref::<Int64Array>() {
+                        // Scanner classified this as Int64 (e.g. -0 has no decimal/exponent).
+                        // Verify the integer value matches when cast to f64.
+                        if !arr.is_null(row) {
+                            let actual = arr.value(row) as f64;
+                            assert!(
+                                (actual - expected).abs() < 1.0,
+                                "Float(as int) value mismatch at '{key_str}'[{row}]: expected={expected}, actual={actual}.\nInput: {:?}",
+                                String::from_utf8_lossy(line)
+                            );
+                        }
+                    } else {
+                        panic!(
+                            "Expected Float64Array or Int64Array for key '{key_str}' at row {row} but got {:?}.\nInput: {:?}",
+                            col.data_type(),
+                            String::from_utf8_lossy(line)
+                        );
+                    }
                 }
             }
             // booleans stored as strings, nulls are null — skip for now
@@ -315,13 +336,25 @@ fn assert_builders_consistent(input: &[u8]) {
                     );
                 }
                 // String comparison: StorageBuilder uses Utf8, StreamingBuilder uses Utf8View.
-                // Check by DataType so bare string columns (no _str suffix) are also compared.
-                if matches!(
+                // Detect by DataType so bare string columns (no _str suffix) are also compared.
+                let s_is_str = matches!(
                     s_col.data_type(),
                     arrow::datatypes::DataType::Utf8
                         | arrow::datatypes::DataType::Utf8View
                         | arrow::datatypes::DataType::LargeUtf8
-                ) {
+                );
+                if s_is_str {
+                    assert!(
+                        matches!(
+                            st_col.data_type(),
+                            arrow::datatypes::DataType::Utf8
+                                | arrow::datatypes::DataType::Utf8View
+                                | arrow::datatypes::DataType::LargeUtf8
+                        ),
+                        "Type mismatch at {col_name}[{row}]: storage has {:?} but streaming has {:?}",
+                        s_col.data_type(),
+                        st_col.data_type()
+                    );
                     let s_val =
                         arrow::compute::cast(s_col, &arrow::datatypes::DataType::Utf8).unwrap();
                     let st_val =
