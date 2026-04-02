@@ -5,6 +5,10 @@
 //! SELECT json_int(_raw, 'status') as status FROM logs WHERE json_int(_raw, 'status') > 400
 //! SELECT json_float(_raw, 'duration') as dur FROM logs
 //! ```
+//!
+//! Each call parses the JSON independently. For multi-field optimization,
+//! use `json_preprocess::populate_and_rewrite()` which runs the scanner once
+//! and rewrites the SQL to use pre-extracted column references.
 
 use std::any::Any;
 use std::sync::Arc;
@@ -18,14 +22,12 @@ use datafusion::logical_expr::{
 };
 
 use logfwd_arrow::StreamingSimdScanner;
-use logfwd_core::scan_config::ScanConfig;
+use logfwd_core::scan_config::{FieldSpec, ScanConfig};
 
 // ---------------------------------------------------------------------------
-// Shared: parse JSON lines with our SIMD scanner, extract a named field
+// Shared: parse JSON lines with our SIMD scanner
 // ---------------------------------------------------------------------------
 
-/// Parse a batch of JSON lines and return columns for `field_name`.
-/// Returns a map of suffix → ArrayRef for all variants found.
 fn parse_and_extract_all(
     raw_array: &arrow::array::StringArray,
     field_name: &str,
@@ -35,7 +37,6 @@ fn parse_and_extract_all(
         return result;
     }
 
-    // Reconstruct NDJSON buffer from the StringArray
     let mut buf = Vec::with_capacity(raw_array.len() * 128);
     for i in 0..raw_array.len() {
         if !raw_array.is_null(i) {
@@ -45,7 +46,7 @@ fn parse_and_extract_all(
     }
 
     let config = ScanConfig {
-        wanted_fields: vec![logfwd_core::scan_config::FieldSpec {
+        wanted_fields: vec![FieldSpec {
             name: field_name.to_string(),
             aliases: vec![],
         }],
@@ -60,7 +61,6 @@ fn parse_and_extract_all(
         Err(_) => return result,
     };
 
-    // Collect all column variants for this field
     for suffix in ["_int", "_float", "_str", ""] {
         let col_name = if suffix.is_empty() {
             field_name.to_string()
@@ -132,7 +132,6 @@ impl ScalarUDFImpl for JsonExtractUdf {
         };
 
         let cols = parse_and_extract_all(raw_array, key);
-        // For json() (string extraction), prefer _str, then cast anything else.
         let arr = cols
             .get("_str")
             .or_else(|| cols.get(""))
@@ -209,17 +208,14 @@ impl ScalarUDFImpl for JsonExtractIntUdf {
         };
 
         let cols = parse_and_extract_all(raw_array, key);
-        // For json_int(), prefer _int column directly.
         if let Some(arr) = cols.get("_int") {
             return Ok(ColumnarValue::Array(Arc::clone(arr)));
         }
-        // If bare column exists and is Int64, use it.
         if let Some(arr) = cols.get("") {
             if *arr.data_type() == DataType::Int64 {
                 return Ok(ColumnarValue::Array(Arc::clone(arr)));
             }
         }
-        // Try parsing from string column.
         if let Some(arr) = cols.get("_str").or_else(|| cols.get("")) {
             let str_arr = arrow::compute::cast(arr, &DataType::Utf8)?;
             let str_arr = str_arr
@@ -239,7 +235,6 @@ impl ScalarUDFImpl for JsonExtractIntUdf {
             }
             return Ok(ColumnarValue::Array(Arc::new(builder.finish())));
         }
-        // Field not found at all.
         let nulls = arrow::array::new_null_array(&DataType::Int64, raw_array.len());
         Ok(ColumnarValue::Array(nulls))
     }
@@ -303,21 +298,13 @@ impl ScalarUDFImpl for JsonExtractFloatUdf {
         };
 
         let cols = parse_and_extract_all(raw_array, key);
-        // For json_float(), prefer _float column directly.
         if let Some(arr) = cols.get("_float") {
             return Ok(ColumnarValue::Array(Arc::clone(arr)));
         }
-        if let Some(arr) = cols.get("") {
-            if *arr.data_type() == DataType::Float64 {
-                return Ok(ColumnarValue::Array(Arc::clone(arr)));
-            }
-        }
-        // Try _int (ints are valid floats)
         if let Some(arr) = cols.get("_int") {
             let f_arr = arrow::compute::cast(arr, &DataType::Float64)?;
             return Ok(ColumnarValue::Array(f_arr));
         }
-        // Try parsing from string column.
         if let Some(arr) = cols.get("_str").or_else(|| cols.get("")) {
             let str_arr = arrow::compute::cast(arr, &DataType::Utf8)?;
             let str_arr = str_arr
@@ -368,7 +355,6 @@ mod tests {
         ctx.register_udf(ScalarUDF::from(JsonExtractUdf::new()));
         ctx.register_udf(ScalarUDF::from(JsonExtractIntUdf::new()));
         ctx.register_udf(ScalarUDF::from(JsonExtractFloatUdf::new()));
-        // json_parse removed — DataFusion can't handle data-dependent return types
         let table = MemTable::try_new(schema, vec![vec![batch]]).unwrap();
         ctx.register_table("logs", Arc::new(table)).unwrap();
         let df = ctx.sql(sql).await.unwrap();
@@ -402,7 +388,7 @@ mod tests {
             .unwrap();
         assert_eq!(col.value(0), 200);
         assert_eq!(col.value(1), 500);
-        assert!(col.is_null(2)); // "OK" is not an int
+        assert!(col.is_null(2));
     }
 
     #[tokio::test]
@@ -441,7 +427,6 @@ mod tests {
         let result = query("SELECT json(_raw, 'status') as s FROM logs", batch).await;
         let col = result.column(0).as_string::<i32>();
         assert_eq!(col.value(0), "200");
-        // Row 1 has no "status" — but our scanner still produces the column with null
         assert!(col.is_null(1));
     }
 
