@@ -8,7 +8,7 @@ interface LogsResponse {
 export function LogViewer() {
   const [logs, setLogs] = useState<string[]>([]);
   const [capturing, setCapturing] = useState(false);
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(true);
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -53,22 +53,15 @@ export function LogViewer() {
           {open && capturing && <span class="log-live">● live</span>}
           {open && <span class="log-count">{logs.length} lines</span>}
         </div>
-        {open && (
-          <button class="log-close" onClick={() => setOpen(false)} aria-label="Close log viewer">✕</button>
-        )}
+        <button class="log-close" onClick={() => setOpen(!open)} aria-label={open ? "Collapse log viewer" : "Expand log viewer"}>
+          {open ? "−" : "+"}
+        </button>
       </div>
-      {!open ? (
-        <div class="log-start" role="button" tabIndex={0} onClick={() => setOpen(true)} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setOpen(true); }}>
-          <span class="log-start-btn">▶ Stream logs</span>
-          <span class="log-start-hint">Captures stderr output from this process</span>
-        </div>
-      ) : (
+      {open && (
         <div class="log-output">
           {logs.length === 0 ? (
             <div class="log-empty">
-              {capturing
-                ? "Capturing stderr… waiting for output."
-                : "Activating capture…"}
+              {capturing ? "Waiting for output…" : "No logs yet."}
             </div>
           ) : (
             logs.map((line, i) => (
