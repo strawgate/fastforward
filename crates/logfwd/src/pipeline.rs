@@ -401,8 +401,8 @@ impl Pipeline {
         skip_all,
         fields(
             pipeline = %self.name,
-            input_rows = tracing::field::Empty,
-            output_rows = tracing::field::Empty,
+            input_rows = 0u64,
+            output_rows = 0u64,
             errors = 0u64,
         )
     )]
@@ -447,6 +447,7 @@ impl Pipeline {
                     self.metrics.inc_scan_error();
                     self.metrics.inc_dropped_batch();
                     eprintln!("pipeline: scan error (batch dropped): {e}");
+                    tracing::Span::current().record("errors", 1u64);
                     return;
                 }
             }

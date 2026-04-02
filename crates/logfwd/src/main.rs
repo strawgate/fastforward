@@ -414,7 +414,7 @@ async fn run_pipelines(
     let tracer = opentelemetry::trace::TracerProvider::tracer(&tracer_provider, "logfwd");
     let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
     let _ = tracing_subscriber::registry().with(otel_layer).try_init(); // ignore error if a subscriber is already installed (e.g. in tests)
-    opentelemetry::global::set_tracer_provider(tracer_provider);
+    opentelemetry::global::set_tracer_provider(tracer_provider.clone());
 
     let mut pipelines = Vec::new();
     for (name, pipe_cfg) in &config.pipelines {
@@ -536,6 +536,13 @@ async fn run_pipelines(
     if let Err(e) = meter_provider.shutdown() {
         eprintln!(
             "{}warning{}: meter provider shutdown: {e}",
+            yellow(),
+            reset()
+        );
+    }
+    if let Err(e) = tracer_provider.shutdown() {
+        eprintln!(
+            "{}warning{}: tracer provider shutdown: {e}",
             yellow(),
             reset()
         );
