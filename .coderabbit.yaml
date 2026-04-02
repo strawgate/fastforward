@@ -22,7 +22,7 @@ reviews:
       mode: 'off'
     custom_checks:
       - name: High-Quality Rust Practices
-        mode: blocking
+        mode: error
         instructions: >-
           You are a senior Rust engineer reviewing a pull request against logfwd,
           a formally verified, ultra-performance log forwarder targeting 1.7 million
@@ -185,7 +185,7 @@ reviews:
           Run PROPTEST_CASES=2000 minimum for scanner-related proptest suites.
 
       - name: Formal Verification Coverage
-        mode: blocking
+        mode: error
         instructions: >-
           You are reviewing formal verification coverage for logfwd, a project that
           uses a four-tier verification strategy as a core differentiator. The project
@@ -494,7 +494,7 @@ reviews:
           updated so agents and reviewers have accurate API guidance.
 
       - name: Crate Boundary and Dependency Integrity
-        mode: blocking
+        mode: error
         instructions: >-
           You are reviewing crate boundary integrity and dependency rules for logfwd.
           This workspace uses strict structural constraints on each crate, enforced by
