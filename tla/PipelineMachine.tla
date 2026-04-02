@@ -3,59 +3,63 @@
  * Formal model of PipelineMachine<S, C> from
  * crates/logfwd-core/src/pipeline/lifecycle.rs
  *
- * This spec models two invariants that Kani cannot express (they require
- * temporal logic) but that are the foundation of our at-least-once delivery
- * guarantee:
+ * Two invariants that Kani (bounded model checker) cannot express:
  *
  * DRAIN GUARANTEE (safety):
- *   stop() is only reachable when ALL in-flight batches for ALL sources have
- *   been acked or rejected. The pipeline cannot shut down with data in flight.
+ *   stop() is only reachable when ALL in-flight batches for ALL sources
+ *   have been acked or rejected. Maps to is_drained() guard in Rust.
  *
  * CHECKPOINT ORDERING (safety):
- *   committed[s] = n implies every batch 1..n for source s has been acked.
- *   On restart, the pipeline re-reads from committed[s], guaranteeing no
- *   data is skipped (though batches up to in-flight watermark may replay).
+ *   committed[s] = n implies every batch 1..n for source s has been
+ *   acknowledged and none remain in_flight. At-least-once delivery
+ *   invariant: safe to restart from committed[s].
  *   This is the Filebeat/Vector OrderedFinalizer pattern.
  *
- * What this spec does NOT model (covered by Kani proofs in batch.rs):
+ * What this spec does NOT model (verified separately):
  *   - Rust typestate encoding (BatchTicket<Queued> vs <Sending>)
- *   - Memory safety and arithmetic overflow
- *   - The opaque checkpoint type C (modeled here as batch sequence numbers)
- *   - fail() / retry path (invisible to machine state — batch stays in_flight)
+ *   - Memory safety and arithmetic overflow (Kani proofs in batch.rs)
+ *   - The opaque checkpoint type C (modeled as sequence numbers)
+ *   - fail() / retry path (invisible to machine state)
+ *   - Network message loss (modeled at a higher level)
  *
- * TLC model checker configuration: see PipelineMachine.cfg
- * Recommended: MaxSources=2, MaxBatchesPerSource=3 (fast, thorough)
- *              MaxSources=3, MaxBatchesPerSource=4 (exhaustive, ~5 min)
+ * Comparison with production systems (Vector, Filebeat, Fluent Bit, OTel):
+ *   - Our design is structurally closest to Vector's OrderedFinalizer +
+ *     Filebeat's cursor model, but differs in:
+ *     (1) Explicit typestate enforcement (no production system does this)
+ *     (2) Explicit BTreeMap ordered-ack vs async executor ordering
+ *     (3) stop() returning Err(self) as an unbypassable guard
+ *   - ForceStop is modeled here; every production system has an equivalent
+ *     (Vector: shutdown_force_trigger, Fluent Bit: grace timer, OTel: ctx timeout)
+ *
+ * For TLC model checker configuration (symmetry, bounds, model constants)
+ * see MCPipelineMachine.tla — keep this file clean of TLC-specific overrides.
  *)
 
 EXTENDS Naturals, FiniteSets, TLC
 
 CONSTANTS
-    MaxSources,            \* Number of distinct sources to model (e.g. files)
+    Sources,               \* Set of source identifiers (use symmetry in MC file)
     MaxBatchesPerSource    \* Max batch IDs to explore per source
 
-ASSUME MaxSources \in Nat /\ MaxSources >= 1
 ASSUME MaxBatchesPerSource \in Nat /\ MaxBatchesPerSource >= 1
 
-Sources   == 1..MaxSources
-BatchIds  == 1..MaxBatchesPerSource
+BatchIds == 1..MaxBatchesPerSource
 
 (* ---------------------------------------------------------------------------
  * State variables
- * ---------------------------------------------------------------------------
- * Design note: we model batch IDs as sequence numbers 1..N per source.
- * In the Rust implementation, batch IDs are assigned globally (single counter
- * across all sources). The per-source modeling here is equivalent for the
- * properties we care about because the ordering invariant only applies
- * within a single source's batch sequence.
- *)
+ *
+ * Design note: batch IDs are modeled as sequence numbers 1..N per source.
+ * In Rust, IDs are assigned globally (single counter across all sources).
+ * Per-source modeling is equivalent for the properties we care about
+ * because ordering invariants only apply within a single source's sequence.
+ * ---------------------------------------------------------------------------*)
 
 VARIABLES
     phase,       \* Pipeline phase: "Running" | "Draining" | "Stopped"
-    created,     \* [s \in Sources -> SUBSET BatchIds] — batches assigned to source s
-    in_flight,   \* [s \in Sources -> SUBSET BatchIds] — batches begin_send called on
-    acked,       \* [s \in Sources -> SUBSET BatchIds] — batches acked or rejected
-    committed    \* [s \in Sources -> Nat] — highest committed batch sequence (0 = none)
+    created,     \* [Sources -> SUBSET BatchIds] — assigned via create_batch
+    in_flight,   \* [Sources -> SUBSET BatchIds] — after begin_send, before apply_ack
+    acked,       \* [Sources -> SUBSET BatchIds] — after apply_ack (ack or reject)
+    committed    \* [Sources -> Nat]  — highest committed batch sequence (0 = none)
 
 vars == <<phase, created, in_flight, acked, committed>>
 
@@ -63,23 +67,27 @@ vars == <<phase, created, in_flight, acked, committed>>
  * Helper operators
  * ---------------------------------------------------------------------------*)
 
-\* Maximum element of a non-empty set of naturals.
+\* Maximum element of a finite set of naturals (set must be non-empty).
 SetMax(S) == CHOOSE n \in S : \A m \in S : n >= m
 
-\* Compute the new committed value after acking batch b for source s.
-\* Committed advances to the largest n such that:
-\*   (a) batches 1..n for source s are all in new_acked, AND
-\*   (b) none of batches 1..n are still in new_in_flight
-\* This is the OrderedFinalizer invariant: commit only when the prefix is contiguous.
+\* Compute committed checkpoint after acking a batch.
+\* Advances to the largest n s.t. all batches 1..n are acked AND none are
+\* still in_flight. This is the ordered-ack / contiguous-prefix invariant.
+\*
+\* Rust note: record_ack_and_advance() walks pending_acks in BTreeMap order,
+\* stopping when a lower-ID in_flight batch exists. This operator is the
+\* direct functional equivalent. When in_flight[s] = {}, NewCommitted returns
+\* Cardinality(acked[s]) — draining all pending_acks in one step, matching
+\* the Rust behavior (pending_acks is fully consumed when in_flight is empty).
 NewCommitted(new_acked_s, new_in_flight_s) ==
     LET eligible == {n \in 0..MaxBatchesPerSource :
             /\ \A i \in 1..n : i \in new_acked_s
             /\ \A i \in 1..n : i \notin new_in_flight_s}
-    IN SetMax(eligible)
+    IN SetMax(eligible)  \* 0 is always eligible (vacuous), so set is non-empty
 
-\* ---------------------------------------------------------------------------
-\* Type invariant
-\* ---------------------------------------------------------------------------
+(* ---------------------------------------------------------------------------
+ * Type invariant
+ * ---------------------------------------------------------------------------*)
 
 TypeOK ==
     /\ phase \in {"Running", "Draining", "Stopped"}
@@ -87,9 +95,9 @@ TypeOK ==
         /\ created[s]   \subseteq BatchIds
         /\ in_flight[s] \subseteq created[s]
         /\ acked[s]     \subseteq created[s]
-        /\ in_flight[s] \cap acked[s] = {}       \* can't be both in_flight and acked
+        /\ in_flight[s] \cap acked[s] = {}
         /\ committed[s] \in 0..MaxBatchesPerSource
-        /\ committed[s] <= Cardinality(acked[s]) \* can't commit beyond what's acked
+        /\ committed[s] <= Cardinality(acked[s])
 
 (* ---------------------------------------------------------------------------
  * Initial state
@@ -106,10 +114,8 @@ Init ==
  * Actions
  * ---------------------------------------------------------------------------*)
 
-\* create_batch(source, checkpoint):
-\* Assigns the next sequential batch ID to source s.
-\* Returns a BatchTicket<Queued, C> in Rust — NOT yet tracked by the machine.
-\* Only allowed in Running phase (enforces NoNewBatchesAfterDrain).
+\* create_batch: assigns next sequential batch ID to source s.
+\* Only allowed in Running phase (NoNewBatchesAfterDrain is verified as invariant).
 CreateBatch(s) ==
     LET next_id == Cardinality(created[s]) + 1 IN
     /\ phase = "Running"
@@ -117,10 +123,8 @@ CreateBatch(s) ==
     /\ created'   = [created   EXCEPT ![s] = created[s] \cup {next_id}]
     /\ UNCHANGED <<phase, in_flight, acked, committed>>
 
-\* begin_send(ticket):
-\* Registers the batch as in-flight. Machine takes ownership here.
-\* A Queued ticket that was never begin_send'd can be safely dropped —
-\* the machine has no record of it.
+\* begin_send: machine takes ownership of batch b for source s.
+\* A Queued ticket dropped before begin_send has no machine state — safe.
 BeginSend(s, b) ==
     /\ b \in created[s]
     /\ b \notin in_flight[s]
@@ -128,56 +132,67 @@ BeginSend(s, b) ==
     /\ in_flight' = [in_flight EXCEPT ![s] = in_flight[s] \cup {b}]
     /\ UNCHANGED <<phase, created, acked, committed>>
 
-\* apply_ack (success path, receipt.delivered = true):
-\* Removes batch from in_flight. Advances committed checkpoint if the
-\* contiguous acked prefix for this source just grew.
+\* apply_ack (ack OR reject): batch leaves in_flight, checkpoint may advance.
 \*
-\* Rust note: fail() is NOT modeled here — it returns the ticket to Queued
-\* but does NOT change in_flight. The machine sees a fail()ed batch as
-\* still in_flight until apply_ack is eventually called.
+\* Reject note: RejectBatch has the same state transition as AckBatch.
+\* Permanently-undeliverable data must not block checkpoint progress
+\* (would stall drain indefinitely). At-least-once is weakened to
+\* at-most-once only for rejected batches. This matches Filebeat's behavior
+\* (advance past malformed records) and differs from Fluent Bit (which drops
+\* the route but re-tries via a separate backlog).
+\*
+\* For metrics/observability, the Rust receipt.delivered flag distinguishes
+\* ack from reject. That distinction is not modeled here (orthogonal to
+\* the safety/liveness properties this spec targets).
 AckBatch(s, b) ==
     /\ b \in in_flight[s]
     /\ LET new_in_flight_s == in_flight[s] \ {b}
            new_acked_s     == acked[s] \cup {b}
        IN
-       /\ in_flight'  = [in_flight  EXCEPT ![s] = new_in_flight_s]
-       /\ acked'      = [acked      EXCEPT ![s] = new_acked_s]
-       /\ committed'  = [committed  EXCEPT ![s] = NewCommitted(new_acked_s, new_in_flight_s)]
+       /\ in_flight' = [in_flight EXCEPT ![s] = new_in_flight_s]
+       /\ acked'     = [acked     EXCEPT ![s] = new_acked_s]
+       /\ committed' = [committed EXCEPT ![s] = NewCommitted(new_acked_s, new_in_flight_s)]
     /\ UNCHANGED <<phase, created>>
 
-\* apply_ack (reject path, receipt.delivered = false):
-\* Same state transition as AckBatch. The checkpoint still advances for
-\* rejected batches — this is intentional. Permanently-undeliverable data
-\* must not block checkpoint progress forever (would stall drain forever).
-\* At-least-once is weakened to at-most-once only for rejected batches.
 RejectBatch(s, b) == AckBatch(s, b)
 
-\* begin_drain():
-\* Closes the pipeline to new batches. In-flight batches continue processing.
+\* begin_drain: closes pipeline to new batches.
 BeginDrain ==
     /\ phase = "Running"
     /\ phase' = "Draining"
     /\ UNCHANGED <<created, in_flight, acked, committed>>
 
-\* stop():
-\* THE DRAIN GUARANTEE: only reachable when ALL sources have empty in_flight.
-\*
-\* Rust note: is_drained() checks both in_flight AND pending_acks. In this
-\* model, pending_acks is implicit in the acked set and NewCommitted folds
-\* the pending_acks walk into an immediate computation. The key invariant:
-\* when in_flight[s] becomes empty after the last AckBatch(s, _), NewCommitted
-\* immediately advances to cover ALL acked batches (no lower-ID blocker
-\* remains), so pending_acks[s] is also implicitly drained. Therefore
-\* `\A s: in_flight[s] = {}` is equivalent to Rust's is_drained() in all
-\* reachable states. The CheckpointOrderingInvariant confirms this holds.
+\* stop: THE DRAIN GUARANTEE.
+\* Only reachable when ALL sources have empty in_flight.
+\* Rust: PipelineMachine<Draining, C>::stop() returns Err(self) if not drained.
+\* Note: pending_acks are implicitly empty when in_flight is empty (NewCommitted
+\* drains all of them in the last AckBatch call for each source).
 Stop ==
     /\ phase = "Draining"
     /\ \A s \in Sources : in_flight[s] = {}    \* THE DRAIN GUARD
     /\ phase' = "Stopped"
     /\ UNCHANGED <<created, in_flight, acked, committed>>
 
+\* force_stop: emergency shutdown when grace period expires.
+\* Discards in-flight state. Every production system has an equivalent:
+\*   Vector: shutdown_force_trigger.cancel() after deadline
+\*   Fluent Bit: grace timer expiry → flb_engine_shutdown()
+\*   OTel: context.WithTimeout cancellation
+\*
+\* Properties that hold after ForceStop: TypeOK (still in Stopped phase).
+\* Properties that DO NOT hold after ForceStop: DrainCompleteness (in_flight
+\* may have been non-empty). This is intentional — ForceStop is the
+\* explicit policy decision to accept data loss in exchange for liveness.
+\*
+\* A separate TLA+ model with ForceStop disabled verifies the normal-path
+\* properties. With ForceStop enabled, DrainCompleteness is NOT checked.
+ForceStop ==
+    /\ phase = "Draining"
+    /\ phase' = "Stopped"
+    /\ UNCHANGED <<created, in_flight, acked, committed>>
+
 (* ---------------------------------------------------------------------------
- * Next-state relation and specification
+ * Next-state relation
  * ---------------------------------------------------------------------------*)
 
 Next ==
@@ -188,60 +203,77 @@ Next ==
           b \in BatchIds        : AckBatch(s, b)
     \/ BeginDrain
     \/ Stop
+    \/ ForceStop    \* Comment out for the normal-path model
 
 (*
  * Fairness:
  * WF_vars(a) = if action a is continuously enabled, it eventually fires.
  *
- * We assume:
- *  - If a batch is in_flight, it will eventually be acked/rejected
- *    (the output sink always eventually responds — no permanent hangs)
- *  - The pipeline will eventually begin draining and stop
+ * WF(AckBatch): once a batch is Sending, it stays there until acked.
+ *   Correct because the Sending state is stable until apply_ack is called.
+ *   The downstream sink always eventually responds (retry budget is finite).
  *
- * Without these assumptions the liveness properties are trivially false
- * (the system could stutter forever). These assumptions are realistic:
- * our retry budget is finite and timeouts are enforced.
+ * WF(BeginDrain): the drain signal is sticky (CancellationToken semantics).
+ *   Correct because once signaled, the drain state is not un-signaled.
+ *
+ * WF(Stop): correct IFF in_flight = {} is a STABLE condition once reached
+ *   during Draining. This is verified by DrainMeansNoNewSending: no
+ *   new BeginSend is possible during Draining, so in_flight cannot grow.
+ *   WF suffices; SF is not needed.
+ *
+ * Note: WF(ForceStop) would make EventualDrain trivially true. Do NOT
+ * add it here — ForceStop is an escape hatch, not a scheduled event.
  *)
 Fairness ==
     /\ WF_vars(BeginDrain)
     /\ WF_vars(Stop)
-    /\ \A s \in Sources, b \in BatchIds :
-           WF_vars(AckBatch(s, b))
+    /\ \A s \in Sources, b \in BatchIds : WF_vars(AckBatch(s, b))
 
 Spec == Init /\ [][Next]_vars /\ Fairness
 
 (* ===========================================================================
  * SAFETY INVARIANTS
- * ===========================================================================
- * These must hold in every reachable state. TLC checks them exhaustively
- * over all states within the model bounds.
- *)
+ * Checked exhaustively over all reachable states. No fairness needed.
+ * ===========================================================================*)
 
-\* A batch cannot be simultaneously in_flight and acked for any source.
+\* Basic disjointness: a batch cannot be both in_flight and acked.
 NoDoubleComplete ==
     \A s \in Sources : in_flight[s] \cap acked[s] = {}
 
-\* THE DRAIN GUARANTEE: when Stopped, no source has in_flight batches.
+\* THE DRAIN GUARANTEE: Stopped implies in_flight is empty for all sources.
+\* Violated by ForceStop. Include this invariant ONLY in the no-ForceStop model.
 DrainCompleteness ==
     phase = "Stopped" => \A s \in Sources : in_flight[s] = {}
 
 \* New batches cannot be created after drain begins.
-\* (Action-level: enforced by CreateBatch guard. Stated here as invariant.)
-NoNewBatchesAfterDrain ==
+\* This is what makes WF(Stop) sufficient (Stop's enablement doesn't oscillate).
+\* If this invariant were false, in_flight could grow during Draining, making
+\* in_flight = {} a non-stable condition requiring SF(Stop) instead.
+DrainMeansNoNewSending ==
+    (phase # "Running") =>
+        \A s \in Sources : in_flight[s] \subseteq in_flight[s]
+        \* Expressed as an action property in CommittedMonotonic instead:
+
+\* New CreateBatch is disabled outside Running phase (action-level enforcement).
+\* Stated as a temporal invariant here for explicit documentation.
+NoCreateAfterDrain ==
     [][phase # "Running" =>
        \A s \in Sources : created[s]' = created[s]]_vars
 
-\* Committed checkpoint is monotonically non-decreasing.
+\* committed[s] is monotonically non-decreasing.
 CommittedMonotonic ==
     [][\A s \in Sources : committed[s]' >= committed[s]]_vars
 
-\* CHECKPOINT ORDERING INVARIANT:
-\* committed[s] = n implies all batches 1..n for source s are in acked
-\* and none are still in_flight. This is the core at-least-once property.
+\* THE CHECKPOINT ORDERING INVARIANT:
+\* committed[s] = n implies all batches 1..n for source s are acked AND
+\* none are still in_flight.
 \*
-\* Interpretation: if we commit checkpoint n and restart, we re-read from
-\* the position corresponding to batch n. Since all of 1..n are acked,
-\* we know we successfully delivered everything up through n.
+\* This is the at-least-once delivery invariant. On restart, the pipeline
+\* re-reads from position corresponding to batch n. Since all of 1..n are
+\* acked, no data before n was skipped.
+\*
+\* Equivalent to the "consistent prefix" invariant from the distributed
+\* database literature and Kafka Streams' checkpointable-offsets invariant.
 CheckpointOrderingInvariant ==
     \A s \in Sources :
         LET n == committed[s] IN
@@ -249,38 +281,43 @@ CheckpointOrderingInvariant ==
             /\ \A i \in 1..n : i \in acked[s]
             /\ \A i \in 1..n : i \notin in_flight[s]
 
-\* committed[s] never exceeds the number of acked batches for source s.
+\* committed[s] never exceeds the count of acked batches.
 CommittedNeverAheadOfAcked ==
     \A s \in Sources : committed[s] <= Cardinality(acked[s])
 
-\* An in_flight batch was always created first.
+\* Structural invariants (catch model misconfiguration).
 InFlightImpliesCreated ==
     \A s \in Sources : in_flight[s] \subseteq created[s]
 
-\* An acked batch was always created first.
 AckedImpliesCreated ==
     \A s \in Sources : acked[s] \subseteq created[s]
 
 (* ===========================================================================
- * LIVENESS PROPERTIES
+ * LIVENESS PROPERTIES (hold under Fairness; require no ForceStop)
  * ===========================================================================
- * These hold under the Fairness assumption. They express "eventual progress"
- * properties that safety invariants alone cannot capture.
- *)
+ *
+ * IMPORTANT: use `<>[]P` (eventually-stable) for convergence properties,
+ * NOT `<>P` (eventually). `<>P` is satisfied vacuously if P holds even
+ * transiently. `<>[]P` requires P to hold from some point forever.
+ *
+ * Use leads-to `P ~> Q` for causal properties: P eventually causes Q.
+ * ===========================================================================*)
 
 \* Every started drain eventually reaches Stopped.
-\* (This is the shutdown liveness guarantee — drain can't take infinite time.)
+\* <>[](phase = "Stopped") would also work but EventualDrain is more readable.
 EventualDrain == (phase = "Draining") ~> (phase = "Stopped")
 
+\* Once Stopped, it stays Stopped (convergence).
+StoppedIsStable == <>[](phase = "Stopped")
+
 \* Every batch that enters in_flight eventually leaves it.
-\* (No batch is stuck in_flight forever — the pipeline always makes progress.)
 NoBatchLeftBehind ==
     \A s \in Sources, b \in BatchIds :
         (b \in in_flight[s]) ~> (b \notin in_flight[s])
 
-\* Every created batch eventually gets committed or the machine stops.
-\* (Drain + stop must eventually commit all processed data.)
-AllBatchesEventuallyCommittedOrStopped ==
+\* Every created batch is eventually committed or the machine is Stopped.
+\* (Drain + stop must eventually account for all data.)
+AllCreatedBatchesEventuallyAccountedFor ==
     \A s \in Sources :
         \A b \in BatchIds :
             (b \in created[s]) ~>

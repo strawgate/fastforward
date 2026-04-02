@@ -1,7 +1,7 @@
 # TLA+ Formal Specifications
 
 Formal models for the logfwd pipeline design. These specs capture
-properties that Kani (bounded model checker) cannot express: temporal
+properties that Kani (bounded model checker) cannot express — temporal
 logic, liveness, and protocol-level design invariants.
 
 ## PipelineMachine.tla
@@ -11,81 +11,187 @@ Models `PipelineMachine<S, C>` from
 
 ### What it proves
 
-**Drain guarantee (safety):** `stop()` is only reachable when every
-in-flight batch for every source has been acked or rejected. The
-pipeline cannot shut down with data in flight.
+| Property | Type | Description |
+|----------|------|-------------|
+| `DrainCompleteness` | Safety | `stop()` only reachable when all in_flight batches are resolved |
+| `CheckpointOrderingInvariant` | Safety | committed[s]=n implies all batches 1..n are acked, none in_flight |
+| `CommittedMonotonic` | Safety (temporal) | checkpoint never goes backwards |
+| `NoCreateAfterDrain` | Safety (temporal) | no new batches after begin_drain |
+| `NoDoubleComplete` | Safety | batch cannot be both in_flight and acked |
+| `EventualDrain` | Liveness | every started drain eventually reaches Stopped |
+| `NoBatchLeftBehind` | Liveness | every in_flight batch eventually leaves in_flight |
+| `StoppedIsStable` | Liveness | once Stopped, stays Stopped |
 
-**Checkpoint ordering (safety):** `committed[s] = n` implies that all
-batches 1..n for source `s` are acknowledged and none are still
-in-flight. This is the at-least-once delivery invariant — safe to
-restart from `committed[s]` because all prior data was delivered.
+### File structure (two-file pattern)
 
-**Liveness (under fairness):** Every in-flight batch eventually leaves
-in-flight. Every started drain eventually reaches Stopped. No batch is
-stuck forever.
+This spec follows the industry-standard two-file pattern used by etcd-io/raft
+(`MCetcdraft.tla`), PingCAP/tla-plus, and Jack Vanlightly's Kafka verification:
 
-### Relationship to Kani proofs
-
-| Layer | Tool | Scope |
-|-------|------|-------|
-| Design | TLA+ (this spec) | Temporal logic, liveness, protocol invariants |
-| Implementation | Kani (`batch.rs`, `lifecycle.rs`) | Memory safety, overflow, type transitions |
-| Property-based | proptest (`pipeline.rs`) | State sequence correctness |
-
-TLA+ proves the design is correct. Kani proves the Rust implementation
-doesn't panic or overflow. They are complementary — a design bug would
-be caught here; an implementation bug would be caught by Kani.
-
-### Running the model checker
-
-**Prerequisites:** [TLA+ Toolbox](https://lamport.azurewebsites.net/tla/toolbox.html)
-or the TLC CLI.
-
-```bash
-# CLI (requires tla2tools.jar on classpath)
-cd tla/
-java -jar /path/to/tla2tools.jar -config PipelineMachine.cfg PipelineMachine.tla
-
-# Or via the Toolbox IDE:
-# File -> Open Spec -> PipelineMachine.tla
-# TLC Model Checker -> New Model -> Load from .cfg
+```
+tla/
+  PipelineMachine.tla     — clean algorithm spec, no TLC-specific overrides
+  MCPipelineMachine.tla   — TLC config: symmetry sets, model constants, bounds
+  PipelineMachine.cfg     — TLC configuration file (3 models documented inside)
+  README.md               — this file
 ```
 
-**Expected output:** All invariants satisfied, all temporal properties
-verified. State space should be ~50K states for the fast configuration
-(MaxSources=2, MaxBatchesPerSource=3).
+### Three models to run
 
-### Model bounds
+**Model 1 — Safety (normal path, no ForceStop):**
+```bash
+tlc MCPipelineMachine.tla -config PipelineMachine.cfg
+# Sources={"s1","s2"}, MaxBatchesPerSource=3, symmetry on Sources
+# ~50K states, < 30s. Check all INVARIANTS. Comment out ForceStop in Next.
+```
 
-The `.cfg` file has two preset bounds:
+**Model 2 — Liveness (smaller constants):**
+```
+Sources={"s1","s2"}, MaxBatchesPerSource=2
+Check PROPERTIES: EventualDrain, NoBatchLeftBehind, StoppedIsStable
+~5K states, < 5 min
+```
+> **Warning:** Never use `CONSTRAINT` to bound state space for liveness
+> checking — it silently breaks liveness by cutting off infinite behaviors
+> before they reach the convergent state. Use model constants instead.
 
-| Config | MaxSources | MaxBatchesPerSource | States | Time |
-|--------|-----------|---------------------|--------|------|
-| FAST | 2 | 3 | ~50K | < 30s |
-| THOROUGH | 3 | 4 | ~2M | ~5 min |
+**Model 3 — Safety with ForceStop:**
+```
+Enable ForceStop in Next. Remove DrainCompleteness from INVARIANTS.
+Verifies: Stopped is reachable even with in_flight > 0; all other invariants hold.
+```
 
-The THOROUGH configuration should be run before merging changes to
-`crates/logfwd-core/src/pipeline/lifecycle.rs` or `batch.rs`.
+### Running TLC
 
-### Key design decisions captured in this spec
+```bash
+# CLI (requires tla2tools.jar)
+cd tla/
+java -cp /path/to/tla2tools.jar tlc2.TLC MCPipelineMachine.tla -config PipelineMachine.cfg
 
-1. **`fail()` is invisible to the machine**: A `fail()`ed batch
-   stays in `in_flight` until `apply_ack` is called. The TLA+ model
-   reflects this — there is no `FailBatch` action because it doesn't
-   change machine state.
+# Via TLA+ Toolbox:
+# File -> Open Spec -> MCPipelineMachine.tla
+# TLC Model Checker -> New Model -> Load from PipelineMachine.cfg
+```
 
-2. **Rejected batches advance the checkpoint**: `RejectBatch` has the
-   same state transition as `AckBatch`. Permanently-undeliverable data
-   must not block checkpoint progress forever (it would stall drain
-   indefinitely). At-least-once is weakened to at-most-once only for
-   rejected batches.
+---
 
-3. **Committed is per-source, not global**: Each source has an
-   independent committed checkpoint. A slow source doesn't block a
-   fast source from committing. This is verified by the
-   `CheckpointOrderingInvariant` holding per-source.
+## Relationship to Kani proofs and proptest
 
-4. **Contiguous prefix, not arbitrary subset**: The `NewCommitted`
-   operator advances only when all of batches 1..n are acked — gaps
-   are not allowed. This matches the Rust `record_ack_and_advance`
-   implementation which walks the pending_acks BTreeMap in order.
+| Layer | Tool | File | Scope |
+|-------|------|------|-------|
+| Design | TLA+ (this dir) | `tla/*.tla` | Temporal logic, liveness, protocol invariants |
+| Implementation | Kani | `pipeline/batch.rs`, `pipeline/lifecycle.rs` | Memory safety, overflow, type transitions |
+| Property-based | proptest | `pipeline.rs` tests | State sequence correctness under arbitrary inputs |
+
+TLA+ proves the **design** is correct — no race conditions, correct ordering, drain is eventually possible. Kani proves the **Rust implementation** doesn't panic or overflow. They are complementary: a design bug is caught here; an implementation bug is caught by Kani.
+
+---
+
+## Comparison with production systems
+
+| Feature | Our Design | Vector | Filebeat | Fluent Bit | OTel |
+|---------|-----------|--------|----------|------------|------|
+| Typestate enforcement | ✅ (PhantomData) | ❌ | ❌ | ❌ | ❌ |
+| Explicit ordered-ack | ✅ (BTreeMap) | FuturesOrdered | activeCursorOps | ❌ | ❌ |
+| Unbypassable stop guard | ✅ (Err(self)) | ❌ (timeout kill) | ❌ | ❌ | ❌ |
+| Formal verification | ✅ (Kani + TLA+) | ❌ | ❌ | ❌ | ❌ |
+| Force-drain escape | ✅ (ForceStop) | ✅ | ❌ | ✅ (grace) | ✅ (ctx timeout) |
+
+Our design is closest to Vector's `OrderedFinalizer` + Filebeat's cursor model.
+Key difference: `FuturesOrdered` (Vector) vs explicit `BTreeMap` (us). The BTreeMap
+approach is more inspectable (`is_drained()` queries, `in_flight_count()`) at the
+cost of more explicit management.
+
+---
+
+## Key design decisions captured in this spec
+
+### 1. `fail()` is invisible to the machine
+
+A `fail()`ed batch returns its ticket to Queued state but the machine still
+tracks it as in_flight (it was already `begin_send`'d). The TLA+ model has no
+`FailBatch` action because fail() changes no machine state. This models the
+Rust code exactly: `fail()` returns `BatchTicket<Queued, C>` but the BTreeMap
+entry in `in_flight[source]` is not removed until `apply_ack` is called.
+
+### 2. Rejected batches advance the checkpoint
+
+`RejectBatch` is aliased to `AckBatch` — same state transition. Permanently-
+undeliverable data must not block checkpoint progress forever; that would
+stall drain indefinitely. At-least-once is weakened to at-most-once only for
+rejected batches. This matches Filebeat's behavior (advance past malformed
+records) and differs from Fluent Bit (drops the route, retries via backlog).
+
+**Implication:** if a batch is rejected, the data in that batch is lost. This
+is the correct behavior for a log forwarder where corrupted or oversized data
+cannot be retried, but it must be explicitly documented and metered.
+
+### 3. `pending_acks` is correctly abstracted away
+
+The Rust implementation uses an explicit `pending_acks: BTreeMap<SourceId,
+BTreeMap<BatchId, C>>` to handle out-of-order acks. In this spec, `pending_acks`
+is implicit: `NewCommitted` directly computes the committed value from the
+`acked` set. The two are equivalent:
+
+- When `in_flight[s]` becomes empty after `apply_ack(last_batch)`, `NewCommitted`
+  advances to cover ALL acked batches (no lower-ID blocker exists), matching the
+  Rust behavior where the pending_acks loop drains completely.
+- The `is_drained()` check (Rust: `in_flight.all_empty() && pending_acks.all_empty()`)
+  is equivalent to the TLA+ Stop guard (`\A s: in_flight[s] = {}`) in all
+  reachable states, because empty in_flight implies empty pending_acks.
+
+### 4. Per-source independent checkpoints
+
+Each source `s` has its own `committed[s]`. A slow source doesn't block a fast
+source from committing. This is the right design for a log forwarder (equivalent
+to per-partition independent offsets in Kafka). It differs from Flink's global
+checkpoint barrier, which is required for stateful stream processing but adds
+blocking that a stateless forwarder should not need.
+
+### 5. ForceStop and the liveness assumption
+
+`ForceStop` is modeled to reflect that every production system has a hard-kill
+escape hatch. Under normal operation (no ForceStop), the spec proves that drain
+always eventually completes (`EventualDrain`). With `ForceStop` enabled,
+`DrainCompleteness` no longer holds — this is intentional and correct: force-
+stopping is explicitly the policy decision to accept data loss for liveness.
+
+**Fairness assumption for `WF(Stop)`:** Stop's enabledness is stable once
+reached during Draining, because `NoCreateAfterDrain` (verified invariant)
+prevents new BeginSend calls from growing `in_flight` during the Draining
+phase. Therefore WF (weak fairness) suffices; SF (strong fairness, required
+when enabledness oscillates) is not needed.
+
+---
+
+## Known gaps (not modeled here, documented for future work)
+
+**Gap detection:** Vector's `OrderedAcknowledgements` in `acks.rs` detects gaps
+in marker ID sequences (disk corruption / dropped records). Our BTreeMap-based
+design will stall if a BatchId is never acked (bug). The invariant is: all
+BatchIds in `[0, next_batch_id)` will eventually receive `apply_ack`. This is
+enforced by the Rust type system (`#[must_use]` on `BatchTicket`) but not
+formally proven in TLA+ here. A future spec extension could add a `GapFreeIds`
+safety invariant.
+
+**Source identity re-use:** Vector's `Checkpointer::update_key(old, new)` handles
+file fingerprint changes (log rotation). Our `SourceRegistry::upsert()` re-
+activates Committed sources, but the interaction with in-flight batches from the
+old identity is not modeled here.
+
+**Sink liveness during drain:** The Rust caller must ensure sinks remain alive
+until all Sending tickets are resolved. If sinks are torn down early, `is_drained()`
+will never become true and drain will never complete. OTel enforces this via
+topological shutdown order (receivers stop before exporters). This is a caller
+constraint on the pipeline, not a property of the machine itself.
+
+---
+
+## Resources for learning TLA+
+
+- [Learn TLA+](https://learntla.com) — the best introductory resource
+- [Hillel Wayne: Weak and Strong Fairness](https://www.hillelwayne.com/post/fairness/) — when to use WF vs SF
+- [Jack Vanlightly: Verifying Kafka Transactions](https://jack-vanlightly.com/analyses/2024/12/3/verifying-kafka-transactions-diary-entry-2-writing-an-initial-tla-spec) — real-world pipeline verification
+- [AWS: How Formal Methods Are Used at Amazon](https://cacm.acm.org/research/how-amazon-web-services-uses-formal-methods/) — the DynamoDB 35-step bug story
+- [TLA+ Examples repository](https://github.com/tlaplus/Examples) — reference specs
+- [PingCAP/tla-plus](https://github.com/pingcap/tla-plus) — Raft, Percolator, 2PC
+- [spacejam/tla-rust](https://github.com/spacejam/tla-rust) — TLA+ + Rust workflow reference
