@@ -192,7 +192,7 @@ mod tests {
         agg.feed(b"a", false);
         match agg.feed(b"b", true) {
             AggregateResult::Complete(out) => assert_eq!(out, b"ab"),
-            AggregateResult::Pending => panic!("expected Complete"),
+            _ => panic!("expected Complete"),
         }
         agg.reset();
 
@@ -201,7 +201,7 @@ mod tests {
             AggregateResult::Complete(out) => {
                 assert_eq!(out, b"standalone");
             }
-            AggregateResult::Pending => panic!("expected Complete"),
+            _ => panic!("expected Complete"),
         }
         agg.reset();
 
@@ -210,7 +210,7 @@ mod tests {
         agg.feed(b"y", false);
         match agg.feed(b"z", true) {
             AggregateResult::Complete(out) => assert_eq!(out, b"xyz"),
-            AggregateResult::Pending => panic!("expected Complete"),
+            _ => panic!("expected Complete"),
         }
         agg.reset();
     }

@@ -223,8 +223,12 @@ fn write_json_value(arr: &dyn Array, row: usize, out: &mut Vec<u8>) -> io::Resul
             }
         }
         DataType::Boolean => {
-            let v = arr.as_boolean().value(row);
-            out.extend_from_slice(if v { b"true" } else { b"false" });
+            if arr.is_null(row) {
+                out.extend_from_slice(b"null");
+            } else {
+                let v = arr.as_boolean().value(row);
+                out.extend_from_slice(if v { b"true" } else { b"false" });
+            }
         }
         _ => {
             write_json_string(out, str_value(arr, row))?;
