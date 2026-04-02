@@ -6,17 +6,17 @@
 //! SELECT json_float(_raw, 'duration') as dur FROM logs
 //! ```
 //!
-//! Each call parses the JSON independently. For multi-field optimization,
-//! use `json_preprocess::populate_and_rewrite()` which runs the scanner once
-//! and rewrites the SQL to use pre-extracted column references.
+//! A single parameterised struct [`JsonExtractUdf`] covers all three functions.
+//! The [`JsonExtractMode`] selects name, return type, and suffix lookup order.
 
 use std::any::Any;
 use std::sync::Arc;
 
-use arrow::array::{Array, AsArray, Float64Builder, Int64Builder};
+use arrow::array::{Array, Float64Builder, Int64Builder, StringArray};
 use arrow::datatypes::DataType;
+use arrow::record_batch::RecordBatch;
 
-use datafusion::common::{Result as DfResult, ScalarValue};
+use datafusion::common::{DataFusionError, Result as DfResult, ScalarValue};
 use datafusion::logical_expr::{
     ColumnarValue, ScalarFunctionArgs, ScalarUDFImpl, Signature, TypeSignature, Volatility,
 };
@@ -25,18 +25,55 @@ use logfwd_arrow::StreamingSimdScanner;
 use logfwd_core::scan_config::{FieldSpec, ScanConfig};
 
 // ---------------------------------------------------------------------------
-// Shared: parse JSON lines with our SIMD scanner
+// Mode enum
 // ---------------------------------------------------------------------------
 
-fn parse_and_extract_all(
-    raw_array: &arrow::array::StringArray,
-    field_name: &str,
-) -> std::collections::HashMap<String, arrow::array::ArrayRef> {
-    let mut result = std::collections::HashMap::new();
-    if raw_array.is_empty() {
-        return result;
+/// Selects which json extraction variant to expose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JsonExtractMode {
+    /// `json(_raw, 'key')` -> Utf8
+    Str,
+    /// `json_int(_raw, 'key')` -> Int64
+    Int,
+    /// `json_float(_raw, 'key')` -> Float64
+    Float,
+}
+
+impl JsonExtractMode {
+    fn udf_name(self) -> &'static str {
+        match self {
+            Self::Str => "json",
+            Self::Int => "json_int",
+            Self::Float => "json_float",
+        }
     }
 
+    fn return_type(self) -> DataType {
+        match self {
+            Self::Str => DataType::Utf8,
+            Self::Int => DataType::Int64,
+            Self::Float => DataType::Float64,
+        }
+    }
+
+    /// Column-name suffixes to try, in preference order, when looking up the
+    /// scanner output for this mode.
+    fn suffix_order(self) -> &'static [&'static str] {
+        match self {
+            Self::Str => &["_str", "", "_int", "_float"],
+            Self::Int => &["_int", ""],
+            Self::Float => &["_float", "_int", ""],
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shared: parse raw lines with the SIMD scanner
+// ---------------------------------------------------------------------------
+
+/// Reconstruct an NDJSON buffer from `raw_array`, run the scanner for
+/// `field_name`, and return the resulting [`RecordBatch`].
+fn parse_raw(raw_array: &StringArray, field_name: &str) -> Result<RecordBatch, DataFusionError> {
     let mut buf = Vec::with_capacity(raw_array.len() * 128);
     for i in 0..raw_array.len() {
         if !raw_array.is_null(i) {
@@ -56,46 +93,69 @@ fn parse_and_extract_all(
     };
 
     let mut scanner = StreamingSimdScanner::new(config);
-    let batch = match scanner.scan(bytes::Bytes::from(buf)) {
-        Ok(b) => b,
-        Err(_) => return result,
-    };
+    let batch = scanner
+        .scan(bytes::Bytes::from(buf))
+        .map_err(|e| DataFusionError::Execution(format!("scanner error: {e}")))?;
 
-    for suffix in ["_int", "_float", "_str", ""] {
-        let col_name = if suffix.is_empty() {
-            field_name.to_string()
-        } else {
-            format!("{field_name}{suffix}")
-        };
-        if let Some(col) = batch.column_by_name(&col_name) {
-            result.insert(suffix.to_string(), Arc::clone(col));
-        }
+    if batch.num_rows() != raw_array.len() {
+        return Err(DataFusionError::Execution(format!(
+            "scanner row count mismatch: got {} rows, expected {}",
+            batch.num_rows(),
+            raw_array.len(),
+        )));
     }
-    result
+
+    Ok(batch)
+}
+
+/// Cast `arr` to [`StringArray`] (Utf8). Accepts Utf8, Utf8View, and LargeUtf8.
+fn coerce_to_string_array(arr: &dyn Array) -> Result<StringArray, DataFusionError> {
+    let coerced = if *arr.data_type() == DataType::Utf8 {
+        Arc::new(
+            arr.as_any()
+                .downcast_ref::<StringArray>()
+                .expect("already checked Utf8")
+                .clone(),
+        ) as _
+    } else {
+        arrow::compute::cast(arr, &DataType::Utf8)
+            .map_err(|e| DataFusionError::Execution(format!("Failed to cast _raw to Utf8: {e}")))?
+    };
+    Ok(coerced
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .expect("cast to Utf8 must yield StringArray")
+        .clone())
 }
 
 // ---------------------------------------------------------------------------
-// json(_raw, 'key') -> Utf8
+// The unified UDF struct
 // ---------------------------------------------------------------------------
 
+/// Scalar UDF that extracts a named field from raw JSON lines.
+///
+/// Instantiate once per [`JsonExtractMode`] and register with DataFusion.
 #[derive(Debug)]
 pub struct JsonExtractUdf {
+    mode: JsonExtractMode,
     signature: Signature,
 }
 
-impl Default for JsonExtractUdf {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl JsonExtractUdf {
-    pub fn new() -> Self {
+    pub fn new(mode: JsonExtractMode) -> Self {
+        // Accept Utf8, Utf8View, and LargeUtf8 as the first argument.
+        let variants = vec![
+            TypeSignature::Exact(vec![DataType::Utf8, DataType::Utf8]),
+            TypeSignature::Exact(vec![DataType::Utf8View, DataType::Utf8]),
+            TypeSignature::Exact(vec![DataType::LargeUtf8, DataType::Utf8]),
+            // The key argument may also come as Utf8View from the planner.
+            TypeSignature::Exact(vec![DataType::Utf8, DataType::Utf8View]),
+            TypeSignature::Exact(vec![DataType::Utf8View, DataType::Utf8View]),
+            TypeSignature::Exact(vec![DataType::LargeUtf8, DataType::Utf8View]),
+        ];
         Self {
-            signature: Signature::new(
-                TypeSignature::Exact(vec![DataType::Utf8, DataType::Utf8]),
-                Volatility::Immutable,
-            ),
+            mode,
+            signature: Signature::new(TypeSignature::OneOf(variants), Volatility::Immutable),
         }
     }
 }
@@ -104,228 +164,114 @@ impl ScalarUDFImpl for JsonExtractUdf {
     fn as_any(&self) -> &dyn Any {
         self
     }
+
     fn name(&self) -> &'static str {
-        "json"
+        self.mode.udf_name()
     }
+
     fn signature(&self) -> &Signature {
         &self.signature
     }
+
     fn return_type(&self, _args: &[DataType]) -> DfResult<DataType> {
-        Ok(DataType::Utf8)
+        Ok(self.mode.return_type())
     }
+
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DfResult<ColumnarValue> {
+        let udf_name = self.mode.udf_name();
+
+        // --- arg 0: the raw column (coerce to StringArray) ---
         let raw_array = match &args.args[0] {
-            ColumnarValue::Array(a) => a.as_string::<i32>(),
+            ColumnarValue::Array(a) => coerce_to_string_array(a.as_ref())?,
             ColumnarValue::Scalar(_) => {
-                return Err(datafusion::common::DataFusionError::Internal(
-                    "json() first arg must be a string column".into(),
-                ));
+                return Err(DataFusionError::Internal(format!(
+                    "{udf_name}() first arg must be a string column",
+                )));
             }
         };
+
+        // --- arg 1: field name (constant string) ---
         let key = match &args.args[1] {
-            ColumnarValue::Scalar(ScalarValue::Utf8(Some(k))) => k.as_str(),
+            ColumnarValue::Scalar(ScalarValue::Utf8(Some(k)))
+            | ColumnarValue::Scalar(ScalarValue::Utf8View(Some(k))) => k.as_str(),
             _ => {
-                return Err(datafusion::common::DataFusionError::Internal(
-                    "json() second arg must be a string literal".into(),
-                ));
+                return Err(DataFusionError::Internal(format!(
+                    "{udf_name}() second arg must be a string literal",
+                )));
             }
         };
 
-        let cols = parse_and_extract_all(raw_array, key);
-        let arr = cols
-            .get("_str")
-            .or_else(|| cols.get(""))
-            .or_else(|| cols.get("_int"))
-            .or_else(|| cols.get("_float"));
-        match arr {
-            Some(a) => {
-                let str_arr = arrow::compute::cast(a, &DataType::Utf8)?;
-                Ok(ColumnarValue::Array(str_arr))
-            }
-            None => {
-                let nulls = arrow::array::new_null_array(&DataType::Utf8, raw_array.len());
-                Ok(ColumnarValue::Array(nulls))
-            }
-        }
-    }
-}
+        // --- parse ---
+        let batch = parse_raw(&raw_array, key)?;
 
-// ---------------------------------------------------------------------------
-// json_int(_raw, 'key') -> Int64
-// ---------------------------------------------------------------------------
+        // --- look up the best column by suffix order ---
+        let col = self.mode.suffix_order().iter().find_map(|suffix| {
+            let col_name = if suffix.is_empty() {
+                key.to_string()
+            } else {
+                format!("{key}{suffix}")
+            };
+            batch.column_by_name(&col_name).map(Arc::clone)
+        });
 
-#[derive(Debug)]
-pub struct JsonExtractIntUdf {
-    signature: Signature,
-}
+        // --- coerce to the declared return type ---
+        let target_dt = self.mode.return_type();
+        let num_rows = raw_array.len();
 
-impl Default for JsonExtractIntUdf {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl JsonExtractIntUdf {
-    pub fn new() -> Self {
-        Self {
-            signature: Signature::new(
-                TypeSignature::Exact(vec![DataType::Utf8, DataType::Utf8]),
-                Volatility::Immutable,
-            ),
-        }
-    }
-}
-
-impl ScalarUDFImpl for JsonExtractIntUdf {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-    fn name(&self) -> &'static str {
-        "json_int"
-    }
-    fn signature(&self) -> &Signature {
-        &self.signature
-    }
-    fn return_type(&self, _args: &[DataType]) -> DfResult<DataType> {
-        Ok(DataType::Int64)
-    }
-    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DfResult<ColumnarValue> {
-        let raw_array = match &args.args[0] {
-            ColumnarValue::Array(a) => a.as_string::<i32>(),
-            ColumnarValue::Scalar(_) => {
-                return Err(datafusion::common::DataFusionError::Internal(
-                    "json_int() first arg must be a string column".into(),
-                ));
-            }
-        };
-        let key = match &args.args[1] {
-            ColumnarValue::Scalar(ScalarValue::Utf8(Some(k))) => k.as_str(),
-            _ => {
-                return Err(datafusion::common::DataFusionError::Internal(
-                    "json_int() second arg must be a string literal".into(),
-                ));
-            }
-        };
-
-        let cols = parse_and_extract_all(raw_array, key);
-        if let Some(arr) = cols.get("_int") {
-            return Ok(ColumnarValue::Array(Arc::clone(arr)));
-        }
-        if let Some(arr) = cols.get("") {
-            if *arr.data_type() == DataType::Int64 {
-                return Ok(ColumnarValue::Array(Arc::clone(arr)));
-            }
-        }
-        if let Some(arr) = cols.get("_str").or_else(|| cols.get("")) {
-            let str_arr = arrow::compute::cast(arr, &DataType::Utf8)?;
-            let str_arr = str_arr
-                .as_any()
-                .downcast_ref::<arrow::array::StringArray>()
-                .unwrap();
-            let mut builder = Int64Builder::with_capacity(str_arr.len());
-            for i in 0..str_arr.len() {
-                if str_arr.is_null(i) {
-                    builder.append_null();
-                } else {
-                    match str_arr.value(i).parse::<i64>() {
-                        Ok(v) => builder.append_value(v),
-                        Err(_) => builder.append_null(),
+        let result = match col {
+            None => arrow::array::new_null_array(&target_dt, num_rows),
+            Some(arr) => match self.mode {
+                JsonExtractMode::Str => {
+                    // Cast any type to Utf8.
+                    arrow::compute::cast(&arr, &DataType::Utf8)?
+                }
+                JsonExtractMode::Int => {
+                    if *arr.data_type() == DataType::Int64 {
+                        arr
+                    } else {
+                        // Try parsing strings as i64; unparseable → null.
+                        let str_arr = arrow::compute::cast(&arr, &DataType::Utf8)?;
+                        let str_arr = str_arr.as_any().downcast_ref::<StringArray>().unwrap();
+                        let mut builder = Int64Builder::with_capacity(str_arr.len());
+                        for i in 0..str_arr.len() {
+                            if str_arr.is_null(i) {
+                                builder.append_null();
+                            } else {
+                                match str_arr.value(i).parse::<i64>() {
+                                    Ok(v) => builder.append_value(v),
+                                    Err(_) => builder.append_null(),
+                                }
+                            }
+                        }
+                        Arc::new(builder.finish())
                     }
                 }
-            }
-            return Ok(ColumnarValue::Array(Arc::new(builder.finish())));
-        }
-        let nulls = arrow::array::new_null_array(&DataType::Int64, raw_array.len());
-        Ok(ColumnarValue::Array(nulls))
-    }
-}
-
-// ---------------------------------------------------------------------------
-// json_float(_raw, 'key') -> Float64
-// ---------------------------------------------------------------------------
-
-#[derive(Debug)]
-pub struct JsonExtractFloatUdf {
-    signature: Signature,
-}
-
-impl Default for JsonExtractFloatUdf {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl JsonExtractFloatUdf {
-    pub fn new() -> Self {
-        Self {
-            signature: Signature::new(
-                TypeSignature::Exact(vec![DataType::Utf8, DataType::Utf8]),
-                Volatility::Immutable,
-            ),
-        }
-    }
-}
-
-impl ScalarUDFImpl for JsonExtractFloatUdf {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-    fn name(&self) -> &'static str {
-        "json_float"
-    }
-    fn signature(&self) -> &Signature {
-        &self.signature
-    }
-    fn return_type(&self, _args: &[DataType]) -> DfResult<DataType> {
-        Ok(DataType::Float64)
-    }
-    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DfResult<ColumnarValue> {
-        let raw_array = match &args.args[0] {
-            ColumnarValue::Array(a) => a.as_string::<i32>(),
-            ColumnarValue::Scalar(_) => {
-                return Err(datafusion::common::DataFusionError::Internal(
-                    "json_float() first arg must be a string column".into(),
-                ));
-            }
-        };
-        let key = match &args.args[1] {
-            ColumnarValue::Scalar(ScalarValue::Utf8(Some(k))) => k.as_str(),
-            _ => {
-                return Err(datafusion::common::DataFusionError::Internal(
-                    "json_float() second arg must be a string literal".into(),
-                ));
-            }
-        };
-
-        let cols = parse_and_extract_all(raw_array, key);
-        if let Some(arr) = cols.get("_float") {
-            return Ok(ColumnarValue::Array(Arc::clone(arr)));
-        }
-        if let Some(arr) = cols.get("_int") {
-            let f_arr = arrow::compute::cast(arr, &DataType::Float64)?;
-            return Ok(ColumnarValue::Array(f_arr));
-        }
-        if let Some(arr) = cols.get("_str").or_else(|| cols.get("")) {
-            let str_arr = arrow::compute::cast(arr, &DataType::Utf8)?;
-            let str_arr = str_arr
-                .as_any()
-                .downcast_ref::<arrow::array::StringArray>()
-                .unwrap();
-            let mut builder = Float64Builder::with_capacity(str_arr.len());
-            for i in 0..str_arr.len() {
-                if str_arr.is_null(i) {
-                    builder.append_null();
-                } else {
-                    match str_arr.value(i).parse::<f64>() {
-                        Ok(v) => builder.append_value(v),
-                        Err(_) => builder.append_null(),
+                JsonExtractMode::Float => {
+                    if *arr.data_type() == DataType::Float64 {
+                        arr
+                    } else if *arr.data_type() == DataType::Int64 {
+                        arrow::compute::cast(&arr, &DataType::Float64)?
+                    } else {
+                        let str_arr = arrow::compute::cast(&arr, &DataType::Utf8)?;
+                        let str_arr = str_arr.as_any().downcast_ref::<StringArray>().unwrap();
+                        let mut builder = Float64Builder::with_capacity(str_arr.len());
+                        for i in 0..str_arr.len() {
+                            if str_arr.is_null(i) {
+                                builder.append_null();
+                            } else {
+                                match str_arr.value(i).parse::<f64>() {
+                                    Ok(v) => builder.append_value(v),
+                                    Err(_) => builder.append_null(),
+                                }
+                            }
+                        }
+                        Arc::new(builder.finish())
                     }
                 }
-            }
-            return Ok(ColumnarValue::Array(Arc::new(builder.finish())));
-        }
-        let nulls = arrow::array::new_null_array(&DataType::Float64, raw_array.len());
-        Ok(ColumnarValue::Array(nulls))
+            },
+        };
+
+        Ok(ColumnarValue::Array(result))
     }
 }
 
@@ -352,9 +298,9 @@ mod tests {
     async fn query(sql: &str, batch: RecordBatch) -> RecordBatch {
         let schema = batch.schema();
         let ctx = SessionContext::new();
-        ctx.register_udf(ScalarUDF::from(JsonExtractUdf::new()));
-        ctx.register_udf(ScalarUDF::from(JsonExtractIntUdf::new()));
-        ctx.register_udf(ScalarUDF::from(JsonExtractFloatUdf::new()));
+        ctx.register_udf(ScalarUDF::from(JsonExtractUdf::new(JsonExtractMode::Str)));
+        ctx.register_udf(ScalarUDF::from(JsonExtractUdf::new(JsonExtractMode::Int)));
+        ctx.register_udf(ScalarUDF::from(JsonExtractUdf::new(JsonExtractMode::Float)));
         let table = MemTable::try_new(schema, vec![vec![batch]]).unwrap();
         ctx.register_table("logs", Arc::new(table)).unwrap();
         let df = ctx.sql(sql).await.unwrap();
@@ -368,7 +314,11 @@ mod tests {
             r#"{"status": 404, "level": "WARN"}"#,
         ]);
         let result = query("SELECT json(_raw, 'level') as level FROM logs", batch).await;
-        let col = result.column(0).as_string::<i32>();
+        let col = result
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
         assert_eq!(col.value(0), "INFO");
         assert_eq!(col.value(1), "WARN");
     }
@@ -417,7 +367,11 @@ mod tests {
         )
         .await;
         assert_eq!(result.num_rows(), 1);
-        let col = result.column(0).as_string::<i32>();
+        let col = result
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
         assert_eq!(col.value(0), "error");
     }
 
@@ -425,7 +379,11 @@ mod tests {
     async fn test_json_missing_key_returns_null() {
         let batch = make_raw_batch(vec![r#"{"status": 200}"#, r#"{"level": "INFO"}"#]);
         let result = query("SELECT json(_raw, 'status') as s FROM logs", batch).await;
-        let col = result.column(0).as_string::<i32>();
+        let col = result
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
         assert_eq!(col.value(0), "200");
         assert!(col.is_null(1));
     }
@@ -438,7 +396,11 @@ mod tests {
         ]);
         let result = query("SELECT _raw FROM logs", batch).await;
         assert_eq!(result.num_rows(), 2);
-        let col = result.column(0).as_string::<i32>();
+        let col = result
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
         assert!(col.value(0).contains("200"));
         assert!(col.value(1).contains("500"));
     }
