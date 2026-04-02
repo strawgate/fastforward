@@ -413,9 +413,7 @@ async fn run_pipelines(
     let tracer_provider = build_tracer_provider(trace_buf.clone(), &config)?;
     let tracer = opentelemetry::trace::TracerProvider::tracer(&tracer_provider, "logfwd");
     let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
-    let _ = tracing_subscriber::registry()
-        .with(otel_layer)
-        .try_init(); // ignore error if a subscriber is already installed (e.g. in tests)
+    let _ = tracing_subscriber::registry().with(otel_layer).try_init(); // ignore error if a subscriber is already installed (e.g. in tests)
     opentelemetry::global::set_tracer_provider(tracer_provider);
 
     let mut pipelines = Vec::new();

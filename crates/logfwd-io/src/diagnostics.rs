@@ -646,6 +646,7 @@ impl DiagnosticsServer {
     fn serve_traces(&self, request: tiny_http::Request) -> Result<(), Box<dyn std::error::Error>> {
         use crate::span_exporter::TraceSpan;
         use std::collections::HashMap;
+        use std::fmt::Write;
 
         let body = if let Some(ref buf) = self.trace_buf {
             let all_spans = buf.get_spans();
@@ -678,7 +679,7 @@ impl DiagnosticsServer {
                 let mut transform_ns = 0u64;
                 let mut output_ns = 0u64;
                 if let Some(kids) = children.get(root.trace_id.as_str()) {
-                    for kid in kids.iter() {
+                    for kid in kids {
                         match kid.name.as_str() {
                             "scan" => scan_ns = kid.duration_ns,
                             "transform" => transform_ns = kid.duration_ns,
@@ -700,8 +701,21 @@ impl DiagnosticsServer {
                 let output_rows = attr("output_rows");
                 let errors = attr("errors");
 
-                out.push_str(&format!(
-                    r#"{{"trace_id":"{tid}","pipeline":"{pl}","start_unix_ns":{st},"total_ns":{tot},"scan_ns":{scan},"transform_ns":{xfm},"output_ns":{out_ns},"input_rows":{ir},"output_rows":{or},"errors":{err},"status":"{status}"}}"#,
+                let _ = write!(
+                    out,
+                    "{{\
+                        \"trace_id\":\"{tid}\",\
+                        \"pipeline\":\"{pl}\",\
+                        \"start_unix_ns\":{st},\
+                        \"total_ns\":{tot},\
+                        \"scan_ns\":{scan},\
+                        \"transform_ns\":{xfm},\
+                        \"output_ns\":{out_ns},\
+                        \"input_rows\":{ir},\
+                        \"output_rows\":{or},\
+                        \"errors\":{err},\
+                        \"status\":\"{status}\"\
+                    }}",
                     tid = root.trace_id,
                     pl = esc(pipeline),
                     st = root.start_unix_ns,
@@ -713,9 +727,9 @@ impl DiagnosticsServer {
                     or = output_rows,
                     err = errors,
                     status = root.status,
-                ));
+                );
             }
-            out.push_str(r#"]}"#);
+            out.push_str("]}");
             out
         } else {
             r#"{"traces":[]}"#.to_string()

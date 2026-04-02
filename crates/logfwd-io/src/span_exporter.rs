@@ -146,9 +146,7 @@ fn convert(s: SpanData) -> TraceSpan {
     let attrs: Vec<[String; 2]> = s
         .attributes
         .iter()
-        .map(|KeyValue { key, value, .. }| {
-            [key.to_string(), value.to_string()]
-        })
+        .map(|KeyValue { key, value, .. }| [key.to_string(), value.to_string()])
         .collect();
 
     let status = match s.status {

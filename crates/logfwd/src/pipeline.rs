@@ -64,7 +64,6 @@ struct InputState {
 
 /// A single pipeline: inputs → Scanner → SQL transform → output sinks.
 pub struct Pipeline {
-    #[expect(dead_code, reason = "reserved for future per-pipeline logging")]
     name: String,
     inputs: Vec<InputState>,
     scanner: Scanner,
@@ -522,8 +521,7 @@ impl Pipeline {
             observed_time_ns: now_nanos(),
         };
         let output_ok = {
-            let _out_span =
-                tracing::info_span!("output", pipeline = %self.name).entered();
+            let _out_span = tracing::info_span!("output", pipeline = %self.name).entered();
             match tokio::task::block_in_place(|| self.output.send_batch(&result, &metadata)) {
                 Ok(()) => true,
                 Err(e) => {
