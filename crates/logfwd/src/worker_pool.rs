@@ -90,8 +90,6 @@ enum WorkerMsg {
 struct WorkerHandle {
     /// Channel to send work items to this worker.
     tx: mpsc::Sender<WorkerMsg>,
-    /// Worker index, used for logging.
-    id: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -232,15 +230,17 @@ impl OutputWorkerPool {
     ///    after calling `drain`.
     /// 2. **Wait**: join all worker tasks (with `graceful_timeout`).
     /// 3. **Force**: cancel any tasks still running after the timeout.
-    pub async fn drain(mut self, graceful_timeout: Duration) {
+    pub async fn drain(&mut self, graceful_timeout: Duration) {
         // Phase 1 — signal all workers.
-        for handle in &self.workers {
+        // Take the workers vec so we can drop the Senders after signalling.
+        let workers = std::mem::take(&mut self.workers);
+        for handle in &workers {
             let _ = handle.tx.send(WorkerMsg::Shutdown).await;
         }
-        drop(self.workers); // Release all Senders.
+        drop(workers); // Release all Senders → workers see channel closed.
 
         // Phase 2 — wait with timeout.
-        let drain = async {
+        let drain_fut = async {
             while let Some(res) = self.join_set.join_next().await {
                 if let Err(e) = res {
                     if e.is_panic() {
@@ -249,7 +249,10 @@ impl OutputWorkerPool {
                 }
             }
         };
-        if tokio::time::timeout(graceful_timeout, drain).await.is_err() {
+        if tokio::time::timeout(graceful_timeout, drain_fut)
+            .await
+            .is_err()
+        {
             eprintln!(
                 "worker_pool: drain timeout ({graceful_timeout:?}); \
                  aborting remaining workers"
@@ -258,6 +261,7 @@ impl OutputWorkerPool {
             self.cancel.cancel();
             self.join_set.shutdown().await;
         }
+        // After this point all workers have exited and sent their final acks.
     }
 
     /// Spawn a new worker task and return a handle.
@@ -281,7 +285,7 @@ impl OutputWorkerPool {
             max_retry_delay,
         ));
 
-        Ok(WorkerHandle { tx, id })
+        Ok(WorkerHandle { tx })
     }
 
     /// Active worker count (workers whose channels are still open).
