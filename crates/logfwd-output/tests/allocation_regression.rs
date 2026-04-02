@@ -107,7 +107,7 @@ fn otlp_encode_stable_across_batches() {
 
     let batch = make_batch(500);
     let meta = BatchMetadata {
-        resource_attrs: vec![],
+        resource_attrs: Arc::new(vec![]),
         observed_time_ns: now_nanos(),
     };
 
