@@ -155,6 +155,8 @@ jobs:
         uses: model-checking/kani-github-action@v1
         with:
           args: -p logfwd-core
+        env:
+          RUSTC_WRAPPER: ""
 
   actionlint:
     name: Actionlint
