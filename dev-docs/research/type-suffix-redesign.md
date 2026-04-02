@@ -58,22 +58,19 @@ SELECT status, level FROM logs WHERE status > 400
 SELECT status_int, status_str FROM logs WHERE status_int > 400
 ```
 
-**View layer for type-conflict batches:** when suffixed columns exist,
-a DataFusion view provides bare-name access. The bare name resolves to
-the string representation. Typed columns remain available.
+**AnalyzerRule + TableProvider for type-conflict batches (see #625):**
+a DataFusion `AnalyzerRule` walks the expression tree and routes bare-name
+references to the appropriate typed column. A custom `TableProvider` presents
+bare column names in its schema so `SELECT *` shows clean names.
 
-```sql
-CREATE VIEW logs AS SELECT
-  status_str AS status,
-  status_int,
-  status_str,
-  level_str AS level,
-  ...
-FROM _raw_logs
-```
+- `status > 400` → routed to `status_int > 400`
+- `status = 'ERROR'` → routed to `status_str = 'ERROR'`
+- `SELECT status` → COALESCE(CAST(status_int AS VARCHAR), status_str) AS status
 
-The view is only created when suffixed columns are detected in the batch
-schema. For clean-schema batches, the table is registered directly.
+A DataFusion VIEW was considered but rejected: VIEWs only help `SELECT *`
+and cannot rewrite WHERE/GROUP BY/ORDER BY predicates correctly. The
+AnalyzerRule handles all SQL constructs. For clean-schema batches (no conflict),
+the table is registered directly with no AnalyzerRule overhead.
 
 ### Output serialization
 

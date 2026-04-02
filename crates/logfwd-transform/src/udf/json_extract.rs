@@ -12,7 +12,7 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use arrow::array::{Array, Float64Builder, Int64Builder, StringArray};
+use arrow::array::{Array, StringArray};
 use arrow::datatypes::DataType;
 use arrow::record_batch::RecordBatch;
 
@@ -57,14 +57,14 @@ impl JsonExtractMode {
     }
 
     /// Column-name suffixes to try, in preference order, when looking up the
-    /// scanner output for this mode. The scanner always emits type-suffixed
-    /// column names (`_str`, `_int`, `_float`), so bare-name (`""`) entries
-    /// are omitted — they would never match any scanner output.
+    /// scanner output for this mode. Bare name (`""`) is included as a
+    /// fallback for single-type fields, which use the bare field name
+    /// when there is no type conflict in the batch.
     fn suffix_order(self) -> &'static [&'static str] {
         match self {
-            Self::Str => &["_str", "_int", "_float"],
-            Self::Int => &["_int"],
-            Self::Float => &["_float", "_int"],
+            Self::Str => &["", "_str", "_int", "_float"],
+            Self::Int => &["_int", ""],
+            Self::Float => &["_float", "_int", ""],
         }
     }
 }
@@ -239,24 +239,10 @@ impl ScalarUDFImpl for JsonExtractUdf {
                     if *arr.data_type() == DataType::Int64 {
                         arr
                     } else {
-                        // Try parsing strings as i64; unparsable → null.
-                        let str_arr = arrow::compute::cast(&arr, &DataType::Utf8)?;
-                        let str_arr = str_arr
-                            .as_any()
-                            .downcast_ref::<StringArray>()
-                            .expect("cast to Utf8 must yield StringArray in Int path");
-                        let mut builder = Int64Builder::with_capacity(str_arr.len());
-                        for i in 0..str_arr.len() {
-                            if str_arr.is_null(i) {
-                                builder.append_null();
-                            } else {
-                                match str_arr.value(i).parse::<i64>() {
-                                    Ok(v) => builder.append_value(v),
-                                    Err(_) => builder.append_null(),
-                                }
-                            }
-                        }
-                        Arc::new(builder.finish())
+                        // The column is not Int64 (e.g. bare string column found
+                        // via bare-name fallback). The JSON value is not a number,
+                        // so return all-null rather than coercing a string "200" → 200.
+                        arrow::array::new_null_array(&DataType::Int64, num_rows)
                     }
                 }
                 JsonExtractMode::Float => {
@@ -265,23 +251,10 @@ impl ScalarUDFImpl for JsonExtractUdf {
                     } else if *arr.data_type() == DataType::Int64 {
                         arrow::compute::cast(&arr, &DataType::Float64)?
                     } else {
-                        let str_arr = arrow::compute::cast(&arr, &DataType::Utf8)?;
-                        let str_arr = str_arr
-                            .as_any()
-                            .downcast_ref::<StringArray>()
-                            .expect("cast to Utf8 must yield StringArray in Float path");
-                        let mut builder = Float64Builder::with_capacity(str_arr.len());
-                        for i in 0..str_arr.len() {
-                            if str_arr.is_null(i) {
-                                builder.append_null();
-                            } else {
-                                match str_arr.value(i).parse::<f64>() {
-                                    Ok(v) => builder.append_value(v),
-                                    Err(_) => builder.append_null(),
-                                }
-                            }
-                        }
-                        Arc::new(builder.finish())
+                        // The column is not a numeric type (e.g. bare string column found
+                        // via bare-name fallback). The JSON value is not a number,
+                        // so return all-null rather than coercing a string "1.5" → 1.5.
+                        arrow::array::new_null_array(&DataType::Float64, num_rows)
                     }
                 }
             },

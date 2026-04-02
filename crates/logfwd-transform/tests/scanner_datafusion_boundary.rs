@@ -523,25 +523,25 @@ fn streaming_builder_realistic_transform() {
     // Verify schema types match StreamingBuilder contract.
     let schema = batch.schema();
     assert_eq!(
-        schema.field_with_name("level_str").unwrap().data_type(),
+        schema.field_with_name("level").unwrap().data_type(),
         &DataType::Utf8View,
         "StreamingBuilder must produce Utf8View for string columns",
     );
 
     // SQL: select ERROR rows and compute average latency.
     let mut t = SqlTransform::new(
-        "SELECT level_str, status_int, latency_ms_float \
+        "SELECT level, status, latency_ms \
          FROM logs \
-         WHERE level_str = 'ERROR'",
+         WHERE level = 'ERROR'",
     )
     .unwrap();
     let result = t.execute_blocking(batch).unwrap();
     assert_eq!(result.num_rows(), 1);
 
-    let levels = collect_string_col(&result, "level_str");
+    let levels = collect_string_col(&result, "level");
     assert_eq!(levels[0], "ERROR");
 
-    let statuses = collect_i64_col(&result, "status_int");
+    let statuses = collect_i64_col(&result, "status");
     assert_eq!(statuses[0], Some(500));
 }
 
@@ -568,16 +568,16 @@ fn streaming_builder_group_by_and_order_by() {
     let batch = b.finish_batch().expect("batch build should succeed");
 
     let mut t = SqlTransform::new(
-        "SELECT level_str, COUNT(*) AS cnt \
+        "SELECT level, COUNT(*) AS cnt \
          FROM logs \
-         GROUP BY level_str \
-         ORDER BY cnt DESC, level_str ASC",
+         GROUP BY level \
+         ORDER BY cnt DESC, level ASC",
     )
     .unwrap();
     let result = t.execute_blocking(batch).unwrap();
     assert_eq!(result.num_rows(), 3, "three distinct levels");
 
-    let levels = collect_string_col(&result, "level_str");
+    let levels = collect_string_col(&result, "level");
     let counts = collect_i64_col(&result, "cnt");
 
     // ERROR×2 comes first (cnt DESC), then DEBUG×1 and INFO×2 tie — but INFO

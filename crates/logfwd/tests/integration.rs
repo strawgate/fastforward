@@ -174,7 +174,7 @@ input:
   type: file
   path: {}
   format: json
-transform: "SELECT * FROM logs WHERE level_str = 'ERROR'"
+transform: "SELECT * FROM logs WHERE level = 'ERROR'"
 output:
   type: stdout
   format: json
@@ -484,9 +484,9 @@ fn test_enrichment_join() {
     // CSV columns use plain names (no `_str` suffix); scanner columns use the
     // `{field}_{type}` convention.  The alias brings the enriched column into
     // the logfwd naming scheme for downstream compatibility.
-    let sql = "SELECT l.service_str, l.message_str, t.team AS team_str \
+    let sql = "SELECT l.service, l.message, t.team AS team \
                FROM logs l \
-               JOIN teams t ON l.service_str = t.service";
+               JOIN teams t ON l.service = t.service";
     let mut transform = SqlTransform::new(sql).expect("SQL parse failed");
     transform
         .add_enrichment_table(csv_table)
@@ -502,27 +502,25 @@ fn test_enrichment_join() {
     // The output must contain the `team_str` column from the CSV.
     let schema = result.schema();
     assert!(
-        schema.field_with_name("team_str").is_ok(),
-        "expected 'team_str' column in enriched output; schema: {schema:?}"
+        schema.field_with_name("team").is_ok(),
+        "expected 'team' column in enriched output; schema: {schema:?}"
     );
 
     // Spot-check values: both "auth" rows should map to "platform".
-    let team_col = result
-        .column_by_name("team_str")
-        .expect("team_str column missing");
+    let team_col = result.column_by_name("team").expect("team column missing");
     use arrow::array::StringArray;
     // The CSV enrichment table stores columns as DataType::Utf8 (StringArray).
     let team_arr = team_col
         .as_any()
         .downcast_ref::<StringArray>()
-        .expect("team_str column should be DataType::Utf8");
+        .expect("team column should be DataType::Utf8");
     let teams: Vec<&str> = team_arr.iter().map(|v| v.unwrap_or("")).collect();
     assert!(
         teams.contains(&"platform"),
-        "expected 'platform' in team_str column; got {teams:?}"
+        "expected 'platform' in team column; got {teams:?}"
     );
     assert!(
         teams.contains(&"commerce"),
-        "expected 'commerce' in team_str column; got {teams:?}"
+        "expected 'commerce' in team column; got {teams:?}"
     );
 }

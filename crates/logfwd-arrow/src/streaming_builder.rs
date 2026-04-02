@@ -268,8 +268,16 @@ impl StreamingBuilder {
             // handled gracefully instead of triggering undefined behaviour.
             let name = String::from_utf8_lossy(&fc.name);
 
+            // Suffix columns only when the same field has multiple types in this
+            // batch. Single-type fields use the bare field name.
+            let conflict = (fc.has_int as u8) + (fc.has_float as u8) + (fc.has_str as u8) > 1;
+
             if fc.has_int {
-                let col_name = format!("{}_int", name);
+                let col_name = if conflict {
+                    format!("{}_int", name)
+                } else {
+                    name.to_string()
+                };
                 let mut values = vec![0i64; num_rows];
                 let mut valid = vec![false; num_rows];
                 for &(row, v) in &fc.int_values {
@@ -287,7 +295,11 @@ impl StreamingBuilder {
             }
 
             if fc.has_float {
-                let col_name = format!("{}_float", name);
+                let col_name = if conflict {
+                    format!("{}_float", name)
+                } else {
+                    name.to_string()
+                };
                 let mut values = vec![0.0f64; num_rows];
                 let mut valid = vec![false; num_rows];
                 for &(row, v) in &fc.float_values {
@@ -305,7 +317,11 @@ impl StreamingBuilder {
             }
 
             if fc.has_str {
-                let col_name = format!("{}_str", name);
+                let col_name = if conflict {
+                    format!("{}_str", name)
+                } else {
+                    name.to_string()
+                };
                 let mut builder = StringViewBuilder::new();
                 let block = builder.append_block(arrow_buf.clone());
 
@@ -386,8 +402,44 @@ mod tests {
 
         let batch = b.finish_batch().unwrap();
         assert_eq!(batch.num_rows(), 1);
-        assert!(batch.column_by_name("name_str").is_some());
-        assert!(batch.column_by_name("age_int").is_some());
+        // Single-type fields use bare column names (no suffix).
+        assert!(batch.column_by_name("name").is_some());
+        assert!(batch.column_by_name("age").is_some());
+    }
+
+    #[test]
+    fn test_type_conflict_produces_suffixed_columns() {
+        let buf = bytes::Bytes::from_static(b"unused");
+        let mut b = StreamingBuilder::new(false);
+        b.begin_batch(buf.clone());
+
+        let idx_status = b.resolve_field(b"status");
+
+        // Row 0: status is an int
+        b.begin_row();
+        b.append_int_by_idx(idx_status, b"200");
+        b.end_row();
+
+        // Row 1: status is a string — type conflict
+        b.begin_row();
+        b.append_str_by_idx(idx_status, &buf[0..0]); // empty but valid str
+        b.end_row();
+
+        let batch = b.finish_batch().unwrap();
+        assert_eq!(batch.num_rows(), 2);
+        // Conflict: both suffixed columns present, no bare "status"
+        assert!(
+            batch.column_by_name("status_int").is_some(),
+            "status_int missing"
+        );
+        assert!(
+            batch.column_by_name("status_str").is_some(),
+            "status_str missing"
+        );
+        assert!(
+            batch.column_by_name("status").is_none(),
+            "bare status should not exist on conflict"
+        );
     }
 
     #[test]
@@ -407,9 +459,9 @@ mod tests {
 
         let batch = b.finish_batch().unwrap();
         assert_eq!(batch.num_rows(), 2);
-        // The values should be correct even though they're views into the buffer
+        // Single-type string field: bare name
         let col = batch
-            .column_by_name("msg_str")
+            .column_by_name("msg")
             .unwrap()
             .as_any()
             .downcast_ref::<arrow::array::StringViewArray>()
@@ -437,10 +489,11 @@ mod tests {
 
         let batch = b.finish_batch().unwrap();
         assert_eq!(batch.num_rows(), 2);
-        let a = batch.column_by_name("a_str").unwrap();
+        // Single-type string fields: bare names
+        let a = batch.column_by_name("a").unwrap();
         assert!(!a.is_null(0));
         assert!(a.is_null(1));
-        let b_col = batch.column_by_name("b_str").unwrap();
+        let b_col = batch.column_by_name("b").unwrap();
         assert!(b_col.is_null(0));
         assert!(!b_col.is_null(1));
     }
@@ -459,8 +512,9 @@ mod tests {
         b.end_row();
 
         let batch = b.finish_batch().unwrap();
+        // Single-type string field: bare name
         let col = batch
-            .column_by_name("val_str")
+            .column_by_name("val")
             .unwrap()
             .as_any()
             .downcast_ref::<arrow::array::StringViewArray>()
@@ -511,8 +565,9 @@ mod tests {
         b.end_row();
 
         let batch = b.finish_batch().unwrap();
+        // Single-type float field: bare name
         let col = batch
-            .column_by_name("lat_float")
+            .column_by_name("lat")
             .unwrap()
             .as_any()
             .downcast_ref::<Float64Array>()
@@ -551,7 +606,7 @@ mod tests {
         // Must not panic and must produce a valid batch.
         let batch = b.finish_batch().unwrap();
         assert_eq!(batch.num_rows(), 1);
-        assert!(batch.column_by_name("field64_str").is_some());
+        assert!(batch.column_by_name("field64").is_some());
     }
 
     /// `append_raw` stores zero-copy views into the buffer when `keep_raw` is true.
@@ -576,6 +631,8 @@ mod tests {
 
         let batch = b.finish_batch().unwrap();
         assert_eq!(batch.num_rows(), 2);
+        // Single-type string field: bare name
+        assert!(batch.column_by_name("msg").is_some());
 
         let raw_col = batch
             .column_by_name("_raw")

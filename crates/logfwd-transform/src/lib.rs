@@ -20,10 +20,7 @@ use datafusion::prelude::*;
 
 use logfwd_core::scan_config::ScanConfig;
 
-pub mod rewriter;
 pub mod udf;
-
-pub use rewriter::{FieldTypeMap, FieldTypes, field_type_map_from_schema, rewrite_sql};
 
 // Re-export sqlparser through datafusion.
 use datafusion::sql::sqlparser::ast::{

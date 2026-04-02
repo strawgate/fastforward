@@ -92,7 +92,14 @@ fn assert_values_correct(input: &[u8]) {
 
             if val.is_str() {
                 let expected = val.as_str().unwrap();
-                let col_name = format!("{}_str", key_str);
+                // With suffix-on-conflict: single-type fields use bare name,
+                // conflict fields use suffixed name. Try both.
+                let suffixed = format!("{}_str", key_str);
+                let col_name = if batch.column_by_name(&suffixed).is_some() {
+                    suffixed
+                } else {
+                    key_str.to_string()
+                };
                 if let Some(col) = batch.column_by_name(&col_name)
                     && let Some(arr) = col.as_any().downcast_ref::<StringArray>()
                     && !arr.is_null(row)
@@ -114,7 +121,12 @@ fn assert_values_correct(input: &[u8]) {
                 }
             } else if val.is_i64() {
                 let expected = val.as_i64().unwrap();
-                let col_name = format!("{}_int", key_str);
+                let suffixed = format!("{}_int", key_str);
+                let col_name = if batch.column_by_name(&suffixed).is_some() {
+                    suffixed
+                } else {
+                    key_str.to_string()
+                };
                 if let Some(col) = batch.column_by_name(&col_name)
                     && let Some(arr) = col.as_any().downcast_ref::<Int64Array>()
                     && !arr.is_null(row)
@@ -128,7 +140,12 @@ fn assert_values_correct(input: &[u8]) {
                 }
             } else if val.is_f64() {
                 let expected = val.as_f64().unwrap();
-                let col_name = format!("{}_float", key_str);
+                let suffixed = format!("{}_float", key_str);
+                let col_name = if batch.column_by_name(&suffixed).is_some() {
+                    suffixed
+                } else {
+                    key_str.to_string()
+                };
                 if let Some(col) = batch.column_by_name(&col_name)
                     && let Some(arr) = col.as_any().downcast_ref::<Float64Array>()
                     && !arr.is_null(row)
@@ -298,9 +315,13 @@ fn assert_builders_consistent(input: &[u8]) {
                     );
                 }
                 // String comparison: StorageBuilder uses Utf8, StreamingBuilder uses Utf8View.
-                // Both support .as_any().downcast_ref::<StringArray>() won't work for views.
-                // Use arrow::array::Array::as_ref() and string accessor instead.
-                if col_name.ends_with("_str") {
+                // Check by DataType so bare string columns (no _str suffix) are also compared.
+                if matches!(
+                    s_col.data_type(),
+                    arrow::datatypes::DataType::Utf8
+                        | arrow::datatypes::DataType::Utf8View
+                        | arrow::datatypes::DataType::LargeUtf8
+                ) {
                     let s_val =
                         arrow::compute::cast(s_col, &arrow::datatypes::DataType::Utf8).unwrap();
                     let st_val =
@@ -505,7 +526,7 @@ fn edge_duplicate_keys() {
     assert_eq!(batch.num_rows(), 1);
     // First-writer-wins
     let col = batch
-        .column_by_name("a_int")
+        .column_by_name("a")
         .unwrap()
         .as_any()
         .downcast_ref::<Int64Array>()
