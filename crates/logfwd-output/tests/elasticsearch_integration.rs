@@ -103,7 +103,10 @@ fn elasticsearch_sink_sends_bulk_data() {
     assert_eq!(lines, 3, "expected 3 log records");
 
     // Verify stats were updated
-    assert_eq!(stats.lines_total.load(std::sync::atomic::Ordering::Relaxed), 3);
+    assert_eq!(
+        stats.lines_total.load(std::sync::atomic::Ordering::Relaxed),
+        3
+    );
     assert!(stats.bytes_total.load(std::sync::atomic::Ordering::Relaxed) > 0);
 }
 
@@ -117,8 +120,11 @@ fn elasticsearch_sink_handles_empty_batch() {
         false,
     )]));
 
-    let batch = RecordBatch::try_new(schema, vec![Arc::new(StringArray::from(Vec::<&str>::new()))])
-        .expect("batch creation failed");
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![Arc::new(StringArray::from(Vec::<&str>::new()))],
+    )
+    .expect("batch creation failed");
 
     let stats = Arc::new(ComponentStats::default());
     let mut sink = ElasticsearchSink::new(
@@ -139,8 +145,14 @@ fn elasticsearch_sink_handles_empty_batch() {
         .expect("send_batch failed");
 
     // Empty batch should not increment stats
-    assert_eq!(stats.lines_total.load(std::sync::atomic::Ordering::Relaxed), 0);
-    assert_eq!(stats.bytes_total.load(std::sync::atomic::Ordering::Relaxed), 0);
+    assert_eq!(
+        stats.lines_total.load(std::sync::atomic::Ordering::Relaxed),
+        0
+    );
+    assert_eq!(
+        stats.bytes_total.load(std::sync::atomic::Ordering::Relaxed),
+        0
+    );
 }
 
 #[test]
@@ -190,5 +202,8 @@ fn elasticsearch_sink_multiple_batches() {
 
     // 3 batches × 2 rows each = 6 total records
     assert_eq!(lines, 6);
-    assert_eq!(stats.lines_total.load(std::sync::atomic::Ordering::Relaxed), 6);
+    assert_eq!(
+        stats.lines_total.load(std::sync::atomic::Ordering::Relaxed),
+        6
+    );
 }
