@@ -605,7 +605,7 @@ fn encode_key_value_bool(buf: &mut Vec<u8>, key: &[u8], value: bool) {
 /// ```
 fn write_grpc_frame(buf: &mut Vec<u8>, payload: &[u8], compressed: bool) {
     buf.clear();
-    buf.push(if compressed { 1 } else { 0 });
+    buf.push(u8::from(compressed));
     buf.extend_from_slice(&(payload.len() as u32).to_be_bytes());
     buf.extend_from_slice(payload);
 }
