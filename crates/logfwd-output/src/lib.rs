@@ -404,8 +404,7 @@ pub fn build_output_sink(
                 .index
                 .as_ref()
                 .or(cfg.path.as_ref())
-                .map(String::as_str)
-                .unwrap_or("logs")
+                .map_or("logs", String::as_str)
                 .to_string();
             Ok(Box::new(ElasticsearchSink::new(
                 name.to_string(),

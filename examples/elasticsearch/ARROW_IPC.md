@@ -142,8 +142,14 @@ Benchmarks measure query performance and compare Arrow IPC vs JSON format:
 # Start Elasticsearch
 cd examples/elasticsearch && docker-compose up -d
 
-# Run benchmarks (standalone binary, not Criterion)
-cargo run --release --package logfwd-bench --bin elasticsearch_arrow
+# Run benchmarks (note: this is a bench target, not a bin target)
+# The benchmark will run as a standalone executable with `main()`
+cargo bench --package logfwd-bench --bench elasticsearch_arrow --no-run
+./target/release/deps/elasticsearch_arrow-*
+
+# Or build and run in one step (release mode)
+cargo build --release -p logfwd-bench --benches
+./target/release/deps/elasticsearch_arrow-*
 
 # Expected output:
 # - Query latency (ms)
