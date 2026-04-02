@@ -34,49 +34,62 @@ use arrow::record_batch::RecordBatch;
 /// Suffixes the scanner appends when a type conflict is detected.
 const CONFLICT_SUFFIXES: &[&str] = &["__int", "__float", "__str"];
 
-/// Strip a known conflict suffix. Returns `(base, suffix)` or `None`.
-fn strip_conflict_suffix(name: &str) -> Option<(&str, &str)> {
-    for suf in CONFLICT_SUFFIXES {
-        if let Some(base) = name.strip_suffix(suf) {
-            if !base.is_empty() {
-                return Some((base, suf));
-            }
-        }
-    }
-    None
+/// The schema metadata key written by the builders when conflict columns are emitted.
+const CONFLICT_GROUPS_METADATA_KEY: &str = "logfwd.conflict_groups";
+
+/// Parse `"status:int,str;duration:float,int"` into `["status", "duration"]`.
+fn parse_conflict_group_bases(meta: &str) -> Vec<&str> {
+    meta.split(';')
+        .filter_map(|group| group.split_once(':').map(|(base, _)| base))
+        .filter(|base| !base.is_empty())
+        .collect()
 }
 
 /// Add a bare `Utf8` column for every conflict group that lacks one.
 ///
-/// A *conflict group* is a set of columns sharing the same base name with
-/// different type suffixes (`__int`, `__float`, `__str`) where at least two
-/// variants are present — a single `foo__str` column is just a field whose
-/// JSON key literally ends in `__str`, not a conflict artifact.
+/// Uses the `logfwd.conflict_groups` schema metadata key as the authoritative
+/// discriminator. If the key is absent, the batch has no conflict columns and
+/// is returned unchanged. This avoids false positives from user fields whose
+/// names happen to end in `__int`, `__str`, etc.
 ///
 /// Batches with no conflict groups are returned unchanged (zero allocation).
 /// Any schema metadata (including `logfwd.conflict_groups`) is preserved.
 pub fn normalize_conflict_columns(batch: RecordBatch) -> RecordBatch {
     let schema = batch.schema();
 
+    // Use the metadata as the authoritative source of conflict groups.
+    // If absent, there are no conflict columns — return unchanged.
+    let meta_val = match schema.metadata().get(CONFLICT_GROUPS_METADATA_KEY) {
+        Some(v) => v.clone(),
+        None => return batch,
+    };
+
+    let base_names = parse_conflict_group_bases(&meta_val);
+    if base_names.is_empty() {
+        return batch;
+    }
+
     // Collect the set of bare column names already present.
     let existing_bare: std::collections::HashSet<&str> =
         schema.fields().iter().map(|f| f.name().as_str()).collect();
 
-    // Build base → [(suffix, col_index)] for columns that look like conflict
-    // artifacts and whose base name is not already present as a bare column.
-    // BTreeMap ensures deterministic iteration order (by base name).
+    // Build groups from the metadata base names, looking up variant columns by name.
     let mut groups: BTreeMap<&str, Vec<(&str, usize)>> = BTreeMap::new();
-    for (idx, field) in schema.fields().iter().enumerate() {
-        if let Some((base, suf)) = strip_conflict_suffix(field.name()) {
-            if !existing_bare.contains(base) {
-                groups.entry(base).or_default().push((suf, idx));
+    for base in &base_names {
+        // Skip if a bare column already exists.
+        if existing_bare.contains(*base) {
+            continue;
+        }
+        for suf in CONFLICT_SUFFIXES {
+            let col_name = format!("{base}{suf}");
+            if let Ok(idx) = schema.index_of(&col_name) {
+                groups.entry(*base).or_default().push((suf, idx));
             }
         }
     }
 
-    // A true conflict group has ≥ 2 variants. A lone `foo__str` is just a
-    // field whose JSON key ends in `__str` — do not synthesize a bare `foo`.
-    groups.retain(|_, members| members.len() >= 2);
+    // Only keep groups that actually have variant columns.
+    groups.retain(|_, members| !members.is_empty());
 
     if groups.is_empty() {
         return batch;
@@ -119,7 +132,7 @@ pub fn normalize_conflict_columns(batch: RecordBatch) -> RecordBatch {
 /// Merge int, float, and str variants into a single `Utf8` column via COALESCE.
 ///
 /// Priority order: int (cast to str) > float (cast to str) > str.
-fn merge_to_utf8(
+pub(crate) fn merge_to_utf8(
     int_col: Option<&dyn Array>,
     float_col: Option<&dyn Array>,
     str_col: Option<&dyn Array>,
@@ -165,13 +178,30 @@ mod tests {
     use arrow::array::{Int64Array, StringArray};
     use arrow::datatypes::{Field, Schema};
 
+    use std::collections::HashMap;
+
     fn make_batch(fields: Vec<Field>, arrays: Vec<Arc<dyn Array>>) -> RecordBatch {
         RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays).unwrap()
     }
 
+    /// Build a batch with `logfwd.conflict_groups` metadata.
+    fn make_conflict_batch(
+        conflict_groups_meta: &str,
+        fields: Vec<Field>,
+        arrays: Vec<Arc<dyn Array>>,
+    ) -> RecordBatch {
+        let mut meta = HashMap::new();
+        meta.insert(
+            "logfwd.conflict_groups".to_string(),
+            conflict_groups_meta.to_string(),
+        );
+        let schema = Arc::new(Schema::new_with_metadata(fields, meta));
+        RecordBatch::try_new(schema, arrays).unwrap()
+    }
+
     #[test]
     fn no_conflict_passthrough() {
-        // Clean batch: bare column names, nothing to normalize.
+        // Clean batch: bare column names, no metadata → return unchanged.
         let batch = make_batch(
             vec![
                 Field::new("status", DataType::Int64, true),
@@ -189,8 +219,7 @@ mod tests {
 
     #[test]
     fn single_suffixed_col_not_treated_as_conflict() {
-        // A lone `foo__str` column is just a field literally named `foo__str`;
-        // normalize must not synthesize a bare `foo` column.
+        // A lone `foo__str` column with no metadata must not synthesize a bare `foo`.
         let batch = make_batch(
             vec![Field::new("error__str", DataType::Utf8, true)],
             vec![Arc::new(StringArray::from(vec!["oops"]))],
@@ -203,7 +232,8 @@ mod tests {
     #[test]
     fn conflict_adds_bare_utf8_column() {
         // Conflict: status__int + status__str → add bare status: Utf8
-        let batch = make_batch(
+        let batch = make_conflict_batch(
+            "status:int,str",
             vec![
                 Field::new("status__int", DataType::Int64, true),
                 Field::new("status__str", DataType::Utf8, true),
@@ -228,7 +258,8 @@ mod tests {
     #[test]
     fn conflict_int_takes_priority_over_str() {
         // When both int and str are non-null for the same row, int wins.
-        let batch = make_batch(
+        let batch = make_conflict_batch(
+            "x:int,str",
             vec![
                 Field::new("x__int", DataType::Int64, true),
                 Field::new("x__str", DataType::Utf8, true),
@@ -248,7 +279,9 @@ mod tests {
     #[test]
     fn bare_column_already_present_not_overwritten() {
         // If a bare `status` column already exists (clean batch), do not add another.
-        let batch = make_batch(
+        // The metadata lists status as a conflict group but bare name is present.
+        let batch = make_conflict_batch(
+            "status:int,str",
             vec![
                 Field::new("status", DataType::Int64, true),
                 Field::new("status__int", DataType::Int64, true),
@@ -267,7 +300,8 @@ mod tests {
 
     #[test]
     fn all_null_conflict_group() {
-        let batch = make_batch(
+        let batch = make_conflict_batch(
+            "v:int,str",
             vec![
                 Field::new("v__int", DataType::Int64, true),
                 Field::new("v__str", DataType::Utf8, true),
@@ -282,6 +316,31 @@ mod tests {
         let arr = v.as_any().downcast_ref::<StringArray>().unwrap();
         assert!(arr.is_null(0));
         assert!(arr.is_null(1));
+    }
+
+    /// Regression: a batch with real user fields `foo__int` and `foo__str` but
+    /// NO `logfwd.conflict_groups` metadata must be returned unchanged — no
+    /// synthetic `foo` column should be added.
+    #[test]
+    fn no_metadata_no_false_positive_conflict() {
+        // User genuinely has fields named foo__int and foo__str — no conflict.
+        let batch = make_batch(
+            vec![
+                Field::new("foo__int", DataType::Int64, true),
+                Field::new("foo__str", DataType::Utf8, true),
+            ],
+            vec![
+                Arc::new(Int64Array::from(vec![Some(1i64), Some(2)])),
+                Arc::new(StringArray::from(vec![Some("a"), Some("b")])),
+            ],
+        );
+        let normalized = normalize_conflict_columns(batch.clone());
+        // Must be unchanged — no synthetic `foo` column.
+        assert_eq!(normalized.num_columns(), 2);
+        assert!(
+            normalized.column_by_name("foo").is_none(),
+            "normalize must not synthesize a bare 'foo' without conflict metadata"
+        );
     }
 
     #[test]

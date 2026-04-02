@@ -114,7 +114,11 @@ The reader infers by default (type conflicts produce suffixed columns).
 Config can declare `schema: { status: int }` to pin a field type at scan
 time, eliminating conflict columns. This satisfies C8 for teams with
 known-type fields. Default behavior (no hint) is data-driven and
-satisfies C1 and C3 per-batch.
+satisfies C1 (per-batch type fidelity) only. C3 (cross-batch schema
+stability) is NOT guaranteed by default: a field that is always-int in one
+batch gets a bare `status: Int64` column, but in a later batch where it
+conflicts it becomes `status__int` + `status__str`. C3 is only satisfied
+when type hints are pinned via config (future work).
 
 **3. JSON offers detect-types mode only (current behavior).**
 "Everything is string" mode is not worth the complexity — CSV/syslog

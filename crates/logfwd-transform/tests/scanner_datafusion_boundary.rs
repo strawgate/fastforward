@@ -606,15 +606,24 @@ fn streaming_builder_group_by_and_order_by() {
 #[test]
 fn conflict_batch_bare_select() {
     use arrow::array::StringViewBuilder;
+    use std::collections::HashMap;
 
     let mut sv = StringViewBuilder::new();
     sv.append_null(); // row 0: no string value
     sv.append_value("OK"); // row 1: string value
 
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("status__int", DataType::Int64, true),
-        Field::new("status__str", DataType::Utf8View, true),
-    ]));
+    let mut meta = HashMap::new();
+    meta.insert(
+        "logfwd.conflict_groups".to_string(),
+        "status:int,str".to_string(),
+    );
+    let schema = Arc::new(Schema::new_with_metadata(
+        vec![
+            Field::new("status__int", DataType::Int64, true),
+            Field::new("status__str", DataType::Utf8View, true),
+        ],
+        meta,
+    ));
     let batch = RecordBatch::try_new(
         schema,
         vec![
@@ -637,16 +646,25 @@ fn conflict_batch_bare_select() {
 #[test]
 fn conflict_batch_where_on_bare_column() {
     use arrow::array::StringViewBuilder;
+    use std::collections::HashMap;
 
     let mut sv = StringViewBuilder::new();
     sv.append_null();
     sv.append_value("OK");
     sv.append_value("NOT_FOUND");
 
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("status__int", DataType::Int64, true),
-        Field::new("status__str", DataType::Utf8View, true),
-    ]));
+    let mut meta = HashMap::new();
+    meta.insert(
+        "logfwd.conflict_groups".to_string(),
+        "status:int,str".to_string(),
+    );
+    let schema = Arc::new(Schema::new_with_metadata(
+        vec![
+            Field::new("status__int", DataType::Int64, true),
+            Field::new("status__str", DataType::Utf8View, true),
+        ],
+        meta,
+    ));
     let batch = RecordBatch::try_new(
         schema,
         vec![
@@ -668,15 +686,24 @@ fn conflict_batch_where_on_bare_column() {
 #[test]
 fn conflict_batch_int_udf_on_bare_column() {
     use arrow::array::StringViewBuilder;
+    use std::collections::HashMap;
 
     let mut sv = StringViewBuilder::new();
     sv.append_null();
     sv.append_value("OK");
 
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("status__int", DataType::Int64, true),
-        Field::new("status__str", DataType::Utf8View, true),
-    ]));
+    let mut meta = HashMap::new();
+    meta.insert(
+        "logfwd.conflict_groups".to_string(),
+        "status:int,str".to_string(),
+    );
+    let schema = Arc::new(Schema::new_with_metadata(
+        vec![
+            Field::new("status__int", DataType::Int64, true),
+            Field::new("status__str", DataType::Utf8View, true),
+        ],
+        meta,
+    ));
     let batch = RecordBatch::try_new(
         schema,
         vec![

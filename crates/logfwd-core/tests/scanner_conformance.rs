@@ -176,11 +176,12 @@ fn assert_values_correct(input: &[u8]) {
                     }
                 } else if let Some(arr) = col.as_any().downcast_ref::<Int64Array>() {
                     // Scanner classified this as Int64 (e.g. -0 has no decimal/exponent).
-                    // Verify the integer value matches when cast to f64.
+                    // The cast to f64 is exact for semantically integral values, so require
+                    // exact equality rather than a loose tolerance that can hide real bugs.
                     if !arr.is_null(row) {
                         let actual = arr.value(row) as f64;
                         assert!(
-                            (actual - expected).abs() < 1.0,
+                            actual == expected,
                             "Float(as int) value mismatch at '{key_str}'[{row}]: expected={expected}, actual={actual}.\nInput: {:?}",
                             String::from_utf8_lossy(line)
                         );

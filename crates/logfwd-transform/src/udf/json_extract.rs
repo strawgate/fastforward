@@ -217,16 +217,35 @@ impl ScalarUDFImpl for JsonExtractUdf {
         // --- parse ---
         let batch = parse_raw(&raw_array, key)?;
 
+        // --- coerce to the declared return type ---
+        let target_dt = self.mode.return_type();
+        let num_rows = raw_array.len();
+
+        // Special case: Str mode on a conflict batch where the bare column is
+        // absent. Coalesce all variant columns row-by-row into a single Utf8.
+        if self.mode == JsonExtractMode::Str && batch.column_by_name(key).is_none() {
+            let int_col = batch.column_by_name(&format!("{key}__int"));
+            let float_col = batch.column_by_name(&format!("{key}__float"));
+            let str_col = batch.column_by_name(&format!("{key}__str"));
+
+            if int_col.is_some() || float_col.is_some() || str_col.is_some() {
+                use crate::conflict_schema::merge_to_utf8;
+                let merged = merge_to_utf8(
+                    int_col.map(Arc::as_ref),
+                    float_col.map(Arc::as_ref),
+                    str_col.map(Arc::as_ref),
+                    num_rows,
+                );
+                return Ok(ColumnarValue::Array(merged));
+            }
+        }
+
         // --- look up the best column by suffix order ---
         let col = self.mode.suffix_order().iter().find_map(|suffix| {
             batch
                 .column_by_name(&format!("{key}{suffix}"))
                 .map(Arc::clone)
         });
-
-        // --- coerce to the declared return type ---
-        let target_dt = self.mode.return_type();
-        let num_rows = raw_array.len();
 
         let result = match col {
             None => arrow::array::new_null_array(&target_dt, num_rows),
@@ -411,6 +430,22 @@ mod tests {
             col.is_null(0),
             "json_int on a quoted string must return null"
         );
+    }
+
+    /// `json(_raw, 'status')` on a batch where some rows have `{"status": 200}`
+    /// and others have `{"status": "OK"}` must coalesce all variants row-by-row
+    /// and return `["200", "OK"]` — not `[null, "OK"]`.
+    #[tokio::test]
+    async fn test_json_str_on_conflict_batch_coalesces() {
+        let batch = make_raw_batch(vec![r#"{"status": 200}"#, r#"{"status": "OK"}"#]);
+        let result = query("SELECT json(_raw, 'status') as s FROM logs", batch).await;
+        let col = result
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(col.value(0), "200", "int row must be coalesced to string");
+        assert_eq!(col.value(1), "OK", "str row must be returned as-is");
     }
 
     /// `json_float` on a field that is a quoted string must return NULL.

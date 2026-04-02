@@ -191,29 +191,32 @@ if !conflict {
 
 ### Schema stability
 
-At config time, `QueryAnalyzer` extracts `referenced_columns` from the
-user's SQL. Before registering each batch as a MemTable, pad with null
-columns for any SQL-referenced columns missing from the batch.
+**Current behavior:** `normalize_conflict_columns` synthesizes the bare
+Utf8 column from conflict variants before each batch is registered as a
+DataFusion MemTable. SQL references to bare names always resolve. This is
+stateless — no per-batch schema tracking needed.
 
-For conflict batches, `normalize_conflict_columns` synthesizes the bare
-column so SQL references resolve. This is stateless — no per-batch
-schema tracking needed.
+**Planned (#625):** At config time, a `QueryAnalyzer` will extract
+`referenced_columns` from the user's SQL. An `AnalyzerRule` +
+`TableProvider` will route each batch through schema-padding (null columns
+for any SQL-referenced columns missing from the batch) and conflict
+normalization, replacing the direct MemTable registration used today.
 
 ## Implementation Phases
 
 ### Phase 10 (complete — PR #684)
-- Builders emit bare names for single-type fields, `_int`/`_str`/`_float`
-  for conflicts (single underscore — to be updated)
+- Builders emit bare names for single-type fields, `__int`/`__str`/`__float`
+  (double underscore) for conflicts
 - `normalize_conflict_columns` synthesizes bare Utf8 column for SQL
 - Dead `rewriter.rs` deleted
 
-### Phase 10b: Double-underscore rename
-- Change `_int`/`_str`/`_float` → `__int`/`__str`/`__float` in
+### Phase 10b (complete — this PR)
+- Double-underscore suffixes (`__int`/`__str`/`__float`) in
   `StreamingBuilder`, `StorageBuilder`
-- Update `strip_conflict_suffix` in `conflict_schema.rs`
-- Update `suffix_order` in `json_extract.rs`
-- Update all tests (scanner_conformance, compliance_data, scanner.rs, etc.)
-- Add `logfwd.conflict_groups` schema metadata stamping in builders
+- `strip_conflict_suffix` in `conflict_schema.rs` uses `__` prefix
+- `suffix_order` in `json_extract.rs` updated
+- All tests updated (scanner_conformance, compliance_data, scanner.rs, etc.)
+- `logfwd.conflict_groups` schema metadata stamped in builders
 
 ### Phase 10c: ConflictGroups output abstraction
 - Add `ConflictGroups` + `TypedValue` to `logfwd-output`
