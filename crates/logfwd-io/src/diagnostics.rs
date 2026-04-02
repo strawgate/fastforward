@@ -400,6 +400,10 @@ impl DiagnosticsServer {
         let server = tiny_http::Server::http(&self.bind_addr)
             .map_err(|e| io::Error::other(e.to_string()))?;
 
+        // Start capturing stderr into the 1 MiB ring buffer immediately so
+        // log lines emitted before the first /api/logs request are not lost.
+        self.stderr.start();
+
         // Background metric sampler — records pipeline + process metrics
         // every 2s into the history buffer, regardless of dashboard activity.
         let sampler_pipelines = self.pipelines.clone();
