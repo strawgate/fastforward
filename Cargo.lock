@@ -2108,6 +2108,7 @@ dependencies = [
  "memchr",
  "serde",
  "serde_json",
+ "ureq",
 ]
 
 [[package]]
@@ -2193,10 +2194,12 @@ dependencies = [
  "logfwd-config",
  "logfwd-core",
  "logfwd-io",
+ "memchr",
  "ryu",
  "serde_json",
  "serial_test",
  "stats_alloc",
+ "tiny_http",
  "ureq",
 ]
 
