@@ -29,13 +29,19 @@ logfwd needs an OTLP receiver to send to. Options: [OpenTelemetry Collector](htt
 
 ---
 
-## Quick Start
+## Install
 
-### Build from source
+Download the latest release from [GitHub Releases](https://github.com/strawgate/memagent/releases) or build from source:
 
 ```bash
+# From source (requires Rust toolchain)
 cargo build --release -p logfwd
+cp target/release/logfwd /usr/local/bin/
 ```
+
+---
+
+## Quick Start
 
 ### Try it in 60 seconds — no collector needed
 
@@ -43,10 +49,10 @@ logfwd ships a test-data generator and a built-in OTLP "blackhole" — accepts d
 
 ```bash
 # 1. Generate 100,000 synthetic JSON log lines
-./target/release/logfwd --generate-json 100000 logs.json
+logfwd --generate-json 100000 logs.json
 
 # 2. Start the blackhole receiver (listens on :4318)
-./target/release/logfwd --blackhole &
+logfwd --blackhole &
 
 # 3. Create config.yaml
 cat > config.yaml << 'EOF'
@@ -65,7 +71,7 @@ output:
 EOF
 
 # 4. Run
-./target/release/logfwd --config config.yaml
+logfwd --config config.yaml
 ```
 
 ### Or just print to stdout
@@ -81,6 +87,10 @@ input:
 output:
   type: stdout
   format: console
+```
+
+```bash
+logfwd --config config.yaml
 ```
 
 ---
@@ -167,6 +177,8 @@ pipelines:
       format: console
 ```
 
+See [docs/CONFIG_REFERENCE.md](docs/CONFIG_REFERENCE.md) for all YAML fields, input/output types, and enrichment tables.
+
 ---
 
 ## Kubernetes (CRI) Support
@@ -225,8 +237,6 @@ logfwd --version                          Print version
 ### Docker
 
 ```bash
-docker build -t logfwd:latest .
-
 docker run -d \
   --name logfwd \
   -v /var/log:/var/log:ro \
@@ -251,11 +261,21 @@ See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for full details, resource sizing, 
 
 ## Documentation
 
+### User guides (`docs/`)
+
 | Guide | Description |
 |-------|-------------|
 | [docs/CONFIG_REFERENCE.md](docs/CONFIG_REFERENCE.md) | All YAML fields, input/output types, SQL transforms, UDFs, enrichment |
 | [docs/COLUMN_NAMING.md](docs/COLUMN_NAMING.md) | How JSON fields map to SQL column names |
 | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | Docker, Kubernetes DaemonSet, resource sizing, OTLP integration |
 | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Common errors, debug mode, diagnostics API |
+
+### Developer guides (`dev-docs/`)
+
+| Guide | Description |
+|-------|-------------|
 | [dev-docs/ARCHITECTURE.md](dev-docs/ARCHITECTURE.md) | Pipeline data flow, SIMD stages, crate map |
+| [dev-docs/DECISIONS.md](dev-docs/DECISIONS.md) | Settled architecture decisions with rationale |
+| [dev-docs/CODE_STYLE.md](dev-docs/CODE_STYLE.md) | Code style conventions enforced during review |
 | [DEVELOPING.md](DEVELOPING.md) | Build, test, lint, bench commands |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | How to contribute — PR process, pre-commit checks |
