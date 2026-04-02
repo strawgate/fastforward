@@ -300,6 +300,13 @@ impl StructuralIndex {
 
     /// Find the next unescaped quote at or after `pos`.
     #[inline(always)]
+    #[cfg_attr(kani, kani::ensures(|result: &Option<usize>| {
+        if let Some(quote_pos) = result {
+            *quote_pos >= pos && *quote_pos < self.buf_len
+        } else {
+            true
+        }
+    }))]
     pub fn next_quote(&self, pos: usize) -> Option<usize> {
         if pos >= self.buf_len {
             return None;
@@ -334,6 +341,18 @@ impl StructuralIndex {
     /// bounded by `end`. Returns None if the closing quote is not found
     /// before `end`, preventing cross-line reads on malformed input (#368).
     #[inline(always)]
+    #[cfg_attr(kani, kani::requires(pos < buf.len() && end <= buf.len()))]
+    #[cfg_attr(kani, kani::ensures(|result: &Option<(&[u8], usize)>| {
+        if let Some((slice, after_pos)) = result {
+            // Returned slice must be within buf bounds
+            slice.as_ptr() >= buf.as_ptr()
+                && unsafe { slice.as_ptr().add(slice.len()) } <= unsafe { buf.as_ptr().add(buf.len()) }
+                // Position after closing quote must be <= end
+                && *after_pos <= end
+        } else {
+            true
+        }
+    }))]
     pub fn scan_string<'a>(
         &self,
         buf: &'a [u8],
@@ -1330,5 +1349,28 @@ mod verification {
         kani::cover!(line_ranges.len() > 1, "multiple line ranges");
         kani::cover!(line_ranges.is_empty(), "no ranges (all newlines)");
         kani::cover!(newline_count == 0, "no newlines in buffer");
+    }
+
+    /// Verify next_quote contract: returned position is within bounds and >= pos.
+    #[kani::proof_for_contract(StructuralIndex::next_quote)]
+    fn verify_next_quote_contract() {
+        // Create a simple StructuralIndex with symbolic data
+        let real_quotes: [u64; 1] = [kani::any()];
+        let in_string: [u64; 1] = [kani::any()];
+        let index = StructuralIndex {
+            real_quotes: real_quotes.to_vec(),
+            in_string: in_string.to_vec(),
+            buf_len: 64,
+        };
+
+        let pos: usize = kani::any();
+        kani::assume(pos < 64);
+
+        let result = index.next_quote(pos);
+        // Contract ensures if Some, position is >= pos and < buf_len
+        if let Some(quote_pos) = result {
+            assert!(quote_pos >= pos);
+            assert!(quote_pos < 64);
+        }
     }
 }
