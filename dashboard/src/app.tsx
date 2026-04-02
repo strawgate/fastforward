@@ -3,14 +3,13 @@ import { api } from "./api";
 import { RateTracker } from "./lib/rates";
 import { RingBuffer } from "./lib/ring";
 import { fmt, fmtBytes, fmtCompact, fmtBytesCompact } from "./lib/format";
-import type { PipelinesResponse, StatsResponse } from "./types";
+import type { PipelinesResponse, StatsResponse, TraceRecord } from "./types";
 import { StatusBar } from "./components/StatusBar";
 import { MetricBadges } from "./components/MetricBadges";
 import { ChartGrid } from "./components/ChartGrid";
 import { PipelineView } from "./components/PipelineView";
 import { ConfigView } from "./components/ConfigView";
 import { LogViewer } from "./components/LogViewer";
-import { TraceExplorer } from "./components/TraceExplorer";
 
 const POLL_MS = 2000;
 
@@ -52,6 +51,7 @@ export function App() {
   const [connected, setConnected] = useState(false);
   const [pipes, setPipes] = useState<PipelinesResponse | null>(null);
   const [stats, setStats] = useState<StatsResponse | null>(null);
+  const [traces, setTraces] = useState<TraceRecord[]>([]);
   const [totalErrors, setTotalErrors] = useState(0);
   const seriesRef = useRef(createSeries());
   const [, forceUpdate] = useState(0);
@@ -120,7 +120,8 @@ export function App() {
   }, []);
 
   const poll = useCallback(async () => {
-    const [pipeData, statsData] = await Promise.all([api.pipelines(), api.stats()]);
+    const [pipeData, statsData, tracesData] = await Promise.all([api.pipelines(), api.stats(), api.traces()]);
+    if (tracesData) setTraces(tracesData.traces);
 
     if (pipeData) {
       setConnected(true);
@@ -208,10 +209,13 @@ export function App() {
         </div>
 
         <LogViewer />
-        <TraceExplorer />
 
         {pipes?.pipelines.map((p) => (
-          <PipelineView key={p.name} pipeline={p} />
+          <PipelineView
+            key={p.name}
+            pipeline={p}
+            traces={traces.filter(t => t.pipeline === p.name)}
+          />
         ))}
 
         <ConfigView />

@@ -294,6 +294,43 @@ main {
   color: var(--purple);
 }
 
+/* === Pipeline traces section === */
+.pipe-traces {
+  margin-top: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  overflow: hidden;
+}
+.pipe-traces-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  background: var(--card-hover);
+  border: none;
+  border-bottom: 1px solid var(--border);
+  padding: 6px 12px;
+  cursor: pointer;
+  font-size: 11px;
+  color: var(--t3);
+  text-align: left;
+}
+.pipe-traces-toggle:hover { color: var(--t2); }
+.pipe-traces-count {
+  color: var(--t4);
+  font-family: var(--mono);
+  font-size: 10px;
+}
+.pipe-traces-chevron {
+  margin-left: auto;
+  font-size: 9px;
+  color: var(--t4);
+}
+.pipe-traces .t2-body {
+  padding: 10px 12px;
+  background: transparent;
+}
+
 /* === Inspector === */
 .inspector {
   background: var(--card-hover);
