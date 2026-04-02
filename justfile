@@ -123,7 +123,11 @@ bench-otlp seconds="10":
     @echo "==> OTLP benchmark (generator → otlp → otlp_receiver → null)"
     just _bench-pair otlp bench/scenarios/otlp-receiver.yaml bench/scenarios/otlp-sender.yaml {{seconds}}
 
-# Run all pipeline benchmarks
+# Run all pipeline benchmarks (alias: bench-pipelines)
+bench-e2e seconds="10":
+    just bench-pipelines {{seconds}}
+
+[private]
 bench-pipelines seconds="10":
     @echo "logfwd pipeline benchmarks ({{seconds}}s each)"
     @echo "================================================"
@@ -240,7 +244,7 @@ bench-rate *ARGS:
 
 # Install development tools
 install-tools:
-    cargo install taplo-cli cargo-deny
+    cargo install taplo-cli cargo-deny cargo-audit
     @echo "Optional: cargo install cargo-nextest inferno"
     @echo "Install just: https://just.systems/man/en/installation.html"
 
