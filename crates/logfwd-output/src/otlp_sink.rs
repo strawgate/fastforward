@@ -48,6 +48,7 @@ pub struct OtlpSink {
     headers: Vec<(String, String)>,
     pub(crate) encoder_buf: Vec<u8>,
     compress_buf: Vec<u8>,
+    grpc_buf: Vec<u8>,
     compressor: Option<ChunkCompressor>,
     http_agent: ureq::Agent,
     stats: Arc<ComponentStats>,
@@ -80,6 +81,7 @@ impl OtlpSink {
             headers,
             encoder_buf: Vec::with_capacity(64 * 1024),
             compress_buf: Vec::with_capacity(64 * 1024),
+            grpc_buf: Vec::new(),
             compressor,
             http_agent,
             stats,
@@ -201,6 +203,18 @@ impl OutputSink for OtlpSink {
         let content_type = match self.protocol {
             OtlpProtocol::Grpc => "application/grpc",
             OtlpProtocol::Http => "application/x-protobuf",
+        };
+
+        // For gRPC, prepend the 5-byte length-prefixed frame header required by the
+        // gRPC wire protocol. Note: ureq uses HTTP/1.1; a true gRPC endpoint requires
+        // HTTP/2. Use a reverse proxy (e.g. Envoy) or `protocol: http` when the
+        // collector does not accept HTTP/1.1 upgrades.
+        let compressed = self.compression == Compression::Zstd;
+        let payload: &[u8] = if self.protocol == OtlpProtocol::Grpc {
+            write_grpc_frame(&mut self.grpc_buf, payload, compressed);
+            &self.grpc_buf
+        } else {
+            payload
         };
 
         // Retry with exponential backoff for transient failures.
@@ -581,6 +595,21 @@ fn encode_key_value_bool(buf: &mut Vec<u8>, key: &[u8], value: bool) {
     encode_varint_field(buf, 2, u64::from(value));
 }
 
+/// Write a gRPC length-prefixed message frame into `buf`.
+///
+/// gRPC wire format (per the [gRPC over HTTP/2 specification](https://grpc.io/docs/what-is-grpc/core-concepts/)):
+/// ```text
+/// [1 byte: compressed flag (0 = not compressed, 1 = compressed)]
+/// [4 bytes: big-endian message length]
+/// [N bytes: protobuf message]
+/// ```
+fn write_grpc_frame(buf: &mut Vec<u8>, payload: &[u8], compressed: bool) {
+    buf.clear();
+    buf.push(u8::from(compressed));
+    buf.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    buf.extend_from_slice(payload);
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -742,6 +771,44 @@ mod tests {
             !contains_bytes(&sink.encoder_buf, &probe),
             "invalid trace_id should not produce field 9"
         );
+    }
+
+    #[test]
+    fn grpc_frame_prepends_five_byte_header() {
+        let proto_payload = [0x0a, 0x02, 0x08, 0x01];
+        let mut framed = Vec::new();
+        write_grpc_frame(&mut framed, &proto_payload, false);
+        assert_eq!(framed.len(), 5 + proto_payload.len());
+        assert_eq!(framed[0], 0x00, "compressed flag must be 0x00");
+        let msg_len = u32::from_be_bytes(framed[1..5].try_into().unwrap());
+        assert_eq!(
+            msg_len as usize,
+            proto_payload.len(),
+            "length field must match payload length"
+        );
+        assert_eq!(
+            &framed[5..],
+            &proto_payload,
+            "payload bytes must follow header"
+        );
+    }
+
+    #[test]
+    fn grpc_frame_empty_payload() {
+        let mut framed = Vec::new();
+        write_grpc_frame(&mut framed, &[], false);
+        assert_eq!(framed.len(), 5);
+        assert_eq!(framed[0], 0x00, "compressed flag must be 0x00");
+        let msg_len = u32::from_be_bytes(framed[1..5].try_into().unwrap());
+        assert_eq!(msg_len, 0, "length field must be zero for empty payload");
+    }
+
+    #[test]
+    fn grpc_frame_compressed_flag() {
+        let proto_payload = [0x0a, 0x02];
+        let mut framed = Vec::new();
+        write_grpc_frame(&mut framed, &proto_payload, true);
+        assert_eq!(framed[0], 0x01, "compressed flag must be 0x01");
     }
 
     #[test]
