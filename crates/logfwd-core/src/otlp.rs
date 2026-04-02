@@ -535,6 +535,7 @@ mod tests {
 #[cfg(kani)]
 mod verification {
     use super::*;
+    use alloc::{vec, vec::Vec};
 
     /// Prove varint_len matches encode_varint output length for ALL u64 values.
     ///
