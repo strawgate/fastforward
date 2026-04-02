@@ -363,6 +363,25 @@ impl Pipeline {
             self.flush_batch(&mut scan_buf, &mut batch_checkpoints).await;
         }
 
+        // Transition machine: Running → Draining → Stopped.
+        // All batches were processed above, so in-flight should be 0.
+        if let Some(machine) = self.machine.take() {
+            let draining = machine.begin_drain();
+            match draining.stop() {
+                Ok(_stopped) => {
+                    // All in-flight batches resolved.
+                    // TODO (#588): persist final checkpoints from stopped.final_checkpoints()
+                }
+                Err(still_draining) => {
+                    eprintln!(
+                        "pipeline: shutdown with {} in-flight batches \
+                         (checkpoint may not reflect latest delivered data)",
+                        still_draining.in_flight_count()
+                    );
+                }
+            }
+        }
+
         tokio::task::block_in_place(|| self.output.flush())?;
         Ok(())
     }
