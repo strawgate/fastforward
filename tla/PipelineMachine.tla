@@ -125,7 +125,12 @@ CreateBatch(s) ==
 
 \* begin_send: machine takes ownership of batch b for source s.
 \* A Queued ticket dropped before begin_send has no machine state — safe.
+\* Phase guard: matches Rust typestate — PipelineMachine<Draining,C> has no
+\* begin_send method. Without this guard the trace CreateBatch → BeginDrain →
+\* BeginSend is valid in TLA+, letting in_flight grow after drain begins and
+\* violating DrainMeansNoNewSending.
 BeginSend(s, b) ==
+    /\ phase = "Running"
     /\ b \in created[s]
     /\ b \notin in_flight[s]
     /\ b \notin acked[s]
@@ -165,11 +170,19 @@ BeginDrain ==
 \* stop: THE DRAIN GUARANTEE.
 \* Only reachable when ALL sources have empty in_flight.
 \* Rust: PipelineMachine<Draining, C>::stop() returns Err(self) if not drained.
-\* Note: pending_acks are implicitly empty when in_flight is empty (NewCommitted
-\* drains all of them in the last AckBatch call for each source).
+\*
+\* Rust's is_drained() checks BOTH in_flight.all_empty() AND pending_acks.all_empty().
+\* The TLA+ guard `\A s: in_flight[s] = {}` is equivalent because:
+\*   In record_ack_and_advance(), when the last in-flight batch for source s is
+\*   acked, the pending_acks loop immediately drains (has_lower is false for all
+\*   pending entries since in_flight[s] is now empty). So pending_acks[s] is
+\*   always empty whenever in_flight[s] is empty — the two conditions are
+\*   inseparable in the Rust implementation. NewCommitted() models this by
+\*   computing the committed value directly from acked and in_flight, without
+\*   a separate pending_acks variable; the result is identical.
 Stop ==
     /\ phase = "Draining"
-    /\ \A s \in Sources : in_flight[s] = {}    \* THE DRAIN GUARD
+    /\ \A s \in Sources : in_flight[s] = {}    \* THE DRAIN GUARD (≡ is_drained())
     /\ phase' = "Stopped"
     /\ UNCHANGED <<created, in_flight, acked, committed>>
 
@@ -245,14 +258,17 @@ NoDoubleComplete ==
 DrainCompleteness ==
     phase = "Stopped" => \A s \in Sources : in_flight[s] = {}
 
-\* New batches cannot be created after drain begins.
-\* This is what makes WF(Stop) sufficient (Stop's enablement doesn't oscillate).
-\* If this invariant were false, in_flight could grow during Draining, making
-\* in_flight = {} a non-stable condition requiring SF(Stop) instead.
+\* in_flight cannot grow once drain begins.
+\* This is what makes WF(Stop) sufficient — once in_flight[s] = {} is reached
+\* during Draining it stays empty, so Stop's enabledness is stable (doesn't
+\* oscillate), meaning WF (not SF) suffices.
+\*
+\* Enforced structurally: BeginSend requires phase = "Running", so it cannot
+\* fire during Draining or Stopped. This property is therefore a consequence
+\* of the action guards and is verified here as an explicit temporal check.
 DrainMeansNoNewSending ==
-    (phase # "Running") =>
-        \A s \in Sources : in_flight[s] \subseteq in_flight[s]
-        \* Expressed as an action property in CommittedMonotonic instead:
+    [][(phase # "Running") =>
+        (\A s \in Sources : in_flight[s]' \subseteq in_flight[s])]_vars
 
 \* New CreateBatch is disabled outside Running phase (action-level enforcement).
 \* Stated as a temporal invariant here for explicit documentation.

@@ -27,35 +27,38 @@ Models `PipelineMachine<S, C>` from
 This spec follows the industry-standard two-file pattern used by etcd-io/raft
 (`MCetcdraft.tla`), PingCAP/tla-plus, and Jack Vanlightly's Kafka verification:
 
-```
+```text
 tla/
-  PipelineMachine.tla     — clean algorithm spec, no TLC-specific overrides
-  MCPipelineMachine.tla   — TLC config: symmetry sets, model constants, bounds
-  PipelineMachine.cfg     — TLC configuration file (3 models documented inside)
-  README.md               — this file
+  PipelineMachine.tla          — clean algorithm spec, no TLC-specific overrides
+  MCPipelineMachine.tla        — TLC config: symmetry sets, model constants, bounds
+  PipelineMachine.cfg          — safety model (fast, ~50K states)
+  PipelineMachine.liveness.cfg — liveness model (smaller constants)
+  PipelineMachine.thorough.cfg — thorough safety model (3 sources, 4 batches)
+  README.md                    — this file
 ```
 
 ### Three models to run
 
 **Model 1 — Safety (normal path, no ForceStop):**
 ```bash
-tlc MCPipelineMachine.tla -config PipelineMachine.cfg
+java -cp /path/to/tla2tools.jar tlc2.TLC MCPipelineMachine.tla -config PipelineMachine.cfg
 # Sources={"s1","s2"}, MaxBatchesPerSource=3, symmetry on Sources
-# ~50K states, < 30s. Check all INVARIANTS. Comment out ForceStop in Next.
+# ~50K states, < 30s. Checks all INVARIANTS + temporal action properties.
+# ForceStop must be commented out in Next (see MCPipelineMachine.tla).
 ```
 
 **Model 2 — Liveness (smaller constants):**
-```
-Sources={"s1","s2"}, MaxBatchesPerSource=2
-Check PROPERTIES: EventualDrain, NoBatchLeftBehind, StoppedIsStable
-~5K states, < 5 min
+```bash
+java -cp /path/to/tla2tools.jar tlc2.TLC MCPipelineMachine.tla -config PipelineMachine.liveness.cfg
+# Sources={"s1","s2"}, MaxBatchesPerSource=2 — liveness needs small constants
+# ~5K states, < 5 min. Checks EventualDrain, NoBatchLeftBehind, StoppedIsStable
 ```
 > **Warning:** Never use `CONSTRAINT` to bound state space for liveness
 > checking — it silently breaks liveness by cutting off infinite behaviors
 > before they reach the convergent state. Use model constants instead.
 
 **Model 3 — Safety with ForceStop:**
-```
+```text
 Enable ForceStop in Next. Remove DrainCompleteness from INVARIANTS.
 Verifies: Stopped is reachable even with in_flight > 0; all other invariants hold.
 ```
