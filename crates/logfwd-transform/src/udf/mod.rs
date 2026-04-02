@@ -5,6 +5,7 @@
 pub mod geo_lookup;
 pub mod grok;
 pub mod json_extract;
+pub mod json_preprocess;
 pub mod regexp_extract;
 
 pub use geo_lookup::GeoLookupUdf;

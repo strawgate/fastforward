@@ -160,6 +160,43 @@ async fn path_b_passthrough(json_data: &[u8]) -> RecordBatch {
 }
 
 // =========================================================================
+// Path C: Raw-first with preprocess optimization (single parse)
+// =========================================================================
+
+async fn path_c_extraction(json_data: &[u8], num_fields: usize) -> RecordBatch {
+    use logfwd_transform::udf::json_preprocess;
+
+    let batch = make_raw_batch(json_data);
+
+    // Build the same SQL as Path B
+    let select_cols: Vec<String> = (0..num_fields.min(10))
+        .map(|f| match f % 3 {
+            0 => format!("json_int(_raw, 'f{f}') as f{f}"),
+            1 => format!("json_float(_raw, 'f{f}') as f{f}"),
+            _ => format!("json(_raw, 'f{f}') as f{f}"),
+        })
+        .collect();
+    let sql = format!(
+        "SELECT {} FROM logs WHERE json_int(_raw, 'f0') > 5000",
+        select_cols.join(", "),
+    );
+
+    // Preprocess: extract refs, run scanner once, rewrite SQL
+    let refs = json_preprocess::extract_json_refs(&sql);
+    let (enriched, rewrite_map) = json_preprocess::preprocess_json_batch(&batch, &refs).unwrap();
+    let new_sql = json_preprocess::rewrite_sql(&sql, &rewrite_map);
+
+    // Execute rewritten SQL against enriched batch
+    let schema = enriched.schema();
+    let ctx = SessionContext::new();
+    let table = MemTable::try_new(schema, vec![vec![enriched]]).unwrap();
+    ctx.register_table("logs", Arc::new(table)).unwrap();
+
+    let df = ctx.sql(&new_sql).await.unwrap();
+    df.collect().await.unwrap().into_iter().next().unwrap()
+}
+
+// =========================================================================
 // Benchmark harness
 // =========================================================================
 
@@ -195,6 +232,21 @@ async fn bench_scenario(label: &str, num_rows: usize, num_fields: usize, iters: 
         let tp = data_mb / (start.elapsed().as_secs_f64() / iters as f64);
         println!(
             "    B (raw+json UDF) extract:  {:7.1}ms  ({:5.0} MB/s)",
+            avg, tp
+        );
+    }
+
+    // Path C: extraction with preprocess optimization
+    {
+        let _ = path_c_extraction(&json_data, num_fields).await;
+        let start = Instant::now();
+        for _ in 0..iters {
+            std::hint::black_box(path_c_extraction(&json_data, num_fields).await);
+        }
+        let avg = start.elapsed().as_secs_f64() / iters as f64 * 1000.0;
+        let tp = data_mb / (start.elapsed().as_secs_f64() / iters as f64);
+        println!(
+            "    C (raw+preprocess) extract: {:7.1}ms  ({:5.0} MB/s)",
             avg, tp
         );
     }
