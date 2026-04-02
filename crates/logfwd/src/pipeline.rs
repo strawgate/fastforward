@@ -3,6 +3,7 @@
 //! Single thread per pipeline. All components are already built and tested;
 //! this module wires them together.
 
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -14,14 +15,33 @@ use logfwd_arrow::scanner::StreamingSimdScanner as Scanner;
 use logfwd_config::{
     EnrichmentConfig, Format, GeoDatabaseFormat, InputConfig, InputType, PipelineConfig,
 };
+use logfwd_core::pipeline::SourceId;
 use logfwd_io::diagnostics::{ComponentStats, PipelineMetrics};
 use logfwd_io::format::FormatProcessor;
 use logfwd_io::framed::FramedInput;
 use logfwd_io::input::{FileInput, InputEvent, InputSource};
-use logfwd_io::tail::TailConfig;
+use logfwd_io::tail::{ByteOffset, TailConfig};
 use logfwd_output::{BatchMetadata, FanOut, FanOutError, OutputSink, build_output_sink};
 use logfwd_transform::SqlTransform;
 use tokio_util::sync::CancellationToken;
+
+// ---------------------------------------------------------------------------
+// Channel message types
+// ---------------------------------------------------------------------------
+
+/// Message from input thread to pipeline async loop.
+enum ChannelMsg {
+    /// Data with per-file checkpoint metadata.
+    Data {
+        /// Accumulated scanner-ready bytes.
+        bytes: Vec<u8>,
+        /// Per-file (source_id, byte_offset) at time of send.
+        checkpoints: Vec<(SourceId, ByteOffset)>,
+    },
+    /// Path mapping updates. Sent on file open/rotation.
+    /// Must arrive before the first Data referencing a new SourceId.
+    PathUpdate(Vec<(SourceId, PathBuf)>),
+}
 
 // ---------------------------------------------------------------------------
 // Per-input state
@@ -231,7 +251,7 @@ impl Pipeline {
         // Spawn input threads. Each polls its source, parses format, and
         // sends accumulated JSON lines through a bounded channel.
         // Backpressure: when the channel is full, the input thread blocks.
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<ChannelMsg>(16);
 
         let batch_target = self.batch_target_bytes;
         let batch_timeout = self.batch_timeout;
@@ -256,6 +276,8 @@ impl Pipeline {
         drop(tx); // Drop our copy so rx.recv() returns None when all inputs exit.
 
         let mut scan_buf = Vec::with_capacity(self.batch_target_bytes);
+        let mut batch_checkpoints: HashMap<SourceId, ByteOffset> = HashMap::new();
+        let mut source_paths: HashMap<SourceId, PathBuf> = HashMap::new();
         let mut flush_interval = tokio::time::interval(self.batch_timeout);
         flush_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
@@ -267,13 +289,21 @@ impl Pipeline {
 
                 msg = rx.recv() => {
                     match msg {
-                        Some(data) => {
-                            scan_buf.extend_from_slice(&data);
+                        Some(ChannelMsg::Data { bytes, checkpoints }) => {
+                            scan_buf.extend_from_slice(&bytes);
+                            for (sid, offset) in checkpoints {
+                                batch_checkpoints.insert(sid, offset);
+                            }
                             // Flush if buffer is large enough.
                             if scan_buf.len() >= self.batch_target_bytes {
                                 self.metrics.inc_flush_by_size();
-                                self.flush_batch(&mut scan_buf).await;
+                                self.flush_batch(&mut scan_buf, &mut batch_checkpoints).await;
                                 flush_interval.reset();
+                            }
+                        }
+                        Some(ChannelMsg::PathUpdate(updates)) => {
+                            for (sid, path) in updates {
+                                source_paths.insert(sid, path);
                             }
                         }
                         None => {
@@ -286,7 +316,7 @@ impl Pipeline {
                 _ = flush_interval.tick() => {
                     if !scan_buf.is_empty() {
                         self.metrics.inc_flush_by_timeout();
-                        self.flush_batch(&mut scan_buf).await;
+                        self.flush_batch(&mut scan_buf, &mut batch_checkpoints).await;
                     }
                 }
             }
@@ -297,10 +327,22 @@ impl Pipeline {
         // `blocking_send` while the bounded channel is full.
         // Flush in batch_target_bytes increments to avoid unbounded memory
         // growth when the channel has many buffered messages.
-        while let Some(data) = rx.recv().await {
-            scan_buf.extend_from_slice(&data);
-            if scan_buf.len() >= self.batch_target_bytes {
-                self.flush_batch(&mut scan_buf).await;
+        while let Some(msg) = rx.recv().await {
+            match msg {
+                ChannelMsg::Data { bytes, checkpoints } => {
+                    scan_buf.extend_from_slice(&bytes);
+                    for (sid, offset) in checkpoints {
+                        batch_checkpoints.insert(sid, offset);
+                    }
+                    if scan_buf.len() >= self.batch_target_bytes {
+                        self.flush_batch(&mut scan_buf, &mut batch_checkpoints).await;
+                    }
+                }
+                ChannelMsg::PathUpdate(updates) => {
+                    for (sid, path) in updates {
+                        source_paths.insert(sid, path);
+                    }
+                }
             }
         }
 
@@ -314,7 +356,7 @@ impl Pipeline {
 
         // Flush any remaining buffered data.
         if !scan_buf.is_empty() {
-            self.flush_batch(&mut scan_buf).await;
+            self.flush_batch(&mut scan_buf, &mut batch_checkpoints).await;
         }
 
         tokio::task::block_in_place(|| self.output.flush())?;
@@ -322,10 +364,21 @@ impl Pipeline {
     }
 
     /// Scan + transform + output a batch of accumulated JSON lines.
-    async fn flush_batch(&mut self, scan_buf: &mut Vec<u8>) {
+    ///
+    /// Accepts checkpoint metadata alongside the data. Currently checkpoints
+    /// are cleared but not acted on — PipelineMachine integration (#586) will
+    /// create BatchTickets from them.
+    async fn flush_batch(
+        &mut self,
+        scan_buf: &mut Vec<u8>,
+        batch_checkpoints: &mut HashMap<SourceId, ByteOffset>,
+    ) {
         if scan_buf.is_empty() {
             return;
         }
+        // Clear checkpoints for this batch. Will be used by #586 to create
+        // BatchTickets for checkpoint tracking.
+        let _checkpoints = std::mem::take(batch_checkpoints);
         // Swap in a pre-allocated buffer to avoid losing the capacity
         // of the original scan_buf (which was created with
         // Vec::with_capacity(batch_target_bytes)).
@@ -411,7 +464,7 @@ impl Pipeline {
 /// This avoids flooding the channel with tiny fragments.
 fn input_poll_loop(
     mut input: InputState,
-    tx: tokio::sync::mpsc::Sender<Vec<u8>>,
+    tx: tokio::sync::mpsc::Sender<ChannelMsg>,
     metrics: Arc<PipelineMetrics>,
     shutdown: CancellationToken,
     batch_target_bytes: usize,
@@ -422,6 +475,9 @@ fn input_poll_loop(
     // sent. This ensures batch_timeout measures "time since first data
     // arrived in this batch", preventing tiny flushes after idle periods.
     let mut buffered_since: Option<Instant> = None;
+
+    // Track known source IDs to detect new files (for PathUpdate messages).
+    let mut known_sources: HashSet<SourceId> = HashSet::new();
 
     loop {
         if shutdown.is_cancelled() {
@@ -455,6 +511,8 @@ fn input_poll_loop(
                         // FramedInput already resets its internal state on these events.
                         // Track these expected lifecycle events separately from errors.
                         input.stats.inc_rotations();
+                        // File change — clear known sources to trigger PathUpdate on next send.
+                        known_sources.clear();
                     }
                     _ => {}
                 }
@@ -472,7 +530,41 @@ fn input_poll_loop(
         if should_send {
             let mut data = Vec::with_capacity(batch_target_bytes);
             std::mem::swap(&mut input.buf, &mut data);
-            if blocking_send_with_backpressure_metric(&tx, &metrics, data).is_err() {
+
+            // Snapshot file offsets (hot path — no PathBuf allocation).
+            let checkpoints = input.source.checkpoint_data();
+
+            // Detect new sources and send PathUpdate before first Data.
+            let current_sources: HashSet<SourceId> =
+                checkpoints.iter().map(|(s, _)| *s).collect();
+            if current_sources != known_sources {
+                let new_sources: Vec<SourceId> = current_sources
+                    .difference(&known_sources)
+                    .copied()
+                    .collect();
+                if !new_sources.is_empty() {
+                    let paths: Vec<_> = input
+                        .source
+                        .source_paths()
+                        .into_iter()
+                        .filter(|(s, _)| new_sources.contains(s))
+                        .collect();
+                    if !paths.is_empty() {
+                        let _ = blocking_send_channel_msg(
+                            &tx,
+                            &metrics,
+                            ChannelMsg::PathUpdate(paths),
+                        );
+                    }
+                }
+                known_sources = current_sources;
+            }
+
+            let msg = ChannelMsg::Data {
+                bytes: data,
+                checkpoints,
+            };
+            if blocking_send_channel_msg(&tx, &metrics, msg).is_err() {
                 break;
             }
             buffered_since = None;
@@ -482,23 +574,28 @@ fn input_poll_loop(
     // Drain any remaining buffered data on shutdown.
     if !input.buf.is_empty() {
         let data = std::mem::take(&mut input.buf);
-        let _ = blocking_send_with_backpressure_metric(&tx, &metrics, data);
+        let checkpoints = input.source.checkpoint_data();
+        let msg = ChannelMsg::Data {
+            bytes: data,
+            checkpoints,
+        };
+        let _ = blocking_send_channel_msg(&tx, &metrics, msg);
     }
 }
 
-fn blocking_send_with_backpressure_metric(
-    tx: &tokio::sync::mpsc::Sender<Vec<u8>>,
+fn blocking_send_channel_msg(
+    tx: &tokio::sync::mpsc::Sender<ChannelMsg>,
     metrics: &PipelineMetrics,
-    data: Vec<u8>,
-) -> Result<(), tokio::sync::mpsc::error::SendError<Vec<u8>>> {
-    match tx.try_send(data) {
+    msg: ChannelMsg,
+) -> Result<(), tokio::sync::mpsc::error::SendError<ChannelMsg>> {
+    match tx.try_send(msg) {
         Ok(()) => Ok(()),
-        Err(tokio::sync::mpsc::error::TrySendError::Full(data)) => {
+        Err(tokio::sync::mpsc::error::TrySendError::Full(msg)) => {
             metrics.inc_backpressure_stall();
-            tx.blocking_send(data)
+            tx.blocking_send(msg)
         }
-        Err(tokio::sync::mpsc::error::TrySendError::Closed(data)) => {
-            Err(tokio::sync::mpsc::error::SendError(data))
+        Err(tokio::sync::mpsc::error::TrySendError::Closed(msg)) => {
+            Err(tokio::sync::mpsc::error::SendError(msg))
         }
     }
 }
@@ -1215,14 +1312,26 @@ output:
 
         let meter = test_meter();
         let metrics = Arc::new(PipelineMetrics::new("test", "SELECT * FROM logs", &meter));
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1);
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<ChannelMsg>(1);
 
-        tx.try_send(vec![1]).unwrap();
+        // Fill the channel (capacity=1).
+        tx.try_send(ChannelMsg::Data {
+            bytes: vec![1],
+            checkpoints: vec![],
+        })
+        .unwrap();
 
         let tx2 = tx.clone();
         let metrics2 = Arc::clone(&metrics);
         let handle = std::thread::spawn(move || {
-            blocking_send_with_backpressure_metric(&tx2, &metrics2, vec![2])
+            blocking_send_channel_msg(
+                &tx2,
+                &metrics2,
+                ChannelMsg::Data {
+                    bytes: vec![2],
+                    checkpoints: vec![],
+                },
+            )
         });
 
         for _ in 0..50 {
@@ -1238,8 +1347,11 @@ output:
             "full channel should increment backpressure_stalls before blocking"
         );
 
-        assert_eq!(rx.recv().await, Some(vec![1]));
-        assert_eq!(rx.recv().await, Some(vec![2]));
+        // Drain both messages.
+        let msg1 = rx.recv().await.unwrap();
+        let msg2 = rx.recv().await.unwrap();
+        assert!(matches!(msg1, ChannelMsg::Data { bytes, .. } if bytes == vec![1]));
+        assert!(matches!(msg2, ChannelMsg::Data { bytes, .. } if bytes == vec![2]));
         assert!(
             handle.join().unwrap().is_ok(),
             "blocking send should succeed"
