@@ -26,10 +26,11 @@ Models `PipelineMachine<S, C>` from
 | `NoBatchLeftBehind` | Liveness | every in_flight batch eventually leaves in_flight |
 | `StoppedIsStable` | Liveness | once Stopped, stays Stopped |
 | `AllCreatedBatchesEventuallyAccountedFor` | Liveness | every created batch is committed or machine is Stopped |
-| `BeginDrainReachable` | Reachability | Draining phase is reachable (vacuity guard) |
-| `StopReachable` | Reachability | Stopped phase is reachable (vacuity guard) |
-| `AckOccurs` | Reachability | at least one batch is acked (AckBatch fires) |
-| `CommitAdvances` | Reachability | committed checkpoint advances at least once |
+| `BeginDrainReachable` | Reachability (invariant ~P) | Draining phase is reachable (vacuity guard) |
+| `StopReachable` | Reachability (invariant ~P) | Stopped phase is reachable (vacuity guard) |
+| `AckOccurs` | Reachability (invariant ~P) | at least one batch is acked (AckBatch fires) |
+| `CommitAdvances` | Reachability (invariant ~P) | committed checkpoint advances at least once |
+| `ForcedReachable` | Reachability (invariant ~P) | ForceStop path is reachable (vacuity guard) |
 
 ### File structure (two-file pattern)
 
@@ -84,10 +85,15 @@ the safety config and inspect the `forced=TRUE` traces in TLC's error output.
 
 ```bash
 java -cp /path/to/tla2tools.jar tlc2.TLC MCPipelineMachine.tla -config PipelineMachine.coverage.cfg
-# TLC will report PROPERTY VIOLATIONS for BeginDrainReachable, StopReachable,
-# AckOccurs, CommitAdvances — each violation is a witness trace proving the
-# state IS reachable. No violation = state unreachable = spec or model bug.
+# TLC will report INVARIANT VIOLATIONS for BeginDrainReachable, StopReachable,
+# AckOccurs, CommitAdvances, ForcedReachable — each violation is a witness
+# trace proving the state IS reachable. No violation = state unreachable = bug.
 ```
+
+Each reachability assertion is defined as `~P` (negation of the target state).
+As an INVARIANT, a violation means TLC found a state where P holds — the trace
+IS the witness. Using `<>(P)` as a PROPERTY would have inverted semantics:
+a violation would mean P is *never* reached (counterexample), not that it IS.
 
 This is the TLA+ equivalent of `kani::cover!()`. If you add a new invariant, add
 a corresponding reachability assertion to verify its precondition is not vacuously

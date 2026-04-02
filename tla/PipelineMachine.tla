@@ -359,36 +359,37 @@ AllCreatedBatchesEventuallyAccountedFor ==
                  \/ phase = "Stopped")
 
 (* ===========================================================================
- * REACHABILITY ASSERTIONS  (vacuity guards)
+ * REACHABILITY ASSERTIONS  (vacuity guards — kani::cover!() equivalent)
  *
- * These are the TLA+ equivalent of kani::cover!() — they prove that the
- * interesting states are actually reachable. A spec with vacuous invariants
- * (impossible preconditions) would pass all INVARIANTS and PROPERTIES
- * trivially. These PROPERTIES catch that.
+ * Defined as state-predicate NEGATIONS. Used as INVARIANTS in
+ * PipelineMachine.coverage.cfg. When TLC violates an invariant I == ~P,
+ * it found a reachable state where P holds — the violation trace IS the
+ * witness. No violation = P unreachable = spec or model bug.
  *
- * Run in PipelineMachine.coverage.cfg. TLC reports a PROPERTY VIOLATION
- * when a reachability assertion is FALSE — which here means the state was
- * never reached. A "violation" is the desired outcome: it is TLC confirming
- * coverage.
+ * Why INVARIANTS, not PROPERTIES: <>(P) as a PROPERTY produces a
+ * counterexample when P is never reached, which is the wrong signal —
+ * no-violation means "P is always eventually reached," not "P is reachable."
+ * INVARIANTS with ~P give the correct semantics: violation = witness.
  *
- * Sabotage test: to verify an invariant P is non-vacuous, temporarily replace
- * P's consequent with FALSE. TLC should find a counterexample. If it does
- * not, P was vacuously true — the precondition was unreachable.
+ * Sabotage test: to verify an invariant I is non-vacuous, temporarily
+ * replace I's consequent with FALSE. TLC must find a counterexample.
+ * If it reports "No error found," the precondition is unreachable and
+ * the invariant was trivially satisfied.
  * ===========================================================================*)
 
 \* The Draining phase is reachable (BeginDrain fires at least once).
-BeginDrainReachable == <>(phase = "Draining")
+BeginDrainReachable == ~(phase = "Draining")
 
 \* The Stopped phase is reachable (the full lifecycle completes).
-StopReachable == <>(phase = "Stopped")
+StopReachable == ~(phase = "Stopped")
 
-\* At least one batch is eventually acked (AckBatch fires at least once).
-AckOccurs == \E s \in Sources : \E b \in BatchIds : <>(b \in acked[s])
+\* At least one batch is acked (AckBatch fires at least once).
+AckOccurs == ~(\E s \in Sources : acked[s] /= {})
 
 \* The committed checkpoint advances at least once (ordering logic is exercised).
-CommitAdvances == \E s \in Sources : <>(committed[s] > 0)
+CommitAdvances == ~(\E s \in Sources : committed[s] > 0)
 
 \* ForceStop is reachable (the kill-switch path is exercised).
-ForcedReachable == <>(forced = TRUE)
+ForcedReachable == ~(forced = TRUE)
 
 =============================================================================
