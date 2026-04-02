@@ -54,7 +54,7 @@ fn setup_test_data(sink: &mut ElasticsearchSink) -> RecordBatch {
     .expect("batch creation failed");
 
     let metadata = BatchMetadata {
-        resource_attrs: Arc::default(),
+        resource_attrs: Arc::new(vec![]),
         observed_time_ns: 0,
     };
 
