@@ -77,7 +77,7 @@ pub struct Pipeline {
     batch_timeout: Duration,
     poll_interval: Duration,
     /// Static OTLP resource attributes (e.g. `service.name`) emitted with every batch.
-    resource_attrs: Vec<(String, String)>,
+    resource_attrs: Arc<Vec<(String, String)>>,
     /// Batch lifecycle state machine. Option because begin_drain() consumes self.
     /// Some during run_async, None only after shutdown drain transition.
     machine: Option<PipelineMachine<Running, u64>>,
@@ -211,7 +211,7 @@ impl Pipeline {
             batch_target_bytes: 4 * 1024 * 1024,
             batch_timeout: Duration::from_millis(100),
             poll_interval: Duration::from_millis(10),
-            resource_attrs,
+            resource_attrs: Arc::new(resource_attrs),
             machine: Some(PipelineMachine::new().start()),
         })
     }
@@ -560,7 +560,7 @@ impl Pipeline {
         // Output (block_in_place wraps the sync HTTP send).
         let t2 = Instant::now();
         let metadata = BatchMetadata {
-            resource_attrs: self.resource_attrs.clone(),
+            resource_attrs: Arc::clone(&self.resource_attrs),
             observed_time_ns: now_nanos(),
         };
         let output_ok = {

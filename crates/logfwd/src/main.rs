@@ -612,10 +612,35 @@ pub fn build_tracer_provider(
         builder = builder.with_span_processor(
             opentelemetry_sdk::trace::BatchSpanProcessor::builder(otlp_exporter).build(),
         );
-        eprintln!("  {}traces push{}: {endpoint}", dim(), reset());
+        eprintln!(
+            "  {}traces push{}: {}",
+            dim(),
+            reset(),
+            redact_url(endpoint)
+        );
     }
 
     Ok(builder.build())
+}
+
+/// Return a URL with credentials and query parameters stripped, for safe logging.
+/// Falls back to the original string if parsing fails.
+fn redact_url(url: &str) -> String {
+    // Find scheme end ("://")
+    let after_scheme = url.find("://").map_or(0, |i| i + 3);
+    let rest = &url[after_scheme..];
+    // Strip userinfo (anything before '@' in the authority)
+    let host_start = rest.find('@').map_or(0, |i| i + 1);
+    let authority_and_path = &rest[host_start..];
+    // Strip path/query/fragment — keep only host:port
+    let host_end = authority_and_path
+        .find(['/', '?', '#'])
+        .unwrap_or(authority_and_path.len());
+    let host = &authority_and_path[..host_end];
+    if host.is_empty() {
+        return url.to_string();
+    }
+    format!("{}://{}", &url[..after_scheme.saturating_sub(3)], host)
 }
 
 // ---------------------------------------------------------------------------

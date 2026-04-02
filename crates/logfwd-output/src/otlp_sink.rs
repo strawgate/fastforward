@@ -129,7 +129,7 @@ impl OtlpSink {
         // Encode resource attributes as Resource message (field 1 of ResourceLogs)
         let mut resource_msg: Vec<u8> = Vec::new();
         if !metadata.resource_attrs.is_empty() {
-            for (k, v) in &metadata.resource_attrs {
+            for (k, v) in metadata.resource_attrs.as_ref() {
                 encode_key_value_string(&mut resource_msg, k.as_bytes(), v.as_bytes());
             }
         }

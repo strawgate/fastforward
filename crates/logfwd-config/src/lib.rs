@@ -350,6 +350,14 @@ impl Config {
 
     /// Validate the loaded configuration.
     fn validate(&self) -> Result<(), ConfigError> {
+        if let Some(ep) = &self.server.traces_endpoint {
+            if let Err(msg) = validate_endpoint_url(ep) {
+                return Err(ConfigError::Validation(format!(
+                    "server.traces_endpoint: {msg}"
+                )));
+            }
+        }
+
         if self.pipelines.is_empty() {
             return Err(ConfigError::Validation(
                 "at least one pipeline must be defined".into(),
