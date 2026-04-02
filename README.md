@@ -275,7 +275,8 @@ See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for full details, resource sizing, 
 | Guide | Description |
 |-------|-------------|
 | [dev-docs/ARCHITECTURE.md](dev-docs/ARCHITECTURE.md) | Pipeline data flow, SIMD stages, crate map |
-| [dev-docs/DECISIONS.md](dev-docs/DECISIONS.md) | Settled architecture decisions with rationale |
+| [dev-docs/DESIGN.md](dev-docs/DESIGN.md) | Vision, target architecture, architecture decision records |
+| [dev-docs/VERIFICATION.md](dev-docs/VERIFICATION.md) | TLA+, Kani, proptest — tool selection, tiers, per-module status |
 | [dev-docs/CODE_STYLE.md](dev-docs/CODE_STYLE.md) | Code style conventions enforced during review |
 | [DEVELOPING.md](DEVELOPING.md) | Build, test, lint, bench commands |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | How to contribute — PR process, pre-commit checks |

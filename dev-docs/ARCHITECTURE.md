@@ -17,7 +17,7 @@ How data flows through logfwd, from bytes on disk to serialized output.
 │       ▼              ▼                    ▼              │
 │  ┌──────────────────────────────────────────────────┐   │
 │  │  logfwd-arrow                                    │   │
-│  │  FieldSink impls, SIMD backends, RecordBatch     │   │
+│  │  ScanBuilder impls, SIMD backends, RecordBatch     │   │
 │  └──────────────────────────────────────────────────┘   │
 │       │                                                  │
 │       ▼                                                  │
@@ -221,7 +221,7 @@ logfwd-core defines          logfwd-arrow implements
 ScanBuilder                   StreamingBuilder
                               StorageBuilder
 
-logfwd-core defines          logfwd-input implements
+logfwd-core defines          logfwd-io implements
 ──────────────────────────    ──────────────────────────
 InputSource                   FileInput
                               (future: ArrowIpcInput, OtapReceiver)
@@ -291,28 +291,19 @@ Target (zero-copy for 99% path):
 
 ## Verification strategy
 
-Each layer has appropriate verification:
+Each pipeline layer has appropriate verification. See `dev-docs/VERIFICATION.md` for tool
+selection guidance, proof quality requirements, and per-module status.
 
-| Layer | Verification | Tool |
-|-------|-------------|------|
-| Structural scanning | Exhaustive (all inputs ≤32 bytes) | Kani |
-| Framing | Exhaustive + oracle proof | Kani |
-| CRI aggregation | Exhaustive (bounded) | Kani |
-| Byte search | Exhaustive + oracle | Kani |
-| Number parsing | Exhaustive + oracle | Kani |
-| OTLP encoding | Exhaustive (wire format) | Kani |
-| Scanner | Bounded (≤128 bytes, ≤8 fields) | Kani (planned) |
-| SIMD backends | Conformance (SIMD == scalar) | proptest |
-| Pipeline state machine | Temporal properties | TLA+ (planned) |
-| End-to-end | Roundtrip (scan → encode → decode) | proptest |
-
-Proof gap analysis lives in doc comments on each `#[kani::proof]` harness.
-See `dev-docs/PROVEN_CORE.md` for verification tier definitions.
+| Layer | Tool |
+|-------|------|
+| Structural scanning, framing, CRI, byte search, number parsing, OTLP encoding | Kani (exhaustive/bounded) |
+| SIMD backends | proptest (SIMD ≡ scalar conformance) |
+| Pipeline state machine | TLA+ (temporal: drain liveness, checkpoint ordering) + Kani (single-step) |
+| End-to-end roundtrip | proptest |
 
 ## Related documents
 
-- `DIRECTION.md` — vision, goals, what we're building toward
-- `DECISIONS.md` — architecture decision records with rationale
-- `CRATE_RULES.md` — per-crate enforcement rules
-- `PHASES.md` — implementation roadmap with issue references
-- `PROVEN_CORE.md` — verification tiers, proof mechanics
+- `dev-docs/DESIGN.md` — vision, goals, and architecture decision records
+- `dev-docs/VERIFICATION.md` — verification tiers, tool selection, per-module status
+- `dev-docs/CRATE_RULES.md` — per-crate enforcement rules
+- `dev-docs/PHASES.md` — implementation roadmap with issue references

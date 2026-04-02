@@ -77,7 +77,7 @@ The hot path is: reader → framer → scanner → builders → OTLP encoder →
 - **One test per behavior**, not per function.
 - **Test names describe the scenario:** `empty_input_returns_none`, not `test_parse`.
 - **No `#[should_panic]`** — test the Result/Option return instead.
-- **Kani proofs** for pure logic in logfwd-core (see `dev-docs/DECISIONS.md`).
+- **Kani proofs** for pure logic in logfwd-core (see `dev-docs/DESIGN.md`).
 - **proptest** for property-based testing of complex inputs.
 
 ## Git

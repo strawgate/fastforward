@@ -70,9 +70,11 @@ Extract run_async decisions into pure state machine in core.
     Ordered ACK via BatchId (not checkpoint values)
     5 Kani proofs, 15 unit tests
 
-5c: Wire into pipeline.rs              → TODO
+5c: Wire into pipeline.rs              → TODO (design complete)
     PipelineMachine<_, u64> for file byte offsets
+    Multi-receipt per batch (one physical batch, multiple file checkpoints)
     Checkpoint persistence (fingerprint → offset map)
+    See plan: .claude/plans/noble-swimming-cherny.md
 
 5d: proptest random event sequences    ✅ DONE
     4 property tests: in-flight consistency, final checkpoint,
@@ -89,17 +91,23 @@ Extract run_async decisions into pure state machine in core.
 proptest-state-machine for stateful components.
 Proof coverage enforcement. cargo-mutants weekly. cargo-vet.
 
-## Phase 7: TLA+ pipeline specification (#272)
+## Phase 7: TLA+ pipeline specification (#272) ← IN PROGRESS
 
-Model batching/timeout/shutdown protocol. Prove liveness (data is
-never abandoned) and fairness (no input starved). Requires Phase 5
-completion (pure state machine extraction).
+Model the pipeline state machine and shutdown protocol. Prove liveness properties that
+Kani cannot express (temporal logic, fairness, infinite behaviors).
 
 ```text
-7a: PipelineBatch.tla — N inputs, bounded channel, consumer
-7b: Prove NoDataAbandoned (every batch eventually acked or rejected)
-7c: Prove ShutdownCompletes (drain terminates)
-7d: Turmoil simulation tests (requires async sink migration)
+7a: PipelineMachine.tla — lifecycle state machine     ✅ DONE (PR #651)
+    8 safety invariants + 4 liveness properties
+    ForceStop model (escape hatch present in all production systems)
+    See tla/README.md for three model configurations and running TLC
+
+7b: PipelineBatch.tla — channel + batching protocol   → TODO
+    Broader scope: NoDataAbandoned across full channel protocol
+    Best started after Phase 5c wires PipelineMachine into pipeline.rs
+
+7c: Turmoil simulation tests                          → TODO
+    Requires async sink migration
 ```
 
 ## Phase 8: Tighten logfwd-core (#267)
