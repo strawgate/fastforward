@@ -213,7 +213,7 @@ WHERE _stream_str = 'stderr'
 | `otlp`          | ✅ Implemented  | OTLP protobuf over HTTP or gRPC — works with any OpenTelemetry-compatible receiver |
 | `http`          | ✅ Implemented  | JSON lines over HTTP POST, optional zstd compression |
 | `stdout`        | ✅ Implemented  | JSON or colored console output — great for local debugging |
-| `elasticsearch` | 🚧 Stub         | Struct exists; Elasticsearch bulk API not yet implemented |
+| `elasticsearch` | ✅ Implemented  | Elasticsearch bulk API with retry logic, per-document error handling |
 | `loki`          | 🚧 Stub         | Struct exists; Loki push API not yet implemented |
 | `parquet`       | 🚧 Stub         | Struct exists; Parquet file writing not yet implemented |
 

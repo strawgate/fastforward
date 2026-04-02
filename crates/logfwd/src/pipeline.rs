@@ -904,6 +904,7 @@ mod tests {
             compression: None,
             format: Some(Format::Json),
             path: None,
+            index: None,
             auth: None,
         };
         let sink = build_output_sink("test", &cfg, Arc::new(ComponentStats::new())).unwrap();
@@ -920,6 +921,7 @@ mod tests {
             compression: Some("zstd".to_string()),
             format: None,
             path: None,
+            index: None,
             auth: None,
         };
         let sink = build_output_sink("otel", &cfg, Arc::new(ComponentStats::new())).unwrap();
@@ -936,6 +938,7 @@ mod tests {
             compression: None,
             format: None,
             path: None,
+            index: None,
             auth: None,
         };
         let sink = build_output_sink("es", &cfg, Arc::new(ComponentStats::new())).unwrap();
@@ -952,6 +955,7 @@ mod tests {
             compression: None,
             format: None,
             path: None,
+            index: None,
             auth: None,
         };
         let result = build_output_sink("bad", &cfg, Arc::new(ComponentStats::new()));
