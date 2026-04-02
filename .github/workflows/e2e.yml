@@ -1,10 +1,9 @@
 name: E2E
 
 on:
-  push:
-    branches: [master]
   schedule:
     - cron: '0 6 * * *'
+  workflow_dispatch:
 
 concurrency:
   group: e2e-${{ github.head_ref || github.run_id }}
@@ -31,6 +30,16 @@ jobs:
 
       - name: Run e2e test
         run: bash tests/e2e/run.sh
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-logs-${{ github.run_id }}
+          path: |
+            tests/e2e/logs/
+            /tmp/logfwd-e2e*/
+          retention-days: 7
 
       - name: Create issue on failure
         if: failure() && github.event_name == 'schedule'

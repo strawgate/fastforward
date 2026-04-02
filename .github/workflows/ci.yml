@@ -14,9 +14,51 @@ concurrency:
 permissions:
   contents: read
 
+# Tool versions — bump these to upgrade across all jobs.
+env:
+  TAPLO_VERSION: "0.10.0"
+  CARGO_DENY_VERSION: "0.19.0"
+
 jobs:
+  # -------------------------------------------------------------------------
+  # Fast checks: format, TOML, typos, actionlint — no Rust build, fail fast
+  # -------------------------------------------------------------------------
+  fast-checks:
+    name: Fast checks (fmt / TOML / typos / actionlint)
+    if: github.event_name == 'push' || github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Format check
+        run: cargo fmt --check
+
+      - name: Install taplo
+        run: |
+          curl -sSL "https://github.com/tamasfe/taplo/releases/download/${TAPLO_VERSION}/taplo-linux-x86_64.gz" \
+            | gunzip > /usr/local/bin/taplo && chmod +x /usr/local/bin/taplo
+
+      - name: TOML check
+        run: taplo check
+
+      - name: Typos
+        uses: crate-ci/typos@v1
+
+      - name: Install actionlint
+        run: bash <(curl -sSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+
+      - name: Actionlint
+        run: ./actionlint
+
+  # -------------------------------------------------------------------------
+  # Clippy + dependency audits (needs a Rust build, runs in parallel with tests)
+  # -------------------------------------------------------------------------
   lint:
-    name: Lint
+    name: Lint (clippy / deny / audit)
     if: github.event_name == 'push' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     steps:
@@ -26,43 +68,31 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy, rustfmt
+          components: clippy
 
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/master' }}
 
-      - name: Install tools
+      - name: Install cargo-deny
         run: |
-          curl -sSL https://github.com/tamasfe/taplo/releases/latest/download/taplo-linux-x86_64.gz | gunzip > /usr/local/bin/taplo && chmod +x /usr/local/bin/taplo
-          DENY_URL=$(curl -sSL -o /dev/null -w '%{url_effective}' https://github.com/EmbarkStudios/cargo-deny/releases/latest) && \
-            DENY_VER=$(basename "$DENY_URL") && \
-            curl -sSL "https://github.com/EmbarkStudios/cargo-deny/releases/download/${DENY_VER}/cargo-deny-${DENY_VER}-x86_64-unknown-linux-musl.tar.gz" | tar xz -C /tmp && \
-            mv /tmp/cargo-deny-*/cargo-deny /usr/local/bin/
-
-      - uses: extractions/setup-just@dd310ad5a97d8e7b41793f8ef055398d51ad4de6 # v2
-
-      - name: Format check
-        run: just fmt-check
+          curl -sSL "https://github.com/EmbarkStudios/cargo-deny/releases/download/${CARGO_DENY_VERSION}/cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
+            | tar xz -C /tmp && mv /tmp/cargo-deny-*/cargo-deny /usr/local/bin/
 
       - name: Clippy
-        run: just clippy
+        run: cargo clippy -- -D warnings
 
-      - name: TOML check
-        run: just toml-check
-
-      - name: Dependency audit
-        run: just deny
-
-      - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
+      - name: Dependency audit (licenses / bans / advisories)
+        run: cargo deny check
 
       - name: Security audit
-        run: cargo audit
+        uses: rustsec/audit-check@v2
+        with:
+          token: ${{ github.token }}
 
-      - name: Typos
-        uses: crate-ci/typos@v1
-
+  # -------------------------------------------------------------------------
+  # Tests — Linux and macOS in parallel
+  # -------------------------------------------------------------------------
   test-linux:
     name: Test (Linux)
     if: github.event_name == 'push' || github.event.pull_request.draft == false
@@ -77,55 +107,8 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/master' }}
 
-      - uses: extractions/setup-just@dd310ad5a97d8e7b41793f8ef055398d51ad4de6 # v2
-
       - name: Tests
-        run: just test
-
-  release-check:
-    name: Release build check
-    if: github.event_name == 'push' || github.event.pull_request.draft == false
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/build-dashboard
-      - uses: mozilla-actions/sccache-action@v0.0.7
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/master' }}
-
-      - name: Release check
-        run: cargo check --release
-
-  cross-compile-arm64:
-    name: Cross-compile check (ARM64)
-    if: github.event_name == 'push' || github.event.pull_request.draft == false
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/build-dashboard
-      - uses: mozilla-actions/sccache-action@v0.0.7
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-unknown-linux-gnu
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/master' }}
-          key: aarch64-unknown-linux-gnu
-
-      - name: Install cross-compilation toolchain
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross
-
-      - name: Cross-compile check
-        run: cargo check --target aarch64-unknown-linux-gnu
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        run: cargo test
 
   test-macos:
     name: Test (macOS)
@@ -134,7 +117,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/build-dashboard
-      - uses: mozilla-actions/sccache-action@v0.0.7
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
@@ -144,6 +126,54 @@ jobs:
       - name: Tests
         run: cargo test
 
+  # -------------------------------------------------------------------------
+  # Build checks — release + cross-compile as a matrix (one job definition)
+  # -------------------------------------------------------------------------
+  build-check:
+    name: Build check (${{ matrix.name }})
+    if: github.event_name == 'push' || github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - name: release
+            extra_targets: ""
+            apt: ""
+            linker: ""
+            cargo_args: "--release"
+          - name: aarch64
+            extra_targets: "aarch64-unknown-linux-gnu"
+            apt: "gcc-aarch64-linux-gnu libc6-dev-arm64-cross"
+            linker: "aarch64-linux-gnu-gcc"
+            cargo_args: "--target aarch64-unknown-linux-gnu"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/build-dashboard
+      - uses: mozilla-actions/sccache-action@v0.0.7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.extra_targets }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+          key: ${{ matrix.name }}
+
+      - name: Install cross-compilation toolchain
+        if: matrix.apt != ''
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ${{ matrix.apt }}
+
+      - name: Check
+        run: cargo check ${{ matrix.cargo_args }}
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.linker }}
+
+  # -------------------------------------------------------------------------
+  # Kani formal verification
+  # -------------------------------------------------------------------------
   kani:
     name: Kani proofs
     if: github.event_name == 'push' || github.event.pull_request.draft == false
@@ -158,16 +188,3 @@ jobs:
           args: -p logfwd-core -Z function-contracts -Z mem-predicates -Z stubbing
         env:
           RUSTC_WRAPPER: ""
-
-  actionlint:
-    name: Actionlint
-    if: github.event_name == 'push' || github.event.pull_request.draft == false
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install actionlint
-        run: bash <(curl -sSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
-
-      - name: Run actionlint
-        run: ./actionlint
