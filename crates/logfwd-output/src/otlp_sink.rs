@@ -234,7 +234,7 @@ impl OutputSink for OtlpSink {
                 req = req.header(k.as_str(), v.as_str());
             }
             req = req.header("Content-Type", content_type);
-            if self.compression == Compression::Zstd {
+            if payload_is_compressed {
                 req = req.header("Content-Encoding", "zstd");
             }
             req
@@ -821,10 +821,11 @@ mod tests {
         assert_eq!(framed[0], 0x01, "compressed flag must be 0x01");
     }
 
-    /// Verify that `send_batch` with gRPC protocol prepends a valid 5-byte frame header.
-    /// We intercept at `encoder_buf` + manual framing rather than making a real network call.
+    /// Verify that `encode_batch` + `write_grpc_frame` produce a valid 5-byte gRPC frame header
+    /// followed by the exact protobuf payload. Tests the encode-and-frame path directly without
+    /// making a real network call.
     #[test]
-    fn grpc_send_batch_frames_payload() {
+    fn encode_and_frame_payload() {
         let schema = Arc::new(Schema::new(vec![Field::new("body", DataType::Utf8, true)]));
         let arr = StringArray::from(vec!["hello"]);
         let batch = RecordBatch::try_new(schema, vec![Arc::new(arr)]).unwrap();
