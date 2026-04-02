@@ -38,6 +38,9 @@ enum ChannelMsg {
         bytes: Vec<u8>,
         /// Per-file (source_id, byte_offset) at time of send.
         checkpoints: Vec<(SourceId, ByteOffset)>,
+        /// When the input thread enqueued this message. Used to measure
+        /// queue wait time (time data sat in channel before processing).
+        queued_at: Instant,
     },
     /// Path mapping updates. Sent on file open/rotation.
     /// Must arrive before the first Data referencing a new SourceId.
@@ -285,6 +288,8 @@ impl Pipeline {
         let mut scan_buf = Vec::with_capacity(self.batch_target_bytes);
         let mut batch_checkpoints: HashMap<SourceId, ByteOffset> = HashMap::new();
         let mut source_paths: HashMap<SourceId, PathBuf> = HashMap::new();
+        // Oldest queued_at in the current accumulating batch — reset after each flush.
+        let mut batch_queued_at: Option<Instant> = None;
         let mut flush_interval = tokio::time::interval(self.batch_timeout);
         flush_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
@@ -296,7 +301,10 @@ impl Pipeline {
 
                 msg = rx.recv() => {
                     match msg {
-                        Some(ChannelMsg::Data { bytes, checkpoints }) => {
+                        Some(ChannelMsg::Data { bytes, checkpoints, queued_at }) => {
+                            if batch_queued_at.is_none() {
+                                batch_queued_at = Some(queued_at);
+                            }
                             scan_buf.extend_from_slice(&bytes);
                             for (sid, offset) in checkpoints {
                                 batch_checkpoints.insert(sid, offset);
@@ -304,7 +312,7 @@ impl Pipeline {
                             // Flush if buffer is large enough.
                             if scan_buf.len() >= self.batch_target_bytes {
                                 self.metrics.inc_flush_by_size();
-                                self.flush_batch(&mut scan_buf, &mut batch_checkpoints).await;
+                                self.flush_batch(&mut scan_buf, &mut batch_checkpoints, "size", batch_queued_at.take()).await;
                                 flush_interval.reset();
                             }
                         }
@@ -323,7 +331,7 @@ impl Pipeline {
                 _ = flush_interval.tick() => {
                     if !scan_buf.is_empty() {
                         self.metrics.inc_flush_by_timeout();
-                        self.flush_batch(&mut scan_buf, &mut batch_checkpoints).await;
+                        self.flush_batch(&mut scan_buf, &mut batch_checkpoints, "timeout", batch_queued_at.take()).await;
                     }
                 }
             }
@@ -336,14 +344,26 @@ impl Pipeline {
         // growth when the channel has many buffered messages.
         while let Some(msg) = rx.recv().await {
             match msg {
-                ChannelMsg::Data { bytes, checkpoints } => {
+                ChannelMsg::Data {
+                    bytes,
+                    checkpoints,
+                    queued_at,
+                } => {
+                    if batch_queued_at.is_none() {
+                        batch_queued_at = Some(queued_at);
+                    }
                     scan_buf.extend_from_slice(&bytes);
                     for (sid, offset) in checkpoints {
                         batch_checkpoints.insert(sid, offset);
                     }
                     if scan_buf.len() >= self.batch_target_bytes {
-                        self.flush_batch(&mut scan_buf, &mut batch_checkpoints)
-                            .await;
+                        self.flush_batch(
+                            &mut scan_buf,
+                            &mut batch_checkpoints,
+                            "drain",
+                            batch_queued_at.take(),
+                        )
+                        .await;
                     }
                 }
                 ChannelMsg::PathUpdate(updates) => {
@@ -364,8 +384,13 @@ impl Pipeline {
 
         // Flush any remaining buffered data.
         if !scan_buf.is_empty() {
-            self.flush_batch(&mut scan_buf, &mut batch_checkpoints)
-                .await;
+            self.flush_batch(
+                &mut scan_buf,
+                &mut batch_checkpoints,
+                "drain",
+                batch_queued_at.take(),
+            )
+            .await;
         }
 
         // Transition machine: Running → Draining → Stopped.
@@ -401,6 +426,9 @@ impl Pipeline {
         skip_all,
         fields(
             pipeline = %self.name,
+            bytes_in = 0u64,
+            flush_reason = tracing::field::Empty,
+            queue_wait_ns = 0u64,
             input_rows = 0u64,
             output_rows = 0u64,
             errors = 0u64,
@@ -410,6 +438,8 @@ impl Pipeline {
         &mut self,
         scan_buf: &mut Vec<u8>,
         batch_checkpoints: &mut HashMap<SourceId, ByteOffset>,
+        flush_reason: &'static str,
+        queued_at: Option<Instant>,
     ) {
         if scan_buf.is_empty() {
             return;
@@ -422,6 +452,14 @@ impl Pipeline {
         // Vec::with_capacity(batch_target_bytes)).
         let mut combined = Vec::with_capacity(self.batch_target_bytes);
         std::mem::swap(scan_buf, &mut combined);
+
+        // Record batch-level attributes now that we know the input size.
+        let span = tracing::Span::current();
+        span.record("bytes_in", combined.len() as u64);
+        span.record("flush_reason", flush_reason);
+        if let Some(qa) = queued_at {
+            span.record("queue_wait_ns", qa.elapsed().as_nanos() as u64);
+        }
 
         // Create Queued tickets (one per contributing file source).
         // These are lightweight — NOT tracked by the machine yet.
@@ -439,8 +477,9 @@ impl Pipeline {
         // tokio to move other tasks off this worker while scanning.
         let t0 = Instant::now();
         let batch = {
-            let _scan_span = tracing::info_span!("scan", pipeline = %self.name).entered();
-            match tokio::task::block_in_place(|| self.scanner.scan(combined.into())) {
+            let scan_span = tracing::info_span!("scan", pipeline = %self.name, rows = 0u64);
+            let _entered = scan_span.enter();
+            let b = match tokio::task::block_in_place(|| self.scanner.scan(combined.into())) {
                 Ok(b) => b,
                 Err(e) => {
                     // Queued tickets dropped here — safe, not tracked by machine.
@@ -450,8 +489,10 @@ impl Pipeline {
                     tracing::Span::current().record("errors", 1u64);
                     return;
                 }
-            }
-        }; // _scan_span drops here → span ends
+            };
+            scan_span.record("rows", b.num_rows() as u64);
+            b
+        }; // _entered and scan_span drop here → span ends
         let scan_elapsed = t0.elapsed();
 
         // begin_send all tickets — machine now tracks them, MUST ack or reject.
@@ -480,7 +521,7 @@ impl Pipeline {
         let result = match self
             .transform
             .execute(batch)
-            .instrument(tracing::info_span!("transform", pipeline = %self.name))
+            .instrument(tracing::info_span!("transform", pipeline = %self.name, rows_in = num_rows))
             .await
         {
             Ok(r) => r,
@@ -513,7 +554,8 @@ impl Pipeline {
             return;
         }
 
-        tracing::Span::current().record("output_rows", result.num_rows() as u64);
+        let out_rows = result.num_rows() as u64;
+        tracing::Span::current().record("output_rows", out_rows);
 
         // Output (block_in_place wraps the sync HTTP send).
         let t2 = Instant::now();
@@ -522,7 +564,8 @@ impl Pipeline {
             observed_time_ns: now_nanos(),
         };
         let output_ok = {
-            let _out_span = tracing::info_span!("output", pipeline = %self.name).entered();
+            let out_span = tracing::info_span!("output", pipeline = %self.name, rows = out_rows);
+            let _entered = out_span.enter();
             match tokio::task::block_in_place(|| self.output.send_batch(&result, &metadata)) {
                 Ok(()) => true,
                 Err(e) => {
@@ -541,7 +584,7 @@ impl Pipeline {
                     false
                 }
             }
-        }; // _out_span drops here → output span ends
+        }; // _entered and out_span drop here → output span ends
         let output_elapsed = t2.elapsed();
 
         if !output_ok {
@@ -620,6 +663,7 @@ fn input_poll_loop(
             Ok(e) => e,
             Err(e) => {
                 eprintln!("pipeline input: poll error: {e}");
+                tracing::warn!(input = input.source.name(), error = %e, "input.poll_error");
                 std::thread::sleep(Duration::from_millis(100));
                 continue;
             }
@@ -633,12 +677,16 @@ fn input_poll_loop(
                     InputEvent::Data { bytes } => {
                         input.buf.extend_from_slice(&bytes);
                     }
-                    InputEvent::Rotated | InputEvent::Truncated => {
+                    InputEvent::Rotated => {
                         // FramedInput already resets its internal state on these events.
-                        // Track these expected lifecycle events separately from errors.
                         input.stats.inc_rotations();
-                        // File change — clear known sources to trigger PathUpdate on next send.
                         known_sources.clear();
+                        tracing::info!(input = input.source.name(), "input.file_rotated");
+                    }
+                    InputEvent::Truncated => {
+                        input.stats.inc_rotations();
+                        known_sources.clear();
+                        tracing::info!(input = input.source.name(), "input.file_truncated");
                     }
                     _ => {}
                 }
@@ -675,8 +723,17 @@ fn input_poll_loop(
                         .filter(|(s, _)| new_sources.contains(s))
                         .collect();
                     if !paths.is_empty() {
-                        let _ =
-                            blocking_send_channel_msg(&tx, &metrics, ChannelMsg::PathUpdate(paths));
+                        tracing::info!(
+                            input = input.source.name(),
+                            files = paths.len(),
+                            "input.new_files"
+                        );
+                        let _ = blocking_send_channel_msg(
+                            input.source.name(),
+                            &tx,
+                            &metrics,
+                            ChannelMsg::PathUpdate(paths),
+                        );
                     }
                 }
                 known_sources = current_sources;
@@ -685,8 +742,9 @@ fn input_poll_loop(
             let msg = ChannelMsg::Data {
                 bytes: data,
                 checkpoints,
+                queued_at: Instant::now(),
             };
-            if blocking_send_channel_msg(&tx, &metrics, msg).is_err() {
+            if blocking_send_channel_msg(input.source.name(), &tx, &metrics, msg).is_err() {
                 break;
             }
             buffered_since = None;
@@ -700,12 +758,14 @@ fn input_poll_loop(
         let msg = ChannelMsg::Data {
             bytes: data,
             checkpoints,
+            queued_at: Instant::now(),
         };
-        let _ = blocking_send_channel_msg(&tx, &metrics, msg);
+        let _ = blocking_send_channel_msg(input.source.name(), &tx, &metrics, msg);
     }
 }
 
 fn blocking_send_channel_msg(
+    input_name: &str,
     tx: &tokio::sync::mpsc::Sender<ChannelMsg>,
     metrics: &PipelineMetrics,
     msg: ChannelMsg,
@@ -713,6 +773,7 @@ fn blocking_send_channel_msg(
     match tx.try_send(msg) {
         Ok(()) => Ok(()),
         Err(tokio::sync::mpsc::error::TrySendError::Full(msg)) => {
+            tracing::warn!(input = input_name, "input.backpressure");
             metrics.inc_backpressure_stall();
             tx.blocking_send(msg)
         }

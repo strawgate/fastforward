@@ -674,14 +674,25 @@ impl DiagnosticsServer {
                 }
                 first = false;
 
-                // Pull stage durations from child spans.
+                // Pull stage durations and per-stage row counts from child spans.
                 let mut scan_ns = 0u64;
+                let mut scan_rows = 0u64;
                 let mut transform_ns = 0u64;
                 let mut output_ns = 0u64;
                 if let Some(kids) = children.get(root.trace_id.as_str()) {
                     for kid in kids {
+                        let kid_attr = |key: &str| -> u64 {
+                            kid.attrs
+                                .iter()
+                                .find(|kv| kv[0] == key)
+                                .and_then(|kv| kv[1].parse().ok())
+                                .unwrap_or(0)
+                        };
                         match kid.name.as_str() {
-                            "scan" => scan_ns = kid.duration_ns,
+                            "scan" => {
+                                scan_ns = kid.duration_ns;
+                                scan_rows = kid_attr("rows");
+                            }
                             "transform" => transform_ns = kid.duration_ns,
                             "output" => output_ns = kid.duration_ns,
                             _ => {}
@@ -697,6 +708,9 @@ impl DiagnosticsServer {
                         .map_or("", |kv| kv[1].as_str())
                 };
                 let pipeline = attr("pipeline");
+                let bytes_in: u64 = attr("bytes_in").parse().unwrap_or(0);
+                let flush_reason = attr("flush_reason");
+                let queue_wait_ns: u64 = attr("queue_wait_ns").parse().unwrap_or(0);
                 let input_rows: u64 = attr("input_rows").parse().unwrap_or(0);
                 let output_rows: u64 = attr("output_rows").parse().unwrap_or(0);
                 let errors: u64 = attr("errors").parse().unwrap_or(0);
@@ -711,8 +725,12 @@ impl DiagnosticsServer {
                         \"scan_ns\":{scan},\
                         \"transform_ns\":{xfm},\
                         \"output_ns\":{out_ns},\
+                        \"scan_rows\":{sr},\
                         \"input_rows\":{ir},\
                         \"output_rows\":{or},\
+                        \"bytes_in\":{bi},\
+                        \"queue_wait_ns\":{qw},\
+                        \"flush_reason\":\"{fr}\",\
                         \"errors\":{err},\
                         \"status\":\"{status}\"\
                     }}",
@@ -723,8 +741,12 @@ impl DiagnosticsServer {
                     scan = scan_ns,
                     xfm = transform_ns,
                     out_ns = output_ns,
+                    sr = scan_rows,
                     ir = input_rows,
                     or = output_rows,
+                    bi = bytes_in,
+                    qw = queue_wait_ns,
+                    fr = esc(flush_reason),
                     err = errors,
                     status = root.status,
                 );

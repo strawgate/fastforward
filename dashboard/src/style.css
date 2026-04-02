@@ -587,6 +587,19 @@ main {
   border-radius: 3px;
   font-weight: 600;
 }
+.trace-bytes {
+  color: var(--t3);
+  font-size: 10px;
+  font-family: var(--mono);
+}
+.trace-badge-timeout {
+  background: rgba(245, 158, 11, 0.15);
+  color: #f59e0b;
+  font-size: 9px;
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-weight: 600;
+}
 .trace-bar-track {
   display: flex;
   height: 8px;

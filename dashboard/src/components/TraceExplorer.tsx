@@ -21,6 +21,20 @@ function fmt_rows(n: number): string {
   return String(n);
 }
 
+function fmt_bytes(n: number): string {
+  if (n >= 1_048_576) return `${(n / 1_048_576).toFixed(1)}MB`;
+  if (n >= 1_024)     return `${(n / 1_024).toFixed(0)}KB`;
+  return `${n}B`;
+}
+
+function fmt_throughput(bytes: number, ns: number): string {
+  if (ns <= 0) return "";
+  const mbps = (bytes / 1_048_576) / (ns / 1e9);
+  if (mbps >= 100) return `${mbps.toFixed(0)}MB/s`;
+  if (mbps >= 1)   return `${mbps.toFixed(1)}MB/s`;
+  return `${(mbps * 1024).toFixed(0)}KB/s`;
+}
+
 export function TraceExplorer() {
   const [traces, setTraces] = useState<TraceRecord[]>([]);
   const [open, setOpen] = useState(true);
@@ -102,6 +116,12 @@ export function TraceExplorer() {
                         <span class="trace-rows">
                           {fmt_rows(t.input_rows)}→{fmt_rows(t.output_rows)}
                         </span>
+                        {t.bytes_in > 0 && (
+                          <span class="trace-bytes">{fmt_bytes(t.bytes_in)}</span>
+                        )}
+                        {t.flush_reason === "timeout" && (
+                          <span class="trace-badge-timeout">timeout</span>
+                        )}
                         {t.errors > 0 && <span class="trace-error-badge">err</span>}
                       </div>
 
@@ -138,7 +158,7 @@ export function TraceExplorer() {
 
                       {isSelected && (
                         <div class="trace-detail">
-                          <span>scan <b>{fmt_ns(t.scan_ns)}</b></span>
+                          <span>scan <b>{fmt_ns(t.scan_ns)}</b>{t.scan_rows > 0 && ` · ${fmt_rows(t.scan_rows)} rows`}</span>
                           <span>transform <b>{fmt_ns(t.transform_ns)}</b></span>
                           <span>output <b>{fmt_ns(t.output_ns)}</b></span>
                           <span>total <b>{fmt_ns(t.total_ns)}</b></span>
@@ -147,6 +167,13 @@ export function TraceExplorer() {
                           {t.input_rows > 0 && (
                             <span>filter ratio <b>{((1 - t.output_rows / t.input_rows) * 100).toFixed(1)}%</b> dropped</span>
                           )}
+                          {t.bytes_in > 0 && (
+                            <span>input <b>{fmt_bytes(t.bytes_in)}</b> · <b>{fmt_throughput(t.bytes_in, t.total_ns)}</b></span>
+                          )}
+                          {t.queue_wait_ns > 0 && (
+                            <span>queue wait <b>{fmt_ns(t.queue_wait_ns)}</b></span>
+                          )}
+                          <span>flush <b>{t.flush_reason}</b></span>
                         </div>
                       )}
                     </div>
