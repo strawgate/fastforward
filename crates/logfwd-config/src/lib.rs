@@ -243,6 +243,9 @@ pub struct ServerConfig {
     pub metrics_endpoint: Option<String>,
     /// OTLP push interval in seconds. Default: 60.
     pub metrics_interval_secs: Option<u64>,
+    /// OTLP endpoint for trace push (e.g. "http://localhost:4318").
+    /// If not set, traces are only buffered in-process for the dashboard.
+    pub traces_endpoint: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -347,6 +350,14 @@ impl Config {
 
     /// Validate the loaded configuration.
     fn validate(&self) -> Result<(), ConfigError> {
+        if let Some(ep) = &self.server.traces_endpoint {
+            if let Err(msg) = validate_endpoint_url(ep) {
+                return Err(ConfigError::Validation(format!(
+                    "server.traces_endpoint: {msg}"
+                )));
+            }
+        }
+
         if self.pipelines.is_empty() {
             return Err(ConfigError::Validation(
                 "at least one pipeline must be defined".into(),

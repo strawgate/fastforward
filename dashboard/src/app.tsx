@@ -3,7 +3,7 @@ import { api } from "./api";
 import { RateTracker } from "./lib/rates";
 import { RingBuffer } from "./lib/ring";
 import { fmt, fmtBytes, fmtCompact, fmtBytesCompact } from "./lib/format";
-import type { PipelinesResponse, StatsResponse } from "./types";
+import type { PipelinesResponse, StatsResponse, TraceRecord } from "./types";
 import { StatusBar } from "./components/StatusBar";
 import { MetricBadges } from "./components/MetricBadges";
 import { ChartGrid } from "./components/ChartGrid";
@@ -51,6 +51,7 @@ export function App() {
   const [connected, setConnected] = useState(false);
   const [pipes, setPipes] = useState<PipelinesResponse | null>(null);
   const [stats, setStats] = useState<StatsResponse | null>(null);
+  const [traces, setTraces] = useState<TraceRecord[]>([]);
   const [totalErrors, setTotalErrors] = useState(0);
   const seriesRef = useRef(createSeries());
   const [, forceUpdate] = useState(0);
@@ -119,7 +120,8 @@ export function App() {
   }, []);
 
   const poll = useCallback(async () => {
-    const [pipeData, statsData] = await Promise.all([api.pipelines(), api.stats()]);
+    const [pipeData, statsData, tracesData] = await Promise.all([api.pipelines(), api.stats(), api.traces()]);
+    if (tracesData) setTraces(tracesData.traces);
 
     if (pipeData) {
       setConnected(true);
@@ -168,13 +170,13 @@ export function App() {
         }
       }
 
-      if (statsData.batches > 0) {
-        const totalSec = statsData.scan_sec + statsData.transform_sec + statsData.output_sec;
-        const latRate = rates.rate("lat", totalSec * 1000);
-        if (latRate != null) {
-          series[5].ring.push(latRate);
-          series[5].value = latRate.toFixed(1);
-        }
+      // Batch latency: rolling average of total_ns from recent traces.
+      // This gives true ms/batch rather than the cumulative-rate approximation.
+      if (tracesData && tracesData.traces.length > 0) {
+        const recent = tracesData.traces.slice(0, 50);
+        const avgMs = recent.reduce((s, t) => s + t.total_ns, 0) / recent.length / 1e6;
+        series[5].ring.push(avgMs);
+        series[5].value = avgMs.toFixed(1);
       }
     }
 
@@ -209,7 +211,11 @@ export function App() {
         <LogViewer />
 
         {pipes?.pipelines.map((p) => (
-          <PipelineView key={p.name} pipeline={p} />
+          <PipelineView
+            key={p.name}
+            pipeline={p}
+            traces={traces.filter(t => t.pipeline === p.name)}
+          />
         ))}
 
         <ConfigView />

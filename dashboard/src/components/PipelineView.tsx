@@ -1,10 +1,12 @@
 import { useState, useRef } from "preact/hooks";
 import { fmt, fmtBytes } from "../lib/format";
-import type { PipelineData, ComponentData } from "../types";
+import type { PipelineData, ComponentData, TraceRecord } from "../types";
 import { RateTracker } from "../lib/rates";
+import { TraceExplorer } from "./TraceExplorer";
 
 interface Props {
   pipeline: PipelineData;
+  traces: TraceRecord[];
 }
 
 const Arrow = () => (
@@ -16,8 +18,32 @@ const Arrow = () => (
   </div>
 );
 
-export function PipelineView({ pipeline: p }: Props) {
-  const [sel, setSel] = useState<string | null>(null);
+// Human-readable label for component types coming from the server.
+function typeLabel(type: string): string {
+  const map: Record<string, string> = {
+    file:       "File",
+    generator:  "Generator",
+    tcp:        "TCP",
+    udp:        "UDP",
+    otlp:       "OTLP",
+    otlpgrpc:   "OTLP/gRPC",
+    loki:       "Loki",
+    elasticsearch: "Elasticsearch",
+    parquet:    "Parquet",
+    stdout:     "Stdout",
+    null:       "Null",
+  };
+  return map[type.toLowerCase()] ?? type;
+}
+
+// Names like "input_0", "output_1" are auto-generated and not worth showing.
+function isGenericName(name: string): boolean {
+  return /^(input|output)_\d+$/.test(name);
+}
+
+export function PipelineView({ pipeline: p, traces }: Props) {
+  const [sel, setSel]             = useState<string | null>(null);
+  const [tracesOpen, setTracesOpen] = useState(false);
   const ratesRef = useRef(new RateTracker());
 
   const toggle = (id: string) => setSel(sel === id ? null : id);
@@ -38,8 +64,8 @@ export function PipelineView({ pipeline: p }: Props) {
               class={`pn inp ${sel === `i${i}` ? "selected" : ""}`}
               onClick={() => toggle(`i${i}`)}
             >
-              <div class="pn-type">Input</div>
-              <div class="pn-name">{inp.name}</div>
+              <div class="pn-type">{typeLabel(inp.type)}</div>
+              {!isGenericName(inp.name) && <div class="pn-name">{inp.name}</div>}
               <div class="pn-row"><span>lines</span><b>{fmt(inp.lines_total)}</b></div>
               <div class="pn-row"><span>bytes</span><b>{fmtBytes(inp.bytes_total)}</b></div>
               <div class="pn-row"><span>rate</span><b>{compRate(inp, "lines_total")}</b></div>
@@ -51,8 +77,7 @@ export function PipelineView({ pipeline: p }: Props) {
           class={`pn xfm ${sel === "t" ? "selected" : ""}`}
           onClick={() => toggle("t")}
         >
-          <div class="pn-type">Transform</div>
-          <div class="pn-name">SQL</div>
+          <div class="pn-type">SQL</div>
           <div class="pn-row"><span>in</span><b>{fmt(p.transform.lines_in)}</b></div>
           <div class="pn-row"><span>out</span><b>{fmt(p.transform.lines_out)}</b></div>
           <div class="pn-row">
@@ -70,8 +95,8 @@ export function PipelineView({ pipeline: p }: Props) {
               class={`pn out ${sel === `o${i}` ? "selected" : ""}`}
               onClick={() => toggle(`o${i}`)}
             >
-              <div class="pn-type">Output</div>
-              <div class="pn-name">{out.name}</div>
+              <div class="pn-type">{typeLabel(out.type)}</div>
+              {!isGenericName(out.name) && <div class="pn-name">{out.name}</div>}
               <div class="pn-row"><span>lines</span><b>{fmt(out.lines_total)}</b></div>
               <div class="pn-row"><span>bytes</span><b>{fmtBytes(out.bytes_total)}</b></div>
               <div class="pn-row">
@@ -83,7 +108,7 @@ export function PipelineView({ pipeline: p }: Props) {
         ))}
       </div>
 
-      {/* Inspector panel */}
+      {/* Inspector panels */}
       {sel === "t" && (
         <div class="inspector">
           <div class="insp-header">
@@ -108,12 +133,12 @@ export function PipelineView({ pipeline: p }: Props) {
         return (
           <div class="inspector">
             <div class="insp-header">
-              <span class="insp-title">Input &mdash; {inp.name}</span>
+              <span class="insp-title">Input &mdash; {typeLabel(inp.type)}{!isGenericName(inp.name) ? ` · ${inp.name}` : ""}</span>
               <button class="insp-close" onClick={() => setSel(null)}>&times; close</button>
             </div>
             <div class="insp-grid">
-              <div class="insp-kv"><div class="ik-l">Name</div><div class="ik-v">{inp.name}</div></div>
-              <div class="insp-kv"><div class="ik-l">Type</div><div class="ik-v">{inp.type}</div></div>
+              <div class="insp-kv"><div class="ik-l">Type</div><div class="ik-v">{typeLabel(inp.type)}</div></div>
+              {!isGenericName(inp.name) && <div class="insp-kv"><div class="ik-l">Name</div><div class="ik-v">{inp.name}</div></div>}
               <div class="insp-kv"><div class="ik-l">Lines</div><div class="ik-v">{fmt(inp.lines_total)}</div></div>
               <div class="insp-kv"><div class="ik-l">Bytes</div><div class="ik-v">{fmtBytes(inp.bytes_total)}</div></div>
               <div class="insp-kv"><div class="ik-l">Errors</div><div class="ik-v">{inp.errors}</div></div>
@@ -129,12 +154,12 @@ export function PipelineView({ pipeline: p }: Props) {
         return (
           <div class="inspector">
             <div class="insp-header">
-              <span class="insp-title">Output &mdash; {out.name}</span>
+              <span class="insp-title">Output &mdash; {typeLabel(out.type)}{!isGenericName(out.name) ? ` · ${out.name}` : ""}</span>
               <button class="insp-close" onClick={() => setSel(null)}>&times; close</button>
             </div>
             <div class="insp-grid">
-              <div class="insp-kv"><div class="ik-l">Name</div><div class="ik-v">{out.name}</div></div>
-              <div class="insp-kv"><div class="ik-l">Type</div><div class="ik-v">{out.type}</div></div>
+              <div class="insp-kv"><div class="ik-l">Type</div><div class="ik-v">{typeLabel(out.type)}</div></div>
+              {!isGenericName(out.name) && <div class="insp-kv"><div class="ik-l">Name</div><div class="ik-v">{out.name}</div></div>}
               <div class="insp-kv"><div class="ik-l">Lines</div><div class="ik-v">{fmt(out.lines_total)}</div></div>
               <div class="insp-kv"><div class="ik-l">Bytes</div><div class="ik-v">{fmtBytes(out.bytes_total)}</div></div>
               <div class="insp-kv"><div class="ik-l">Errors</div><div class="ik-v" style={out.errors > 0 ? "color:var(--err)" : ""}>{out.errors}</div></div>
@@ -142,6 +167,21 @@ export function PipelineView({ pipeline: p }: Props) {
           </div>
         );
       })()}
+
+      {/* Batch traces — timeline always visible, list shown when expanded */}
+      {traces.length > 0 && (
+        <div class="pipe-traces">
+          <button
+            class="pipe-traces-toggle"
+            onClick={() => setTracesOpen(!tracesOpen)}
+          >
+            <span>Batch Traces</span>
+            <span class="pipe-traces-count">{traces.length} recent</span>
+            <span class="pipe-traces-chevron">{tracesOpen ? "▲" : "▼"}</span>
+          </button>
+          <TraceExplorer traces={traces} collapsed={!tracesOpen} />
+        </div>
+      )}
     </div>
   );
 }

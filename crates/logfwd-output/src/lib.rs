@@ -66,8 +66,8 @@ pub(crate) fn is_transient_error(e: &ureq::Error) -> bool {
 
 /// Metadata about the batch for output serialization.
 pub struct BatchMetadata {
-    /// Resource attributes (k8s pod name, namespace, etc.)
-    pub resource_attrs: Vec<(String, String)>,
+    /// Resource attributes (k8s pod name, namespace, etc.) — Arc so cloning is cheap.
+    pub resource_attrs: Arc<Vec<(String, String)>>,
     /// Observed timestamp in nanoseconds.
     pub observed_time_ns: u64,
 }
@@ -461,7 +461,7 @@ mod tests {
 
     fn make_metadata() -> BatchMetadata {
         BatchMetadata {
-            resource_attrs: vec![],
+            resource_attrs: Arc::default(),
             observed_time_ns: 1_700_000_000_000_000_000,
         }
     }
@@ -616,7 +616,7 @@ mod tests {
         .unwrap();
 
         let meta = BatchMetadata {
-            resource_attrs: vec![("k8s.pod.name".to_string(), "myapp-abc".to_string())],
+            resource_attrs: Arc::new(vec![("k8s.pod.name".to_string(), "myapp-abc".to_string())]),
             observed_time_ns: 1_700_000_000_000_000_000,
         };
 
@@ -926,7 +926,7 @@ mod tests {
         let msg = StringArray::from(vec![Some("something happened")]);
         let batch = RecordBatch::try_new(schema, vec![Arc::new(count), Arc::new(msg)]).unwrap();
         let meta = BatchMetadata {
-            resource_attrs: vec![],
+            resource_attrs: Arc::default(),
             observed_time_ns: 1_700_000_000_000_000_000,
         };
         let mut sink = OtlpSink::new(
@@ -953,7 +953,7 @@ mod tests {
         let status = Int64Array::from(vec![Some(200i64)]);
         let batch = RecordBatch::try_new(schema, vec![Arc::new(status)]).unwrap();
         let meta = BatchMetadata {
-            resource_attrs: vec![],
+            resource_attrs: Arc::default(),
             observed_time_ns: 1_700_000_000_000_000_000,
         };
         let mut sink = OtlpSink::new(

@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use opentelemetry::metrics::Meter;
+use tracing::Instrument;
 
 use logfwd_arrow::scanner::StreamingSimdScanner as Scanner;
 use logfwd_config::{
@@ -37,6 +38,9 @@ enum ChannelMsg {
         bytes: Vec<u8>,
         /// Per-file (source_id, byte_offset) at time of send.
         checkpoints: Vec<(SourceId, ByteOffset)>,
+        /// When the input thread enqueued this message. Used to measure
+        /// queue wait time (time data sat in channel before processing).
+        queued_at: Instant,
     },
     /// Path mapping updates. Sent on file open/rotation.
     /// Must arrive before the first Data referencing a new SourceId.
@@ -63,7 +67,6 @@ struct InputState {
 
 /// A single pipeline: inputs → Scanner → SQL transform → output sinks.
 pub struct Pipeline {
-    #[expect(dead_code, reason = "reserved for future per-pipeline logging")]
     name: String,
     inputs: Vec<InputState>,
     scanner: Scanner,
@@ -74,7 +77,7 @@ pub struct Pipeline {
     batch_timeout: Duration,
     poll_interval: Duration,
     /// Static OTLP resource attributes (e.g. `service.name`) emitted with every batch.
-    resource_attrs: Vec<(String, String)>,
+    resource_attrs: Arc<Vec<(String, String)>>,
     /// Batch lifecycle state machine. Option because begin_drain() consumes self.
     /// Some during run_async, None only after shutdown drain transition.
     machine: Option<PipelineMachine<Running, u64>>,
@@ -208,7 +211,7 @@ impl Pipeline {
             batch_target_bytes: 4 * 1024 * 1024,
             batch_timeout: Duration::from_millis(100),
             poll_interval: Duration::from_millis(10),
-            resource_attrs,
+            resource_attrs: Arc::new(resource_attrs),
             machine: Some(PipelineMachine::new().start()),
         })
     }
@@ -285,6 +288,8 @@ impl Pipeline {
         let mut scan_buf = Vec::with_capacity(self.batch_target_bytes);
         let mut batch_checkpoints: HashMap<SourceId, ByteOffset> = HashMap::new();
         let mut source_paths: HashMap<SourceId, PathBuf> = HashMap::new();
+        // Oldest queued_at in the current accumulating batch — reset after each flush.
+        let mut batch_queued_at: Option<Instant> = None;
         let mut flush_interval = tokio::time::interval(self.batch_timeout);
         flush_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
@@ -296,7 +301,10 @@ impl Pipeline {
 
                 msg = rx.recv() => {
                     match msg {
-                        Some(ChannelMsg::Data { bytes, checkpoints }) => {
+                        Some(ChannelMsg::Data { bytes, checkpoints, queued_at }) => {
+                            if batch_queued_at.is_none() {
+                                batch_queued_at = Some(queued_at);
+                            }
                             scan_buf.extend_from_slice(&bytes);
                             for (sid, offset) in checkpoints {
                                 batch_checkpoints.insert(sid, offset);
@@ -304,7 +312,7 @@ impl Pipeline {
                             // Flush if buffer is large enough.
                             if scan_buf.len() >= self.batch_target_bytes {
                                 self.metrics.inc_flush_by_size();
-                                self.flush_batch(&mut scan_buf, &mut batch_checkpoints).await;
+                                self.flush_batch(&mut scan_buf, &mut batch_checkpoints, "size", batch_queued_at.take()).await;
                                 flush_interval.reset();
                             }
                         }
@@ -323,7 +331,7 @@ impl Pipeline {
                 _ = flush_interval.tick() => {
                     if !scan_buf.is_empty() {
                         self.metrics.inc_flush_by_timeout();
-                        self.flush_batch(&mut scan_buf, &mut batch_checkpoints).await;
+                        self.flush_batch(&mut scan_buf, &mut batch_checkpoints, "timeout", batch_queued_at.take()).await;
                     }
                 }
             }
@@ -336,14 +344,26 @@ impl Pipeline {
         // growth when the channel has many buffered messages.
         while let Some(msg) = rx.recv().await {
             match msg {
-                ChannelMsg::Data { bytes, checkpoints } => {
+                ChannelMsg::Data {
+                    bytes,
+                    checkpoints,
+                    queued_at,
+                } => {
+                    if batch_queued_at.is_none() {
+                        batch_queued_at = Some(queued_at);
+                    }
                     scan_buf.extend_from_slice(&bytes);
                     for (sid, offset) in checkpoints {
                         batch_checkpoints.insert(sid, offset);
                     }
                     if scan_buf.len() >= self.batch_target_bytes {
-                        self.flush_batch(&mut scan_buf, &mut batch_checkpoints)
-                            .await;
+                        self.flush_batch(
+                            &mut scan_buf,
+                            &mut batch_checkpoints,
+                            "drain",
+                            batch_queued_at.take(),
+                        )
+                        .await;
                     }
                 }
                 ChannelMsg::PathUpdate(updates) => {
@@ -364,8 +384,13 @@ impl Pipeline {
 
         // Flush any remaining buffered data.
         if !scan_buf.is_empty() {
-            self.flush_batch(&mut scan_buf, &mut batch_checkpoints)
-                .await;
+            self.flush_batch(
+                &mut scan_buf,
+                &mut batch_checkpoints,
+                "drain",
+                batch_queued_at.take(),
+            )
+            .await;
         }
 
         // Transition machine: Running → Draining → Stopped.
@@ -396,10 +421,25 @@ impl Pipeline {
     /// Creates BatchTickets from checkpoint metadata for each contributing
     /// file source. Tickets are Queued before scan/transform (safe to drop
     /// on error), then begin_send after (must ack or reject).
+    #[tracing::instrument(
+        name = "batch",
+        skip_all,
+        fields(
+            pipeline = %self.name,
+            bytes_in = tracing::field::Empty,
+            flush_reason = tracing::field::Empty,
+            queue_wait_ns = tracing::field::Empty,
+            input_rows = tracing::field::Empty,
+            output_rows = tracing::field::Empty,
+            errors = tracing::field::Empty,
+        )
+    )]
     async fn flush_batch(
         &mut self,
         scan_buf: &mut Vec<u8>,
         batch_checkpoints: &mut HashMap<SourceId, ByteOffset>,
+        flush_reason: &'static str,
+        queued_at: Option<Instant>,
     ) {
         if scan_buf.is_empty() {
             return;
@@ -412,6 +452,14 @@ impl Pipeline {
         // Vec::with_capacity(batch_target_bytes)).
         let mut combined = Vec::with_capacity(self.batch_target_bytes);
         std::mem::swap(scan_buf, &mut combined);
+
+        // Record batch-level attributes now that we know the input size.
+        let span = tracing::Span::current();
+        span.record("bytes_in", combined.len() as u64);
+        span.record("flush_reason", flush_reason);
+        if let Some(qa) = queued_at {
+            span.record("queue_wait_ns", qa.elapsed().as_nanos() as u64);
+        }
 
         // Create Queued tickets (one per contributing file source).
         // These are lightweight — NOT tracked by the machine yet.
@@ -428,16 +476,26 @@ impl Pipeline {
         // Scan (CPU-bound, ~1-5ms per 4MB batch). block_in_place tells
         // tokio to move other tasks off this worker while scanning.
         let t0 = Instant::now();
-        let batch = match tokio::task::block_in_place(|| self.scanner.scan(combined.into())) {
-            Ok(b) => b,
-            Err(e) => {
-                // Queued tickets dropped here — safe, not tracked by machine.
-                self.metrics.inc_scan_error();
-                self.metrics.inc_dropped_batch();
-                eprintln!("pipeline: scan error (batch dropped): {e}");
-                return;
-            }
-        };
+        let batch = {
+            let scan_span =
+                tracing::info_span!("scan", pipeline = %self.name, rows = tracing::field::Empty);
+            let _entered = scan_span.enter();
+            let b = match tokio::task::block_in_place(|| self.scanner.scan(combined.into())) {
+                Ok(b) => b,
+                Err(e) => {
+                    // Queued tickets dropped here — safe, not tracked by machine.
+                    self.metrics.inc_scan_error();
+                    self.metrics.inc_dropped_batch();
+                    eprintln!("pipeline: scan error (batch dropped): {e}");
+                    // Must use `span` (the batch root) not `Span::current()` here —
+                    // _entered is still live so current() points to the scan child span.
+                    span.record("errors", 1u64);
+                    return;
+                }
+            };
+            scan_span.record("rows", b.num_rows() as u64);
+            b
+        }; // _entered and scan_span drop here → span ends
         let scan_elapsed = t0.elapsed();
 
         // begin_send all tickets — machine now tracks them, MUST ack or reject.
@@ -459,14 +517,22 @@ impl Pipeline {
         let num_rows = batch.num_rows() as u64;
         self.metrics.transform_in.inc_lines(num_rows);
 
+        tracing::Span::current().record("input_rows", num_rows);
+
         // Transform (already async).
         let t1 = Instant::now();
-        let result = match self.transform.execute(batch).await {
+        let result = match self
+            .transform
+            .execute(batch)
+            .instrument(tracing::info_span!("transform", pipeline = %self.name, rows_in = num_rows))
+            .await
+        {
             Ok(r) => r,
             Err(e) => {
                 self.metrics.inc_transform_error();
                 self.metrics.inc_dropped_batch();
                 eprintln!("pipeline: transform error (batch dropped): {e}");
+                tracing::Span::current().record("errors", 1u64);
                 // Reject tickets — transform failed, data not delivered.
                 self.ack_all_tickets(sending, false);
                 return;
@@ -491,13 +557,18 @@ impl Pipeline {
             return;
         }
 
+        let out_rows = result.num_rows() as u64;
+        tracing::Span::current().record("output_rows", out_rows);
+
         // Output (block_in_place wraps the sync HTTP send).
         let t2 = Instant::now();
         let metadata = BatchMetadata {
-            resource_attrs: self.resource_attrs.clone(),
+            resource_attrs: Arc::clone(&self.resource_attrs),
             observed_time_ns: now_nanos(),
         };
-        let output_ok =
+        let output_ok = {
+            let out_span = tracing::info_span!("output", pipeline = %self.name, rows = out_rows);
+            let _entered = out_span.enter();
             match tokio::task::block_in_place(|| self.output.send_batch(&result, &metadata)) {
                 Ok(()) => true,
                 Err(e) => {
@@ -515,8 +586,13 @@ impl Pipeline {
                     eprintln!("pipeline: output error (batch dropped): {e}");
                     false
                 }
-            };
+            }
+        }; // _entered and out_span drop here → output span ends
         let output_elapsed = t2.elapsed();
+
+        if !output_ok {
+            tracing::Span::current().record("errors", 1u64);
+        }
 
         // Ack or reject all tickets based on output result.
         self.ack_all_tickets(sending, output_ok);
@@ -590,6 +666,7 @@ fn input_poll_loop(
             Ok(e) => e,
             Err(e) => {
                 eprintln!("pipeline input: poll error: {e}");
+                tracing::warn!(input = input.source.name(), error = %e, "input.poll_error");
                 std::thread::sleep(Duration::from_millis(100));
                 continue;
             }
@@ -603,12 +680,16 @@ fn input_poll_loop(
                     InputEvent::Data { bytes } => {
                         input.buf.extend_from_slice(&bytes);
                     }
-                    InputEvent::Rotated | InputEvent::Truncated => {
+                    InputEvent::Rotated => {
                         // FramedInput already resets its internal state on these events.
-                        // Track these expected lifecycle events separately from errors.
                         input.stats.inc_rotations();
-                        // File change — clear known sources to trigger PathUpdate on next send.
                         known_sources.clear();
+                        tracing::info!(input = input.source.name(), "input.file_rotated");
+                    }
+                    InputEvent::Truncated => {
+                        input.stats.inc_rotations();
+                        known_sources.clear();
+                        tracing::info!(input = input.source.name(), "input.file_truncated");
                     }
                     _ => {}
                 }
@@ -645,8 +726,17 @@ fn input_poll_loop(
                         .filter(|(s, _)| new_sources.contains(s))
                         .collect();
                     if !paths.is_empty() {
-                        let _ =
-                            blocking_send_channel_msg(&tx, &metrics, ChannelMsg::PathUpdate(paths));
+                        tracing::info!(
+                            input = input.source.name(),
+                            files = paths.len(),
+                            "input.new_files"
+                        );
+                        let _ = blocking_send_channel_msg(
+                            input.source.name(),
+                            &tx,
+                            &metrics,
+                            ChannelMsg::PathUpdate(paths),
+                        );
                     }
                 }
                 known_sources = current_sources;
@@ -655,8 +745,9 @@ fn input_poll_loop(
             let msg = ChannelMsg::Data {
                 bytes: data,
                 checkpoints,
+                queued_at: Instant::now(),
             };
-            if blocking_send_channel_msg(&tx, &metrics, msg).is_err() {
+            if blocking_send_channel_msg(input.source.name(), &tx, &metrics, msg).is_err() {
                 break;
             }
             buffered_since = None;
@@ -670,12 +761,14 @@ fn input_poll_loop(
         let msg = ChannelMsg::Data {
             bytes: data,
             checkpoints,
+            queued_at: Instant::now(),
         };
-        let _ = blocking_send_channel_msg(&tx, &metrics, msg);
+        let _ = blocking_send_channel_msg(input.source.name(), &tx, &metrics, msg);
     }
 }
 
 fn blocking_send_channel_msg(
+    input_name: &str,
     tx: &tokio::sync::mpsc::Sender<ChannelMsg>,
     metrics: &PipelineMetrics,
     msg: ChannelMsg,
@@ -683,6 +776,7 @@ fn blocking_send_channel_msg(
     match tx.try_send(msg) {
         Ok(()) => Ok(()),
         Err(tokio::sync::mpsc::error::TrySendError::Full(msg)) => {
+            tracing::warn!(input = input_name, "input.backpressure");
             metrics.inc_backpressure_stall();
             tx.blocking_send(msg)
         }
@@ -1410,6 +1504,7 @@ output:
         tx.try_send(ChannelMsg::Data {
             bytes: vec![1],
             checkpoints: vec![],
+            queued_at: Instant::now(),
         })
         .unwrap();
 
@@ -1417,11 +1512,13 @@ output:
         let metrics2 = Arc::clone(&metrics);
         let handle = std::thread::spawn(move || {
             blocking_send_channel_msg(
+                "test",
                 &tx2,
                 &metrics2,
                 ChannelMsg::Data {
                     bytes: vec![2],
                     checkpoints: vec![],
+                    queued_at: Instant::now(),
                 },
             )
         });
@@ -2315,6 +2412,7 @@ output:
         tx.try_send(ChannelMsg::Data {
             bytes: b"test\n".to_vec(),
             checkpoints: vec![(SourceId(42), ByteOffset(1000))],
+            queued_at: Instant::now(),
         })
         .unwrap();
 

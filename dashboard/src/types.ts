@@ -59,3 +59,31 @@ export interface ConfigResponse {
   raw_yaml: string;
 }
 
+
+export interface TraceRecord {
+  trace_id: string;
+  pipeline: string;
+  start_unix_ns: number;
+  total_ns: number;
+  scan_ns: number;
+  transform_ns: number;
+  output_ns: number;
+  /** Rows extracted by the scanner (before SQL filter). */
+  scan_rows: number;
+  /** Rows into SQL transform (= scan_rows for non-empty scans). */
+  input_rows: number;
+  /** Rows after SQL filter, sent to output. */
+  output_rows: number;
+  /** Raw bytes fed to the scanner. */
+  bytes_in: number;
+  /** Time data waited in channel before processing, nanoseconds. */
+  queue_wait_ns: number;
+  /** "size" | "timeout" | "drain" */
+  flush_reason: string;
+  errors: number;
+  status: "ok" | "error" | "unset";
+}
+
+export interface TracesResponse {
+  traces: TraceRecord[];
+}

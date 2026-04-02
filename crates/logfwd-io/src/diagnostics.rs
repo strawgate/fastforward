@@ -358,6 +358,8 @@ pub struct DiagnosticsServer {
     stderr: crate::stderr_capture::StderrCapture,
     /// Server-side metric history (1 hour, reducing precision).
     history: Arc<crate::metric_history::MetricHistory>,
+    /// Ring buffer of recent batch spans for /api/traces.
+    trace_buf: Option<crate::span_exporter::SpanBuffer>,
 }
 
 impl DiagnosticsServer {
@@ -371,7 +373,13 @@ impl DiagnosticsServer {
             config_path: String::new(),
             stderr: crate::stderr_capture::StderrCapture::new(),
             history: Arc::new(crate::metric_history::MetricHistory::new()),
+            trace_buf: None,
         }
+    }
+
+    /// Attach a span buffer so `/api/traces` can serve batch trace data.
+    pub fn set_trace_buffer(&mut self, buf: crate::span_exporter::SpanBuffer) {
+        self.trace_buf = Some(buf);
     }
 
     /// Store the raw config YAML and file path for the /api/config endpoint.
@@ -446,6 +454,7 @@ impl DiagnosticsServer {
             "/api/config" => self.serve_config(request),
             "/api/logs" => self.serve_logs(request),
             "/api/history" => self.serve_history(request),
+            "/api/traces" => self.serve_traces(request),
             // Prometheus /metrics removed — use OTLP metrics push instead.
             // The /api/pipelines endpoint provides the same data as JSON.
             _ => {
@@ -626,6 +635,127 @@ impl DiagnosticsServer {
             "false"
         });
         body.push('}');
+
+        let header = tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+            .map_err(|()| io::Error::other("invalid HTTP header"))?;
+        let resp = tiny_http::Response::from_string(body).with_header(header);
+        request.respond(resp)?;
+        Ok(())
+    }
+
+    fn serve_traces(&self, request: tiny_http::Request) -> Result<(), Box<dyn std::error::Error>> {
+        use crate::span_exporter::TraceSpan;
+        use std::collections::HashMap;
+        use std::fmt::Write;
+
+        let body = if let Some(ref buf) = self.trace_buf {
+            let all_spans = buf.get_spans();
+
+            // Group child spans by trace_id, and collect root spans separately.
+            let mut roots: Vec<&TraceSpan> = Vec::new();
+            let mut children: HashMap<&str, Vec<&TraceSpan>> = HashMap::new();
+            let root_marker = "0000000000000000";
+
+            for span in &all_spans {
+                if span.parent_id == root_marker {
+                    roots.push(span);
+                } else {
+                    children.entry(&span.trace_id).or_default().push(span);
+                }
+            }
+
+            // Build JSON — newest first, cap at 500 traces.
+            let mut out = String::with_capacity(64 * 1024);
+            out.push_str(r#"{"traces":["#);
+            let mut first = true;
+            for root in roots.iter().rev().take(500) {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+
+                // Pull stage durations and per-stage row counts from child spans.
+                let mut scan_ns = 0u64;
+                let mut scan_rows = 0u64;
+                let mut transform_ns = 0u64;
+                let mut output_ns = 0u64;
+                if let Some(kids) = children.get(root.trace_id.as_str()) {
+                    for kid in kids {
+                        let kid_attr = |key: &str| -> u64 {
+                            kid.attrs
+                                .iter()
+                                .find(|kv| kv[0] == key)
+                                .and_then(|kv| kv[1].parse().ok())
+                                .unwrap_or(0)
+                        };
+                        match kid.name.as_str() {
+                            "scan" => {
+                                scan_ns = kid.duration_ns;
+                                scan_rows = kid_attr("rows");
+                            }
+                            "transform" => transform_ns = kid.duration_ns,
+                            "output" => output_ns = kid.duration_ns,
+                            _ => {}
+                        }
+                    }
+                }
+
+                // Extract well-known attributes from root span.
+                let attr = |key: &str| -> &str {
+                    root.attrs
+                        .iter()
+                        .find(|kv| kv[0] == key)
+                        .map_or("", |kv| kv[1].as_str())
+                };
+                let pipeline = attr("pipeline");
+                let bytes_in: u64 = attr("bytes_in").parse().unwrap_or(0);
+                let flush_reason = attr("flush_reason");
+                let queue_wait_ns: u64 = attr("queue_wait_ns").parse().unwrap_or(0);
+                let input_rows: u64 = attr("input_rows").parse().unwrap_or(0);
+                let output_rows: u64 = attr("output_rows").parse().unwrap_or(0);
+                let errors: u64 = attr("errors").parse().unwrap_or(0);
+
+                let _ = write!(
+                    out,
+                    "{{\
+                        \"trace_id\":\"{tid}\",\
+                        \"pipeline\":\"{pl}\",\
+                        \"start_unix_ns\":{st},\
+                        \"total_ns\":{tot},\
+                        \"scan_ns\":{scan},\
+                        \"transform_ns\":{xfm},\
+                        \"output_ns\":{out_ns},\
+                        \"scan_rows\":{sr},\
+                        \"input_rows\":{ir},\
+                        \"output_rows\":{or},\
+                        \"bytes_in\":{bi},\
+                        \"queue_wait_ns\":{qw},\
+                        \"flush_reason\":\"{fr}\",\
+                        \"errors\":{err},\
+                        \"status\":\"{status}\"\
+                    }}",
+                    tid = root.trace_id,
+                    pl = esc(pipeline),
+                    st = root.start_unix_ns,
+                    tot = root.duration_ns,
+                    scan = scan_ns,
+                    xfm = transform_ns,
+                    out_ns = output_ns,
+                    sr = scan_rows,
+                    ir = input_rows,
+                    or = output_rows,
+                    bi = bytes_in,
+                    qw = queue_wait_ns,
+                    fr = esc(flush_reason),
+                    err = errors,
+                    status = root.status,
+                );
+            }
+            out.push_str("]}");
+            out
+        } else {
+            r#"{"traces":[]}"#.to_string()
+        };
 
         let header = tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
             .map_err(|()| io::Error::other("invalid HTTP header"))?;
@@ -944,16 +1074,25 @@ mod tests {
     use std::io::Read;
     use std::net::TcpListener;
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicU16, Ordering};
 
     /// Serialize diagnostics tests to prevent port collisions.
-    /// free_port() releases the port before the server binds — running
-    /// tests in parallel means another test can grab the same port.
     static TEST_LOCK: Mutex<()> = Mutex::new(());
 
-    /// Pick an available port by binding to :0.
+    /// Pick a port that is both free AND unique within this test run.
+    ///
+    /// Using :0 (OS-assigned) alone has a TOCTOU race: previous test servers
+    /// stay bound after the test ends (JoinHandle drop detaches, not stops),
+    /// and macOS can re-assign the same port on the next :0 bind.  A
+    /// monotonically-increasing counter ensures we never repeat a port.
     fn free_port() -> u16 {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.local_addr().unwrap().port()
+        static NEXT: AtomicU16 = AtomicU16::new(19100);
+        loop {
+            let port = NEXT.fetch_add(1, Ordering::Relaxed);
+            if TcpListener::bind(("127.0.0.1", port)).is_ok() {
+                return port;
+            }
+        }
     }
 
     /// Build a server with one pipeline pre-populated with known counter values.
@@ -1338,5 +1477,87 @@ mod tests {
         // Check that the overall JSON is valid (can be parsed).
         let _v: serde_json::Value =
             serde_json::from_str(&body).expect("invalid JSON output from /api/pipelines");
+    }
+
+    #[test]
+    fn test_traces_endpoint_empty() {
+        let _lock = TEST_LOCK.lock().unwrap();
+        let port = free_port();
+        // Server with no trace buffer attached — should return empty array.
+        let server = server_with_test_pipeline(port);
+        let _handle = server.start().expect("server bind failed");
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        let (status, body) = http_get(port, "/api/traces");
+        assert_eq!(status, 200);
+        assert_eq!(body, r#"{"traces":[]}"#, "unexpected body: {body}");
+    }
+
+    #[test]
+    fn test_traces_endpoint_with_data() {
+        use crate::span_exporter::{SpanBuffer, TraceSpan};
+
+        let _lock = TEST_LOCK.lock().unwrap();
+        let port = free_port();
+
+        let trace_buf = SpanBuffer::new();
+
+        // Push a root span (parent_id all-zeros = root).
+        trace_buf.push_test_span(TraceSpan {
+            trace_id: "aabbccdd00112233aabbccdd00112233".into(),
+            span_id: "aabbccdd00112233".into(),
+            parent_id: "0000000000000000".into(),
+            name: "batch".into(),
+            start_unix_ns: 1_000_000_000,
+            duration_ns: 200_000_000,
+            attrs: vec![
+                ["pipeline".into(), "default".into()],
+                ["bytes_in".into(), "4096".into()],
+                ["input_rows".into(), "100".into()],
+                ["output_rows".into(), "75".into()],
+                ["errors".into(), "0".into()],
+                ["flush_reason".into(), "size".into()],
+                ["queue_wait_ns".into(), "5000000".into()],
+            ],
+            status: "ok",
+        });
+        // Push a scan child span.
+        trace_buf.push_test_span(TraceSpan {
+            trace_id: "aabbccdd00112233aabbccdd00112233".into(),
+            span_id: "1122334455667788".into(),
+            parent_id: "aabbccdd00112233".into(),
+            name: "scan".into(),
+            start_unix_ns: 1_000_000_000,
+            duration_ns: 150_000_000,
+            attrs: vec![["rows".into(), "100".into()]],
+            status: "ok",
+        });
+
+        let mut server = server_with_test_pipeline(port);
+        server.set_trace_buffer(trace_buf);
+        let _handle = server.start().expect("server bind failed");
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        let (status, body) = http_get(port, "/api/traces");
+        assert_eq!(status, 200);
+
+        // Must parse as valid JSON.
+        let v: serde_json::Value =
+            serde_json::from_str(&body).expect("invalid JSON from /api/traces");
+
+        let traces = v["traces"].as_array().expect("traces must be array");
+        assert_eq!(traces.len(), 1, "expected 1 trace, got {}", traces.len());
+
+        let t = &traces[0];
+        assert_eq!(t["pipeline"], "default");
+        assert_eq!(t["input_rows"], 100);
+        assert_eq!(t["output_rows"], 75);
+        assert_eq!(t["errors"], 0);
+        assert_eq!(t["flush_reason"], "size");
+        assert_eq!(t["scan_ns"], 150_000_000u64);
+        assert_eq!(t["total_ns"], 200_000_000u64);
+        assert_eq!(t["status"], "ok");
     }
 }

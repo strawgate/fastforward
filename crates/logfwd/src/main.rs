@@ -347,6 +347,8 @@ async fn run_pipelines(
 ) -> Result<(), CliError> {
     use logfwd::pipeline::Pipeline;
     use logfwd_io::diagnostics::DiagnosticsServer;
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
     let shutdown = CancellationToken::new();
 
     // Listen for SIGINT (Ctrl-C) and SIGTERM to trigger graceful shutdown.
@@ -405,6 +407,15 @@ async fn run_pipelines(
     let meter_provider = build_meter_provider(&config)?;
     let meter = meter_provider.meter("logfwd");
 
+    // Set up the tracing subscriber with an OTel layer that routes spans
+    // to our in-process ring buffer (and optionally to an OTLP endpoint).
+    let trace_buf = logfwd_io::span_exporter::SpanBuffer::new();
+    let tracer_provider = build_tracer_provider(trace_buf.clone(), &config)?;
+    let tracer = opentelemetry::trace::TracerProvider::tracer(&tracer_provider, "logfwd");
+    let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
+    let _ = tracing_subscriber::registry().with(otel_layer).try_init(); // ignore error if a subscriber is already installed (e.g. in tests)
+    opentelemetry::global::set_tracer_provider(tracer_provider.clone());
+
     let mut pipelines = Vec::new();
     for (name, pipe_cfg) in &config.pipelines {
         match Pipeline::from_config(name, pipe_cfg, &meter, base_path) {
@@ -420,6 +431,7 @@ async fn run_pipelines(
     let diag_handle = if let Some(ref addr) = config.server.diagnostics {
         let mut server = DiagnosticsServer::new(addr);
         server.set_config(config_path, config_yaml);
+        server.set_trace_buffer(trace_buf);
         for p in &pipelines {
             server.add_pipeline(Arc::clone(p.metrics()));
         }
@@ -528,6 +540,13 @@ async fn run_pipelines(
             reset()
         );
     }
+    if let Err(e) = tracer_provider.shutdown() {
+        eprintln!(
+            "{}warning{}: tracer provider shutdown: {e}",
+            yellow(),
+            reset()
+        );
+    }
 
     Ok(())
 }
@@ -564,6 +583,63 @@ fn build_meter_provider(
     } else {
         Ok(SdkMeterProvider::builder().build())
     }
+}
+
+// ---------------------------------------------------------------------------
+// OTel tracing + in-process span buffer
+// ---------------------------------------------------------------------------
+
+/// Build a `SdkTracerProvider` that writes completed spans into `buf`.
+/// If `config.server.traces_endpoint` is set, also pushes via OTLP.
+pub fn build_tracer_provider(
+    buf: logfwd_io::span_exporter::SpanBuffer,
+    config: &logfwd_config::Config,
+) -> io::Result<opentelemetry_sdk::trace::SdkTracerProvider> {
+    use logfwd_io::span_exporter::RingBufferExporter;
+    use opentelemetry_sdk::trace::{SdkTracerProvider, SimpleSpanProcessor};
+
+    let ring_processor = SimpleSpanProcessor::new(RingBufferExporter::new(buf));
+
+    let mut builder = SdkTracerProvider::builder().with_span_processor(ring_processor);
+
+    if let Some(ref endpoint) = config.server.traces_endpoint {
+        let otlp_exporter = opentelemetry_otlp::SpanExporter::builder()
+            .with_http()
+            .with_endpoint(endpoint)
+            .build()
+            .map_err(|e| io::Error::other(format!("OTLP trace exporter: {e}")))?;
+        builder = builder.with_span_processor(
+            opentelemetry_sdk::trace::BatchSpanProcessor::builder(otlp_exporter).build(),
+        );
+        eprintln!(
+            "  {}traces push{}: {}",
+            dim(),
+            reset(),
+            redact_url(endpoint)
+        );
+    }
+
+    Ok(builder.build())
+}
+
+/// Return a URL with credentials and query parameters stripped, for safe logging.
+/// Falls back to the original string if parsing fails.
+fn redact_url(url: &str) -> String {
+    // Find scheme end ("://")
+    let after_scheme = url.find("://").map_or(0, |i| i + 3);
+    let rest = &url[after_scheme..];
+    // Strip userinfo (anything before '@' in the authority)
+    let host_start = rest.find('@').map_or(0, |i| i + 1);
+    let authority_and_path = &rest[host_start..];
+    // Strip path/query/fragment — keep only host:port
+    let host_end = authority_and_path
+        .find(['/', '?', '#'])
+        .unwrap_or(authority_and_path.len());
+    let host = &authority_and_path[..host_end];
+    if host.is_empty() {
+        return url.to_string();
+    }
+    format!("{}://{}", &url[..after_scheme.saturating_sub(3)], host)
 }
 
 // ---------------------------------------------------------------------------
