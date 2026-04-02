@@ -697,9 +697,9 @@ impl DiagnosticsServer {
                         .map_or("", |kv| kv[1].as_str())
                 };
                 let pipeline = attr("pipeline");
-                let input_rows = attr("input_rows");
-                let output_rows = attr("output_rows");
-                let errors = attr("errors");
+                let input_rows: u64 = attr("input_rows").parse().unwrap_or(0);
+                let output_rows: u64 = attr("output_rows").parse().unwrap_or(0);
+                let errors: u64 = attr("errors").parse().unwrap_or(0);
 
                 let _ = write!(
                     out,
