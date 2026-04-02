@@ -32,6 +32,19 @@ pub struct CriLine<'a> {
 /// This is zero-copy — all returned slices point into the input `line`.
 /// Uses `byte_search::find_byte` (Kani-proven) instead of memchr.
 #[inline]
+#[cfg_attr(kani, kani::ensures(|result: &Option<CriLine>| {
+    if let Some(cri) = result {
+        // All slices must point within input bounds
+        cri.timestamp.as_ptr() >= line.as_ptr()
+            && cri.timestamp.as_ptr() <= unsafe { line.as_ptr().add(line.len()) }
+            && cri.stream.as_ptr() >= line.as_ptr()
+            && cri.stream.as_ptr() <= unsafe { line.as_ptr().add(line.len()) }
+            && cri.message.as_ptr() >= line.as_ptr()
+            && cri.message.as_ptr() <= unsafe { line.as_ptr().add(line.len()) }
+    } else {
+        true
+    }
+}))]
 pub fn parse_cri_line(line: &[u8]) -> Option<CriLine<'_>> {
     use crate::byte_search::find_byte;
 
@@ -514,6 +527,20 @@ mod verification {
                     assert!(result.is_none(), "invalid flag accepted");
                 }
             }
+        }
+    }
+
+    /// Verify parse_cri_line contract: returned slices point within input bounds.
+    #[kani::proof_for_contract(parse_cri_line)]
+    #[kani::unwind(34)]
+    fn verify_parse_cri_line_contract() {
+        let input: [u8; 32] = kani::any();
+        let result = parse_cri_line(&input);
+        // Contract ensures all slices are within bounds
+        if let Some(cri) = result {
+            // If we got a result, the contract guarantees slice safety
+            assert!(!cri.timestamp.is_empty());
+            assert!(!cri.stream.is_empty());
         }
     }
 

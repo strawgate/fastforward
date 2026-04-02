@@ -40,6 +40,7 @@ pub fn encode_varint(buf: &mut Vec<u8>, mut value: u64) {
 /// Compute encoded varint length without writing.
 #[inline(always)]
 #[allow(clippy::match_overlapping_arm)]
+#[cfg_attr(kani, kani::ensures(|result: &usize| *result >= 1 && *result <= 10))]
 pub const fn varint_len(value: u64) -> usize {
     match value {
         0..=0x7F => 1,
@@ -85,6 +86,8 @@ pub fn encode_bytes_field(buf: &mut Vec<u8>, field_number: u32, data: &[u8]) {
 
 /// Compute the encoded size of a length-delimited field (without writing).
 #[inline(always)]
+#[cfg_attr(kani, kani::requires(field_number > 0 && field_number <= 0x1FFFFFFF))]
+#[cfg_attr(kani, kani::ensures(|result: &usize| *result >= data_len))]
 pub const fn bytes_field_size(field_number: u32, data_len: usize) -> usize {
     let tag_size = varint_len(((field_number as u64) << 3) | 2);
     let len_size = varint_len(data_len as u64);
@@ -123,6 +126,7 @@ pub fn hex_decode(hex_bytes: &[u8], out: &mut [u8]) -> bool {
 }
 
 #[inline(always)]
+#[cfg_attr(kani, kani::ensures(|result: &u8| *result <= 15))]
 fn hex_nibble(c: u8) -> u8 {
     match c {
         b'0'..=b'9' => c - b'0',
@@ -189,6 +193,7 @@ fn eq_ignore_case_match(a: &[u8], b: &[u8]) -> bool {
 /// collisions for non-letters (e.g., `@` |0x20 = `` ` ``). Safe here because
 /// the comparison targets ("INFO", "WARN") are all ASCII letters.
 #[inline(always)]
+#[cfg_attr(kani, kani::requires(a.len() >= 4 && b.len() >= 4))]
 fn eq_ignore_case_4(a: &[u8], b: &[u8]) -> bool {
     a[0] | 0x20 == b[0] | 0x20
         && a[1] | 0x20 == b[1] | 0x20
@@ -198,6 +203,7 @@ fn eq_ignore_case_4(a: &[u8], b: &[u8]) -> bool {
 
 /// Case-insensitive 5-byte comparison.
 #[inline(always)]
+#[cfg_attr(kani, kani::requires(a.len() >= 5 && b.len() >= 5))]
 fn eq_ignore_case_5(a: &[u8], b: &[u8]) -> bool {
     a[0] | 0x20 == b[0] | 0x20
         && a[1] | 0x20 == b[1] | 0x20
@@ -986,6 +992,52 @@ mod verification {
         kani::assume(month >= 1 && month <= 12);
         kani::assume(day >= 1 && day <= 31);
         days_from_civil(year, month, day);
+    }
+
+    /// Verify varint_len contract: output is between 1 and 10 inclusive.
+    #[kani::proof_for_contract(varint_len)]
+    fn verify_varint_len_contract() {
+        let value: u64 = kani::any();
+        let result = varint_len(value);
+        // Contract ensures 1 ≤ result ≤ 10, Kani verifies this
+        assert!(result >= 1 && result <= 10);
+    }
+
+    /// Verify bytes_field_size contract: output is at least data_len.
+    #[kani::proof_for_contract(bytes_field_size)]
+    fn verify_bytes_field_size_contract() {
+        let field_number: u32 = kani::any();
+        let data_len: usize = kani::any();
+        kani::assume(field_number > 0 && field_number <= 0x1FFFFFFF);
+        kani::assume(data_len <= 1024); // Bound for proof tractability
+        let result = bytes_field_size(field_number, data_len);
+        // Contract ensures result ≥ data_len
+        assert!(result >= data_len);
+    }
+
+    /// Verify hex_nibble contract: output is at most 15.
+    #[kani::proof_for_contract(hex_nibble)]
+    fn verify_hex_nibble_contract() {
+        let c: u8 = kani::any();
+        let result = hex_nibble(c);
+        // Contract ensures result ≤ 15
+        assert!(result <= 15);
+    }
+
+    /// Verify eq_ignore_case_4 contract: requires slices of length ≥ 4.
+    #[kani::proof_for_contract(eq_ignore_case_4)]
+    fn verify_eq_ignore_case_4_contract() {
+        let a: [u8; 8] = kani::any();
+        let b: [u8; 8] = kani::any();
+        let _ = eq_ignore_case_4(&a[..4], &b[..4]);
+    }
+
+    /// Verify eq_ignore_case_5 contract: requires slices of length ≥ 5.
+    #[kani::proof_for_contract(eq_ignore_case_5)]
+    fn verify_eq_ignore_case_5_contract() {
+        let a: [u8; 8] = kani::any();
+        let b: [u8; 8] = kani::any();
+        let _ = eq_ignore_case_5(&a[..5], &b[..5]);
     }
 
     /// Compositional proof: parse_timestamp_nanos using proven sub-functions.
