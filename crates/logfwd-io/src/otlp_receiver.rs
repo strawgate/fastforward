@@ -98,6 +98,64 @@ impl OtlpReceiverInput {
                         Ok(_) => {}
                     }
 
+                    // Decompress if Content-Encoding is set.
+                    let content_encoding = request
+                        .headers()
+                        .iter()
+                        .find(|h| h.field.equiv("Content-Encoding"))
+                        .map(|h| h.value.as_str().to_lowercase());
+
+                    let body = match content_encoding.as_deref() {
+                        Some("zstd") => {
+                            let decoder = match zstd::Decoder::new(&body[..]) {
+                                Ok(d) => d,
+                                Err(_) => {
+                                    let _ = request.respond(
+                                        tiny_http::Response::from_string(
+                                            "zstd decompression failed",
+                                        )
+                                        .with_status_code(400),
+                                    );
+                                    continue;
+                                }
+                            };
+                            let mut decompressed =
+                                Vec::with_capacity(body.len().min(MAX_BODY_SIZE));
+                            match decoder
+                                .take(MAX_BODY_SIZE as u64 + 1)
+                                .read_to_end(&mut decompressed)
+                            {
+                                Ok(n) if n > MAX_BODY_SIZE => {
+                                    let _ = request.respond(
+                                        tiny_http::Response::from_string("payload too large")
+                                            .with_status_code(413),
+                                    );
+                                    continue;
+                                }
+                                Ok(_) => decompressed,
+                                Err(_) => {
+                                    let _ = request.respond(
+                                        tiny_http::Response::from_string(
+                                            "zstd decompression failed",
+                                        )
+                                        .with_status_code(400),
+                                    );
+                                    continue;
+                                }
+                            }
+                        }
+                        None | Some("identity") => body,
+                        Some(other) => {
+                            let _ = request.respond(
+                                tiny_http::Response::from_string(format!(
+                                    "unsupported content-encoding: {other}"
+                                ))
+                                .with_status_code(415),
+                            );
+                            continue;
+                        }
+                    };
+
                     // Determine content type — accept protobuf and JSON.
                     let content_type = request
                         .headers()
