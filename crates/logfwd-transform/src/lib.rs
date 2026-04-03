@@ -103,10 +103,10 @@ impl QueryAnalyzer {
 
     /// Generate ScanConfig for the scanner based on query analysis.
     ///
-    /// After Phase 10, SQL column references use bare field names (`level`) for
-    /// single-type fields, so `strip_type_suffix` is a no-op for them.  For
-    /// direct conflict-variant references (`status__int`) the double-underscore
-    /// suffix is stripped to recover the JSON key (`status`).
+    /// SQL column references use bare field names (`level`, `status`).
+    /// Conflict fields are now emitted as struct columns by the builders, so
+    /// there are no `__int`/`__str`/`__float` suffixed names in SQL.
+    /// `strip_type_suffix` is a no-op and is kept only for call-site symmetry.
     pub fn scan_config(&self) -> ScanConfig {
         if self.uses_select_star {
             ScanConfig {
@@ -272,23 +272,12 @@ fn expr_as_u8_literal(expr: &SqlExpr) -> Option<u8> {
     }
 }
 
-/// Strip a conflict-column suffix (`__str`, `__int`, `__float`) from a column
-/// name to derive the underlying JSON field name for scanner pushdown.
+/// Strip a conflict-column type suffix from a column name.
 ///
-/// After Phase 10 single-type fields use bare names in SQL (`level`, not
-/// `level_str`), so this function is a no-op for them. It only activates when
-/// a user explicitly references a conflict-variant column such as `status__int`.
-///
-/// Using double-underscore avoids the pre-Phase-10 bug where a real JSON field
-/// named `start_int` would be incorrectly mapped to `start`.
+/// Struct conflict format has no `__int`/`__str`/`__float` suffixes; this
+/// function is now a no-op kept only so call sites remain unchanged.
 fn strip_type_suffix(name: &str) -> String {
-    for suffix in &["__str", "__int", "__float"] {
-        if let Some(base) = name.strip_suffix(suffix)
-            && !base.is_empty()
-        {
-            return base.to_string();
-        }
-    }
+    // Struct conflict format has no type suffixes; this function is now a no-op.
     name.to_string()
 }
 
@@ -605,9 +594,9 @@ impl SqlTransform {
         // don't leave the context without a `logs` table.
         //
         // Normalize the batch first: if the scanner detected type conflicts it
-        // emits double-underscore suffixed columns (`status__int`, `status__str`).
-        // Add a bare `status: Utf8` column so SQL using bare names resolves on
-        // both clean and conflict batches.
+        // emits struct columns (`status: Struct { int: Int64, str: Utf8View }`).
+        // Replace each conflict struct with a flat `status: Utf8` column so SQL
+        // using bare names resolves on both clean and conflict batches.
         let batch = conflict_schema::normalize_conflict_columns(batch);
         let schema = batch.schema();
         let table = MemTable::try_new(schema, vec![vec![batch]])
@@ -1123,11 +1112,12 @@ mod tests {
 
     #[test]
     fn test_filter_hints_typed_column_stripped() {
-        // severity__int in WHERE (direct conflict-column reference) should strip
-        // to "severity" so predicate pushdown still applies.
+        // With the struct conflict format there are no more `__int`/`__str` suffixed
+        // columns. `strip_type_suffix` is a no-op. `severity__int` is an unrecognised
+        // column name, so no severity pushdown fires.
         let a = QueryAnalyzer::new("SELECT * FROM logs WHERE severity__int <= 4").unwrap();
         let h = a.filter_hints();
-        assert_eq!(h.max_severity, Some(4));
+        assert_eq!(h.max_severity, None);
     }
 
     #[test]

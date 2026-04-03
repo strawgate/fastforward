@@ -15,7 +15,7 @@ use logfwd_io::diagnostics::ComponentStats;
 
 use super::{
     BatchMetadata, Compression, HTTP_MAX_RETRIES, HTTP_RETRY_INITIAL_DELAY_MS, OutputSink,
-    is_transient_error, parse_column_name, str_value,
+    is_transient_error, str_value,
 };
 
 // ---------------------------------------------------------------------------
@@ -314,7 +314,7 @@ fn resolve_batch_columns(batch: &RecordBatch) -> BatchColumns<'_> {
 
     for (idx, field) in schema.fields().iter().enumerate() {
         let col_name = field.name().as_str();
-        let (field_name, _) = parse_column_name(col_name);
+        let field_name = col_name;
         match field_name {
             "timestamp" | "time" | "ts" => {
                 if timestamp_col.is_none()
@@ -378,8 +378,7 @@ fn resolve_batch_columns(batch: &RecordBatch) -> BatchColumns<'_> {
         if excluded.contains(&idx) {
             continue;
         }
-        let col_name = field.name().as_str();
-        let (field_name, _) = parse_column_name(col_name);
+        let field_name = field.name().as_str();
         // Dispatch on the actual Arrow DataType, not the column name suffix.
         // A SQL transform may produce a column whose name suffix disagrees with
         // its real type (e.g. `SELECT level_str AS count_int`); using

@@ -31,7 +31,7 @@ use std::io::{self, Write};
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use arrow::array::{Array, AsArray};
+use arrow::array::{Array, AsArray, StructArray};
 use arrow::datatypes::DataType;
 use arrow::record_batch::RecordBatch;
 
@@ -93,6 +93,10 @@ pub trait OutputSink: Send {
 /// "duration_ms_int" -> ("duration_ms", "int")
 /// "level_str"       -> ("level", "str")
 /// "_raw"            -> ("_raw", "")
+///
+/// Deprecated: the flat-suffix scheme is being replaced by struct conflict
+/// columns.  This function is kept for backward compatibility with
+/// `otlp_sink.rs` column-role detection.
 pub fn parse_column_name(col_name: &str) -> (&str, &str) {
     if let Some(pos) = col_name.rfind('_') {
         let suffix = &col_name[pos + 1..];
@@ -104,70 +108,234 @@ pub fn parse_column_name(col_name: &str) -> (&str, &str) {
 }
 
 // ---------------------------------------------------------------------------
+// Struct conflict column helpers
+// ---------------------------------------------------------------------------
+
+/// Returns `true` if a Struct column's child fields are all type-name fields
+/// ("int", "float", "str", "bool") — i.e. it is a conflict struct column.
+fn is_conflict_struct(fields: &arrow::datatypes::Fields) -> bool {
+    !fields.is_empty()
+        && fields
+            .iter()
+            .all(|f| matches!(f.name().as_str(), "int" | "float" | "str" | "bool"))
+}
+
+/// JSON output priority: higher wins per row.  Int64 > Float64 > Boolean > Utf8.
+fn json_priority(dt: &DataType) -> u8 {
+    match dt {
+        DataType::Int64 => 4,
+        DataType::Float64 => 3,
+        DataType::Boolean => 2,
+        _ => 1,
+    }
+}
+
+/// String-coalesce priority: Utf8 wins (for Loki labels etc.), then Bool, Int, Float.
+fn str_priority(dt: &DataType) -> u8 {
+    match dt {
+        DataType::Utf8 | DataType::Utf8View | DataType::LargeUtf8 => 4,
+        DataType::Boolean => 3,
+        DataType::Int64 => 2,
+        DataType::Float64 => 1,
+        _ => 0,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ColVariant / ColInfo
+// ---------------------------------------------------------------------------
+
+/// Where to find one typed variant of a conflict field.
+pub enum ColVariant {
+    /// A top-level flat Arrow column.
+    Flat { col_idx: usize, dt: DataType },
+    /// One child field inside a StructArray conflict column.
+    StructField {
+        struct_col_idx: usize,
+        field_idx: usize,
+        dt: DataType,
+    },
+}
+
+/// Describes one output JSON field, potentially backed by a struct conflict
+/// column or multiple flat typed columns.
+pub struct ColInfo {
+    /// Logical field name (e.g. "status", "_raw").
+    pub field_name: String,
+    /// Variants ordered for JSON output: Int64 > Float64 > Boolean > Utf8.
+    pub json_variants: Vec<ColVariant>,
+    /// Variants ordered for the virtual coalesced Utf8 column: Utf8 first,
+    /// then Boolean, Int64, Float64.  Used by Loki label extraction.
+    pub str_variants: Vec<ColVariant>,
+}
+
+// ---------------------------------------------------------------------------
 // JSON serialization helpers (shared by StdoutSink and JsonLinesSink)
 // ---------------------------------------------------------------------------
 
-/// Describes one output field, potentially backed by multiple Arrow columns.
-///
-/// A JSON field like "status" that had both integer and string values across
-/// rows produces `status_int` (Int64) and `status_str` (Utf8) columns. This
-/// struct groups them so the output picks the first non-null variant per row,
-/// preserving type fidelity (integers stay unquoted, strings stay quoted).
-pub struct ColInfo {
-    /// Base field name with type suffix stripped (e.g. "status" from "status_int").
-    pub field_name: String,
-    /// All column variants for this field, ordered by type priority (Int64 first).
-    /// Each entry is (column_index, data_type).
-    pub variants: Vec<(usize, DataType)>,
+/// Extract the `DataType` from any `ColVariant`.
+fn variant_dt(v: &ColVariant) -> &DataType {
+    match v {
+        ColVariant::Flat { dt, .. } => dt,
+        ColVariant::StructField { dt, .. } => dt,
+    }
 }
 
-/// Priority for Arrow DataTypes when multiple columns exist for the same field.
-/// Higher priority types are checked first per row — the first non-null wins.
-fn datatype_priority(dt: &DataType) -> u8 {
-    match dt {
-        DataType::Int64 => 3,
-        DataType::Float64 => 2,
-        _ => 1, // Utf8, Utf8View, or anything else
+/// Returns `true` if the given `ColVariant` is null at `row` in `batch`.
+pub(crate) fn is_null(batch: &RecordBatch, variant: &ColVariant, row: usize) -> bool {
+    match variant {
+        ColVariant::Flat { col_idx, .. } => batch.column(*col_idx).is_null(row),
+        ColVariant::StructField {
+            struct_col_idx,
+            field_idx,
+            ..
+        } => {
+            let sa = batch
+                .column(*struct_col_idx)
+                .as_any()
+                .downcast_ref::<StructArray>()
+                .expect("conflict struct column must be StructArray");
+            sa.is_null(row) || sa.column(*field_idx).is_null(row)
+        }
     }
+}
+
+/// Return a reference to the underlying Arrow array for a `ColVariant`.
+pub(crate) fn get_array<'b>(batch: &'b RecordBatch, variant: &ColVariant) -> &'b dyn Array {
+    match variant {
+        ColVariant::Flat { col_idx, .. } => batch.column(*col_idx).as_ref(),
+        ColVariant::StructField {
+            struct_col_idx,
+            field_idx,
+            ..
+        } => {
+            let sa = batch
+                .column(*struct_col_idx)
+                .as_any()
+                .downcast_ref::<StructArray>()
+                .expect("conflict struct column must be StructArray");
+            sa.column(*field_idx).as_ref()
+        }
+    }
+}
+
+/// Coalesce a conflict field to a `String` using `str_variants` ordering
+/// (Utf8 wins, then Boolean, Int64, Float64).  Returns `None` if all variants
+/// are null.
+///
+/// Used by Loki label extraction to always produce a string value.
+pub(crate) fn coalesce_as_str(batch: &RecordBatch, row: usize, col: &ColInfo) -> Option<String> {
+    let variant = col.str_variants.iter().find(|v| !is_null(batch, v, row))?;
+    let arr = get_array(batch, variant);
+    let s = match arr.data_type() {
+        DataType::Int64 => {
+            let v = arr.as_primitive::<arrow::datatypes::Int64Type>().value(row);
+            itoa::Buffer::new().format(v).to_string()
+        }
+        DataType::Float64 => {
+            let v = arr
+                .as_primitive::<arrow::datatypes::Float64Type>()
+                .value(row);
+            if v.is_finite() {
+                ryu::Buffer::new().format_finite(v).to_string()
+            } else {
+                return None;
+            }
+        }
+        DataType::Boolean => {
+            if arr.as_boolean().value(row) {
+                "true".to_string()
+            } else {
+                "false".to_string()
+            }
+        }
+        _ => str_value(arr, row).to_string(),
+    };
+    Some(s)
 }
 
 /// Build a grouped, ordered list of output fields from a RecordBatch schema.
 ///
-/// Columns sharing the same base field name (e.g. `status_int` and `status_str`)
-/// are grouped into a single `ColInfo` with multiple variants. During output,
-/// the first non-null variant per row is used — no data is silently dropped.
+/// Handles both struct conflict columns (`status: Struct { int, str }`) and
+/// legacy flat typed columns (`status_int`, `status_str`).  The returned
+/// `ColInfo` items contain two independently ordered variant lists for the
+/// two coalesce strategies.
 pub fn build_col_infos(batch: &RecordBatch) -> Vec<ColInfo> {
     let schema = batch.schema();
+    let mut infos: Vec<ColInfo> = Vec::new();
 
-    // Collect (field_name, column_index, data_type) for every column.
-    let mut entries: Vec<(String, usize, DataType)> = Vec::new();
-    for (idx, field) in schema.fields().iter().enumerate() {
-        let (field_name, _) = parse_column_name(field.name().as_str());
-        entries.push((field_name.to_string(), idx, field.data_type().clone()));
-    }
+    for (col_idx, field) in schema.fields().iter().enumerate() {
+        match field.data_type() {
+            DataType::Struct(child_fields) if is_conflict_struct(child_fields) => {
+                // Struct conflict column: one ColInfo, variants = child fields.
+                let mut json_variants: Vec<ColVariant> = child_fields
+                    .iter()
+                    .enumerate()
+                    .map(|(field_idx, f)| ColVariant::StructField {
+                        struct_col_idx: col_idx,
+                        field_idx,
+                        dt: f.data_type().clone(),
+                    })
+                    .collect();
+                let mut str_variants: Vec<ColVariant> = child_fields
+                    .iter()
+                    .enumerate()
+                    .map(|(field_idx, f)| ColVariant::StructField {
+                        struct_col_idx: col_idx,
+                        field_idx,
+                        dt: f.data_type().clone(),
+                    })
+                    .collect();
 
-    // Group by field_name, preserving first-seen order.
-    let mut groups: Vec<ColInfo> = Vec::new();
-    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    for (field_name, idx, dt) in entries {
-        if let Some(&group_idx) = seen.get(&field_name) {
-            groups[group_idx].variants.push((idx, dt));
-        } else {
-            seen.insert(field_name.clone(), groups.len());
-            groups.push(ColInfo {
-                field_name,
-                variants: vec![(idx, dt)],
-            });
+                json_variants.sort_by_key(|v| std::cmp::Reverse(json_priority(variant_dt(v))));
+                str_variants.sort_by_key(|v| std::cmp::Reverse(str_priority(variant_dt(v))));
+
+                infos.push(ColInfo {
+                    field_name: field.name().clone(),
+                    json_variants,
+                    str_variants,
+                });
+            }
+            dt => {
+                // Plain flat column (may be a legacy `_int`/`_str` suffixed column
+                // OR a post-SQL Utf8 coalesced column — both handled identically).
+                let (field_name, _) = parse_column_name(field.name().as_str());
+                // Check if there's already a ColInfo for this logical field name
+                // (for legacy flat `status_int` + `status_str` pairs).
+                if let Some(existing) = infos.iter_mut().find(|c| c.field_name == field_name) {
+                    existing.json_variants.push(ColVariant::Flat {
+                        col_idx,
+                        dt: dt.clone(),
+                    });
+                    existing.str_variants.push(ColVariant::Flat {
+                        col_idx,
+                        dt: dt.clone(),
+                    });
+                    // Re-sort both lists.
+                    existing
+                        .json_variants
+                        .sort_by_key(|v| std::cmp::Reverse(json_priority(variant_dt(v))));
+                    existing
+                        .str_variants
+                        .sort_by_key(|v| std::cmp::Reverse(str_priority(variant_dt(v))));
+                } else {
+                    infos.push(ColInfo {
+                        field_name: field_name.to_string(),
+                        json_variants: vec![ColVariant::Flat {
+                            col_idx,
+                            dt: dt.clone(),
+                        }],
+                        str_variants: vec![ColVariant::Flat {
+                            col_idx,
+                            dt: dt.clone(),
+                        }],
+                    });
+                }
+            }
         }
     }
 
-    // Sort variants within each group by priority (Int64 first).
-    for g in &mut groups {
-        g.variants
-            .sort_by(|a, b| datatype_priority(&b.1).cmp(&datatype_priority(&a.1)));
-    }
-
-    groups
+    infos
 }
 
 /// Read a string value from a column at the given row.
@@ -289,10 +457,11 @@ fn write_json_value(arr: &dyn Array, row: usize, out: &mut Vec<u8>) -> io::Resul
 
 /// Write a single row as a JSON object into `out`.
 ///
-/// For fields backed by multiple typed columns (e.g. `status_int` + `status_str`),
-/// the first non-null variant is used. If all variants are null the field is emitted
-/// as `"field":null` to preserve JSON field presence. Type dispatch uses the Arrow
-/// DataType, not the column name suffix.
+/// For fields backed by struct conflict columns or multiple flat typed columns,
+/// the first non-null variant (by `json_variants` ordering) is used. If all
+/// variants are null the field is emitted as `"field":null` to preserve JSON
+/// field presence.  Type dispatch uses the Arrow DataType, not the column name
+/// suffix.
 pub fn write_row_json(
     batch: &RecordBatch,
     row: usize,
@@ -302,11 +471,8 @@ pub fn write_row_json(
     out.push(b'{');
     let mut first = true;
     for col in cols {
-        // Find the first non-null variant for this field.
-        let variant = col
-            .variants
-            .iter()
-            .find(|(idx, _)| !batch.column(*idx).is_null(row));
+        // Find the first non-null variant for this field (json ordering).
+        let variant = col.json_variants.iter().find(|v| !is_null(batch, v, row));
 
         if !first {
             out.push(b',');
@@ -319,12 +485,12 @@ pub fn write_row_json(
         out.push(b'"');
         out.push(b':');
 
-        let Some((arr_idx, _)) = variant else {
+        let Some(v) = variant else {
             // All variants null for this row — emit JSON null to preserve field presence.
             out.extend_from_slice(b"null");
             continue;
         };
-        let arr = batch.column(*arr_idx);
+        let arr = get_array(batch, v);
 
         // Value — dispatch on Arrow DataType, not column name suffix
         write_json_value(arr, row, out)?;
@@ -1585,6 +1751,120 @@ mod write_row_json_tests {
         assert_eq!(v["u16"], 65535, "UInt16 should be number");
         assert_eq!(v["u32"], 1_000_000, "UInt32 should be number");
     }
+
+    // -----------------------------------------------------------------------
+    // Struct conflict column tests (production)
+    // -----------------------------------------------------------------------
+
+    /// Build a `status: Struct { int: Int64, str: Utf8 }` batch.
+    fn make_int_str_struct_batch(
+        int_vals: Vec<Option<i64>>,
+        str_vals: Vec<Option<&str>>,
+    ) -> RecordBatch {
+        use arrow::array::{ArrayRef, Int64Array, StringArray, StructArray};
+        use arrow::buffer::NullBuffer;
+        use arrow::datatypes::{Field, Fields, Schema};
+
+        let int_field = Arc::new(Field::new("int", DataType::Int64, true));
+        let str_field = Arc::new(Field::new("str", DataType::Utf8, true));
+        let int_arr: ArrayRef = Arc::new(Int64Array::from(int_vals));
+        let str_arr: ArrayRef = Arc::new(StringArray::from(str_vals));
+
+        let n = int_arr.len();
+        let nulls = NullBuffer::new(arrow::buffer::BooleanBuffer::collect_bool(n, |i| {
+            !int_arr.is_null(i) || !str_arr.is_null(i)
+        }));
+
+        let struct_field = Field::new(
+            "status",
+            DataType::Struct(Fields::from(vec![
+                int_field.as_ref().clone(),
+                str_field.as_ref().clone(),
+            ])),
+            true,
+        );
+        let struct_arr: ArrayRef = Arc::new(StructArray::new(
+            Fields::from(vec![int_field, str_field]),
+            vec![int_arr, str_arr],
+            Some(nulls),
+        ));
+
+        RecordBatch::try_new(Arc::new(Schema::new(vec![struct_field])), vec![struct_arr]).unwrap()
+    }
+
+    #[test]
+    fn build_col_infos_struct_conflict_json_order() {
+        // Struct with int+str → json_variants should have Int64 first.
+        let batch = make_int_str_struct_batch(vec![Some(200)], vec![Some("OK")]);
+        let cols = build_col_infos(&batch);
+        assert_eq!(cols.len(), 1);
+        assert_eq!(cols[0].field_name, "status");
+        assert!(
+            matches!(
+                cols[0].json_variants[0],
+                ColVariant::StructField {
+                    dt: DataType::Int64,
+                    ..
+                }
+            ),
+            "json_variants[0] must be Int64"
+        );
+    }
+
+    #[test]
+    fn build_col_infos_struct_conflict_str_order() {
+        // str_variants should have Utf8 first.
+        let batch = make_int_str_struct_batch(vec![Some(200)], vec![Some("OK")]);
+        let cols = build_col_infos(&batch);
+        assert_eq!(cols.len(), 1);
+        assert!(
+            matches!(
+                cols[0].str_variants[0],
+                ColVariant::StructField {
+                    dt: DataType::Utf8,
+                    ..
+                }
+            ),
+            "str_variants[0] must be Utf8"
+        );
+    }
+
+    #[test]
+    fn write_row_json_struct_int_emits_number() {
+        // status: Struct{int=200, str=null} → {"status":200}
+        let batch = make_int_str_struct_batch(vec![Some(200), None], vec![None, Some("OK")]);
+        let json = render(&batch, 0);
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(
+            v["status"].is_number(),
+            "expected number, got {}",
+            v["status"]
+        );
+        assert_eq!(v["status"].as_i64(), Some(200));
+    }
+
+    #[test]
+    fn write_row_json_struct_str_emits_string() {
+        // status: Struct{int=null, str="OK"} → {"status":"OK"}
+        let batch = make_int_str_struct_batch(vec![Some(200), None], vec![None, Some("OK")]);
+        let json = render(&batch, 1);
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(
+            v["status"].is_string(),
+            "expected string, got {}",
+            v["status"]
+        );
+        assert_eq!(v["status"].as_str(), Some("OK"));
+    }
+
+    #[test]
+    fn write_row_json_flat_column_unchanged() {
+        // Plain Utf8 column works as before (no struct involved).
+        let batch = make_batch(vec![("level", Arc::new(StringArray::from(vec!["INFO"])))]);
+        let json = render(&batch, 0);
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["level"], "INFO");
+    }
 }
 
 #[cfg(test)]
@@ -1760,5 +2040,31 @@ mod write_row_json_proptests {
                 );
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Kani proofs
+// ---------------------------------------------------------------------------
+
+#[cfg(kani)]
+mod kani_proofs {
+    use super::*;
+    use arrow::datatypes::Fields;
+
+    #[kani::proof]
+    fn proof_is_conflict_struct_empty_returns_false() {
+        let fields = Fields::empty();
+        assert!(!is_conflict_struct(&fields));
+    }
+
+    #[kani::proof]
+    fn proof_json_priority_int_beats_utf8() {
+        assert!(json_priority(&DataType::Int64) > json_priority(&DataType::Utf8));
+    }
+
+    #[kani::proof]
+    fn proof_str_priority_utf8_beats_int() {
+        assert!(str_priority(&DataType::Utf8) > str_priority(&DataType::Int64));
     }
 }

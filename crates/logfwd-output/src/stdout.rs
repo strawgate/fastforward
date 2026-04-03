@@ -7,7 +7,10 @@ use arrow::record_batch::RecordBatch;
 
 use logfwd_io::diagnostics::ComponentStats;
 
-use super::{BatchMetadata, OutputSink, build_col_infos, str_value, write_row_json};
+use super::{
+    BatchMetadata, ColVariant, OutputSink, build_col_infos, get_array, is_null, str_value,
+    write_row_json,
+};
 
 // ---------------------------------------------------------------------------
 // StdoutSink
@@ -174,23 +177,24 @@ impl StdoutSink {
                 // Skip the well-known columns and _raw. Check ALL variant
                 // indices — find_col may have matched a different variant
                 // (e.g. message_str vs message_int).
-                if col.field_name == "_raw"
-                    || col.variants.iter().any(|(idx, _)| {
-                        Some(*idx) == ts_idx || Some(*idx) == level_idx || Some(*idx) == msg_idx
-                    })
-                {
+                let col_matches_well_known = col.json_variants.iter().any(|v| match v {
+                    ColVariant::Flat { col_idx, .. } => {
+                        Some(*col_idx) == ts_idx
+                            || Some(*col_idx) == level_idx
+                            || Some(*col_idx) == msg_idx
+                    }
+                    ColVariant::StructField { .. } => false,
+                });
+                if col.field_name == "_raw" || col_matches_well_known {
                     continue;
                 }
 
                 // Find first non-null variant for this field in this row.
-                let Some((arr_idx, _)) = col
-                    .variants
-                    .iter()
-                    .find(|(idx, _)| !batch.column(*idx).is_null(row))
+                let Some(winner) = col.json_variants.iter().find(|v| !is_null(batch, v, row))
                 else {
                     continue;
                 };
-                let arr = batch.column(*arr_idx);
+                let arr = get_array(batch, winner);
 
                 if has_extra {
                     self.buf.push(b' ');

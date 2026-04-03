@@ -7,12 +7,12 @@
 //! ```
 //!
 //! A single parameterised struct [`JsonExtractUdf`] covers all three functions.
-//! The [`JsonExtractMode`] selects name, return type, and suffix lookup order.
+//! The [`JsonExtractMode`] selects name and return type.
 
 use std::any::Any;
 use std::sync::Arc;
 
-use arrow::array::{Array, StringArray};
+use arrow::array::{Array, StringArray, StructArray};
 use arrow::datatypes::DataType;
 use arrow::record_batch::RecordBatch;
 
@@ -55,18 +55,18 @@ impl JsonExtractMode {
             Self::Float => DataType::Float64,
         }
     }
+}
 
-    /// Column-name suffixes to try, in preference order, when looking up the
-    /// scanner output for this mode. Bare name (`""`) is included as a
-    /// fallback for single-type fields, which use the bare field name
-    /// when there is no type conflict in the batch.
-    fn suffix_order(self) -> &'static [&'static str] {
-        match self {
-            Self::Str => &["", "__str", "__int", "__float"],
-            Self::Int => &["__int", ""],
-            Self::Float => &["__float", "__int", ""],
-        }
-    }
+// ---------------------------------------------------------------------------
+// Helper: identify conflict struct columns
+// ---------------------------------------------------------------------------
+
+/// Returns `true` iff all child field names are conflict-type names.
+fn is_conflict_struct_fields(fields: &arrow::datatypes::Fields) -> bool {
+    !fields.is_empty()
+        && fields
+            .iter()
+            .all(|f| matches!(f.name().as_str(), "int" | "float" | "str" | "bool"))
 }
 
 // ---------------------------------------------------------------------------
@@ -221,65 +221,113 @@ impl ScalarUDFImpl for JsonExtractUdf {
         let target_dt = self.mode.return_type();
         let num_rows = raw_array.len();
 
-        // Special case: Str mode on a conflict batch where the bare column is
-        // absent. Coalesce all variant columns row-by-row into a single Utf8.
-        if self.mode == JsonExtractMode::Str && batch.column_by_name(key).is_none() {
-            let int_col = batch.column_by_name(&format!("{key}__int"));
-            let float_col = batch.column_by_name(&format!("{key}__float"));
-            let str_col = batch.column_by_name(&format!("{key}__str"));
-
-            if int_col.is_some() || float_col.is_some() || str_col.is_some() {
-                use crate::conflict_schema::merge_to_utf8;
-                let merged = merge_to_utf8(
-                    int_col.map(Arc::as_ref),
-                    float_col.map(Arc::as_ref),
-                    str_col.map(Arc::as_ref),
-                    num_rows,
-                );
-                return Ok(ColumnarValue::Array(merged));
-            }
+        // 1. Try flat column (single-type field — no conflict in this batch).
+        // Skip StructArrays here; they are handled in step 2 below.
+        if let Some(flat_col) = batch.column_by_name(key) {
+            if matches!(flat_col.data_type(), DataType::Struct(_)) {
+                // Fall through to step 2 (struct conflict column path).
+            } else {
+                let result = match self.mode {
+                    JsonExtractMode::Str => {
+                        // Cast any type to Utf8.
+                        arrow::compute::cast(flat_col, &DataType::Utf8)?
+                    }
+                    JsonExtractMode::Int => {
+                        if *flat_col.data_type() == DataType::Int64 {
+                            Arc::clone(flat_col)
+                        } else {
+                            // Bare string column — the JSON value is not a number.
+                            // Return all-null rather than coercing "200" → 200.
+                            arrow::array::new_null_array(&DataType::Int64, num_rows)
+                        }
+                    }
+                    JsonExtractMode::Float => {
+                        if *flat_col.data_type() == DataType::Float64 {
+                            Arc::clone(flat_col)
+                        } else if *flat_col.data_type() == DataType::Int64 {
+                            arrow::compute::cast(flat_col, &DataType::Float64)?
+                        } else {
+                            // Bare string column — the JSON value is not a number.
+                            arrow::array::new_null_array(&DataType::Float64, num_rows)
+                        }
+                    }
+                };
+                return Ok(ColumnarValue::Array(result));
+            } // end non-struct flat column branch
         }
 
-        // --- look up the best column by suffix order ---
-        let col = self.mode.suffix_order().iter().find_map(|suffix| {
-            batch
-                .column_by_name(&format!("{key}{suffix}"))
-                .map(Arc::clone)
-        });
+        // 2. Try struct conflict column.
+        let struct_col_idx = batch
+            .schema()
+            .fields()
+            .iter()
+            .enumerate()
+            .find(|(_, f)| {
+                f.name() == key
+                    && matches!(f.data_type(), DataType::Struct(cf) if is_conflict_struct_fields(cf))
+            })
+            .map(|(i, _)| i);
 
-        let result = match col {
-            None => arrow::array::new_null_array(&target_dt, num_rows),
-            Some(arr) => match self.mode {
+        if let Some(idx) = struct_col_idx {
+            let struct_arr = batch
+                .column(idx)
+                .as_any()
+                .downcast_ref::<StructArray>()
+                .expect("column declared as Struct must downcast to StructArray");
+            let field_dt = batch.schema().field(idx).data_type().clone();
+            let child_fields = match &field_dt {
+                DataType::Struct(f) => f.clone(),
+                _ => unreachable!(),
+            };
+
+            let find_child = |name: &str| -> Option<&dyn Array> {
+                child_fields
+                    .iter()
+                    .enumerate()
+                    .find(|(_, f)| f.name() == name)
+                    .map(|(i, _)| struct_arr.column(i).as_ref())
+            };
+
+            let result: Arc<dyn Array> = match self.mode {
                 JsonExtractMode::Str => {
-                    // Cast any type to Utf8.
-                    arrow::compute::cast(&arr, &DataType::Utf8)?
+                    // Coalesce all children to Utf8 (int > float > str priority).
+                    use crate::conflict_schema::merge_to_utf8;
+                    merge_to_utf8(
+                        find_child("int"),
+                        find_child("float"),
+                        find_child("str"),
+                        num_rows,
+                    )
                 }
-                JsonExtractMode::Int => {
-                    if *arr.data_type() == DataType::Int64 {
-                        arr
-                    } else {
-                        // The column is not Int64 (e.g. bare string column found
-                        // via bare-name fallback). The JSON value is not a number,
-                        // so return all-null rather than coercing a string "200" → 200.
-                        arrow::array::new_null_array(&DataType::Int64, num_rows)
-                    }
-                }
+                JsonExtractMode::Int => match find_child("int") {
+                    Some(int_col) => arrow::compute::cast(int_col, &DataType::Int64)
+                        .unwrap_or_else(|_| {
+                            arrow::array::new_null_array(&DataType::Int64, num_rows)
+                        }),
+                    None => arrow::array::new_null_array(&DataType::Int64, num_rows),
+                },
                 JsonExtractMode::Float => {
-                    if *arr.data_type() == DataType::Float64 {
-                        arr
-                    } else if *arr.data_type() == DataType::Int64 {
-                        arrow::compute::cast(&arr, &DataType::Float64)?
+                    if let Some(float_col) = find_child("float") {
+                        arrow::compute::cast(float_col, &DataType::Float64).unwrap_or_else(|_| {
+                            arrow::array::new_null_array(&DataType::Float64, num_rows)
+                        })
+                    } else if let Some(int_col) = find_child("int") {
+                        // Promote int to float.
+                        arrow::compute::cast(int_col, &DataType::Float64).unwrap_or_else(|_| {
+                            arrow::array::new_null_array(&DataType::Float64, num_rows)
+                        })
                     } else {
-                        // The column is not a numeric type (e.g. bare string column found
-                        // via bare-name fallback). The JSON value is not a number,
-                        // so return all-null rather than coercing a string "1.5" → 1.5.
                         arrow::array::new_null_array(&DataType::Float64, num_rows)
                     }
                 }
-            },
-        };
+            };
+            return Ok(ColumnarValue::Array(result));
+        }
 
-        Ok(ColumnarValue::Array(result))
+        // 3. Neither flat nor conflict struct found → all-null.
+        Ok(ColumnarValue::Array(arrow::array::new_null_array(
+            &target_dt, num_rows,
+        )))
     }
 }
 
