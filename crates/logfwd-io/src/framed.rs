@@ -5,14 +5,16 @@
 //! passthrough). The pipeline receives scanner-ready bytes without knowing
 //! about formats or line boundaries.
 //!
-//! Remainder buffers are tracked per-source so that interleaved data from
-//! multiple files (or TCP connections) never cross-contaminates partial lines.
+//! Remainder buffers and format state are tracked per-source so that
+//! interleaved data from multiple files (or TCP connections) never
+//! cross-contaminates partial lines or CRI P/F aggregation state.
 
 use crate::diagnostics::ComponentStats;
 use crate::filter_hints::FilterHints;
 use crate::format::FormatProcessor;
 use crate::input::{InputEvent, InputSource};
 use crate::tail::ByteOffset;
+use logfwd_core::checkpoint_tracker::CheckpointTracker;
 use logfwd_core::pipeline::SourceId;
 use std::collections::HashMap;
 use std::io;
@@ -23,6 +25,22 @@ use std::sync::Arc;
 /// input without newlines). Applied per source.
 const MAX_REMAINDER_BYTES: usize = 2 * 1024 * 1024;
 
+/// Per-source state for framing and checkpoint tracking.
+///
+/// Each logical source (identified by `Option<SourceId>`) gets its own
+/// remainder buffer, format processor, and checkpoint tracker. This
+/// prevents cross-contamination between sources for both newline framing
+/// and stateful format processing (e.g., CRI P/F aggregation).
+struct SourceState {
+    /// Partial-line bytes after the last newline.
+    remainder: Vec<u8>,
+    /// Per-source format processor (CRI aggregator state is source-scoped).
+    format: FormatProcessor,
+    /// Kani-proven checkpoint offset tracker. Tracks the relationship
+    /// between file read position and the last complete newline boundary.
+    tracker: CheckpointTracker,
+}
+
 /// Wraps a raw [`InputSource`] with newline framing and format processing.
 ///
 /// The inner source provides raw bytes (from file, TCP, UDP, etc.). This
@@ -30,15 +48,16 @@ const MAX_REMAINDER_BYTES: usize = 2 * 1024 * 1024;
 /// and runs format-specific processing (CRI extraction, passthrough, etc.).
 /// The output is scanner-ready bytes.
 ///
-/// Remainder buffers are keyed by `Option<SourceId>` so that interleaved
-/// data from multiple sources never mixes partial lines. Sources without
-/// identity (`None`) share a single remainder buffer.
+/// All per-source state (remainder, format, checkpoint tracker) is keyed by
+/// `Option<SourceId>` so that interleaved data from multiple sources never
+/// mixes partial lines or CRI aggregation state. Sources without identity
+/// (`None`) share a single state entry.
 pub struct FramedInput {
     inner: Box<dyn InputSource>,
-    format: FormatProcessor,
-    /// Per-source remainder buffers. Keyed by `Option<SourceId>` — events
-    /// with `source_id: None` use the `None` key, avoiding sentinel aliasing.
-    remainders: HashMap<Option<SourceId>, Vec<u8>>,
+    /// Template format processor — cloned per-source on first data arrival.
+    format_template: FormatProcessor,
+    /// Per-source state: remainder, format processor, checkpoint tracker.
+    sources: HashMap<Option<SourceId>, SourceState>,
     out_buf: Vec<u8>,
     /// Spare buffer swapped in when out_buf is emitted, preserving capacity
     /// across polls without allocating.
@@ -54,13 +73,14 @@ impl FramedInput {
     ) -> Self {
         Self {
             inner,
-            format,
-            remainders: HashMap::new(),
+            format_template: format,
+            sources: HashMap::new(),
             out_buf: Vec::with_capacity(64 * 1024),
             spare_buf: Vec::with_capacity(64 * 1024),
             stats,
         }
     }
+
 }
 
 impl InputSource for FramedInput {
@@ -78,25 +98,59 @@ impl InputSource for FramedInput {
                     self.stats.inc_bytes(bytes.len() as u64);
 
                     let key = source_id;
+                    let n_bytes = bytes.len() as u64;
+
+                    // Get or create per-source state.
+                    let state = {
+                        let template = &self.format_template;
+                        self.sources.entry(key).or_insert_with(|| SourceState {
+                            remainder: Vec::new(),
+                            format: template.new_instance(),
+                            tracker: CheckpointTracker::new(0),
+                        })
+                    };
 
                     // Prepend remainder from last poll for this source,
                     // reusing the Vec's capacity.
-                    let mut chunk = self.remainders.remove(&key).unwrap_or_default();
+                    let mut chunk = std::mem::take(&mut state.remainder);
                     chunk.extend_from_slice(&bytes);
 
                     // Find last newline — everything before is complete lines,
                     // everything after is the new remainder.
-                    match memchr::memrchr(b'\n', &chunk) {
+                    let last_newline_pos = memchr::memrchr(b'\n', &chunk);
+
+                    // Compute the last newline position relative to the NEW
+                    // bytes only (for the checkpoint tracker). The tracker
+                    // only sees bytes read from the file, not the remainder
+                    // prefix.
+                    let remainder_prefix_len = chunk.len() - bytes.len();
+                    let last_newline_in_new_bytes = last_newline_pos.and_then(|pos| {
+                        if pos >= remainder_prefix_len {
+                            Some((pos - remainder_prefix_len) as u64)
+                        } else {
+                            // The last newline is inside the old remainder,
+                            // not in the new bytes. From the tracker's
+                            // perspective, the new bytes have no newline.
+                            None
+                        }
+                    });
+
+                    // Update checkpoint tracker with the new read.
+                    state.tracker.apply_read(n_bytes, last_newline_in_new_bytes);
+
+                    match last_newline_pos {
                         Some(pos) => {
                             if pos + 1 < chunk.len() {
                                 // Move tail to remainder without allocating.
                                 let tail = chunk.split_off(pos + 1);
                                 if tail.len() > MAX_REMAINDER_BYTES {
                                     self.stats.inc_parse_errors(1);
-                                    // Drop the oversized remainder.
-                                    self.format.reset();
+                                    // Drop the oversized remainder and reset format.
+                                    let state = self.sources.get_mut(&key).expect("just inserted");
+                                    state.format.reset();
                                 } else {
-                                    self.remainders.insert(key, tail);
+                                    let state = self.sources.get_mut(&key).expect("just inserted");
+                                    state.remainder = tail;
                                 }
                                 chunk.truncate(pos + 1);
                             }
@@ -105,17 +159,20 @@ impl InputSource for FramedInput {
                             // No newline at all — entire chunk is remainder.
                             if chunk.len() > MAX_REMAINDER_BYTES {
                                 self.stats.inc_parse_errors(1);
-                                self.format.reset();
+                                let state = self.sources.get_mut(&key).expect("just inserted");
+                                state.format.reset();
                             } else {
-                                self.remainders.insert(key, chunk);
+                                let state = self.sources.get_mut(&key).expect("just inserted");
+                                state.remainder = chunk;
                             }
                             continue;
                         }
                     }
 
-                    // Process complete lines through format handler.
+                    // Process complete lines through per-source format handler.
                     self.out_buf.clear();
-                    self.format.process_lines(&chunk, &mut self.out_buf);
+                    let state = self.sources.get_mut(&key).expect("just inserted");
+                    state.format.process_lines(&chunk, &mut self.out_buf);
 
                     let line_count = memchr::memchr_iter(b'\n', &chunk).count();
                     self.stats.inc_lines(line_count as u64);
@@ -135,19 +192,18 @@ impl InputSource for FramedInput {
                 // Rotation/truncation: clear framing state + forward event.
                 //
                 // When source_id is known, clear only the affected source's
-                // remainder. When unknown (None), clear all remainders as a
+                // state. When unknown (None), clear all sources as a
                 // conservative fallback.
                 event @ (InputEvent::Rotated { source_id }
                 | InputEvent::Truncated { source_id }) => {
                     match source_id {
                         Some(_) => {
-                            self.remainders.remove(&source_id);
+                            self.sources.remove(&source_id);
                         }
                         None => {
-                            self.remainders.clear();
+                            self.sources.clear();
                         }
                     }
-                    self.format.reset();
                     result_events.push(event);
                 }
                 // End of file: flush any partial-line remainder.
@@ -163,15 +219,18 @@ impl InputSource for FramedInput {
                 InputEvent::EndOfFile { source_id } => {
                     let keys_to_flush: Vec<Option<SourceId>> = match source_id {
                         Some(_) => vec![source_id],
-                        None => self.remainders.keys().copied().collect(),
+                        None => self.sources.keys().copied().collect(),
                     };
                     for key in keys_to_flush {
-                        if let Some(mut remainder) = self.remainders.remove(&key) {
-                            if !remainder.is_empty() {
+                        if let Some(state) = self.sources.get_mut(&key) {
+                            if !state.remainder.is_empty() {
+                                let mut remainder = std::mem::take(&mut state.remainder);
                                 remainder.push(b'\n');
 
                                 self.out_buf.clear();
-                                self.format.process_lines(&remainder, &mut self.out_buf);
+                                let state =
+                                    self.sources.get_mut(&key).expect("just checked existence");
+                                state.format.process_lines(&remainder, &mut self.out_buf);
 
                                 self.stats.inc_lines(1);
 
@@ -201,23 +260,30 @@ impl InputSource for FramedInput {
         self.inner.apply_hints(hints);
     }
 
-    /// Return checkpoint offsets adjusted for buffered remainder bytes.
+    /// Return checkpoint offsets from the Kani-proven CheckpointTracker.
     ///
-    /// The inner source reports the file read offset (bytes consumed from
-    /// the OS). But some of those bytes are sitting in our remainder buffer
-    /// and have NOT been emitted as framed data. Subtracting the remainder
-    /// length gives the true "processed" offset -- the position a crash
-    /// recovery should seek to in order to replay only unprocessed data.
+    /// Each per-source tracker maintains the relationship between the file
+    /// read offset and the last complete newline boundary. The
+    /// `checkpointable_offset()` is always at a newline boundary, so a
+    /// crash + restart from that offset will not skip any unprocessed data.
+    ///
+    /// This replaces ad-hoc `offset.saturating_sub(remainder_len)` with
+    /// the same proven arithmetic from `CheckpointTracker`.
     fn checkpoint_data(&self) -> Vec<(SourceId, ByteOffset)> {
         self.inner
             .checkpoint_data()
             .into_iter()
             .map(|(sid, offset)| {
-                let remainder_len = self
-                    .remainders
-                    .get(&Some(sid))
-                    .map_or(0, |r| r.len() as u64);
-                (sid, ByteOffset(offset.0.saturating_sub(remainder_len)))
+                let checkpointable = self.sources.get(&Some(sid)).map_or(offset.0, |state| {
+                    // The tracker's checkpointable_offset is relative to
+                    // the tracker's cumulative read_offset. We need to
+                    // translate: the inner source reports absolute file
+                    // offset, and the tracker reports how much remainder
+                    // to subtract.
+                    let remainder_len = state.tracker.remainder_len();
+                    offset.0.saturating_sub(remainder_len)
+                });
+                (sid, ByteOffset(checkpointable))
             })
             .collect()
     }
@@ -725,5 +791,110 @@ mod tests {
         let cp = framed.checkpoint_data();
         assert_eq!(cp.len(), 1);
         assert_eq!(cp[0].1, ByteOffset(500));
+    }
+
+    // -----------------------------------------------------------------------
+    // Per-source CRI isolation tests
+    // -----------------------------------------------------------------------
+
+    /// CRI P/F aggregation state is isolated between sources.
+    ///
+    /// Source A sends a P (partial) line, source B sends an F (full) line.
+    /// Without per-source format state, B's F would complete A's P, merging
+    /// data from two different files into one record.
+    #[test]
+    fn cri_pf_state_isolated_between_sources() {
+        let stats = make_stats();
+        let sid_a = SourceId(100);
+        let sid_b = SourceId(200);
+
+        let source = MockSource::new(vec![
+            // Source A: CRI partial line
+            vec![InputEvent::Data {
+                bytes: b"2024-01-15T10:30:00Z stdout P hello \n".to_vec(),
+                source_id: Some(sid_a),
+            }],
+            // Source B: CRI full line (must NOT merge with A's partial)
+            vec![InputEvent::Data {
+                bytes: b"2024-01-15T10:30:01Z stderr F {\"msg\":\"world\"}\n".to_vec(),
+                source_id: Some(sid_b),
+            }],
+            // Source A: CRI full line (completes A's partial)
+            vec![InputEvent::Data {
+                bytes: b"2024-01-15T10:30:02Z stdout F from-A\n".to_vec(),
+                source_id: Some(sid_a),
+            }],
+        ]);
+
+        let mut framed = FramedInput::new(
+            Box::new(source),
+            FormatProcessor::cri(2 * 1024 * 1024, Arc::clone(&stats)),
+            stats,
+        );
+
+        // Poll 1: A's partial — nothing emitted
+        let events1 = framed.poll().unwrap();
+        assert!(collect_data(events1).is_empty());
+
+        // Poll 2: B's full line — emitted as standalone
+        let events2 = framed.poll().unwrap();
+        let data2 = collect_data(events2);
+        assert!(
+            data2.starts_with(b"{\"_timestamp\":\"2024-01-15T10:30:01Z\""),
+            "B's line should be emitted independently"
+        );
+        assert!(
+            !data2.windows(5).any(|w| w == b"hello"),
+            "B's output must NOT contain A's partial"
+        );
+
+        // Poll 3: A's full line — completes A's P+F sequence
+        let events3 = framed.poll().unwrap();
+        let data3 = collect_data(events3);
+        assert!(
+            data3.windows(5).any(|w| w == b"hello"),
+            "A's output should contain the merged P+F data"
+        );
+    }
+
+    /// CheckpointTracker is updated correctly through framing operations.
+    #[test]
+    fn checkpoint_tracker_tracks_remainder() {
+        let stats = make_stats();
+        let sid = SourceId(42);
+
+        let source = MockSource::new(vec![
+            // First read: 9 bytes, newline at position 5
+            vec![InputEvent::Data {
+                bytes: b"hello\nwor".to_vec(),
+                source_id: Some(sid),
+            }],
+            // Second read: 3 bytes, newline at position 1 (the 'd\n')
+            vec![InputEvent::Data {
+                bytes: b"ld\n".to_vec(),
+                source_id: Some(sid),
+            }],
+        ])
+        .with_offsets(vec![(sid, ByteOffset(12))]);
+
+        let mut framed = FramedInput::new(
+            Box::new(source),
+            FormatProcessor::passthrough(Arc::clone(&stats)),
+            stats,
+        );
+
+        // After first poll: remainder is "wor" (3 bytes)
+        let _ = framed.poll().unwrap();
+        let state = framed.sources.get(&Some(sid)).unwrap();
+        assert_eq!(state.tracker.remainder_len(), 3);
+
+        // After second poll: remainder is empty (all consumed)
+        let _ = framed.poll().unwrap();
+        let state = framed.sources.get(&Some(sid)).unwrap();
+        assert_eq!(state.tracker.remainder_len(), 0);
+
+        // Checkpoint should reflect: 12 - 0 = 12
+        let cp = framed.checkpoint_data();
+        assert_eq!(cp[0].1, ByteOffset(12));
     }
 }
