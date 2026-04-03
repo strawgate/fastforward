@@ -233,7 +233,7 @@ impl FileTailer {
         let mut tailer = Self::new(&initial_paths, config)?;
         tailer.glob_patterns = patterns
             .iter()
-            .map(std::string::ToString::to_string)
+            .map(ToString::to_string)
             .collect();
         Ok(tailer)
     }
@@ -681,7 +681,7 @@ mod tests {
         // Truncate and write new data (simulating copytruncate).
         {
             let f = File::create(&log_path).unwrap(); // truncates
-            let mut f = std::io::BufWriter::new(f);
+            let mut f = io::BufWriter::new(f);
             writeln!(f, "after truncate 1").unwrap();
             writeln!(f, "after truncate 2").unwrap();
         }

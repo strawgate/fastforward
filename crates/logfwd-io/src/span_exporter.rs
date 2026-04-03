@@ -113,7 +113,7 @@ impl SpanExporter for RingBufferExporter {
     fn export(
         &self,
         batch: Vec<SpanData>,
-    ) -> impl std::future::Future<Output = OTelSdkResult> + Send {
+    ) -> impl Future<Output = OTelSdkResult> + Send {
         let spans: Vec<TraceSpan> = batch.into_iter().map(convert).collect();
         if let Ok(mut buf) = self.buf.inner.lock() {
             for span in spans {

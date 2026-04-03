@@ -402,8 +402,8 @@ impl ElasticsearchAsyncSink {
                 let len = self.batch_buf.len();
                 // Remove the trailing `}\n` (2 bytes).
                 if !self.batch_buf.ends_with(b"}\n") {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
                         "serialize_batch: JSON document did not end with '}\\n' — internal invariant violated",
                     ));
                 }
@@ -535,7 +535,7 @@ impl super::sink::Sink for ElasticsearchAsyncSink {
         batch: &'a RecordBatch,
         metadata: &'a BatchMetadata,
     ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = io::Result<super::sink::SendResult>> + Send + 'a>,
+        Box<dyn Future<Output = io::Result<super::sink::SendResult>> + Send + 'a>,
     > {
         Box::pin(async move {
             self.serialize_batch(batch, metadata)?;
@@ -556,7 +556,7 @@ impl super::sink::Sink for ElasticsearchAsyncSink {
 
     fn flush(
         &mut self,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = io::Result<()>> + Send + '_>> {
+    ) -> std::pin::Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
         Box::pin(async { Ok(()) })
     }
 
@@ -566,7 +566,7 @@ impl super::sink::Sink for ElasticsearchAsyncSink {
 
     fn shutdown(
         &mut self,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = io::Result<()>> + Send + '_>> {
+    ) -> std::pin::Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
         Box::pin(async { Ok(()) })
     }
 }
@@ -977,8 +977,8 @@ mod snapshot_tests {
     use arrow::record_batch::RecordBatch;
     use std::sync::Arc;
 
-    fn make_stats() -> Arc<logfwd_io::diagnostics::ComponentStats> {
-        Arc::new(logfwd_io::diagnostics::ComponentStats::default())
+    fn make_stats() -> Arc<ComponentStats> {
+        Arc::new(ComponentStats::default())
     }
 
     fn make_sync_sink() -> ElasticsearchSink {

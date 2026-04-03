@@ -1173,7 +1173,7 @@ mod tests {
                     stream = Some(s);
                     break;
                 }
-                Err(_) => std::thread::sleep(std::time::Duration::from_millis(50)),
+                Err(_) => thread::sleep(std::time::Duration::from_millis(50)),
             }
         }
         let mut stream = stream.unwrap_or_else(|| {
@@ -1235,7 +1235,7 @@ mod tests {
         let _handle = server.start().expect("server bind failed");
 
         // Give the server a moment to bind.
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        thread::sleep(std::time::Duration::from_millis(100));
 
         let (status, body) = http_get(port, "/health");
         assert_eq!(status, 200);
@@ -1255,7 +1255,7 @@ mod tests {
         let server = server_with_test_pipeline(port);
         let _handle = server.start().expect("server bind failed");
 
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        thread::sleep(std::time::Duration::from_millis(100));
 
         let (status, body) = http_get(port, "/api/pipelines");
         assert_eq!(status, 200);
@@ -1297,7 +1297,7 @@ mod tests {
         });
         let _handle = server.start().expect("server bind failed");
 
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        thread::sleep(std::time::Duration::from_millis(100));
 
         let (status, body) = http_get(port, "/api/stats");
         assert_eq!(status, 200);
@@ -1375,7 +1375,7 @@ mod tests {
         let server = server_with_test_pipeline(port);
         let _handle = server.start().expect("server bind failed");
 
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        thread::sleep(std::time::Duration::from_millis(100));
 
         let (status, _body) = http_get(port, "/nonexistent");
         assert_eq!(status, 404);
@@ -1390,7 +1390,7 @@ mod tests {
         let server = server_with_test_pipeline(port);
         let _handle = server.start().expect("server bind failed");
 
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        thread::sleep(std::time::Duration::from_millis(100));
 
         let (status, body) = http_get(port, "/api/pipelines");
         assert_eq!(status, 200);
@@ -1418,7 +1418,7 @@ mod tests {
         });
         let _handle = server.start().expect("server bind failed");
 
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        thread::sleep(std::time::Duration::from_millis(100));
 
         let (status, body) = http_get(port, "/api/pipelines");
         assert_eq!(status, 200);
@@ -1438,7 +1438,7 @@ mod tests {
         // Don't add any pipelines.
         let _handle = server.start().expect("server bind failed");
 
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        thread::sleep(std::time::Duration::from_millis(100));
 
         let (status, body) = http_get(port, "/ready");
         assert_eq!(status, 503, "body: {}", body);
@@ -1459,7 +1459,7 @@ mod tests {
         server.add_pipeline(Arc::new(pm));
         let _handle = server.start().expect("server bind failed");
 
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        thread::sleep(std::time::Duration::from_millis(100));
 
         let (status, body) = http_get(port, "/ready");
         assert_eq!(status, 200, "body: {}", body);
@@ -1486,7 +1486,7 @@ mod tests {
         server.add_pipeline(Arc::new(pm));
         let _handle = server.start().expect("server bind failed");
 
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        thread::sleep(std::time::Duration::from_millis(100));
 
         let (status, body) = http_get(port, "/api/pipelines");
         assert_eq!(status, 200);
@@ -1510,7 +1510,7 @@ mod tests {
         let server = server_with_test_pipeline(port);
         let _handle = server.start().expect("server bind failed");
 
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        thread::sleep(std::time::Duration::from_millis(100));
 
         let (status, body) = http_get(port, "/api/traces");
         assert_eq!(status, 200);
@@ -1561,7 +1561,7 @@ mod tests {
         server.set_trace_buffer(trace_buf);
         let _handle = server.start().expect("server bind failed");
 
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        thread::sleep(std::time::Duration::from_millis(100));
 
         let (status, body) = http_get(port, "/api/traces");
         assert_eq!(status, 200);
@@ -1597,7 +1597,7 @@ mod tests {
                     stream = Some(s);
                     break;
                 }
-                Err(_) => std::thread::sleep(std::time::Duration::from_millis(50)),
+                Err(_) => thread::sleep(std::time::Duration::from_millis(50)),
             }
         }
         let mut stream = stream.unwrap_or_else(|| panic!("connect failed after retries to {addr}"));
@@ -1627,7 +1627,7 @@ mod tests {
         let server = server_with_test_pipeline(port);
         let _handle = server.start().expect("server bind failed");
 
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        thread::sleep(std::time::Duration::from_millis(100));
 
         for path in &["/health", "/api/pipelines", "/api/stats"] {
             let status = http_post(port, path);
@@ -1644,7 +1644,7 @@ mod tests {
         let server = server_with_test_pipeline(port);
         let _handle = server.start().expect("server bind failed");
 
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        thread::sleep(std::time::Duration::from_millis(100));
 
         let (status, body) = http_get(port, "/metrics");
         assert_eq!(status, 410, "expected 410 Gone for /metrics, got {status}");

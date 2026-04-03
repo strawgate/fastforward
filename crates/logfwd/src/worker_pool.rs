@@ -888,16 +888,16 @@ mod tests {
     impl Sink for CountingSink {
         fn send_batch<'a>(
             &'a mut self,
-            _batch: &'a arrow::record_batch::RecordBatch,
+            _batch: &'a RecordBatch,
             _metadata: &'a BatchMetadata,
-        ) -> Pin<Box<dyn std::future::Future<Output = io::Result<SendResult>> + Send + 'a>>
+        ) -> Pin<Box<dyn Future<Output = io::Result<SendResult>> + Send + 'a>>
         {
             let calls = self.calls.clone();
             let fail = self.fail;
             Box::pin(async move {
                 calls.fetch_add(1, Ordering::Relaxed);
                 if fail {
-                    Err(io::Error::new(io::ErrorKind::Other, "injected failure"))
+                    Err(io::Error::other("injected failure"))
                 } else {
                     Ok(SendResult::Ok)
                 }
@@ -906,7 +906,7 @@ mod tests {
 
         fn flush(
             &mut self,
-        ) -> Pin<Box<dyn std::future::Future<Output = io::Result<()>> + Send + '_>> {
+        ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
             Box::pin(async { Ok(()) })
         }
 
@@ -916,7 +916,7 @@ mod tests {
 
         fn shutdown(
             &mut self,
-        ) -> Pin<Box<dyn std::future::Future<Output = io::Result<()>> + Send + '_>> {
+        ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
             Box::pin(async { Ok(()) })
         }
     }
@@ -935,14 +935,14 @@ mod tests {
             }))
         }
 
-        fn name(&self) -> &str {
+        fn name(&self) -> &'static str {
             "counting"
         }
     }
 
-    fn make_batch() -> arrow::record_batch::RecordBatch {
+    fn make_batch() -> RecordBatch {
         let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Utf8, true)]));
-        arrow::record_batch::RecordBatch::try_new(
+        RecordBatch::try_new(
             schema,
             vec![Arc::new(StringArray::from(vec!["hello"]))],
         )
