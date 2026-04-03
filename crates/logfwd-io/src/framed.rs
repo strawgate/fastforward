@@ -168,6 +168,10 @@ impl InputSource for FramedInput {
     fn set_offset(&mut self, path: &Path, offset: u64) {
         self.inner.set_offset(path, offset);
     }
+
+    fn set_offset_by_source(&mut self, source_id: SourceId, offset: u64) {
+        self.inner.set_offset_by_source(source_id, offset);
+    }
 }
 
 #[cfg(test)]

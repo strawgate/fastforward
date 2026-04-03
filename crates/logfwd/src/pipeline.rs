@@ -3,7 +3,7 @@
 //! Single thread per pipeline. All components are already built and tested;
 //! this module wires them together.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -49,9 +49,6 @@ enum ChannelMsg {
         /// queue wait time (time data sat in channel before processing).
         queued_at: Instant,
     },
-    /// Path mapping updates. Sent on file open/rotation.
-    /// Must arrive before the first Data referencing a new SourceId.
-    PathUpdate(Vec<(SourceId, PathBuf)>),
 }
 
 // ---------------------------------------------------------------------------
@@ -90,9 +87,6 @@ pub struct Pipeline {
     /// Batch lifecycle state machine. Option because begin_drain() consumes self.
     /// Some during run_async, None only after shutdown drain transition.
     machine: Option<PipelineMachine<Running, u64>>,
-    /// Maps SourceId (file fingerprint) → absolute path. Populated from PathUpdate
-    /// messages; used when persisting checkpoints so the store records the path.
-    source_paths: HashMap<SourceId, PathBuf>,
     /// Durable checkpoint store. None when running without persistence (tests).
     checkpoint_store: Option<FileCheckpointStore>,
     /// Throttle checkpoint flushes to at most once per 5 seconds.
@@ -202,12 +196,12 @@ impl Pipeline {
             inputs.push(build_input_state(&input_name, &resolved_cfg, input_stats)?);
         }
 
-        // Restore previously saved file offsets so we resume from where we left off.
+        // Restore previously saved file offsets by fingerprint (SourceId).
+        // No path needed — the tailer finds the matching file by fingerprint.
         for cp in &saved_checkpoints {
-            if let Some(path) = &cp.path {
-                for input in &mut inputs {
-                    input.source.set_offset(path, cp.offset);
-                }
+            let source_id = SourceId(cp.source_id);
+            for input in &mut inputs {
+                input.source.set_offset_by_source(source_id, cp.offset);
             }
         }
 
@@ -269,7 +263,6 @@ impl Pipeline {
             poll_interval: Duration::from_millis(10),
             resource_attrs: Arc::new(resource_attrs),
             machine: Some(PipelineMachine::new().start()),
-            source_paths: HashMap::new(),
             checkpoint_store,
             last_checkpoint_flush: Instant::now(),
         })
@@ -378,11 +371,6 @@ impl Pipeline {
                                 flush_interval.reset();
                             }
                         }
-                        Some(ChannelMsg::PathUpdate(updates)) => {
-                            for (sid, path) in updates {
-                                self.source_paths.insert(sid, path);
-                            }
-                        }
                         None => {
                             // All input threads exited.
                             break;
@@ -435,11 +423,6 @@ impl Pipeline {
                         .await;
                     }
                 }
-                ChannelMsg::PathUpdate(updates) => {
-                    for (sid, path) in updates {
-                        self.source_paths.insert(sid, path);
-                    }
-                }
             }
         }
 
@@ -481,7 +464,7 @@ impl Pipeline {
                         for (source_id, offset) in stopped.final_checkpoints() {
                             store.update(SourceCheckpoint {
                                 source_id: source_id.0,
-                                path: self.source_paths.get(source_id).cloned(),
+                                path: None, // path is metadata, not required for restore
                                 offset: *offset,
                             });
                         }
@@ -711,7 +694,7 @@ impl Pipeline {
                 {
                     store.update(SourceCheckpoint {
                         source_id: advance.source.0,
-                        path: self.source_paths.get(&advance.source).cloned(),
+                        path: None, // path is metadata, not required for restore
                         offset,
                     });
                     any_advanced = true;
@@ -752,9 +735,6 @@ fn input_poll_loop(
     // arrived in this batch", preventing tiny flushes after idle periods.
     let mut buffered_since: Option<Instant> = None;
 
-    // Track known source IDs to detect new files (for PathUpdate messages).
-    let mut known_sources: HashSet<SourceId> = HashSet::new();
-
     loop {
         if shutdown.is_cancelled() {
             break;
@@ -782,14 +762,11 @@ fn input_poll_loop(
                         input.buf.extend_from_slice(&bytes);
                     }
                     InputEvent::Rotated => {
-                        // FramedInput already resets its internal state on these events.
                         input.stats.inc_rotations();
-                        known_sources.clear();
                         tracing::info!(input = input.source.name(), "input.file_rotated");
                     }
                     InputEvent::Truncated => {
                         input.stats.inc_rotations();
-                        known_sources.clear();
                         tracing::info!(input = input.source.name(), "input.file_truncated");
                     }
                     _ => {}
@@ -811,37 +788,6 @@ fn input_poll_loop(
 
             // Snapshot file offsets (hot path — no PathBuf allocation).
             let checkpoints = input.source.checkpoint_data();
-
-            // Detect new sources and send PathUpdate before first Data.
-            let current_sources: HashSet<SourceId> = checkpoints.iter().map(|(s, _)| *s).collect();
-            if current_sources != known_sources {
-                let new_sources: Vec<SourceId> = current_sources
-                    .difference(&known_sources)
-                    .copied()
-                    .collect();
-                if !new_sources.is_empty() {
-                    let paths: Vec<_> = input
-                        .source
-                        .source_paths()
-                        .into_iter()
-                        .filter(|(s, _)| new_sources.contains(s))
-                        .collect();
-                    if !paths.is_empty() {
-                        tracing::info!(
-                            input = input.source.name(),
-                            files = paths.len(),
-                            "input.new_files"
-                        );
-                        let _ = blocking_send_channel_msg(
-                            input.source.name(),
-                            &tx,
-                            &metrics,
-                            ChannelMsg::PathUpdate(paths),
-                        );
-                    }
-                }
-                known_sources = current_sources;
-            }
 
             let msg = ChannelMsg::Data {
                 bytes: data,
@@ -2511,17 +2457,8 @@ output:
         })
         .unwrap();
 
-        tx.try_send(ChannelMsg::PathUpdate(vec![(
-            SourceId(42),
-            PathBuf::from("/var/log/test.log"),
-        )]))
-        .unwrap();
-
         let msg = rx.try_recv().unwrap();
         assert!(matches!(&msg, ChannelMsg::Data { checkpoints, .. } if checkpoints.len() == 1));
-
-        let msg = rx.try_recv().unwrap();
-        assert!(matches!(msg, ChannelMsg::PathUpdate(updates) if updates.len() == 1));
     }
 
     #[test]

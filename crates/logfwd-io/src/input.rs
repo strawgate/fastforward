@@ -55,6 +55,12 @@ pub trait InputSource: Send {
 
     /// Restore a file offset from checkpoint. Default: no-op.
     fn set_offset(&mut self, _path: &Path, _offset: u64) {}
+
+    /// Restore a file offset by SourceId (fingerprint). Default: no-op.
+    ///
+    /// Preferred over `set_offset` — does not require path, which eliminates
+    /// the need for PathUpdate messages and source_paths tracking.
+    fn set_offset_by_source(&mut self, _source_id: SourceId, _offset: u64) {}
 }
 
 /// An input source backed by a `FileTailer`.
@@ -118,6 +124,15 @@ impl InputSource for FileInput {
     fn set_offset(&mut self, path: &Path, offset: u64) {
         if let Err(e) = self.tailer.set_offset(path, offset) {
             eprintln!("warn: failed to restore offset for {}: {e}", path.display());
+        }
+    }
+
+    fn set_offset_by_source(&mut self, source_id: SourceId, offset: u64) {
+        if let Err(e) = self.tailer.set_offset_by_source(source_id, offset) {
+            eprintln!(
+                "warn: failed to restore offset for source {}: {e}",
+                source_id.0
+            );
         }
     }
 }
