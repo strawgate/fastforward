@@ -87,19 +87,19 @@ impl CheckpointTracker {
         }
 
         let old_read = self.read_offset;
-        self.read_offset = old_read + n_bytes;
+        self.read_offset = old_read.saturating_add(n_bytes);
 
         match last_newline_pos {
             Some(pos) => {
                 // pos is relative to chunk start; +1 because the newline
                 // itself is consumed (processed_offset is one past the \n).
-                let newline_abs = old_read + pos + 1;
+                let newline_abs = old_read.saturating_add(pos).saturating_add(1);
                 self.processed_offset = newline_abs;
-                self.remainder_len = self.read_offset - newline_abs;
+                self.remainder_len = self.read_offset.saturating_sub(newline_abs);
             }
             None => {
                 // No newline in chunk -- everything is added to remainder.
-                self.remainder_len += n_bytes;
+                self.remainder_len = self.remainder_len.saturating_add(n_bytes);
                 // processed_offset unchanged.
             }
         }
