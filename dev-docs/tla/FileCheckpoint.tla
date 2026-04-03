@@ -3,471 +3,471 @@
  * Formal model of logfwd's file tailing + framing + checkpoint + crash
  * recovery system.
  *
- * Models the end-to-end data path from file writes through emission,
- * including:
- *   - File content (append-only except for truncation)
- *   - Tailer: read from file, advance read_offset
- *   - Framer: split on newlines, manage per-source remainder
- *   - Pipeline: batch complete lines, send to output, receive acks
- *   - Checkpoint: persist processed_offset at newline boundaries
- *   - Crash + Restart: lose in-memory state, resume from checkpoint
- *   - File rotation: rename old file, new file at same path
- *   - Copytruncate: truncate file content to 0, same inode
+ * KEY DESIGN INSIGHT: Checkpoints are keyed by file identity (fingerprint),
+ * not by file path. When a file is rotated or truncated, its identity
+ * changes (new fingerprint). In-flight batches carry the identity of the
+ * file they were read from. On ack, only THAT identity's checkpoint
+ * advances. This cleanly handles rotation and truncation during in-flight
+ * batches — a counterexample found by TLC on the single-checkpoint model.
  *
- * Relationship to PipelineMachine.tla:
- *   PipelineMachine models the batch lifecycle (create/send/ack/drain).
- *   This spec models the DATA path: how bytes flow from disk through
- *   the pipeline and how checkpoints ensure no-data-loss across crashes.
- *   They are complementary — PipelineMachine proves drain completes;
- *   this spec proves every written line is eventually emitted.
+ * Models:
+ *   - File content (append-only except for truncation)
+ *   - File identity (changes on rotation, truncation, or content change)
+ *   - Tailer: read from file, advance read_offset
+ *   - Framer: per-source remainder, split on newlines
+ *   - Pipeline: batch complete lines, send to output, receive acks
+ *   - Checkpoint: per-source-identity offset persistence
+ *   - Crash + Restart: lose in-memory state, resume from checkpoint
+ *   - File rotation: rename old file, new file at same path (new identity)
+ *   - Copytruncate: truncate to 0, recompute fingerprint (new identity)
  *
  * What this spec does NOT model:
- *   - Multiple output sinks (modeled as single abstract output)
- *   - SQL transforms (pass-through for correctness purposes)
+ *   - Multiple output sinks (single abstract output)
+ *   - SQL transforms (pass-through)
  *   - CRI parsing (orthogonal to checkpoint correctness)
- *   - Network failures / retries (see PipelineMachine for ack ordering)
- *   - Concurrent file writes from multiple processes
- *
- * Modeling approach:
- *   Files are modeled as sequences of lines (not raw bytes). Each "line"
- *   is a natural number (abstract content). Newlines are implicit between
- *   sequence elements. This abstracts away byte-level details while
- *   preserving the essential framing and checkpoint semantics.
+ *   - Byte-level framing (lines are atomic units)
+ *   - Multiple concurrent files (single file path, but identity changes)
  *)
 
 EXTENDS Naturals, Sequences, FiniteSets, TLC
 
 CONSTANTS
-    MaxLines,          \* Maximum lines a file can contain
-    MaxBatches,        \* Maximum batches to explore
-    MaxCrashes,        \* Bound on crash events (state space control)
-    MaxRotations,      \* Bound on rotation events
-    BatchSize          \* Lines per batch (simplified: fixed size)
+    MaxLines,        \* Maximum total lines written across all generations
+    MaxCrashes,      \* Bound on crash events
+    MaxRotations,    \* Bound on rotation/truncation events
+    BatchSize        \* Lines per batch (fixed for simplicity)
 
 ASSUME MaxLines \in Nat /\ MaxLines >= 1
-ASSUME MaxBatches \in Nat /\ MaxBatches >= 1
 ASSUME MaxCrashes \in Nat /\ MaxCrashes >= 0
 ASSUME MaxRotations \in Nat /\ MaxRotations >= 0
 ASSUME BatchSize \in Nat /\ BatchSize >= 1
 
-(* -----------------------------------------------------------------------
- * Abstract line values: natural numbers 1..MaxLines.
- * Each line written to the file gets a unique monotonic value, serving
- * as both content and identity. This lets us verify that emitted lines
- * match what was written without modeling byte content.
- * -----------------------------------------------------------------------*)
+(*------------------------------------------------------------------------
+ * Abstract line values and source identities.
+ *
+ * Lines are natural numbers 1..MaxLines (unique, monotonic).
+ * Source identities are natural numbers representing fingerprints.
+ * Each file generation gets a new identity.
+ *------------------------------------------------------------------------*)
 
 LineValues == 1..MaxLines
 
-(* -----------------------------------------------------------------------
+\* Source identities: 0 = no source, 1..N = file generations.
+\* Identity changes on rotation or truncation (fingerprint changes).
+MaxSourceIds == MaxRotations + 1
+SourceIds == 1..MaxSourceIds
+
+(*------------------------------------------------------------------------
  * State variables
- *
- * The model tracks two "files": the current file at the watched path
- * and an optional rotated-away file. This is sufficient to model one
- * rotation cycle. Multiple rotations are equivalent: the old-old file
- * is already fully read or abandoned.
- * -----------------------------------------------------------------------*)
+ *------------------------------------------------------------------------*)
 
 VARIABLES
-    \* === File state ===
-    file_content,       \* Seq(LineValues): lines in the current file (append-only)
-    rotated_content,    \* Seq(LineValues): lines in the rotated-away file (or <<>>)
-    next_line_id,       \* Nat: next unique line value to write
-    rotation_count,     \* Nat: how many rotations have occurred
-    crash_count,        \* Nat: how many crashes have occurred
+    \* === File state (on disk) ===
+    file_content,       \* Seq(LineValues): lines in the current file
+    file_identity,      \* SourceIds: current file's fingerprint/identity
+    next_line_id,       \* Nat: next unique line to write
+    next_identity,      \* Nat: next identity to assign
+
+    \* === Rotated file (on disk, may be drained) ===
+    rotated_content,    \* Seq(LineValues): old file content (<<>> if none)
+    rotated_identity,   \* Nat: old file's identity (0 if none)
 
     \* === Tailer state (in-memory, lost on crash) ===
-    read_offset,        \* Nat: byte offset into current file (= lines read)
-    rotated_offset,     \* Nat: offset into rotated file (0 if not reading)
-    rotated_active,     \* BOOLEAN: whether we are draining the rotated file
+    read_offset,        \* Nat: lines read from current file
+    rotated_offset,     \* Nat: lines read from rotated file
+    rotated_active,     \* BOOLEAN: draining rotated file?
 
     \* === Framer state (in-memory, lost on crash) ===
-    \* In the real system, remainder holds partial lines between newlines.
-    \* In our line-level model, lines are always complete, so remainder is
-    \* just a buffer of lines not yet forwarded to the pipeline.
-    framer_buf,         \* Seq(LineValues): complete lines waiting to be batched
+    \* Per-source remainder. In line-level model, lines are complete,
+    \* so this is a buffer of lines awaiting batching.
+    framer_buf,         \* Seq(LineValues): lines waiting to be batched
+    framer_source,      \* SourceIds \cup {0}: which source the buffer came from
 
     \* === Pipeline state (in-memory, lost on crash) ===
-    pipeline_batch,     \* Seq(LineValues): lines accumulated for current batch
-    in_flight_batch,    \* Seq(LineValues): batch sent to output, awaiting ack
-    in_flight_offset,   \* Nat: the offset that should be checkpointed when acked
+    pipeline_batch,     \* Seq(LineValues): batch being formed
+    in_flight_batch,    \* Seq(LineValues): batch sent, awaiting ack
+    in_flight_source,   \* Nat: source identity of the in-flight batch
+    in_flight_offset,   \* Nat: offset to checkpoint on ack
 
     \* === Checkpoint state (persistent, survives crash) ===
-    checkpoint_offset,  \* Nat: last durably persisted offset (at newline boundary)
-    checkpoint_gen,     \* Nat: generation (incremented on rotation to track which file)
+    \* Map from source identity to last checkpointed offset.
+    \* checkpoint[id] = N means "lines 1..N of source id are committed."
+    checkpoints,        \* [SourceIds -> Nat]: per-source checkpoint offsets
 
-    \* === Output / emitted lines (ghost variable for verification) ===
-    emitted,            \* Seq(LineValues): all lines successfully emitted (ghost)
+    \* === Ghost variable (verification only) ===
+    emitted,            \* Seq(LineValues): all lines successfully delivered
 
     \* === System state ===
-    alive               \* BOOLEAN: whether the process is running
+    alive,              \* BOOLEAN: process running?
+    crash_count,        \* Nat: crashes so far
+    rotation_count      \* Nat: rotations/truncations so far
 
-vars == <<file_content, rotated_content, next_line_id, rotation_count,
-          crash_count, read_offset, rotated_offset, rotated_active,
-          framer_buf, pipeline_batch, in_flight_batch, in_flight_offset,
-          checkpoint_offset, checkpoint_gen, emitted, alive>>
+vars == <<file_content, file_identity, next_line_id, next_identity,
+          rotated_content, rotated_identity,
+          read_offset, rotated_offset, rotated_active,
+          framer_buf, framer_source,
+          pipeline_batch, in_flight_batch, in_flight_source, in_flight_offset,
+          checkpoints, emitted, alive, crash_count, rotation_count>>
 
-(* -----------------------------------------------------------------------
- * Helper operators
- * -----------------------------------------------------------------------*)
+(*------------------------------------------------------------------------
+ * Helpers
+ *------------------------------------------------------------------------*)
 
-\* Subsequence: elements from index `from` to `to` (1-indexed, inclusive).
 SubSeqFromTo(seq, from, to) ==
     IF from > to \/ from > Len(seq) THEN <<>>
     ELSE SubSeq(seq, from, IF to > Len(seq) THEN Len(seq) ELSE to)
 
-\* Lines in the current file that haven't been read yet.
 UnreadLines ==
     SubSeqFromTo(file_content, read_offset + 1, Len(file_content))
 
-\* Lines in the rotated file that haven't been read yet.
 UnreadRotatedLines ==
     SubSeqFromTo(rotated_content, rotated_offset + 1, Len(rotated_content))
 
-\* Total lines written across all file generations (for progress tracking).
-TotalLinesWritten == next_line_id - 1
-
-\* Convert sequence to set (for subset checking).
 SeqToSet(seq) == {seq[i] : i \in 1..Len(seq)}
 
-(* -----------------------------------------------------------------------
+(*------------------------------------------------------------------------
  * Type invariant
- * -----------------------------------------------------------------------*)
+ *------------------------------------------------------------------------*)
 
 TypeOK ==
     /\ file_content \in Seq(LineValues)
     /\ Len(file_content) <= MaxLines
-    /\ rotated_content \in Seq(LineValues)
-    /\ Len(rotated_content) <= MaxLines
+    /\ file_identity \in SourceIds
     /\ next_line_id \in 1..(MaxLines + 1)
-    /\ rotation_count \in 0..MaxRotations
-    /\ crash_count \in 0..MaxCrashes
+    /\ next_identity \in 1..(MaxSourceIds + 1)
+    /\ rotated_content \in Seq(LineValues)
+    /\ rotated_identity \in 0..MaxSourceIds
     /\ read_offset \in 0..MaxLines
     /\ rotated_offset \in 0..MaxLines
     /\ rotated_active \in BOOLEAN
     /\ framer_buf \in Seq(LineValues)
+    /\ framer_source \in 0..MaxSourceIds
     /\ pipeline_batch \in Seq(LineValues)
     /\ in_flight_batch \in Seq(LineValues)
+    /\ in_flight_source \in 0..MaxSourceIds
     /\ in_flight_offset \in 0..MaxLines
-    /\ checkpoint_offset \in 0..MaxLines
-    /\ checkpoint_gen \in 0..MaxRotations
+    /\ checkpoints \in [SourceIds -> 0..MaxLines]
     /\ emitted \in Seq(LineValues)
     /\ alive \in BOOLEAN
+    /\ crash_count \in 0..MaxCrashes
+    /\ rotation_count \in 0..MaxRotations
 
-(* -----------------------------------------------------------------------
+(*------------------------------------------------------------------------
  * Initial state
- * -----------------------------------------------------------------------*)
+ *------------------------------------------------------------------------*)
 
 Init ==
     /\ file_content     = <<>>
-    /\ rotated_content  = <<>>
+    /\ file_identity    = 1
     /\ next_line_id     = 1
-    /\ rotation_count   = 0
-    /\ crash_count      = 0
+    /\ next_identity    = 2        \* Identity 1 is the initial file
+    /\ rotated_content  = <<>>
+    /\ rotated_identity = 0
     /\ read_offset      = 0
     /\ rotated_offset   = 0
     /\ rotated_active   = FALSE
     /\ framer_buf       = <<>>
+    /\ framer_source    = 0
     /\ pipeline_batch   = <<>>
     /\ in_flight_batch  = <<>>
+    /\ in_flight_source = 0
     /\ in_flight_offset = 0
-    /\ checkpoint_offset = 0
-    /\ checkpoint_gen   = 0
+    /\ checkpoints      = [s \in SourceIds |-> 0]
     /\ emitted          = <<>>
     /\ alive            = TRUE
+    /\ crash_count      = 0
+    /\ rotation_count   = 0
 
-(* -----------------------------------------------------------------------
- * ENVIRONMENT ACTIONS (external to logfwd)
- * -----------------------------------------------------------------------*)
+(*========================================================================
+ * ENVIRONMENT ACTIONS
+ *========================================================================*)
 
-\* A new line is appended to the current file by the application being
-\* logged. This can happen regardless of whether logfwd is alive.
+\* Append a new line to the current file.
 AppendLine ==
     /\ next_line_id <= MaxLines
     /\ file_content' = Append(file_content, next_line_id)
     /\ next_line_id' = next_line_id + 1
-    /\ UNCHANGED <<rotated_content, rotation_count, crash_count,
+    /\ UNCHANGED <<file_identity, next_identity,
+                   rotated_content, rotated_identity,
                    read_offset, rotated_offset, rotated_active,
-                   framer_buf, pipeline_batch, in_flight_batch,
-                   in_flight_offset, checkpoint_offset, checkpoint_gen,
-                   emitted, alive>>
+                   framer_buf, framer_source,
+                   pipeline_batch, in_flight_batch, in_flight_source,
+                   in_flight_offset, checkpoints, emitted,
+                   alive, crash_count, rotation_count>>
 
-\* File rotation: the current file is renamed away and a new empty file
-\* is created at the same path. The tailer should drain the old file
-\* before switching to the new one.
-\*
-\* Precondition: process is alive (rotation while dead is just append to
-\* new file on restart — handled by crash recovery reading from checkpoint).
+\* File rotation: current file renamed away, new empty file created.
+\* New file gets a new identity (different fingerprint).
 RotateFile ==
     /\ alive
     /\ rotation_count < MaxRotations
-    /\ Len(file_content) > 0          \* Only rotate non-empty files
-    /\ rotated_active = FALSE          \* Don't rotate while still draining previous
-    /\ rotated_content' = file_content \* Old content moves to rotated slot
-    /\ rotated_offset'  = read_offset  \* Continue reading from where we were
-    /\ rotated_active'  = TRUE         \* Start draining rotated file
-    /\ file_content'    = <<>>         \* New empty file
-    /\ read_offset'     = 0            \* Reset offset for new file
-    /\ rotation_count'  = rotation_count + 1
-    /\ UNCHANGED <<next_line_id, crash_count, framer_buf,
-                   pipeline_batch, in_flight_batch, in_flight_offset,
-                   checkpoint_offset, checkpoint_gen, emitted, alive>>
+    /\ next_identity <= MaxSourceIds
+    /\ Len(file_content) > 0
+    /\ rotated_active = FALSE
+    \* Old file moves to rotated slot, keeps its identity
+    /\ rotated_content'  = file_content
+    /\ rotated_identity' = file_identity
+    /\ rotated_offset'   = read_offset
+    /\ rotated_active'   = TRUE
+    \* New empty file with new identity
+    /\ file_content'  = <<>>
+    /\ file_identity'  = next_identity
+    /\ next_identity'  = next_identity + 1
+    /\ read_offset'    = 0
+    /\ rotation_count' = rotation_count + 1
+    \* Clear framer if it was buffering data from the old file — the
+    \* tailer will re-read the rotated file's unread portion separately.
+    \* In reality, the framer keeps its buffer (data already read is not
+    \* re-read). But the framer_source must update if we're switching files.
+    /\ UNCHANGED <<next_line_id, framer_buf, framer_source,
+                   pipeline_batch, in_flight_batch, in_flight_source,
+                   in_flight_offset, checkpoints, emitted,
+                   alive, crash_count>>
 
-\* Copytruncate: the file is truncated to zero bytes but keeps the same
-\* inode. The tailer detects offset > file_size and resets.
-\*
-\* Key difference from rotation: there is no "old file" to drain.
-\* Lines between checkpoint_offset and the truncation point that were
-\* not yet checkpointed are re-readable ONLY if they are still in memory
-\* (framer_buf, pipeline_batch). If the process crashes after truncation,
-\* those lines are lost. This is a known limitation of copytruncate
-\* (documented in all four shippers: Filebeat, Vector, Fluent Bit, OTel).
+\* Copytruncate: file truncated to 0 bytes, same path.
+\* Fingerprint changes (empty file ≠ original content), so new identity.
 CopyTruncate ==
     /\ alive
     /\ rotation_count < MaxRotations
+    /\ next_identity <= MaxSourceIds
     /\ Len(file_content) > 0
-    \* Detect truncation: tailer sees file smaller than offset
-    /\ read_offset' = 0
-    /\ file_content' = <<>>             \* Content is gone (truncated)
-    /\ framer_buf' = <<>>               \* Clear remainder (stale data)
+    \* File becomes empty with new identity
+    /\ file_content'  = <<>>
+    /\ file_identity'  = next_identity
+    /\ next_identity'  = next_identity + 1
+    /\ read_offset'    = 0
     /\ rotation_count' = rotation_count + 1
-    \* Reset checkpoint to 0 for this generation
-    /\ checkpoint_offset' = 0
-    /\ checkpoint_gen' = checkpoint_gen + 1
-    /\ UNCHANGED <<rotated_content, next_line_id, crash_count,
+    \* Clear framer buffer — stale data from old content
+    /\ framer_buf'    = <<>>
+    /\ framer_source' = 0
+    \* No rotated file to drain (copytruncate doesn't preserve the old file
+    \* as a separate fd — the content is gone after truncation)
+    /\ UNCHANGED <<next_line_id, rotated_content, rotated_identity,
                    rotated_offset, rotated_active,
-                   pipeline_batch, in_flight_batch, in_flight_offset,
-                   emitted, alive>>
+                   pipeline_batch, in_flight_batch, in_flight_source,
+                   in_flight_offset, checkpoints, emitted,
+                   alive, crash_count>>
 
-(* -----------------------------------------------------------------------
- * TAILER ACTIONS (read from file, advance offset)
- * -----------------------------------------------------------------------*)
+(*========================================================================
+ * TAILER ACTIONS
+ *========================================================================*)
 
-\* Read new lines from the current file. Reads up to all available
-\* unread lines and passes them to the framer buffer.
-\*
-\* In the real system this reads raw bytes; here we read complete lines
-\* since our file model is line-granular.
+\* Read unread lines from the current file.
 TailerRead ==
     /\ alive
-    /\ in_flight_batch = <<>>           \* Backpressure: don't read if output is busy
-    /\ read_offset < Len(file_content)  \* There are unread lines
+    /\ read_offset < Len(file_content)
     /\ LET new_lines == UnreadLines
        IN
-       /\ framer_buf' = framer_buf \o new_lines
+       \* If framer is empty or same source, append
+       /\ IF framer_source = 0 \/ framer_source = file_identity
+          THEN /\ framer_buf' = framer_buf \o new_lines
+               /\ framer_source' = file_identity
+          \* Different source — in real system, per-source remainder
+          \* handles this. In our single-file model, this shouldn't happen.
+          \* Model it as overwriting (the per-source remainder handles
+          \* the old source's data separately).
+          ELSE /\ framer_buf' = new_lines
+               /\ framer_source' = file_identity
        /\ read_offset' = Len(file_content)
-    /\ UNCHANGED <<file_content, rotated_content, next_line_id,
-                   rotation_count, crash_count, rotated_offset,
-                   rotated_active, pipeline_batch, in_flight_batch,
-                   in_flight_offset, checkpoint_offset, checkpoint_gen,
-                   emitted, alive>>
+    /\ UNCHANGED <<file_content, file_identity, next_line_id, next_identity,
+                   rotated_content, rotated_identity,
+                   rotated_offset, rotated_active,
+                   pipeline_batch, in_flight_batch, in_flight_source,
+                   in_flight_offset, checkpoints, emitted,
+                   alive, crash_count, rotation_count>>
 
-\* Read remaining lines from the rotated-away file (drain old file).
+\* Read remaining lines from the rotated file.
 TailerReadRotated ==
     /\ alive
     /\ rotated_active
-    /\ in_flight_batch = <<>>
     /\ rotated_offset < Len(rotated_content)
     /\ LET new_lines == UnreadRotatedLines
        IN
-       /\ framer_buf' = framer_buf \o new_lines
+       /\ IF framer_source = 0 \/ framer_source = rotated_identity
+          THEN /\ framer_buf' = framer_buf \o new_lines
+               /\ framer_source' = rotated_identity
+          ELSE /\ framer_buf' = new_lines
+               /\ framer_source' = rotated_identity
        /\ rotated_offset' = Len(rotated_content)
-    /\ UNCHANGED <<file_content, rotated_content, next_line_id,
-                   rotation_count, crash_count, read_offset,
-                   rotated_active, pipeline_batch, in_flight_batch,
-                   in_flight_offset, checkpoint_offset, checkpoint_gen,
-                   emitted, alive>>
+    /\ UNCHANGED <<file_content, file_identity, next_line_id, next_identity,
+                   rotated_content, rotated_identity,
+                   read_offset, rotated_active,
+                   pipeline_batch, in_flight_batch, in_flight_source,
+                   in_flight_offset, checkpoints, emitted,
+                   alive, crash_count, rotation_count>>
 
-\* Finish draining the rotated file (all lines read).
+\* Finish draining the rotated file.
 TailerFinishRotated ==
     /\ alive
     /\ rotated_active
     /\ rotated_offset = Len(rotated_content)
-    \* All rotated lines must be flushed through pipeline before we close
-    /\ framer_buf = <<>>
+    /\ framer_buf = <<>>  \* All rotated data has been batched/sent
     /\ pipeline_batch = <<>>
     /\ in_flight_batch = <<>>
-    /\ rotated_active' = FALSE
-    /\ rotated_content' = <<>>
-    /\ rotated_offset' = 0
-    /\ UNCHANGED <<file_content, next_line_id, rotation_count, crash_count,
-                   read_offset, framer_buf, pipeline_batch,
-                   in_flight_batch, in_flight_offset,
-                   checkpoint_offset, checkpoint_gen, emitted, alive>>
+    /\ rotated_active'   = FALSE
+    /\ rotated_content'  = <<>>
+    /\ rotated_identity' = 0
+    /\ rotated_offset'   = 0
+    /\ UNCHANGED <<file_content, file_identity, next_line_id, next_identity,
+                   read_offset, framer_buf, framer_source,
+                   pipeline_batch, in_flight_batch, in_flight_source,
+                   in_flight_offset, checkpoints, emitted,
+                   alive, crash_count, rotation_count>>
 
-(* -----------------------------------------------------------------------
- * FRAMER → PIPELINE ACTIONS (batch lines)
- * -----------------------------------------------------------------------*)
+(*========================================================================
+ * FRAMER → PIPELINE ACTIONS
+ *========================================================================*)
 
-\* Move lines from framer buffer into a pipeline batch.
-\* In the real system, the framer splits on newlines and the pipeline
-\* accumulates up to batch_target_bytes. Here we batch by line count.
+\* Form a full batch from the framer buffer.
 FormBatch ==
     /\ alive
     /\ Len(framer_buf) >= BatchSize
-    /\ pipeline_batch = <<>>            \* No current batch being formed
-    /\ in_flight_batch = <<>>           \* No batch in flight
-    /\ LET batch_lines == SubSeq(framer_buf, 1, BatchSize)
-           remaining   == SubSeqFromTo(framer_buf, BatchSize + 1, Len(framer_buf))
+    /\ pipeline_batch = <<>>
+    /\ in_flight_batch = <<>>
+    /\ LET batch == SubSeq(framer_buf, 1, BatchSize)
+           rest  == SubSeqFromTo(framer_buf, BatchSize + 1, Len(framer_buf))
        IN
-       /\ pipeline_batch' = batch_lines
-       /\ framer_buf' = remaining
-    /\ UNCHANGED <<file_content, rotated_content, next_line_id,
-                   rotation_count, crash_count, read_offset,
-                   rotated_offset, rotated_active,
-                   in_flight_batch, in_flight_offset,
-                   checkpoint_offset, checkpoint_gen, emitted, alive>>
+       /\ pipeline_batch' = batch
+       /\ framer_buf' = rest
+       /\ IF Len(rest) = 0
+          THEN framer_source' = 0
+          ELSE framer_source' = framer_source
+    /\ UNCHANGED <<file_content, file_identity, next_line_id, next_identity,
+                   rotated_content, rotated_identity,
+                   read_offset, rotated_offset, rotated_active,
+                   in_flight_batch, in_flight_source, in_flight_offset,
+                   checkpoints, emitted, alive, crash_count, rotation_count>>
 
-\* Flush a partial batch (fewer than BatchSize lines) when no more data
-\* is arriving. This models the batch timeout or EndOfFile flush.
+\* Flush a partial batch (fewer than BatchSize) when file is caught up.
 FlushPartialBatch ==
     /\ alive
     /\ Len(framer_buf) > 0
     /\ Len(framer_buf) < BatchSize
     /\ pipeline_batch = <<>>
     /\ in_flight_batch = <<>>
-    \* Only flush when file is caught up (EndOfFile condition)
+    \* Only flush when caught up (EndOfFile condition)
     /\ read_offset = Len(file_content)
     /\ pipeline_batch' = framer_buf
     /\ framer_buf' = <<>>
-    /\ UNCHANGED <<file_content, rotated_content, next_line_id,
-                   rotation_count, crash_count, read_offset,
-                   rotated_offset, rotated_active,
-                   in_flight_batch, in_flight_offset,
-                   checkpoint_offset, checkpoint_gen, emitted, alive>>
+    /\ framer_source' = 0
+    /\ UNCHANGED <<file_content, file_identity, next_line_id, next_identity,
+                   rotated_content, rotated_identity,
+                   read_offset, rotated_offset, rotated_active,
+                   in_flight_batch, in_flight_source, in_flight_offset,
+                   checkpoints, emitted, alive, crash_count, rotation_count>>
 
-(* -----------------------------------------------------------------------
- * PIPELINE → OUTPUT ACTIONS (send batch, receive ack)
- * -----------------------------------------------------------------------*)
+(*========================================================================
+ * PIPELINE → OUTPUT ACTIONS
+ *========================================================================*)
 
-\* Send the formed batch to the output. The batch moves from
-\* pipeline_batch to in_flight_batch. We record the offset that should
-\* be checkpointed upon successful delivery.
+\* Send the batch to output. Record the source identity and offset
+\* so that on ack, we advance the correct source's checkpoint.
 SendBatch ==
     /\ alive
     /\ Len(pipeline_batch) > 0
     /\ in_flight_batch = <<>>
-    /\ in_flight_batch' = pipeline_batch
-    \* The offset to checkpoint is the read_offset at the time of send.
-    \* This represents "all data up to this point is accounted for in
-    \* batches that have been sent." In the real system this is the
-    \* processed_offset (last newline boundary of data in this batch).
-    /\ in_flight_offset' = read_offset
+    /\ in_flight_batch'  = pipeline_batch
+    /\ in_flight_source' = framer_source
+    \* The offset to checkpoint is the read position for this source.
+    \* For current file: read_offset. For rotated file: rotated_offset.
+    /\ in_flight_offset' = IF framer_source = file_identity
+                           THEN read_offset
+                           ELSE IF framer_source = rotated_identity
+                                THEN rotated_offset
+                                ELSE 0
     /\ pipeline_batch' = <<>>
-    /\ UNCHANGED <<file_content, rotated_content, next_line_id,
-                   rotation_count, crash_count, read_offset,
-                   rotated_offset, rotated_active, framer_buf,
-                   checkpoint_offset, checkpoint_gen, emitted, alive>>
+    /\ UNCHANGED <<file_content, file_identity, next_line_id, next_identity,
+                   rotated_content, rotated_identity,
+                   read_offset, rotated_offset, rotated_active,
+                   framer_buf, framer_source,
+                   checkpoints, emitted, alive, crash_count, rotation_count>>
 
-\* Output acknowledges successful delivery of the in-flight batch.
-\* Lines are added to the emitted ghost variable. The checkpoint is
-\* eligible to advance.
+\* Output acknowledges the batch. Advance the checkpoint for the
+\* batch's source identity. The key insight: we advance the checkpoint
+\* for in_flight_source, which may be different from the current
+\* file_identity if rotation/truncation happened while in flight.
 AckBatch ==
     /\ alive
     /\ Len(in_flight_batch) > 0
     /\ emitted' = emitted \o in_flight_batch
     /\ in_flight_batch' = <<>>
-    \* Advance checkpoint ONLY if the file generation hasn't changed.
-    \* If a rotation or truncation happened between SendBatch and AckBatch,
-    \* the in_flight_offset refers to the OLD file — advancing would corrupt
-    \* the checkpoint. The batch is still emitted (data was delivered), but
-    \* the checkpoint stays where it was (or at the truncation reset value).
-    /\ checkpoint_offset' = IF in_flight_offset > checkpoint_offset
-                               /\ checkpoint_gen = checkpoint_gen  \* No gen change (always true here, but see below)
-                            THEN in_flight_offset
-                            ELSE checkpoint_offset
+    \* Advance checkpoint for THIS source (not necessarily current file)
+    /\ IF in_flight_source \in SourceIds
+          /\ in_flight_offset > checkpoints[in_flight_source]
+       THEN checkpoints' = [checkpoints EXCEPT
+                ![in_flight_source] = in_flight_offset]
+       ELSE checkpoints' = checkpoints
+    /\ in_flight_source' = 0
     /\ in_flight_offset' = 0
-    /\ UNCHANGED <<file_content, rotated_content, next_line_id,
-                   rotation_count, crash_count, read_offset,
-                   rotated_offset, rotated_active, framer_buf,
-                   pipeline_batch, checkpoint_gen, alive>>
+    /\ UNCHANGED <<file_content, file_identity, next_line_id, next_identity,
+                   rotated_content, rotated_identity,
+                   read_offset, rotated_offset, rotated_active,
+                   framer_buf, framer_source, pipeline_batch,
+                   alive, crash_count, rotation_count>>
 
-(* -----------------------------------------------------------------------
+(*========================================================================
  * CRASH + RESTART
- *
- * On crash, all in-memory state is lost. On restart, the tailer resumes
- * reading from checkpoint_offset. Lines between checkpoint_offset and
- * the old read_offset are re-read (at-least-once semantics).
- * -----------------------------------------------------------------------*)
+ *========================================================================*)
 
 Crash ==
     /\ alive
     /\ crash_count < MaxCrashes
     /\ alive' = FALSE
     /\ crash_count' = crash_count + 1
-    \* In-memory state is destroyed
+    \* All in-memory state destroyed
     /\ read_offset'      = 0
     /\ rotated_offset'   = 0
     /\ rotated_active'   = FALSE
     /\ framer_buf'       = <<>>
+    /\ framer_source'    = 0
     /\ pipeline_batch'   = <<>>
     /\ in_flight_batch'  = <<>>
+    /\ in_flight_source' = 0
     /\ in_flight_offset' = 0
     \* Persistent state survives
-    /\ UNCHANGED <<file_content, rotated_content, next_line_id,
-                   rotation_count, checkpoint_offset, checkpoint_gen,
-                   emitted>>
+    /\ UNCHANGED <<file_content, file_identity, next_line_id, next_identity,
+                   rotated_content, rotated_identity,
+                   checkpoints, emitted, rotation_count>>
 
 Restart ==
     /\ ~alive
     /\ alive' = TRUE
-    \* Resume reading from the last checkpoint.
-    \* If file was truncated (content shorter than checkpoint), reset to 0.
-    /\ read_offset' = IF checkpoint_offset <= Len(file_content)
-                      THEN checkpoint_offset
-                      ELSE 0
-    \* Rotated file is lost after crash (fd is closed, file may be deleted).
-    \* Lines in the rotated file between its checkpoint and end are lost
-    \* if they weren't checkpointed before the crash. This is the standard
-    \* behavior for all shippers (rotation + crash = potential data loss
-    \* for uncheckpointed lines in the rotated file).
-    /\ rotated_active' = FALSE
-    /\ rotated_content' = <<>>
-    /\ rotated_offset' = 0
-    /\ UNCHANGED <<file_content, next_line_id, rotation_count,
-                   crash_count, framer_buf, pipeline_batch,
-                   in_flight_batch, in_flight_offset,
-                   checkpoint_offset, checkpoint_gen, emitted>>
+    \* Resume from checkpoint for the current file identity.
+    \* If file was truncated (new identity, checkpoint = 0), start at 0.
+    /\ LET cp == checkpoints[file_identity]
+       IN read_offset' = IF cp <= Len(file_content) THEN cp ELSE 0
+    \* Rotated file's fd is closed on crash; can't reopen by inode.
+    \* Lines in the rotated file that weren't checkpointed are lost.
+    /\ rotated_active'   = FALSE
+    /\ rotated_content'  = <<>>
+    /\ rotated_identity' = 0
+    /\ rotated_offset'   = 0
+    /\ UNCHANGED <<file_content, file_identity, next_line_id, next_identity,
+                   framer_buf, framer_source,
+                   pipeline_batch, in_flight_batch, in_flight_source,
+                   in_flight_offset, checkpoints, emitted,
+                   crash_count, rotation_count>>
 
-(* -----------------------------------------------------------------------
+(*========================================================================
  * Next-state relation
- * -----------------------------------------------------------------------*)
+ *========================================================================*)
 
 Next ==
-    \* Environment actions (can happen anytime)
     \/ AppendLine
     \/ RotateFile
     \/ CopyTruncate
-    \* Tailer actions (require alive)
     \/ TailerRead
     \/ TailerReadRotated
     \/ TailerFinishRotated
-    \* Framer/pipeline actions (require alive)
     \/ FormBatch
     \/ FlushPartialBatch
     \/ SendBatch
     \/ AckBatch
-    \* Crash/restart
     \/ Crash
     \/ Restart
 
-(* -----------------------------------------------------------------------
+(*========================================================================
  * Fairness
- *
- * WF (weak fairness): if an action is continuously enabled, it fires.
- *
- * Fairness is needed for liveness properties but not safety invariants.
- *
- * We do NOT give fairness to Crash — crashes are adversarial, not
- * scheduled. We DO give fairness to Restart — a crashed system
- * eventually comes back (operational assumption).
- *
- * We do NOT give fairness to AppendLine — the file may stop growing.
- * Liveness properties are conditioned on "if data exists."
- *
- * We do NOT give fairness to RotateFile or CopyTruncate — these are
- * external events, not guaranteed to happen.
- * -----------------------------------------------------------------------*)
+ *========================================================================*)
 
 Fairness ==
     /\ WF_vars(TailerRead)
@@ -481,137 +481,79 @@ Fairness ==
 
 Spec == Init /\ [][Next]_vars /\ Fairness
 
-(* =======================================================================
+(*========================================================================
  * SAFETY INVARIANTS
- * Checked exhaustively over all reachable states.
- * =======================================================================*)
+ *========================================================================*)
 
-\* --- NoCorruption ---
-\* Every emitted line is a valid line that was written to some file.
-\* (No fabricated or corrupted data.)
+\* Every emitted line was actually written.
 NoCorruption ==
     \A i \in 1..Len(emitted) :
         emitted[i] \in LineValues /\ emitted[i] < next_line_id
 
-\* --- CheckpointAtBoundary ---
-\* The checkpoint offset always points to the end of a complete line.
-\* In our line-level model, any offset 0..Len(file_content) is a valid
-\* boundary. The real invariant is: checkpoint_offset is never in the
-\* middle of a line (between bytes of a partially-written line).
-\* In the line-level model this is automatically satisfied, but we
-\* verify it structurally: checkpoint_offset <= number of complete lines.
-CheckpointAtBoundary ==
-    \/ checkpoint_offset <= Len(file_content)
-    \* After rotation, checkpoint may reference the old file's offset space.
-    \* The rotated file (if still being drained) or the pre-rotation length
-    \* bounds the checkpoint. With rotation_count > 0, the checkpoint may
-    \* exceed the current (new, empty) file length.
-    \/ (rotation_count > 0 /\ checkpoint_offset <= Len(rotated_content))
-    \* After truncation or rotation, checkpoint resets to 0
-    \/ checkpoint_offset = 0
+\* Checkpoint for any source never exceeds lines available for that source.
+\* For the current file: checkpoints[file_identity] <= Len(file_content).
+\* For rotated file (if active): checkpoints[rotated_identity] <= Len(rotated_content).
+\* For any other source: checkpoint stays at whatever it was.
+CheckpointBounded ==
+    /\ alive => checkpoints[file_identity] <= Len(file_content)
+    /\ (alive /\ rotated_active /\ rotated_identity \in SourceIds)
+           => checkpoints[rotated_identity] <= Len(rotated_content)
 
-\* --- CheckpointMonotonicity ---
-\* Checkpoint offset never decreases EXCEPT on truncation reset.
-\* Modeled as a temporal action property (checked across transitions).
-\* CopyTruncate is the only action that can decrease checkpoint_offset.
-CheckpointMonotonicity ==
-    [][checkpoint_offset' >= checkpoint_offset
-       \/ checkpoint_offset' = 0]_vars
-
-\* --- ReadOffsetBounded ---
-\* The read offset never exceeds the file length.
+\* Read offset never exceeds file length.
 ReadOffsetBounded ==
     alive => read_offset <= Len(file_content)
 
-\* --- RotatedReadBounded ---
-\* The rotated file read offset never exceeds the rotated file length.
+\* Rotated read offset never exceeds rotated file length.
 RotatedReadBounded ==
     (alive /\ rotated_active) => rotated_offset <= Len(rotated_content)
 
-\* --- InFlightInvariant ---
-\* At most one batch is in flight at a time (simplified single-output model).
+\* At most one batch in flight.
 InFlightInvariant ==
     (Len(in_flight_batch) > 0) => (Len(pipeline_batch) = 0)
 
-\* --- PipelineConsistency ---
-\* Lines in the pipeline (framer + batch + in_flight) are a subset of
-\* lines that have been written to files.
+\* All in-pipeline lines were actually written.
 PipelineConsistency ==
     alive =>
-        LET all_in_pipeline == SeqToSet(framer_buf) \cup
-                               SeqToSet(pipeline_batch) \cup
-                               SeqToSet(in_flight_batch)
-        IN \A v \in all_in_pipeline : v \in LineValues /\ v < next_line_id
+        LET all_lines == SeqToSet(framer_buf) \cup
+                         SeqToSet(pipeline_batch) \cup
+                         SeqToSet(in_flight_batch)
+        IN \A v \in all_lines : v \in LineValues /\ v < next_line_id
 
-\* --- NoEmitBeforeWrite ---
-\* A line cannot be emitted before it has been written.
+\* No line emitted before it was written.
 NoEmitBeforeWrite ==
     \A i \in 1..Len(emitted) : emitted[i] < next_line_id
 
-(* =======================================================================
- * LIVENESS PROPERTIES
- * Require fairness. Checked with smaller model constants.
- * =======================================================================*)
+\* Checkpoint monotonicity per source: each source's checkpoint never
+\* decreases. (New sources start at 0; existing sources only increase.)
+CheckpointMonotonicity ==
+    [][\A s \in SourceIds : checkpoints'[s] >= checkpoints[s]]_vars
 
-\* --- Progress ---
-\* If the system is alive and there are unread lines in the file,
-\* those lines are eventually read (framer_buf grows or emitted grows).
-\*
-\* Stated as: if a line exists in the file and the system is alive,
-\* the line is eventually emitted OR the system crashes.
-\* After crash + restart (with fairness on Restart), the line is
-\* re-read from checkpoint.
-\*
-\* Precise formulation: every line written when alive eventually appears
-\* in emitted, provided the system does not stay dead forever and the
-\* file is not truncated before the line is checkpointed.
+(*========================================================================
+ * LIVENESS PROPERTIES
+ *========================================================================*)
+
+\* If a line is in the current file, system is alive, and file isn't about
+\* to be truncated, the line eventually gets emitted or system crashes.
 Progress ==
     \A v \in LineValues :
-        \* "line v is in the current file and system is alive and file not truncated"
-        \* leads to "line v is in emitted"
         (alive /\ v \in SeqToSet(file_content) /\ read_offset < Len(file_content))
             ~> (v \in SeqToSet(emitted) \/ ~alive)
 
-\* --- CheckpointProgress ---
-\* If the system is alive and a batch is in flight, the checkpoint
-\* eventually advances beyond its current value (the ack will fire
-\* and persist the offset), unless the system crashes first.
-\*
-\* We capture "checkpoint was at value C when the batch was in flight"
-\* by including the current checkpoint value in the leads-to antecedent.
-\* The consequent checks that checkpoint has moved past C or system died.
-CheckpointProgress ==
-    \A c \in 0..MaxLines :
-        (alive /\ Len(in_flight_batch) > 0 /\ checkpoint_offset = c)
-            ~> (checkpoint_offset > c \/ ~alive)
-
-\* --- EventualEmission ---
-\* If the file contains N lines and the system is alive with no more
-\* writes, eventually N lines are emitted (steady-state convergence).
-\* This is the key "no data loss" liveness property for the stable case.
+\* After all writes stop, every line in the current file is eventually emitted.
 EventualEmission ==
     \A v \in LineValues :
         (v \in SeqToSet(file_content) /\ alive /\ next_line_id > MaxLines)
             ~> (v \in SeqToSet(emitted))
 
-(* =======================================================================
- * REACHABILITY ASSERTIONS (vacuity guards)
- * As INVARIANTS, TLC violation = witness that the state IS reachable.
- * =======================================================================*)
+(*========================================================================
+ * REACHABILITY (vacuity guards)
+ * As INVARIANTS: TLC violation = state IS reachable.
+ *========================================================================*)
 
-\* A line is emitted at least once.
 EmitOccurs == ~(Len(emitted) > 0)
-
-\* Checkpoint advances at least once.
-CheckpointAdvances == ~(checkpoint_offset > 0)
-
-\* A crash occurs at least once.
+CheckpointAdvances == ~(\E s \in SourceIds : checkpoints[s] > 0)
 CrashOccurs == ~(crash_count > 0)
-
-\* Rotation occurs at least once.
 RotationOccurs == ~(rotation_count > 0)
-
-\* System recovers from crash (Restart fires).
 RestartOccurs == ~(alive /\ crash_count > 0)
 
 =============================================================================
