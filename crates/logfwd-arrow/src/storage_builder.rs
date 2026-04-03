@@ -71,6 +71,12 @@ impl FieldCollector {
 pub struct StorageBuilder {
     fields: Vec<FieldCollector>,
     field_index: HashMap<Vec<u8>, usize>,
+    /// Number of fields active in the current batch. Slots `0..num_active` in
+    /// `fields` are in use; slots beyond that are pre-allocated but dormant.
+    /// Resetting this to zero on `begin_batch` — together with clearing
+    /// `field_index` — bounds `fields.len()` to the high-water mark of unique
+    /// fields seen in any *single* batch rather than growing without limit.
+    num_active: usize,
     raw_values: Vec<Vec<u8>>,
     row_count: u32,
     keep_raw: bool,
@@ -84,6 +90,7 @@ impl StorageBuilder {
         StorageBuilder {
             fields: Vec::with_capacity(32),
             field_index: HashMap::with_capacity(32),
+            num_active: 0,
             raw_values: Vec::new(),
             row_count: 0,
             keep_raw,
@@ -93,9 +100,18 @@ impl StorageBuilder {
 
     pub fn begin_batch(&mut self) {
         self.row_count = 0;
-        for fc in &mut self.fields {
+        // Only clear the slots that were active in the previous batch.
+        // This preserves the inner-Vec capacity of each FieldCollector for
+        // hot-path reuse while still bounding memory under key churn.
+        for fc in &mut self.fields[..self.num_active] {
             fc.clear();
         }
+        // Discard all name→index mappings so resolve_field rebuilds them from
+        // scratch.  Combined with resetting num_active, this prevents the
+        // HashMap and the fields Vec from growing across batches with churning
+        // field names (issue: field_index HashMap grows unboundedly).
+        self.field_index.clear();
+        self.num_active = 0;
         self.raw_values.clear();
     }
 
@@ -117,8 +133,16 @@ impl StorageBuilder {
         if let Some(&idx) = self.field_index.get(key) {
             return idx;
         }
-        let idx = self.fields.len();
-        self.fields.push(FieldCollector::new(key));
+        let idx = self.num_active;
+        if idx < self.fields.len() {
+            // Reuse an existing slot — its data was cleared in begin_batch.
+            // Only the name needs updating.
+            self.fields[idx].name.clear();
+            self.fields[idx].name.extend_from_slice(key);
+        } else {
+            self.fields.push(FieldCollector::new(key));
+        }
+        self.num_active += 1;
         self.field_index.insert(key.to_vec(), idx);
         idx
     }
@@ -184,8 +208,8 @@ impl StorageBuilder {
 
     pub fn finish_batch(&mut self) -> Result<RecordBatch, ArrowError> {
         let num_rows = self.row_count as usize;
-        let mut schema_fields: Vec<Field> = Vec::with_capacity(self.fields.len() + 1);
-        let mut arrays: Vec<ArrayRef> = Vec::with_capacity(self.fields.len() + 1);
+        let mut schema_fields: Vec<Field> = Vec::with_capacity(self.num_active + 1);
+        let mut arrays: Vec<ArrayRef> = Vec::with_capacity(self.num_active + 1);
 
         // Detect duplicate output column names before building the schema.
         let mut emitted_names = std::collections::HashSet::new();
@@ -203,7 +227,7 @@ impl StorageBuilder {
             }
         };
 
-        for fc in &self.fields {
+        for fc in &self.fields[..self.num_active] {
             // Field names come from JSON keys (valid UTF-8 in well-formed input).
             // Use from_utf8_lossy so that fuzz inputs with arbitrary bytes are
             // handled gracefully instead of triggering undefined behaviour.
@@ -664,6 +688,103 @@ mod tests {
         assert_eq!(arr.value(0), 1);
         assert_eq!(arr.value(1), 2);
         assert_eq!(arr.value(2), 3);
+    }
+
+    /// `field_index` must not grow without bound when every batch introduces a
+    /// completely new set of field names (key churn).
+    ///
+    /// Previously, `begin_batch` never cleared `field_index`, so each unique
+    /// field name from every past batch accumulated in the HashMap forever.
+    /// After the fix, `begin_batch` clears `field_index` and resets
+    /// `num_active`, bounding `fields.len()` to the high-water mark of unique
+    /// fields in any *single* batch.
+    #[test]
+    fn field_index_stays_bounded_under_key_churn() {
+        let mut b = StorageBuilder::new(false);
+        const BATCHES: usize = 20;
+
+        for i in 0..BATCHES {
+            b.begin_batch();
+            // Each batch uses a different unique field name.
+            let name = format!("field_{i}");
+            let idx = b.resolve_field(name.as_bytes());
+            b.begin_row();
+            b.append_int_by_idx(idx, b"1");
+            b.end_row();
+            let batch = b.finish_batch().unwrap();
+            assert_eq!(batch.num_rows(), 1);
+            assert!(
+                batch.column_by_name(&name).is_some(),
+                "column {name} must exist"
+            );
+        }
+
+        // After all batches, the fields Vec must not have grown to BATCHES
+        // entries — it should only hold the high-water mark (1 here).
+        assert_eq!(
+            b.fields.len(),
+            1,
+            "fields Vec must be bounded by max unique fields per single batch, \
+             got {} (expected 1)",
+            b.fields.len()
+        );
+        assert_eq!(
+            b.field_index.len(),
+            1,
+            "field_index must hold only the current batch's entries, \
+             got {} (expected 1)",
+            b.field_index.len()
+        );
+    }
+
+    /// Repeated batches with the *same* field names reuse pre-allocated
+    /// `FieldCollector` slots (inner Vec capacity is preserved across batches).
+    #[test]
+    fn stable_fields_reuse_slots_across_batches() {
+        let mut b = StorageBuilder::new(false);
+
+        // Prime the builder so slots are allocated.
+        b.begin_batch();
+        let h = b.resolve_field(b"host");
+        let s = b.resolve_field(b"status");
+        b.begin_row();
+        b.append_str_by_idx(h, b"web1");
+        b.append_int_by_idx(s, b"200");
+        b.end_row();
+        let _ = b.finish_batch().unwrap();
+
+        // Second batch: same fields. Slots must be reused (fields.len() stays 2).
+        b.begin_batch();
+        let h2 = b.resolve_field(b"host");
+        let s2 = b.resolve_field(b"status");
+        b.begin_row();
+        b.append_str_by_idx(h2, b"web2");
+        b.append_int_by_idx(s2, b"404");
+        b.end_row();
+        let batch = b.finish_batch().unwrap();
+
+        assert_eq!(
+            b.fields.len(),
+            2,
+            "fields Vec must not grow when same fields reappear"
+        );
+        assert_eq!(batch.num_rows(), 1);
+        // Slot indices match here because both batches resolved fields in the
+        // same order ("host" first, "status" second), so the slot-reuse
+        // algorithm assigns the same indices.  The important invariant is that
+        // `fields.len()` stayed bounded — not that the indices are identical.
+        assert_eq!(h, h2, "same field name must resolve to the same slot index");
+        assert_eq!(s, s2, "same field name must resolve to the same slot index");
+        assert_eq!(
+            batch
+                .column_by_name("host")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap()
+                .value(0),
+            "web2"
+        );
     }
 }
 
