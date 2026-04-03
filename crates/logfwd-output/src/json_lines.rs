@@ -137,12 +137,12 @@ impl OutputSink for JsonLinesSink {
                 use flate2::write::GzEncoder;
                 use std::io::Write;
                 self.compress_buf.clear();
-                let mut enc =
-                    GzEncoder::new(&mut self.compress_buf, GzLevel::default());
+                let mut enc = GzEncoder::new(&mut self.compress_buf, GzLevel::default());
                 enc.write_all(&self.batch_buf)
                     .map_err(|e| io::Error::other(format!("gzip compression failed: {e}")))?;
-                enc.finish()
-                    .map_err(|e| io::Error::other(format!("gzip compression finish failed: {e}")))?;
+                enc.finish().map_err(|e| {
+                    io::Error::other(format!("gzip compression finish failed: {e}"))
+                })?;
                 &self.compress_buf
             }
             Compression::None | Compression::Zstd => &self.batch_buf,

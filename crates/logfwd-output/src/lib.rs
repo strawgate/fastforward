@@ -1203,7 +1203,10 @@ mod tests {
             auth: None,
         };
         let result = build_output_sink("http-bad", &cfg, Arc::new(ComponentStats::new()));
-        assert!(result.is_err(), "unsupported compression should be rejected");
+        assert!(
+            result.is_err(),
+            "unsupported compression should be rejected"
+        );
         let err = result.err().unwrap();
         assert!(
             err.contains("zstd"),

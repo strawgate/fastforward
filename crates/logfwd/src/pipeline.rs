@@ -131,7 +131,9 @@ impl Pipeline {
                         }
                     };
                     if geo_cfg.refresh_interval.is_some() {
-                        tracing::warn!("geo_database refresh_interval is not yet implemented, database will not auto-reload");
+                        tracing::warn!(
+                            "geo_database refresh_interval is not yet implemented, database will not auto-reload"
+                        );
                     }
                     transform.set_geo_database(db);
                 }
@@ -156,18 +158,19 @@ impl Pipeline {
         // Only create the directory if LOGFWD_DATA_DIR is explicitly set
         // (prevents tests from polluting the default data dir).
         let checkpoint_dir = default_data_dir().join(name);
-        let checkpoint_store =
-            if checkpoint_dir.exists() || std::env::var_os("LOGFWD_DATA_DIR").is_some() {
-                match FileCheckpointStore::open(&checkpoint_dir) {
-                    Ok(s) => Some(s),
-                    Err(e) => {
-                        tracing::warn!(error = %e, "could not open checkpoint store — starting from beginning");
-                        None
-                    }
+        let checkpoint_store = if checkpoint_dir.exists()
+            || std::env::var_os("LOGFWD_DATA_DIR").is_some()
+        {
+            match FileCheckpointStore::open(&checkpoint_dir) {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    tracing::warn!(error = %e, "could not open checkpoint store — starting from beginning");
+                    None
                 }
-            } else {
-                None
-            };
+            }
+        } else {
+            None
+        };
         let saved_checkpoints: Vec<SourceCheckpoint> = checkpoint_store
             .as_ref()
             .map(FileCheckpointStore::load_all)
