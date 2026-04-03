@@ -399,9 +399,18 @@ async fn run_pipelines(
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
 
-    // Acquire exclusive lock to prevent multiple instances processing
-    // the same files (#737). The lock is held until this function returns.
-    let _lock_guard = acquire_instance_lock(&config)?;
+    // Acquire exclusive lock only when tailing files — OTLP-only and
+    // blackhole pipelines don't need filesystem locking (#737).
+    let has_file_inputs = config.pipelines.values().any(|pipe| {
+        pipe.inputs
+            .iter()
+            .any(|input| matches!(input.input_type, logfwd_config::InputType::File))
+    });
+    let _lock_guard = if has_file_inputs {
+        acquire_instance_lock(&config)?
+    } else {
+        None
+    };
 
     let shutdown = CancellationToken::new();
 
@@ -661,11 +670,11 @@ fn acquire_instance_lock(
             }
             return Err(CliError::Runtime(err));
         }
-        tracing::debug!(path = %lock_path.display(), "acquired instance lock");
+        // Note: tracing subscriber not yet initialized at this point.
     }
 
     #[cfg(not(unix))]
-    tracing::warn!("file-based instance locking not supported on this platform");
+    eprintln!("warn: file-based instance locking not supported on this platform");
 
     // Return the File so the lock is held until the caller drops it.
     Ok(Some(lock_file))
