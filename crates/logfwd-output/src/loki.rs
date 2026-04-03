@@ -45,7 +45,7 @@ use arrow::record_batch::RecordBatch;
 
 use logfwd_io::diagnostics::ComponentStats;
 
-use super::{BatchMetadata, build_col_infos, write_row_json};
+use super::{BatchMetadata, build_col_infos, coalesce_as_str, write_row_json};
 
 // ---------------------------------------------------------------------------
 // LokiStream helpers
@@ -154,22 +154,21 @@ impl LokiAsyncSink {
         let cols = build_col_infos(batch);
 
         // Find timestamp column index (prefer `_timestamp`, fall back to `@timestamp`).
+        // Timestamp columns are always flat Int64/UInt64 — no struct conflict expected.
         let ts_col_idx = schema
             .fields()
             .iter()
             .position(|f| f.name() == "_timestamp" || f.name() == "@timestamp");
 
-        // Find label column indices.
-        let label_col_indices: Vec<(String, usize)> = self
+        // Find label ColInfos for configured label columns.
+        let label_col_infos: Vec<(String, &super::ColInfo)> = self
             .config
             .label_columns
             .iter()
             .filter_map(|label_col| {
-                schema
-                    .fields()
-                    .iter()
-                    .position(|f| f.name() == label_col.as_str())
-                    .map(|idx| (label_col.clone(), idx))
+                cols.iter()
+                    .find(|c| &c.field_name == label_col)
+                    .map(|ci| (label_col.clone(), ci))
             })
             .collect();
 
@@ -193,21 +192,13 @@ impl LokiAsyncSink {
             };
 
             // --- Labels ---
+            // Use coalesce_as_str so that struct conflict columns (and plain Utf8
+            // columns alike) always produce a string value for the label.
             let mut labels: Vec<(String, String)> = self.config.static_labels.clone();
-            for (label_name, col_idx) in &label_col_indices {
-                let col = batch.column(*col_idx);
-                if col.is_null(row) {
-                    continue;
+            for (label_name, col_info) in &label_col_infos {
+                if let Some(val) = coalesce_as_str(batch, row, col_info) {
+                    labels.push((label_name.clone(), val));
                 }
-                let val = match col.data_type() {
-                    DataType::Utf8 => col.as_string::<i32>().value(row).to_string(),
-                    DataType::LargeUtf8 => col.as_string::<i64>().value(row).to_string(),
-                    DataType::Int64 => itoa::Buffer::new()
-                        .format(col.as_primitive::<arrow::datatypes::Int64Type>().value(row))
-                        .to_string(),
-                    _ => continue,
-                };
-                labels.push((label_name.clone(), val));
             }
             labels.sort_unstable_by(|a, b| a.0.cmp(&b.0));
 
@@ -641,6 +632,66 @@ mod tests {
                 "value {i} must round-trip through JSON encoding"
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Struct conflict column label extraction tests
+    // -----------------------------------------------------------------------
+
+    /// Build a batch with `status: Struct { int: Int64, str: Utf8 }`.
+    fn make_status_struct_batch(int_val: Option<i64>, str_val: Option<&str>) -> RecordBatch {
+        use arrow::array::{ArrayRef, Int64Array, StringArray, StructArray};
+        use arrow::buffer::NullBuffer;
+        use arrow::datatypes::{DataType, Field, Fields, Schema};
+
+        let int_field = Arc::new(Field::new("int", DataType::Int64, true));
+        let str_field = Arc::new(Field::new("str", DataType::Utf8, true));
+        let int_arr: ArrayRef = Arc::new(Int64Array::from(vec![int_val]));
+        let str_arr: ArrayRef = Arc::new(StringArray::from(vec![str_val]));
+
+        let nulls = NullBuffer::new(arrow::buffer::BooleanBuffer::collect_bool(1, |_| {
+            int_val.is_some() || str_val.is_some()
+        }));
+
+        let struct_field = Field::new(
+            "status",
+            DataType::Struct(Fields::from(vec![
+                int_field.as_ref().clone(),
+                str_field.as_ref().clone(),
+            ])),
+            true,
+        );
+        let struct_arr: ArrayRef = Arc::new(StructArray::new(
+            Fields::from(vec![int_field, str_field]),
+            vec![int_arr, str_arr],
+            Some(nulls),
+        ));
+
+        RecordBatch::try_new(Arc::new(Schema::new(vec![struct_field])), vec![struct_arr]).unwrap()
+    }
+
+    #[test]
+    fn label_extraction_from_struct_conflict_column() {
+        // status: Struct{int=200, str=null} — label should be "200" (int cast to str).
+        let batch = make_status_struct_batch(Some(200), None);
+        let cols = super::build_col_infos(&batch);
+        let status_info = cols.iter().find(|c| c.field_name == "status").unwrap();
+        let val = super::coalesce_as_str(&batch, 0, status_info);
+        assert_eq!(val.as_deref(), Some("200"), "int label must be stringified");
+    }
+
+    #[test]
+    fn label_extraction_prefers_str_over_int() {
+        // status: Struct{int=200, str="OK"} — str wins in str_variants ordering.
+        let batch = make_status_struct_batch(Some(200), Some("OK"));
+        let cols = super::build_col_infos(&batch);
+        let status_info = cols.iter().find(|c| c.field_name == "status").unwrap();
+        let val = super::coalesce_as_str(&batch, 0, status_info);
+        assert_eq!(
+            val.as_deref(),
+            Some("OK"),
+            "str variant must win over int in str_variants ordering"
+        );
     }
 }
 

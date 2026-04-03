@@ -12,8 +12,9 @@ use std::sync::Arc;
 
 use arrow::array::{
     Array, ArrayRef, DictionaryArray, Int32Array, Int64Array, StringArray, StringViewBuilder,
+    StructArray,
 };
-use arrow::datatypes::{DataType, Field, Int32Type, Schema};
+use arrow::datatypes::{DataType, Field, Fields, Int32Type, Schema};
 use arrow::record_batch::RecordBatch;
 
 use logfwd_transform::SqlTransform;
@@ -594,85 +595,83 @@ fn streaming_builder_group_by_and_order_by() {
 // Section 5: Conflict-schema normalization (bare-name SQL on conflict batches)
 // ===========================================================================
 //
-// When the scanner detects a type conflict for a field it emits
-// double-underscore suffixed columns (`status__int: Int64, status__str: Utf8View`).
+// The Arrow builders now emit a Struct column for each field that has a type
+// conflict across rows.  For example:
+//   status: Struct { int: Int64, str: Utf8View }
+//
 // Before handing the batch to DataFusion, SqlTransform calls
-// normalize_conflict_columns() which adds a bare `status: Utf8` column so that
-// user SQL using bare names resolves correctly against both clean and conflict
-// batches.
+// normalize_conflict_columns() which replaces every conflict struct in-place
+// with a flat `status: Utf8` column so that user SQL using bare names resolves
+// correctly against both clean and conflict batches.
 
-/// Conflict batch: `status__int` + `status__str` both present.
-/// SQL `SELECT status FROM logs` must resolve the synthesised bare column.
-#[test]
-fn conflict_batch_bare_select() {
-    use arrow::array::StringViewBuilder;
-    use std::collections::HashMap;
+// ---------------------------------------------------------------------------
+// Conflict-batch helper
+// ---------------------------------------------------------------------------
+
+/// Build a conflict struct batch with `status: Struct { int: Int64, str: Utf8View }`.
+fn make_conflict_struct_batch(
+    int_vals: Vec<Option<i64>>,
+    str_vals: Vec<Option<&str>>,
+) -> RecordBatch {
+    assert_eq!(int_vals.len(), str_vals.len());
+
+    let int_arr: ArrayRef = Arc::new(Int64Array::from(int_vals));
 
     let mut sv = StringViewBuilder::new();
-    sv.append_null(); // row 0: no string value
-    sv.append_value("OK"); // row 1: string value
+    for v in &str_vals {
+        match v {
+            Some(s) => sv.append_value(s),
+            None => sv.append_null(),
+        }
+    }
+    let str_arr: ArrayRef = Arc::new(sv.finish());
 
-    let mut meta = HashMap::new();
-    meta.insert(
-        "logfwd.conflict_groups".to_string(),
-        "status:int,str".to_string(),
+    let struct_fields = Fields::from(vec![
+        Field::new("int", DataType::Int64, true),
+        Field::new("str", DataType::Utf8View, true),
+    ]);
+    let struct_arr = StructArray::new(
+        struct_fields.clone(),
+        vec![Arc::clone(&int_arr), Arc::clone(&str_arr)],
+        None,
     );
-    let schema = Arc::new(Schema::new_with_metadata(
-        vec![
-            Field::new("status__int", DataType::Int64, true),
-            Field::new("status__str", DataType::Utf8View, true),
-        ],
-        meta,
-    ));
-    let batch = RecordBatch::try_new(
-        schema,
-        vec![
-            Arc::new(Int64Array::from(vec![Some(200), None])) as ArrayRef,
-            Arc::new(sv.finish()) as ArrayRef,
-        ],
-    )
-    .unwrap();
+
+    let schema = Arc::new(Schema::new(vec![Field::new(
+        "status",
+        DataType::Struct(struct_fields),
+        true,
+    )]));
+
+    RecordBatch::try_new(schema, vec![Arc::new(struct_arr) as ArrayRef]).unwrap()
+}
+
+/// Conflict batch: `status: Struct { int: Int64, str: Utf8View }`.
+/// SQL `SELECT status FROM logs` must resolve the normalised flat column.
+#[test]
+fn conflict_batch_bare_select() {
+    // Row 0: int=200, str=null → "200"
+    // Row 1: int=null, str="OK" → "OK"
+    let batch = make_conflict_struct_batch(vec![Some(200), None], vec![None, Some("OK")]);
 
     let mut t = SqlTransform::new("SELECT status FROM logs").unwrap();
     let result = t.execute_blocking(batch).unwrap();
 
     assert_eq!(result.num_rows(), 2);
     let col = collect_string_col(&result, "status");
-    assert_eq!(col[0], "200"); // from status__int
-    assert_eq!(col[1], "OK"); // from status__str
+    assert_eq!(col[0], "200"); // from int child
+    assert_eq!(col[1], "OK"); // from str child
 }
 
-/// WHERE on a bare column from a conflict batch.
+/// WHERE on the normalised bare column from a conflict batch.
 #[test]
 fn conflict_batch_where_on_bare_column() {
-    use arrow::array::StringViewBuilder;
-    use std::collections::HashMap;
-
-    let mut sv = StringViewBuilder::new();
-    sv.append_null();
-    sv.append_value("OK");
-    sv.append_value("NOT_FOUND");
-
-    let mut meta = HashMap::new();
-    meta.insert(
-        "logfwd.conflict_groups".to_string(),
-        "status:int,str".to_string(),
+    // Row 0: int=200, str=null → "200"
+    // Row 1: int=null, str="OK" → "OK"
+    // Row 2: int=null, str="NOT_FOUND" → "NOT_FOUND"
+    let batch = make_conflict_struct_batch(
+        vec![Some(200), None, None],
+        vec![None, Some("OK"), Some("NOT_FOUND")],
     );
-    let schema = Arc::new(Schema::new_with_metadata(
-        vec![
-            Field::new("status__int", DataType::Int64, true),
-            Field::new("status__str", DataType::Utf8View, true),
-        ],
-        meta,
-    ));
-    let batch = RecordBatch::try_new(
-        schema,
-        vec![
-            Arc::new(Int64Array::from(vec![Some(200), None, None])) as ArrayRef,
-            Arc::new(sv.finish()) as ArrayRef,
-        ],
-    )
-    .unwrap();
 
     let mut t = SqlTransform::new("SELECT status FROM logs WHERE status = 'OK'").unwrap();
     let result = t.execute_blocking(batch).unwrap();
@@ -682,36 +681,13 @@ fn conflict_batch_where_on_bare_column() {
     assert_eq!(col[0], "OK");
 }
 
-/// `int(status)` on a conflict batch's bare column returns the numeric value.
+/// `int(status)` on a conflict batch's normalised flat column returns the
+/// numeric value for int rows and NULL for string-only rows.
 #[test]
 fn conflict_batch_int_udf_on_bare_column() {
-    use arrow::array::StringViewBuilder;
-    use std::collections::HashMap;
-
-    let mut sv = StringViewBuilder::new();
-    sv.append_null();
-    sv.append_value("OK");
-
-    let mut meta = HashMap::new();
-    meta.insert(
-        "logfwd.conflict_groups".to_string(),
-        "status:int,str".to_string(),
-    );
-    let schema = Arc::new(Schema::new_with_metadata(
-        vec![
-            Field::new("status__int", DataType::Int64, true),
-            Field::new("status__str", DataType::Utf8View, true),
-        ],
-        meta,
-    ));
-    let batch = RecordBatch::try_new(
-        schema,
-        vec![
-            Arc::new(Int64Array::from(vec![Some(500), None])) as ArrayRef,
-            Arc::new(sv.finish()) as ArrayRef,
-        ],
-    )
-    .unwrap();
+    // Row 0: int=500, str=null → "500"
+    // Row 1: int=null, str="OK" → "OK"
+    let batch = make_conflict_struct_batch(vec![Some(500), None], vec![None, Some("OK")]);
 
     let mut t =
         SqlTransform::new("SELECT int(status) AS s FROM logs WHERE int(status) > 400").unwrap();
@@ -723,43 +699,48 @@ fn conflict_batch_int_udf_on_bare_column() {
     assert_eq!(counts[0], Some(500));
 }
 
-/// Verify that a batch with only a single suffixed column (no true conflict)
-/// is NOT modified — the lone `error_str` column must remain unmodified.
+/// A struct whose children are NOT type-names must NOT be normalized.
+/// Here `Struct { x: Int64, y: Utf8 }` must pass through unchanged.
 #[test]
-fn single_suffixed_column_not_treated_as_conflict() {
-    use arrow::array::StringViewBuilder;
+fn lone_column_not_treated_as_conflict() {
+    // Build a struct with children "x" and "y" — not conflict type-names.
+    let x_arr: ArrayRef = Arc::new(Int64Array::from(vec![1i64, 2]));
+    let y_arr: ArrayRef = Arc::new(StringArray::from(vec!["a", "b"]));
 
-    let mut sv = StringViewBuilder::new();
-    sv.append_value("oops");
-    sv.append_value("crash");
+    let struct_fields = Fields::from(vec![
+        Field::new("x", DataType::Int64, true),
+        Field::new("y", DataType::Utf8, true),
+    ]);
+    let struct_arr = StructArray::new(
+        struct_fields.clone(),
+        vec![Arc::clone(&x_arr), Arc::clone(&y_arr)],
+        None,
+    );
 
     let schema = Arc::new(Schema::new(vec![Field::new(
-        "error__str",
-        DataType::Utf8View,
+        "point",
+        DataType::Struct(struct_fields.clone()),
         true,
     )]));
-    let batch = RecordBatch::try_new(schema, vec![Arc::new(sv.finish()) as ArrayRef]).unwrap();
+    let batch = RecordBatch::try_new(schema, vec![Arc::new(struct_arr) as ArrayRef]).unwrap();
 
-    // SQL must use the actual column name — no bare `error` column should appear.
-    let mut t = SqlTransform::new("SELECT error__str FROM logs").unwrap();
+    // The batch must pass through normalize unchanged — the struct type is
+    // preserved and no extra "point" Utf8 column is added.
+    // We verify via SqlTransform: SELECT the struct field by sub-field path.
+    // (DataFusion supports `point['x']` syntax for struct sub-fields.)
+    let mut t = SqlTransform::new("SELECT point FROM logs").unwrap();
     let result = t.execute_blocking(batch).unwrap();
 
     assert_eq!(result.num_rows(), 2);
-    // No bare `error` column in output.
+    // Output column must still be a Struct, not Utf8.
     assert!(
-        result.column_by_name("error").is_none(),
-        "bare 'error' column must not be synthesized from a lone 'error__str'"
+        matches!(result.schema().field(0).data_type(), DataType::Struct(_)),
+        "non-conflict struct must not be normalized to Utf8"
     );
 }
 
-/// Cross-batch type stability: documents that `int(status) > 400` is the
-/// safe SQL idiom for numeric comparison across both clean and conflict batches.
-///
-/// A clean batch has `status: Int64` (bare name, numeric type).
-/// A conflict batch has `status__int + status__str` and a synthesized
-/// `status: Utf8` (string type). The `WHERE status > 400` predicate has
-/// different semantics across the two batches. `int(status)` resolves
-/// to the numeric value in both cases.
+/// Cross-batch type stability: `int(status) > 400` works on both clean
+/// (Int64) and conflict (struct → normalized Utf8) batches.
 #[test]
 fn cross_batch_int_udf_works_on_clean_and_conflict_batches() {
     // --- Clean batch: status is always Int64 (no conflict) ---
@@ -779,7 +760,6 @@ fn cross_batch_int_udf_works_on_clean_and_conflict_batches() {
     let clean_col = clean_result
         .column_by_name("status_int")
         .expect("int(status) must resolve on clean batch");
-    // int() on a plain Int64 column returns the value directly.
     let arr = clean_col
         .as_any()
         .downcast_ref::<Int64Array>()
@@ -787,27 +767,10 @@ fn cross_batch_int_udf_works_on_clean_and_conflict_batches() {
     assert_eq!(arr.value(0), 200);
     assert_eq!(arr.value(1), 404);
 
-    // --- Conflict batch: status__int + status__str + synthesized status: Utf8 ---
-    let mut meta = std::collections::HashMap::new();
-    meta.insert(
-        "logfwd.conflict_groups".to_string(),
-        "status:int,str".to_string(),
-    );
-    let conflict_schema = Arc::new(Schema::new_with_metadata(
-        vec![
-            Field::new("status__int", DataType::Int64, true),
-            Field::new("status__str", DataType::Utf8, true),
-        ],
-        meta,
-    ));
-    let conflict_batch = RecordBatch::try_new(
-        conflict_schema,
-        vec![
-            Arc::new(Int64Array::from(vec![Some(503i64), None])) as ArrayRef,
-            Arc::new(StringArray::from(vec![None, Some("OK")])) as ArrayRef,
-        ],
-    )
-    .unwrap();
+    // --- Conflict batch: status: Struct { int: Int64, str: Utf8View }
+    //     normalize_conflict_columns replaces it with flat status: Utf8.
+    let conflict_batch =
+        make_conflict_struct_batch(vec![Some(503i64), None], vec![None, Some("OK")]);
 
     let mut t2 = SqlTransform::new("SELECT int(status) AS status_int FROM logs").unwrap();
     let conflict_result = t2.execute_blocking(conflict_batch).unwrap();

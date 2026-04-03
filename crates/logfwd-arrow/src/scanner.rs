@@ -223,11 +223,33 @@ mod tests {
     }
     #[test]
     fn test_type_conflict() {
+        use arrow::array::StructArray;
+        use arrow::datatypes::DataType;
         let batch = default_scanner(4)
             .scan(b"{\"status\":200}\n{\"status\":\"OK\"}\n")
             .unwrap();
-        assert!(batch.column_by_name("status__int").is_some());
-        assert!(batch.column_by_name("status__str").is_some());
+        // Old suffixed columns must not exist
+        assert!(
+            batch.column_by_name("status__int").is_none(),
+            "status__int must not exist"
+        );
+        assert!(
+            batch.column_by_name("status__str").is_none(),
+            "status__str must not exist"
+        );
+        // New struct column
+        let status_col = batch
+            .column_by_name("status")
+            .expect("status struct column");
+        assert!(
+            matches!(status_col.data_type(), DataType::Struct(_)),
+            "status must be Struct, got {:?}",
+            status_col.data_type()
+        );
+        let sa = status_col.as_any().downcast_ref::<StructArray>().unwrap();
+        let child_names: Vec<&str> = sa.fields().iter().map(|f| f.name().as_str()).collect();
+        assert!(child_names.contains(&"int"), "missing int child");
+        assert!(child_names.contains(&"str"), "missing str child");
     }
     #[test]
     fn test_missing_fields() {
