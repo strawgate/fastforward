@@ -1015,5 +1015,7 @@ mod kani_proofs {
 
         assert_eq!(values.len(), num_rows);
         assert_eq!(valid.len(), num_rows);
+        kani::cover!(num_rows == 0, "zero-row batch exercised");
+        kani::cover!(num_rows > 0, "non-empty batch exercised");
     }
 }

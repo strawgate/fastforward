@@ -125,16 +125,22 @@ pub(crate) fn merge_to_utf8(
     use arrow::array::StringArray;
     use arrow::compute;
 
-    let int_s =
-        int_col.map(|c| compute::cast(c, &DataType::Utf8).expect("cast int column to Utf8"));
-    let float_s =
-        float_col.map(|c| compute::cast(c, &DataType::Utf8).expect("cast float column to Utf8"));
+    // Arrow always supports Int64 → Utf8 and Float64 → Utf8 (formats as decimal).
+    // Utf8View → Utf8 is also infallible. These casts cannot fail at runtime.
+    let int_s = int_col.map(|c| {
+        compute::cast(c, &DataType::Utf8).expect("Int64 → Utf8 cast is always supported by Arrow")
+    });
+    let float_s = float_col.map(|c| {
+        compute::cast(c, &DataType::Utf8).expect("Float64 → Utf8 cast is always supported by Arrow")
+    });
     // StreamingBuilder emits str columns as Utf8View; StorageBuilder emits Utf8.
     // Both cast cleanly to Utf8 here. This loses the zero-copy StringView property,
     // but normalize_conflict_columns is only called in the SQL transform path (not
     // the storage path), so the trade-off is intentional and acceptable.
-    let str_s =
-        str_col.map(|c| compute::cast(c, &DataType::Utf8).expect("cast str column to Utf8"));
+    let str_s = str_col.map(|c| {
+        compute::cast(c, &DataType::Utf8)
+            .expect("Utf8/Utf8View → Utf8 cast is always supported by Arrow")
+    });
 
     let int_arr = int_s
         .as_ref()

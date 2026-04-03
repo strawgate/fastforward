@@ -113,6 +113,11 @@ pub fn parse_column_name(col_name: &str) -> (&str, &str) {
 
 /// Returns `true` if a Struct column's child fields are all type-name fields
 /// ("int", "float", "str", "bool") — i.e. it is a conflict struct column.
+///
+/// Note: the current builders only emit "int", "float", and "str" children.
+/// "bool" is included for forward compatibility — if a future builder adds a
+/// bool child, this detection and the priority functions will handle it
+/// automatically.
 fn is_conflict_struct(fields: &arrow::datatypes::Fields) -> bool {
     !fields.is_empty()
         && fields
@@ -2052,19 +2057,50 @@ mod kani_proofs {
     use super::*;
     use arrow::datatypes::Fields;
 
+    /// Empty struct is not a conflict struct — the guard requires at least one child.
     #[kani::proof]
     fn proof_is_conflict_struct_empty_returns_false() {
         let fields = Fields::empty();
         assert!(!is_conflict_struct(&fields));
+        kani::cover!(true, "empty fields path exercised");
     }
 
+    /// JSON priority ordering: Int64 wins over Float64 wins over Utf8.
+    /// This is the core contract that drives per-row type-preserving serialization.
     #[kani::proof]
-    fn proof_json_priority_int_beats_utf8() {
+    fn proof_json_priority_total_order() {
+        assert!(json_priority(&DataType::Int64) > json_priority(&DataType::Float64));
+        assert!(json_priority(&DataType::Float64) > json_priority(&DataType::Utf8));
         assert!(json_priority(&DataType::Int64) > json_priority(&DataType::Utf8));
+        kani::cover!(
+            json_priority(&DataType::Int64) > json_priority(&DataType::Utf8),
+            "int beats utf8"
+        );
     }
 
+    /// String-coalesce priority: Utf8/Utf8View wins over numeric types.
+    /// Loki labels and other string consumers depend on this contract.
     #[kani::proof]
-    fn proof_str_priority_utf8_beats_int() {
+    fn proof_str_priority_string_beats_numerics() {
         assert!(str_priority(&DataType::Utf8) > str_priority(&DataType::Int64));
+        assert!(str_priority(&DataType::Utf8View) > str_priority(&DataType::Float64));
+        assert!(str_priority(&DataType::Utf8) == str_priority(&DataType::Utf8View));
+        kani::cover!(
+            str_priority(&DataType::Utf8) > str_priority(&DataType::Int64),
+            "utf8 beats int64"
+        );
+    }
+
+    /// json_priority and str_priority assign different orderings — they are not equal.
+    /// This guards against accidentally returning the same function for both callers.
+    #[kani::proof]
+    fn proof_json_and_str_priority_differ_for_int_vs_utf8() {
+        // In JSON mode, Int64 wins; in string mode, Utf8 wins.
+        assert!(json_priority(&DataType::Int64) > json_priority(&DataType::Utf8));
+        assert!(str_priority(&DataType::Utf8) > str_priority(&DataType::Int64));
+        kani::cover!(
+            true,
+            "ordering inversion between json and str priority verified"
+        );
     }
 }
