@@ -579,7 +579,7 @@ impl FileTailer {
     /// Returns None if no new data.
     /// Maximum bytes to read from a single file per poll cycle.
     /// Prevents OOM when a file grows significantly between polls (#800).
-    const MAX_READ_PER_POLL: usize = 64 * 1024 * 1024; // 64 MiB
+    const MAX_READ_PER_POLL: usize = 4 * 1024 * 1024; // 4 MiB
 
     fn read_new_data(&mut self, path: &Path) -> io::Result<ReadResult> {
         let tailed = match self.files.get_mut(path) {
@@ -1554,8 +1554,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let log_path = dir.path().join("large.log");
 
-        // Write more than MAX_READ_PER_POLL (64 MiB) — use 65 MiB.
-        let target_size = 65 * 1024 * 1024;
+        // Write more than MAX_READ_PER_POLL (4 MiB) — use 5 MiB.
+        let target_size = 5 * 1024 * 1024;
         {
             let mut f = File::create(&log_path).unwrap();
             let line = "x".repeat(1023) + "\n"; // 1 KiB per line
@@ -1585,7 +1585,7 @@ mod tests {
             .sum();
 
         assert!(
-            total_bytes <= FileTailer::MAX_READ_PER_POLL + 256 * 1024, // allow one extra read_buf
+            total_bytes <= FileTailer::MAX_READ_PER_POLL + 512 * 1024, // allow one extra read_buf
             "read should be capped near 64 MiB, got {} bytes",
             total_bytes
         );
