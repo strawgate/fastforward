@@ -77,7 +77,9 @@ overflow-checks = true
 debug = true  # needed for flamegraphs and dhat to show source locations
 
 [profile.test]
-debug = true
+# line-tables-only keeps backtraces readable while shrinking test binaries
+# from ~180 MB to ~60 MB each (DataFusion debug info is enormous). (#812)
+debug = "line-tables-only"
 
 [profile.bench]
 inherits = "release"

@@ -47,6 +47,19 @@ struct TailedFile {
     eof_emitted: bool,
 }
 
+/// Internal result from read_new_data — distinguishes truncation from no-data.
+enum ReadResult {
+    /// New data available.
+    Data(Vec<u8>),
+    /// File was truncated, then new data read from beginning.
+    /// Downstream should clear remainder BEFORE processing the new data.
+    TruncatedThenData(Vec<u8>),
+    /// File was truncated but no new data yet.
+    Truncated,
+    /// No new data.
+    NoData,
+}
+
 /// Events emitted by the tailer.
 #[non_exhaustive]
 pub enum TailEvent {
@@ -148,7 +161,7 @@ fn expand_glob_patterns(patterns: &[&str]) -> Vec<PathBuf> {
                 }
             }
             Err(e) => {
-                eprintln!("warn: invalid glob pattern {pattern:?}: {e}");
+                tracing::warn!(pattern, error = %e, "tail.invalid_glob_pattern");
             }
         }
     }
@@ -221,12 +234,14 @@ impl FileTailer {
             evicted_offsets: HashMap::new(),
         };
 
-        // Open existing files.
+        // Open existing files. Warn about missing paths (#730).
         for path in paths {
-            if path.exists()
-                && let Err(e) = tailer.open_file(path)
-            {
-                eprintln!("warn: could not open {}: {e}", path.display());
+            if path.exists() {
+                if let Err(e) = tailer.open_file_at(path, tailer.config.start_from_end) {
+                    tracing::warn!(path = %path.display(), error = %e, "tail.open_failed");
+                }
+            } else {
+                tracing::warn!(path = %path.display(), "tail.file_not_found — pipeline will wait until file appears");
             }
         }
 
@@ -244,6 +259,16 @@ impl FileTailer {
     pub fn new_with_globs(patterns: &[&str], config: TailConfig) -> io::Result<Self> {
         // Expand patterns to get the initial set of concrete paths.
         let initial_paths: Vec<PathBuf> = expand_glob_patterns(patterns);
+
+        // Warn when glob patterns match no files (#730).
+        if initial_paths.is_empty() {
+            for pattern in patterns {
+                tracing::warn!(
+                    pattern,
+                    "tail.glob_no_matches — pipeline will wait until matching files appear"
+                );
+            }
+        }
 
         let mut tailer = Self::new(&initial_paths, config)?;
         tailer.glob_patterns = patterns.iter().map(ToString::to_string).collect();
@@ -272,10 +297,20 @@ impl FileTailer {
         let pattern_refs: Vec<&str> = self.glob_patterns.iter().map(String::as_str).collect();
         let candidates = expand_glob_patterns(&pattern_refs);
 
-        let existing: HashSet<&PathBuf> = self.watch_paths.iter().collect();
+        // Canonicalize for dedup to prevent double-opens via symlinks or
+        // relative/absolute path variants (#799).
+        let existing: HashSet<PathBuf> = self
+            .watch_paths
+            .iter()
+            .filter_map(|p| fs::canonicalize(p).ok())
+            .collect();
         let new_paths: Vec<PathBuf> = candidates
             .into_iter()
-            .filter(|p| !existing.contains(p))
+            .filter(|p| {
+                fs::canonicalize(p)
+                    .map(|c| !existing.contains(&c))
+                    .unwrap_or(true) // keep paths we can't canonicalize
+            })
             .collect();
 
         for path in new_paths {
@@ -283,31 +318,32 @@ impl FileTailer {
             if let Some(parent) = path.parent()
                 && let Err(e) = self.watch_dir(parent)
             {
-                eprintln!("warn: could not watch {}: {e}", parent.display());
+                tracing::warn!(path = %parent.display(), error = %e, "tail.watch_dir_failed");
             }
 
-            // Open the file (new files from glob discovery always read from the beginning).
-            let saved = self.config.start_from_end;
-            self.config.start_from_end = false;
-            if let Err(e) = self.open_file(&path) {
-                eprintln!("warn: could not open {}: {e}", path.display());
+            // New files from glob discovery always read from the beginning.
+            if let Err(e) = self.open_file_at(&path, false) {
+                tracing::warn!(path = %path.display(), error = %e, "tail.open_failed");
             }
-            self.config.start_from_end = saved;
 
             self.watch_paths.push(path);
         }
     }
 
-    /// Open and start tailing a file. If start_from_end is true, seeks to EOF.
-    /// If the file was previously evicted from the LRU cache, restores the
-    /// saved offset so reads resume where they left off.
-    fn open_file(&mut self, path: &Path) -> io::Result<()> {
+    /// Open and start tailing a file.
+    ///
+    /// If `start_from_end` is true, seeks to EOF. If the file was previously
+    /// evicted from the LRU cache, restores the saved offset instead.
+    ///
+    /// Takes `start_from_end` as a parameter (Bug E) instead of reading
+    /// from `self.config` to avoid the fragile save/restore pattern.
+    fn open_file_at(&mut self, path: &Path, start_from_end: bool) -> io::Result<()> {
         let identity = identify_file(path, self.config.fingerprint_bytes)?;
         let mut file = File::open(path)?;
 
         let offset = if let Some(saved) = self.evicted_offsets.remove(path) {
             file.seek(SeekFrom::Start(saved))?
-        } else if self.config.start_from_end {
+        } else if start_from_end {
             file.seek(SeekFrom::End(0))?
         } else {
             0
@@ -398,15 +434,21 @@ impl FileTailer {
                 // before the rename.  The kernel keeps the old inode alive while
                 // our File handle is open, so these bytes are still readable.
                 match self.read_new_data(path) {
-                    Ok(Some(data)) => {
+                    Ok(ReadResult::Data(data)) => {
                         events.push(TailEvent::Data {
                             path: path.clone(),
                             bytes: data,
                         });
                     }
-                    Ok(None) => {}
+                    Ok(ReadResult::TruncatedThenData(data)) => {
+                        events.push(TailEvent::Data {
+                            path: path.clone(),
+                            bytes: data,
+                        });
+                    }
+                    Ok(ReadResult::Truncated) | Ok(ReadResult::NoData) => {}
                     Err(e) => {
-                        eprintln!("warn: error draining rotated file {}: {e}", path.display());
+                        tracing::warn!(path = %path.display(), error = %e, "tail.drain_rotated_error");
                     }
                 }
 
@@ -414,23 +456,13 @@ impl FileTailer {
                 // and switch to the new file.
                 events.push(TailEvent::Rotated { path: path.clone() });
                 let _ = self.files.remove(path);
-                let saved_start_from_end = self.config.start_from_end;
-                self.config.start_from_end = false; // read new file from beginning
-                if let Err(e) = self.open_file(path) {
-                    eprintln!(
-                        "warn: could not open {} after rotation: {e}",
-                        path.display()
-                    );
+                if let Err(e) = self.open_file_at(path, false) {
+                    tracing::warn!(path = %path.display(), error = %e, "tail.open_after_rotation_failed");
                 }
-                self.config.start_from_end = saved_start_from_end;
             } else if is_new {
-                // New file appeared.
-                let saved = self.config.start_from_end;
-                self.config.start_from_end = false; // new files read from beginning
-                if let Err(e) = self.open_file(path) {
-                    eprintln!("warn: could not open new file {}: {e}", path.display());
+                if let Err(e) = self.open_file_at(path, false) {
+                    tracing::warn!(path = %path.display(), error = %e, "tail.open_new_file_failed");
                 }
-                self.config.start_from_end = saved;
             }
         }
 
@@ -438,7 +470,7 @@ impl FileTailer {
         let paths: Vec<PathBuf> = self.files.keys().cloned().collect();
         for path in paths {
             match self.read_new_data(&path) {
-                Ok(Some(data)) => {
+                Ok(ReadResult::Data(data)) => {
                     // New data arrived — reset the EOF-emitted flag so a fresh
                     // EndOfFile event can be emitted the next time reads stall.
                     if let Some(tailed) = self.files.get_mut(&path) {
@@ -449,8 +481,25 @@ impl FileTailer {
                         bytes: data,
                     });
                 }
-                Ok(None) => {
-                    // No new data.  Emit EndOfFile once so downstream can flush
+                Ok(ReadResult::TruncatedThenData(data)) => {
+                    // Copytruncate detected + new data from beginning (#796).
+                    // Emit Truncated FIRST so downstream clears remainder,
+                    // then emit the new data.
+                    events.push(TailEvent::Truncated { path: path.clone() });
+                    if let Some(tailed) = self.files.get_mut(&path) {
+                        tailed.eof_emitted = false;
+                    }
+                    events.push(TailEvent::Data {
+                        path: path.clone(),
+                        bytes: data,
+                    });
+                }
+                Ok(ReadResult::Truncated) => {
+                    // Truncated but no new data yet.
+                    events.push(TailEvent::Truncated { path: path.clone() });
+                }
+                Ok(ReadResult::NoData) => {
+                    // No new data. Emit EndOfFile once so downstream can flush
                     // any partial-line remainder that was not newline-terminated.
                     if let Some(tailed) = self.files.get_mut(&path) {
                         if !tailed.eof_emitted {
@@ -460,7 +509,7 @@ impl FileTailer {
                     }
                 }
                 Err(e) => {
-                    eprintln!("warn: error reading {}: {e}", path.display());
+                    tracing::warn!(path = %path.display(), error = %e, "tail.read_error");
                 }
             }
         }
@@ -484,18 +533,25 @@ impl FileTailer {
         for path in &deleted {
             // Drain any remaining data before closing the FD.
             match self.read_new_data(path) {
-                Ok(Some(data)) => {
+                Ok(ReadResult::Data(data)) => {
                     events.push(TailEvent::Data {
                         path: path.clone(),
                         bytes: data,
                     });
                 }
-                Ok(None) => {}
+                Ok(ReadResult::TruncatedThenData(data)) => {
+                    events.push(TailEvent::Data {
+                        path: path.clone(),
+                        bytes: data,
+                    });
+                }
+                Ok(ReadResult::Truncated) | Ok(ReadResult::NoData) => {}
                 Err(e) => {
-                    eprintln!("warn: error draining deleted file {}: {e}", path.display());
+                    tracing::warn!(path = %path.display(), error = %e, "tail.drain_deleted_error");
                 }
             }
             self.files.remove(path);
+            self.evicted_offsets.remove(path); // Bug G: prevent unbounded leak
         }
 
         // Evict least-recently-read files when over the open-file limit.
@@ -521,19 +577,26 @@ impl FileTailer {
 
     /// Read ALL available new data from a file. Drains until read() returns 0.
     /// Returns None if no new data.
-    fn read_new_data(&mut self, path: &Path) -> io::Result<Option<Vec<u8>>> {
+    /// Maximum bytes to read from a single file per poll cycle.
+    /// Prevents OOM when a file grows significantly between polls (#800).
+    const MAX_READ_PER_POLL: usize = 4 * 1024 * 1024; // 4 MiB
+
+    fn read_new_data(&mut self, path: &Path) -> io::Result<ReadResult> {
         let tailed = match self.files.get_mut(path) {
             Some(t) => t,
-            None => return Ok(None),
+            None => return Ok(ReadResult::NoData),
         };
 
         // Check current file size.
         let meta = tailed.file.metadata()?;
         let current_size = meta.len();
 
-        if current_size < tailed.offset {
-            // File was truncated (copytruncate rotation).
+        let was_truncated = current_size < tailed.offset;
+        if was_truncated {
+            // File was truncated (copytruncate rotation) (#796).
+            // Reset offset, fingerprint, and eof flag.
             tailed.offset = 0;
+            tailed.eof_emitted = false; // Bug A: allow fresh EndOfFile after truncation
             tailed.file.seek(SeekFrom::Start(0))?;
             tailed.identity.fingerprint =
                 compute_fingerprint(&mut tailed.file, self.config.fingerprint_bytes)?;
@@ -541,12 +604,19 @@ impl FileTailer {
         }
 
         if current_size <= tailed.offset {
-            return Ok(None);
+            return Ok(if was_truncated {
+                ReadResult::Truncated
+            } else {
+                ReadResult::NoData
+            });
         }
 
-        // Read ALL available bytes in a loop until we drain everything.
+        // Read available bytes, capped at MAX_READ_PER_POLL (#800).
         let mut result = Vec::new();
         loop {
+            if result.len() >= Self::MAX_READ_PER_POLL {
+                break; // continue on next poll
+            }
             let n = tailed.file.read(&mut self.read_buf)?;
             if n == 0 {
                 break;
@@ -556,11 +626,19 @@ impl FileTailer {
         }
 
         if result.is_empty() {
-            return Ok(None);
+            return Ok(if was_truncated {
+                ReadResult::Truncated
+            } else {
+                ReadResult::NoData
+            });
         }
 
         tailed.last_read = Instant::now();
-        Ok(Some(result))
+        Ok(if was_truncated {
+            ReadResult::TruncatedThenData(result)
+        } else {
+            ReadResult::Data(result)
+        })
     }
 
     /// Get the current offset for a file (for checkpointing).
@@ -569,10 +647,26 @@ impl FileTailer {
     }
 
     /// Set the offset for a file (for restoring from checkpoint).
+    ///
+    /// Validates the offset against the current file size (#656). If the saved
+    /// offset exceeds the file size (file was truncated between runs), resets
+    /// to 0 instead of reading garbage.
     pub fn set_offset(&mut self, path: &Path, offset: u64) -> io::Result<()> {
         if let Some(tailed) = self.files.get_mut(path) {
-            tailed.offset = offset;
-            tailed.file.seek(SeekFrom::Start(offset))?;
+            let file_size = tailed.file.metadata()?.len();
+            let safe_offset = if offset > file_size {
+                tracing::warn!(
+                    path = %path.display(),
+                    saved_offset = offset,
+                    file_size,
+                    "checkpoint offset exceeds file size — resetting to 0"
+                );
+                0
+            } else {
+                offset
+            };
+            tailed.offset = safe_offset;
+            tailed.file.seek(SeekFrom::Start(safe_offset))?;
         }
         Ok(())
     }
@@ -1387,5 +1481,171 @@ mod tests {
         let offset_sids: Vec<_> = offsets.iter().map(|(s, _)| s.0).collect();
         let path_sids: Vec<_> = paths.iter().map(|(s, _)| s.0).collect();
         assert_eq!(offset_sids, path_sids);
+    }
+
+    // -----------------------------------------------------------------------
+    // Bug fix regression tests
+    // -----------------------------------------------------------------------
+
+    /// #796: Copytruncate must emit TailEvent::Truncated before new data.
+    #[test]
+    fn test_truncation_emits_truncated_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("trunc_event.log");
+
+        // Write initial data.
+        {
+            let mut f = File::create(&log_path).unwrap();
+            for i in 0..50 {
+                writeln!(f, "original line {i}").unwrap();
+            }
+        }
+
+        let config = TailConfig {
+            start_from_end: false,
+            poll_interval_ms: 10,
+            ..Default::default()
+        };
+        let mut tailer = FileTailer::new(std::slice::from_ref(&log_path), config).unwrap();
+
+        // Read all initial data.
+        std::thread::sleep(Duration::from_millis(50));
+        tailer.poll().unwrap();
+
+        // Truncate and write new data (copytruncate).
+        {
+            let mut f = File::create(&log_path).unwrap(); // truncates
+            writeln!(f, "after truncate").unwrap();
+        }
+
+        // Poll should emit Truncated THEN Data.
+        std::thread::sleep(Duration::from_millis(50));
+        let events = tailer.poll().unwrap();
+
+        let has_truncated = events
+            .iter()
+            .any(|e| matches!(e, TailEvent::Truncated { .. }));
+        assert!(
+            has_truncated,
+            "must emit TailEvent::Truncated on copytruncate"
+        );
+
+        let has_data = events.iter().any(|e| matches!(e, TailEvent::Data { .. }));
+        assert!(has_data, "must emit data after truncation");
+
+        // Truncated must come BEFORE Data in the event list.
+        let trunc_idx = events
+            .iter()
+            .position(|e| matches!(e, TailEvent::Truncated { .. }))
+            .unwrap();
+        let data_idx = events
+            .iter()
+            .position(|e| matches!(e, TailEvent::Data { .. }))
+            .unwrap();
+        assert!(
+            trunc_idx < data_idx,
+            "Truncated event must precede Data event"
+        );
+    }
+
+    /// #800: read_new_data must not exceed MAX_READ_PER_POLL.
+    #[test]
+    fn test_read_cap_prevents_oom() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("large.log");
+
+        // Write more than MAX_READ_PER_POLL (4 MiB) — use 5 MiB.
+        let target_size = 5 * 1024 * 1024;
+        {
+            let mut f = File::create(&log_path).unwrap();
+            let line = "x".repeat(1023) + "\n"; // 1 KiB per line
+            let lines_needed = target_size / 1024;
+            for _ in 0..lines_needed {
+                f.write_all(line.as_bytes()).unwrap();
+            }
+        }
+
+        let config = TailConfig {
+            start_from_end: false,
+            poll_interval_ms: 10,
+            ..Default::default()
+        };
+        let mut tailer = FileTailer::new(std::slice::from_ref(&log_path), config).unwrap();
+
+        // First poll should read at most MAX_READ_PER_POLL bytes.
+        std::thread::sleep(Duration::from_millis(50));
+        let events = tailer.poll().unwrap();
+
+        let total_bytes: usize = events
+            .iter()
+            .filter_map(|e| match e {
+                TailEvent::Data { bytes, .. } => Some(bytes.len()),
+                _ => None,
+            })
+            .sum();
+
+        assert!(
+            total_bytes <= FileTailer::MAX_READ_PER_POLL + 512 * 1024, // allow one extra read_buf
+            "read should be capped near 64 MiB, got {} bytes",
+            total_bytes
+        );
+        assert!(total_bytes > 0, "should read some data");
+
+        // Second poll should read the remaining data.
+        std::thread::sleep(Duration::from_millis(50));
+        let events2 = tailer.poll().unwrap();
+        let total_bytes2: usize = events2
+            .iter()
+            .filter_map(|e| match e {
+                TailEvent::Data { bytes, .. } => Some(bytes.len()),
+                _ => None,
+            })
+            .sum();
+        assert!(total_bytes2 > 0, "second poll should read remaining data");
+    }
+
+    /// #656: set_offset must reset to 0 if offset > file size.
+    #[test]
+    fn test_set_offset_validates_against_file_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("stale.log");
+
+        // Write a small file (100 bytes).
+        {
+            let mut f = File::create(&log_path).unwrap();
+            writeln!(f, "small file content").unwrap();
+        }
+
+        let config = TailConfig {
+            start_from_end: false,
+            poll_interval_ms: 10,
+            ..Default::default()
+        };
+        let mut tailer = FileTailer::new(std::slice::from_ref(&log_path), config).unwrap();
+
+        // Try to set offset beyond file size (stale checkpoint).
+        tailer.set_offset(&log_path, 999_999).unwrap();
+
+        // Offset should be reset to 0, not 999_999.
+        let offset = tailer.get_offset(&log_path).unwrap();
+        assert_eq!(offset, 0, "stale offset should reset to 0");
+    }
+
+    /// #730: Non-existent file paths should not prevent construction.
+    #[test]
+    fn test_nonexistent_path_does_not_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("does_not_exist.log");
+
+        let config = TailConfig {
+            start_from_end: false,
+            poll_interval_ms: 10,
+            ..Default::default()
+        };
+
+        // Should succeed — missing files are warned but not fatal.
+        let tailer = FileTailer::new(std::slice::from_ref(&missing), config);
+        assert!(tailer.is_ok(), "missing path should not fail construction");
+        assert_eq!(tailer.unwrap().num_files(), 0);
     }
 }
