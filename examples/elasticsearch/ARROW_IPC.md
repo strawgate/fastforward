@@ -61,31 +61,26 @@ cargo run -p logfwd -- --config config.yaml
 
 ## Querying with Arrow IPC
 
-### Using the ElasticsearchSink API
+### Using the ElasticsearchSinkFactory API
 
 ```rust
 use std::sync::Arc;
-use logfwd_output::ElasticsearchSink;
+use logfwd_output::ElasticsearchSinkFactory;
+use logfwd_output::sink::SinkFactory;
 use logfwd_io::diagnostics::ComponentStats;
 
-let sink = ElasticsearchSink::new(
+let factory = ElasticsearchSinkFactory::new(
     "query".into(),
     "http://localhost:9200".into(),
     "logs".into(),
     vec![],
+    false,
     Arc::new(ComponentStats::default()),
-);
+)?;
+let sink = factory.create()?;
 
-// Query with ES|QL, receive Arrow IPC response
-let batches = sink.query_arrow(r#"
-    FROM logs
-    | WHERE level == "ERROR"
-    | LIMIT 1000
-"#)?;
-
-for batch in batches {
-    println!("Received {} rows", batch.num_rows());
-}
+// Query with ES|QL uses the async sink's query_arrow method.
+// See ElasticsearchAsyncSink::query_arrow for the Arrow IPC query API.
 ```
 
 ### ES|QL Query Examples
@@ -176,7 +171,7 @@ Arrow IPC format provides significant performance improvements over JSON:
 
 ## API Reference
 
-### `ElasticsearchSink::query_arrow(query: &str) -> io::Result<Vec<RecordBatch>>`
+### `ElasticsearchAsyncSink::query_arrow(query: &str) -> io::Result<Vec<RecordBatch>>`
 
 Query Elasticsearch using ES|QL and receive Arrow IPC response.
 
@@ -221,7 +216,7 @@ The implementation automatically sets this header in `query_arrow()`.
 
 For large queries, increase the HTTP timeout:
 - Default: 30 seconds
-- Adjust in `ElasticsearchSink::new()` configuration
+- Adjust in `ElasticsearchAsyncSink::new()` configuration
 
 ## References
 

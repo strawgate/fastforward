@@ -2314,9 +2314,11 @@ dependencies = [
  "logfwd-output",
  "logfwd-transform",
  "memchr",
+ "pprof",
+ "reqwest",
  "serde",
  "serde_json",
- "ureq",
+ "tokio",
 ]
 
 [[package]]
