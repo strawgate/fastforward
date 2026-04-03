@@ -138,6 +138,7 @@ No extra fields required; the listen address will be configurable in a future re
 | Value | Status | Description |
 |-------|--------|-------------|
 | `file` | Implemented | Tail files matching a glob pattern. |
+| `generator` | Implemented | Synthetic data generator for benchmarking. Produces JSON log lines without external data sources. No extra fields required. |
 | `udp` | Planned | Receive log lines over UDP. |
 | `tcp` | Planned | Accept log lines over TCP. |
 | `otlp` | Planned | Receive OTLP logs. |
@@ -311,9 +312,8 @@ Special columns added by the scanner:
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `_file_str` | string | Absolute path of the source file (file inputs only). |
 | `_raw_str` | string | Original JSON line (only when `keep_raw: true`). |
-| `_time_ns_int` | int64 | Timestamp from CRI header in nanoseconds (CRI inputs only). |
+| `_timestamp_str` | string | Timestamp from CRI header as an RFC 3339 string (CRI inputs only). |
 | `_stream_str` | string | CRI stream name (`stdout`/`stderr`). |
 
 ### Built-in UDFs
@@ -369,9 +369,11 @@ Parses Kubernetes pod log paths (e.g.
 `/var/log/pods/<namespace>_<pod>_<uid>/<container>/`) to extract metadata.
 
 ```sql
+-- Requires source path column injection (not yet implemented).
+-- Once available, join on the source file path:
 SELECT l.level_str, l.message_str, k.namespace, k.pod_name, k.container_name
 FROM logs l
-JOIN k8s k ON l._file_str = k.log_path_prefix
+JOIN k8s k ON l._source_path_str = k.log_path_prefix
 ```
 
 Columns exposed by `k8s`:
@@ -507,7 +509,7 @@ pipelines:
         k.container_name,
         lbl.environment
       FROM logs l
-      LEFT JOIN k8s k ON l._file_str = k.log_path_prefix
+      LEFT JOIN k8s k ON l._source_path_str = k.log_path_prefix  -- requires source path injection
       CROSS JOIN labels lbl
       WHERE l.level_str IN ('ERROR', 'WARN')
         OR l.status_int >= 500
