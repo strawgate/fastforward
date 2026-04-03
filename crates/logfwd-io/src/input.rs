@@ -15,14 +15,6 @@ pub enum InputEvent {
     Rotated,
     /// The underlying file was truncated.
     Truncated,
-    /// The source has been fully consumed and has no new data.
-    ///
-    /// Emitted once per "caught-up" transition (i.e., after the first poll
-    /// cycle where reads find no new bytes).  Downstream components (e.g.
-    /// `FramedInput`) use this to flush any partial-line remainder that was
-    /// not terminated by a newline — a common situation for static files and
-    /// for the last line written before a log rotation.
-    EndOfFile,
 }
 
 /// Trait for input sources that produce raw bytes.
@@ -94,9 +86,6 @@ impl InputSource for FileInput {
                 }
                 TailEvent::Truncated { .. } => {
                     events.push(InputEvent::Truncated);
-                }
-                TailEvent::EndOfFile { .. } => {
-                    events.push(InputEvent::EndOfFile);
                 }
             }
         }

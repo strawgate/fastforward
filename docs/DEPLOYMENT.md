@@ -103,7 +103,7 @@ data:
     transform: |
       SELECT
         level_str,
-        message_str,
+        msg_str,
         _time_ns_int,
         _stream_str
       FROM logs
@@ -194,7 +194,7 @@ enrichment:
 transform: |
   SELECT
     l.level_str,
-    l.message_str,
+    l.msg_str,
     k.namespace,
     k.pod_name,
     k.container_name

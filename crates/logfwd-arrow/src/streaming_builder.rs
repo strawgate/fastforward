@@ -1,18 +1,18 @@
-// streaming_builder.rs -- Zero-copy hot-path builder.
+// streaming_builder.rs — Zero-copy hot-path builder.
 //
 // Uses Arrow's StringViewArray to store string values as 16-byte views
 // pointing directly into the input buffer. No string copies during scanning
 // or during finish_batch. The input buffer (as bytes::Bytes) is reference-counted
 // and shared between the builder and the resulting Arrow arrays.
 //
-// For the hot pipeline path: scan -> query -> output -> discard.
+// For the hot pipeline path: scan → query → output → discard.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use arrow::array::{ArrayRef, Float64Array, Int64Array, StringViewBuilder, StructArray};
+use arrow::array::{ArrayRef, Float64Array, Int64Array, StringViewBuilder};
 use arrow::buffer::{Buffer, NullBuffer};
-use arrow::datatypes::{DataType, Field, Fields, Schema};
+use arrow::datatypes::{DataType, Field, Schema};
 use arrow::error::ArrowError;
 use arrow::record_batch::{RecordBatch, RecordBatchOptions};
 
@@ -68,7 +68,7 @@ impl FieldColumns {
 ///
 /// String values are stored as (offset, len) views into the input buffer.
 /// The buffer is reference-counted via `bytes::Bytes` and shared with the
-/// resulting Arrow `StringViewArray` columns -- no string copies at any point.
+/// resulting Arrow `StringViewArray` columns — no string copies at any point.
 ///
 /// Numeric values (int, float) are parsed during scanning and stored directly.
 ///
@@ -87,7 +87,7 @@ pub struct StreamingBuilder {
     field_index: HashMap<Vec<u8>, usize>,
     row_count: u32,
     /// Tracks which fields (by index) were written in the current row.
-    /// Only covers the first 64 fields (indices 0-63); see `check_dup_bits`.
+    /// Only covers the first 64 fields (indices 0–63); see `check_dup_bits`.
     written_bits: u64,
     /// Reference-counted buffer. Stored here to compute offsets safely
     /// and shared with Arrow StringViewArrays in finish_batch.
@@ -234,7 +234,7 @@ impl StreamingBuilder {
 
     #[inline(always)]
     pub fn append_null_by_idx(&mut self, idx: usize) {
-        // Nulls are represented by gaps -- no value record needed.
+        // Nulls are represented by gaps — no value record needed.
         // But mark as written for duplicate-key detection.
         let _ = check_dup_bits(&mut self.written_bits, idx);
     }
@@ -254,15 +254,19 @@ impl StreamingBuilder {
     /// Build a RecordBatch with zero-copy StringViewArrays.
     ///
     /// The resulting RecordBatch shares the input buffer via Bytes reference
-    /// counting -- no string data is copied.
+    /// counting — no string data is copied.
     pub fn finish_batch(&self) -> Result<RecordBatch, ArrowError> {
         let num_rows = self.row_count as usize;
         let arrow_buf = Buffer::from(self.buf.clone());
 
         let mut schema_fields: Vec<Field> = Vec::with_capacity(self.fields.len());
         let mut arrays: Vec<ArrayRef> = Vec::with_capacity(self.fields.len());
+        // Accumulate conflict group descriptions for schema metadata.
+        let mut conflict_meta: Vec<String> = Vec::new();
 
         // Detect duplicate output column names before building the schema.
+        // A user field literally named `status__int` would collide with a
+        // conflict-suffixed `status` field; `_raw` would collide with keep_raw.
         let mut emitted_names = std::collections::HashSet::new();
         if self.keep_raw && !self.raw_views.is_empty() {
             emitted_names.insert("_raw".to_string());
@@ -283,141 +287,96 @@ impl StreamingBuilder {
             // handled gracefully instead of triggering undefined behaviour.
             let name = String::from_utf8_lossy(&fc.name);
 
-            // Emit a StructArray when the same field has multiple types in this
-            // batch. Single-type fields use the bare field name as a flat column.
+            // Suffix columns only when the same field has multiple types in this
+            // batch. Single-type fields use the bare field name.
             let conflict = (fc.has_int as u8) + (fc.has_float as u8) + (fc.has_str as u8) > 1;
 
             if conflict {
-                let mut child_fields: Vec<Arc<Field>> = Vec::new();
-                let mut child_arrays: Vec<ArrayRef> = Vec::new();
-
+                // Record this group for schema metadata.
+                let mut types = Vec::with_capacity(3);
                 if fc.has_int {
-                    let mut values = vec![0i64; num_rows];
-                    let mut valid = vec![false; num_rows];
-                    for &(row, v) in &fc.int_values {
-                        let row = row as usize;
-                        if row >= num_rows {
-                            continue;
-                        }
-                        values[row] = v;
-                        valid[row] = true;
-                    }
-                    let nulls = NullBuffer::from(valid);
-                    let array = Int64Array::new(values.into(), Some(nulls));
-                    child_fields.push(Arc::new(Field::new("int", DataType::Int64, true)));
-                    child_arrays.push(Arc::new(array) as ArrayRef);
+                    types.push("int");
                 }
-
                 if fc.has_float {
-                    let mut values = vec![0.0f64; num_rows];
-                    let mut valid = vec![false; num_rows];
-                    for &(row, v) in &fc.float_values {
-                        let row = row as usize;
-                        if row >= num_rows {
-                            continue;
-                        }
-                        values[row] = v;
-                        valid[row] = true;
-                    }
-                    let nulls = NullBuffer::from(valid);
-                    let array = Float64Array::new(values.into(), Some(nulls));
-                    child_fields.push(Arc::new(Field::new("float", DataType::Float64, true)));
-                    child_arrays.push(Arc::new(array) as ArrayRef);
+                    types.push("float");
                 }
-
                 if fc.has_str {
-                    let mut builder = StringViewBuilder::new();
-                    let block = builder.append_block(arrow_buf.clone());
-                    let mut vi = 0;
-                    for row in 0..num_rows as u32 {
-                        if vi < fc.str_views.len() && fc.str_views[vi].0 == row {
-                            let (_, offset, len) = fc.str_views[vi];
-                            builder
-                                .try_append_view(block, offset, len)
-                                .expect("offset/len pre-validated by offset_of and UTF-8 check");
-                            vi += 1;
-                        } else {
-                            builder.append_null();
-                        }
+                    types.push("str");
+                }
+                conflict_meta.push(format!("{}:{}", name, types.join(",")));
+            }
+
+            if fc.has_int {
+                let col_name = if conflict {
+                    format!("{}__int", name)
+                } else {
+                    name.to_string()
+                };
+                reserve_name(&col_name)?;
+                let mut values = vec![0i64; num_rows];
+                let mut valid = vec![false; num_rows];
+                for &(row, v) in &fc.int_values {
+                    let row = row as usize;
+                    if row >= num_rows {
+                        continue;
                     }
-                    child_fields.push(Arc::new(Field::new("str", DataType::Utf8View, true)));
-                    child_arrays.push(Arc::new(builder.finish()) as ArrayRef);
+                    values[row] = v;
+                    valid[row] = true;
+                }
+                let nulls = NullBuffer::from(valid);
+                let array = Int64Array::new(values.into(), Some(nulls));
+                schema_fields.push(Field::new(col_name, DataType::Int64, true));
+                arrays.push(Arc::new(array) as ArrayRef);
+            }
+
+            if fc.has_float {
+                let col_name = if conflict {
+                    format!("{}__float", name)
+                } else {
+                    name.to_string()
+                };
+                reserve_name(&col_name)?;
+                let mut values = vec![0.0f64; num_rows];
+                let mut valid = vec![false; num_rows];
+                for &(row, v) in &fc.float_values {
+                    let row = row as usize;
+                    if row >= num_rows {
+                        continue;
+                    }
+                    values[row] = v;
+                    valid[row] = true;
+                }
+                let nulls = NullBuffer::from(valid);
+                let array = Float64Array::new(values.into(), Some(nulls));
+                schema_fields.push(Field::new(col_name, DataType::Float64, true));
+                arrays.push(Arc::new(array) as ArrayRef);
+            }
+
+            if fc.has_str {
+                let col_name = if conflict {
+                    format!("{}__str", name)
+                } else {
+                    name.to_string()
+                };
+                reserve_name(&col_name)?;
+                let mut builder = StringViewBuilder::new();
+                let block = builder.append_block(arrow_buf.clone());
+
+                let mut vi = 0;
+                for row in 0..num_rows as u32 {
+                    if vi < fc.str_views.len() && fc.str_views[vi].0 == row {
+                        let (_, offset, len) = fc.str_views[vi];
+                        builder
+                            .try_append_view(block, offset, len)
+                            .expect("offset/len pre-validated by offset_of and UTF-8 check");
+                        vi += 1;
+                    } else {
+                        builder.append_null();
+                    }
                 }
 
-                // Struct is non-null iff any child is non-null for that row.
-                let struct_validity: Vec<bool> = (0..num_rows)
-                    .map(|i| child_arrays.iter().any(|arr| !arr.is_null(i)))
-                    .collect();
-
-                let fields = Fields::from(child_fields);
-                let struct_arr = StructArray::new(
-                    fields.clone(),
-                    child_arrays,
-                    Some(NullBuffer::from(struct_validity)),
-                );
-
-                reserve_name(name.as_ref())?;
-                schema_fields.push(Field::new(name.as_ref(), DataType::Struct(fields), true));
-                arrays.push(Arc::new(struct_arr) as ArrayRef);
-            } else {
-                // Single-type field: bare flat column.
-                if fc.has_int {
-                    reserve_name(name.as_ref())?;
-                    let mut values = vec![0i64; num_rows];
-                    let mut valid = vec![false; num_rows];
-                    for &(row, v) in &fc.int_values {
-                        let row = row as usize;
-                        if row >= num_rows {
-                            continue;
-                        }
-                        values[row] = v;
-                        valid[row] = true;
-                    }
-                    let nulls = NullBuffer::from(valid);
-                    let array = Int64Array::new(values.into(), Some(nulls));
-                    schema_fields.push(Field::new(name.as_ref(), DataType::Int64, true));
-                    arrays.push(Arc::new(array) as ArrayRef);
-                }
-
-                if fc.has_float {
-                    reserve_name(name.as_ref())?;
-                    let mut values = vec![0.0f64; num_rows];
-                    let mut valid = vec![false; num_rows];
-                    for &(row, v) in &fc.float_values {
-                        let row = row as usize;
-                        if row >= num_rows {
-                            continue;
-                        }
-                        values[row] = v;
-                        valid[row] = true;
-                    }
-                    let nulls = NullBuffer::from(valid);
-                    let array = Float64Array::new(values.into(), Some(nulls));
-                    schema_fields.push(Field::new(name.as_ref(), DataType::Float64, true));
-                    arrays.push(Arc::new(array) as ArrayRef);
-                }
-
-                if fc.has_str {
-                    reserve_name(name.as_ref())?;
-                    let mut builder = StringViewBuilder::new();
-                    let block = builder.append_block(arrow_buf.clone());
-
-                    let mut vi = 0;
-                    for row in 0..num_rows as u32 {
-                        if vi < fc.str_views.len() && fc.str_views[vi].0 == row {
-                            let (_, offset, len) = fc.str_views[vi];
-                            builder
-                                .try_append_view(block, offset, len)
-                                .expect("offset/len pre-validated by offset_of and UTF-8 check");
-                            vi += 1;
-                        } else {
-                            builder.append_null();
-                        }
-                    }
-
-                    schema_fields.push(Field::new(name.as_ref(), DataType::Utf8View, true));
-                    arrays.push(Arc::new(builder.finish()) as ArrayRef);
-                }
+                schema_fields.push(Field::new(col_name, DataType::Utf8View, true));
+                arrays.push(Arc::new(builder.finish()) as ArrayRef);
             }
         }
 
@@ -447,7 +406,16 @@ impl StreamingBuilder {
             arrays.push(Arc::new(builder.finish()) as ArrayRef);
         }
 
-        let schema = Arc::new(Schema::new(schema_fields));
+        let schema = if conflict_meta.is_empty() {
+            Arc::new(Schema::new(schema_fields))
+        } else {
+            let mut meta = HashMap::new();
+            meta.insert(
+                crate::CONFLICT_GROUPS_METADATA_KEY.to_string(),
+                conflict_meta.join(";"),
+            );
+            Arc::new(Schema::new_with_metadata(schema_fields, meta))
+        };
         let opts = RecordBatchOptions::new().with_row_count(Some(num_rows));
         RecordBatch::try_new_with_options(schema, arrays, &opts)
     }
@@ -460,7 +428,7 @@ impl StreamingBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::array::{Array, StructArray as ArrowStructArray};
+    use arrow::array::Array;
 
     #[test]
     fn test_basic_string_and_int() {
@@ -486,7 +454,7 @@ mod tests {
     }
 
     #[test]
-    fn test_type_conflict_produces_struct_column() {
+    fn test_type_conflict_produces_suffixed_columns() {
         let buf = bytes::Bytes::from_static(b"unused");
         let mut b = StreamingBuilder::new(false);
         b.begin_batch(buf.clone());
@@ -498,38 +466,26 @@ mod tests {
         b.append_int_by_idx(idx_status, b"200");
         b.end_row();
 
-        // Row 1: status is a string -- type conflict
+        // Row 1: status is a string — type conflict
         b.begin_row();
         b.append_str_by_idx(idx_status, &buf[0..0]); // empty but valid str
         b.end_row();
 
         let batch = b.finish_batch().unwrap();
         assert_eq!(batch.num_rows(), 2);
-        // Old suffixed columns must not exist
+        // Conflict: both suffixed columns present, no bare "status"
         assert!(
-            batch.column_by_name("status__int").is_none(),
-            "status__int must not exist"
+            batch.column_by_name("status__int").is_some(),
+            "status__int missing"
         );
         assert!(
-            batch.column_by_name("status__str").is_none(),
-            "status__str must not exist"
+            batch.column_by_name("status__str").is_some(),
+            "status__str missing"
         );
-        // New struct column
-        let status_col = batch
-            .column_by_name("status")
-            .expect("status struct column must exist");
         assert!(
-            matches!(status_col.data_type(), DataType::Struct(_)),
-            "status must be Struct, got {:?}",
-            status_col.data_type()
+            batch.column_by_name("status").is_none(),
+            "bare status should not exist on conflict"
         );
-        let sa = status_col
-            .as_any()
-            .downcast_ref::<ArrowStructArray>()
-            .unwrap();
-        let child_names: Vec<&str> = sa.fields().iter().map(|f| f.name().as_str()).collect();
-        assert!(child_names.contains(&"int"), "missing int child");
-        assert!(child_names.contains(&"str"), "missing str child");
     }
 
     #[test]
@@ -598,7 +554,7 @@ mod tests {
         let idx = b.resolve_field(b"val");
         b.begin_row();
         b.append_str_by_idx(idx, &buf[0..5]); // "first"
-        b.append_str_by_idx(idx, &buf[5..11]); // "second" -- should be ignored
+        b.append_str_by_idx(idx, &buf[5..11]); // "second" — should be ignored
         b.end_row();
 
         let batch = b.finish_batch().unwrap();
@@ -682,9 +638,13 @@ mod tests {
             let name = format!("field{}", i);
             indices.push(b.resolve_field(name.as_bytes()));
         }
-        let idx_65 = indices[64]; // index 64 -- first field outside the bitmask
+        let idx_65 = indices[64]; // index 64 — first field outside the bitmask
 
         b.begin_row();
+        // Write the 65th field twice. Duplicate-key detection is not active for
+        // idx >= 64, so both writes go through without panic. The second write
+        // overwrites the first in the (row, offset, len) list, but that is the
+        // documented behaviour for fields beyond the bitmask range.
         b.append_str_by_idx(idx_65, &buf[0..2]);
         b.append_str_by_idx(idx_65, &buf[2..4]);
         b.end_row();
@@ -731,7 +691,7 @@ mod tests {
         assert_eq!(raw_arr.value(1), "goodbye world");
     }
 
-    /// `append_raw` is a no-op when `keep_raw` is false -- `_raw` column absent.
+    /// `append_raw` is a no-op when `keep_raw` is false — `_raw` column absent.
     #[test]
     fn test_append_raw_keep_raw_false() {
         let data = b"hello world\n";
@@ -748,274 +708,5 @@ mod tests {
             batch.column_by_name("_raw").is_none(),
             "_raw must not be present when keep_raw=false"
         );
-    }
-
-    /// Struct child "int" has correct values when rows are int-typed.
-    #[test]
-    fn struct_child_int_values_correct() {
-        let buf = bytes::Bytes::from_static(b"ERR");
-        let mut b = StreamingBuilder::new(false);
-        b.begin_batch(buf.clone());
-        let si = b.resolve_field(b"code");
-        // Make it a conflict: rows 0,1 are int, row 2 is str
-        b.begin_row();
-        b.append_int_by_idx(si, b"100");
-        b.end_row();
-        b.begin_row();
-        b.append_int_by_idx(si, b"200");
-        b.end_row();
-        b.begin_row();
-        b.append_str_by_idx(si, &buf[0..3]);
-        b.end_row();
-        let batch = b.finish_batch().unwrap();
-        let col = batch.column_by_name("code").expect("code struct");
-        assert!(matches!(col.data_type(), DataType::Struct(_)));
-        let sa = col.as_any().downcast_ref::<ArrowStructArray>().unwrap();
-        let int_child = sa.column_by_name("int").expect("int child");
-        let int_arr = int_child.as_any().downcast_ref::<Int64Array>().unwrap();
-        assert_eq!(int_arr.value(0), 100);
-        assert_eq!(int_arr.value(1), 200);
-        assert!(int_arr.is_null(2));
-    }
-
-    /// Struct child "str" has correct values when rows are str-typed.
-    #[test]
-    fn struct_child_str_values_correct() {
-        let buf = bytes::Bytes::from_static(b"helloworld");
-        let mut b = StreamingBuilder::new(false);
-        b.begin_batch(buf.clone());
-        let si = b.resolve_field(b"msg");
-        // Make it a conflict: row 0 is int, rows 1,2 are str
-        b.begin_row();
-        b.append_int_by_idx(si, b"1");
-        b.end_row();
-        b.begin_row();
-        b.append_str_by_idx(si, &buf[0..5]); // "hello"
-        b.end_row();
-        b.begin_row();
-        b.append_str_by_idx(si, &buf[5..10]); // "world"
-        b.end_row();
-        let batch = b.finish_batch().unwrap();
-        let col = batch.column_by_name("msg").expect("msg struct");
-        let sa = col.as_any().downcast_ref::<ArrowStructArray>().unwrap();
-        let str_child = sa.column_by_name("str").expect("str child");
-        let str_arr = str_child
-            .as_any()
-            .downcast_ref::<arrow::array::StringViewArray>()
-            .unwrap();
-        assert!(str_arr.is_null(0));
-        assert_eq!(str_arr.value(1), "hello");
-        assert_eq!(str_arr.value(2), "world");
-    }
-
-    /// Struct NullBuffer: row is non-null iff at least one child is non-null.
-    #[test]
-    fn struct_null_iff_all_children_null() {
-        let buf = bytes::Bytes::from_static(b"OK");
-        let mut b = StreamingBuilder::new(false);
-        b.begin_batch(buf.clone());
-        let si = b.resolve_field(b"val");
-        // Row 0: int=200, str=null
-        b.begin_row();
-        b.append_int_by_idx(si, b"200");
-        b.end_row();
-        // Row 1: int=null, str="OK"
-        b.begin_row();
-        b.append_str_by_idx(si, &buf[0..2]);
-        b.end_row();
-        // Row 2: int=null, str=null
-        b.begin_row();
-        b.end_row();
-        let batch = b.finish_batch().unwrap();
-        let col = batch.column_by_name("val").expect("val struct");
-        assert!(!col.is_null(0), "row 0 should be non-null");
-        assert!(!col.is_null(1), "row 1 should be non-null");
-        assert!(col.is_null(2), "row 2 should be null");
-    }
-
-    /// Three-way conflict: int, float, str all appear -- struct has all three children.
-    #[test]
-    fn three_way_conflict_int_float_str() {
-        let buf = bytes::Bytes::from_static(b"text");
-        let mut b = StreamingBuilder::new(false);
-        b.begin_batch(buf.clone());
-        let si = b.resolve_field(b"mixed");
-        b.begin_row();
-        b.append_int_by_idx(si, b"42");
-        b.end_row();
-        b.begin_row();
-        b.append_float_by_idx(si, b"3.14");
-        b.end_row();
-        b.begin_row();
-        b.append_str_by_idx(si, &buf[0..4]);
-        b.end_row();
-        let batch = b.finish_batch().unwrap();
-        let col = batch.column_by_name("mixed").expect("mixed struct");
-        assert!(matches!(col.data_type(), DataType::Struct(_)));
-        let sa = col.as_any().downcast_ref::<ArrowStructArray>().unwrap();
-        let child_names: Vec<&str> = sa.fields().iter().map(|f| f.name().as_str()).collect();
-        assert!(child_names.contains(&"int"), "missing int child");
-        assert!(child_names.contains(&"float"), "missing float child");
-        assert!(child_names.contains(&"str"), "missing str child");
-    }
-
-    /// Single-type int field stays as bare flat Int64 column, not a struct.
-    #[test]
-    fn single_type_field_stays_flat() {
-        let buf = bytes::Bytes::from_static(b"unused");
-        let mut b = StreamingBuilder::new(false);
-        b.begin_batch(buf);
-        let si = b.resolve_field(b"count");
-        b.begin_row();
-        b.append_int_by_idx(si, b"1");
-        b.end_row();
-        b.begin_row();
-        b.append_int_by_idx(si, b"2");
-        b.end_row();
-        b.begin_row();
-        b.append_int_by_idx(si, b"3");
-        b.end_row();
-        let batch = b.finish_batch().unwrap();
-        let col = batch.column_by_name("count").expect("count column");
-        assert!(
-            matches!(col.data_type(), DataType::Int64),
-            "single-type int must be bare Int64, got {:?}",
-            col.data_type()
-        );
-        let arr = col.as_any().downcast_ref::<Int64Array>().unwrap();
-        assert_eq!(arr.value(0), 1);
-        assert_eq!(arr.value(1), 2);
-        assert_eq!(arr.value(2), 3);
-    }
-
-    /// A 3-way conflict (int + float + str in the same field across rows) must
-    /// produce a StructArray with all three children present.
-    #[test]
-    fn test_three_way_conflict_int_float_str() {
-        let buf = bytes::Bytes::from_static(b"unused");
-        let mut b = StreamingBuilder::new(false);
-        b.begin_batch(buf.clone());
-        let idx = b.resolve_field(b"mixed");
-
-        b.begin_row();
-        b.append_int_by_idx(idx, b"42");
-        b.end_row();
-
-        b.begin_row();
-        b.append_float_by_idx(idx, b"3.14");
-        b.end_row();
-
-        b.begin_row();
-        b.append_str_by_idx(idx, &buf[0..0]); // empty-but-valid string view
-        b.end_row();
-
-        let batch = b.finish_batch().unwrap();
-        assert_eq!(batch.num_rows(), 3);
-
-        let col = batch.column_by_name("mixed").expect("mixed must exist");
-        assert!(
-            matches!(col.data_type(), DataType::Struct(_)),
-            "3-way conflict must produce Struct, got {:?}",
-            col.data_type()
-        );
-        let sa = col.as_any().downcast_ref::<StructArray>().unwrap();
-        let names: Vec<&str> = sa.fields().iter().map(|f| f.name().as_str()).collect();
-        assert!(names.contains(&"int"), "int child missing");
-        assert!(names.contains(&"float"), "float child missing");
-        assert!(names.contains(&"str"), "str child missing");
-
-        // Row 0: int=42, float=null, str=null
-        let int_idx = sa.fields().iter().position(|f| f.name() == "int").unwrap();
-        let int_col = sa
-            .column(int_idx)
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .unwrap();
-        assert_eq!(int_col.value(0), 42);
-        assert!(int_col.is_null(1));
-        assert!(int_col.is_null(2));
-
-        // Struct-level null: no row should be all-null here
-        assert!(!col.is_null(0));
-        assert!(!col.is_null(1));
-        assert!(!col.is_null(2));
-    }
-
-    /// After a conflict batch (struct column), a second batch with only a single
-    /// type for the same field must emit a flat column — not a struct.
-    #[test]
-    fn test_batch_reuse_conflict_then_single_type_emits_flat() {
-        let buf = bytes::Bytes::from_static(b"unused");
-        let mut b = StreamingBuilder::new(false);
-
-        // Batch 1: conflict → struct
-        b.begin_batch(buf.clone());
-        let idx = b.resolve_field(b"status");
-        b.begin_row();
-        b.append_int_by_idx(idx, b"200");
-        b.end_row();
-        b.begin_row();
-        b.append_str_by_idx(idx, &buf[0..0]);
-        b.end_row();
-        let b1 = b.finish_batch().unwrap();
-        assert!(
-            matches!(
-                b1.column_by_name("status").unwrap().data_type(),
-                DataType::Struct(_)
-            ),
-            "batch 1 must be struct"
-        );
-
-        // Batch 2: only int — must be flat Int64
-        b.begin_batch(buf.clone());
-        let idx = b.resolve_field(b"status");
-        b.begin_row();
-        b.append_int_by_idx(idx, b"404");
-        b.end_row();
-        b.begin_row();
-        b.append_int_by_idx(idx, b"500");
-        b.end_row();
-        let b2 = b.finish_batch().unwrap();
-        assert!(
-            matches!(
-                b2.column_by_name("status").unwrap().data_type(),
-                DataType::Int64
-            ),
-            "batch 2 must be flat Int64 after clean data, got {:?}",
-            b2.column_by_name("status").unwrap().data_type()
-        );
-    }
-}
-
-#[cfg(kani)]
-mod kani_proofs {
-    use super::*;
-
-    /// Prove that the duplicate-name guard fires for a small known case:
-    /// two fields with the same name in the same batch must return an error.
-    #[kani::proof]
-    fn verify_duplicate_name_check_rejects_collision() {
-        let mut emitted_names = std::collections::HashSet::new();
-        let name = "status";
-        let first = emitted_names.insert(name.to_string());
-        let second = emitted_names.insert(name.to_string());
-        assert!(first, "first reservation must succeed");
-        assert!(!second, "second reservation of same name must fail");
-    }
-
-    /// Prove that a single-type field produces exactly num_rows entries in the
-    /// values buffer before being handed to Int64Array.
-    #[kani::proof]
-    fn verify_single_type_produces_num_rows_entries() {
-        let num_rows: usize = kani::any();
-        kani::assume(num_rows <= 4);
-
-        let values: Vec<i64> = vec![0i64; num_rows];
-        let valid: Vec<bool> = vec![false; num_rows];
-
-        assert_eq!(values.len(), num_rows);
-        assert_eq!(valid.len(), num_rows);
-        kani::cover!(num_rows == 0, "zero-row batch exercised");
-        kani::cover!(num_rows > 0, "non-empty batch exercised");
     }
 }

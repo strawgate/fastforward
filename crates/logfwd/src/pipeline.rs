@@ -832,8 +832,7 @@ fn make_format(
     let proc = match format {
         Format::Cri => FormatProcessor::cri(CRI_MAX_MESSAGE, Arc::clone(stats)),
         Format::Auto => FormatProcessor::auto(CRI_MAX_MESSAGE, Arc::clone(stats)),
-        Format::Json => FormatProcessor::passthrough_json(Arc::clone(stats)),
-        Format::Raw => FormatProcessor::passthrough(Arc::clone(stats)),
+        Format::Json | Format::Raw => FormatProcessor::Passthrough,
         unsupported => {
             return Err(format!(
                 "input '{name}': format {:?} is not supported for {:?} inputs",

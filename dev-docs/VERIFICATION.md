@@ -226,9 +226,6 @@ logfwd-core is the proven kernel. All rules are CI-enforced.
 | `otlp.rs` | Protobuf wire format + OTLP encoding + timestamp parsing | Kani exhaustive (25 proofs incl. 3 contract verifications) |
 | `pipeline/lifecycle.rs` | Pipeline state machine (ordered ACK, drain, shutdown) | Kani exhaustive (6 proofs) + proptest + **TLA+** |
 | `pipeline/batch.rs` | BatchTicket typestate (ack/nack/fail/reject) | Kani exhaustive (5 proofs) + compile-time |
-| `logfwd-output/lib.rs` | Conflict struct detection, ColVariant priority ordering | Kani (4 proofs: is_conflict_struct, json/str priority contracts) |
-| `logfwd-arrow/storage_builder.rs` | StructArray conflict column assembly | Kani (2 proofs: duplicate name guard, row count invariant) + unit tests |
-| `logfwd-arrow/streaming_builder.rs` | StructArray conflict column assembly (StringView) | Kani (2 proofs: duplicate name guard, row count invariant) + unit tests |
 
 ### Verification tiers
 

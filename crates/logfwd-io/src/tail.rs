@@ -41,10 +41,6 @@ struct TailedFile {
     offset: u64,
     /// Last time we successfully read new data.
     last_read: Instant,
-    /// Whether we have already emitted an `EndOfFile` event for the current
-    /// "no new data" streak.  Reset to `false` whenever new data is read so
-    /// that a fresh `EndOfFile` can be emitted the next time reads stall.
-    eof_emitted: bool,
 }
 
 /// Events emitted by the tailer.
@@ -57,17 +53,6 @@ pub enum TailEvent {
     Rotated { path: PathBuf },
     /// A file was truncated (copytruncate rotation).
     Truncated { path: PathBuf },
-    /// The file has been fully read and contains no new data.
-    ///
-    /// Emitted once after every transition from "has data" to "no data"
-    /// (i.e., the first poll cycle after all available bytes have been
-    /// consumed). This lets downstream components flush any partial-line
-    /// remainder that was not terminated by a newline.
-    ///
-    /// The event is suppressed on subsequent polls until new data arrives,
-    /// at which point the flag resets so a fresh `EndOfFile` can be emitted
-    /// the next time the file is caught up.
-    EndOfFile { path: PathBuf },
 }
 
 /// Configuration for the file tailer.
@@ -324,7 +309,6 @@ impl FileTailer {
                 file,
                 offset,
                 last_read: Instant::now(),
-                eof_emitted: false,
             },
         );
 
@@ -442,26 +426,12 @@ impl FileTailer {
         for path in paths {
             match self.read_new_data(&path) {
                 Ok(Some(data)) => {
-                    // New data arrived — reset the EOF-emitted flag so a fresh
-                    // EndOfFile event can be emitted the next time reads stall.
-                    if let Some(tailed) = self.files.get_mut(&path) {
-                        tailed.eof_emitted = false;
-                    }
                     events.push(TailEvent::Data {
                         path: path.clone(),
                         bytes: data,
                     });
                 }
-                Ok(None) => {
-                    // No new data.  Emit EndOfFile once so downstream can flush
-                    // any partial-line remainder that was not newline-terminated.
-                    if let Some(tailed) = self.files.get_mut(&path) {
-                        if !tailed.eof_emitted {
-                            tailed.eof_emitted = true;
-                            events.push(TailEvent::EndOfFile { path: path.clone() });
-                        }
-                    }
-                }
+                Ok(None) => {} // no new data
                 Err(e) => {
                     eprintln!("warn: error reading {}: {e}", path.display());
                 }

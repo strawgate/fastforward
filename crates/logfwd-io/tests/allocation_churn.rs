@@ -61,7 +61,7 @@ fn framed_input_no_buffer_churn() {
     let source = MockSource::repeating(&chunk, TOTAL_POLLS);
     let mut framed = FramedInput::new(
         Box::new(source),
-        FormatProcessor::passthrough(Arc::clone(&stats)),
+        FormatProcessor::Passthrough,
         Arc::clone(&stats),
     );
 
@@ -102,7 +102,7 @@ fn framed_input_no_leak_across_polls() {
     let source = MockSource::repeating(&chunk, 100);
     let mut framed = FramedInput::new(
         Box::new(source),
-        FormatProcessor::passthrough(Arc::clone(&stats)),
+        FormatProcessor::Passthrough,
         Arc::clone(&stats),
     );
 

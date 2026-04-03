@@ -9,7 +9,8 @@ Context: #445, #625
    types. `SELECT *` round-trips the data.
 
 2. **Clean-schema inputs stay clean.** OTLP, Arrow IPC, CSV, and other
-   typed inputs pass through with bare column names — no overhead.
+   typed inputs pass through with bare column names — no suffixes, no
+   views, no overhead.
 
 3. **Mixed-type inputs are handled gracefully.** JSON can have
    `status: 200` in one row and `status: "OK"` in another. The system
@@ -21,7 +22,7 @@ Context: #445, #625
 5. **Schema stability.** SQL-referenced columns always exist, padded
    with nulls if absent from a batch.
 
-## Design: StructArray Conflict Columns
+## Design: Suffix Only On Conflict
 
 When the builder finalizes a batch, each field gets:
 
@@ -31,14 +32,13 @@ When the builder finalizes a batch, each field gets:
   - `level` always string → column `level` (Utf8View)
 
 - **Type conflict** (field has multiple types across rows in the batch):
-  a single Arrow `StructArray` column with child fields named after the
-  observed types.
+  double-underscore suffixed columns for each observed type.
   - `status` is int in some rows, string in others →
-    `status: Struct { int: Int64, str: Utf8View }`
+    `status__int` (Int64) + `status__str` (Utf8View)
 
-A conflict struct is detected structurally by `is_conflict_struct()`: an
-Arrow `Struct` type whose child fields are all named from
-`{"int", "float", "str", "bool"}`. No schema metadata key is required.
+Double underscores (`__`) are used to minimize collision with real field
+names (a JSON field literally named `status_int` is common; `status__int`
+is not).
 
 ### Input compatibility
 
@@ -47,29 +47,44 @@ Arrow `Struct` type whose child fields are all named from
 | OTLP / Arrow IPC | Never (typed per-column) | Bare: `status`, `level` |
 | CSV / raw / syslog | Never (all strings) | Bare: `status`, `level` |
 | JSON (consistent) | No | Bare: `status` (Int64), `level` (Utf8View) |
-| JSON (mixed types) | Yes | `status: Struct { int: Int64, str: Utf8View }` |
-| Mixed pipeline | Depends on batch | Bare when clean, struct on conflict |
+| JSON (mixed types) | Yes | `status__int` + `status__str`, `level` (Utf8View) |
+| Mixed pipeline | Depends on batch | Bare when clean, suffixed on conflict |
 
 This is almost entirely a JSON problem. Protobuf, Avro, Parquet, and
 OTLP all have per-field schemas that eliminate type conflicts at the
 source. The typed-variant machinery is invisible for non-JSON inputs.
 
+### Schema metadata
+
+When the builder emits conflict columns, it also stamps the Arrow schema
+with a metadata key listing the conflict groups:
+
+```
+schema.metadata["logfwd.conflict_groups"] = "status:int,str;duration:float,int"
+```
+
+Format: semicolon-separated groups, each group is `base_name:type1,type2`
+where types are `int`, `float`, `str`. The metadata is the authoritative
+record — all downstream code (output sinks, tests) reads this key rather
+than parsing column names.
+
+For batches with no conflicts (the common case), the key is absent.
+Zero overhead.
+
 ### SQL layer
 
-**Problem:** When a conflict batch has `status: Struct { int, str }`,
-SQL `SELECT status FROM logs` either fails or returns the struct — not
-the per-row coalesced value.
+**Problem:** When a conflict batch has `status__int` and `status__str`
+but no bare `status` column, SQL `SELECT status FROM logs` fails.
 
-**Solution:** `normalize_conflict_columns()` in `logfwd-transform` detects
-conflict structs via `is_conflict_struct()` and replaces each in-place with
-a synthesized flat `Utf8` column before handing the batch to DataFusion:
+**Solution:** `normalize_conflict_columns()` in `logfwd-transform` reads
+the `logfwd.conflict_groups` metadata and adds a synthesized bare
+`status: Utf8` column before handing the batch to DataFusion:
 
 ```
-COALESCE(CAST(status.int AS Utf8), CAST(status.float AS Utf8), status.str)
+COALESCE(CAST(status__int AS Utf8), CAST(status__float AS Utf8), status__str)
 ```
 
-This column is for SQL resolution only. Output sinks never see it — they
-operate on the original `RecordBatch` before normalization.
+This column is for SQL resolution only. Output sinks ignore it (see below).
 
 **Bare names (common case — no conflict):**
 ```sql
@@ -83,75 +98,101 @@ SELECT status, level FROM logs WHERE int(status) > 400
 SELECT status, level FROM logs WHERE status = 'ERROR'
 ```
 
-The `int()` / `float()` / `str()` UDFs inspect the struct's children
-directly if the column is a conflict struct, or read the flat column
-otherwise. They work correctly on both single-type and conflict batches.
+**Direct typed-variant access (power users):**
+```sql
+SELECT status__int, status__str FROM logs WHERE status__int > 400
+```
 
 ### Output serialization
 
-Output sinks receive the original `RecordBatch` (before SQL normalization).
-They use `build_col_infos()` from `logfwd-output`, which returns a
-`Vec<ColInfo>` — one per logical field. Each `ColInfo` carries
-`json_variants: Vec<ColVariant>` (int > float > str priority) and
-`str_variants: Vec<ColVariant>` (str > int > float).
+Output sinks **must not** emit `status__int`/`status__str` as separate
+fields, and **must not** use the synthesized bare `status: Utf8` column
+(it's string-only and loses type fidelity).
+
+Instead, each output sink uses `ConflictGroups` from `logfwd-output`:
 
 ```rust
-pub enum ColVariant {
-    /// Column is a flat (non-struct) Arrow array.
-    Flat { col_idx: usize, dt: DataType },
-    /// Column is a child of a conflict StructArray.
-    StructField { struct_col_idx: usize, field_idx: usize, dt: DataType },
+pub enum TypedValue<'a> {
+    Int(i64),
+    Float(f64),
+    Str(&'a str),
+    Null,
 }
 
-pub struct ColInfo {
-    pub field_name: Arc<str>,
-    pub json_variants: Vec<ColVariant>,  // priority order for JSON emission
-    pub str_variants:  Vec<ColVariant>,  // priority order for string coercion
+pub struct ConflictGroup {
+    pub base: String,             // "status"
+    pub int_col:   Option<usize>, // column index of status__int
+    pub float_col: Option<usize>,
+    pub str_col:   Option<usize>,
+    pub synth_col: Option<usize>, // index of synthesized bare col — skip
+}
+
+pub struct ConflictGroups {
+    pub groups:    Vec<ConflictGroup>,
+    pub skip_cols: HashSet<usize>, // variant + synth cols — skip in normal iteration
+}
+
+impl ConflictGroups {
+    /// Parse from Arrow schema metadata.
+    pub fn from_schema(schema: &Schema) -> Self { ... }
+
+    /// Return the non-null typed value for this group at this row.
+    /// Priority: int > float > str.
+    pub fn typed_value_for_row<'a>(
+        &self, batch: &'a RecordBatch, group: &ConflictGroup, row: usize,
+    ) -> TypedValue<'a> { ... }
 }
 ```
 
-For each row, `write_row_json()` picks the first non-null variant from
-`json_variants` and emits the correctly-typed JSON field. Output is
-`"status": 200` or `"status": "error"` — identical to the original document.
+Each output sink's row-emission loop:
 
-Struct conflict columns are skipped in sinks that cannot represent typed
-variants (e.g., OTLP attribute encoding — `DataType::Struct(_) => continue`
-in `resolve_batch_columns()`). Those sinks rely on a per-output SQL
-transform (planned architecture) to reshape the struct before emission.
+```rust
+let groups = ConflictGroups::from_schema(batch.schema());
+
+// Normal columns
+for (i, field) in schema.fields().iter().enumerate() {
+    if groups.skip_cols.contains(&i) { continue; }
+    emit_column(field.name(), batch.column(i), row);
+}
+
+// Conflict groups (type-preserving, correct field names)
+for group in &groups.groups {
+    match groups.typed_value_for_row(batch, group, row) {
+        TypedValue::Int(v)   => emit_int(group.base, v),
+        TypedValue::Float(v) => emit_float(group.base, v),
+        TypedValue::Str(v)   => emit_str(group.base, v),
+        TypedValue::Null     => {},
+    }
+}
+```
+
+This produces `"status": 200` or `"status": "error"` per row with correct
+types — identical to what the original JSON document contained.
 
 ### Builder logic
 
 ```rust
 let conflict = (fc.has_int as u8) + (fc.has_float as u8) + (fc.has_str as u8) > 1;
 
-if conflict {
-    // Build child arrays and assemble StructArray
-    let mut child_fields: Vec<Arc<Field>> = Vec::new();
-    let mut child_arrays: Vec<ArrayRef> = Vec::new();
-    if fc.has_int   { child_fields.push(Field::new("int",   DataType::Int64,   true)); child_arrays.push(...); }
-    if fc.has_float { child_fields.push(Field::new("float", DataType::Float64, true)); child_arrays.push(...); }
-    if fc.has_str   { child_fields.push(Field::new("str",   DataType::Utf8View,true)); child_arrays.push(...); }
-    let struct_validity: Vec<bool> = (0..num_rows)
-        .map(|i| child_arrays.iter().any(|arr| !arr.is_null(i)))
-        .collect();
-    let struct_arr = StructArray::new(Fields::from(child_fields.clone()), child_arrays,
-        Some(NullBuffer::from(struct_validity)));
-    schema_fields.push(Field::new(name, DataType::Struct(Fields::from(child_fields)), true));
-    arrays.push(Arc::new(struct_arr) as ArrayRef);
-} else {
+if !conflict {
     // Single type: bare name, zero overhead
-    if fc.has_int   { schema_fields.push(Field::new(name, DataType::Int64,    true)); arrays.push(int_arr);   }
-    if fc.has_float { schema_fields.push(Field::new(name, DataType::Float64,  true)); arrays.push(float_arr); }
-    if fc.has_str   { schema_fields.push(Field::new(name, DataType::Utf8View, true)); arrays.push(str_arr);   }
+    if fc.has_int   { columns.push((field_name.clone(), DataType::Int64,    int_values));   }
+    if fc.has_float { columns.push((field_name.clone(), DataType::Float64,  float_values)); }
+    if fc.has_str   { columns.push((field_name.clone(), DataType::Utf8View, str_values));   }
+} else {
+    // Type conflict: double-underscore suffixed names
+    if fc.has_int   { columns.push((format!("{field_name}__int"),   DataType::Int64,    int_values));   }
+    if fc.has_float { columns.push((format!("{field_name}__float"), DataType::Float64,  float_values)); }
+    if fc.has_str   { columns.push((format!("{field_name}__str"),   DataType::Utf8View, str_values));   }
+    // Stamp schema metadata (accumulated and set on schema at finish_batch)
+    conflict_groups.push((field_name.clone(), observed_types));
 }
 ```
-
-No schema metadata is written or read for conflict detection.
 
 ### Schema stability
 
 **Current behavior:** `normalize_conflict_columns` synthesizes the bare
-Utf8 column from the conflict struct before each batch is registered as a
+Utf8 column from conflict variants before each batch is registered as a
 DataFusion MemTable. SQL references to bare names always resolve. This is
 stateless — no per-batch schema tracking needed.
 
@@ -169,24 +210,20 @@ normalization, replacing the direct MemTable registration used today.
 - `normalize_conflict_columns` synthesizes bare Utf8 column for SQL
 - Dead `rewriter.rs` deleted
 
-### Phase 10b (complete — PR #713)
-- Standardized double-underscore suffixes across `StreamingBuilder` and
-  `StorageBuilder`
+### Phase 10b (complete — this PR)
+- Double-underscore suffixes (`__int`/`__str`/`__float`) in
+  `StreamingBuilder`, `StorageBuilder`
+- `strip_conflict_suffix` in `conflict_schema.rs` uses `__` prefix
+- `suffix_order` in `json_extract.rs` updated
+- All tests updated (scanner_conformance, compliance_data, scanner.rs, etc.)
 - `logfwd.conflict_groups` schema metadata stamped in builders
-- `strip_conflict_suffix` / `suffix_order` updated in `conflict_schema.rs`
-  and `json_extract.rs`
 
-### Phase 10c (complete — PR #760)
-- **Replaced** flat `__int`/`__str`/`__float` columns + `logfwd.conflict_groups`
-  metadata with a single Arrow `StructArray` conflict column per field
-- `is_conflict_struct()` structural detection replaces metadata parsing
-- `normalize_conflict_columns()` rewrites struct → flat Utf8 for SQL path
-- `ColVariant` / `ColInfo` / `build_col_infos()` / `write_row_json()` added
-  to `logfwd-output` for type-preserving output serialization
-- `json_extract` UDF updated: step 1 skips structs, step 2 extracts from
-  struct children
-- OTLP sink skips struct columns instead of emitting empty-string attributes
-- All sinks updated; 500+ tests passing
+### Phase 10c: ConflictGroups output abstraction
+- Add `ConflictGroups` + `TypedValue` to `logfwd-output`
+- Update OTLP sink (type-preserving per-row emission)
+- Update JSON Lines / TCP / UDP sinks (same)
+- Update stdout sink
+- Tests: conflict batch round-trips correctly through each sink
 
 ### Future: Type hints (#625 follow-on)
 A user can declare in config:

@@ -547,7 +547,7 @@ mod verification {
     #[kani::solver(kissat)]
     fn verify_varint_len_matches_encode() {
         let value: u64 = kani::any();
-        let mut buf = Vec::with_capacity(10); // varint max 10 bytes — no realloc paths
+        let mut buf = Vec::new();
         encode_varint(&mut buf, value);
         assert!(
             buf.len() == varint_len(value),
@@ -567,7 +567,7 @@ mod verification {
     #[kani::solver(kissat)]
     fn verify_varint_format_and_roundtrip() {
         let value: u64 = kani::any();
-        let mut buf = Vec::with_capacity(10); // varint max 10 bytes — no realloc paths
+        let mut buf = Vec::new();
         encode_varint(&mut buf, value);
 
         let len = buf.len();
@@ -601,17 +601,15 @@ mod verification {
     /// Prove encode_varint never panics for any u64 input.
     #[kani::proof]
     #[kani::unwind(12)]
-    #[kani::solver(kissat)] // arithmetic-heavy varint bit ops: kissat outperforms cadical
     fn verify_varint_no_panic() {
         let value: u64 = kani::any();
-        let mut buf = Vec::with_capacity(10); // varint max 10 bytes — no realloc paths
+        let mut buf = Vec::new();
         encode_varint(&mut buf, value);
     }
 
     /// Prove encode_tag produces correct field_number and wire_type encoding.
     #[kani::proof]
     #[kani::unwind(12)]
-    #[kani::solver(kissat)] // arithmetic-heavy varint bit ops: kissat outperforms cadical
     fn verify_encode_tag() {
         let field_number: u32 = kani::any();
         let wire_type: u8 = kani::any();
@@ -619,7 +617,7 @@ mod verification {
         kani::assume(field_number <= 0x1FFFFFFF); // max protobuf field number
         kani::assume(wire_type <= 5); // valid wire types: 0-5
 
-        let mut buf = Vec::with_capacity(10); // tag varint max 10 bytes — no realloc paths
+        let mut buf = Vec::new();
         encode_tag(&mut buf, field_number, wire_type);
 
         // Decode the tag varint
@@ -638,10 +636,6 @@ mod verification {
         let decoded_field = (tag_value >> 3) as u32;
         assert!(decoded_wire == wire_type, "wire type mismatch");
         assert!(decoded_field == field_number, "field number mismatch");
-
-        // Confirm both extremes of the constrained space are reachable
-        kani::cover!(field_number == 1 && wire_type == 0);
-        kani::cover!(field_number == 0x1FFFFFFF && wire_type == 5);
     }
 
     /// Prove days_from_civil never panics and produces reasonable values
@@ -707,20 +701,15 @@ mod verification {
 
         let predicted = bytes_field_size(field_number, data_len);
 
-        // Fixed array sliced to data_len — no dynamic allocation, no realloc paths.
-        // Output buf pre-sized to tag varint (10) + length varint (10) + data (256) = 276 max.
-        let data = [0u8; 256];
-        let mut buf = Vec::with_capacity(276);
-        encode_bytes_field(&mut buf, field_number, &data[..data_len]);
+        // Create dummy data of the right length and encode
+        let data = vec![0u8; data_len];
+        let mut buf = Vec::new();
+        encode_bytes_field(&mut buf, field_number, &data);
 
         assert!(
             buf.len() == predicted,
             "bytes_field_size disagrees with encode_bytes_field"
         );
-
-        // Confirm both boundary cases are reachable
-        kani::cover!(field_number == 1 && data_len == 0);
-        kani::cover!(field_number == 1000 && data_len == 256);
     }
 
     // NOTE: parse_timestamp_nanos proofs deferred — Kani has trouble with

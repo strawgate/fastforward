@@ -13,7 +13,7 @@
 //! Find minimal failing case:
 //!   cargo test --features simd-scanner -p logfwd-core --test scanner_conformance -- --nocapture
 
-use arrow::array::{Array, Float64Array, Int64Array, StringArray, StructArray};
+use arrow::array::{Array, Float64Array, Int64Array, StringArray};
 use logfwd_arrow::scanner::SimdScanner;
 use logfwd_core::scan_config::ScanConfig;
 use logfwd_test_utils::json::{arb_flat_object, arb_json_string, arb_ndjson_buffer};
@@ -22,19 +22,6 @@ use proptest::prelude::*;
 // ===========================================================================
 // Core: ground-truth oracle (sonic-rs)
 // ===========================================================================
-
-/// Return a child column from a conflict StructArray column.
-/// `field` is the bare column name (e.g. `"status"`), `child` is `"int"`, `"str"`, or `"float"`.
-fn get_struct_child<'a>(
-    batch: &'a arrow::record_batch::RecordBatch,
-    field: &str,
-    child: &str,
-) -> Option<&'a dyn Array> {
-    let col = batch.column_by_name(field)?;
-    let sa = col.as_any().downcast_ref::<StructArray>()?;
-    let idx = sa.fields().iter().position(|f| f.name() == child)?;
-    Some(sa.column(idx).as_ref())
-}
 
 /// Verify the SIMD scanner produces correct values by comparing against
 /// sonic-rs (a known-correct JSON parser) as the ground-truth oracle.
@@ -105,24 +92,19 @@ fn assert_values_correct(input: &[u8]) {
 
             if val.is_str() {
                 let expected = val.as_str().unwrap();
-                // With struct-on-conflict: single-type fields use bare name,
-                // conflict fields use a StructArray with a "str" child.
-                // Try the struct child first, then fall back to the bare column.
-                let col_owned;
-                let col: &dyn Array = if let Some(child) = get_struct_child(&batch, key_str, "str")
-                {
-                    child
-                } else {
-                    col_owned = batch
-                        .column_by_name(key_str)
-                        .unwrap_or_else(|| {
-                            panic!(
-                                "Scanner produced no column for string key '{key_str}' at row {row}.\nInput: {:?}",
-                                String::from_utf8_lossy(line)
-                            )
-                        });
-                    col_owned.as_ref()
-                };
+                // With suffix-on-conflict: single-type fields use bare name,
+                // conflict fields use suffixed name. Try suffixed first so that
+                // a conflict batch (which has both bare-int and suffixed-str cols)
+                // resolves to the typed column.
+                let col = batch
+                    .column_by_name(&format!("{key_str}__str"))
+                    .or_else(|| batch.column_by_name(key_str))
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "Scanner produced no column for string key '{key_str}' at row {row}.\nInput: {:?}",
+                            String::from_utf8_lossy(line)
+                        )
+                    });
                 let arr = col.as_any().downcast_ref::<StringArray>().unwrap_or_else(|| {
                     panic!(
                         "Expected StringArray for key '{key_str}' at row {row} but got {:?}.\nInput: {:?}",
@@ -146,21 +128,15 @@ fn assert_values_correct(input: &[u8]) {
                 }
             } else if val.is_i64() {
                 let expected = val.as_i64().unwrap();
-                let col_owned;
-                let col: &dyn Array = if let Some(child) = get_struct_child(&batch, key_str, "int")
-                {
-                    child
-                } else {
-                    col_owned = batch
-                        .column_by_name(key_str)
-                        .unwrap_or_else(|| {
-                            panic!(
-                                "Scanner produced no column for int key '{key_str}' at row {row}.\nInput: {:?}",
-                                String::from_utf8_lossy(line)
-                            )
-                        });
-                    col_owned.as_ref()
-                };
+                let col = batch
+                    .column_by_name(&format!("{key_str}__int"))
+                    .or_else(|| batch.column_by_name(key_str))
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "Scanner produced no column for int key '{key_str}' at row {row}.\nInput: {:?}",
+                            String::from_utf8_lossy(line)
+                        )
+                    });
                 let arr = col.as_any().downcast_ref::<Int64Array>().unwrap_or_else(|| {
                     panic!(
                         "Expected Int64Array for key '{key_str}' at row {row} but got {:?}.\nInput: {:?}",
@@ -178,22 +154,15 @@ fn assert_values_correct(input: &[u8]) {
                 }
             } else if val.is_f64() {
                 let expected = val.as_f64().unwrap();
-                let col_owned;
-                let col: &dyn Array = if let Some(child) =
-                    get_struct_child(&batch, key_str, "float")
-                {
-                    child
-                } else {
-                    col_owned = batch
-                        .column_by_name(key_str)
-                        .unwrap_or_else(|| {
-                            panic!(
-                                "Scanner produced no column for float key '{key_str}' at row {row}.\nInput: {:?}",
-                                String::from_utf8_lossy(line)
-                            )
-                        });
-                    col_owned.as_ref()
-                };
+                let col = batch
+                    .column_by_name(&format!("{key_str}__float"))
+                    .or_else(|| batch.column_by_name(key_str))
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "Scanner produced no column for float key '{key_str}' at row {row}.\nInput: {:?}",
+                            String::from_utf8_lossy(line)
+                        )
+                    });
                 if let Some(arr) = col.as_any().downcast_ref::<Float64Array>() {
                     if !arr.is_null(row) {
                         let actual = arr.value(row);

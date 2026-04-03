@@ -120,29 +120,6 @@ impl InputSource for FramedInput {
                     self.format.reset();
                     result_events.push(event);
                 }
-                // End of file: flush any partial-line remainder.
-                //
-                // When a file ends without a trailing newline the last record
-                // sits in `self.remainder` indefinitely.  Appending a synthetic
-                // `\n` lets the format processor treat it as a complete line so
-                // it reaches the scanner instead of being silently dropped.
-                InputEvent::EndOfFile => {
-                    if !self.remainder.is_empty() {
-                        self.remainder.push(b'\n');
-                        let chunk = std::mem::take(&mut self.remainder);
-
-                        self.out_buf.clear();
-                        self.format.process_lines(&chunk, &mut self.out_buf);
-
-                        self.stats.inc_lines(1);
-
-                        if !self.out_buf.is_empty() {
-                            let data = std::mem::take(&mut self.out_buf);
-                            std::mem::swap(&mut self.out_buf, &mut self.spare_buf);
-                            result_events.push(InputEvent::Data { bytes: data });
-                        }
-                    }
-                }
             }
         }
 
@@ -227,11 +204,7 @@ mod tests {
     fn passthrough_complete_lines() {
         let stats = make_stats();
         let source = MockSource::from_chunks(vec![b"line1\nline2\n"]);
-        let mut framed = FramedInput::new(
-            Box::new(source),
-            FormatProcessor::passthrough(Arc::clone(&stats)),
-            stats,
-        );
+        let mut framed = FramedInput::new(Box::new(source), FormatProcessor::Passthrough, stats);
 
         let events = framed.poll().unwrap();
         assert_eq!(collect_data(events), b"line1\nline2\n");
@@ -241,11 +214,7 @@ mod tests {
     fn remainder_across_polls() {
         let stats = make_stats();
         let source = MockSource::from_chunks(vec![b"hello\nwor", b"ld\n"]);
-        let mut framed = FramedInput::new(
-            Box::new(source),
-            FormatProcessor::passthrough(Arc::clone(&stats)),
-            stats,
-        );
+        let mut framed = FramedInput::new(Box::new(source), FormatProcessor::Passthrough, stats);
 
         // First poll: "hello\n" is complete, "wor" is remainder
         let events1 = framed.poll().unwrap();
@@ -262,7 +231,7 @@ mod tests {
         let source = MockSource::from_chunks(vec![b"partial", b"more\n"]);
         let mut framed = FramedInput::new(
             Box::new(source),
-            FormatProcessor::passthrough(Arc::clone(&stats)),
+            FormatProcessor::Passthrough,
             Arc::clone(&stats),
         );
 
@@ -283,7 +252,7 @@ mod tests {
         let source = MockSource::from_chunks(vec![&big]);
         let mut framed = FramedInput::new(
             Box::new(source),
-            FormatProcessor::passthrough(Arc::clone(&stats)),
+            FormatProcessor::Passthrough,
             Arc::clone(&stats),
         );
 
@@ -305,7 +274,7 @@ mod tests {
         let source = MockSource::from_chunks(vec![&chunk]);
         let mut framed = FramedInput::new(
             Box::new(source),
-            FormatProcessor::passthrough(Arc::clone(&stats)),
+            FormatProcessor::Passthrough,
             Arc::clone(&stats),
         );
 
@@ -331,11 +300,7 @@ mod tests {
                 bytes: b"fresh\n".to_vec(),
             }],
         ]);
-        let mut framed = FramedInput::new(
-            Box::new(source),
-            FormatProcessor::passthrough(Arc::clone(&stats)),
-            stats,
-        );
+        let mut framed = FramedInput::new(Box::new(source), FormatProcessor::Passthrough, stats);
 
         // Partial goes to remainder
         let _ = framed.poll().unwrap();
@@ -376,7 +341,7 @@ mod tests {
         let source_full = MockSource::from_chunks(vec![full_input.as_slice()]);
         let mut framed_full = FramedInput::new(
             Box::new(source_full),
-            FormatProcessor::passthrough(Arc::clone(&stats)),
+            FormatProcessor::Passthrough,
             Arc::clone(&stats),
         );
         let reference = collect_data(framed_full.poll().unwrap());
@@ -387,11 +352,8 @@ mod tests {
             let chunk1 = &full_input[..split_at];
             let chunk2 = &full_input[split_at..];
             let source = MockSource::from_chunks(vec![chunk1, chunk2]);
-            let mut framed = FramedInput::new(
-                Box::new(source),
-                FormatProcessor::passthrough(Arc::clone(&stats2)),
-                stats2,
-            );
+            let mut framed =
+                FramedInput::new(Box::new(source), FormatProcessor::Passthrough, stats2);
 
             let mut collected = collect_data(framed.poll().unwrap());
             collected.extend_from_slice(&collect_data(framed.poll().unwrap()));
@@ -401,81 +363,5 @@ mod tests {
                 "split at byte {split_at} produced different output"
             );
         }
-    }
-
-    /// A file (or any source) that ends without a trailing newline must not
-    /// silently drop its last record.  The `EndOfFile` event causes
-    /// `FramedInput` to flush the remainder buffer with a synthetic newline.
-    #[test]
-    fn eof_flushes_remainder() {
-        let stats = make_stats();
-        let source = MockSource::new(vec![
-            vec![InputEvent::Data {
-                bytes: b"no-newline".to_vec(),
-            }],
-            vec![InputEvent::EndOfFile],
-        ]);
-        let mut framed = FramedInput::new(
-            Box::new(source),
-            FormatProcessor::passthrough(stats.clone()),
-            stats,
-        );
-
-        // First poll: data with no newline — goes to remainder, nothing emitted.
-        let events1 = framed.poll().unwrap();
-        assert!(collect_data(events1).is_empty());
-
-        // Second poll: EndOfFile flushes the remainder as a complete line.
-        let events2 = framed.poll().unwrap();
-        assert_eq!(collect_data(events2), b"no-newline\n");
-    }
-
-    /// Multiple records in a file where only the last one lacks a newline:
-    /// all records must be emitted.
-    #[test]
-    fn eof_flushes_only_partial_remainder() {
-        let stats = make_stats();
-        let source = MockSource::new(vec![
-            vec![InputEvent::Data {
-                bytes: b"complete\npartial".to_vec(),
-            }],
-            vec![InputEvent::EndOfFile],
-        ]);
-        let mut framed = FramedInput::new(
-            Box::new(source),
-            FormatProcessor::passthrough(stats.clone()),
-            stats,
-        );
-
-        // First poll: "complete\n" is emitted; "partial" stays in remainder.
-        let events1 = framed.poll().unwrap();
-        assert_eq!(collect_data(events1), b"complete\n");
-
-        // Second poll: EndOfFile flushes "partial" with a synthetic newline.
-        let events2 = framed.poll().unwrap();
-        assert_eq!(collect_data(events2), b"partial\n");
-    }
-
-    /// A redundant EndOfFile (no bytes in remainder) must produce no output.
-    #[test]
-    fn eof_with_empty_remainder_is_noop() {
-        let stats = make_stats();
-        let source = MockSource::new(vec![
-            vec![InputEvent::Data {
-                bytes: b"line\n".to_vec(),
-            }],
-            vec![InputEvent::EndOfFile],
-        ]);
-        let mut framed = FramedInput::new(
-            Box::new(source),
-            FormatProcessor::passthrough(stats.clone()),
-            stats,
-        );
-
-        let events1 = framed.poll().unwrap();
-        assert_eq!(collect_data(events1), b"line\n");
-
-        let events2 = framed.poll().unwrap();
-        assert!(collect_data(events2).is_empty());
     }
 }

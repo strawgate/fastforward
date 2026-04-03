@@ -6,7 +6,7 @@
 //! Run:
 //!   cargo test -p logfwd-core --test compliance_data
 
-use arrow::array::{Array, Float64Array, Int64Array, StringArray, StructArray};
+use arrow::array::{Array, Float64Array, Int64Array, StringArray};
 use arrow::compute;
 use arrow::datatypes::DataType;
 use arrow::record_batch::RecordBatch;
@@ -96,67 +96,6 @@ fn assert_not_null(batch: &RecordBatch, col_name: &str, row: usize) {
         !col.is_null(row),
         "{col_name}[{row}] expected non-null, got null"
     );
-}
-
-/// Extract an i64 value from the `"int"` child of a conflict StructArray column.
-fn get_struct_int(batch: &RecordBatch, field: &str, row: usize) -> Option<i64> {
-    let col = batch.column_by_name(field)?;
-    let sa = col.as_any().downcast_ref::<StructArray>()?;
-    let child_idx = sa.fields().iter().position(|f| f.name() == "int")?;
-    let int_col = sa.column(child_idx);
-    if int_col.is_null(row) {
-        return None;
-    }
-    Some(int_col.as_any().downcast_ref::<Int64Array>()?.value(row))
-}
-
-/// Extract a String value from the `"str"` child of a conflict StructArray column.
-/// Supports both Utf8 and Utf8View child arrays.
-fn get_struct_str(batch: &RecordBatch, field: &str, row: usize) -> Option<String> {
-    let col = batch.column_by_name(field)?;
-    let sa = col.as_any().downcast_ref::<StructArray>()?;
-    let child_idx = sa.fields().iter().position(|f| f.name() == "str")?;
-    let str_col = sa.column(child_idx);
-    if str_col.is_null(row) {
-        return None;
-    }
-    let cast = compute::cast(str_col.as_ref(), &DataType::Utf8).ok()?;
-    let arr = cast.as_any().downcast_ref::<StringArray>()?;
-    Some(arr.value(row).to_string())
-}
-
-/// Extract an f64 value from the `"float"` child of a conflict StructArray column.
-fn get_struct_float(batch: &RecordBatch, field: &str, row: usize) -> Option<f64> {
-    let col = batch.column_by_name(field)?;
-    let sa = col.as_any().downcast_ref::<StructArray>()?;
-    let child_idx = sa.fields().iter().position(|f| f.name() == "float")?;
-    let float_col = sa.column(child_idx);
-    if float_col.is_null(row) {
-        return None;
-    }
-    Some(
-        float_col
-            .as_any()
-            .downcast_ref::<Float64Array>()?
-            .value(row),
-    )
-}
-
-/// Assert that the named child field of a conflict StructArray column is null at `row`.
-fn assert_struct_child_null(batch: &RecordBatch, field: &str, child: &str, row: usize) {
-    if let Some(col) = batch.column_by_name(field) {
-        if let Some(sa) = col.as_any().downcast_ref::<StructArray>() {
-            if let Some(child_idx) = sa.fields().iter().position(|f| f.name() == child) {
-                let child_col = sa.column(child_idx);
-                assert!(
-                    child_col.is_null(row),
-                    "{field}.{child}[{row}] expected null, got non-null"
-                );
-            }
-            // Child not present is also acceptable.
-        }
-    }
-    // Column not existing is also acceptable.
 }
 
 /// Run a test function against both SimdScanner and StreamingSimdScanner,
@@ -287,13 +226,13 @@ fn compliance_type_conflict() {
     assert_both_scanners(input, |batch| {
         assert_eq!(batch.num_rows(), 2);
 
-        // Row 0: status.int=200, status.str=null
-        assert_eq!(get_struct_int(batch, "status", 0), Some(200));
-        assert_struct_child_null(batch, "status", "str", 0);
+        // Row 0: status__int=200, status__str=null
+        assert_eq!(get_int(batch, "status__int", 0), Some(200));
+        assert_null(batch, "status__str", 0);
 
-        // Row 1: status.int=null, status.str="OK"
-        assert_struct_child_null(batch, "status", "int", 1);
-        assert_eq!(get_struct_str(batch, "status", 1), Some("OK".to_string()));
+        // Row 1: status__int=null, status__str="OK"
+        assert_null(batch, "status__int", 1);
+        assert_eq!(get_str(batch, "status__str", 1), Some("OK".to_string()));
     });
 }
 
@@ -309,14 +248,14 @@ fn compliance_integer_boundaries() {
         assert_eq!(batch.num_rows(), 3);
 
         // Row 0: i64::MAX as int
-        assert_eq!(get_struct_int(batch, "n", 0), Some(i64::MAX));
+        assert_eq!(get_int(batch, "n__int", 0), Some(i64::MAX));
 
         // Row 1: i64::MIN as int
-        assert_eq!(get_struct_int(batch, "n", 1), Some(i64::MIN));
+        assert_eq!(get_int(batch, "n__int", 1), Some(i64::MIN));
 
-        // Row 2: overflow -> float child
-        assert_struct_child_null(batch, "n", "int", 2);
-        let f = get_struct_float(batch, "n", 2).expect("n.float should exist for overflow");
+        // Row 2: overflow -> float column
+        assert_null(batch, "n__int", 2);
+        let f = get_float(batch, "n__float", 2).expect("n__float should exist for overflow");
         assert!(f > 9.2e18, "overflow should be a large float: {f}");
     });
 }
@@ -361,10 +300,10 @@ fn compliance_null_value() {
         assert_eq!(batch.num_rows(), 1);
         assert_not_null(batch, "a", 0);
         assert_eq!(get_str(batch, "a", 0), Some("x".to_string()));
-        // b is null — it may not have a column at all, or the struct children are null.
-        assert_struct_child_null(batch, "b", "str", 0);
-        assert_struct_child_null(batch, "b", "int", 0);
-        assert_struct_child_null(batch, "b", "float", 0);
+        // b is null — it may not have a column at all, or the column is null.
+        assert_null(batch, "b__str", 0);
+        assert_null(batch, "b__int", 0);
+        assert_null(batch, "b__float", 0);
         assert_not_null(batch, "c", 0);
         assert_eq!(get_str(batch, "c", 0), Some("y".to_string()));
     });
@@ -673,24 +612,24 @@ fn compliance_mixed_type_across_rows() {
         assert_eq!(batch.num_rows(), 5);
 
         // Row 0: int
-        assert_eq!(get_struct_int(batch, "v", 0), Some(42));
+        assert_eq!(get_int(batch, "v__int", 0), Some(42));
 
         // Row 1: float
-        let f = get_struct_float(batch, "v", 1).expect("v.float should exist for row 1");
+        let f = get_float(batch, "v__float", 1).expect("v__float should exist for row 1");
         #[allow(clippy::approx_constant)]
         let expected = 3.14;
         assert!((f - expected).abs() < 1e-10);
 
         // Row 2: string "text"
-        assert_eq!(get_struct_str(batch, "v", 2), Some("text".to_string()));
+        assert_eq!(get_str(batch, "v__str", 2), Some("text".to_string()));
 
         // Row 3: bool stored as string
-        assert_eq!(get_struct_str(batch, "v", 3), Some("true".to_string()));
+        assert_eq!(get_str(batch, "v__str", 3), Some("true".to_string()));
 
-        // Row 4: null — all typed children should be null for this row.
-        assert_struct_child_null(batch, "v", "int", 4);
-        assert_struct_child_null(batch, "v", "float", 4);
-        assert_struct_child_null(batch, "v", "str", 4);
+        // Row 4: null — all typed columns should be null for this row.
+        assert_null(batch, "v__int", 4);
+        assert_null(batch, "v__float", 4);
+        assert_null(batch, "v__str", 4);
     });
 }
 
@@ -796,9 +735,9 @@ fn compliance_zero_as_all_types() {
     let input = b"{\"a\":0}\n{\"a\":0.0}\n{\"a\":\"0\"}\n";
     assert_both_scanners(input, |batch| {
         assert_eq!(batch.num_rows(), 3);
-        assert_eq!(get_struct_int(batch, "a", 0), Some(0));
-        assert_eq!(get_struct_float(batch, "a", 1), Some(0.0));
-        assert_eq!(get_struct_str(batch, "a", 2), Some("0".to_string()));
+        assert_eq!(get_int(batch, "a__int", 0), Some(0));
+        assert_eq!(get_float(batch, "a__float", 1), Some(0.0));
+        assert_eq!(get_str(batch, "a__str", 2), Some("0".to_string()));
     });
 }
 
