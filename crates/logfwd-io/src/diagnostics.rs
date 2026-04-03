@@ -821,7 +821,17 @@ impl DiagnosticsServer {
                 .collect();
 
             let lines_in = pm.transform_in.lines();
-            let lines_out = pm.transform_out.lines();
+            // lines_out is the number of lines actually delivered — derived from
+            // output-sink stats so the counter has a single increment path
+            // (each sink calls inc_lines once on success). For fan-out pipelines
+            // this is the maximum across all outputs, which equals the number of
+            // distinct lines that reached at least one output.
+            let lines_out: u64 = pm
+                .outputs
+                .iter()
+                .map(|(_, _, s)| s.lines())
+                .max()
+                .unwrap_or(0);
             let drop_rate = if lines_in > 0 {
                 1.0 - (lines_out as f64 / lines_in as f64)
             } else {
@@ -1122,7 +1132,8 @@ mod tests {
         inp.inc_rotations();
 
         pm.transform_in.inc_lines(1000);
-        pm.transform_out.inc_lines(900);
+        // transform_out.inc_lines is no longer called in the pipeline hot path;
+        // lines_out is derived from output-sink stats instead.
 
         let out = pm.add_output("collector", "otlp");
         out.inc_lines(900);
