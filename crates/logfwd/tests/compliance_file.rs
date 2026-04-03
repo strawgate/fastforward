@@ -413,3 +413,39 @@ fn compliance_glob_new_files() {
         "expected 2000 lines through transform (1000 from each file), got {lines_in}"
     );
 }
+
+/// A file that ends without a trailing newline must not drop its last record.
+///
+/// Regression test for: last line silently dropped when input file has no
+/// trailing newline.
+#[test]
+fn compliance_file_no_trailing_newline() {
+    let dir = tempfile::tempdir().unwrap();
+    let log_path = dir.path().join("no-newline.log");
+
+    // Write 3 complete lines followed by a record with NO trailing newline.
+    let mut content = generate_lines(0, 3);
+    content.push_str(r#"{"seq":3,"msg":"no newline"}"#); // deliberately no '\n'
+    fs::write(&log_path, &content).unwrap();
+
+    let yaml = file_pipeline_yaml(&log_path);
+    let pipeline = build_pipeline(&yaml);
+    let (shutdown, handle) = run_pipeline_background(pipeline);
+
+    // Wait long enough for the tailer to read the file and for the
+    // EndOfFile event to flush the remainder.
+    std::thread::sleep(Duration::from_millis(1000));
+
+    shutdown.cancel();
+    let pipeline = handle.join().expect("pipeline thread panicked");
+
+    let lines_in = pipeline
+        .metrics()
+        .transform_in
+        .lines_total
+        .load(Ordering::Relaxed);
+    assert_eq!(
+        lines_in, 4,
+        "expected 4 lines through transform (3 complete + 1 without trailing newline), got {lines_in}"
+    );
+}
