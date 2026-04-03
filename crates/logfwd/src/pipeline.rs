@@ -18,6 +18,9 @@ use logfwd_config::{
     EnrichmentConfig, Format, GeoDatabaseFormat, InputConfig, InputType, PipelineConfig,
 };
 use logfwd_core::pipeline::{PipelineMachine, Running, SourceId};
+use logfwd_io::checkpoint::{
+    CheckpointStore, FileCheckpointStore, SourceCheckpoint, default_data_dir,
+};
 use logfwd_io::diagnostics::{ComponentStats, PipelineMetrics};
 use logfwd_io::format::FormatProcessor;
 use logfwd_io::framed::FramedInput;
@@ -87,6 +90,13 @@ pub struct Pipeline {
     /// Batch lifecycle state machine. Option because begin_drain() consumes self.
     /// Some during run_async, None only after shutdown drain transition.
     machine: Option<PipelineMachine<Running, u64>>,
+    /// Maps SourceId (file fingerprint) → absolute path. Populated from PathUpdate
+    /// messages; used when persisting checkpoints so the store records the path.
+    source_paths: HashMap<SourceId, PathBuf>,
+    /// Durable checkpoint store. None when running without persistence (tests).
+    checkpoint_store: Option<FileCheckpointStore>,
+    /// Throttle checkpoint flushes to at most once per 5 seconds.
+    last_checkpoint_flush: Instant,
 }
 
 impl Pipeline {
@@ -150,6 +160,20 @@ impl Pipeline {
 
         let mut metrics = PipelineMetrics::new(name, transform_sql, meter);
 
+        // Open checkpoint store and load any previously saved offsets.
+        // Errors are logged but not fatal — we start from the beginning instead.
+        let checkpoint_store = match FileCheckpointStore::open(default_data_dir()) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                eprintln!("warn: could not open checkpoint store: {e} — starting from beginning");
+                None
+            }
+        };
+        let saved_checkpoints: Vec<SourceCheckpoint> = checkpoint_store
+            .as_ref()
+            .map(FileCheckpointStore::load_all)
+            .unwrap_or_default();
+
         // Build inputs (file only for now).
         let mut inputs = Vec::new();
         for (i, input_cfg) in config.inputs.iter().enumerate() {
@@ -176,6 +200,15 @@ impl Pipeline {
             let input_type_str = format!("{:?}", input_cfg.input_type).to_lowercase();
             let input_stats = metrics.add_input(&input_name, &input_type_str);
             inputs.push(build_input_state(&input_name, &resolved_cfg, input_stats)?);
+        }
+
+        // Restore previously saved file offsets so we resume from where we left off.
+        for cp in &saved_checkpoints {
+            if let Some(path) = &cp.path {
+                for input in &mut inputs {
+                    input.source.set_offset(path, cp.offset);
+                }
+            }
         }
 
         // Build output sink factory → pool.
@@ -236,6 +269,9 @@ impl Pipeline {
             poll_interval: Duration::from_millis(10),
             resource_attrs: Arc::new(resource_attrs),
             machine: Some(PipelineMachine::new().start()),
+            source_paths: HashMap::new(),
+            checkpoint_store,
+            last_checkpoint_flush: Instant::now(),
         })
     }
 
@@ -314,7 +350,6 @@ impl Pipeline {
 
         let mut scan_buf = Vec::with_capacity(self.batch_target_bytes);
         let mut batch_checkpoints: HashMap<SourceId, ByteOffset> = HashMap::new();
-        let mut source_paths: HashMap<SourceId, PathBuf> = HashMap::new();
         // Oldest queued_at in the current accumulating batch — reset after each flush.
         let mut batch_queued_at: Option<Instant> = None;
         let mut flush_interval = tokio::time::interval(self.batch_timeout);
@@ -345,7 +380,7 @@ impl Pipeline {
                         }
                         Some(ChannelMsg::PathUpdate(updates)) => {
                             for (sid, path) in updates {
-                                source_paths.insert(sid, path);
+                                self.source_paths.insert(sid, path);
                             }
                         }
                         None => {
@@ -402,7 +437,7 @@ impl Pipeline {
                 }
                 ChannelMsg::PathUpdate(updates) => {
                     for (sid, path) in updates {
-                        source_paths.insert(sid, path);
+                        self.source_paths.insert(sid, path);
                     }
                 }
             }
@@ -440,9 +475,20 @@ impl Pipeline {
         if let Some(machine) = self.machine.take() {
             let draining = machine.begin_drain();
             match draining.stop() {
-                Ok(_stopped) => {
-                    // All in-flight batches resolved.
-                    // TODO (#588): persist final checkpoints from stopped.final_checkpoints()
+                Ok(stopped) => {
+                    // All in-flight batches resolved — persist final checkpoints.
+                    if let Some(ref mut store) = self.checkpoint_store {
+                        for (source_id, offset) in stopped.final_checkpoints() {
+                            store.update(SourceCheckpoint {
+                                source_id: source_id.0,
+                                path: self.source_paths.get(source_id).cloned(),
+                                offset: *offset,
+                            });
+                        }
+                        if let Err(e) = store.flush() {
+                            eprintln!("pipeline: failed to flush final checkpoints: {e}");
+                        }
+                    }
                 }
                 Err(still_draining) => {
                     eprintln!(
@@ -641,6 +687,8 @@ impl Pipeline {
     }
 
     /// Ack or reject all Sending tickets and apply receipts to the machine.
+    /// When a checkpoint advances, the new offset is persisted to the store.
+    /// Flushes are throttled to at most once per 5 seconds to avoid fsync storms.
     fn ack_all_tickets(
         &mut self,
         tickets: Vec<logfwd_core::pipeline::BatchTicket<logfwd_core::pipeline::Sending, u64>>,
@@ -649,14 +697,36 @@ impl Pipeline {
         let Some(ref mut machine) = self.machine else {
             return;
         };
+        let mut any_advanced = false;
         for ticket in tickets {
             let receipt = if success {
                 ticket.ack()
             } else {
                 ticket.reject()
             };
-            let _advance = machine.apply_ack(receipt);
-            // TODO (#588): if advance.advanced, persist checkpoint via CheckpointStore
+            let advance = machine.apply_ack(receipt);
+            if advance.advanced {
+                if let (Some(ref mut store), Some(offset)) =
+                    (self.checkpoint_store.as_mut(), advance.checkpoint)
+                {
+                    store.update(SourceCheckpoint {
+                        source_id: advance.source.0,
+                        path: self.source_paths.get(&advance.source).cloned(),
+                        offset,
+                    });
+                    any_advanced = true;
+                }
+            }
+        }
+        // Flush to disk at most once per 5 seconds to amortize fsync cost.
+        if any_advanced && self.last_checkpoint_flush.elapsed() >= Duration::from_secs(5) {
+            if let Some(ref mut store) = self.checkpoint_store {
+                if let Err(e) = store.flush() {
+                    eprintln!("pipeline: checkpoint flush error: {e}");
+                } else {
+                    self.last_checkpoint_flush = Instant::now();
+                }
+            }
         }
     }
 }
@@ -991,8 +1061,8 @@ mod tests {
 
     use logfwd_config::{Format, OutputConfig, OutputType};
     use logfwd_io::diagnostics::ComponentStats;
-    use logfwd_test_utils::sinks::{DevNullSink, FailingSink, FrozenSink, SlowSink};
-    use logfwd_test_utils::test_meter;
+    use logfwd_test_utils::sinks::{CountingSink, DevNullSink, FailingSink, FrozenSink, SlowSink};
+    use logfwd_test_utils::{append_json_lines, test_meter};
 
     struct NamedSink<T> {
         name: &'static str,
@@ -2507,6 +2577,152 @@ output:
             pipeline.machine.is_none(),
             "machine should drain cleanly even when transform filters all rows"
         );
+    }
+
+    /// Write N lines, run the pipeline, shut down cleanly. Verify that
+    /// checkpoints.json exists and contains a non-zero offset.
+    #[test]
+    fn test_checkpoint_persisted_after_clean_shutdown() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("test.log");
+        logfwd_test_utils::generate_json_lines(&log_path, 50, "cp-test");
+
+        // Override data dir so checkpoints land in our temp dir.
+        // SAFETY: single-threaded test; no concurrent env reads.
+        unsafe {
+            std::env::set_var("LOGFWD_DATA_DIR", dir.path());
+        }
+
+        let mut pipeline = pipeline_with_sink(&log_path, Box::new(DevNullSink));
+        pipeline.set_batch_timeout(Duration::from_millis(10));
+
+        let shutdown = CancellationToken::new();
+        let sd = shutdown.clone();
+        let metrics = Arc::clone(pipeline.metrics());
+        std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                if metrics.batch_rows_total.load(Ordering::Relaxed) >= 50 {
+                    std::thread::sleep(Duration::from_millis(50));
+                    sd.cancel();
+                    return;
+                }
+                if Instant::now() > deadline {
+                    sd.cancel();
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        });
+
+        pipeline.run(&shutdown).unwrap();
+
+        // checkpoints.json must exist and contain a non-zero offset.
+        assert!(
+            dir.path().join("checkpoints.json").exists(),
+            "checkpoints.json must exist after clean shutdown"
+        );
+        // Re-open the store to verify the checkpoints are readable.
+        let store = logfwd_io::checkpoint::FileCheckpointStore::open(dir.path()).unwrap();
+        let cps = store.load_all();
+        assert!(!cps.is_empty(), "at least one checkpoint must be written");
+        assert!(cps[0].offset > 0, "checkpoint offset must be non-zero");
+
+        // SAFETY: single-threaded test; no concurrent env reads.
+        unsafe {
+            std::env::remove_var("LOGFWD_DATA_DIR");
+        }
+    }
+
+    /// Write N lines, run pipeline, shut down, then write M more lines, run
+    /// again. The second run must process only the M new lines.
+    #[test]
+    fn test_pipeline_resumes_from_checkpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("resume.log");
+        // SAFETY: single-threaded test; no concurrent env reads.
+        unsafe {
+            std::env::set_var("LOGFWD_DATA_DIR", dir.path());
+        }
+
+        // First run: write 20 lines, process them.
+        logfwd_test_utils::generate_json_lines(&log_path, 20, "resume-first");
+        {
+            let counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let counter_clone = Arc::clone(&counter);
+            let sink = logfwd_test_utils::CountingSink::new(counter_clone);
+
+            let mut pipeline = pipeline_with_sink(&log_path, Box::new(sink));
+            pipeline.set_batch_timeout(Duration::from_millis(10));
+
+            let shutdown = CancellationToken::new();
+            let sd = shutdown.clone();
+            let metrics = Arc::clone(pipeline.metrics());
+            std::thread::spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                loop {
+                    if metrics.batch_rows_total.load(Ordering::Relaxed) >= 20 {
+                        std::thread::sleep(Duration::from_millis(50));
+                        sd.cancel();
+                        return;
+                    }
+                    if Instant::now() > deadline {
+                        sd.cancel();
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            });
+            pipeline.run(&shutdown).unwrap();
+            assert_eq!(
+                counter.load(Ordering::Relaxed),
+                20,
+                "first run must process 20 rows"
+            );
+        }
+
+        // Append 10 more lines.
+        logfwd_test_utils::append_json_lines(&log_path, 10, "resume-second");
+
+        // Second run: must process only the 10 new lines.
+        {
+            let counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let counter_clone = Arc::clone(&counter);
+            let sink = logfwd_test_utils::CountingSink::new(counter_clone);
+
+            let mut pipeline = pipeline_with_sink(&log_path, Box::new(sink));
+            pipeline.set_batch_timeout(Duration::from_millis(10));
+
+            let shutdown = CancellationToken::new();
+            let sd = shutdown.clone();
+            let metrics = Arc::clone(pipeline.metrics());
+            std::thread::spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                loop {
+                    if metrics.batch_rows_total.load(Ordering::Relaxed) >= 10 {
+                        std::thread::sleep(Duration::from_millis(50));
+                        sd.cancel();
+                        return;
+                    }
+                    if Instant::now() > deadline {
+                        sd.cancel();
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            });
+            pipeline.run(&shutdown).unwrap();
+            assert_eq!(
+                counter.load(Ordering::Relaxed),
+                10,
+                "second run must process only the 10 new lines, not re-read the first 20"
+            );
+        }
+
+        // SAFETY: single-threaded test; no concurrent env reads.
+        unsafe {
+            std::env::remove_var("LOGFWD_DATA_DIR");
+        }
     }
 }
 
