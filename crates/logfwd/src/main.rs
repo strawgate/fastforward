@@ -418,6 +418,42 @@ async fn run_pipelines(
         })?;
 
     let shutdown_for_signal = shutdown.clone();
+
+    // Acquire exclusive lock file in the data directory.
+    let data_dir = config
+        .storage
+        .data_dir
+        .as_ref()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(logfwd_io::checkpoint::default_data_dir);
+    std::fs::create_dir_all(&data_dir)?;
+    let lock_path = data_dir.join("logfwd.lock");
+    let lock_file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(&lock_path)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        // Attempt an exclusive lock. LOCK_NB means "non-blocking" — fail if already locked.
+        let ret = unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if ret != 0 {
+            let err = io::Error::last_os_error();
+            if err.kind() == io::ErrorKind::WouldBlock
+                || err.raw_os_error() == Some(libc::EAGAIN)
+                || err.raw_os_error() == Some(libc::EWOULDBLOCK)
+            {
+                return Err(CliError::Runtime(io::Error::other(format!(
+                    "another instance of logfwd is already running (could not acquire lock on {})",
+                    lock_path.display()
+                ))));
+            }
+            return Err(CliError::Runtime(err));
+        }
+    }
+
     tokio::spawn(async move {
         #[cfg(feature = "dhat-heap")]
         let _profiler_to_drop = profiler;
@@ -596,6 +632,9 @@ async fn run_pipelines(
             )));
         }
     }
+
+    // Ensure lock_file stays alive for the duration of the run.
+    drop(lock_file);
 
     if let Err(e) = meter_provider.shutdown() {
         eprintln!(

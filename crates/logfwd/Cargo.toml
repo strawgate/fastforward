@@ -44,3 +44,7 @@ tiny_http = "0.12"
 
 [lints]
 workspace = true
+
+[[test]]
+name = "test_lock"
+path = "tests/test_lock.rs"

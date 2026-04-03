@@ -148,7 +148,7 @@ fn expand_glob_patterns(patterns: &[&str]) -> Vec<PathBuf> {
                 }
             }
             Err(e) => {
-                eprintln!("warn: invalid glob pattern {pattern:?}: {e}");
+                tracing::warn!("invalid glob pattern {pattern:?}: {e}");
             }
         }
     }
@@ -226,7 +226,7 @@ impl FileTailer {
             if path.exists()
                 && let Err(e) = tailer.open_file(path)
             {
-                eprintln!("warn: could not open {}: {e}", path.display());
+                tracing::warn!("could not open {}: {e}", path.display());
             }
         }
 
@@ -244,6 +244,9 @@ impl FileTailer {
     pub fn new_with_globs(patterns: &[&str], config: TailConfig) -> io::Result<Self> {
         // Expand patterns to get the initial set of concrete paths.
         let initial_paths: Vec<PathBuf> = expand_glob_patterns(patterns);
+        if initial_paths.is_empty() && !patterns.is_empty() {
+            tracing::warn!("glob patterns match no files at startup: {:?}", patterns);
+        }
 
         let mut tailer = Self::new(&initial_paths, config)?;
         tailer.glob_patterns = patterns
@@ -274,6 +277,12 @@ impl FileTailer {
 
         let pattern_refs: Vec<&str> = self.glob_patterns.iter().map(String::as_str).collect();
         let candidates = expand_glob_patterns(&pattern_refs);
+        if candidates.is_empty() {
+            tracing::warn!(
+                "glob patterns still match no files: {:?}",
+                self.glob_patterns
+            );
+        }
 
         let existing: HashSet<&PathBuf> = self.watch_paths.iter().collect();
         let new_paths: Vec<PathBuf> = candidates
@@ -286,14 +295,14 @@ impl FileTailer {
             if let Some(parent) = path.parent()
                 && let Err(e) = self.watch_dir(parent)
             {
-                eprintln!("warn: could not watch {}: {e}", parent.display());
+                tracing::warn!("could not watch {}: {e}", parent.display());
             }
 
             // Open the file (new files from glob discovery always read from the beginning).
             let saved = self.config.start_from_end;
             self.config.start_from_end = false;
             if let Err(e) = self.open_file(&path) {
-                eprintln!("warn: could not open {}: {e}", path.display());
+                tracing::warn!("could not open {}: {e}", path.display());
             }
             self.config.start_from_end = saved;
 
@@ -308,13 +317,27 @@ impl FileTailer {
         let identity = identify_file(path, self.config.fingerprint_bytes)?;
         let mut file = File::open(path)?;
 
-        let offset = if let Some(saved) = self.evicted_offsets.remove(path) {
-            file.seek(SeekFrom::Start(saved))?
+        let mut offset = if let Some(saved) = self.evicted_offsets.remove(path) {
+            saved
         } else if self.config.start_from_end {
             file.seek(SeekFrom::End(0))?
         } else {
             0
         };
+
+        // Validate offset against current file size.
+        let file_size = file.metadata()?.len();
+        if offset > file_size {
+            tracing::warn!(
+                "stale offset {} for {} (file size {}); resetting to 0",
+                offset,
+                path.display(),
+                file_size
+            );
+            offset = 0;
+        }
+
+        file.seek(SeekFrom::Start(offset))?;
 
         self.files.insert(
             path.to_path_buf(),
@@ -409,7 +432,7 @@ impl FileTailer {
                     }
                     Ok(None) => {}
                     Err(e) => {
-                        eprintln!("warn: error draining rotated file {}: {e}", path.display());
+                        tracing::warn!("error draining rotated file {}: {e}", path.display());
                     }
                 }
 
@@ -420,8 +443,8 @@ impl FileTailer {
                 let saved_start_from_end = self.config.start_from_end;
                 self.config.start_from_end = false; // read new file from beginning
                 if let Err(e) = self.open_file(path) {
-                    eprintln!(
-                        "warn: could not open {} after rotation: {e}",
+                    tracing::warn!(
+                        "could not open {} after rotation: {e}",
                         path.display()
                     );
                 }
@@ -431,7 +454,7 @@ impl FileTailer {
                 let saved = self.config.start_from_end;
                 self.config.start_from_end = false; // new files read from beginning
                 if let Err(e) = self.open_file(path) {
-                    eprintln!("warn: could not open new file {}: {e}", path.display());
+                    tracing::warn!("could not open new file {}: {e}", path.display());
                 }
                 self.config.start_from_end = saved;
             }
@@ -463,7 +486,7 @@ impl FileTailer {
                     }
                 }
                 Err(e) => {
-                    eprintln!("warn: error reading {}: {e}", path.display());
+                    tracing::warn!("error reading {}: {e}", path.display());
                 }
             }
         }
@@ -495,7 +518,7 @@ impl FileTailer {
                 }
                 Ok(None) => {}
                 Err(e) => {
-                    eprintln!("warn: error draining deleted file {}: {e}", path.display());
+                    tracing::warn!("error draining deleted file {}: {e}", path.display());
                 }
             }
             self.files.remove(path);
@@ -572,8 +595,18 @@ impl FileTailer {
     }
 
     /// Set the offset for a file (for restoring from checkpoint).
-    pub fn set_offset(&mut self, path: &Path, offset: u64) -> io::Result<()> {
+    pub fn set_offset(&mut self, path: &Path, mut offset: u64) -> io::Result<()> {
         if let Some(tailed) = self.files.get_mut(path) {
+            let file_size = tailed.file.metadata()?.len();
+            if offset > file_size {
+                tracing::warn!(
+                    "stale checkpoint offset {} for {} (file size {}); resetting to 0",
+                    offset,
+                    path.display(),
+                    file_size
+                );
+                offset = 0;
+            }
             tailed.offset = offset;
             tailed.file.seek(SeekFrom::Start(offset))?;
         }
@@ -1363,6 +1396,67 @@ mod tests {
             sids[0], sids[1],
             "distinct files should have distinct fingerprints"
         );
+    }
+
+    #[test]
+    fn test_glob_no_match_warning() {
+        let dir = tempfile::tempdir().unwrap();
+        let pattern = format!("{}/*.nonexistent", dir.path().display());
+
+        let config = TailConfig {
+            poll_interval_ms: 10,
+            glob_rescan_interval_ms: 50,
+            ..Default::default()
+        };
+
+        // This should trigger the "match no files at startup" warning.
+        let mut tailer = FileTailer::new_with_globs(&[&pattern], config).unwrap();
+        assert_eq!(tailer.num_files(), 0);
+
+        // Wait for rescan. This should trigger the "still match no files" warning.
+        std::thread::sleep(Duration::from_millis(150));
+        tailer.poll().unwrap();
+        assert_eq!(tailer.num_files(), 0);
+    }
+
+    #[test]
+    fn test_checkpoint_validation_on_startup() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("stale.log");
+
+        // Create file with 10 bytes.
+        {
+            let mut f = File::create(&log_path).unwrap();
+            f.write_all(b"0123456789").unwrap();
+        }
+
+        let config = TailConfig {
+            start_from_end: false,
+            poll_interval_ms: 10,
+            ..Default::default()
+        };
+
+        let mut tailer = FileTailer::new(std::slice::from_ref(&log_path), config).unwrap();
+
+        // Set offset past EOF (e.g., 100).
+        tailer.set_offset(&log_path, 100).unwrap();
+
+        // Offset should have been reset to 0 because 100 > 10.
+        assert_eq!(tailer.get_offset(&log_path).unwrap(), 0);
+
+        // Next poll should read the 10 bytes from the beginning.
+        std::thread::sleep(Duration::from_millis(50));
+        let events = tailer.poll().unwrap();
+        let data: Vec<u8> = events
+            .iter()
+            .filter_map(|e| match e {
+                TailEvent::Data { bytes, .. } => Some(bytes.clone()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        assert_eq!(data.len(), 10);
+        assert_eq!(data, b"0123456789");
     }
 
     #[test]
