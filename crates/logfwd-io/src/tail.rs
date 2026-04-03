@@ -297,19 +297,19 @@ impl FileTailer {
         let pattern_refs: Vec<&str> = self.glob_patterns.iter().map(String::as_str).collect();
         let candidates = expand_glob_patterns(&pattern_refs);
 
-        // Canonicalize for dedup to prevent double-opens via symlinks or
-        // relative/absolute path variants (#799).
+        // Canonicalize for dedup, falling back to raw path if resolve fails (#799).
         let existing: HashSet<PathBuf> = self
             .watch_paths
             .iter()
-            .filter_map(|p| fs::canonicalize(p).ok())
+            .map(|p| fs::canonicalize(p).unwrap_or_else(|_| p.clone()))
             .collect();
         let new_paths: Vec<PathBuf> = candidates
             .into_iter()
             .filter(|p| {
-                fs::canonicalize(p)
-                    .map(|c| !existing.contains(&c))
-                    .unwrap_or(true) // keep paths we can't canonicalize
+                fs::canonicalize(p).map_or_else(
+                    |_| !existing.contains(p), // fallback to raw path check
+                    |c| !existing.contains(&c),
+                )
             })
             .collect();
 
@@ -575,12 +575,13 @@ impl FileTailer {
         Ok(events)
     }
 
-    /// Read ALL available new data from a file. Drains until read() returns 0.
-    /// Returns None if no new data.
     /// Maximum bytes to read from a single file per poll cycle.
     /// Prevents OOM when a file grows significantly between polls (#800).
     const MAX_READ_PER_POLL: usize = 4 * 1024 * 1024; // 4 MiB
 
+    /// Read new data from a file, capped at [`Self::MAX_READ_PER_POLL`].
+    /// Returns [`ReadResult::Truncated`] or [`ReadResult::TruncatedThenData`]
+    /// if the file was truncated since the last read.
     fn read_new_data(&mut self, path: &Path) -> io::Result<ReadResult> {
         let tailed = match self.files.get_mut(path) {
             Some(t) => t,
