@@ -677,6 +677,20 @@ impl FileTailer {
         self.files.len()
     }
 
+    /// Look up the `SourceId` for a given path.
+    ///
+    /// Returns `None` if the path is not currently tailed or is an empty file
+    /// (fingerprint 0).
+    pub fn source_id_for_path(&self, path: &Path) -> Option<SourceId> {
+        self.files.get(path).and_then(|tailed| {
+            if tailed.identity.fingerprint != 0 {
+                Some(SourceId(tailed.identity.fingerprint))
+            } else {
+                None
+            }
+        })
+    }
+
     /// Hot path: source identity + offset for all tailed files.
     ///
     /// Skips empty files (fingerprint 0) — they have no data to checkpoint.

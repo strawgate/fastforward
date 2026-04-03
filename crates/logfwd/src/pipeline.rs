@@ -708,7 +708,7 @@ fn input_poll_loop(
         } else {
             for event in events {
                 match event {
-                    InputEvent::Data { bytes } => {
+                    InputEvent::Data { bytes, .. } => {
                         input.buf.extend_from_slice(&bytes);
                     }
                     InputEvent::Rotated => {

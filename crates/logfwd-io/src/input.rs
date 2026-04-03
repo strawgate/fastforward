@@ -10,7 +10,13 @@ use crate::tail::{ByteOffset, FileTailer, TailConfig, TailEvent};
 #[non_exhaustive]
 pub enum InputEvent {
     /// New data read from the source.
-    Data { bytes: Vec<u8> },
+    ///
+    /// `source_id` identifies which logical source produced the data (e.g.,
+    /// which tailed file). `None` for push sources that don't track identity.
+    Data {
+        bytes: Vec<u8>,
+        source_id: Option<SourceId>,
+    },
     /// The underlying file was rotated (new inode).
     Rotated,
     /// The underlying file was truncated.
@@ -86,8 +92,9 @@ impl InputSource for FileInput {
         let mut events = Vec::with_capacity(tail_events.len());
         for te in tail_events {
             match te {
-                TailEvent::Data { bytes, .. } => {
-                    events.push(InputEvent::Data { bytes });
+                TailEvent::Data { path, bytes } => {
+                    let source_id = self.tailer.source_id_for_path(&path);
+                    events.push(InputEvent::Data { bytes, source_id });
                 }
                 TailEvent::Rotated { .. } => {
                     events.push(InputEvent::Rotated);

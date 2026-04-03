@@ -4,6 +4,9 @@
 //! (remainder management across polls) and format processing (CRI, Auto,
 //! passthrough). The pipeline receives scanner-ready bytes without knowing
 //! about formats or line boundaries.
+//!
+//! Remainder buffers are tracked per-source so that interleaved data from
+//! multiple files (or TCP connections) never cross-contaminates partial lines.
 
 use crate::diagnostics::ComponentStats;
 use crate::filter_hints::FilterHints;
@@ -11,13 +14,18 @@ use crate::format::FormatProcessor;
 use crate::input::{InputEvent, InputSource};
 use crate::tail::ByteOffset;
 use logfwd_core::pipeline::SourceId;
+use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Maximum remainder buffer size before discarding (prevents OOM on
-/// input without newlines).
+/// input without newlines). Applied per source.
 const MAX_REMAINDER_BYTES: usize = 2 * 1024 * 1024;
+
+/// Sentinel `SourceId` used for events that carry `source_id: None`
+/// (push sources like generators, UDP, TCP without per-connection tracking).
+const SENTINEL_SOURCE_ID: SourceId = SourceId(0);
 
 /// Wraps a raw [`InputSource`] with newline framing and format processing.
 ///
@@ -25,10 +33,15 @@ const MAX_REMAINDER_BYTES: usize = 2 * 1024 * 1024;
 /// wrapper splits on newlines, manages partial-line remainders across polls,
 /// and runs format-specific processing (CRI extraction, passthrough, etc.).
 /// The output is scanner-ready bytes.
+///
+/// Remainder buffers are keyed by `SourceId` so that interleaved data from
+/// multiple sources never mixes partial lines.
 pub struct FramedInput {
     inner: Box<dyn InputSource>,
     format: FormatProcessor,
-    remainder: Vec<u8>,
+    /// Per-source remainder buffers. Keyed by SourceId; events with
+    /// `source_id: None` use `SENTINEL_SOURCE_ID`.
+    remainders: HashMap<SourceId, Vec<u8>>,
     out_buf: Vec<u8>,
     /// Spare buffer swapped in when out_buf is emitted, preserving capacity
     /// across polls without allocating.
@@ -45,11 +58,16 @@ impl FramedInput {
         Self {
             inner,
             format,
-            remainder: Vec::new(),
+            remainders: HashMap::new(),
             out_buf: Vec::with_capacity(64 * 1024),
             spare_buf: Vec::with_capacity(64 * 1024),
             stats,
         }
+    }
+
+    /// Resolve `Option<SourceId>` to a concrete key for the remainders map.
+    fn remainder_key(source_id: Option<SourceId>) -> SourceId {
+        source_id.unwrap_or(SENTINEL_SOURCE_ID)
     }
 }
 
@@ -64,11 +82,14 @@ impl InputSource for FramedInput {
 
         for event in raw_events {
             match event {
-                InputEvent::Data { bytes } => {
+                InputEvent::Data { bytes, source_id } => {
                     self.stats.inc_bytes(bytes.len() as u64);
 
-                    // Prepend remainder from last poll, reusing the Vec's capacity.
-                    let mut chunk = std::mem::take(&mut self.remainder);
+                    let key = Self::remainder_key(source_id);
+
+                    // Prepend remainder from last poll for this source,
+                    // reusing the Vec's capacity.
+                    let mut chunk = self.remainders.remove(&key).unwrap_or_default();
                     chunk.extend_from_slice(&bytes);
 
                     // Find last newline — everything before is complete lines,
@@ -77,22 +98,24 @@ impl InputSource for FramedInput {
                         Some(pos) => {
                             if pos + 1 < chunk.len() {
                                 // Move tail to remainder without allocating.
-                                self.remainder = chunk.split_off(pos + 1);
-                                if self.remainder.len() > MAX_REMAINDER_BYTES {
+                                let tail = chunk.split_off(pos + 1);
+                                if tail.len() > MAX_REMAINDER_BYTES {
                                     self.stats.inc_parse_errors(1);
-                                    self.remainder.clear();
+                                    // Drop the oversized remainder.
                                     self.format.reset();
+                                } else {
+                                    self.remainders.insert(key, tail);
                                 }
                                 chunk.truncate(pos + 1);
                             }
                         }
                         None => {
                             // No newline at all — entire chunk is remainder.
-                            self.remainder = chunk;
-                            if self.remainder.len() > MAX_REMAINDER_BYTES {
+                            if chunk.len() > MAX_REMAINDER_BYTES {
                                 self.stats.inc_parse_errors(1);
-                                self.remainder.clear();
                                 self.format.reset();
+                            } else {
+                                self.remainders.insert(key, chunk);
                             }
                             continue;
                         }
@@ -111,35 +134,58 @@ impl InputSource for FramedInput {
                         // between the two buffers.
                         let data = std::mem::take(&mut self.out_buf);
                         std::mem::swap(&mut self.out_buf, &mut self.spare_buf);
-                        result_events.push(InputEvent::Data { bytes: data });
+                        result_events.push(InputEvent::Data {
+                            bytes: data,
+                            source_id,
+                        });
                     }
                 }
                 // Rotation/truncation: clear framing state + forward event.
+                //
+                // TODO: When InputEvent gains source_id for Rotated/Truncated,
+                // clear only the affected source's remainder instead of all.
                 event @ (InputEvent::Rotated | InputEvent::Truncated) => {
-                    self.remainder.clear();
+                    self.remainders.clear();
                     self.format.reset();
                     result_events.push(event);
                 }
                 // End of file: flush any partial-line remainder.
                 //
                 // When a file ends without a trailing newline the last record
-                // sits in `self.remainder` indefinitely.  Appending a synthetic
+                // sits in the remainder indefinitely.  Appending a synthetic
                 // `\n` lets the format processor treat it as a complete line so
                 // it reaches the scanner instead of being silently dropped.
+                //
+                // We flush ALL remainders on EOF because the current EndOfFile
+                // event does not carry a source_id. When it does, we should
+                // flush only the affected source.
                 InputEvent::EndOfFile => {
-                    if !self.remainder.is_empty() {
-                        self.remainder.push(b'\n');
-                        let chunk = std::mem::take(&mut self.remainder);
+                    // Collect keys to avoid borrowing issues.
+                    let keys: Vec<SourceId> = self.remainders.keys().copied().collect();
+                    for key in keys {
+                        if let Some(mut remainder) = self.remainders.remove(&key) {
+                            if !remainder.is_empty() {
+                                remainder.push(b'\n');
 
-                        self.out_buf.clear();
-                        self.format.process_lines(&chunk, &mut self.out_buf);
+                                self.out_buf.clear();
+                                self.format.process_lines(&remainder, &mut self.out_buf);
 
-                        self.stats.inc_lines(1);
+                                self.stats.inc_lines(1);
 
-                        if !self.out_buf.is_empty() {
-                            let data = std::mem::take(&mut self.out_buf);
-                            std::mem::swap(&mut self.out_buf, &mut self.spare_buf);
-                            result_events.push(InputEvent::Data { bytes: data });
+                                if !self.out_buf.is_empty() {
+                                    let data = std::mem::take(&mut self.out_buf);
+                                    std::mem::swap(&mut self.out_buf, &mut self.spare_buf);
+                                    let source_id = if key == SENTINEL_SOURCE_ID {
+                                        None
+                                    } else {
+                                        Some(key)
+                                    };
+                                    result_events.push(InputEvent::Data {
+                                        bytes: data,
+                                        source_id,
+                                    });
+                                }
+                            }
                         }
                     }
                 }
@@ -157,8 +203,26 @@ impl InputSource for FramedInput {
         self.inner.apply_hints(hints);
     }
 
+    /// Return checkpoint offsets adjusted for buffered remainder bytes.
+    ///
+    /// The inner source reports the file read offset (bytes consumed from
+    /// the OS). But some of those bytes are sitting in our remainder buffer
+    /// and have NOT been emitted as framed data. Subtracting the remainder
+    /// length gives the true "processed" offset -- the position a crash
+    /// recovery should seek to in order to replay only unprocessed data.
     fn checkpoint_data(&self) -> Vec<(SourceId, ByteOffset)> {
-        self.inner.checkpoint_data()
+        self.inner
+            .checkpoint_data()
+            .into_iter()
+            .map(|(sid, offset)| {
+                let remainder_len = self
+                    .remainders
+                    .get(&sid)
+                    .map(|r| r.len() as u64)
+                    .unwrap_or(0);
+                (sid, ByteOffset(offset.0.saturating_sub(remainder_len)))
+            })
+            .collect()
     }
 
     fn source_paths(&self) -> Vec<(SourceId, PathBuf)> {
@@ -179,6 +243,7 @@ mod tests {
     struct MockSource {
         name: String,
         events: VecDeque<Vec<InputEvent>>,
+        offsets: Vec<(SourceId, ByteOffset)>,
     }
 
     impl MockSource {
@@ -186,6 +251,7 @@ mod tests {
             Self {
                 name: "mock".to_string(),
                 events: batches.into(),
+                offsets: vec![],
             }
         }
 
@@ -193,9 +259,19 @@ mod tests {
             Self::new(
                 chunks
                     .into_iter()
-                    .map(|c| vec![InputEvent::Data { bytes: c.to_vec() }])
+                    .map(|c| {
+                        vec![InputEvent::Data {
+                            bytes: c.to_vec(),
+                            source_id: None,
+                        }]
+                    })
                     .collect(),
             )
+        }
+
+        fn with_offsets(mut self, offsets: Vec<(SourceId, ByteOffset)>) -> Self {
+            self.offsets = offsets;
+            self
         }
     }
 
@@ -207,6 +283,10 @@ mod tests {
         fn name(&self) -> &str {
             &self.name
         }
+
+        fn checkpoint_data(&self) -> Vec<(SourceId, ByteOffset)> {
+            self.offsets.clone()
+        }
     }
 
     fn make_stats() -> Arc<ComponentStats> {
@@ -216,7 +296,7 @@ mod tests {
     fn collect_data(events: Vec<InputEvent>) -> Vec<u8> {
         let mut out = Vec::new();
         for e in events {
-            if let InputEvent::Data { bytes } = e {
+            if let InputEvent::Data { bytes, .. } = e {
                 out.extend_from_slice(&bytes);
             }
         }
@@ -325,10 +405,12 @@ mod tests {
         let source = MockSource::new(vec![
             vec![InputEvent::Data {
                 bytes: b"partial".to_vec(),
+                source_id: None,
             }],
             vec![InputEvent::Rotated],
             vec![InputEvent::Data {
                 bytes: b"fresh\n".to_vec(),
+                source_id: None,
             }],
         ]);
         let mut framed = FramedInput::new(
@@ -412,6 +494,7 @@ mod tests {
         let source = MockSource::new(vec![
             vec![InputEvent::Data {
                 bytes: b"no-newline".to_vec(),
+                source_id: None,
             }],
             vec![InputEvent::EndOfFile],
         ]);
@@ -438,6 +521,7 @@ mod tests {
         let source = MockSource::new(vec![
             vec![InputEvent::Data {
                 bytes: b"complete\npartial".to_vec(),
+                source_id: None,
             }],
             vec![InputEvent::EndOfFile],
         ]);
@@ -463,6 +547,7 @@ mod tests {
         let source = MockSource::new(vec![
             vec![InputEvent::Data {
                 bytes: b"line\n".to_vec(),
+                source_id: None,
             }],
             vec![InputEvent::EndOfFile],
         ]);
@@ -477,5 +562,167 @@ mod tests {
 
         let events2 = framed.poll().unwrap();
         assert!(collect_data(events2).is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Per-source remainder tests
+    // -----------------------------------------------------------------------
+
+    /// Two sources interleaving with partial lines -- no cross-contamination.
+    #[test]
+    fn two_sources_interleaved_no_cross_contamination() {
+        let stats = make_stats();
+        let sid_a = SourceId(100);
+        let sid_b = SourceId(200);
+
+        let source = MockSource::new(vec![
+            // Poll 1: partial lines from both sources in one batch
+            vec![
+                InputEvent::Data {
+                    bytes: b"hello-from-A".to_vec(),
+                    source_id: Some(sid_a),
+                },
+                InputEvent::Data {
+                    bytes: b"hello-from-B".to_vec(),
+                    source_id: Some(sid_b),
+                },
+            ],
+            // Poll 2: complete the lines from each source
+            vec![
+                InputEvent::Data {
+                    bytes: b"-done\n".to_vec(),
+                    source_id: Some(sid_a),
+                },
+                InputEvent::Data {
+                    bytes: b"-done\n".to_vec(),
+                    source_id: Some(sid_b),
+                },
+            ],
+        ]);
+
+        let mut framed = FramedInput::new(
+            Box::new(source),
+            FormatProcessor::passthrough(Arc::clone(&stats)),
+            stats,
+        );
+
+        // Poll 1: no complete lines -- everything in remainders.
+        let events1 = framed.poll().unwrap();
+        assert!(collect_data(events1).is_empty());
+
+        // Poll 2: each source gets its own remainder prepended.
+        let events2 = framed.poll().unwrap();
+        let mut output_a = Vec::new();
+        let mut output_b = Vec::new();
+        for e in events2 {
+            if let InputEvent::Data { bytes, source_id } = e {
+                match source_id {
+                    Some(sid) if sid == sid_a => output_a.extend_from_slice(&bytes),
+                    Some(sid) if sid == sid_b => output_b.extend_from_slice(&bytes),
+                    _ => panic!("unexpected source_id"),
+                }
+            }
+        }
+        assert_eq!(output_a, b"hello-from-A-done\n");
+        assert_eq!(output_b, b"hello-from-B-done\n");
+    }
+
+    /// Truncation clears all remainders (current behavior).
+    #[test]
+    fn truncation_clears_all_remainders() {
+        let stats = make_stats();
+        let sid_a = SourceId(100);
+        let sid_b = SourceId(200);
+
+        let source = MockSource::new(vec![
+            // Partial lines from two sources
+            vec![
+                InputEvent::Data {
+                    bytes: b"partial-A".to_vec(),
+                    source_id: Some(sid_a),
+                },
+                InputEvent::Data {
+                    bytes: b"partial-B".to_vec(),
+                    source_id: Some(sid_b),
+                },
+            ],
+            // Truncation
+            vec![InputEvent::Truncated],
+            // Fresh data from source A
+            vec![InputEvent::Data {
+                bytes: b"fresh-A\n".to_vec(),
+                source_id: Some(sid_a),
+            }],
+        ]);
+
+        let mut framed = FramedInput::new(
+            Box::new(source),
+            FormatProcessor::passthrough(Arc::clone(&stats)),
+            stats,
+        );
+
+        // Partials go into remainders
+        let _ = framed.poll().unwrap();
+
+        // Truncation clears all
+        let _ = framed.poll().unwrap();
+
+        // Fresh data from A -- must NOT include "partial-A" prefix
+        let events3 = framed.poll().unwrap();
+        assert_eq!(collect_data(events3), b"fresh-A\n");
+    }
+
+    /// checkpoint_data() subtracts remainder length from inner offsets.
+    #[test]
+    fn checkpoint_data_subtracts_remainder() {
+        let stats = make_stats();
+        let sid = SourceId(42);
+
+        // The inner source reports offset 1000 for our source.
+        let source = MockSource::new(vec![vec![InputEvent::Data {
+            bytes: b"hello\nwor".to_vec(),
+            source_id: Some(sid),
+        }]])
+        .with_offsets(vec![(sid, ByteOffset(1000))]);
+
+        let mut framed = FramedInput::new(
+            Box::new(source),
+            FormatProcessor::passthrough(Arc::clone(&stats)),
+            stats,
+        );
+
+        // After poll, "wor" (3 bytes) is in the remainder for sid.
+        let _ = framed.poll().unwrap();
+
+        let cp = framed.checkpoint_data();
+        assert_eq!(cp.len(), 1);
+        assert_eq!(cp[0].0, sid);
+        // 1000 - 3 = 997
+        assert_eq!(cp[0].1, ByteOffset(997));
+    }
+
+    /// checkpoint_data() returns the raw offset when no remainder is buffered.
+    #[test]
+    fn checkpoint_data_no_remainder() {
+        let stats = make_stats();
+        let sid = SourceId(42);
+
+        let source = MockSource::new(vec![vec![InputEvent::Data {
+            bytes: b"complete\n".to_vec(),
+            source_id: Some(sid),
+        }]])
+        .with_offsets(vec![(sid, ByteOffset(500))]);
+
+        let mut framed = FramedInput::new(
+            Box::new(source),
+            FormatProcessor::passthrough(Arc::clone(&stats)),
+            stats,
+        );
+
+        let _ = framed.poll().unwrap();
+
+        let cp = framed.checkpoint_data();
+        assert_eq!(cp.len(), 1);
+        assert_eq!(cp[0].1, ByteOffset(500));
     }
 }
