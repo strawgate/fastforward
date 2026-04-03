@@ -711,13 +711,13 @@ fn input_poll_loop(
                     InputEvent::Data { bytes, .. } => {
                         input.buf.extend_from_slice(&bytes);
                     }
-                    InputEvent::Rotated => {
+                    InputEvent::Rotated { .. } => {
                         // FramedInput already resets its internal state on these events.
                         input.stats.inc_rotations();
                         known_sources.clear();
                         tracing::info!(input = input.source.name(), "input.file_rotated");
                     }
-                    InputEvent::Truncated => {
+                    InputEvent::Truncated { .. } => {
                         input.stats.inc_rotations();
                         known_sources.clear();
                         tracing::info!(input = input.source.name(), "input.file_truncated");

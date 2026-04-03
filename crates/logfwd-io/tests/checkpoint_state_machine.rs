@@ -137,6 +137,9 @@ struct Sut {
     remainder: Vec<u8>,
     /// All line IDs the SUT has emitted.
     emitted_ids: Vec<u64>,
+    /// Epoch boundaries: indices into `emitted_ids` where a crash+restart
+    /// occurred. Used to verify monotonicity within each epoch.
+    epoch_boundaries: Vec<usize>,
     /// Counter matching RefState::next_line_id.
     next_line_id: u64,
     source_id: u64,
@@ -157,7 +160,7 @@ impl Sut {
     fn do_poll(&mut self) {
         let tailer = self.tailer.as_mut().expect("tailer not running");
 
-        std::thread::sleep(std::time::Duration::from_millis(15));
+        std::thread::sleep(std::time::Duration::from_millis(2));
 
         let events = tailer.poll().expect("poll failed");
 
@@ -214,6 +217,7 @@ impl Sut {
     }
 
     fn do_crash_and_restart(&mut self) {
+        self.epoch_boundaries.push(self.emitted_ids.len());
         drop(self.tailer.take());
         drop(self.checkpoint_store.take());
         self.remainder.clear();
@@ -279,6 +283,7 @@ impl StateMachineTest for TailCheckpointTest {
             checkpoint_store: Some(checkpoint_store),
             remainder: Vec::new(),
             emitted_ids: Vec::new(),
+            epoch_boundaries: Vec::new(),
             next_line_id: 0,
             source_id: 1,
         }
@@ -359,30 +364,40 @@ impl StateMachineTest for TailCheckpointTest {
             );
         }
 
-        // PROPERTY 3: Monotonic ordering within each epoch.
-        //
-        // Between crash+restart boundaries, line IDs must be monotonically
-        // non-decreasing (the tailer reads sequentially). After restart,
-        // IDs may go backwards (re-reading from checkpoint).
-        //
-        // We check that emitted IDs never go backwards within a
-        // contiguous segment (no restart in between).
-        // Note: this is verified post-hoc in teardown for simplicity.
+        // PROPERTY 3 is verified post-hoc in teardown (requires epoch
+        // tracking across transitions).
     }
 
     fn teardown(mut sut: Self::SystemUnderTest, ref_state: RefState) {
         // Final drain: poll multiple times.
         for _ in 0..5 {
             sut.do_poll();
-            std::thread::sleep(std::time::Duration::from_millis(15));
+            std::thread::sleep(std::time::Duration::from_millis(2));
         }
 
-        // PROPERTY 3 (post-hoc): Check ordering.
-        // We look for decreasing subsequences. Each "reset" is legitimate
-        // if it corresponds to a CrashAndRestart. We can't distinguish
-        // here, so we just verify no individual emitted ID is invalid.
-        // The per-step check in check_invariants already verifies each ID
-        // is in written_line_ids.
+        // PROPERTY 3 (post-hoc): Monotonic ordering within each epoch.
+        //
+        // Between crash+restart boundaries, line IDs must be monotonically
+        // non-decreasing (the tailer reads sequentially). After restart,
+        // IDs may go backwards (re-reading from checkpoint).
+        {
+            let mut boundaries = sut.epoch_boundaries.clone();
+            boundaries.insert(0, 0);
+            boundaries.push(sut.emitted_ids.len());
+            for window in boundaries.windows(2) {
+                let (start, end) = (window[0], window[1]);
+                let epoch = &sut.emitted_ids[start..end];
+                for pair in epoch.windows(2) {
+                    assert!(
+                        pair[0] <= pair[1],
+                        "Monotonicity violation within epoch [{start}..{end}]: \
+                         id {} followed by {}",
+                        pair[0],
+                        pair[1],
+                    );
+                }
+            }
+        }
 
         // PROPERTY 4 (informational): Coverage.
         // Count how many unique written lines were emitted at least once.

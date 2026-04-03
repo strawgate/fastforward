@@ -23,10 +23,6 @@ use std::sync::Arc;
 /// input without newlines). Applied per source.
 const MAX_REMAINDER_BYTES: usize = 2 * 1024 * 1024;
 
-/// Sentinel `SourceId` used for events that carry `source_id: None`
-/// (push sources like generators, UDP, TCP without per-connection tracking).
-const SENTINEL_SOURCE_ID: SourceId = SourceId(0);
-
 /// Wraps a raw [`InputSource`] with newline framing and format processing.
 ///
 /// The inner source provides raw bytes (from file, TCP, UDP, etc.). This
@@ -34,14 +30,15 @@ const SENTINEL_SOURCE_ID: SourceId = SourceId(0);
 /// and runs format-specific processing (CRI extraction, passthrough, etc.).
 /// The output is scanner-ready bytes.
 ///
-/// Remainder buffers are keyed by `SourceId` so that interleaved data from
-/// multiple sources never mixes partial lines.
+/// Remainder buffers are keyed by `Option<SourceId>` so that interleaved
+/// data from multiple sources never mixes partial lines. Sources without
+/// identity (`None`) share a single remainder buffer.
 pub struct FramedInput {
     inner: Box<dyn InputSource>,
     format: FormatProcessor,
-    /// Per-source remainder buffers. Keyed by SourceId; events with
-    /// `source_id: None` use `SENTINEL_SOURCE_ID`.
-    remainders: HashMap<SourceId, Vec<u8>>,
+    /// Per-source remainder buffers. Keyed by `Option<SourceId>` — events
+    /// with `source_id: None` use the `None` key, avoiding sentinel aliasing.
+    remainders: HashMap<Option<SourceId>, Vec<u8>>,
     out_buf: Vec<u8>,
     /// Spare buffer swapped in when out_buf is emitted, preserving capacity
     /// across polls without allocating.
@@ -64,11 +61,6 @@ impl FramedInput {
             stats,
         }
     }
-
-    /// Resolve `Option<SourceId>` to a concrete key for the remainders map.
-    fn remainder_key(source_id: Option<SourceId>) -> SourceId {
-        source_id.unwrap_or(SENTINEL_SOURCE_ID)
-    }
 }
 
 impl InputSource for FramedInput {
@@ -85,7 +77,7 @@ impl InputSource for FramedInput {
                 InputEvent::Data { bytes, source_id } => {
                     self.stats.inc_bytes(bytes.len() as u64);
 
-                    let key = Self::remainder_key(source_id);
+                    let key = source_id;
 
                     // Prepend remainder from last poll for this source,
                     // reusing the Vec's capacity.
@@ -142,10 +134,19 @@ impl InputSource for FramedInput {
                 }
                 // Rotation/truncation: clear framing state + forward event.
                 //
-                // TODO: When InputEvent gains source_id for Rotated/Truncated,
-                // clear only the affected source's remainder instead of all.
-                event @ (InputEvent::Rotated | InputEvent::Truncated) => {
-                    self.remainders.clear();
+                // When source_id is known, clear only the affected source's
+                // remainder. When unknown (None), clear all remainders as a
+                // conservative fallback.
+                event @ (InputEvent::Rotated { source_id }
+                | InputEvent::Truncated { source_id }) => {
+                    match source_id {
+                        Some(_) => {
+                            self.remainders.remove(&source_id);
+                        }
+                        None => {
+                            self.remainders.clear();
+                        }
+                    }
                     self.format.reset();
                     result_events.push(event);
                 }
@@ -156,13 +157,15 @@ impl InputSource for FramedInput {
                 // `\n` lets the format processor treat it as a complete line so
                 // it reaches the scanner instead of being silently dropped.
                 //
-                // We flush ALL remainders on EOF because the current EndOfFile
-                // event does not carry a source_id. When it does, we should
-                // flush only the affected source.
-                InputEvent::EndOfFile => {
-                    // Collect keys to avoid borrowing issues.
-                    let keys: Vec<SourceId> = self.remainders.keys().copied().collect();
-                    for key in keys {
+                // When source_id is known, flush only the affected source's
+                // remainder. When unknown (None), flush all remainders as a
+                // conservative fallback.
+                InputEvent::EndOfFile { source_id } => {
+                    let keys_to_flush: Vec<Option<SourceId>> = match source_id {
+                        Some(_) => vec![source_id],
+                        None => self.remainders.keys().copied().collect(),
+                    };
+                    for key in keys_to_flush {
                         if let Some(mut remainder) = self.remainders.remove(&key) {
                             if !remainder.is_empty() {
                                 remainder.push(b'\n');
@@ -175,14 +178,9 @@ impl InputSource for FramedInput {
                                 if !self.out_buf.is_empty() {
                                     let data = std::mem::take(&mut self.out_buf);
                                     std::mem::swap(&mut self.out_buf, &mut self.spare_buf);
-                                    let source_id = if key == SENTINEL_SOURCE_ID {
-                                        None
-                                    } else {
-                                        Some(key)
-                                    };
                                     result_events.push(InputEvent::Data {
                                         bytes: data,
-                                        source_id,
+                                        source_id: key,
                                     });
                                 }
                             }
@@ -215,7 +213,10 @@ impl InputSource for FramedInput {
             .checkpoint_data()
             .into_iter()
             .map(|(sid, offset)| {
-                let remainder_len = self.remainders.get(&sid).map_or(0, |r| r.len() as u64);
+                let remainder_len = self
+                    .remainders
+                    .get(&Some(sid))
+                    .map_or(0, |r| r.len() as u64);
                 (sid, ByteOffset(offset.0.saturating_sub(remainder_len)))
             })
             .collect()
@@ -403,7 +404,7 @@ mod tests {
                 bytes: b"partial".to_vec(),
                 source_id: None,
             }],
-            vec![InputEvent::Rotated],
+            vec![InputEvent::Rotated { source_id: None }],
             vec![InputEvent::Data {
                 bytes: b"fresh\n".to_vec(),
                 source_id: None,
@@ -420,7 +421,11 @@ mod tests {
 
         // Rotation clears remainder
         let events2 = framed.poll().unwrap();
-        assert!(events2.iter().any(|e| matches!(e, InputEvent::Rotated)));
+        assert!(
+            events2
+                .iter()
+                .any(|e| matches!(e, InputEvent::Rotated { .. }))
+        );
 
         // Fresh data starts clean (no stale "partial" prefix)
         let events3 = framed.poll().unwrap();
@@ -492,7 +497,7 @@ mod tests {
                 bytes: b"no-newline".to_vec(),
                 source_id: None,
             }],
-            vec![InputEvent::EndOfFile],
+            vec![InputEvent::EndOfFile { source_id: None }],
         ]);
         let mut framed = FramedInput::new(
             Box::new(source),
@@ -519,7 +524,7 @@ mod tests {
                 bytes: b"complete\npartial".to_vec(),
                 source_id: None,
             }],
-            vec![InputEvent::EndOfFile],
+            vec![InputEvent::EndOfFile { source_id: None }],
         ]);
         let mut framed = FramedInput::new(
             Box::new(source),
@@ -545,7 +550,7 @@ mod tests {
                 bytes: b"line\n".to_vec(),
                 source_id: None,
             }],
-            vec![InputEvent::EndOfFile],
+            vec![InputEvent::EndOfFile { source_id: None }],
         ]);
         let mut framed = FramedInput::new(
             Box::new(source),
@@ -643,7 +648,7 @@ mod tests {
                 },
             ],
             // Truncation
-            vec![InputEvent::Truncated],
+            vec![InputEvent::Truncated { source_id: None }],
             // Fresh data from source A
             vec![InputEvent::Data {
                 bytes: b"fresh-A\n".to_vec(),
