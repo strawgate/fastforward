@@ -101,7 +101,7 @@ The transform is the main reason to use logfwd over a plain forwarder. Every bat
 
 ```sql
 -- Forward only errors and slow requests
-SELECT level_str, message_str, duration_ms_int, status_int
+SELECT level_str, msg_str, duration_ms_int, status_int
 FROM logs
 WHERE level_str = 'ERROR'
    OR duration_ms_int > 1000
@@ -111,8 +111,8 @@ WHERE level_str = 'ERROR'
 -- Extract a field with regex, rename columns
 SELECT
   level_str,
-  message_str,
-  regexp_extract(message_str, 'request_id=([a-f0-9-]+)', 1) AS request_id_str,
+  msg_str,
+  regexp_extract(msg_str, 'request_id=([a-f0-9-]+)', 1) AS request_id_str,
   status_int
 FROM logs
 WHERE level_str IN ('ERROR', 'WARN')
@@ -145,7 +145,7 @@ input:
   path: /var/log/app/*.log
   format: json
 
-transform: SELECT level_str, message_str, status_int FROM logs WHERE status_int >= 400
+transform: SELECT level_str, msg_str, status_int FROM logs WHERE status_int >= 400
 
 output:
   type: otlp
@@ -158,21 +158,21 @@ output:
 ```yaml
 pipelines:
   errors:
-    inputs:
+    input:
       type: file
       path: /var/log/pods/**/*.log
       format: cri
     transform: SELECT * FROM logs WHERE level_str = 'ERROR'
-    outputs:
+    output:
       type: otlp
       endpoint: http://otel-collector:4318
 
   debug:
-    inputs:
+    input:
       type: file
       path: /var/log/pods/**/*.log
       format: cri
-    outputs:
+    output:
       type: stdout
       format: console
 ```
@@ -196,7 +196,7 @@ Every CRI record gets these extra columns:
 Use `_file_str` to identify which pod and container generated a record, or filter by stream:
 
 ```sql
-SELECT _time_ns_int, _stream_str, level_str, message_str
+SELECT _time_ns_int, _stream_str, level_str, msg_str
 FROM logs
 WHERE _stream_str = 'stderr'
   AND level_str = 'ERROR'
@@ -213,7 +213,7 @@ WHERE _stream_str = 'stderr'
 | `otlp`          | ✅ Implemented  | OTLP protobuf over HTTP or gRPC — works with any OpenTelemetry-compatible receiver |
 | `http`          | ✅ Implemented  | JSON lines over HTTP POST, optional zstd compression |
 | `stdout`        | ✅ Implemented  | JSON or colored console output — great for local debugging |
-| `elasticsearch` | ✅ Implemented   | Elasticsearch bulk API with retry logic, per-document error handling |
+| `elasticsearch` | ✅ Implemented  | Elasticsearch bulk API with retry logic, per-document error handling |
 | `loki`          | 🚧 Stub         | Struct exists; Loki push API not yet implemented |
 | `parquet`       | 🚧 Stub         | Struct exists; Parquet file writing not yet implemented |
 

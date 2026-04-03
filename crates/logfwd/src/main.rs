@@ -268,7 +268,9 @@ async fn cmd_config(args: &[String]) -> Result<(), CliError> {
 }
 
 async fn cmd_blackhole(args: &[String]) -> Result<(), CliError> {
-    let addr = args.get(2).map_or("127.0.0.1:4318", String::as_str);
+    let addr = args
+        .get(2)
+        .map_or("127.0.0.1:4318", std::string::String::as_str);
 
     // Validate addr is a parseable socket address before injecting into YAML.
     addr.parse::<std::net::SocketAddr>()
@@ -416,6 +418,52 @@ async fn run_pipelines(
         })?;
 
     let shutdown_for_signal = shutdown.clone();
+
+    // Acquire exclusive lock file in the data directory.
+    let data_dir = config.storage.data_dir.as_ref().map_or_else(
+        logfwd_io::checkpoint::default_data_dir,
+        std::path::PathBuf::from,
+    );
+    std::fs::create_dir_all(&data_dir)?;
+    let lock_path = data_dir.join("logfwd.lock");
+    let lock_file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&lock_path)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        // Attempt an exclusive lock. LOCK_NB means "non-blocking" — fail if already locked.
+        // SAFETY: `lock_file` is an open `File`, so `as_raw_fd()` returns a valid file
+        // descriptor. `libc::flock` is safe to call on any valid fd and does not mutate
+        // memory — it only manipulates the kernel-level advisory lock on the file.
+        let ret = unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if ret != 0 {
+            let err = io::Error::last_os_error();
+            if err.kind() == io::ErrorKind::WouldBlock
+                || err.raw_os_error() == Some(libc::EAGAIN)
+                || err.raw_os_error() == Some(libc::EWOULDBLOCK)
+            {
+                return Err(CliError::Runtime(io::Error::other(format!(
+                    "another instance of logfwd is already running (could not acquire lock on {})",
+                    lock_path.display()
+                ))));
+            }
+            return Err(CliError::Runtime(err));
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        tracing::warn!(
+            "file-based instance locking is not supported on this platform; \
+             skipping lock acquisition"
+        );
+    }
+
     tokio::spawn(async move {
         #[cfg(feature = "dhat-heap")]
         let _profiler_to_drop = profiler;
@@ -595,6 +643,9 @@ async fn run_pipelines(
         }
     }
 
+    // Ensure lock_file stays alive for the duration of the run.
+    drop(lock_file);
+
     if let Err(e) = meter_provider.shutdown() {
         eprintln!(
             "{}warning{}: meter provider shutdown: {e}",
@@ -737,18 +788,16 @@ fn generate_json_log_file(num_lines: usize, output: &str) -> io::Result<()> {
         let id = 10000 + (i * 7) % 90000;
         let dur = 1 + (i * 13) % 500;
         let rid = format!("{:016x}", (i as u64).wrapping_mul(0x517cc1b727220a95));
-        let status = [200, 201, 400, 404, 500, 503][i % 6];
 
         write!(
             writer,
-            r#"{{"timestamp":"2024-01-15T10:30:00.{:03}Z","level":"{}","message":"request handled GET {}/{}","duration_ms":{},"request_id":"{}","service":"myapp","status":{}}}"#,
+            r#"{{"timestamp":"2024-01-15T10:30:00.{:03}Z","level":"{}","message":"request handled GET {}/{}","duration_ms":{},"request_id":"{}","service":"myapp"}}"#,
             i % 1000,
             level,
             path,
             id,
             dur,
             rid,
-            status,
         )?;
         writer.write_all(b"\n")?;
     }

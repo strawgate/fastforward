@@ -51,7 +51,7 @@ output:
     // Cancel as soon as all expected rows are processed, or after 30s safety timeout.
     // This makes the test data-driven, not time-driven.
     std::thread::spawn(move || {
-        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
         loop {
             if metrics.batch_rows_total.load(Ordering::Relaxed) >= expected {
                 // All rows processed — give a brief moment for output flush,
@@ -68,7 +68,7 @@ output:
         }
     });
 
-    let reg = Region::new(GLOBAL);
+    let reg = Region::new(&GLOBAL);
     pipeline.run(&shutdown).unwrap();
     let stats = reg.change();
 

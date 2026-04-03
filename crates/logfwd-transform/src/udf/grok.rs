@@ -118,16 +118,10 @@ impl ScalarUDFImpl for GrokUdf {
         Ok(DataType::Utf8)
     }
 
-    /// Determine the return type at planning time based on the grok pattern.
-    ///
-    /// If the pattern argument is a string literal, compiles the grok pattern
-    /// and returns a nullable Struct type with one Utf8 field per named capture
-    /// group. Falls back to nullable Utf8 if the pattern is not a literal or
-    /// compilation fails.
-    fn return_field_from_args(
+    fn return_type_from_args(
         &self,
-        args: datafusion::logical_expr::ReturnFieldArgs,
-    ) -> DfResult<arrow::datatypes::FieldRef> {
+        args: datafusion::logical_expr::ReturnTypeArgs,
+    ) -> DfResult<datafusion::logical_expr::ReturnInfo> {
         // If the pattern argument is a literal, extract field names and return Struct type.
         if args.scalar_arguments.len() >= 2
             && let Some(datafusion::common::ScalarValue::Utf8(Some(pattern_str))) =
@@ -140,15 +134,15 @@ impl ScalarUDFImpl for GrokUdf {
                 .map(|name| Field::new(name, DataType::Utf8, true))
                 .collect();
             if !fields.is_empty() {
-                return Ok(Arc::new(Field::new(
-                    self.name(),
+                return Ok(datafusion::logical_expr::ReturnInfo::new_nullable(
                     DataType::Struct(Fields::from(fields)),
-                    true,
-                )));
+                ));
             }
         }
         // Fallback: can't determine struct fields, return Utf8
-        Ok(Arc::new(Field::new(self.name(), DataType::Utf8, true)))
+        Ok(datafusion::logical_expr::ReturnInfo::new_nullable(
+            DataType::Utf8,
+        ))
     }
 
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DfResult<ColumnarValue> {
@@ -312,7 +306,7 @@ mod tests {
             Some("no match here"),
             None,
         ]));
-        RecordBatch::try_new(schema, vec![msgs]).unwrap()
+        arrow::record_batch::RecordBatch::try_new(schema, vec![msgs]).unwrap()
     }
 
     #[test]
@@ -407,7 +401,7 @@ mod tests {
             Some("Connection from 192.168.1.100 port 22"),
             Some("Request from 10.0.0.1 port 443"),
         ]));
-        let batch = RecordBatch::try_new(schema, vec![logs]).unwrap();
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![logs]).unwrap();
 
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()

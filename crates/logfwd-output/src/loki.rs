@@ -336,8 +336,9 @@ impl super::sink::Sink for LokiAsyncSink {
         &'a mut self,
         batch: &'a RecordBatch,
         metadata: &'a BatchMetadata,
-    ) -> std::pin::Pin<Box<dyn Future<Output = io::Result<super::sink::SendResult>> + Send + 'a>>
-    {
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = io::Result<super::sink::SendResult>> + Send + 'a>,
+    > {
         Box::pin(async move {
             if batch.num_rows() == 0 {
                 return Ok(super::sink::SendResult::Ok);
@@ -349,7 +350,9 @@ impl super::sink::Sink for LokiAsyncSink {
         })
     }
 
-    fn flush(&mut self) -> std::pin::Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+    fn flush(
+        &mut self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = io::Result<()>> + Send + '_>> {
         Box::pin(async { Ok(()) })
     }
 
@@ -357,7 +360,9 @@ impl super::sink::Sink for LokiAsyncSink {
         &self.name
     }
 
-    fn shutdown(&mut self) -> std::pin::Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+    fn shutdown(
+        &mut self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = io::Result<()>> + Send + '_>> {
         Box::pin(async { Ok(()) })
     }
 }
@@ -599,7 +604,7 @@ mod tests {
     #[test]
     fn stream_key_encoding_roundtrip_with_special_chars() {
         // These characters were lossy in the old k=v,... format.
-        let labels = [
+        let labels = vec![
             ("env".to_string(), "prod=us-east,eu-west".to_string()),
             ("app".to_string(), r#"my"app"#.to_string()),
             ("path".to_string(), r"C:\Users\log".to_string()),

@@ -267,10 +267,7 @@ fn expr_as_column(expr: &SqlExpr) -> Option<String> {
 /// Extract a small integer literal from a SQL expression.
 fn expr_as_u8_literal(expr: &SqlExpr) -> Option<u8> {
     match expr {
-        SqlExpr::Value(v) => match &v.value {
-            sqlast::Value::Number(s, _) => s.parse::<u8>().ok(),
-            _ => None,
-        },
+        SqlExpr::Value(sqlast::Value::Number(s, _)) => s.parse::<u8>().ok(),
         _ => None,
     }
 }
@@ -355,15 +352,18 @@ fn collect_column_refs(expr: &SqlExpr, cols: &mut HashSet<String>) {
         SqlExpr::Case {
             operand,
             conditions,
+            results,
             else_result,
             ..
         } => {
             if let Some(op) = operand {
                 collect_column_refs(op, cols);
             }
-            for cw in conditions {
-                collect_column_refs(&cw.condition, cols);
-                collect_column_refs(&cw.result, cols);
+            for c in conditions {
+                collect_column_refs(c, cols);
+            }
+            for r in results {
+                collect_column_refs(r, cols);
             }
             if let Some(e) = else_result {
                 collect_column_refs(e, cols);
@@ -672,19 +672,19 @@ impl SqlTransform {
         // Register custom UDFs once — they persist across batches.
         ctx.register_udf(ScalarUDF::from(IntCastUdf::new()));
         ctx.register_udf(ScalarUDF::from(FloatCastUdf::new()));
-        ctx.register_udf(ScalarUDF::from(udf::RegexpExtractUdf::new()));
-        ctx.register_udf(ScalarUDF::from(udf::GrokUdf::new()));
-        ctx.register_udf(ScalarUDF::from(udf::JsonExtractUdf::new(
-            udf::JsonExtractMode::Str,
+        ctx.register_udf(ScalarUDF::from(crate::udf::RegexpExtractUdf::new()));
+        ctx.register_udf(ScalarUDF::from(crate::udf::GrokUdf::new()));
+        ctx.register_udf(ScalarUDF::from(crate::udf::JsonExtractUdf::new(
+            crate::udf::JsonExtractMode::Str,
         )));
-        ctx.register_udf(ScalarUDF::from(udf::JsonExtractUdf::new(
-            udf::JsonExtractMode::Int,
+        ctx.register_udf(ScalarUDF::from(crate::udf::JsonExtractUdf::new(
+            crate::udf::JsonExtractMode::Int,
         )));
-        ctx.register_udf(ScalarUDF::from(udf::JsonExtractUdf::new(
-            udf::JsonExtractMode::Float,
+        ctx.register_udf(ScalarUDF::from(crate::udf::JsonExtractUdf::new(
+            crate::udf::JsonExtractMode::Float,
         )));
         if let Some(ref db) = self.geo_database {
-            ctx.register_udf(ScalarUDF::from(udf::geo_lookup::GeoLookupUdf::new(
+            ctx.register_udf(ScalarUDF::from(crate::udf::geo_lookup::GeoLookupUdf::new(
                 Arc::clone(db),
             )));
         }
@@ -1065,7 +1065,7 @@ mod tests {
         let a = QueryAnalyzer::new("SELECT * FROM logs WHERE facility IN (1, 4, 16)").unwrap();
         let h = a.filter_hints();
         let mut facs = h.facilities.unwrap();
-        facs.sort_unstable();
+        facs.sort();
         assert_eq!(facs, vec![1, 4, 16]);
     }
 

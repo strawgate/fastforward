@@ -103,7 +103,7 @@ fn tcp_multiple_lines() {
 
     let mut client = TcpStream::connect(addr).unwrap();
     for i in 0..100 {
-        writeln!(client, "{{\"seq\":{i}}}").unwrap();
+        write!(client, "{{\"seq\":{i}}}\n").unwrap();
     }
     client.flush().unwrap();
 
@@ -156,7 +156,7 @@ fn tcp_multiple_clients() {
             thread::spawn(move || {
                 let mut client = TcpStream::connect(addr).unwrap();
                 for i in 0..10 {
-                    writeln!(client, "{{\"client\":{id},\"seq\":{i}}}").unwrap();
+                    write!(client, "{{\"client\":{id},\"seq\":{i}}}\n").unwrap();
                 }
                 client.flush().unwrap();
             })

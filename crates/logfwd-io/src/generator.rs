@@ -434,9 +434,12 @@ mod tests {
                 break;
             }
             for event in &events {
-                if let InputEvent::Data { bytes } = event {
-                    let text = String::from_utf8_lossy(bytes);
-                    total_lines += text.trim().lines().count() as u64;
+                match event {
+                    InputEvent::Data { bytes } => {
+                        let text = String::from_utf8_lossy(bytes);
+                        total_lines += text.trim().lines().count() as u64;
+                    }
+                    _ => {}
                 }
             }
         }
