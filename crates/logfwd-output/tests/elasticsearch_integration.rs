@@ -8,7 +8,8 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 
 use logfwd_io::diagnostics::ComponentStats;
-use logfwd_output::{BatchMetadata, ElasticsearchSink, OutputSink};
+use logfwd_output::sink::SinkFactory;
+use logfwd_output::{BatchMetadata, ElasticsearchSinkFactory};
 
 /// Start a blackhole HTTP server that mimics Elasticsearch bulk API.
 fn start_blackhole() -> (String, tiny_http::Server) {
@@ -79,13 +80,16 @@ fn elasticsearch_sink_sends_bulk_data() {
     .expect("batch creation failed");
 
     let stats = Arc::new(ComponentStats::default());
-    let mut sink = ElasticsearchSink::new(
+    let factory = ElasticsearchSinkFactory::new(
         "test_es".to_string(),
         endpoint,
         "logs".to_string(),
         vec![],
+        false,
         stats.clone(),
-    );
+    )
+    .unwrap();
+    let mut sink = factory.create().unwrap();
 
     let metadata = BatchMetadata {
         resource_attrs: Arc::new(vec![]),
@@ -93,7 +97,8 @@ fn elasticsearch_sink_sends_bulk_data() {
     };
 
     // Send batch
-    sink.send_batch(&batch, &metadata)
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(sink.send_batch(&batch, &metadata))
         .expect("send_batch failed");
 
     // Give server time to process
@@ -127,13 +132,16 @@ fn elasticsearch_sink_handles_empty_batch() {
     .expect("batch creation failed");
 
     let stats = Arc::new(ComponentStats::default());
-    let mut sink = ElasticsearchSink::new(
+    let factory = ElasticsearchSinkFactory::new(
         "test_es".to_string(),
         endpoint,
         "logs".to_string(),
         vec![],
+        false,
         stats.clone(),
-    );
+    )
+    .unwrap();
+    let mut sink = factory.create().unwrap();
 
     let metadata = BatchMetadata {
         resource_attrs: Arc::new(vec![]),
@@ -141,7 +149,8 @@ fn elasticsearch_sink_handles_empty_batch() {
     };
 
     // Send empty batch
-    sink.send_batch(&batch, &metadata)
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(sink.send_batch(&batch, &metadata))
         .expect("send_batch failed");
 
     // Empty batch should not increment stats
@@ -167,18 +176,23 @@ fn elasticsearch_sink_multiple_batches() {
     ]));
 
     let stats = Arc::new(ComponentStats::default());
-    let mut sink = ElasticsearchSink::new(
+    let factory = ElasticsearchSinkFactory::new(
         "test_es".to_string(),
         endpoint,
         "logs".to_string(),
         vec![],
+        false,
         stats.clone(),
-    );
+    )
+    .unwrap();
+    let mut sink = factory.create().unwrap();
 
     let metadata = BatchMetadata {
         resource_attrs: Arc::new(vec![]),
         observed_time_ns: 0,
     };
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
 
     // Send 3 batches
     for i in 0..3 {
@@ -191,7 +205,7 @@ fn elasticsearch_sink_multiple_batches() {
         )
         .expect("batch creation failed");
 
-        sink.send_batch(&batch, &metadata)
+        rt.block_on(sink.send_batch(&batch, &metadata))
             .expect("send_batch failed");
     }
 

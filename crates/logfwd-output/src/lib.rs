@@ -16,7 +16,7 @@ mod loki;
 #[allow(dead_code)]
 mod parquet;
 
-pub use elasticsearch::{ElasticsearchAsyncSink, ElasticsearchSink, ElasticsearchSinkFactory};
+pub use elasticsearch::{ElasticsearchAsyncSink, ElasticsearchSinkFactory};
 pub use fanout::{FanOut, FanOutError};
 pub use json_lines::JsonLinesSink;
 pub use loki::{LokiAsyncSink, LokiSinkFactory};
@@ -613,24 +613,9 @@ pub fn build_output_sink(
                 .map_err(|e| format!("output '{name}': udp_out bind failed: {e}"))
         }
         OutputType::Elasticsearch => {
-            let endpoint = cfg
-                .endpoint
-                .as_ref()
-                .ok_or_else(|| format!("output '{name}': elasticsearch requires 'endpoint'"))?;
-            // Index name can come from config.index or config.path, defaulting to "logs"
-            let index = cfg
-                .index
-                .as_ref()
-                .or(cfg.path.as_ref())
-                .map_or("logs", String::as_str)
-                .to_string();
-            Ok(Box::new(ElasticsearchSink::new(
-                name.to_string(),
-                endpoint.clone(),
-                index,
-                auth_headers,
-                stats,
-            )))
+            Err(format!(
+                "output '{name}': elasticsearch requires the async pipeline — use build_sink_factory() instead"
+            ))
         }
         _ => Err(format!(
             "output '{name}': type {:?} not yet supported",

@@ -3,23 +3,19 @@
 //! Tests the full pipeline with configurable workers, batch size, and compression.
 //! Credentials are read from environment variables:
 //!
-//!   ES_ENDPOINT   — base URL (e.g. https://my-cluster.es.us-east-1.aws.elastic.cloud)
+//!   ES_URL        — base URL (e.g. https://my-cluster.es.us-east-1.aws.elastic.cloud)
+//!   ES_ENDPOINT   — alias for ES_URL (legacy)
 //!   ES_API_KEY    — Elasticsearch API key (without the "ApiKey " prefix)
 //!   ES_INDEX      — target index name (default: logfwd-bench)
 //!
 //! Usage:
-//!   ES_ENDPOINT=https://... ES_API_KEY=... ./es-throughput [duration_secs] [workers] [batch_lines] [compress: 0|1]
+//!   ES_URL=https://... ES_API_KEY=... ./es-throughput [duration_secs] [workers] [batch_lines] [compress: 0|1]
 //!
 //! Examples:
 //!   ./es-throughput 30 1 1000 0     # baseline (single worker, no compress)
 //!   ./es-throughput 30 4 1000 0     # 4 workers, no compress
 //!   ./es-throughput 30 4 5000 1     # 4 workers, gzip, 5k batch
 //!   ./es-throughput 30 1 1000 1     # single worker + gzip only
-//!
-//! NOTE: This binary uses the **sync** ElasticsearchSink (ureq-based) as a
-//! temporary measurement baseline. It needs to be rewritten to use
-//! ElasticsearchSinkFactory (async/reqwest, gzip, connection pooling) to reflect
-//! production throughput. See HANDOFF.md for details.
 
 use std::fmt::Write as FmtWrite;
 use std::sync::Arc;
@@ -29,12 +25,15 @@ use std::time::Instant;
 use logfwd_arrow::scanner::SimdScanner;
 use logfwd_core::scan_config::ScanConfig;
 use logfwd_io::diagnostics::ComponentStats;
-use logfwd_output::{BatchMetadata, ElasticsearchSink, OutputSink};
+use logfwd_output::sink::SinkFactory;
+use logfwd_output::{BatchMetadata, ElasticsearchSinkFactory};
 use logfwd_transform::SqlTransform;
 use pprof::ProfilerGuardBuilder;
 
 fn es_endpoint() -> String {
-    std::env::var("ES_ENDPOINT").expect("ES_ENDPOINT env var required")
+    std::env::var("ES_URL")
+        .or_else(|_| std::env::var("ES_ENDPOINT"))
+        .expect("ES_URL or ES_ENDPOINT required")
 }
 
 fn es_api_key() -> String {
@@ -76,24 +75,27 @@ fn run_worker(
     worker_id: usize,
     duration: std::time::Duration,
     batch_lines: usize,
-    _compress: bool,
+    compress: bool,
     total_events: Arc<AtomicU64>,
     total_batches: Arc<AtomicU64>,
     total_errors: Arc<AtomicU64>,
     total_raw_bytes: Arc<AtomicU64>,
     total_wire_bytes: Arc<AtomicU64>,
 ) {
-    // NOTE: compress path is not implemented in this sync-sink baseline.
-    // The async rewrite (see HANDOFF.md §5) will handle gzip automatically
-    // via ElasticsearchSinkFactory.
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+
     let stats = Arc::new(ComponentStats::default());
-    let mut sink = ElasticsearchSink::new(
-        format!("es-bench-{worker_id}"),
-        es_endpoint(),
-        es_index(),
-        vec![("Authorization".to_string(), format!("ApiKey {}", es_api_key()))],
-        stats,
-    );
+    let name = format!("es-bench-{worker_id}");
+    let endpoint = es_endpoint();
+    let index = es_index();
+    let headers = vec![("Authorization".to_string(), format!("ApiKey {}", es_api_key()))];
+
+    let factory = ElasticsearchSinkFactory::new(name, endpoint, index, headers, compress, stats)
+        .expect("failed to create sink factory");
+    let mut sink = factory.create().expect("failed to create sink");
 
     let mut scanner = SimdScanner::new(ScanConfig::default());
     let mut transform = SqlTransform::new("SELECT * FROM logs").unwrap();
@@ -127,7 +129,7 @@ fn run_worker(
         let rows = result.num_rows() as u64;
         let raw = rows as usize * 300; // approximate bytes per row
 
-        if let Err(e) = sink.send_batch(&result, &meta) {
+        if let Err(e) = rt.block_on(sink.send_batch(&result, &meta)) {
             eprintln!("[worker {worker_id}] send_batch error: {e}");
             total_errors.fetch_add(1, Ordering::Relaxed);
         } else {
@@ -216,7 +218,7 @@ fn main() {
     println!("=== Elasticsearch Output Throughput Bench ===");
     println!("  endpoint : {endpoint}");
     println!("  index    : {index}");
-    println!("  NOTE: This bench uses the SYNC sink (ureq). See HANDOFF.md for async rewrite.");
+    println!("  sink     : async (reqwest, connection pooling, gzip)");
 
     let guard = ProfilerGuardBuilder::default()
         .frequency(997)
