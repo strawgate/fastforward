@@ -890,8 +890,7 @@ mod tests {
             &'a mut self,
             _batch: &'a RecordBatch,
             _metadata: &'a BatchMetadata,
-        ) -> Pin<Box<dyn Future<Output = io::Result<SendResult>> + Send + 'a>>
-        {
+        ) -> Pin<Box<dyn Future<Output = io::Result<SendResult>> + Send + 'a>> {
             let calls = self.calls.clone();
             let fail = self.fail;
             Box::pin(async move {
@@ -904,9 +903,7 @@ mod tests {
             })
         }
 
-        fn flush(
-            &mut self,
-        ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+        fn flush(&mut self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
             Box::pin(async { Ok(()) })
         }
 
@@ -914,9 +911,7 @@ mod tests {
             &self.name
         }
 
-        fn shutdown(
-            &mut self,
-        ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+        fn shutdown(&mut self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
             Box::pin(async { Ok(()) })
         }
     }
@@ -942,11 +937,7 @@ mod tests {
 
     fn make_batch() -> RecordBatch {
         let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Utf8, true)]));
-        RecordBatch::try_new(
-            schema,
-            vec![Arc::new(StringArray::from(vec!["hello"]))],
-        )
-        .unwrap()
+        RecordBatch::try_new(schema, vec![Arc::new(StringArray::from(vec!["hello"]))]).unwrap()
     }
 
     fn make_metadata() -> BatchMetadata {

@@ -1237,8 +1237,7 @@ mod write_row_json_tests {
                 .map(|(name, arr)| Field::new(*name, arr.data_type().clone(), true))
                 .collect::<Vec<_>>(),
         );
-        let arrays: Vec<Arc<dyn Array>> =
-            fields.into_iter().map(|(_, a)| a).collect();
+        let arrays: Vec<Arc<dyn Array>> = fields.into_iter().map(|(_, a)| a).collect();
         RecordBatch::try_new(Arc::new(schema), arrays).unwrap()
     }
 

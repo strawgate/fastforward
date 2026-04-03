@@ -158,8 +158,8 @@ fn bench_cri(c: &mut Criterion) {
                 let mut count = 0usize;
                 let mut start = 0;
                 while start < data.len() {
-                    let end = memchr::memchr(b'\n', &data[start..])
-                        .map_or(data.len(), |p| start + p);
+                    let end =
+                        memchr::memchr(b'\n', &data[start..]).map_or(data.len(), |p| start + p);
                     if parse_cri_line(&data[start..end]).is_some() {
                         count += 1;
                     }
@@ -176,8 +176,8 @@ fn bench_cri(c: &mut Criterion) {
                 let mut json_buf = Vec::with_capacity(data.len());
                 let mut start = 0;
                 while start < data.len() {
-                    let end = memchr::memchr(b'\n', &data[start..])
-                        .map_or(data.len(), |p| start + p);
+                    let end =
+                        memchr::memchr(b'\n', &data[start..]).map_or(data.len(), |p| start + p);
                     if let Some(cri) = parse_cri_line(&data[start..end])
                         && let Some(msg) = reassembler.feed(&cri)
                     {

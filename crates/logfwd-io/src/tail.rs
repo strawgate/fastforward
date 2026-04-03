@@ -231,10 +231,7 @@ impl FileTailer {
         let initial_paths: Vec<PathBuf> = expand_glob_patterns(patterns);
 
         let mut tailer = Self::new(&initial_paths, config)?;
-        tailer.glob_patterns = patterns
-            .iter()
-            .map(ToString::to_string)
-            .collect();
+        tailer.glob_patterns = patterns.iter().map(ToString::to_string).collect();
         Ok(tailer)
     }
 

@@ -534,9 +534,8 @@ impl super::sink::Sink for ElasticsearchAsyncSink {
         &'a mut self,
         batch: &'a RecordBatch,
         metadata: &'a BatchMetadata,
-    ) -> std::pin::Pin<
-        Box<dyn Future<Output = io::Result<super::sink::SendResult>> + Send + 'a>,
-    > {
+    ) -> std::pin::Pin<Box<dyn Future<Output = io::Result<super::sink::SendResult>> + Send + 'a>>
+    {
         Box::pin(async move {
             self.serialize_batch(batch, metadata)?;
             if self.batch_buf.is_empty() {
@@ -554,9 +553,7 @@ impl super::sink::Sink for ElasticsearchAsyncSink {
         })
     }
 
-    fn flush(
-        &mut self,
-    ) -> std::pin::Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+    fn flush(&mut self) -> std::pin::Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
         Box::pin(async { Ok(()) })
     }
 
@@ -564,9 +561,7 @@ impl super::sink::Sink for ElasticsearchAsyncSink {
         &self.name
     }
 
-    fn shutdown(
-        &mut self,
-    ) -> std::pin::Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+    fn shutdown(&mut self) -> std::pin::Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
         Box::pin(async { Ok(()) })
     }
 }
