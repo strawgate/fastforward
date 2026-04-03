@@ -307,7 +307,7 @@ impl ElasticsearchAsyncSink {
             use flate2::Compression;
             use flate2::write::GzEncoder;
             use std::io::Write;
-            let mut enc = GzEncoder::new(Vec::new(), Compression::default());
+            let mut enc = GzEncoder::new(Vec::new(), Compression::fast());
             enc.write_all(&body).map_err(io::Error::other)?;
             let compressed = enc.finish().map_err(io::Error::other)?;
             req.header("Content-Encoding", "gzip").body(compressed)
