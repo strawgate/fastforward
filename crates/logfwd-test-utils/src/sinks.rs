@@ -3,6 +3,12 @@
 //! These sinks implement the async [`Sink`] trait and simulate various output
 //! behaviors: discarding, slow I/O, frozen connections, and transient failures.
 
+// The `Sink` trait requires `fn name(&self) -> &str`, but all test sinks
+// return string literals.  Clippy's `unnecessary_literal_bound` fires on
+// every impl because it wants `&'static str`, which is incompatible with
+// the trait signature.
+#![allow(clippy::unnecessary_literal_bound)]
+
 use std::future::Future;
 use std::io;
 use std::pin::Pin;
@@ -15,8 +21,8 @@ use std::time::Duration;
 use arrow::record_batch::RecordBatch;
 use tokio_util::sync::CancellationToken;
 
-use logfwd_output::sink::{SendResult, Sink};
 use logfwd_output::BatchMetadata;
+use logfwd_output::sink::{SendResult, Sink};
 
 /// A sink that discards all data.
 pub struct DevNullSink;

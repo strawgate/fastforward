@@ -237,8 +237,7 @@ impl Pipeline {
                         .name
                         .clone()
                         .unwrap_or_else(|| format!("output_{i}"));
-                    let output_type_str =
-                        format!("{:?}", output_cfg.output_type).to_lowercase();
+                    let output_type_str = format!("{:?}", output_cfg.output_type).to_lowercase();
                     let output_stats = metrics.add_output(&output_name, &output_type_str);
                     sinks.push(build_output_sink(&output_name, output_cfg, output_stats)?);
                 }

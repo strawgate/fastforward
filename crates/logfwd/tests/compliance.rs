@@ -24,8 +24,8 @@ use arrow::record_batch::RecordBatch;
 
 use logfwd::pipeline::Pipeline;
 use logfwd_config::Config;
-use logfwd_output::sink::{SendResult, Sink};
 use logfwd_output::BatchMetadata;
+use logfwd_output::sink::{SendResult, Sink};
 use logfwd_test_utils::{generate_json_lines, test_meter};
 use tokio_util::sync::CancellationToken;
 
