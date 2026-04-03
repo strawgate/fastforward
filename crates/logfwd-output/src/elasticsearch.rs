@@ -387,12 +387,13 @@ impl super::sink::Sink for ElasticsearchAsyncSink {
 
 /// Creates `ElasticsearchAsyncSink` instances for the output worker pool.
 ///
-/// Each call to `create()` builds a fresh `reqwest::Client` for the new worker.
-/// This means idle workers release their connection pool when they exit rather
-/// than keeping it alive through a shared `Arc`.
+/// All workers share a single `reqwest::Client` (which is internally
+/// `Arc`-wrapped) so they reuse the same connection pool, TLS sessions,
+/// and DNS cache.
 pub struct ElasticsearchSinkFactory {
     name: String,
     pub(crate) config: Arc<ElasticsearchConfig>,
+    client: reqwest::Client,
     stats: Arc<ComponentStats>,
 }
 
@@ -422,6 +423,12 @@ impl ElasticsearchSinkFactory {
             })
             .collect::<io::Result<Vec<_>>>()?;
 
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .pool_max_idle_per_host(64)
+            .build()
+            .map_err(io::Error::other)?;
+
         Ok(ElasticsearchSinkFactory {
             name,
             config: Arc::new(ElasticsearchConfig {
@@ -431,25 +438,18 @@ impl ElasticsearchSinkFactory {
                 compress,
                 max_bulk_bytes: 5 * 1024 * 1024, // 5 MiB default
             }),
+            client,
             stats,
         })
-    }
-
-    pub(crate) fn build_client() -> io::Result<reqwest::Client> {
-        reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .map_err(io::Error::other)
     }
 }
 
 impl super::sink::SinkFactory for ElasticsearchSinkFactory {
     fn create(&self) -> io::Result<Box<dyn super::sink::Sink>> {
-        let client = Self::build_client()?;
         Ok(Box::new(ElasticsearchAsyncSink::new(
             self.name.clone(),
             Arc::clone(&self.config),
-            client,
+            self.client.clone(), // reqwest::Client is Arc-wrapped, clone is cheap
             Arc::clone(&self.stats),
         )))
     }
@@ -541,7 +541,7 @@ mod tests {
             Arc::new(ComponentStats::default()),
         )
         .expect("factory creation failed");
-        let client = ElasticsearchSinkFactory::build_client().expect("client creation failed");
+        let client = reqwest::Client::new();
         ElasticsearchAsyncSink::new(
             "test".to_string(),
             Arc::clone(&factory.config),
@@ -768,7 +768,7 @@ mod snapshot_tests {
             Arc::new(ComponentStats::default()),
         )
         .expect("factory creation failed");
-        let client = ElasticsearchSinkFactory::build_client().expect("client creation failed");
+        let client = reqwest::Client::new();
         ElasticsearchAsyncSink::new(
             "test".to_string(),
             Arc::clone(&factory.config),
