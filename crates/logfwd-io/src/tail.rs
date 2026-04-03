@@ -32,6 +32,24 @@ pub struct FileIdentity {
     pub fingerprint: u64,
 }
 
+impl FileIdentity {
+    /// Derive a [`SourceId`] by hashing all three identity components.
+    ///
+    /// Using only the content fingerprint causes collisions when two files
+    /// share the same first N bytes (e.g., container logs with identical
+    /// headers). Incorporating device and inode makes the identity unique
+    /// per filesystem object (#798).
+    fn source_id(&self) -> SourceId {
+        // Mix all three fields into a single xxh64 hash. We feed them as
+        // little-endian bytes so the result is platform-independent.
+        let mut buf = [0u8; 24];
+        buf[0..8].copy_from_slice(&self.device.to_le_bytes());
+        buf[8..16].copy_from_slice(&self.inode.to_le_bytes());
+        buf[16..24].copy_from_slice(&self.fingerprint.to_le_bytes());
+        SourceId(xxhash_rust::xxh64::xxh64(&buf, 0))
+    }
+}
+
 /// State tracked per tailed file.
 struct TailedFile {
     #[expect(dead_code, reason = "retained for debug logging")]
@@ -686,13 +704,13 @@ impl FileTailer {
         Ok(())
     }
 
-    /// Restore a file offset by SourceId (fingerprint), not path.
+    /// Restore a file offset by SourceId (composite identity hash), not path.
     ///
-    /// Scans all tailed files for a matching fingerprint. Used for checkpoint
-    /// restore — the checkpoint stores fingerprint + offset, not path.
+    /// Scans all tailed files for a matching identity. Used for checkpoint
+    /// restore — the checkpoint stores identity hash + offset, not path.
     pub fn set_offset_by_source(&mut self, source_id: SourceId, offset: u64) -> io::Result<()> {
         for tailed in self.files.values_mut() {
-            if SourceId(tailed.identity.fingerprint) == source_id {
+            if tailed.identity.source_id() == source_id {
                 tailed.offset = offset;
                 tailed.file.seek(SeekFrom::Start(offset))?;
                 return Ok(());
@@ -713,7 +731,7 @@ impl FileTailer {
     pub fn source_id_for_path(&self, path: &Path) -> Option<SourceId> {
         self.files.get(path).and_then(|tailed| {
             if tailed.identity.fingerprint != 0 {
-                Some(SourceId(tailed.identity.fingerprint))
+                Some(tailed.identity.source_id())
             } else {
                 None
             }
@@ -730,7 +748,7 @@ impl FileTailer {
             .filter(|(_, tailed)| tailed.identity.fingerprint != 0)
             .map(|(_, tailed)| {
                 (
-                    SourceId(tailed.identity.fingerprint),
+                    tailed.identity.source_id(),
                     ByteOffset(tailed.offset),
                 )
             })
@@ -745,7 +763,7 @@ impl FileTailer {
         self.files
             .iter()
             .filter(|(_, tailed)| tailed.identity.fingerprint != 0)
-            .map(|(path, tailed)| (SourceId(tailed.identity.fingerprint), path.clone()))
+            .map(|(path, tailed)| (tailed.identity.source_id(), path.clone()))
             .collect()
     }
 }
@@ -1691,5 +1709,44 @@ mod tests {
         let tailer = FileTailer::new(std::slice::from_ref(&missing), config);
         assert!(tailer.is_ok(), "missing path should not fail construction");
         assert_eq!(tailer.unwrap().num_files(), 0);
+    }
+
+    /// #798: Two files with identical content must get distinct SourceIds.
+    ///
+    /// Before the fix, SourceId was derived solely from the content fingerprint
+    /// (xxh64 of first N bytes). Files with identical headers would collide,
+    /// causing checkpoint misattribution. Now SourceId incorporates
+    /// (device, inode, fingerprint) so each filesystem object is unique.
+    #[test]
+    fn test_identical_content_different_source_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let path_a = dir.path().join("dup_a.log");
+        let path_b = dir.path().join("dup_b.log");
+        let content = b"identical header content\nidentical line two\n";
+        {
+            let mut f = File::create(&path_a).unwrap();
+            f.write_all(content).unwrap();
+        }
+        {
+            let mut f = File::create(&path_b).unwrap();
+            f.write_all(content).unwrap();
+        }
+
+        let config = TailConfig {
+            start_from_end: false,
+            poll_interval_ms: 10,
+            ..Default::default()
+        };
+        let mut tailer = FileTailer::new(&[path_a, path_b], config).unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+        let _ = tailer.poll().unwrap();
+
+        let offsets = tailer.file_offsets();
+        assert_eq!(offsets.len(), 2, "should have two files");
+        let sids: Vec<_> = offsets.iter().map(|(s, _)| *s).collect();
+        assert_ne!(
+            sids[0], sids[1],
+            "files with identical content must have distinct SourceIds (#798)"
+        );
     }
 }
