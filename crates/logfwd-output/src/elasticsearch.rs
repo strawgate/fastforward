@@ -290,7 +290,10 @@ impl ElasticsearchAsyncSink {
 
     async fn do_send(&self, body: Vec<u8>) -> io::Result<super::sink::SendResult> {
         let body_len = body.len();
-        let url = format!("{}/_bulk", self.config.endpoint);
+        let url = format!(
+            "{}/_bulk?filter_path=errors,took,items.*.error,items.*.status",
+            self.config.endpoint
+        );
 
         let mut req = self
             .client
