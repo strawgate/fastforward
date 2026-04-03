@@ -1237,4 +1237,137 @@ mod tests {
             assert_eq!(col.value(0), i as i64, "batch {i} has wrong value");
         }
     }
+
+    // -----------------------------------------------------------------------
+    // CASE expression tests
+    // -----------------------------------------------------------------------
+
+    /// Verify that collect_column_refs correctly extracts column names from a
+    /// CASE expression so that scan_config() requests the right fields.
+    ///
+    /// This is a regression test for the bug where CASE conditions and results
+    /// fell through to the catch-all arm and were silently ignored, causing the
+    /// scanner to never extract those fields and DataFusion to fail with
+    /// "column not found" errors at execution time.
+    #[test]
+    fn test_query_analyzer_case_column_refs() {
+        let sql = "SELECT CASE \
+                       WHEN level = 'ERROR' THEN 'high' \
+                       WHEN level = 'WARN'  THEN 'medium' \
+                       ELSE 'low' \
+                   END AS severity FROM logs";
+        let a = QueryAnalyzer::new(sql).unwrap();
+        // `level` must be collected so scan_config requests it from the scanner.
+        assert!(
+            a.referenced_columns.contains("level"),
+            "expected 'level' in referenced_columns, got {:?}",
+            a.referenced_columns
+        );
+    }
+
+    /// Verify that a CASE expression with column references in both WHEN
+    /// conditions and THEN results executes correctly end-to-end.
+    #[test]
+    fn test_case_expression_in_select() {
+        let batch = make_test_batch();
+        let mut transform = SqlTransform::new(
+            "SELECT CASE \
+                 WHEN level = 'ERROR' THEN 'high' \
+                 WHEN level = 'WARN'  THEN 'medium' \
+                 ELSE 'low' \
+             END AS severity FROM logs",
+        )
+        .unwrap();
+        let result = transform.execute_blocking(batch).unwrap();
+        assert_eq!(result.num_rows(), 4);
+
+        let severity = result
+            .column_by_name("severity")
+            .expect("severity column must be present")
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        // Row 0: level=INFO → 'low'
+        assert_eq!(severity.value(0), "low");
+        // Row 1: level=ERROR → 'high'
+        assert_eq!(severity.value(1), "high");
+        // Row 2: level=DEBUG → 'low'
+        assert_eq!(severity.value(2), "low");
+        // Row 3: level=ERROR → 'high'
+        assert_eq!(severity.value(3), "high");
+    }
+
+    /// Verify that a searched CASE expression used in a WHERE clause executes
+    /// correctly end-to-end.  Column references inside the CASE conditions must
+    /// be resolved by DataFusion (i.e. the scanner must have been asked to
+    /// extract those columns via scan_config).
+    #[test]
+    fn test_case_expression_in_where() {
+        let batch = make_test_batch();
+        // Keep only rows where the CASE evaluates to 'high' (i.e. level=ERROR).
+        let mut transform = SqlTransform::new(
+            "SELECT msg FROM logs WHERE \
+             CASE WHEN level = 'ERROR' THEN 'high' ELSE 'low' END = 'high'",
+        )
+        .unwrap();
+        let result = transform.execute_blocking(batch).unwrap();
+        assert_eq!(result.num_rows(), 2);
+
+        let msg = result
+            .column_by_name("msg")
+            .expect("msg column must be present")
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(msg.value(0), "disk full");
+        assert_eq!(msg.value(1), "oom killed");
+    }
+
+    /// Verify that collect_column_refs picks up column references from CASE
+    /// THEN results (not just WHEN conditions).
+    #[test]
+    fn test_query_analyzer_case_result_column_refs() {
+        // The THEN clause references `msg` — it must appear in referenced_columns.
+        let sql = "SELECT CASE WHEN level = 'ERROR' THEN msg ELSE 'ok' END AS out FROM logs";
+        let a = QueryAnalyzer::new(sql).unwrap();
+        assert!(
+            a.referenced_columns.contains("level"),
+            "expected 'level' in referenced_columns, got {:?}",
+            a.referenced_columns
+        );
+        assert!(
+            a.referenced_columns.contains("msg"),
+            "expected 'msg' in referenced_columns, got {:?}",
+            a.referenced_columns
+        );
+    }
+
+    /// Verify that a CASE expression whose THEN clause yields a column value
+    /// executes correctly end-to-end.
+    #[test]
+    fn test_case_expression_result_is_column() {
+        let batch = make_test_batch();
+        // For ERROR rows return msg, otherwise return a literal.
+        let mut transform = SqlTransform::new(
+            "SELECT CASE WHEN level = 'ERROR' THEN msg ELSE 'ok' END AS out FROM logs",
+        )
+        .unwrap();
+        let result = transform.execute_blocking(batch).unwrap();
+        assert_eq!(result.num_rows(), 4);
+
+        let out = result
+            .column_by_name("out")
+            .expect("out column must be present")
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        // Row 0: INFO → 'ok'
+        assert_eq!(out.value(0), "ok");
+        // Row 1: ERROR → msg = 'disk full'
+        assert_eq!(out.value(1), "disk full");
+        // Row 2: DEBUG → 'ok'
+        assert_eq!(out.value(2), "ok");
+        // Row 3: ERROR → msg = 'oom killed'
+        assert_eq!(out.value(3), "oom killed");
+    }
 }
