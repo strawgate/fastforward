@@ -131,9 +131,7 @@ impl Pipeline {
                         }
                     };
                     if geo_cfg.refresh_interval.is_some() {
-                        eprintln!(
-                            "warn: geo_database refresh_interval is not yet implemented, database will not auto-reload"
-                        );
+                        tracing::warn!("geo_database refresh_interval is not yet implemented, database will not auto-reload");
                     }
                     transform.set_geo_database(db);
                 }
@@ -163,9 +161,7 @@ impl Pipeline {
                 match FileCheckpointStore::open(&checkpoint_dir) {
                     Ok(s) => Some(s),
                     Err(e) => {
-                        eprintln!(
-                            "warn: could not open checkpoint store: {e} — starting from beginning"
-                        );
+                        tracing::warn!(error = %e, "could not open checkpoint store — starting from beginning");
                         None
                     }
                 }
@@ -439,7 +435,7 @@ impl Pipeline {
         // joined without risking a channel backpressure deadlock.
         for h in input_handles {
             if let Err(e) = h.join() {
-                eprintln!("pipeline: input thread panicked: {e:?}");
+                tracing::error!(error = ?e, "pipeline: input thread panicked");
             }
         }
 
@@ -478,15 +474,14 @@ impl Pipeline {
                             });
                         }
                         if let Err(e) = store.flush() {
-                            eprintln!("pipeline: failed to flush final checkpoints: {e}");
+                            tracing::error!(error = %e, "pipeline: failed to flush final checkpoints");
                         }
                     }
                 }
                 Err(still_draining) => {
-                    eprintln!(
-                        "pipeline: shutdown with {} in-flight batches \
-                         (checkpoint may not reflect latest delivered data)",
-                        still_draining.in_flight_count()
+                    tracing::warn!(
+                        in_flight = still_draining.in_flight_count(),
+                        "pipeline: shutdown with in-flight batches (checkpoint may not reflect latest delivered data)"
                     );
                 }
             }
@@ -565,7 +560,7 @@ impl Pipeline {
                     // Queued tickets dropped here — safe, not tracked by machine.
                     self.metrics.inc_scan_error();
                     self.metrics.inc_dropped_batch();
-                    eprintln!("pipeline: scan error (batch dropped): {e}");
+                    tracing::warn!(error = %e, "pipeline: scan error (batch dropped)");
                     // Must use `span` (the batch root) not `Span::current()` here —
                     // _entered is still live so current() points to the scan child span.
                     span.record("errors", 1u64);
@@ -610,7 +605,7 @@ impl Pipeline {
             Err(e) => {
                 self.metrics.inc_transform_error();
                 self.metrics.inc_dropped_batch();
-                eprintln!("pipeline: transform error (batch dropped): {e}");
+                tracing::warn!(error = %e, "pipeline: transform error (batch dropped)");
                 tracing::Span::current().record("errors", 1u64);
                 // Reject tickets — transform failed, data not delivered.
                 self.ack_all_tickets(sending, false);
@@ -716,7 +711,7 @@ impl Pipeline {
             self.last_checkpoint_flush = Instant::now();
             if let Some(ref mut store) = self.checkpoint_store {
                 if let Err(e) = store.flush() {
-                    eprintln!("pipeline: checkpoint flush error: {e}");
+                    tracing::warn!(error = %e, "pipeline: checkpoint flush error");
                 }
             }
         }
@@ -755,7 +750,6 @@ fn input_poll_loop(
         let events = match input.source.poll() {
             Ok(e) => e,
             Err(e) => {
-                eprintln!("pipeline input: poll error: {e}");
                 tracing::warn!(input = input.source.name(), error = %e, "input.poll_error");
                 std::thread::sleep(Duration::from_millis(100));
                 continue;
@@ -1015,8 +1009,8 @@ mod tests {
 
     use logfwd_config::{Format, OutputConfig, OutputType};
     use logfwd_io::diagnostics::ComponentStats;
-    use logfwd_test_utils::sinks::{CountingSink, DevNullSink, FailingSink, FrozenSink, SlowSink};
-    use logfwd_test_utils::{append_json_lines, test_meter};
+    use logfwd_test_utils::sinks::{DevNullSink, FailingSink, FrozenSink, SlowSink};
+    use logfwd_test_utils::test_meter;
 
     #[test]
     fn test_build_output_sink_stdout() {
@@ -2541,7 +2535,7 @@ output:
             "checkpoints.json must exist after clean shutdown"
         );
         // Re-open the store to verify the checkpoints are readable.
-        let store = logfwd_io::checkpoint::FileCheckpointStore::open(&cp_dir).unwrap();
+        let store = FileCheckpointStore::open(&cp_dir).unwrap();
         let cps = store.load_all();
         assert!(!cps.is_empty(), "at least one checkpoint must be written");
         assert!(cps[0].offset > 0, "checkpoint offset must be non-zero");
