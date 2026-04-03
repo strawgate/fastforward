@@ -8,18 +8,32 @@ fn test_exclusive_lock() {
     let data_dir = dir.path().to_path_buf();
 
     let config_path = dir.path().join("config.yaml");
-    std::fs::write(&config_path, format!(r#"
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"
 input:
   type: generator
 output:
   type: "null"
 storage:
   data_dir: {}
-"#, data_dir.display())).unwrap();
+"#,
+            data_dir.display()
+        ),
+    )
+    .unwrap();
 
     // Start the first instance.
     let mut child1 = Command::new("cargo")
-        .args(["run", "-p", "logfwd", "--", "--config", config_path.to_str().unwrap()])
+        .args([
+            "run",
+            "-p",
+            "logfwd",
+            "--",
+            "--config",
+            config_path.to_str().unwrap(),
+        ])
         .spawn()
         .expect("failed to start first logfwd instance");
 
@@ -28,7 +42,14 @@ storage:
 
     // Try to start a second instance.
     let output2 = Command::new("cargo")
-        .args(["run", "-p", "logfwd", "--", "--config", config_path.to_str().unwrap()])
+        .args([
+            "run",
+            "-p",
+            "logfwd",
+            "--",
+            "--config",
+            config_path.to_str().unwrap(),
+        ])
         .output()
         .expect("failed to start second logfwd instance");
 

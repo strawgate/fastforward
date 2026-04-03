@@ -420,18 +420,17 @@ async fn run_pipelines(
     let shutdown_for_signal = shutdown.clone();
 
     // Acquire exclusive lock file in the data directory.
-    let data_dir = config
-        .storage
-        .data_dir
-        .as_ref()
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(logfwd_io::checkpoint::default_data_dir);
+    let data_dir = config.storage.data_dir.as_ref().map_or_else(
+        logfwd_io::checkpoint::default_data_dir,
+        std::path::PathBuf::from,
+    );
     std::fs::create_dir_all(&data_dir)?;
     let lock_path = data_dir.join("logfwd.lock");
     let lock_file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
+        .truncate(true)
         .open(&lock_path)?;
 
     #[cfg(unix)]

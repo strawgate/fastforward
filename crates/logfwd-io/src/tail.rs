@@ -443,10 +443,7 @@ impl FileTailer {
                 let saved_start_from_end = self.config.start_from_end;
                 self.config.start_from_end = false; // read new file from beginning
                 if let Err(e) = self.open_file(path) {
-                    tracing::warn!(
-                        "could not open {} after rotation: {e}",
-                        path.display()
-                    );
+                    tracing::warn!("could not open {} after rotation: {e}", path.display());
                 }
                 self.config.start_from_end = saved_start_from_end;
             } else if is_new {
