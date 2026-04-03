@@ -488,7 +488,7 @@ impl Config {
 
                 // Reject placeholder output types that are not yet implemented.
                 match output.output_type {
-                    OutputType::Parquet => {
+                    OutputType::FileOut | OutputType::Parquet => {
                         return Err(ConfigError::Validation(format!(
                             "pipeline '{name}' output '{label}': {} output type is not yet implemented",
                             output_type_name(&output.output_type),
@@ -537,8 +537,8 @@ impl Config {
                             )));
                         }
                     }
-                    // Parquet is already rejected above.
-                    OutputType::Parquet => {
+                    // FileOut and Parquet are already rejected above.
+                    OutputType::FileOut | OutputType::Parquet => {
                         unreachable!("placeholder types are rejected before this match")
                     }
                 }
@@ -905,7 +905,7 @@ server:
     }
 
     #[test]
-    fn file_out_requires_path() {
+    fn file_out_rejected_as_unimplemented() {
         let yaml = r"
 input:
   type: file
@@ -915,14 +915,17 @@ output:
 ";
         let err = Config::load_str(yaml).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("path"), "expected 'path' in error: {msg}");
+        assert!(
+            msg.contains("not yet implemented"),
+            "expected 'not yet implemented' in error: {msg}"
+        );
     }
 
     #[test]
     fn validation_unimplemented_output_type() {
         // Each placeholder type should be caught by Config::validate() before
         // pipeline construction, not silently accepted.
-        for otype in ["parquet"] {
+        for otype in ["file_out", "parquet"] {
             let yaml = format!(
                 "input:\n  type: file\n  path: /tmp/x.log\noutput:\n  type: {otype}\n  endpoint: http://x\n  path: /tmp/x\n"
             );
@@ -982,7 +985,6 @@ output:
             ("otlp", "endpoint: http://x:4317"),
             ("http", "endpoint: http://x"),
             ("stdout", ""),
-            ("file_out", "path: /tmp/out.log"),
             ("null", ""),
             ("elasticsearch", "endpoint: http://x"),
             ("loki", "endpoint: http://x"),
@@ -994,7 +996,7 @@ output:
         }
 
         // Placeholder output types must be rejected at validation time.
-        for otype in ["parquet"] {
+        for otype in ["file_out", "parquet"] {
             let yaml = format!(
                 "input:\n  type: file\n  path: /tmp/x.log\noutput:\n  type: {otype}\n  endpoint: http://x\n  path: /tmp/x\n"
             );
