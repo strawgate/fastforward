@@ -501,7 +501,7 @@ async fn run_pipelines(
         }
         #[cfg(unix)]
         server.set_memory_stats_fn(jemalloc_stats);
-        let handle = server.start()?;
+        let (handle, _) = server.start()?;
         Some((handle, addr.clone()))
     } else {
         None

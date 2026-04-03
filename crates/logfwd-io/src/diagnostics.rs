@@ -403,10 +403,17 @@ impl DiagnosticsServer {
 
     /// Spawn the server on a background thread. Binds synchronously before
     /// returning so that port-in-use errors are reported at startup.
-    /// Returns the join handle on success or an `io::Error` on bind failure.
-    pub fn start(self) -> io::Result<JoinHandle<()>> {
+    ///
+    /// Returns `(handle, bound_addr)` on success. `bound_addr` reflects the
+    /// actual address after OS port assignment (useful when `bind_addr` uses
+    /// port 0). Returns an `io::Error` on bind failure.
+    pub fn start(self) -> io::Result<(JoinHandle<()>, std::net::SocketAddr)> {
         let server = tiny_http::Server::http(&self.bind_addr)
             .map_err(|e| io::Error::other(e.to_string()))?;
+        let bound_addr = server
+            .server_addr()
+            .to_ip()
+            .ok_or_else(|| io::Error::other("diagnostics server bound to non-IP address"))?;
 
         // Start capturing stderr into the 1 MiB ring buffer immediately so
         // log lines emitted before the first /api/logs request are not lost.
@@ -430,11 +437,12 @@ impl DiagnosticsServer {
             })
             .ok();
 
-        Ok(thread::spawn(move || {
+        let handle = thread::spawn(move || {
             for request in server.incoming_requests() {
                 let _ = self.handle_request(request);
             }
-        }))
+        });
+        Ok((handle, bound_addr))
     }
 
     fn handle_request(
@@ -1095,31 +1103,12 @@ fn sample_metrics(
 mod tests {
     use super::*;
     use std::io::Read;
-    use std::net::TcpListener;
-    use std::sync::Mutex;
-    use std::sync::atomic::{AtomicU16, Ordering};
-
-    /// Serialize diagnostics tests to prevent port collisions.
-    static TEST_LOCK: Mutex<()> = Mutex::new(());
-
-    /// Pick a port that is both free AND unique within this test run.
-    ///
-    /// Using :0 (OS-assigned) alone has a TOCTOU race: previous test servers
-    /// stay bound after the test ends (JoinHandle drop detaches, not stops),
-    /// and macOS can re-assign the same port on the next :0 bind.  A
-    /// monotonically-increasing counter ensures we never repeat a port.
-    fn free_port() -> u16 {
-        static NEXT: AtomicU16 = AtomicU16::new(19100);
-        loop {
-            let port = NEXT.fetch_add(1, Ordering::Relaxed);
-            if TcpListener::bind(("127.0.0.1", port)).is_ok() {
-                return port;
-            }
-        }
-    }
+    use std::sync::atomic::Ordering;
 
     /// Build a server with one pipeline pre-populated with known counter values.
-    fn server_with_test_pipeline(port: u16) -> DiagnosticsServer {
+    /// Binds to port 0 so the OS assigns a free port; call `.start()` and use
+    /// the returned `SocketAddr` to find the actual port.
+    fn server_with_test_pipeline() -> DiagnosticsServer {
         let meter = opentelemetry::global::meter("test");
         let mut pm = PipelineMetrics::new(
             "default",
@@ -1154,7 +1143,7 @@ mod tests {
         pm.output_nanos_total.store(200_000_000, Ordering::Relaxed); // 0.2s
         pm.transform_errors.store(3, Ordering::Relaxed);
 
-        let mut server = DiagnosticsServer::new(&format!("127.0.0.1:{}", port));
+        let mut server = DiagnosticsServer::new("127.0.0.1:0");
         server.add_pipeline(Arc::new(pm));
         server
     }
@@ -1229,10 +1218,9 @@ mod tests {
 
     #[test]
     fn test_health_endpoint() {
-        let _lock = TEST_LOCK.lock().unwrap();
-        let port = free_port();
-        let server = server_with_test_pipeline(port);
-        let _handle = server.start().expect("server bind failed");
+        let server = server_with_test_pipeline();
+        let (_handle, addr) = server.start().expect("server bind failed");
+        let port = addr.port();
 
         // Give the server a moment to bind.
         std::thread::sleep(std::time::Duration::from_millis(100));
@@ -1250,10 +1238,9 @@ mod tests {
 
     #[test]
     fn test_pipelines_endpoint() {
-        let _lock = TEST_LOCK.lock().unwrap();
-        let port = free_port();
-        let server = server_with_test_pipeline(port);
-        let _handle = server.start().expect("server bind failed");
+        let server = server_with_test_pipeline();
+        let (_handle, addr) = server.start().expect("server bind failed");
+        let port = addr.port();
 
         std::thread::sleep(std::time::Duration::from_millis(100));
 
@@ -1285,9 +1272,7 @@ mod tests {
 
     #[test]
     fn test_stats_endpoint_contract() {
-        let _lock = TEST_LOCK.lock().unwrap();
-        let port = free_port();
-        let mut server = server_with_test_pipeline(port);
+        let mut server = server_with_test_pipeline();
         server.set_memory_stats_fn(|| {
             Some(MemoryStats {
                 resident: 1_000_000,
@@ -1295,7 +1280,8 @@ mod tests {
                 active: 900_000,
             })
         });
-        let _handle = server.start().expect("server bind failed");
+        let (_handle, addr) = server.start().expect("server bind failed");
+        let port = addr.port();
 
         std::thread::sleep(std::time::Duration::from_millis(100));
 
@@ -1370,10 +1356,9 @@ mod tests {
 
     #[test]
     fn test_not_found() {
-        let _lock = TEST_LOCK.lock().unwrap();
-        let port = free_port();
-        let server = server_with_test_pipeline(port);
-        let _handle = server.start().expect("server bind failed");
+        let server = server_with_test_pipeline();
+        let (_handle, addr) = server.start().expect("server bind failed");
+        let port = addr.port();
 
         std::thread::sleep(std::time::Duration::from_millis(100));
 
@@ -1385,10 +1370,9 @@ mod tests {
     fn test_pipelines_endpoint_no_memory_stats() {
         // Without a memory_stats_fn set, the system section must NOT contain
         // a "memory" key — no partial or null fields.
-        let _lock = TEST_LOCK.lock().unwrap();
-        let port = free_port();
-        let server = server_with_test_pipeline(port);
-        let _handle = server.start().expect("server bind failed");
+        let server = server_with_test_pipeline();
+        let (_handle, addr) = server.start().expect("server bind failed");
+        let port = addr.port();
 
         std::thread::sleep(std::time::Duration::from_millis(100));
 
@@ -1406,9 +1390,7 @@ mod tests {
     fn test_pipelines_endpoint_with_memory_stats() {
         // With a memory_stats_fn set, the system section must include
         // "memory" with resident/allocated/active fields.
-        let _lock = TEST_LOCK.lock().unwrap();
-        let port = free_port();
-        let mut server = server_with_test_pipeline(port);
+        let mut server = server_with_test_pipeline();
         server.set_memory_stats_fn(|| {
             Some(MemoryStats {
                 resident: 1_000_000,
@@ -1416,7 +1398,8 @@ mod tests {
                 active: 900_000,
             })
         });
-        let _handle = server.start().expect("server bind failed");
+        let (_handle, addr) = server.start().expect("server bind failed");
+        let port = addr.port();
 
         std::thread::sleep(std::time::Duration::from_millis(100));
 
@@ -1431,12 +1414,10 @@ mod tests {
     #[test]
     fn test_ready_endpoint_no_pipelines_returns_503() {
         // No pipelines registered yet → not ready.
-        let _lock = TEST_LOCK.lock().unwrap();
-        let port = free_port();
-
-        let server = DiagnosticsServer::new(&format!("127.0.0.1:{}", port));
+        let server = DiagnosticsServer::new("127.0.0.1:0");
         // Don't add any pipelines.
-        let _handle = server.start().expect("server bind failed");
+        let (_handle, addr) = server.start().expect("server bind failed");
+        let port = addr.port();
 
         std::thread::sleep(std::time::Duration::from_millis(100));
 
@@ -1449,15 +1430,14 @@ mod tests {
     fn test_ready_endpoint_with_pipeline_returns_200() {
         // A registered pipeline makes the server ready, regardless of
         // whether any batches have been processed.
-        let _lock = TEST_LOCK.lock().unwrap();
-        let port = free_port();
         let meter = opentelemetry::global::meter("test");
         let pm = PipelineMetrics::new("default", "SELECT * FROM logs", &meter);
         // last_batch_time_ns stays at 0 — no data yet, but still ready.
 
-        let mut server = DiagnosticsServer::new(&format!("127.0.0.1:{}", port));
+        let mut server = DiagnosticsServer::new("127.0.0.1:0");
         server.add_pipeline(Arc::new(pm));
-        let _handle = server.start().expect("server bind failed");
+        let (_handle, addr) = server.start().expect("server bind failed");
+        let port = addr.port();
 
         std::thread::sleep(std::time::Duration::from_millis(100));
 
@@ -1476,15 +1456,14 @@ mod tests {
 
     #[test]
     fn test_pipelines_endpoint_escaping() {
-        let _lock = TEST_LOCK.lock().unwrap();
-        let port = free_port();
         let meter = opentelemetry::global::meter("test");
         // Control character in pipeline name.
         let pm = PipelineMetrics::new("pipe\x01line", "SELECT * FROM logs", &meter);
 
-        let mut server = DiagnosticsServer::new(&format!("127.0.0.1:{}", port));
+        let mut server = DiagnosticsServer::new("127.0.0.1:0");
         server.add_pipeline(Arc::new(pm));
-        let _handle = server.start().expect("server bind failed");
+        let (_handle, addr) = server.start().expect("server bind failed");
+        let port = addr.port();
 
         std::thread::sleep(std::time::Duration::from_millis(100));
 
@@ -1504,11 +1483,10 @@ mod tests {
 
     #[test]
     fn test_traces_endpoint_empty() {
-        let _lock = TEST_LOCK.lock().unwrap();
-        let port = free_port();
         // Server with no trace buffer attached — should return empty array.
-        let server = server_with_test_pipeline(port);
-        let _handle = server.start().expect("server bind failed");
+        let server = server_with_test_pipeline();
+        let (_handle, addr) = server.start().expect("server bind failed");
+        let port = addr.port();
 
         std::thread::sleep(std::time::Duration::from_millis(100));
 
@@ -1520,9 +1498,6 @@ mod tests {
     #[test]
     fn test_traces_endpoint_with_data() {
         use crate::span_exporter::{SpanBuffer, TraceSpan};
-
-        let _lock = TEST_LOCK.lock().unwrap();
-        let port = free_port();
 
         let trace_buf = SpanBuffer::new();
 
@@ -1557,9 +1532,10 @@ mod tests {
             status: "ok",
         });
 
-        let mut server = server_with_test_pipeline(port);
+        let mut server = server_with_test_pipeline();
         server.set_trace_buffer(trace_buf);
-        let _handle = server.start().expect("server bind failed");
+        let (_handle, addr) = server.start().expect("server bind failed");
+        let port = addr.port();
 
         std::thread::sleep(std::time::Duration::from_millis(100));
 
@@ -1622,10 +1598,9 @@ mod tests {
     // Bug #728: diagnostics server should return 405 for non-GET methods.
     #[test]
     fn non_get_returns_405() {
-        let _lock = TEST_LOCK.lock().unwrap();
-        let port = free_port();
-        let server = server_with_test_pipeline(port);
-        let _handle = server.start().expect("server bind failed");
+        let server = server_with_test_pipeline();
+        let (_handle, addr) = server.start().expect("server bind failed");
+        let port = addr.port();
 
         std::thread::sleep(std::time::Duration::from_millis(100));
 
@@ -1639,10 +1614,9 @@ mod tests {
     // not a generic 404 that gives no hint about what happened.
     #[test]
     fn metrics_endpoint_returns_410() {
-        let _lock = TEST_LOCK.lock().unwrap();
-        let port = free_port();
-        let server = server_with_test_pipeline(port);
-        let _handle = server.start().expect("server bind failed");
+        let server = server_with_test_pipeline();
+        let (_handle, addr) = server.start().expect("server bind failed");
+        let port = addr.port();
 
         std::thread::sleep(std::time::Duration::from_millis(100));
 
