@@ -498,7 +498,10 @@ impl Config {
                 }
 
                 match output.output_type {
-                    OutputType::Otlp | OutputType::Http | OutputType::Elasticsearch | OutputType::Loki => {
+                    OutputType::Otlp
+                    | OutputType::Http
+                    | OutputType::Elasticsearch
+                    | OutputType::Loki => {
                         if output.endpoint.is_none() {
                             return Err(ConfigError::Validation(format!(
                                 "pipeline '{name}' output '{label}': {} output requires 'endpoint'",
@@ -537,9 +540,8 @@ impl Config {
                             )));
                         }
                     }
-                    // FileOut and Parquet are already rejected above.
-                    OutputType::FileOut | OutputType::Parquet => {
-                        unreachable!("placeholder types are rejected before this match")
+                    OutputType::Parquet => {
+                        // Parquet output not yet implemented
                     }
                 }
             }
