@@ -116,7 +116,7 @@ pub fn normalize_conflict_columns(batch: RecordBatch) -> RecordBatch {
 /// Merge int, float, and str variants into a single `Utf8` column via COALESCE.
 ///
 /// Priority order: int (cast to str) > float (cast to str) > str.
-pub(crate) fn merge_to_utf8(
+pub fn merge_to_utf8(
     int_col: Option<&dyn Array>,
     float_col: Option<&dyn Array>,
     str_col: Option<&dyn Array>,
@@ -190,7 +190,7 @@ mod tests {
             str_vals.len(),
             "int_vals and str_vals must have the same length"
         );
-        let num_rows = int_vals.len();
+        let _num_rows = int_vals.len();
 
         let int_arr: Arc<dyn Array> = Arc::new(Int64Array::from(int_vals));
 

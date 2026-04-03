@@ -4,6 +4,7 @@
 //! Contains `StreamingBuilder` (zero-copy hot path) and `StorageBuilder`
 //! (persistence path), plus scanner wrapper types that produce `RecordBatch`.
 
+pub mod conflict_schema;
 pub mod scanner;
 pub mod storage_builder;
 pub mod streaming_builder;

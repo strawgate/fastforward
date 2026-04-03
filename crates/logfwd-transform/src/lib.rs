@@ -20,7 +20,7 @@ use datafusion::prelude::*;
 
 use logfwd_core::scan_config::ScanConfig;
 
-pub mod conflict_schema;
+pub use logfwd_arrow::conflict_schema;
 pub mod udf;
 
 // Re-export sqlparser through datafusion.
