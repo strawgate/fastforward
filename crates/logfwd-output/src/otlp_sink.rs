@@ -5,6 +5,7 @@ use arrow::array::{Array, AsArray, PrimitiveArray};
 use arrow::datatypes::{DataType, Float64Type, Int64Type};
 use arrow::record_batch::RecordBatch;
 
+use logfwd_arrow::conflict_schema::normalize_conflict_columns;
 use logfwd_core::otlp::{
     Severity, bytes_field_size, encode_bytes_field, encode_fixed32, encode_fixed64, encode_tag,
     encode_varint, encode_varint_field, hex_decode, parse_severity, parse_timestamp_nanos,
@@ -96,6 +97,22 @@ impl OtlpSink {
         if num_rows == 0 {
             return;
         }
+
+        // Normalize any conflict struct columns (e.g. `status: Struct { int, str }`)
+        // to flat Utf8 columns before encoding. Without this, struct columns would be
+        // silently dropped, causing data loss when no SQL transform is applied upstream.
+        let normalized;
+        let batch = if batch
+            .schema()
+            .fields()
+            .iter()
+            .any(|f| matches!(f.data_type(), DataType::Struct(_)))
+        {
+            normalized = normalize_conflict_columns(batch.clone());
+            &normalized
+        } else {
+            batch
+        };
 
         // Resolve column roles and downcast arrays once for the whole batch.
         let columns = resolve_batch_columns(batch);
@@ -387,10 +404,10 @@ fn resolve_batch_columns(batch: &RecordBatch) -> BatchColumns<'_> {
             DataType::Int64 => AttrArray::Int(batch.column(idx).as_primitive::<Int64Type>()),
             DataType::Float64 => AttrArray::Float(batch.column(idx).as_primitive::<Float64Type>()),
             DataType::Boolean => AttrArray::Bool(batch.column(idx).as_boolean()),
-            // Struct conflict columns (status: Struct { int, str }) cannot be encoded as
-            // a single typed OTLP attribute without coalescing. Skip them here; a SQL
-            // transform with normalize_conflict_columns() produces a flat Utf8 column
-            // that encodes correctly via the fallback arm below.
+            // Non-conflict struct columns (e.g. nested objects not produced by the
+            // type-conflict builder) cannot be encoded as a single typed OTLP attribute.
+            // Conflict structs (Struct { int, str, float, bool }) are already normalized
+            // to flat Utf8 by `encode_batch` before this function is called.
             DataType::Struct(_) => continue,
             _ => AttrArray::Str(batch.column(idx).as_ref()),
         };
@@ -634,23 +651,22 @@ mod tests {
 
     use super::*;
 
-    /// Struct conflict columns (status: Struct { int, str }) must be skipped
-    /// by the OTLP attribute encoder rather than emitting an empty-string attribute.
+    /// Struct conflict columns (status: Struct { int, str }) must be normalized
+    /// to flat Utf8 before OTLP encoding so values are not silently dropped.
     #[test]
-    fn struct_conflict_column_is_skipped_not_emitted_as_empty_string() {
+    fn struct_conflict_column_is_normalized_not_dropped() {
         use arrow::array::{Int64Array as I64A, StructArray};
         use arrow::buffer::NullBuffer;
         use arrow::datatypes::{Field as F, Fields};
 
-        let int_arr: Arc<dyn arrow::array::Array> = Arc::new(I64A::from(vec![Some(200i64), None]));
-        let str_arr: Arc<dyn arrow::array::Array> =
-            Arc::new(StringArray::from(vec![None::<&str>, Some("OK")]));
+        let int_arr: Arc<dyn Array> = Arc::new(I64A::from(vec![Some(200i64), None]));
+        let str_arr: Arc<dyn Array> = Arc::new(StringArray::from(vec![None::<&str>, Some("OK")]));
         let child_fields = Fields::from(vec![
             Arc::new(F::new("int", DataType::Int64, true)),
             Arc::new(F::new("str", DataType::Utf8, true)),
         ]);
         let validity = NullBuffer::from(vec![true, true]);
-        let struct_arr: Arc<dyn arrow::array::Array> = Arc::new(StructArray::new(
+        let struct_arr: Arc<dyn Array> = Arc::new(StructArray::new(
             child_fields.clone(),
             vec![Arc::clone(&int_arr), Arc::clone(&str_arr)],
             Some(validity),
@@ -665,11 +681,19 @@ mod tests {
         let mut sink = make_sink();
         sink.encode_batch(&batch, &make_metadata());
 
-        // The struct column must NOT appear in the encoded output —
-        // no "status" key and no empty-string value.
+        // After normalization the "status" key must appear in the encoded output
+        // with its coalesced value ("200" from the int child, "OK" from str child).
         assert!(
-            !contains_bytes(&sink.encoder_buf, b"status"),
-            "struct conflict column 'status' must not be encoded as an OTLP attribute"
+            contains_bytes(&sink.encoder_buf, b"status"),
+            "conflict struct column 'status' must be encoded as an OTLP attribute after normalization"
+        );
+        assert!(
+            contains_bytes(&sink.encoder_buf, b"200"),
+            "int value 200 must be encoded as the coalesced string '200'"
+        );
+        assert!(
+            contains_bytes(&sink.encoder_buf, b"OK"),
+            "str value 'OK' must be encoded as an OTLP attribute"
         );
     }
 

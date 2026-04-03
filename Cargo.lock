@@ -2401,6 +2401,7 @@ dependencies = [
  "insta",
  "itoa",
  "libc",
+ "logfwd-arrow",
  "logfwd-config",
  "logfwd-core",
  "logfwd-io",

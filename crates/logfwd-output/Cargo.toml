@@ -8,6 +8,7 @@ publish = false
 [dependencies]
 logfwd-config = { version = "0.1.0", path = "../logfwd-config" }
 logfwd-core = { version = "0.1.0", path = "../logfwd-core" }
+logfwd-arrow = { version = "0.1.0", path = "../logfwd-arrow" }
 arrow = { workspace = true }
 itoa = "1"
 ryu = "1"
