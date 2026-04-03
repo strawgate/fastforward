@@ -23,13 +23,15 @@ pub(crate) struct ElasticsearchConfig {
     /// larger than this are split in half and sent as separate `_bulk` requests.
     /// Default: 5 MiB — safe for Elasticsearch Serverless and self-hosted.
     max_bulk_bytes: usize,
+    /// Precomputed `_bulk` URL with `filter_path` to avoid per-request allocation.
+    bulk_url: String,
 }
 
 /// Async Elasticsearch sink using reqwest.
 ///
 /// Implements the [`super::sink::Sink`] trait for use with `OutputWorkerPool`.
-/// Each worker owns its own `reqwest::Client` so idle worker shutdown drops
-/// its connection pool immediately rather than keeping it alive via a shared Arc.
+/// All workers share the same `reqwest::Client` (cloned from the factory) to
+/// reuse connection pools, TLS sessions, and DNS caches.
 pub struct ElasticsearchAsyncSink {
     config: Arc<ElasticsearchConfig>,
     client: reqwest::Client,
@@ -290,14 +292,10 @@ impl ElasticsearchAsyncSink {
 
     async fn do_send(&self, body: Vec<u8>) -> io::Result<super::sink::SendResult> {
         let body_len = body.len();
-        let url = format!(
-            "{}/_bulk?filter_path=errors,took,items.*.error,items.*.status",
-            self.config.endpoint
-        );
 
         let mut req = self
             .client
-            .post(&url)
+            .post(&self.config.bulk_url)
             .header("Content-Type", "application/x-ndjson");
         for (k, v) in &self.config.headers {
             req = req.header(k.clone(), v.clone());
@@ -423,20 +421,31 @@ impl ElasticsearchSinkFactory {
             })
             .collect::<io::Result<Vec<_>>>()?;
 
+        // 30s timeout: generous enough for large bulk responses, short enough to
+        // detect dead connections before the pipeline stalls.
+        // 64 max idle per host: allows all workers (typically ≤16) to keep warm
+        // connections without excessive socket churn.
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .pool_max_idle_per_host(64)
             .build()
             .map_err(io::Error::other)?;
 
+        let endpoint = endpoint.trim_end_matches('/').to_string();
+        let bulk_url = format!(
+            "{}/_bulk?filter_path=errors,took,items.*.error,items.*.status",
+            endpoint
+        );
+
         Ok(ElasticsearchSinkFactory {
             name,
             config: Arc::new(ElasticsearchConfig {
-                endpoint: endpoint.trim_end_matches('/').to_string(),
+                endpoint,
                 index,
                 headers: parsed_headers,
                 compress,
                 max_bulk_bytes: 5 * 1024 * 1024, // 5 MiB default
+                bulk_url,
             }),
             client,
             stats,
