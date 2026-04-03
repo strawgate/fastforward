@@ -121,6 +121,12 @@ pub struct TailConfig {
     /// until the count is within the limit. Evicted files are re-opened
     /// automatically on the next poll if they have new data.
     pub max_open_files: usize,
+    /// Maximum bytes to read from a single file per poll cycle.
+    ///
+    /// Limits how much data any one file can emit per poll, ensuring fair
+    /// scheduling across all tailed files (#801). Also prevents OOM when a
+    /// file grows significantly between polls (#800).
+    pub max_read_per_file: usize,
 }
 
 impl Default for TailConfig {
@@ -132,6 +138,7 @@ impl Default for TailConfig {
             start_from_end: true,
             glob_rescan_interval_ms: 5000,
             max_open_files: 1024,
+            max_read_per_file: 256 * 1024, // 256 KiB — fairness budget (#801)
         }
     }
 }
@@ -593,11 +600,7 @@ impl FileTailer {
         Ok(events)
     }
 
-    /// Maximum bytes to read from a single file per poll cycle.
-    /// Prevents OOM when a file grows significantly between polls (#800).
-    const MAX_READ_PER_POLL: usize = 4 * 1024 * 1024; // 4 MiB
-
-    /// Read new data from a file, capped at [`Self::MAX_READ_PER_POLL`].
+    /// Read new data from a file, capped at `config.max_read_per_file`.
     /// Returns [`ReadResult::Truncated`] or [`ReadResult::TruncatedThenData`]
     /// if the file was truncated since the last read.
     fn read_new_data(&mut self, path: &Path) -> io::Result<ReadResult> {
@@ -630,10 +633,11 @@ impl FileTailer {
             });
         }
 
-        // Read available bytes, capped at MAX_READ_PER_POLL (#800).
+        // Read available bytes, capped at max_read_per_file (#800, #801).
+        let budget = self.config.max_read_per_file;
         let mut result = Vec::new();
         loop {
-            if result.len() >= Self::MAX_READ_PER_POLL {
+            if result.len() >= budget {
                 break; // continue on next poll
             }
             let n = tailed.file.read(&mut self.read_buf)?;
@@ -1610,14 +1614,14 @@ mod tests {
         );
     }
 
-    /// #800: read_new_data must not exceed MAX_READ_PER_POLL.
+    /// #800/#801: read_new_data must not exceed max_read_per_file.
     #[test]
     fn test_read_cap_prevents_oom() {
         let dir = tempfile::tempdir().unwrap();
         let log_path = dir.path().join("large.log");
 
-        // Write more than MAX_READ_PER_POLL (4 MiB) — use 5 MiB.
-        let target_size = 5 * 1024 * 1024;
+        // Write more than the default max_read_per_file (256 KiB) — use 512 KiB.
+        let target_size = 512 * 1024;
         {
             let mut f = File::create(&log_path).unwrap();
             let line = "x".repeat(1023) + "\n"; // 1 KiB per line
@@ -1632,9 +1636,11 @@ mod tests {
             poll_interval_ms: 10,
             ..Default::default()
         };
+        let budget = config.max_read_per_file;
+        let read_buf_size = config.read_buf_size;
         let mut tailer = FileTailer::new(std::slice::from_ref(&log_path), config).unwrap();
 
-        // First poll should read at most MAX_READ_PER_POLL bytes.
+        // First poll should read at most max_read_per_file bytes.
         std::thread::sleep(Duration::from_millis(50));
         let events = tailer.poll().unwrap();
 
@@ -1647,8 +1653,9 @@ mod tests {
             .sum();
 
         assert!(
-            total_bytes <= FileTailer::MAX_READ_PER_POLL + 512 * 1024, // allow one extra read_buf
-            "read should be capped near 64 MiB, got {} bytes",
+            total_bytes <= budget + read_buf_size, // allow one extra read_buf
+            "read should be capped near {} bytes, got {} bytes",
+            budget,
             total_bytes
         );
         assert!(total_bytes > 0, "should read some data");
@@ -1747,6 +1754,75 @@ mod tests {
         assert_ne!(
             sids[0], sids[1],
             "files with identical content must have distinct SourceIds (#798)"
+        );
+    }
+
+    /// #801: Per-file read budget ensures fair scheduling across files.
+    ///
+    /// A chatty file with a lot of data should not prevent a quiet file from
+    /// being read in the same poll cycle.
+    #[test]
+    fn test_per_file_read_fairness() {
+        let dir = tempfile::tempdir().unwrap();
+        let chatty_path = dir.path().join("chatty.log");
+        let quiet_path = dir.path().join("quiet.log");
+
+        // Chatty file: write 1 MiB (far exceeds default 256 KiB budget).
+        {
+            let mut f = File::create(&chatty_path).unwrap();
+            let line = "c".repeat(1023) + "\n";
+            for _ in 0..1024 {
+                f.write_all(line.as_bytes()).unwrap();
+            }
+        }
+        // Quiet file: write a single line.
+        {
+            let mut f = File::create(&quiet_path).unwrap();
+            writeln!(f, "quiet line").unwrap();
+        }
+
+        let config = TailConfig {
+            start_from_end: false,
+            poll_interval_ms: 10,
+            ..Default::default()
+        };
+        let budget = config.max_read_per_file;
+        let mut tailer =
+            FileTailer::new(&[chatty_path.clone(), quiet_path.clone()], config).unwrap();
+
+        std::thread::sleep(Duration::from_millis(50));
+        let events = tailer.poll().unwrap();
+
+        // Both files should have produced Data events in the same poll.
+        let paths_with_data: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                TailEvent::Data { path, .. } => Some(path.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            paths_with_data.contains(&chatty_path),
+            "chatty file should have data"
+        );
+        assert!(
+            paths_with_data.contains(&quiet_path),
+            "quiet file should have data — not starved by chatty file"
+        );
+
+        // Chatty file's data should be capped near the budget.
+        let chatty_bytes: usize = events
+            .iter()
+            .filter_map(|e| match e {
+                TailEvent::Data { path, bytes } if path == &chatty_path => Some(bytes.len()),
+                _ => None,
+            })
+            .sum();
+        assert!(
+            chatty_bytes <= budget + 256 * 1024, // allow one extra read_buf
+            "chatty file should be capped near {} KiB, got {} KiB",
+            budget / 1024,
+            chatty_bytes / 1024,
         );
     }
 }
