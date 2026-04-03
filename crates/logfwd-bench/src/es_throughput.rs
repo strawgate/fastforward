@@ -6,16 +6,15 @@
 //!   ES_URL        — base URL (e.g. https://my-cluster.es.us-east-1.aws.elastic.cloud)
 //!   ES_ENDPOINT   — alias for ES_URL (legacy)
 //!   ES_API_KEY    — Elasticsearch API key (without the "ApiKey " prefix)
-//!   ES_INDEX      — target index name (default: logfwd-bench)
+//!   ES_INDEX      — target index base name (default: logfwd-bench)
 //!
 //! Usage:
-//!   ES_URL=https://... ES_API_KEY=... ./es-throughput [duration_secs] [workers] [batch_lines] [compress: 0|1]
+//!   ES_URL=https://... ES_API_KEY=... ./es-throughput [duration_secs] [workers] [batch_lines] [compress: 0|1] [indices: default 1]
 //!
 //! Examples:
+//!   ./es-throughput 60 16 5000 1 4  # 16 workers, gzip, 5k batch, 4 indices
+//!   ./es-throughput 30 4 5000 1     # 4 workers, gzip, 1 index
 //!   ./es-throughput 30 1 1000 0     # baseline (single worker, no compress)
-//!   ./es-throughput 30 4 1000 0     # 4 workers, no compress
-//!   ./es-throughput 30 4 5000 1     # 4 workers, gzip, 5k batch
-//!   ./es-throughput 30 1 1000 1     # single worker + gzip only
 
 use std::fmt::Write as FmtWrite;
 use std::sync::Arc;
@@ -73,6 +72,7 @@ fn gen_json_lines(n: usize) -> Vec<u8> {
 
 fn run_worker(
     worker_id: usize,
+    index: String,
     duration: std::time::Duration,
     batch_lines: usize,
     compress: bool,
@@ -90,7 +90,6 @@ fn run_worker(
     let stats = Arc::new(ComponentStats::default());
     let name = format!("es-bench-{worker_id}");
     let endpoint = es_endpoint();
-    let index = es_index();
     let headers = vec![("Authorization".to_string(), format!("ApiKey {}", es_api_key()))];
 
     let factory = ElasticsearchSinkFactory::new(name, endpoint, index, headers, compress, stats)
@@ -147,11 +146,22 @@ fn run_scenario(
     workers: usize,
     batch_lines: usize,
     compress: bool,
+    num_indices: usize,
 ) {
+    let index_base = es_index();
+    let indices: Vec<String> = if num_indices <= 1 {
+        vec![index_base]
+    } else {
+        (0..num_indices)
+            .map(|i| format!("{index_base}-{i}"))
+            .collect()
+    };
+
     println!("\n--- {label} ---");
     println!(
-        "  workers={workers}  batch={batch_lines}  compress={}  duration={duration_secs}s",
-        if compress { "gzip" } else { "none" }
+        "  workers={workers}  batch={batch_lines}  compress={}  indices={}  duration={duration_secs}s",
+        if compress { "gzip" } else { "none" },
+        indices.join(","),
     );
 
     let total_events = Arc::new(AtomicU64::new(0));
@@ -169,8 +179,9 @@ fn run_scenario(
         let er = Arc::clone(&total_errors);
         let rb = Arc::clone(&total_raw_bytes);
         let wb = Arc::clone(&total_wire_bytes);
+        let index = indices[i % indices.len()].clone();
         handles.push(std::thread::spawn(move || {
-            run_worker(i, duration, batch_lines, compress, ev, ba, er, rb, wb);
+            run_worker(i, index, duration, batch_lines, compress, ev, ba, er, rb, wb);
         }));
     }
     for h in handles {
@@ -211,6 +222,7 @@ fn main() {
     let workers: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
     let batch_lines: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
     let compress_flag: u8 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(255);
+    let num_indices: usize = args.get(5).and_then(|s| s.parse().ok()).unwrap_or(1);
 
     let endpoint = es_endpoint();
     let index = es_index();
@@ -227,46 +239,16 @@ fn main() {
 
     if workers == 0 {
         // Run a progression of scenarios
-        run_scenario(
-            "Baseline (1 worker, 1k batch, no compress)",
-            duration_secs,
-            1,
-            1_000,
-            false,
-        );
-        run_scenario(
-            "Larger batch (1 worker, 5k batch, no compress)",
-            duration_secs,
-            1,
-            5_000,
-            false,
-        );
-        run_scenario(
-            "Gzip (1 worker, 1k batch, gzip)",
-            duration_secs,
-            1,
-            1_000,
-            true,
-        );
-        run_scenario(
-            "Gzip + large batch (1 worker, 5k batch, gzip)",
-            duration_secs,
-            1,
-            5_000,
-            true,
-        );
-        run_scenario(
-            "4 workers, 1k batch, no compress",
-            duration_secs,
-            4,
-            1_000,
-            false,
-        );
-        run_scenario("4 workers, 5k batch, gzip", duration_secs, 4, 5_000, true);
+        run_scenario("1w/1k/raw/1idx", duration_secs, 1, 1_000, false, 1);
+        run_scenario("1w/5k/raw/1idx", duration_secs, 1, 5_000, false, 1);
+        run_scenario("1w/5k/gzip/1idx", duration_secs, 1, 5_000, true, 1);
+        run_scenario("4w/5k/gzip/1idx", duration_secs, 4, 5_000, true, 1);
+        run_scenario("8w/5k/gzip/2idx", duration_secs, 8, 5_000, true, 2);
+        run_scenario("16w/5k/gzip/4idx", duration_secs, 16, 5_000, true, 4);
     } else {
         let compress = compress_flag != 0;
         let bl = if batch_lines == 0 { 1_000 } else { batch_lines };
-        run_scenario("Custom", duration_secs, workers, bl, compress);
+        run_scenario("Custom", duration_secs, workers, bl, compress, num_indices);
     }
 
     // Write flamegraph from the last scenario
