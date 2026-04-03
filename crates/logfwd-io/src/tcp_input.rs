@@ -13,8 +13,8 @@ use crate::input::{InputEvent, InputSource};
 const MAX_CLIENTS: usize = 1024;
 
 /// Per-poll read buffer size (64 KiB). Shared across all connections within a
-/// single `poll` call; data is copied into `all_data` immediately, so one
-/// moderate buffer is sufficient.
+/// single `poll` call; data is copied into per-connection `line_buf`s
+/// immediately, so one moderate buffer is sufficient.
 const READ_BUF_SIZE: usize = 64 * 1024;
 
 /// Default disconnect timeout for idle clients (no data received).
@@ -28,8 +28,11 @@ const MAX_LINE_LENGTH: usize = 1024 * 1024; // 1 MiB
 struct Client {
     stream: TcpStream,
     last_data: Instant,
-    /// Bytes received since the last newline. Reset to 0 on every `\n`.
-    bytes_since_newline: usize,
+    /// Per-connection partial line buffer. Complete lines (ending in `\n`) are
+    /// extracted each poll cycle; the remainder stays here until the next read
+    /// or until the client disconnects (at which point it is flushed with a
+    /// synthetic newline).
+    line_buf: Vec<u8>,
 }
 
 /// TCP input that accepts connections and reads newline-delimited data.
@@ -116,7 +119,7 @@ impl InputSource for TcpInput {
                     self.clients.push(Client {
                         stream,
                         last_data: Instant::now(),
-                        bytes_since_newline: 0,
+                        line_buf: Vec::new(),
                     });
                 }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
@@ -127,8 +130,7 @@ impl InputSource for TcpInput {
             }
         }
 
-        // Read from all clients.
-        let mut all_data = Vec::new();
+        // Read from all clients into per-connection line buffers.
         let now = Instant::now();
         // Track which connections are dead using a bitmap for O(1) lookup.
         let mut alive = vec![true; self.clients.len()];
@@ -147,28 +149,21 @@ impl InputSource for TcpInput {
                         client.last_data = now;
                         got_data = true;
 
-                        // Track bytes since last newline for max-line-length.
-                        // Check BEFORE resetting at newline to catch lines that
-                        // were already over the limit when the newline arrives.
-                        if let Some(first_nl) = memchr::memchr(b'\n', chunk) {
-                            // Line length = accumulated + bytes up to first \n.
-                            let line_len = client.bytes_since_newline + first_nl;
-                            if line_len >= MAX_LINE_LENGTH {
-                                alive[i] = false;
-                                break;
-                            }
-                            // Reset to bytes after the LAST newline in this chunk.
-                            if let Some(last_nl) = memchr::memrchr(b'\n', chunk) {
-                                client.bytes_since_newline = n - last_nl - 1;
-                            }
-                        } else {
-                            client.bytes_since_newline += n;
-                            if client.bytes_since_newline >= MAX_LINE_LENGTH {
-                                alive[i] = false;
-                                break;
-                            }
+                        client.line_buf.extend_from_slice(chunk);
+
+                        // Check the line buffer size for max-line-length.
+                        // Use bytes after the last newline in the buffer as
+                        // the current incomplete line length.
+                        let bytes_since_newline =
+                            if let Some(last_nl) = memchr::memrchr(b'\n', &client.line_buf) {
+                                client.line_buf.len() - last_nl - 1
+                            } else {
+                                client.line_buf.len()
+                            };
+                        if bytes_since_newline >= MAX_LINE_LENGTH {
+                            alive[i] = false;
+                            break;
                         }
-                        all_data.extend_from_slice(chunk);
                     }
                     Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
                     Err(e) if e.kind() == io::ErrorKind::ConnectionReset => {
@@ -186,6 +181,27 @@ impl InputSource for TcpInput {
             // Check idle AFTER reading — data may have arrived since last poll.
             if !got_data && alive[i] && now.duration_since(client.last_data) > self.idle_timeout {
                 alive[i] = false;
+            }
+        }
+
+        // Collect complete lines from alive clients, and flush partial lines
+        // from dead clients (issue #804: disconnect flushes partial line).
+        let mut all_data = Vec::new();
+
+        for (i, client) in self.clients.iter_mut().enumerate() {
+            if alive[i] {
+                // Extract only complete lines (up to and including the last `\n`).
+                if let Some(last_nl) = memchr::memrchr(b'\n', &client.line_buf) {
+                    all_data.extend(client.line_buf.drain(..=last_nl));
+                }
+            } else {
+                // Dead client: flush any remaining partial line with a
+                // synthetic newline so it is not lost.
+                if !client.line_buf.is_empty() {
+                    client.line_buf.push(b'\n');
+                    all_data.extend_from_slice(&client.line_buf);
+                    client.line_buf.clear();
+                }
             }
         }
 
@@ -393,6 +409,126 @@ mod tests {
             input.client_count(),
             0,
             "all storm connections should be cleaned up (no fd leak)"
+        );
+    }
+
+    #[test]
+    fn tcp_per_connection_isolation() {
+        // Two clients sending partial lines should NOT have their data merged.
+        // Before the fix, Client A's "hello " and Client B's "world\n" would
+        // combine into "hello world\n" — a corrupted line from neither client.
+        let mut input = TcpInput::new("test", "127.0.0.1:0").unwrap();
+        let addr = input.listener.local_addr().unwrap();
+
+        let mut client_a = StdTcpStream::connect(addr).unwrap();
+        let mut client_b = StdTcpStream::connect(addr).unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+
+        // Accept both connections.
+        let _ = input.poll().unwrap();
+
+        // Client A sends a partial line (no newline).
+        client_a.write_all(b"from_a_partial").unwrap();
+        client_a.flush().unwrap();
+
+        // Client B sends a complete line.
+        client_b.write_all(b"from_b_complete\n").unwrap();
+        client_b.flush().unwrap();
+
+        std::thread::sleep(Duration::from_millis(50));
+
+        let events = input.poll().unwrap();
+        let mut all_bytes = Vec::new();
+        for event in &events {
+            if let InputEvent::Data { bytes, .. } = event {
+                all_bytes.extend_from_slice(bytes);
+            }
+        }
+        let text = String::from_utf8_lossy(&all_bytes);
+
+        // Client B's complete line should appear.
+        assert!(
+            text.contains("from_b_complete\n"),
+            "expected Client B's complete line, got: {text}"
+        );
+
+        // Client A's partial data must NOT appear yet (no newline sent).
+        assert!(
+            !text.contains("from_a_partial"),
+            "Client A's partial line should be buffered, not emitted; got: {text}"
+        );
+
+        // Now Client A completes its line.
+        client_a.write_all(b"_done\n").unwrap();
+        client_a.flush().unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+
+        let events = input.poll().unwrap();
+        let mut all_bytes = Vec::new();
+        for event in &events {
+            if let InputEvent::Data { bytes, .. } = event {
+                all_bytes.extend_from_slice(bytes);
+            }
+        }
+        let text = String::from_utf8_lossy(&all_bytes);
+
+        // Now Client A's full line should appear, correctly reassembled.
+        assert!(
+            text.contains("from_a_partial_done\n"),
+            "expected Client A's reassembled line, got: {text}"
+        );
+
+        // Verify no cross-contamination: "from_a_partialfrom_b" should never appear.
+        assert!(
+            !text.contains("from_a_partialfrom_b"),
+            "cross-connection data corruption detected: {text}"
+        );
+    }
+
+    #[test]
+    fn tcp_disconnect_flushes_partial_line() {
+        // When a client disconnects with a partial line (no trailing newline),
+        // the data should be emitted with a synthetic newline — not lost.
+        let mut input = TcpInput::new("test", "127.0.0.1:0").unwrap();
+        let addr = input.listener.local_addr().unwrap();
+
+        {
+            let mut client = StdTcpStream::connect(addr).unwrap();
+            // Send partial line without newline, then disconnect.
+            client.write_all(b"partial_no_newline").unwrap();
+            client.flush().unwrap();
+            std::thread::sleep(Duration::from_millis(50));
+        } // client drops here → connection closed
+
+        std::thread::sleep(Duration::from_millis(50));
+
+        // Poll until we see the data (may take a couple of polls for accept +
+        // read + EOF detection).
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut all_bytes = Vec::new();
+        while Instant::now() < deadline {
+            let events = input.poll().unwrap();
+            for event in &events {
+                if let InputEvent::Data { bytes, .. } = event {
+                    all_bytes.extend_from_slice(bytes);
+                }
+            }
+            if !all_bytes.is_empty() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        let text = String::from_utf8_lossy(&all_bytes);
+
+        // The partial line should be present with a synthetic newline.
+        assert!(
+            text.contains("partial_no_newline"),
+            "expected partial line to be flushed on disconnect, got: {text}"
+        );
+        assert!(
+            all_bytes.ends_with(b"\n"),
+            "expected synthetic newline at end of flushed data"
         );
     }
 }
