@@ -215,10 +215,7 @@ impl InputSource for FramedInput {
             .checkpoint_data()
             .into_iter()
             .map(|(sid, offset)| {
-                let remainder_len = self
-                    .remainders
-                    .get(&sid)
-                    .map_or(0, |r| r.len() as u64);
+                let remainder_len = self.remainders.get(&sid).map_or(0, |r| r.len() as u64);
                 (sid, ByteOffset(offset.0.saturating_sub(remainder_len)))
             })
             .collect()
