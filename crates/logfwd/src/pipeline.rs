@@ -291,6 +291,14 @@ impl Pipeline {
         &self.metrics
     }
 
+    /// Validate the SQL plan by running a probe batch through the transform.
+    ///
+    /// Called by `--dry-run` to surface planning errors (duplicate aliases,
+    /// bad window specs, etc.) before the first real batch arrives.
+    pub fn validate_sql_plan(&mut self) -> Result<(), String> {
+        self.transform.validate_plan()
+    }
+
     /// Override the batch flush timeout (for testing).
     pub fn set_batch_timeout(&mut self, timeout: Duration) {
         self.batch_timeout = timeout;
