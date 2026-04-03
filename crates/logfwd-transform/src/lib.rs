@@ -1562,15 +1562,16 @@ mod tests {
     #[test]
     fn validate_plan_accepts_valid_sql() {
         let mut transform = SqlTransform::new("SELECT * FROM logs").unwrap();
-        transform.validate_plan().expect("valid SQL should pass plan validation");
+        transform
+            .validate_plan()
+            .expect("valid SQL should pass plan validation");
     }
 
     #[test]
     fn validate_plan_catches_duplicate_aliases() {
         // "SELECT level AS k, msg AS k FROM logs" produces a duplicate alias error
         // at DataFusion planning time (not at parse time).
-        let mut transform =
-            SqlTransform::new("SELECT level AS k, msg AS k FROM logs").unwrap();
+        let mut transform = SqlTransform::new("SELECT level AS k, msg AS k FROM logs").unwrap();
         let err = transform.validate_plan();
         assert!(
             err.is_err(),
@@ -1581,8 +1582,7 @@ mod tests {
     #[test]
     fn validate_plan_catches_invalid_function() {
         // A non-existent function should fail during planning.
-        let mut transform =
-            SqlTransform::new("SELECT nonexistent_fn(level) FROM logs").unwrap();
+        let mut transform = SqlTransform::new("SELECT nonexistent_fn(level) FROM logs").unwrap();
         let err = transform.validate_plan();
         assert!(
             err.is_err(),
@@ -1592,8 +1592,7 @@ mod tests {
 
     #[test]
     fn validate_plan_accepts_filter_query() {
-        let mut transform =
-            SqlTransform::new("SELECT * FROM logs WHERE level = 'ERROR'").unwrap();
+        let mut transform = SqlTransform::new("SELECT * FROM logs WHERE level = 'ERROR'").unwrap();
         transform
             .validate_plan()
             .expect("filter query should pass plan validation");
