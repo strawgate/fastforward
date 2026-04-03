@@ -1184,7 +1184,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Protocol-violation tests: debug_assert fires on mis-wired callers.
+    // Protocol-violation tests: debug_assert fires on incorrectly wired callers.
     // These are only meaningful in debug builds where debug_assert is active.
     // -----------------------------------------------------------------------
 
