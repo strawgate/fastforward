@@ -52,6 +52,13 @@ async fn query_arrow(query: &str) -> std::io::Result<Vec<RecordBatch>> {
         .send()
         .await
         .map_err(std::io::Error::other)?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return Err(std::io::Error::other(format!(
+            "ES query failed (HTTP {status}): {body}"
+        )));
+    }
     let body = response.bytes().await.map_err(std::io::Error::other)?;
     let cursor = std::io::Cursor::new(body);
     let reader = arrow::ipc::reader::StreamReader::try_new(cursor, None)

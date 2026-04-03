@@ -30,7 +30,7 @@ pub struct ElasticsearchAsyncSink {
     config: Arc<ElasticsearchConfig>,
     client: reqwest::Client,
     name: String,
-    pub batch_buf: Vec<u8>,
+    pub(crate) batch_buf: Vec<u8>,
     stats: Arc<ComponentStats>,
 }
 
@@ -182,6 +182,13 @@ impl ElasticsearchAsyncSink {
             req = req.header(k.clone(), v.clone());
         }
         let response = req.body(query_bytes).send().await.map_err(io::Error::other)?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(io::Error::other(format!(
+                "ES query failed (HTTP {status}): {body}"
+            )));
+        }
         let body = response.bytes().await.map_err(io::Error::other)?;
         let cursor = io::Cursor::new(body);
         let reader = StreamReader::try_new(cursor, None).map_err(|e| {

@@ -149,9 +149,6 @@ fn bench_arrow_query(
                 .await
         }) {
             Ok(response) => {
-                let elapsed = start.elapsed();
-                total_duration += elapsed;
-
                 if let Ok(body) = rt.block_on(response.bytes()) {
                     let cursor = std::io::Cursor::new(body);
                     if let Ok(reader) = StreamReader::try_new(cursor, None) {
@@ -162,6 +159,8 @@ fn bench_arrow_query(
                         }
                     }
                 }
+                // Stop clock after full response read + decode
+                total_duration += start.elapsed();
             }
             Err(e) => {
                 eprintln!("Arrow query failed: {}", e);
