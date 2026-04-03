@@ -218,8 +218,7 @@ impl InputSource for FramedInput {
                 let remainder_len = self
                     .remainders
                     .get(&sid)
-                    .map(|r| r.len() as u64)
-                    .unwrap_or(0);
+                    .map_or(0, |r| r.len() as u64);
                 (sid, ByteOffset(offset.0.saturating_sub(remainder_len)))
             })
             .collect()
