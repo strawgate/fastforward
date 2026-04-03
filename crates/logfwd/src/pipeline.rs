@@ -778,7 +778,7 @@ fn input_poll_loop(
                         input.stats.inc_rotations();
                         tracing::info!(input = input.source.name(), "input.file_truncated");
                     }
-                    _ => {}
+                    InputEvent::EndOfFile => {}
                 }
             }
             if buffered_since.is_none() && !input.buf.is_empty() {
