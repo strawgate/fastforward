@@ -369,9 +369,11 @@ Parses Kubernetes pod log paths (e.g.
 `/var/log/pods/<namespace>_<pod>_<uid>/<container>/`) to extract metadata.
 
 ```sql
+-- Requires source path column injection (not yet implemented).
+-- Once available, join on the source file path:
 SELECT l.level_str, l.message_str, k.namespace, k.pod_name, k.container_name
 FROM logs l
-JOIN k8s k ON l._file_str = k.log_path_prefix
+JOIN k8s k ON l._source_path_str = k.log_path_prefix
 ```
 
 Columns exposed by `k8s`:
@@ -487,7 +489,7 @@ pipelines:
         k.container_name,
         lbl.environment
       FROM logs l
-      LEFT JOIN k8s k ON l._file_str = k.log_path_prefix
+      LEFT JOIN k8s k ON l._source_path_str = k.log_path_prefix  -- requires source path injection
       CROSS JOIN labels lbl
       WHERE l.level_str IN ('ERROR', 'WARN')
         OR l.status_int >= 500
