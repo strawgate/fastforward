@@ -70,6 +70,7 @@ impl OtlpReceiverInput {
                         continue;
                     }
                     if request.method() != &tiny_http::Method::Post {
+                        // RFC 7231 §6.5.5: wrong method → 405 with Allow header.
                         let allow_header = "Allow: POST"
                             .parse::<tiny_http::Header>()
                             .expect("static header is valid");
@@ -289,7 +290,12 @@ fn decode_otlp_logs_json(body: &[u8]) -> Result<Vec<u8>, String> {
 
     let resource_logs = match root.get("resourceLogs").and_then(|v| v.as_array()) {
         Some(arr) => arr,
-        None => return Ok(Vec::new()),
+        None => {
+            // An object that parses as valid JSON but lacks `resourceLogs` is
+            // not a valid ExportLogsServiceRequest. Return 400 so the client
+            // knows its payload was rejected rather than silently discarding it.
+            return Err("missing required field 'resourceLogs' in OTLP JSON payload".to_string());
+        }
     };
 
     let mut out = Vec::new();
@@ -1008,7 +1014,6 @@ mod tests {
         })
         .to_string();
 
-        // Send with mixed-case Content-Type header.
         let resp = ureq::post(&url)
             .header("content-type", "Application/JSON")
             .send(body.as_bytes())
@@ -1019,12 +1024,77 @@ mod tests {
             "Application/JSON should be decoded as JSON and return 200"
         );
 
-        // Verify data actually arrived (receiver parsed the JSON body).
         std::thread::sleep(std::time::Duration::from_millis(50));
         let data = receiver.poll().unwrap();
         assert!(
             !data.is_empty(),
             "expected data from JSON body with mixed-case Content-Type"
+        );
+    }
+
+    // Bug #723: wrong HTTP method should return 405, not 404.
+    #[test]
+    fn wrong_http_method_returns_405() {
+        let receiver = OtlpReceiverInput::new_with_capacity("test", "127.0.0.1:0", 16).unwrap();
+        let port = receiver.local_addr().port();
+        let url = format!("http://127.0.0.1:{port}/v1/logs");
+
+        for (method, result) in [
+            ("GET", ureq::get(&url).call()),
+            ("DELETE", ureq::delete(&url).call()),
+        ] {
+            let status: u16 = match result {
+                Ok(resp) => resp.status().as_u16(),
+                Err(ureq::Error::StatusCode(code)) => code,
+                Err(e) => panic!("unexpected error for {method}: {e}"),
+            };
+            assert_eq!(
+                status, 405,
+                "{method} /v1/logs should return 405 Method Not Allowed, got {status}"
+            );
+        }
+    }
+
+    // Bug #722: JSON body missing resourceLogs should return 400, not 200.
+    #[test]
+    fn missing_resource_logs_returns_400() {
+        let receiver = OtlpReceiverInput::new_with_capacity("test", "127.0.0.1:0", 16).unwrap();
+        let port = receiver.local_addr().port();
+        let url = format!("http://127.0.0.1:{port}/v1/logs");
+
+        let bad_bodies = [r#"{}"#, r#"{"foo":"bar"}"#, r#"{"resourceLogs":null}"#];
+        for body in &bad_bodies {
+            let result = ureq::post(&url)
+                .header("content-type", "application/json")
+                .send(body.as_bytes());
+            let status: u16 = match result {
+                Ok(resp) => resp.status().as_u16(),
+                Err(ureq::Error::StatusCode(code)) => code,
+                Err(e) => panic!("unexpected error for body {body}: {e}"),
+            };
+            assert_eq!(status, 400, "body {body:?} should return 400, got {status}");
+        }
+    }
+
+    // Valid OTLP JSON should still return 200 after the 400 fix.
+    #[test]
+    fn valid_otlp_json_returns_200() {
+        let receiver = OtlpReceiverInput::new_with_capacity("test", "127.0.0.1:0", 16).unwrap();
+        let port = receiver.local_addr().port();
+        let url = format!("http://127.0.0.1:{port}/v1/logs");
+
+        let valid_body = r#"{"resourceLogs":[{"scopeLogs":[{"logRecords":[{"severityText":"INFO","body":{"stringValue":"hello"}}]}]}]}"#;
+        let result = ureq::post(&url)
+            .header("content-type", "application/json")
+            .send(valid_body.as_bytes());
+        let status: u16 = match result {
+            Ok(resp) => resp.status().as_u16(),
+            Err(ureq::Error::StatusCode(code)) => code,
+            Err(e) => panic!("unexpected error: {e}"),
+        };
+        assert_eq!(
+            status, 200,
+            "valid OTLP JSON should return 200, got {status}"
         );
     }
 }

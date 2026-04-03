@@ -114,6 +114,10 @@ async fn main_inner() -> i32 {
         return EXIT_OK;
     }
 
+    // Normalise arg order: allow flags like --validate before --config.
+    // Scan for the primary command flag regardless of position.
+    let args = normalize_args(args);
+
     let result = match args[1].as_str() {
         "--config" | "-c" => cmd_config(&args).await,
         "--blackhole" => cmd_blackhole(&args).await,
@@ -135,38 +139,83 @@ async fn main_inner() -> i32 {
 }
 
 fn print_usage() {
-    eprintln!(
+    println!(
         "{}logfwd{} {}v{VERSION}{} -- fast log forwarder with SQL transforms",
         bold(),
         reset(),
         dim(),
         reset(),
     );
-    eprintln!();
-    eprintln!("{}USAGE:{}", bold(), reset());
-    eprintln!("  logfwd --config <config.yaml> [--validate] [--dry-run]");
-    eprintln!("  logfwd --blackhole [bind_addr]");
-    eprintln!("  logfwd --generate-json <num_lines> <output_file>");
-    eprintln!();
-    eprintln!("{}OPTIONS:{}", bold(), reset());
-    eprintln!("  -c, --config <path>    Run pipeline from YAML config");
-    eprintln!("      --validate         Validate config and exit (alias: --check)");
-    eprintln!("      --dry-run          Build pipelines without running");
-    eprintln!("      --blackhole [addr] OTLP blackhole receiver (default: 127.0.0.1:4318)");
-    eprintln!("      --generate-json    Generate synthetic JSON log file");
-    eprintln!("  -h, --help             Show this help");
-    eprintln!("  -V, --version          Show version");
-    eprintln!();
-    eprintln!("{}EXIT CODES:{}", bold(), reset());
-    eprintln!("  0  Success");
-    eprintln!("  1  Configuration error");
-    eprintln!("  2  Runtime error");
-    eprintln!();
-    eprintln!(
+    println!();
+    println!("{}USAGE:{}", bold(), reset());
+    println!("  logfwd --config <config.yaml> [--validate] [--dry-run]");
+    println!("  logfwd --blackhole [bind_addr]");
+    println!("  logfwd --generate-json <num_lines> <output_file>");
+    println!();
+    println!("{}OPTIONS:{}", bold(), reset());
+    println!("  -c, --config <path>    Run pipeline from YAML config");
+    println!("      --validate         Validate config and exit (alias: --check)");
+    println!("      --dry-run          Build pipelines without running");
+    println!("      --blackhole [addr] OTLP blackhole receiver (default: 127.0.0.1:4318)");
+    println!("      --generate-json    Generate synthetic JSON log file");
+    println!("  -h, --help             Show this help");
+    println!("  -V, --version          Show version");
+    println!();
+    println!("{}EXIT CODES:{}", bold(), reset());
+    println!("  0  Success");
+    println!("  1  Configuration error");
+    println!("  2  Runtime error");
+    println!();
+    println!(
         "{}Respects NO_COLOR (https://no-color.org){}",
         dim(),
         reset(),
     );
+}
+
+// ---------------------------------------------------------------------------
+// Arg normalisation
+// ---------------------------------------------------------------------------
+
+/// Reorder args so that --config/-c always appears at position 1.
+///
+/// Users of tools like `nginx -t -c config` expect to put flags before the
+/// config path. This allows `logfwd --validate --config foo.yaml` in addition
+/// to the canonical `logfwd --config foo.yaml --validate`.
+fn normalize_args(args: Vec<String>) -> Vec<String> {
+    // If already in canonical form, nothing to do.
+    if args.get(1).is_some_and(|a| a == "--config" || a == "-c") {
+        return args;
+    }
+
+    // Find --config/-c anywhere in the arg list.
+    let config_pos = args
+        .iter()
+        .skip(1)
+        .position(|a| a == "--config" || a == "-c")
+        .map(|i| i + 1);
+
+    let Some(pos) = config_pos else {
+        return args;
+    };
+
+    // config_path is the value after --config/-c.
+    if pos + 1 >= args.len() {
+        return args;
+    }
+
+    // Build normalised list: program, --config, path, then everything else.
+    let mut out = Vec::with_capacity(args.len());
+    out.push(args[0].clone());
+    out.push(args[pos].clone());
+    out.push(args[pos + 1].clone());
+    for (i, a) in args.iter().enumerate().skip(1) {
+        if i == pos || i == pos + 1 {
+            continue;
+        }
+        out.push(a.clone());
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -283,7 +332,8 @@ fn validate_pipelines(
     for (name, pipe_cfg) in &config.pipelines {
         match Pipeline::from_config(name, pipe_cfg, &meter, base_path) {
             Ok(_) => {
-                eprintln!("  {}ready{}: {}{name}{}", green(), reset(), bold(), reset());
+                // Success output goes to stdout so scripts can capture it.
+                println!("  {}ready{}: {}{name}{}", green(), reset(), bold(), reset());
             }
             Err(e) => {
                 eprintln!("  {}error{}: pipeline '{name}': {e}", red(), reset());
@@ -299,7 +349,8 @@ fn validate_pipelines(
     }
 
     let label = if dry_run { "dry run ok" } else { "config ok" };
-    eprintln!(
+    // Success summary goes to stdout so scripts can parse it reliably.
+    println!(
         "{}{label}{}: {} pipeline(s)",
         green(),
         reset(),
@@ -379,9 +430,22 @@ async fn run_pipelines(
             use tokio::signal::unix::{SignalKind, signal};
             let mut sigterm =
                 signal(SignalKind::terminate()).expect("failed to register SIGTERM handler");
-            tokio::select! {
-                _ = tokio::signal::ctrl_c() => {}
-                _ = sigterm.recv() => {}
+            // Install a SIGHUP handler so logrotate / supervisors don't kill us.
+            // Config reload is not yet implemented; we ignore SIGHUP and log a warning.
+            let mut sighup =
+                signal(SignalKind::hangup()).expect("failed to register SIGHUP handler");
+            loop {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => break,
+                    _ = sigterm.recv() => break,
+                    _ = sighup.recv() => {
+                        eprintln!(
+                            "{}logfwd{}: SIGHUP received — config reload not yet implemented, ignoring",
+                            yellow(), reset(),
+                        );
+                        // Continue the loop — SIGHUP does not trigger shutdown.
+                    }
+                }
             }
         }
         #[cfg(not(unix))]

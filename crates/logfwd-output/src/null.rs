@@ -20,6 +20,9 @@ pub struct NullSink {
     name: String,
     batches_discarded: AtomicU64,
     rows_discarded: AtomicU64,
+    // Stored for API consistency with other sinks; not used by NullSink since
+    // discarded data is not worth metering at the byte level.
+    #[allow(dead_code)]
     stats: Arc<ComponentStats>,
 }
 
@@ -49,7 +52,9 @@ impl OutputSink for NullSink {
         self.batches_discarded.fetch_add(1, Ordering::Relaxed);
         let num_rows = batch.num_rows() as u64;
         self.rows_discarded.fetch_add(num_rows, Ordering::Relaxed);
-        self.stats.inc_lines(num_rows);
+        // Line counting is done once by the pipeline after send_batch returns
+        // (via PipelineMetrics::inc_output_success). Sinks must not also call
+        // inc_lines or the counter is doubled.
         Ok(())
     }
 
@@ -108,7 +113,10 @@ mod tests {
     }
 
     #[test]
-    fn null_sink_records_stats() {
+    fn null_sink_does_not_increment_lines_total() {
+        // Line counting is the pipeline's responsibility (PipelineMetrics::inc_output_success).
+        // NullSink must NOT call inc_lines, or the counter would be doubled
+        // every time a batch is forwarded.
         use arrow::array::Int32Array;
         use arrow::datatypes::{DataType, Field, Schema};
         use std::sync::Arc;
@@ -127,6 +135,13 @@ mod tests {
         sink.send_batch(&batch, &meta).unwrap();
         sink.send_batch(&batch, &meta).unwrap();
 
-        assert_eq!(stats.lines_total.load(Ordering::Relaxed), 6);
+        // Sink must not increment lines_total — that is pipeline.rs's job.
+        assert_eq!(
+            stats.lines_total.load(Ordering::Relaxed),
+            0,
+            "sink must not double-count lines"
+        );
+        // Row-level counters on the sink itself are still tracked.
+        assert_eq!(sink.rows_discarded(), 6);
     }
 }
