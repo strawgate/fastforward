@@ -221,6 +221,15 @@ build-pgo:
 bench:
     cargo bench -p logfwd-bench
 
+# Run all criterion benchmarks including heavier I/O and batch formation benches
+bench-full:
+    cargo bench -p logfwd-bench
+
+# Run system-level benchmarks (pipeline, contention, backpressure — requires running services)
+bench-system:
+    @echo "System-level benchmarks: pipeline end-to-end with real I/O"
+    just bench-pipelines
+
 # Run competitive benchmarks (binary mode, local dev)
 bench-competitive *ARGS:
     cargo run -p logfwd-competitive-bench --release -- {{ARGS}}

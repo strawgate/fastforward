@@ -5,7 +5,6 @@
 
 #![allow(deprecated)] // Benchmarks use sync OutputSink; migration tracked separately.
 
-use std::fmt::Write;
 use std::sync::Arc;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
@@ -21,11 +20,13 @@ use logfwd_output::{
 use logfwd_transform::SqlTransform;
 
 // ---------------------------------------------------------------------------
-// Test data generators
+// Test data generators (legacy — kept for backward compatibility;
+// new benchmarks should use logfwd_bench::generators)
 // ---------------------------------------------------------------------------
 
 /// Generate N newline-delimited JSON log lines (~250 bytes each).
 fn gen_json_lines(n: usize) -> Vec<u8> {
+    use std::fmt::Write;
     let levels = ["INFO", "ERROR", "DEBUG", "WARN"];
     let paths = [
         "/api/users",
@@ -54,6 +55,7 @@ fn gen_json_lines(n: usize) -> Vec<u8> {
 
 /// Generate N CRI-formatted log lines wrapping JSON.
 fn gen_cri_lines(n: usize) -> Vec<u8> {
+    use std::fmt::Write;
     let levels = ["INFO", "ERROR", "DEBUG", "WARN"];
     let mut s = String::with_capacity(n * 310);
     for i in 0..n {

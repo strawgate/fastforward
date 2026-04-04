@@ -1,0 +1,204 @@
+//! Batch formation timing benchmarks.
+//!
+//! Measures how batch size affects scan + transform throughput and captures
+//! the amortization curve: at what batch size does per-row overhead stabilize?
+//!
+//! - Varies batch sizes: 100, 500, 1K, 5K, 10K, 50K, 100K rows
+//! - Measures: scan time, transform time, and combined throughput per batch
+//! - Tracks: per-row cost at each batch size to find the amortization knee
+
+#![allow(deprecated)]
+
+use std::sync::Arc;
+
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+
+use logfwd_arrow::scanner::Scanner;
+use logfwd_bench::generators;
+use logfwd_core::scan_config::ScanConfig;
+use logfwd_output::{BatchMetadata, Compression, OtlpProtocol, OtlpSink, OutputSink};
+use logfwd_transform::SqlTransform;
+use logfwd_types::diagnostics::ComponentStats;
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+fn make_otlp_sink() -> OtlpSink {
+    OtlpSink::new(
+        "bench".into(),
+        "http://localhost:1".into(),
+        OtlpProtocol::Http,
+        Compression::None,
+        vec![],
+        Arc::new(ComponentStats::default()),
+    )
+}
+
+struct NullSink;
+
+impl OutputSink for NullSink {
+    fn send_batch(
+        &mut self,
+        _batch: &arrow::record_batch::RecordBatch,
+        _metadata: &BatchMetadata,
+    ) -> std::io::Result<()> {
+        Ok(())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+    fn name(&self) -> &'static str {
+        "null"
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Batch size scaling: scan
+// ---------------------------------------------------------------------------
+
+fn bench_batch_scan(c: &mut Criterion) {
+    let mut group = c.benchmark_group("batch_scan");
+    group.sample_size(20);
+
+    let batch_sizes: &[usize] = &[100, 500, 1_000, 5_000, 10_000, 50_000, 100_000];
+
+    for &n in batch_sizes {
+        let data = generators::gen_production_mixed(n, 42);
+
+        group.throughput(Throughput::Elements(n as u64));
+        group.bench_with_input(BenchmarkId::new("scan", n), &data, |b, data| {
+            let mut scanner = Scanner::new(ScanConfig::default());
+            b.iter(|| {
+                scanner
+                    .scan_detached(bytes::Bytes::from(data.clone()))
+                    .expect("scan should not fail")
+            });
+        });
+    }
+
+    group.finish();
+}
+
+// ---------------------------------------------------------------------------
+// Batch size scaling: scan + transform
+// ---------------------------------------------------------------------------
+
+fn bench_batch_transform(c: &mut Criterion) {
+    let mut group = c.benchmark_group("batch_transform");
+    group.sample_size(20);
+
+    let meta = generators::make_metadata();
+    let batch_sizes: &[usize] = &[100, 500, 1_000, 5_000, 10_000, 50_000];
+
+    for &n in batch_sizes {
+        let data = generators::gen_production_mixed(n, 42);
+
+        group.throughput(Throughput::Elements(n as u64));
+
+        // Scan + SELECT * (passthrough)
+        group.bench_with_input(BenchmarkId::new("scan_passthrough", n), &data, |b, data| {
+            let mut scanner = Scanner::new(ScanConfig::default());
+            let mut transform = SqlTransform::new("SELECT * FROM logs").unwrap();
+            let mut sink = NullSink;
+            b.iter(|| {
+                let batch = scanner
+                    .scan_detached(bytes::Bytes::from(data.clone()))
+                    .expect("scan should not fail");
+                let result = transform.execute_blocking(batch).unwrap();
+                sink.send_batch(&result, &meta).unwrap();
+            });
+        });
+
+        // Scan + WHERE filter
+        group.bench_with_input(BenchmarkId::new("scan_filter", n), &data, |b, data| {
+            let mut scanner = Scanner::new(ScanConfig::default());
+            let mut transform =
+                SqlTransform::new("SELECT * FROM logs WHERE level_str = 'ERROR'").unwrap();
+            let mut sink = NullSink;
+            b.iter(|| {
+                let batch = scanner
+                    .scan_detached(bytes::Bytes::from(data.clone()))
+                    .expect("scan should not fail");
+                let result = transform.execute_blocking(batch).unwrap();
+                sink.send_batch(&result, &meta).unwrap();
+            });
+        });
+    }
+
+    group.finish();
+}
+
+// ---------------------------------------------------------------------------
+// Batch size scaling: full pipeline (scan + transform + encode)
+// ---------------------------------------------------------------------------
+
+fn bench_batch_pipeline(c: &mut Criterion) {
+    let mut group = c.benchmark_group("batch_pipeline");
+    group.sample_size(20);
+
+    let meta = generators::make_metadata();
+    let batch_sizes: &[usize] = &[100, 500, 1_000, 5_000, 10_000, 50_000];
+
+    for &n in batch_sizes {
+        let data = generators::gen_production_mixed(n, 42);
+
+        group.throughput(Throughput::Elements(n as u64));
+
+        // Full pipeline: scan → SELECT * → OTLP encode
+        group.bench_with_input(
+            BenchmarkId::new("scan_transform_otlp", n),
+            &data,
+            |b, data| {
+                let mut scanner = Scanner::new(ScanConfig::default());
+                let mut transform = SqlTransform::new("SELECT * FROM logs").unwrap();
+                let mut sink = make_otlp_sink();
+                b.iter(|| {
+                    let batch = scanner
+                        .scan_detached(bytes::Bytes::from(data.clone()))
+                        .expect("scan should not fail");
+                    let result = transform.execute_blocking(batch).unwrap();
+                    sink.encode_batch(&result, &meta);
+                });
+            },
+        );
+
+        // Full pipeline: scan → SELECT * → JSON serialize
+        group.bench_with_input(
+            BenchmarkId::new("scan_transform_json", n),
+            &data,
+            |b, data| {
+                let mut scanner = Scanner::new(ScanConfig::default());
+                let mut transform = SqlTransform::new("SELECT * FROM logs").unwrap();
+                b.iter(|| {
+                    let batch = scanner
+                        .scan_detached(bytes::Bytes::from(data.clone()))
+                        .expect("scan should not fail");
+                    let result = transform.execute_blocking(batch).unwrap();
+                    let cols = logfwd_output::build_col_infos(&result);
+                    let mut buf = Vec::with_capacity(result.num_rows() * 300);
+                    for row in 0..result.num_rows() {
+                        logfwd_output::write_row_json(&result, row, &cols, &mut buf)
+                            .expect("JSON serialization should not fail");
+                        buf.push(b'\n');
+                    }
+                    std::hint::black_box(buf.len());
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+// ---------------------------------------------------------------------------
+// Entry point
+// ---------------------------------------------------------------------------
+
+criterion_group!(
+    benches,
+    bench_batch_scan,
+    bench_batch_transform,
+    bench_batch_pipeline
+);
+criterion_main!(benches);
