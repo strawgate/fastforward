@@ -18,11 +18,19 @@ use arrow::array::{Array, AsArray};
 use arrow::datatypes::DataType;
 use std::collections::BTreeSet;
 
-fuzz_target!(|data: &[u8]| {
-    let mut detached_scanner = Scanner::new(ScanConfig::default());
+fn check_consistency(data: &[u8], validate_utf8: bool) {
+    let config_d = ScanConfig {
+        validate_utf8,
+        ..ScanConfig::default()
+    };
+    let config_s = ScanConfig {
+        validate_utf8,
+        ..ScanConfig::default()
+    };
+    let mut detached_scanner = Scanner::new(config_d);
     let Ok(detached_batch) = detached_scanner.scan_detached(bytes::Bytes::copy_from_slice(data)) else { return; };
 
-    let mut streaming_scanner = Scanner::new(ScanConfig::default());
+    let mut streaming_scanner = Scanner::new(config_s);
     let Ok(streaming_batch) = streaming_scanner.scan(bytes::Bytes::copy_from_slice(data)) else { return; };
 
     // Row counts must match.
@@ -114,4 +122,9 @@ fuzz_target!(|data: &[u8]| {
             }
         }
     }
+}
+
+fuzz_target!(|data: &[u8]| {
+    check_consistency(data, false);
+    check_consistency(data, true);
 });
