@@ -22,12 +22,18 @@ pub struct ComponentStats {
     pub rotations_total: AtomicU64,
     /// Lines that failed format parsing (e.g. malformed CRI lines).
     pub parse_errors_total: AtomicU64,
+    /// Cumulative nanoseconds spent in output send operations (HTTP round-trips, etc.).
+    pub send_ns_total: AtomicU64,
+    /// Number of completed output send operations.
+    pub send_count: AtomicU64,
     // OTel counters (for OTLP push)
     otel_lines: Counter<u64>,
     otel_bytes: Counter<u64>,
     otel_errors: Counter<u64>,
     otel_rotations: Counter<u64>,
     otel_parse_errors: Counter<u64>,
+    otel_send_ns: Counter<u64>,
+    otel_send_count: Counter<u64>,
     otel_attrs: Vec<KeyValue>,
 }
 
@@ -40,11 +46,15 @@ impl ComponentStats {
             errors_total: AtomicU64::new(0),
             rotations_total: AtomicU64::new(0),
             parse_errors_total: AtomicU64::new(0),
+            send_ns_total: AtomicU64::new(0),
+            send_count: AtomicU64::new(0),
             otel_lines: meter.u64_counter(format!("{prefix}_lines")).build(),
             otel_bytes: meter.u64_counter(format!("{prefix}_bytes")).build(),
             otel_errors: meter.u64_counter(format!("{prefix}_errors")).build(),
             otel_rotations: meter.u64_counter(format!("{prefix}_rotations")).build(),
             otel_parse_errors: meter.u64_counter(format!("{prefix}_parse_errors")).build(),
+            otel_send_ns: meter.u64_counter(format!("{prefix}_send_ns")).build(),
+            otel_send_count: meter.u64_counter(format!("{prefix}_send_count")).build(),
             otel_attrs: attrs,
         }
     }
@@ -85,6 +95,14 @@ impl ComponentStats {
         self.otel_parse_errors.add(n, &self.otel_attrs);
     }
 
+    /// Record a completed send operation with its duration in nanoseconds.
+    pub fn record_send(&self, ns: u64) {
+        self.send_ns_total.fetch_add(ns, Ordering::Relaxed);
+        self.send_count.fetch_add(1, Ordering::Relaxed);
+        self.otel_send_ns.add(ns, &self.otel_attrs);
+        self.otel_send_count.add(1, &self.otel_attrs);
+    }
+
     fn lines(&self) -> u64 {
         self.lines_total.load(Ordering::Relaxed)
     }
@@ -103,6 +121,14 @@ impl ComponentStats {
 
     fn parse_errors(&self) -> u64 {
         self.parse_errors_total.load(Ordering::Relaxed)
+    }
+
+    fn send_ns(&self) -> u64 {
+        self.send_ns_total.load(Ordering::Relaxed)
+    }
+
+    fn send_count(&self) -> u64 {
+        self.send_count.load(Ordering::Relaxed)
     }
 }
 
@@ -142,9 +168,15 @@ pub struct PipelineMetrics {
     pub scan_nanos_total: AtomicU64,
     pub transform_nanos_total: AtomicU64,
     pub output_nanos_total: AtomicU64,
+    /// Cumulative total batch processing time (scan + transform + output) in nanoseconds.
+    pub batch_nanos_total: AtomicU64,
     /// Unix timestamp (nanoseconds) of the last successfully processed batch.
     /// Zero means no batch has been processed yet.
     pub last_batch_time_ns: AtomicU64,
+    /// Current number of messages in the input→pipeline channel.
+    pub channel_depth: AtomicU64,
+    /// Total capacity of the input→pipeline channel.
+    pub channel_capacity: AtomicU64,
     // OTel counters (for OTLP push)
     meter: Meter,
     otel_attrs: Vec<KeyValue>,
@@ -158,6 +190,7 @@ pub struct PipelineMetrics {
     otel_scan_nanos: Counter<u64>,
     otel_transform_nanos: Counter<u64>,
     otel_output_nanos: Counter<u64>,
+    otel_batch_nanos: Counter<u64>,
     otel_backpressure_stalls: Counter<u64>,
 }
 
@@ -190,7 +223,10 @@ impl PipelineMetrics {
             scan_nanos_total: AtomicU64::new(0),
             transform_nanos_total: AtomicU64::new(0),
             output_nanos_total: AtomicU64::new(0),
+            batch_nanos_total: AtomicU64::new(0),
             last_batch_time_ns: AtomicU64::new(0),
+            channel_depth: AtomicU64::new(0),
+            channel_capacity: AtomicU64::new(0),
             otel_transform_errors: meter.u64_counter("logfwd_transform_errors").build(),
             otel_batches: meter.u64_counter("logfwd_batches").build(),
             otel_batch_rows: meter.u64_counter("logfwd_batch_rows").build(),
@@ -201,6 +237,7 @@ impl PipelineMetrics {
             otel_scan_nanos: meter.u64_counter("logfwd_stage_scan_nanos").build(),
             otel_transform_nanos: meter.u64_counter("logfwd_stage_transform_nanos").build(),
             otel_output_nanos: meter.u64_counter("logfwd_stage_output_nanos").build(),
+            otel_batch_nanos: meter.u64_counter("logfwd_stage_batch_nanos").build(),
             otel_backpressure_stalls: meter.u64_counter("logfwd_backpressure_stalls").build(),
             meter: meter.clone(),
             otel_attrs: attrs,
@@ -283,6 +320,7 @@ impl PipelineMetrics {
     }
 
     pub fn record_batch(&self, rows: u64, scan_ns: u64, transform_ns: u64, output_ns: u64) {
+        let total_ns = scan_ns + transform_ns + output_ns;
         self.batches_total.fetch_add(1, Ordering::Relaxed);
         self.batch_rows_total.fetch_add(rows, Ordering::Relaxed);
         self.scan_nanos_total.fetch_add(scan_ns, Ordering::Relaxed);
@@ -290,6 +328,8 @@ impl PipelineMetrics {
             .fetch_add(transform_ns, Ordering::Relaxed);
         self.output_nanos_total
             .fetch_add(output_ns, Ordering::Relaxed);
+        self.batch_nanos_total
+            .fetch_add(total_ns, Ordering::Relaxed);
         self.last_batch_time_ns
             .store(now_nanos(), Ordering::Relaxed);
 
@@ -299,6 +339,7 @@ impl PipelineMetrics {
         self.otel_transform_nanos
             .add(transform_ns, &self.otel_attrs);
         self.otel_output_nanos.add(output_ns, &self.otel_attrs);
+        self.otel_batch_nanos.add(total_ns, &self.otel_attrs);
     }
 
     pub fn inc_backpressure_stall(&self) {
@@ -317,6 +358,21 @@ impl PipelineMetrics {
     pub fn inc_scan_error(&self) {
         self.scan_errors_total.fetch_add(1, Ordering::Relaxed);
         self.otel_scan_errors.add(1, &self.otel_attrs);
+    }
+
+    /// Set the channel capacity (call once at pipeline startup).
+    pub fn set_channel_capacity(&self, cap: u64) {
+        self.channel_capacity.store(cap, Ordering::Relaxed);
+    }
+
+    /// Increment channel depth when a message is sent to the channel.
+    pub fn inc_channel_depth(&self) {
+        self.channel_depth.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Decrement channel depth when a message is received from the channel.
+    pub fn dec_channel_depth(&self) {
+        self.channel_depth.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -843,13 +899,22 @@ impl DiagnosticsServer {
                 .outputs
                 .iter()
                 .map(|(name, typ, stats)| {
+                    let sc = stats.send_count();
+                    let avg_send_ms = if sc > 0 {
+                        stats.send_ns() as f64 / sc as f64 / 1e6
+                    } else {
+                        0.0
+                    };
                     format!(
-                        r#"{{"name":"{}","type":"{}","lines_total":{},"bytes_total":{},"errors":{}}}"#,
+                        r#"{{"name":"{}","type":"{}","lines_total":{},"bytes_total":{},"errors":{},"send_ns_total":{},"send_count":{},"avg_send_ms":{:.3}}}"#,
                         esc(name),
                         esc(typ),
                         stats.lines(),
                         stats.bytes(),
                         stats.errors(),
+                        stats.send_ns(),
+                        sc,
+                        avg_send_ms,
                     )
                 })
                 .collect();
@@ -864,11 +929,15 @@ impl DiagnosticsServer {
             let scan_s = pm.scan_nanos_total.load(Ordering::Relaxed) as f64 / 1e9;
             let transform_s = pm.transform_nanos_total.load(Ordering::Relaxed) as f64 / 1e9;
             let output_s = pm.output_nanos_total.load(Ordering::Relaxed) as f64 / 1e9;
+            let batch_s = pm.batch_nanos_total.load(Ordering::Relaxed) as f64 / 1e9;
 
             let last_batch_ns = pm.last_batch_time_ns.load(Ordering::Relaxed);
 
+            let ch_depth = pm.channel_depth.load(Ordering::Relaxed);
+            let ch_capacity = pm.channel_capacity.load(Ordering::Relaxed);
+
             pipelines_json.push(format!(
-                r#"{{"name":"{}","inputs":[{}],"transform":{{"sql":"{}","lines_in":{},"lines_out":{},"errors":{},"filter_drop_rate":{:.3}}},"outputs":[{}],"batches":{{"total":{},"avg_rows":{:.1},"flush_by_size":{},"flush_by_timeout":{},"dropped_batches_total":{},"scan_errors_total":{},"last_batch_time_ns":{}}},"stage_seconds":{{"scan":{:.6},"transform":{:.6},"output":{:.6}}}}}"#,
+                r#"{{"name":"{}","inputs":[{}],"transform":{{"sql":"{}","lines_in":{},"lines_out":{},"errors":{},"filter_drop_rate":{:.3}}},"outputs":[{}],"batches":{{"total":{},"avg_rows":{:.1},"flush_by_size":{},"flush_by_timeout":{},"dropped_batches_total":{},"scan_errors_total":{},"last_batch_time_ns":{}}},"stage_seconds":{{"scan":{:.6},"transform":{:.6},"output":{:.6},"total":{:.6}}},"channel":{{"depth":{},"capacity":{}}}}}"#,
                 esc(&pm.name),
                 inputs_json.join(","),
                 esc(&pm.transform_sql),
@@ -887,6 +956,9 @@ impl DiagnosticsServer {
                 scan_s,
                 transform_s,
                 output_s,
+                batch_s,
+                ch_depth,
+                ch_capacity,
             ));
         }
 
@@ -1153,7 +1225,16 @@ mod tests {
         pm.transform_nanos_total
             .store(500_000_000, Ordering::Relaxed); // 0.5s
         pm.output_nanos_total.store(200_000_000, Ordering::Relaxed); // 0.2s
+        pm.batch_nanos_total.store(800_000_000, Ordering::Relaxed); // 0.8s
         pm.transform_errors.store(3, Ordering::Relaxed);
+
+        // Channel metrics.
+        pm.channel_depth.store(3, Ordering::Relaxed);
+        pm.channel_capacity.store(16, Ordering::Relaxed);
+
+        // Output send latency.
+        out.send_ns_total.store(150_000_000, Ordering::Relaxed); // 150ms total
+        out.send_count.store(10, Ordering::Relaxed);
 
         let mut server = DiagnosticsServer::new("127.0.0.1:0");
         server.add_pipeline(Arc::new(pm));
@@ -1275,6 +1356,34 @@ mod tests {
         assert!(body.contains(r#""scan_errors_total":2"#), "body: {}", body);
         assert!(body.contains(r#""rotations":1"#), "body: {}", body);
         assert!(body.contains(r#""parse_errors":0"#), "body: {}", body);
+        // #521: batch latency in stage_seconds.total
+        assert!(
+            body.contains(r#""total":0.800000"#),
+            "missing batch total seconds: {}",
+            body
+        );
+        // #522: channel depth and capacity
+        assert!(
+            body.contains(r#""channel":{"depth":3,"capacity":16}"#),
+            "missing channel metrics: {}",
+            body
+        );
+        // #524: per-output send latency
+        assert!(
+            body.contains(r#""send_ns_total":150000000"#),
+            "missing send_ns_total: {}",
+            body
+        );
+        assert!(
+            body.contains(r#""send_count":10"#),
+            "missing send_count: {}",
+            body
+        );
+        assert!(
+            body.contains(r#""avg_send_ms":15.000"#),
+            "missing avg_send_ms: {}",
+            body
+        );
         assert!(
             body.contains(&format!(r#""version":"{}""#, env!("CARGO_PKG_VERSION"))),
             "body: {}",
@@ -1364,6 +1473,54 @@ mod tests {
         stats.inc_rotations();
         stats.inc_rotations();
         assert_eq!(stats.rotations_total.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn test_component_stats_send_latency() {
+        let stats = ComponentStats::new();
+        assert_eq!(stats.send_ns(), 0);
+        assert_eq!(stats.send_count(), 0);
+
+        stats.record_send(5_000_000); // 5ms
+        assert_eq!(stats.send_ns(), 5_000_000);
+        assert_eq!(stats.send_count(), 1);
+
+        stats.record_send(10_000_000); // 10ms
+        assert_eq!(stats.send_ns(), 15_000_000);
+        assert_eq!(stats.send_count(), 2);
+    }
+
+    #[test]
+    fn test_pipeline_batch_nanos_total() {
+        let meter = opentelemetry::global::meter("test");
+        let pm = PipelineMetrics::new("test", "SELECT *", &meter);
+
+        // record_batch should accumulate total_ns = scan + transform + output.
+        pm.record_batch(100, 10_000, 20_000, 30_000);
+        assert_eq!(pm.batch_nanos_total.load(Ordering::Relaxed), 60_000);
+        assert_eq!(pm.batches_total.load(Ordering::Relaxed), 1);
+
+        pm.record_batch(200, 5_000, 15_000, 25_000);
+        assert_eq!(pm.batch_nanos_total.load(Ordering::Relaxed), 105_000);
+        assert_eq!(pm.batches_total.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn test_pipeline_channel_depth() {
+        let meter = opentelemetry::global::meter("test");
+        let pm = PipelineMetrics::new("test", "SELECT *", &meter);
+
+        pm.set_channel_capacity(16);
+        assert_eq!(pm.channel_capacity.load(Ordering::Relaxed), 16);
+        assert_eq!(pm.channel_depth.load(Ordering::Relaxed), 0);
+
+        pm.inc_channel_depth();
+        pm.inc_channel_depth();
+        pm.inc_channel_depth();
+        assert_eq!(pm.channel_depth.load(Ordering::Relaxed), 3);
+
+        pm.dec_channel_depth();
+        assert_eq!(pm.channel_depth.load(Ordering::Relaxed), 2);
     }
 
     #[test]
