@@ -123,7 +123,7 @@ mod kani_proofs {
 
     /// SendResult::Ok is not a RetryAfter or Rejected variant.
     #[kani::proof]
-    fn proof_ok_is_not_retry_or_rejection() {
+    fn verify_ok_is_not_retry_or_rejection() {
         let result = SendResult::Ok;
         assert!(matches!(result, SendResult::Ok));
         assert!(!matches!(result, SendResult::RetryAfter(_)));
@@ -133,7 +133,7 @@ mod kani_proofs {
 
     /// SendResult::RetryAfter preserves the Duration for any bounded duration.
     #[kani::proof]
-    fn proof_retry_after_preserves_duration() {
+    fn verify_retry_after_preserves_duration() {
         let secs: u64 = kani::any();
         kani::assume(secs <= 3600);
         let d = Duration::from_secs(secs);
@@ -149,7 +149,7 @@ mod kani_proofs {
 
     /// SendResult::Rejected is not Ok or RetryAfter.
     #[kani::proof]
-    fn proof_rejected_is_not_ok_or_retry() {
+    fn verify_rejected_is_not_ok_or_retry() {
         let result = SendResult::Rejected("error".to_string());
         assert!(!matches!(result, SendResult::Ok));
         assert!(!matches!(result, SendResult::RetryAfter(_)));
@@ -159,7 +159,7 @@ mod kani_proofs {
 
     /// The three SendResult variants are mutually exclusive.
     #[kani::proof]
-    fn proof_send_result_variants_are_mutually_exclusive() {
+    fn verify_send_result_variants_are_mutually_exclusive() {
         let ok = SendResult::Ok;
         let retry = SendResult::RetryAfter(Duration::from_millis(100));
         let rejected = SendResult::Rejected("fail".to_string());
