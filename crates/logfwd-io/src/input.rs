@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
 
@@ -92,56 +91,25 @@ impl FileInput {
 
 impl InputSource for FileInput {
     fn poll(&mut self) -> io::Result<Vec<InputEvent>> {
-        // Snapshot path-to-source_id mapping BEFORE polling. This is
-        // critical because `tailer.poll()` may mutate internal state
-        // (e.g., re-open a rotated file with a new fingerprint), which
-        // would cause `source_id_for_path` to return the NEW identity
-        // for bytes that were read from the OLD file.
-        let source_id_snapshot: HashMap<PathBuf, Option<SourceId>> = self
-            .tailer
-            .file_paths()
-            .into_iter()
-            .map(|(sid, path)| (path, Some(sid)))
-            .collect();
-
+        // source_id is embedded in each TailEvent at the time of creation
+        // inside FileTailer::poll(), before any rotation mutates internal
+        // state. No snapshot HashMap is needed here.
         let tail_events = self.tailer.poll()?;
         let mut events = Vec::with_capacity(tail_events.len());
         for te in tail_events {
             match te {
-                TailEvent::Data { path, bytes } => {
-                    // Use the snapshot for data events — the bytes were
-                    // read from the file as it existed before poll().
-                    // Fall back to live lookup for files opened during
-                    // this poll (new files discovered by glob rescan).
-                    let source_id = source_id_snapshot
-                        .get(&path)
-                        .copied()
-                        .flatten()
-                        .or_else(|| self.tailer.source_id_for_path(&path));
+                TailEvent::Data {
+                    bytes, source_id, ..
+                } => {
                     events.push(InputEvent::Data { bytes, source_id });
                 }
-                TailEvent::Rotated { path } => {
-                    // After rotation, the old source_id is in the snapshot;
-                    // the live tailer now has the new file's identity.
-                    let source_id = source_id_snapshot
-                        .get(&path)
-                        .copied()
-                        .flatten()
-                        .or_else(|| self.tailer.source_id_for_path(&path));
+                TailEvent::Rotated { source_id, .. } => {
                     events.push(InputEvent::Rotated { source_id });
                 }
-                TailEvent::Truncated { path } => {
-                    let source_id = source_id_snapshot
-                        .get(&path)
-                        .copied()
-                        .flatten()
-                        .or_else(|| self.tailer.source_id_for_path(&path));
+                TailEvent::Truncated { source_id, .. } => {
                     events.push(InputEvent::Truncated { source_id });
                 }
-                TailEvent::EndOfFile { path } => {
-                    // EndOfFile comes from the live state (no-data poll),
-                    // so live lookup is fine here — the file wasn't mutated.
-                    let source_id = self.tailer.source_id_for_path(&path);
+                TailEvent::EndOfFile { source_id, .. } => {
                     events.push(InputEvent::EndOfFile { source_id });
                 }
             }
