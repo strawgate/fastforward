@@ -13,7 +13,7 @@ use arrow::record_batch::RecordBatch;
 use bytes::Bytes;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
-use logfwd_arrow::materialize::materialize_if_pinned;
+use logfwd_arrow::materialize::detach_if_attached;
 use logfwd_arrow::scanner::StreamingSimdScanner;
 use logfwd_core::scan_config::ScanConfig;
 use logfwd_transform::SqlTransform;
@@ -189,12 +189,12 @@ fn bench_persist(c: &mut Criterion) {
         let buf = Bytes::from(data.clone());
         group.throughput(Throughput::Bytes(data.len() as u64));
 
-        // streaming scan → materialize_if_pinned → IPC zstd
+        // streaming scan → detach → IPC zstd
         group.bench_function(BenchmarkId::new("streaming", name), |b| {
             let mut scanner = StreamingSimdScanner::new(ScanConfig::default());
             b.iter(|| {
                 let batch = scanner.scan(buf.clone()).unwrap();
-                let owned = logfwd_arrow::materialize::materialize(&batch);
+                let owned = logfwd_arrow::materialize::detach(&batch);
                 let compressed = write_ipc_zstd(&owned);
                 std::hint::black_box(compressed.len());
             });
@@ -215,7 +215,7 @@ fn bench_persist(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------------------
-// 3. Full pipeline: scan → SQL → materialize_if_pinned → IPC zstd
+// 3. Full pipeline: scan → SQL → detach_if_attached → IPC zstd
 // ---------------------------------------------------------------------------
 
 fn bench_pipeline(c: &mut Criterion) {
@@ -235,7 +235,7 @@ fn bench_pipeline(c: &mut Criterion) {
         b.iter(|| {
             let batch = scanner.scan(buf.clone()).unwrap();
             let transformed = transform.execute_blocking(batch).unwrap();
-            let owned = materialize_if_pinned(&transformed, &buf);
+            let owned = detach_if_attached(&transformed, &buf);
             let compressed = write_ipc_zstd(&owned);
             std::hint::black_box(compressed.len());
         });
@@ -260,7 +260,7 @@ fn bench_pipeline(c: &mut Criterion) {
         b.iter(|| {
             let batch = scanner.scan(buf.clone()).unwrap();
             let transformed = transform.execute_blocking(batch).unwrap();
-            let owned = materialize_if_pinned(&transformed, &buf);
+            let owned = detach_if_attached(&transformed, &buf);
             let compressed = write_ipc_zstd(&owned);
             std::hint::black_box(compressed.len());
         });
@@ -287,7 +287,7 @@ fn bench_pipeline(c: &mut Criterion) {
         b.iter(|| {
             let batch = scanner.scan(buf.clone()).unwrap();
             let transformed = transform.execute_blocking(batch).unwrap();
-            let owned = materialize_if_pinned(&transformed, &buf);
+            let owned = detach_if_attached(&transformed, &buf);
             let compressed = write_ipc_zstd(&owned);
             std::hint::black_box(compressed.len());
         });
@@ -368,7 +368,7 @@ fn bench_sizes(c: &mut Criterion) {
         let mut s1 = StreamingSimdScanner::new(ScanConfig::default());
         let streaming_batch = s1.scan(buf.clone()).unwrap();
         let streaming_mem = streaming_batch.get_array_memory_size();
-        let streaming_ipc = write_ipc_zstd(&logfwd_arrow::materialize::materialize(&streaming_batch));
+        let streaming_ipc = write_ipc_zstd(&logfwd_arrow::materialize::detach(&streaming_batch));
 
         let mut s2 = StreamingSimdScanner::new(ScanConfig::default());
         let owned_batch = s2.scan_owned(buf).unwrap();

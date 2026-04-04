@@ -608,17 +608,6 @@ impl StreamingBuilder {
             "finish_batch_owned called outside of a batch"
         );
         let num_rows = self.row_count as usize;
-
-        // Resolve the combined buffer (original + decoded) so we can read
-        // string bytes by offset regardless of whether they were decoded.
-        let combined: &[u8] = if self.decoded_buf.is_empty() {
-            &self.buf
-        } else {
-            // Need a contiguous view; build temporarily on the stack.
-            // (finish_batch does the same for StringViewArray.)
-            // We'll use the buf + decoded_buf separately via offset dispatch.
-            &[] // placeholder — we read via offset_read() below
-        };
         let has_decoded = !self.decoded_buf.is_empty();
 
         let mut schema_fields: Vec<Field> = Vec::with_capacity(self.num_active);
@@ -685,7 +674,7 @@ impl StreamingBuilder {
                     for row in 0..num_rows as u32 {
                         if vi < fc.str_views.len() && fc.str_views[vi].0 == row {
                             let (_, offset, len) = fc.str_views[vi];
-                            let s = self.read_str(offset, len, has_decoded, combined);
+                            let s = self.read_str(offset, len, has_decoded);
                             builder.append_value(s);
                             vi += 1;
                         } else {
@@ -751,7 +740,7 @@ impl StreamingBuilder {
                     for row in 0..num_rows as u32 {
                         if vi < fc.str_views.len() && fc.str_views[vi].0 == row {
                             let (_, offset, len) = fc.str_views[vi];
-                            let s = self.read_str(offset, len, has_decoded, combined);
+                            let s = self.read_str(offset, len, has_decoded);
                             builder.append_value(s);
                             vi += 1;
                         } else {
@@ -793,13 +782,7 @@ impl StreamingBuilder {
     ///
     /// Offsets `< buf.len()` read from the original input buffer.
     /// Offsets `>= buf.len()` read from `decoded_buf` at `offset - buf.len()`.
-    fn read_str<'a>(
-        &'a self,
-        offset: u32,
-        len: u32,
-        has_decoded: bool,
-        _combined: &'a [u8],
-    ) -> &'a str {
+    fn read_str(&self, offset: u32, len: u32, has_decoded: bool) -> &str {
         let start = offset as usize;
         let end = start + len as usize;
         let buf_len = self.buf.len();
