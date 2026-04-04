@@ -509,7 +509,10 @@ impl FileTailer {
                         });
                     }
                     Ok(ReadResult::TruncatedThenData(data)) => {
-                        events.push(TailEvent::Truncated { path: path.clone() });
+                        events.push(TailEvent::Truncated {
+                            path: path.clone(),
+                            source_id: pre_rotate_source_id,
+                        });
                         events.push(TailEvent::Data {
                             path: path.clone(),
                             bytes: data,
@@ -517,7 +520,10 @@ impl FileTailer {
                         });
                     }
                     Ok(ReadResult::Truncated) => {
-                        events.push(TailEvent::Truncated { path: path.clone() });
+                        events.push(TailEvent::Truncated {
+                            path: path.clone(),
+                            source_id: pre_rotate_source_id,
+                        });
                     }
                     Ok(ReadResult::NoData) => {}
                     Err(e) => {
@@ -644,7 +650,10 @@ impl FileTailer {
                     });
                 }
                 Ok(ReadResult::TruncatedThenData(data)) => {
-                    events.push(TailEvent::Truncated { path: path.clone() });
+                    events.push(TailEvent::Truncated {
+                        path: path.clone(),
+                        source_id,
+                    });
                     events.push(TailEvent::Data {
                         path: path.clone(),
                         bytes: data,
@@ -652,7 +661,10 @@ impl FileTailer {
                     });
                 }
                 Ok(ReadResult::Truncated) => {
-                    events.push(TailEvent::Truncated { path: path.clone() });
+                    events.push(TailEvent::Truncated {
+                        path: path.clone(),
+                        source_id,
+                    });
                 }
                 Ok(ReadResult::NoData) => {}
                 Err(e) => {
@@ -2081,7 +2093,7 @@ mod tests {
         let data: Vec<u8> = events
             .iter()
             .filter_map(|e| match e {
-                TailEvent::Data { path, bytes } if path == &evicted_path => Some(bytes.clone()),
+                TailEvent::Data { path, bytes, .. } if path == &evicted_path => Some(bytes.clone()),
                 _ => None,
             })
             .flatten()
