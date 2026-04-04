@@ -205,8 +205,8 @@ impl Pipeline {
             inputs.push(build_input_state(&input_name, &resolved_cfg, input_stats)?);
         }
 
-        // Restore previously saved file offsets by fingerprint (SourceId).
-        // No path needed — the tailer finds the matching file by fingerprint.
+        // Restore previously saved file offsets by compound identity (device + inode + fingerprint hash).
+        // No path needed — the tailer finds the matching file by compound identity.
         for cp in &saved_checkpoints {
             let source_id = SourceId(cp.source_id);
             for input in &mut inputs {

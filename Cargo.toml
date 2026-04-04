@@ -44,6 +44,7 @@ tokio = { version = "1" }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-opentelemetry = "0.32"
+xxhash-rust = { version = "0.8", features = ["xxh32", "xxh64"] }
 
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }

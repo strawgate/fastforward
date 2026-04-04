@@ -60,10 +60,10 @@ pub trait InputSource: Send {
         vec![]
     }
 
-    /// Restore a file offset by SourceId (fingerprint). Default: no-op.
+    /// Restore a file offset by SourceId (compound identity). Default: no-op.
     ///
-    /// Used for checkpoint restore — the checkpoint stores fingerprint + offset.
-    /// The input source finds the matching file by fingerprint, not path.
+    /// Used for checkpoint restore — the checkpoint stores compound identity + offset.
+    /// The input source finds the matching file by compound identity, not path.
     fn set_offset_by_source(&mut self, _source_id: SourceId, _offset: u64) {}
 }
 

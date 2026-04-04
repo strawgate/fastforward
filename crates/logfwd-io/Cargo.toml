@@ -25,7 +25,7 @@ serde_json = "1"
 socket2 = { version = "0.6", features = ["all"] }
 tiny_http = "0.12"
 zstd = "0.13"
-xxhash-rust = { version = "0.8.15", features = ["xxh32", "xxh64"] }
+xxhash-rust = { workspace = true }
 
 [dev-dependencies]
 dhat = "0.3"
