@@ -5,6 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 publish = false
 
+[lib]
+doctest = false
+
 [dependencies]
 logfwd-config = { version = "0.1.0", path = "../logfwd-config" }
 logfwd-core = { version = "0.1.0", path = "../logfwd-core" }
@@ -32,6 +35,9 @@ serde_json = "1.0.149"
 tiny_http = "0.12"
 memchr = "2"
 insta = "1"
+
+[features]
+elasticsearch_integration_tests = []
 
 [lints]
 workspace = true

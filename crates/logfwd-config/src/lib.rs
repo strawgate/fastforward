@@ -36,6 +36,7 @@ pub struct AuthConfig {
 
 /// Errors that can occur while loading or validating configuration.
 #[derive(Debug)]
+#[must_use]
 pub enum ConfigError {
     Io(std::io::Error),
     Yaml(serde_yaml_ng::Error),
@@ -83,6 +84,18 @@ pub enum InputType {
     Generator,
 }
 
+impl fmt::Display for InputType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            InputType::File => f.write_str("file"),
+            InputType::Udp => f.write_str("udp"),
+            InputType::Tcp => f.write_str("tcp"),
+            InputType::Otlp => f.write_str("otlp"),
+            InputType::Generator => f.write_str("generator"),
+        }
+    }
+}
+
 /// Recognised output types.
 ///
 /// Uses a custom `Deserialize` impl so that `type: null` in YAML (which
@@ -104,6 +117,23 @@ pub enum OutputType {
     TcpOut,
     /// Send datagrams over UDP.
     UdpOut,
+}
+
+impl fmt::Display for OutputType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            OutputType::Otlp => f.write_str("otlp"),
+            OutputType::Http => f.write_str("http"),
+            OutputType::Elasticsearch => f.write_str("elasticsearch"),
+            OutputType::Loki => f.write_str("loki"),
+            OutputType::Stdout => f.write_str("stdout"),
+            OutputType::FileOut => f.write_str("file_out"),
+            OutputType::Parquet => f.write_str("parquet"),
+            OutputType::Null => f.write_str("null"),
+            OutputType::TcpOut => f.write_str("tcp_out"),
+            OutputType::UdpOut => f.write_str("udp_out"),
+        }
+    }
 }
 
 impl<'de> Deserialize<'de> for OutputType {
@@ -169,6 +199,20 @@ pub enum Format {
     Auto,
     /// Human-readable colored console output for debugging/testing.
     Console,
+}
+
+impl fmt::Display for Format {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Format::Cri => f.write_str("cri"),
+            Format::Json => f.write_str("json"),
+            Format::Logfmt => f.write_str("logfmt"),
+            Format::Syslog => f.write_str("syslog"),
+            Format::Raw => f.write_str("raw"),
+            Format::Auto => f.write_str("auto"),
+            Format::Console => f.write_str("console"),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -500,7 +544,7 @@ impl Config {
                     OutputType::FileOut | OutputType::Parquet => {
                         return Err(ConfigError::Validation(format!(
                             "pipeline '{name}' output '{label}': {} output type is not yet implemented",
-                            output_type_name(&output.output_type),
+                            output.output_type,
                         )));
                     }
                     _ => {}
@@ -514,7 +558,7 @@ impl Config {
                         if output.endpoint.is_none() {
                             return Err(ConfigError::Validation(format!(
                                 "pipeline '{name}' output '{label}': {} output requires 'endpoint'",
-                                output_type_name(&output.output_type),
+                                output.output_type,
                             )));
                         }
                         if let Some(ep) = &output.endpoint
@@ -536,7 +580,7 @@ impl Config {
                         if output.path.is_none() {
                             return Err(ConfigError::Validation(format!(
                                 "pipeline '{name}' output '{label}': {} output requires 'path'",
-                                output_type_name(&output.output_type),
+                                output.output_type,
                             )));
                         }
                     }
@@ -545,7 +589,7 @@ impl Config {
                         if output.endpoint.is_none() {
                             return Err(ConfigError::Validation(format!(
                                 "pipeline '{name}' output '{label}': {} output requires 'endpoint'",
-                                output_type_name(&output.output_type),
+                                output.output_type,
                             )));
                         }
                     }
@@ -563,21 +607,6 @@ impl Config {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-fn output_type_name(t: &OutputType) -> &'static str {
-    match t {
-        OutputType::Otlp => "otlp",
-        OutputType::Http => "http",
-        OutputType::Elasticsearch => "elasticsearch",
-        OutputType::Loki => "loki",
-        OutputType::Stdout => "stdout",
-        OutputType::FileOut => "file_out",
-        OutputType::Parquet => "parquet",
-        OutputType::Null => "null",
-        OutputType::TcpOut => "tcp_out",
-        OutputType::UdpOut => "udp_out",
-    }
-}
 
 /// Validate that a bind address is a parseable `host:port` socket address.
 fn validate_bind_addr(addr: &str) -> Result<(), String> {
