@@ -19,9 +19,9 @@ use logfwd::pipeline::Pipeline;
 use logfwd_arrow::scanner::CopyScanner;
 use logfwd_config::Config;
 use logfwd_core::scan_config::ScanConfig;
-use logfwd_transform::enrichment::CsvFileTable;
 use logfwd_test_utils::test_meter;
 use logfwd_transform::SqlTransform;
+use logfwd_transform::enrichment::CsvFileTable;
 use tokio_util::sync::CancellationToken;
 
 // ---------------------------------------------------------------------------

@@ -122,7 +122,9 @@ impl Pipeline {
                         path = base.join(path);
                     }
 
-                    let db: Arc<dyn logfwd_transform::enrichment::GeoDatabase> = match geo_cfg.format {
+                    let db: Arc<dyn logfwd_transform::enrichment::GeoDatabase> = match geo_cfg
+                        .format
+                    {
                         GeoDatabaseFormat::Mmdb => {
                             let mmdb = logfwd_transform::udf::geo_lookup::MmdbDatabase::open(&path)
                                 .map_err(|e| {
@@ -165,7 +167,9 @@ impl Pipeline {
                         .map_err(|e| format!("enrichment host_info: {e}"))?;
                 }
                 EnrichmentConfig::K8sPath(cfg) => {
-                    let table = Arc::new(logfwd_transform::enrichment::K8sPathTable::new(&cfg.table_name));
+                    let table = Arc::new(logfwd_transform::enrichment::K8sPathTable::new(
+                        &cfg.table_name,
+                    ));
                     transform
                         .add_enrichment_table(table)
                         .map_err(|e| format!("enrichment '{}': {e}", cfg.table_name))?;
