@@ -16,7 +16,7 @@ wrong and should be deleted.
 | **User book** | `book/src/` | Operators deploying and configuring logfwd | Config reference, deployment guides, troubleshooting, architecture overview |
 | **Dev docs** | `dev-docs/` | Engineers modifying the codebase | Architecture decisions, code style, crate rules, verification, scanner contract |
 | **Review guides** | `docs/ci/` | Code reviewers (human and AI) | PR review checklists, one per review dimension |
-| **Spec docs** | `tla/`, `dev-docs/tla/` | Engineers modifying formal specs | TLA+ READMEs, AGENTS.md guides, running instructions |
+| **Spec docs** | `tla/` | Engineers modifying formal specs | TLA+ specs, TLC configs, running instructions |
 
 ### What goes where
 
@@ -46,7 +46,7 @@ _why_ the code is shaped a certain way, not _how to use_ the product. Subcategor
 | `dev-docs/` (root) | Living standards and specs: ARCHITECTURE, DESIGN, CODE_STYLE, CRATE_RULES, VERIFICATION, SCANNER_CONTRACT |
 | `dev-docs/references/` | Pinned API references for specific library versions (Arrow, DataFusion, etc.) |
 | `dev-docs/research/` | Research artifacts with lifecycle headers (see below) |
-| `dev-docs/tla/` | FileCheckpoint spec docs |
+| `tla/` | TLA+ specs (PipelineMachine, ShutdownProtocol, PipelineBatch) |
 
 **Review guides** (`docs/ci/`) are self-contained review checklists loaded by CI
 review tooling. Each guide covers one review dimension (Rust practices, verification

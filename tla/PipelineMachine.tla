@@ -103,7 +103,6 @@ TypeOK ==
         /\ acked[s]     \subseteq created[s]
         /\ in_flight[s] \cap acked[s] = {}
         /\ committed[s] \in 0..MaxBatchesPerSource
-        /\ committed[s] <= Cardinality(acked[s])
 
 (* ---------------------------------------------------------------------------
  * Initial state
@@ -141,6 +140,11 @@ BeginSend(s, b) ==
     /\ b \in created[s]
     /\ b \notin in_flight[s]
     /\ b \notin acked[s]
+    \* In Rust, Queued tickets are consumed by begin_send or dropped.
+    \* Once dropped, the ticket is gone — you cannot send a batch whose
+    \* ticket was dropped. This means sends are monotonic: you cannot send
+    \* batch b if any batch with a higher ID was already sent or acked.
+    /\ \A other \in (in_flight[s] \cup acked[s]) : b >= other
     /\ in_flight' = [in_flight EXCEPT ![s] = in_flight[s] \cup {b}]
     /\ UNCHANGED <<phase, created, acked, committed, forced>>
 
@@ -226,6 +230,9 @@ Next ==
     \/ BeginDrain
     \/ Stop
     \/ ForceStop
+    \* Terminal state: Stopped is final, nothing more can happen.
+    \* Explicit stuttering prevents TLC from reporting a false deadlock.
+    \/ (phase = "Stopped" /\ UNCHANGED vars)
 
 (*
  * Fairness:
@@ -314,9 +321,11 @@ CheckpointOrderingInvariant ==
                     /\ i \in acked[s]
                     /\ i \notin in_flight[s]
 
-\* committed[s] never exceeds the count of acked batches.
-CommittedNeverAheadOfAcked ==
-    \A s \in Sources : committed[s] <= Cardinality(acked[s])
+\* committed[s] never exceeds the highest created batch ID.
+\* (It can exceed Cardinality(acked[s]) when some batch IDs were created
+\* but never sent — skipped batches don't block checkpoint advancement.)
+CommittedNeverAheadOfCreated ==
+    \A s \in Sources : committed[s] <= Cardinality(created[s])
 
 \* Structural invariants (catch model misconfiguration).
 InFlightImpliesCreated ==
@@ -391,5 +400,10 @@ CommitAdvances == ~(\E s \in Sources : committed[s] > 0)
 
 \* ForceStop is reachable (the kill-switch path is exercised).
 ForcedReachable == ~(forced = TRUE)
+
+\* At least one batch is created (CreateBatch fires).
+\* Covers NoBatchLeftBehind and AllCreatedBatchesEventuallyAccountedFor
+\* antecedents — without this, those properties are vacuously true.
+CreateOccurs == ~(\E s \in Sources : created[s] /= {})
 
 =============================================================================

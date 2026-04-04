@@ -89,7 +89,7 @@ pub struct Pipeline {
     /// Some during run_async, None only after shutdown drain transition.
     machine: Option<PipelineMachine<Running, u64>>,
     /// Durable checkpoint store. None when running without persistence (tests).
-    checkpoint_store: Option<FileCheckpointStore>,
+    checkpoint_store: Option<Box<dyn CheckpointStore>>,
     /// Throttle checkpoint flushes to at most once per 5 seconds.
     last_checkpoint_flush: Instant,
 }
@@ -169,7 +169,7 @@ impl Pipeline {
             || std::env::var_os("LOGFWD_DATA_DIR").is_some()
         {
             match FileCheckpointStore::open(&checkpoint_dir) {
-                Ok(s) => Some(s),
+                Ok(s) => Some(Box::new(s) as Box<dyn CheckpointStore>),
                 Err(e) => {
                     tracing::warn!(error = %e, "could not open checkpoint store — starting from beginning");
                     None
@@ -180,7 +180,7 @@ impl Pipeline {
         };
         let saved_checkpoints: Vec<SourceCheckpoint> = checkpoint_store
             .as_ref()
-            .map(FileCheckpointStore::load_all)
+            .map(|s| s.load_all())
             .unwrap_or_default();
 
         // Build inputs (file only for now).
@@ -314,6 +314,22 @@ impl Pipeline {
             Duration::from_secs(30),
             Arc::clone(&self.metrics),
         );
+        self
+    }
+
+    /// Add an input source for testing. Bypasses config-based input construction.
+    pub fn with_input(mut self, _name: &str, source: Box<dyn InputSource>) -> Self {
+        self.inputs.push(InputState {
+            source,
+            buf: Vec::new(),
+            stats: Arc::new(ComponentStats::new()),
+        });
+        self
+    }
+
+    /// Replace the checkpoint store. Useful for injecting an in-memory store in tests.
+    pub fn with_checkpoint_store(mut self, store: Box<dyn CheckpointStore>) -> Self {
+        self.checkpoint_store = Some(store);
         self
     }
 
@@ -521,10 +537,26 @@ impl Pipeline {
                     }
                 }
                 Err(still_draining) => {
+                    let abandoned = still_draining.in_flight_count();
                     tracing::warn!(
-                        in_flight = still_draining.in_flight_count(),
-                        "pipeline: shutdown with in-flight batches (checkpoint may not reflect latest delivered data)"
+                        in_flight = abandoned,
+                        "pipeline: force-stopping with in-flight batches (checkpoint may not reflect latest delivered data)"
                     );
+                    let stopped = still_draining.force_stop();
+                    // Persist what we have — committed checkpoints are still
+                    // valid (they only reflect contiguously-acked batches).
+                    if let Some(ref mut store) = self.checkpoint_store {
+                        for (source_id, offset) in stopped.final_checkpoints() {
+                            store.update(SourceCheckpoint {
+                                source_id: source_id.0,
+                                path: None,
+                                offset: *offset,
+                            });
+                        }
+                        if let Err(e) = store.flush() {
+                            tracing::error!(error = %e, "pipeline: failed to flush checkpoints after force-stop");
+                        }
+                    }
                 }
             }
         }
