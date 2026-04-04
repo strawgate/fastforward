@@ -269,9 +269,12 @@ EventualStop ==
 InFlightResolves ==
     (in_flight_id > 0) ~> (in_flight_id = 0)
 
-\* Once stopped, stays stopped.
+\* Once all sources finish producing, the pipeline eventually stops and stays stopped.
+\* Guarded on done_producing because there is no WF on Produce —
+\* sources are not obligated to produce, so the pipeline may legitimately
+\* run forever if no data arrives.
 StoppedIsStable ==
-    <>[](phase = "Stopped")
+    done_producing ~> [](phase = "Stopped")
 
 (* -----------------------------------------------------------------------
  * Reachability / vacuity guards

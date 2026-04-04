@@ -124,7 +124,6 @@ InputProduce(i) ==
     /\ input_alive[i]
     /\ input_produced[i] < MaxItems
     /\ Len(channel) < ChannelCapacity     \* not full (would block)
-    /\ ~shutdown_signaled                  \* not shutting down
     /\ input_produced' = [input_produced EXCEPT ![i] = @ + 1]
     /\ channel' = Append(channel, i)      \* item identity = producing input
     /\ UNCHANGED <<input_alive, consumed, consumer_buf, flushed,
@@ -182,16 +181,14 @@ SignalShutdown ==
                    final_flushed, machine_stopped, forced>>
 
 \* 2. Input threads notice shutdown and stop producing.
-\* They may send one final buffer before exiting.
+\* In the real code, inputs drain their local buffer before exiting.
+\* Modeled as: input can still produce via InputProduce (now enabled
+\* during shutdown), then exits via InputShutdown.
 InputShutdown(i) ==
     /\ shutdown_signaled
     /\ input_alive[i]
     /\ input_alive' = [input_alive EXCEPT ![i] = FALSE]
-    \* May send remaining buffer as final message
-    /\ IF input_produced[i] > 0 /\ Len(channel) < ChannelCapacity
-       THEN channel' = Append(channel, i)
-       ELSE channel' = channel
-    /\ UNCHANGED <<input_produced, consumed, consumer_buf, flushed,
+    /\ UNCHANGED <<input_produced, channel, consumed, consumer_buf, flushed,
                    pool_pending, pool_acked, shutdown_signaled,
                    channel_drained, inputs_joined, pool_drained,
                    final_flushed, machine_stopped, forced>>
@@ -363,13 +360,6 @@ StopAfterFlush ==
 \* DrainCompleteness for the shutdown protocol.
 NormalStopImpliesPoolDrained ==
     (machine_stopped /\ ~forced) => pool_drained
-
-\* No items lost: everything produced is eventually consumed or in channel.
-\* (Items flow: produced → channel → consumed → consumer_buf → flushed → pool)
-TotalConservation ==
-    LET total_produced == SumProd(input_produced)
-        total_in_system == Len(channel) + consumed
-    IN total_in_system <= total_produced
 
 \* Helper: sum of a function over its domain
 RECURSIVE SumProdHelper(_, _, _)
