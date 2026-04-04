@@ -147,7 +147,7 @@ impl OtlpSink {
         let mut resource_msg: Vec<u8> = Vec::new();
         if !metadata.resource_attrs.is_empty() {
             for (k, v) in metadata.resource_attrs.as_ref() {
-                encode_key_value_string(&mut resource_msg, k.as_bytes(), v.as_bytes());
+                encode_resource_kv_string(&mut resource_msg, k.as_bytes(), v.as_bytes());
             }
         }
         if !resource_msg.is_empty() {
@@ -569,10 +569,19 @@ fn encode_row_as_log_record(
 /// Encode a KeyValue with string AnyValue as an attribute (field 6 of LogRecord).
 /// KeyValue: { key (field 1, string), value (field 2, AnyValue { string_value (field 1) }) }
 fn encode_key_value_string(buf: &mut Vec<u8>, key: &[u8], value: &[u8]) {
+    encode_key_value_string_field(buf, 6, key, value);
+}
+
+/// Encode a KeyValue with string AnyValue as a Resource attribute (field 1 of Resource).
+fn encode_resource_kv_string(buf: &mut Vec<u8>, key: &[u8], value: &[u8]) {
+    encode_key_value_string_field(buf, 1, key, value);
+}
+
+/// Shared implementation: encode a KeyValue at the given parent field number.
+fn encode_key_value_string_field(buf: &mut Vec<u8>, field_number: u32, key: &[u8], value: &[u8]) {
     let anyvalue_inner = bytes_field_size(1, value.len()); // AnyValue.string_value
     let kv_inner = bytes_field_size(1, key.len()) + bytes_field_size(2, anyvalue_inner);
-    // LogRecord field 6, wire type 2
-    encode_tag(buf, 6, 2);
+    encode_tag(buf, field_number, 2);
     encode_varint(buf, kv_inner as u64);
     // KeyValue.key = field 1
     encode_bytes_field(buf, 1, key);
