@@ -65,10 +65,18 @@ fn write_row_json_stable_across_batches() {
     let cols = build_col_infos(&batch);
     let mut buf = Vec::with_capacity(4096);
 
-    for row in 0..batch.num_rows() {
-        let _ = write_row_json(&batch, row, &cols, &mut buf);
+    // Two warmup passes: the first grows the buffer and triggers any lazy
+    // one-time allocations (Arrow downcast caches, thread-local state, etc.).
+    // The second pass runs with the final buffer capacity so that the
+    // measured windows start from a fully settled state.  Without this,
+    // glibc's allocator on Linux can leave a single reallocation in window 1
+    // that window 2 no longer needs, making the ratio 0.
+    for _ in 0..2 {
+        for row in 0..batch.num_rows() {
+            let _ = write_row_json(&batch, row, &cols, &mut buf);
+        }
+        buf.clear();
     }
-    buf.clear();
 
     let reg1 = Region::new(GLOBAL);
     for row in 0..batch.num_rows() {

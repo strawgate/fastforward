@@ -72,8 +72,8 @@ input:
 
 transform: |
   SELECT
-    _time_ns_int,
-    _stream_str,
+    _timestamp,
+    _stream,
     level_str,
     message_str,
     status_int,
@@ -154,8 +154,8 @@ input:
 
 transform: |
   SELECT
-    _time_ns_int AS timestamp_ns_int,
-    _stream_str AS stream_str,
+    _timestamp,
+    _stream,
     level_str,
     message_str,
     _file_str AS source_file_str

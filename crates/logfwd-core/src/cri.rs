@@ -49,18 +49,14 @@ pub fn parse_cri_line(line: &[u8]) -> Option<CriLine<'_>> {
     }
 
     // Find third space (after flags).
-    let msg_start = if let Some(sp3) = find_byte(line, b' ', sp2 + 1) {
-        sp3 + 1
+    let (flags_end, msg_start) = if let Some(sp3) = find_byte(line, b' ', sp2 + 1) {
+        (sp3, sp3 + 1)
     } else {
         // No message content (just flags, no trailing space) — empty message.
-        line.len()
+        (line.len(), line.len())
     };
 
-    let flags = &line[sp2 + 1..if msg_start > sp2 + 1 {
-        msg_start - 1
-    } else {
-        line.len()
-    }];
+    let flags = &line[sp2 + 1..flags_end];
 
     // CRI spec: flags must be exactly "F" (full) or "P" (partial).
     // Reject anything else as invalid format.
@@ -423,6 +419,44 @@ mod tests {
         assert_eq!(count, 1);
         assert_eq!(errors, 1);
         assert_eq!(lines[0], b"valid");
+    }
+
+    #[test]
+    fn test_parse_full_line_no_message() {
+        // CRI line with flag but no message content (no trailing space after flag).
+        // Previously returned None due to incorrect flags computation (#698).
+        let line = b"2024-01-15T10:30:00Z stdout F";
+        let cri = parse_cri_line(line).unwrap();
+        assert_eq!(cri.timestamp, b"2024-01-15T10:30:00Z");
+        assert_eq!(cri.stream, b"stdout");
+        assert!(cri.is_full);
+        assert_eq!(cri.message, b"");
+    }
+
+    #[test]
+    fn test_parse_partial_line_no_message() {
+        let line = b"2024-01-15T10:30:00Z stderr P";
+        let cri = parse_cri_line(line).unwrap();
+        assert_eq!(cri.stream, b"stderr");
+        assert!(!cri.is_full);
+        assert_eq!(cri.message, b"");
+    }
+
+    #[test]
+    fn test_process_chunk_empty_message_not_dropped() {
+        // A CRI line with no message content should produce an empty message,
+        // not be silently dropped as a parse error (#698).
+        let chunk = b"2024-01-15T10:30:00Z stdout F\n\
+                       2024-01-15T10:30:01Z stdout F has content\n";
+        let mut reassembler = CriReassembler::new(1024 * 1024);
+        let mut lines = Vec::new();
+        let (count, errors) = process_cri_chunk(chunk, &mut reassembler, |msg| {
+            lines.push(msg.to_vec());
+        });
+        assert_eq!(count, 2);
+        assert_eq!(errors, 0);
+        assert_eq!(lines[0], b"");
+        assert_eq!(lines[1], b"has content");
     }
 
     #[test]

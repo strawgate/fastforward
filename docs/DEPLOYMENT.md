@@ -104,8 +104,8 @@ data:
       SELECT
         level_str,
         message_str,
-        _time_ns_int,
-        _stream_str
+        _timestamp,
+        _stream
       FROM logs
       WHERE level_str != 'DEBUG'
 

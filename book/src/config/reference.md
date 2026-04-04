@@ -313,8 +313,8 @@ Special columns added by the scanner:
 |--------|------|-------------|
 | `_file_str` | string | Absolute path of the source file (file inputs only). |
 | `_raw_str` | string | Original JSON line (only when `keep_raw: true`). |
-| `_time_ns_int` | int64 | Timestamp from CRI header in nanoseconds (CRI inputs only). |
-| `_stream_str` | string | CRI stream name (`stdout`/`stderr`). |
+| `_timestamp` | string | Timestamp from CRI header as an RFC 3339 string (CRI inputs only). |
+| `_stream` | string | CRI stream name (`stdout`/`stderr`) (CRI inputs only). |
 
 ### Built-in UDFs
 
