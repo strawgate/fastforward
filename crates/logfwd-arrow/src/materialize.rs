@@ -123,8 +123,7 @@ fn cast_views(batch: &RecordBatch) -> RecordBatch {
 fn cast_column(field: &Arc<Field>, col: &ArrayRef) -> (Arc<Field>, ArrayRef) {
     match field.data_type() {
         DataType::Utf8View => {
-            let utf8_col =
-                arrow::compute::cast(col, &DataType::Utf8).expect("Utf8View→Utf8 cast");
+            let utf8_col = arrow::compute::cast(col, &DataType::Utf8).expect("Utf8View→Utf8 cast");
             let new_field = Arc::new(Field::new(
                 field.name(),
                 DataType::Utf8,
@@ -134,9 +133,9 @@ fn cast_column(field: &Arc<Field>, col: &ArrayRef) -> (Arc<Field>, ArrayRef) {
         }
         DataType::Struct(struct_fields) => {
             // Check if any child is Utf8View
-            let needs_cast = struct_fields.iter().any(|f| {
-                *f.data_type() == DataType::Utf8View
-            });
+            let needs_cast = struct_fields
+                .iter()
+                .any(|f| *f.data_type() == DataType::Utf8View);
             if !needs_cast {
                 return (Arc::clone(field), Arc::clone(col));
             }
@@ -248,10 +247,16 @@ mod tests {
     fn detach_handles_conflict_struct_column() {
         // status is int in row 0, string in row 1 → StructArray with str child as Utf8View
         let (batch, buf) = scan(b"{\"status\":200}\n{\"status\":\"OK\"}\n");
-        assert!(is_attached(&batch, &buf), "conflict struct should be attached");
+        assert!(
+            is_attached(&batch, &buf),
+            "conflict struct should be attached"
+        );
 
         let owned = detach(&batch);
-        assert!(!is_attached(&owned, &buf), "should be detached after detach()");
+        assert!(
+            !is_attached(&owned, &buf),
+            "should be detached after detach()"
+        );
         assert_eq!(owned.num_rows(), 2);
 
         // Verify the struct's str child is now Utf8 (not Utf8View)

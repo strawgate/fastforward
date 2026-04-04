@@ -1265,10 +1265,10 @@ fn scatter_resource_attrs(
 
         // Phase 2: scatter to all rows.
         if let TypedColumn::Str(ref mut v) = flat_cols[col_pos].1 {
-            for row in 0..num_rows {
+            for (row, slot) in v.iter_mut().enumerate().take(num_rows) {
                 let rid = resource_ids.value(row);
                 if let Some(val) = rid_to_val.get(&rid) {
-                    v[row] = val.clone();
+                    *slot = val.clone();
                 }
             }
         }

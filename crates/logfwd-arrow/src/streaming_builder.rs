@@ -669,7 +669,8 @@ impl StreamingBuilder {
 
                 if fc.has_str {
                     let total_bytes: usize = fc.str_views.iter().map(|&(_, _, l)| l as usize).sum();
-                    let mut builder = arrow::array::StringBuilder::with_capacity(num_rows, total_bytes);
+                    let mut builder =
+                        arrow::array::StringBuilder::with_capacity(num_rows, total_bytes);
                     let mut vi = 0;
                     for row in 0..num_rows as u32 {
                         if vi < fc.str_views.len() && fc.str_views[vi].0 == row {
@@ -735,7 +736,8 @@ impl StreamingBuilder {
                 if fc.has_str {
                     reserve_name(name.as_ref())?;
                     let total_bytes: usize = fc.str_views.iter().map(|&(_, _, l)| l as usize).sum();
-                    let mut builder = arrow::array::StringBuilder::with_capacity(num_rows, total_bytes);
+                    let mut builder =
+                        arrow::array::StringBuilder::with_capacity(num_rows, total_bytes);
                     let mut vi = 0;
                     for row in 0..num_rows as u32 {
                         if vi < fc.str_views.len() && fc.str_views[vi].0 == row {
@@ -760,8 +762,9 @@ impl StreamingBuilder {
                 if row < self.raw_views.len() {
                     let (offset, len) = self.raw_views[row];
                     // Raw views always reference the original buffer (not decoded_buf).
-                    let s = std::str::from_utf8(&self.buf[offset as usize..(offset + len) as usize])
-                        .unwrap_or("");
+                    let s =
+                        std::str::from_utf8(&self.buf[offset as usize..(offset + len) as usize])
+                            .unwrap_or("");
                     builder.append_value(s);
                 } else {
                     builder.append_null();
@@ -1570,10 +1573,7 @@ mod tests {
 
         // Int column unchanged
         let age_col = batch.column_by_name("age").unwrap();
-        let int_arr = age_col
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .unwrap();
+        let int_arr = age_col.as_any().downcast_ref::<Int64Array>().unwrap();
         assert_eq!(int_arr.value(0), 30);
     }
 
@@ -1800,15 +1800,29 @@ mod tests {
         assert_eq!(view_batch.num_columns(), owned_batch.num_columns());
 
         // Same column names
-        let view_names: Vec<_> = view_batch.schema().fields().iter().map(|f| f.name().clone()).collect();
-        let owned_names: Vec<_> = owned_batch.schema().fields().iter().map(|f| f.name().clone()).collect();
+        let view_names: Vec<_> = view_batch
+            .schema()
+            .fields()
+            .iter()
+            .map(|f| f.name().clone())
+            .collect();
+        let owned_names: Vec<_> = owned_batch
+            .schema()
+            .fields()
+            .iter()
+            .map(|f| f.name().clone())
+            .collect();
         assert_eq!(view_names, owned_names);
 
         // Same values at every position
         for name in &view_names {
             let view_col = view_batch.column_by_name(name).unwrap();
             let owned_col = owned_batch.column_by_name(name).unwrap();
-            assert_eq!(view_col.len(), owned_col.len(), "column {name} length mismatch");
+            assert_eq!(
+                view_col.len(),
+                owned_col.len(),
+                "column {name} length mismatch"
+            );
             for row in 0..view_col.len() {
                 assert_eq!(
                     view_col.is_null(row),

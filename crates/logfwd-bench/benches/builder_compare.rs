@@ -7,8 +7,8 @@
 
 use std::fmt::Write;
 
-use arrow::ipc::writer::{FileWriter, IpcWriteOptions};
 use arrow::ipc::CompressionType;
+use arrow::ipc::writer::{FileWriter, IpcWriteOptions};
 use arrow::record_batch::RecordBatch;
 use bytes::Bytes;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
@@ -25,14 +25,25 @@ use logfwd_transform::SqlTransform;
 /// Simple 7-field JSON (~180 bytes/line). Mix of strings and ints.
 fn gen_simple(n: usize) -> Vec<u8> {
     let levels = ["INFO", "ERROR", "DEBUG", "WARN"];
-    let paths = ["/api/users", "/api/orders", "/api/health", "/api/auth/login", "/api/metrics"];
+    let paths = [
+        "/api/users",
+        "/api/orders",
+        "/api/health",
+        "/api/auth/login",
+        "/api/metrics",
+    ];
     let mut s = String::with_capacity(n * 260);
     for i in 0..n {
         let _ = write!(
             s,
             r#"{{"timestamp":"2024-01-15T10:30:{:02}.{:09}Z","level":"{}","message":"GET {} HTTP/1.1","status":{},"duration_ms":{},"request_id":"req-{:08x}","service":"api-gateway"}}"#,
-            i % 60, i % 1_000_000_000, levels[i % levels.len()], paths[i % paths.len()],
-            [200, 200, 200, 500, 404][i % 5], (i % 500) + 1, i,
+            i % 60,
+            i % 1_000_000_000,
+            levels[i % levels.len()],
+            paths[i % paths.len()],
+            [200, 200, 200, 500, 404][i % 5],
+            (i % 500) + 1,
+            i,
         );
         s.push('\n');
     }
@@ -44,7 +55,13 @@ fn gen_narrow(n: usize) -> Vec<u8> {
     let levels = ["INFO", "DEBUG", "WARN", "ERROR"];
     let mut s = String::with_capacity(n * 60);
     for i in 0..n {
-        let _ = write!(s, r#"{{"ts":"{}","lvl":"{}","msg":"event {}"}}"#, i, levels[i % 4], i);
+        let _ = write!(
+            s,
+            r#"{{"ts":"{}","lvl":"{}","msg":"event {}"}}"#,
+            i,
+            levels[i % 4],
+            i
+        );
         s.push('\n');
     }
     s.into_bytes()
@@ -61,14 +78,26 @@ fn gen_wide(n: usize) -> Vec<u8> {
         let _ = write!(
             s,
             r#"{{"timestamp":"2024-01-15T10:30:00.{:03}Z","level":"{}","message":"request {}","duration_ms":{},"service":"myapp","host":"node-{}","pod":"app-{:04}","namespace":"{}","method":"{}","status_code":{},"region":"{}","user_id":"user-{}","trace_id":"{:032x}","response_bytes":{},"latency_p99_ms":{},"error_count":{},"cache_hit":{},"db_query_ms":{},"upstream":"svc-{}","version":"v{}.{}"}}"#,
-            i % 1000, levels[i % 4], i, 1 + (i * 13) % 500,
-            i % 10, i % 100, namespaces[i % 4], methods[i % 5],
-            [200, 201, 400, 404, 500][i % 5], regions[i % 4],
-            i % 1000, (i as u64).wrapping_mul(0x517cc1b727220a95),
-            100 + (i * 37) % 10000, 10 + (i * 11) % 1000,
+            i % 1000,
+            levels[i % 4],
+            i,
+            1 + (i * 13) % 500,
+            i % 10,
+            i % 100,
+            namespaces[i % 4],
+            methods[i % 5],
+            [200, 201, 400, 404, 500][i % 5],
+            regions[i % 4],
+            i % 1000,
+            (i as u64).wrapping_mul(0x517cc1b727220a95),
+            100 + (i * 37) % 10000,
+            10 + (i * 11) % 1000,
             if i % 20 == 0 { 1 } else { 0 },
             if i % 3 == 0 { "true" } else { "false" },
-            (i * 7) % 200, i % 4, 1 + i % 5, i % 10,
+            (i * 7) % 200,
+            i % 4,
+            1 + i % 5,
+            i % 10,
         );
         s.push('\n');
     }
@@ -83,7 +112,9 @@ fn gen_long_strings(n: usize) -> Vec<u8> {
         let _ = write!(
             s,
             r#"{{"id":{},"body":"{}","tag":"item-{}"}}"#,
-            i, long_msg, i % 100,
+            i,
+            long_msg,
+            i % 100,
         );
         s.push('\n');
     }
@@ -97,7 +128,15 @@ fn gen_int_heavy(n: usize) -> Vec<u8> {
         let _ = write!(
             s,
             r#"{{"ts":{},"a":{},"b":{},"c":{},"d":{},"e":{},"f":{},"g":{},"label":"x{}"}}"#,
-            i, i * 2, i * 3, i * 5, i * 7, i * 11, i * 13, i * 17, i % 10,
+            i,
+            i * 2,
+            i * 3,
+            i * 5,
+            i * 7,
+            i * 11,
+            i * 13,
+            i * 17,
+            i % 10,
         );
         s.push('\n');
     }
@@ -127,10 +166,15 @@ fn read_ipc(data: &[u8]) -> RecordBatch {
 }
 
 fn fmt_bytes(n: usize) -> String {
-    if n >= 1_073_741_824 { format!("{:.1} GB", n as f64 / 1_073_741_824.0) }
-    else if n >= 1_048_576 { format!("{:.1} MB", n as f64 / 1_048_576.0) }
-    else if n >= 1024 { format!("{:.1} KB", n as f64 / 1024.0) }
-    else { format!("{} B", n) }
+    if n >= 1_073_741_824 {
+        format!("{:.1} GB", n as f64 / 1_073_741_824.0)
+    } else if n >= 1_048_576 {
+        format!("{:.1} MB", n as f64 / 1_048_576.0)
+    } else if n >= 1024 {
+        format!("{:.1} KB", n as f64 / 1024.0)
+    } else {
+        format!("{} B", n)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -283,7 +327,8 @@ fn bench_pipeline(c: &mut Criterion) {
         let mut scanner = StreamingSimdScanner::new(ScanConfig::default());
         let mut transform = SqlTransform::new(
             "SELECT level, message, status, duration_ms FROM logs WHERE status >= 400",
-        ).unwrap();
+        )
+        .unwrap();
         b.iter(|| {
             let batch = scanner.scan(buf.clone()).unwrap();
             let transformed = transform.execute_blocking(batch).unwrap();
@@ -297,7 +342,8 @@ fn bench_pipeline(c: &mut Criterion) {
         let mut scanner = StreamingSimdScanner::new(ScanConfig::default());
         let mut transform = SqlTransform::new(
             "SELECT level, message, status, duration_ms FROM logs WHERE status >= 400",
-        ).unwrap();
+        )
+        .unwrap();
         b.iter(|| {
             let batch = scanner.scan_owned(buf.clone()).unwrap();
             let transformed = transform.execute_blocking(batch).unwrap();
@@ -357,8 +403,10 @@ fn bench_sizes(c: &mut Criterion) {
     ];
 
     eprintln!();
-    eprintln!("{:<20} {:>10} {:>12} {:>12} {:>12} {:>12} {:>8}",
-        "Dataset", "Raw", "Streaming", "scan_owned", "IPC(stream)", "IPC(owned)", "Ratio");
+    eprintln!(
+        "{:<20} {:>10} {:>12} {:>12} {:>12} {:>12} {:>8}",
+        "Dataset", "Raw", "Streaming", "scan_owned", "IPC(stream)", "IPC(owned)", "Ratio"
+    );
     eprintln!("{}", "-".repeat(95));
 
     for (name, data) in &datasets {
@@ -375,10 +423,14 @@ fn bench_sizes(c: &mut Criterion) {
         let owned_mem = owned_batch.get_array_memory_size();
         let owned_ipc = write_ipc_zstd(&owned_batch);
 
-        eprintln!("{:<20} {:>10} {:>12} {:>12} {:>12} {:>12} {:>7.1}x",
-            name, fmt_bytes(raw_size),
-            fmt_bytes(streaming_mem), fmt_bytes(owned_mem),
-            fmt_bytes(streaming_ipc.len()), fmt_bytes(owned_ipc.len()),
+        eprintln!(
+            "{:<20} {:>10} {:>12} {:>12} {:>12} {:>12} {:>7.1}x",
+            name,
+            fmt_bytes(raw_size),
+            fmt_bytes(streaming_mem),
+            fmt_bytes(owned_mem),
+            fmt_bytes(streaming_ipc.len()),
+            fmt_bytes(owned_ipc.len()),
             raw_size as f64 / owned_ipc.len() as f64,
         );
     }
