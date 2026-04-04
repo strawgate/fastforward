@@ -1083,7 +1083,9 @@ async fn async_input_poll_loop(
     batch_timeout: Duration,
     poll_interval: Duration,
 ) {
-    let mut buffered_since: Option<Instant> = None;
+    // Use tokio::time::Instant (not std::time::Instant) so that elapsed()
+    // measures simulated time under Turmoil, not real wall-clock time.
+    let mut buffered_since: Option<tokio::time::Instant> = None;
 
     loop {
         if shutdown.is_cancelled() {
@@ -1117,7 +1119,7 @@ async fn async_input_poll_loop(
                 }
             }
             if buffered_since.is_none() && !input.buf.is_empty() {
-                buffered_since = Some(Instant::now());
+                buffered_since = Some(tokio::time::Instant::now());
             }
         }
 
@@ -1130,7 +1132,7 @@ async fn async_input_poll_loop(
             let msg = ChannelMsg::Data {
                 bytes: data,
                 checkpoints,
-                queued_at: Instant::now(),
+                queued_at: Instant::now(), // std::time OK here — metrics only
             };
             if tx.send(msg).await.is_err() {
                 break;
@@ -1146,7 +1148,7 @@ async fn async_input_poll_loop(
         let msg = ChannelMsg::Data {
             bytes: data,
             checkpoints,
-            queued_at: Instant::now(),
+            queued_at: Instant::now(), // std::time OK here — metrics only
         };
         let _ = tx.send(msg).await;
     }
