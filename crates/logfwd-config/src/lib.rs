@@ -527,6 +527,13 @@ impl Config {
                             .into(),
                     ));
                 }
+                if !raw.resource_attrs.is_empty() {
+                    return Err(ConfigError::Validation(
+                        "top-level `resource_attrs` cannot be used with `pipelines:`; \
+                         move resource_attrs into each pipeline"
+                            .into(),
+                    ));
+                }
                 p
             }
             (None, Some(input), Some(output)) => {
@@ -2050,6 +2057,31 @@ server:
     // -----------------------------------------------------------------------
     // Top-level enrichment rejected with pipelines: form
     // -----------------------------------------------------------------------
+
+    #[test]
+    fn top_level_resource_attrs_rejected_with_pipelines_form() {
+        let yaml = r"
+pipelines:
+  app:
+    inputs:
+      - type: file
+        path: /tmp/x.log
+    outputs:
+      - type: stdout
+resource_attrs:
+  service.name: my-service
+";
+        let err = Config::load_str(yaml).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("top-level `resource_attrs`"),
+            "error should mention top-level resource_attrs: {msg}"
+        );
+        assert!(
+            msg.contains("pipelines"),
+            "error should mention pipelines: {msg}"
+        );
+    }
 
     #[test]
     fn top_level_enrichment_rejected_with_pipelines_form() {
