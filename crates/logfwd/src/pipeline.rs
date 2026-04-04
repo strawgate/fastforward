@@ -11,6 +11,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bytes::{Bytes, BytesMut};
 
+use crate::batch_accumulator::{AccumulatorAction, BatchAccumulator};
+
 use opentelemetry::metrics::Meter;
 use tracing::Instrument;
 
@@ -35,6 +37,28 @@ use logfwd_output::{
 };
 use logfwd_transform::SqlTransform;
 use tokio_util::sync::CancellationToken;
+
+// ---------------------------------------------------------------------------
+// block_in_place shim for simulation
+// ---------------------------------------------------------------------------
+
+/// Scan a batch. In production (multi-thread runtime), uses `block_in_place`
+/// to avoid starving other tasks. Under `turmoil` feature (single-thread
+/// runtime), calls scan directly since `block_in_place` panics.
+#[inline]
+fn scan_maybe_blocking(
+    scanner: &mut Scanner,
+    buf: Bytes,
+) -> Result<arrow::record_batch::RecordBatch, arrow::error::ArrowError> {
+    #[cfg(feature = "turmoil")]
+    {
+        scanner.scan(buf)
+    }
+    #[cfg(not(feature = "turmoil"))]
+    {
+        tokio::task::block_in_place(|| scanner.scan(buf))
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Channel message types
@@ -421,6 +445,41 @@ impl Pipeline {
         self.batch_timeout = timeout;
     }
 
+    /// Create a minimal pipeline for simulation testing.
+    ///
+    /// Bypasses config parsing, filesystem, and OTel meter setup.
+    /// Uses default scanner (JSON passthrough), identity SQL transform,
+    /// and the provided sink.
+    #[cfg(feature = "turmoil")]
+    pub fn for_simulation(name: &str, sink: Box<dyn logfwd_output::Sink>) -> Self {
+        use logfwd_arrow::scanner::Scanner;
+        use logfwd_core::scan_config::ScanConfig;
+
+        let scan_config = ScanConfig::default();
+        let scanner = Scanner::new(scan_config);
+        let transform = SqlTransform::new("SELECT * FROM logs").expect("default SQL");
+        let meter = opentelemetry::global::meter("test");
+        let metrics = Arc::new(PipelineMetrics::new(name, "SELECT * FROM logs", &meter));
+        let factory = Arc::new(OnceAsyncFactory::new(name.to_string(), sink));
+        let pool = OutputWorkerPool::new(factory, 1, Duration::MAX, Arc::clone(&metrics));
+
+        Pipeline {
+            name: name.to_string(),
+            inputs: vec![],
+            scanner,
+            transform,
+            pool,
+            metrics,
+            batch_target_bytes: 64 * 1024,
+            batch_timeout: Duration::from_millis(50),
+            poll_interval: Duration::from_millis(5),
+            resource_attrs: Arc::new(vec![]),
+            machine: Some(PipelineMachine::new().start()),
+            checkpoint_store: None,
+            last_checkpoint_flush: Instant::now(),
+        }
+    }
+
     /// Run the pipeline until `shutdown` is cancelled. Blocks the calling thread.
     /// Run the pipeline until `shutdown` is cancelled. Blocks the calling thread.
     ///
@@ -456,13 +515,34 @@ impl Pipeline {
         let batch_target = self.batch_target_bytes;
         let batch_timeout = self.batch_timeout;
         let poll_interval = self.poll_interval;
-        let mut input_handles = Vec::new();
+        #[cfg(not(feature = "turmoil"))]
+        let mut input_handles: Vec<std::thread::JoinHandle<()>> = Vec::new();
+        #[cfg(feature = "turmoil")]
+        let mut input_tasks = tokio::task::JoinSet::<()>::new();
+
         for input in self.inputs.drain(..) {
             let tx = tx.clone();
             let sd = shutdown.clone();
             let metrics = Arc::clone(&self.metrics);
-            input_handles.push(std::thread::spawn(move || {
-                input_poll_loop(
+
+            #[cfg(not(feature = "turmoil"))]
+            {
+                input_handles.push(std::thread::spawn(move || {
+                    input_poll_loop(
+                        input,
+                        tx,
+                        metrics,
+                        sd,
+                        batch_target,
+                        batch_timeout,
+                        poll_interval,
+                    );
+                }));
+            }
+
+            #[cfg(feature = "turmoil")]
+            {
+                input_tasks.spawn(async_input_poll_loop(
                     input,
                     tx,
                     metrics,
@@ -470,15 +550,12 @@ impl Pipeline {
                     batch_target,
                     batch_timeout,
                     poll_interval,
-                );
-            }));
+                ));
+            }
         }
         drop(tx); // Drop our copy so rx.recv() returns None when all inputs exit.
 
-        let mut scan_buf = BytesMut::with_capacity(self.batch_target_bytes);
-        let mut batch_checkpoints: HashMap<SourceId, ByteOffset> = HashMap::new();
-        // Oldest queued_at in the current accumulating batch — reset after each flush.
-        let mut batch_queued_at: Option<Instant> = None;
+        let mut accumulator = BatchAccumulator::new(self.batch_target_bytes);
         let mut flush_interval = tokio::time::interval(self.batch_timeout);
         flush_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
@@ -491,31 +568,24 @@ impl Pipeline {
                 msg = rx.recv() => {
                     match msg {
                         Some(ChannelMsg::Data { bytes, checkpoints, queued_at }) => {
-                            if batch_queued_at.is_none() {
-                                batch_queued_at = Some(queued_at);
-                            }
-                            scan_buf.extend_from_slice(&bytes);
-                            for (sid, offset) in checkpoints {
-                                batch_checkpoints.insert(sid, offset);
-                            }
-                            // Flush if buffer is large enough.
-                            if scan_buf.len() >= self.batch_target_bytes {
+                            if let AccumulatorAction::Flush { data, checkpoints, queued_at, .. } =
+                                accumulator.ingest(bytes, checkpoints, queued_at)
+                            {
                                 self.metrics.inc_flush_by_size();
-                                self.flush_batch(&mut scan_buf, &mut batch_checkpoints, "size", batch_queued_at.take()).await;
+                                self.flush_batch_from(data, checkpoints, "size", queued_at).await;
                                 flush_interval.reset();
                             }
                         }
-                        None => {
-                            // All input threads exited.
-                            break;
-                        }
+                        None => break,
                     }
                 }
 
                 _ = flush_interval.tick() => {
-                    if !scan_buf.is_empty() {
+                    if let AccumulatorAction::Flush { data, checkpoints, queued_at, .. } =
+                        accumulator.check_timeout()
+                    {
                         self.metrics.inc_flush_by_timeout();
-                        self.flush_batch(&mut scan_buf, &mut batch_checkpoints, "timeout", batch_queued_at.take()).await;
+                        self.flush_batch_from(data, checkpoints, "timeout", queued_at).await;
                     }
                 }
 
@@ -540,43 +610,39 @@ impl Pipeline {
                     checkpoints,
                     queued_at,
                 } => {
-                    if batch_queued_at.is_none() {
-                        batch_queued_at = Some(queued_at);
-                    }
-                    scan_buf.extend_from_slice(&bytes);
-                    for (sid, offset) in checkpoints {
-                        batch_checkpoints.insert(sid, offset);
-                    }
-                    if scan_buf.len() >= self.batch_target_bytes {
-                        self.flush_batch(
-                            &mut scan_buf,
-                            &mut batch_checkpoints,
-                            "drain",
-                            batch_queued_at.take(),
-                        )
-                        .await;
+                    if let AccumulatorAction::Flush {
+                        data,
+                        checkpoints,
+                        queued_at,
+                        ..
+                    } = accumulator.ingest(bytes, checkpoints, queued_at)
+                    {
+                        self.flush_batch_from(data, checkpoints, "drain", queued_at)
+                            .await;
                     }
                 }
             }
         }
 
-        // All sender clones have now been dropped, so input threads can be
-        // joined without risking a channel backpressure deadlock.
+        // All sender clones have now been dropped, so input threads/tasks can
+        // be joined without risking a channel backpressure deadlock.
+        #[cfg(not(feature = "turmoil"))]
         for h in input_handles {
             if let Err(e) = h.join() {
                 tracing::error!(error = ?e, "pipeline: input thread panicked");
             }
         }
+        #[cfg(feature = "turmoil")]
+        while let Some(result) = input_tasks.join_next().await {
+            if let Err(e) = result {
+                tracing::error!(error = ?e, "pipeline: input task panicked");
+            }
+        }
 
         // Flush any remaining buffered data.
-        if !scan_buf.is_empty() {
-            self.flush_batch(
-                &mut scan_buf,
-                &mut batch_checkpoints,
-                "drain",
-                batch_queued_at.take(),
-            )
-            .await;
+        if let Some((data, checkpoints, queued_at)) = accumulator.drain() {
+            self.flush_batch_from(data, checkpoints, "drain", queued_at)
+                .await;
         }
 
         // Drain the pool: signal workers to finish current item and exit,
@@ -653,25 +719,21 @@ impl Pipeline {
             errors = tracing::field::Empty,
         )
     )]
-    async fn flush_batch(
+    async fn flush_batch_from(
         &mut self,
-        scan_buf: &mut BytesMut,
-        batch_checkpoints: &mut HashMap<SourceId, ByteOffset>,
+        data: Bytes,
+        checkpoints: HashMap<SourceId, ByteOffset>,
         flush_reason: &'static str,
         queued_at: Option<Instant>,
     ) {
-        if scan_buf.is_empty() {
+        if data.is_empty() {
             return;
         }
 
         let batch_id = self.metrics.alloc_batch_id();
         self.metrics.begin_active_batch(batch_id, now_nanos());
 
-        let checkpoints = std::mem::take(batch_checkpoints);
-
-        // Split off accumulated data. BytesMut::split retains the allocation
-        // for the next batch; freeze() produces immutable Bytes for the scanner.
-        let combined = scan_buf.split().freeze();
+        let combined = data;
 
         // Record batch-level attributes now that we know the input size.
         let span = tracing::Span::current();
@@ -693,14 +755,14 @@ impl Pipeline {
             Vec::new()
         };
 
-        // Scan (CPU-bound, ~1-5ms per 4MB batch). block_in_place tells
-        // tokio to move other tasks off this worker while scanning.
+        // Scan (CPU-bound, ~1-5ms per 4MB batch). scan_maybe_blocking
+        // uses block_in_place in production, direct call under turmoil.
         let t0 = Instant::now();
         let batch = {
             let scan_span =
                 tracing::info_span!("scan", pipeline = %self.name, rows = tracing::field::Empty);
             let _entered = scan_span.enter();
-            let b = match tokio::task::block_in_place(|| self.scanner.scan(combined)) {
+            let b = match scan_maybe_blocking(&mut self.scanner, combined) {
                 Ok(b) => b,
                 Err(e) => {
                     // Queued tickets dropped here — safe, not tracked by machine.
@@ -896,6 +958,7 @@ impl Pipeline {
 /// before sending. Sends when the buffer reaches `batch_target_bytes` or
 /// after `batch_timeout` of accumulated data, whichever comes first.
 /// This avoids flooding the channel with tiny fragments.
+#[cfg(not(feature = "turmoil"))]
 fn input_poll_loop(
     mut input: InputState,
     tx: tokio::sync::mpsc::Sender<ChannelMsg>,
@@ -987,6 +1050,7 @@ fn input_poll_loop(
     }
 }
 
+#[cfg(not(feature = "turmoil"))]
 fn blocking_send_channel_msg(
     input_name: &str,
     tx: &tokio::sync::mpsc::Sender<ChannelMsg>,
@@ -1003,6 +1067,88 @@ fn blocking_send_channel_msg(
         Err(tokio::sync::mpsc::error::TrySendError::Closed(msg)) => {
             Err(tokio::sync::mpsc::error::SendError(msg))
         }
+    }
+}
+
+/// Async version of `input_poll_loop` for simulation testing.
+/// Uses `tokio::time::sleep` instead of `std::thread::sleep` so that
+/// Turmoil's simulated time advances deterministically.
+#[cfg(feature = "turmoil")]
+async fn async_input_poll_loop(
+    mut input: InputState,
+    tx: tokio::sync::mpsc::Sender<ChannelMsg>,
+    _metrics: Arc<PipelineMetrics>,
+    shutdown: CancellationToken,
+    batch_target_bytes: usize,
+    batch_timeout: Duration,
+    poll_interval: Duration,
+) {
+    let mut buffered_since: Option<Instant> = None;
+
+    loop {
+        if shutdown.is_cancelled() {
+            break;
+        }
+
+        let events = match input.source.poll() {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!(input = input.source.name(), error = %e, "input.poll_error");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                continue;
+            }
+        };
+
+        if events.is_empty() {
+            tokio::time::sleep(poll_interval).await;
+        } else {
+            for event in events {
+                match event {
+                    InputEvent::Data { bytes, .. } => {
+                        input.buf.extend_from_slice(&bytes);
+                    }
+                    InputEvent::Rotated { .. } => {
+                        input.stats.inc_rotations();
+                    }
+                    InputEvent::Truncated { .. } => {
+                        input.stats.inc_rotations();
+                    }
+                    InputEvent::EndOfFile { .. } => {}
+                }
+            }
+            if buffered_since.is_none() && !input.buf.is_empty() {
+                buffered_since = Some(Instant::now());
+            }
+        }
+
+        let timeout_elapsed = buffered_since.is_some_and(|t| t.elapsed() >= batch_timeout);
+        let should_send =
+            input.buf.len() >= batch_target_bytes || (!input.buf.is_empty() && timeout_elapsed);
+        if should_send {
+            let data = input.buf.split().freeze();
+            let checkpoints = input.source.checkpoint_data();
+            let msg = ChannelMsg::Data {
+                bytes: data,
+                checkpoints,
+                queued_at: Instant::now(),
+            };
+            if tx.send(msg).await.is_err() {
+                break;
+            }
+            buffered_since = None;
+        }
+    }
+
+    // Drain remaining
+    if !input.buf.is_empty() {
+        let data = input.buf.split().freeze();
+        let checkpoints = input.source.checkpoint_data();
+        let msg = ChannelMsg::Data {
+            bytes: data,
+            checkpoints,
+            queued_at: Instant::now(),
+        };
+        let _ = tx.send(msg).await;
     }
 }
 
@@ -1692,6 +1838,7 @@ output:
         );
     }
 
+    #[cfg(not(feature = "turmoil"))]
     #[tokio::test]
     async fn test_blocking_send_records_backpressure_stall() {
         use std::sync::atomic::Ordering;
@@ -2744,6 +2891,7 @@ output:
 
     /// Write N lines, run pipeline, shut down, then write M more lines, run
     /// again. The second run must process only the M new lines.
+    #[cfg(not(feature = "turmoil"))]
     #[test]
     fn test_pipeline_resumes_from_checkpoint() {
         let dir = tempfile::tempdir().unwrap();
