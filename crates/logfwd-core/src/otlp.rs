@@ -614,6 +614,48 @@ mod tests {
         assert!(!hex_decode(b"0102030G", &mut out)); // 'G' is invalid
         assert!(!hex_decode(b"01 20304", &mut out)); // space is invalid
     }
+
+    /// Spot-check protobuf field number constants against the OTLP proto spec.
+    /// Catches drift without requiring the Kani toolchain.
+    #[test]
+    fn field_constants_spot_check() {
+        // Wire types (protobuf spec).
+        assert_eq!(WIRE_TYPE_VARINT, 0);
+        assert_eq!(WIRE_TYPE_FIXED64, 1);
+        assert_eq!(WIRE_TYPE_LEN, 2);
+        assert_eq!(WIRE_TYPE_FIXED32, 5);
+
+        // LogRecord fields (logs.proto).
+        assert_eq!(LOG_RECORD_TIME_UNIX_NANO, 1);
+        assert_eq!(LOG_RECORD_SEVERITY_NUMBER, 2);
+        assert_eq!(LOG_RECORD_SEVERITY_TEXT, 3);
+        assert_eq!(LOG_RECORD_BODY, 5);
+        assert_eq!(LOG_RECORD_ATTRIBUTES, 6);
+        assert_eq!(LOG_RECORD_FLAGS, 8);
+        assert_eq!(LOG_RECORD_TRACE_ID, 9);
+        assert_eq!(LOG_RECORD_SPAN_ID, 10);
+        assert_eq!(LOG_RECORD_OBSERVED_TIME_UNIX_NANO, 11);
+
+        // AnyValue fields (common.proto).
+        assert_eq!(ANY_VALUE_STRING_VALUE, 1);
+        assert_eq!(ANY_VALUE_BOOL_VALUE, 2);
+        assert_eq!(ANY_VALUE_INT_VALUE, 3);
+        assert_eq!(ANY_VALUE_DOUBLE_VALUE, 4);
+
+        // KeyValue fields (common.proto).
+        assert_eq!(KEY_VALUE_KEY, 1);
+        assert_eq!(KEY_VALUE_VALUE, 2);
+
+        // Message nesting fields.
+        assert_eq!(EXPORT_LOGS_REQUEST_RESOURCE_LOGS, 1);
+        assert_eq!(RESOURCE_LOGS_RESOURCE, 1);
+        assert_eq!(RESOURCE_LOGS_SCOPE_LOGS, 2);
+        assert_eq!(RESOURCE_ATTRIBUTES, 1);
+        assert_eq!(SCOPE_LOGS_SCOPE, 1);
+        assert_eq!(SCOPE_LOGS_LOG_RECORDS, 2);
+        assert_eq!(INSTRUMENTATION_SCOPE_NAME, 1);
+        assert_eq!(INSTRUMENTATION_SCOPE_VERSION, 2);
+    }
 }
 
 // ---------------------------------------------------------------------------
