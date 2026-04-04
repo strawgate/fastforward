@@ -307,7 +307,7 @@ fn bench_output(c: &mut Criterion) {
                 let _ = logfwd_output::write_row_json(&batch, row, &cols, &mut buf);
                 buf.push(b'\n');
             }
-            criterion::black_box(buf.len());
+            std::hint::black_box(buf.len());
         });
     });
 
