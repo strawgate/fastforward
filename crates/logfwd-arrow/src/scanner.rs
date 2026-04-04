@@ -19,10 +19,6 @@ use crate::streaming_builder::StreamingBuilder;
 
 impl ScanBuilder for StorageBuilder {
     #[inline(always)]
-    fn begin_batch(&mut self) {
-        self.begin_batch();
-    }
-    #[inline(always)]
     fn begin_row(&mut self) {
         self.begin_row();
     }
@@ -58,10 +54,6 @@ impl ScanBuilder for StorageBuilder {
 
 impl ScanBuilder for StreamingBuilder {
     #[inline(always)]
-    fn begin_batch(&mut self) {
-        // no-op: begin_batch(Bytes) called by StreamingSimdScanner
-    }
-    #[inline(always)]
     fn begin_row(&mut self) {
         self.begin_row();
     }
@@ -76,6 +68,10 @@ impl ScanBuilder for StreamingBuilder {
     #[inline(always)]
     fn append_str_by_idx(&mut self, idx: usize, v: &[u8]) {
         self.append_str_by_idx(idx, v);
+    }
+    #[inline(always)]
+    fn append_decoded_str_by_idx(&mut self, idx: usize, v: &[u8]) {
+        self.append_decoded_str_by_idx(idx, v);
     }
     #[inline(always)]
     fn append_int_by_idx(&mut self, idx: usize, v: &[u8]) {
@@ -129,6 +125,7 @@ impl SimdScanner {
                 ))
             })?;
         }
+        self.builder.begin_batch();
         scan_streaming(buf, &self.config, &mut self.builder);
         self.builder.finish_batch()
     }

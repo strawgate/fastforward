@@ -22,7 +22,7 @@ pub use json_lines::JsonLinesSink;
 pub use loki::{LokiAsyncSink, LokiSinkFactory};
 pub use null::NullSink;
 pub use otlp_sink::{OtlpProtocol, OtlpSink};
-pub use sink::{SendResult, Sink, SinkFactory, SyncSinkAdapter};
+pub use sink::{OnceAsyncFactory, SendResult, Sink, SinkFactory, SyncSinkAdapter};
 use stdout::*;
 pub use tcp_sink::TcpSink;
 pub use udp_sink::UdpSink;
@@ -74,7 +74,13 @@ pub struct BatchMetadata {
     pub observed_time_ns: u64,
 }
 
-/// Every output implements this trait.
+/// Synchronous output sink trait.
+///
+/// Deprecated: use the async [`Sink`] trait instead. New sinks should
+/// implement [`Sink`] directly. Existing sync sinks will be migrated
+/// incrementally. The [`SyncSinkAdapter`] bridges legacy `OutputSink`
+/// implementations into the async pipeline.
+#[deprecated(note = "use the async `Sink` trait instead")]
 pub trait OutputSink: Send {
     /// Serialize and send a batch.
     fn send_batch(&mut self, batch: &RecordBatch, metadata: &BatchMetadata) -> io::Result<()>;
@@ -537,6 +543,7 @@ fn build_auth_headers(auth: Option<&AuthConfig>) -> Vec<(String, String)> {
 // ---------------------------------------------------------------------------
 
 /// Build an output sink from configuration.
+#[allow(deprecated)]
 pub fn build_output_sink(
     name: &str,
     cfg: &OutputConfig,
@@ -584,10 +591,20 @@ pub fn build_output_sink(
                 .endpoint
                 .as_ref()
                 .ok_or_else(|| format!("output '{name}': HTTP requires 'endpoint'"))?;
+            let compression = match cfg.compression.as_deref() {
+                Some("gzip") => Compression::Gzip,
+                Some(other) => {
+                    return Err(format!(
+                        "output '{name}': json_lines HTTP does not support '{other}' compression (use 'gzip')"
+                    ));
+                }
+                None => Compression::None,
+            };
             Ok(Box::new(JsonLinesSink::new(
                 name.to_string(),
                 endpoint.clone(),
                 auth_headers,
+                compression,
                 stats,
             )))
         }
@@ -635,11 +652,16 @@ pub fn build_output_sink(
 ///
 /// For most sync sinks (Stdout, TCP, UDP) a single worker is correct —
 /// there is only one connection or file handle anyway.
+///
+/// For new code, prefer [`OnceAsyncFactory`] with a sink implementing the
+/// async [`Sink`] trait directly.
+#[allow(deprecated)]
 pub struct OnceFactory {
     name: String,
     inner: Mutex<Option<Box<dyn OutputSink>>>,
 }
 
+#[allow(deprecated)]
 impl OnceFactory {
     pub fn new(name: String, sink: Box<dyn OutputSink>) -> Self {
         OnceFactory {
@@ -682,6 +704,7 @@ impl SinkFactory for OnceFactory {
 /// creates a fresh reqwest-based sink per worker. For all other sinks it
 /// builds the sink synchronously and wraps it in a [`OnceFactory`] — those
 /// sinks are limited to one worker.
+#[allow(deprecated)]
 pub fn build_sink_factory(
     name: &str,
     cfg: &OutputConfig,
@@ -762,6 +785,7 @@ impl CaptureSink {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 impl OutputSink for CaptureSink {
     fn send_batch(&mut self, batch: &RecordBatch, _metadata: &BatchMetadata) -> io::Result<()> {
         self.batches.push(batch.clone());
@@ -782,6 +806,7 @@ impl OutputSink for CaptureSink {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
     use arrow::array::{Float64Array, Int64Array, StringArray};
@@ -894,6 +919,7 @@ mod tests {
         name: &'static str,
     }
 
+    #[allow(deprecated)]
     impl OutputSink for AlwaysFailSink {
         fn send_batch(
             &mut self,
@@ -1007,6 +1033,7 @@ mod tests {
             "test-jsonl".to_string(),
             "http://localhost:9200".to_string(),
             vec![],
+            Compression::None,
             Arc::new(ComponentStats::new()),
         );
         sink.serialize_batch(&batch).unwrap();
@@ -1159,6 +1186,48 @@ mod tests {
         };
         let sink = build_output_sink("es", &cfg, Arc::new(ComponentStats::new())).unwrap();
         assert_eq!(sink.name(), "es");
+    }
+
+    #[test]
+    fn test_build_output_sink_http_with_gzip_compression() {
+        let cfg = OutputConfig {
+            name: Some("http-gz".to_string()),
+            output_type: OutputType::Http,
+            endpoint: Some("http://localhost:9200".to_string()),
+            protocol: None,
+            compression: Some("gzip".to_string()),
+            format: None,
+            path: None,
+            index: None,
+            auth: None,
+        };
+        let sink = build_output_sink("http-gz", &cfg, Arc::new(ComponentStats::new())).unwrap();
+        assert_eq!(sink.name(), "http-gz");
+    }
+
+    #[test]
+    fn test_build_output_sink_http_rejects_unknown_compression() {
+        let cfg = OutputConfig {
+            name: Some("http-bad".to_string()),
+            output_type: OutputType::Http,
+            endpoint: Some("http://localhost:9200".to_string()),
+            protocol: None,
+            compression: Some("zstd".to_string()),
+            format: None,
+            path: None,
+            index: None,
+            auth: None,
+        };
+        let result = build_output_sink("http-bad", &cfg, Arc::new(ComponentStats::new()));
+        assert!(
+            result.is_err(),
+            "unsupported compression should be rejected"
+        );
+        let err = result.err().unwrap();
+        assert!(
+            err.contains("zstd"),
+            "error should name the unsupported algorithm, got: {err}"
+        );
     }
 
     #[test]
@@ -1329,6 +1398,7 @@ mod tests {
             "test-jsonl".to_string(),
             "http://localhost:9200".to_string(),
             vec![],
+            Compression::None,
             Arc::new(ComponentStats::new()),
         );
         // Must not panic.
@@ -2074,7 +2144,7 @@ mod kani_proofs {
 
     /// Empty struct is not a conflict struct — the guard requires at least one child.
     #[kani::proof]
-    fn proof_is_conflict_struct_empty_returns_false() {
+    fn verify_is_conflict_struct_empty_returns_false() {
         let fields = Fields::empty();
         assert!(!is_conflict_struct(&fields));
         kani::cover!(true, "empty fields path exercised");
@@ -2083,7 +2153,7 @@ mod kani_proofs {
     /// JSON priority ordering: Int64 wins over Float64 wins over Utf8.
     /// This is the core contract that drives per-row type-preserving serialization.
     #[kani::proof]
-    fn proof_json_priority_total_order() {
+    fn verify_json_priority_total_order() {
         assert!(json_priority(&DataType::Int64) > json_priority(&DataType::Float64));
         assert!(json_priority(&DataType::Float64) > json_priority(&DataType::Utf8));
         assert!(json_priority(&DataType::Int64) > json_priority(&DataType::Utf8));
@@ -2096,7 +2166,7 @@ mod kani_proofs {
     /// String-coalesce priority: Utf8/Utf8View wins over numeric types.
     /// Loki labels and other string consumers depend on this contract.
     #[kani::proof]
-    fn proof_str_priority_string_beats_numerics() {
+    fn verify_str_priority_string_beats_numerics() {
         assert!(str_priority(&DataType::Utf8) > str_priority(&DataType::Int64));
         assert!(str_priority(&DataType::Utf8View) > str_priority(&DataType::Float64));
         assert!(str_priority(&DataType::Utf8) == str_priority(&DataType::Utf8View));
@@ -2109,7 +2179,7 @@ mod kani_proofs {
     /// json_priority and str_priority assign different orderings — they are not equal.
     /// This guards against accidentally returning the same function for both callers.
     #[kani::proof]
-    fn proof_json_and_str_priority_differ_for_int_vs_utf8() {
+    fn verify_json_and_str_priority_differ_for_int_vs_utf8() {
         // In JSON mode, Int64 wins; in string mode, Utf8 wins.
         assert!(json_priority(&DataType::Int64) > json_priority(&DataType::Utf8));
         assert!(str_priority(&DataType::Utf8) > str_priority(&DataType::Int64));
@@ -2117,5 +2187,68 @@ mod kani_proofs {
             true,
             "ordering inversion between json and str priority verified"
         );
+    }
+
+    /// ColVariant::Flat preserves its col_idx and DataType exactly.
+    #[kani::proof]
+    fn verify_col_variant_flat_preserves_idx_and_type() {
+        let col_idx: usize = kani::any();
+        let v = ColVariant::Flat {
+            col_idx,
+            dt: DataType::Int64,
+        };
+        if let ColVariant::Flat { col_idx: idx, dt } = v {
+            assert_eq!(idx, col_idx);
+            assert_eq!(dt, DataType::Int64);
+        }
+        kani::cover!(col_idx > 0, "non-zero col_idx");
+        kani::cover!(col_idx == 0, "zero col_idx");
+    }
+
+    /// ColVariant::StructField preserves struct_col_idx, field_idx, and DataType.
+    #[kani::proof]
+    fn verify_col_variant_struct_field_preserves_indices() {
+        let struct_col_idx: usize = kani::any();
+        let field_idx: usize = kani::any();
+        let v = ColVariant::StructField {
+            struct_col_idx,
+            field_idx,
+            dt: DataType::Utf8,
+        };
+        if let ColVariant::StructField {
+            struct_col_idx: sci,
+            field_idx: fi,
+            dt,
+        } = v
+        {
+            assert_eq!(sci, struct_col_idx);
+            assert_eq!(fi, field_idx);
+            assert_eq!(dt, DataType::Utf8);
+        }
+        kani::cover!(struct_col_idx > 0, "non-zero struct_col_idx");
+        kani::cover!(field_idx > 0, "non-zero field_idx");
+    }
+
+    /// variant_dt extracts the DataType from a Flat variant correctly.
+    #[kani::proof]
+    fn verify_variant_dt_flat() {
+        let v = ColVariant::Flat {
+            col_idx: 0,
+            dt: DataType::Int64,
+        };
+        assert_eq!(variant_dt(&v), &DataType::Int64);
+        kani::cover!(true, "variant_dt(Flat) returns correct type");
+    }
+
+    /// variant_dt extracts the DataType from a StructField variant correctly.
+    #[kani::proof]
+    fn verify_variant_dt_struct_field() {
+        let v = ColVariant::StructField {
+            struct_col_idx: 0,
+            field_idx: 1,
+            dt: DataType::Float64,
+        };
+        assert_eq!(variant_dt(&v), &DataType::Float64);
+        kani::cover!(true, "variant_dt(StructField) returns correct type");
     }
 }

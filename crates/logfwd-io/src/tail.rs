@@ -553,6 +553,15 @@ impl FileTailer {
             self.files.remove(path);
             self.evicted_offsets.remove(path); // Bug G: prevent unbounded leak
         }
+        // Remove deleted paths from watch_paths when using glob patterns so
+        // the list does not grow unboundedly with file churn. (#810)
+        // Glob-discovered paths will be re-added by the next rescan_globs() call
+        // when the file reappears.  Literal-path tailers (glob_patterns empty)
+        // must keep deleted paths so they detect the file if it is re-created.
+        if !self.glob_patterns.is_empty() && !deleted.is_empty() {
+            let deleted_set: HashSet<&PathBuf> = deleted.iter().collect();
+            self.watch_paths.retain(|p| !deleted_set.contains(p));
+        }
 
         // Evict least-recently-read files when over the open-file limit.
         // Save each evicted file's offset so it can resume from the correct
@@ -1414,6 +1423,62 @@ mod tests {
             0,
             "deleted file should be removed from the files map"
         );
+        // For literal-path tailers, watch_paths must KEEP the path so the
+        // file can be detected if it is re-created. (#810)
+        assert_eq!(
+            tailer.watch_paths.len(),
+            1,
+            "literal-path tailers must keep watch_paths entry after deletion"
+        );
+    }
+
+    /// Regression test: glob-discovered file deletions must shrink watch_paths
+    /// so the list does not grow unboundedly with file churn. (#810)
+    #[test]
+    fn test_glob_deleted_file_removed_from_watch_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let pattern = format!("{}/*.log", dir.path().display());
+
+        // Create several files matching the glob.
+        let paths: Vec<_> = (0..5)
+            .map(|i| {
+                let p = dir.path().join(format!("churn-{i}.log"));
+                let mut f = File::create(&p).unwrap();
+                writeln!(f, "data {i}").unwrap();
+                p
+            })
+            .collect();
+
+        let config = TailConfig {
+            start_from_end: false,
+            poll_interval_ms: 10,
+            glob_rescan_interval_ms: 10,
+            ..Default::default()
+        };
+        let mut tailer = FileTailer::new_with_globs(&[&pattern], config).unwrap();
+
+        // Read initial data so the tailer advances past the initial content.
+        std::thread::sleep(Duration::from_millis(50));
+        tailer.poll().unwrap();
+
+        let paths_before = tailer.watch_paths.len();
+        assert_eq!(paths_before, 5, "should have 5 watch_paths before deletion");
+
+        // Delete all files.
+        for p in &paths {
+            fs::remove_file(p).unwrap();
+        }
+
+        // Poll to trigger deletion cleanup.
+        std::thread::sleep(Duration::from_millis(50));
+        tailer.poll().unwrap();
+
+        assert_eq!(
+            tailer.watch_paths.len(),
+            0,
+            "watch_paths must shrink to 0 after all glob files are deleted (#810)"
+        );
+        assert_eq!(tailer.num_files(), 0, "files map must also be empty");
     }
 
     #[test]
@@ -1691,5 +1756,85 @@ mod tests {
         let tailer = FileTailer::new(std::slice::from_ref(&missing), config);
         assert!(tailer.is_ok(), "missing path should not fail construction");
         assert_eq!(tailer.unwrap().num_files(), 0);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Kani proofs
+// ---------------------------------------------------------------------------
+
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    /// Pure model of the `eof_emitted` state transition in `FileTailer::poll()`.
+    ///
+    /// Mirrors the logic from the `ReadResult::Data`, `ReadResult::TruncatedThenData`,
+    /// and `ReadResult::NoData` arms exactly, making the invariant explicitly testable.
+    ///
+    /// Returns `(new_eof_emitted, should_emit_eof_event)`.
+    fn eof_transition(eof_emitted: bool, had_data: bool) -> (bool, bool) {
+        if had_data {
+            (false, false)
+        } else if !eof_emitted {
+            (true, true)
+        } else {
+            (true, false)
+        }
+    }
+
+    /// EndOfFile is emitted at most once per no-data streak: the event fires only
+    /// when `eof_emitted` transitions from `false` to `true`, never while it is
+    /// already `true`.
+    #[kani::proof]
+    fn verify_eof_emitted_at_most_once_per_no_data_streak() {
+        let eof_emitted: bool = kani::any();
+        let (_, fires) = eof_transition(eof_emitted, false); // NoData
+        if fires {
+            assert!(!eof_emitted, "EndOfFile may only fire when flag was false");
+        }
+        kani::cover!(fires, "EndOfFile event fired");
+        kani::cover!(
+            !fires && eof_emitted,
+            "EndOfFile suppressed — already emitted"
+        );
+    }
+
+    /// Data always resets the eof_emitted flag to false and never fires EndOfFile.
+    ///
+    /// This ensures a fresh EndOfFile can be emitted the next time reads stall,
+    /// correctly signalling the downstream framer to flush any partial-line remainder.
+    #[kani::proof]
+    fn verify_data_resets_eof_flag() {
+        let eof_emitted: bool = kani::any();
+        let (new_flag, fires) = eof_transition(eof_emitted, true); // Data
+        assert!(!new_flag, "Data must reset eof_emitted to false");
+        assert!(!fires, "Data must not emit EndOfFile");
+        kani::cover!(eof_emitted, "eof_emitted was true before data arrived");
+        kani::cover!(!eof_emitted, "eof_emitted was already false");
+    }
+
+    /// Two consecutive NoData polls emit EndOfFile exactly once (on the first).
+    #[kani::proof]
+    fn verify_two_no_data_polls_emit_exactly_once() {
+        let (state1, fires1) = eof_transition(false, false); // first NoData
+        let (state2, fires2) = eof_transition(state1, false); // second NoData
+        assert!(fires1, "first NoData poll must emit EndOfFile");
+        assert!(!fires2, "second NoData poll must not emit again");
+        assert!(state1 && state2, "flag stays true after both polls");
+        kani::cover!(true, "two-poll no-data sequence verified");
+    }
+
+    /// After data resets the flag, the next NoData streak fires EndOfFile again.
+    ///
+    /// Sequence: NoData → Data → NoData.  Both stalls must emit exactly one event.
+    #[kani::proof]
+    fn verify_eof_fires_again_after_data_resets_flag() {
+        let (after_nodata, fires1) = eof_transition(false, false); // first stall
+        let (after_data, _) = eof_transition(after_nodata, true); // data arrives
+        let (_, fires2) = eof_transition(after_data, false); // second stall
+        assert!(fires1, "first stall must emit EndOfFile");
+        assert!(fires2, "second stall must emit EndOfFile after data reset");
+        kani::cover!(true, "data-reset cycle verified");
     }
 }

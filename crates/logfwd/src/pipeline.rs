@@ -26,9 +26,10 @@ use logfwd_io::format::FormatProcessor;
 use logfwd_io::framed::FramedInput;
 use logfwd_io::input::{FileInput, InputEvent, InputSource};
 use logfwd_io::tail::{ByteOffset, TailConfig};
+#[allow(deprecated)]
 use logfwd_output::{
-    BatchMetadata, FanOut, OnceFactory, OutputSink, SinkFactory, build_output_sink,
-    build_sink_factory,
+    BatchMetadata, FanOut, OnceAsyncFactory, OnceFactory, OutputSink, SinkFactory,
+    build_output_sink, build_sink_factory,
 };
 use logfwd_transform::SqlTransform;
 use tokio_util::sync::CancellationToken;
@@ -131,8 +132,8 @@ impl Pipeline {
                         }
                     };
                     if geo_cfg.refresh_interval.is_some() {
-                        eprintln!(
-                            "warn: geo_database refresh_interval is not yet implemented, database will not auto-reload"
+                        tracing::warn!(
+                            "geo_database refresh_interval is not yet implemented, database will not auto-reload"
                         );
                     }
                     transform.set_geo_database(db);
@@ -158,20 +159,19 @@ impl Pipeline {
         // Only create the directory if LOGFWD_DATA_DIR is explicitly set
         // (prevents tests from polluting the default data dir).
         let checkpoint_dir = default_data_dir().join(name);
-        let checkpoint_store =
-            if checkpoint_dir.exists() || std::env::var_os("LOGFWD_DATA_DIR").is_some() {
-                match FileCheckpointStore::open(&checkpoint_dir) {
-                    Ok(s) => Some(s),
-                    Err(e) => {
-                        eprintln!(
-                            "warn: could not open checkpoint store: {e} — starting from beginning"
-                        );
-                        None
-                    }
+        let checkpoint_store = if checkpoint_dir.exists()
+            || std::env::var_os("LOGFWD_DATA_DIR").is_some()
+        {
+            match FileCheckpointStore::open(&checkpoint_dir) {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    tracing::warn!(error = %e, "could not open checkpoint store — starting from beginning");
+                    None
                 }
-            } else {
-                None
-            };
+            }
+        } else {
+            None
+        };
         let saved_checkpoints: Vec<SourceCheckpoint> = checkpoint_store
             .as_ref()
             .map(FileCheckpointStore::load_all)
@@ -228,18 +228,21 @@ impl Pipeline {
             build_sink_factory(&output_name, output_cfg, output_stats)?
         } else {
             // Multiple outputs: build a FanOut of sync sinks wrapped in OnceFactory.
-            let mut sinks: Vec<Box<dyn OutputSink>> = Vec::new();
-            for (i, output_cfg) in config.outputs.iter().enumerate() {
-                let output_name = output_cfg
-                    .name
-                    .clone()
-                    .unwrap_or_else(|| format!("output_{i}"));
-                let output_type_str = format!("{:?}", output_cfg.output_type).to_lowercase();
-                let output_stats = metrics.add_output(&output_name, &output_type_str);
-                sinks.push(build_output_sink(&output_name, output_cfg, output_stats)?);
+            #[allow(deprecated)]
+            {
+                let mut sinks: Vec<Box<dyn OutputSink>> = Vec::new();
+                for (i, output_cfg) in config.outputs.iter().enumerate() {
+                    let output_name = output_cfg
+                        .name
+                        .clone()
+                        .unwrap_or_else(|| format!("output_{i}"));
+                    let output_type_str = format!("{:?}", output_cfg.output_type).to_lowercase();
+                    let output_stats = metrics.add_output(&output_name, &output_type_str);
+                    sinks.push(build_output_sink(&output_name, output_cfg, output_stats)?);
+                }
+                let fanout_name = name.to_string();
+                Arc::new(OnceFactory::new(fanout_name, Box::new(FanOut::new(sinks))))
             }
-            let fanout_name = name.to_string();
-            Arc::new(OnceFactory::new(fanout_name, Box::new(FanOut::new(sinks))))
         };
 
         // Single-use factories (OnceFactory wrapping a sync sink) can only
@@ -277,9 +280,24 @@ impl Pipeline {
         })
     }
 
+    /// Replace the output sink with an async [`Sink`].
+    ///
+    /// Wraps the sink in a single-worker pool via [`OnceAsyncFactory`].
+    pub fn with_sink(mut self, sink: Box<dyn logfwd_output::Sink>) -> Self {
+        let name = self.name.clone();
+        let factory = Arc::new(OnceAsyncFactory::new(name, sink));
+        self.pool = OutputWorkerPool::new(factory, 1, Duration::MAX);
+        self
+    }
+
     /// Replace the output sink. Useful for injecting a test sink.
     ///
     /// Wraps the sink in a single-worker pool via [`OnceFactory`].
+    ///
+    /// Deprecated: use [`with_sink`](Self::with_sink) with an async [`Sink`]
+    /// implementation instead.
+    #[deprecated(note = "use with_sink() with an async Sink instead")]
+    #[allow(deprecated)]
     pub fn with_output(mut self, output: Box<dyn OutputSink>) -> Self {
         let name = self.name.clone();
         let factory = Arc::new(OnceFactory::new(name, output));
@@ -289,6 +307,14 @@ impl Pipeline {
 
     pub fn metrics(&self) -> &Arc<PipelineMetrics> {
         &self.metrics
+    }
+
+    /// Validate the SQL plan by running a probe batch through the transform.
+    ///
+    /// Called by `--dry-run` to surface planning errors (duplicate aliases,
+    /// bad window specs, etc.) before the first real batch arrives.
+    pub fn validate_sql_plan(&mut self) -> Result<(), String> {
+        self.transform.validate_plan()
     }
 
     /// Override the batch flush timeout (for testing).
@@ -439,7 +465,7 @@ impl Pipeline {
         // joined without risking a channel backpressure deadlock.
         for h in input_handles {
             if let Err(e) = h.join() {
-                eprintln!("pipeline: input thread panicked: {e:?}");
+                tracing::error!(error = ?e, "pipeline: input thread panicked");
             }
         }
 
@@ -478,15 +504,14 @@ impl Pipeline {
                             });
                         }
                         if let Err(e) = store.flush() {
-                            eprintln!("pipeline: failed to flush final checkpoints: {e}");
+                            tracing::error!(error = %e, "pipeline: failed to flush final checkpoints");
                         }
                     }
                 }
                 Err(still_draining) => {
-                    eprintln!(
-                        "pipeline: shutdown with {} in-flight batches \
-                         (checkpoint may not reflect latest delivered data)",
-                        still_draining.in_flight_count()
+                    tracing::warn!(
+                        in_flight = still_draining.in_flight_count(),
+                        "pipeline: shutdown with in-flight batches (checkpoint may not reflect latest delivered data)"
                     );
                 }
             }
@@ -565,7 +590,7 @@ impl Pipeline {
                     // Queued tickets dropped here — safe, not tracked by machine.
                     self.metrics.inc_scan_error();
                     self.metrics.inc_dropped_batch();
-                    eprintln!("pipeline: scan error (batch dropped): {e}");
+                    tracing::warn!(error = %e, "pipeline: scan error (batch dropped)");
                     // Must use `span` (the batch root) not `Span::current()` here —
                     // _entered is still live so current() points to the scan child span.
                     span.record("errors", 1u64);
@@ -610,7 +635,7 @@ impl Pipeline {
             Err(e) => {
                 self.metrics.inc_transform_error();
                 self.metrics.inc_dropped_batch();
-                eprintln!("pipeline: transform error (batch dropped): {e}");
+                tracing::warn!(error = %e, "pipeline: transform error (batch dropped)");
                 tracing::Span::current().record("errors", 1u64);
                 // Reject tickets — transform failed, data not delivered.
                 self.ack_all_tickets(sending, false);
@@ -618,9 +643,6 @@ impl Pipeline {
             }
         };
         let transform_elapsed = t1.elapsed();
-        self.metrics
-            .transform_out
-            .inc_lines(result.num_rows() as u64);
 
         // Handle zero-row transform results (SQL WHERE filtered all rows).
         // Still ack — data was processed, just not forwarded.
@@ -716,7 +738,7 @@ impl Pipeline {
             self.last_checkpoint_flush = Instant::now();
             if let Some(ref mut store) = self.checkpoint_store {
                 if let Err(e) = store.flush() {
-                    eprintln!("pipeline: checkpoint flush error: {e}");
+                    tracing::warn!(error = %e, "pipeline: checkpoint flush error");
                 }
             }
         }
@@ -755,7 +777,6 @@ fn input_poll_loop(
         let events = match input.source.poll() {
             Ok(e) => e,
             Err(e) => {
-                eprintln!("pipeline input: poll error: {e}");
                 tracing::warn!(input = input.source.name(), error = %e, "input.poll_error");
                 std::thread::sleep(Duration::from_millis(100));
                 continue;
@@ -1009,14 +1030,15 @@ fn now_nanos() -> u64 {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
     use std::sync::atomic::Ordering;
 
     use logfwd_config::{Format, OutputConfig, OutputType};
     use logfwd_io::diagnostics::ComponentStats;
-    use logfwd_test_utils::sinks::{CountingSink, DevNullSink, FailingSink, FrozenSink, SlowSink};
-    use logfwd_test_utils::{append_json_lines, test_meter};
+    use logfwd_test_utils::sinks::{DevNullSink, FailingSink, FrozenSink, SlowSink};
+    use logfwd_test_utils::test_meter;
 
     #[test]
     fn test_build_output_sink_stdout() {
@@ -1367,7 +1389,7 @@ output:
         let mut pipeline = Pipeline::from_config("default", pipe_cfg, &test_meter(), None).unwrap();
 
         // Use devnull output to avoid stdout noise in test.
-        pipeline = pipeline.with_output(Box::new(DevNullSink));
+        pipeline = pipeline.with_sink(Box::new(DevNullSink));
 
         pipeline.batch_timeout = Duration::from_millis(50);
 
@@ -1427,7 +1449,7 @@ output:
         let config = logfwd_config::Config::load_str(&yaml).unwrap();
         let pipe_cfg = &config.pipelines["default"];
         let mut pipeline = Pipeline::from_config("default", pipe_cfg, &test_meter(), None).unwrap();
-        pipeline = pipeline.with_output(Box::new(DevNullSink));
+        pipeline = pipeline.with_sink(Box::new(DevNullSink));
         pipeline.batch_timeout = Duration::from_millis(20);
 
         let shutdown = CancellationToken::new();
@@ -1493,7 +1515,7 @@ output:
         let mut pipeline = Pipeline::from_config("default", pipe_cfg, &test_meter(), None).unwrap();
 
         // SlowSink blocks the consumer, causing the channel to fill up.
-        pipeline = pipeline.with_output(Box::new(SlowSink {
+        pipeline = pipeline.with_sink(Box::new(SlowSink {
             delay: Duration::from_millis(50),
         }));
         pipeline.batch_target_bytes = 64; // tiny batches → many channel sends
@@ -1611,7 +1633,7 @@ output:
         let config = logfwd_config::Config::load_str(&yaml).unwrap();
         let pipe_cfg = &config.pipelines["default"];
         let mut pipeline = Pipeline::from_config("default", pipe_cfg, &test_meter(), None).unwrap();
-        pipeline = pipeline.with_output(Box::new(SlowSink {
+        pipeline = pipeline.with_sink(Box::new(SlowSink {
             delay: Duration::from_millis(20),
         }));
         pipeline.batch_timeout = Duration::from_millis(30);
@@ -1670,7 +1692,7 @@ output:
         let config = logfwd_config::Config::load_str(&yaml).unwrap();
         let pipe_cfg = &config.pipelines["default"];
         let mut pipeline = Pipeline::from_config("default", pipe_cfg, &test_meter(), None).unwrap();
-        pipeline = pipeline.with_output(Box::new(DevNullSink));
+        pipeline = pipeline.with_sink(Box::new(DevNullSink));
         pipeline.batch_timeout = Duration::from_millis(20);
 
         let shutdown = CancellationToken::new();
@@ -1718,7 +1740,7 @@ output:
         let config = logfwd_config::Config::load_str(&yaml).unwrap();
         let pipe_cfg = &config.pipelines["default"];
         let mut pipeline = Pipeline::from_config("default", pipe_cfg, &test_meter(), None).unwrap();
-        pipeline = pipeline.with_output(Box::new(DevNullSink));
+        pipeline = pipeline.with_sink(Box::new(DevNullSink));
 
         let shutdown = CancellationToken::new();
         let sd = shutdown.clone();
@@ -1758,7 +1780,7 @@ output:
         let config = logfwd_config::Config::load_str(&yaml).unwrap();
         let pipe_cfg = &config.pipelines["default"];
         let mut pipeline = Pipeline::from_config("default", pipe_cfg, &test_meter(), None).unwrap();
-        pipeline = pipeline.with_output(Box::new(DevNullSink));
+        pipeline = pipeline.with_sink(Box::new(DevNullSink));
 
         let shutdown = CancellationToken::new();
         // Cancel immediately, before even starting.
@@ -1802,7 +1824,7 @@ output:
         let pipe_cfg = &config.pipelines["default"];
         let mut pipeline = Pipeline::from_config("default", pipe_cfg, &test_meter(), None).unwrap();
         // FailingSink fails the first N batches, then succeeds.
-        pipeline = pipeline.with_output(Box::new(FailingSink {
+        pipeline = pipeline.with_sink(Box::new(FailingSink {
             fail_count: 3,
             calls: 0,
         }));
@@ -1873,7 +1895,7 @@ pipelines:
         let pipe_cfg = &config.pipelines["default"];
         let mut pipeline = Pipeline::from_config("default", pipe_cfg, &test_meter(), None).unwrap();
         // always-failing: fails every call — pool exhausts retries → dropped
-        pipeline = pipeline.with_output(Box::new(FailingSink::new(u32::MAX)));
+        pipeline = pipeline.with_sink(Box::new(FailingSink::new(u32::MAX)));
         pipeline.batch_timeout = Duration::from_millis(20);
 
         let shutdown = CancellationToken::new();
@@ -1930,7 +1952,7 @@ output:
         let config = logfwd_config::Config::load_str(&yaml).unwrap();
         let pipe_cfg = &config.pipelines["default"];
         let mut pipeline = Pipeline::from_config("default", pipe_cfg, &test_meter(), None).unwrap();
-        pipeline = pipeline.with_output(Box::new(DevNullSink));
+        pipeline = pipeline.with_sink(Box::new(DevNullSink));
         pipeline.batch_timeout = Duration::from_millis(20);
 
         let shutdown = CancellationToken::new();
@@ -1981,7 +2003,7 @@ output:
         let config = logfwd_config::Config::load_str(&yaml).unwrap();
         let pipe_cfg = &config.pipelines["default"];
         let mut pipeline = Pipeline::from_config("default", pipe_cfg, &test_meter(), None).unwrap();
-        pipeline = pipeline.with_output(Box::new(DevNullSink));
+        pipeline = pipeline.with_sink(Box::new(DevNullSink));
         pipeline.batch_target_bytes = 1024; // Much smaller than the line
         pipeline.batch_timeout = Duration::from_millis(20);
 
@@ -2042,7 +2064,7 @@ output:
         // FrozenSink: first call blocks until the token is cancelled.
         // This simulates an output that hangs (network timeout, deadlock).
         let freeze_token = CancellationToken::new();
-        pipeline = pipeline.with_output(Box::new(FrozenSink {
+        pipeline = pipeline.with_sink(Box::new(FrozenSink {
             release: freeze_token.clone(),
         }));
         pipeline.batch_timeout = Duration::from_millis(20);
@@ -2107,7 +2129,7 @@ output:
         // Slow output with a small delay. Combined with a short batch_timeout
         // and large batch_target_bytes, this forces flushes by timeout rather
         // than by size.
-        pipeline = pipeline.with_output(Box::new(SlowSink {
+        pipeline = pipeline.with_sink(Box::new(SlowSink {
             delay: Duration::from_millis(10),
         }));
         pipeline.batch_timeout = Duration::from_millis(30);
@@ -2181,7 +2203,7 @@ output:
         let mut pipeline = Pipeline::from_config("default", pipe_cfg, &test_meter(), None).unwrap();
 
         let freeze_token = CancellationToken::new();
-        pipeline = pipeline.with_output(Box::new(FrozenSink {
+        pipeline = pipeline.with_sink(Box::new(FrozenSink {
             release: freeze_token.clone(),
         }));
         pipeline.batch_timeout = Duration::from_millis(20);
@@ -2260,7 +2282,7 @@ output:
         let config = logfwd_config::Config::load_str(&yaml).unwrap();
         let pipe_cfg = &config.pipelines["default"];
         let mut pipeline = Pipeline::from_config("default", pipe_cfg, &test_meter(), None).unwrap();
-        pipeline = pipeline.with_output(Box::new(DevNullSink));
+        pipeline = pipeline.with_sink(Box::new(DevNullSink));
         pipeline.batch_timeout = Duration::from_millis(20);
 
         let shutdown = CancellationToken::new();
@@ -2298,8 +2320,11 @@ output:
     // PipelineMachine integration tests (#586, #587)
     // -----------------------------------------------------------------------
 
-    /// Helper: build a pipeline from a log file path with a custom output sink.
-    fn pipeline_with_sink(log_path: &std::path::Path, sink: Box<dyn OutputSink>) -> Pipeline {
+    /// Helper: build a pipeline from a log file path with a custom async sink.
+    fn pipeline_with_sink(
+        log_path: &std::path::Path,
+        sink: Box<dyn logfwd_output::Sink>,
+    ) -> Pipeline {
         let yaml = format!(
             r#"
 input:
@@ -2315,7 +2340,7 @@ output:
         let pipe_cfg = &config.pipelines["default"];
         Pipeline::from_config("default", pipe_cfg, &test_meter(), None)
             .unwrap()
-            .with_output(sink)
+            .with_sink(sink)
     }
 
     #[test]
@@ -2541,7 +2566,7 @@ output:
             "checkpoints.json must exist after clean shutdown"
         );
         // Re-open the store to verify the checkpoints are readable.
-        let store = logfwd_io::checkpoint::FileCheckpointStore::open(&cp_dir).unwrap();
+        let store = FileCheckpointStore::open(&cp_dir).unwrap();
         let cps = store.load_all();
         assert!(!cps.is_empty(), "at least one checkpoint must be written");
         assert!(cps[0].offset > 0, "checkpoint offset must be non-zero");

@@ -10,6 +10,7 @@ use arrow::record_batch::RecordBatch;
 
 use logfwd_io::diagnostics::ComponentStats;
 
+#[allow(deprecated)]
 use crate::{BatchMetadata, OutputSink, build_col_infos, write_row_json};
 
 /// Connect timeout. Kept short so the pipeline doesn't stall when the
@@ -94,6 +95,7 @@ impl TcpSink {
     }
 }
 
+#[allow(deprecated)]
 impl OutputSink for TcpSink {
     fn send_batch(&mut self, batch: &RecordBatch, _metadata: &BatchMetadata) -> io::Result<()> {
         if batch.num_rows() == 0 {
@@ -108,7 +110,7 @@ impl OutputSink for TcpSink {
         }
 
         self.write_with_retry()?;
-        // inc_lines is counted by the pipeline; only track bytes here.
+        self.stats.inc_lines(batch.num_rows() as u64);
         self.stats.inc_bytes(self.buf.len() as u64);
         Ok(())
     }

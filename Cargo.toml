@@ -12,6 +12,16 @@ members = [
     "crates/logfwd-competitive-bench",
     "crates/logfwd-test-utils",
 ]
+# default-members: all non-bench crates — keep in sync with members
+default-members = [
+    "crates/logfwd-config",
+    "crates/logfwd-core",
+    "crates/logfwd-arrow",
+    "crates/logfwd-transform",
+    "crates/logfwd-io",
+    "crates/logfwd-output",
+    "crates/logfwd",
+]
 
 [workspace.package]
 edition = "2024"
@@ -30,6 +40,7 @@ opentelemetry = "0.31"
 opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"] }
 opentelemetry-otlp = { version = "0.31", default-features = false, features = ["http-proto", "reqwest-client", "trace", "metrics"] }
 serde = { version = "1", features = ["derive"] }
+tokio = { version = "1" }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-opentelemetry = "0.32"
@@ -68,6 +79,11 @@ assigning_clones = "allow"
 [workspace.lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
 unused_qualifications = "warn"
+
+[profile.dev]
+# line-tables-only keeps backtraces readable while shrinking debug binaries
+# significantly (DataFusion debug info is enormous). (#812)
+debug = "line-tables-only"
 
 [profile.release]
 opt-level = 3
