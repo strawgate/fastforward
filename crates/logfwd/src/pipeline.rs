@@ -615,6 +615,9 @@ impl Pipeline {
         // were consumed. Without this, filtered data causes infinite re-read.
         if batch.num_rows() == 0 {
             self.ack_all_tickets(sending, true);
+            // Record batch with 0 rows so batches_total and scan timing are tracked.
+            self.metrics
+                .record_batch(0, scan_elapsed.as_nanos() as u64, 0, 0);
             return;
         }
 
@@ -648,9 +651,10 @@ impl Pipeline {
         // Still ack — data was processed, just not forwarded.
         if result.num_rows() == 0 {
             self.ack_all_tickets(sending, true);
-            // Still record batch timing for observability.
+            // Record batch with 0 output rows so batches_total and timing are
+            // tracked, but batch_rows_total reflects actual output (not input).
             self.metrics.record_batch(
-                num_rows,
+                0,
                 scan_elapsed.as_nanos() as u64,
                 transform_elapsed.as_nanos() as u64,
                 0,
@@ -2517,6 +2521,19 @@ output:
         assert!(
             pipeline.machine.is_none(),
             "machine should drain cleanly even when transform filters all rows"
+        );
+
+        // Bug #700 fix: batch_rows_total must be 0 when all rows are filtered
+        // by the SQL WHERE clause. batches_total must still be incremented.
+        let batches = pipeline.metrics.batches_total.load(Ordering::Relaxed);
+        assert!(
+            batches > 0,
+            "batches_total must be incremented even when transform filters all rows, got {batches}"
+        );
+        let batch_rows = pipeline.metrics.batch_rows_total.load(Ordering::Relaxed);
+        assert_eq!(
+            batch_rows, 0,
+            "batch_rows_total must be 0 when transform filters all rows, got {batch_rows}"
         );
     }
 
