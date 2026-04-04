@@ -217,6 +217,58 @@ fn libc_getuid() -> u32 {
 }
 
 // ---------------------------------------------------------------------------
+// InMemoryCheckpointStore — for testing
+// ---------------------------------------------------------------------------
+
+/// A `CheckpointStore` backed by an in-memory BTreeMap.
+///
+/// Useful for deterministic testing: no file I/O, inspectable state.
+pub struct InMemoryCheckpointStore {
+    checkpoints: BTreeMap<u64, SourceCheckpoint>,
+    flush_count: u64,
+}
+
+impl InMemoryCheckpointStore {
+    /// Create an empty in-memory store.
+    pub fn new() -> Self {
+        Self {
+            checkpoints: BTreeMap::new(),
+            flush_count: 0,
+        }
+    }
+
+    /// Number of times `flush()` was called.
+    pub fn flush_count(&self) -> u64 {
+        self.flush_count
+    }
+}
+
+impl Default for InMemoryCheckpointStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CheckpointStore for InMemoryCheckpointStore {
+    fn update(&mut self, checkpoint: SourceCheckpoint) {
+        self.checkpoints.insert(checkpoint.source_id, checkpoint);
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.flush_count += 1;
+        Ok(())
+    }
+
+    fn load(&self, source_id: u64) -> Option<SourceCheckpoint> {
+        self.checkpoints.get(&source_id).cloned()
+    }
+
+    fn load_all(&self) -> Vec<SourceCheckpoint> {
+        self.checkpoints.values().cloned().collect()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

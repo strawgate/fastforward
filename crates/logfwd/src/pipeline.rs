@@ -89,7 +89,7 @@ pub struct Pipeline {
     /// Some during run_async, None only after shutdown drain transition.
     machine: Option<PipelineMachine<Running, u64>>,
     /// Durable checkpoint store. None when running without persistence (tests).
-    checkpoint_store: Option<FileCheckpointStore>,
+    checkpoint_store: Option<Box<dyn CheckpointStore>>,
     /// Throttle checkpoint flushes to at most once per 5 seconds.
     last_checkpoint_flush: Instant,
 }
@@ -163,7 +163,7 @@ impl Pipeline {
             || std::env::var_os("LOGFWD_DATA_DIR").is_some()
         {
             match FileCheckpointStore::open(&checkpoint_dir) {
-                Ok(s) => Some(s),
+                Ok(s) => Some(Box::new(s) as Box<dyn CheckpointStore>),
                 Err(e) => {
                     tracing::warn!(error = %e, "could not open checkpoint store — starting from beginning");
                     None
@@ -174,7 +174,7 @@ impl Pipeline {
         };
         let saved_checkpoints: Vec<SourceCheckpoint> = checkpoint_store
             .as_ref()
-            .map(FileCheckpointStore::load_all)
+            .map(|s| s.load_all())
             .unwrap_or_default();
 
         // Build inputs (file only for now).
@@ -302,6 +302,22 @@ impl Pipeline {
         let name = self.name.clone();
         let factory = Arc::new(OnceFactory::new(name, output));
         self.pool = OutputWorkerPool::new(factory, 1, Duration::from_secs(30));
+        self
+    }
+
+    /// Add an input source for testing. Bypasses config-based input construction.
+    pub fn with_input(mut self, _name: &str, source: Box<dyn InputSource>) -> Self {
+        self.inputs.push(InputState {
+            source,
+            buf: Vec::new(),
+            stats: Arc::new(ComponentStats::new()),
+        });
+        self
+    }
+
+    /// Replace the checkpoint store. Useful for injecting an in-memory store in tests.
+    pub fn with_checkpoint_store(mut self, store: Box<dyn CheckpointStore>) -> Self {
+        self.checkpoint_store = Some(store);
         self
     }
 
