@@ -514,6 +514,11 @@ impl FileTailer {
         // Collect paths first; read_new_data requires &mut self.
         let paths: Vec<PathBuf> = self.files.keys().cloned().collect();
         for path in paths {
+            // Capture source_id BEFORE read_new_data: truncation detection
+            // inside read_new_data updates the fingerprint, so the post-read
+            // identity is the NEW file. Downstream uses source_id to clear
+            // per-source state keyed by the OLD identity.
+            let pre_read_source_id = self.source_id_for_path(&path);
             match self.read_new_data(&path) {
                 Ok(ReadResult::Data(data)) => {
                     // New data arrived — reset the EOF-emitted flag so a fresh
@@ -534,15 +539,16 @@ impl FileTailer {
                 Ok(ReadResult::TruncatedThenData(data)) => {
                     // Copytruncate detected + new data from beginning (#796).
                     // Emit Truncated FIRST so downstream clears remainder,
-                    // then emit the new data.
-                    let source_id = self.source_id_for_path(&path);
+                    // then emit the new data. Use pre-read source_id for
+                    // Truncated (what downstream knows), post-read for Data.
                     events.push(TailEvent::Truncated {
                         path: path.clone(),
-                        source_id,
+                        source_id: pre_read_source_id,
                     });
                     if let Some(tailed) = self.files.get_mut(&path) {
                         tailed.eof_emitted = false;
                     }
+                    let source_id = self.source_id_for_path(&path);
                     events.push(TailEvent::Data {
                         path: path.clone(),
                         bytes: data,
@@ -550,11 +556,11 @@ impl FileTailer {
                     });
                 }
                 Ok(ReadResult::Truncated) => {
-                    // Truncated but no new data yet.
-                    let source_id = self.source_id_for_path(&path);
+                    // Truncated but no new data yet. Use pre-read source_id
+                    // so downstream can find and clear the old identity.
                     events.push(TailEvent::Truncated {
                         path: path.clone(),
-                        source_id,
+                        source_id: pre_read_source_id,
                     });
                 }
                 Ok(ReadResult::NoData) => {
