@@ -157,8 +157,8 @@ fn compute_fingerprint(file: &mut File, max_bytes: usize) -> io::Result<u64> {
 
 /// Build a FileIdentity for a path.
 fn identify_file(path: &Path, fingerprint_bytes: usize) -> io::Result<FileIdentity> {
-    let meta = fs::metadata(path)?;
     let mut file = File::open(path)?;
+    let meta = file.metadata()?;
     let fingerprint = compute_fingerprint(&mut file, fingerprint_bytes)?;
     Ok(FileIdentity {
         device: meta.dev(),
@@ -461,12 +461,16 @@ impl FileTailer {
                         });
                     }
                     Ok(ReadResult::TruncatedThenData(data)) => {
+                        events.push(TailEvent::Truncated { path: path.clone() });
                         events.push(TailEvent::Data {
                             path: path.clone(),
                             bytes: data,
                         });
                     }
-                    Ok(ReadResult::Truncated) | Ok(ReadResult::NoData) => {}
+                    Ok(ReadResult::Truncated) => {
+                        events.push(TailEvent::Truncated { path: path.clone() });
+                    }
+                    Ok(ReadResult::NoData) => {}
                     Err(e) => {
                         tracing::warn!(path = %path.display(), error = %e, "tail.drain_rotated_error");
                     }
@@ -560,12 +564,16 @@ impl FileTailer {
                     });
                 }
                 Ok(ReadResult::TruncatedThenData(data)) => {
+                    events.push(TailEvent::Truncated { path: path.clone() });
                     events.push(TailEvent::Data {
                         path: path.clone(),
                         bytes: data,
                     });
                 }
-                Ok(ReadResult::Truncated) | Ok(ReadResult::NoData) => {}
+                Ok(ReadResult::Truncated) => {
+                    events.push(TailEvent::Truncated { path: path.clone() });
+                }
+                Ok(ReadResult::NoData) => {}
                 Err(e) => {
                     tracing::warn!(path = %path.display(), error = %e, "tail.drain_deleted_error");
                 }
@@ -946,6 +954,60 @@ mod tests {
             new_str.contains("after rotation"),
             "should read new file content, got: {new_str}"
         );
+    }
+
+    /// #816: Ensure rotated drain path emits Truncated if file was copytruncated before rename
+    #[test]
+    fn test_tail_rotation_drains_truncated_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("drain_trunc.log");
+        let rotated_path = dir.path().join("drain_trunc.log.1");
+
+        // Write initial data.
+        {
+            let mut f = File::create(&log_path).unwrap();
+            writeln!(f, "initial").unwrap();
+        }
+
+        let config = TailConfig {
+            start_from_end: false,
+            poll_interval_ms: 10,
+            ..Default::default()
+        };
+        let mut tailer = FileTailer::new(std::slice::from_ref(&log_path), config).unwrap();
+
+        // First poll — drain initial data.
+        std::thread::sleep(Duration::from_millis(50));
+        tailer.poll().unwrap();
+
+        // Overwrite the file to be smaller than the current offset, simulating copytruncate.
+        {
+            let mut f = File::create(&log_path).unwrap();
+            writeln!(f, "new").unwrap();
+        }
+
+        // Rotate: rename old file, create new one.
+        fs::rename(&log_path, &rotated_path).unwrap();
+        {
+            let mut f = File::create(&log_path).unwrap();
+            writeln!(f, "post-rotation").unwrap();
+        }
+
+        // Poll must detect rotation and emit Truncated THEN Data for the drained bytes.
+        std::thread::sleep(Duration::from_millis(50));
+        let events = tailer.poll().unwrap();
+
+        let trunc_pos = events
+            .iter()
+            .position(|e| matches!(e, TailEvent::Truncated { .. }))
+            .expect("should have a Truncated event from drain");
+
+        let data_pos = events
+            .iter()
+            .position(|e| matches!(e, TailEvent::Data { .. }))
+            .expect("should have a Data event from drain");
+
+        assert!(trunc_pos < data_pos, "Truncated must precede Data");
     }
 
     /// Regression test: bytes appended to the old file after the last poll but
@@ -1443,6 +1505,54 @@ mod tests {
             1,
             "literal-path tailers must keep watch_paths entry after deletion"
         );
+    }
+
+    /// #816: Ensure deleted drain path emits Truncated if file was copytruncated before deletion
+    #[test]
+    fn test_deleted_file_cleanup_drains_truncated_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("delete_trunc.log");
+
+        // Write initial data.
+        {
+            let mut f = File::create(&log_path).unwrap();
+            writeln!(f, "initial").unwrap();
+        }
+
+        let config = TailConfig {
+            start_from_end: false,
+            poll_interval_ms: 10,
+            ..Default::default()
+        };
+        let mut tailer = FileTailer::new(std::slice::from_ref(&log_path), config).unwrap();
+
+        // First poll — drain initial data.
+        std::thread::sleep(Duration::from_millis(50));
+        tailer.poll().unwrap();
+
+        // Overwrite the file to be smaller than the current offset, simulating copytruncate.
+        {
+            let mut f = File::create(&log_path).unwrap();
+            writeln!(f, "new").unwrap();
+        }
+
+        fs::remove_file(&log_path).unwrap();
+
+        // Poll must emit Truncated THEN Data for the drained bytes.
+        std::thread::sleep(Duration::from_millis(50));
+        let events = tailer.poll().unwrap();
+
+        let trunc_pos = events
+            .iter()
+            .position(|e| matches!(e, TailEvent::Truncated { .. }))
+            .expect("should have a Truncated event from drain");
+
+        let data_pos = events
+            .iter()
+            .position(|e| matches!(e, TailEvent::Data { .. }))
+            .expect("should have a Data event from drain");
+
+        assert!(trunc_pos < data_pos, "Truncated must precede Data");
     }
 
     /// Regression test: glob-discovered file deletions must shrink watch_paths
