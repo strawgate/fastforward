@@ -16,7 +16,6 @@ use super::{BatchMetadata, build_col_infos, write_row_json};
 /// the same factory.
 pub(crate) struct ElasticsearchConfig {
     endpoint: String,
-    index: String,
     headers: Vec<(reqwest::header::HeaderName, reqwest::header::HeaderValue)>,
     compress: bool,
     /// Maximum uncompressed bulk payload size in bytes. Batches that serialize
@@ -25,6 +24,9 @@ pub(crate) struct ElasticsearchConfig {
     max_bulk_bytes: usize,
     /// Precomputed `_bulk` URL with `filter_path` to avoid per-request allocation.
     bulk_url: String,
+    /// Precomputed `{"index":{"_index":"<name>"}}\n` bytes — avoids a `format!`
+    /// allocation on every `serialize_batch` call.
+    action_bytes: Box<[u8]>,
 }
 
 /// Async Elasticsearch sink using reqwest.
@@ -51,9 +53,18 @@ impl ElasticsearchAsyncSink {
             name,
             config,
             client,
+            // Start with a modest initial capacity; the buffer will grow to the
+            // right size after the first batch and stay there (via reserve in
+            // send_batch_inner after each send).
             batch_buf: Vec::with_capacity(64 * 1024),
             stats,
         }
+    }
+
+    /// Returns the number of bytes currently serialized in the internal buffer.
+    /// Useful for benchmarks and diagnostics.
+    pub fn serialized_len(&self) -> usize {
+        self.batch_buf.len()
     }
 
     /// Serialize the batch into `self.batch_buf` in Elasticsearch bulk format.
@@ -72,18 +83,24 @@ impl ElasticsearchAsyncSink {
             return Ok(());
         }
 
-        let action_line = format!("{{\"index\":{{\"_index\":\"{}\"}}}}\n", self.config.index);
-        let action_bytes = action_line.as_bytes();
+        // Pre-computed in config — no allocation on the hot path.
+        let action_bytes = &self.config.action_bytes;
 
         // Derive @timestamp from metadata (ISO-8601 UTC).
+        // Computed once per batch using a stack-allocated buffer — no heap allocation.
         let ts_nanos = metadata.observed_time_ns;
         let ts_secs = ts_nanos / 1_000_000_000;
         let ts_frac = ts_nanos % 1_000_000_000;
-        let ts_str = format!(
-            ",\"@timestamp\":\"{}.{:09}Z\"}}",
-            format_unix_timestamp_utc(ts_secs),
-            ts_frac
-        );
+        // Stack buffer: ,"@timestamp":"YYYY-MM-DDTHH:MM:SS.fffffffffZ"}  (47 bytes)
+        let mut ts_buf = [0u8; 47];
+        write_ts_suffix(&mut ts_buf, ts_secs, ts_frac);
+        let ts_with_comma = &ts_buf[..]; // with leading ','
+        let ts_no_comma = &ts_buf[1..]; // without leading ',' (for empty-doc case)
+
+        // Pre-reserve capacity to avoid multiple Vec reallocations while writing.
+        // Estimate: action line + ~256 bytes JSON per row.
+        let estimated = num_rows * (action_bytes.len() + 256);
+        self.batch_buf.reserve(estimated);
 
         let cols = build_col_infos(batch);
         // Check normalized JSON output names (field_name strips type suffixes like
@@ -118,11 +135,10 @@ impl ElasticsearchAsyncSink {
                     // doc was `{}`; replace with `{"@timestamp":"..."}`.
                     self.batch_buf.truncate(doc_start);
                     self.batch_buf.push(b'{');
-                    self.batch_buf
-                        .extend_from_slice(ts_str.trim_start_matches(',').as_bytes());
+                    self.batch_buf.extend_from_slice(ts_no_comma);
                 } else {
                     self.batch_buf.truncate(trim_to);
-                    self.batch_buf.extend_from_slice(ts_str.as_bytes());
+                    self.batch_buf.extend_from_slice(ts_with_comma);
                 }
                 self.batch_buf.push(b'\n');
             }
@@ -239,6 +255,9 @@ impl ElasticsearchAsyncSink {
             }
 
             let payload_len = self.batch_buf.len();
+            // Remember the serialized size so we can restore warm capacity after
+            // the buffer is moved into `do_send`.
+            let prev_cap = self.batch_buf.capacity();
             let max_bytes = self.config.max_bulk_bytes;
 
             // Proactive split: if serialized payload exceeds max_bulk_bytes, split
@@ -248,11 +267,18 @@ impl ElasticsearchAsyncSink {
                 return self.send_split_halves(batch, metadata, depth).await;
             }
 
-            let body = std::mem::replace(&mut self.batch_buf, Vec::with_capacity(64 * 1024));
+            // Move the serialized payload out of batch_buf so we can pass it to
+            // do_send without copying.  `mem::take` leaves batch_buf as Vec::new()
+            // (zero capacity, no allocation).  After do_send we restore capacity so
+            // the next serialize_batch call doesn't have to grow from scratch.
+            let body = std::mem::take(&mut self.batch_buf);
             let row_count = n as u64;
 
             match self.do_send(body).await {
                 Ok(result) => {
+                    // Restore warm capacity so the next serialize_batch avoids
+                    // repeated small-step growth.
+                    self.batch_buf.reserve(prev_cap);
                     if matches!(result, super::sink::SendResult::Ok) {
                         self.stats.inc_lines(row_count);
                         self.stats.inc_bytes(payload_len as u64);
@@ -265,9 +291,13 @@ impl ElasticsearchAsyncSink {
                         && n > 1
                         && depth < MAX_SPLIT_DEPTH =>
                 {
+                    self.batch_buf.reserve(prev_cap);
                     self.send_split_halves(batch, metadata, depth).await
                 }
-                Err(e) => Err(e),
+                Err(e) => {
+                    self.batch_buf.reserve(prev_cap);
+                    Err(e)
+                }
             }
         })
     }
@@ -437,15 +467,19 @@ impl ElasticsearchSinkFactory {
             endpoint
         );
 
+        // Pre-compute the action line bytes once so serialize_batch doesn't have
+        // to allocate a String on every call.
+        let action_line = format!("{{\"index\":{{\"_index\":\"{index}\"}}}}\n");
+
         Ok(ElasticsearchSinkFactory {
             name,
             config: Arc::new(ElasticsearchConfig {
                 endpoint,
-                index,
                 headers: parsed_headers,
                 compress,
                 max_bulk_bytes: 5 * 1024 * 1024, // 5 MiB default
                 bulk_url,
+                action_bytes: action_line.into_bytes().into_boxed_slice(),
             }),
             client,
             stats,
@@ -468,23 +502,36 @@ impl super::sink::SinkFactory for ElasticsearchSinkFactory {
     }
 }
 
+impl ElasticsearchSinkFactory {
+    /// Create a concrete `ElasticsearchAsyncSink` without boxing it.
+    ///
+    /// Intended for benchmarks and tests that need access to
+    /// `serialize_batch` or `serialized_len` directly.
+    pub fn create_sink(&self) -> ElasticsearchAsyncSink {
+        ElasticsearchAsyncSink::new(
+            self.name.clone(),
+            Arc::clone(&self.config),
+            self.client.clone(),
+            Arc::clone(&self.stats),
+        )
+    }
+}
+
 // ---------------------------------------------------------------------------
 // UTC timestamp formatting (no chrono dependency)
 // ---------------------------------------------------------------------------
 
-/// Format a Unix timestamp (seconds) as `YYYY-MM-DDTHH:MM:SS` in UTC.
+/// Write a Unix timestamp (seconds) as `YYYY-MM-DDTHH:MM:SS` directly into
+/// `buf[0..19]`, zero-allocation.
 ///
-/// This minimal implementation handles dates from 1970 to 2100 without pulling
-/// in the chrono crate. The fractional seconds are formatted by the caller.
-fn format_unix_timestamp_utc(secs: u64) -> String {
-    // Days since epoch
+/// Handles dates from 1970 to ~2100 correctly via the Gregorian calendar.
+fn write_unix_timestamp_utc_into(buf: &mut [u8; 19], secs: u64) {
     let days = secs / 86400;
     let time = secs % 86400;
     let h = time / 3600;
     let m = (time % 3600) / 60;
     let s = time % 60;
 
-    // Gregorian calendar calculation
     let mut year = 1970u32;
     let mut remaining = days;
     loop {
@@ -518,8 +565,68 @@ fn format_unix_timestamp_utc(secs: u64) -> String {
         remaining -= md as u64;
         month += 1;
     }
-    let day = remaining + 1;
-    format!("{year:04}-{month:02}-{day:02}T{h:02}:{m:02}:{s:02}")
+    let day = (remaining + 1) as u32;
+
+    // Write YYYY-MM-DDTHH:MM:SS into the 19-byte buffer.
+    buf[0] = b'0' + (year / 1000) as u8;
+    buf[1] = b'0' + (year / 100 % 10) as u8;
+    buf[2] = b'0' + (year / 10 % 10) as u8;
+    buf[3] = b'0' + (year % 10) as u8;
+    buf[4] = b'-';
+    buf[5] = b'0' + (month / 10) as u8;
+    buf[6] = b'0' + (month % 10) as u8;
+    buf[7] = b'-';
+    buf[8] = b'0' + (day / 10) as u8;
+    buf[9] = b'0' + (day % 10) as u8;
+    buf[10] = b'T';
+    buf[11] = b'0' + (h / 10) as u8;
+    buf[12] = b'0' + (h % 10) as u8;
+    buf[13] = b':';
+    buf[14] = b'0' + (m / 10) as u8;
+    buf[15] = b'0' + (m % 10) as u8;
+    buf[16] = b':';
+    buf[17] = b'0' + (s / 10) as u8;
+    buf[18] = b'0' + (s % 10) as u8;
+}
+
+/// Fill `out[0..47]` with the full `@timestamp` suffix used in bulk documents:
+///
+/// ```text
+/// ,"@timestamp":"YYYY-MM-DDTHH:MM:SS.fffffffffZ"}
+/// ```
+///
+/// The leading `,` is at index 0; callers that need the no-comma form
+/// (empty-document case) can simply slice `&out[1..]`.
+///
+/// Zero-allocation: all work happens on the stack-allocated `out` buffer.
+fn write_ts_suffix(out: &mut [u8; 47], secs: u64, frac: u64) {
+    out[0] = b',';
+    out[1..15].copy_from_slice(b"\"@timestamp\":\"");
+    let mut dt = [0u8; 19];
+    write_unix_timestamp_utc_into(&mut dt, secs);
+    out[15..34].copy_from_slice(&dt);
+    out[34] = b'.';
+    // Write 9-digit zero-padded nanosecond fraction.
+    let mut f = frac;
+    for i in (35..44).rev() {
+        out[i] = b'0' + (f % 10) as u8;
+        f /= 10;
+    }
+    out[44] = b'Z';
+    out[45] = b'"';
+    out[46] = b'}';
+}
+
+/// Format a Unix timestamp (seconds) as `YYYY-MM-DDTHH:MM:SS` in UTC.
+///
+/// Wraps [`write_unix_timestamp_utc_into`] for use in unit tests.
+/// Production code uses [`write_ts_suffix`] directly to avoid the String allocation.
+#[cfg(test)]
+fn format_unix_timestamp_utc(secs: u64) -> String {
+    let mut buf = [0u8; 19];
+    write_unix_timestamp_utc_into(&mut buf, secs);
+    // SAFETY: write_unix_timestamp_utc_into only writes ASCII digits and punctuation.
+    String::from_utf8(buf.to_vec()).expect("timestamp bytes are valid UTF-8")
 }
 
 fn is_leap_year(y: u32) -> bool {
@@ -922,5 +1029,31 @@ mod kani_proofs {
         if y % 4 != 0 {
             assert!(!is_leap_year(y), "not div by 4 must not be leap: {y}");
         }
+    }
+
+    /// Prove write_ts_suffix produces valid ASCII for any representative
+    /// timestamp in the first 16 years of the epoch (bounded for solver speed).
+    #[kani::proof]
+    fn verify_write_ts_suffix_ascii() {
+        // Restrict to first ~16 years (0..504921600) to keep the solver tractable.
+        let secs: u64 = kani::any();
+        kani::assume(secs < 504_921_600); // 1970-01-01 to 1985-12-31
+        let frac: u64 = kani::any();
+        kani::assume(frac < 1_000_000_000);
+
+        let mut buf = [0u8; 47];
+        write_ts_suffix(&mut buf, secs, frac);
+
+        // Every byte must be printable ASCII (32..=126).
+        for &b in &buf {
+            assert!(b >= 32 && b <= 126, "non-printable byte in ts_suffix");
+        }
+        // Structural checks: leading comma, fixed string markers.
+        assert_eq!(buf[0], b',');
+        assert_eq!(buf[1], b'"');
+        assert_eq!(buf[34], b'.');
+        assert_eq!(buf[44], b'Z');
+        assert_eq!(buf[45], b'"');
+        assert_eq!(buf[46], b'}');
     }
 }
