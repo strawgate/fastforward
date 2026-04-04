@@ -408,6 +408,8 @@ fn bench_elasticsearch_serialize(c: &mut Criterion) {
             |b, batch| {
                 let mut sink = factory.create_sink();
                 b.iter(|| {
+                    // serialize_batch calls clear() at the start of every call, so
+                    // the buffer does not grow unboundedly across iterations.
                     sink.serialize_batch(batch, &meta)
                         .expect("bench: serialize should not fail");
                     criterion::black_box(sink.serialized_len());

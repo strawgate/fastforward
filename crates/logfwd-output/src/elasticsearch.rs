@@ -94,7 +94,6 @@ impl ElasticsearchAsyncSink {
         // Stack buffer: ,"@timestamp":"YYYY-MM-DDTHH:MM:SS.fffffffffZ"}  (47 bytes)
         let mut ts_buf = [0u8; 47];
         write_ts_suffix(&mut ts_buf, ts_secs, ts_frac);
-        let ts_with_comma = &ts_buf[..]; // with leading ','
         let ts_no_comma = &ts_buf[1..]; // without leading ',' (for empty-doc case)
 
         // Pre-reserve capacity to avoid multiple Vec reallocations while writing.
@@ -138,7 +137,7 @@ impl ElasticsearchAsyncSink {
                     self.batch_buf.extend_from_slice(ts_no_comma);
                 } else {
                     self.batch_buf.truncate(trim_to);
-                    self.batch_buf.extend_from_slice(ts_with_comma);
+                    self.batch_buf.extend_from_slice(&ts_buf);
                 }
                 self.batch_buf.push(b'\n');
             }
@@ -625,8 +624,9 @@ fn write_ts_suffix(out: &mut [u8; 47], secs: u64, frac: u64) {
 fn format_unix_timestamp_utc(secs: u64) -> String {
     let mut buf = [0u8; 19];
     write_unix_timestamp_utc_into(&mut buf, secs);
-    // SAFETY: write_unix_timestamp_utc_into only writes ASCII digits and punctuation.
-    String::from_utf8(buf.to_vec()).expect("timestamp bytes are valid UTF-8")
+    // `[u8; 19]` is Copy; Vec::from avoids the extra clone that to_vec() would do.
+    // write_unix_timestamp_utc_into only writes ASCII digits and punctuation.
+    String::from_utf8(Vec::from(buf)).expect("timestamp bytes are valid UTF-8")
 }
 
 fn is_leap_year(y: u32) -> bool {
