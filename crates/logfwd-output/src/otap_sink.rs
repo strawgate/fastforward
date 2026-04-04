@@ -135,7 +135,12 @@ pub struct BatchStatus {
 ///   bytes            record    = 3;  // length-delimited
 /// }
 /// ```
-fn encode_arrow_payload(buf: &mut Vec<u8>, schema_id: &str, ptype: ArrowPayloadType, ipc_bytes: &[u8]) {
+fn encode_arrow_payload(
+    buf: &mut Vec<u8>,
+    schema_id: &str,
+    ptype: ArrowPayloadType,
+    ipc_bytes: &[u8],
+) {
     // field 1: schema_id (string = length-delimited, wire type 2)
     if !schema_id.is_empty() {
         encode_bytes_field(buf, 1, schema_id.as_bytes());
@@ -345,9 +350,7 @@ pub fn decode_batch_status(data: &[u8]) -> io::Result<BatchStatus> {
 ///
 /// Returns the batch_id and a list of (schema_id, payload_type, ipc_bytes)
 /// for each `ArrowPayload` in the message.
-pub fn decode_batch_arrow_records(
-    data: &[u8],
-) -> io::Result<(i64, Vec<DecodedPayload>, Vec<u8>)> {
+pub fn decode_batch_arrow_records(data: &[u8]) -> io::Result<(i64, Vec<DecodedPayload>, Vec<u8>)> {
     let mut batch_id: i64 = 0;
     let mut payloads: Vec<DecodedPayload> = Vec::new();
     let mut headers: Vec<u8> = Vec::new();
@@ -550,9 +553,7 @@ impl OtapSink {
     /// Optionally compress the protobuf payload.
     fn maybe_compress(&self) -> io::Result<Vec<u8>> {
         match self.config.compression {
-            Compression::Zstd => {
-                zstd::bulk::compress(&self.proto_buf, 1).map_err(io::Error::other)
-            }
+            Compression::Zstd => zstd::bulk::compress(&self.proto_buf, 1).map_err(io::Error::other),
             Compression::None | Compression::Gzip => Ok(self.proto_buf.clone()),
         }
     }
@@ -770,8 +771,7 @@ mod tests {
             Some("2024-03-15T10:30:01.000000000Z"),
             Some("2024-03-15T10:30:02.000000000Z"),
         ]);
-        let resource_host =
-            StringArray::from(vec![Some("host-a"), Some("host-a"), Some("host-b")]);
+        let resource_host = StringArray::from(vec![Some("host-a"), Some("host-a"), Some("host-b")]);
         let resource_ns = StringArray::from(vec![
             Some("production"),
             Some("production"),
@@ -853,11 +853,7 @@ mod tests {
 
     #[test]
     fn encode_decode_batch_arrow_records_with_headers() {
-        let payloads = vec![(
-            "test".to_string(),
-            ArrowPayloadType::Logs,
-            b"data".to_vec(),
-        )];
+        let payloads = vec![("test".to_string(), ArrowPayloadType::Logs, b"data".to_vec())];
 
         let mut buf = Vec::new();
         encode_batch_arrow_records(&mut buf, 7, &payloads, b"custom-headers");
@@ -970,8 +966,7 @@ mod tests {
         assert_eq!(decoded_payloads.len(), 4);
 
         // Step 5: Deserialize IPC bytes back to RecordBatches
-        let decoded_logs =
-            deserialize_ipc(&decoded_payloads[0].2).expect("logs IPC decode");
+        let decoded_logs = deserialize_ipc(&decoded_payloads[0].2).expect("logs IPC decode");
         let decoded_log_attrs =
             deserialize_ipc(&decoded_payloads[1].2).expect("log_attrs IPC decode");
         let decoded_resource_attrs =
@@ -987,7 +982,10 @@ mod tests {
         // Step 6: Reconstruct star schema and convert back to flat
         let reconstructed_star = logfwd_arrow::star_schema::StarSchema {
             logs: decoded_logs.into_iter().next().expect("logs batch"),
-            log_attrs: decoded_log_attrs.into_iter().next().expect("log_attrs batch"),
+            log_attrs: decoded_log_attrs
+                .into_iter()
+                .next()
+                .expect("log_attrs batch"),
             resource_attrs: decoded_resource_attrs
                 .into_iter()
                 .next()
@@ -1098,11 +1096,7 @@ mod tests {
 
     #[test]
     fn protobuf_encoding_handles_large_batch_ids() {
-        let payloads = vec![(
-            "logs".to_string(),
-            ArrowPayloadType::Logs,
-            b"data".to_vec(),
-        )];
+        let payloads = vec![("logs".to_string(), ArrowPayloadType::Logs, b"data".to_vec())];
 
         let mut buf = Vec::new();
         encode_batch_arrow_records(&mut buf, i64::MAX, &payloads, &[]);

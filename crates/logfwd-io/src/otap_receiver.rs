@@ -80,9 +80,7 @@ impl OtapReceiver {
         let bound_addr = match server.server_addr() {
             tiny_http::ListenAddr::IP(a) => a,
             tiny_http::ListenAddr::Unix(_) => {
-                return Err(io::Error::other(
-                    "OTAP receiver: unexpected listen addr",
-                ));
+                return Err(io::Error::other("OTAP receiver: unexpected listen addr"));
             }
         };
 
@@ -97,8 +95,7 @@ impl OtapReceiver {
                     let path = url.split('?').next().unwrap_or(&url);
                     if path != "/v1/arrow_logs" {
                         let _ = request.respond(
-                            tiny_http::Response::from_string("not found")
-                                .with_status_code(404),
+                            tiny_http::Response::from_string("not found").with_status_code(404),
                         );
                         continue;
                     }
@@ -123,9 +120,8 @@ impl OtapReceiver {
                     }
 
                     // Read body with hard cap.
-                    let mut body = Vec::with_capacity(
-                        request.body_length().unwrap_or(0).min(MAX_BODY_SIZE),
-                    );
+                    let mut body =
+                        Vec::with_capacity(request.body_length().unwrap_or(0).min(MAX_BODY_SIZE));
                     match request
                         .as_reader()
                         .take(MAX_BODY_SIZE as u64 + 1)
@@ -153,8 +149,7 @@ impl OtapReceiver {
                         Ok(b) => b,
                         Err(msg) => {
                             let _ = request.respond(
-                                tiny_http::Response::from_string(msg)
-                                    .with_status_code(400),
+                                tiny_http::Response::from_string(msg).with_status_code(400),
                             );
                             continue;
                         }
@@ -166,8 +161,7 @@ impl OtapReceiver {
                         Ok(s) => s,
                         Err(msg) => {
                             let _ = request.respond(
-                                tiny_http::Response::from_string(msg)
-                                    .with_status_code(400),
+                                tiny_http::Response::from_string(msg).with_status_code(400),
                             );
                             continue;
                         }
@@ -189,10 +183,8 @@ impl OtapReceiver {
 
                     // Skip empty batches.
                     if flat.num_rows() == 0 {
-                        let resp_body = encode_batch_status(
-                            batch_records.batch_id,
-                            BATCH_STATUS_OK,
-                        );
+                        let resp_body =
+                            encode_batch_status(batch_records.batch_id, BATCH_STATUS_OK);
                         let _ = request.respond(
                             tiny_http::Response::from_data(resp_body)
                                 .with_header(
@@ -208,10 +200,8 @@ impl OtapReceiver {
                     // Send to pipeline via bounded channel.
                     match tx.try_send(flat) {
                         Ok(()) => {
-                            let resp_body = encode_batch_status(
-                                batch_records.batch_id,
-                                BATCH_STATUS_OK,
-                            );
+                            let resp_body =
+                                encode_batch_status(batch_records.batch_id, BATCH_STATUS_OK);
                             let _ = request.respond(
                                 tiny_http::Response::from_data(resp_body)
                                     .with_header(
@@ -489,8 +479,8 @@ fn deserialize_ipc_batch(bytes: &[u8]) -> Result<RecordBatch, String> {
         return Err("empty Arrow IPC payload".to_string());
     }
     let cursor = io::Cursor::new(bytes);
-    let reader = StreamReader::try_new(cursor, None)
-        .map_err(|e| format!("Arrow IPC reader failed: {e}"))?;
+    let reader =
+        StreamReader::try_new(cursor, None).map_err(|e| format!("Arrow IPC reader failed: {e}"))?;
 
     let batches: Vec<RecordBatch> = reader
         .collect::<Result<Vec<_>, _>>()
@@ -538,15 +528,12 @@ fn assemble_star_schema(payloads: &[ArrowPayload]) -> Result<StarSchema, String>
     let logs = logs_batch.ok_or_else(|| "missing LOGS payload in BatchArrowRecords".to_string())?;
 
     // Use empty batches with correct schemas for missing dimension tables.
-    let log_attrs = log_attrs_batch.unwrap_or_else(|| {
-        RecordBatch::new_empty(std::sync::Arc::new(attrs_schema()))
-    });
-    let resource_attrs = resource_attrs_batch.unwrap_or_else(|| {
-        RecordBatch::new_empty(std::sync::Arc::new(attrs_schema()))
-    });
-    let scope_attrs = scope_attrs_batch.unwrap_or_else(|| {
-        RecordBatch::new_empty(std::sync::Arc::new(attrs_schema()))
-    });
+    let log_attrs = log_attrs_batch
+        .unwrap_or_else(|| RecordBatch::new_empty(std::sync::Arc::new(attrs_schema())));
+    let resource_attrs = resource_attrs_batch
+        .unwrap_or_else(|| RecordBatch::new_empty(std::sync::Arc::new(attrs_schema())));
+    let scope_attrs = scope_attrs_batch
+        .unwrap_or_else(|| RecordBatch::new_empty(std::sync::Arc::new(attrs_schema())));
 
     Ok(StarSchema {
         logs,
@@ -626,8 +613,8 @@ fn encode_varint_to(buf: &mut Vec<u8>, mut value: u64) {
 mod tests {
     use super::*;
     use arrow::array::{
-        ArrayRef, BinaryArray, BooleanArray, Float64Array, Int64Array, StringArray,
-        UInt16Array, UInt8Array,
+        ArrayRef, BinaryArray, BooleanArray, Float64Array, Int64Array, StringArray, UInt8Array,
+        UInt16Array,
     };
     use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
     use std::sync::Arc;
@@ -675,9 +662,8 @@ mod tests {
     /// Serialize a RecordBatch to Arrow IPC stream bytes.
     fn serialize_batch_to_ipc(batch: &RecordBatch) -> Vec<u8> {
         let mut buf = Vec::new();
-        let mut writer =
-            arrow::ipc::writer::StreamWriter::try_new(&mut buf, &batch.schema())
-                .expect("IPC writer init");
+        let mut writer = arrow::ipc::writer::StreamWriter::try_new(&mut buf, &batch.schema())
+            .expect("IPC writer init");
         writer.write(batch).expect("IPC write batch");
         writer.finish().expect("IPC finish");
         buf
@@ -807,7 +793,10 @@ mod tests {
         assert_eq!(decoded.payloads.len(), 4);
         assert_eq!(decoded.payloads[0].payload_type, PAYLOAD_TYPE_LOGS);
         assert_eq!(decoded.payloads[1].payload_type, PAYLOAD_TYPE_LOG_ATTRS);
-        assert_eq!(decoded.payloads[2].payload_type, PAYLOAD_TYPE_RESOURCE_ATTRS);
+        assert_eq!(
+            decoded.payloads[2].payload_type,
+            PAYLOAD_TYPE_RESOURCE_ATTRS
+        );
         assert_eq!(decoded.payloads[3].payload_type, PAYLOAD_TYPE_SCOPE_ATTRS);
 
         // Verify the IPC bytes can be deserialized.
@@ -963,9 +952,8 @@ mod tests {
 
     #[test]
     fn receiver_accepts_otap_post() {
-        let receiver =
-            OtapReceiver::new_with_capacity("test", "127.0.0.1:0", 16)
-                .expect("bind should succeed");
+        let receiver = OtapReceiver::new_with_capacity("test", "127.0.0.1:0", 16)
+            .expect("bind should succeed");
         let addr = receiver.local_addr();
 
         // Build a valid OTAP payload.
@@ -1000,9 +988,8 @@ mod tests {
 
     #[test]
     fn receiver_rejects_wrong_path() {
-        let receiver =
-            OtapReceiver::new_with_capacity("test-404", "127.0.0.1:0", 16)
-                .expect("bind should succeed");
+        let receiver = OtapReceiver::new_with_capacity("test-404", "127.0.0.1:0", 16)
+            .expect("bind should succeed");
         let addr = receiver.local_addr();
 
         let url = format!("http://{addr}/v1/logs");
@@ -1015,9 +1002,8 @@ mod tests {
 
     #[test]
     fn receiver_rejects_get_method() {
-        let receiver =
-            OtapReceiver::new_with_capacity("test-405", "127.0.0.1:0", 16)
-                .expect("bind should succeed");
+        let receiver = OtapReceiver::new_with_capacity("test-405", "127.0.0.1:0", 16)
+            .expect("bind should succeed");
         let addr = receiver.local_addr();
 
         let url = format!("http://{addr}/v1/arrow_logs");
@@ -1030,16 +1016,12 @@ mod tests {
 
     #[test]
     fn receiver_returns_429_when_channel_full() {
-        let receiver =
-            OtapReceiver::new_with_capacity("test-429", "127.0.0.1:0", 1)
-                .expect("bind should succeed");
+        let receiver = OtapReceiver::new_with_capacity("test-429", "127.0.0.1:0", 1)
+            .expect("bind should succeed");
         let addr = receiver.local_addr();
 
         let logs_ipc = serialize_batch_to_ipc(&make_logs_batch());
-        let proto = encode_batch_arrow_records(
-            1,
-            &[(PAYLOAD_TYPE_LOGS, &logs_ipc)],
-        );
+        let proto = encode_batch_arrow_records(1, &[(PAYLOAD_TYPE_LOGS, &logs_ipc)]);
 
         let url = format!("http://{addr}/v1/arrow_logs");
 
@@ -1077,8 +1059,7 @@ mod tests {
         let mut status_code: u32 = 0;
 
         while pos < resp.len() {
-            let (field_number, wire_type, new_pos) = decode_tag(&resp, pos)
-                .expect("decode tag");
+            let (field_number, wire_type, new_pos) = decode_tag(&resp, pos).expect("decode tag");
             pos = new_pos;
             match (field_number, wire_type) {
                 (1, WIRE_TYPE_VARINT) => {
