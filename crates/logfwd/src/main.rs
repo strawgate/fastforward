@@ -161,6 +161,10 @@ fn print_usage() {
     println!("  -h, --help             Show this help");
     println!("  -V, --version          Show version");
     println!();
+    println!("{}ENVIRONMENT:{}", bold(), reset());
+    println!("  LOGFWD_LOG             Set log filter (e.g. LOGFWD_LOG=debug)");
+    println!("  RUST_LOG               Fallback if LOGFWD_LOG is not set");
+    println!();
     println!("{}EXIT CODES:{}", bold(), reset());
     println!("  0  Success");
     println!("  1  Configuration error");
@@ -507,10 +511,11 @@ async fn run_pipelines(
     let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
 
     let env_filter = tracing_subscriber::EnvFilter::try_from_env("LOGFWD_LOG")
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"));
+        .or_else(|_| tracing_subscriber::EnvFilter::try_from_default_env())
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
     let fmt_layer = tracing_subscriber::fmt::layer()
         .with_writer(io::stderr)
-        .with_target(false);
+        .with_target(true);
     // Apply env_filter only to the fmt layer so it doesn't suppress OTel spans.
     let _ = tracing_subscriber::registry()
         .with(fmt_layer.with_filter(env_filter))

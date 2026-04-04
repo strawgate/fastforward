@@ -2448,6 +2448,7 @@ dependencies = [
  "maxminddb",
  "regex",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
