@@ -19,19 +19,20 @@ use arrow::datatypes::DataType;
 use std::collections::BTreeSet;
 
 fn check_consistency(data: &[u8], validate_utf8: bool) {
-    let config_d = ScanConfig {
+    let config = ScanConfig {
         validate_utf8,
         ..ScanConfig::default()
     };
-    let config_s = ScanConfig {
-        validate_utf8,
-        ..ScanConfig::default()
-    };
-    let mut detached_scanner = Scanner::new(config_d);
-    let Ok(detached_batch) = detached_scanner.scan_detached(bytes::Bytes::copy_from_slice(data)) else { return; };
+    let buf = bytes::Bytes::copy_from_slice(data);
 
-    let mut streaming_scanner = Scanner::new(config_s);
-    let Ok(streaming_batch) = streaming_scanner.scan(bytes::Bytes::copy_from_slice(data)) else { return; };
+    let mut detached_scanner = Scanner::new(config);
+    let Ok(detached_batch) = detached_scanner.scan_detached(buf.clone()) else { return; };
+
+    let mut streaming_scanner = Scanner::new(ScanConfig {
+        validate_utf8,
+        ..ScanConfig::default()
+    });
+    let Ok(streaming_batch) = streaming_scanner.scan(buf) else { return; };
 
     // Row counts must match.
     assert_eq!(
