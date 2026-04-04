@@ -71,6 +71,8 @@ struct TailedFile {
 struct EvictedFile {
     identity: FileIdentity,
     offset: u64,
+    path: PathBuf,
+    source_id: SourceId,
 }
 
 /// Internal result from read_new_data — distinguishes truncation from no-data.
@@ -374,14 +376,14 @@ impl FileTailer {
             // saved offset. If the file was deleted and a new file appeared
             // at the same path, the fingerprint will differ and we must not
             // seek to the stale offset — that would skip data. (#817)
-            if evicted.identity.fingerprint == identity.fingerprint {
+            if evicted.identity == identity {
                 file.seek(SeekFrom::Start(evicted.offset))?
             } else {
                 tracing::warn!(
                     path = %path.display(),
-                    saved_fingerprint = evicted.identity.fingerprint,
-                    current_fingerprint = identity.fingerprint,
-                    "evicted offset fingerprint mismatch — ignoring saved offset"
+                    evicted_identity = ?evicted.identity,
+                    current_identity = ?identity,
+                    "evicted offset identity mismatch — ignoring saved offset"
                 );
                 if start_from_end {
                     file.seek(SeekFrom::End(0))?
@@ -621,12 +623,15 @@ impl FileTailer {
             by_age.sort_by_key(|(_, last_read)| *last_read);
             let to_remove = self.files.len() - self.config.max_open_files;
             for (path, _) in by_age.into_iter().take(to_remove) {
-                if let Some(evicted) = self.files.remove(&path) {
+                if let Some(tailed) = self.files.remove(&path) {
+                    let source_id = tailed.identity.source_id();
                     self.evicted_offsets.insert(
-                        path,
+                        path.clone(),
                         EvictedFile {
-                            identity: evicted.identity,
-                            offset: evicted.offset,
+                            identity: tailed.identity,
+                            offset: tailed.offset,
+                            path,
+                            source_id,
                         },
                     );
                 }
@@ -798,21 +803,30 @@ impl FileTailer {
             .evicted_offsets
             .values()
             .filter(|e| e.identity.fingerprint != 0)
-            .map(|e| (e.identity.source_id(), ByteOffset(e.offset)));
+            .map(|e| (e.source_id, ByteOffset(e.offset)));
 
         active.chain(evicted).collect()
     }
 
     /// Cold path: source identity + canonical path for all tailed files.
     ///
+    /// Includes evicted files so checkpoint paths stay consistent with offsets.
     /// Called on file open/close/rotate, not per-batch. PathBuf cloning is
     /// acceptable here since this runs infrequently.
     pub fn file_paths(&self) -> Vec<(SourceId, PathBuf)> {
-        self.files
+        let active = self
+            .files
             .iter()
             .filter(|(_, tailed)| tailed.identity.fingerprint != 0)
-            .map(|(path, tailed)| (tailed.identity.source_id(), path.clone()))
-            .collect()
+            .map(|(path, tailed)| (tailed.identity.source_id(), path.clone()));
+
+        let evicted = self
+            .evicted_offsets
+            .values()
+            .filter(|e| e.identity.fingerprint != 0)
+            .map(|e| (e.source_id, e.path.clone()));
+
+        active.chain(evicted).collect()
     }
 }
 

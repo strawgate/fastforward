@@ -147,8 +147,10 @@ impl CheckpointStore for FileCheckpointStore {
         // fsync the parent directory so the rename entry is durable.
         // On ext4, rename metadata lives in the directory — without this
         // fsync a power failure can revert the rename, losing the checkpoint.
+        // sync_data() suffices: we only need data (directory entries), not
+        // file metadata like mtime/permissions.
         let dir = std::fs::File::open(&self.data_dir)?;
-        dir.sync_all()?;
+        dir.sync_data()?;
 
         Ok(())
     }
