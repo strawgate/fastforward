@@ -14,7 +14,8 @@ use std::sync::mpsc;
 
 use arrow::ipc::reader::StreamReader;
 use arrow::record_batch::RecordBatch;
-use logfwd_arrow::star_schema::{StarSchema, star_to_flat};
+use logfwd_arrow::star_schema::{StarSchema, attrs_schema, star_to_flat};
+use logfwd_core::otlp::{decode_tag, decode_varint, encode_tag, encode_varint, skip_field};
 
 /// Maximum request body size: 10 MB.
 const MAX_BODY_SIZE: usize = 10 * 1024 * 1024;
@@ -46,8 +47,8 @@ const BATCH_STATUS_OK: u32 = 1;
 // Protobuf wire types
 // ---------------------------------------------------------------------------
 
-const WIRE_TYPE_VARINT: u32 = 0;
-const WIRE_TYPE_LENGTH_DELIMITED: u32 = 2;
+const WIRE_TYPE_VARINT: u8 = 0;
+const WIRE_TYPE_LENGTH_DELIMITED: u8 = 2;
 
 // ---------------------------------------------------------------------------
 // OtapReceiver
@@ -296,74 +297,8 @@ struct ArrowPayload {
     record: Vec<u8>,
 }
 
-// ---------------------------------------------------------------------------
-// Protobuf hand-decoding
-// ---------------------------------------------------------------------------
-
-/// Decode a varint from `buf` starting at `pos`. Returns (value, new_pos).
-fn decode_varint(buf: &[u8], pos: usize) -> Result<(u64, usize), String> {
-    let mut value: u64 = 0;
-    let mut shift: u32 = 0;
-    let mut i = pos;
-
-    loop {
-        if i >= buf.len() {
-            return Err("varint: unexpected end of input".to_string());
-        }
-        let byte = buf[i];
-        i += 1;
-
-        value |= ((byte & 0x7F) as u64) << shift;
-        if byte & 0x80 == 0 {
-            return Ok((value, i));
-        }
-        shift += 7;
-        if shift >= 64 {
-            return Err("varint: too many bytes".to_string());
-        }
-    }
-}
-
-/// Read a protobuf tag, returning (field_number, wire_type, new_pos).
-fn decode_tag(buf: &[u8], pos: usize) -> Result<(u32, u32, usize), String> {
-    let (tag, new_pos) = decode_varint(buf, pos)?;
-    let field_number = (tag >> 3) as u32;
-    let wire_type = (tag & 0x07) as u32;
-    Ok((field_number, wire_type, new_pos))
-}
-
-/// Skip a protobuf field value based on wire type. Returns new position.
-fn skip_field(buf: &[u8], wire_type: u32, pos: usize) -> Result<usize, String> {
-    match wire_type {
-        WIRE_TYPE_VARINT => {
-            let (_, new_pos) = decode_varint(buf, pos)?;
-            Ok(new_pos)
-        }
-        1 => {
-            // 64-bit fixed
-            if pos + 8 > buf.len() {
-                return Err("skip: unexpected end for fixed64".to_string());
-            }
-            Ok(pos + 8)
-        }
-        WIRE_TYPE_LENGTH_DELIMITED => {
-            let (len, new_pos) = decode_varint(buf, pos)?;
-            let end = new_pos + len as usize;
-            if end > buf.len() {
-                return Err("skip: length-delimited overflow".to_string());
-            }
-            Ok(end)
-        }
-        5 => {
-            // 32-bit fixed
-            if pos + 4 > buf.len() {
-                return Err("skip: unexpected end for fixed32".to_string());
-            }
-            Ok(pos + 4)
-        }
-        _ => Err(format!("skip: unsupported wire type {wire_type}")),
-    }
-}
+// Protobuf decode helpers (decode_varint, decode_tag, skip_field) are
+// imported from logfwd_core::otlp.
 
 /// Decode `BatchArrowRecords` from protobuf bytes.
 ///
@@ -543,20 +478,7 @@ fn assemble_star_schema(payloads: &[ArrowPayload]) -> Result<StarSchema, String>
     })
 }
 
-/// Build the attrs dimension table schema (matches `star_schema.rs`).
-fn attrs_schema() -> arrow::datatypes::Schema {
-    use arrow::datatypes::{DataType, Field};
-    arrow::datatypes::Schema::new(vec![
-        Field::new("parent_id", DataType::UInt16, false),
-        Field::new("key", DataType::Utf8, false),
-        Field::new("type", DataType::UInt8, false),
-        Field::new("str", DataType::Utf8, true),
-        Field::new("int", DataType::Int64, true),
-        Field::new("double", DataType::Float64, true),
-        Field::new("bool", DataType::Boolean, true),
-        Field::new("bytes", DataType::Binary, true),
-    ])
-}
+// attrs_schema() is imported from logfwd_arrow::star_schema.
 
 // ---------------------------------------------------------------------------
 // BatchStatus protobuf encoding
@@ -575,35 +497,18 @@ fn encode_batch_status(batch_id: i64, status_code: u32) -> Vec<u8> {
     // field 1: batch_id (varint)
     if batch_id != 0 {
         encode_tag(&mut buf, 1, 0);
-        encode_varint_to(&mut buf, batch_id as u64);
+        encode_varint(&mut buf, batch_id as u64);
     }
     // field 2: status_code (varint)
     if status_code != 0 {
         encode_tag(&mut buf, 2, 0);
-        encode_varint_to(&mut buf, status_code as u64);
+        encode_varint(&mut buf, status_code as u64);
     }
     buf
 }
 
-/// Encode a protobuf tag.
-fn encode_tag(buf: &mut Vec<u8>, field_number: u32, wire_type: u8) {
-    encode_varint_to(buf, ((field_number as u64) << 3) | wire_type as u64);
-}
-
-/// Encode a varint into a buffer.
-fn encode_varint_to(buf: &mut Vec<u8>, mut value: u64) {
-    loop {
-        if value < 0x80 {
-            buf.push(value as u8);
-            return;
-        }
-        buf.push((value as u8 & 0x7F) | 0x80);
-        value >>= 7;
-    }
-}
-
-// encode_bytes_field, encode_batch_arrow_records, serialize_batch_to_ipc
-// are defined inside #[cfg(test)] below — they are only needed for tests.
+// Protobuf encode helpers (encode_tag, encode_varint) are imported from
+// logfwd_core::otlp.
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -614,7 +519,7 @@ mod tests {
     use super::*;
     use arrow::array::{
         ArrayRef, BinaryArray, BooleanArray, Float64Array, Int64Array, StringArray, UInt8Array,
-        UInt16Array,
+        UInt32Array,
     };
     use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
     use std::sync::Arc;
@@ -626,7 +531,7 @@ mod tests {
     /// Encode a length-delimited field (tag + length + bytes).
     fn encode_bytes_field(buf: &mut Vec<u8>, field_number: u32, data: &[u8]) {
         encode_tag(buf, field_number, 2);
-        encode_varint_to(buf, data.len() as u64);
+        encode_varint(buf, data.len() as u64);
         buf.extend_from_slice(data);
     }
 
@@ -639,7 +544,7 @@ mod tests {
         // field 1: batch_id
         if batch_id != 0 {
             encode_tag(&mut buf, 1, 0);
-            encode_varint_to(&mut buf, batch_id as u64);
+            encode_varint(&mut buf, batch_id as u64);
         }
         // field 2: repeated ArrowPayload
         for (payload_type, record) in payloads {
@@ -647,7 +552,7 @@ mod tests {
             // ArrowPayload.type = field 2 (varint)
             if *payload_type != 0 {
                 encode_tag(&mut payload_buf, 2, 0);
-                encode_varint_to(&mut payload_buf, *payload_type as u64);
+                encode_varint(&mut payload_buf, *payload_type as u64);
             }
             // ArrowPayload.record = field 3 (bytes)
             if !record.is_empty() {
@@ -673,9 +578,9 @@ mod tests {
 
     fn make_logs_batch() -> RecordBatch {
         let schema = Arc::new(Schema::new(vec![
-            Field::new("id", DataType::UInt16, false),
-            Field::new("resource_id", DataType::UInt16, false),
-            Field::new("scope_id", DataType::UInt16, false),
+            Field::new("id", DataType::UInt32, false),
+            Field::new("resource_id", DataType::UInt32, false),
+            Field::new("scope_id", DataType::UInt32, false),
             Field::new(
                 "time_unix_nano",
                 DataType::Timestamp(TimeUnit::Nanosecond, None),
@@ -699,9 +604,9 @@ mod tests {
         span_id_builder.append_null();
 
         let columns: Vec<ArrayRef> = vec![
-            Arc::new(UInt16Array::from(vec![0u16, 1])),
-            Arc::new(UInt16Array::from(vec![0u16, 0])),
-            Arc::new(UInt16Array::from(vec![0u16, 0])),
+            Arc::new(UInt32Array::from(vec![0u32, 1])),
+            Arc::new(UInt32Array::from(vec![0u32, 0])),
+            Arc::new(UInt32Array::from(vec![0u32, 0])),
             Arc::new(arrow::array::TimestampNanosecondArray::from(vec![
                 Some(1_705_314_600_000_000_000i64),
                 Some(1_705_314_601_000_000_000i64),
@@ -727,7 +632,7 @@ mod tests {
     fn make_log_attrs_batch() -> RecordBatch {
         let schema = Arc::new(attrs_schema());
         let columns: Vec<ArrayRef> = vec![
-            Arc::new(UInt16Array::from(vec![0u16, 1])),
+            Arc::new(UInt32Array::from(vec![0u32, 1])),
             Arc::new(StringArray::from(vec!["host", "host"])),
             Arc::new(UInt8Array::from(vec![0u8, 0])), // ATTR_TYPE_STR
             Arc::new(StringArray::from(vec![Some("host-1"), Some("host-2")])),
@@ -742,7 +647,7 @@ mod tests {
     fn make_resource_attrs_batch() -> RecordBatch {
         let schema = Arc::new(attrs_schema());
         let columns: Vec<ArrayRef> = vec![
-            Arc::new(UInt16Array::from(vec![0u16])),
+            Arc::new(UInt32Array::from(vec![0u32])),
             Arc::new(StringArray::from(vec!["service_name"])),
             Arc::new(UInt8Array::from(vec![0u8])), // ATTR_TYPE_STR
             Arc::new(StringArray::from(vec![Some("api-server")])),
@@ -757,7 +662,7 @@ mod tests {
     fn make_scope_attrs_batch() -> RecordBatch {
         let schema = Arc::new(attrs_schema());
         let columns: Vec<ArrayRef> = vec![
-            Arc::new(UInt16Array::from(vec![0u16])),
+            Arc::new(UInt32Array::from(vec![0u32])),
             Arc::new(StringArray::from(vec!["scope_name"])),
             Arc::new(UInt8Array::from(vec![0u8])),
             Arc::new(StringArray::from(vec![Some("logfwd")])),
@@ -1086,7 +991,7 @@ mod tests {
     fn varint_roundtrip() {
         for value in [0u64, 1, 127, 128, 255, 300, 16383, 16384, u64::MAX] {
             let mut buf = Vec::new();
-            encode_varint_to(&mut buf, value);
+            encode_varint(&mut buf, value);
             let (decoded, end) = decode_varint(&buf, 0).expect("decode");
             assert_eq!(decoded, value, "varint roundtrip failed for {value}");
             assert_eq!(end, buf.len());

@@ -43,7 +43,7 @@ use std::time::Duration;
 use arrow::record_batch::RecordBatch;
 
 use logfwd_arrow::star_schema::flat_to_star;
-use logfwd_core::otlp::{encode_bytes_field, encode_tag, encode_varint, encode_varint_field};
+use logfwd_core::otlp::{self, encode_bytes_field, encode_tag, encode_varint, encode_varint_field};
 use logfwd_io::diagnostics::ComponentStats;
 
 use super::arrow_ipc_sink::serialize_ipc;
@@ -200,91 +200,20 @@ pub fn encode_batch_arrow_records(
 }
 
 // ---------------------------------------------------------------------------
-// Protobuf decoding
+// Protobuf decoding — thin wrappers around logfwd_core::otlp
 // ---------------------------------------------------------------------------
 
-/// Decode a varint from `data` starting at `pos`.
-/// Returns `(value, new_pos)` or an error if the data is truncated.
 fn decode_varint(data: &[u8], pos: usize) -> io::Result<(u64, usize)> {
-    let mut value: u64 = 0;
-    let mut shift: u32 = 0;
-    let mut i = pos;
-    loop {
-        if i >= data.len() {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "truncated varint",
-            ));
-        }
-        let byte = data[i];
-        value |= ((byte & 0x7F) as u64) << shift;
-        i += 1;
-        if byte & 0x80 == 0 {
-            return Ok((value, i));
-        }
-        shift += 7;
-        if shift >= 64 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "varint too long",
-            ));
-        }
-    }
+    otlp::decode_varint(data, pos).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
-/// Decode a protobuf tag into (field_number, wire_type).
 fn decode_tag(data: &[u8], pos: usize) -> io::Result<(u32, u8, usize)> {
-    let (tag_val, new_pos) = decode_varint(data, pos)?;
-    let field_number = (tag_val >> 3) as u32;
-    let wire_type = (tag_val & 0x07) as u8;
-    Ok((field_number, wire_type, new_pos))
+    otlp::decode_tag(data, pos).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
-/// Skip a field value based on its wire type.
 fn skip_field(data: &[u8], wire_type: u8, pos: usize) -> io::Result<usize> {
-    match wire_type {
-        0 => {
-            // Varint: consume bytes until MSB is 0.
-            let (_, new_pos) = decode_varint(data, pos)?;
-            Ok(new_pos)
-        }
-        1 => {
-            // 64-bit fixed.
-            if pos + 8 > data.len() {
-                return Err(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "truncated fixed64",
-                ));
-            }
-            Ok(pos + 8)
-        }
-        2 => {
-            // Length-delimited.
-            let (len, new_pos) = decode_varint(data, pos)?;
-            let end = new_pos + len as usize;
-            if end > data.len() {
-                return Err(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "truncated length-delimited field",
-                ));
-            }
-            Ok(end)
-        }
-        5 => {
-            // 32-bit fixed.
-            if pos + 4 > data.len() {
-                return Err(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "truncated fixed32",
-                ));
-            }
-            Ok(pos + 4)
-        }
-        _ => Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("unknown wire type {wire_type}"),
-        )),
-    }
+    otlp::skip_field(data, wire_type, pos)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
 /// Decode a `BatchStatus` response from protobuf bytes.

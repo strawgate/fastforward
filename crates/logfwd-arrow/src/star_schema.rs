@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use arrow::array::{
     Array, ArrayRef, BinaryArray, BooleanArray, Float64Array, Int64Array, StringArray, UInt8Array,
-    UInt16Array, UInt32Array,
+    UInt32Array,
 };
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use arrow::error::ArrowError;
@@ -70,9 +70,9 @@ const ATTR_TYPE_BYTES: u8 = 4;
 
 fn logs_schema() -> Schema {
     Schema::new(vec![
-        Field::new("id", DataType::UInt16, false),
-        Field::new("resource_id", DataType::UInt16, false),
-        Field::new("scope_id", DataType::UInt16, false),
+        Field::new("id", DataType::UInt32, false),
+        Field::new("resource_id", DataType::UInt32, false),
+        Field::new("scope_id", DataType::UInt32, false),
         Field::new(
             "time_unix_nano",
             DataType::Timestamp(TimeUnit::Nanosecond, None),
@@ -88,9 +88,10 @@ fn logs_schema() -> Schema {
     ])
 }
 
-fn attrs_schema() -> Schema {
+/// Schema for dimension tables (LOG_ATTRS, RESOURCE_ATTRS, SCOPE_ATTRS).
+pub fn attrs_schema() -> Schema {
     Schema::new(vec![
-        Field::new("parent_id", DataType::UInt16, false),
+        Field::new("parent_id", DataType::UInt32, false),
         Field::new("key", DataType::Utf8, false),
         Field::new("type", DataType::UInt8, false),
         Field::new("str", DataType::Utf8, true),
@@ -176,9 +177,9 @@ pub fn flat_to_star(batch: &RecordBatch) -> Result<StarSchema, ArrowError> {
     // --- Resource deduplication ---
     // Build a map of unique resource attribute sets → resource_id.
     // Key: sorted string of all resource attribute values for one row.
-    let mut resource_id_map: HashMap<Vec<String>, u16> = HashMap::new();
-    let mut row_resource_ids: Vec<u16> = Vec::with_capacity(num_rows);
-    let mut resource_sets: Vec<(u16, Vec<(String, String)>)> = Vec::new();
+    let mut resource_id_map: HashMap<Vec<String>, u32> = HashMap::new();
+    let mut row_resource_ids: Vec<u32> = Vec::with_capacity(num_rows);
+    let mut resource_sets: Vec<(u32, Vec<(String, String)>)> = Vec::new();
 
     for row in 0..num_rows {
         let mut key_parts: Vec<String> = Vec::with_capacity(resource_cols.len());
@@ -190,7 +191,7 @@ pub fn flat_to_star(batch: &RecordBatch) -> Result<StarSchema, ArrowError> {
             attrs.push((attr_key.clone(), val));
         }
 
-        let next_id = resource_id_map.len() as u16;
+        let next_id = resource_id_map.len() as u32;
         let rid = *resource_id_map.entry(key_parts).or_insert_with(|| {
             resource_sets.push((next_id, attrs));
             next_id
@@ -233,9 +234,67 @@ pub fn flat_to_star(batch: &RecordBatch) -> Result<StarSchema, ArrowError> {
 // star_to_flat
 // ---------------------------------------------------------------------------
 
+/// Typed column data for `star_to_flat` reconstruction.
+///
+/// Each variant holds a `Vec` with one slot per output row. The variant is
+/// chosen based on the `type` column in the attrs dimension table, so the
+/// original Arrow type survives the round-trip.
+enum TypedColumn {
+    /// UTF-8 string column (ATTR_TYPE_STR or well-known text fields).
+    Str(Vec<Option<String>>),
+    /// 64-bit signed integer column (ATTR_TYPE_INT).
+    Int(Vec<Option<i64>>),
+    /// 64-bit float column (ATTR_TYPE_DOUBLE).
+    Double(Vec<Option<f64>>),
+    /// Boolean column (ATTR_TYPE_BOOL).
+    Bool(Vec<Option<bool>>),
+}
+
+impl TypedColumn {
+    fn new_str(n: usize) -> Self {
+        Self::Str(vec![None; n])
+    }
+    fn new_int(n: usize) -> Self {
+        Self::Int(vec![None; n])
+    }
+    fn new_double(n: usize) -> Self {
+        Self::Double(vec![None; n])
+    }
+    fn new_bool(n: usize) -> Self {
+        Self::Bool(vec![None; n])
+    }
+
+    /// Build the Arrow array and data type for this column.
+    fn to_arrow(&self) -> (DataType, ArrayRef) {
+        match self {
+            Self::Str(v) => {
+                let arr: ArrayRef = Arc::new(StringArray::from(
+                    v.iter()
+                        .map(|v| v.as_deref())
+                        .collect::<Vec<Option<&str>>>(),
+                ));
+                (DataType::Utf8, arr)
+            }
+            Self::Int(v) => {
+                let arr: ArrayRef = Arc::new(Int64Array::from(v.clone()));
+                (DataType::Int64, arr)
+            }
+            Self::Double(v) => {
+                let arr: ArrayRef = Arc::new(Float64Array::from(v.clone()));
+                (DataType::Float64, arr)
+            }
+            Self::Bool(v) => {
+                let arr: ArrayRef = Arc::new(BooleanArray::from(v.clone()));
+                (DataType::Boolean, arr)
+            }
+        }
+    }
+}
+
 /// Convert OTAP star schema back to logfwd's flat `RecordBatch`.
 ///
-/// 1. Reads LOG_ATTRS: unpivots rows grouped by parent_id into columns.
+/// 1. Reads LOG_ATTRS: unpivots rows grouped by parent_id into columns,
+///    preserving the original Arrow type (string, int, double, bool).
 /// 2. Reads RESOURCE_ATTRS: groups by parent_id, prefixes keys with
 ///    `_resource_`, scatters to rows via resource_id from the LOGS table.
 /// 3. Maps well-known LOGS fields back: time_unix_nano → `_timestamp`,
@@ -258,33 +317,33 @@ pub fn star_to_flat(star: &StarSchema) -> Result<RecordBatch, ArrowError> {
                 .map_err(|e| ArrowError::SchemaError(format!("missing resource_id: {e}")))?,
         )
         .as_any()
-        .downcast_ref::<UInt16Array>()
-        .ok_or_else(|| ArrowError::SchemaError("resource_id not UInt16".to_string()))?;
+        .downcast_ref::<UInt32Array>()
+        .ok_or_else(|| ArrowError::SchemaError("resource_id not UInt32".to_string()))?;
 
-    // Collect flat columns: name → Vec<Option<String>>.
-    let mut flat_cols: Vec<(String, Vec<Option<String>>)> = Vec::new();
+    // Collect flat columns: name → TypedColumn.
+    let mut flat_cols: Vec<(String, TypedColumn)> = Vec::new();
     let mut col_index: HashMap<String, usize> = HashMap::new();
 
-    // Helper to get or create a column.
-    let ensure_col = |name: &str,
-                      flat_cols: &mut Vec<(String, Vec<Option<String>>)>,
-                      col_index: &mut HashMap<String, usize>|
+    // Helper to get or create a string column.
+    let ensure_str_col = |name: &str,
+                          flat_cols: &mut Vec<(String, TypedColumn)>,
+                          col_index: &mut HashMap<String, usize>|
      -> usize {
         if let Some(&idx) = col_index.get(name) {
             idx
         } else {
             let idx = flat_cols.len();
-            flat_cols.push((name.to_string(), vec![None; num_rows]));
+            flat_cols.push((name.to_string(), TypedColumn::new_str(num_rows)));
             col_index.insert(name.to_string(), idx);
             idx
         }
     };
 
-    // --- Map well-known LOGS fields ---
+    // --- Map well-known LOGS fields (always string) ---
     // _timestamp from time_unix_nano
     if let Ok(ts_idx) = logs_schema.index_of("time_unix_nano") {
         let ts_arr = star.logs.column(ts_idx);
-        let col_pos = ensure_col("_timestamp", &mut flat_cols, &mut col_index);
+        let col_pos = ensure_str_col("_timestamp", &mut flat_cols, &mut col_index);
         for row in 0..num_rows {
             if !ts_arr.is_null(row) {
                 // Timestamp is stored as i64 nanoseconds.
@@ -296,7 +355,9 @@ pub fn star_to_flat(star: &StarSchema) -> Result<RecordBatch, ArrowError> {
                     // Format as RFC3339 nanoseconds.
                     let secs = ns / 1_000_000_000;
                     let nanos = (ns % 1_000_000_000) as u32;
-                    flat_cols[col_pos].1[row] = Some(chrono_timestamp(secs, nanos));
+                    if let TypedColumn::Str(ref mut v) = flat_cols[col_pos].1 {
+                        v[row] = Some(chrono_timestamp(secs, nanos));
+                    }
                 }
             }
         }
@@ -305,12 +366,14 @@ pub fn star_to_flat(star: &StarSchema) -> Result<RecordBatch, ArrowError> {
     // severity_text → level
     if let Ok(sev_idx) = logs_schema.index_of("severity_text") {
         let sev_arr = star.logs.column(sev_idx);
-        let col_pos = ensure_col("level", &mut flat_cols, &mut col_index);
+        let col_pos = ensure_str_col("level", &mut flat_cols, &mut col_index);
         for row in 0..num_rows {
             if !sev_arr.is_null(row) {
                 let val = str_from_array(sev_arr.as_ref(), row);
                 if !val.is_empty() {
-                    flat_cols[col_pos].1[row] = Some(val);
+                    if let TypedColumn::Str(ref mut v) = flat_cols[col_pos].1 {
+                        v[row] = Some(val);
+                    }
                 }
             }
         }
@@ -319,12 +382,14 @@ pub fn star_to_flat(star: &StarSchema) -> Result<RecordBatch, ArrowError> {
     // body_str → message
     if let Ok(body_idx) = logs_schema.index_of("body_str") {
         let body_arr = star.logs.column(body_idx);
-        let col_pos = ensure_col("message", &mut flat_cols, &mut col_index);
+        let col_pos = ensure_str_col("message", &mut flat_cols, &mut col_index);
         for row in 0..num_rows {
             if !body_arr.is_null(row) {
                 let val = str_from_array(body_arr.as_ref(), row);
                 if !val.is_empty() {
-                    flat_cols[col_pos].1[row] = Some(val);
+                    if let TypedColumn::Str(ref mut v) = flat_cols[col_pos].1 {
+                        v[row] = Some(val);
+                    }
                 }
             }
         }
@@ -365,14 +430,9 @@ pub fn star_to_flat(star: &StarSchema) -> Result<RecordBatch, ArrowError> {
     let mut fields: Vec<Field> = Vec::with_capacity(flat_cols.len());
     let mut arrays: Vec<ArrayRef> = Vec::with_capacity(flat_cols.len());
 
-    for (name, values) in &flat_cols {
-        fields.push(Field::new(name.as_str(), DataType::Utf8, true));
-        let arr: ArrayRef = Arc::new(StringArray::from(
-            values
-                .iter()
-                .map(|v| v.as_deref())
-                .collect::<Vec<Option<&str>>>(),
-        ));
+    for (name, col) in &flat_cols {
+        let (dt, arr) = col.to_arrow();
+        fields.push(Field::new(name.as_str(), dt, true));
         arrays.push(arr);
     }
 
@@ -476,7 +536,7 @@ fn attr_type_for(dt: &DataType) -> u8 {
 }
 
 /// Build an attrs dimension table from deduplicated resource attribute sets.
-fn build_attrs_table(sets: &[(u16, Vec<(String, String)>)]) -> Result<RecordBatch, ArrowError> {
+fn build_attrs_table(sets: &[(u32, Vec<(String, String)>)]) -> Result<RecordBatch, ArrowError> {
     let schema = Arc::new(attrs_schema());
 
     if sets.is_empty() {
@@ -516,7 +576,7 @@ fn build_attrs_table(sets: &[(u16, Vec<(String, String)>)]) -> Result<RecordBatc
     }
 
     let columns: Vec<ArrayRef> = vec![
-        Arc::new(UInt16Array::from(parent_ids)),
+        Arc::new(UInt32Array::from(parent_ids)),
         Arc::new(StringArray::from(keys)),
         Arc::new(UInt8Array::from(types)),
         Arc::new(StringArray::from(str_vals)),
@@ -534,7 +594,7 @@ fn build_scope_attrs() -> Result<RecordBatch, ArrowError> {
     let schema = Arc::new(attrs_schema());
 
     let columns: Vec<ArrayRef> = vec![
-        Arc::new(UInt16Array::from(vec![0u16])),
+        Arc::new(UInt32Array::from(vec![0u32])),
         Arc::new(StringArray::from(vec!["scope_name"])),
         Arc::new(UInt8Array::from(vec![ATTR_TYPE_STR])),
         Arc::new(StringArray::from(vec![Some("logfwd")])),
@@ -582,7 +642,7 @@ fn build_log_attrs(
             let field = schema.field(*col_idx);
             let type_tag = attr_type_for(field.data_type());
 
-            parent_ids.push(row as u16);
+            parent_ids.push(row as u32);
             keys.push(key.clone());
             types.push(type_tag);
 
@@ -637,7 +697,7 @@ fn build_log_attrs(
     }
 
     let columns: Vec<ArrayRef> = vec![
-        Arc::new(UInt16Array::from(parent_ids)),
+        Arc::new(UInt32Array::from(parent_ids)),
         Arc::new(StringArray::from(keys)),
         Arc::new(UInt8Array::from(types)),
         Arc::new(StringArray::from(
@@ -665,7 +725,7 @@ fn build_log_attrs(
 fn build_logs_fact(
     batch: &RecordBatch,
     num_rows: usize,
-    resource_ids: &[u16],
+    resource_ids: &[u32],
     timestamp_col: Option<usize>,
     severity_col: Option<usize>,
     body_col: Option<usize>,
@@ -676,13 +736,13 @@ fn build_logs_fact(
     let schema = Arc::new(logs_schema());
 
     // id: sequential row index
-    let ids: Vec<u16> = (0..num_rows as u16).collect();
+    let ids: Vec<u32> = (0..num_rows as u32).collect();
 
     // resource_id: from deduplication
-    let rid_arr = UInt16Array::from(resource_ids.to_vec());
+    let rid_arr = UInt32Array::from(resource_ids.to_vec());
 
     // scope_id: all 0 (single scope)
-    let scope_ids: Vec<u16> = vec![0; num_rows];
+    let scope_ids: Vec<u32> = vec![0; num_rows];
 
     // time_unix_nano: parse timestamp strings to i64 nanoseconds
     let timestamps: Vec<Option<i64>> = if let Some(ts_idx) = timestamp_col {
@@ -796,9 +856,9 @@ fn build_logs_fact(
     let span_id_arr = build_fixed_binary_array::<8>(&span_ids)?;
 
     let columns: Vec<ArrayRef> = vec![
-        Arc::new(UInt16Array::from(ids)),
+        Arc::new(UInt32Array::from(ids)),
         Arc::new(rid_arr),
-        Arc::new(UInt16Array::from(scope_ids)),
+        Arc::new(UInt32Array::from(scope_ids)),
         Arc::new(arrow::array::TimestampNanosecondArray::from(timestamps)),
         Arc::new(arrow::array::Int32Array::from(severity_numbers)),
         Arc::new(StringArray::from(
@@ -1005,16 +1065,17 @@ fn severity_text_to_number(text: &str) -> i32 {
     }
 }
 
-/// Unpivot an attrs dimension table into flat columns.
+/// Unpivot an attrs dimension table into flat typed columns.
 ///
 /// For each row in the attrs table, reads (parent_id, key, typed value) and
-/// writes the value into `flat_cols[key][row_for(parent_id)]`.
+/// writes the value into `flat_cols[key][row_for(parent_id)]`, preserving the
+/// original type from the `type` column.
 fn unpivot_attrs_to_flat(
     attrs_batch: &RecordBatch,
-    flat_cols: &mut Vec<(String, Vec<Option<String>>)>,
+    flat_cols: &mut Vec<(String, TypedColumn)>,
     col_index: &mut HashMap<String, usize>,
     num_rows: usize,
-    row_for: impl Fn(u16) -> usize,
+    row_for: impl Fn(u32) -> usize,
     map_key: impl Fn(&str) -> String,
 ) -> Result<(), ArrowError> {
     if attrs_batch.num_rows() == 0 {
@@ -1029,8 +1090,8 @@ fn unpivot_attrs_to_flat(
                 .map_err(|e| ArrowError::SchemaError(format!("missing parent_id: {e}")))?,
         )
         .as_any()
-        .downcast_ref::<UInt16Array>()
-        .ok_or_else(|| ArrowError::SchemaError("parent_id not UInt16".to_string()))?;
+        .downcast_ref::<UInt32Array>()
+        .ok_or_else(|| ArrowError::SchemaError("parent_id not UInt32".to_string()))?;
 
     let key_arr = attrs_batch
         .column(
@@ -1103,49 +1164,54 @@ fn unpivot_attrs_to_flat(
         let mapped_key = map_key(key);
         let type_tag = type_arr.value(row);
 
-        // Get or create the flat column.
+        // Get or create the flat column with the correct type.
         let col_pos = if let Some(&idx) = col_index.get(&mapped_key) {
             idx
         } else {
             let idx = flat_cols.len();
-            flat_cols.push((mapped_key.clone(), vec![None; num_rows]));
+            let col = match type_tag {
+                ATTR_TYPE_INT => TypedColumn::new_int(num_rows),
+                ATTR_TYPE_DOUBLE => TypedColumn::new_double(num_rows),
+                ATTR_TYPE_BOOL => TypedColumn::new_bool(num_rows),
+                _ => TypedColumn::new_str(num_rows),
+            };
+            flat_cols.push((mapped_key.clone(), col));
             col_index.insert(mapped_key, idx);
             idx
         };
 
-        let val_str = match type_tag {
+        // Write the typed value into the column.
+        match type_tag {
             ATTR_TYPE_INT => {
-                if int_arr.is_null(row) {
-                    None
-                } else {
-                    Some(int_arr.value(row).to_string())
+                if !int_arr.is_null(row) {
+                    if let TypedColumn::Int(ref mut v) = flat_cols[col_pos].1 {
+                        v[target_row] = Some(int_arr.value(row));
+                    }
                 }
             }
             ATTR_TYPE_DOUBLE => {
-                if double_arr.is_null(row) {
-                    None
-                } else {
-                    Some(double_arr.value(row).to_string())
+                if !double_arr.is_null(row) {
+                    if let TypedColumn::Double(ref mut v) = flat_cols[col_pos].1 {
+                        v[target_row] = Some(double_arr.value(row));
+                    }
                 }
             }
             ATTR_TYPE_BOOL => {
-                if bool_arr.is_null(row) {
-                    None
-                } else {
-                    Some(bool_arr.value(row).to_string())
+                if !bool_arr.is_null(row) {
+                    if let TypedColumn::Bool(ref mut v) = flat_cols[col_pos].1 {
+                        v[target_row] = Some(bool_arr.value(row));
+                    }
                 }
             }
             _ => {
                 // ATTR_TYPE_STR or ATTR_TYPE_BYTES — read from str column.
-                if str_arr.is_null(row) {
-                    None
-                } else {
-                    Some(str_arr.value(row).to_string())
+                if !str_arr.is_null(row) {
+                    if let TypedColumn::Str(ref mut v) = flat_cols[col_pos].1 {
+                        v[target_row] = Some(str_arr.value(row).to_string());
+                    }
                 }
             }
-        };
-
-        flat_cols[col_pos].1[target_row] = val_str;
+        }
     }
 
     Ok(())
@@ -1158,9 +1224,9 @@ fn unpivot_attrs_to_flat(
 /// row index matching the parent_id. This function copies those values to
 /// every row whose resource_id matches.
 fn scatter_resource_attrs(
-    flat_cols: &mut [(String, Vec<Option<String>>)],
+    flat_cols: &mut [(String, TypedColumn)],
     col_index: &HashMap<String, usize>,
-    resource_ids: &UInt16Array,
+    resource_ids: &UInt32Array,
     num_rows: usize,
 ) {
     // Find all _resource_* columns.
@@ -1176,26 +1242,34 @@ fn scatter_resource_attrs(
 
     // For each resource column, build a map of resource_id → value from
     // the template rows, then scatter to all matching rows.
+    // Resource attrs are always strings (from _resource_* flat columns).
     for &col_pos in &resource_col_indices {
-        // Collect distinct resource_id → value.
-        let mut rid_to_val: HashMap<u16, Option<String>> = HashMap::new();
-        for row in 0..num_rows {
-            let rid = resource_ids.value(row);
-            // The template value was placed at row index = rid (the parent_id).
-            if let std::collections::hash_map::Entry::Vacant(e) = rid_to_val.entry(rid) {
-                let rid_row = rid as usize;
-                if rid_row < num_rows {
-                    let val = flat_cols[col_pos].1[rid_row].clone();
-                    e.insert(val);
+        // Phase 1: collect distinct resource_id → value.
+        let rid_to_val: HashMap<u32, Option<String>> = {
+            let values = match &flat_cols[col_pos].1 {
+                TypedColumn::Str(v) => v,
+                _ => continue,
+            };
+            let mut map: HashMap<u32, Option<String>> = HashMap::new();
+            for row in 0..num_rows {
+                let rid = resource_ids.value(row);
+                if let std::collections::hash_map::Entry::Vacant(e) = map.entry(rid) {
+                    let rid_row = rid as usize;
+                    if rid_row < num_rows {
+                        e.insert(values[rid_row].clone());
+                    }
                 }
             }
-        }
+            map
+        };
 
-        // Scatter to all rows.
-        for row in 0..num_rows {
-            let rid = resource_ids.value(row);
-            if let Some(val) = rid_to_val.get(&rid) {
-                flat_cols[col_pos].1[row] = val.clone();
+        // Phase 2: scatter to all rows.
+        if let TypedColumn::Str(ref mut v) = flat_cols[col_pos].1 {
+            for row in 0..num_rows {
+                let rid = resource_ids.value(row);
+                if let Some(val) = rid_to_val.get(&rid) {
+                    v[row] = val.clone();
+                }
             }
         }
     }
@@ -1353,16 +1427,16 @@ mod tests {
         assert_eq!(host_arr.value(1), "host-2");
         assert_eq!(host_arr.value(2), "host-1");
 
-        // status (int attribute — roundtrips as string representation)
+        // status (int attribute — now roundtrips as Int64)
         let st_idx = rt_schema.index_of("status").expect("status col");
         let st_arr = roundtrip
             .column(st_idx)
             .as_any()
-            .downcast_ref::<StringArray>()
-            .expect("status str");
-        assert_eq!(st_arr.value(0), "200");
-        assert_eq!(st_arr.value(1), "500");
-        assert_eq!(st_arr.value(2), "429");
+            .downcast_ref::<Int64Array>()
+            .expect("status i64");
+        assert_eq!(st_arr.value(0), 200);
+        assert_eq!(st_arr.value(1), 500);
+        assert_eq!(st_arr.value(2), 429);
     }
 
     #[test]
@@ -1410,7 +1484,7 @@ mod tests {
             .logs
             .column(1)
             .as_any()
-            .downcast_ref::<UInt16Array>()
+            .downcast_ref::<UInt32Array>()
             .expect("rid");
         assert_eq!(rid_arr.value(0), rid_arr.value(1));
 
@@ -1538,7 +1612,7 @@ mod tests {
             .logs
             .column(1) // resource_id
             .as_any()
-            .downcast_ref::<UInt16Array>()
+            .downcast_ref::<UInt32Array>()
             .expect("rid");
         assert_eq!(rid_arr.value(0), rid_arr.value(1));
         assert_ne!(rid_arr.value(0), rid_arr.value(2));
