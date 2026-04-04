@@ -1025,6 +1025,8 @@ output:
             pipe.outputs[0].endpoint.as_deref(),
             Some("http://my-collector:4317")
         );
+        // SAFETY: this test is not run concurrently with other tests that
+        // depend on the same environment variable.
         unsafe { std::env::remove_var("LOGFWD_TEST_ENDPOINT") };
     }
 
@@ -1344,6 +1346,8 @@ output:
         let pipe = &cfg.pipelines["default"];
         let auth = pipe.outputs[0].auth.as_ref().expect("auth present");
         assert_eq!(auth.bearer_token.as_deref(), Some("env-bearer-token"));
+        // SAFETY: this test is not run concurrently with other tests that
+        // depend on the same environment variable.
         unsafe { std::env::remove_var("LOGFWD_TEST_TOKEN") };
     }
 

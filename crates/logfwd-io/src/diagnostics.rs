@@ -1019,6 +1019,9 @@ fn get_process_metrics_linux() -> Option<(u64, u64, u64)> {
 /// Fallback using getrusage (macOS, BSDs).
 #[cfg(unix)]
 fn get_process_metrics_unix() -> Option<(u64, u64, u64)> {
+    // SAFETY: `zeroed()` is valid for `rusage` (all-zero is a valid bit pattern),
+    // and `getrusage` is called with a valid `RUSAGE_SELF` flag and a valid
+    // mutable pointer. No other invariants are required.
     unsafe {
         let mut usage: libc::rusage = std::mem::zeroed();
         if libc::getrusage(libc::RUSAGE_SELF, &raw mut usage) != 0 {
