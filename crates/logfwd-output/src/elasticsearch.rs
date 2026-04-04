@@ -428,7 +428,7 @@ impl ElasticsearchAsyncSink {
         }
 
         let body = response.bytes().await.map_err(io::Error::other)?;
-        let recv_ns = t0.elapsed().as_nanos() as u64 - send_ns;
+        let recv_ns = (t0.elapsed().as_nanos() as u64).saturating_sub(send_ns);
         tracing::Span::current().record("recv_ns", recv_ns);
         tracing::Span::current().record("resp_bytes", body.len() as u64);
         if let Some(took) = Self::extract_took(&body) {
@@ -585,7 +585,7 @@ impl ElasticsearchAsyncSink {
         }
 
         let body = response.bytes().await.map_err(io::Error::other)?;
-        let recv_ns = t0.elapsed().as_nanos() as u64 - send_ns;
+        let recv_ns = (t0.elapsed().as_nanos() as u64).saturating_sub(send_ns);
         tracing::Span::current().record("recv_ns", recv_ns);
         tracing::Span::current().record("resp_bytes", body.len() as u64);
         if let Some(took) = Self::extract_took(&body) {
