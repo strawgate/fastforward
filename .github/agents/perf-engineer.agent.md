@@ -55,11 +55,12 @@ Read these files in full:
 ## Workflow
 
 ### 1. Establish Baseline
-Always capture a baseline before making changes:
+Always capture a baseline before making changes. Pipeline benchmarks (`bench-self`, `bench-tcp`, etc.) require a release binary:
 ```bash
-just bench                    # criterion microbenchmarks
-just bench-self 10            # pipeline throughput (no network)
-just profile-otlp-local       # CPU flamegraph
+cargo build --release -p logfwd   # required before bench-self/tcp/udp/otlp
+just bench-self 10                # pipeline throughput (no network)
+just bench                        # criterion microbenchmarks (compiles its own binary)
+just profile-otlp-local           # CPU flamegraph
 ```
 Save criterion baseline: `cargo bench --bench pipeline -- --save-baseline before`
 
