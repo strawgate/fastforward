@@ -43,7 +43,7 @@ use arrow::datatypes::DataType;
 use arrow::record_batch::RecordBatch;
 
 use logfwd_config::{AuthConfig, Format, OutputConfig, OutputType};
-use logfwd_io::diagnostics::ComponentStats;
+use logfwd_types::diagnostics::ComponentStats;
 
 // ---------------------------------------------------------------------------
 // HTTP retry helper
@@ -827,7 +827,7 @@ mod tests {
     use super::*;
     use arrow::array::{Float64Array, Int64Array, StringArray};
     use arrow::datatypes::{Field, Schema};
-    use logfwd_io::diagnostics::ComponentStats;
+    use logfwd_types::diagnostics::ComponentStats;
     use std::sync::Arc;
 
     fn make_test_batch() -> RecordBatch {

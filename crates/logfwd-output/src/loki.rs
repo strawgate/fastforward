@@ -43,7 +43,7 @@ use arrow::array::AsArray;
 use arrow::datatypes::DataType;
 use arrow::record_batch::RecordBatch;
 
-use logfwd_io::diagnostics::ComponentStats;
+use logfwd_types::diagnostics::ComponentStats;
 
 use super::{BatchMetadata, build_col_infos, coalesce_as_str, write_row_json};
 

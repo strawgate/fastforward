@@ -44,7 +44,7 @@ use arrow::record_batch::RecordBatch;
 
 use logfwd_arrow::star_schema::flat_to_star;
 use logfwd_core::otlp::{self, encode_bytes_field, encode_tag, encode_varint, encode_varint_field};
-use logfwd_io::diagnostics::ComponentStats;
+use logfwd_types::diagnostics::ComponentStats;
 
 use super::arrow_ipc_sink::serialize_ipc;
 use super::sink::{SendResult, Sink, SinkFactory};

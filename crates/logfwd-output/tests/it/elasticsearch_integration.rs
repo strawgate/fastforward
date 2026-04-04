@@ -7,7 +7,7 @@ use arrow::array::{Int64Array, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 
-use logfwd_io::diagnostics::ComponentStats;
+use logfwd_types::diagnostics::ComponentStats;
 use logfwd_output::sink::SinkFactory;
 use logfwd_output::{BatchMetadata, ElasticsearchRequestMode, ElasticsearchSinkFactory};
 

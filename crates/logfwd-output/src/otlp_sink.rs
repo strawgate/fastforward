@@ -11,7 +11,7 @@ use logfwd_core::otlp::{
     encode_tag, encode_varint, encode_varint_field, hex_decode, parse_severity,
     parse_timestamp_nanos, varint_len,
 };
-use logfwd_io::diagnostics::ComponentStats;
+use logfwd_types::diagnostics::ComponentStats;
 use zstd::bulk::Compressor as ZstdCompressor;
 
 #[allow(deprecated)]

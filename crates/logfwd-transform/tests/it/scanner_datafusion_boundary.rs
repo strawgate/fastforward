@@ -285,7 +285,7 @@ fn utf8view_order_by_desc() {
 /// CROSS JOIN between a Utf8View-column table and a static enrichment table.
 #[test]
 fn utf8view_cross_join_enrichment() {
-    use logfwd_io::enrichment::StaticTable;
+    use logfwd_transform::enrichment::StaticTable;
 
     let batch = make_utf8view_batch();
     let mut t =

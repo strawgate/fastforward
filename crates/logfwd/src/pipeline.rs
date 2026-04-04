@@ -122,7 +122,7 @@ impl Pipeline {
                         path = base.join(path);
                     }
 
-                    let db: Arc<dyn logfwd_io::enrichment::GeoDatabase> = match geo_cfg.format {
+                    let db: Arc<dyn logfwd_transform::enrichment::GeoDatabase> = match geo_cfg.format {
                         GeoDatabaseFormat::Mmdb => {
                             let mmdb = logfwd_transform::udf::geo_lookup::MmdbDatabase::open(&path)
                                 .map_err(|e| {
@@ -151,7 +151,7 @@ impl Pipeline {
                         .map(|(k, v)| (k.clone(), v.clone()))
                         .collect();
                     let table = Arc::new(
-                        logfwd_io::enrichment::StaticTable::new(&cfg.table_name, &labels)
+                        logfwd_transform::enrichment::StaticTable::new(&cfg.table_name, &labels)
                             .map_err(|e| format!("enrichment '{}': {e}", cfg.table_name))?,
                     );
                     transform
@@ -159,13 +159,13 @@ impl Pipeline {
                         .map_err(|e| format!("enrichment '{}': {e}", cfg.table_name))?;
                 }
                 EnrichmentConfig::HostInfo(_) => {
-                    let table = Arc::new(logfwd_io::enrichment::HostInfoTable::new());
+                    let table = Arc::new(logfwd_transform::enrichment::HostInfoTable::new());
                     transform
                         .add_enrichment_table(table)
                         .map_err(|e| format!("enrichment host_info: {e}"))?;
                 }
                 EnrichmentConfig::K8sPath(cfg) => {
-                    let table = Arc::new(logfwd_io::enrichment::K8sPathTable::new(&cfg.table_name));
+                    let table = Arc::new(logfwd_transform::enrichment::K8sPathTable::new(&cfg.table_name));
                     transform
                         .add_enrichment_table(table)
                         .map_err(|e| format!("enrichment '{}': {e}", cfg.table_name))?;
@@ -177,7 +177,7 @@ impl Pipeline {
                     {
                         path = base.join(path);
                     }
-                    let table = Arc::new(logfwd_io::enrichment::CsvFileTable::new(
+                    let table = Arc::new(logfwd_transform::enrichment::CsvFileTable::new(
                         &cfg.table_name,
                         &path,
                     ));
@@ -195,7 +195,7 @@ impl Pipeline {
                     {
                         path = base.join(path);
                     }
-                    let table = Arc::new(logfwd_io::enrichment::JsonLinesFileTable::new(
+                    let table = Arc::new(logfwd_transform::enrichment::JsonLinesFileTable::new(
                         &cfg.table_name,
                         &path,
                     ));

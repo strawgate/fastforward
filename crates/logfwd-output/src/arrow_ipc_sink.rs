@@ -14,7 +14,7 @@ use std::time::Duration;
 use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
 
-use logfwd_io::diagnostics::ComponentStats;
+use logfwd_types::diagnostics::ComponentStats;
 
 use super::sink::{SendResult, Sink, SinkFactory};
 use super::{BatchMetadata, Compression};

@@ -2371,13 +2371,12 @@ version = "0.1.0"
 dependencies = [
  "arrow",
  "crossbeam-channel",
- "csv",
  "dhat",
- "gethostname",
  "glob",
  "libc",
  "logfwd-arrow",
  "logfwd-core",
+ "logfwd-types",
  "memchr",
  "notify",
  "opentelemetry",
@@ -2410,7 +2409,7 @@ dependencies = [
  "logfwd-arrow",
  "logfwd-config",
  "logfwd-core",
- "logfwd-io",
+ "logfwd-types",
  "memchr",
  "opentelemetry-proto",
  "proptest",
@@ -2446,13 +2445,17 @@ version = "0.1.0"
 dependencies = [
  "arrow",
  "bytes",
+ "csv",
  "datafusion",
+ "gethostname",
  "grok",
  "logfwd-arrow",
  "logfwd-core",
- "logfwd-io",
+ "logfwd-types",
  "maxminddb",
  "regex",
+ "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
 ]
@@ -2461,7 +2464,11 @@ dependencies = [
 name = "logfwd-types"
 version = "0.1.0"
 dependencies = [
+<<<<<<< HEAD
  "proptest",
+=======
+ "opentelemetry",
+>>>>>>> 8bbbbce (feat: move ComponentStats to logfwd-types, enrichment to logfwd-transform)
 ]
 
 [[package]]

@@ -21,6 +21,7 @@ use datafusion::prelude::*;
 use logfwd_core::scan_config::ScanConfig;
 
 pub use logfwd_arrow::conflict_schema;
+pub mod enrichment;
 pub mod udf;
 
 // Re-export sqlparser through datafusion.
@@ -144,8 +145,8 @@ impl QueryAnalyzer {
     /// columns (severity, facility) that can be pushed to input sources.
     /// Only predicates in top-level AND chains are extracted — OR'd predicates
     /// are left for DataFusion since pushing them could miss matching rows.
-    pub fn filter_hints(&self) -> logfwd_io::filter_hints::FilterHints {
-        let mut hints = logfwd_io::filter_hints::FilterHints::default();
+    pub fn filter_hints(&self) -> logfwd_types::filter_hints::FilterHints {
+        let mut hints = logfwd_types::filter_hints::FilterHints::default();
 
         if let Some(ref where_expr) = self.where_clause {
             extract_pushable_predicates(where_expr, &mut hints);
@@ -168,7 +169,7 @@ impl QueryAnalyzer {
 
 /// Walk a WHERE clause AST and extract predicates that can be pushed down.
 /// Only extracts from top-level AND chains (not OR branches).
-fn extract_pushable_predicates(expr: &SqlExpr, hints: &mut logfwd_io::filter_hints::FilterHints) {
+fn extract_pushable_predicates(expr: &SqlExpr, hints: &mut logfwd_types::filter_hints::FilterHints) {
     match expr {
         // AND: recurse into both sides
         SqlExpr::BinaryOp {
@@ -515,9 +516,9 @@ pub struct SqlTransform {
     /// Schema fingerprint for cache invalidation.
     schema_hash: u64,
     /// Enrichment tables registered alongside `logs` in each DataFusion session.
-    enrichment_tables: Vec<Arc<dyn logfwd_io::enrichment::EnrichmentTable>>,
+    enrichment_tables: Vec<Arc<dyn enrichment::EnrichmentTable>>,
     /// Optional geo-IP database for the `geo_lookup()` UDF.
-    geo_database: Option<Arc<dyn logfwd_io::enrichment::GeoDatabase>>,
+    geo_database: Option<Arc<dyn enrichment::GeoDatabase>>,
     /// Cached DataFusion session — created once, table swapped per batch.
     ctx: Option<SessionContext>,
 }
@@ -541,7 +542,7 @@ impl SqlTransform {
     ///
     /// Invalidates the cached SessionContext so the UDF is re-registered
     /// with the new database on the next execute() call.
-    pub fn set_geo_database(&mut self, db: Arc<dyn logfwd_io::enrichment::GeoDatabase>) {
+    pub fn set_geo_database(&mut self, db: Arc<dyn enrichment::GeoDatabase>) {
         self.geo_database = Some(db);
         self.ctx = None; // force re-creation with new geo UDF
     }
@@ -555,7 +556,7 @@ impl SqlTransform {
     /// `execute()`. The context doesn't need to know about them at creation time.
     pub fn add_enrichment_table(
         &mut self,
-        table: Arc<dyn logfwd_io::enrichment::EnrichmentTable>,
+        table: Arc<dyn enrichment::EnrichmentTable>,
     ) -> Result<(), String> {
         let name = table.name();
         if name == "logs" {
@@ -1012,7 +1013,7 @@ mod tests {
 
     #[test]
     fn test_enrichment_cross_join() {
-        use logfwd_io::enrichment::StaticTable;
+        use enrichment::StaticTable;
 
         let batch = make_test_batch();
         let mut transform =
@@ -1045,7 +1046,7 @@ mod tests {
 
     #[test]
     fn test_enrichment_unused_table_no_error() {
-        use logfwd_io::enrichment::StaticTable;
+        use enrichment::StaticTable;
 
         let batch = make_test_batch();
         let table = Arc::new(
@@ -1063,7 +1064,7 @@ mod tests {
 
     #[test]
     fn test_enrichment_empty_table_skipped() {
-        use logfwd_io::enrichment::K8sPathTable;
+        use enrichment::K8sPathTable;
 
         let batch = make_test_batch();
         let k8s = Arc::new(K8sPathTable::new("k8s_pods"));

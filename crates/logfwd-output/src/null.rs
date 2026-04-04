@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use arrow::record_batch::RecordBatch;
 
-use logfwd_io::diagnostics::ComponentStats;
+use logfwd_types::diagnostics::ComponentStats;
 
 #[allow(deprecated)]
 use crate::{BatchMetadata, OutputSink};
@@ -71,7 +71,7 @@ impl OutputSink for NullSink {
 #[allow(deprecated)]
 mod tests {
     use super::*;
-    use logfwd_io::diagnostics::ComponentStats;
+    use logfwd_types::diagnostics::ComponentStats;
 
     #[test]
     fn null_sink_accepts_and_discards() {

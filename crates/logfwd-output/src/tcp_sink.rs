@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use arrow::record_batch::RecordBatch;
 
-use logfwd_io::diagnostics::ComponentStats;
+use logfwd_types::diagnostics::ComponentStats;
 
 #[allow(deprecated)]
 use crate::{BatchMetadata, OutputSink, build_col_infos, write_row_json};

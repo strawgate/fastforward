@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use arrow::record_batch::RecordBatch;
 
-use logfwd_io::diagnostics::ComponentStats;
+use logfwd_types::diagnostics::ComponentStats;
 
 #[allow(deprecated)]
 use crate::{BatchMetadata, OutputSink, build_col_infos, write_row_json};
@@ -130,7 +130,7 @@ mod tests {
     use super::*;
     use arrow::array::StringArray;
     use arrow::datatypes::{DataType, Field, Schema};
-    use logfwd_io::diagnostics::ComponentStats;
+    use logfwd_types::diagnostics::ComponentStats;
     use std::net::UdpSocket as StdSocket;
     use std::sync::Arc;
 
