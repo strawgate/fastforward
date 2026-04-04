@@ -868,7 +868,7 @@ mod tests {
     fn grpc_frame_prepends_five_byte_header() {
         let proto_payload = [0x0a, 0x02, 0x08, 0x01];
         let mut framed = Vec::new();
-        write_grpc_frame(&mut framed, &proto_payload, false);
+        write_grpc_frame(&mut framed, &proto_payload, false).unwrap();
         assert_eq!(framed.len(), 5 + proto_payload.len());
         assert_eq!(framed[0], 0x00, "compressed flag must be 0x00");
         let msg_len = u32::from_be_bytes(framed[1..5].try_into().unwrap());
@@ -887,7 +887,7 @@ mod tests {
     #[test]
     fn grpc_frame_empty_payload() {
         let mut framed = Vec::new();
-        write_grpc_frame(&mut framed, &[], false);
+        write_grpc_frame(&mut framed, &[], false).unwrap();
         assert_eq!(framed.len(), 5);
         assert_eq!(framed[0], 0x00, "compressed flag must be 0x00");
         let msg_len = u32::from_be_bytes(framed[1..5].try_into().unwrap());
@@ -898,7 +898,7 @@ mod tests {
     fn grpc_frame_compressed_flag() {
         let proto_payload = [0x0a, 0x02];
         let mut framed = Vec::new();
-        write_grpc_frame(&mut framed, &proto_payload, true);
+        write_grpc_frame(&mut framed, &proto_payload, true).unwrap();
         assert_eq!(framed[0], 0x01, "compressed flag must be 0x01");
     }
 
@@ -925,7 +925,7 @@ mod tests {
 
         // Frame as send_batch would.
         let mut framed = Vec::new();
-        write_grpc_frame(&mut framed, &proto_payload, false);
+        write_grpc_frame(&mut framed, &proto_payload, false).unwrap();
 
         // The frame header must be 5 bytes followed by the exact protobuf payload.
         assert_eq!(
