@@ -63,6 +63,20 @@ output:
 | `index` | string | No | `logs` | Target index name |
 | `compression` | string | No | none | `zstd` or `none` |
 
+## Loki
+
+Push logs to Grafana Loki with automatic label grouping.
+
+```yaml
+output:
+  type: loki
+  endpoint: http://loki:3100
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `endpoint` | string | Yes | Loki push URL |
+
 ## Multiple outputs (fan-out)
 
 ```yaml

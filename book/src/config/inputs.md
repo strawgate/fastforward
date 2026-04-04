@@ -32,6 +32,33 @@ input:
 
 Use `--generate-json <n> <file>` on the CLI to write a fixed number of lines to a file instead.
 
-## UDP / TCP / OTLP (planned)
+## UDP
 
-Network input sources are defined in the config schema but not yet implemented.
+Receive log lines on a UDP socket.
+
+```yaml
+input:
+  type: udp
+  listen: 0.0.0.0:514
+  format: syslog
+```
+
+## TCP
+
+Accept log lines on a TCP socket.
+
+```yaml
+input:
+  type: tcp
+  listen: 0.0.0.0:5140
+  format: json
+```
+
+## OTLP
+
+Receive OTLP log records from another agent or SDK.
+
+```yaml
+input:
+  type: otlp
+```

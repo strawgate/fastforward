@@ -55,7 +55,7 @@ pipeline — everything downstream references it instead of copying.
 ### 2. Framing: raw bytes → complete lines
 
 ```
-Vec<u8> → FramedInput::push() → newline-delimited JSON in buffer
+Vec<u8> → FramedInput::poll() → newline-delimited JSON in buffer
 ```
 
 **FramedInput** (`logfwd-io/src/framed.rs`) combines format detection

@@ -161,22 +161,22 @@ output:
 pipelines:
   errors:
     inputs:
-      type: file
-      path: /var/log/pods/**/*.log
-      format: cri
+      - type: file
+        path: /var/log/pods/**/*.log
+        format: cri
     transform: SELECT * FROM logs WHERE level = 'ERROR'
     outputs:
-      type: otlp
-      endpoint: http://otel-collector:4318
+      - type: otlp
+        endpoint: http://otel-collector:4318
 
   debug:
     inputs:
-      type: file
-      path: /var/log/pods/**/*.log
-      format: cri
+      - type: file
+        path: /var/log/pods/**/*.log
+        format: cri
     outputs:
-      type: stdout
-      format: console
+      - type: stdout
+        format: console
 ```
 
 See the [Configuration Reference](book/src/config/reference.md) for all YAML fields, input/output types, and enrichment tables.

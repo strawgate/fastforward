@@ -321,7 +321,7 @@ Special columns added for CRI inputs:
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `_raw` | Utf8View | Original JSON line (only when `keep_raw: true`). |
+| `_raw` | Utf8View | Original raw line (only when `keep_raw: true`). |
 | `_timestamp` | Utf8View | Timestamp from CRI header as an RFC 3339 string. |
 | `_stream` | Utf8View | CRI stream name (`stdout`/`stderr`). |
 

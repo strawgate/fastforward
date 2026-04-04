@@ -181,7 +181,7 @@ delete one and replace it with a link.
 | Config YAML fields | `book/src/config/reference.md` |
 | Column naming rules | `book/src/config/sql-transforms.md` |
 | Deployment manifests | `book/src/deployment/` |
-| Troubleshooting | `book/src/deployment/troubleshooting.md` |
+| Troubleshooting | `book/src/troubleshooting.md` |
 | Crate boundaries and deps | `dev-docs/CRATE_RULES.md` |
 | Architecture and data flow | `dev-docs/ARCHITECTURE.md` |
 | Design decisions | `dev-docs/DESIGN.md` |

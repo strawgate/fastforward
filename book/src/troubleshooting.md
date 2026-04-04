@@ -86,11 +86,14 @@ logfwd cannot reach the configured OTLP collector.
 
 1. Verify the endpoint address and port are correct.
 2. Check that the collector is running:
+
    ```bash
    curl -v http://otel-collector:4318/v1/logs
    ```
+
 3. If using gRPC (`protocol: grpc`), ensure port 4317 is open; for HTTP use 4318.
 4. In Kubernetes, verify the service name resolves from within the pod:
+
    ```bash
    kubectl exec -n collectors <pod> -- nslookup otel-collector
    ```
@@ -158,7 +161,7 @@ server:
 
 Look for log lines like:
 
-```
+```text
 [DEBUG] tailing /var/log/pods/app_pod-xyz/app/0.log
 [DEBUG] read 4096 bytes from /var/log/pods/app_pod-xyz/app/0.log
 ```

@@ -75,6 +75,7 @@ pipelines:
 | Type | Description | Status |
 |------|-------------|--------|
 | `file` | Tail log files by glob pattern | Implemented |
+| `generator` | Synthetic data for benchmarking | Implemented |
 | `tcp` | TCP listener | Implemented |
 | `udp` | UDP listener | Implemented |
 | `otlp` | Receive OTLP logs | Implemented |

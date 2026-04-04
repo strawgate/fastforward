@@ -158,7 +158,7 @@ transform: |
     _stream,
     level,
     message,
-    _source_path AS source_source_path
+    _source_path AS source_file
   FROM logs
 
 output:

@@ -104,17 +104,15 @@ deciding what to add to which crate — inaccuracy causes agents to add the wron
 dependency to the wrong crate.
 
 
-## PHASES.md (`dev-docs/PHASES.md`)
+## Roadmap (GitHub issue #889)
 
-Update required when: a phase task is completed (mark with `✅ DONE` and add the
-PR number), a phase is fully completed (add `✅ DONE` to the phase heading), a new
-sub-task is identified and added to a phase, or a task is moved between phases.
-The roadmap is the shared understanding of project direction between human
-maintainers and AI agents. Out-of-date phase status causes agents to implement
-work that is already done or skip work that is next in sequence. If this PR
-completes a phase task, that task must be marked done in `PHASES.md`. Read
-`PHASES.md` to determine current phase status rather than relying on any
-cached snapshot.
+The roadmap is tracked in a pinned GitHub issue, not in a file:
+https://github.com/strawgate/memagent/issues/889
+
+Update required when: a roadmap task is completed (check its checkbox and add
+the PR number). The roadmap is the shared understanding of project direction
+between human maintainers and AI agents. If this PR completes a roadmap task,
+that task must be checked off in the issue.
 
 
 ## SCANNER_CONTRACT.md (`dev-docs/SCANNER_CONTRACT.md`)
