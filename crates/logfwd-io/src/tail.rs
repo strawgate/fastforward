@@ -54,8 +54,6 @@ impl FileIdentity {
 
 /// State tracked per tailed file.
 struct TailedFile {
-    #[expect(dead_code, reason = "retained for debug logging")]
-    path: PathBuf,
     identity: FileIdentity,
     file: File,
     offset: u64,
@@ -93,11 +91,25 @@ enum ReadResult {
 pub enum TailEvent {
     /// New data available. The Vec is raw bytes read from the file.
     /// NOT necessarily aligned on line boundaries — the pipeline handles that.
-    Data { path: PathBuf, bytes: Vec<u8> },
+    Data {
+        path: PathBuf,
+        bytes: Vec<u8>,
+        /// Identity of the source that produced this data, computed at read
+        /// time (before any rotation mutates the tailer's internal state).
+        source_id: Option<SourceId>,
+    },
     /// A file was rotated (old file at path replaced by new file).
-    Rotated { path: PathBuf },
+    Rotated {
+        path: PathBuf,
+        /// Identity of the *old* (pre-rotation) file.
+        source_id: Option<SourceId>,
+    },
     /// A file was truncated (copytruncate rotation).
-    Truncated { path: PathBuf },
+    Truncated {
+        path: PathBuf,
+        /// Identity of the file at the time truncation was detected.
+        source_id: Option<SourceId>,
+    },
     /// The file has been fully read and contains no new data.
     ///
     /// Emitted once after every transition from "has data" to "no data"
@@ -108,7 +120,11 @@ pub enum TailEvent {
     /// The event is suppressed on subsequent polls until new data arrives,
     /// at which point the flag resets so a fresh `EndOfFile` can be emitted
     /// the next time the file is caught up.
-    EndOfFile { path: PathBuf },
+    EndOfFile {
+        path: PathBuf,
+        /// Identity of the source that reached EOF.
+        source_id: Option<SourceId>,
+    },
 }
 
 /// Configuration for the file tailer.
@@ -400,7 +416,6 @@ impl FileTailer {
         self.files.insert(
             path.to_path_buf(),
             TailedFile {
-                path: path.to_path_buf(),
                 identity,
                 file,
                 offset,
@@ -478,6 +493,10 @@ impl FileTailer {
             let is_new = !self.files.contains_key(path);
 
             if is_rotated {
+                // Capture the old file's identity before any mutation so that
+                // drained bytes and the Rotated event carry the correct source_id.
+                let pre_rotate_source_id = self.source_id_for_path(path);
+
                 // Drain any bytes written to the old fd after the last read but
                 // before the rename.  The kernel keeps the old inode alive while
                 // our File handle is open, so these bytes are still readable.
@@ -486,17 +505,25 @@ impl FileTailer {
                         events.push(TailEvent::Data {
                             path: path.clone(),
                             bytes: data,
+                            source_id: pre_rotate_source_id,
                         });
                     }
                     Ok(ReadResult::TruncatedThenData(data)) => {
-                        events.push(TailEvent::Truncated { path: path.clone() });
+                        events.push(TailEvent::Truncated {
+                            path: path.clone(),
+                            source_id: pre_rotate_source_id,
+                        });
                         events.push(TailEvent::Data {
                             path: path.clone(),
                             bytes: data,
+                            source_id: pre_rotate_source_id,
                         });
                     }
                     Ok(ReadResult::Truncated) => {
-                        events.push(TailEvent::Truncated { path: path.clone() });
+                        events.push(TailEvent::Truncated {
+                            path: path.clone(),
+                            source_id: pre_rotate_source_id,
+                        });
                     }
                     Ok(ReadResult::NoData) => {}
                     Err(e) => {
@@ -506,7 +533,10 @@ impl FileTailer {
 
                 // Now that the old fd is fully drained, emit the rotation event
                 // and switch to the new file.
-                events.push(TailEvent::Rotated { path: path.clone() });
+                events.push(TailEvent::Rotated {
+                    path: path.clone(),
+                    source_id: pre_rotate_source_id,
+                });
                 let _ = self.files.remove(path);
                 if let Err(e) = self.open_file_at(path, false) {
                     tracing::warn!(path = %path.display(), error = %e, "tail.open_after_rotation_failed");
@@ -519,8 +549,14 @@ impl FileTailer {
         }
 
         // Read new data from all tailed files.
+        // Collect paths first; read_new_data requires &mut self.
         let paths: Vec<PathBuf> = self.files.keys().cloned().collect();
         for path in paths {
+            // Capture source_id BEFORE read_new_data: truncation detection
+            // inside read_new_data updates the fingerprint, so the post-read
+            // identity is the NEW file. Downstream uses source_id to clear
+            // per-source state keyed by the OLD identity.
+            let pre_read_source_id = self.source_id_for_path(&path);
             match self.read_new_data(&path) {
                 Ok(ReadResult::Data(data)) => {
                     // New data arrived — reset the EOF-emitted flag so a fresh
@@ -528,27 +564,42 @@ impl FileTailer {
                     if let Some(tailed) = self.files.get_mut(&path) {
                         tailed.eof_emitted = false;
                     }
+                    // Compute source_id AFTER read_new_data: empty files acquire
+                    // their real fingerprint during the read, so the post-read
+                    // identity is the correct one to associate with this data.
+                    let source_id = self.source_id_for_path(&path);
                     events.push(TailEvent::Data {
                         path: path.clone(),
                         bytes: data,
+                        source_id,
                     });
                 }
                 Ok(ReadResult::TruncatedThenData(data)) => {
                     // Copytruncate detected + new data from beginning (#796).
                     // Emit Truncated FIRST so downstream clears remainder,
-                    // then emit the new data.
-                    events.push(TailEvent::Truncated { path: path.clone() });
+                    // then emit the new data. Use pre-read source_id for
+                    // Truncated (what downstream knows), post-read for Data.
+                    events.push(TailEvent::Truncated {
+                        path: path.clone(),
+                        source_id: pre_read_source_id,
+                    });
                     if let Some(tailed) = self.files.get_mut(&path) {
                         tailed.eof_emitted = false;
                     }
+                    let source_id = self.source_id_for_path(&path);
                     events.push(TailEvent::Data {
                         path: path.clone(),
                         bytes: data,
+                        source_id,
                     });
                 }
                 Ok(ReadResult::Truncated) => {
-                    // Truncated but no new data yet.
-                    events.push(TailEvent::Truncated { path: path.clone() });
+                    // Truncated but no new data yet. Use pre-read source_id
+                    // so downstream can find and clear the old identity.
+                    events.push(TailEvent::Truncated {
+                        path: path.clone(),
+                        source_id: pre_read_source_id,
+                    });
                 }
                 Ok(ReadResult::NoData) => {
                     // No new data. Emit EndOfFile once so downstream can flush
@@ -556,7 +607,11 @@ impl FileTailer {
                     if let Some(tailed) = self.files.get_mut(&path) {
                         if !tailed.eof_emitted {
                             tailed.eof_emitted = true;
-                            events.push(TailEvent::EndOfFile { path: path.clone() });
+                            let source_id = self.source_id_for_path(&path);
+                            events.push(TailEvent::EndOfFile {
+                                path: path.clone(),
+                                source_id,
+                            });
                         }
                     }
                 }
@@ -583,23 +638,33 @@ impl FileTailer {
             .map(|(path, _)| path.clone())
             .collect();
         for path in &deleted {
+            // Capture source_id before removing the file entry.
+            let source_id = self.source_id_for_path(path);
             // Drain any remaining data before closing the FD.
             match self.read_new_data(path) {
                 Ok(ReadResult::Data(data)) => {
                     events.push(TailEvent::Data {
                         path: path.clone(),
                         bytes: data,
+                        source_id,
                     });
                 }
                 Ok(ReadResult::TruncatedThenData(data)) => {
-                    events.push(TailEvent::Truncated { path: path.clone() });
+                    events.push(TailEvent::Truncated {
+                        path: path.clone(),
+                        source_id,
+                    });
                     events.push(TailEvent::Data {
                         path: path.clone(),
                         bytes: data,
+                        source_id,
                     });
                 }
                 Ok(ReadResult::Truncated) => {
-                    events.push(TailEvent::Truncated { path: path.clone() });
+                    events.push(TailEvent::Truncated {
+                        path: path.clone(),
+                        source_id,
+                    });
                 }
                 Ok(ReadResult::NoData) => {}
                 Err(e) => {
@@ -687,7 +752,7 @@ impl FileTailer {
         }
 
         // Read available bytes, capped at MAX_READ_PER_POLL (#800).
-        let mut result = Vec::new();
+        let mut result = Vec::with_capacity(self.config.read_buf_size);
         loop {
             if result.len() >= Self::MAX_READ_PER_POLL {
                 break; // continue on next poll
@@ -2028,7 +2093,7 @@ mod tests {
         let data: Vec<u8> = events
             .iter()
             .filter_map(|e| match e {
-                TailEvent::Data { path, bytes } if path == &evicted_path => Some(bytes.clone()),
+                TailEvent::Data { path, bytes, .. } if path == &evicted_path => Some(bytes.clone()),
                 _ => None,
             })
             .flatten()
