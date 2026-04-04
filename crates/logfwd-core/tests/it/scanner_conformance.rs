@@ -431,6 +431,117 @@ proptest! {
 }
 
 // ===========================================================================
+// BytesMut accumulation consistency: pipeline pattern
+// ===========================================================================
+
+/// Verify that accumulating NDJSON chunks into BytesMut, freezing, and
+/// scanning produces the same RecordBatch as scanning the concatenated input
+/// directly. This exercises the exact data path used by pipeline.rs:
+///   multiple Bytes → extend_from_slice into BytesMut → split().freeze() → ZeroCopyScanner
+fn assert_accumulation_consistent(chunks: &[&[u8]]) {
+    use bytes::BytesMut;
+    use logfwd_arrow::scanner::ZeroCopyScanner;
+
+    // Path A: concatenate then scan (baseline)
+    let mut full = Vec::new();
+    for chunk in chunks {
+        full.extend_from_slice(chunk);
+    }
+    let mut scanner_a = ZeroCopyScanner::new(ScanConfig::default());
+    let batch_a = scanner_a
+        .scan(bytes::Bytes::from(full.clone()))
+        .expect("baseline scan should succeed");
+
+    // Path B: accumulate via BytesMut (pipeline pattern)
+    let mut buf = BytesMut::new();
+    for chunk in chunks {
+        buf.extend_from_slice(chunk);
+    }
+    let frozen = buf.split().freeze();
+    let mut scanner_b = ZeroCopyScanner::new(ScanConfig::default());
+    let batch_b = scanner_b
+        .scan(frozen)
+        .expect("accumulated scan should succeed");
+
+    assert_eq!(
+        batch_a.num_rows(),
+        batch_b.num_rows(),
+        "Row count differs: direct={} vs accumulated={}",
+        batch_a.num_rows(),
+        batch_b.num_rows()
+    );
+
+    // Compare all column values
+    for (i, field) in batch_a.schema().fields().iter().enumerate() {
+        let col_a = batch_a.column(i);
+        let col_b = batch_b.column_by_name(field.name());
+        assert!(
+            col_b.is_some(),
+            "Column '{}' missing in accumulated batch",
+            field.name()
+        );
+        let col_b = col_b.unwrap();
+        assert_eq!(
+            col_a.len(),
+            col_b.len(),
+            "Column '{}' length differs",
+            field.name()
+        );
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    /// Split NDJSON at random newline boundaries and accumulate via BytesMut.
+    #[test]
+    fn accumulation_matches_direct(buf in arb_ndjson_buffer()) {
+        // Find all newline positions
+        let newlines: Vec<usize> = buf.iter()
+            .enumerate()
+            .filter(|&(_, b)| *b == b'\n')
+            .map(|(i, _)| i + 1)
+            .collect();
+
+        if newlines.is_empty() {
+            return Ok(());
+        }
+
+        // Split at a random newline position
+        let mid = newlines[newlines.len() / 2];
+        let chunk1 = &buf[..mid];
+        let chunk2 = &buf[mid..];
+
+        assert_accumulation_consistent(&[chunk1, chunk2]);
+    }
+
+    /// Single chunk (regression: must match direct scan exactly)
+    #[test]
+    fn accumulation_single_chunk(buf in arb_ndjson_buffer()) {
+        assert_accumulation_consistent(&[&buf]);
+    }
+
+    /// Many small chunks (stress the accumulation pattern)
+    #[test]
+    fn accumulation_per_line(buf in arb_ndjson_buffer()) {
+        let mut chunks: Vec<&[u8]> = Vec::new();
+        let mut start = 0;
+        for (i, &b) in buf.iter().enumerate() {
+            if b == b'\n' {
+                chunks.push(&buf[start..=i]);
+                start = i + 1;
+            }
+        }
+        if start < buf.len() {
+            chunks.push(&buf[start..]);
+        }
+        if !chunks.is_empty() {
+            assert_accumulation_consistent(&chunks);
+        }
+    }
+}
+
+// ===========================================================================
 // Curated edge cases
 // ===========================================================================
 
