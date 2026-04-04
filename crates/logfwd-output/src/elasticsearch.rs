@@ -592,6 +592,7 @@ fn write_unix_timestamp_utc_into(buf: &mut [u8; 19], secs: u64) {
     let day = (remaining + 1) as u32;
 
     // Write YYYY-MM-DDTHH:MM:SS into the 19-byte buffer.
+    debug_assert!(year <= 9999, "year must be <= 9999, got {year}");
     buf[0] = b'0' + (year / 1000) as u8;
     buf[1] = b'0' + (year / 100 % 10) as u8;
     buf[2] = b'0' + (year / 10 % 10) as u8;
@@ -624,6 +625,7 @@ fn write_unix_timestamp_utc_into(buf: &mut [u8; 19], secs: u64) {
 ///
 /// Zero-allocation: all work happens on the stack-allocated `out` buffer.
 fn write_ts_suffix(out: &mut [u8; 47], secs: u64, frac: u64) {
+    debug_assert!(frac < 1_000_000_000, "frac must be < 1e9, got {frac}");
     out[0] = b',';
     out[1..15].copy_from_slice(b"\"@timestamp\":\"");
     let mut dt = [0u8; 19];
