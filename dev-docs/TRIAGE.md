@@ -93,7 +93,7 @@
 
 **[#931](https://github.com/strawgate/memagent/pull/931) — `perf(kani): kissat solver`**
 - Kani proofs still failing at 32m32s timeout despite the kissat solver annotation. CodeRabbit approved.
-- Root cause: `verify_write_json_line_no_prefix` proof still exceeds the 45-minute timeout even with kissat.
+- Root cause: `verify_write_json_line_no_prefix` proof still exceeds the 45-minute timeout even with Kissat.
 - Labels: `performance` `P2: medium` `rust`
 - **Action:** Check Kani job logs at [run 23983262979](https://github.com/strawgate/memagent/actions/runs/23983262979/job/69950981147); consider `#[kani::proof_for_contract]` with `--unwind` limits or splitting the proof.
 
