@@ -144,6 +144,68 @@ impl Pipeline {
                     }
                     transform.set_geo_database(db);
                 }
+                EnrichmentConfig::Static(cfg) => {
+                    let labels: Vec<(String, String)> = cfg
+                        .labels
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect();
+                    let table = Arc::new(
+                        logfwd_io::enrichment::StaticTable::new(&cfg.table_name, &labels)
+                            .map_err(|e| format!("enrichment '{}': {e}", cfg.table_name))?,
+                    );
+                    transform
+                        .add_enrichment_table(table)
+                        .map_err(|e| format!("enrichment '{}': {e}", cfg.table_name))?;
+                }
+                EnrichmentConfig::HostInfo(_) => {
+                    let table = Arc::new(logfwd_io::enrichment::HostInfoTable::new());
+                    transform
+                        .add_enrichment_table(table)
+                        .map_err(|e| format!("enrichment host_info: {e}"))?;
+                }
+                EnrichmentConfig::K8sPath(cfg) => {
+                    let table = Arc::new(logfwd_io::enrichment::K8sPathTable::new(&cfg.table_name));
+                    transform
+                        .add_enrichment_table(table)
+                        .map_err(|e| format!("enrichment '{}': {e}", cfg.table_name))?;
+                }
+                EnrichmentConfig::Csv(cfg) => {
+                    let mut path = PathBuf::from(&cfg.path);
+                    if path.is_relative()
+                        && let Some(base) = base_path
+                    {
+                        path = base.join(path);
+                    }
+                    let table = Arc::new(logfwd_io::enrichment::CsvFileTable::new(
+                        &cfg.table_name,
+                        &path,
+                    ));
+                    table
+                        .reload()
+                        .map_err(|e| format!("enrichment '{}': {e}", cfg.table_name))?;
+                    transform
+                        .add_enrichment_table(table)
+                        .map_err(|e| format!("enrichment '{}': {e}", cfg.table_name))?;
+                }
+                EnrichmentConfig::Jsonl(cfg) => {
+                    let mut path = PathBuf::from(&cfg.path);
+                    if path.is_relative()
+                        && let Some(base) = base_path
+                    {
+                        path = base.join(path);
+                    }
+                    let table = Arc::new(logfwd_io::enrichment::JsonLinesFileTable::new(
+                        &cfg.table_name,
+                        &path,
+                    ));
+                    table
+                        .reload()
+                        .map_err(|e| format!("enrichment '{}': {e}", cfg.table_name))?;
+                    transform
+                        .add_enrichment_table(table)
+                        .map_err(|e| format!("enrichment '{}': {e}", cfg.table_name))?;
+                }
             }
         }
 
