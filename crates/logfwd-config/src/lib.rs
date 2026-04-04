@@ -94,6 +94,7 @@ impl fmt::Display for InputType {
             InputType::Tcp => f.write_str("tcp"),
             InputType::Otlp => f.write_str("otlp"),
             InputType::Generator => f.write_str("generator"),
+            InputType::ArrowIpc => f.write_str("arrow_ipc"),
         }
     }
 }
@@ -136,6 +137,7 @@ impl fmt::Display for OutputType {
             OutputType::Null => f.write_str("null"),
             OutputType::TcpOut => f.write_str("tcp_out"),
             OutputType::UdpOut => f.write_str("udp_out"),
+            OutputType::ArrowIpc => f.write_str("arrow_ipc"),
         }
     }
 }
