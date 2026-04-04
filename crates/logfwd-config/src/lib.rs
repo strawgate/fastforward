@@ -295,6 +295,93 @@ pub struct GeoDatabaseConfig {
     pub refresh_interval: Option<u64>,
 }
 
+/// Configuration for a static key-value enrichment table.
+///
+/// ```yaml
+/// enrichment:
+///   - type: static
+///     table_name: env
+///     labels:
+///       dc: us-east-1
+///       team: platform
+/// ```
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StaticEnrichmentConfig {
+    /// SQL table name for the enrichment source.
+    pub table_name: String,
+    /// Key-value pairs that form a single-row table.
+    pub labels: HashMap<String, String>,
+}
+
+/// Configuration for the host-info enrichment table.
+///
+/// Resolves hostname, OS type, and architecture at startup.
+///
+/// ```yaml
+/// enrichment:
+///   - type: host_info
+/// ```
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostInfoConfig {}
+
+/// Configuration for the Kubernetes CRI log-path enrichment table.
+///
+/// Extracts namespace, pod name, pod UID, and container name from CRI log
+/// file paths. Updated automatically as the tailer discovers new log files.
+///
+/// ```yaml
+/// enrichment:
+///   - type: k8s_path
+///     table_name: k8s_pods
+/// ```
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct K8sPathConfig {
+    /// SQL table name. Defaults to `"k8s_pods"`.
+    #[serde(default = "default_k8s_table_name")]
+    pub table_name: String,
+}
+
+fn default_k8s_table_name() -> String {
+    "k8s_pods".to_string()
+}
+
+/// Configuration for a CSV file enrichment table.
+///
+/// ```yaml
+/// enrichment:
+///   - type: csv
+///     table_name: assets
+///     path: /etc/logfwd/assets.csv
+/// ```
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CsvEnrichmentConfig {
+    /// SQL table name for the enrichment source.
+    pub table_name: String,
+    /// Path to the CSV file.
+    pub path: String,
+}
+
+/// Configuration for a JSON Lines file enrichment table.
+///
+/// ```yaml
+/// enrichment:
+///   - type: jsonl
+///     table_name: ip_owners
+///     path: /etc/logfwd/ip-owners.jsonl
+/// ```
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JsonlEnrichmentConfig {
+    /// SQL table name for the enrichment source.
+    pub table_name: String,
+    /// Path to the JSON Lines file.
+    pub path: String,
+}
+
 /// Enrichment configuration entry.
 ///
 /// Each entry in the `enrichment` list specifies one enrichment source.
@@ -303,6 +390,16 @@ pub struct GeoDatabaseConfig {
 pub enum EnrichmentConfig {
     /// Geo-IP lookup database for the `geo_lookup()` UDF.
     GeoDatabase(GeoDatabaseConfig),
+    /// Static key-value pairs exposed as a single-row SQL table.
+    Static(StaticEnrichmentConfig),
+    /// System host metadata (hostname, OS, arch).
+    HostInfo(HostInfoConfig),
+    /// Kubernetes pod metadata parsed from CRI log file paths.
+    K8sPath(K8sPathConfig),
+    /// Lookup table loaded from a CSV file.
+    Csv(CsvEnrichmentConfig),
+    /// Lookup table loaded from a JSON Lines file.
+    Jsonl(JsonlEnrichmentConfig),
 }
 
 // ---------------------------------------------------------------------------
@@ -380,6 +477,9 @@ struct RawConfig {
     input: Option<InputConfig>,
     transform: Option<String>,
     output: Option<OutputConfig>,
+    /// Enrichment sources for the simple-form default pipeline.
+    #[serde(default)]
+    enrichment: Vec<EnrichmentConfig>,
     /// Static OTLP resource attributes for the simple-form default pipeline.
     #[serde(default)]
     resource_attrs: HashMap<String, String>,
@@ -419,13 +519,29 @@ impl Config {
     // Normalise the two layout variants into a single representation.
     fn from_raw(raw: RawConfig) -> Result<Self, ConfigError> {
         let pipelines = match (raw.pipelines, raw.input, raw.output) {
-            (Some(p), None, None) => p,
+            (Some(p), None, None) => {
+                if !raw.enrichment.is_empty() {
+                    return Err(ConfigError::Validation(
+                        "top-level `enrichment` is not supported when using `pipelines:` form \
+                         — move enrichment configuration inside each pipeline"
+                            .into(),
+                    ));
+                }
+                if !raw.resource_attrs.is_empty() {
+                    return Err(ConfigError::Validation(
+                        "top-level `resource_attrs` cannot be used with `pipelines:`; \
+                         move resource_attrs into each pipeline"
+                            .into(),
+                    ));
+                }
+                p
+            }
             (None, Some(input), Some(output)) => {
                 let pipeline = PipelineConfig {
                     inputs: vec![input],
                     transform: raw.transform,
                     outputs: vec![output],
-                    enrichment: Vec::new(),
+                    enrichment: raw.enrichment,
                     resource_attrs: raw.resource_attrs,
                     workers: None,
                     batch_target_bytes: None,
@@ -486,6 +602,13 @@ impl Config {
             }
         }
 
+        // Validate server.log_level is a recognised level (#481).
+        if let Some(level) = &self.server.log_level {
+            if let Err(msg) = validate_log_level(level) {
+                return Err(ConfigError::Validation(format!("server.log_level: {msg}")));
+            }
+        }
+
         if self.pipelines.is_empty() {
             return Err(ConfigError::Validation(
                 "at least one pipeline must be defined".into(),
@@ -531,6 +654,13 @@ impl Config {
                 if let Some(fmt @ (Format::Logfmt | Format::Syslog)) = &input.format {
                     return Err(ConfigError::Validation(format!(
                         "pipeline '{name}' input '{label}': format {fmt:?} is not yet implemented",
+                    )));
+                }
+
+                // max_open_files: 0 silently disables all file reading (#696).
+                if input.max_open_files == Some(0) {
+                    return Err(ConfigError::Validation(format!(
+                        "pipeline '{name}' input '{label}': max_open_files must be at least 1"
                     )));
                 }
             }
@@ -620,6 +750,49 @@ impl Config {
                     }
                 }
             }
+
+            // Validate enrichment entries (#550).
+            for (j, enrichment) in pipe.enrichment.iter().enumerate() {
+                match enrichment {
+                    EnrichmentConfig::GeoDatabase(geo_cfg) => {
+                        // Only check existence for absolute paths; relative paths
+                        // are resolved against base_path in Pipeline::from_config.
+                        let p = Path::new(&geo_cfg.path);
+                        if p.is_absolute() && !p.exists() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' enrichment #{j}: geo database file not found: {}",
+                                geo_cfg.path,
+                            )));
+                        }
+                    }
+                    EnrichmentConfig::Static(cfg) => {
+                        if cfg.labels.is_empty() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' enrichment #{j}: static enrichment requires at least one label"
+                            )));
+                        }
+                    }
+                    EnrichmentConfig::Csv(cfg) => {
+                        let p = Path::new(&cfg.path);
+                        if p.is_absolute() && !p.exists() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' enrichment #{j}: csv file not found: {}",
+                                cfg.path,
+                            )));
+                        }
+                    }
+                    EnrichmentConfig::Jsonl(cfg) => {
+                        let p = Path::new(&cfg.path);
+                        if p.is_absolute() && !p.exists() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' enrichment #{j}: jsonl file not found: {}",
+                                cfg.path,
+                            )));
+                        }
+                    }
+                    EnrichmentConfig::HostInfo(_) | EnrichmentConfig::K8sPath(_) => {}
+                }
+            }
         }
 
         Ok(())
@@ -635,6 +808,18 @@ fn validate_bind_addr(addr: &str) -> Result<(), String> {
     addr.parse::<std::net::SocketAddr>()
         .map(|_| ())
         .map_err(|e| format!("'{addr}' is not a valid host:port address: {e}"))
+}
+
+/// Validate that a log level string is a recognised tracing level.
+///
+/// Accepted values (case-insensitive): `trace`, `debug`, `info`, `warn`, `error`.
+fn validate_log_level(level: &str) -> Result<(), String> {
+    match level.to_ascii_lowercase().as_str() {
+        "trace" | "debug" | "info" | "warn" | "error" => Ok(()),
+        _ => Err(format!(
+            "'{level}' is not a recognised log level; expected one of: trace, debug, info, warn, error"
+        )),
+    }
 }
 
 /// Validate that an endpoint URL has a recognised scheme and a non-empty host.
@@ -1487,5 +1672,441 @@ server:
         // (We test the normalize_args logic via Config parsing instead since
         // normalize_args lives in the binary crate.)
         let _ = Config::load_str; // ensure the import is live
+    }
+
+    // -----------------------------------------------------------------------
+    // Bug #696: max_open_files: 0 silently disables file reading
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn max_open_files_zero_rejected() {
+        let yaml = r"
+input:
+  type: file
+  path: /var/log/test.log
+  max_open_files: 0
+output:
+  type: stdout
+";
+        let err = Config::load_str(yaml).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("max_open_files must be at least 1"),
+            "expected 'max_open_files must be at least 1' in error: {msg}"
+        );
+    }
+
+    #[test]
+    fn max_open_files_one_accepted() {
+        let yaml = r"
+input:
+  type: file
+  path: /var/log/test.log
+  max_open_files: 1
+output:
+  type: stdout
+";
+        Config::load_str(yaml).expect("max_open_files: 1 should be valid");
+    }
+
+    #[test]
+    fn max_open_files_absent_accepted() {
+        let yaml = r"
+input:
+  type: file
+  path: /var/log/test.log
+output:
+  type: stdout
+";
+        Config::load_str(yaml).expect("absent max_open_files should be valid");
+    }
+
+    // -----------------------------------------------------------------------
+    // Bug #550: enrichment path validation at config load time
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn enrichment_geo_database_missing_path_rejected() {
+        let yaml = r"
+pipelines:
+  app:
+    inputs:
+      - type: file
+        path: /tmp/x.log
+    outputs:
+      - type: stdout
+    enrichment:
+      - type: geo_database
+        format: mmdb
+        path: /nonexistent/path/to/GeoLite2-City.mmdb
+";
+        let err = Config::load_str(yaml).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not found"),
+            "expected 'not found' in error: {msg}"
+        );
+        assert!(
+            msg.contains("geo database"),
+            "expected 'geo database' in error: {msg}"
+        );
+    }
+
+    #[test]
+    fn enrichment_csv_missing_path_rejected() {
+        let yaml = r"
+pipelines:
+  app:
+    inputs:
+      - type: file
+        path: /tmp/x.log
+    outputs:
+      - type: stdout
+    enrichment:
+      - type: csv
+        table_name: assets
+        path: /nonexistent/path/to/assets.csv
+";
+        let err = Config::load_str(yaml).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not found"),
+            "expected 'not found' in error: {msg}"
+        );
+        assert!(msg.contains("csv"), "expected 'csv' in error: {msg}");
+    }
+
+    #[test]
+    fn enrichment_jsonl_missing_path_rejected() {
+        let yaml = r"
+pipelines:
+  app:
+    inputs:
+      - type: file
+        path: /tmp/x.log
+    outputs:
+      - type: stdout
+    enrichment:
+      - type: jsonl
+        table_name: ips
+        path: /nonexistent/path/to/data.jsonl
+";
+        let err = Config::load_str(yaml).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not found"),
+            "expected 'not found' in error: {msg}"
+        );
+        assert!(msg.contains("jsonl"), "expected 'jsonl' in error: {msg}");
+    }
+
+    #[test]
+    fn enrichment_relative_path_accepted_at_validation_time() {
+        // Relative paths are resolved against base_path in Pipeline::from_config,
+        // so Config::validate() must not reject them.
+        let yaml = r"
+pipelines:
+  app:
+    inputs:
+      - type: file
+        path: /tmp/x.log
+    outputs:
+      - type: stdout
+    enrichment:
+      - type: csv
+        table_name: assets
+        path: data/assets.csv
+      - type: jsonl
+        table_name: ips
+        path: data/ips.jsonl
+      - type: geo_database
+        format: mmdb
+        path: data/GeoLite2-City.mmdb
+";
+        Config::load_str(yaml).expect("relative enrichment paths should pass validation");
+    }
+
+    #[test]
+    fn enrichment_static_empty_labels_rejected() {
+        let yaml = r"
+pipelines:
+  app:
+    inputs:
+      - type: file
+        path: /tmp/x.log
+    outputs:
+      - type: stdout
+    enrichment:
+      - type: static
+        table_name: env
+        labels: {}
+";
+        let err = Config::load_str(yaml).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("at least one label"),
+            "expected 'at least one label' in error: {msg}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Bug #540: enrichment config variants for all implemented types
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn enrichment_static_config_accepted() {
+        let yaml = r#"
+pipelines:
+  app:
+    inputs:
+      - type: file
+        path: /tmp/x.log
+    outputs:
+      - type: stdout
+    enrichment:
+      - type: static
+        table_name: env
+        labels:
+          dc: us-east-1
+          team: platform
+"#;
+        let cfg = Config::load_str(yaml).expect("static enrichment should parse");
+        let pipe = &cfg.pipelines["app"];
+        assert_eq!(pipe.enrichment.len(), 1);
+        match &pipe.enrichment[0] {
+            EnrichmentConfig::Static(c) => {
+                assert_eq!(c.table_name, "env");
+                assert_eq!(c.labels.get("dc").map(String::as_str), Some("us-east-1"));
+                assert_eq!(c.labels.get("team").map(String::as_str), Some("platform"));
+            }
+            other => panic!("expected Static, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn enrichment_host_info_config_accepted() {
+        let yaml = r"
+pipelines:
+  app:
+    inputs:
+      - type: file
+        path: /tmp/x.log
+    outputs:
+      - type: stdout
+    enrichment:
+      - type: host_info
+";
+        let cfg = Config::load_str(yaml).expect("host_info enrichment should parse");
+        let pipe = &cfg.pipelines["app"];
+        assert_eq!(pipe.enrichment.len(), 1);
+        assert!(matches!(&pipe.enrichment[0], EnrichmentConfig::HostInfo(_)));
+    }
+
+    #[test]
+    fn enrichment_k8s_path_config_accepted() {
+        let yaml = r"
+pipelines:
+  app:
+    inputs:
+      - type: file
+        path: /tmp/x.log
+    outputs:
+      - type: stdout
+    enrichment:
+      - type: k8s_path
+        table_name: pods
+";
+        let cfg = Config::load_str(yaml).expect("k8s_path enrichment should parse");
+        let pipe = &cfg.pipelines["app"];
+        assert_eq!(pipe.enrichment.len(), 1);
+        match &pipe.enrichment[0] {
+            EnrichmentConfig::K8sPath(c) => assert_eq!(c.table_name, "pods"),
+            other => panic!("expected K8sPath, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn enrichment_k8s_path_default_table_name() {
+        let yaml = r"
+pipelines:
+  app:
+    inputs:
+      - type: file
+        path: /tmp/x.log
+    outputs:
+      - type: stdout
+    enrichment:
+      - type: k8s_path
+";
+        let cfg = Config::load_str(yaml).expect("k8s_path with default table_name should parse");
+        let pipe = &cfg.pipelines["app"];
+        match &pipe.enrichment[0] {
+            EnrichmentConfig::K8sPath(c) => assert_eq!(c.table_name, "k8s_pods"),
+            other => panic!("expected K8sPath, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn enrichment_csv_config_accepted() {
+        // Use a path that exists to pass validation.
+        let tmp = std::env::temp_dir().join("logfwd_test_enrichment.csv");
+        std::fs::write(&tmp, "host,owner\nweb1,alice\n").expect("create temp csv");
+        let yaml = format!(
+            "pipelines:\n  app:\n    inputs:\n      - type: file\n        path: /tmp/x.log\n    outputs:\n      - type: stdout\n    enrichment:\n      - type: csv\n        table_name: assets\n        path: {}\n",
+            tmp.display()
+        );
+        let cfg = Config::load_str(&yaml).expect("csv enrichment should parse");
+        let pipe = &cfg.pipelines["app"];
+        assert_eq!(pipe.enrichment.len(), 1);
+        match &pipe.enrichment[0] {
+            EnrichmentConfig::Csv(c) => {
+                assert_eq!(c.table_name, "assets");
+                assert_eq!(c.path, tmp.to_str().unwrap());
+            }
+            other => panic!("expected Csv, got {other:?}"),
+        }
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn enrichment_jsonl_config_accepted() {
+        // Use a path that exists to pass validation.
+        let tmp = std::env::temp_dir().join("logfwd_test_enrichment.jsonl");
+        std::fs::write(&tmp, "{\"ip\":\"1.2.3.4\",\"owner\":\"alice\"}\n")
+            .expect("create temp jsonl");
+        let yaml = format!(
+            "pipelines:\n  app:\n    inputs:\n      - type: file\n        path: /tmp/x.log\n    outputs:\n      - type: stdout\n    enrichment:\n      - type: jsonl\n        table_name: ip_owners\n        path: {}\n",
+            tmp.display()
+        );
+        let cfg = Config::load_str(&yaml).expect("jsonl enrichment should parse");
+        let pipe = &cfg.pipelines["app"];
+        assert_eq!(pipe.enrichment.len(), 1);
+        match &pipe.enrichment[0] {
+            EnrichmentConfig::Jsonl(c) => {
+                assert_eq!(c.table_name, "ip_owners");
+                assert_eq!(c.path, tmp.to_str().unwrap());
+            }
+            other => panic!("expected Jsonl, got {other:?}"),
+        }
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn enrichment_simple_form_preserved() {
+        // Enrichment in simple form should be wired into the default pipeline,
+        // not silently dropped (#540).
+        let yaml = r"
+input:
+  type: file
+  path: /tmp/x.log
+output:
+  type: stdout
+enrichment:
+  - type: host_info
+  - type: k8s_path
+";
+        let cfg = Config::load_str(yaml).expect("simple form with enrichment should parse");
+        let pipe = &cfg.pipelines["default"];
+        assert_eq!(
+            pipe.enrichment.len(),
+            2,
+            "enrichment should not be dropped in simple form"
+        );
+        assert!(matches!(&pipe.enrichment[0], EnrichmentConfig::HostInfo(_)));
+        assert!(matches!(&pipe.enrichment[1], EnrichmentConfig::K8sPath(_)));
+    }
+
+    // -----------------------------------------------------------------------
+    // Bug #481: server.log_level validation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn log_level_valid_values_accepted() {
+        for level in ["trace", "debug", "info", "warn", "error", "INFO", "Warn"] {
+            let yaml = format!(
+                "input:\n  type: file\n  path: /tmp/x.log\noutput:\n  type: stdout\nserver:\n  log_level: {level}\n"
+            );
+            Config::load_str(&yaml)
+                .unwrap_or_else(|e| panic!("log_level '{level}' should be valid: {e}"));
+        }
+    }
+
+    #[test]
+    fn log_level_invalid_value_rejected() {
+        let yaml = r"
+input:
+  type: file
+  path: /tmp/x.log
+output:
+  type: stdout
+server:
+  log_level: inof
+";
+        let err = Config::load_str(yaml).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("log_level"),
+            "expected 'log_level' in error: {msg}"
+        );
+        assert!(
+            msg.contains("not a recognised log level"),
+            "expected 'not a recognised log level' in error: {msg}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Top-level enrichment rejected with pipelines: form
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn top_level_resource_attrs_rejected_with_pipelines_form() {
+        let yaml = r"
+pipelines:
+  app:
+    inputs:
+      - type: file
+        path: /tmp/x.log
+    outputs:
+      - type: stdout
+resource_attrs:
+  service.name: my-service
+";
+        let err = Config::load_str(yaml).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("top-level `resource_attrs`"),
+            "error should mention top-level resource_attrs: {msg}"
+        );
+        assert!(
+            msg.contains("pipelines"),
+            "error should mention pipelines: {msg}"
+        );
+    }
+
+    #[test]
+    fn top_level_enrichment_rejected_with_pipelines_form() {
+        let yaml = r"
+pipelines:
+  app:
+    inputs:
+      - type: file
+        path: /tmp/x.log
+    outputs:
+      - type: stdout
+enrichment:
+  - type: geo_database
+    format: mmdb
+    path: /tmp/geo.mmdb
+";
+        let err = Config::load_str(yaml).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("top-level `enrichment`"),
+            "error should mention top-level enrichment: {msg}"
+        );
+        assert!(
+            msg.contains("pipelines"),
+            "error should mention pipelines form: {msg}"
+        );
     }
 }
