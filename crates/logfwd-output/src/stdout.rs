@@ -7,6 +7,7 @@ use arrow::record_batch::RecordBatch;
 
 use logfwd_io::diagnostics::ComponentStats;
 
+#[allow(deprecated)]
 use super::{
     BatchMetadata, ColVariant, OutputSink, build_col_infos, get_array, is_null, str_value,
     write_row_json,
@@ -272,6 +273,7 @@ fn find_col(fields: &arrow::datatypes::Fields, names: &[&str]) -> Option<usize> 
     None
 }
 
+#[allow(deprecated)]
 impl OutputSink for StdoutSink {
     fn send_batch(&mut self, batch: &RecordBatch, metadata: &BatchMetadata) -> io::Result<()> {
         let mut counter = ByteCounter {

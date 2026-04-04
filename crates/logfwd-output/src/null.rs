@@ -9,6 +9,7 @@ use arrow::record_batch::RecordBatch;
 
 use logfwd_io::diagnostics::ComponentStats;
 
+#[allow(deprecated)]
 use crate::{BatchMetadata, OutputSink};
 
 /// Discards all data. Useful as the output side of a blackhole receiver
@@ -44,6 +45,7 @@ impl NullSink {
     }
 }
 
+#[allow(deprecated)]
 impl OutputSink for NullSink {
     fn send_batch(&mut self, batch: &RecordBatch, _metadata: &BatchMetadata) -> io::Result<()> {
         self.batches_discarded.fetch_add(1, Ordering::Relaxed);
@@ -66,6 +68,7 @@ impl OutputSink for NullSink {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
     use logfwd_io::diagnostics::ComponentStats;

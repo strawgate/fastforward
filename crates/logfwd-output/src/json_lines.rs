@@ -6,6 +6,7 @@ use arrow::record_batch::RecordBatch;
 
 use logfwd_io::diagnostics::ComponentStats;
 
+#[allow(deprecated)]
 use super::{
     BatchMetadata, Compression, HTTP_MAX_RETRIES, HTTP_RETRY_INITIAL_DELAY_MS, OutputSink,
     build_col_infos, is_transient_error, str_value, write_row_json,
@@ -119,6 +120,7 @@ impl JsonLinesSink {
     }
 }
 
+#[allow(deprecated)]
 impl OutputSink for JsonLinesSink {
     fn send_batch(&mut self, batch: &RecordBatch, _metadata: &BatchMetadata) -> io::Result<()> {
         self.serialize_batch(batch)?;
