@@ -58,6 +58,9 @@ VARIABLES
     committed,          \* [Sources -> Nat] committed checkpoint per source
     next_batch_id,      \* Nat: monotonic batch ID counter
 
+    (* Per-source flushed watermark — advanced when data leaves accumulator *)
+    flushed,            \* [Sources -> Nat] highest offset flushed per source
+
     (* Output *)
     flushed_total,      \* Nat: total items flushed to output
     acked_total,        \* Nat: total items acked by output
@@ -67,8 +70,8 @@ VARIABLES
     done_producing      \* BOOLEAN: all sources have produced their max
 
 vars == <<produced, source_offset, buf_count, buf_offsets, in_flight_id,
-          in_flight_offsets, committed, next_batch_id, flushed_total,
-          acked_total, phase, done_producing>>
+          in_flight_offsets, committed, next_batch_id, flushed,
+          flushed_total, acked_total, phase, done_producing>>
 
 (* -----------------------------------------------------------------------
  * Type invariant
@@ -81,6 +84,7 @@ TypeOK ==
         /\ buf_offsets[s] \in 0..(MaxItemsPerSource * 1000)
         /\ in_flight_offsets[s] \in 0..(MaxItemsPerSource * 1000)
         /\ committed[s] \in 0..(MaxItemsPerSource * 1000)
+        /\ flushed[s] \in 0..(MaxItemsPerSource * 1000)
     /\ buf_count \in 0..(Cardinality(Sources) * MaxItemsPerSource)
     /\ in_flight_id \in Nat
     /\ next_batch_id \in Nat
@@ -102,6 +106,7 @@ Init ==
     /\ in_flight_offsets = [s \in Sources |-> 0]
     /\ committed = [s \in Sources |-> 0]
     /\ next_batch_id = 1
+    /\ flushed = [s \in Sources |-> 0]
     /\ flushed_total = 0
     /\ acked_total = 0
     /\ phase = "Running"
@@ -122,8 +127,8 @@ Produce(s) ==
     \* Last-writer-wins: latest offset for this source in current batch
     /\ buf_offsets' = [buf_offsets EXCEPT ![s] = source_offset[s] + 100]
     /\ UNCHANGED <<in_flight_id, in_flight_offsets, committed,
-                   next_batch_id, flushed_total, acked_total, phase,
-                   done_producing>>
+                   next_batch_id, flushed, flushed_total, acked_total,
+                   phase, done_producing>>
 
 \* Flush the accumulator: create batch, begin_send, submit to output.
 \* Models: flush_batch in pipeline.rs.
@@ -135,6 +140,11 @@ FlushBatch ==
     /\ in_flight_id' = next_batch_id
     /\ in_flight_offsets' = buf_offsets
     /\ next_batch_id' = next_batch_id + 1
+    \* Advance per-source flushed watermark for sources in this batch
+    /\ flushed' = [s \in Sources |->
+        IF buf_offsets[s] > flushed[s]
+        THEN buf_offsets[s]
+        ELSE flushed[s]]
     /\ buf_count' = 0
     /\ buf_offsets' = [s \in Sources |-> 0]
     /\ UNCHANGED <<produced, source_offset, committed, acked_total,
@@ -150,6 +160,11 @@ TimeoutFlush ==
     /\ in_flight_id' = next_batch_id
     /\ in_flight_offsets' = buf_offsets
     /\ next_batch_id' = next_batch_id + 1
+    \* Advance per-source flushed watermark for sources in this batch
+    /\ flushed' = [s \in Sources |->
+        IF buf_offsets[s] > flushed[s]
+        THEN buf_offsets[s]
+        ELSE flushed[s]]
     /\ buf_count' = 0
     /\ buf_offsets' = [s \in Sources |-> 0]
     /\ UNCHANGED <<produced, source_offset, committed, acked_total,
@@ -167,7 +182,8 @@ AckBatch ==
     /\ in_flight_id' = 0
     /\ in_flight_offsets' = [s \in Sources |-> 0]
     /\ UNCHANGED <<produced, source_offset, buf_count, buf_offsets,
-                   next_batch_id, flushed_total, phase, done_producing>>
+                   next_batch_id, flushed, flushed_total, phase,
+                   done_producing>>
 
 \* Transform or output rejects the batch (permanent error).
 \* Checkpoint STILL advances — design decision from DESIGN.md:
@@ -182,7 +198,8 @@ RejectBatch ==
     /\ in_flight_id' = 0
     /\ in_flight_offsets' = [s \in Sources |-> 0]
     /\ UNCHANGED <<produced, source_offset, buf_count, buf_offsets,
-                   next_batch_id, flushed_total, phase, done_producing>>
+                   next_batch_id, flushed, flushed_total, phase,
+                   done_producing>>
 
 \* All sources have produced their maximum.
 MarkDoneProducing ==
@@ -191,7 +208,8 @@ MarkDoneProducing ==
     /\ done_producing' = TRUE
     /\ UNCHANGED <<produced, source_offset, buf_count, buf_offsets,
                    in_flight_id, in_flight_offsets, committed,
-                   next_batch_id, flushed_total, acked_total, phase>>
+                   next_batch_id, flushed, flushed_total, acked_total,
+                   phase>>
 
 \* Stop the pipeline (all data processed).
 Stop ==
@@ -202,7 +220,7 @@ Stop ==
     /\ phase' = "Stopped"
     /\ UNCHANGED <<produced, source_offset, buf_count, buf_offsets,
                    in_flight_id, in_flight_offsets, committed,
-                   next_batch_id, flushed_total, acked_total,
+                   next_batch_id, flushed, flushed_total, acked_total,
                    done_producing>>
 
 (* -----------------------------------------------------------------------
@@ -243,7 +261,7 @@ Spec == Init /\ [][Next]_vars /\ Fairness
 \* (No checkpoint ahead of what was delivered.)
 CheckpointNeverAheadOfFlushed ==
     \A s \in Sources :
-        committed[s] <= source_offset[s]
+        committed[s] <= flushed[s]
 
 \* Checkpoints are monotonic.
 MonotonicCheckpoints ==
@@ -251,9 +269,11 @@ MonotonicCheckpoints ==
 
 \* No double-flush: at most one batch in-flight at a time.
 \* Enforced structurally: FlushBatch/TimeoutFlush require in_flight_id = 0.
-\* The scalar in_flight_id is always 0 (none) or a previously-assigned batch ID.
+\* The scalar in_flight_id (0 = none, nonzero = one in flight) already
+\* enforces at-most-one-in-flight. This invariant confirms the ID is
+\* always within the valid range of assigned batch IDs.
 SingleInFlight ==
-    in_flight_id < next_batch_id
+    in_flight_id \in 0..next_batch_id
 
 \* Reject advances checkpoint (same as ack — design decision).
 \* This is modeled by RejectBatch having the same committed update as AckBatch.

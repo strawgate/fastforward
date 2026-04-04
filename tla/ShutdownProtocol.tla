@@ -146,8 +146,11 @@ ConsumerReceive ==
 
 \* Consumer flushes buffer to output pool.
 \* Models: flush_batch (size threshold or timeout).
+\* Allowed both in normal operation AND during the drain phase
+\* (after shutdown but before inputs are joined), matching the real
+\* code's channel-drain loop (pipeline.rs:449-471).
 ConsumerFlush ==
-    /\ ~shutdown_signaled
+    /\ (~shutdown_signaled \/ (~channel_drained /\ ~inputs_joined))
     /\ consumer_buf > 0
     /\ flushed' = flushed + consumer_buf
     /\ pool_pending' = pool_pending + 1
