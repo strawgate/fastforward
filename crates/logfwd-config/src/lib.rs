@@ -1170,7 +1170,7 @@ output:
 
     #[test]
     fn elasticsearch_request_mode_accepts_streaming() {
-        let yaml = r#"
+        let yaml = r"
 input:
   type: file
   path: /var/log/test.log
@@ -1178,7 +1178,7 @@ output:
   type: elasticsearch
   endpoint: http://localhost:9200
   request_mode: streaming
-"#;
+";
         let cfg = Config::load_str(yaml).expect("streaming request_mode should validate");
         let pipe = &cfg.pipelines["default"];
         assert_eq!(pipe.outputs[0].request_mode.as_deref(), Some("streaming"));
@@ -1186,7 +1186,7 @@ output:
 
     #[test]
     fn elasticsearch_request_mode_rejects_unknown_value() {
-        let yaml = r#"
+        let yaml = r"
 input:
   type: file
   path: /var/log/test.log
@@ -1194,14 +1194,14 @@ output:
   type: elasticsearch
   endpoint: http://localhost:9200
   request_mode: fancy
-"#;
+";
         let err = Config::load_str(yaml).expect_err("invalid request_mode should fail");
         assert!(err.to_string().contains("request_mode"));
     }
 
     #[test]
     fn elasticsearch_streaming_rejects_gzip() {
-        let yaml = r#"
+        let yaml = r"
 input:
   type: file
   path: /var/log/test.log
@@ -1210,14 +1210,14 @@ output:
   endpoint: http://localhost:9200
   compression: gzip
   request_mode: streaming
-"#;
+";
         let err = Config::load_str(yaml).expect_err("streaming+gzip should fail");
         assert!(err.to_string().contains("does not support gzip"));
     }
 
     #[test]
     fn non_elasticsearch_request_mode_is_rejected() {
-        let yaml = r#"
+        let yaml = r"
 input:
   type: file
   path: /var/log/test.log
@@ -1225,7 +1225,7 @@ output:
   type: http
   endpoint: http://localhost:9200
   request_mode: streaming
-"#;
+";
         let err = Config::load_str(yaml).expect_err("request_mode should be es-only");
         assert!(err.to_string().contains("only supported for elasticsearch"));
     }

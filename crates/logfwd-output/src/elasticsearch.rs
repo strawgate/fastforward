@@ -36,7 +36,7 @@ pub(crate) struct ElasticsearchConfig {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ElasticsearchRequestMode {
+pub enum ElasticsearchRequestMode {
     Buffered,
     Streaming,
 }
@@ -520,6 +520,7 @@ impl ElasticsearchAsyncSink {
         batch: RecordBatch,
         metadata: BatchMetadata,
     ) -> io::Result<super::sink::SendResult> {
+        let row_count = batch.num_rows() as u64;
         let (tx, rx) = mpsc::channel::<io::Result<Vec<u8>>>(4);
         let emitted = Arc::new(AtomicU64::new(0));
         let producer_emitted = Arc::clone(&emitted);
@@ -567,7 +568,9 @@ impl ElasticsearchAsyncSink {
             let detail = response.text().await.unwrap_or_default();
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("ES returned 413 Payload Too Large (streamed body {payload_len} bytes): {detail}"),
+                format!(
+                    "ES returned 413 Payload Too Large (streamed body {payload_len} bytes): {detail}"
+                ),
             ));
         }
 
@@ -589,7 +592,7 @@ impl ElasticsearchAsyncSink {
             tracing::Span::current().record("took_ms", took);
         }
         Self::parse_bulk_response(&body)?;
-        self.stats.inc_lines(batch.num_rows() as u64);
+        self.stats.inc_lines(row_count);
         self.stats.inc_bytes(payload_len as u64);
         Ok(super::sink::SendResult::Ok)
     }

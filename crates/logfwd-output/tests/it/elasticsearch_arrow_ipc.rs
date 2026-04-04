@@ -102,7 +102,8 @@ async fn setup_test_data(sink: &mut Box<dyn logfwd_output::Sink>) -> RecordBatch
     };
 
     // Index the batch
-    sink.send_batch(&batch, &metadata)
+    let _ = sink
+        .send_batch(&batch, &metadata)
         .await
         .expect("failed to index test data");
 

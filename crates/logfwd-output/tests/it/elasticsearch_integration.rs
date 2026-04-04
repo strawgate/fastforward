@@ -132,7 +132,8 @@ fn elasticsearch_sink_sends_bulk_data() {
 
     // Send batch
     let rt = tokio::runtime::Runtime::new().unwrap();
-    rt.block_on(sink.send_batch(&batch, &metadata))
+    let _ = rt
+        .block_on(sink.send_batch(&batch, &metadata))
         .expect("send_batch failed");
 
     // Give server time to process
@@ -185,7 +186,8 @@ fn elasticsearch_sink_handles_empty_batch() {
 
     // Send empty batch
     let rt = tokio::runtime::Runtime::new().unwrap();
-    rt.block_on(sink.send_batch(&batch, &metadata))
+    let _ = rt
+        .block_on(sink.send_batch(&batch, &metadata))
         .expect("send_batch failed");
 
     // Empty batch should not increment stats
@@ -241,7 +243,8 @@ fn elasticsearch_sink_multiple_batches() {
         )
         .expect("batch creation failed");
 
-        rt.block_on(sink.send_batch(&batch, &metadata))
+        let _ = rt
+            .block_on(sink.send_batch(&batch, &metadata))
             .expect("send_batch failed");
     }
 
@@ -263,11 +266,7 @@ fn elasticsearch_streaming_mode_uses_chunked_transfer() {
     let (endpoint, server) = start_blackhole();
     let total_lines = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let saw_chunked = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    handle_bulk_requests_with_transfer_encoding(
-        server,
-        total_lines.clone(),
-        saw_chunked.clone(),
-    );
+    handle_bulk_requests_with_transfer_encoding(server, total_lines.clone(), saw_chunked.clone());
 
     let schema = Arc::new(Schema::new(vec![
         Field::new("level_str", DataType::Utf8, false),
@@ -301,7 +300,8 @@ fn elasticsearch_streaming_mode_uses_chunked_transfer() {
     };
 
     let rt = tokio::runtime::Runtime::new().unwrap();
-    rt.block_on(sink.send_batch(&batch, &metadata))
+    let _ = rt
+        .block_on(sink.send_batch(&batch, &metadata))
         .expect("send_batch failed");
 
     std::thread::sleep(Duration::from_millis(200));
