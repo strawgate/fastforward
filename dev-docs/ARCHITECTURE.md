@@ -37,25 +37,24 @@ The binary crate wires everything together.
 ### 1. Reading: bytes enter the system
 
 ```
-Disk → FileTailer → InputEvent::Data { bytes: Vec<u8> }
+Disk → FileReader (BytesMut) → freeze() → InputEvent::Data { bytes: Bytes }
 ```
 
-**FileTailer** (`logfwd-core/src/tail.rs`) watches log files via
-OS notifications (kqueue/inotify) with polling as fallback. It reads
-raw bytes at arbitrary boundaries — a read may split a line in half.
+**FileTailer** (`logfwd-io/src/tail.rs`) is composed of two internal layers:
+- **FileDiscovery**: path watching via notify (kqueue/inotify), glob evaluation,
+  rotation detection, deleted-file cleanup, LRU eviction.
+- **FileReader**: open file descriptors, `BytesMut` read buffer, byte reading.
+  Reads into `BytesMut`, then `freeze()` produces refcounted `Bytes`.
 
 Each input source runs on its own OS thread. Reads feed a bounded
-`tokio::sync::mpsc` channel to the async pipeline loop.
-
-**Target:** Replace `Vec<u8>` with `bytes::Bytes` (#303). The reader
-owns a `BytesMut` per file, reads into it, then `freeze()` produces
-a refcounted `Bytes`. This buffer stays alive through the entire
-pipeline — everything downstream references it instead of copying.
+`tokio::sync::mpsc` channel to the async pipeline loop. The channel
+carries `Bytes` (immutable, refcounted) — ownership transfers cleanly
+across the thread boundary.
 
 ### 2. Framing: raw bytes → complete lines
 
 ```
-Vec<u8> → FramedInput::poll() → newline-delimited JSON in buffer
+Bytes → FramedInput::poll() → newline-delimited JSON as Bytes
 ```
 
 **FramedInput** (`logfwd-io/src/framed.rs`) combines format detection
@@ -272,19 +271,22 @@ operations.
 Understanding who owns what and when copies happen:
 
 ```
-Current (2 unnecessary copies):
-  tailer reads → Vec<u8> [COPY 1: read_buf → fresh Vec]
-  parser accumulates → json_buf [COPY 2: line → json_buf]
+Current (after #939 — 3 copies remain, down from 5):
+  tailer reads → BytesMut → freeze() → Bytes           (no copy)
+  FramedInput: remainder + extend_from_slice(bytes)     [COPY 1: framing]
+  FormatProcessor: chunk → out_buf                      [COPY 2: format processing]
+  pipeline: scan_buf.extend_from_slice(&bytes)          [COPY 3: SIMD contiguity — required]
   scanner classifies → ChunkIndex (bitmasks, no copy)
   StreamingBuilder stores views → RecordBatch (zero-copy)
+  Bytes dropped when RecordBatch is consumed
 
-Target (zero-copy for 99% path):
-  tailer reads → BytesMut (reusable per file, no alloc)
-  freeze() → Bytes (refcounted, zero-copy)
-  StructuralIndex classifies (bitmasks, no copy)
-  NewlineFramer returns ranges (no copy)
-  CriAggregator: F lines pass through (no copy)
-                 P+F lines concat (one copy, ~1% of traffic)
+Target (zero-copy for 99% passthrough path — #608):
+  tailer reads → BytesMut → freeze() → Bytes            (no copy)
+  FramedInput: Bytes::slice() for line ranges            (no copy)
+  Passthrough format: emit Bytes slice directly          (no copy)
+  CRI format: metadata injection requires rewrite        [COPY 1: unavoidable]
+  pipeline: scan_buf.extend_from_slice(&bytes)           [COPY 2: SIMD contiguity — required]
+  scanner classifies → ChunkIndex (bitmasks, no copy)
   StreamingBuilder stores views → RecordBatch (zero-copy)
   Bytes dropped when RecordBatch is consumed
 ```
