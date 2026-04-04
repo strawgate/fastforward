@@ -5,6 +5,7 @@
 //! (persistence path), plus scanner wrapper types that produce `RecordBatch`.
 
 pub mod conflict_schema;
+pub mod materialize;
 pub mod scanner;
 pub mod star_schema;
 pub mod storage_builder;

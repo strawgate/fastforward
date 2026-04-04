@@ -590,6 +590,214 @@ impl StreamingBuilder {
         self.state = BuilderState::Idle;
         result
     }
+
+    /// Build a self-contained `RecordBatch` with owned `StringArray` columns.
+    ///
+    /// Uses the same scan data as `finish_batch` but produces `StringArray`
+    /// (contiguous offsets + data) instead of `StringViewArray` (views into
+    /// the input buffer). The input `Bytes` can be freed immediately after
+    /// this call.
+    ///
+    /// This is the optimal persistence path: zero-copy scan speed during
+    /// parsing, single bulk copy during finalization, and the resulting
+    /// `StringArray` compresses efficiently via IPC zstd.
+    pub fn finish_batch_owned(&mut self) -> Result<RecordBatch, ArrowError> {
+        debug_assert_eq!(
+            self.state,
+            BuilderState::InBatch,
+            "finish_batch_owned called outside of a batch"
+        );
+        let num_rows = self.row_count as usize;
+        let has_decoded = !self.decoded_buf.is_empty();
+
+        let mut schema_fields: Vec<Field> = Vec::with_capacity(self.num_active);
+        let mut arrays: Vec<ArrayRef> = Vec::with_capacity(self.num_active);
+
+        let mut emitted_names = std::collections::HashSet::new();
+        if self.keep_raw && !self.raw_views.is_empty() {
+            emitted_names.insert("_raw".to_string());
+        }
+        let mut reserve_name = |name: &str| -> Result<(), ArrowError> {
+            if emitted_names.insert(name.to_string()) {
+                Ok(())
+            } else {
+                Err(ArrowError::InvalidArgumentError(format!(
+                    "duplicate output column name: {name}"
+                )))
+            }
+        };
+
+        for fc in &self.fields[..self.num_active] {
+            let name = String::from_utf8_lossy(&fc.name);
+            let conflict = (fc.has_int as u8) + (fc.has_float as u8) + (fc.has_str as u8) > 1;
+
+            if conflict {
+                let mut child_fields: Vec<Arc<Field>> = Vec::new();
+                let mut child_arrays: Vec<ArrayRef> = Vec::new();
+
+                if fc.has_int {
+                    let mut values = vec![0i64; num_rows];
+                    let mut valid = vec![false; num_rows];
+                    for &(row, v) in &fc.int_values {
+                        let r = row as usize;
+                        if r < num_rows {
+                            values[r] = v;
+                            valid[r] = true;
+                        }
+                    }
+                    let nulls = NullBuffer::from(valid);
+                    let array = Int64Array::new(values.into(), Some(nulls));
+                    child_fields.push(Arc::new(Field::new("int", DataType::Int64, true)));
+                    child_arrays.push(Arc::new(array) as ArrayRef);
+                }
+
+                if fc.has_float {
+                    let mut values = vec![0.0f64; num_rows];
+                    let mut valid = vec![false; num_rows];
+                    for &(row, v) in &fc.float_values {
+                        let r = row as usize;
+                        if r < num_rows {
+                            values[r] = v;
+                            valid[r] = true;
+                        }
+                    }
+                    let nulls = NullBuffer::from(valid);
+                    let array = Float64Array::new(values.into(), Some(nulls));
+                    child_fields.push(Arc::new(Field::new("float", DataType::Float64, true)));
+                    child_arrays.push(Arc::new(array) as ArrayRef);
+                }
+
+                if fc.has_str {
+                    let total_bytes: usize = fc.str_views.iter().map(|&(_, _, l)| l as usize).sum();
+                    let mut builder =
+                        arrow::array::StringBuilder::with_capacity(num_rows, total_bytes);
+                    let mut vi = 0;
+                    for row in 0..num_rows as u32 {
+                        if vi < fc.str_views.len() && fc.str_views[vi].0 == row {
+                            let (_, offset, len) = fc.str_views[vi];
+                            let s = self.read_str(offset, len, has_decoded);
+                            builder.append_value(s);
+                            vi += 1;
+                        } else {
+                            builder.append_null();
+                        }
+                    }
+                    child_fields.push(Arc::new(Field::new("str", DataType::Utf8, true)));
+                    child_arrays.push(Arc::new(builder.finish()) as ArrayRef);
+                }
+
+                let struct_validity: Vec<bool> = (0..num_rows)
+                    .map(|i| child_arrays.iter().any(|arr| !arr.is_null(i)))
+                    .collect();
+                let fields = Fields::from(child_fields);
+                let struct_arr = StructArray::new(
+                    fields.clone(),
+                    child_arrays,
+                    Some(NullBuffer::from(struct_validity)),
+                );
+                reserve_name(name.as_ref())?;
+                schema_fields.push(Field::new(name.as_ref(), DataType::Struct(fields), true));
+                arrays.push(Arc::new(struct_arr) as ArrayRef);
+            } else {
+                if fc.has_int {
+                    reserve_name(name.as_ref())?;
+                    let mut values = vec![0i64; num_rows];
+                    let mut valid = vec![false; num_rows];
+                    for &(row, v) in &fc.int_values {
+                        let r = row as usize;
+                        if r < num_rows {
+                            values[r] = v;
+                            valid[r] = true;
+                        }
+                    }
+                    let nulls = NullBuffer::from(valid);
+                    let array = Int64Array::new(values.into(), Some(nulls));
+                    schema_fields.push(Field::new(name.as_ref(), DataType::Int64, true));
+                    arrays.push(Arc::new(array) as ArrayRef);
+                }
+
+                if fc.has_float {
+                    reserve_name(name.as_ref())?;
+                    let mut values = vec![0.0f64; num_rows];
+                    let mut valid = vec![false; num_rows];
+                    for &(row, v) in &fc.float_values {
+                        let r = row as usize;
+                        if r < num_rows {
+                            values[r] = v;
+                            valid[r] = true;
+                        }
+                    }
+                    let nulls = NullBuffer::from(valid);
+                    let array = Float64Array::new(values.into(), Some(nulls));
+                    schema_fields.push(Field::new(name.as_ref(), DataType::Float64, true));
+                    arrays.push(Arc::new(array) as ArrayRef);
+                }
+
+                if fc.has_str {
+                    reserve_name(name.as_ref())?;
+                    let total_bytes: usize = fc.str_views.iter().map(|&(_, _, l)| l as usize).sum();
+                    let mut builder =
+                        arrow::array::StringBuilder::with_capacity(num_rows, total_bytes);
+                    let mut vi = 0;
+                    for row in 0..num_rows as u32 {
+                        if vi < fc.str_views.len() && fc.str_views[vi].0 == row {
+                            let (_, offset, len) = fc.str_views[vi];
+                            let s = self.read_str(offset, len, has_decoded);
+                            builder.append_value(s);
+                            vi += 1;
+                        } else {
+                            builder.append_null();
+                        }
+                    }
+                    schema_fields.push(Field::new(name.as_ref(), DataType::Utf8, true));
+                    arrays.push(Arc::new(builder.finish()) as ArrayRef);
+                }
+            }
+        }
+
+        if self.keep_raw && !self.raw_views.is_empty() {
+            let total_bytes: usize = self.raw_views.iter().map(|&(_, l)| l as usize).sum();
+            let mut builder = arrow::array::StringBuilder::with_capacity(num_rows, total_bytes);
+            for row in 0..num_rows {
+                if row < self.raw_views.len() {
+                    let (offset, len) = self.raw_views[row];
+                    // Raw views always reference the original buffer (not decoded_buf).
+                    let s =
+                        std::str::from_utf8(&self.buf[offset as usize..(offset + len) as usize])
+                            .unwrap_or("");
+                    builder.append_value(s);
+                } else {
+                    builder.append_null();
+                }
+            }
+            schema_fields.push(Field::new("_raw", DataType::Utf8, true));
+            arrays.push(Arc::new(builder.finish()) as ArrayRef);
+        }
+
+        let schema = Arc::new(Schema::new(schema_fields));
+        let opts = RecordBatchOptions::new().with_row_count(Some(num_rows));
+        let result = RecordBatch::try_new_with_options(schema, arrays, &opts);
+        self.state = BuilderState::Idle;
+        result
+    }
+
+    /// Read a string value from the buffer(s) by offset and length.
+    ///
+    /// Offsets `< buf.len()` read from the original input buffer.
+    /// Offsets `>= buf.len()` read from `decoded_buf` at `offset - buf.len()`.
+    fn read_str(&self, offset: u32, len: u32, has_decoded: bool) -> &str {
+        let start = offset as usize;
+        let end = start + len as usize;
+        let buf_len = self.buf.len();
+        let bytes = if !has_decoded || start < buf_len {
+            &self.buf[start..end]
+        } else {
+            let dec_start = start - buf_len;
+            let dec_end = end - buf_len;
+            &self.decoded_buf[dec_start..dec_end]
+        };
+        std::str::from_utf8(bytes).unwrap_or("")
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1332,6 +1540,344 @@ mod tests {
     fn test_resolve_field_without_batch_panics() {
         let mut b = StreamingBuilder::new(false);
         b.resolve_field(b"x"); // no begin_batch — must panic
+    }
+
+    // --- finish_batch_owned tests ---
+
+    #[test]
+    fn test_owned_basic_string_and_int() {
+        let json = b"{\"name\":\"alice\",\"age\":30}\n";
+        let buf = bytes::Bytes::from(json.to_vec());
+        let mut b = StreamingBuilder::new(false);
+        b.begin_batch(buf.clone());
+
+        let idx_name = b.resolve_field(b"name");
+        let idx_age = b.resolve_field(b"age");
+
+        b.begin_row();
+        b.append_str_by_idx(idx_name, &buf[9..14]); // "alice"
+        b.append_int_by_idx(idx_age, b"30");
+        b.end_row();
+
+        let batch = b.finish_batch_owned().unwrap();
+        assert_eq!(batch.num_rows(), 1);
+
+        // Strings are StringArray (Utf8), not StringViewArray (Utf8View)
+        let name_col = batch.column_by_name("name").unwrap();
+        assert_eq!(*name_col.data_type(), DataType::Utf8);
+        let arr = name_col
+            .as_any()
+            .downcast_ref::<arrow::array::StringArray>()
+            .expect("should be StringArray");
+        assert_eq!(arr.value(0), "alice");
+
+        // Int column unchanged
+        let age_col = batch.column_by_name("age").unwrap();
+        let int_arr = age_col.as_any().downcast_ref::<Int64Array>().unwrap();
+        assert_eq!(int_arr.value(0), 30);
+    }
+
+    #[test]
+    fn test_owned_not_pinned_to_input() {
+        let json = b"{\"msg\":\"hello world\"}\n";
+        let buf = bytes::Bytes::from(json.to_vec());
+        let buf_start = buf.as_ptr() as usize;
+        let buf_end = buf_start + buf.len();
+
+        let mut b = StreamingBuilder::new(false);
+        b.begin_batch(buf.clone());
+        let idx = b.resolve_field(b"msg");
+        b.begin_row();
+        b.append_str_by_idx(idx, &buf[8..19]); // "hello world"
+        b.end_row();
+
+        let batch = b.finish_batch_owned().unwrap();
+
+        // Verify no buffer in the batch points into the input
+        for col in batch.columns() {
+            let arr_data = col.to_data();
+            for buffer in arr_data.buffers() {
+                let ptr = buffer.as_ptr() as usize;
+                let end = ptr + buffer.len();
+                assert!(
+                    ptr >= buf_end || end <= buf_start,
+                    "owned batch should not reference input buffer"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_owned_type_conflict_struct() {
+        let buf = bytes::Bytes::from_static(b"unused_padding");
+        let mut b = StreamingBuilder::new(false);
+        b.begin_batch(buf.clone());
+
+        let idx = b.resolve_field(b"val");
+        b.begin_row();
+        b.append_int_by_idx(idx, b"42");
+        b.end_row();
+        b.begin_row();
+        b.append_str_by_idx(idx, &buf[0..6]); // "unused"
+        b.end_row();
+
+        let batch = b.finish_batch_owned().unwrap();
+        assert_eq!(batch.num_rows(), 2);
+
+        let col = batch.column_by_name("val").unwrap();
+        assert!(
+            matches!(col.data_type(), DataType::Struct(_)),
+            "conflict should produce Struct"
+        );
+        // The str child should be Utf8 (not Utf8View)
+        let sa = col.as_any().downcast_ref::<ArrowStructArray>().unwrap();
+        let str_child = sa.column_by_name("str").unwrap();
+        assert_eq!(*str_child.data_type(), DataType::Utf8);
+    }
+
+    #[test]
+    fn test_owned_missing_fields_nulls() {
+        let buf = bytes::Bytes::from_static(b"abcdef");
+        let mut b = StreamingBuilder::new(false);
+        b.begin_batch(buf.clone());
+
+        let idx_a = b.resolve_field(b"a");
+        let idx_b = b.resolve_field(b"b");
+
+        b.begin_row();
+        b.append_str_by_idx(idx_a, &buf[0..3]); // "abc"
+        b.end_row();
+        b.begin_row();
+        b.append_str_by_idx(idx_b, &buf[3..6]); // "def"
+        b.end_row();
+
+        let batch = b.finish_batch_owned().unwrap();
+        assert_eq!(batch.num_rows(), 2);
+
+        let a_col = batch
+            .column_by_name("a")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::StringArray>()
+            .unwrap();
+        assert!(!a_col.is_null(0));
+        assert!(a_col.is_null(1));
+    }
+
+    #[test]
+    fn test_owned_batch_reuse() {
+        let buf1 = bytes::Bytes::from_static(b"hello");
+        let buf2 = bytes::Bytes::from_static(b"world");
+        let mut b = StreamingBuilder::new(false);
+
+        b.begin_batch(buf1.clone());
+        let idx = b.resolve_field(b"x");
+        b.begin_row();
+        b.append_str_by_idx(idx, &buf1[..]);
+        b.end_row();
+        let batch1 = b.finish_batch_owned().unwrap();
+
+        b.begin_batch(buf2.clone());
+        let idx = b.resolve_field(b"x");
+        b.begin_row();
+        b.append_str_by_idx(idx, &buf2[..]);
+        b.end_row();
+        let batch2 = b.finish_batch_owned().unwrap();
+
+        assert_eq!(batch1.num_rows(), 1);
+        assert_eq!(batch2.num_rows(), 1);
+        let arr = batch2
+            .column_by_name("x")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::StringArray>()
+            .unwrap();
+        assert_eq!(arr.value(0), "world");
+    }
+
+    #[test]
+    fn test_owned_empty_batch() {
+        let buf = bytes::Bytes::from_static(b"\n");
+        let mut b = StreamingBuilder::new(false);
+        b.begin_batch(buf);
+        let batch = b.finish_batch_owned().unwrap();
+        assert_eq!(batch.num_rows(), 0);
+    }
+
+    #[test]
+    fn test_owned_float_values() {
+        let buf = bytes::Bytes::from_static(b"unused");
+        let mut b = StreamingBuilder::new(false);
+        b.begin_batch(buf);
+        let idx = b.resolve_field(b"lat");
+        b.begin_row();
+        b.append_float_by_idx(idx, b"3.14");
+        b.end_row();
+        b.begin_row();
+        b.end_row(); // missing → null
+        let batch = b.finish_batch_owned().unwrap();
+        assert_eq!(batch.num_rows(), 2);
+        let col = batch
+            .column_by_name("lat")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        assert!((col.value(0) - 3.14).abs() < 1e-10);
+        assert!(col.is_null(1));
+    }
+
+    #[test]
+    fn test_owned_keep_raw() {
+        let json = b"{\"msg\":\"hi\"}\n";
+        let buf = bytes::Bytes::from(json.to_vec());
+        let mut b = StreamingBuilder::new(true);
+        b.begin_batch(buf.clone());
+        let idx = b.resolve_field(b"msg");
+        b.begin_row();
+        b.append_str_by_idx(idx, &buf[8..10]); // "hi"
+        b.append_raw(&buf[0..12]); // full line
+        b.end_row();
+        let batch = b.finish_batch_owned().unwrap();
+        assert_eq!(batch.num_rows(), 1);
+        let raw_col = batch.column_by_name("_raw").unwrap();
+        assert_eq!(*raw_col.data_type(), DataType::Utf8);
+        let arr = raw_col
+            .as_any()
+            .downcast_ref::<arrow::array::StringArray>()
+            .unwrap();
+        assert_eq!(arr.value(0), "{\"msg\":\"hi\"}");
+    }
+
+    #[test]
+    fn test_owned_decoded_strings() {
+        // Simulate a JSON string with escape sequences that go through
+        // append_decoded_str_by_idx (decoded_buf path).
+        let json = b"hello world padding";
+        let buf = bytes::Bytes::from(json.to_vec());
+        let mut b = StreamingBuilder::new(false);
+        b.begin_batch(buf.clone());
+        let idx = b.resolve_field(b"msg");
+        b.begin_row();
+        // Decoded string goes into decoded_buf, not the original buffer
+        b.append_decoded_str_by_idx(idx, b"decoded value");
+        b.end_row();
+        let batch = b.finish_batch_owned().unwrap();
+        assert_eq!(batch.num_rows(), 1);
+        let col = batch
+            .column_by_name("msg")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::StringArray>()
+            .unwrap();
+        assert_eq!(col.value(0), "decoded value");
+    }
+
+    /// Verify that finish_batch() and finish_batch_owned() produce the same
+    /// data (same values, same nulls) just with different string types
+    /// (Utf8View vs Utf8).
+    #[test]
+    fn test_finish_batch_equivalence() {
+        use arrow::array::{Array, StringViewArray};
+
+        let input = b"{\"name\":\"alice\",\"score\":95}\n{\"name\":\"bob\",\"extra\":\"x\"}\n{\"score\":100}\n";
+        let buf = bytes::Bytes::from(input.to_vec());
+
+        // Run through finish_batch (StringViewArray)
+        let mut b1 = StreamingBuilder::new(false);
+        b1.begin_batch(buf.clone());
+        populate_builder(&mut b1, &buf, input);
+        let view_batch = b1.finish_batch().unwrap();
+
+        // Run through finish_batch_owned (StringArray)
+        let mut b2 = StreamingBuilder::new(false);
+        b2.begin_batch(buf.clone());
+        populate_builder(&mut b2, &buf, input);
+        let owned_batch = b2.finish_batch_owned().unwrap();
+
+        // Same shape
+        assert_eq!(view_batch.num_rows(), owned_batch.num_rows());
+        assert_eq!(view_batch.num_columns(), owned_batch.num_columns());
+
+        // Same column names
+        let view_names: Vec<_> = view_batch
+            .schema()
+            .fields()
+            .iter()
+            .map(|f| f.name().clone())
+            .collect();
+        let owned_names: Vec<_> = owned_batch
+            .schema()
+            .fields()
+            .iter()
+            .map(|f| f.name().clone())
+            .collect();
+        assert_eq!(view_names, owned_names);
+
+        // Same values at every position
+        for name in &view_names {
+            let view_col = view_batch.column_by_name(name).unwrap();
+            let owned_col = owned_batch.column_by_name(name).unwrap();
+            assert_eq!(
+                view_col.len(),
+                owned_col.len(),
+                "column {name} length mismatch"
+            );
+            for row in 0..view_col.len() {
+                assert_eq!(
+                    view_col.is_null(row),
+                    owned_col.is_null(row),
+                    "column {name} row {row} null mismatch"
+                );
+                if !view_col.is_null(row) {
+                    // Compare as string representation for type-agnostic comparison
+                    let view_val = array_value_to_string(view_col, row);
+                    let owned_val = array_value_to_string(owned_col, row);
+                    assert_eq!(
+                        view_val, owned_val,
+                        "column {name} row {row} value mismatch"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Populate a builder with multi-row input for equivalence testing.
+    fn populate_builder(b: &mut StreamingBuilder, buf: &bytes::Bytes, _input: &[u8]) {
+        // Row 0: {"name":"alice","score":95}
+        let idx_name = b.resolve_field(b"name");
+        let idx_score = b.resolve_field(b"score");
+        let idx_extra = b.resolve_field(b"extra");
+        b.begin_row();
+        b.append_str_by_idx(idx_name, &buf[9..14]); // "alice"
+        b.append_int_by_idx(idx_score, b"95");
+        b.end_row();
+        // Row 1: {"name":"bob","extra":"x"}
+        b.begin_row();
+        b.append_str_by_idx(idx_name, &buf[28..31]); // "bob" (approx offset)
+        b.append_str_by_idx(idx_extra, &buf[0..1]); // just "{"
+        b.end_row();
+        // Row 2: {"score":100}
+        b.begin_row();
+        b.append_int_by_idx(idx_score, b"100");
+        b.end_row();
+    }
+
+    fn array_value_to_string(col: &dyn Array, row: usize) -> String {
+        use arrow::array::StringViewArray;
+        if let Some(a) = col.as_any().downcast_ref::<arrow::array::StringArray>() {
+            return a.value(row).to_string();
+        }
+        if let Some(a) = col.as_any().downcast_ref::<StringViewArray>() {
+            return a.value(row).to_string();
+        }
+        if let Some(a) = col.as_any().downcast_ref::<Int64Array>() {
+            return a.value(row).to_string();
+        }
+        if let Some(a) = col.as_any().downcast_ref::<Float64Array>() {
+            return a.value(row).to_string();
+        }
+        format!("<unknown type at row {row}>")
     }
 }
 

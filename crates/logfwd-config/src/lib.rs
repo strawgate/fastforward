@@ -812,23 +812,6 @@ impl Config {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn output_type_name(t: &OutputType) -> &'static str {
-    match t {
-        OutputType::Otlp => "otlp",
-        OutputType::Http => "http",
-        OutputType::Elasticsearch => "elasticsearch",
-        OutputType::Loki => "loki",
-        OutputType::Stdout => "stdout",
-        OutputType::FileOut => "file_out",
-        OutputType::Parquet => "parquet",
-        OutputType::Null => "null",
-        OutputType::TcpOut => "tcp_out",
-        OutputType::UdpOut => "udp_out",
-        OutputType::ArrowIpc => "arrow_ipc",
-    }
-}
-
-
 /// Validate that a bind address is a parseable `host:port` socket address.
 fn validate_bind_addr(addr: &str) -> Result<(), String> {
     addr.parse::<std::net::SocketAddr>()

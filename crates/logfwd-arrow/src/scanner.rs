@@ -170,6 +170,27 @@ impl StreamingSimdScanner {
         scan_streaming(&buf, &self.config, &mut self.builder);
         self.builder.finish_batch()
     }
+
+    /// Scan an NDJSON buffer into a self-contained `RecordBatch`.
+    ///
+    /// Uses the same zero-copy scan as [`scan`](Self::scan) but produces
+    /// owned `StringArray` columns instead of `StringViewArray` views.
+    /// The input buffer can be freed immediately after this call.
+    ///
+    /// This is the optimal persistence path: zero-copy scan speed with
+    /// a single bulk copy at finalization.
+    pub fn scan_owned(&mut self, buf: bytes::Bytes) -> Result<RecordBatch, ArrowError> {
+        if self.config.validate_utf8 {
+            std::str::from_utf8(&buf).map_err(|e| {
+                ArrowError::InvalidArgumentError(format!(
+                    "StreamingSimdScanner: input is not valid UTF-8: {e}"
+                ))
+            })?;
+        }
+        self.builder.begin_batch(buf.clone());
+        scan_streaming(&buf, &self.config, &mut self.builder);
+        self.builder.finish_batch_owned()
+    }
 }
 
 #[cfg(test)]
