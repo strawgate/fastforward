@@ -509,10 +509,26 @@ impl Pipeline {
                     }
                 }
                 Err(still_draining) => {
+                    let abandoned = still_draining.in_flight_count();
                     tracing::warn!(
-                        in_flight = still_draining.in_flight_count(),
-                        "pipeline: shutdown with in-flight batches (checkpoint may not reflect latest delivered data)"
+                        in_flight = abandoned,
+                        "pipeline: force-stopping with in-flight batches (checkpoint may not reflect latest delivered data)"
                     );
+                    let stopped = still_draining.force_stop();
+                    // Persist what we have — committed checkpoints are still
+                    // valid (they only reflect contiguously-acked batches).
+                    if let Some(ref mut store) = self.checkpoint_store {
+                        for (source_id, offset) in stopped.final_checkpoints() {
+                            store.update(SourceCheckpoint {
+                                source_id: source_id.0,
+                                path: None,
+                                offset: *offset,
+                            });
+                        }
+                        if let Err(e) = store.flush() {
+                            tracing::error!(error = %e, "pipeline: failed to flush checkpoints after force-stop");
+                        }
+                    }
                 }
             }
         }

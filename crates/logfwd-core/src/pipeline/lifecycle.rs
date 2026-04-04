@@ -43,6 +43,10 @@ pub struct PipelineMachine<S, C> {
     in_flight: BTreeMap<SourceId, BTreeMap<BatchId, C>>,
     /// Per-source pending ACKs received out of order (batch_id → checkpoint).
     pending_acks: BTreeMap<SourceId, BTreeMap<BatchId, C>>,
+    /// TRUE if `force_stop()` was used to bypass the drain guard.
+    /// Models TLA+ `forced` variable. When true, `DrainCompleteness`
+    /// does not hold: in-flight batches may exist at Stopped.
+    forced: bool,
     /// Typestate marker.
     _state: PhantomData<S>,
 }
@@ -70,6 +74,7 @@ impl<C> PipelineMachine<Starting, C> {
             committed: BTreeMap::new(),
             in_flight: BTreeMap::new(),
             pending_acks: BTreeMap::new(),
+            forced: false,
             _state: PhantomData,
         }
     }
@@ -81,6 +86,7 @@ impl<C> PipelineMachine<Starting, C> {
             committed: self.committed,
             in_flight: self.in_flight,
             pending_acks: self.pending_acks,
+            forced: false,
             _state: PhantomData,
         }
     }
@@ -151,6 +157,7 @@ impl<C: Clone> PipelineMachine<Running, C> {
             committed: self.committed,
             in_flight: self.in_flight,
             pending_acks: self.pending_acks,
+            forced: false,
             _state: PhantomData,
         }
     }
@@ -279,8 +286,27 @@ impl<C: Clone> PipelineMachine<Draining, C> {
             committed: self.committed,
             in_flight: self.in_flight, // guaranteed empty by is_drained()
             pending_acks: self.pending_acks, // guaranteed empty by is_drained()
+            forced: false,
             _state: PhantomData,
         })
+    }
+
+    /// Emergency shutdown — bypass the drain guard, accept data loss.
+    ///
+    /// Models TLA+ `ForceStop` action. Transitions to Stopped regardless of
+    /// in-flight batches. The `was_forced()` flag records that drain was
+    /// incomplete — callers should log the in-flight count for diagnostics.
+    ///
+    /// Use when the drain timeout expires and the pipeline must stop.
+    pub fn force_stop(self) -> PipelineMachine<Stopped, C> {
+        PipelineMachine {
+            next_batch_id: self.next_batch_id,
+            committed: self.committed,
+            in_flight: self.in_flight,
+            pending_acks: self.pending_acks,
+            forced: true,
+            _state: PhantomData,
+        }
     }
 
     /// Number of in-flight batches across all sources.
@@ -302,6 +328,21 @@ impl<C> PipelineMachine<Stopped, C> {
     /// Final committed checkpoints for all sources.
     pub fn final_checkpoints(&self) -> &BTreeMap<SourceId, C> {
         &self.committed
+    }
+
+    /// Whether the pipeline was force-stopped (drain incomplete).
+    ///
+    /// When true, `DrainCompleteness` does not hold: in-flight batches
+    /// may have existed at shutdown. Checkpoints reflect the last
+    /// successfully committed state, not the latest delivered data.
+    pub fn was_forced(&self) -> bool {
+        self.forced
+    }
+
+    /// Number of in-flight batches that were abandoned by force_stop.
+    /// Zero when `was_forced()` is false.
+    pub fn abandoned_count(&self) -> usize {
+        self.in_flight.values().map(BTreeMap::len).sum()
     }
 }
 
@@ -432,6 +473,51 @@ mod tests {
 
         let stopped = draining.stop().ok().expect("should be drained");
         assert_eq!(*stopped.final_checkpoints().get(&src).unwrap(), 1000);
+        assert!(!stopped.was_forced());
+        assert_eq!(stopped.abandoned_count(), 0);
+    }
+
+    #[test]
+    fn force_stop_with_in_flight() {
+        let mut running = new_running();
+        let src = SourceId(0);
+
+        let t1 = running.create_batch(src, 1000u64);
+        let t2 = running.create_batch(src, 2000u64);
+        let s1 = running.begin_send(t1);
+        let _s2 = running.begin_send(t2); // leave in-flight
+
+        // Ack t1 but leave t2
+        running.apply_ack(s1.ack());
+
+        let draining = running.begin_drain();
+        assert!(!draining.is_drained());
+        assert_eq!(draining.in_flight_count(), 1);
+
+        // stop() should refuse
+        let draining = match draining.stop() {
+            Err(d) => d,
+            Ok(_) => panic!("stop() should refuse with in-flight batches"),
+        };
+
+        // force_stop() always succeeds
+        let stopped = draining.force_stop();
+        assert!(stopped.was_forced());
+        assert_eq!(stopped.abandoned_count(), 1);
+        // Committed checkpoint is 1000 (t1 was acked), NOT 2000
+        assert_eq!(*stopped.final_checkpoints().get(&src).unwrap(), 1000);
+    }
+
+    #[test]
+    fn force_stop_when_already_drained() {
+        let running = new_running();
+        let draining = running.begin_drain();
+        assert!(draining.is_drained());
+
+        // force_stop on an already-drained machine still works
+        let stopped = draining.force_stop();
+        assert!(stopped.was_forced()); // forced flag is set regardless
+        assert_eq!(stopped.abandoned_count(), 0);
     }
 
     #[test]
@@ -1108,6 +1194,74 @@ mod verification {
         // All resolved — checkpoint must equal cp3 regardless of ack/reject mix
         assert_eq!(final_adv.checkpoint, Some(cp3));
         assert_eq!(running.in_flight_count(), 0);
+    }
+
+    /// force_stop() transitions to Stopped regardless of in-flight state.
+    ///
+    /// Models TLA+ `ForceStop`: phase = "Draining" → phase = "Stopped",
+    /// forced = TRUE. Unlike stop(), does NOT require is_drained().
+    #[kani::proof]
+    #[kani::unwind(3)]
+    fn verify_force_stop_always_succeeds() {
+        let mut running: PipelineMachine<Running, u64> =
+            PipelineMachine::<Starting, u64>::new().start();
+        let src = SourceId(0);
+
+        let cp: u64 = kani::any();
+        let t1 = running.create_batch(src, cp);
+        let _s1 = running.begin_send(t1); // leave in-flight
+
+        let draining = running.begin_drain();
+        assert!(!draining.is_drained());
+        assert!(draining.stop().is_err(), "stop() should refuse");
+
+        // Get the machine back from the Err
+        let mut running2: PipelineMachine<Running, u64> =
+            PipelineMachine::<Starting, u64>::new().start();
+        let t2 = running2.create_batch(src, cp);
+        let _s2 = running2.begin_send(t2);
+        let draining2 = running2.begin_drain();
+
+        // force_stop always succeeds
+        let stopped = draining2.force_stop();
+        assert!(stopped.was_forced());
+        assert_eq!(stopped.abandoned_count(), 1);
+
+        kani::cover!(stopped.was_forced(), "force_stop sets forced flag");
+    }
+
+    /// force_stop() preserves committed checkpoints.
+    ///
+    /// Even under forced shutdown, committed checkpoints reflect the
+    /// last contiguously-acked state — they are valid for restart.
+    #[kani::proof]
+    #[kani::unwind(3)]
+    fn verify_force_stop_preserves_committed() {
+        let mut running: PipelineMachine<Running, u64> =
+            PipelineMachine::<Starting, u64>::new().start();
+        let src = SourceId(0);
+
+        let cp1: u64 = kani::any();
+        let cp2: u64 = kani::any();
+
+        let t1 = running.create_batch(src, cp1);
+        let t2 = running.create_batch(src, cp2);
+        let s1 = running.begin_send(t1);
+        let _s2 = running.begin_send(t2); // leave t2 in-flight
+
+        // Ack t1, leave t2 in-flight
+        let adv = running.apply_ack(s1.ack());
+        assert!(adv.advanced);
+        assert_eq!(adv.checkpoint, Some(cp1));
+
+        let draining = running.begin_drain();
+        let stopped = draining.force_stop();
+
+        // Committed checkpoint is cp1 (the last contiguously acked),
+        // NOT cp2 (which was in-flight and abandoned).
+        assert_eq!(*stopped.final_checkpoints().get(&src).unwrap(), cp1);
+        assert!(stopped.was_forced());
+        assert_eq!(stopped.abandoned_count(), 1);
     }
 }
 
