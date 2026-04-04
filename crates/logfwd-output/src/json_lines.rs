@@ -4,7 +4,7 @@ use std::sync::Arc;
 use arrow::array::Array;
 use arrow::record_batch::RecordBatch;
 
-use logfwd_io::diagnostics::ComponentStats;
+use logfwd_types::diagnostics::ComponentStats;
 
 #[allow(deprecated)]
 use super::{
@@ -200,7 +200,7 @@ mod tests {
     use super::*;
     use arrow::array::StringArray;
     use arrow::datatypes::{DataType, Field, Schema};
-    use logfwd_io::diagnostics::ComponentStats;
+    use logfwd_types::diagnostics::ComponentStats;
 
     fn make_sink() -> JsonLinesSink {
         JsonLinesSink::new(

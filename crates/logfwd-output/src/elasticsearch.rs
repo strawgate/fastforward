@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use arrow::ipc::reader::StreamReader;
 use arrow::record_batch::RecordBatch;
 
-use logfwd_io::diagnostics::ComponentStats;
+use logfwd_types::diagnostics::ComponentStats;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 

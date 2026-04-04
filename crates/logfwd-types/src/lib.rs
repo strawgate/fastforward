@@ -1,14 +1,17 @@
 //! Stable pipeline types for logfwd.
 //!
-//! `#![no_std]` + `#![forbid(unsafe_code)]` — pure types and state machines
-//! with no IO, no filesystem, no threads, no unsafe. Extracted from
-//! `logfwd-core` so SIMD scanner changes don't cascade rebuilds to
-//! downstream crates that only need pipeline types.
-#![no_std]
-#![forbid(unsafe_code)]
+//! Provides cross-cutting types that multiple crates need without pulling in
+//! heavy I/O or transform dependencies. Includes pure state-machine types
+//! (pipeline) and lock-free diagnostic counters.
 #![warn(missing_docs)]
 
 extern crate alloc;
 
 /// Pipeline state machine — typestate batch lifecycle + ordered offset tracking.
 pub mod pipeline;
+
+/// Component-level diagnostic counters (lock-free, hot-path friendly).
+pub mod diagnostics;
+
+/// Hints that input sources and parsers can use to filter early.
+pub mod filter_hints;

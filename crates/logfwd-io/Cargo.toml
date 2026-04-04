@@ -11,10 +11,9 @@ doctest = false
 [dependencies]
 logfwd-core = { version = "0.1.0", path = "../logfwd-core" }
 logfwd-arrow = { version = "0.1.0", path = "../logfwd-arrow" }
+logfwd-types = { version = "0.1.0", path = "../logfwd-types" }
 arrow = { workspace = true }
 crossbeam-channel = "0.5"
-csv = "1"
-gethostname = "1"
 glob = "0.3"
 libc = "0.2"
 memchr = "2"
