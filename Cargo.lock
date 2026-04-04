@@ -2307,6 +2307,7 @@ name = "logfwd-bench"
 version = "0.1.0"
 dependencies = [
  "arrow",
+ "bytes",
  "criterion",
  "logfwd-arrow",
  "logfwd-core",
