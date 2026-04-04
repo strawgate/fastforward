@@ -138,10 +138,7 @@ impl OtlpSink {
             bytes_field_size(otlp::SCOPE_LOGS_SCOPE, instrumentation_scope_inner_size);
         for &(start, end) in &record_ranges {
             let record_len = end - start;
-            // tag for log_records field + varint length + payload
-            scope_logs_inner_size += varint_len(((otlp::SCOPE_LOGS_LOG_RECORDS as u64) << 3) | 2)
-                + varint_len(record_len as u64)
-                + record_len;
+            scope_logs_inner_size += bytes_field_size(otlp::SCOPE_LOGS_LOG_RECORDS, record_len);
         }
 
         // ResourceLogs inner = resource (field 1) + scope_logs (field 2)
