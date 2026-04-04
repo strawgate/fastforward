@@ -1213,17 +1213,15 @@ mod verification {
 
         let draining = running.begin_drain();
         assert!(!draining.is_drained());
-        assert!(draining.stop().is_err(), "stop() should refuse");
 
-        // Get the machine back from the Err
-        let mut running2: PipelineMachine<Running, u64> =
-            PipelineMachine::<Starting, u64>::new().start();
-        let t2 = running2.create_batch(src, cp);
-        let _s2 = running2.begin_send(t2);
-        let draining2 = running2.begin_drain();
+        // stop() should refuse — recover the Draining machine from the Err
+        let draining = match draining.stop() {
+            Err(d) => d,
+            Ok(_) => panic!("stop() should refuse with in-flight batches"),
+        };
 
-        // force_stop always succeeds
-        let stopped = draining2.force_stop();
+        // force_stop always succeeds on the same machine that stop() refused
+        let stopped = draining.force_stop();
         assert!(stopped.was_forced());
         assert_eq!(stopped.abandoned_count(), 1);
 

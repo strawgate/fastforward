@@ -254,7 +254,7 @@ impl CheckpointStore for InMemoryCheckpointStore {
         self.checkpoints.insert(checkpoint.source_id, checkpoint);
     }
 
-    fn flush(&mut self) -> std::io::Result<()> {
+    fn flush(&mut self) -> io::Result<()> {
         self.flush_count += 1;
         Ok(())
     }

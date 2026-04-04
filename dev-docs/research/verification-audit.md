@@ -3,7 +3,7 @@
 > **Status:** Active
 > **Date:** 2026-03-31
 > **Context:** Audit of TLA+ spec and Kani proofs with HIGH-priority findings on RotateFile and invariants.
-> **Scope:** `dev-docs/tla/FileCheckpoint.tla`, `crates/logfwd-core/src/checkpoint_tracker.rs`
+> **Scope:** `dev-docs/research/FileCheckpoint.tla` (archived), `crates/logfwd-core/src/checkpoint_tracker.rs`
 
 ---
 
