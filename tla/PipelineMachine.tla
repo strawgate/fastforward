@@ -140,6 +140,11 @@ BeginSend(s, b) ==
     /\ b \in created[s]
     /\ b \notin in_flight[s]
     /\ b \notin acked[s]
+    \* In Rust, Queued tickets are consumed by begin_send or dropped.
+    \* Once dropped, the ticket is gone — you cannot send a batch whose
+    \* ticket was dropped. This means sends are monotonic: you cannot send
+    \* batch b if any batch with a higher ID was already sent or acked.
+    /\ \A other \in (in_flight[s] \cup acked[s]) : b >= other
     /\ in_flight' = [in_flight EXCEPT ![s] = in_flight[s] \cup {b}]
     /\ UNCHANGED <<phase, created, acked, committed, forced>>
 
