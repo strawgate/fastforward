@@ -140,9 +140,9 @@ impl StreamingBuilder {
     /// Start a new batch. Takes ownership of the input buffer via Bytes
     /// (zero-copy if converted from Vec via `Bytes::from(vec)`).
     ///
-    /// # Panics (debug builds)
-    /// Debug-asserts that `buf.len()` fits in a u32, because string-view
-    /// offsets are stored as u32.  Buffers larger than 4 GiB would produce
+    /// # Panics
+    /// Asserts that `buf.len()` fits in a u32, because string-view
+    /// offsets are stored as u32. Buffers larger than 4 GiB would produce
     /// silently truncated offsets without this guard.
     pub fn begin_batch(&mut self, buf: bytes::Bytes) {
         debug_assert_ne!(
@@ -150,7 +150,7 @@ impl StreamingBuilder {
             BuilderState::InRow,
             "begin_batch called while inside a row (missing end_row)"
         );
-        debug_assert!(
+        assert!(
             u32::try_from(buf.len()).is_ok(),
             "StreamingBuilder buffer too large for u32 offsets ({} bytes)",
             buf.len()
@@ -290,11 +290,14 @@ impl StreamingBuilder {
         if std::str::from_utf8(value).is_err() {
             return;
         }
-        let decoded_offset = self.decoded_buf.len() as u32;
+        let decoded_offset = u32::try_from(self.decoded_buf.len())
+            .expect("StreamingBuilder decoded_buf exceeds u32::MAX");
         self.decoded_buf.extend_from_slice(value);
         // Offset into the combined buffer: original buf bytes come first,
         // decoded bytes follow at buf.len() + decoded_offset.
-        let combined_offset = self.buf.len() as u32 + decoded_offset;
+        let combined_offset = (self.buf.len() as u32).checked_add(decoded_offset).expect(
+            "StreamingBuilder combined offset overflow: buf.len() + decoded_buf.len() exceeds u32::MAX",
+        );
         let fc = &mut self.fields[idx];
         fc.has_str = true;
         fc.str_views

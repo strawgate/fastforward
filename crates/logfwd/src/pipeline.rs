@@ -734,9 +734,7 @@ impl Pipeline {
                                 offset: *offset,
                             });
                         }
-                        if let Err(e) = store.flush() {
-                            tracing::error!(error = %e, "pipeline: failed to flush final checkpoints");
-                        }
+                        flush_checkpoint_with_retry(store.as_mut());
                     }
                 }
                 Err(still_draining) => {
@@ -756,9 +754,7 @@ impl Pipeline {
                                 offset: *offset,
                             });
                         }
-                        if let Err(e) = store.flush() {
-                            tracing::error!(error = %e, "pipeline: failed to flush checkpoints after force-stop");
-                        }
+                        flush_checkpoint_with_retry(store.as_mut());
                     }
                 }
             }
@@ -1117,6 +1113,48 @@ fn input_poll_loop(
             queued_at: Instant::now(),
         };
         let _ = blocking_send_channel_msg(input.source.name(), &tx, &metrics, msg);
+    }
+}
+
+/// Flush checkpoint store with bounded retry (3 attempts, 100ms between).
+///
+/// The final shutdown flush is the last chance to persist checkpoint progress.
+/// A single failure here loses all checkpoint advancement from the run.
+/// Retry with brief sleeps to handle transient I/O errors (disk busy, NFS glitch).
+///
+/// Uses `std::thread::sleep` (not `tokio::time::sleep`) because this runs
+/// during shutdown after all async work is drained, and `CheckpointStore::flush`
+/// is itself synchronous I/O — there is no benefit to yielding.
+fn flush_checkpoint_with_retry(store: &mut dyn CheckpointStore) {
+    const MAX_ATTEMPTS: u32 = 3;
+    const RETRY_DELAY: Duration = Duration::from_millis(100);
+
+    for attempt in 0..MAX_ATTEMPTS {
+        match store.flush() {
+            Ok(()) => {
+                if attempt > 0 {
+                    tracing::info!(attempt, "pipeline: checkpoint flush succeeded after retry");
+                }
+                return;
+            }
+            Err(e) => {
+                if attempt + 1 < MAX_ATTEMPTS {
+                    tracing::warn!(
+                        attempt,
+                        error = %e,
+                        "pipeline: checkpoint flush failed, retrying"
+                    );
+                    std::thread::sleep(RETRY_DELAY);
+                } else {
+                    tracing::error!(
+                        attempts = MAX_ATTEMPTS,
+                        error = %e,
+                        "pipeline: checkpoint flush failed after all retries — \
+                         checkpoint progress from this run may be lost"
+                    );
+                }
+            }
+        }
     }
 }
 
