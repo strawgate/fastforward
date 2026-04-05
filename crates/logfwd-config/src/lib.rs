@@ -247,6 +247,15 @@ pub struct OutputConfig {
     /// Optional authentication for HTTP-based outputs.
     #[serde(default)]
     pub auth: Option<AuthConfig>,
+    /// Optional tenant ID to include in output metadata.
+    #[serde(default)]
+    pub tenant_id: Option<String>,
+    /// Static key/value labels to attach to every output record.
+    #[serde(default)]
+    pub static_labels: Option<HashMap<String, String>>,
+    /// Column names whose values should be promoted to output labels.
+    #[serde(default)]
+    pub label_columns: Option<Vec<String>>,
 }
 
 // ---------------------------------------------------------------------------
