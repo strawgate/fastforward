@@ -129,6 +129,9 @@ impl StderrCapture {
             return Ok(()); // already started
         }
 
+        // SAFETY: All POSIX calls (`dup`, `pipe`, `dup2`, `close`) operate on
+        // valid file descriptors. fd 2 (stderr) is always open at this point.
+        // Error paths close every fd they opened before returning.
         unsafe {
             // Save original stderr.
             let orig = libc::dup(2);
@@ -185,6 +188,8 @@ fn reader_loop(read_fd: i32, orig_fd: i32, state: &CaptureState) {
     let mut partial: Vec<u8> = Vec::new();
 
     loop {
+        // SAFETY: `read_fd` is a valid open pipe fd, and `buf` is a valid
+        // mutable slice with at least `buf.len()` bytes available.
         let n = unsafe { libc::read(read_fd, buf.as_mut_ptr().cast::<libc::c_void>(), buf.len()) };
 
         if n < 0 {
@@ -204,6 +209,8 @@ fn reader_loop(read_fd: i32, orig_fd: i32, state: &CaptureState) {
         let bytes = &buf[..n as usize];
 
         // Tee to original stderr so terminal still works.
+        // SAFETY: `orig_fd` is a valid dup'd stderr fd, and `bytes` is a
+        // valid slice of `n` bytes just read from the pipe.
         unsafe {
             libc::write(orig_fd, bytes.as_ptr().cast::<libc::c_void>(), n as usize);
         }
@@ -224,6 +231,9 @@ fn reader_loop(read_fd: i32, orig_fd: i32, state: &CaptureState) {
     // Restore stderr to the original fd before closing it, so any eprintln!()
     // calls after this thread exits still go to the terminal rather than the
     // now-broken pipe.
+    // SAFETY: `orig_fd` and `read_fd` are valid open fds obtained from `dup`
+    // and `pipe` earlier. `dup2` restores fd 2 to the original stderr, then
+    // both helper fds are closed exactly once.
     unsafe {
         libc::dup2(orig_fd, 2);
         libc::close(read_fd);

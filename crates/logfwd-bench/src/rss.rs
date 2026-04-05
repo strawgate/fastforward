@@ -12,9 +12,14 @@ fn rss_mb() -> f64 {
     #[cfg(target_os = "macos")]
     {
         use std::mem;
+        // SAFETY: `zeroed()` is valid for `mach_task_basic_info_data_t`
+        // (all-zero is a valid bit pattern for this plain-data struct).
         let mut info: libc::mach_task_basic_info_data_t = unsafe { mem::zeroed() };
         let mut count = (mem::size_of::<libc::mach_task_basic_info_data_t>()
             / mem::size_of::<libc::natural_t>()) as libc::mach_msg_type_number_t;
+        // SAFETY: `mach_task_self_` is always a valid task port. `info` is a
+        // mutable reference to a zeroed struct of the correct type and `count`
+        // holds the matching element count. `task_info` only writes into `info`.
         let kr = unsafe {
             libc::task_info(
                 libc::mach_task_self_,

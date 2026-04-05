@@ -435,6 +435,8 @@ pub fn run_agent_dhat(
     // dhat writes its output on clean exit, so send SIGTERM first.
     #[cfg(unix)]
     {
+        // SAFETY: `child.id()` returns the PID of a live child process that
+        // we spawned. Sending `SIGTERM` to a valid PID is safe.
         unsafe {
             libc::kill(child.id() as i32, libc::SIGTERM);
         }
