@@ -6,3 +6,5 @@ mod instrumented_sink;
 mod network_sim;
 mod observable_checkpoint;
 mod pipeline_sim;
+mod tcp_server;
+mod turmoil_tcp_sink;

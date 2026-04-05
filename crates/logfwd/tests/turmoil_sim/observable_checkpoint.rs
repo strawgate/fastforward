@@ -35,6 +35,7 @@ pub struct CheckpointHandle {
     crash_armed: Arc<AtomicBool>,
 }
 
+#[allow(dead_code)]
 impl CheckpointHandle {
     /// Get the durable checkpoint offset for a source.
     pub fn durable_offset(&self, source_id: u64) -> Option<u64> {

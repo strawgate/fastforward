@@ -113,6 +113,8 @@ fn batch_flushes_on_timeout() {
 
     let delivered = Arc::new(AtomicU64::new(0));
     let delivered_clone = delivered.clone();
+    // A second clone to check mid-test from within the client.
+    let mid_test_check = delivered.clone();
 
     sim.client("pipeline", async move {
         // 5 small lines -- well below batch_target_bytes
@@ -127,6 +129,22 @@ fn batch_flushes_on_timeout() {
 
         let shutdown = CancellationToken::new();
         let sd = shutdown.clone();
+
+        // Mid-test assertion: verify data is delivered by the timeout flush
+        // BEFORE the shutdown signal fires.
+        let mid = mid_test_check.clone();
+        tokio::spawn(async move {
+            // Wait long enough for the 50ms batch timeout to fire and
+            // for data to flow through the pipeline (but well before the
+            // 2s shutdown timer).
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            let count = mid.load(Ordering::Relaxed);
+            assert!(
+                count > 0,
+                "mid-test: expected data delivered by batch timeout flush \
+                 before shutdown, got 0"
+            );
+        });
 
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(2)).await;

@@ -75,9 +75,14 @@ fn crash_checkpoint_consistency() {
 
     sim.run().unwrap();
 
-    // 1. Data was delivered to the sink despite the checkpoint crash.
+    // 1. All 20 rows must be delivered despite the checkpoint crash.
+    // Output delivery is independent of checkpoint persistence — a crash
+    // during flush must not prevent data from reaching the sink.
     let count = delivered.load(Ordering::Relaxed);
-    assert!(count > 0, "expected data delivered despite checkpoint crash, got 0");
+    assert_eq!(
+        count, 20,
+        "expected all 20 rows delivered despite checkpoint crash, got {count}"
+    );
 
     // 2. The crash happened — verify crash injection worked.
     assert!(
