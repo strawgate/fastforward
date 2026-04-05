@@ -10,6 +10,7 @@ pub mod input;
 pub mod metric_history;
 pub mod otap_receiver;
 pub mod otlp_receiver;
+pub mod segment;
 pub mod span_exporter;
 pub mod stderr_capture;
 pub mod tail;
