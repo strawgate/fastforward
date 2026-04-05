@@ -342,10 +342,12 @@ fn print_report(run: &ProfileRun<'_>) {
 
     // --- RSS analysis ---
     let rss_values: Vec<f64> = samples.iter().map(|s| s.rss_mb).collect();
-    let (peak_rss, min_rss) = rss_values.iter().copied().fold(
-        (f64::NEG_INFINITY, f64::INFINITY),
-        |(peak, min), v| (peak.max(v), min.min(v)),
-    );
+    let (peak_rss, min_rss) = rss_values
+        .iter()
+        .copied()
+        .fold((f64::NEG_INFINITY, f64::INFINITY), |(peak, min), v| {
+            (peak.max(v), min.min(v))
+        });
 
     // Steady-state: average of last half of samples
     let steady_start = samples.len() / 2;
@@ -559,8 +561,7 @@ fn print_report(run: &ProfileRun<'_>) {
     println!("| Allocations/row | {:.1} |", allocs_per_row);
     println!(
         "| RSS per batch ({} rows) | {:.1} MB |",
-        batch_lines,
-        steady_rss,
+        batch_lines, steady_rss,
     );
 }
 
