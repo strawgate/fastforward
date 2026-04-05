@@ -17,18 +17,48 @@ jobs:
       COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
     with:
       additional-instructions: |
-        This is logfwd, a Rust log forwarder that tails files, parses JSON
-        and Kubernetes CRI logs with SIMD, transforms with SQL (DataFusion),
-        and ships to OTLP/Elasticsearch/Loki.
+        IMPORTANT: This repo's issues are NOT typical bug reports from
+        external users. They are pre-planned work items (enhancements,
+        refactors, bugs we already know about) with detailed descriptions
+        written by the maintainers. Many are labeled "work-unit" and
+        contain implementation plans with file paths and code sketches.
 
-        Key crates:
-        - logfwd-core: no_std proven kernel (scanner, parsers, OTLP encoding)
-        - logfwd-arrow: Arrow integration (Scanner, StreamingBuilder)
-        - logfwd-io: file tailing, TCP/UDP inputs, checkpointing
-        - logfwd-transform: DataFusion SQL transforms, UDFs
-        - logfwd-output: output sinks (OTLP, ES, Loki, TCP, stdout)
-        - logfwd: binary crate, async pipeline orchestration
+        Your job is NOT to diagnose an unknown bug. Instead:
 
-        Read CLAUDE.md and dev-docs/ARCHITECTURE.md for full context.
-        Check dev-docs/VERIFICATION.md for Kani/TLA+/proptest strategy.
-        Check the roadmap at issue #889 for what's in progress.
+        1. READ the issue body carefully — it already contains the plan.
+
+        2. FIND related source files. For every file path mentioned in
+           the issue, verify it exists and note the current line numbers
+           for the functions/structs referenced. Add any files the issue
+           missed.
+
+        3. RESEARCH the current state of the code at the locations
+           described. Has anything changed since the issue was filed?
+           Are the line numbers still accurate? Are the API signatures
+           still correct?
+
+        4. IDENTIFY potential conflicts with other open PRs. Check
+           `gh pr list --state open` for PRs touching the same files.
+
+        5. ADD missing context: function signatures, struct definitions,
+           test patterns from nearby code, relevant doc sections.
+
+        6. If the issue references other issues (#NNN), check their
+           current state (open/closed) and note any that have been
+           resolved since the issue was written.
+
+        Format your comment as:
+        - **Status**: Is the issue still valid? Any parts already done?
+        - **Key Files**: File paths with current line numbers
+        - **Open PRs**: Any in-flight work that touches the same area
+        - **Implementation Notes**: Anything the assignee should know
+          that isn't in the issue body
+
+        This is logfwd, a Rust log forwarder: file tail → SIMD parse →
+        Arrow RecordBatch → DataFusion SQL → OTLP/ES/Loki output.
+
+        Read CLAUDE.md for the full project guide. Key docs:
+        - dev-docs/ARCHITECTURE.md — pipeline data flow, crate map
+        - dev-docs/DESIGN.md — architecture decisions, checkpoint ADR
+        - dev-docs/VERIFICATION.md — Kani, TLA+, proptest strategy
+        - Roadmap: issue #889
