@@ -21,7 +21,7 @@ mod parquet;
 pub use arrow_ipc_sink::{ArrowIpcSinkFactory, deserialize_ipc, serialize_ipc};
 pub use elasticsearch::{ElasticsearchRequestMode, ElasticsearchSink, ElasticsearchSinkFactory};
 pub use fanout::{FanoutSink, FanoutSinkError};
-pub use json_lines::JsonLinesSink;
+pub use json_lines::{JsonLinesSink, JsonLinesSinkFactory};
 pub use loki::{LokiSink, LokiSinkFactory};
 pub use null::NullSink;
 pub use otap_sink::{
@@ -545,28 +545,9 @@ pub fn build_output_sink(
         OutputType::Otlp => Err(format!(
             "output '{name}': OTLP requires the async pipeline — use build_sink_factory() instead"
         )),
-        OutputType::Http => {
-            let endpoint = cfg
-                .endpoint
-                .as_ref()
-                .ok_or_else(|| format!("output '{name}': HTTP requires 'endpoint'"))?;
-            let compression = match cfg.compression.as_deref() {
-                Some("gzip") => Compression::Gzip,
-                Some(other) => {
-                    return Err(format!(
-                        "output '{name}': json_lines HTTP does not support '{other}' compression (use 'gzip')"
-                    ));
-                }
-                None => Compression::None,
-            };
-            Ok(Box::new(JsonLinesSink::new(
-                name.to_string(),
-                endpoint.clone(),
-                auth_headers,
-                compression,
-                stats,
-            )))
-        }
+        OutputType::Http => Err(format!(
+            "output '{name}': http requires the async pipeline — use build_sink_factory() instead"
+        )),
         OutputType::Null => Ok(Box::new(NullSink::new(name.to_string(), stats))),
         OutputType::Tcp => Err(format!(
             "output '{name}': tcp requires the async pipeline — use build_sink_factory() instead"
@@ -788,6 +769,30 @@ pub fn build_sink_factory(
                 endpoint.clone(),
                 stats,
             )))
+        }
+        OutputType::Http => {
+            let endpoint = cfg
+                .endpoint
+                .as_ref()
+                .ok_or_else(|| format!("output '{name}': HTTP requires 'endpoint'"))?;
+            let compression = match cfg.compression.as_deref() {
+                Some("gzip") => Compression::Gzip,
+                Some(other) => {
+                    return Err(format!(
+                        "output '{name}': json_lines HTTP does not support '{other}' compression (use 'gzip')"
+                    ));
+                }
+                None => Compression::None,
+            };
+            let factory = JsonLinesSinkFactory::new(
+                name.to_string(),
+                endpoint.clone(),
+                auth_headers,
+                compression,
+                stats,
+            )
+            .map_err(|e| format!("output '{name}': json_lines factory: {e}"))?;
+            Ok(Arc::new(factory))
         }
         _ => {
             // Sync sink — build it once, wrap in OnceFactory (max_workers=1).
@@ -1071,6 +1076,7 @@ mod tests {
             "http://localhost:9200".to_string(),
             vec![],
             Compression::None,
+            reqwest::Client::new(),
             Arc::new(ComponentStats::new()),
         );
         sink.serialize_batch(&batch).unwrap();
@@ -1224,7 +1230,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_output_sink_http() {
+    fn test_build_sink_factory_http() {
         let cfg = OutputConfig {
             name: Some("es".to_string()),
             output_type: OutputType::Http,
@@ -1237,12 +1243,12 @@ mod tests {
             index: None,
             auth: None,
         };
-        let sink = build_output_sink("es", &cfg, Arc::new(ComponentStats::new())).unwrap();
-        assert_eq!(sink.name(), "es");
+        let factory = build_sink_factory("es", &cfg, Arc::new(ComponentStats::new())).unwrap();
+        assert_eq!(factory.name(), "es");
     }
 
     #[test]
-    fn test_build_output_sink_http_with_gzip_compression() {
+    fn test_build_sink_factory_http_with_gzip_compression() {
         let cfg = OutputConfig {
             name: Some("http-gz".to_string()),
             output_type: OutputType::Http,
@@ -1255,12 +1261,12 @@ mod tests {
             index: None,
             auth: None,
         };
-        let sink = build_output_sink("http-gz", &cfg, Arc::new(ComponentStats::new())).unwrap();
-        assert_eq!(sink.name(), "http-gz");
+        let factory = build_sink_factory("http-gz", &cfg, Arc::new(ComponentStats::new())).unwrap();
+        assert_eq!(factory.name(), "http-gz");
     }
 
     #[test]
-    fn test_build_output_sink_http_rejects_unknown_compression() {
+    fn test_build_sink_factory_http_rejects_unknown_compression() {
         let cfg = OutputConfig {
             name: Some("http-bad".to_string()),
             output_type: OutputType::Http,
@@ -1273,7 +1279,7 @@ mod tests {
             index: None,
             auth: None,
         };
-        let result = build_output_sink("http-bad", &cfg, Arc::new(ComponentStats::new()));
+        let result = build_sink_factory("http-bad", &cfg, Arc::new(ComponentStats::new()));
         assert!(
             result.is_err(),
             "unsupported compression should be rejected"
@@ -1361,7 +1367,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_output_sink_http_with_bearer_auth() {
+    fn test_build_sink_factory_http_with_bearer_auth() {
         use logfwd_config::AuthConfig;
         let cfg = OutputConfig {
             name: Some("auth-sink".to_string()),
@@ -1378,8 +1384,9 @@ mod tests {
                 headers: std::collections::HashMap::new(),
             }),
         };
-        let sink = build_output_sink("auth-sink", &cfg, Arc::new(ComponentStats::new())).unwrap();
-        assert_eq!(sink.name(), "auth-sink");
+        let factory =
+            build_sink_factory("auth-sink", &cfg, Arc::new(ComponentStats::new())).unwrap();
+        assert_eq!(factory.name(), "auth-sink");
     }
 
     // -----------------------------------------------------------------------
@@ -1459,6 +1466,7 @@ mod tests {
             "http://localhost:9200".to_string(),
             vec![],
             Compression::None,
+            reqwest::Client::new(),
             Arc::new(ComponentStats::new()),
         );
         // Must not panic.

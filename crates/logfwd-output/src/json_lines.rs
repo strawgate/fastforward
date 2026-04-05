@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::io;
 use std::sync::Arc;
 
@@ -6,10 +7,9 @@ use arrow::record_batch::RecordBatch;
 
 use logfwd_types::diagnostics::ComponentStats;
 
-#[allow(deprecated)]
 use super::{
-    BatchMetadata, Compression, HTTP_MAX_RETRIES, HTTP_RETRY_INITIAL_DELAY_MS, OutputSink,
-    build_col_infos, is_transient_error, str_value, write_row_json,
+    BatchMetadata, Compression, HTTP_MAX_RETRIES, HTTP_RETRY_INITIAL_DELAY_MS, build_col_infos,
+    str_value, write_row_json,
 };
 
 // ---------------------------------------------------------------------------
@@ -24,22 +24,23 @@ pub struct JsonLinesSink {
     pub(crate) batch_buf: Vec<u8>,
     compress_buf: Vec<u8>,
     compression: Compression,
-    http_agent: ureq::Agent,
+    client: reqwest::Client,
     stats: Arc<ComponentStats>,
 }
 
 impl JsonLinesSink {
+    /// Create a new JSON-lines sink.
+    ///
+    /// The caller supplies a shared `reqwest::Client` (typically cloned from
+    /// the factory) so all workers reuse the same connection pool.
     pub fn new(
         name: String,
         url: String,
         headers: Vec<(String, String)>,
         compression: Compression,
+        client: reqwest::Client,
         stats: Arc<ComponentStats>,
     ) -> Self {
-        let http_agent = ureq::config::Config::builder()
-            .timeout_global(Some(std::time::Duration::from_secs(30)))
-            .build()
-            .new_agent();
         JsonLinesSink {
             name,
             url,
@@ -47,7 +48,7 @@ impl JsonLinesSink {
             batch_buf: Vec::with_capacity(64 * 1024),
             compress_buf: Vec::new(),
             compression,
-            http_agent,
+            client,
             stats,
         }
     }
@@ -118,21 +119,23 @@ impl JsonLinesSink {
         }
         Ok(())
     }
-}
 
-#[allow(deprecated)]
-impl OutputSink for JsonLinesSink {
-    fn send_batch(&mut self, batch: &RecordBatch, _metadata: &BatchMetadata) -> io::Result<()> {
+    /// Serialize, compress (if configured), and POST the batch over HTTP.
+    ///
+    /// Retries transient failures (5xx, timeouts, connection errors) with
+    /// exponential backoff. Returns `SendResult::RetryAfter` on HTTP 429 and
+    /// `SendResult::Rejected` on non-429 4xx client errors.
+    async fn send_batch_inner(
+        &mut self,
+        batch: &RecordBatch,
+    ) -> io::Result<super::sink::SendResult> {
         self.serialize_batch(batch)?;
         if self.batch_buf.is_empty() {
-            return Ok(());
+            return Ok(super::sink::SendResult::Ok);
         }
 
-        // Retry with exponential backoff for transient failures.
-        // 1 initial attempt + up to HTTP_MAX_RETRIES retries; delays: 100ms → 200ms → 400ms.
-        // Note: `self.batch_buf` is re-sent as `&[u8]` on each attempt — no
-        // allocation, but the full NDJSON payload is retransmitted each time.
-        // This is acceptable as a temporary measure until SinkDriver (#319).
+        // Compress if configured. The compressed payload is stored in
+        // `self.compress_buf` and lives until the next call.
         let payload: &[u8] = match self.compression {
             Compression::Gzip => {
                 use flate2::Compression as GzLevel;
@@ -152,38 +155,164 @@ impl OutputSink for JsonLinesSink {
                 unreachable!("zstd is not supported for json_lines; rejected at config validation")
             }
         };
-        let build_req = || {
-            let mut req = self.http_agent.post(&self.url);
-            for (k, v) in &self.headers {
-                req = req.header(k.as_str(), v.as_str());
-            }
-            req = req.header("Content-Type", "application/x-ndjson");
+
+        // Retry with exponential backoff for transient failures.
+        // 1 initial attempt + up to HTTP_MAX_RETRIES retries; delays: 100ms → 200ms → 400ms.
+        let mut delay_ms: u64 = HTTP_RETRY_INITIAL_DELAY_MS;
+        let mut attempt: u32 = 0;
+
+        // Own the payload once; on retries we call `.clone()` which allocates
+        // but is acceptable for a path limited to HTTP_MAX_RETRIES iterations.
+        let body = payload.to_vec();
+
+        loop {
+            let mut req = self
+                .client
+                .post(&self.url)
+                .header("Content-Type", "application/x-ndjson");
             if self.compression == Compression::Gzip {
                 req = req.header("Content-Encoding", "gzip");
             }
-            req
-        };
-        let mut delay_ms: u64 = HTTP_RETRY_INITIAL_DELAY_MS;
-        let mut attempt: u32 = 0;
-        loop {
-            match build_req().send(payload) {
-                Ok(_) => {
+            for (k, v) in &self.headers {
+                req = req.header(k.as_str(), v.as_str());
+            }
+            let req = req.body(body.clone());
+
+            match req.send().await {
+                Ok(response) => {
+                    let status = response.status();
+
+                    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                        // Parse Retry-After header (seconds integer) or use default.
+                        let retry_after = response
+                            .headers()
+                            .get("Retry-After")
+                            .and_then(|v| v.to_str().ok())
+                            .and_then(|s| s.parse::<u64>().ok())
+                            .unwrap_or(5);
+                        return Ok(super::sink::SendResult::RetryAfter(
+                            std::time::Duration::from_secs(retry_after),
+                        ));
+                    }
+
+                    if status.is_client_error() {
+                        return Ok(super::sink::SendResult::Rejected(format!(
+                            "HTTP endpoint rejected batch with HTTP {status}"
+                        )));
+                    }
+
+                    if status.is_server_error() {
+                        if attempt < HTTP_MAX_RETRIES {
+                            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                            delay_ms *= 2;
+                            attempt += 1;
+                            continue;
+                        }
+                        return Err(io::Error::other(format!(
+                            "HTTP endpoint returned {status} after {attempt} retries"
+                        )));
+                    }
+
+                    // Success.
                     self.stats.inc_lines(batch.num_rows() as u64);
                     self.stats.inc_bytes(payload.len() as u64);
-                    return Ok(());
+                    return Ok(super::sink::SendResult::Ok);
                 }
-                Err(e) if attempt < HTTP_MAX_RETRIES && is_transient_error(&e) => {
-                    std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                Err(_e) if attempt < HTTP_MAX_RETRIES => {
+                    // Transport-level error (connection refused, timeout, DNS, etc.)
+                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                     delay_ms *= 2;
                     attempt += 1;
                 }
-                Err(e) => return Err(io::Error::other(e.to_string())),
+                Err(e) => {
+                    return Err(io::Error::other(format!(
+                        "HTTP request failed after {attempt} retries: {e}"
+                    )));
+                }
             }
         }
     }
+}
 
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
+impl super::sink::Sink for JsonLinesSink {
+    fn send_batch<'a>(
+        &'a mut self,
+        batch: &'a RecordBatch,
+        _metadata: &'a BatchMetadata,
+    ) -> std::pin::Pin<Box<dyn Future<Output = io::Result<super::sink::SendResult>> + Send + 'a>>
+    {
+        Box::pin(async move { self.send_batch_inner(batch).await })
+    }
+
+    fn flush(&mut self) -> std::pin::Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn shutdown(&mut self) -> std::pin::Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// JsonLinesSinkFactory
+// ---------------------------------------------------------------------------
+
+/// Creates [`JsonLinesSink`] instances for the output worker pool.
+///
+/// All workers share a single `reqwest::Client` (which is internally
+/// `Arc`-wrapped) so they reuse the same connection pool, TLS sessions,
+/// and DNS cache.
+pub struct JsonLinesSinkFactory {
+    name: String,
+    url: String,
+    headers: Vec<(String, String)>,
+    compression: Compression,
+    client: reqwest::Client,
+    stats: Arc<ComponentStats>,
+}
+
+impl JsonLinesSinkFactory {
+    /// Create a new factory.
+    ///
+    /// Builds a shared `reqwest::Client` with a 30-second timeout and a
+    /// generous idle-connection pool.
+    pub fn new(
+        name: String,
+        url: String,
+        headers: Vec<(String, String)>,
+        compression: Compression,
+        stats: Arc<ComponentStats>,
+    ) -> io::Result<Self> {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .pool_max_idle_per_host(64)
+            .build()
+            .map_err(io::Error::other)?;
+        Ok(JsonLinesSinkFactory {
+            name,
+            url,
+            headers,
+            compression,
+            client,
+            stats,
+        })
+    }
+}
+
+impl super::sink::SinkFactory for JsonLinesSinkFactory {
+    fn create(&self) -> io::Result<Box<dyn super::sink::Sink>> {
+        Ok(Box::new(JsonLinesSink::new(
+            self.name.clone(),
+            self.url.clone(),
+            self.headers.clone(),
+            self.compression,
+            self.client.clone(), // reqwest::Client is Arc-wrapped, clone is cheap
+            Arc::clone(&self.stats),
+        )))
     }
 
     fn name(&self) -> &str {
@@ -203,11 +332,13 @@ mod tests {
     use logfwd_types::diagnostics::ComponentStats;
 
     fn make_sink() -> JsonLinesSink {
+        let client = reqwest::Client::new();
         JsonLinesSink::new(
             "test".to_string(),
             "http://localhost:1".to_string(), // unreachable — tests only call serialize_batch
             vec![],
             Compression::None,
+            client,
             Arc::new(ComponentStats::default()),
         )
     }
