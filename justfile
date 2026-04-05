@@ -217,11 +217,11 @@ build-pgo:
     cp target/release/logfwd target/release/logfwd-pgo
     echo "PGO binary written to target/release/logfwd-pgo"
 
-# Run criterion microbenchmarks
+# Run Tier 1 criterion benchmarks (fast, ~30s — composed functions, no heavy I/O)
 bench:
-    cargo bench -p logfwd-bench
+    cargo bench -p logfwd-bench --bench pipeline --bench output_encode --bench full_chain
 
-# Run all criterion benchmarks including heavier I/O and batch formation benches
+# Run all criterion benchmarks (Tier 1 + Tier 2 — includes I/O and batch scaling, ~2-5min)
 bench-full:
     cargo bench -p logfwd-bench
 

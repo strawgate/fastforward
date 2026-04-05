@@ -12,16 +12,13 @@
 
 #![allow(deprecated)]
 
-use std::sync::Arc;
-
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
 use logfwd_arrow::scanner::Scanner;
-use logfwd_bench::generators;
+use logfwd_bench::{NullSink, generators, make_otlp_sink};
 use logfwd_core::scan_config::ScanConfig;
 use logfwd_io::compress::ChunkCompressor;
-use logfwd_output::{BatchMetadata, Compression, OtlpProtocol, OtlpSink, OutputSink};
-use logfwd_types::diagnostics::ComponentStats;
+use logfwd_output::{Compression, OutputSink};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -32,35 +29,6 @@ fn scan_to_batch(data: &[u8]) -> arrow::record_batch::RecordBatch {
     scanner
         .scan_detached(bytes::Bytes::copy_from_slice(data))
         .expect("bench: scan should not fail")
-}
-
-fn make_otlp_sink(compression: Compression) -> OtlpSink {
-    OtlpSink::new(
-        "bench".into(),
-        "http://localhost:1".into(), // unreachable — we only call encode_batch
-        OtlpProtocol::Http,
-        compression,
-        vec![],
-        Arc::new(ComponentStats::default()),
-    )
-}
-
-struct NullSink;
-
-impl OutputSink for NullSink {
-    fn send_batch(
-        &mut self,
-        _batch: &arrow::record_batch::RecordBatch,
-        _metadata: &BatchMetadata,
-    ) -> std::io::Result<()> {
-        Ok(())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-    fn name(&self) -> &'static str {
-        "null"
-    }
 }
 
 // ---------------------------------------------------------------------------

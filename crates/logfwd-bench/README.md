@@ -5,10 +5,10 @@ Criterion microbenchmarks and profiling tools for logfwd.
 ## Quick Start
 
 ```bash
-# Run all Criterion benchmarks (Tier 1 + 2)
+# Run Tier 1 Criterion benchmarks (fast, ~30s — pipeline, output_encode, full_chain)
 just bench
 
-# Run full benchmark suite including I/O-heavy benches
+# Run all Criterion benchmarks (Tier 1 + 2, includes file_io, batch_formation)
 just bench-full
 
 # Run system-level pipeline benchmarks (Tier 3, requires built binary)
@@ -29,8 +29,8 @@ just bench-report
 
 | Tier | What | Speed | Command |
 |------|------|-------|---------|
-| 1 — Composed Functions | Criterion benchmarks composing real types, no async | Fast (~30s) | `just bench` |
-| 2 — Real Pipeline | Criterion benchmarks with tmpfile I/O, batch scaling | Medium (~2-5min) | `just bench-full` |
+| 1 — Composed Functions | `pipeline`, `output_encode`, `full_chain` — real types, no heavy I/O | Fast (~30s) | `just bench` |
+| 2 — I/O + Scaling | `file_io`, `batch_formation`, `builder_compare`, `elasticsearch_arrow` | Medium (~2-5min) | `just bench-full` |
 | 3 — System-Level | Full pipeline end-to-end with real networking | Slow (~5-10min) | `just bench-system` |
 
 ## Benchmark Files
@@ -70,6 +70,13 @@ deterministic, reproducible output.
 | `gen_narrow(count, seed)` | Simple 5-field JSON | ~130 bytes/line |
 | `gen_wide(count, seed)` | Verbose 20+ field JSON | ~650 bytes/line |
 | `make_metadata()` | Standard `BatchMetadata` with K8s resource attrs | — |
+
+## Shared Bench Helpers (`src/lib.rs`)
+
+| Helper | Description |
+|--------|-------------|
+| `NullSink` | Discards all data — measures pure iteration overhead |
+| `make_otlp_sink(compression)` | Buffer-only `OtlpSink` (no HTTP) for encode benchmarks |
 
 ### Determinism Guarantee
 

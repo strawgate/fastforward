@@ -9,49 +9,13 @@
 
 #![allow(deprecated)]
 
-use std::sync::Arc;
-
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
 use logfwd_arrow::scanner::Scanner;
-use logfwd_bench::generators;
+use logfwd_bench::{NullSink, generators, make_otlp_sink};
 use logfwd_core::scan_config::ScanConfig;
-use logfwd_output::{BatchMetadata, Compression, OtlpProtocol, OtlpSink, OutputSink};
+use logfwd_output::{Compression, OutputSink};
 use logfwd_transform::SqlTransform;
-use logfwd_types::diagnostics::ComponentStats;
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-fn make_otlp_sink() -> OtlpSink {
-    OtlpSink::new(
-        "bench".into(),
-        "http://localhost:1".into(),
-        OtlpProtocol::Http,
-        Compression::None,
-        vec![],
-        Arc::new(ComponentStats::default()),
-    )
-}
-
-struct NullSink;
-
-impl OutputSink for NullSink {
-    fn send_batch(
-        &mut self,
-        _batch: &arrow::record_batch::RecordBatch,
-        _metadata: &BatchMetadata,
-    ) -> std::io::Result<()> {
-        Ok(())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-    fn name(&self) -> &'static str {
-        "null"
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Batch size scaling: scan
@@ -152,7 +116,7 @@ fn bench_batch_pipeline(c: &mut Criterion) {
             |b, data| {
                 let mut scanner = Scanner::new(ScanConfig::default());
                 let mut transform = SqlTransform::new("SELECT * FROM logs").unwrap();
-                let mut sink = make_otlp_sink();
+                let mut sink = make_otlp_sink(Compression::None);
                 b.iter(|| {
                     let batch = scanner
                         .scan_detached(bytes::Bytes::from(data.clone()))
