@@ -338,8 +338,7 @@ impl super::sink::Sink for LokiSink {
         &'a mut self,
         batch: &'a RecordBatch,
         metadata: &'a BatchMetadata,
-    ) -> std::pin::Pin<Box<dyn Future<Output = super::sink::SendResult> + Send + 'a>>
-    {
+    ) -> std::pin::Pin<Box<dyn Future<Output = super::sink::SendResult> + Send + 'a>> {
         Box::pin(async move {
             if batch.num_rows() == 0 {
                 return super::sink::SendResult::Ok;

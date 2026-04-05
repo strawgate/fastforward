@@ -39,6 +39,27 @@ pub enum SendResult {
     Rejected(String),
 }
 
+impl SendResult {
+    /// Returns `true` if the result is [`SendResult::Ok`].
+    pub fn is_ok(&self) -> bool {
+        matches!(self, SendResult::Ok)
+    }
+
+    /// Returns `true` if the result is not [`SendResult::Ok`].
+    pub fn is_err(&self) -> bool {
+        !self.is_ok()
+    }
+
+    /// Panics if the result is not [`SendResult::Ok`], printing the variant as
+    /// the panic message.
+    pub fn unwrap(self) {
+        assert!(
+            matches!(self, SendResult::Ok),
+            "called `SendResult::unwrap()` on a non-Ok value: {self:?}"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Sink trait
 // ---------------------------------------------------------------------------
@@ -269,11 +290,9 @@ impl Sink for SyncSinkAdapter {
         // SAFETY: block_in_place is safe here because we're within a
         // multi-threaded tokio runtime (logfwd always uses rt-multi-thread).
         Box::pin(async move {
-            tokio::task::block_in_place(|| {
-                match self.inner.send_batch(batch, metadata) {
-                    Ok(()) => SendResult::Ok,
-                    Err(e) => SendResult::IoError(e),
-                }
+            tokio::task::block_in_place(|| match self.inner.send_batch(batch, metadata) {
+                Ok(()) => SendResult::Ok,
+                Err(e) => SendResult::IoError(e),
             })
         })
     }

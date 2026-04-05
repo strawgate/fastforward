@@ -691,7 +691,7 @@ pub fn build_sink_factory(
             };
 
             // For json_lines HTTP output, we wrap it in a OnceFactory for now.
-            let sink = Box::new(json_lines::JsonLinesSink::new(
+            let sink = Box::new(JsonLinesSink::new(
                 name.to_string(),
                 endpoint.clone(),
                 auth_headers,

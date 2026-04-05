@@ -634,8 +634,7 @@ impl super::sink::Sink for ElasticsearchSink {
         &'a mut self,
         batch: &'a RecordBatch,
         metadata: &'a BatchMetadata,
-    ) -> std::pin::Pin<Box<dyn Future<Output = super::sink::SendResult> + Send + 'a>>
-    {
+    ) -> std::pin::Pin<Box<dyn Future<Output = super::sink::SendResult> + Send + 'a>> {
         Box::pin(async move {
             match self.send_batch_inner(batch, metadata, 0).await {
                 Ok(r) => r,
@@ -1204,7 +1203,7 @@ mod tests {
             .enable_all()
             .build()
             .unwrap();
-        let result = rt.block_on(sink.send_batch(&batch, &meta)).unwrap();
+        let result = rt.block_on(sink.send_batch(&batch, &meta));
         match result {
             crate::sink::SendResult::Rejected(msg) => {
                 assert!(msg.contains("exceeds max_bulk_bytes"))
