@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use bytes::{Bytes, BytesMut};
-use logfwd_core::pipeline::SourceId;
+use logfwd_types::pipeline::SourceId;
 use logfwd_io::tail::ByteOffset;
 
 /// Action returned by the accumulator after ingesting data or checking timeout.

@@ -6,7 +6,7 @@
 //! (JSON, CRI, Raw) via composition.
 
 use crate::diagnostics::ComponentStats;
-use logfwd_core::aggregator::{AggregateResult, CriReassembler};
+use logfwd_core::reassembler::{AggregateResult, CriReassembler};
 use logfwd_core::cri::{json_escape_bytes, parse_cri_line};
 use std::sync::Arc;
 

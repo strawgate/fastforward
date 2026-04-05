@@ -43,7 +43,7 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
-use logfwd_core::pipeline::{BatchTicket, Sending};
+use logfwd_types::pipeline::{BatchTicket, Sending};
 use logfwd_io::diagnostics::PipelineMetrics;
 use logfwd_output::BatchMetadata;
 use logfwd_output::sink::{SendResult, Sink, SinkFactory};

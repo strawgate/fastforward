@@ -11,8 +11,6 @@ extern crate alloc;
 
 /// CRI partial line reassembler (P/F reassembly).
 pub mod reassembler;
-/// Backward-compat re-export so downstream `logfwd_core::aggregator::*` still compiles.
-pub use reassembler as aggregator;
 /// Proven byte search (alternative to memchr for Kani).
 pub mod byte_search;
 /// Pure state machine for checkpoint-remainder coordination (Kani-proven).
@@ -25,10 +23,6 @@ pub mod framer;
 pub mod json_scanner;
 /// OTLP protobuf encoding helpers and parsers.
 pub mod otlp;
-/// Pipeline state machine — typestate batch lifecycle + ordered offset tracking.
-///
-/// Re-exported from [`logfwd_types::pipeline`] for backward compatibility.
-pub use logfwd_types::pipeline;
 /// Per-crate error types.
 pub mod error;
 /// Scanner configuration and field selection.

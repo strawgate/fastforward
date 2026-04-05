@@ -3,7 +3,7 @@
 use std::collections::VecDeque;
 use std::io;
 
-use logfwd_core::pipeline::SourceId;
+use logfwd_types::pipeline::SourceId;
 use logfwd_io::input::{InputEvent, InputSource};
 use logfwd_io::tail::ByteOffset;
 
