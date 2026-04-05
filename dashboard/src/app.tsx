@@ -392,7 +392,6 @@ export function App() {
   const uptime = stats?.uptime_sec ?? pipes?.system?.uptime_seconds ?? 0;
 
   // Stable references — series composition never changes, only data mutated in place.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: intentionally stable slice
   const pipelineSeries = useMemo(
     () =>
       seriesRef.current.filter((s) =>
@@ -400,7 +399,6 @@ export function App() {
       ),
     []
   );
-  // biome-ignore lint/correctness/useExhaustiveDependencies: intentionally stable slice
   const systemSeries = useMemo(
     () => seriesRef.current.filter((s) => ["cpu", "mem"].includes(s.id)),
     []

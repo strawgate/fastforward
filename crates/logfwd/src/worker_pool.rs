@@ -95,6 +95,8 @@ pub struct AckItem {
     pub output_ns: u64,
     /// Nanoseconds spent waiting in the pool queue before a worker picked it up.
     pub queue_wait_ns: u64,
+    /// Nanoseconds of pure `send_batch` wall time (tightest measurement around the call).
+    pub send_latency_ns: u64,
     /// Batch ID for active-batch tracking in PipelineMetrics.
     pub batch_id: u64,
 }
@@ -227,6 +229,7 @@ impl OutputWorkerPool {
                     transform_ns: item.transform_ns,
                     output_ns: 0,
                     queue_wait_ns: 0,
+                    send_latency_ns: 0,
                     batch_id: item.batch_id,
                 })
                 .is_err()
@@ -295,6 +298,7 @@ impl OutputWorkerPool {
                         transform_ns: item.transform_ns,
                         output_ns: 0,
                         queue_wait_ns: 0,
+                        send_latency_ns: 0,
                         batch_id: item.batch_id,
                     })
                     .is_err()
@@ -325,6 +329,7 @@ impl OutputWorkerPool {
                     transform_ns: item.transform_ns,
                     output_ns: 0,
                     queue_wait_ns: 0,
+                    send_latency_ns: 0,
                     batch_id: item.batch_id,
                 })
                 .is_err()
@@ -494,7 +499,7 @@ async fn worker_task(
                             cmp_bytes = tracing::field::Empty,
                             resp_bytes = tracing::field::Empty,
                         );
-                        let success = process_item(
+                        let (success, send_latency_ns) = process_item(
                             id, &mut *sink, item.batch.clone(), &item.metadata, max_retry_delay,
                         )
                         .instrument(output_span)
@@ -514,6 +519,7 @@ async fn worker_task(
                                 transform_ns,
                                 output_ns,
                                 queue_wait_ns,
+                                send_latency_ns,
                                 batch_id,
                             })
                             .is_err()
@@ -547,29 +553,33 @@ async fn recv_with_idle_timeout(
 
 /// Process one batch with retry on `RetryAfter` and server errors.
 ///
-/// Returns `true` if the batch was successfully delivered, `false` on
-/// permanent failure (rejected, timeout exceeded, or `Rejected` result).
+/// Returns `(success, send_latency_ns)` where `send_latency_ns` is
+/// cumulative wall time inside `sink.send_batch()` across all attempts
+/// (excludes backoff sleep).
 async fn process_item(
     worker_id: usize,
     sink: &mut dyn Sink,
     batch: RecordBatch,
     metadata: &BatchMetadata,
     max_retry_delay: Duration,
-) -> bool {
+) -> (bool, u64) {
     const MAX_RETRIES: u32 = 3; // 1 initial + 3 retries = 4 total attempts
     const BATCH_TIMEOUT_SECS: u64 = 60;
 
     let mut delay = Duration::from_millis(100);
     let mut attempts = 0u32;
+    let mut send_latency_ns: u64 = 0;
 
     loop {
         // Hard per-batch timeout: prevents one slow/broken batch from
         // tying up the worker indefinitely.
+        let send_start = std::time::Instant::now();
         let result = tokio::time::timeout(
             Duration::from_secs(BATCH_TIMEOUT_SECS),
             sink.send_batch(&batch, metadata),
         )
         .await;
+        send_latency_ns += send_start.elapsed().as_nanos() as u64;
 
         match result {
             Err(_elapsed) => {
@@ -578,15 +588,15 @@ async fn process_item(
                     timeout_secs = BATCH_TIMEOUT_SECS,
                     "worker_pool: batch send timed out"
                 );
-                return false;
+                return (false, send_latency_ns);
             }
             Ok(Ok(SendResult::Ok)) => {
                 tracing::Span::current().record("retries", attempts);
-                return true;
+                return (true, send_latency_ns);
             }
             Ok(Ok(SendResult::Rejected(reason))) => {
                 tracing::warn!(worker_id, %reason, "worker_pool: batch rejected");
-                return false;
+                return (false, send_latency_ns);
             }
             Ok(Ok(SendResult::RetryAfter(retry_dur))) => {
                 if attempts >= MAX_RETRIES {
@@ -595,7 +605,7 @@ async fn process_item(
                         max_retries = MAX_RETRIES,
                         "worker_pool: RetryAfter exceeded max retries"
                     );
-                    return false;
+                    return (false, send_latency_ns);
                 }
                 let sleep_for = retry_dur.min(max_retry_delay);
                 tracing::warn!(worker_id, ?sleep_for, "worker_pool: rate-limited, retrying");
@@ -605,7 +615,7 @@ async fn process_item(
                 attempts += 1;
             }
             // Future SendResult variants (#[non_exhaustive]) — treat as failure.
-            Ok(Ok(_)) => return false,
+            Ok(Ok(_)) => return (false, send_latency_ns),
             Ok(Err(e)) => {
                 if attempts >= MAX_RETRIES {
                     tracing::error!(
@@ -614,7 +624,7 @@ async fn process_item(
                         error = %e,
                         "worker_pool: gave up after retries"
                     );
-                    return false;
+                    return (false, send_latency_ns);
                 }
                 tracing::warn!(
                     worker_id,

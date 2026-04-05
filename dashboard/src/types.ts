@@ -16,13 +16,32 @@ export interface TransformData {
   filter_drop_rate: number;
 }
 
+export interface BatchesData {
+  total: number;
+  avg_rows: number;
+  flush_by_size: number;
+  flush_by_timeout: number;
+  dropped_batches_total: number;
+  scan_errors_total: number;
+  last_batch_time_ns: number;
+  batch_latency_avg_ns?: number;
+  inflight?: number;
+  rows_total?: number;
+}
+
 export interface PipelineData {
   name: string;
   inputs: ComponentData[];
   transform: TransformData;
   outputs: ComponentData[];
-  batches?: number;
-  stage_seconds?: { scan: number; transform: number; output: number };
+  batches?: BatchesData;
+  stage_seconds?: {
+    scan: number;
+    transform: number;
+    output: number;
+    queue_wait?: number;
+    send?: number;
+  };
   backpressure_stalls?: number;
 }
 

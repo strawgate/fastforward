@@ -965,6 +965,10 @@ impl Pipeline {
         if ack.success {
             self.metrics
                 .record_batch(ack.num_rows, ack.scan_ns, ack.transform_ns, ack.output_ns);
+            self.metrics.record_queue_wait(ack.queue_wait_ns);
+            self.metrics.record_send_latency(ack.send_latency_ns);
+            self.metrics
+                .record_batch_latency(ack.submitted_at.elapsed().as_nanos() as u64);
         } else {
             self.metrics.inc_dropped_batch();
             self.metrics.output_error(self.name.as_str());
