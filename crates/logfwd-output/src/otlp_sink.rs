@@ -278,6 +278,8 @@ impl OtlpSink {
 
         // Retry with exponential backoff for transient failures.
         // 1 initial attempt + up to HTTP_MAX_RETRIES retries; delays: 100ms → 200ms → 400ms.
+        // Allocate the owned body once before the retry loop to avoid per-attempt copies.
+        let body = payload.to_vec();
         let mut delay_ms: u64 = HTTP_RETRY_INITIAL_DELAY_MS;
         let mut attempt: u32 = 0;
         loop {
@@ -290,7 +292,7 @@ impl OtlpSink {
                 req = req.header("Content-Encoding", "zstd");
             }
 
-            match req.body(payload.to_vec()).send().await {
+            match req.body(body.clone()).send().await {
                 Ok(response) => {
                     let status = response.status();
 
@@ -320,8 +322,12 @@ impl OtlpSink {
                         continue;
                     }
 
-                    // Non-retryable error.
-                    let detail = response.text().await.unwrap_or_default();
+                    // Non-retryable error — read body as bytes to avoid String allocation.
+                    let detail = response
+                        .bytes()
+                        .await
+                        .map(|b| String::from_utf8_lossy(&b).into_owned())
+                        .unwrap_or_default();
                     return Err(io::Error::other(format!(
                         "OTLP request failed with status {status}: {detail}"
                     )));
