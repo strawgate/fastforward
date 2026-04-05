@@ -648,6 +648,11 @@ impl SqlTransform {
             .await
             .map_err(|e| format!("SQL execution error: {e}"))?;
 
+        // Capture the output schema before collecting so we can build an empty
+        // batch when the WHERE clause filters out every row — without
+        // re-executing `ctx.sql()` a second time.
+        let output_schema: SchemaRef = Arc::clone(df.schema().inner());
+
         let batches = df
             .collect()
             .await
@@ -655,14 +660,7 @@ impl SqlTransform {
 
         // Concat all result batches into one.
         match batches.len() {
-            0 => {
-                let df2 = ctx
-                    .sql(sql)
-                    .await
-                    .map_err(|e| format!("SQL schema error: {e}"))?;
-                let df_schema = df2.schema();
-                Ok(RecordBatch::new_empty(Arc::clone(df_schema.inner())))
-            }
+            0 => Ok(RecordBatch::new_empty(output_schema)),
             1 => Ok(batches.into_iter().next().expect("verified len==1")),
             _ => {
                 let schema = batches[0].schema();
@@ -1708,5 +1706,21 @@ mod tests {
         transform
             .validate_plan()
             .expect("filter query should pass plan validation");
+    }
+
+    /// When a WHERE clause filters out every row, execute should return an
+    /// empty RecordBatch with the correct output schema — without calling
+    /// `ctx.sql()` a second time (the original bug).
+    #[test]
+    fn test_where_drops_all_rows_returns_correct_schema() {
+        let batch = make_test_batch(); // has levels: INFO, ERROR, DEBUG, ERROR
+        let mut transform =
+            SqlTransform::new("SELECT level, msg FROM logs WHERE level = 'FATAL'").unwrap();
+        let result = transform.execute_blocking(batch).unwrap();
+
+        assert_eq!(result.num_rows(), 0, "no rows should match");
+        assert_eq!(result.num_columns(), 2, "output should have 2 columns");
+        assert_eq!(result.schema().field(0).name(), "level");
+        assert_eq!(result.schema().field(1).name(), "msg");
     }
 }
