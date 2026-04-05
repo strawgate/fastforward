@@ -358,8 +358,10 @@ pub fn star_to_flat(star: &StarSchema) -> Result<RecordBatch, ArrowError> {
                     })?;
                 let ns = prim.value(row);
                 // Format as RFC3339 nanoseconds.
-                let secs = ns / 1_000_000_000;
-                let nanos = (ns % 1_000_000_000) as u32;
+                // Use Euclidean division so pre-epoch (negative) timestamps
+                // produce valid nanos in 0..1_000_000_000.
+                let secs = ns.div_euclid(1_000_000_000);
+                let nanos = ns.rem_euclid(1_000_000_000) as u32;
                 if let TypedColumn::Str(ref mut v) = flat_cols[col_pos].1 {
                     v[row] = Some(chrono_timestamp(secs, nanos));
                 }
