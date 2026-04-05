@@ -529,6 +529,40 @@ fn build_auth_headers(auth: Option<&AuthConfig>) -> Vec<(String, String)> {
     headers
 }
 
+fn parse_http_compression(
+    name: &str,
+    compression: Option<&str>,
+) -> Result<Compression, OutputError> {
+    match compression {
+        None => Ok(Compression::None),
+        Some("gzip") => Ok(Compression::Gzip),
+        Some(other) => Err(OutputError::Construction(format!(
+            "output '{name}': unsupported compression '{other}'"
+        ))),
+    }
+}
+
+#[allow(deprecated)]
+fn build_http_json_lines_sink(
+    name: &str,
+    cfg: &OutputConfig,
+    stats: Arc<ComponentStats>,
+) -> Result<Box<dyn OutputSink>, OutputError> {
+    let endpoint = cfg.endpoint.as_ref().ok_or_else(|| {
+        OutputError::Construction(format!("output '{name}': http requires 'endpoint'"))
+    })?;
+    let compression = parse_http_compression(name, cfg.compression.as_deref())?;
+    let auth_headers = build_auth_headers(cfg.auth.as_ref());
+
+    Ok(Box::new(JsonLinesSink::new(
+        name.to_string(),
+        endpoint.clone(),
+        auth_headers,
+        compression,
+        stats,
+    )))
+}
+
 // ---------------------------------------------------------------------------
 // Output construction (factory)
 // ---------------------------------------------------------------------------
@@ -540,7 +574,6 @@ pub fn build_output_sink(
     cfg: &OutputConfig,
     stats: Arc<ComponentStats>,
 ) -> Result<Box<dyn OutputSink>, OutputError> {
-    let _auth_headers = build_auth_headers(cfg.auth.as_ref());
     match cfg.output_type {
         OutputType::Stdout => Err(OutputError::Construction(format!(
             "output '{name}': stdout requires the async pipeline — use build_sink_factory() instead"
@@ -548,9 +581,7 @@ pub fn build_output_sink(
         OutputType::Otlp => Err(OutputError::Construction(format!(
             "output '{name}': OTLP requires the async pipeline — use build_sink_factory() instead"
         ))),
-        OutputType::Http => Err(OutputError::Construction(format!(
-            "output '{name}': http requires the async pipeline — use build_sink_factory() instead"
-        ))),
+        OutputType::Http => build_http_json_lines_sink(name, cfg, stats),
         OutputType::Null => Ok(Box::new(NullSink::new(name.to_string(), stats))),
         OutputType::Tcp => Err(OutputError::Construction(format!(
             "output '{name}': tcp requires the async pipeline — use build_sink_factory() instead"
@@ -673,6 +704,12 @@ pub fn build_sink_factory(
             .map_err(|e| {
                 OutputError::Construction(format!("output '{name}': elasticsearch factory: {e}"))
             })?;
+            Ok(Arc::new(factory))
+        }
+        OutputType::Http => {
+            let _ = auth_headers;
+            let sink = build_http_json_lines_sink(name, cfg, stats)?;
+            let factory = OnceFactory::new(name.to_string(), sink);
             Ok(Arc::new(factory))
         }
         OutputType::Loki => {
@@ -1062,8 +1099,8 @@ mod tests {
 
         use crate::Sink;
         match sink.send_batch(&batch, &meta).await {
-            Ok(_) => panic!("gzip compression should return an error"),
-            Err(err) => assert!(err.to_string().contains("gzip"), "got: {err}"),
+            SendResult::IoError(err) => assert!(err.to_string().contains("gzip"), "got {err}"),
+            _ => panic!("gzip compression should return an error"),
         }
     }
 
@@ -1300,7 +1337,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_output_sink_http_redirects_to_async() {
+    fn test_build_output_sink_http_constructs_sink() {
         let cfg = OutputConfig {
             name: Some("es".to_string()),
             output_type: OutputType::Http,
@@ -1317,19 +1354,15 @@ mod tests {
             label_columns: None,
         };
         let result = build_output_sink("es", &cfg, Arc::new(ComponentStats::new()));
-        assert!(result.is_err(), "http should redirect to async pipeline");
-        let err = result.err().unwrap();
         assert!(
-            err.to_string().contains("async pipeline"),
-            "error should mention async pipeline, got: {err}"
+            result.is_ok(),
+            "http should build a sync sink for fanout paths"
         );
     }
 
     #[test]
-    fn test_build_sink_factory_http_not_yet_in_async_pipeline() {
-        // Http async sink is not yet implemented (closed PR #1000).
-        // build_sink_factory should return an error directing callers to
-        // wait for the Http async implementation.
+    fn test_build_sink_factory_http_rejects_unsupported_compression() {
+        // Http sink rejects unsupported compression algorithms.
         let cfg = OutputConfig {
             name: Some("http-bad".to_string()),
             output_type: OutputType::Http,
@@ -1346,14 +1379,11 @@ mod tests {
             label_columns: None,
         };
         let result = build_sink_factory("http-bad", &cfg, Arc::new(ComponentStats::new()));
-        assert!(
-            result.is_err(),
-            "Http should not yet be in the async pipeline"
-        );
+        assert!(result.is_err(), "unsupported compression should fail");
         let err = result.err().unwrap();
         assert!(
-            err.to_string().contains("async pipeline"),
-            "error should mention async pipeline, got: {err}"
+            err.to_string().contains("zstd") && err.to_string().contains("unsupported compression"),
+            "error should mention the unsupported compression, got: {err}"
         );
     }
 
@@ -1436,11 +1466,8 @@ mod tests {
     }
 
     #[test]
-    fn test_build_sink_factory_http_with_bearer_auth_not_yet_supported() {
-        // Http async sink is not yet implemented (closed PR #1000).
-        // This test documents the current behavior: Http with any auth config
-        // returns an error rather than building a factory.
-        // TODO: update this test when the Http async sink is implemented.
+    fn test_build_sink_factory_http_with_bearer_auth_supported() {
+        // Http sink now supports bearer auth headers.
         use logfwd_config::AuthConfig;
         let cfg = OutputConfig {
             name: Some("auth-sink".to_string()),
@@ -1460,8 +1487,9 @@ mod tests {
             static_labels: None,
             label_columns: None,
         };
-        let result = build_sink_factory("auth-sink", &cfg, Arc::new(ComponentStats::new()));
-        assert!(result.is_err(), "Http is not yet in the async pipeline");
+        let factory = build_sink_factory("auth-sink", &cfg, Arc::new(ComponentStats::new()))
+            .expect("Http with bearer auth should succeed");
+        assert_eq!(factory.name(), "auth-sink");
     }
 
     // -----------------------------------------------------------------------

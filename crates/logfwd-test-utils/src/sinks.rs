@@ -32,8 +32,8 @@ impl Sink for DevNullSink {
         &'a mut self,
         _batch: &'a RecordBatch,
         _metadata: &'a BatchMetadata,
-    ) -> Pin<Box<dyn Future<Output = io::Result<SendResult>> + Send + 'a>> {
-        Box::pin(async { Ok(SendResult::Ok) })
+    ) -> Pin<Box<dyn Future<Output = SendResult> + Send + 'a>> {
+        Box::pin(async { SendResult::Ok })
     }
 
     fn flush(&mut self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
@@ -60,10 +60,10 @@ impl Sink for SlowSink {
         &'a mut self,
         _batch: &'a RecordBatch,
         _metadata: &'a BatchMetadata,
-    ) -> Pin<Box<dyn Future<Output = io::Result<SendResult>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = SendResult> + Send + 'a>> {
         Box::pin(async move {
             tokio::time::sleep(self.delay).await;
-            Ok(SendResult::Ok)
+            SendResult::Ok
         })
     }
 
@@ -92,10 +92,10 @@ impl Sink for FrozenSink {
         &'a mut self,
         _batch: &'a RecordBatch,
         _metadata: &'a BatchMetadata,
-    ) -> Pin<Box<dyn Future<Output = io::Result<SendResult>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = SendResult> + Send + 'a>> {
         Box::pin(async move {
             self.release.cancelled().await;
-            Ok(SendResult::Ok)
+            SendResult::Ok
         })
     }
 
@@ -135,17 +135,17 @@ impl Sink for FailingSink {
         &'a mut self,
         _batch: &'a RecordBatch,
         _metadata: &'a BatchMetadata,
-    ) -> Pin<Box<dyn Future<Output = io::Result<SendResult>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = SendResult> + Send + 'a>> {
         self.calls += 1;
         let calls = self.calls;
         let fail_count = self.fail_count;
         Box::pin(async move {
             if calls <= fail_count {
-                return Err(io::Error::other(format!(
+                return SendResult::IoError(io::Error::other(format!(
                     "simulated output failure {calls}/{fail_count}",
                 )));
             }
-            Ok(SendResult::Ok)
+            SendResult::Ok
         })
     }
 
@@ -180,10 +180,10 @@ impl Sink for CountingSink {
         &'a mut self,
         batch: &'a RecordBatch,
         _metadata: &'a BatchMetadata,
-    ) -> Pin<Box<dyn Future<Output = io::Result<SendResult>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = SendResult> + Send + 'a>> {
         self.counter
             .fetch_add(batch.num_rows() as u64, Ordering::Relaxed);
-        Box::pin(async { Ok(SendResult::Ok) })
+        Box::pin(async { SendResult::Ok })
     }
 
     fn flush(&mut self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
@@ -223,7 +223,10 @@ mod tests {
         let mut sink = DevNullSink;
         let batch = dummy_batch();
         let meta = dummy_metadata();
-        assert!(sink.send_batch(&batch, &meta).await.is_ok());
+        assert!(matches!(
+            sink.send_batch(&batch, &meta).await,
+            SendResult::Ok
+        ));
         assert!(sink.flush().await.is_ok());
         assert_eq!(sink.name(), "devnull");
     }
@@ -234,10 +237,22 @@ mod tests {
         let batch = dummy_batch();
         let meta = dummy_metadata();
 
-        assert!(sink.send_batch(&batch, &meta).await.is_err()); // call 1
-        assert!(sink.send_batch(&batch, &meta).await.is_err()); // call 2
-        assert!(sink.send_batch(&batch, &meta).await.is_ok()); // call 3 — success
-        assert!(sink.send_batch(&batch, &meta).await.is_ok()); // call 4 — success
+        assert!(matches!(
+            sink.send_batch(&batch, &meta).await,
+            SendResult::IoError(_)
+        )); // call 1
+        assert!(matches!(
+            sink.send_batch(&batch, &meta).await,
+            SendResult::IoError(_)
+        )); // call 2
+        assert!(matches!(
+            sink.send_batch(&batch, &meta).await,
+            SendResult::Ok
+        )); // call 3 — success
+        assert!(matches!(
+            sink.send_batch(&batch, &meta).await,
+            SendResult::Ok
+        )); // call 4 — success
     }
 
     #[tokio::test]
@@ -248,7 +263,10 @@ mod tests {
         let meta = dummy_metadata();
 
         let start = std::time::Instant::now();
-        assert!(sink.send_batch(&batch, &meta).await.is_ok());
+        assert!(matches!(
+            sink.send_batch(&batch, &meta).await,
+            SendResult::Ok
+        ));
         assert!(
             start.elapsed() >= delay,
             "SlowSink should sleep at least {:?}, but only {:?} elapsed",
@@ -277,7 +295,10 @@ mod tests {
         });
 
         let start = std::time::Instant::now();
-        assert!(sink.send_batch(&batch, &meta).await.is_ok());
+        assert!(matches!(
+            sink.send_batch(&batch, &meta).await,
+            SendResult::Ok
+        ));
         // Allow 20% scheduling jitter below the release delay.
         let min_expected = release_delay * 80 / 100;
         assert!(
@@ -296,8 +317,14 @@ mod tests {
         let batch = dummy_batch();
         let meta = dummy_metadata();
 
-        sink.send_batch(&batch, &meta).await.unwrap();
-        sink.send_batch(&batch, &meta).await.unwrap();
+        assert!(matches!(
+            sink.send_batch(&batch, &meta).await,
+            SendResult::Ok
+        ));
+        assert!(matches!(
+            sink.send_batch(&batch, &meta).await,
+            SendResult::Ok
+        ));
         assert_eq!(counter.load(Ordering::Relaxed), 2);
     }
 }

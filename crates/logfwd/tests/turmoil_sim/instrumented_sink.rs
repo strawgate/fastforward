@@ -133,7 +133,7 @@ impl Sink for InstrumentedSink {
         &'a mut self,
         batch: &'a RecordBatch,
         _metadata: &'a BatchMetadata,
-    ) -> Pin<Box<dyn Future<Output = io::Result<SendResult>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = SendResult> + Send + 'a>> {
         self.call_count.fetch_add(1, Ordering::Relaxed);
         let action = self.next_action();
         let rows = batch.num_rows() as u64;
@@ -143,15 +143,17 @@ impl Sink for InstrumentedSink {
             match action {
                 FailureAction::Succeed => {
                     delivered.fetch_add(rows, Ordering::Relaxed);
-                    Ok(SendResult::Ok)
+                    SendResult::Ok
                 }
-                FailureAction::RetryAfter(dur) => Ok(SendResult::RetryAfter(dur)),
-                FailureAction::IoError(kind) => Err(io::Error::new(kind, "simulated failure")),
-                FailureAction::Reject(reason) => Ok(SendResult::Rejected(reason)),
+                FailureAction::RetryAfter(dur) => SendResult::RetryAfter(dur),
+                FailureAction::IoError(kind) => {
+                    SendResult::IoError(io::Error::new(kind, "simulated failure"))
+                }
+                FailureAction::Reject(reason) => SendResult::Rejected(reason),
                 FailureAction::Delay(dur) => {
                     tokio::time::sleep(dur).await;
                     delivered.fetch_add(rows, Ordering::Relaxed);
-                    Ok(SendResult::Ok)
+                    SendResult::Ok
                 }
                 FailureAction::Panic => {
                     panic!("simulated sink panic for testing");
