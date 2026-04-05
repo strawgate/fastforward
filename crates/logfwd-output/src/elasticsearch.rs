@@ -1124,11 +1124,16 @@ mod tests {
             false,
             ElasticsearchRequestMode::Buffered,
             Arc::new(ComponentStats::default()),
-        ).expect("factory creation failed");
+        )
+        .expect("factory creation failed");
 
         let action_line = std::str::from_utf8(&factory.config.action_bytes).unwrap();
         // Should be: {"index":{"_index":"logs\"-and-\\backslashes"}}\n
-        assert!(action_line.contains(r#"_index":"logs\"-and-\\backslashes""#), "got: {}", action_line);
+        assert!(
+            action_line.contains(r#"_index":"logs\"-and-\\backslashes""#),
+            "got: {}",
+            action_line
+        );
     }
 
     #[test]
@@ -1148,7 +1153,8 @@ mod tests {
     fn test_parse_bulk_response_whitespace() {
         // Bug #1095: parser misses errors if there's whitespace
         let response = br#" { "took": 5, "errors" :  true , "items": [] } "#;
-        ElasticsearchSink::parse_bulk_response(response).expect_err("should detect errors:true with whitespace");
+        ElasticsearchSink::parse_bulk_response(response)
+            .expect_err("should detect errors:true with whitespace");
     }
 
     #[test]
@@ -1177,22 +1183,27 @@ mod tests {
             false,
             ElasticsearchRequestMode::Buffered,
             Arc::new(ComponentStats::default()),
-        ).unwrap();
+        )
+        .unwrap();
         let mut sink = factory.create_sink();
 
         // Use a row large enough to exceed 5MB default limit.
         let large_str = "A".repeat(5 * 1024 * 1024 + 1024);
         let schema = Arc::new(Schema::new(vec![Field::new("msg", DataType::Utf8, false)]));
-        let batch = RecordBatch::try_new(
-            schema,
-            vec![Arc::new(StringArray::from(vec![large_str]))],
-        ).unwrap();
+        let batch =
+            RecordBatch::try_new(schema, vec![Arc::new(StringArray::from(vec![large_str]))])
+                .unwrap();
 
         let meta = zero_metadata();
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         let result = rt.block_on(sink.send_batch(&batch, &meta)).unwrap();
         match result {
-            crate::sink::SendResult::Rejected(msg) => assert!(msg.contains("exceeds max_bulk_bytes")),
+            crate::sink::SendResult::Rejected(msg) => {
+                assert!(msg.contains("exceeds max_bulk_bytes"))
+            }
             _ => panic!("Expected Rejected, got {:?}", result),
         }
     }
