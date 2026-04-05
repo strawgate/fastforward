@@ -1,5 +1,6 @@
 #![cfg(feature = "turmoil")]
 
+mod bug_hunt;
 mod channel_input;
 mod crash_sim;
 mod instrumented_sink;

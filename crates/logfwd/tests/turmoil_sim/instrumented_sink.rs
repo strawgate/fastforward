@@ -25,6 +25,8 @@ pub enum FailureAction {
     Reject(String),
     /// Succeed after a delay (simulates slow delivery).
     Delay(Duration),
+    /// Panic during send (simulates buggy sink implementation).
+    Panic,
 }
 
 /// Sink that follows a script of actions and records all calls.
@@ -155,6 +157,9 @@ impl Sink for InstrumentedSink {
                     tokio::time::sleep(dur).await;
                     delivered.fetch_add(rows, Ordering::Relaxed);
                     Ok(SendResult::Ok)
+                }
+                FailureAction::Panic => {
+                    panic!("simulated sink panic for testing");
                 }
             }
         })

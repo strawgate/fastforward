@@ -450,6 +450,15 @@ impl Pipeline {
         self.batch_timeout = timeout;
     }
 
+    /// Override the batch target size in bytes (for testing).
+    ///
+    /// Must be called BEFORE `with_input()` since input buffers are sized
+    /// from `batch_target_bytes`.
+    #[cfg(feature = "turmoil")]
+    pub fn set_batch_target_bytes(&mut self, bytes: usize) {
+        self.batch_target_bytes = bytes;
+    }
+
     /// Create a minimal pipeline for simulation testing.
     ///
     /// Bypasses config parsing, filesystem, and OTel meter setup.
