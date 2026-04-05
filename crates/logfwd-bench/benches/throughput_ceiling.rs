@@ -1,8 +1,8 @@
 //! Throughput ceiling benchmarks: generator → scan → null.
 //!
 //! Determines the absolute maximum throughput logfwd can achieve on a single
-//! core with no I/O and no transform — pure scan → null.  This is the
-//! theoretical ceiling that all other scenarios are bounded by.
+//! core with no I/O and no transform — pure generator → scan → null.  This is
+//! the theoretical ceiling that all other scenarios are bounded by.
 //!
 //! **Dimensions varied:**
 //! - Input schema: narrow (~120 B, 5 fields), production_mixed (~250 B, variable), wide (~600 B, 20+ fields)
@@ -14,7 +14,7 @@
 //!
 //! Run with: `cargo bench -p logfwd-bench --bench throughput_ceiling`
 
-#![allow(deprecated)]
+#![allow(deprecated)] // Benchmarks use sync OutputSink; migration tracked separately.
 
 use bytes::Bytes;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
