@@ -239,10 +239,29 @@ impl SegmentFile {
 
         // Read footer (last FOOTER_SIZE bytes).
         let mut footer_buf = [0u8; FOOTER_SIZE];
-        if file.seek(SeekFrom::End(-(FOOTER_SIZE as i64))).is_err()
-            || file.read_exact(&mut footer_buf).is_err()
-        {
-            return SegmentStatus::Incomplete(path.to_path_buf());
+        match file.seek(SeekFrom::End(-(FOOTER_SIZE as i64))) {
+            Ok(_) => {}
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
+                return SegmentStatus::Incomplete(path.to_path_buf());
+            }
+            Err(e) => {
+                return SegmentStatus::Corrupt(
+                    path.to_path_buf(),
+                    format!("cannot seek to footer: {e}"),
+                );
+            }
+        }
+        match file.read_exact(&mut footer_buf) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
+                return SegmentStatus::Incomplete(path.to_path_buf());
+            }
+            Err(e) => {
+                return SegmentStatus::Corrupt(
+                    path.to_path_buf(),
+                    format!("cannot read footer: {e}"),
+                );
+            }
         }
         let footer = match SegmentFooter::from_bytes(&footer_buf) {
             Ok(f) => f,
@@ -254,8 +273,17 @@ impl SegmentFile {
 
         // Read header.
         let mut header_buf = [0u8; HEADER_SIZE];
-        if file.seek(SeekFrom::Start(0)).is_err() || file.read_exact(&mut header_buf).is_err() {
-            return SegmentStatus::Corrupt(path.to_path_buf(), "cannot read header".into());
+        if let Err(e) = file.seek(SeekFrom::Start(0)) {
+            return SegmentStatus::Corrupt(
+                path.to_path_buf(),
+                format!("cannot seek to header: {e} (kind: {:?})", e.kind()),
+            );
+        }
+        if let Err(e) = file.read_exact(&mut header_buf) {
+            return SegmentStatus::Corrupt(
+                path.to_path_buf(),
+                format!("cannot read header: {e} (kind: {:?})", e.kind()),
+            );
         }
         let header = match SegmentHeader::from_bytes(&header_buf) {
             Ok(h) => h,
@@ -274,7 +302,22 @@ impl SegmentFile {
         };
 
         // Verify sizes are consistent.
-        let expected_size = HEADER_SIZE as u64 + footer.data_size + FOOTER_SIZE as u64;
+        let expected_size = (HEADER_SIZE as u64)
+            .checked_add(footer.data_size)
+            .and_then(|n| n.checked_add(FOOTER_SIZE as u64))
+            .ok_or_else(|| {
+                SegmentStatus::Corrupt(
+                    path.to_path_buf(),
+                    format!(
+                        "footer data_size {} overflows size computation",
+                        footer.data_size
+                    ),
+                )
+            });
+        let expected_size = match expected_size {
+            Ok(n) => n,
+            Err(s) => return s,
+        };
         if file_size != expected_size {
             return SegmentStatus::Corrupt(
                 path.to_path_buf(),
@@ -283,7 +326,22 @@ impl SegmentFile {
         }
 
         // Verify checksum: hash header + IPC data + first 20 bytes of footer.
-        let bytes_to_hash = HEADER_SIZE as u64 + footer.data_size + 20;
+        let bytes_to_hash = (HEADER_SIZE as u64)
+            .checked_add(footer.data_size)
+            .and_then(|n| n.checked_add(20))
+            .ok_or_else(|| {
+                SegmentStatus::Corrupt(
+                    path.to_path_buf(),
+                    format!(
+                        "footer data_size {} overflows checksum computation",
+                        footer.data_size
+                    ),
+                )
+            });
+        let bytes_to_hash = match bytes_to_hash {
+            Ok(n) => n,
+            Err(s) => return s,
+        };
         let mut hasher = xxhash_rust::xxh32::Xxh32::new(0);
         if file.seek(SeekFrom::Start(0)).is_err() {
             return SegmentStatus::Corrupt(path.to_path_buf(), "seek failed".into());
@@ -307,10 +365,10 @@ impl SegmentFile {
                     hasher.update(&read_buf[..to_read]);
                     remaining -= to_read;
                 }
-                Err(_) => {
+                Err(err) => {
                     return SegmentStatus::Corrupt(
                         path.to_path_buf(),
-                        "read error during checksum".into(),
+                        format!("read error during checksum: {err} (kind: {:?})", err.kind()),
                     );
                 }
             }
@@ -816,7 +874,20 @@ pub fn recover_segments(
 
     // Use max of all seen IDs (not just valid), so we never collide with
     // a corrupt file that failed to delete.
-    let next_segment_id = if max_seen_id > 0 { max_seen_id + 1 } else { 1 };
+    let next_segment_id = if max_seen_id > 0 {
+        max_seen_id.checked_add(1).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "segment directory {} contains maximum segment id {}; cannot allocate next segment id",
+                    segment_dir.display(),
+                    max_seen_id,
+                ),
+            )
+        })?
+    } else {
+        1
+    };
     let total_records: u64 = valid.iter().map(|s| s.footer.record_count).sum();
 
     tracing::info!(
