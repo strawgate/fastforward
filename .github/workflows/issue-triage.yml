@@ -1,0 +1,34 @@
+name: Issue Triage
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  actions: read
+  contents: read
+  discussions: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  run:
+    uses: elastic/ai-github-actions/.github/workflows/gh-aw-issue-triage.lock.yml@v0
+    secrets:
+      COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+    with:
+      additional-instructions: |
+        This is logfwd, a Rust log forwarder that tails files, parses JSON
+        and Kubernetes CRI logs with SIMD, transforms with SQL (DataFusion),
+        and ships to OTLP/Elasticsearch/Loki.
+
+        Key crates:
+        - logfwd-core: no_std proven kernel (scanner, parsers, OTLP encoding)
+        - logfwd-arrow: Arrow integration (Scanner, StreamingBuilder)
+        - logfwd-io: file tailing, TCP/UDP inputs, checkpointing
+        - logfwd-transform: DataFusion SQL transforms, UDFs
+        - logfwd-output: output sinks (OTLP, ES, Loki, TCP, stdout)
+        - logfwd: binary crate, async pipeline orchestration
+
+        Read CLAUDE.md and dev-docs/ARCHITECTURE.md for full context.
+        Check dev-docs/VERIFICATION.md for Kani/TLA+/proptest strategy.
+        Check the roadmap at issue #889 for what's in progress.
