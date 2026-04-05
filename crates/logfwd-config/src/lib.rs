@@ -87,9 +87,10 @@ impl fmt::Display for InputType {
 /// Uses a custom `Deserialize` impl so that `type: null` in YAML (which
 /// the YAML spec parses as the scalar null, not the string `"null"`) is
 /// accepted as the `Null` variant in both simple and list contexts.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum OutputType {
+    #[default]
     Otlp,
     Http,
     Elasticsearch,
@@ -231,7 +232,7 @@ pub struct InputConfig {
 }
 
 /// A single output destination.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct OutputConfig {
     pub name: Option<String>,
@@ -249,6 +250,14 @@ pub struct OutputConfig {
     /// Optional authentication for HTTP-based outputs.
     #[serde(default)]
     pub auth: Option<AuthConfig>,
+
+    // Loki-specific configuration
+    /// Optional X-Scope-OrgID header value for multi-tenant Loki.
+    pub tenant_id: Option<String>,
+    /// Static labels added to every Loki stream.
+    pub static_labels: Option<HashMap<String, String>>,
+    /// Record columns to use as Loki stream labels.
+    pub label_columns: Option<Vec<String>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -812,6 +821,23 @@ impl Config {
                     return Err(ConfigError::Validation(format!(
                         "pipeline '{name}' output '{label}': 'protocol' is only supported for otlp outputs"
                     )));
+                }
+                if output.output_type != OutputType::Loki {
+                    if output.tenant_id.is_some() {
+                        return Err(ConfigError::Validation(format!(
+                            "pipeline '{name}' output '{label}': 'tenant_id' is only supported for loki outputs"
+                        )));
+                    }
+                    if output.static_labels.is_some() {
+                        return Err(ConfigError::Validation(format!(
+                            "pipeline '{name}' output '{label}': 'static_labels' is only supported for loki outputs"
+                        )));
+                    }
+                    if output.label_columns.is_some() {
+                        return Err(ConfigError::Validation(format!(
+                            "pipeline '{name}' output '{label}': 'label_columns' is only supported for loki outputs"
+                        )));
+                    }
                 }
                 if !matches!(output.output_type, OutputType::File | OutputType::Parquet)
                     && output.path.is_some()
@@ -2442,5 +2468,80 @@ output:
         let cfg = Config::load_str(yaml).expect("format: text should be accepted");
         let pipe = &cfg.pipelines["default"];
         assert_eq!(pipe.inputs[0].format, Some(Format::Text));
+    }
+
+    // -----------------------------------------------------------------------
+    // Loki-only field rejection for non-Loki outputs
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn non_loki_output_rejects_tenant_id() {
+        let yaml = r#"
+pipelines:
+  test:
+    inputs:
+      - type: file
+        path: /tmp/test.log
+    outputs:
+      - type: stdout
+        tenant_id: my-tenant
+"#;
+        let err = Config::load_str(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("tenant_id"),
+            "expected tenant_id rejection: {err}"
+        );
+        assert!(
+            err.to_string().contains("only supported for loki"),
+            "expected loki-only message: {err}"
+        );
+    }
+
+    #[test]
+    fn non_loki_output_rejects_static_labels() {
+        let yaml = r#"
+pipelines:
+  test:
+    inputs:
+      - type: file
+        path: /tmp/test.log
+    outputs:
+      - type: stdout
+        static_labels:
+          env: prod
+"#;
+        let err = Config::load_str(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("static_labels"),
+            "expected static_labels rejection: {err}"
+        );
+        assert!(
+            err.to_string().contains("only supported for loki"),
+            "expected loki-only message: {err}"
+        );
+    }
+
+    #[test]
+    fn non_loki_output_rejects_label_columns() {
+        let yaml = r#"
+pipelines:
+  test:
+    inputs:
+      - type: file
+        path: /tmp/test.log
+    outputs:
+      - type: stdout
+        label_columns:
+          - container_name
+"#;
+        let err = Config::load_str(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("label_columns"),
+            "expected label_columns rejection: {err}"
+        );
+        assert!(
+            err.to_string().contains("only supported for loki"),
+            "expected loki-only message: {err}"
+        );
     }
 }
