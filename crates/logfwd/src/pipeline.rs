@@ -958,7 +958,17 @@ impl Pipeline {
         }
         // Flush to disk at most once per checkpoint_flush_interval to amortize fsync cost.
         // Advance the timer even on failure to prevent retry flooding.
-        if any_advanced && self.last_checkpoint_flush.elapsed() >= self.checkpoint_flush_interval {
+        //
+        // Under the turmoil feature, always flush when advanced — simulated time
+        // makes std::time::Instant::elapsed() return ~0, so the throttle would
+        // never fire. The throttle exists to amortize real fsync cost, which
+        // doesn't apply in simulation.
+        #[cfg(feature = "turmoil")]
+        let flush_due = any_advanced;
+        #[cfg(not(feature = "turmoil"))]
+        let flush_due =
+            any_advanced && self.last_checkpoint_flush.elapsed() >= self.checkpoint_flush_interval;
+        if flush_due {
             self.last_checkpoint_flush = Instant::now();
             if let Some(ref mut store) = self.checkpoint_store {
                 if let Err(e) = store.flush() {

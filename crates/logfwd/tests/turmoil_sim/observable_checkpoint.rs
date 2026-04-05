@@ -1,71 +1,68 @@
-//! Checkpoint store that records full update history for invariant verification.
+//! Checkpoint store with Arc-shared state for post-test invariant verification.
+//!
+//! The store is moved into the Pipeline, but its inner state is Arc-shared,
+//! so tests can inspect checkpoint history and durable offsets AFTER the
+//! simulation completes.
 
 use std::collections::BTreeMap;
 use std::io;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use logfwd_io::checkpoint::{CheckpointStore, SourceCheckpoint};
 
 /// Entry in the checkpoint update history.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct CheckpointEvent {
     pub source_id: u64,
     pub offset: u64,
-    pub flush_number: u64,
 }
 
-/// A `CheckpointStore` that records full update history and can simulate crashes.
-///
-/// Maintains two tiers of state:
-/// - **durable**: survives crashes (like data already fsync'd to disk)
-/// - **pending**: lost on crash (like data written but not fsync'd)
-///
-/// All `update()` calls are recorded in `update_history` for post-test
-/// invariant verification (monotonicity, upper bounds, etc.).
-pub struct ObservableCheckpointStore {
-    durable: BTreeMap<u64, SourceCheckpoint>,
-    pending: BTreeMap<u64, SourceCheckpoint>,
-    crash_armed: Arc<AtomicBool>,
-    flush_count: u64,
-    /// Full history of all update() calls, in order.
+/// Shared inner state — survives the store being moved into the Pipeline.
+#[derive(Default)]
+pub struct CheckpointState {
+    pub durable: BTreeMap<u64, SourceCheckpoint>,
     pub update_history: Vec<CheckpointEvent>,
+    pub flush_count: u64,
+    pub crash_count: u64,
 }
 
-#[allow(dead_code)]
-impl ObservableCheckpointStore {
-    pub fn new() -> Self {
-        Self {
-            durable: BTreeMap::new(),
-            pending: BTreeMap::new(),
-            crash_armed: Arc::new(AtomicBool::new(false)),
-            flush_count: 0,
-            update_history: Vec::new(),
-        }
-    }
+/// Handle for inspecting and asserting on checkpoint state from outside
+/// the Pipeline (after the ObservableCheckpointStore has been moved in).
+#[derive(Clone)]
+pub struct CheckpointHandle {
+    state: Arc<Mutex<CheckpointState>>,
+    crash_armed: Arc<AtomicBool>,
+}
 
-    /// Get a handle to arm crashes from outside (e.g., from a test closure).
-    pub fn crash_handle(&self) -> Arc<AtomicBool> {
-        self.crash_armed.clone()
-    }
-
-    /// Get the durable checkpoint offset for a source (what survives a crash).
+impl CheckpointHandle {
+    /// Get the durable checkpoint offset for a source.
     pub fn durable_offset(&self, source_id: u64) -> Option<u64> {
-        self.durable.get(&source_id).map(|c| c.offset)
+        let s = self.state.lock().unwrap();
+        s.durable.get(&source_id).map(|c| c.offset)
     }
 
     /// Number of successful flushes.
     pub fn flush_count(&self) -> u64 {
-        self.flush_count
+        self.state.lock().unwrap().flush_count
     }
 
-    /// Verify that offsets for a given source never decrease in the update history.
-    ///
-    /// Panics with a descriptive message if a regression is found.
+    /// Number of crash-simulated flushes.
+    pub fn crash_count(&self) -> u64 {
+        self.state.lock().unwrap().crash_count
+    }
+
+    /// Arm a crash — next flush() will fail and lose pending data.
+    pub fn arm_crash(&self) {
+        self.crash_armed.store(true, Ordering::SeqCst);
+    }
+
+    /// Verify that offsets for a given source never decrease in update history.
+    /// Panics with descriptive message if regression found.
     pub fn assert_monotonic(&self, source_id: u64) {
+        let s = self.state.lock().unwrap();
         let mut last_offset: Option<u64> = None;
-        for (i, event) in self.update_history.iter().enumerate() {
+        for (i, event) in s.update_history.iter().enumerate() {
             if event.source_id != source_id {
                 continue;
             }
@@ -81,9 +78,7 @@ impl ObservableCheckpointStore {
         }
     }
 
-    /// Verify that the durable checkpoint for a source never exceeds a given bound.
-    ///
-    /// Panics if the durable offset is greater than `max_offset`.
+    /// Verify durable checkpoint for source does not exceed max_offset.
     pub fn assert_checkpoint_le(&self, source_id: u64, max_offset: u64) {
         if let Some(offset) = self.durable_offset(source_id) {
             assert!(
@@ -93,41 +88,78 @@ impl ObservableCheckpointStore {
             );
         }
     }
+
+    /// Number of update events for a source.
+    pub fn update_count(&self, source_id: u64) -> usize {
+        let s = self.state.lock().unwrap();
+        s.update_history
+            .iter()
+            .filter(|e| e.source_id == source_id)
+            .count()
+    }
+}
+
+/// A `CheckpointStore` with Arc-shared inner state for post-test inspection.
+pub struct ObservableCheckpointStore {
+    state: Arc<Mutex<CheckpointState>>,
+    pending: BTreeMap<u64, SourceCheckpoint>,
+    crash_armed: Arc<AtomicBool>,
+}
+
+impl ObservableCheckpointStore {
+    pub fn new() -> (Self, CheckpointHandle) {
+        let state = Arc::new(Mutex::new(CheckpointState::default()));
+        let crash_armed = Arc::new(AtomicBool::new(false));
+        let handle = CheckpointHandle {
+            state: state.clone(),
+            crash_armed: crash_armed.clone(),
+        };
+        let store = Self {
+            state,
+            pending: BTreeMap::new(),
+            crash_armed,
+        };
+        (store, handle)
+    }
 }
 
 impl CheckpointStore for ObservableCheckpointStore {
     fn update(&mut self, checkpoint: SourceCheckpoint) {
-        self.update_history.push(CheckpointEvent {
+        let mut s = self.state.lock().unwrap();
+        s.update_history.push(CheckpointEvent {
             source_id: checkpoint.source_id,
             offset: checkpoint.offset,
-            flush_number: self.flush_count,
         });
+        drop(s);
         self.pending.insert(checkpoint.source_id, checkpoint);
     }
 
     fn flush(&mut self) -> io::Result<()> {
         if self.crash_armed.swap(false, Ordering::SeqCst) {
-            // Simulate crash: pending data is lost (not fsync'd)
             self.pending.clear();
+            let mut s = self.state.lock().unwrap();
+            s.crash_count += 1;
             return Err(io::Error::new(
                 io::ErrorKind::Other,
                 "simulated crash during checkpoint flush",
             ));
         }
-        // Normal flush: pending becomes durable
+        let mut s = self.state.lock().unwrap();
         let pending = std::mem::take(&mut self.pending);
         for (k, v) in pending {
-            self.durable.insert(k, v);
+            s.durable.insert(k, v);
         }
-        self.flush_count += 1;
+        s.flush_count += 1;
         Ok(())
     }
 
     fn load(&self, source_id: u64) -> Option<SourceCheckpoint> {
-        self.durable.get(&source_id).cloned()
+        let s = self.state.lock().unwrap();
+        s.durable.get(&source_id).cloned()
     }
 
     fn load_all(&self) -> Vec<SourceCheckpoint> {
-        self.durable.values().cloned().collect()
+        let s = self.state.lock().unwrap();
+        s.durable.values().cloned().collect()
     }
 }
