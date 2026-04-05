@@ -447,31 +447,27 @@ fn write_json_any_value_field_from_json(
     value: &serde_json::Value,
 ) -> Result<bool, InputError> {
     if let Some(i) = value.get("intValue") {
-        out.push(b'"');
-        out.extend_from_slice(key.as_bytes());
-        out.extend_from_slice(b"\":");
+        write_json_key(out, key);
         if let Some(s) = i.as_str() {
             out.extend_from_slice(s.as_bytes());
         } else if let Some(n) = i.as_i64() {
             write_i64_to_buf(out, n);
         } else {
-            out.extend_from_slice(b"0");
+            return Err(InputError::Receiver(format!(
+                "invalid OTLP JSON intValue for key {key}"
+            )));
         }
         return Ok(true);
     }
 
     if let Some(d) = value.get("doubleValue").and_then(serde_json::Value::as_f64) {
-        out.push(b'"');
-        out.extend_from_slice(key.as_bytes());
-        out.extend_from_slice(b"\":");
+        write_json_key(out, key);
         write_f64_to_buf(out, d);
         return Ok(true);
     }
 
     if let Some(b) = value.get("boolValue").and_then(serde_json::Value::as_bool) {
-        out.push(b'"');
-        out.extend_from_slice(key.as_bytes());
-        out.extend_from_slice(b"\":");
+        write_json_key(out, key);
         if b {
             out.extend_from_slice(b"true");
         } else {
@@ -605,25 +601,17 @@ fn any_value_to_string(v: &AnyValue) -> String {
 fn write_json_any_value(out: &mut Vec<u8>, key: &str, v: &AnyValue) -> bool {
     match &v.value {
         Some(Value::IntValue(i)) => {
-            out.push(b'"');
-            out.extend_from_slice(key.as_bytes());
-            out.extend_from_slice(b"\":");
-            // Write integer directly without allocating a String
+            write_json_key(out, key);
             write_i64_to_buf(out, *i);
             true
         }
         Some(Value::DoubleValue(d)) => {
-            out.push(b'"');
-            out.extend_from_slice(key.as_bytes());
-            out.extend_from_slice(b"\":");
-            // Write double directly without allocating a String
+            write_json_key(out, key);
             write_f64_to_buf(out, *d);
             true
         }
         Some(Value::BoolValue(b)) => {
-            out.push(b'"');
-            out.extend_from_slice(key.as_bytes());
-            out.extend_from_slice(b"\":");
+            write_json_key(out, key);
             out.extend_from_slice(if *b { b"true" } else { b"false" });
             true
         }
@@ -712,16 +700,29 @@ fn write_f64_to_buf(out: &mut Vec<u8>, d: f64) {
 }
 
 fn write_json_field(out: &mut Vec<u8>, key: &str, value: &str) {
-    out.push(b'"');
-    out.extend_from_slice(key.as_bytes());
-    out.extend_from_slice(b"\":");
+    write_json_key(out, key);
     out.extend_from_slice(value.as_bytes());
 }
 
 fn write_json_string_field(out: &mut Vec<u8>, key: &str, value: &str) {
+    write_json_key(out, key);
+    write_json_quoted_string(out, value);
+}
+
+const HEX_DIGITS: [u8; 16] = *b"0123456789abcdef";
+
+fn write_json_key(out: &mut Vec<u8>, key: &str) {
+    write_json_quoted_string(out, key);
+    out.push(b':');
+}
+
+fn write_json_quoted_string(out: &mut Vec<u8>, value: &str) {
     out.push(b'"');
-    out.extend_from_slice(key.as_bytes());
-    out.extend_from_slice(b"\":\"");
+    write_json_escaped_string_contents(out, value);
+    out.push(b'"');
+}
+
+fn write_json_escaped_string_contents(out: &mut Vec<u8>, value: &str) {
     // JSON escape per RFC 8259: all control chars (0x00-0x1f) must be escaped.
     for &b in value.as_bytes() {
         match b {
@@ -739,10 +740,7 @@ fn write_json_string_field(out: &mut Vec<u8>, key: &str, value: &str) {
             _ => out.push(b),
         }
     }
-    out.push(b'"');
 }
-
-const HEX_DIGITS: [u8; 16] = *b"0123456789abcdef";
 
 /// Write hex-encoded bytes directly to output buffer (zero allocation).
 fn write_hex_to_buf(out: &mut Vec<u8>, bytes: &[u8]) {
@@ -891,7 +889,7 @@ mod tests {
                 scope_logs: vec![ScopeLogs {
                     log_records: vec![
                         LogRecord {
-                            time_unix_nano: 1705314600_000_000_000,
+                            time_unix_nano: 1_705_314_600_000_000_000,
                             severity_text: "INFO".into(),
                             body: Some(AnyValue {
                                 value: Some(Value::StringValue("hello world".into())),
@@ -941,7 +939,7 @@ mod tests {
         let body = make_test_request();
         let json = decode_otlp_logs(&body).unwrap();
         let text = String::from_utf8(json).unwrap();
-        let lines: Vec<&str> = text.trim().split('\n').collect();
+        let lines: Vec<&str> = text.lines().collect();
 
         assert_eq!(lines.len(), 2);
         assert!(lines[0].contains("\"level\":\"INFO\""), "got: {}", lines[0]);
@@ -1107,6 +1105,26 @@ mod tests {
     }
 
     #[test]
+    fn invalid_json_int_value_returns_error() {
+        let result = decode_otlp_logs_json(
+            br#"{
+                "resourceLogs": [{
+                    "scopeLogs": [{
+                        "logRecords": [{
+                            "attributes": [{
+                                "key": "status",
+                                "value": {"intValue": true}
+                            }]
+                        }]
+                    }]
+                }]
+            }"#,
+        );
+
+        assert!(result.is_err(), "invalid intValue must fail");
+    }
+
+    #[test]
     fn handles_invalid_protobuf() {
         let result = decode_otlp_logs(b"not valid protobuf");
         assert!(result.is_err());
@@ -1207,6 +1225,17 @@ mod tests {
         let json_str = format!("{{{text}}}");
         serde_json::from_str::<serde_json::Value>(&json_str)
             .unwrap_or_else(|e| panic!("invalid JSON: {e}\n{json_str}"));
+    }
+
+    #[test]
+    fn json_escaping_key_chars() {
+        let mut out = Vec::new();
+        write_json_string_field(&mut out, "my\"key\\path", "value");
+        let text = String::from_utf8(out).unwrap();
+        let json_str = format!("{{{text}}}");
+        let parsed: serde_json::Value = serde_json::from_str(&json_str)
+            .unwrap_or_else(|e| panic!("invalid JSON: {e}\n{json_str}"));
+        assert_eq!(parsed["my\"key\\path"], "value");
     }
 
     /// Regression test: when the pipeline channel is full the receiver must

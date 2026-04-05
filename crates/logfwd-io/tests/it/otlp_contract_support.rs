@@ -226,7 +226,7 @@ fn normalized_json_number(value: f64) -> Option<serde_json::Number> {
     if value.fract() == 0.0
         && value.is_finite()
         && value >= i64::MIN as f64
-        && value <= i64::MAX as f64
+        && value < (i64::MAX as f64 + 1.0)
     {
         return Some((value as i64).into());
     }
