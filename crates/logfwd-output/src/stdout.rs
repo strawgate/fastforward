@@ -1,42 +1,19 @@
+use std::future::Future;
 use std::io::{self, Write};
+use std::pin::Pin;
 use std::sync::Arc;
 
 use arrow::array::{Array, AsArray};
 use arrow::datatypes::DataType;
 use arrow::record_batch::RecordBatch;
+use tokio::io::AsyncWriteExt;
 
 use logfwd_types::diagnostics::ComponentStats;
 
-#[allow(deprecated)]
+use super::sink::{SendResult, Sink, SinkFactory};
 use super::{
-    BatchMetadata, ColVariant, OutputSink, build_col_infos, get_array, is_null, str_value,
-    write_row_json,
+    BatchMetadata, ColVariant, build_col_infos, get_array, is_null, str_value, write_row_json,
 };
-
-// ---------------------------------------------------------------------------
-// ByteCounter — write wrapper that tallies bytes written
-// ---------------------------------------------------------------------------
-
-/// Wraps any [`Write`] and counts every byte that passes through.
-///
-/// Used by [`StdoutSink`] to report `output_bytes` without changing the
-/// public `write_batch_to` signature.
-struct ByteCounter<W> {
-    inner: W,
-    written: u64,
-}
-
-impl<W: Write> Write for ByteCounter<W> {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let n = self.inner.write(buf)?;
-        self.written += n as u64;
-        Ok(n)
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        self.inner.flush()
-    }
-}
 
 // ---------------------------------------------------------------------------
 // StdoutSink
@@ -52,6 +29,8 @@ pub enum StdoutFormat {
 }
 
 /// Writes log records to stdout, one per line.
+///
+/// Implements the async [`Sink`] trait using `tokio::io::stdout()`.
 pub struct StdoutSink {
     name: String,
     format: StdoutFormat,
@@ -128,6 +107,22 @@ impl StdoutSink {
             }
         }
         Ok(())
+    }
+
+    /// Serialize a batch into `self.buf`, returning the number of bytes written.
+    ///
+    /// This avoids writing row-by-row to the async writer; instead the whole
+    /// batch is rendered into a temporary buffer and then flushed in a single
+    /// `write_all` to `tokio::io::Stdout`.  `self.buf` is used as scratch
+    /// space by `write_batch_to`, so a separate output buffer is needed.
+    fn serialize_batch(
+        &mut self,
+        batch: &RecordBatch,
+        metadata: &BatchMetadata,
+        output: &mut Vec<u8>,
+    ) -> io::Result<()> {
+        output.clear();
+        self.write_batch_to(batch, metadata, output)
     }
 
     fn write_console<W: Write>(&mut self, batch: &RecordBatch, dest: &mut W) -> io::Result<()> {
@@ -273,21 +268,80 @@ fn find_col(fields: &arrow::datatypes::Fields, names: &[&str]) -> Option<usize> 
     None
 }
 
-#[allow(deprecated)]
-impl OutputSink for StdoutSink {
-    fn send_batch(&mut self, batch: &RecordBatch, metadata: &BatchMetadata) -> io::Result<()> {
-        let mut counter = ByteCounter {
-            inner: io::stdout().lock(),
-            written: 0,
-        };
-        self.write_batch_to(batch, metadata, &mut counter)?;
-        self.stats.inc_lines(batch.num_rows() as u64);
-        self.stats.inc_bytes(counter.written);
-        Ok(())
+// ---------------------------------------------------------------------------
+// Async Sink implementation
+// ---------------------------------------------------------------------------
+
+impl Sink for StdoutSink {
+    fn send_batch<'a>(
+        &'a mut self,
+        batch: &'a RecordBatch,
+        metadata: &'a BatchMetadata,
+    ) -> Pin<Box<dyn Future<Output = io::Result<SendResult>> + Send + 'a>> {
+        Box::pin(async move {
+            // Serialize the entire batch into a buffer synchronously (CPU work,
+            // no I/O — fine on an async task).
+            let mut output = Vec::new();
+            self.serialize_batch(batch, metadata, &mut output)?;
+
+            let bytes_written = output.len() as u64;
+
+            // Write the pre-rendered buffer to async stdout in one shot.
+            let mut stdout = tokio::io::stdout();
+            stdout.write_all(&output).await?;
+            stdout.flush().await?;
+
+            self.stats.inc_lines(batch.num_rows() as u64);
+            self.stats.inc_bytes(bytes_written);
+            Ok(SendResult::Ok)
+        })
     }
 
-    fn flush(&mut self) -> io::Result<()> {
-        io::stdout().flush()
+    fn flush(&mut self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+        Box::pin(async { tokio::io::stdout().flush().await })
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn shutdown(&mut self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+        Box::pin(async { tokio::io::stdout().flush().await })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// StdoutSinkFactory
+// ---------------------------------------------------------------------------
+
+/// Factory that creates [`StdoutSink`] instances for the output worker pool.
+///
+/// Because stdout is a single shared resource, this factory is single-use:
+/// only one worker should write to stdout at a time.
+pub struct StdoutSinkFactory {
+    name: String,
+    format: StdoutFormat,
+    stats: Arc<ComponentStats>,
+}
+
+impl StdoutSinkFactory {
+    /// Create a new factory for stdout sinks.
+    pub fn new(name: String, format: StdoutFormat, stats: Arc<ComponentStats>) -> Self {
+        StdoutSinkFactory {
+            name,
+            format,
+            stats,
+        }
+    }
+}
+
+impl SinkFactory for StdoutSinkFactory {
+    fn create(&self) -> io::Result<Box<dyn Sink>> {
+        Ok(Box::new(StdoutSink::new(
+            self.name.clone(),
+            self.format,
+            Arc::clone(&self.stats),
+        )))
     }
 
     fn name(&self) -> &str {
