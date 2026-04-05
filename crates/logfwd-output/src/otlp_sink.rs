@@ -27,6 +27,8 @@ use super::{BatchMetadata, Compression, str_value};
 const SCOPE_NAME: &[u8] = b"logfwd";
 /// Version emitted in the OTLP `InstrumentationScope.version` field (from Cargo.toml).
 const SCOPE_VERSION: &[u8] = env!("CARGO_PKG_VERSION").as_bytes();
+/// Default retry-after delay in seconds when the server does not send a Retry-After header.
+const DEFAULT_RETRY_AFTER_SECS: u64 = 5;
 
 // ---------------------------------------------------------------------------
 // OtlpSink
@@ -300,7 +302,7 @@ impl OtlpSink {
                         .get("Retry-After")
                         .and_then(|v| v.to_str().ok())
                         .and_then(|s| s.parse::<u64>().ok())
-                        .unwrap_or(5);
+                        .unwrap_or(DEFAULT_RETRY_AFTER_SECS);
                     return Ok(super::sink::SendResult::RetryAfter(Duration::from_secs(
                         retry_after,
                     )));
@@ -326,7 +328,9 @@ impl OtlpSink {
                 }
 
                 if status.is_server_error() {
-                    return Ok(super::sink::SendResult::RetryAfter(Duration::from_secs(5)));
+                    return Ok(super::sink::SendResult::RetryAfter(Duration::from_secs(
+                        DEFAULT_RETRY_AFTER_SECS,
+                    )));
                 }
 
                 Err(io::Error::other(format!(
