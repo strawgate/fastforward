@@ -776,9 +776,8 @@ impl StreamingBuilder {
             for row in 0..num_rows {
                 let (offset, len) = self.raw_views[row];
                 // Raw views always reference the original buffer (not decoded_buf).
-                let s =
-                    std::str::from_utf8(&self.buf[offset as usize..(offset + len) as usize])
-                        .unwrap_or("");
+                let s = std::str::from_utf8(&self.buf[offset as usize..(offset + len) as usize])
+                    .unwrap_or("");
                 builder.append_value(s);
             }
             schema_fields.push(Field::new("_raw", DataType::Utf8, true));
@@ -1133,8 +1132,8 @@ mod tests {
 
         // Row 0: two append_raw calls — first should win
         b.begin_row();
-        b.append_raw(&buf[0..5]);   // "first"
-        b.append_raw(&buf[5..11]);  // "second" — duplicate, should be ignored
+        b.append_raw(&buf[0..5]); // "first"
+        b.append_raw(&buf[5..11]); // "second" — duplicate, should be ignored
         b.append_str_by_idx(idx, &buf[0..5]);
         b.end_row();
 
@@ -1156,7 +1155,11 @@ mod tests {
             .expect("_raw must be StringViewArray");
 
         // Row 0 should have "first" (first writer wins), not "second"
-        assert_eq!(raw_arr.value(0), "first", "row 0 _raw should be first writer");
+        assert_eq!(
+            raw_arr.value(0),
+            "first",
+            "row 0 _raw should be first writer"
+        );
         // Row 1 should have "third", not shifted data from row 0's second append
         assert_eq!(raw_arr.value(1), "third", "row 1 _raw should be correct");
     }
@@ -1172,8 +1175,8 @@ mod tests {
 
         // Row 0: two append_raw calls — first should win
         b.begin_row();
-        b.append_raw(&buf[0..5]);   // "first"
-        b.append_raw(&buf[5..11]);  // "second" — duplicate, should be ignored
+        b.append_raw(&buf[0..5]); // "first"
+        b.append_raw(&buf[5..11]); // "second" — duplicate, should be ignored
         b.append_str_by_idx(idx, &buf[0..5]);
         b.end_row();
 
@@ -1195,7 +1198,11 @@ mod tests {
             .expect("_raw must be StringArray in detached mode");
 
         // Row 0 should have "first" (first writer wins), not "second"
-        assert_eq!(raw_arr.value(0), "first", "row 0 _raw should be first writer");
+        assert_eq!(
+            raw_arr.value(0),
+            "first",
+            "row 0 _raw should be first writer"
+        );
         // Row 1 should have "third", not shifted data from row 0's second append
         assert_eq!(raw_arr.value(1), "third", "row 1 _raw should be correct");
     }
