@@ -150,7 +150,7 @@ impl StreamingBuilder {
             BuilderState::InRow,
             "begin_batch called while inside a row (missing end_row)"
         );
-        debug_assert!(
+        assert!(
             u32::try_from(buf.len()).is_ok(),
             "StreamingBuilder buffer too large for u32 offsets ({} bytes)",
             buf.len()
@@ -294,7 +294,9 @@ impl StreamingBuilder {
         self.decoded_buf.extend_from_slice(value);
         // Offset into the combined buffer: original buf bytes come first,
         // decoded bytes follow at buf.len() + decoded_offset.
-        let combined_offset = self.buf.len() as u32 + decoded_offset;
+        let combined_offset = (self.buf.len() as u32).checked_add(decoded_offset).expect(
+            "StreamingBuilder combined offset overflow: buf.len() + decoded_buf.len() exceeds u32::MAX",
+        );
         let fc = &mut self.fields[idx];
         fc.has_str = true;
         fc.str_views
