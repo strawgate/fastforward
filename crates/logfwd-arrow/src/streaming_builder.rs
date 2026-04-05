@@ -311,11 +311,12 @@ impl StreamingBuilder {
         if std::str::from_utf8(value).is_err() {
             return;
         }
+        // Compute both offsets before mutating decoded_buf so that a bail-out
+        // on overflow does not leave unreferenced bytes in decoded_buf.
         let Ok(decoded_offset) = u32::try_from(self.decoded_buf.len()) else {
             // decoded_buf has grown past 4 GiB; drop this field rather than panic.
             return;
         };
-        self.decoded_buf.extend_from_slice(value);
         // Offset into the combined buffer: original buf bytes come first,
         // decoded bytes follow at buf.len() + decoded_offset.
         let Some(combined_offset) = u32::try_from(self.buf.len())
@@ -325,6 +326,8 @@ impl StreamingBuilder {
             // Combined offset would overflow u32; drop this field rather than panic.
             return;
         };
+        // All checks passed — safe to extend decoded_buf.
+        self.decoded_buf.extend_from_slice(value);
         let fc = &mut self.fields[idx];
         fc.has_str = true;
         fc.str_views
