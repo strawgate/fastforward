@@ -38,10 +38,7 @@ fn generate_json_lines(n: usize) -> Vec<Vec<u8>> {
 /// Script: all calls return IoError(ConnectionRefused).
 #[test]
 fn retry_exhaustion_drops_batch_and_advances() {
-    let mut sim = turmoil::Builder::new()
-        .simulation_duration(Duration::from_secs(120))
-        .tick_duration(Duration::from_millis(1))
-        .build();
+    let mut sim = super::build_sim(120, 1);
 
     let mut script = Vec::new();
     for _ in 0..100 {
@@ -93,10 +90,7 @@ fn retry_exhaustion_drops_batch_and_advances() {
 /// should be delivered.
 #[test]
 fn shutdown_drain_with_inflight_work() {
-    let mut sim = turmoil::Builder::new()
-        .simulation_duration(Duration::from_secs(120))
-        .tick_duration(Duration::from_millis(10))
-        .build();
+    let mut sim = super::build_sim(120, 10);
 
     // 2s delay — fast enough to complete within drain window (60s default).
     let sink = InstrumentedSink::new(vec![FailureAction::Delay(Duration::from_secs(2))]);
@@ -146,10 +140,7 @@ fn shutdown_drain_with_inflight_work() {
 /// 1 worker, batches are sequential by definition.
 #[test]
 fn multi_worker_out_of_order_ack_checkpoint_ordering() {
-    let mut sim = turmoil::Builder::new()
-        .simulation_duration(Duration::from_secs(60))
-        .tick_duration(Duration::from_millis(1))
-        .build();
+    let mut sim = super::build_sim(60, 1);
 
     // Worker 1 script: first batch delays 3s (slow), then succeeds normally.
     // Worker 2 script: all batches succeed instantly (fast).
@@ -229,10 +220,11 @@ const TCP_PORT: u16 = 9000;
 /// pipeline with TurmoilTcpSink runs on "pipeline".
 #[test]
 fn real_tcp_delivery_through_turmoil_net() {
-    let mut sim = turmoil::Builder::new()
+    let mut builder = super::sim_builder();
+    builder
         .simulation_duration(Duration::from_secs(30))
-        .tick_duration(Duration::from_millis(1))
-        .build();
+        .tick_duration(Duration::from_millis(1));
+    let mut sim = builder.build();
 
     let server_handle = TcpServerHandle::new();
     let server_handle_check = server_handle.clone();
@@ -294,10 +286,11 @@ fn real_tcp_delivery_through_turmoil_net() {
 /// partition gracefully and resume delivery after repair.
 #[test]
 fn tcp_partition_causes_retry_and_recovery() {
-    let mut sim = turmoil::Builder::new()
+    let mut builder = super::sim_builder();
+    builder
         .simulation_duration(Duration::from_secs(60))
-        .tick_duration(Duration::from_millis(1))
-        .build();
+        .tick_duration(Duration::from_millis(1));
+    let mut sim = builder.build();
 
     let server_handle = TcpServerHandle::new();
     let server_handle_check = server_handle.clone();
@@ -372,10 +365,11 @@ fn tcp_partition_causes_retry_and_recovery() {
 /// connection and reconnect after the server restarts.
 #[test]
 fn tcp_server_crash_triggers_reconnect() {
-    let mut sim = turmoil::Builder::new()
+    let mut builder = super::sim_builder();
+    builder
         .simulation_duration(Duration::from_secs(60))
-        .tick_duration(Duration::from_millis(1))
-        .build();
+        .tick_duration(Duration::from_millis(1));
+    let mut sim = builder.build();
 
     let server_handle = TcpServerHandle::new();
     let server_handle_check = server_handle.clone();
@@ -470,5 +464,159 @@ fn tcp_server_crash_triggers_reconnect() {
     assert!(
         pre_crash > 0,
         "expected data delivered before crash, got 0"
+    );
+}
+
+/// Test: hold/release creates burst delivery after message buffering.
+///
+/// turmoil::hold() buffers TCP segments without dropping them (unlike
+/// partition which drops). When released, all buffered data arrives in
+/// a burst. This exercises a failure mode that partition cannot create:
+/// delayed delivery rather than failed delivery.
+///
+/// We use 500 lines and apply hold after only 50 steps, ensuring the
+/// pipeline is still actively sending when the hold takes effect.
+#[test]
+fn tcp_hold_release_burst_delivery() {
+    let mut builder = super::sim_builder();
+    builder
+        .simulation_duration(Duration::from_secs(60))
+        .tick_duration(Duration::from_millis(1))
+        .tcp_capacity(1024 * 1024); // 1 MiB buffer to hold burst data
+    let mut sim = builder.build();
+
+    let server_handle = TcpServerHandle::new();
+    let server_check = server_handle.clone();
+
+    let sh = server_handle.clone();
+    sim.host("server", move || {
+        let h = sh.clone();
+        async move { run_tcp_server(TCP_PORT, h).await }
+    });
+
+    sim.client("pipeline", async move {
+        let lines = generate_json_lines(200);
+        let input = ChannelInputSource::new("test", SourceId(1), lines);
+        let sink = TurmoilTcpSink::new("server", TCP_PORT);
+        let mut pipeline = Pipeline::for_simulation("sim", Box::new(sink));
+        pipeline.set_batch_timeout(Duration::from_millis(20));
+        let mut pipeline = pipeline.with_input("test", Box::new(input));
+
+        let shutdown = CancellationToken::new();
+        let sd = shutdown.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            sd.cancel();
+        });
+
+        pipeline.run_async(&shutdown).await.unwrap();
+        Ok(())
+    });
+
+    // Let some data flow normally — only 50 steps so the pipeline is
+    // still actively sending when we apply the hold.
+    for _ in 0..50 {
+        sim.step().unwrap();
+    }
+    let _pre_hold = server_check
+        .received_lines
+        .load(Ordering::Relaxed);
+
+    // Hold: buffer TCP segments, don't drop them.
+    sim.hold("pipeline", "server");
+
+    // Step during hold — data is buffered, not delivered.
+    for _ in 0..500 {
+        sim.step().unwrap();
+    }
+    let during_hold = server_check
+        .received_lines
+        .load(Ordering::Relaxed);
+
+    // Release: deliver all buffered data in a burst.
+    sim.release("pipeline", "server");
+
+    // Run to completion.
+    sim.run().unwrap();
+
+    let total = server_check
+        .received_lines
+        .load(Ordering::Relaxed);
+
+    // After release, total should exceed during_hold (burst delivery).
+    // If during_hold == total, the hold had no effect (all data arrived
+    // before or during hold via in-flight segments).
+    assert!(
+        total > during_hold,
+        "expected burst delivery after release, but total ({total}) == during_hold ({during_hold})"
+    );
+
+    // All 200 lines should eventually arrive (hold doesn't drop).
+    assert_eq!(
+        total, 200,
+        "expected all 200 lines delivered after hold/release, got {total}"
+    );
+}
+
+/// Test: intermittent TCP connection failures exercise retry under realistic conditions.
+///
+/// Unlike retry_exhaustion (all calls fail) or happy_path (all succeed),
+/// this test uses turmoil's fail_rate for random TCP connection breakage.
+/// In turmoil, fail_rate breaks TCP connections entirely (not individual
+/// segments), and repair_rate controls how quickly the link is restored.
+///
+/// With a low fail_rate and high repair_rate, the pipeline's retry logic
+/// should recover from most connection breaks and deliver a substantial
+/// portion of data.
+#[test]
+fn tcp_intermittent_failures_with_fail_rate() {
+    let seed = super::turmoil_seed();
+
+    let mut builder = super::sim_builder();
+    builder
+        .simulation_duration(Duration::from_secs(120))
+        .tick_duration(Duration::from_millis(1))
+        .fail_rate(0.005); // 0.5% random TCP connection breakage
+    let mut sim = builder.build();
+
+    let server_handle = TcpServerHandle::new();
+    let server_check = server_handle.clone();
+
+    let sh = server_handle.clone();
+    sim.host("server", move || {
+        let h = sh.clone();
+        async move { run_tcp_server(TCP_PORT, h).await }
+    });
+
+    sim.client("pipeline", async move {
+        let lines = generate_json_lines(50);
+        let input = ChannelInputSource::new("test", SourceId(1), lines);
+        let sink = TurmoilTcpSink::new("server", TCP_PORT);
+        let mut pipeline = Pipeline::for_simulation("sim", Box::new(sink));
+        pipeline.set_batch_timeout(Duration::from_millis(50));
+        let mut pipeline = pipeline.with_input("test", Box::new(input));
+
+        let shutdown = CancellationToken::new();
+        let sd = shutdown.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            sd.cancel();
+        });
+
+        pipeline.run_async(&shutdown).await.unwrap();
+        Ok(())
+    });
+
+    sim.run().unwrap();
+
+    // With 0.5% TCP connection breakage, the pipeline's retry logic should
+    // recover from most breaks. Some batches may exhaust retries and be
+    // dropped. We assert a minimum delivery threshold.
+    let received = server_check
+        .received_lines
+        .load(Ordering::Relaxed);
+    assert!(
+        received >= 5,
+        "expected at least 5 of 50 lines despite 0.5% fail rate (seed={seed}), got {received}"
     );
 }

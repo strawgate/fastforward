@@ -33,10 +33,7 @@ fn generate_json_lines(n: usize) -> Vec<Vec<u8>> {
 /// 4. Subsequent flushes succeed (pipeline recovers from the crash)
 #[test]
 fn crash_checkpoint_consistency() {
-    let mut sim = turmoil::Builder::new()
-        .simulation_duration(Duration::from_secs(30))
-        .tick_duration(Duration::from_millis(1))
-        .build();
+    let mut sim = super::build_sim(30, 1);
 
     let delivered = Arc::new(AtomicU64::new(0));
     let delivered_clone = delivered.clone();
@@ -123,10 +120,7 @@ fn crash_checkpoint_consistency() {
 /// 4. Source 2's checkpoint doesn't depend on Source 1's progress
 #[test]
 fn multi_source_independent_checkpoint() {
-    let mut sim = turmoil::Builder::new()
-        .simulation_duration(Duration::from_secs(30))
-        .tick_duration(Duration::from_millis(1))
-        .build();
+    let mut sim = super::build_sim(30, 1);
 
     let delivered = Arc::new(AtomicU64::new(0));
     let delivered_clone = delivered.clone();

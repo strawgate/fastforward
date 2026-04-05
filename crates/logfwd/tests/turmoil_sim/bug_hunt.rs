@@ -41,10 +41,7 @@ fn generate_json_lines(n: usize) -> Vec<Vec<u8>> {
 
 #[test]
 fn ack_starvation_under_sustained_load() {
-    let mut sim = turmoil::Builder::new()
-        .simulation_duration(Duration::from_secs(120))
-        .tick_duration(Duration::from_millis(1))
-        .build();
+    let mut sim = super::build_sim(120, 1);
 
     // 1 worker with 50ms delay per batch: slow enough that acks queue up
     // while new data keeps arriving.
@@ -126,10 +123,7 @@ fn ack_starvation_under_sustained_load() {
 
 #[test]
 fn worker_panic_does_not_block_drain() {
-    let mut sim = turmoil::Builder::new()
-        .simulation_duration(Duration::from_secs(120))
-        .tick_duration(Duration::from_millis(1))
-        .build();
+    let mut sim = super::build_sim(120, 1);
 
     // Worker script: first batch panics, subsequent batches succeed.
     let factory = Arc::new(InstrumentedSinkFactory::new(vec![vec![FailureAction::Panic]]));
@@ -194,10 +188,7 @@ fn worker_panic_does_not_block_drain() {
 
 #[test]
 fn rejected_batch_checkpoint_behavior() {
-    let mut sim = turmoil::Builder::new()
-        .simulation_duration(Duration::from_secs(120))
-        .tick_duration(Duration::from_millis(1))
-        .build();
+    let mut sim = super::build_sim(120, 1);
 
     // Script: first batch returns Reject, rest succeed.
     let factory = Arc::new(InstrumentedSinkFactory::new(vec![vec![FailureAction::Reject(
@@ -306,10 +297,7 @@ fn rejected_batch_checkpoint_behavior() {
 
 #[test]
 fn retry_after_respects_server_backoff() {
-    let mut sim = turmoil::Builder::new()
-        .simulation_duration(Duration::from_secs(120))
-        .tick_duration(Duration::from_millis(1))
-        .build();
+    let mut sim = super::build_sim(120, 1);
 
     // Script: 2 RetryAfter(1s), then succeed.
     // With 1 worker, all batches go to the same worker, and this script

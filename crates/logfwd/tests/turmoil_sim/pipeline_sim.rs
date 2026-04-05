@@ -29,10 +29,7 @@ fn generate_json_lines(n: usize) -> Vec<Vec<u8>> {
 /// drained via the shutdown path. Mutation: delete accumulator.drain() -> fails.
 #[test]
 fn graceful_shutdown_drains_buffered_data() {
-    let mut sim = turmoil::Builder::new()
-        .simulation_duration(Duration::from_secs(30))
-        .tick_duration(Duration::from_millis(10))
-        .build();
+    let mut sim = super::build_sim(30, 10);
 
     let delivered = Arc::new(AtomicU64::new(0));
     let delivered_clone = delivered.clone();
@@ -75,10 +72,7 @@ fn graceful_shutdown_drains_buffered_data() {
 /// mid-test assertion fails.
 #[test]
 fn batch_flushes_on_timeout() {
-    let mut sim = turmoil::Builder::new()
-        .simulation_duration(Duration::from_secs(30))
-        .tick_duration(Duration::from_millis(1))
-        .build();
+    let mut sim = super::build_sim(30, 1);
 
     let delivered = Arc::new(AtomicU64::new(0));
     let delivered_clone = delivered.clone();
