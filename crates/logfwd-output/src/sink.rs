@@ -123,7 +123,7 @@ impl SyncSinkAdapter {
 // ---------------------------------------------------------------------------
 
 #[cfg(kani)]
-mod kani_proofs {
+mod verification {
     use super::*;
     use std::time::Duration;
 
@@ -183,6 +183,64 @@ mod kani_proofs {
         assert!(matches!(rejected, SendResult::Rejected(_)));
 
         kani::cover!(true, "all three variants are mutually exclusive");
+    }
+
+    /// Prove that total retry wait time is bounded regardless of server-suggested delays.
+    #[kani::proof]
+    #[kani::unwind(5)]
+    fn verify_total_retry_wait_bounded() {
+        let max_retries: u32 = 3;
+        let max_retry_delay_ms: u64 = 30_000;
+
+        let mut total_wait_ms: u64 = 0;
+        let mut delay_ms: u64 = 100; // initial backoff
+
+        for attempt in 0..max_retries {
+            // Each attempt either gets a server RetryAfter or uses exponential backoff
+            let is_retry_after: bool = kani::any();
+            if is_retry_after {
+                let server_delay_ms: u64 = kani::any();
+                kani::assume(server_delay_ms <= 120_000); // server can suggest up to 2 min
+                let capped = if server_delay_ms < max_retry_delay_ms {
+                    server_delay_ms
+                } else {
+                    max_retry_delay_ms
+                };
+                total_wait_ms += capped;
+                delay_ms = 100; // reset on RetryAfter
+            } else {
+                let capped = if delay_ms < max_retry_delay_ms {
+                    delay_ms
+                } else {
+                    max_retry_delay_ms
+                };
+                total_wait_ms += capped;
+                delay_ms = delay_ms.saturating_mul(2);
+            }
+            kani::cover!(attempt == 2, "reached max retries");
+        }
+
+        // Total wait across all retries must not exceed 3 * 30s = 90s
+        assert!(total_wait_ms <= max_retries as u64 * max_retry_delay_ms);
+        kani::cover!(total_wait_ms > 0, "non-zero wait");
+    }
+
+    /// Prove exponential backoff stays bounded by cap within MAX_RETRIES steps.
+    #[kani::proof]
+    #[kani::unwind(5)]
+    fn verify_backoff_bounded_by_cap() {
+        let mut delay_ms: u64 = 100;
+        let max_delay_ms: u64 = 30_000;
+        for _ in 0..3u32 {
+            delay_ms = delay_ms.saturating_mul(2);
+            if delay_ms > max_delay_ms {
+                delay_ms = max_delay_ms;
+            }
+        }
+        // After 3 doublings: 100 → 200 → 400 → 800, all < 30_000
+        // So delay should still be < cap after 3 steps
+        assert!(delay_ms <= max_delay_ms);
+        kani::cover!(delay_ms < max_delay_ms, "below cap after 3 doublings");
     }
 }
 

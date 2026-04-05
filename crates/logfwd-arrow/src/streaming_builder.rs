@@ -1881,34 +1881,51 @@ mod tests {
 }
 
 #[cfg(kani)]
-mod kani_proofs {
+mod verification {
     use super::*;
 
-    /// Prove that the duplicate-name guard fires for a small known case:
-    /// two fields with the same name in the same batch must return an error.
+    /// Prove that `finish_batch_detached` produces a valid single-column batch
+    /// when one field is resolved and one row is appended through the real
+    /// builder API, exercising `resolve_field`, `begin_row`, `append_int_by_idx`,
+    /// `end_row`, and the `emitted_names` duplicate-name guard in
+    /// `finish_batch_detached`.
     #[kani::proof]
-    fn verify_duplicate_name_check_rejects_collision() {
-        let mut emitted_names = std::collections::HashSet::new();
-        let name = "status";
-        let first = emitted_names.insert(name.to_string());
-        let second = emitted_names.insert(name.to_string());
-        assert!(first, "first reservation must succeed");
-        assert!(!second, "second reservation of same name must fail");
+    #[kani::solver(kissat)]
+    fn verify_single_field_batch_created() {
+        let mut b = StreamingBuilder::new(false);
+        b.begin_batch(bytes::Bytes::from_static(b"test data pad"));
+        let idx = b.resolve_field(b"x");
+        b.begin_row();
+        b.append_int_by_idx(idx, b"1");
+        b.end_row();
+        let result = b.finish_batch_detached();
+        assert!(result.is_ok());
+        let batch = result.unwrap();
+        kani::cover!(batch.num_rows() == 1, "single row produced");
+        assert_eq!(batch.num_columns(), 1);
     }
 
-    /// Prove that a single-type field produces exactly num_rows entries in the
-    /// values buffer before being handed to Int64Array.
+    /// Prove that the builder's int-field array construction produces exactly
+    /// `num_rows` entries for a symbolic row count, exercising the real
+    /// `begin_row` / `append_int_by_idx` / `end_row` / `finish_batch_detached`
+    /// pipeline rather than testing `Vec::len()` on a pre-allocated vector.
     #[kani::proof]
-    fn verify_single_type_produces_num_rows_entries() {
-        let num_rows: usize = kani::any();
-        kani::assume(num_rows <= 4);
-
-        let values: Vec<i64> = vec![0i64; num_rows];
-        let valid: Vec<bool> = vec![false; num_rows];
-
-        assert_eq!(values.len(), num_rows);
-        assert_eq!(valid.len(), num_rows);
-        kani::cover!(num_rows == 0, "zero-row batch exercised");
-        kani::cover!(num_rows > 0, "non-empty batch exercised");
+    #[kani::unwind(5)]
+    #[kani::solver(kissat)]
+    fn verify_int_field_row_count_matches() {
+        let num_rows: u32 = kani::any();
+        kani::assume(num_rows <= 3);
+        let mut b = StreamingBuilder::new(false);
+        b.begin_batch(bytes::Bytes::from_static(b"pad"));
+        let idx = b.resolve_field(b"n");
+        for _ in 0..num_rows {
+            b.begin_row();
+            b.append_int_by_idx(idx, b"42");
+            b.end_row();
+        }
+        let batch = b.finish_batch_detached().unwrap();
+        assert_eq!(batch.num_rows(), num_rows as usize);
+        kani::cover!(num_rows == 0, "empty batch");
+        kani::cover!(num_rows > 0, "non-empty batch");
     }
 }
