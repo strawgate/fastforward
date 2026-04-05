@@ -279,8 +279,15 @@ impl OtlpSink {
             req = req.header(k.as_str(), v.as_str());
         }
         req = req.header("Content-Type", content_type);
-        if payload_is_compressed && self.protocol == OtlpProtocol::Http {
-            req = req.header("Content-Encoding", "zstd");
+        if payload_is_compressed {
+            match self.protocol {
+                OtlpProtocol::Http => {
+                    req = req.header("Content-Encoding", "zstd");
+                }
+                OtlpProtocol::Grpc => {
+                    req = req.header("grpc-encoding", "zstd");
+                }
+            }
         }
 
         match req.body(payload.to_vec()).send().await {
