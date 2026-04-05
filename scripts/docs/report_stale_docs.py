@@ -23,14 +23,15 @@ class FileAge:
     last_commit_iso: str
 
 
-def git_last_commit_iso(path: Path) -> str:
+def git_last_commit_iso(path: Path) -> str | None:
     result = subprocess.run(
         ["git", "log", "-1", "--format=%cI", "--", str(path)],
         check=True,
         capture_output=True,
         text=True,
     )
-    return result.stdout.strip()
+    out = result.stdout.strip()
+    return out if out else None
 
 
 def main() -> int:
@@ -44,6 +45,9 @@ def main() -> int:
             return 1
 
         iso = git_last_commit_iso(path)
+        if iso is None:
+            print(f"no git history for: {path} (shallow clone?)")
+            continue
         ts = datetime.fromisoformat(iso.replace("Z", "+00:00"))
         age_days = (now - ts).days
 
