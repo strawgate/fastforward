@@ -346,7 +346,12 @@ fn decode_batch_arrow_records(buf: &[u8]) -> Result<BatchArrowRecords, InputErro
             (2, WIRE_TYPE_LENGTH_DELIMITED) => {
                 let (len, new_pos) =
                     decode_varint(buf, pos).map_err(|e| InputError::Receiver(e.to_string()))?;
-                let end = new_pos + len as usize;
+                let len_usize = usize::try_from(len).map_err(|_| {
+                    InputError::Receiver("ArrowPayload: length too large".to_string())
+                })?;
+                let end = new_pos.checked_add(len_usize).ok_or_else(|| {
+                    InputError::Receiver("ArrowPayload: length overflow".to_string())
+                })?;
                 if end > buf.len() {
                     return Err(InputError::Receiver(
                         "ArrowPayload: length overflow".to_string(),
@@ -391,7 +396,12 @@ fn decode_arrow_payload(buf: &[u8]) -> Result<ArrowPayload, InputError> {
             (1, WIRE_TYPE_LENGTH_DELIMITED) => {
                 let (len, new_pos) =
                     decode_varint(buf, pos).map_err(|e| InputError::Receiver(e.to_string()))?;
-                pos = new_pos + len as usize;
+                let len_usize = usize::try_from(len).map_err(|_| {
+                    InputError::Receiver("ArrowPayload.schema_id: length too large".to_string())
+                })?;
+                pos = new_pos.checked_add(len_usize).ok_or_else(|| {
+                    InputError::Receiver("ArrowPayload.schema_id: length overflow".to_string())
+                })?;
                 if pos > buf.len() {
                     return Err(InputError::Receiver(
                         "ArrowPayload.schema_id: length overflow".to_string(),
@@ -409,7 +419,12 @@ fn decode_arrow_payload(buf: &[u8]) -> Result<ArrowPayload, InputError> {
             (3, WIRE_TYPE_LENGTH_DELIMITED) => {
                 let (len, new_pos) =
                     decode_varint(buf, pos).map_err(|e| InputError::Receiver(e.to_string()))?;
-                let end = new_pos + len as usize;
+                let len_usize = usize::try_from(len).map_err(|_| {
+                    InputError::Receiver("ArrowPayload.record: length too large".to_string())
+                })?;
+                let end = new_pos.checked_add(len_usize).ok_or_else(|| {
+                    InputError::Receiver("ArrowPayload.record: length overflow".to_string())
+                })?;
                 if end > buf.len() {
                     return Err(InputError::Receiver(
                         "ArrowPayload.record: length overflow".to_string(),
