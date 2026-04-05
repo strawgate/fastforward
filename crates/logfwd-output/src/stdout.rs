@@ -352,4 +352,8 @@ impl SinkFactory for StdoutSinkFactory {
     fn name(&self) -> &str {
         &self.name
     }
+
+    fn is_single_use(&self) -> bool {
+        true
+    }
 }

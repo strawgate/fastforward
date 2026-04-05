@@ -1123,6 +1123,7 @@ mod tests {
         };
         let factory = build_sink_factory("test", &cfg, Arc::new(ComponentStats::new())).unwrap();
         assert_eq!(factory.name(), "test");
+        assert!(factory.is_single_use(), "stdout factory must be single-use");
         let sink = factory.create().expect("create should succeed");
         assert_eq!(sink.name(), "test");
     }
