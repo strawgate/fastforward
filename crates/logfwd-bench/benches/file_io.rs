@@ -68,24 +68,42 @@ fn bench_framing(c: &mut Criterion) {
             },
         );
 
-        // Newline framing: read + frame
+        // Newline framing: read + frame (loop to consume all lines)
         group.bench_with_input(
             BenchmarkId::new("newline_frame", name),
             &file_path.to_path_buf(),
             |b, path| {
                 b.iter(|| {
                     let buf = std::fs::read(path).expect("read file");
-                    let output = framer.frame(&buf);
-                    std::hint::black_box(output.len());
+                    let mut total_lines = 0usize;
+                    let mut offset = 0;
+                    while offset < buf.len() {
+                        let output = framer.frame(&buf[offset..]);
+                        total_lines += output.len();
+                        if output.remainder_offset == 0 {
+                            break;
+                        }
+                        offset += output.remainder_offset;
+                    }
+                    std::hint::black_box(total_lines);
                 });
             },
         );
 
-        // In-memory framing only (no I/O cost)
+        // In-memory framing only (no I/O cost, loop to consume all lines)
         group.bench_with_input(BenchmarkId::new("frame_only", name), data, |b, data| {
             b.iter(|| {
-                let output = framer.frame(data);
-                std::hint::black_box(output.len());
+                let mut total_lines = 0usize;
+                let mut offset = 0;
+                while offset < data.len() {
+                    let output = framer.frame(&data[offset..]);
+                    total_lines += output.len();
+                    if output.remainder_offset == 0 {
+                        break;
+                    }
+                    offset += output.remainder_offset;
+                }
+                std::hint::black_box(total_lines);
             });
         });
     }

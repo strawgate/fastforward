@@ -256,7 +256,7 @@ pub fn gen_narrow(count: usize, seed: u64) -> Vec<u8> {
         let duration = rng.f64() * 500.0;
         let _ = write!(
             buf,
-            r#"{{"level":"{level}","msg":"{} {path}","path":"{path}","status":{status},"duration_ms":{duration:.1}}}"#,
+            r#"{{"level":"{level}","message":"{} {path}","path":"{path}","status":{status},"duration_ms":{duration:.1}}}"#,
             METHODS[i % METHODS.len()],
         );
         buf.push('\n');

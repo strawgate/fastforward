@@ -10,96 +10,13 @@ use std::sync::Arc;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
 use logfwd_arrow::scanner::Scanner;
+use logfwd_bench::{NullSink, generators};
 use logfwd_core::cri::{CriReassembler, ReassembleResult, parse_cri_line};
 use logfwd_core::scan_config::{FieldSpec, ScanConfig};
 use logfwd_io::compress::ChunkCompressor;
 use logfwd_io::diagnostics::ComponentStats;
-use logfwd_output::{
-    BatchMetadata, ElasticsearchRequestMode, ElasticsearchSinkFactory, OutputSink,
-};
+use logfwd_output::{ElasticsearchRequestMode, ElasticsearchSinkFactory, OutputSink};
 use logfwd_transform::SqlTransform;
-
-// ---------------------------------------------------------------------------
-// Test data generators (legacy — kept for backward compatibility;
-// new benchmarks should use logfwd_bench::generators)
-// ---------------------------------------------------------------------------
-
-/// Generate N newline-delimited JSON log lines (~250 bytes each).
-fn gen_json_lines(n: usize) -> Vec<u8> {
-    use std::fmt::Write;
-    let levels = ["INFO", "ERROR", "DEBUG", "WARN"];
-    let paths = [
-        "/api/users",
-        "/api/orders",
-        "/api/health",
-        "/api/auth/login",
-        "/api/metrics",
-    ];
-    let mut s = String::with_capacity(n * 260);
-    for i in 0..n {
-        let _ = write!(
-            s,
-            r#"{{"timestamp":"2024-01-15T10:30:{:02}.{:09}Z","level":"{}","message":"GET {} HTTP/1.1","status":{},"duration_ms":{},"request_id":"req-{:08x}","service":"api-gateway"}}"#,
-            i % 60,
-            i % 1_000_000_000,
-            levels[i % levels.len()],
-            paths[i % paths.len()],
-            [200, 200, 200, 500, 404][i % 5],
-            (i % 500) + 1,
-            i,
-        );
-        s.push('\n');
-    }
-    s.into_bytes()
-}
-
-/// Generate N CRI-formatted log lines wrapping JSON.
-fn gen_cri_lines(n: usize) -> Vec<u8> {
-    use std::fmt::Write;
-    let levels = ["INFO", "ERROR", "DEBUG", "WARN"];
-    let mut s = String::with_capacity(n * 310);
-    for i in 0..n {
-        let _ = write!(
-            s,
-            r#"2024-01-15T10:30:{:02}.{:09}Z stdout F {{"level":"{}","message":"request handled","status":{},"duration_ms":{}}}"#,
-            i % 60,
-            i % 1_000_000_000,
-            levels[i % levels.len()],
-            [200, 500, 404][i % 3],
-            (i % 500) + 1,
-        );
-        s.push('\n');
-    }
-    s.into_bytes()
-}
-
-fn make_metadata() -> BatchMetadata {
-    BatchMetadata {
-        resource_attrs: Arc::new(vec![("service.name".into(), "bench".into())]),
-        observed_time_ns: 0,
-    }
-}
-
-/// Null sink that discards all data — measures pure serialization overhead.
-struct NullSink;
-
-impl OutputSink for NullSink {
-    fn send_batch(
-        &mut self,
-        _batch: &arrow::record_batch::RecordBatch,
-        _metadata: &BatchMetadata,
-    ) -> std::io::Result<()> {
-        Ok(())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-
-    fn name(&self) -> &'static str {
-        "null"
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Scanner benchmarks
@@ -109,21 +26,23 @@ fn bench_scanner(c: &mut Criterion) {
     let mut group = c.benchmark_group("scanner");
 
     for &n in &[1_000, 10_000, 100_000] {
-        let data = gen_json_lines(n);
+        let data = generators::gen_production_mixed(n, 42);
         let bytes = data.len() as u64;
 
         group.throughput(Throughput::Bytes(bytes));
         group.bench_with_input(BenchmarkId::new("scan_all_fields", n), &data, |b, data| {
+            let data_bytes = bytes::Bytes::from(data.clone());
             let mut scanner = Scanner::new(ScanConfig::default());
             b.iter(|| {
                 scanner
-                    .scan_detached(bytes::Bytes::from(data.to_vec()))
+                    .scan_detached(data_bytes.clone())
                     .expect("bench: scan should not fail")
             });
         });
 
         // Pushdown: only extract 3 fields.
         group.bench_with_input(BenchmarkId::new("scan_3_fields", n), &data, |b, data| {
+            let data_bytes = bytes::Bytes::from(data.clone());
             let config = ScanConfig {
                 wanted_fields: vec![
                     FieldSpec {
@@ -146,7 +65,7 @@ fn bench_scanner(c: &mut Criterion) {
             let mut scanner = Scanner::new(config);
             b.iter(|| {
                 scanner
-                    .scan_detached(bytes::Bytes::from(data.to_vec()))
+                    .scan_detached(data_bytes.clone())
                     .expect("bench: scan should not fail")
             });
         });
@@ -163,7 +82,7 @@ fn bench_cri(c: &mut Criterion) {
     let mut group = c.benchmark_group("cri");
 
     for &n in &[1_000, 10_000] {
-        let data = gen_cri_lines(n);
+        let data = generators::gen_cri_k8s(n, 42);
         let bytes = data.len() as u64;
 
         // Benchmark just parsing (no reassembly allocation).
@@ -223,7 +142,7 @@ fn bench_transform(c: &mut Criterion) {
     group.sample_size(20);
 
     let n = 10_000;
-    let data = gen_json_lines(n);
+    let data = generators::gen_production_mixed(n, 42);
     let mut scanner = Scanner::new(ScanConfig::default());
     let batch = scanner
         .scan_detached(bytes::Bytes::from(data.clone()))
@@ -236,25 +155,22 @@ fn bench_transform(c: &mut Criterion) {
 
     // Filter
     group.bench_function("where_filter", |b| {
-        let mut transform =
-            SqlTransform::new("SELECT * FROM logs WHERE level_str = 'ERROR'").unwrap();
+        let mut transform = SqlTransform::new("SELECT * FROM logs WHERE level = 'ERROR'").unwrap();
         b.iter(|| transform.execute_blocking(batch.clone()).unwrap());
     });
 
     // Projection + computed column
     group.bench_function("projection_computed", |b| {
-        let mut transform = SqlTransform::new(
-            "SELECT level_str, message_str, status_int, duration_ms_int FROM logs",
-        )
-        .unwrap();
+        let mut transform =
+            SqlTransform::new("SELECT level, message, status, duration_ms FROM logs").unwrap();
         b.iter(|| transform.execute_blocking(batch.clone()).unwrap());
     });
 
     // regexp_extract
     group.bench_function("regexp_extract", |b| {
         let mut transform = SqlTransform::new(
-            "SELECT regexp_extract(message_str, '(GET|POST) (\\S+)', 1) AS method, \
-             regexp_extract(message_str, '(GET|POST) (\\S+)', 2) AS path FROM logs",
+            "SELECT regexp_extract(message, '(GET|POST) (\\S+)', 1) AS method, \
+             regexp_extract(message, '(GET|POST) (\\S+)', 2) AS path FROM logs",
         )
         .unwrap();
         b.iter(|| transform.execute_blocking(batch.clone()).unwrap());
@@ -263,7 +179,7 @@ fn bench_transform(c: &mut Criterion) {
     // grok
     group.bench_function("grok_parse", |b| {
         let mut transform = SqlTransform::new(
-            "SELECT grok(message_str, '%{WORD:method} %{URIPATH:path} %{WORD:proto}') AS parsed FROM logs",
+            "SELECT grok(message, '%{WORD:method} %{URIPATH:path} %{WORD:proto}') AS parsed FROM logs",
         )
         .unwrap();
         b.iter(|| transform.execute_blocking(batch.clone()).unwrap());
@@ -281,7 +197,7 @@ fn bench_compress(c: &mut Criterion) {
 
     // Compress JSON log data at different sizes.
     for &n in &[1_000, 10_000, 100_000] {
-        let data = gen_json_lines(n);
+        let data = generators::gen_production_mixed(n, 42);
         let bytes = data.len() as u64;
 
         group.throughput(Throughput::Bytes(bytes));
@@ -303,12 +219,12 @@ fn bench_output(c: &mut Criterion) {
     group.sample_size(20);
 
     let n = 10_000;
-    let data = gen_json_lines(n);
+    let data = generators::gen_production_mixed(n, 42);
     let mut scanner = Scanner::new(ScanConfig::default());
     let batch = scanner
         .scan_detached(bytes::Bytes::from(data.clone()))
         .expect("bench: scan should not fail");
-    let meta = make_metadata();
+    let meta = generators::make_metadata();
 
     // NullSink (measures overhead of scan + batch creation only)
     group.throughput(Throughput::Elements(n as u64));
@@ -343,18 +259,19 @@ fn bench_end_to_end(c: &mut Criterion) {
     group.sample_size(20);
 
     let n = 10_000;
-    let data = gen_json_lines(n);
-    let meta = make_metadata();
+    let data = generators::gen_production_mixed(n, 42);
+    let meta = generators::make_metadata();
 
     // Full pipeline: scan → SELECT * → capture sink
     group.throughput(Throughput::Elements(n as u64));
+    let data_bytes = bytes::Bytes::from(data.clone());
     group.bench_function("scan_passthrough_capture", |b| {
         let mut scanner = Scanner::new(ScanConfig::default());
         let mut transform = SqlTransform::new("SELECT * FROM logs").unwrap();
         let mut sink = NullSink;
         b.iter(|| {
             let batch = scanner
-                .scan_detached(bytes::Bytes::from(data.clone()))
+                .scan_detached(data_bytes.clone())
                 .expect("bench: scan should not fail");
             let result = transform.execute_blocking(batch).unwrap();
             sink.send_batch(&result, &meta).unwrap();
@@ -364,12 +281,11 @@ fn bench_end_to_end(c: &mut Criterion) {
     // Full pipeline: scan → filter → capture sink
     group.bench_function("scan_filter_capture", |b| {
         let mut scanner = Scanner::new(ScanConfig::default());
-        let mut transform =
-            SqlTransform::new("SELECT * FROM logs WHERE level_str = 'ERROR'").unwrap();
+        let mut transform = SqlTransform::new("SELECT * FROM logs WHERE level = 'ERROR'").unwrap();
         let mut sink = NullSink;
         b.iter(|| {
             let batch = scanner
-                .scan_detached(bytes::Bytes::from(data.clone()))
+                .scan_detached(data_bytes.clone())
                 .expect("bench: scan should not fail");
             let result = transform.execute_blocking(batch).unwrap();
             sink.send_batch(&result, &meta).unwrap();
@@ -380,14 +296,14 @@ fn bench_end_to_end(c: &mut Criterion) {
     group.bench_function("scan_grok_filter_capture", |b| {
         let mut scanner = Scanner::new(ScanConfig::default());
         let mut transform = SqlTransform::new(
-            "SELECT grok(message_str, '%{WORD:method} %{URIPATH:path} %{WORD:proto}') AS parsed \
-             FROM logs WHERE level_str != 'DEBUG'",
+            "SELECT grok(message, '%{WORD:method} %{URIPATH:path} %{WORD:proto}') AS parsed \
+             FROM logs WHERE level != 'DEBUG'",
         )
         .unwrap();
         let mut sink = NullSink;
         b.iter(|| {
             let batch = scanner
-                .scan_detached(bytes::Bytes::from(data.clone()))
+                .scan_detached(data_bytes.clone())
                 .expect("bench: scan should not fail");
             let result = transform.execute_blocking(batch).unwrap();
             sink.send_batch(&result, &meta).unwrap();
@@ -401,7 +317,7 @@ fn bench_end_to_end(c: &mut Criterion) {
 // Elasticsearch bulk serialization benchmark
 // ---------------------------------------------------------------------------
 
-/// Measures the throughput of `ElasticsearchSink::serialize_batch` —
+/// Measures the throughput of `ElasticsearchSink::serialize_batch` ---
 /// the hot path that converts Arrow RecordBatches into NDJSON bulk payloads
 /// ready to POST to `/_bulk`.
 ///
@@ -423,12 +339,12 @@ fn bench_elasticsearch_serialize(c: &mut Criterion) {
     .expect("factory creation failed");
 
     for &n in &[1_000usize, 10_000, 100_000] {
-        let data = gen_json_lines(n);
+        let data = generators::gen_production_mixed(n, 42);
         let mut scanner = Scanner::new(ScanConfig::default());
         let batch = scanner
             .scan_detached(bytes::Bytes::from(data.clone()))
             .expect("bench: scan should not fail");
-        let meta = make_metadata();
+        let meta = generators::make_metadata();
 
         group.throughput(Throughput::Elements(n as u64));
         group.bench_with_input(
