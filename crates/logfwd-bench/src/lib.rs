@@ -48,5 +48,5 @@ pub fn make_otlp_sink(compression: Compression) -> OtlpSink {
         vec![],
         reqwest::Client::new(),
         Arc::new(ComponentStats::default()),
-    )
+    ).expect("bench sink creation failed")
 }
