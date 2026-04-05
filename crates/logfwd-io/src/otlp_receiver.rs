@@ -32,7 +32,7 @@ pub struct OtlpReceiverInput {
     addr: std::net::SocketAddr,
     server: std::sync::Arc<tiny_http::Server>,
     /// Keep the server thread handle alive.
-    _handle: Option<std::thread::JoinHandle<()>>,
+    handle: Option<std::thread::JoinHandle<()>>,
 }
 
 impl OtlpReceiverInput {
@@ -253,7 +253,7 @@ impl OtlpReceiverInput {
             rx: Some(rx),
             addr: bound_addr,
             server,
-            _handle: Some(handle),
+            handle: Some(handle),
         })
     }
 
@@ -267,7 +267,7 @@ impl Drop for OtlpReceiverInput {
     fn drop(&mut self) {
         self.rx.take();
         self.server.unblock();
-        if let Some(handle) = self._handle.take() {
+        if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
     }

@@ -63,7 +63,7 @@ pub struct OtapReceiver {
     rx: Option<mpsc::Receiver<RecordBatch>>,
     addr: std::net::SocketAddr,
     server: std::sync::Arc<tiny_http::Server>,
-    _handle: Option<std::thread::JoinHandle<()>>,
+    handle: Option<std::thread::JoinHandle<()>>,
 }
 
 impl OtapReceiver {
@@ -247,7 +247,7 @@ impl OtapReceiver {
             rx: Some(rx),
             addr: bound_addr,
             server,
-            _handle: Some(handle),
+            handle: Some(handle),
         })
     }
 
@@ -1037,7 +1037,7 @@ impl Drop for OtapReceiver {
     fn drop(&mut self) {
         self.rx.take();
         self.server.unblock();
-        if let Some(handle) = self._handle.take() {
+        if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
     }
