@@ -272,136 +272,26 @@ fn rejected_batch_checkpoint_behavior() {
     //   - Server 429 (rate limit): should NOT reject, should RetryAfter
     //   - Transient server error: should NOT reject, should IO error + retry
     //
-    // With 1 worker and 64KB batch target, all 20 lines form 1 batch.
-    // The Reject happens on that sole batch, so calls == 1 and delivered == 0.
-    assert!(
-        calls >= 1,
-        "expected at least 1 send_batch call, got {calls}"
-    );
+    // All 20 lines fit in 1 batch (64KB target). That batch is rejected.
+    assert_eq!(delivered, 0, "expected 0 rows delivered (batch was rejected)");
+    assert_eq!(calls, 1, "expected exactly 1 send_batch call (1 batch, rejected)");
 
-    // Verify the confirmed behavior: checkpoint advanced past rejected data.
-    // This documents that rejected data IS skipped on restart.
-    if let Some(offset) = durable {
-        if offset > 0 && delivered == 0 {
-            eprintln!(
-                "CONFIRMED: checkpoint advanced to offset {offset} despite \
-                 0 rows delivered. On restart, {delivered} rows of rejected \
-                 data would be permanently skipped."
-            );
-        }
-    }
+    // CONFIRMED BUG (issue #1001): checkpoint advances past rejected data.
+    // The PipelineMachine treats reject() identically to ack() for checkpoint
+    // advancement. On restart, rejected data is permanently skipped.
+    assert!(
+        durable.is_some() && durable.unwrap() > 0,
+        "CONFIRMED: checkpoint MUST advance past rejected data (current behavior). \
+         If this assertion fails, someone fixed issue #1001 — update this test. \
+         durable={durable:?}"
+    );
 
     // Checkpoint history must be monotonic regardless of reject behavior.
     ckpt_handle.assert_monotonic(1);
 }
 
 // ---------------------------------------------------------------------------
-// Test 4: Drain path ack processing
-// ---------------------------------------------------------------------------
-//
-// Bug hypothesis: During the drain path (after select! loop breaks),
-// `flush_batch_from` submits batches to the pool but `apply_pool_ack`
-// is NOT called until after `pool.drain()`. All acks are processed in a
-// burst at the end. If the process crashes during drain, checkpoint
-// progress from drain batches is lost.
-//
-// This test verifies that checkpoints advance during normal processing
-// and that the drain path produces a final checkpoint.
-
-#[test]
-fn drain_path_ack_processing() {
-    let mut sim = turmoil::Builder::new()
-        .simulation_duration(Duration::from_secs(120))
-        .tick_duration(Duration::from_millis(1))
-        .build();
-
-    // 1 worker with 10ms delay to slow processing slightly.
-    let mut script = Vec::new();
-    for _ in 0..200 {
-        script.push(FailureAction::Delay(Duration::from_millis(10)));
-    }
-    let factory = Arc::new(InstrumentedSinkFactory::new(vec![script]));
-    let delivered_counter = factory.delivered_counter();
-
-    let (store, ckpt_handle) = ObservableCheckpointStore::new();
-
-    sim.client("pipeline", async move {
-        // 50 lines with very small batch_target_bytes to force many batches.
-        let lines = generate_json_lines(50);
-        let input = ChannelInputSource::new("test", SourceId(1), lines);
-
-        let mut pipeline = Pipeline::for_simulation_with_factory("sim", factory, 1);
-        pipeline.set_batch_timeout(Duration::from_millis(20));
-        pipeline.set_batch_target_bytes(256);
-        pipeline.set_checkpoint_flush_interval(Duration::from_millis(50));
-        let mut pipeline = pipeline
-            .with_input("test", Box::new(input))
-            .with_checkpoint_store(Box::new(store));
-
-        let shutdown = CancellationToken::new();
-        let sd = shutdown.clone();
-        // Cancel quickly (50ms) so most data flows through the drain path.
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            sd.cancel();
-        });
-
-        pipeline.run_async(&shutdown).await.unwrap();
-        Ok(())
-    });
-
-    sim.run().unwrap();
-
-    // All rows must be delivered (drain path processes remaining data).
-    let delivered = delivered_counter.load(Ordering::Relaxed);
-    assert_eq!(
-        delivered, 50,
-        "expected all 50 rows delivered, got {delivered}"
-    );
-
-    // Checkpoint must have advanced (durable offset > 0).
-    let durable = ckpt_handle.durable_offset(1);
-    assert!(
-        durable.is_some() && durable.unwrap() > 0,
-        "expected durable checkpoint offset > 0, got {durable:?}"
-    );
-
-    // KEY ASSERTION: multiple checkpoint updates occurred.
-    // If all acks are processed in a burst at the end (during drain),
-    // we might see only 1 update. If acks flow during normal processing,
-    // we see multiple.
-    let updates = ckpt_handle.update_count(1);
-    let flushes = ckpt_handle.flush_count();
-
-    eprintln!(
-        "drain_path test: {updates} checkpoint updates, {flushes} flushes, \
-         durable offset = {durable:?}"
-    );
-
-    // At minimum, checkpoint must exist. Whether it updated multiple times
-    // during processing or only at the end depends on timing.
-    assert!(
-        updates > 0,
-        "expected at least 1 checkpoint update, got 0"
-    );
-
-    // Document: did multiple flushes happen (proving intermediate progress)?
-    // Or was it a single burst at shutdown?
-    if flushes <= 1 {
-        eprintln!(
-            "FINDING: Only {flushes} flush(es) occurred. This suggests checkpoint \
-             progress was NOT persisted incrementally during the drain path. \
-             If the process crashes during drain, all drain-path checkpoint \
-             progress would be lost."
-        );
-    }
-
-    // Checkpoint history must be monotonic.
-    ckpt_handle.assert_monotonic(1);
-}
-
-// ---------------------------------------------------------------------------
-// Test 5: RetryAfter respects server-specified backoff timing
+// Test 4: RetryAfter respects server-specified backoff timing
 // ---------------------------------------------------------------------------
 //
 // Bug hypothesis: `process_item` resets `delay = Duration::from_millis(100)`

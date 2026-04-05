@@ -127,11 +127,11 @@ fn shutdown_drain_with_inflight_work() {
     sim.run().unwrap();
 
     // The drain window (60s default) is long enough for the 2s-delayed batch
-    // to complete, so data should be delivered.
+    // to complete, so all 10 rows should be delivered.
     let delivered = delivered_counter.load(Ordering::Relaxed);
-    assert!(
-        delivered > 0,
-        "expected data delivered during drain, got 0 — drain may have timed out too early"
+    assert_eq!(
+        delivered, 10,
+        "expected all 10 rows delivered during drain, got {delivered}"
     );
 }
 
@@ -355,14 +355,13 @@ fn tcp_partition_causes_retry_and_recovery() {
     // Run to completion.
     sim.run().unwrap();
 
-    // Server must have received at least the pre-partition data.
-    // Some lines may be lost during the partition, but lines sent before
-    // partition and after repair must arrive.
+    // Server must have received a substantial portion of the data.
+    // Some lines may be lost during the partition window, but data sent
+    // before partition and after repair must arrive.
     let received = server_handle_check.received_lines.load(Ordering::Relaxed);
     assert!(
-        received > 0,
-        "expected server to receive some lines, got 0 — \
-         pipeline did not deliver any data before or after the partition"
+        received >= 5,
+        "expected server to receive at least 5 of 20 lines (pre-partition + post-repair), got {received}"
     );
 }
 
@@ -391,9 +390,9 @@ fn tcp_server_crash_triggers_reconnect() {
         }
     });
 
-    // Pipeline client: sends 50 lines total — some before crash, some after.
+    // Pipeline client: sends 200 lines — enough that the crash happens mid-stream.
     sim.client("pipeline", async move {
-        let lines = generate_json_lines(50);
+        let lines = generate_json_lines(200);
         let input = ChannelInputSource::new("test", SourceId(1), lines);
 
         let sink = TurmoilTcpSink::new("server", TCP_PORT);
@@ -412,9 +411,16 @@ fn tcp_server_crash_triggers_reconnect() {
         Ok(())
     });
 
-    // Step 1: let the pipeline deliver some data.
-    for _ in 0..500 {
+    // Step until the server has received some data, then crash it.
+    // This ensures data was flowing before the crash.
+    let mut steps = 0;
+    loop {
         sim.step().unwrap();
+        steps += 1;
+        let received = server_handle_check.received_lines.load(Ordering::Relaxed);
+        if received > 0 || steps > 5000 {
+            break;
+        }
     }
 
     let pre_crash = server_handle_check.received_lines.load(Ordering::Relaxed);
@@ -443,11 +449,26 @@ fn tcp_server_crash_triggers_reconnect() {
         "expected data delivered before server crash, got 0"
     );
 
-    // After recovery, total should exceed pre-crash (pipeline reconnected
-    // and sent more data). Some data may have been lost during the crash
-    // window, which is acceptable for at-least-once semantics.
+    // FINDING: After crash+bounce, the pipeline MAY NOT deliver new data.
+    // The worker pool exhausts MAX_RETRIES=3 during the crash window
+    // (each retry fails with connection refused). When the server bounces,
+    // the worker has already given up on in-flight batches. Subsequent batches
+    // also fail if the worker is still in its retry loop during the crash.
+    //
+    // This is a real limitation: transient server downtime longer than the
+    // retry window (~1s with default backoff) causes permanent batch loss.
+    //
+    // We assert total_received >= pre_crash (data received before crash is
+    // not corrupted by the crash). Post-bounce recovery depends on whether
+    // new batches are submitted after the worker's retry loop exhausts.
     assert!(
         total_received >= pre_crash,
-        "total received ({total_received}) should be >= pre-crash ({pre_crash})"
+        "crash should not corrupt pre-crash data: total ({total_received}) < pre_crash ({pre_crash})"
+    );
+
+    // Assert pre-crash data actually existed.
+    assert!(
+        pre_crash > 0,
+        "expected data delivered before crash, got 0"
     );
 }
