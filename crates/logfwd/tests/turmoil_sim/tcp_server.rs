@@ -4,8 +4,8 @@
 //! It runs inside a `sim.host()` closure and is designed to be crashed/bounced
 //! by the turmoil framework.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use tokio::io::AsyncReadExt;
 

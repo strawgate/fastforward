@@ -9,8 +9,8 @@
 //! and server crash reconnection.
 
 use std::io;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use logfwd::pipeline::Pipeline;
@@ -204,7 +204,10 @@ fn multi_worker_out_of_order_ack_checkpoint_ordering() {
 
     // INVARIANT: checkpoint updates happened (flush throttle worked).
     let updates = ckpt_handle.update_count(1);
-    assert!(updates > 0, "expected checkpoint updates for source 1, got 0");
+    assert!(
+        updates > 0,
+        "expected checkpoint updates for source 1, got 0"
+    );
 }
 
 // ============================================================================
@@ -270,9 +273,7 @@ fn real_tcp_delivery_through_turmoil_net() {
     );
 
     // At least one connection was established.
-    let conns = server_handle_check
-        .connection_count
-        .load(Ordering::Relaxed);
+    let conns = server_handle_check.connection_count.load(Ordering::Relaxed);
     assert!(
         conns >= 1,
         "expected at least 1 TCP connection, got {conns}"
@@ -461,10 +462,7 @@ fn tcp_server_crash_triggers_reconnect() {
     );
 
     // Assert pre-crash data actually existed.
-    assert!(
-        pre_crash > 0,
-        "expected data delivered before crash, got 0"
-    );
+    assert!(pre_crash > 0, "expected data delivered before crash, got 0");
 }
 
 /// Test: hold/release creates burst delivery after message buffering.
@@ -518,9 +516,7 @@ fn tcp_hold_release_burst_delivery() {
     for _ in 0..50 {
         sim.step().unwrap();
     }
-    let _pre_hold = server_check
-        .received_lines
-        .load(Ordering::Relaxed);
+    let _pre_hold = server_check.received_lines.load(Ordering::Relaxed);
 
     // Hold: buffer TCP segments, don't drop them.
     sim.hold("pipeline", "server");
@@ -529,9 +525,7 @@ fn tcp_hold_release_burst_delivery() {
     for _ in 0..500 {
         sim.step().unwrap();
     }
-    let during_hold = server_check
-        .received_lines
-        .load(Ordering::Relaxed);
+    let during_hold = server_check.received_lines.load(Ordering::Relaxed);
 
     // Release: deliver all buffered data in a burst.
     sim.release("pipeline", "server");
@@ -539,9 +533,7 @@ fn tcp_hold_release_burst_delivery() {
     // Run to completion.
     sim.run().unwrap();
 
-    let total = server_check
-        .received_lines
-        .load(Ordering::Relaxed);
+    let total = server_check.received_lines.load(Ordering::Relaxed);
 
     // After release, total should exceed during_hold (burst delivery).
     // If during_hold == total, the hold had no effect (all data arrived
@@ -612,9 +604,7 @@ fn tcp_intermittent_failures_with_fail_rate() {
     // With 0.5% TCP connection breakage, the pipeline's retry logic should
     // recover from most breaks. Some batches may exhaust retries and be
     // dropped. We assert a minimum delivery threshold.
-    let received = server_check
-        .received_lines
-        .load(Ordering::Relaxed);
+    let received = server_check.received_lines.load(Ordering::Relaxed);
     assert!(
         received >= 5,
         "expected at least 5 of 50 lines despite 0.5% fail rate (seed={seed}), got {received}"

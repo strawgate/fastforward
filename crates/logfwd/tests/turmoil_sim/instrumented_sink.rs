@@ -112,12 +112,7 @@ impl InstrumentedSinkFactory {
 
 impl logfwd_output::SinkFactory for InstrumentedSinkFactory {
     fn create(&self) -> io::Result<Box<dyn Sink>> {
-        let script = self
-            .scripts
-            .lock()
-            .unwrap()
-            .pop()
-            .unwrap_or_default();
+        let script = self.scripts.lock().unwrap().pop().unwrap_or_default();
         let mut sink = InstrumentedSink::new(script);
         sink.delivered_rows = self.delivered_rows.clone();
         sink.call_count = self.call_count.clone();

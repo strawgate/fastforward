@@ -3,8 +3,8 @@
 //! These test the pipeline's batch accumulation, timeout flushing,
 //! and graceful shutdown drain path.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use logfwd::pipeline::Pipeline;
@@ -59,7 +59,10 @@ fn graceful_shutdown_drains_buffered_data() {
     sim.run().unwrap();
 
     let count = delivered.load(Ordering::Relaxed);
-    assert_eq!(count, 10, "expected all 10 rows drained on shutdown, got {count}");
+    assert_eq!(
+        count, 10,
+        "expected all 10 rows drained on shutdown, got {count}"
+    );
 }
 
 /// Test: batch timeout flush delivers data before shutdown.
@@ -113,5 +116,8 @@ fn batch_flushes_on_timeout() {
     sim.run().unwrap();
 
     let count = delivered.load(Ordering::Relaxed);
-    assert_eq!(count, 5, "expected timeout flush to deliver all 5 rows, got {count}");
+    assert_eq!(
+        count, 5,
+        "expected timeout flush to deliver all 5 rows, got {count}"
+    );
 }

@@ -4,8 +4,8 @@
 //! that expose real bugs document the actual (possibly wrong) behavior
 //! with comments explaining why it differs from the expected behavior.
 
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use logfwd::pipeline::Pipeline;
@@ -126,7 +126,9 @@ fn worker_panic_does_not_block_drain() {
     let mut sim = super::build_sim(120, 1);
 
     // Worker script: first batch panics, subsequent batches succeed.
-    let factory = Arc::new(InstrumentedSinkFactory::new(vec![vec![FailureAction::Panic]]));
+    let factory = Arc::new(InstrumentedSinkFactory::new(vec![vec![
+        FailureAction::Panic,
+    ]]));
     let delivered_counter = factory.delivered_counter();
 
     sim.client("pipeline", async move {
@@ -191,9 +193,9 @@ fn rejected_batch_checkpoint_behavior() {
     let mut sim = super::build_sim(120, 1);
 
     // Script: first batch returns Reject, rest succeed.
-    let factory = Arc::new(InstrumentedSinkFactory::new(vec![vec![FailureAction::Reject(
-        "test rejection".to_string(),
-    )]]));
+    let factory = Arc::new(InstrumentedSinkFactory::new(vec![vec![
+        FailureAction::Reject("test rejection".to_string()),
+    ]]));
     let delivered_counter = factory.delivered_counter();
     let call_counter = factory.call_counter();
 
@@ -229,9 +231,7 @@ fn rejected_batch_checkpoint_behavior() {
     // The first batch was rejected, so delivered < 20 (unless all lines
     // ended up in the first batch and got rejected, then delivered could be 0).
     // Subsequent batches succeed.
-    eprintln!(
-        "rejected_batch test: {delivered} rows delivered, {calls} send_batch calls"
-    );
+    eprintln!("rejected_batch test: {delivered} rows delivered, {calls} send_batch calls");
 
     // DOCUMENT: does the checkpoint advance past the rejected batch?
     // In pipeline.rs `ack_all_tickets`, reject calls `ticket.reject()` which
@@ -243,9 +243,7 @@ fn rejected_batch_checkpoint_behavior() {
     let durable = ckpt_handle.durable_offset(1);
     let updates = ckpt_handle.update_count(1);
 
-    eprintln!(
-        "rejected_batch test: durable offset = {durable:?}, checkpoint updates = {updates}"
-    );
+    eprintln!("rejected_batch test: durable offset = {durable:?}, checkpoint updates = {updates}");
 
     // CONFIRMED BUG / DESIGN DECISION: The checkpoint advances past rejected
     // (undelivered) data. With default batch_target_bytes (64KB), all 20 lines
@@ -264,8 +262,14 @@ fn rejected_batch_checkpoint_behavior() {
     //   - Transient server error: should NOT reject, should IO error + retry
     //
     // All 20 lines fit in 1 batch (64KB target). That batch is rejected.
-    assert_eq!(delivered, 0, "expected 0 rows delivered (batch was rejected)");
-    assert_eq!(calls, 1, "expected exactly 1 send_batch call (1 batch, rejected)");
+    assert_eq!(
+        delivered, 0,
+        "expected 0 rows delivered (batch was rejected)"
+    );
+    assert_eq!(
+        calls, 1,
+        "expected exactly 1 send_batch call (1 batch, rejected)"
+    );
 
     // CONFIRMED BUG (issue #1001): checkpoint advances past rejected data.
     // The PipelineMachine treats reject() identically to ack() for checkpoint
@@ -352,9 +356,7 @@ fn retry_after_respects_server_backoff() {
          got {calls}"
     );
 
-    eprintln!(
-        "retry_after test: {calls} total send_batch calls, {delivered} rows delivered"
-    );
+    eprintln!("retry_after test: {calls} total send_batch calls, {delivered} rows delivered");
 
     // DOCUMENT: The delay reset after RetryAfter (`delay = Duration::from_millis(100)`)
     // is intentional per the code comment: "Reset delay to initial - server specified

@@ -4,8 +4,8 @@
 //! using ObservableCheckpointStore with Arc-shared state for post-test
 //! invariant inspection.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use logfwd::pipeline::Pipeline;
@@ -157,13 +157,22 @@ fn multi_source_independent_checkpoint() {
 
     // 1. All 15 rows from both sources delivered.
     let count = delivered.load(Ordering::Relaxed);
-    assert_eq!(count, 15, "expected all 15 rows from 2 sources, got {count}");
+    assert_eq!(
+        count, 15,
+        "expected all 15 rows from 2 sources, got {count}"
+    );
 
     // 2. Both sources have checkpoint updates.
     let s1_updates = handle.update_count(1);
     let s2_updates = handle.update_count(2);
-    assert!(s1_updates > 0, "expected checkpoint updates for source 1, got 0");
-    assert!(s2_updates > 0, "expected checkpoint updates for source 2, got 0");
+    assert!(
+        s1_updates > 0,
+        "expected checkpoint updates for source 1, got 0"
+    );
+    assert!(
+        s2_updates > 0,
+        "expected checkpoint updates for source 2, got 0"
+    );
 
     // 3. Each source's checkpoint history is independently monotonic.
     handle.assert_monotonic(1);
