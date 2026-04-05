@@ -157,8 +157,6 @@ impl Sink for UdpSink {
 /// Factory for creating [`UdpSink`] instances.
 ///
 /// Each call to `create()` binds a fresh UDP socket on an ephemeral port.
-/// The factory is `is_single_use() = true` because each `UdpSink` holds
-/// mutable scratch buffers — sharing across workers would require locking.
 pub struct UdpSinkFactory {
     name: String,
     target: String,
@@ -191,7 +189,7 @@ impl SinkFactory for UdpSinkFactory {
     }
 
     fn is_single_use(&self) -> bool {
-        true
+        false
     }
 }
 
@@ -286,9 +284,11 @@ mod tests {
             Arc::new(ComponentStats::new()),
         );
         assert_eq!(factory.name(), "test-udp");
-        assert!(factory.is_single_use());
+        assert!(!factory.is_single_use());
 
         let sink = factory.create().expect("create should succeed");
         assert_eq!(sink.name(), "test-udp");
+
+        let _sink2 = factory.create().expect("second create should succeed");
     }
 }
