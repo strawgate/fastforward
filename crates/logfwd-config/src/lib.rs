@@ -206,6 +206,7 @@ pub enum Format {
     Raw,
     Auto,
     /// Human-readable colored console output for debugging/testing.
+    #[serde(alias = "text")]
     Console,
 }
 
@@ -658,6 +659,63 @@ impl Config {
                     InputType::Otlp | InputType::Generator | InputType::ArrowIpc => {}
                 }
 
+                // Reject fields that don't apply to this input type.
+                match input.input_type {
+                    InputType::File => {
+                        if input.listen.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'listen' is not supported for file inputs"
+                            )));
+                        }
+                    }
+                    InputType::Tcp | InputType::Udp => {
+                        if input.path.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'path' is not supported for tcp/udp inputs"
+                            )));
+                        }
+                        if input.max_open_files.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'max_open_files' is not supported for tcp/udp inputs"
+                            )));
+                        }
+                    }
+                    InputType::Otlp => {
+                        if input.path.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'path' is not supported for otlp inputs"
+                            )));
+                        }
+                        if input.max_open_files.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'max_open_files' is not supported for otlp inputs"
+                            )));
+                        }
+                    }
+                    InputType::Generator => {
+                        if input.path.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'path' is not supported for generator inputs"
+                            )));
+                        }
+                        if input.max_open_files.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'max_open_files' is not supported for generator inputs"
+                            )));
+                        }
+                        if input.listen.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'listen' is not supported for generator inputs"
+                            )));
+                        }
+                    }
+                    InputType::ArrowIpc => {
+                        return Err(ConfigError::Validation(format!(
+                            "pipeline '{name}' input '{label}': arrow_ipc input type is not yet supported"
+                        )));
+                    }
+                }
+
                 // Reject input formats that are not yet implemented.
                 if let Some(fmt @ (Format::Logfmt | Format::Syslog)) = &input.format {
                     return Err(ConfigError::Validation(format!(
@@ -757,6 +815,49 @@ impl Config {
                     OutputType::Parquet => {
                         // Parquet output not yet implemented
                     }
+                }
+
+                // Reject fields that don't apply to this output type.
+                if output.output_type != OutputType::Elasticsearch && output.index.is_some() {
+                    return Err(ConfigError::Validation(format!(
+                        "pipeline '{name}' output '{label}': 'index' is only supported for elasticsearch outputs"
+                    )));
+                }
+                if output.output_type != OutputType::Otlp && output.protocol.is_some() {
+                    return Err(ConfigError::Validation(format!(
+                        "pipeline '{name}' output '{label}': 'protocol' is only supported for otlp outputs"
+                    )));
+                }
+                if !matches!(output.output_type, OutputType::File | OutputType::Parquet)
+                    && output.path.is_some()
+                {
+                    return Err(ConfigError::Validation(format!(
+                        "pipeline '{name}' output '{label}': 'path' is only supported for file/parquet outputs"
+                    )));
+                }
+                // auth is only valid for HTTP-based outputs
+                if !matches!(
+                    output.output_type,
+                    OutputType::Otlp
+                        | OutputType::Http
+                        | OutputType::Elasticsearch
+                        | OutputType::Loki
+                        | OutputType::ArrowIpc
+                ) && output.auth.is_some()
+                {
+                    return Err(ConfigError::Validation(format!(
+                        "pipeline '{name}' output '{label}': 'auth' is only supported for HTTP-based outputs"
+                    )));
+                }
+                // compression: only valid for outputs that support it
+                if matches!(
+                    output.output_type,
+                    OutputType::Stdout | OutputType::Null | OutputType::Tcp | OutputType::Udp
+                ) && output.compression.is_some()
+                {
+                    return Err(ConfigError::Validation(format!(
+                        "pipeline '{name}' output '{label}': 'compression' is not supported for this output type"
+                    )));
                 }
             }
 
@@ -2121,5 +2222,241 @@ enrichment:
             msg.contains("pipelines"),
             "error should mention pipelines form: {msg}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Input-side field rejection
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn file_input_rejects_listen() {
+        let yaml = r#"
+pipelines:
+  test:
+    inputs:
+      - type: file
+        path: /tmp/test.log
+        listen: 127.0.0.1:9999
+    outputs:
+      - type: null
+"#;
+        let err = Config::load_str(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("listen"),
+            "expected listen rejection: {err}"
+        );
+    }
+
+    #[test]
+    fn tcp_input_rejects_path() {
+        let yaml = r#"
+pipelines:
+  test:
+    inputs:
+      - type: tcp
+        listen: 0.0.0.0:514
+        path: /tmp/test.log
+    outputs:
+      - type: null
+"#;
+        let err = Config::load_str(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("path"),
+            "expected path rejection: {err}"
+        );
+    }
+
+    #[test]
+    fn tcp_input_rejects_max_open_files() {
+        let yaml = r#"
+pipelines:
+  test:
+    inputs:
+      - type: tcp
+        listen: 0.0.0.0:514
+        max_open_files: 128
+    outputs:
+      - type: null
+"#;
+        let err = Config::load_str(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("max_open_files"),
+            "expected max_open_files rejection: {err}"
+        );
+    }
+
+    #[test]
+    fn generator_input_rejects_path() {
+        let yaml = r#"
+pipelines:
+  test:
+    inputs:
+      - type: generator
+        path: /tmp/test.log
+    outputs:
+      - type: null
+"#;
+        let err = Config::load_str(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("path"),
+            "expected path rejection: {err}"
+        );
+    }
+
+    #[test]
+    fn generator_input_rejects_listen() {
+        let yaml = r#"
+pipelines:
+  test:
+    inputs:
+      - type: generator
+        listen: 0.0.0.0:514
+    outputs:
+      - type: null
+"#;
+        let err = Config::load_str(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("listen"),
+            "expected listen rejection: {err}"
+        );
+    }
+
+    #[test]
+    fn arrow_ipc_input_rejected() {
+        let yaml = r#"
+pipelines:
+  test:
+    inputs:
+      - type: arrow_ipc
+    outputs:
+      - type: null
+"#;
+        let err = Config::load_str(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("not yet supported"),
+            "expected arrow_ipc rejection: {err}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Output-side field rejection
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn non_elasticsearch_output_rejects_index() {
+        let yaml = r#"
+pipelines:
+  test:
+    inputs:
+      - type: file
+        path: /tmp/test.log
+    outputs:
+      - type: otlp
+        endpoint: http://localhost:4317
+        index: my-index
+"#;
+        let err = Config::load_str(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("index"),
+            "expected index rejection: {err}"
+        );
+    }
+
+    #[test]
+    fn non_otlp_output_rejects_protocol() {
+        let yaml = r#"
+pipelines:
+  test:
+    inputs:
+      - type: file
+        path: /tmp/test.log
+    outputs:
+      - type: http
+        endpoint: http://localhost:9200
+        protocol: grpc
+"#;
+        let err = Config::load_str(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("protocol"),
+            "expected protocol rejection: {err}"
+        );
+    }
+
+    #[test]
+    fn stdout_output_rejects_compression() {
+        let yaml = r#"
+pipelines:
+  test:
+    inputs:
+      - type: file
+        path: /tmp/test.log
+    outputs:
+      - type: stdout
+        compression: zstd
+"#;
+        let err = Config::load_str(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("compression"),
+            "expected compression rejection: {err}"
+        );
+    }
+
+    #[test]
+    fn stdout_output_rejects_auth() {
+        let yaml = r#"
+pipelines:
+  test:
+    inputs:
+      - type: file
+        path: /tmp/test.log
+    outputs:
+      - type: stdout
+        auth:
+          bearer_token: "secret"
+"#;
+        let err = Config::load_str(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("auth"),
+            "expected auth rejection: {err}"
+        );
+    }
+
+    #[test]
+    fn stdout_output_rejects_path() {
+        let yaml = r#"
+pipelines:
+  test:
+    inputs:
+      - type: file
+        path: /tmp/test.log
+    outputs:
+      - type: stdout
+        path: /tmp/out.log
+"#;
+        let err = Config::load_str(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("path"),
+            "expected path rejection: {err}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Format: text alias for console
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn format_text_alias_accepted() {
+        let yaml = r"
+input:
+  type: file
+  path: /tmp/x.log
+  format: text
+output:
+  type: stdout
+";
+        let cfg =
+            Config::load_str(yaml).expect("format: text should be accepted as alias for console");
+        let pipe = &cfg.pipelines["default"];
+        assert_eq!(pipe.inputs[0].format, Some(Format::Console));
     }
 }
