@@ -35,6 +35,10 @@ pub struct StdoutSink {
     name: String,
     format: StdoutFormat,
     buf: Vec<u8>,
+    /// Reusable buffer for collecting the full batch output before writing to
+    /// async stdout.  Separate from `buf` which is used as row-level scratch
+    /// space inside `write_batch_to`.
+    output_buf: Vec<u8>,
     color: bool,
     stats: Arc<ComponentStats>,
 }
@@ -49,6 +53,7 @@ impl StdoutSink {
             name,
             format,
             buf: Vec::with_capacity(8192),
+            output_buf: Vec::with_capacity(8192),
             color,
             stats,
         }
@@ -109,20 +114,19 @@ impl StdoutSink {
         Ok(())
     }
 
-    /// Serialize a batch into `self.buf`, returning the number of bytes written.
+    /// Serialize a batch into `self.output_buf`.
     ///
     /// This avoids writing row-by-row to the async writer; instead the whole
-    /// batch is rendered into a temporary buffer and then flushed in a single
-    /// `write_all` to `tokio::io::Stdout`.  `self.buf` is used as scratch
-    /// space by `write_batch_to`, so a separate output buffer is needed.
-    fn serialize_batch(
-        &mut self,
-        batch: &RecordBatch,
-        metadata: &BatchMetadata,
-        output: &mut Vec<u8>,
-    ) -> io::Result<()> {
+    /// batch is rendered into the reusable output buffer and then flushed in a
+    /// single `write_all` to `tokio::io::Stdout`.  `self.buf` is used as
+    /// row-level scratch space by `write_batch_to`, so the output buffer is
+    /// temporarily taken out to avoid aliasing borrows.
+    fn serialize_batch(&mut self, batch: &RecordBatch, metadata: &BatchMetadata) -> io::Result<()> {
+        let mut output = std::mem::take(&mut self.output_buf);
         output.clear();
-        self.write_batch_to(batch, metadata, output)
+        let result = self.write_batch_to(batch, metadata, &mut output);
+        self.output_buf = output;
+        result
     }
 
     fn write_console<W: Write>(&mut self, batch: &RecordBatch, dest: &mut W) -> io::Result<()> {
@@ -279,16 +283,15 @@ impl Sink for StdoutSink {
         metadata: &'a BatchMetadata,
     ) -> Pin<Box<dyn Future<Output = io::Result<SendResult>> + Send + 'a>> {
         Box::pin(async move {
-            // Serialize the entire batch into a buffer synchronously (CPU work,
-            // no I/O — fine on an async task).
-            let mut output = Vec::new();
-            self.serialize_batch(batch, metadata, &mut output)?;
+            // Serialize the entire batch into the reusable output buffer
+            // synchronously (CPU work, no I/O — fine on an async task).
+            self.serialize_batch(batch, metadata)?;
 
-            let bytes_written = output.len() as u64;
+            let bytes_written = self.output_buf.len() as u64;
 
             // Write the pre-rendered buffer to async stdout in one shot.
             let mut stdout = tokio::io::stdout();
-            stdout.write_all(&output).await?;
+            stdout.write_all(&self.output_buf).await?;
             stdout.flush().await?;
 
             self.stats.inc_lines(batch.num_rows() as u64);
@@ -306,6 +309,8 @@ impl Sink for StdoutSink {
     }
 
     fn shutdown(&mut self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+        // Stdout has no connection or session to tear down; flushing any
+        // buffered data is the only meaningful cleanup.
         Box::pin(async { tokio::io::stdout().flush().await })
     }
 }
