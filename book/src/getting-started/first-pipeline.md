@@ -16,7 +16,7 @@ transform: |
 
 output:
   type: otlp
-  endpoint: https://otel-collector:4318
+  endpoint: https://otel-collector:4318/v1/logs
   protocol: http
   compression: zstd
 

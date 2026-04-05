@@ -216,15 +216,19 @@ transform: |
 
 ### Scraping the diagnostics endpoint with Prometheus
 
-Expose port 9090 in the pod spec and add a Prometheus scrape annotation:
+Expose port 9090 in the pod spec to make the diagnostics API reachable from
+within the cluster.
 
 ```yaml
-metadata:
-  annotations:
-    prometheus.io/scrape: "true"
-    prometheus.io/port: "9090"
-    prometheus.io/path: "/api/pipelines"
+# Note: logfwd's /metrics endpoint returns HTTP 410 Gone (intentionally disabled).
+# Use /api/pipelines for JSON diagnostics instead.
+# To integrate with Prometheus, use a custom adapter or wait for a future
+# /metrics endpoint.
 ```
+
+To scrape `/api/pipelines`, configure a Prometheus adapter (such as
+`json_exporter`) that converts the JSON response into Prometheus metrics, or
+query the endpoint directly in your monitoring stack.
 
 ---
 
