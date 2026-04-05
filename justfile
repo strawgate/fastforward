@@ -217,9 +217,19 @@ build-pgo:
     cp target/release/logfwd target/release/logfwd-pgo
     echo "PGO binary written to target/release/logfwd-pgo"
 
-# Run criterion microbenchmarks
+# Run Tier 1 criterion benchmarks (fast, ~30s — composed functions, no heavy I/O)
 bench:
-    cargo bench -p logfwd-bench
+    cargo bench -p logfwd-bench --bench pipeline --bench output_encode --bench full_chain
+
+# Run all criterion benchmarks (Tier 1 + Tier 2 — includes I/O and batch scaling, ~2-5min)
+# Excludes elasticsearch_arrow which requires a running ES instance.
+bench-full:
+    cargo bench -p logfwd-bench --bench pipeline --bench output_encode --bench full_chain --bench builder_compare --bench batch_formation --bench file_io
+
+# Run system-level benchmarks (pipeline, contention, backpressure — requires running services)
+bench-system:
+    @echo "System-level benchmarks: pipeline end-to-end with real I/O"
+    just bench-pipelines
 
 # Run competitive benchmarks (binary mode, local dev)
 bench-competitive *ARGS:

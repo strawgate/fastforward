@@ -10,9 +10,11 @@ logfwd-core = { version = "0.1.0", path = "../logfwd-core" }
 logfwd-arrow = { version = "0.1.0", path = "../logfwd-arrow" }
 logfwd-transform = { version = "0.1.0", path = "../logfwd-transform" }
 logfwd-output = { version = "0.1.0", path = "../logfwd-output" }
+logfwd-types = { version = "0.1.0", path = "../logfwd-types" }
 arrow = { workspace = true }
 bytes = "1"
 criterion = { version = "0.7", features = ["html_reports"] }
+fastrand = "2"
 memchr = "2"
 serde = { workspace = true }
 serde_json = "1"
@@ -20,6 +22,7 @@ logfwd-io = { version = "0.1.0", path = "../logfwd-io" }
 tokio = { version = "1", features = ["rt-multi-thread"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 pprof = { version = "0.14", features = ["flamegraph"] }
+tempfile = "3"
 
 [[bench]]
 name = "pipeline"
@@ -31,6 +34,22 @@ harness = false
 
 [[bench]]
 name = "builder_compare"
+harness = false
+
+[[bench]]
+name = "output_encode"
+harness = false
+
+[[bench]]
+name = "full_chain"
+harness = false
+
+[[bench]]
+name = "file_io"
+harness = false
+
+[[bench]]
+name = "batch_formation"
 harness = false
 
 [[bin]]
