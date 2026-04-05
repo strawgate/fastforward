@@ -809,9 +809,11 @@ mod tests {
     #[tokio::test]
     async fn send_payload_returns_rejected_on_4xx() {
         let mut server = mockito::Server::new_async().await;
-        let _mock = server.mock("POST", "/v1/logs")
+        let _mock = server
+            .mock("POST", "/v1/logs")
             .with_status(400)
-            .create_async().await;
+            .create_async()
+            .await;
 
         let mut sink = OtlpSink::new(
             "test".into(),
@@ -836,9 +838,11 @@ mod tests {
     async fn send_payload_returns_err_on_5xx_no_loop() {
         let mut server = mockito::Server::new_async().await;
         // Server will receive 1 request and fail. Since there's no retry loop, it should return Err.
-        let _mock = server.mock("POST", "/v1/logs")
+        let _mock = server
+            .mock("POST", "/v1/logs")
             .with_status(500)
-            .create_async().await;
+            .create_async()
+            .await;
 
         let mut sink = OtlpSink::new(
             "test".into(),
@@ -853,7 +857,10 @@ mod tests {
 
         sink.encoder_buf.push(1);
         let result = sink.send_payload(1).await;
-        assert!(result.is_err(), "Expected Err on 500 response without internal loop");
+        assert!(
+            result.is_err(),
+            "Expected Err on 500 response without internal loop"
+        );
     }
 
     #[test]

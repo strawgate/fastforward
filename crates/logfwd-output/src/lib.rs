@@ -1065,7 +1065,11 @@ mod tests {
             reqwest::Client::new(),
             Arc::new(ComponentStats::new()),
         );
-        assert!(res.is_ok(), "Zstd creation should be OK, but got: {:?}", res.err());
+        assert!(
+            res.is_ok(),
+            "Zstd creation should be OK, but got: {:?}",
+            res.err()
+        );
     }
 
     #[tokio::test]
