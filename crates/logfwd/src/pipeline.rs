@@ -3130,7 +3130,7 @@ mod format_integration_tests {
         };
         let mut scanner = Scanner::new(config);
         let batch = scanner
-            .scan_detached(bytes::Bytes::from(input.to_vec()))
+            .scan_detached(Bytes::from(input.to_vec()))
             .unwrap();
         assert_eq!(batch.num_rows(), 2);
         // Single-type string fields: bare names
@@ -3150,7 +3150,7 @@ mod format_integration_tests {
         };
         let mut scanner = Scanner::new(config);
         let batch = scanner
-            .scan_detached(bytes::Bytes::from(input.to_vec()))
+            .scan_detached(Bytes::from(input.to_vec()))
             .unwrap();
         assert_eq!(batch.num_rows(), 2);
         assert!(batch.schema().field_with_name("_raw").is_ok());
@@ -3173,7 +3173,7 @@ mod format_integration_tests {
         };
         let mut scanner = Scanner::new(config);
         let batch = scanner
-            .scan_detached(bytes::Bytes::from(out.clone()))
+            .scan_detached(Bytes::from(out.clone()))
             .unwrap();
         assert_eq!(batch.num_rows(), 1);
         // Single-type string field: bare name
@@ -3196,7 +3196,7 @@ mod format_integration_tests {
             validate_utf8: false,
         };
         let mut scanner = Scanner::new(config);
-        let batch = scanner.scan_detached(bytes::Bytes::from(out)).unwrap();
+        let batch = scanner.scan_detached(Bytes::from(out)).unwrap();
         assert_eq!(batch.num_rows(), 1);
     }
 }
@@ -3246,7 +3246,7 @@ mod proptest_pipeline {
                 validate_utf8: false,
             };
             let mut scanner_whole = Scanner::new(ScanConfig { wanted_fields: vec![], extract_all: true, keep_raw: false, validate_utf8: false });
-            let batch_whole = scanner_whole.scan_detached(bytes::Bytes::from(ndjson.clone())).unwrap();
+            let batch_whole = scanner_whole.scan_detached(Bytes::from(ndjson.clone())).unwrap();
 
             // Split into two chunks with remainder handling
             let chunk1 = &ndjson[..split_at];
@@ -3281,7 +3281,7 @@ mod proptest_pipeline {
             }
 
             let config2 = ScanConfig { wanted_fields: vec![], extract_all: true, keep_raw: false, validate_utf8: false }; let mut scanner_split = Scanner::new(config2);
-            let batch_split = scanner_split.scan_detached(bytes::Bytes::from(buf.clone())).unwrap();
+            let batch_split = scanner_split.scan_detached(Bytes::from(buf.clone())).unwrap();
 
             prop_assert_eq!(
                 batch_whole.num_rows(),
