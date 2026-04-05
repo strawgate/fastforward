@@ -885,10 +885,16 @@ mod tests {
 
         sink.encoder_buf.push(1);
         let result = sink.send_payload(1).await.unwrap();
-        match result {
-            crate::sink::SendResult::RetryAfter(_) => {} // Expected
-            _ => panic!("Expected RetryAfter on 500 response, got: {:?}", result),
-        }
+        assert!(
+            matches!(
+                result,
+                crate::sink::SendResult::RetryAfter(d)
+                    if d.as_secs() == DEFAULT_RETRY_AFTER_SECS
+            ),
+            "Expected RetryAfter({}s) on 500 response, got: {:?}",
+            DEFAULT_RETRY_AFTER_SECS,
+            result
+        );
     }
 
     #[tokio::test]
