@@ -1353,10 +1353,8 @@ mod tests {
     }
 
     #[test]
-    fn test_build_sink_factory_http_not_yet_in_async_pipeline() {
-        // Http async sink is not yet implemented (closed PR #1000).
-        // build_sink_factory should return an error directing callers to
-        // wait for the Http async implementation.
+    fn test_build_sink_factory_http_rejects_unsupported_compression() {
+        // Http sink rejects unsupported compression algorithms.
         let cfg = OutputConfig {
             name: Some("http-bad".to_string()),
             output_type: OutputType::Http,
@@ -1373,14 +1371,11 @@ mod tests {
             label_columns: None,
         };
         let result = build_sink_factory("http-bad", &cfg, Arc::new(ComponentStats::new()));
-        assert!(
-            result.is_err(),
-            "Http should not yet be in the async pipeline"
-        );
+        assert!(result.is_err(), "unsupported compression should fail");
         let err = result.err().unwrap();
         assert!(
-            err.to_string().contains("async pipeline"),
-            "error should mention async pipeline, got: {err}"
+            err.to_string().contains("zstd"),
+            "error should mention the unsupported compression, got: {err}"
         );
     }
 
@@ -1463,11 +1458,8 @@ mod tests {
     }
 
     #[test]
-    fn test_build_sink_factory_http_with_bearer_auth_not_yet_supported() {
-        // Http async sink is not yet implemented (closed PR #1000).
-        // This test documents the current behavior: Http with any auth config
-        // returns an error rather than building a factory.
-        // TODO: update this test when the Http async sink is implemented.
+    fn test_build_sink_factory_http_with_bearer_auth() {
+        // Http sink now supports bearer auth headers.
         use logfwd_config::AuthConfig;
         let cfg = OutputConfig {
             name: Some("auth-sink".to_string()),
@@ -1487,8 +1479,9 @@ mod tests {
             static_labels: None,
             label_columns: None,
         };
-        let result = build_sink_factory("auth-sink", &cfg, Arc::new(ComponentStats::new()));
-        assert!(result.is_err(), "Http is not yet in the async pipeline");
+        let factory = build_sink_factory("auth-sink", &cfg, Arc::new(ComponentStats::new()))
+            .expect("Http with bearer auth should succeed");
+        assert_eq!(factory.name(), "auth-sink");
     }
 
     // -----------------------------------------------------------------------
