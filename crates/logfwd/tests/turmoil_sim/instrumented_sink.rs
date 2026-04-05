@@ -76,6 +76,61 @@ impl InstrumentedSink {
     }
 }
 
+/// Factory that creates InstrumentedSink instances for multi-worker pool testing.
+///
+/// Each worker gets its own sink with an independent script, but all share
+/// the same delivery and call counters. The factory pops scripts from a queue;
+/// when exhausted, new workers get an always-succeed sink.
+pub struct InstrumentedSinkFactory {
+    scripts: std::sync::Mutex<Vec<Vec<FailureAction>>>,
+    delivered_rows: Arc<AtomicU64>,
+    call_count: Arc<AtomicU64>,
+}
+
+#[allow(dead_code)]
+impl InstrumentedSinkFactory {
+    pub fn new(per_worker_scripts: Vec<Vec<FailureAction>>) -> Self {
+        let delivered_rows = Arc::new(AtomicU64::new(0));
+        let call_count = Arc::new(AtomicU64::new(0));
+        Self {
+            scripts: std::sync::Mutex::new(per_worker_scripts),
+            delivered_rows,
+            call_count,
+        }
+    }
+
+    pub fn delivered_counter(&self) -> Arc<AtomicU64> {
+        self.delivered_rows.clone()
+    }
+
+    pub fn call_counter(&self) -> Arc<AtomicU64> {
+        self.call_count.clone()
+    }
+}
+
+impl logfwd_output::SinkFactory for InstrumentedSinkFactory {
+    fn create(&self) -> io::Result<Box<dyn Sink>> {
+        let script = self
+            .scripts
+            .lock()
+            .unwrap()
+            .pop()
+            .unwrap_or_default();
+        let mut sink = InstrumentedSink::new(script);
+        sink.delivered_rows = self.delivered_rows.clone();
+        sink.call_count = self.call_count.clone();
+        Ok(Box::new(sink))
+    }
+
+    fn name(&self) -> &str {
+        "instrumented-factory"
+    }
+
+    fn is_single_use(&self) -> bool {
+        false
+    }
+}
+
 impl Sink for InstrumentedSink {
     fn send_batch<'a>(
         &'a mut self,

@@ -13,7 +13,7 @@ use logfwd_core::pipeline::SourceId;
 use tokio_util::sync::CancellationToken;
 
 use super::channel_input::ChannelInputSource;
-use super::instrumented_sink::{FailureAction, InstrumentedSink};
+use super::instrumented_sink::{FailureAction, InstrumentedSink, InstrumentedSinkFactory};
 use super::observable_checkpoint::ObservableCheckpointStore;
 
 fn generate_json_lines(n: usize) -> Vec<Vec<u8>> {
@@ -191,4 +191,89 @@ fn shutdown_drain_with_inflight_work() {
     let delivered = delivered_counter.load(Ordering::Relaxed);
     // At least verify we can read the counter (pipeline didn't panic/hang).
     let _ = delivered;
+}
+
+/// Test: multi-worker out-of-order delivery with checkpoint ordering.
+///
+/// Invariant probed: PipelineMachine ordered-ack with ACTUAL concurrency.
+/// With 2 workers, worker 1 gets a slow batch (3s delay) while worker 2
+/// gets fast batches. Worker 2 acks before worker 1. The checkpoint must
+/// NOT advance past worker 1's batch until it completes.
+///
+/// This is the test that the single-worker "ordered_ack_under_out_of_order_delivery"
+/// test CANNOT exercise — with 1 worker, batches are sequential by definition.
+#[test]
+fn multi_worker_out_of_order_ack_checkpoint_ordering() {
+    let mut sim = turmoil::Builder::new()
+        .simulation_duration(Duration::from_secs(60))
+        .tick_duration(Duration::from_millis(1))
+        .build();
+
+    // Worker 1 script: first batch delays 3s (slow), then succeeds normally.
+    // Worker 2 script: all batches succeed instantly (fast).
+    // Note: factory pops from the END, so worker 2's script is pushed first.
+    let factory = std::sync::Arc::new(InstrumentedSinkFactory::new(vec![
+        // Worker 2 (popped first): always fast
+        vec![],
+        // Worker 1 (popped second): slow first batch
+        vec![FailureAction::Delay(Duration::from_secs(3))],
+    ]));
+    let delivered_counter = factory.delivered_counter();
+
+    let (store, ckpt_handle) = ObservableCheckpointStore::new();
+
+    sim.client("pipeline", async move {
+        // 30 lines — enough data for multiple batches across 2 workers.
+        let lines = generate_json_lines(30);
+        let input = ChannelInputSource::new("test", SourceId(1), lines);
+
+        // 2 workers: enables actual concurrent batch processing.
+        let mut pipeline =
+            Pipeline::for_simulation_with_factory("sim", factory, 2);
+        pipeline.set_batch_timeout(Duration::from_millis(20));
+        pipeline.set_checkpoint_flush_interval(Duration::from_millis(100));
+        let mut pipeline = pipeline
+            .with_input("test", Box::new(input))
+            .with_checkpoint_store(Box::new(store));
+
+        let shutdown = CancellationToken::new();
+        let sd = shutdown.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(15)).await;
+            sd.cancel();
+        });
+
+        pipeline.run_async(&shutdown).await.unwrap();
+        Ok(())
+    });
+
+    sim.run().unwrap();
+
+    // All 30 rows should be delivered (slow batch delays, not fails).
+    let count = delivered_counter.load(Ordering::Relaxed);
+    assert_eq!(count, 30, "expected all 30 rows delivered, got {count}");
+
+    // INVARIANT: checkpoint history is monotonically increasing.
+    // If the PipelineMachine allowed worker 2's fast ack to advance the
+    // checkpoint past worker 1's slow batch, this would catch it.
+    ckpt_handle.assert_monotonic(1);
+
+    // INVARIANT: durable checkpoint exists and reflects delivered data.
+    let durable = ckpt_handle.durable_offset(1);
+    assert!(
+        durable.is_some(),
+        "expected durable checkpoint after delivering 30 rows"
+    );
+    assert!(
+        durable.unwrap() > 0,
+        "expected durable offset > 0, got {}",
+        durable.unwrap()
+    );
+
+    // INVARIANT: checkpoint updates happened (flush throttle worked).
+    let updates = ckpt_handle.update_count(1);
+    assert!(
+        updates > 0,
+        "expected checkpoint updates for source 1, got 0"
+    );
 }

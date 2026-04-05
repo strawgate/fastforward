@@ -117,7 +117,9 @@ pub struct Pipeline {
     /// Durable checkpoint store. None when running without persistence (tests).
     checkpoint_store: Option<Box<dyn CheckpointStore>>,
     /// Throttle checkpoint flushes to at most once per this interval.
-    last_checkpoint_flush: Instant,
+    /// Uses tokio::time::Instant so the throttle works correctly under
+    /// both real and simulated (Turmoil) time.
+    last_checkpoint_flush: tokio::time::Instant,
     /// Checkpoint flush throttle interval. Default 5 seconds; overridable for tests.
     checkpoint_flush_interval: Duration,
 }
@@ -380,7 +382,7 @@ impl Pipeline {
             resource_attrs: Arc::new(resource_attrs),
             machine: Some(PipelineMachine::new().start()),
             checkpoint_store,
-            last_checkpoint_flush: Instant::now(),
+            last_checkpoint_flush: tokio::time::Instant::now(),
             checkpoint_flush_interval: Duration::from_secs(5),
         })
     }
@@ -479,7 +481,44 @@ impl Pipeline {
             resource_attrs: Arc::new(vec![]),
             machine: Some(PipelineMachine::new().start()),
             checkpoint_store: None,
-            last_checkpoint_flush: Instant::now(),
+            last_checkpoint_flush: tokio::time::Instant::now(),
+            checkpoint_flush_interval: Duration::from_secs(5),
+        }
+    }
+
+    /// Create a pipeline for simulation testing with a custom sink factory
+    /// and configurable worker count. Enables multi-worker testing for
+    /// out-of-order ack scenarios.
+    #[cfg(feature = "turmoil")]
+    pub fn for_simulation_with_factory(
+        name: &str,
+        factory: Arc<dyn SinkFactory>,
+        max_workers: usize,
+    ) -> Self {
+        use logfwd_arrow::scanner::Scanner;
+        use logfwd_core::scan_config::ScanConfig;
+
+        let scan_config = ScanConfig::default();
+        let scanner = Scanner::new(scan_config);
+        let transform = SqlTransform::new("SELECT * FROM logs").expect("default SQL");
+        let meter = opentelemetry::global::meter("test");
+        let metrics = Arc::new(PipelineMetrics::new(name, "SELECT * FROM logs", &meter));
+        let pool = OutputWorkerPool::new(factory, max_workers, Duration::MAX, Arc::clone(&metrics));
+
+        Pipeline {
+            name: name.to_string(),
+            inputs: vec![],
+            scanner,
+            transform,
+            pool,
+            metrics,
+            batch_target_bytes: 64 * 1024,
+            batch_timeout: Duration::from_millis(50),
+            poll_interval: Duration::from_millis(5),
+            resource_attrs: Arc::new(vec![]),
+            machine: Some(PipelineMachine::new().start()),
+            checkpoint_store: None,
+            last_checkpoint_flush: tokio::time::Instant::now(),
             checkpoint_flush_interval: Duration::from_secs(5),
         }
     }
@@ -958,18 +997,8 @@ impl Pipeline {
         }
         // Flush to disk at most once per checkpoint_flush_interval to amortize fsync cost.
         // Advance the timer even on failure to prevent retry flooding.
-        //
-        // Under the turmoil feature, always flush when advanced — simulated time
-        // makes std::time::Instant::elapsed() return ~0, so the throttle would
-        // never fire. The throttle exists to amortize real fsync cost, which
-        // doesn't apply in simulation.
-        #[cfg(feature = "turmoil")]
-        let flush_due = any_advanced;
-        #[cfg(not(feature = "turmoil"))]
-        let flush_due =
-            any_advanced && self.last_checkpoint_flush.elapsed() >= self.checkpoint_flush_interval;
-        if flush_due {
-            self.last_checkpoint_flush = Instant::now();
+        if any_advanced && self.last_checkpoint_flush.elapsed() >= self.checkpoint_flush_interval {
+            self.last_checkpoint_flush = tokio::time::Instant::now();
             if let Some(ref mut store) = self.checkpoint_store {
                 if let Err(e) = store.flush() {
                     tracing::warn!(error = %e, "pipeline: checkpoint flush error");
