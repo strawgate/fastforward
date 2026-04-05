@@ -148,7 +148,7 @@ fn run_worker(
         let rows = result.num_rows() as u64;
         let raw = rows as usize * 300; // approximate bytes per row
 
-        if let Err(e) = rt.block_on(sink.send_batch(&result, &meta)) {
+        if let logfwd_output::sink::SendResult::IoError(e) = rt.block_on(sink.send_batch(&result, &meta)) {
             eprintln!("[worker {worker_id}] send_batch error: {e}");
             total_errors.fetch_add(1, Ordering::Relaxed);
         } else {

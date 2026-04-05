@@ -58,12 +58,12 @@ impl Sink for TurmoilTcpSink {
         &'a mut self,
         batch: &'a RecordBatch,
         _metadata: &'a BatchMetadata,
-    ) -> Pin<Box<dyn Future<Output = io::Result<SendResult>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = SendResult> + Send + 'a>> {
         Box::pin(async move {
             // Connect (or reconnect) if needed.
             if let Err(e) = self.ensure_connected().await {
                 self.stream = None;
-                return Err(e);
+                return SendResult::IoError(e);
             }
 
             // Serialize each row as a JSON line.
@@ -71,21 +71,22 @@ impl Sink for TurmoilTcpSink {
             let mut buf = Vec::new();
             for row in 0..batch.num_rows() {
                 buf.clear();
-                write_row_json(batch, row, &cols, &mut buf)
-                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+                if let Err(e) = write_row_json(batch, row, &cols, &mut buf) {
+                    return SendResult::IoError(io::Error::new(io::ErrorKind::Other, e.to_string()));
+                }
                 buf.push(b'\n');
 
                 let stream = self.stream.as_mut().unwrap();
                 if let Err(e) = stream.write_all(&buf).await {
                     // Connection broken — drop it so next call reconnects.
                     self.stream = None;
-                    return Err(e);
+                    return SendResult::IoError(e);
                 }
             }
 
             self.delivered_rows
                 .fetch_add(batch.num_rows() as u64, Ordering::Relaxed);
-            Ok(SendResult::Ok)
+            SendResult::Ok
         })
     }
 

@@ -1494,8 +1494,13 @@ mod tests {
             auth: None,
             request_mode: None,
         };
-        let sink = build_output_sink("es", &cfg, Arc::new(ComponentStats::new())).unwrap();
-        assert_eq!(sink.name(), "es");
+        let result = build_output_sink("es", &cfg, Arc::new(ComponentStats::new()));
+        assert!(result.is_err(), "http should redirect to async pipeline");
+        let err = result.err().unwrap();
+        assert!(
+            err.to_string().contains("async pipeline"),
+            "error should mention async pipeline, got: {err}"
+        );
     }
 
     #[test]
