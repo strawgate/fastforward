@@ -45,7 +45,7 @@ jobs:
               - 'crates/logfwd/src/pipeline.rs'
 
   # -------------------------------------------------------------------------
-  # Frontend checks — format, lint, typecheck run in parallel via matrix
+  # Frontend checks — format, lint, typecheck, dashboard freshness in parallel
   # -------------------------------------------------------------------------
   frontend-checks:
     runs-on: ubuntu-latest
@@ -55,7 +55,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        check: [format, lint, typecheck]
+        check: [format, lint, typecheck, dashboard-freshness]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -83,6 +83,20 @@ jobs:
         if: matrix.check == 'typecheck'
         working-directory: dashboard
         run: npx tsgo --noEmit
+
+      # Verify that crates/logfwd-io/src/dashboard.html is in sync with the
+      # dashboard source.  The HTML file is committed so that Rust builds work
+      # without Node.js; this step catches forgotten re-builds after source edits.
+      - name: Check dashboard.html is up to date
+        if: matrix.check == 'dashboard-freshness'
+        working-directory: dashboard
+        run: |
+          npm run build
+          if ! git diff --exit-code ../crates/logfwd-io/src/dashboard.html; then
+            echo "ERROR: crates/logfwd-io/src/dashboard.html is out of date."
+            echo "Run 'just dashboard' locally and commit the updated file."
+            exit 1
+          fi
 
   # -------------------------------------------------------------------------
   # Frontend tests — vitest with coverage
@@ -113,6 +127,8 @@ jobs:
   # Lint: fast checks (fmt, TOML, typos, actionlint) then clippy + audits.
   # Combined into one job to save a runner — fast checks fail-fast before
   # the expensive clippy build starts.
+  # dashboard.html is committed to the repo; Rust jobs use it directly without
+  # rebuilding the dashboard (the frontend-checks job verifies it stays fresh).
   # -------------------------------------------------------------------------
   lint:
     name: Lint
@@ -120,7 +136,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: ./.github/actions/build-dashboard
       - uses: mozilla-actions/sccache-action@v0.0.9
 
       - uses: dtolnay/rust-toolchain@stable
@@ -172,6 +187,7 @@ jobs:
 
   # -------------------------------------------------------------------------
   # Tests — Linux and macOS in parallel
+  # dashboard.html is committed; Rust jobs use it directly without rebuilding.
   # -------------------------------------------------------------------------
   test-linux:
     name: Test (Linux)
@@ -179,7 +195,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: ./.github/actions/build-dashboard
       - uses: mozilla-actions/sccache-action@v0.0.9
       - uses: dtolnay/rust-toolchain@stable
       - uses: taiki-e/install-action@nextest
@@ -197,7 +212,6 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: ./.github/actions/build-dashboard
       - uses: mozilla-actions/sccache-action@v0.0.9
       - uses: dtolnay/rust-toolchain@stable
       - uses: taiki-e/install-action@nextest
@@ -214,6 +228,7 @@ jobs:
   # -------------------------------------------------------------------------
   # Build check — aarch64 cross-compile only (release check removed:
   # clippy already does a full debug build that catches the same errors)
+  # dashboard.html is committed; Rust jobs use it directly without rebuilding.
   # -------------------------------------------------------------------------
   build-check:
     name: Build check (aarch64)
@@ -221,7 +236,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: ./.github/actions/build-dashboard
       - uses: mozilla-actions/sccache-action@v0.0.9
 
       - uses: dtolnay/rust-toolchain@stable

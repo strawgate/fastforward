@@ -20,7 +20,7 @@ crates/
 ## Build, test, lint, bench, fuzz
 
 ```bash
-just test                    # All tests
+just test                    # All tests (uses nextest for parallel execution)
 just lint                    # fmt + clippy + toml + deny + typos
 cargo test -p logfwd-core    # Core crate only (fastest iteration)
 
@@ -29,7 +29,40 @@ RUSTFLAGS="-C target-cpu=native" cargo bench --bench scanner -p logfwd-core
 cd crates/logfwd-core && cargo +nightly fuzz run scanner -- -max_total_time=300
 ```
 
-## Compile caching with sccache
+## Build performance
+
+### Why builds are slow
+
+This workspace depends on **DataFusion** (v48) and **Arrow** (v55) — extremely
+large crates with thousands of generic instantiations.  At the default
+`opt-level = 0` (debug mode), these dependencies generate enormous amounts of
+LLVM IR which makes both compilation and linking slow.  Cold builds
+(no cache, first checkout) were observed to take 10–15 minutes on an average
+developer machine purely because of these two dependency trees.
+
+Three mitigations are in place:
+
+| Mitigation | Where | Effect |
+|-----------|-------|--------|
+| `debug = "line-tables-only"` | `[profile.dev]` and `[profile.test]` | Reduces debug-binary size from ~180 MB to ~60 MB (DataFusion debug info is enormous) |
+| `[profile.dev.package."*"] opt-level = 1` | `Cargo.toml` | Compiles all dependencies at opt-level 1 instead of 0 — one cheap LLVM pass shrinks IR and object files dramatically, cutting cold build time and link time without expensive IPO |
+| `rustc-wrapper = "sccache"` | `.cargo/config.toml` | Caches compiled artefacts so unchanged deps are never recompiled on subsequent builds |
+
+### Dependency opt-level override
+
+`[profile.dev.package."*"]` sets `opt-level = 1` for **all** packages
+(dependencies and workspace crates alike) in dev and test profiles.
+Cargo's profile inheritance means `[profile.test]` picks this up automatically.
+
+This setting matters most for:
+- **Cold builds** (first checkout, no sccache): eliminates the worst of
+  DataFusion's IR explosion.
+- **After `cargo update`** or feature changes: re-compilation of changed deps
+  is much faster.
+- **Incremental rebuilds of your own code**: neutral — sccache caches the
+  compiled workspace artefacts, so only the file you edited is recompiled.
+
+### Compile caching with sccache
 
 [sccache](https://github.com/mozilla/sccache) caches Rust compilation artefacts to speed up builds. The project is configured to use it (`.cargo/config.toml` sets `rustc-wrapper = "sccache"`).
 

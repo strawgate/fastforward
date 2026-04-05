@@ -19,14 +19,14 @@ clippy:
 
 # Run all tests
 test:
-    cargo test
+    cargo nextest run
 
 # Run Kani formal verification proofs (logfwd-core only)
 # Requires: cargo install --locked kani-verifier && cargo kani setup
 kani:
     RUSTC_WRAPPER="" cargo kani -p logfwd-core -Z function-contracts -Z mem-predicates -Z stubbing
 
-# Run all tests with nextest (parallel, faster output)
+# Run all tests with nextest (parallel, faster output) — alias for `test`
 nextest:
     cargo nextest run
 
