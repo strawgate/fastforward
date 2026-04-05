@@ -1,10 +1,18 @@
 name: Deploy Docs
 
 on:
+  pull_request:
+    paths:
+      - "book/**"
+      - "dev-docs/**"
+      - "docs/**"
+      - "README.md"
+      - ".github/workflows/docs.yml"
   push:
     branches: [master]
     paths:
       - "book/**"
+      - "dev-docs/**"
       - "bench/dashboard/**"
       - "crates/**"
       - "docs/**"
@@ -44,7 +52,7 @@ jobs:
             --accept 200,429
             --max-retries 3
             --exclude-mail
-            README.md book/src docs
+            README.md book/src dev-docs docs
 
       - name: Validate required operational doc sections
         run: python3 scripts/docs/validate_operational_sections.py
