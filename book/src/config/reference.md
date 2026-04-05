@@ -107,8 +107,10 @@ Listen for log lines on a UDP socket.
 input:
   type: udp
   listen: 0.0.0.0:514
-  format: syslog
+  format: json
 ```
+
+Use `json` or `raw` for UDP inputs today. `syslog` parsing is not implemented yet.
 
 ### `tcp` input
 
@@ -197,13 +199,13 @@ POST log records as newline-delimited JSON to an HTTP endpoint.
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `endpoint` | string | Yes | Full URL, e.g. `http://ingest.example.com/logs`. |
-| `compression` | string | No | `zstd` to compress the request body. |
+| `compression` | string | No | `gzip` to compress the request body. `zstd` is only supported by the `otlp` output. |
 
 ```yaml
 output:
   type: http
   endpoint: http://ingest.example.com/logs
-  compression: zstd
+  compression: gzip
 ```
 
 ### `stdout` output
@@ -212,7 +214,7 @@ Print records to standard output for local debugging.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `format` | string | No | `json` | `json` (newline-delimited JSON) or `console` (coloured text). |
+| `format` | string | No | `json` | `json` (newline-delimited JSON), `text` (raw line output when `_raw` is present), or `console` (coloured text). |
 
 ```yaml
 output:
@@ -260,7 +262,7 @@ Write records to Parquet files. Not yet functional.
 |-------|--------|-------------|
 | `otlp` | Implemented | OTLP protobuf over HTTP or gRPC. |
 | `http` | Implemented | JSON lines over HTTP POST. |
-| `stdout` | Implemented | Print to stdout (JSON or coloured text). |
+| `stdout` | Implemented | Print to stdout (JSON, raw text, or coloured console output). |
 | `elasticsearch` | Implemented | Elasticsearch bulk API with retry and compression. |
 | `loki` | Implemented | Grafana Loki push API with label grouping. |
 | `file` | Partial | Write to a file. |

@@ -22,6 +22,7 @@ POST newline-delimited JSON to any HTTP endpoint.
 output:
   type: http
   endpoint: https://logging-service:9200
+  compression: gzip   # gzip | none (zstd is OTLP-only)
   auth:
     headers:
       X-API-Key: "${API_KEY}"

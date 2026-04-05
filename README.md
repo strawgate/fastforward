@@ -189,8 +189,8 @@ See the [Deployment Guide](book/src/deployment/kubernetes.md) for resource sizin
 | Output          | Status         | Description |
 |-----------------|----------------|-------------|
 | `otlp`          | Implemented | OTLP protobuf over HTTP or gRPC |
-| `http`          | Implemented | JSON lines over HTTP POST, optional zstd |
-| `stdout`        | Implemented | JSON or colored console output |
+| `http`          | Implemented | JSON lines over HTTP POST, optional gzip |
+| `stdout`        | Implemented | JSON, raw text, or colored console output |
 | `elasticsearch` | Implemented | Bulk API with retry and per-document error handling |
 | `loki`          | Implemented | Grafana Loki push API with label grouping |
 

@@ -57,14 +57,11 @@ logfwd --config pipeline.yaml
 
 ## Monitor it
 
-The diagnostics server gives you three endpoints:
+The diagnostics server gives you these endpoints:
 
 ```bash
 # Health check — returns 200 when the pipeline is running
 curl http://localhost:9090/health
-
-# Prometheus-format metrics — lines processed, bytes sent, errors
-curl http://localhost:9090/metrics
 
 # Pipeline details — JSON with per-pipeline state, input/output stats
 curl http://localhost:9090/api/pipelines | jq .

@@ -40,8 +40,11 @@ Receive log lines on a UDP socket.
 input:
   type: udp
   listen: 0.0.0.0:514
-  format: syslog
+  format: json
 ```
+
+Use `json` or `raw` for UDP inputs today. `syslog` parsing is listed in the format table
+but is not implemented yet.
 
 ## TCP
 

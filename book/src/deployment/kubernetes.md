@@ -216,15 +216,12 @@ transform: |
 
 ### Scraping the diagnostics endpoint with Prometheus
 
-Expose port 9090 in the pod spec and add a Prometheus scrape annotation:
+Expose port 9090 in the pod spec if you want Kubernetes probes or operators to reach the
+diagnostics server, but do not point Prometheus at `/metrics` — that endpoint has been
+removed and now returns `410 Gone`.
 
-```yaml
-metadata:
-  annotations:
-    prometheus.io/scrape: "true"
-    prometheus.io/port: "9090"
-    prometheus.io/path: "/metrics"
-```
+Use `/api/pipelines` for JSON diagnostics, and export Prometheus metrics through your
+OpenTelemetry Collector or another metrics bridge instead of scraping logfwd directly.
 
 ---
 
