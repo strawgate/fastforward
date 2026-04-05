@@ -57,6 +57,13 @@ pub struct PipelineMetrics {
     pub scan_nanos_total: AtomicU64,
     pub transform_nanos_total: AtomicU64,
     pub output_nanos_total: AtomicU64,
+    /// Cumulative nanoseconds spent waiting in the pool queue before a worker
+    /// picks up the batch.
+    pub queue_wait_nanos_total: AtomicU64,
+    /// Cumulative nanoseconds of pure `send_batch` wall time (per-attempt).
+    pub send_nanos_total: AtomicU64,
+    /// Cumulative nanoseconds of total batch latency (submission to ack).
+    pub batch_latency_nanos_total: AtomicU64,
     /// Unix timestamp (nanoseconds) of the last successfully processed batch.
     /// Zero means no batch has been processed yet.
     pub last_batch_time_ns: AtomicU64,
@@ -77,6 +84,9 @@ pub struct PipelineMetrics {
     otel_scan_nanos: Counter<u64>,
     otel_transform_nanos: Counter<u64>,
     otel_output_nanos: Counter<u64>,
+    otel_queue_wait_nanos: Counter<u64>,
+    otel_send_nanos: Counter<u64>,
+    otel_batch_latency_nanos: Counter<u64>,
     otel_backpressure_stalls: Counter<u64>,
 }
 
@@ -109,6 +119,9 @@ impl PipelineMetrics {
             scan_nanos_total: AtomicU64::new(0),
             transform_nanos_total: AtomicU64::new(0),
             output_nanos_total: AtomicU64::new(0),
+            queue_wait_nanos_total: AtomicU64::new(0),
+            send_nanos_total: AtomicU64::new(0),
+            batch_latency_nanos_total: AtomicU64::new(0),
             last_batch_time_ns: AtomicU64::new(0),
             inflight_batches: AtomicU64::new(0),
             active_batches: std::sync::Mutex::new(std::collections::HashMap::new()),
@@ -123,6 +136,9 @@ impl PipelineMetrics {
             otel_scan_nanos: meter.u64_counter("logfwd_stage_scan_nanos").build(),
             otel_transform_nanos: meter.u64_counter("logfwd_stage_transform_nanos").build(),
             otel_output_nanos: meter.u64_counter("logfwd_stage_output_nanos").build(),
+            otel_queue_wait_nanos: meter.u64_counter("logfwd_stage_queue_wait_nanos").build(),
+            otel_send_nanos: meter.u64_counter("logfwd_stage_send_nanos").build(),
+            otel_batch_latency_nanos: meter.u64_counter("logfwd_batch_latency_nanos").build(),
             otel_backpressure_stalls: meter.u64_counter("logfwd_backpressure_stalls").build(),
             meter: meter.clone(),
             otel_attrs: attrs,
@@ -221,6 +237,27 @@ impl PipelineMetrics {
         self.otel_transform_nanos
             .add(transform_ns, &self.otel_attrs);
         self.otel_output_nanos.add(output_ns, &self.otel_attrs);
+    }
+
+    /// Record cumulative queue-wait time (time a batch spent waiting in the
+    /// pool queue before a worker picked it up).
+    pub fn record_queue_wait(&self, nanos: u64) {
+        self.queue_wait_nanos_total
+            .fetch_add(nanos, Ordering::Relaxed);
+        self.otel_queue_wait_nanos.add(nanos, &self.otel_attrs);
+    }
+
+    /// Record cumulative pure `send_batch` wall time (per-attempt).
+    pub fn record_send_latency(&self, nanos: u64) {
+        self.send_nanos_total.fetch_add(nanos, Ordering::Relaxed);
+        self.otel_send_nanos.add(nanos, &self.otel_attrs);
+    }
+
+    /// Record total batch latency (submission to ack).
+    pub fn record_batch_latency(&self, nanos: u64) {
+        self.batch_latency_nanos_total
+            .fetch_add(nanos, Ordering::Relaxed);
+        self.otel_batch_latency_nanos.add(nanos, &self.otel_attrs);
     }
 
     pub fn inc_backpressure_stall(&self) {
@@ -942,11 +979,22 @@ impl DiagnosticsServer {
             let scan_s = pm.scan_nanos_total.load(Ordering::Relaxed) as f64 / 1e9;
             let transform_s = pm.transform_nanos_total.load(Ordering::Relaxed) as f64 / 1e9;
             let output_s = pm.output_nanos_total.load(Ordering::Relaxed) as f64 / 1e9;
+            let queue_wait_s = pm.queue_wait_nanos_total.load(Ordering::Relaxed) as f64 / 1e9;
+            let send_s = pm.send_nanos_total.load(Ordering::Relaxed) as f64 / 1e9;
 
             let last_batch_ns = pm.last_batch_time_ns.load(Ordering::Relaxed);
 
+            let batch_latency_total = pm.batch_latency_nanos_total.load(Ordering::Relaxed);
+            let batch_latency_avg_ns = if batches > 0 {
+                batch_latency_total / batches
+            } else {
+                0
+            };
+            let inflight = pm.inflight_batches.load(Ordering::Relaxed);
+            let backpressure = pm.backpressure_stalls.load(Ordering::Relaxed);
+
             pipelines_json.push(format!(
-                r#"{{"name":"{}","inputs":[{}],"transform":{{"sql":"{}","lines_in":{},"lines_out":{},"errors":{},"filter_drop_rate":{:.3}}},"outputs":[{}],"batches":{{"total":{},"avg_rows":{:.1},"flush_by_size":{},"flush_by_timeout":{},"dropped_batches_total":{},"scan_errors_total":{},"last_batch_time_ns":{}}},"stage_seconds":{{"scan":{:.6},"transform":{:.6},"output":{:.6}}}}}"#,
+                r#"{{"name":"{}","inputs":[{}],"transform":{{"sql":"{}","lines_in":{},"lines_out":{},"errors":{},"filter_drop_rate":{:.3}}},"outputs":[{}],"batches":{{"total":{},"avg_rows":{:.1},"flush_by_size":{},"flush_by_timeout":{},"dropped_batches_total":{},"scan_errors_total":{},"last_batch_time_ns":{},"batch_latency_avg_ns":{},"inflight":{},"rows_total":{}}},"stage_seconds":{{"scan":{:.6},"transform":{:.6},"output":{:.6},"queue_wait":{:.6},"send":{:.6}}},"backpressure_stalls":{}}}"#,
                 esc(&pm.name),
                 inputs_json.join(","),
                 esc(&pm.transform_sql),
@@ -962,9 +1010,15 @@ impl DiagnosticsServer {
                 pm.dropped_batches_total.load(Ordering::Relaxed),
                 pm.scan_errors_total.load(Ordering::Relaxed),
                 last_batch_ns,
+                batch_latency_avg_ns,
+                inflight,
+                batch_rows,
                 scan_s,
                 transform_s,
                 output_s,
+                queue_wait_s,
+                send_s,
+                backpressure,
             ));
         }
 
@@ -1243,6 +1297,13 @@ mod tests {
         pm.transform_nanos_total
             .store(500_000_000, Ordering::Relaxed); // 0.5s
         pm.output_nanos_total.store(200_000_000, Ordering::Relaxed); // 0.2s
+        pm.queue_wait_nanos_total
+            .store(50_000_000, Ordering::Relaxed); // 0.05s
+        pm.send_nanos_total.store(150_000_000, Ordering::Relaxed); // 0.15s
+        pm.batch_latency_nanos_total
+            .store(500_000_000, Ordering::Relaxed); // avg = 500_000_000/50 = 10_000_000
+        pm.inflight_batches.store(3, Ordering::Relaxed);
+        pm.backpressure_stalls.store(7, Ordering::Relaxed);
         pm.transform_errors.store(3, Ordering::Relaxed);
 
         let mut server = DiagnosticsServer::new("127.0.0.1:0");
@@ -1370,6 +1431,21 @@ mod tests {
             "body: {}",
             body
         );
+        // New observability fields (#521, #522, #524)
+        assert!(
+            body.contains(r#""batch_latency_avg_ns":10000000"#),
+            "body: {}",
+            body
+        );
+        assert!(body.contains(r#""inflight":3"#), "body: {}", body);
+        assert!(body.contains(r#""rows_total":4500"#), "body: {}", body);
+        assert!(
+            body.contains(r#""backpressure_stalls":7"#),
+            "body: {}",
+            body
+        );
+        assert!(body.contains(r#""queue_wait":0.050000"#), "body: {}", body);
+        assert!(body.contains(r#""send":0.150000"#), "body: {}", body);
     }
 
     #[test]
@@ -1454,6 +1530,42 @@ mod tests {
         stats.inc_rotations();
         stats.inc_rotations();
         assert_eq!(stats.rotations_total.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn test_pipeline_metrics_record_queue_wait() {
+        let meter = opentelemetry::global::meter("test");
+        let pm = PipelineMetrics::new("test", "", &meter);
+        assert_eq!(pm.queue_wait_nanos_total.load(Ordering::Relaxed), 0);
+
+        pm.record_queue_wait(1_000_000);
+        pm.record_queue_wait(2_000_000);
+        assert_eq!(pm.queue_wait_nanos_total.load(Ordering::Relaxed), 3_000_000);
+    }
+
+    #[test]
+    fn test_pipeline_metrics_record_send_latency() {
+        let meter = opentelemetry::global::meter("test");
+        let pm = PipelineMetrics::new("test", "", &meter);
+        assert_eq!(pm.send_nanos_total.load(Ordering::Relaxed), 0);
+
+        pm.record_send_latency(5_000_000);
+        pm.record_send_latency(3_000_000);
+        assert_eq!(pm.send_nanos_total.load(Ordering::Relaxed), 8_000_000);
+    }
+
+    #[test]
+    fn test_pipeline_metrics_record_batch_latency() {
+        let meter = opentelemetry::global::meter("test");
+        let pm = PipelineMetrics::new("test", "", &meter);
+        assert_eq!(pm.batch_latency_nanos_total.load(Ordering::Relaxed), 0);
+
+        pm.record_batch_latency(10_000_000);
+        pm.record_batch_latency(20_000_000);
+        assert_eq!(
+            pm.batch_latency_nanos_total.load(Ordering::Relaxed),
+            30_000_000
+        );
     }
 
     #[test]
