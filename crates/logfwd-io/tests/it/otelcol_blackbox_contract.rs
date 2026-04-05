@@ -186,6 +186,10 @@ fn wait_for_export_json(path: &Path, timeout: Duration) -> io::Result<serde_json
     ))
 }
 
+fn yaml_single_quoted(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
 fn start_otelcol() -> io::Result<(OtelcolProcess, String)> {
     let binary = ensure_otelcol_binary()?;
     let temp_dir = tempfile::tempdir()?;
@@ -195,6 +199,7 @@ fn start_otelcol() -> io::Result<(OtelcolProcess, String)> {
     let stderr_path = temp_dir.path().join("collector-stderr.log");
     let config_path = temp_dir.path().join("otelcol.yaml");
 
+    let output_path_yaml = yaml_single_quoted(&output_path.to_string_lossy());
     let config = format!(
         r#"receivers:
   otlp:
@@ -204,7 +209,7 @@ fn start_otelcol() -> io::Result<(OtelcolProcess, String)> {
 
 exporters:
   file:
-    path: "{output_path}"
+    path: {output_path_yaml}
 
 service:
   telemetry:
@@ -217,7 +222,7 @@ service:
       receivers: [otlp]
       exporters: [file]
 "#,
-        output_path = output_path.display(),
+        output_path_yaml = output_path_yaml,
     );
     fs::write(&config_path, config)?;
 
@@ -259,11 +264,14 @@ fn start_otelcol_filelog_to_receiver(
     let stderr_path = temp_dir.path().join("collector-stderr.log");
     let config_path = temp_dir.path().join("otelcol.yaml");
 
+    let log_path_yaml = yaml_single_quoted(&log_path.to_string_lossy());
+    let output_path_yaml = yaml_single_quoted(&output_path.to_string_lossy());
+    let receiver_base_url_yaml = yaml_single_quoted(receiver_base_url);
     let config = format!(
         r#"receivers:
   filelog:
     include:
-      - "{log_path}"
+      - {log_path_yaml}
     start_at: beginning
     operators:
       - type: json_parser
@@ -275,9 +283,9 @@ fn start_otelcol_filelog_to_receiver(
 
 exporters:
   file:
-    path: "{output_path}"
+    path: {output_path_yaml}
   otlphttp:
-    endpoint: "{receiver_base_url}"
+    endpoint: {receiver_base_url_yaml}
     compression: none
     tls:
       insecure: true
@@ -293,8 +301,9 @@ service:
       receivers: [filelog]
       exporters: [file, otlphttp]
 "#,
-        log_path = log_path.display(),
-        output_path = output_path.display(),
+        log_path_yaml = log_path_yaml,
+        output_path_yaml = output_path_yaml,
+        receiver_base_url_yaml = receiver_base_url_yaml,
     );
     fs::write(&config_path, config)?;
 
