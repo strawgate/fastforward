@@ -358,7 +358,7 @@ fn decode_otlp_logs_json(body: &[u8]) -> Result<Vec<u8>, InputError> {
                     // Validate as u64 before emitting as a raw JSON number.
                     // An attacker-controlled string with quotes/backslashes could
                     // break the JSON line if written via write_json_field directly.
-                    if let Ok(ns) = ts.parse::<u64>() {
+                    if let Some(ns) = ts.parse::<u64>().ok().filter(|&n| n > 0) {
                         out.push(b'"');
                         out.extend_from_slice(b"timestamp_int\":");
                         write_u64_to_buf(&mut out, ns);
