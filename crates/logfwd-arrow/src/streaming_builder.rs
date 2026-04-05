@@ -570,7 +570,11 @@ impl StreamingBuilder {
             }
         }
 
-        if self.keep_raw && !self.raw_views.is_empty() {
+        if self.keep_raw {
+            // When keep_raw is true every row must have exactly one _raw entry.
+            // Check cardinality even when raw_views is empty so that callers who
+            // never invoke append_raw() get an explicit error rather than a batch
+            // silently missing the _raw column.
             if self.raw_views.len() != num_rows {
                 return Err(ArrowError::InvalidArgumentError(format!(
                     "raw_views cardinality mismatch: {} views for {} rows",
@@ -578,18 +582,20 @@ impl StreamingBuilder {
                     num_rows
                 )));
             }
-            let mut builder = StringViewBuilder::new();
-            let block = builder.append_block(raw_arrow_buf);
+            if !self.raw_views.is_empty() {
+                let mut builder = StringViewBuilder::new();
+                let block = builder.append_block(raw_arrow_buf);
 
-            for row in 0..num_rows {
-                let (offset, len) = self.raw_views[row];
-                builder
-                    .try_append_view(block, offset, len)
-                    .expect("raw view offset/len must be within buffer");
+                for row in 0..num_rows {
+                    let (offset, len) = self.raw_views[row];
+                    builder
+                        .try_append_view(block, offset, len)
+                        .expect("raw view offset/len must be within buffer");
+                }
+
+                schema_fields.push(Field::new("_raw", DataType::Utf8View, true));
+                arrays.push(Arc::new(builder.finish()) as ArrayRef);
             }
-
-            schema_fields.push(Field::new("_raw", DataType::Utf8View, true));
-            arrays.push(Arc::new(builder.finish()) as ArrayRef);
         }
 
         let schema = Arc::new(Schema::new(schema_fields));
@@ -763,7 +769,9 @@ impl StreamingBuilder {
             }
         }
 
-        if self.keep_raw && !self.raw_views.is_empty() {
+        if self.keep_raw {
+            // Same cardinality guard as the non-detached path: every row must
+            // have a raw entry, including the zero-row case (0 == 0 passes).
             if self.raw_views.len() != num_rows {
                 return Err(ArrowError::InvalidArgumentError(format!(
                     "raw_views cardinality mismatch: {} views for {} rows",
@@ -771,17 +779,20 @@ impl StreamingBuilder {
                     num_rows
                 )));
             }
-            let total_bytes: usize = self.raw_views.iter().map(|&(_, l)| l as usize).sum();
-            let mut builder = arrow::array::StringBuilder::with_capacity(num_rows, total_bytes);
-            for row in 0..num_rows {
-                let (offset, len) = self.raw_views[row];
-                // Raw views always reference the original buffer (not decoded_buf).
-                let s = std::str::from_utf8(&self.buf[offset as usize..(offset + len) as usize])
-                    .unwrap_or("");
-                builder.append_value(s);
+            if !self.raw_views.is_empty() {
+                let total_bytes: usize = self.raw_views.iter().map(|&(_, l)| l as usize).sum();
+                let mut builder = arrow::array::StringBuilder::with_capacity(num_rows, total_bytes);
+                for row in 0..num_rows {
+                    let (offset, len) = self.raw_views[row];
+                    // Raw views always reference the original buffer (not decoded_buf).
+                    let s =
+                        std::str::from_utf8(&self.buf[offset as usize..(offset + len) as usize])
+                            .unwrap_or("");
+                    builder.append_value(s);
+                }
+                schema_fields.push(Field::new("_raw", DataType::Utf8, true));
+                arrays.push(Arc::new(builder.finish()) as ArrayRef);
             }
-            schema_fields.push(Field::new("_raw", DataType::Utf8, true));
-            arrays.push(Arc::new(builder.finish()) as ArrayRef);
         }
 
         let schema = Arc::new(Schema::new(schema_fields));
@@ -1099,6 +1110,35 @@ mod tests {
             .expect("_raw must be StringViewArray");
         assert_eq!(raw_arr.value(0), "hello world");
         assert_eq!(raw_arr.value(1), "goodbye world");
+    }
+
+    #[test]
+    fn test_keep_raw_no_append_raw_calls_returns_error() {
+        // Regression test: keep_raw=true with no append_raw() calls must return
+        // an error rather than silently producing a batch without the _raw column.
+        let buf = bytes::Bytes::from_static(b"line1\nline2\n");
+        let mut b = StreamingBuilder::new(true);
+        b.begin_batch(buf.clone());
+        let idx = b.resolve_field(b"msg");
+
+        b.begin_row();
+        b.append_str_by_idx(idx, &buf[0..5]); // no append_raw call
+        b.end_row();
+
+        b.begin_row();
+        b.append_str_by_idx(idx, &buf[6..11]); // no append_raw call
+        b.end_row();
+
+        let result = b.finish_batch();
+        assert!(
+            result.is_err(),
+            "keep_raw=true with no append_raw() calls must error, got a batch"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("cardinality mismatch"),
+            "error should mention cardinality mismatch, got: {err}"
+        );
     }
 
     /// `append_raw` is a no-op when `keep_raw` is false -- `_raw` column absent.
