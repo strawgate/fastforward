@@ -59,6 +59,7 @@ pub(crate) const HTTP_RETRY_INITIAL_DELAY_MS: u64 = 100;
 ///
 /// Transient errors are: HTTP 429 Too Many Requests, 5xx server errors, and
 /// network/transport failures (I/O, host not found, connection failed, timeout).
+#[allow(dead_code)] // Still used by OTLP ureq sink; will be removed when OTLP migrates to reqwest
 pub(crate) fn is_transient_error(e: &ureq::Error) -> bool {
     match e {
         ureq::Error::StatusCode(status) => *status == 429 || *status >= 500,
@@ -537,7 +538,7 @@ pub fn build_output_sink(
     cfg: &OutputConfig,
     stats: Arc<ComponentStats>,
 ) -> Result<Box<dyn OutputSink>, String> {
-    let auth_headers = build_auth_headers(cfg.auth.as_ref());
+    let _auth_headers = build_auth_headers(cfg.auth.as_ref());
     match cfg.output_type {
         OutputType::Stdout => Err(format!(
             "output '{name}': stdout requires the async pipeline — use build_sink_factory() instead"
