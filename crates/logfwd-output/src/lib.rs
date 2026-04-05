@@ -679,12 +679,24 @@ pub fn build_sink_factory(
             let endpoint = cfg.endpoint.as_ref().ok_or_else(|| {
                 OutputError::Construction(format!("output '{name}': loki requires 'endpoint'"))
             })?;
+            let static_labels = cfg
+                .static_labels
+                .as_ref()
+                .map(|labels| {
+                    labels
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let label_columns = cfg.label_columns.clone().unwrap_or_default();
+
             let factory = LokiSinkFactory::new(
                 name.to_string(),
                 endpoint.clone(),
-                None, // tenant_id: not yet in OutputConfig
-                Vec::new(),
-                Vec::new(),
+                cfg.tenant_id.clone(),
+                static_labels,
+                label_columns,
                 auth_headers,
                 stats,
             )
@@ -1157,6 +1169,7 @@ mod tests {
             path: None,
             index: None,
             auth: None,
+            ..Default::default()
         };
         // StdoutSink uses the async pipeline — must use build_sink_factory.
         let factory = build_sink_factory("test", &cfg, Arc::new(ComponentStats::new())).unwrap();
@@ -1176,6 +1189,7 @@ mod tests {
             path: None,
             index: None,
             auth: None,
+            ..Default::default()
         };
         // build_output_sink now redirects OTLP to build_sink_factory.
         let result = build_output_sink("otel", &cfg, Arc::new(ComponentStats::new()));
@@ -1203,6 +1217,7 @@ mod tests {
             path: None,
             index: None,
             auth: None,
+            ..Default::default()
         };
         let err = match build_sink_factory("otel", &cfg, Arc::new(ComponentStats::new())) {
             Ok(_) => panic!("expected gzip OTLP compression to be rejected"),
@@ -1224,6 +1239,7 @@ mod tests {
             path: None,
             index: None,
             auth: None,
+            ..Default::default()
         };
         let result = build_output_sink("es", &cfg, Arc::new(ComponentStats::new()));
         assert!(result.is_err(), "http should redirect to async pipeline");
@@ -1250,6 +1266,7 @@ mod tests {
             path: None,
             index: None,
             auth: None,
+            ..Default::default()
         };
         let result = build_sink_factory("http-bad", &cfg, Arc::new(ComponentStats::new()));
         assert!(
@@ -1276,6 +1293,7 @@ mod tests {
             path: None,
             index: None,
             auth: None,
+            ..Default::default()
         };
         // OTLP now uses the async pipeline via build_sink_factory.
         let result = build_sink_factory("bad", &cfg, Arc::new(ComponentStats::new()));
@@ -1359,6 +1377,7 @@ mod tests {
                 bearer_token: Some("mytoken".to_string()),
                 headers: std::collections::HashMap::new(),
             }),
+            ..Default::default()
         };
         let result = build_sink_factory("auth-sink", &cfg, Arc::new(ComponentStats::new()));
         assert!(result.is_err(), "Http is not yet in the async pipeline");

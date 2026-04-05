@@ -180,7 +180,9 @@ impl LokiSink {
                 let col = batch.column(ts_idx);
                 match col.data_type() {
                     DataType::Int64 => {
-                        col.as_primitive::<arrow::datatypes::Int64Type>().value(row) as u64
+                        let val = col.as_primitive::<arrow::datatypes::Int64Type>().value(row);
+                        // Bug #1084: clamp negative timestamps to 0 to avoid u64 wrap.
+                        if val < 0 { 0 } else { val as u64 }
                     }
                     DataType::UInt64 => col
                         .as_primitive::<arrow::datatypes::UInt64Type>()
@@ -466,11 +468,13 @@ fn escape_json(s: &str) -> String {
 /// If it already starts with `"`, return as-is (already a JSON string).
 fn escape_json_raw(s: &str) -> String {
     let trimmed = s.trim();
-    if trimmed.starts_with('"') {
-        // Already a JSON string.
+    // Bug #1048: leading quote is not enough to guarantee valid JSON string.
+    // Verify it actually parses as a JSON string.
+    if trimmed.starts_with('"') && serde_json::from_str::<String>(trimmed).is_ok() {
+        // Already a valid JSON string.
         trimmed.to_string()
     } else {
-        // A JSON object or array — escape it as a string value.
+        // A JSON object/array or plain string — escape it as a string value.
         format!("\"{}\"", escape_json(trimmed))
     }
 }
@@ -654,6 +658,76 @@ mod tests {
             Some("OK"),
             "str variant must win over int in str_variants ordering"
         );
+    }
+
+    #[test]
+    fn test_escape_json_raw_malformed() {
+        // Bug #1048: starts with quote but not valid JSON string
+        let malformed = "\"not valid json";
+        let escaped = escape_json_raw(malformed);
+
+        // Should be properly escaped and wrapped.
+        assert_ne!(
+            escaped, malformed,
+            "malformed JSON starting with quote should be escaped and wrapped"
+        );
+        assert_eq!(escaped, "\"\\\"not valid json\"", "should be fully escaped");
+    }
+
+    #[test]
+    fn test_escape_json_raw_valid_string() {
+        // Valid JSON string should be returned as-is
+        let valid = "\"valid json string\"";
+        let escaped = escape_json_raw(valid);
+        assert_eq!(escaped, valid);
+    }
+
+    #[test]
+    fn test_escape_json_raw_object() {
+        // JSON object should be escaped and wrapped
+        let obj = "{\"key\": \"value\"}";
+        let escaped = escape_json_raw(obj);
+        assert_eq!(escaped, "\"{\\\"key\\\": \\\"value\\\"}\"");
+    }
+
+    #[test]
+    fn test_negative_timestamp_handling() {
+        // Bug #1084: negative i64 timestamps wrap to far-future u64 values
+        use arrow::array::Int64Array;
+        use arrow::datatypes::{Field, Schema};
+
+        let config = Arc::new(LokiConfig {
+            endpoint: "http://localhost".to_string(),
+            tenant_id: None,
+            static_labels: vec![],
+            label_columns: vec![],
+            headers: vec![],
+        });
+        let sink = LokiSink::new(
+            "test".to_string(),
+            config,
+            Arc::new(reqwest::Client::new()),
+            Arc::new(ComponentStats::new()),
+        );
+
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "_timestamp",
+            DataType::Int64,
+            true,
+        )]));
+        let ts_arr = Int64Array::from(vec![Some(-100i64), Some(100i64)]);
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(ts_arr)]).unwrap();
+        let metadata = BatchMetadata {
+            resource_attrs: Arc::new(vec![]),
+            observed_time_ns: 12345,
+        };
+
+        let stream_map = sink.build_stream_map(&batch, &metadata).unwrap();
+        let mut entries: Vec<LokiEntry> = stream_map.values().flatten().cloned().collect();
+        entries.sort_by_key(|(ts, _)| *ts);
+
+        assert_eq!(entries[0].0, 0, "Negative timestamp should be clamped to 0");
+        assert_eq!(entries[1].0, 100, "Positive timestamp should be preserved");
     }
 }
 
