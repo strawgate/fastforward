@@ -39,8 +39,9 @@ pub struct UdpSink {
 impl UdpSink {
     /// Create a new UDP sink.
     ///
-    /// Binds a UDP socket to an ephemeral port (`0.0.0.0:0`). The socket is
-    /// set to non-blocking mode and converted to a `tokio::net::UdpSocket`.
+    /// Binds a UDP socket to an ephemeral port (`0.0.0.0:0`) for outbound-only
+    /// traffic. The socket is set to non-blocking mode and converted to a
+    /// `tokio::net::UdpSocket`.
     pub fn new(
         name: impl Into<String>,
         target: impl Into<String>,
@@ -277,21 +278,17 @@ mod tests {
         );
     }
 
-    #[test]
-    fn factory_creates_sink() {
-        // UdpSinkFactory::create needs a tokio runtime for from_std.
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let factory = UdpSinkFactory::new(
-                "test-udp".to_string(),
-                "127.0.0.1:9999".to_string(),
-                Arc::new(ComponentStats::new()),
-            );
-            assert_eq!(factory.name(), "test-udp");
-            assert!(factory.is_single_use());
+    #[tokio::test]
+    async fn factory_creates_sink() {
+        let factory = UdpSinkFactory::new(
+            "test-udp".to_string(),
+            "127.0.0.1:9999".to_string(),
+            Arc::new(ComponentStats::new()),
+        );
+        assert_eq!(factory.name(), "test-udp");
+        assert!(factory.is_single_use());
 
-            let sink = factory.create().expect("create should succeed");
-            assert_eq!(sink.name(), "test-udp");
-        });
+        let sink = factory.create().expect("create should succeed");
+        assert_eq!(sink.name(), "test-udp");
     }
 }
