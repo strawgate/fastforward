@@ -64,6 +64,15 @@ pub trait InputSource: Send {
     /// Used for checkpoint restore — the checkpoint stores fingerprint + offset.
     /// The input source finds the matching file by fingerprint, not path.
     fn set_offset_by_source(&mut self, _source_id: SourceId, _offset: u64) {}
+
+    /// True when the last poll suggests more data is immediately available.
+    ///
+    /// Used by the pipeline to skip sleep between polls during bulk reads,
+    /// eliminating idle time when files have large backlogs (#1258).
+    /// Default: `false` (conservative — always sleep).
+    fn has_more_data(&self) -> bool {
+        false
+    }
 }
 
 /// An input source backed by a `FileTailer`.
@@ -129,5 +138,9 @@ impl InputSource for FileInput {
         if let Err(e) = self.tailer.set_offset_by_source(source_id, offset) {
             tracing::warn!(source_id = source_id.0, error = %e, "failed to restore offset");
         }
+    }
+
+    fn has_more_data(&self) -> bool {
+        self.tailer.has_more_data()
     }
 }

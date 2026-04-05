@@ -422,6 +422,9 @@ struct FileReader {
     evicted_offsets: HashMap<PathBuf, EvictedFile>,
     /// Configuration for read buffer size, fingerprint bytes, etc.
     config: TailConfig,
+    /// True when the last `read_all` hit `MAX_READ_PER_POLL` on at least
+    /// one file, indicating more data is likely available without waiting.
+    last_read_hit_cap: bool,
 }
 
 impl FileReader {
@@ -601,6 +604,7 @@ impl FileReader {
 
     /// Read new data from all tailed files, emitting Data/Truncated/EndOfFile events.
     fn read_all(&mut self, events: &mut Vec<TailEvent>) {
+        self.last_read_hit_cap = false;
         let paths: Vec<PathBuf> = self.files.keys().cloned().collect();
         for path in paths {
             // Capture source_id BEFORE read_new_data: truncation detection
@@ -614,6 +618,11 @@ impl FileReader {
                     // EndOfFile event can be emitted the next time reads stall.
                     if let Some(tailed) = self.files.get_mut(&path) {
                         tailed.eof_emitted = false;
+                    }
+                    // If the read hit the per-file cap, more data is likely
+                    // available without waiting (#1258).
+                    if data.len() >= Self::MAX_READ_PER_POLL {
+                        self.last_read_hit_cap = true;
                     }
                     // Compute source_id AFTER read_new_data: empty files acquire
                     // their real fingerprint during the read, so the post-read
@@ -636,6 +645,11 @@ impl FileReader {
                     });
                     if let Some(tailed) = self.files.get_mut(&path) {
                         tailed.eof_emitted = false;
+                    }
+                    // If the read hit the per-file cap, more data is likely
+                    // available without waiting (#1258).
+                    if data.len() >= Self::MAX_READ_PER_POLL {
+                        self.last_read_hit_cap = true;
                     }
                     let source_id = self.source_id_for_path(&path);
                     events.push(TailEvent::Data {
@@ -822,6 +836,9 @@ pub struct FileTailer {
     config: TailConfig,
     /// Last time we did a full poll scan.
     last_poll: Instant,
+    /// True when the last read from any file hit `MAX_READ_PER_POLL`,
+    /// indicating more data is likely available without waiting (#1258).
+    has_more_data: bool,
 }
 
 impl FileTailer {
@@ -863,9 +880,11 @@ impl FileTailer {
                 read_buf: vec![0u8; config.read_buf_size],
                 evicted_offsets: HashMap::new(),
                 config: config.clone(),
+                last_read_hit_cap: false,
             },
             config,
             last_poll: Instant::now(),
+            has_more_data: false,
         };
 
         // Open existing files. Warn about missing paths (#730).
@@ -936,8 +955,10 @@ impl FileTailer {
         let glob_rescan_due = self.config.glob_rescan_interval_ms > 0
             && self.discovery.last_glob_rescan.elapsed()
                 >= Duration::from_millis(self.config.glob_rescan_interval_ms);
-        let should_poll =
-            something_changed || self.last_poll.elapsed() >= poll_interval || glob_rescan_due;
+        let should_poll = self.has_more_data
+            || something_changed
+            || self.last_poll.elapsed() >= poll_interval
+            || glob_rescan_due;
 
         if !should_poll {
             return Ok(events);
@@ -955,6 +976,7 @@ impl FileTailer {
 
         // Read new data from all tailed files.
         self.reader.read_all(&mut events);
+        self.has_more_data = self.reader.last_read_hit_cap;
 
         // Remove entries for files that have been unlinked (nlink == 0).
         self.discovery
@@ -964,6 +986,15 @@ impl FileTailer {
         self.reader.evict_lru(self.config.max_open_files);
 
         Ok(events)
+    }
+
+    /// True when the last poll read the maximum allowed bytes from at least
+    /// one file, indicating more data is likely available immediately.
+    ///
+    /// Used by the pipeline to skip sleep between polls during bulk reads,
+    /// eliminating idle time when files have large backlogs (#1258).
+    pub fn has_more_data(&self) -> bool {
+        self.has_more_data
     }
 
     /// Get the current offset for a file (for checkpointing).
@@ -2242,6 +2273,46 @@ mod tests {
         let tailer = FileTailer::new(std::slice::from_ref(&missing), config);
         assert!(tailer.is_ok(), "missing path should not fail construction");
         assert_eq!(tailer.unwrap().num_files(), 0);
+    }
+
+    /// Verify that `has_more_data()` is set when a read fills the
+    /// `MAX_READ_PER_POLL` buffer and cleared when it doesn't.
+    #[test]
+    fn test_has_more_data_tracks_read_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("burst.log");
+
+        // Write more than MAX_READ_PER_POLL (4 MiB) so the first poll
+        // will hit the cap.
+        let line = "x".repeat(1024) + "\n";
+        let lines_needed = (FileTailer::MAX_READ_PER_POLL / line.len()) + 100;
+        let big_data: String = line.repeat(lines_needed);
+        std::fs::write(&path, big_data.as_bytes()).unwrap();
+
+        let config = TailConfig {
+            start_from_end: false,
+            poll_interval_ms: 10,
+            ..Default::default()
+        };
+        let mut tailer = FileTailer::new(std::slice::from_ref(&path), config).unwrap();
+
+        // Give the tailer time to detect the file.
+        std::thread::sleep(Duration::from_millis(50));
+
+        // First poll should hit the cap.
+        let events1 = tailer.poll().unwrap();
+        assert!(!events1.is_empty(), "first poll should return data");
+        assert!(
+            tailer.has_more_data(),
+            "has_more_data should be true after hitting read cap"
+        );
+
+        // Second poll reads the remainder (< cap), so flag should clear.
+        let _events2 = tailer.poll().unwrap();
+        assert!(
+            !tailer.has_more_data(),
+            "has_more_data should be false after reading remaining data"
+        );
     }
 }
 

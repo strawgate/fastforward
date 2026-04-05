@@ -1045,7 +1045,7 @@ fn input_poll_loop(
             }
         };
 
-        if events.is_empty() {
+        if events.is_empty() && !input.source.has_more_data() {
             std::thread::sleep(poll_interval);
         } else {
             for event in events {

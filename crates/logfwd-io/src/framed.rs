@@ -330,6 +330,10 @@ impl InputSource for FramedInput {
     fn set_offset_by_source(&mut self, source_id: SourceId, offset: u64) {
         self.inner.set_offset_by_source(source_id, offset);
     }
+
+    fn has_more_data(&self) -> bool {
+        self.inner.has_more_data()
+    }
 }
 
 #[cfg(test)]
