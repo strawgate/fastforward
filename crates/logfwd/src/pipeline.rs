@@ -116,8 +116,10 @@ pub struct Pipeline {
     machine: Option<PipelineMachine<Running, u64>>,
     /// Durable checkpoint store. None when running without persistence (tests).
     checkpoint_store: Option<Box<dyn CheckpointStore>>,
-    /// Throttle checkpoint flushes to at most once per 5 seconds.
+    /// Throttle checkpoint flushes to at most once per this interval.
     last_checkpoint_flush: Instant,
+    /// Checkpoint flush throttle interval. Default 5 seconds; overridable for tests.
+    checkpoint_flush_interval: Duration,
 }
 
 impl Pipeline {
@@ -379,6 +381,7 @@ impl Pipeline {
             machine: Some(PipelineMachine::new().start()),
             checkpoint_store,
             last_checkpoint_flush: Instant::now(),
+            checkpoint_flush_interval: Duration::from_secs(5),
         })
     }
 
@@ -477,7 +480,22 @@ impl Pipeline {
             machine: Some(PipelineMachine::new().start()),
             checkpoint_store: None,
             last_checkpoint_flush: Instant::now(),
+            checkpoint_flush_interval: Duration::from_secs(5),
         }
+    }
+
+    /// Number of in-flight batches tracked by the state machine.
+    /// Useful for test assertions on shutdown completeness.
+    #[cfg(feature = "turmoil")]
+    #[allow(clippy::redundant_closure_for_method_calls)]
+    pub fn in_flight_count(&self) -> usize {
+        self.machine.as_ref().map_or(0, |m| m.in_flight_count())
+    }
+
+    /// Override the checkpoint flush interval (default 5s). For testing
+    /// checkpoint persistence timing without waiting real seconds.
+    pub fn set_checkpoint_flush_interval(&mut self, interval: Duration) {
+        self.checkpoint_flush_interval = interval;
     }
 
     /// Run the pipeline until `shutdown` is cancelled. Blocks the calling thread.
@@ -938,9 +956,9 @@ impl Pipeline {
                 }
             }
         }
-        // Flush to disk at most once per 5 seconds to amortize fsync cost.
+        // Flush to disk at most once per checkpoint_flush_interval to amortize fsync cost.
         // Advance the timer even on failure to prevent retry flooding.
-        if any_advanced && self.last_checkpoint_flush.elapsed() >= Duration::from_secs(5) {
+        if any_advanced && self.last_checkpoint_flush.elapsed() >= self.checkpoint_flush_interval {
             self.last_checkpoint_flush = Instant::now();
             if let Some(ref mut store) = self.checkpoint_store {
                 if let Err(e) = store.flush() {

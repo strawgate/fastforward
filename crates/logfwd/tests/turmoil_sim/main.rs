@@ -2,7 +2,7 @@
 
 mod channel_input;
 mod crash_sim;
-mod crashable_checkpoint;
-mod failure_sinks;
+mod instrumented_sink;
 mod network_sim;
+mod observable_checkpoint;
 mod pipeline_sim;
