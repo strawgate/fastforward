@@ -87,9 +87,10 @@ impl fmt::Display for InputType {
 /// Uses a custom `Deserialize` impl so that `type: null` in YAML (which
 /// the YAML spec parses as the scalar null, not the string `"null"`) is
 /// accepted as the `Null` variant in both simple and list contexts.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum OutputType {
+    #[default]
     Otlp,
     Http,
     Elasticsearch,
@@ -229,7 +230,7 @@ pub struct InputConfig {
 }
 
 /// A single output destination.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct OutputConfig {
     pub name: Option<String>,
