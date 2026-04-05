@@ -1,3 +1,6 @@
+pub mod error;
+pub use error::InputError;
+
 pub mod arrow_ipc_receiver;
 pub mod checkpoint;
 pub mod compress;

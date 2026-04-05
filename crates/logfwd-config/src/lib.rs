@@ -35,36 +35,19 @@ pub struct AuthConfig {
 // ---------------------------------------------------------------------------
 
 /// Errors that can occur while loading or validating configuration.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 #[must_use]
+#[non_exhaustive]
 pub enum ConfigError {
-    Io(std::io::Error),
-    Yaml(serde_yaml_ng::Error),
+    /// I/O error reading the configuration file.
+    #[error("config I/O error: {0}")]
+    Io(#[from] std::io::Error),
+    /// YAML parsing error.
+    #[error("config YAML error: {0}")]
+    Yaml(#[from] serde_yaml_ng::Error),
+    /// Semantic validation error in configuration values.
+    #[error("config validation error: {0}")]
     Validation(String),
-}
-
-impl fmt::Display for ConfigError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ConfigError::Io(e) => write!(f, "config I/O error: {e}"),
-            ConfigError::Yaml(e) => write!(f, "config YAML error: {e}"),
-            ConfigError::Validation(msg) => write!(f, "config validation error: {msg}"),
-        }
-    }
-}
-
-impl std::error::Error for ConfigError {}
-
-impl From<std::io::Error> for ConfigError {
-    fn from(e: std::io::Error) -> Self {
-        ConfigError::Io(e)
-    }
-}
-
-impl From<serde_yaml_ng::Error> for ConfigError {
-    fn from(e: serde_yaml_ng::Error) -> Self {
-        ConfigError::Yaml(e)
-    }
 }
 
 // ---------------------------------------------------------------------------

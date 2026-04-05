@@ -2348,6 +2348,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_yaml_ng",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -2367,6 +2368,7 @@ dependencies = [
  "proptest",
  "sonic-rs",
  "tempfile",
+ "thiserror 2.0.18",
  "wide",
 ]
 
@@ -2396,6 +2398,7 @@ dependencies = [
  "serial_test",
  "socket2",
  "tempfile",
+ "thiserror 2.0.18",
  "tiny_http",
  "tracing",
  "ureq",
@@ -2425,6 +2428,7 @@ dependencies = [
  "serde_json",
  "serial_test",
  "stats_alloc",
+ "thiserror 2.0.18",
  "tiny_http",
  "tokio",
  "tokio-stream",
@@ -2462,6 +2466,7 @@ dependencies = [
  "regex",
  "serde_json",
  "tempfile",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
 ]
