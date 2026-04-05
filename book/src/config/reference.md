@@ -22,7 +22,7 @@ input:
   path: /var/log/app/*.log
   format: json
 
-transform: SELECT level_str, message_str, status_int FROM logs WHERE status_int >= 400
+transform: SELECT level, message, status FROM logs WHERE status >= 400
 
 output:
   type: otlp
@@ -44,7 +44,7 @@ pipelines:
         type: file
         path: /var/log/pods/**/*.log
         format: cri
-    transform: SELECT * FROM logs WHERE level_str = 'ERROR'
+    transform: SELECT * FROM logs WHERE level = 'ERROR'
     outputs:
       - type: otlp
         endpoint: otel-collector:4317
@@ -273,7 +273,7 @@ The optional `transform` field contains a DataFusion SQL query that is applied t
 Arrow `RecordBatch` produced by the scanner. The source table is always named `logs`.
 
 ```yaml
-transform: SELECT level_str, message_str, status_int FROM logs WHERE status_int >= 400
+transform: SELECT level, message, status FROM logs WHERE status >= 400
 ```
 
 Multi-line SQL is supported with YAML block scalars:
@@ -281,13 +281,13 @@ Multi-line SQL is supported with YAML block scalars:
 ```yaml
 transform: |
   SELECT
-    level_str,
-    message_str,
-    regexp_extract(message_str, 'request_id=([a-f0-9-]+)', 1) AS request_id_str,
-    status_int
+    level,
+    message,
+    regexp_extract(message, 'request_id=([a-f0-9-]+)', 1) AS request_id,
+    status
   FROM logs
-  WHERE level_str IN ('ERROR', 'WARN')
-    AND status_int >= 400
+  WHERE level IN ('ERROR', 'WARN')
+    AND status >= 400
 ```
 
 ### Column naming convention
@@ -329,16 +329,16 @@ Examples:
 
 ```sql
 -- Cast a string column to int
-SELECT int(status_str) AS status_int FROM logs
+SELECT int(status) AS status FROM logs
 
 -- Extract a field with Grok
-SELECT grok('%{IP:client} %{WORD:method} %{URIPATHPARAM:path}', message_str) AS parsed_str FROM logs
+SELECT grok('%{IP:client} %{WORD:method} %{URIPATHPARAM:path}', message) AS parsed FROM logs
 
 -- Extract a named group with regex
-SELECT regexp_extract(message_str, 'user=([a-z]+)', 1) AS user_str FROM logs
+SELECT regexp_extract(message, 'user=([a-z]+)', 1) AS user FROM logs
 
 -- Type-cast from environment-injected string
-SELECT float(duration_str) AS duration_ms_float FROM logs
+SELECT float(duration) AS duration_ms FROM logs
 ```
 
 ---
@@ -369,7 +369,7 @@ Parses Kubernetes pod log paths (e.g.
 `/var/log/pods/<namespace>_<pod>_<uid>/<container>/`) to extract metadata.
 
 ```sql
-SELECT l.level_str, l.message_str, k.namespace, k.pod_name, k.container_name
+SELECT l.level, l.message, k.namespace, k.pod_name, k.container_name
 FROM logs l
 JOIN k8s k ON l._file_str = k.log_path_prefix
 ```
@@ -499,9 +499,9 @@ pipelines:
         format: cri
     transform: |
       SELECT
-        l.level_str,
-        l.message_str,
-        l.status_int,
+        l.level,
+        l.message,
+        l.status,
         k.namespace,
         k.pod_name,
         k.container_name,
@@ -509,8 +509,8 @@ pipelines:
       FROM logs l
       LEFT JOIN k8s k ON l._file_str = k.log_path_prefix
       CROSS JOIN labels lbl
-      WHERE l.level_str IN ('ERROR', 'WARN')
-        OR l.status_int >= 500
+      WHERE l.level IN ('ERROR', 'WARN')
+        OR l.status >= 500
     outputs:
       - name: collector
         type: otlp
