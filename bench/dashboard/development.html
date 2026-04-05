@@ -109,6 +109,11 @@ function drawSparkline(canvas, data, color) {
 
 const DATA_BASE = 'https://raw.githubusercontent.com/strawgate/memagent/bench-data';
 
+function runId(entry) {
+  if (entry && typeof entry === 'object') return entry.id;
+  return entry;
+}
+
 async function loadJSON(url) {
   try { const r = await fetch(url); if (!r.ok) return null; return await r.json(); }
   catch { return null; }
@@ -122,8 +127,8 @@ async function main() {
     return;
   }
 
-  const rateRunIds = index.rate_runs || [];
-  const criterionRunIds = index.criterion_runs || [];
+  const rateRunIds = (index.rate_runs || []).map(runId).filter(Boolean).map(String);
+  const criterionRunIds = (index.criterion_runs || []).map(runId).filter(Boolean).map(String);
 
   const rateRuns = (await Promise.all(rateRunIds.map(id => loadJSON(DATA_BASE + '/rate-runs/' + id + '.json')))).filter(Boolean);
   const criterionRuns = (await Promise.all(criterionRunIds.map(id => loadJSON(DATA_BASE + '/criterion-runs/' + id + '.json')))).filter(Boolean);
