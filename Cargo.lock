@@ -2324,6 +2324,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "stats_alloc",
  "tempfile",
  "tokio",
 ]

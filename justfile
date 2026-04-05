@@ -326,6 +326,11 @@ bench-rate *ARGS:
     cargo build --release -p logfwd
     LOGFWD=./target/release/logfwd cargo run -p logfwd-competitive-bench --release -- --rate-bench {{ARGS}}
 
+# Run sustained-load memory profiler (generator → SQL → null, default 5 minutes).
+# Use --quick (30s) for CI or --medium (120s) for quick checks.
+bench-memory *ARGS:
+    cargo run -p logfwd-bench --release --bin memory-profile -- {{ARGS}}
+
 # Install development tools
 install-tools:
     cargo install taplo-cli cargo-deny cargo-audit cargo-nextest
