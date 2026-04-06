@@ -120,7 +120,8 @@ fields.
 - A numeric value with a decimal point (`.`) or an exponent (`e`/`E`) is
   stored as `Float64`.
 - A value without either is first tried as `Int64` via `parse_int_fast`.  On
-  overflow (value does not fit in `i64`) it falls back to `Float64`.
+  overflow (value does not fit in `i64`) the original digit string is
+  preserved as `Utf8` to avoid silent precision loss.
 - `true` and `false` are stored as the strings `"true"` / `"false"` in a
   `_str` column.
 - `null` JSON values produce a null entry in the appropriate column.

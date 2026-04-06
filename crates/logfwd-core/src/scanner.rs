@@ -256,7 +256,10 @@ fn scan_line<B: ScanBuilder>(
                     } else if parse_int_fast(val).is_some() {
                         builder.append_int_by_idx(idx, val);
                     } else {
-                        builder.append_float_by_idx(idx, val);
+                        // Integer that doesn't fit in i64 (e.g. > i64::MAX).
+                        // Preserve the original digits as a string rather than
+                        // silently losing precision via float64 conversion.
+                        builder.append_str_by_idx(idx, val);
                     }
                 }
             }
