@@ -281,7 +281,8 @@ impl OtlpReceiverInput {
 
 impl Drop for OtlpReceiverInput {
     fn drop(&mut self) {
-        self.shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.shutdown
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         self.rx.take();
         self.server.unblock();
         if let Some(handle) = self.handle.take() {

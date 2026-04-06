@@ -324,27 +324,27 @@ fn decode_ipc_stream(body: &[u8]) -> Result<Vec<RecordBatch>, InputError> {
 // Tests
 // ---------------------------------------------------------------------------
 
-    // Regression test for issue #1142: clean shutdown
-    #[test]
-    fn clean_shutdown_releases_port() {
-        let addr = "127.0.0.1:0";
-        let receiver = ArrowIpcReceiver::new("test", addr).unwrap();
-        let port = receiver.local_addr().port();
+// Regression test for issue #1142: clean shutdown
+#[test]
+fn clean_shutdown_releases_port() {
+    let addr = "127.0.0.1:0";
+    let receiver = ArrowIpcReceiver::new("test", addr).unwrap();
+    let port = receiver.local_addr().port();
 
-        // Wait briefly for thread to start blocking
-        std::thread::sleep(std::time::Duration::from_millis(50));
+    // Wait briefly for thread to start blocking
+    std::thread::sleep(std::time::Duration::from_millis(50));
 
-        // Drop it
-        drop(receiver);
+    // Drop it
+    drop(receiver);
 
-        // Wait briefly for the OS to actually release the port
-        std::thread::sleep(std::time::Duration::from_millis(50));
+    // Wait briefly for the OS to actually release the port
+    std::thread::sleep(std::time::Duration::from_millis(50));
 
-        // The port should now be free to bind to immediately
-        let new_addr = format!("127.0.0.1:{}", port);
-        let result = tiny_http::Server::http(&new_addr);
-        assert!(result.is_ok(), "Failed to bind to port {} after drop", port);
-    }
+    // The port should now be free to bind to immediately
+    let new_addr = format!("127.0.0.1:{}", port);
+    let result = tiny_http::Server::http(&new_addr);
+    assert!(result.is_ok(), "Failed to bind to port {} after drop", port);
+}
 
 #[cfg(test)]
 mod tests {
@@ -465,7 +465,8 @@ mod tests {
 
 impl Drop for ArrowIpcReceiver {
     fn drop(&mut self) {
-        self.shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.shutdown
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         self.rx.take();
         self.server.unblock();
         if let Some(handle) = self.handle.take() {
