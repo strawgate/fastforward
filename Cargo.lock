@@ -2384,6 +2384,7 @@ name = "logfwd"
 version = "0.1.0"
 dependencies = [
  "arrow",
+ "backon",
  "bytes",
  "dhat",
  "libc",
