@@ -679,7 +679,7 @@ impl Config {
                             }
                         }
                     }
-                    InputType::Otlp | InputType::ArrowIpc => {
+                    InputType::Otlp => {
                         if input.listen.is_none() {
                             return Err(ConfigError::Validation(format!(
                                 "pipeline '{name}' input '{label}': 'listen' is required for {} inputs",
@@ -694,7 +694,7 @@ impl Config {
                             }
                         }
                     }
-                    InputType::Generator => {}
+                    InputType::Generator | InputType::ArrowIpc => {}
                 }
 
                 // Reject fields that don't apply to this input type.
