@@ -566,8 +566,13 @@ impl SegmentWriter {
         }
 
         self.ipc_buf.clear();
+        let compression = if self.header.flags & FLAG_ZSTD != 0 {
+            Some(CompressionType::ZSTD)
+        } else {
+            None
+        };
         let opts = IpcWriteOptions::default()
-            .try_with_compression(Some(CompressionType::ZSTD))
+            .try_with_compression(compression)
             .map_err(|e| io::Error::other(e.to_string()))?;
         let mut ipc_writer =
             StreamWriter::try_new_with_options(&mut self.ipc_buf, &batch.schema(), opts)
