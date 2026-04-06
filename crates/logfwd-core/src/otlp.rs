@@ -449,8 +449,11 @@ pub fn parse_timestamp_nanos(ts: &[u8]) -> Option<u64> {
                 // UTC — nothing to adjust
             }
             sign @ (b'+' | b'-') => {
-                // Expect +HH:MM or -HH:MM
-                if tz_pos + 5 > ts.len() {
+                // Expect +HH:MM or -HH:MM (6 bytes: sign, 2 hour, colon, 2 min)
+                if tz_pos + 6 > ts.len() {
+                    return None;
+                }
+                if ts[tz_pos + 3] != b':' {
                     return None;
                 }
                 let tz_hour = parse_2digits(ts, tz_pos + 1) as u64;
