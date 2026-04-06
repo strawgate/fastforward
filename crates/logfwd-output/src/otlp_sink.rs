@@ -93,6 +93,21 @@ impl OtlpSink {
         client: reqwest::Client,
         stats: Arc<ComponentStats>,
     ) -> io::Result<Self> {
+        // For gRPC, ensure the endpoint has the correct service path.
+        // Users typically configure just the host:port (e.g., "http://collector:4317").
+        // The gRPC spec requires the full path: /package.Service/Method (#1059)
+        let endpoint = if protocol == OtlpProtocol::Grpc {
+            let trimmed = endpoint.trim_end_matches('/');
+            if trimmed.ends_with("/Export")
+                || trimmed.ends_with("/LogsService/Export")
+            {
+                endpoint
+            } else {
+                format!("{trimmed}/opentelemetry.proto.collector.logs.v1.LogsService/Export")
+            }
+        } else {
+            endpoint
+        };
         let compressor = match compression {
             Compression::Zstd => Some(ZstdCompressor::new(1).map_err(io::Error::other)?),
             _ => None,
@@ -328,6 +343,51 @@ impl OtlpSink {
                 }
 
                 if status.is_success() {
+                    // For gRPC, check grpc-status header — HTTP 200 can carry a
+                    // gRPC error in headers (trailers-only responses). (#1097)
+                    //
+                    // Note: reqwest does not surface HTTP/2 trailers from the
+                    // trailers frame, only from the initial HEADERS frame. This
+                    // catches trailers-only responses (the common error path for
+                    // OTLP collectors) but not normal headers→data→trailers flow.
+                    if self.protocol == OtlpProtocol::Grpc {
+                        if let Some(grpc_status) = response.headers().get("grpc-status") {
+                            let code = grpc_status
+                                .to_str()
+                                .unwrap_or("unknown")
+                                .trim()
+                                .parse::<u32>()
+                                .unwrap_or(2); // default to UNKNOWN
+                            if code != 0 {
+                                let msg = response
+                                    .headers()
+                                    .get("grpc-message")
+                                    .and_then(|v| v.to_str().ok())
+                                    .unwrap_or("")
+                                    .to_string();
+                                // Classify gRPC status codes per gRPC spec:
+                                // Retryable: CANCELLED(1), DEADLINE_EXCEEDED(4),
+                                //   RESOURCE_EXHAUSTED(8), ABORTED(10), UNAVAILABLE(14)
+                                // Permanent: all others (INVALID_ARGUMENT, NOT_FOUND, etc.)
+                                return Ok(match code {
+                                    1 | 4 | 10 | 14 => {
+                                        super::sink::SendResult::IoError(io::Error::other(
+                                            format!("gRPC error {code}: {msg}"),
+                                        ))
+                                    }
+                                    8 => {
+                                        // RESOURCE_EXHAUSTED → treat like 429
+                                        super::sink::SendResult::RetryAfter(
+                                            Duration::from_secs(DEFAULT_RETRY_AFTER_SECS),
+                                        )
+                                    }
+                                    _ => super::sink::SendResult::Rejected(format!(
+                                        "gRPC error {code}: {msg}"
+                                    )),
+                                });
+                            }
+                        }
+                    }
                     self.stats.inc_lines(batch_rows);
                     self.stats.inc_bytes(self.encoder_buf.len() as u64);
                     return Ok(super::sink::SendResult::Ok);
@@ -741,10 +801,15 @@ fn encode_row_as_log_record(
         }
     }
 
-    // LogRecord.flags (fixed32) — W3C trace flags
+    // LogRecord.flags (fixed32) — W3C trace flags.
+    // Clamp to u32 range: negative or >u32::MAX values are invalid per the
+    // W3C Trace Context spec (only 8 bits are defined). (#1121)
     if let Some((_, arr)) = columns.flags_col {
         if !arr.is_null(row) {
-            encode_fixed32(buf, otlp::LOG_RECORD_FLAGS, arr.value(row) as u32);
+            let raw = arr.value(row);
+            if let Ok(flags) = u32::try_from(raw) {
+                encode_fixed32(buf, otlp::LOG_RECORD_FLAGS, flags);
+            }
         }
     }
 
