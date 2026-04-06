@@ -27,12 +27,26 @@ fn poll_single_row(input: &mut dyn InputSource, timeout: Duration) -> serde_json
             }
         }
 
-        if let Some(newline) = buf.iter().position(|b| *b == b'\n') {
-            let line = String::from_utf8(buf.drain(..=newline).collect())
-                .expect("receiver emits utf8 json");
-            let line = line.trim_end_matches('\n');
-            return serde_json::from_str(&line)
-                .unwrap_or_else(|e| panic!("valid json row: {e}; line={line}"));
+        if let Some(last_newline) = buf.iter().rposition(|b| *b == b'\n') {
+            let complete = buf.drain(..=last_newline).collect::<Vec<_>>();
+            let mut rows = Vec::new();
+            for line in complete
+                .split(|b| *b == b'\n')
+                .filter(|line| !line.is_empty())
+            {
+                let line = std::str::from_utf8(line).expect("receiver emits utf8 json");
+                rows.push(
+                    serde_json::from_str(line)
+                        .unwrap_or_else(|e| panic!("valid json row: {e}; line={line}")),
+                );
+            }
+            assert_eq!(
+                rows.len(),
+                1,
+                "expected exactly one complete JSON row, got {}",
+                rows.len()
+            );
+            return rows.pop().expect("one parsed row");
         }
 
         std::thread::sleep(Duration::from_millis(20));

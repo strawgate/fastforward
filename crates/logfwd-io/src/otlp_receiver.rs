@@ -307,7 +307,7 @@ fn decode_otlp_logs_json(body: &[u8]) -> Result<Vec<u8>, InputError> {
         return Ok(Vec::new());
     }
 
-    let root: serde_json::Value = serde_json::from_slice(body)
+    let root: serde_json::Value = sonic_rs::from_slice(body)
         .map_err(|e| InputError::Receiver(format!("invalid JSON: {e}")))?;
 
     let resource_logs = match root.get("resourceLogs").and_then(|v| v.as_array()) {
@@ -426,8 +426,8 @@ fn decode_otlp_logs_json(body: &[u8]) -> Result<Vec<u8>, InputError> {
     Ok(out)
 }
 
-/// Extract a string from an OTLP JSON AnyValue object.
-/// For common integer/float/bool cases, write directly to avoid intermediate String allocation.
+/// Extract a scalar OTLP JSON AnyValue as an owned string.
+/// Returns `Ok(None)` when the value is not a supported scalar string representation.
 fn json_any_value_to_string(v: &serde_json::Value) -> Result<Option<String>, InputError> {
     if let Some(s) = v.get("stringValue").and_then(|v| v.as_str()) {
         return Ok(Some(s.to_string()));
@@ -680,6 +680,8 @@ fn parse_protojson_u64_str(s: &str) -> Option<u64> {
 }
 
 fn normalize_protojson_integral_digits(s: &str) -> Option<(bool, String)> {
+    const MAX_INTEGER_DECIMAL_DIGITS: usize = 20;
+
     let s = s.trim();
     if s.is_empty() {
         return None;
@@ -718,19 +720,23 @@ fn normalize_protojson_integral_digits(s: &str) -> Option<(bool, String)> {
     if digits.is_empty() {
         return None;
     }
+    if digits.bytes().all(|b| b == b'0') {
+        return Some((false, "0".to_string()));
+    }
 
     let fractional_digits = i32::try_from(frac_part.len()).ok()?;
     let effective_exponent = exponent.checked_sub(fractional_digits)?;
 
     if effective_exponent >= 0 {
         let zeros = usize::try_from(effective_exponent).ok()?;
+        let total_len = digits.len().checked_add(zeros)?;
+        if total_len > MAX_INTEGER_DECIMAL_DIGITS {
+            return None;
+        }
         digits.extend(std::iter::repeat_n('0', zeros));
     } else {
-        let trim = usize::try_from(-effective_exponent).ok()?;
+        let trim = usize::try_from(effective_exponent.checked_neg()?).ok()?;
         if trim > digits.len() {
-            if digits.bytes().all(|b| b == b'0') {
-                return Some((false, "0".to_string()));
-            }
             return None;
         }
         if !digits[digits.len() - trim..].bytes().all(|b| b == b'0') {
@@ -779,7 +785,10 @@ fn write_json_any_value(out: &mut Vec<u8>, key: &str, v: &AnyValue) -> bool {
             true
         }
         Some(Value::BytesValue(bytes)) => {
-            write_json_string_field(out, key, &hex::encode(bytes));
+            write_json_key(out, key);
+            out.push(b'"');
+            write_hex_to_buf(out, bytes);
+            out.push(b'"');
             true
         }
         _ => false,
@@ -1293,6 +1302,49 @@ mod tests {
         assert_eq!(
             row.get("status").and_then(serde_json::Value::as_i64),
             Some(100)
+        );
+    }
+
+    #[test]
+    fn huge_positive_exponent_json_int_value_returns_error() {
+        let result = decode_otlp_logs_json(
+            br#"{
+                "resourceLogs": [{
+                    "scopeLogs": [{
+                        "logRecords": [{
+                            "attributes": [{
+                                "key": "status",
+                                "value": {"intValue": "1e2147483647"}
+                            }]
+                        }]
+                    }]
+                }]
+            }"#,
+        );
+
+        assert!(result.is_err(), "huge exponent intValue must fail");
+    }
+
+    #[test]
+    fn huge_negative_exponent_json_int_value_returns_error_without_panicking() {
+        let result = decode_otlp_logs_json(
+            br#"{
+                "resourceLogs": [{
+                    "scopeLogs": [{
+                        "logRecords": [{
+                            "attributes": [{
+                                "key": "status",
+                                "value": {"intValue": "1e-2147483648"}
+                            }]
+                        }]
+                    }]
+                }]
+            }"#,
+        );
+
+        assert!(
+            result.is_err(),
+            "extreme negative exponent intValue must fail without panicking"
         );
     }
 
