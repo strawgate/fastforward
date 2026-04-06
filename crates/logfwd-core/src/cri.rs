@@ -742,12 +742,12 @@ mod verification {
     /// and wraps non-JSON messages as {"_raw":"..."}.
     ///
     /// Input: 2-byte msg + 2-byte prefix = 4 symbolic bytes. Reduced from
-    /// 8+4→4+4→2+2 to stay under CI timeout: 4+4 bytes generated ~21K VCCs /
+    /// 8+4->4+4->2+2 to stay under CI timeout: 4+4 bytes generated ~21K VCCs /
     /// ~5K post-simplification that timed out kissat on ubuntu-latest runners.
     /// 2+2 still covers:
     ///   - msg[0] drives JSON vs non-JSON branch
     ///   - msg[1] (non-JSON: through json_escape_bytes; JSON: verbatim copy)
-    ///   - prefix is always written verbatim — 2 bytes suffice to verify injection
+    ///   - prefix is always written verbatim - 2 bytes suffice to verify injection
     /// Vec::with_capacity(64) pre-allocates to avoid realloc VCC explosion.
     #[kani::proof]
     #[kani::unwind(4)] // 2 iterations + 2 margin
@@ -807,13 +807,12 @@ mod verification {
 
     /// Prove write_json_line without prefix passes JSON through and wraps plain text.
     ///
-    /// Input: 2 symbolic bytes. Reduced from 8→4→3→2 to stay under CI timeout:
-    /// 3 bytes generated ~14K VCCs / ~3K post-simplification that timed out
-    /// in kissat on ubuntu-latest runners (90s budget). 2 bytes still covers
-    /// every escape arm in json_escape_bytes and both JSON/non-JSON branches —
-    /// the first byte drives the JSON/plain split; the second byte exercises
-    /// all escape paths. Vec::with_capacity(64) pre-allocates to avoid realloc
-    /// VCC explosion.
+    /// Input: 2 symbolic bytes. Reduced from 8→4→3→2 to keep SAT solving under
+    /// CI timeout (3 bytes still produced thousands of VCCs that timed out in
+    /// kissat on ubuntu-latest runners). 2 bytes still covers every escape path
+    /// and both JSON/non-JSON branches — the second byte independently exercises
+    /// the json_escape_bytes match arms.
+    /// Vec::with_capacity(64) pre-allocates to avoid realloc VCC explosion.
     #[kani::proof]
     #[kani::unwind(4)] // 2 iterations + 2 margin
     #[kani::solver(kissat)] // json_escape_bytes loop × 2 symbolic bytes: kissat outperforms cadical
