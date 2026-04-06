@@ -63,7 +63,7 @@ fn bench_output_encode(c: &mut Criterion) {
             let batch = scan_to_batch(data);
             let label = format!("{schema_name}/{n}");
 
-            group.throughput(Throughput::Elements(*n as u64));
+            group.throughput(Throughput::Bytes(data.len() as u64));
 
             // NullSink — baseline
             group.bench_with_input(BenchmarkId::new("null_sink", &label), &batch, |b, batch| {
@@ -103,7 +103,7 @@ fn bench_output_encode(c: &mut Criterion) {
                         let compressed = compressor
                             .compress(&json_buf)
                             .expect("compression should not fail");
-                        std::hint::black_box(compressed.compressed_size);
+                        std::hint::black_box(&compressed);
                     });
                 },
             );
@@ -122,7 +122,7 @@ fn bench_output_encode(c: &mut Criterion) {
                                 .expect("JSON serialization should not fail");
                             buf.push(b'\n');
                         }
-                        std::hint::black_box(buf.len());
+                        std::hint::black_box(&buf);
                     });
                 },
             );
