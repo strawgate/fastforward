@@ -320,7 +320,11 @@ fn expand_glob_patterns(patterns: &[&str]) -> Vec<PathBuf> {
             // and prefixed patterns like "./*.log" match correctly (#1375).
             let entry_path = entry.path();
             let stripped = entry_path.strip_prefix(".").unwrap_or(entry_path);
-            if glob_set.is_match(entry_path) || glob_set.is_match(stripped) {
+            let prefixed = Path::new(".").join(stripped);
+            if glob_set.is_match(entry_path)
+                || glob_set.is_match(stripped)
+                || glob_set.is_match(&prefixed)
+            {
                 paths.push(entry.into_path());
             }
         }
@@ -1856,15 +1860,17 @@ mod tests {
         let _cwd_guard = CWD_LOCK.lock().unwrap();
 
         // RAII guard restores cwd even if an assert panics.
+        // RAII guard restores cwd even if an assert panics.
+        // Declared AFTER dir so it drops BEFORE dir (reverse order),
+        // ensuring cwd is restored before the temp directory is deleted.
         struct CwdGuard(PathBuf);
         impl Drop for CwdGuard {
             fn drop(&mut self) {
                 let _ = std::env::set_current_dir(&self.0);
             }
         }
-        let _restore = CwdGuard(std::env::current_dir().unwrap());
-
         let dir = tempfile::tempdir().unwrap();
+        let _restore = CwdGuard(std::env::current_dir().unwrap());
         std::env::set_current_dir(dir.path()).unwrap();
 
         let nested = PathBuf::from("logs");
