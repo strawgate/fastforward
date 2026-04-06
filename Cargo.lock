@@ -2567,6 +2567,7 @@ dependencies = [
  "prost",
  "reqwest",
  "ryu",
+ "serde",
  "serde_json",
  "serial_test",
  "stats_alloc",

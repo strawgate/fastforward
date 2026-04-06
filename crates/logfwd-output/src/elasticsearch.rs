@@ -187,17 +187,22 @@ impl ElasticsearchSink {
     /// - `InvalidData`: item-level document errors (mapper_parsing_exception, etc.) — permanent,
     ///   retrying the same document is futile, so these map to `Rejected` in the caller
     fn parse_bulk_response(body: &[u8]) -> io::Result<()> {
-        let v: serde_json::Value = serde_json::from_slice(body)
-            .map_err(|e| io::Error::other(format!("failed to parse ES bulk response: {e}")))?;
+        #[derive(serde::Deserialize)]
+        struct BulkHeader {
+            errors: bool,
+        }
 
-        let has_errors = v
-            .get("errors")
-            .and_then(serde_json::Value::as_bool)
-            .ok_or_else(|| io::Error::other("ES bulk response missing 'errors' boolean field"))?;
+        let header: BulkHeader = serde_json::from_slice(body).map_err(|e| {
+            io::Error::other(format!("failed to parse ES bulk response header: {e}"))
+        })?;
 
-        if !has_errors {
+        if !header.errors {
             return Ok(());
         }
+
+        // Only do full parse on the error path to avoid hot-path allocations.
+        let v: serde_json::Value = serde_json::from_slice(body)
+            .map_err(|e| io::Error::other(format!("failed to parse ES bulk response: {e}")))?;
 
         let items = v
             .get("items")
