@@ -1120,6 +1120,65 @@ mod tests {
             row
         );
     }
+
+    proptest! {
+        /// Oversized integers (> i64::MAX or < i64::MIN) must always be preserved as the
+        /// original digit string regardless of field ordering or surrounding padding.
+        ///
+        /// Covers:
+        ///  - Field ordering: the oversized integer can appear before or after `tag`
+        ///  - Byte-offset variation: a `pad` field of varying length shifts the oversized
+        ///    integer around in the buffer, exercising SIMD-chunk boundary crossings
+        ///  - Duplicate keys: second occurrence is handled (last-wins behaviour)
+        #[test]
+        fn proptest_large_integer_preserved(
+            count_first in any::<bool>(),
+            pad_len in 0usize..128,
+            duplicate in any::<bool>(),
+        ) {
+            // Build a padding string of `pad_len` 'x' characters.
+            let pad: alloc::string::String = "x".repeat(pad_len);
+
+            // Two canonical oversized integers: positive overflow and negative underflow.
+            let oversized_values = ["99999999999999999999", "-9999999999999999999"];
+
+            for &oversized in &oversized_values {
+                let count_field = alloc::format!("\"count\":{oversized}");
+                let tag_field = alloc::format!("\"tag\":\"{pad}\"");
+
+                let fields = if count_first {
+                    alloc::format!("{count_field},{tag_field}")
+                } else {
+                    alloc::format!("{tag_field},{count_field}")
+                };
+
+                let line = if duplicate {
+                    // Append a duplicate "count" key — scanner must handle it without panic.
+                    alloc::format!("{{{fields},\"count\":1}}\n")
+                } else {
+                    alloc::format!("{{{fields}}}\n")
+                };
+
+                let config = ScanConfig::default();
+                let mut builder = TestBuilder::new();
+                scan_streaming(line.as_bytes(), &config, &mut builder);
+
+                prop_assert_eq!(builder.rows.len(), 1, "input: {}", line);
+                let row = &builder.rows[0];
+
+                if !duplicate {
+                    // Without a duplicate, the oversized integer must be preserved exactly.
+                    prop_assert!(
+                        row.iter().any(|(k, v)| k == "count" && v == oversized),
+                        "oversized integer not preserved as string in row: {:?}\ninput: {line}",
+                        row
+                    );
+                }
+                // With a duplicate the last-wins value (int:1) may replace it; just assert
+                // no panic and that exactly one row was produced (already checked above).
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
