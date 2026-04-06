@@ -98,9 +98,7 @@ impl OtlpSink {
         // The gRPC spec requires the full path: /package.Service/Method (#1059)
         let endpoint = if protocol == OtlpProtocol::Grpc {
             let trimmed = endpoint.trim_end_matches('/');
-            if trimmed.ends_with("/Export")
-                || trimmed.ends_with("/LogsService/Export")
-            {
+            if trimmed.ends_with("/Export") || trimmed.ends_with("/LogsService/Export") {
                 endpoint
             } else {
                 format!("{trimmed}/opentelemetry.proto.collector.logs.v1.LogsService/Export")
@@ -370,16 +368,14 @@ impl OtlpSink {
                                 //   RESOURCE_EXHAUSTED(8), ABORTED(10), UNAVAILABLE(14)
                                 // Permanent: all others (INVALID_ARGUMENT, NOT_FOUND, etc.)
                                 return Ok(match code {
-                                    1 | 4 | 10 | 14 => {
-                                        super::sink::SendResult::IoError(io::Error::other(
-                                            format!("gRPC error {code}: {msg}"),
-                                        ))
-                                    }
+                                    1 | 4 | 10 | 14 => super::sink::SendResult::IoError(
+                                        io::Error::other(format!("gRPC error {code}: {msg}")),
+                                    ),
                                     8 => {
                                         // RESOURCE_EXHAUSTED → treat like 429
-                                        super::sink::SendResult::RetryAfter(
-                                            Duration::from_secs(DEFAULT_RETRY_AFTER_SECS),
-                                        )
+                                        super::sink::SendResult::RetryAfter(Duration::from_secs(
+                                            DEFAULT_RETRY_AFTER_SECS,
+                                        ))
                                     }
                                     _ => super::sink::SendResult::Rejected(format!(
                                         "gRPC error {code}: {msg}"
