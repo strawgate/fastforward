@@ -30,6 +30,7 @@
 /// 2. `processed_offset + remainder_len == read_offset`
 /// 3. `checkpoint_offset` never decreases
 /// 4. `processed_offset` only advances via `apply_read` with a newline
+///    or via `apply_remainder_prefix_consumed`
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CheckpointTracker {
     /// Total bytes read from the file (cumulative).
@@ -138,6 +139,29 @@ impl CheckpointTracker {
     pub fn apply_remainder_consumed(&mut self) {
         self.processed_offset = self.read_offset;
         self.remainder_len = 0;
+    }
+
+    /// Advance past a discarded prefix of the remainder.
+    ///
+    /// When the remainder overflows `MAX_REMAINDER_BYTES`, the framer
+    /// discards the oldest `consumed_bytes` and keeps the tail. This
+    /// method advances `processed_offset` by `consumed_bytes` and
+    /// decreases `remainder_len` by the same amount so the checkpoint
+    /// advances past the discarded prefix while still accounting for
+    /// the bytes that remain buffered.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `consumed_bytes > remainder_len` (cannot consume more
+    /// remainder than exists).
+    pub fn apply_remainder_prefix_consumed(&mut self, consumed_bytes: u64) {
+        assert!(
+            consumed_bytes <= self.remainder_len,
+            "consumed_bytes ({consumed_bytes}) exceeds remainder_len ({})",
+            self.remainder_len,
+        );
+        self.processed_offset = self.processed_offset.saturating_add(consumed_bytes);
+        self.remainder_len -= consumed_bytes;
     }
 
     /// The offset that should be checkpointed.
@@ -375,6 +399,40 @@ mod tests {
         check_invariants(&t);
     }
 
+    #[test]
+    fn remainder_prefix_consumed_advances_processed() {
+        let mut t = CheckpointTracker::new(0);
+        // Read 100 bytes, newline at 9 → processed=10, remainder=90
+        t.apply_read(100, Some(9));
+        assert_eq!(t.processed_offset(), 10);
+        assert_eq!(t.remainder_len(), 90);
+
+        // Discard 60 bytes of the remainder prefix, keeping 30.
+        t.apply_remainder_prefix_consumed(60);
+        assert_eq!(t.processed_offset(), 70); // 10 + 60
+        assert_eq!(t.remainder_len(), 30); // 90 - 60
+        assert_eq!(t.read_offset(), 100); // unchanged
+        check_invariants(&t);
+    }
+
+    #[test]
+    fn remainder_prefix_consumed_zero_is_noop() {
+        let mut t = CheckpointTracker::new(0);
+        t.apply_read(50, Some(9));
+        let prev = (t.processed_offset(), t.remainder_len());
+        t.apply_remainder_prefix_consumed(0);
+        assert_eq!((t.processed_offset(), t.remainder_len()), prev);
+        check_invariants(&t);
+    }
+
+    #[test]
+    #[should_panic(expected = "consumed_bytes")]
+    fn remainder_prefix_consumed_over_remainder_panics() {
+        let mut t = CheckpointTracker::new(0);
+        t.apply_read(10, Some(4)); // remainder=5
+        t.apply_remainder_prefix_consumed(6); // exceeds remainder
+    }
+
     /// Helper to assert all invariants hold.
     fn check_invariants(t: &CheckpointTracker) {
         assert!(
@@ -423,9 +481,10 @@ mod verification {
         (n_bytes, last_newline_pos)
     }
 
-    /// Generate a symbolic action tag: 0=Read, 1=Checkpoint, 2=Restart.
+    /// Generate a symbolic action tag: 0=Read, 1=Checkpoint, 2=Restart,
+    /// 3=RemainderPrefixConsumed.
     fn symbolic_action_tag() -> u8 {
-        kani::any_where(|&t: &u8| t < 3)
+        kani::any_where(|&t: &u8| t < 4)
     }
 
     /// Apply a symbolic action to the tracker.
@@ -439,8 +498,16 @@ mod verification {
             1 => {
                 tracker.apply_checkpoint();
             }
-            _ => {
+            2 => {
                 tracker.apply_restart();
+            }
+            _ => {
+                // Only consume a prefix if there is remainder to consume.
+                if tracker.remainder_len > 0 {
+                    let consumed: u64 =
+                        kani::any_where(|&c: &u64| c > 0 && c <= tracker.remainder_len);
+                    tracker.apply_remainder_prefix_consumed(consumed);
+                }
             }
         }
     }
@@ -595,13 +662,14 @@ mod verification {
     }
 
     // -----------------------------------------------------------------------
-    // Harness 4: Processed offset advances only on newline
+    // Harness 4: Processed offset advances only on newline or prefix consume
     // -----------------------------------------------------------------------
 
     /// `processed_offset` only changes via `apply_read` with a `Some`
-    /// newline position. It never changes on reads without newlines,
-    /// on checkpoints, or on restarts (where it resets to checkpoint,
-    /// which is a separate operation).
+    /// newline position, or via `apply_remainder_prefix_consumed`. It
+    /// never changes on reads without newlines, on checkpoints, or on
+    /// restarts (where it resets to checkpoint, which is a separate
+    /// operation).
     #[kani::proof]
     #[kani::unwind(7)]
     #[kani::solver(kissat)]
@@ -643,10 +711,22 @@ mod verification {
                         "processed changed on checkpoint"
                     );
                 }
-                _ => {
+                2 => {
                     tracker.apply_restart();
                     // Restart resets to checkpoint -- may be less than prev.
                     // We don't assert monotonicity here (restart is a reset).
+                }
+                _ => {
+                    // RemainderPrefixConsumed: advances processed_offset
+                    if tracker.remainder_len > 0 {
+                        let consumed: u64 =
+                            kani::any_where(|&c: &u64| c > 0 && c <= tracker.remainder_len);
+                        tracker.apply_remainder_prefix_consumed(consumed);
+                        assert!(
+                            tracker.processed_offset >= prev_processed,
+                            "processed regressed on remainder prefix consumed"
+                        );
+                    }
                 }
             }
             i += 1;

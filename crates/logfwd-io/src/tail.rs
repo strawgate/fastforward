@@ -756,6 +756,7 @@ impl FileReader {
                 let file_size = tailed.file.metadata()?.len();
                 let safe_offset = if offset > file_size {
                     tracing::warn!(
+                        ?source_id,
                         saved_offset = offset,
                         file_size,
                         "checkpoint offset exceeds file size — resetting to 0"

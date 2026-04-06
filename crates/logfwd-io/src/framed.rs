@@ -166,17 +166,14 @@ impl InputSource for FramedInput {
                                     // prefix is lost, so we must advance the checkpoint tracker
                                     // past it. Otherwise the checkpoint stalls and re-reads the
                                     // overflowed data on crash.
-                                    let start = tail.len() - MAX_REMAINDER_BYTES;
-                                    state.remainder = tail.split_off(start);
-                                    // Do NOT call apply_remainder_consumed() here.
-                                    // The remainder still holds MAX_REMAINDER_BYTES, so
-                                    // the tracker must keep remainder_len > 0.  Calling
-                                    // apply_remainder_consumed() would set remainder_len=0
-                                    // causing checkpoint_data() to report an offset past
-                                    // the still-buffered bytes, losing them on crash.
-                                    // Being conservative (checkpoint stays at the last
-                                    // newline) is safe: at-least-once re-reads on restart,
-                                    // but no data loss.
+                                    let discarded = tail.len() - MAX_REMAINDER_BYTES;
+                                    state.remainder = tail.split_off(discarded);
+                                    // Advance the tracker past the discarded prefix only.
+                                    // remainder_len stays equal to MAX_REMAINDER_BYTES so
+                                    // the checkpoint does not jump past still-buffered data.
+                                    state
+                                        .tracker
+                                        .apply_remainder_prefix_consumed(discarded as u64);
                                 } else {
                                     let state = self.sources.get_mut(&key).expect("just inserted");
                                     state.remainder = tail;
@@ -200,10 +197,12 @@ impl InputSource for FramedInput {
                                 self.stats.inc_parse_errors(1);
                                 let state = self.sources.get_mut(&key).expect("just inserted");
                                 state.format.reset();
-                                let start = chunk.len() - MAX_REMAINDER_BYTES;
-                                state.remainder = chunk.split_off(start);
-                                // Same reasoning as the tail-overflow branch: do NOT call
-                                // apply_remainder_consumed() while state.remainder is non-empty.
+                                let discarded = chunk.len() - MAX_REMAINDER_BYTES;
+                                state.remainder = chunk.split_off(discarded);
+                                // Advance the tracker past the discarded prefix only.
+                                state
+                                    .tracker
+                                    .apply_remainder_prefix_consumed(discarded as u64);
                             } else {
                                 let state = self.sources.get_mut(&key).expect("just inserted");
                                 state.remainder = chunk;
