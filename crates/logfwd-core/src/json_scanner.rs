@@ -1137,7 +1137,7 @@ mod tests {
             duplicate in any::<bool>(),
         ) {
             // Build a padding string of `pad_len` 'x' characters.
-            let pad: alloc::string::String = "x".repeat(pad_len);
+            let pad: String = "x".repeat(pad_len);
 
             // Two canonical oversized integers: positive overflow and negative underflow.
             let oversized_values = ["99999999999999999999", "-9999999999999999999"];
