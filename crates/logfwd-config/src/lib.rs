@@ -1010,6 +1010,11 @@ fn validate_host_port(addr: &str) -> Result<(), String> {
         let close_bracket = addr
             .rfind(']')
             .ok_or_else(|| format!("'{addr}' has mismatched brackets"))?;
+        if addr[1..close_bracket].is_empty() {
+            return Err(format!(
+                "'{addr}' has an empty IPv6 address inside brackets"
+            ));
+        }
         if !addr[close_bracket..].starts_with("]:") {
             return Err(format!("'{addr}' is missing a port after IPv6 brackets"));
         }
@@ -1609,6 +1614,24 @@ output:
         let err = Config::load_str(yaml).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("'compression' is not supported"));
+    }
+
+    #[test]
+    fn loki_output_rejects_compression() {
+        let yaml = "input:\n  type: file\n  path: /tmp/x.log\noutput:\n  type: loki\n  endpoint: http://localhost:3100\n  compression: gzip\n";
+        let err = Config::load_str(yaml).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("'compression' is not supported for loki outputs"),
+            "unexpected: {msg}"
+        );
+    }
+
+    #[test]
+    fn ipv6_empty_bracket_rejected() {
+        let err = validate_host_port("[]:8080");
+        assert!(err.is_err(), "expected error for empty IPv6 brackets");
+        assert!(err.unwrap_err().contains("empty IPv6 address"));
     }
 
     #[test]
