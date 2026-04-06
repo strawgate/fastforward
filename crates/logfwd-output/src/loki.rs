@@ -58,6 +58,19 @@ type LokiEntry = (u64, String);
 /// Collect entries per stream label set.
 type StreamMap = HashMap<String, Vec<LokiEntry>>;
 
+fn sanitize_loki_label_name(name: &str) -> String {
+    let mut out = String::with_capacity(name.len().max(1));
+    for (idx, ch) in name.chars().enumerate() {
+        let valid = if idx == 0 {
+            ch.is_ascii_alphabetic() || ch == '_'
+        } else {
+            ch.is_ascii_alphanumeric() || ch == '_'
+        };
+        out.push(if valid { ch } else { '_' });
+    }
+    if out.is_empty() { "_".to_string() } else { out }
+}
+
 /// Sort entries by timestamp and deduplicate by incrementing conflicting timestamps.
 ///
 /// Loki rejects any push where `entries[i].timestamp <= entries[i-1].timestamp`
@@ -174,7 +187,7 @@ impl LokiSink {
             .filter_map(|label_col| {
                 cols.iter()
                     .find(|c| &c.field_name == label_col)
-                    .map(|ci| (label_col.clone(), ci))
+                    .map(|ci| (sanitize_loki_label_name(label_col), ci))
             })
             .collect();
 
@@ -723,6 +736,60 @@ mod tests {
         let obj = "{\"key\": \"value\"}";
         let escaped = escape_json_raw(obj);
         assert_eq!(escaped, "\"{\\\"key\\\": \\\"value\\\"}\"");
+    }
+
+    #[test]
+    fn sanitize_loki_label_name_rewrites_invalid_chars() {
+        assert_eq!(sanitize_loki_label_name("service.name"), "service_name");
+        assert_eq!(
+            sanitize_loki_label_name("http.status_code"),
+            "http_status_code"
+        );
+        assert_eq!(
+            sanitize_loki_label_name("9invalid-prefix"),
+            "_invalid_prefix"
+        );
+        assert_eq!(sanitize_loki_label_name(""), "_");
+    }
+
+    #[test]
+    fn dynamic_label_columns_use_sanitized_loki_names() {
+        use arrow::array::StringArray;
+        use arrow::datatypes::{Field, Schema};
+
+        let config = Arc::new(LokiConfig {
+            endpoint: "http://localhost".to_string(),
+            tenant_id: None,
+            static_labels: vec![],
+            label_columns: vec!["service.name".to_string()],
+            headers: vec![],
+        });
+        let sink = LokiSink::new(
+            "test".to_string(),
+            config,
+            Arc::new(reqwest::Client::new()),
+            Arc::new(ComponentStats::new()),
+        );
+
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "service.name",
+            DataType::Utf8,
+            true,
+        )]));
+        let values = StringArray::from(vec![Some("checkout")]);
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(values)]).unwrap();
+        let metadata = BatchMetadata {
+            resource_attrs: Arc::new(vec![]),
+            observed_time_ns: 1_000,
+        };
+
+        let stream_map = sink.build_stream_map(&batch, &metadata).unwrap();
+        let key = stream_map.keys().next().unwrap();
+        let parsed: Vec<[String; 2]> = serde_json::from_str(key).unwrap();
+        assert_eq!(
+            parsed,
+            vec![["service_name".to_string(), "checkout".to_string()]]
+        );
     }
 
     #[test]

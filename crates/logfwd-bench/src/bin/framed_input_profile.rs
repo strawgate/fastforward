@@ -145,24 +145,23 @@ struct Cli {
 
 impl Cli {
     fn parse() -> Self {
+        Self::parse_from(std::env::args().skip(1).collect::<Vec<_>>())
+    }
+
+    fn parse_from(args: Vec<String>) -> Self {
         let mut lines = DEFAULT_LINES;
         let mut iterations = DEFAULT_ITERATIONS;
         let mut alloc_only = false;
         let mut flamegraph = None;
-        let mut args = std::env::args().skip(1);
+        let mut args = args.into_iter();
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--lines" => {
-                    lines = args
-                        .next()
-                        .and_then(|v| v.parse().ok())
-                        .unwrap_or(DEFAULT_LINES);
+                    lines = parse_positive_usize_arg(args.next(), "--lines", DEFAULT_LINES);
                 }
                 "--iterations" => {
-                    iterations = args
-                        .next()
-                        .and_then(|v| v.parse().ok())
-                        .unwrap_or(DEFAULT_ITERATIONS);
+                    iterations =
+                        parse_positive_usize_arg(args.next(), "--iterations", DEFAULT_ITERATIONS);
                 }
                 "--alloc-only" => alloc_only = true,
                 "--flamegraph" => {
@@ -181,6 +180,19 @@ impl Cli {
             alloc_only,
             flamegraph,
         }
+    }
+}
+
+fn parse_positive_usize_arg(raw: Option<String>, flag: &str, default: usize) -> usize {
+    match raw.as_deref() {
+        Some(value) => match value.parse::<usize>() {
+            Ok(parsed) if parsed > 0 => parsed,
+            _ => {
+                eprintln!("warning: {flag} expects a positive integer; using default {default}");
+                default
+            }
+        },
+        None => default,
     }
 }
 
@@ -665,6 +677,9 @@ fn format_throughput(lines: usize, bytes: usize, ns: u64) -> String {
 }
 
 fn format_lines_per_sec(lines: usize, ns: u64) -> String {
+    if ns == 0 {
+        return "0K l/s".to_string();
+    }
     let rate = lines as f64 / (ns as f64 / 1_000_000_000.0);
     if rate >= 1_000_000.0 {
         format!("{:.2}M l/s", rate / 1_000_000.0)
@@ -674,6 +689,9 @@ fn format_lines_per_sec(lines: usize, ns: u64) -> String {
 }
 
 fn format_bytes_per_sec(bytes: usize, ns: u64) -> String {
+    if ns == 0 {
+        return "0MiB/s".to_string();
+    }
     let rate = bytes as f64 / (ns as f64 / 1_000_000_000.0);
     if rate >= 1_073_741_824.0 {
         format!("{:.2}GiB/s", rate / 1_073_741_824.0)
@@ -723,5 +741,23 @@ mod tests {
             owned_input_fast_path(data.clone())
         );
         assert_eq!(data.len(), passthrough_json_round_trip(&data));
+    }
+
+    #[test]
+    fn cli_zero_values_fall_back_to_defaults() {
+        let cli = Cli::parse_from(vec![
+            "--lines".to_string(),
+            "0".to_string(),
+            "--iterations".to_string(),
+            "0".to_string(),
+        ]);
+        assert_eq!(cli.lines, DEFAULT_LINES);
+        assert_eq!(cli.iterations, DEFAULT_ITERATIONS);
+    }
+
+    #[test]
+    fn format_rates_handle_zero_duration() {
+        assert_eq!(format_lines_per_sec(10, 0), "0K l/s");
+        assert_eq!(format_bytes_per_sec(1024, 0), "0MiB/s");
     }
 }
