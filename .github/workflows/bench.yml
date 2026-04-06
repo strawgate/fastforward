@@ -29,8 +29,6 @@ concurrency:
 permissions:
   issues: write
   contents: write
-  pages: write
-  id-token: write
 
 env:
   LINES: ${{ inputs.lines || '20000000' }}
@@ -478,16 +476,8 @@ jobs:
           git commit -m "bench: add run ${RUN_ID} (${COMMIT})"
           git push origin HEAD:bench-data
 
-      - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v4
-        with:
-          path: bench/dashboard
-
-      - name: Deploy to GitHub Pages
-        if: github.ref == 'refs/heads/master'
-        id: deploy
-        uses: actions/deploy-pages@v5
-
+      # Note: docs.yml performs the only Pages deployment so docs + dashboard
+      # remain available under the same published site.
       # Upload summary for retention.
       - uses: actions/upload-artifact@v7
         with:
@@ -503,6 +493,9 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # Ensure benchmark label exists (gh issue create --label fails otherwise).
+          gh label create benchmark --description "Nightly benchmark reports" --color "1D76DB" 2>/dev/null || true
+
           DATE=$(date -u +%Y-%m-%d)
           COMMIT=$(git rev-parse --short HEAD)
 

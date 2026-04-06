@@ -1,22 +1,23 @@
+use std::future::Future;
 use std::io;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 
 use arrow::array::{Array, AsArray, PrimitiveArray};
 use arrow::datatypes::{DataType, Float64Type, Int64Type};
 use arrow::record_batch::RecordBatch;
 
+use logfwd_arrow::conflict_schema::normalize_conflict_columns;
 use logfwd_core::otlp::{
-    Severity, bytes_field_size, encode_bytes_field, encode_fixed32, encode_fixed64, encode_tag,
-    encode_varint, encode_varint_field, hex_decode, parse_severity, parse_timestamp_nanos,
-    varint_len,
+    self, Severity, bytes_field_size, encode_bytes_field, encode_fixed32, encode_fixed64,
+    encode_tag, encode_varint, encode_varint_field, hex_decode, parse_severity,
+    parse_timestamp_nanos, varint_len,
 };
-use logfwd_io::compress::ChunkCompressor;
-use logfwd_io::diagnostics::ComponentStats;
+use logfwd_types::diagnostics::ComponentStats;
+use zstd::bulk::Compressor as ZstdCompressor;
 
-use super::{
-    BatchMetadata, Compression, HTTP_MAX_RETRIES, HTTP_RETRY_INITIAL_DELAY_MS, OutputSink,
-    is_transient_error, str_value,
-};
+use super::{BatchMetadata, Compression, str_value};
 
 // ---------------------------------------------------------------------------
 // InstrumentationScope constants
@@ -26,6 +27,33 @@ use super::{
 const SCOPE_NAME: &[u8] = b"logfwd";
 /// Version emitted in the OTLP `InstrumentationScope.version` field (from Cargo.toml).
 const SCOPE_VERSION: &[u8] = env!("CARGO_PKG_VERSION").as_bytes();
+/// Default retry-after delay in seconds when the server does not send a Retry-After header.
+const DEFAULT_RETRY_AFTER_SECS: u64 = 5;
+
+/// Parse the `Retry-After` header value (RFC 9110 §10.2.4).
+///
+/// Accepts both formats:
+/// - delta-seconds: `"120"` → `Duration::from_secs(120)`
+/// - HTTP-date: `"Wed, 21 Oct 2015 07:28:00 GMT"` → seconds until that time
+///
+/// Falls back to `DEFAULT_RETRY_AFTER_SECS` if the value is absent, unparsable,
+/// or already in the past.
+fn parse_retry_after(header_value: Option<&reqwest::header::HeaderValue>) -> Duration {
+    let Some(value) = header_value.and_then(|v| v.to_str().ok()) else {
+        return Duration::from_secs(DEFAULT_RETRY_AFTER_SECS);
+    };
+    // Try delta-seconds first (the common case for machine-to-machine APIs).
+    if let Ok(secs) = value.parse::<u64>() {
+        return Duration::from_secs(secs);
+    }
+    // Fall back to HTTP-date (RFC 9110 IMF-fixdate).
+    if let Ok(target) = httpdate::parse_http_date(value) {
+        if let Ok(delay) = target.duration_since(std::time::SystemTime::now()) {
+            return delay;
+        }
+    }
+    Duration::from_secs(DEFAULT_RETRY_AFTER_SECS)
+}
 
 // ---------------------------------------------------------------------------
 // OtlpSink
@@ -49,8 +77,8 @@ pub struct OtlpSink {
     pub(crate) encoder_buf: Vec<u8>,
     compress_buf: Vec<u8>,
     grpc_buf: Vec<u8>,
-    compressor: Option<ChunkCompressor>,
-    http_agent: ureq::Agent,
+    compressor: Option<ZstdCompressor<'static>>,
+    client: reqwest::Client,
     stats: Arc<ComponentStats>,
 }
 
@@ -61,19 +89,14 @@ impl OtlpSink {
         protocol: OtlpProtocol,
         compression: Compression,
         headers: Vec<(String, String)>,
+        client: reqwest::Client,
         stats: Arc<ComponentStats>,
-    ) -> Self {
+    ) -> io::Result<Self> {
         let compressor = match compression {
-            Compression::Zstd => {
-                Some(ChunkCompressor::new(1).expect("zstd level 1 is always valid"))
-            }
+            Compression::Zstd => Some(ZstdCompressor::new(1).map_err(io::Error::other)?),
             _ => None,
         };
-        let http_agent = ureq::config::Config::builder()
-            .timeout_global(Some(std::time::Duration::from_secs(30)))
-            .build()
-            .new_agent();
-        OtlpSink {
+        Ok(OtlpSink {
             name,
             endpoint,
             protocol,
@@ -83,9 +106,9 @@ impl OtlpSink {
             compress_buf: Vec::with_capacity(64 * 1024),
             grpc_buf: Vec::with_capacity(64 * 1024),
             compressor,
-            http_agent,
+            client,
             stats,
-        }
+        })
     }
 
     /// Encode a full ExportLogsServiceRequest from a RecordBatch.
@@ -96,6 +119,22 @@ impl OtlpSink {
         if num_rows == 0 {
             return;
         }
+
+        // Normalize any conflict struct columns (e.g. `status: Struct { int, str }`)
+        // to flat Utf8 columns before encoding. Without this, struct columns would be
+        // silently dropped, causing data loss when no SQL transform is applied upstream.
+        let normalized;
+        let batch = if batch
+            .schema()
+            .fields()
+            .iter()
+            .any(|f| matches!(f.data_type(), DataType::Struct(_)))
+        {
+            normalized = normalize_conflict_columns(batch.clone());
+            &normalized
+        } else {
+            batch
+        };
 
         // Resolve column roles and downcast arrays once for the whole batch.
         let columns = resolve_batch_columns(batch);
@@ -111,81 +150,122 @@ impl OtlpSink {
         }
 
         // Phase 2: compute sizes bottom-up.
-        // ScopeLogs inner = field 1 (InstrumentationScope) + repeated field 2 (LogRecord) entries
+        // ScopeLogs inner = scope (InstrumentationScope) + repeated log_records (LogRecord)
         let instrumentation_scope_inner_size =
-            bytes_field_size(1, SCOPE_NAME.len()) + bytes_field_size(2, SCOPE_VERSION.len());
+            bytes_field_size(otlp::INSTRUMENTATION_SCOPE_NAME, SCOPE_NAME.len())
+                + bytes_field_size(otlp::INSTRUMENTATION_SCOPE_VERSION, SCOPE_VERSION.len());
 
-        let mut scope_logs_inner_size = bytes_field_size(1, instrumentation_scope_inner_size);
+        let mut scope_logs_inner_size =
+            bytes_field_size(otlp::SCOPE_LOGS_SCOPE, instrumentation_scope_inner_size);
         for &(start, end) in &record_ranges {
             let record_len = end - start;
-            // tag for field 2 wire type 2 + varint length + payload
-            scope_logs_inner_size +=
-                varint_len(((2u64) << 3) | 2) + varint_len(record_len as u64) + record_len;
+            scope_logs_inner_size += bytes_field_size(otlp::SCOPE_LOGS_LOG_RECORDS, record_len);
         }
 
-        // ResourceLogs inner = resource attributes (field 1) + scope_logs (field 2)
-        let mut resource_inner_size = bytes_field_size(2, scope_logs_inner_size);
+        // ResourceLogs inner = resource (field 1) + scope_logs (field 2)
+        let mut resource_inner_size =
+            bytes_field_size(otlp::RESOURCE_LOGS_SCOPE_LOGS, scope_logs_inner_size);
 
-        // Encode resource attributes as Resource message (field 1 of ResourceLogs)
+        // Encode resource attributes as Resource message
         let mut resource_msg: Vec<u8> = Vec::new();
         if !metadata.resource_attrs.is_empty() {
             for (k, v) in metadata.resource_attrs.as_ref() {
-                encode_key_value_string(&mut resource_msg, k.as_bytes(), v.as_bytes());
+                encode_key_value_string(
+                    &mut resource_msg,
+                    otlp::RESOURCE_ATTRIBUTES,
+                    k.as_bytes(),
+                    v.as_bytes(),
+                );
             }
         }
         if !resource_msg.is_empty() {
-            // Resource message field 1 (attributes) — we wrote KeyValues directly.
-            // Wrap in Resource message (field 1 of ResourceLogs).
-            resource_inner_size += bytes_field_size(1, resource_msg.len());
+            resource_inner_size +=
+                bytes_field_size(otlp::RESOURCE_LOGS_RESOURCE, resource_msg.len());
         }
 
-        let request_size = bytes_field_size(1, resource_inner_size);
+        let request_size =
+            bytes_field_size(otlp::EXPORT_LOGS_REQUEST_RESOURCE_LOGS, resource_inner_size);
 
         // Phase 3: write the final protobuf.
         self.encoder_buf.reserve(request_size + 16);
 
-        // ExportLogsServiceRequest.resource_logs (field 1)
-        encode_tag(&mut self.encoder_buf, 1, 2);
+        // ExportLogsServiceRequest.resource_logs
+        encode_tag(
+            &mut self.encoder_buf,
+            otlp::EXPORT_LOGS_REQUEST_RESOURCE_LOGS,
+            otlp::WIRE_TYPE_LEN,
+        );
         encode_varint(&mut self.encoder_buf, resource_inner_size as u64);
 
         // Resource (field 1 of ResourceLogs)
         if !resource_msg.is_empty() {
-            encode_bytes_field(&mut self.encoder_buf, 1, &resource_msg);
+            encode_bytes_field(
+                &mut self.encoder_buf,
+                otlp::RESOURCE_LOGS_RESOURCE,
+                &resource_msg,
+            );
         }
 
         // ScopeLogs (field 2 of ResourceLogs)
-        encode_tag(&mut self.encoder_buf, 2, 2);
+        encode_tag(
+            &mut self.encoder_buf,
+            otlp::RESOURCE_LOGS_SCOPE_LOGS,
+            otlp::WIRE_TYPE_LEN,
+        );
         encode_varint(&mut self.encoder_buf, scope_logs_inner_size as u64);
 
         // InstrumentationScope (field 1 of ScopeLogs)
-        encode_tag(&mut self.encoder_buf, 1, 2);
+        encode_tag(
+            &mut self.encoder_buf,
+            otlp::SCOPE_LOGS_SCOPE,
+            otlp::WIRE_TYPE_LEN,
+        );
         encode_varint(
             &mut self.encoder_buf,
             instrumentation_scope_inner_size as u64,
         );
-        encode_bytes_field(&mut self.encoder_buf, 1, SCOPE_NAME);
-        encode_bytes_field(&mut self.encoder_buf, 2, SCOPE_VERSION);
+        encode_bytes_field(
+            &mut self.encoder_buf,
+            otlp::INSTRUMENTATION_SCOPE_NAME,
+            SCOPE_NAME,
+        );
+        encode_bytes_field(
+            &mut self.encoder_buf,
+            otlp::INSTRUMENTATION_SCOPE_VERSION,
+            SCOPE_VERSION,
+        );
 
-        // LogRecords (field 2 of ScopeLogs, repeated)
+        // LogRecords (repeated, field 2 of ScopeLogs)
         for &(start, end) in &record_ranges {
-            encode_bytes_field(&mut self.encoder_buf, 2, &records_buf[start..end]);
+            encode_bytes_field(
+                &mut self.encoder_buf,
+                otlp::SCOPE_LOGS_LOG_RECORDS,
+                &records_buf[start..end],
+            );
         }
     }
 }
 
-impl OutputSink for OtlpSink {
-    fn send_batch(&mut self, batch: &RecordBatch, metadata: &BatchMetadata) -> io::Result<()> {
-        self.encode_batch(batch, metadata);
+impl OtlpSink {
+    /// Compress, frame, and send the encoded payload via reqwest.
+    ///
+    /// Returns `SendResult::RetryAfter` on 429, `SendResult::Ok` on success,
+    /// and retries transient 5xx / network errors with exponential backoff.
+    async fn send_payload(&mut self, batch_rows: u64) -> io::Result<super::sink::SendResult> {
         if self.encoder_buf.is_empty() {
-            return Ok(());
+            return Ok(super::sink::SendResult::Ok);
         }
 
         let payload: &[u8] = match self.compression {
             Compression::Zstd => {
                 if let Some(ref mut compressor) = self.compressor {
-                    let chunk = compressor.compress(&self.encoder_buf)?;
+                    let bound = zstd::zstd_safe::compress_bound(self.encoder_buf.len());
                     self.compress_buf.clear();
-                    self.compress_buf.extend_from_slice(&chunk.data);
+                    self.compress_buf.reserve(bound);
+                    let compressed_len = compressor
+                        .compress_to_buffer(&self.encoder_buf, &mut self.compress_buf)
+                        .map_err(io::Error::other)?;
+                    self.compress_buf.truncate(compressed_len);
                     &self.compress_buf
                 } else {
                     &self.encoder_buf
@@ -206,9 +286,7 @@ impl OutputSink for OtlpSink {
         };
 
         // For gRPC, prepend the 5-byte length-prefixed frame header required by the
-        // gRPC wire protocol. Note: ureq uses HTTP/1.1; a true gRPC endpoint requires
-        // HTTP/2. Use a reverse proxy (e.g. Envoy) or `protocol: http` when the
-        // collector does not accept HTTP/1.1 upgrades.
+        // gRPC wire protocol.
         //
         // The compressed flag reflects whether this specific payload is compressed
         // (i.e. Zstd was configured AND the compressor is present). If the compressor
@@ -217,49 +295,159 @@ impl OutputSink for OtlpSink {
         let payload_is_compressed =
             self.compression == Compression::Zstd && self.compressor.is_some();
         let payload: &[u8] = if self.protocol == OtlpProtocol::Grpc {
-            write_grpc_frame(&mut self.grpc_buf, payload, payload_is_compressed);
+            write_grpc_frame(&mut self.grpc_buf, payload, payload_is_compressed)?;
             &self.grpc_buf
         } else {
             payload
         };
 
-        // Retry with exponential backoff for transient failures.
-        // 1 initial attempt + up to HTTP_MAX_RETRIES retries; delays: 100ms → 200ms → 400ms.
-        // Note: the full encoded payload is retransmitted on each attempt.
-        // For large batches this multiplies bandwidth; this is acceptable as a
-        // temporary measure until SinkDriver (#319) handles retries externally.
-        let build_req = || {
-            let mut req = self.http_agent.post(&self.endpoint);
-            for (k, v) in &self.headers {
-                req = req.header(k.as_str(), v.as_str());
-            }
-            req = req.header("Content-Type", content_type);
-            if payload_is_compressed {
+        let mut req = self.client.post(&self.endpoint);
+        for (k, v) in &self.headers {
+            req = req.header(k.as_str(), v.as_str());
+        }
+        req = req.header("Content-Type", content_type);
+        if payload_is_compressed {
+            // gRPC compression is signaled via the wire-frame compressed flag byte
+            // and the `grpc-encoding` header (per the gRPC-over-HTTP/2 spec).
+            // Plain HTTP/protobuf uses `Content-Encoding` instead.
+            if self.protocol == OtlpProtocol::Grpc {
+                req = req.header("grpc-encoding", "zstd");
+            } else {
                 req = req.header("Content-Encoding", "zstd");
             }
-            req
-        };
-        let mut delay_ms: u64 = HTTP_RETRY_INITIAL_DELAY_MS;
-        let mut attempt: u32 = 0;
-        loop {
-            match build_req().send(payload) {
-                Ok(_) => {
-                    // inc_lines is counted by the pipeline; only track bytes here.
+        }
+
+        match req.body(payload.to_vec()).send().await {
+            Ok(response) => {
+                let status = response.status();
+
+                if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                    let delay = parse_retry_after(response.headers().get("Retry-After"));
+                    return Ok(super::sink::SendResult::RetryAfter(delay));
+                }
+
+                if status.is_success() {
+                    self.stats.inc_lines(batch_rows);
                     self.stats.inc_bytes(self.encoder_buf.len() as u64);
-                    return Ok(());
+                    return Ok(super::sink::SendResult::Ok);
                 }
-                Err(e) if attempt < HTTP_MAX_RETRIES && is_transient_error(&e) => {
-                    std::thread::sleep(std::time::Duration::from_millis(delay_ms));
-                    delay_ms *= 2;
-                    attempt += 1;
+
+                // Server errors are transient — honour Retry-After header if
+                // present, otherwise fall back to the default.  Check before
+                // reading the body to avoid an unnecessary allocation.
+                if status.is_server_error() {
+                    let delay = parse_retry_after(response.headers().get("Retry-After"));
+                    return Ok(super::sink::SendResult::RetryAfter(delay));
                 }
-                Err(e) => return Err(io::Error::other(e.to_string())),
+
+                // Error — read body as bytes to avoid String allocation.
+                let detail = response
+                    .bytes()
+                    .await
+                    .map(|b| String::from_utf8_lossy(&b).into_owned())
+                    .unwrap_or_default();
+
+                if status.is_client_error() {
+                    return Ok(super::sink::SendResult::Rejected(format!(
+                        "OTLP request rejected with status {status}: {detail}"
+                    )));
+                }
+
+                Err(io::Error::other(format!(
+                    "OTLP request failed with status {status}: {detail}"
+                )))
             }
+            Err(e) => Err(io::Error::other(e.to_string())),
         }
     }
+}
 
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
+impl super::sink::Sink for OtlpSink {
+    fn send_batch<'a>(
+        &'a mut self,
+        batch: &'a RecordBatch,
+        metadata: &'a BatchMetadata,
+    ) -> Pin<Box<dyn Future<Output = super::sink::SendResult> + Send + 'a>> {
+        Box::pin(async move {
+            self.encode_batch(batch, metadata);
+            let rows = batch.num_rows() as u64;
+            match self.send_payload(rows).await {
+                Ok(r) => r,
+                Err(e) => super::sink::SendResult::IoError(e),
+            }
+        })
+    }
+
+    fn flush(&mut self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn shutdown(&mut self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// OtlpSinkFactory
+// ---------------------------------------------------------------------------
+
+/// Creates [`OtlpSink`] instances for the output worker pool.
+///
+/// All workers share a single `reqwest::Client` (which is internally
+/// `Arc`-wrapped) so they reuse the same connection pool, TLS sessions,
+/// and DNS cache.
+pub struct OtlpSinkFactory {
+    name: String,
+    endpoint: String,
+    protocol: OtlpProtocol,
+    compression: Compression,
+    headers: Vec<(String, String)>,
+    client: reqwest::Client,
+    stats: Arc<ComponentStats>,
+}
+
+impl OtlpSinkFactory {
+    /// Create a new factory.
+    pub fn new(
+        name: String,
+        endpoint: String,
+        protocol: OtlpProtocol,
+        compression: Compression,
+        headers: Vec<(String, String)>,
+        stats: Arc<ComponentStats>,
+    ) -> io::Result<Self> {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .pool_max_idle_per_host(64)
+            .build()
+            .map_err(io::Error::other)?;
+        Ok(OtlpSinkFactory {
+            name,
+            endpoint,
+            protocol,
+            compression,
+            headers,
+            client,
+            stats,
+        })
+    }
+}
+
+impl super::sink::SinkFactory for OtlpSinkFactory {
+    fn create(&self) -> io::Result<Box<dyn super::sink::Sink>> {
+        Ok(Box::new(OtlpSink::new(
+            self.name.clone(),
+            self.endpoint.clone(),
+            self.protocol,
+            self.compression,
+            self.headers.clone(),
+            self.client.clone(),
+            Arc::clone(&self.stats),
+        )?))
     }
 
     fn name(&self) -> &str {
@@ -387,10 +575,10 @@ fn resolve_batch_columns(batch: &RecordBatch) -> BatchColumns<'_> {
             DataType::Int64 => AttrArray::Int(batch.column(idx).as_primitive::<Int64Type>()),
             DataType::Float64 => AttrArray::Float(batch.column(idx).as_primitive::<Float64Type>()),
             DataType::Boolean => AttrArray::Bool(batch.column(idx).as_boolean()),
-            // Struct conflict columns (status: Struct { int, str }) cannot be encoded as
-            // a single typed OTLP attribute without coalescing. Skip them here; a SQL
-            // transform with normalize_conflict_columns() produces a flat Utf8 column
-            // that encodes correctly via the fallback arm below.
+            // Non-conflict struct columns (e.g. nested objects not produced by the
+            // type-conflict builder) cannot be encoded as a single typed OTLP attribute.
+            // Conflict structs (Struct { int, str, float, bool }) are already normalized
+            // to flat Utf8 by `encode_batch` before this function is called.
             DataType::Struct(_) => continue,
             _ => AttrArray::Str(batch.column(idx).as_ref()),
         };
@@ -463,51 +651,67 @@ fn encode_row_as_log_record(
 
     // --- Write protobuf fields ---
 
-    // field 1: time_unix_nano (fixed64)
+    // LogRecord.time_unix_nano (fixed64)
     if timestamp_ns > 0 {
-        encode_fixed64(buf, 1, timestamp_ns);
+        encode_fixed64(buf, otlp::LOG_RECORD_TIME_UNIX_NANO, timestamp_ns);
     }
 
-    // field 2: severity_number (varint)
+    // LogRecord.severity_number (varint)
     if severity_num as u8 > 0 {
-        encode_varint_field(buf, 2, severity_num as u64);
+        encode_varint_field(buf, otlp::LOG_RECORD_SEVERITY_NUMBER, severity_num as u64);
     }
 
-    // field 3: severity_text (string)
+    // LogRecord.severity_text (string)
     if !severity_text.is_empty() {
-        encode_bytes_field(buf, 3, severity_text);
+        encode_bytes_field(buf, otlp::LOG_RECORD_SEVERITY_TEXT, severity_text);
     }
 
-    // field 5: body (AnyValue { string_value })
+    // LogRecord.body (AnyValue { string_value })
     if !body_bytes.is_empty() {
-        let anyvalue_inner_size = bytes_field_size(1, body_bytes.len());
-        encode_tag(buf, 5, 2);
+        let anyvalue_inner_size = bytes_field_size(otlp::ANY_VALUE_STRING_VALUE, body_bytes.len());
+        encode_tag(buf, otlp::LOG_RECORD_BODY, otlp::WIRE_TYPE_LEN);
         encode_varint(buf, anyvalue_inner_size as u64);
-        encode_bytes_field(buf, 1, body_bytes);
+        encode_bytes_field(buf, otlp::ANY_VALUE_STRING_VALUE, body_bytes);
     }
 
-    // field 6: attributes — pre-resolved attribute columns
+    // LogRecord.attributes — pre-resolved attribute columns
     for (field_name, attr) in &columns.attribute_cols {
         match attr {
             AttrArray::Int(arr) => {
                 if !arr.is_null(row) {
-                    encode_key_value_int(buf, field_name.as_bytes(), arr.value(row));
+                    encode_key_value_int(
+                        buf,
+                        otlp::LOG_RECORD_ATTRIBUTES,
+                        field_name.as_bytes(),
+                        arr.value(row),
+                    );
                 }
             }
             AttrArray::Float(arr) => {
                 if !arr.is_null(row) {
-                    encode_key_value_double(buf, field_name.as_bytes(), arr.value(row));
+                    encode_key_value_double(
+                        buf,
+                        otlp::LOG_RECORD_ATTRIBUTES,
+                        field_name.as_bytes(),
+                        arr.value(row),
+                    );
                 }
             }
             AttrArray::Bool(arr) => {
                 if !arr.is_null(row) {
-                    encode_key_value_bool(buf, field_name.as_bytes(), arr.value(row));
+                    encode_key_value_bool(
+                        buf,
+                        otlp::LOG_RECORD_ATTRIBUTES,
+                        field_name.as_bytes(),
+                        arr.value(row),
+                    );
                 }
             }
             AttrArray::Str(arr) => {
                 if !arr.is_null(row) {
                     encode_key_value_string(
                         buf,
+                        otlp::LOG_RECORD_ATTRIBUTES,
                         field_name.as_bytes(),
                         str_value(*arr, row).as_bytes(),
                     );
@@ -516,93 +720,96 @@ fn encode_row_as_log_record(
         }
     }
 
-    // field 8: flags (fixed32) — W3C trace flags
+    // LogRecord.flags (fixed32) — W3C trace flags
     if let Some((_, arr)) = columns.flags_col {
         if !arr.is_null(row) {
-            encode_fixed32(buf, 8, arr.value(row) as u32);
+            encode_fixed32(buf, otlp::LOG_RECORD_FLAGS, arr.value(row) as u32);
         }
     }
 
-    // field 9: trace_id (bytes, 16 bytes) — hex-decoded from 32-char string column
+    // LogRecord.trace_id (bytes, 16 bytes) — hex-decoded from 32-char string column
     if let Some((_, arr)) = columns.trace_id_col {
         if !arr.is_null(row) {
             let hex = str_value(arr, row);
             let mut decoded = [0u8; 16];
             if hex_decode(hex.as_bytes(), &mut decoded) {
-                encode_bytes_field(buf, 9, &decoded);
+                encode_bytes_field(buf, otlp::LOG_RECORD_TRACE_ID, &decoded);
             }
         }
     }
 
-    // field 10: span_id (bytes, 8 bytes) — hex-decoded from 16-char string column
+    // LogRecord.span_id (bytes, 8 bytes) — hex-decoded from 16-char string column
     if let Some((_, arr)) = columns.span_id_col {
         if !arr.is_null(row) {
             let hex = str_value(arr, row);
             let mut decoded = [0u8; 8];
             if hex_decode(hex.as_bytes(), &mut decoded) {
-                encode_bytes_field(buf, 10, &decoded);
+                encode_bytes_field(buf, otlp::LOG_RECORD_SPAN_ID, &decoded);
             }
         }
     }
 
-    // field 11: observed_time_unix_nano (fixed64)
-    encode_fixed64(buf, 11, metadata.observed_time_ns);
+    // LogRecord.observed_time_unix_nano (fixed64)
+    encode_fixed64(
+        buf,
+        otlp::LOG_RECORD_OBSERVED_TIME_UNIX_NANO,
+        metadata.observed_time_ns,
+    );
 }
 
-/// Encode a KeyValue with string AnyValue as an attribute (field 6 of LogRecord).
-/// KeyValue: { key (field 1, string), value (field 2, AnyValue { string_value (field 1) }) }
-fn encode_key_value_string(buf: &mut Vec<u8>, key: &[u8], value: &[u8]) {
-    let anyvalue_inner = bytes_field_size(1, value.len()); // AnyValue.string_value
-    let kv_inner = bytes_field_size(1, key.len()) + bytes_field_size(2, anyvalue_inner);
-    // LogRecord field 6, wire type 2
-    encode_tag(buf, 6, 2);
+/// Encode a KeyValue with string AnyValue as an attribute.
+/// `field_number` is the protobuf field tag of the parent message's `attributes` repeated field
+/// (e.g. `LOG_RECORD_ATTRIBUTES` for LogRecord, `RESOURCE_ATTRIBUTES` for Resource).
+/// KeyValue: { key (string), value (AnyValue { string_value }) }
+fn encode_key_value_string(buf: &mut Vec<u8>, field_number: u32, key: &[u8], value: &[u8]) {
+    let anyvalue_inner = bytes_field_size(otlp::ANY_VALUE_STRING_VALUE, value.len());
+    let kv_inner = bytes_field_size(otlp::KEY_VALUE_KEY, key.len())
+        + bytes_field_size(otlp::KEY_VALUE_VALUE, anyvalue_inner);
+    encode_tag(buf, field_number, otlp::WIRE_TYPE_LEN);
     encode_varint(buf, kv_inner as u64);
-    // KeyValue.key = field 1
-    encode_bytes_field(buf, 1, key);
-    // KeyValue.value = field 2 (AnyValue)
-    encode_tag(buf, 2, 2);
+    encode_bytes_field(buf, otlp::KEY_VALUE_KEY, key);
+    encode_tag(buf, otlp::KEY_VALUE_VALUE, otlp::WIRE_TYPE_LEN);
     encode_varint(buf, anyvalue_inner as u64);
-    // AnyValue.string_value = field 1
-    encode_bytes_field(buf, 1, value);
+    encode_bytes_field(buf, otlp::ANY_VALUE_STRING_VALUE, value);
 }
 
-/// Encode a KeyValue with int AnyValue (field 3 of AnyValue = int_value).
-fn encode_key_value_int(buf: &mut Vec<u8>, key: &[u8], value: i64) {
+/// Encode a KeyValue with int AnyValue (`AnyValue.int_value`).
+fn encode_key_value_int(buf: &mut Vec<u8>, field_number: u32, key: &[u8], value: i64) {
     let anyvalue_inner = 1 + varint_len(value as u64); // tag(1 byte) + varint
-    let kv_inner = bytes_field_size(1, key.len()) + bytes_field_size(2, anyvalue_inner);
-    encode_tag(buf, 6, 2);
+    let kv_inner = bytes_field_size(otlp::KEY_VALUE_KEY, key.len())
+        + bytes_field_size(otlp::KEY_VALUE_VALUE, anyvalue_inner);
+    encode_tag(buf, field_number, otlp::WIRE_TYPE_LEN);
     encode_varint(buf, kv_inner as u64);
-    encode_bytes_field(buf, 1, key);
-    encode_tag(buf, 2, 2);
+    encode_bytes_field(buf, otlp::KEY_VALUE_KEY, key);
+    encode_tag(buf, otlp::KEY_VALUE_VALUE, otlp::WIRE_TYPE_LEN);
     encode_varint(buf, anyvalue_inner as u64);
-    // AnyValue.int_value = field 3, wire type 0 (varint)
-    encode_varint_field(buf, 3, value as u64);
+    encode_varint_field(buf, otlp::ANY_VALUE_INT_VALUE, value as u64);
 }
 
-/// Encode a KeyValue with double AnyValue (field 4 of AnyValue = double_value).
-fn encode_key_value_double(buf: &mut Vec<u8>, key: &[u8], value: f64) {
+/// Encode a KeyValue with double AnyValue (`AnyValue.double_value`).
+fn encode_key_value_double(buf: &mut Vec<u8>, field_number: u32, key: &[u8], value: f64) {
     let anyvalue_inner = 1 + 8; // tag(1 byte) + fixed64
-    let kv_inner = bytes_field_size(1, key.len()) + bytes_field_size(2, anyvalue_inner);
-    encode_tag(buf, 6, 2);
+    let kv_inner = bytes_field_size(otlp::KEY_VALUE_KEY, key.len())
+        + bytes_field_size(otlp::KEY_VALUE_VALUE, anyvalue_inner);
+    encode_tag(buf, field_number, otlp::WIRE_TYPE_LEN);
     encode_varint(buf, kv_inner as u64);
-    encode_bytes_field(buf, 1, key);
-    encode_tag(buf, 2, 2);
+    encode_bytes_field(buf, otlp::KEY_VALUE_KEY, key);
+    encode_tag(buf, otlp::KEY_VALUE_VALUE, otlp::WIRE_TYPE_LEN);
     encode_varint(buf, anyvalue_inner as u64);
-    // AnyValue.double_value = field 4, wire type 1 (64-bit fixed)
-    encode_fixed64(buf, 4, value.to_bits());
+    encode_fixed64(buf, otlp::ANY_VALUE_DOUBLE_VALUE, value.to_bits());
 }
 
-/// Encode a KeyValue with boolean AnyValue (field 2 of AnyValue = bool_value).
-fn encode_key_value_bool(buf: &mut Vec<u8>, key: &[u8], value: bool) {
+/// Encode a KeyValue with boolean AnyValue (`AnyValue.bool_value`).
+fn encode_key_value_bool(buf: &mut Vec<u8>, field_number: u32, key: &[u8], value: bool) {
     let anyvalue_inner = 1 + 1; // tag(1 byte) + varint(1 byte)
-    let kv_inner = bytes_field_size(1, key.len()) + bytes_field_size(2, anyvalue_inner);
-    encode_tag(buf, 6, 2);
+    let kv_inner = bytes_field_size(otlp::KEY_VALUE_KEY, key.len())
+        + bytes_field_size(otlp::KEY_VALUE_VALUE, anyvalue_inner);
+    encode_tag(buf, field_number, otlp::WIRE_TYPE_LEN);
     encode_varint(buf, kv_inner as u64);
-    encode_bytes_field(buf, 1, key);
-    encode_tag(buf, 2, 2);
+    encode_bytes_field(buf, otlp::KEY_VALUE_KEY, key);
+    encode_tag(buf, otlp::KEY_VALUE_VALUE, otlp::WIRE_TYPE_LEN);
     encode_varint(buf, anyvalue_inner as u64);
-    // AnyValue.bool_value = field 2, wire type 0 (varint)
-    encode_varint_field(buf, 2, u64::from(value));
+    encode_varint_field(buf, otlp::ANY_VALUE_BOOL_VALUE, u64::from(value));
 }
 
 /// Write a gRPC length-prefixed message frame into `buf`.
@@ -613,15 +820,18 @@ fn encode_key_value_bool(buf: &mut Vec<u8>, key: &[u8], value: bool) {
 /// [4 bytes: big-endian message length]
 /// [N bytes: protobuf message]
 /// ```
-fn write_grpc_frame(buf: &mut Vec<u8>, payload: &[u8], compressed: bool) {
+fn write_grpc_frame(buf: &mut Vec<u8>, payload: &[u8], compressed: bool) -> io::Result<()> {
+    let len = u32::try_from(payload.len()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "gRPC message payload must be < 4 GiB",
+        )
+    })?;
     buf.clear();
     buf.push(u8::from(compressed));
-    buf.extend_from_slice(
-        &u32::try_from(payload.len())
-            .expect("gRPC message payload must be < 4 GiB")
-            .to_be_bytes(),
-    );
+    buf.extend_from_slice(&len.to_be_bytes());
     buf.extend_from_slice(payload);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -634,23 +844,144 @@ mod tests {
 
     use super::*;
 
-    /// Struct conflict columns (status: Struct { int, str }) must be skipped
-    /// by the OTLP attribute encoder rather than emitting an empty-string attribute.
+    #[tokio::test]
+    async fn send_payload_returns_rejected_on_4xx() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("POST", "/v1/logs")
+            .with_status(400)
+            .create_async()
+            .await;
+
+        let mut sink = OtlpSink::new(
+            "test".into(),
+            server.url() + "/v1/logs",
+            OtlpProtocol::Http,
+            Compression::None,
+            vec![],
+            reqwest::Client::new(),
+            Arc::new(ComponentStats::new()),
+        )
+        .unwrap();
+
+        sink.encoder_buf.push(1); // Non-empty so it sends
+        let result = sink.send_payload(1).await.unwrap();
+        match result {
+            crate::sink::SendResult::Rejected(_) => {} // Expected
+            _ => panic!("Expected Rejected on 400 response, got: {:?}", result),
+        }
+    }
+
+    #[tokio::test]
+    async fn send_payload_returns_retry_after_on_5xx() {
+        let mut server = mockito::Server::new_async().await;
+        // Server will receive 1 request and respond with 500. send_payload should
+        // return RetryAfter (not Err) so the sink's retry loop handles re-delivery.
+        let _mock = server
+            .mock("POST", "/v1/logs")
+            .with_status(500)
+            .create_async()
+            .await;
+
+        let mut sink = OtlpSink::new(
+            "test".into(),
+            server.url() + "/v1/logs",
+            OtlpProtocol::Http,
+            Compression::None,
+            vec![],
+            reqwest::Client::new(),
+            Arc::new(ComponentStats::new()),
+        )
+        .unwrap();
+
+        sink.encoder_buf.push(1);
+        let result = sink.send_payload(1).await.unwrap();
+        assert!(
+            matches!(
+                result,
+                crate::sink::SendResult::RetryAfter(d)
+                    if d.as_secs() == DEFAULT_RETRY_AFTER_SECS
+            ),
+            "Expected RetryAfter({}s) on 500 response, got: {:?}",
+            DEFAULT_RETRY_AFTER_SECS,
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn send_payload_5xx_honours_retry_after_header() {
+        let mut server = mockito::Server::new_async().await;
+        // Server responds 503 with a Retry-After: 42 header.
+        // send_payload should surface that duration rather than the default.
+        let _mock = server
+            .mock("POST", "/v1/logs")
+            .with_status(503)
+            .with_header("Retry-After", "42")
+            .create_async()
+            .await;
+
+        let mut sink = OtlpSink::new(
+            "test".into(),
+            server.url() + "/v1/logs",
+            OtlpProtocol::Http,
+            Compression::None,
+            vec![],
+            reqwest::Client::new(),
+            Arc::new(ComponentStats::new()),
+        )
+        .unwrap();
+
+        sink.encoder_buf.push(1);
+        let result = sink.send_payload(1).await.unwrap();
+        match result {
+            crate::sink::SendResult::RetryAfter(d) => {
+                assert_eq!(d.as_secs(), 42, "should honour Retry-After header value");
+            }
+            _ => panic!("Expected RetryAfter on 503 response, got: {:?}", result),
+        }
+    }
+
     #[test]
-    fn struct_conflict_column_is_skipped_not_emitted_as_empty_string() {
+    fn invalid_struct_array_downcast_does_not_panic() {
+        use crate::{ColVariant, get_array, is_null};
+
+        // Create a non-struct array (e.g. StringArray)
+        let str_arr: Arc<dyn Array> = Arc::new(StringArray::from(vec!["hello"]));
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "fake_struct",
+            DataType::Utf8, // It's actually utf8
+            true,
+        )]));
+        let batch = RecordBatch::try_new(schema, vec![str_arr]).unwrap();
+
+        // Simulate a variant that thinks the column is a StructArray
+        let variant = ColVariant::StructField {
+            struct_col_idx: 0,
+            field_idx: 0,
+            dt: DataType::Utf8,
+        };
+
+        // These should gracefully return true/None, not panic.
+        assert!(is_null(&batch, &variant, 0));
+        assert!(get_array(&batch, &variant).is_none());
+    }
+
+    /// Struct conflict columns (status: Struct { int, str }) must be normalized
+    /// to flat Utf8 before OTLP encoding so values are not silently dropped.
+    #[test]
+    fn struct_conflict_column_is_normalized_not_dropped() {
         use arrow::array::{Int64Array as I64A, StructArray};
         use arrow::buffer::NullBuffer;
         use arrow::datatypes::{Field as F, Fields};
 
-        let int_arr: Arc<dyn arrow::array::Array> = Arc::new(I64A::from(vec![Some(200i64), None]));
-        let str_arr: Arc<dyn arrow::array::Array> =
-            Arc::new(StringArray::from(vec![None::<&str>, Some("OK")]));
+        let int_arr: Arc<dyn Array> = Arc::new(I64A::from(vec![Some(200i64), None]));
+        let str_arr: Arc<dyn Array> = Arc::new(StringArray::from(vec![None::<&str>, Some("OK")]));
         let child_fields = Fields::from(vec![
             Arc::new(F::new("int", DataType::Int64, true)),
             Arc::new(F::new("str", DataType::Utf8, true)),
         ]);
         let validity = NullBuffer::from(vec![true, true]);
-        let struct_arr: Arc<dyn arrow::array::Array> = Arc::new(StructArray::new(
+        let struct_arr: Arc<dyn Array> = Arc::new(StructArray::new(
             child_fields.clone(),
             vec![Arc::clone(&int_arr), Arc::clone(&str_arr)],
             Some(validity),
@@ -665,11 +996,19 @@ mod tests {
         let mut sink = make_sink();
         sink.encode_batch(&batch, &make_metadata());
 
-        // The struct column must NOT appear in the encoded output —
-        // no "status" key and no empty-string value.
+        // After normalization the "status" key must appear in the encoded output
+        // with its coalesced value ("200" from the int child, "OK" from str child).
         assert!(
-            !contains_bytes(&sink.encoder_buf, b"status"),
-            "struct conflict column 'status' must not be encoded as an OTLP attribute"
+            contains_bytes(&sink.encoder_buf, b"status"),
+            "conflict struct column 'status' must be encoded as an OTLP attribute after normalization"
+        );
+        assert!(
+            contains_bytes(&sink.encoder_buf, b"200"),
+            "int value 200 must be encoded as the coalesced string '200'"
+        );
+        assert!(
+            contains_bytes(&sink.encoder_buf, b"OK"),
+            "str value 'OK' must be encoded as an OTLP attribute"
         );
     }
 
@@ -680,8 +1019,10 @@ mod tests {
             OtlpProtocol::Http,
             Compression::None,
             vec![],
-            Arc::new(logfwd_io::diagnostics::ComponentStats::new()),
+            reqwest::Client::new(),
+            Arc::new(ComponentStats::new()),
         )
+        .unwrap()
     }
 
     fn make_metadata() -> BatchMetadata {
@@ -830,7 +1171,7 @@ mod tests {
     fn grpc_frame_prepends_five_byte_header() {
         let proto_payload = [0x0a, 0x02, 0x08, 0x01];
         let mut framed = Vec::new();
-        write_grpc_frame(&mut framed, &proto_payload, false);
+        write_grpc_frame(&mut framed, &proto_payload, false).unwrap();
         assert_eq!(framed.len(), 5 + proto_payload.len());
         assert_eq!(framed[0], 0x00, "compressed flag must be 0x00");
         let msg_len = u32::from_be_bytes(framed[1..5].try_into().unwrap());
@@ -849,7 +1190,7 @@ mod tests {
     #[test]
     fn grpc_frame_empty_payload() {
         let mut framed = Vec::new();
-        write_grpc_frame(&mut framed, &[], false);
+        write_grpc_frame(&mut framed, &[], false).unwrap();
         assert_eq!(framed.len(), 5);
         assert_eq!(framed[0], 0x00, "compressed flag must be 0x00");
         let msg_len = u32::from_be_bytes(framed[1..5].try_into().unwrap());
@@ -860,7 +1201,7 @@ mod tests {
     fn grpc_frame_compressed_flag() {
         let proto_payload = [0x0a, 0x02];
         let mut framed = Vec::new();
-        write_grpc_frame(&mut framed, &proto_payload, true);
+        write_grpc_frame(&mut framed, &proto_payload, true).unwrap();
         assert_eq!(framed[0], 0x01, "compressed flag must be 0x01");
     }
 
@@ -880,14 +1221,16 @@ mod tests {
             OtlpProtocol::Grpc,
             Compression::None,
             vec![],
-            Arc::new(logfwd_io::diagnostics::ComponentStats::new()),
-        );
+            reqwest::Client::new(),
+            Arc::new(ComponentStats::new()),
+        )
+        .unwrap();
         sink.encode_batch(&batch, &make_metadata());
         let proto_payload = sink.encoder_buf.clone();
 
         // Frame as send_batch would.
         let mut framed = Vec::new();
-        write_grpc_frame(&mut framed, &proto_payload, false);
+        write_grpc_frame(&mut framed, &proto_payload, false).unwrap();
 
         // The frame header must be 5 bytes followed by the exact protobuf payload.
         assert_eq!(
@@ -957,5 +1300,275 @@ mod tests {
             contains_bytes(&sink.encoder_buf, b"active"),
             "attribute key 'active' not found"
         );
+    }
+
+    /// Roundtrip oracle test: encode a RecordBatch with our hand-rolled encoder,
+    /// decode with prost (the canonical protobuf library), and compare fields.
+    ///
+    /// This is the definitive test that our OTLP encoding is spec-compliant.
+    /// If we encode a field incorrectly, prost::Message::decode will either
+    /// fail or produce different values.
+    #[test]
+    fn roundtrip_encode_decode_via_prost() {
+        use opentelemetry_proto::tonic::{
+            collector::logs::v1::ExportLogsServiceRequest, common::v1::any_value::Value,
+        };
+        use prost::Message;
+
+        // Build a RecordBatch with all supported LogRecord field types.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("timestamp", DataType::Utf8, true),
+            Field::new("level", DataType::Utf8, true),
+            Field::new("message", DataType::Utf8, true),
+            Field::new("trace_id", DataType::Utf8, true),
+            Field::new("span_id", DataType::Utf8, true),
+            Field::new("flags", DataType::Int64, true),
+            Field::new("host", DataType::Utf8, true), // string attribute
+            Field::new("count", DataType::Int64, true), // int attribute
+            Field::new("latency", DataType::Float64, true), // double attribute
+            Field::new("active", DataType::Boolean, true), // bool attribute
+        ]));
+
+        let ts_arr = StringArray::from(vec!["2024-01-15T10:30:00Z"]);
+        let level_arr = StringArray::from(vec!["ERROR"]);
+        let msg_arr = StringArray::from(vec!["disk full"]);
+        let trace_arr = StringArray::from(vec!["0102030405060708090a0b0c0d0e0f10"]);
+        let span_arr = StringArray::from(vec!["0102030405060708"]);
+        let flags_arr = Int64Array::from(vec![1i64]);
+        let host_arr = StringArray::from(vec!["web-01"]);
+        let count_arr = Int64Array::from(vec![42i64]);
+        let latency_arr = arrow::array::Float64Array::from(vec![1.5f64]);
+        let active_arr = arrow::array::BooleanArray::from(vec![Some(true)]);
+
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(ts_arr),
+                Arc::new(level_arr),
+                Arc::new(msg_arr),
+                Arc::new(trace_arr),
+                Arc::new(span_arr),
+                Arc::new(flags_arr),
+                Arc::new(host_arr),
+                Arc::new(count_arr),
+                Arc::new(latency_arr),
+                Arc::new(active_arr),
+            ],
+        )
+        .expect("valid batch");
+
+        let observed_ns: u64 = 1_700_000_000_000_000_000;
+        let resource_attrs = Arc::new(vec![("k8s.pod.name".to_string(), "my-pod".to_string())]);
+        let metadata = BatchMetadata {
+            resource_attrs,
+            observed_time_ns: observed_ns,
+        };
+
+        // Encode with our hand-rolled encoder.
+        let mut sink = make_sink();
+        sink.encode_batch(&batch, &metadata);
+        assert!(
+            !sink.encoder_buf.is_empty(),
+            "encoder must produce non-empty output"
+        );
+
+        // Decode with prost — the canonical protobuf decoder.
+        let request = ExportLogsServiceRequest::decode(sink.encoder_buf.as_slice())
+            .expect("prost must decode our encoding without error");
+
+        // --- Verify structure ---
+        assert_eq!(request.resource_logs.len(), 1, "exactly one ResourceLogs");
+        let rl = &request.resource_logs[0];
+
+        // Resource attributes
+        let resource = rl.resource.as_ref().expect("Resource must be present");
+        let pod_attr = resource
+            .attributes
+            .iter()
+            .find(|kv| kv.key == "k8s.pod.name");
+        assert!(pod_attr.is_some(), "resource attr k8s.pod.name must exist");
+        let pod_val = pod_attr
+            .unwrap()
+            .value
+            .as_ref()
+            .and_then(|v| match &v.value {
+                Some(Value::StringValue(s)) => Some(s.as_str()),
+                _ => None,
+            });
+        assert_eq!(pod_val, Some("my-pod"), "resource attr value mismatch");
+
+        // ScopeLogs
+        assert_eq!(rl.scope_logs.len(), 1, "exactly one ScopeLogs");
+        let sl = &rl.scope_logs[0];
+        let scope = sl
+            .scope
+            .as_ref()
+            .expect("InstrumentationScope must be present");
+        assert_eq!(scope.name, "logfwd", "scope name must be 'logfwd'");
+        assert_eq!(
+            scope.version,
+            env!("CARGO_PKG_VERSION"),
+            "scope version must match CARGO_PKG_VERSION"
+        );
+
+        // LogRecord
+        assert_eq!(sl.log_records.len(), 1, "exactly one LogRecord");
+        let lr = &sl.log_records[0];
+
+        // time_unix_nano: 2024-01-15T10:30:00Z = 1705314600 seconds
+        assert_eq!(
+            lr.time_unix_nano, 1_705_314_600_000_000_000,
+            "time_unix_nano mismatch"
+        );
+
+        // observed_time_unix_nano
+        assert_eq!(
+            lr.observed_time_unix_nano, observed_ns,
+            "observed_time_unix_nano mismatch"
+        );
+
+        // severity
+        assert_eq!(lr.severity_number, 17, "ERROR severity_number must be 17");
+        assert_eq!(lr.severity_text, "ERROR", "severity_text mismatch");
+
+        // body
+        let body_str = lr.body.as_ref().and_then(|v| match &v.value {
+            Some(Value::StringValue(s)) => Some(s.as_str()),
+            _ => None,
+        });
+        assert_eq!(body_str, Some("disk full"), "body mismatch");
+
+        // trace_id (16 bytes, decoded from hex)
+        assert_eq!(
+            lr.trace_id,
+            vec![
+                0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+                0x0f, 0x10
+            ],
+            "trace_id mismatch"
+        );
+
+        // span_id (8 bytes, decoded from hex)
+        assert_eq!(
+            lr.span_id,
+            vec![0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08],
+            "span_id mismatch"
+        );
+
+        // flags
+        assert_eq!(lr.flags, 1, "flags mismatch");
+
+        // --- Verify attributes ---
+        let find_attr = |name: &str| lr.attributes.iter().find(|kv| kv.key == name);
+
+        // String attribute: host
+        let host_kv = find_attr("host").expect("host attribute must exist");
+        let host_val = host_kv.value.as_ref().and_then(|v| match &v.value {
+            Some(Value::StringValue(s)) => Some(s.as_str()),
+            _ => None,
+        });
+        assert_eq!(host_val, Some("web-01"), "host attribute value mismatch");
+
+        // Int attribute: count
+        let count_kv = find_attr("count").expect("count attribute must exist");
+        let count_val = count_kv.value.as_ref().and_then(|v| match &v.value {
+            Some(Value::IntValue(i)) => Some(*i),
+            _ => None,
+        });
+        assert_eq!(count_val, Some(42), "count attribute value mismatch");
+
+        // Double attribute: latency
+        let latency_kv = find_attr("latency").expect("latency attribute must exist");
+        let latency_val = latency_kv.value.as_ref().and_then(|v| match &v.value {
+            Some(Value::DoubleValue(d)) => Some(*d),
+            _ => None,
+        });
+        assert!(
+            (latency_val.unwrap() - 1.5).abs() < f64::EPSILON,
+            "latency attribute value mismatch"
+        );
+
+        // Bool attribute: active
+        let active_kv = find_attr("active").expect("active attribute must exist");
+        let active_val = active_kv.value.as_ref().and_then(|v| match &v.value {
+            Some(Value::BoolValue(b)) => Some(*b),
+            _ => None,
+        });
+        assert_eq!(active_val, Some(true), "active attribute value mismatch");
+    }
+
+    /// Roundtrip with minimal fields: only body, no timestamp, no severity,
+    /// no trace context. Ensures sparse records encode correctly.
+    #[test]
+    fn roundtrip_minimal_record() {
+        use opentelemetry_proto::tonic::{
+            collector::logs::v1::ExportLogsServiceRequest, common::v1::any_value::Value,
+        };
+        use prost::Message;
+
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "message",
+            DataType::Utf8,
+            true,
+        )]));
+        let msg_arr = StringArray::from(vec!["hello world"]);
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(msg_arr)]).expect("valid batch");
+
+        let mut sink = make_sink();
+        sink.encode_batch(&batch, &make_metadata());
+
+        let request = ExportLogsServiceRequest::decode(sink.encoder_buf.as_slice())
+            .expect("prost must decode minimal record");
+
+        let lr = &request.resource_logs[0].scope_logs[0].log_records[0];
+        assert_eq!(lr.time_unix_nano, 0, "no timestamp column means 0");
+        assert_eq!(lr.severity_number, 0, "no severity means unspecified");
+        let body_str = lr.body.as_ref().and_then(|v| match &v.value {
+            Some(Value::StringValue(s)) => Some(s.as_str()),
+            _ => None,
+        });
+        assert_eq!(body_str, Some("hello world"), "body mismatch");
+        assert!(lr.trace_id.is_empty(), "no trace_id column means empty");
+        assert!(lr.span_id.is_empty(), "no span_id column means empty");
+    }
+
+    /// Roundtrip with multiple rows to verify repeated LogRecord encoding.
+    #[test]
+    fn roundtrip_multiple_rows() {
+        use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
+        use opentelemetry_proto::tonic::common::v1::any_value::Value;
+        use prost::Message;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("message", DataType::Utf8, true),
+            Field::new("level", DataType::Utf8, true),
+        ]));
+        let msg_arr = StringArray::from(vec!["first", "second", "third"]);
+        let level_arr = StringArray::from(vec!["INFO", "WARN", "ERROR"]);
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(msg_arr), Arc::new(level_arr)])
+            .expect("valid batch");
+
+        let mut sink = make_sink();
+        sink.encode_batch(&batch, &make_metadata());
+
+        let request = ExportLogsServiceRequest::decode(sink.encoder_buf.as_slice())
+            .expect("prost must decode multi-row batch");
+
+        let records = &request.resource_logs[0].scope_logs[0].log_records;
+        assert_eq!(records.len(), 3, "must have 3 LogRecords");
+
+        let bodies: Vec<&str> = records
+            .iter()
+            .filter_map(|lr| {
+                lr.body.as_ref().and_then(|v| match &v.value {
+                    Some(Value::StringValue(s)) => Some(s.as_str()),
+                    _ => None,
+                })
+            })
+            .collect();
+        assert_eq!(bodies, vec!["first", "second", "third"]);
+
+        let severities: Vec<i32> = records.iter().map(|lr| lr.severity_number).collect();
+        assert_eq!(severities, vec![9, 13, 17], "INFO=9, WARN=13, ERROR=17");
     }
 }

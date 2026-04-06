@@ -20,8 +20,12 @@ use datafusion::prelude::*;
 
 use logfwd_core::scan_config::ScanConfig;
 
-pub mod conflict_schema;
+pub use logfwd_arrow::conflict_schema;
+pub mod enrichment;
+pub mod error;
 pub mod udf;
+
+pub use error::TransformError;
 
 // Re-export sqlparser through datafusion.
 use datafusion::sql::sqlparser::ast::{
@@ -46,13 +50,15 @@ pub struct QueryAnalyzer {
 
 impl QueryAnalyzer {
     /// Parse the SQL and extract metadata about column usage.
-    pub fn new(sql: &str) -> Result<Self, String> {
+    pub fn new(sql: &str) -> Result<Self, TransformError> {
         let dialect = GenericDialect {};
-        let statements =
-            Parser::parse_sql(&dialect, sql).map_err(|e| format!("SQL parse error: {e}"))?;
+        let statements = Parser::parse_sql(&dialect, sql)
+            .map_err(|e| TransformError::Sql(format!("SQL parse error: {e}")))?;
 
         if statements.len() != 1 {
-            return Err("Expected exactly one SQL statement".to_string());
+            return Err(TransformError::Sql(
+                "Expected exactly one SQL statement".to_string(),
+            ));
         }
 
         let stmt = &statements[0];
@@ -89,7 +95,9 @@ impl QueryAnalyzer {
                 }
             }
         } else {
-            return Err("Only SELECT statements are supported".to_string());
+            return Err(TransformError::Sql(
+                "Only SELECT statements are supported".to_string(),
+            ));
         }
 
         Ok(QueryAnalyzer {
@@ -144,8 +152,8 @@ impl QueryAnalyzer {
     /// columns (severity, facility) that can be pushed to input sources.
     /// Only predicates in top-level AND chains are extracted — OR'd predicates
     /// are left for DataFusion since pushing them could miss matching rows.
-    pub fn filter_hints(&self) -> logfwd_io::filter_hints::FilterHints {
-        let mut hints = logfwd_io::filter_hints::FilterHints::default();
+    pub fn filter_hints(&self) -> logfwd_types::filter_hints::FilterHints {
+        let mut hints = logfwd_types::filter_hints::FilterHints::default();
 
         if let Some(ref where_expr) = self.where_clause {
             extract_pushable_predicates(where_expr, &mut hints);
@@ -168,7 +176,10 @@ impl QueryAnalyzer {
 
 /// Walk a WHERE clause AST and extract predicates that can be pushed down.
 /// Only extracts from top-level AND chains (not OR branches).
-fn extract_pushable_predicates(expr: &SqlExpr, hints: &mut logfwd_io::filter_hints::FilterHints) {
+fn extract_pushable_predicates(
+    expr: &SqlExpr,
+    hints: &mut logfwd_types::filter_hints::FilterHints,
+) {
     match expr {
         // AND: recurse into both sides
         SqlExpr::BinaryOp {
@@ -267,7 +278,10 @@ fn expr_as_column(expr: &SqlExpr) -> Option<String> {
 /// Extract a small integer literal from a SQL expression.
 fn expr_as_u8_literal(expr: &SqlExpr) -> Option<u8> {
     match expr {
-        SqlExpr::Value(sqlast::Value::Number(s, _)) => s.parse::<u8>().ok(),
+        SqlExpr::Value(v) => match &v.value {
+            sqlast::Value::Number(s, _) => s.parse::<u8>().ok(),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -352,18 +366,15 @@ fn collect_column_refs(expr: &SqlExpr, cols: &mut HashSet<String>) {
         SqlExpr::Case {
             operand,
             conditions,
-            results,
             else_result,
             ..
         } => {
             if let Some(op) = operand {
                 collect_column_refs(op, cols);
             }
-            for c in conditions {
-                collect_column_refs(c, cols);
-            }
-            for r in results {
-                collect_column_refs(r, cols);
+            for cw in conditions {
+                collect_column_refs(&cw.condition, cols);
+                collect_column_refs(&cw.result, cols);
             }
             if let Some(e) = else_result {
                 collect_column_refs(e, cols);
@@ -515,16 +526,16 @@ pub struct SqlTransform {
     /// Schema fingerprint for cache invalidation.
     schema_hash: u64,
     /// Enrichment tables registered alongside `logs` in each DataFusion session.
-    enrichment_tables: Vec<Arc<dyn logfwd_io::enrichment::EnrichmentTable>>,
+    enrichment_tables: Vec<Arc<dyn enrichment::EnrichmentTable>>,
     /// Optional geo-IP database for the `geo_lookup()` UDF.
-    geo_database: Option<Arc<dyn logfwd_io::enrichment::GeoDatabase>>,
+    geo_database: Option<Arc<dyn enrichment::GeoDatabase>>,
     /// Cached DataFusion session — created once, table swapped per batch.
     ctx: Option<SessionContext>,
 }
 
 impl SqlTransform {
     /// Create a new SQL transform from a SQL string.
-    pub fn new(sql: &str) -> Result<Self, String> {
+    pub fn new(sql: &str) -> Result<Self, TransformError> {
         let analyzer = QueryAnalyzer::new(sql)?;
 
         Ok(SqlTransform {
@@ -541,7 +552,7 @@ impl SqlTransform {
     ///
     /// Invalidates the cached SessionContext so the UDF is re-registered
     /// with the new database on the next execute() call.
-    pub fn set_geo_database(&mut self, db: Arc<dyn logfwd_io::enrichment::GeoDatabase>) {
+    pub fn set_geo_database(&mut self, db: Arc<dyn enrichment::GeoDatabase>) {
         self.geo_database = Some(db);
         self.ctx = None; // force re-creation with new geo UDF
     }
@@ -555,14 +566,18 @@ impl SqlTransform {
     /// `execute()`. The context doesn't need to know about them at creation time.
     pub fn add_enrichment_table(
         &mut self,
-        table: Arc<dyn logfwd_io::enrichment::EnrichmentTable>,
-    ) -> Result<(), String> {
+        table: Arc<dyn enrichment::EnrichmentTable>,
+    ) -> Result<(), TransformError> {
         let name = table.name();
         if name == "logs" {
-            return Err("enrichment table cannot be named 'logs' (reserved)".to_string());
+            return Err(TransformError::Enrichment(
+                "enrichment table cannot be named 'logs' (reserved)".to_string(),
+            ));
         }
         if self.enrichment_tables.iter().any(|t| t.name() == name) {
-            return Err(format!("duplicate enrichment table name: '{name}'"));
+            return Err(TransformError::Enrichment(format!(
+                "duplicate enrichment table name: '{name}'"
+            )));
         }
         self.enrichment_tables.push(table);
         Ok(())
@@ -576,13 +591,22 @@ impl SqlTransform {
     ///
     /// Schema changes (new fields in later batches) are handled automatically
     /// since the MemTable is recreated with the batch's schema each call.
-    pub async fn execute(&mut self, batch: RecordBatch) -> Result<RecordBatch, String> {
+    pub async fn execute(&mut self, batch: RecordBatch) -> Result<RecordBatch, TransformError> {
         if batch.num_rows() == 0 {
             return Ok(batch);
         }
 
-        // Track schema hash for diagnostics.
+        // Invalidate the cached SessionContext when the schema changes.
+        //
+        // DataFusion caches logical plans inside the SessionContext. If the
+        // batch schema changes between calls (new fields, type conflicts resolved
+        // differently), the cached plan refers to a stale schema and execution
+        // will fail or produce incorrect results. Forcing ctx = None causes
+        // ensure_context() to build a fresh SessionContext with no stale plans.
         let new_hash = hash_schema(batch.schema());
+        if new_hash != self.schema_hash {
+            self.ctx = None;
+        }
         self.schema_hash = new_hash;
 
         // Ensure the SessionContext exists (created once, reused across batches).
@@ -600,10 +624,10 @@ impl SqlTransform {
         let batch = conflict_schema::normalize_conflict_columns(batch);
         let schema = batch.schema();
         let table = MemTable::try_new(schema, vec![vec![batch]])
-            .map_err(|e| format!("Failed to create MemTable: {e}"))?;
+            .map_err(|e| TransformError::Sql(format!("Failed to create MemTable: {e}")))?;
         let _ = ctx.deregister_table("logs");
         ctx.register_table("logs", Arc::new(table))
-            .map_err(|e| format!("Failed to register table: {e}"))?;
+            .map_err(|e| TransformError::Sql(format!("Failed to register table: {e}")))?;
 
         // Swap enrichment tables whose snapshots have changed.
         // If snapshot() returns None (table not loaded yet), deregister the
@@ -614,16 +638,22 @@ impl SqlTransform {
             if let Some(snapshot) = et.snapshot() {
                 let et_table =
                     MemTable::try_new(snapshot.schema(), vec![vec![snapshot]]).map_err(|e| {
-                        format!("Failed to create enrichment table '{}': {e}", et.name())
+                        TransformError::Enrichment(format!(
+                            "Failed to create enrichment table '{}': {e}",
+                            et.name()
+                        ))
                     })?;
                 ctx.register_table(et.name(), Arc::new(et_table))
                     .map_err(|e| {
-                        format!("Failed to register enrichment table '{}': {e}", et.name())
+                        TransformError::Enrichment(format!(
+                            "Failed to register enrichment table '{}': {e}",
+                            et.name()
+                        ))
                     })?;
             } else {
-                eprintln!(
-                    "  warning: enrichment table '{}' not yet loaded, skipping",
-                    et.name()
+                tracing::warn!(
+                    table = et.name(),
+                    "enrichment table not yet loaded, skipping"
                 );
             }
         }
@@ -633,28 +663,25 @@ impl SqlTransform {
         let df = ctx
             .sql(sql)
             .await
-            .map_err(|e| format!("SQL execution error: {e}"))?;
+            .map_err(|e| TransformError::Sql(format!("SQL execution error: {e}")))?;
+
+        // Capture the output schema before collecting so we can build an empty
+        // batch when the WHERE clause filters out every row — without
+        // re-executing `ctx.sql()` a second time.
+        let output_schema: SchemaRef = Arc::clone(df.schema().inner());
 
         let batches = df
             .collect()
             .await
-            .map_err(|e| format!("Failed to collect results: {e}"))?;
+            .map_err(|e| TransformError::Sql(format!("Failed to collect results: {e}")))?;
 
         // Concat all result batches into one.
         match batches.len() {
-            0 => {
-                let df2 = ctx
-                    .sql(sql)
-                    .await
-                    .map_err(|e| format!("SQL schema error: {e}"))?;
-                let df_schema = df2.schema();
-                Ok(RecordBatch::new_empty(Arc::clone(df_schema.inner())))
-            }
+            0 => Ok(RecordBatch::new_empty(output_schema)),
             1 => Ok(batches.into_iter().next().expect("verified len==1")),
             _ => {
                 let schema = batches[0].schema();
-                concat_batches(&schema, &batches)
-                    .map_err(|e| format!("Failed to concat batches: {e}"))
+                concat_batches(&schema, &batches).map_err(TransformError::Arrow)
             }
         }
     }
@@ -672,19 +699,19 @@ impl SqlTransform {
         // Register custom UDFs once — they persist across batches.
         ctx.register_udf(ScalarUDF::from(IntCastUdf::new()));
         ctx.register_udf(ScalarUDF::from(FloatCastUdf::new()));
-        ctx.register_udf(ScalarUDF::from(crate::udf::RegexpExtractUdf::new()));
-        ctx.register_udf(ScalarUDF::from(crate::udf::GrokUdf::new()));
-        ctx.register_udf(ScalarUDF::from(crate::udf::JsonExtractUdf::new(
-            crate::udf::JsonExtractMode::Str,
+        ctx.register_udf(ScalarUDF::from(udf::RegexpExtractUdf::new()));
+        ctx.register_udf(ScalarUDF::from(udf::GrokUdf::new()));
+        ctx.register_udf(ScalarUDF::from(udf::JsonExtractUdf::new(
+            udf::JsonExtractMode::Str,
         )));
-        ctx.register_udf(ScalarUDF::from(crate::udf::JsonExtractUdf::new(
-            crate::udf::JsonExtractMode::Int,
+        ctx.register_udf(ScalarUDF::from(udf::JsonExtractUdf::new(
+            udf::JsonExtractMode::Int,
         )));
-        ctx.register_udf(ScalarUDF::from(crate::udf::JsonExtractUdf::new(
-            crate::udf::JsonExtractMode::Float,
+        ctx.register_udf(ScalarUDF::from(udf::JsonExtractUdf::new(
+            udf::JsonExtractMode::Float,
         )));
         if let Some(ref db) = self.geo_database {
-            ctx.register_udf(ScalarUDF::from(crate::udf::geo_lookup::GeoLookupUdf::new(
+            ctx.register_udf(ScalarUDF::from(udf::geo_lookup::GeoLookupUdf::new(
                 Arc::clone(db),
             )));
         }
@@ -698,14 +725,16 @@ impl SqlTransform {
     /// runtime.
     ///
     /// When the calling code is made async, switch to `execute().await` directly.
-    pub fn execute_blocking(&mut self, batch: RecordBatch) -> Result<RecordBatch, String> {
+    pub fn execute_blocking(&mut self, batch: RecordBatch) -> Result<RecordBatch, TransformError> {
         match tokio::runtime::Handle::try_current() {
             Ok(handle) => tokio::task::block_in_place(|| handle.block_on(self.execute(batch))),
             Err(_) => {
                 let rt = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
-                    .map_err(|e| format!("Failed to create tokio runtime: {e}"))?;
+                    .map_err(|e| {
+                        TransformError::Sql(format!("Failed to create tokio runtime: {e}"))
+                    })?;
                 rt.block_on(self.execute(batch))
             }
         }
@@ -719,6 +748,44 @@ impl SqlTransform {
     /// Get a reference to the query analyzer.
     pub fn analyzer(&self) -> &QueryAnalyzer {
         &self.analyzer
+    }
+
+    /// Validate the SQL plan by executing it against a dummy single-row batch.
+    ///
+    /// This forces DataFusion to plan the query (resolve columns, check for
+    /// duplicate aliases, validate window specs, etc.) at validation time
+    /// rather than waiting for the first real batch at runtime.
+    pub fn validate_plan(&mut self) -> Result<(), TransformError> {
+        use arrow::array::{ArrayRef, StringArray};
+        use arrow::datatypes::{Field, Schema};
+
+        // Build a schema from referenced columns (or a fallback for SELECT *).
+        let fields: Vec<Field> = if self.analyzer.referenced_columns.is_empty() {
+            // SELECT * — provide a minimal representative schema.
+            vec![
+                Field::new("_raw", DataType::Utf8, true),
+                Field::new("level", DataType::Utf8, true),
+                Field::new("msg", DataType::Utf8, true),
+            ]
+        } else {
+            self.analyzer
+                .referenced_columns
+                .iter()
+                .map(|name| Field::new(name, DataType::Utf8, true))
+                .collect()
+        };
+
+        let schema = Arc::new(Schema::new(fields.clone()));
+        let arrays: Vec<ArrayRef> = fields
+            .iter()
+            .map(|_| Arc::new(StringArray::from(vec![Some("x")])) as ArrayRef)
+            .collect();
+
+        let batch = RecordBatch::try_new(schema, arrays)
+            .map_err(|e| TransformError::Sql(format!("failed to build probe batch: {e}")))?;
+
+        self.execute_blocking(batch)?;
+        Ok(())
     }
 }
 
@@ -965,7 +1032,7 @@ mod tests {
 
     #[test]
     fn test_enrichment_cross_join() {
-        use logfwd_io::enrichment::StaticTable;
+        use enrichment::StaticTable;
 
         let batch = make_test_batch();
         let mut transform =
@@ -998,7 +1065,7 @@ mod tests {
 
     #[test]
     fn test_enrichment_unused_table_no_error() {
-        use logfwd_io::enrichment::StaticTable;
+        use enrichment::StaticTable;
 
         let batch = make_test_batch();
         let table = Arc::new(
@@ -1016,7 +1083,7 @@ mod tests {
 
     #[test]
     fn test_enrichment_empty_table_skipped() {
-        use logfwd_io::enrichment::K8sPathTable;
+        use enrichment::K8sPathTable;
 
         let batch = make_test_batch();
         let k8s = Arc::new(K8sPathTable::new("k8s_pods"));
@@ -1065,7 +1132,7 @@ mod tests {
         let a = QueryAnalyzer::new("SELECT * FROM logs WHERE facility IN (1, 4, 16)").unwrap();
         let h = a.filter_hints();
         let mut facs = h.facilities.unwrap();
-        facs.sort();
+        facs.sort_unstable();
         assert_eq!(facs, vec![1, 4, 16]);
     }
 
@@ -1359,5 +1426,319 @@ mod tests {
         assert_eq!(out.value(2), "ok");
         // Row 3: ERROR → msg = 'oom killed'
         assert_eq!(out.value(3), "oom killed");
+    }
+
+    // -----------------------------------------------------------------------
+    // Schema-change invalidation tests
+    // -----------------------------------------------------------------------
+
+    /// Regression test: schema change across batches must invalidate the cached
+    /// SessionContext so that the new batch's schema is planned correctly.
+    ///
+    /// Before the fix, `schema_hash` was tracked but never used to clear
+    /// `self.ctx`, so the old plan referencing the previous schema was reused,
+    /// causing "column not found" errors or silent wrong results when new fields
+    /// appeared.
+    #[test]
+    fn test_schema_change_new_field_invalidates_cache() {
+        let mut transform = SqlTransform::new("SELECT * FROM logs").unwrap();
+
+        // Batch 1: two columns.
+        let schema1 = Arc::new(Schema::new(vec![
+            Field::new("level", DataType::Utf8, true),
+            Field::new("msg", DataType::Utf8, true),
+        ]));
+        let batch1 = RecordBatch::try_new(
+            Arc::clone(&schema1),
+            vec![
+                Arc::new(StringArray::from(vec!["INFO"])) as ArrayRef,
+                Arc::new(StringArray::from(vec!["hello"])) as ArrayRef,
+            ],
+        )
+        .unwrap();
+        let r1 = transform.execute_blocking(batch1).unwrap();
+        assert_eq!(r1.num_rows(), 1);
+        assert_eq!(r1.num_columns(), 2);
+
+        // Batch 2: three columns (added "host").  Without the fix, the stale
+        // SessionContext plan would fail or miss the new column.
+        let schema2 = Arc::new(Schema::new(vec![
+            Field::new("level", DataType::Utf8, true),
+            Field::new("msg", DataType::Utf8, true),
+            Field::new("host", DataType::Utf8, true),
+        ]));
+        let batch2 = RecordBatch::try_new(
+            Arc::clone(&schema2),
+            vec![
+                Arc::new(StringArray::from(vec!["ERROR"])) as ArrayRef,
+                Arc::new(StringArray::from(vec!["disk full"])) as ArrayRef,
+                Arc::new(StringArray::from(vec!["web1"])) as ArrayRef,
+            ],
+        )
+        .unwrap();
+        let r2 = transform.execute_blocking(batch2).unwrap();
+        assert_eq!(r2.num_rows(), 1);
+        // All three columns must be present after schema change.
+        assert_eq!(
+            r2.num_columns(),
+            3,
+            "expected 3 columns after schema change"
+        );
+        let host = r2
+            .column_by_name("host")
+            .expect("'host' column must be present after schema change")
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(host.value(0), "web1");
+    }
+
+    /// Schema changes across batches where column types change (e.g., a field
+    /// that was Int64 becomes Utf8) must also re-plan correctly.
+    #[test]
+    fn test_schema_change_type_conflict_invalidates_cache() {
+        let mut transform = SqlTransform::new("SELECT * FROM logs").unwrap();
+
+        // Batch 1: "status" is Int64.
+        let schema1 = Arc::new(Schema::new(vec![
+            Field::new("level", DataType::Utf8, true),
+            Field::new("status", DataType::Int64, true),
+        ]));
+        let batch1 = RecordBatch::try_new(
+            Arc::clone(&schema1),
+            vec![
+                Arc::new(StringArray::from(vec!["INFO"])) as ArrayRef,
+                Arc::new(Int64Array::from(vec![200i64])) as ArrayRef,
+            ],
+        )
+        .unwrap();
+        let r1 = transform.execute_blocking(batch1).unwrap();
+        assert_eq!(r1.num_rows(), 1);
+
+        // Batch 2: "status" is now Utf8 (type conflict resolved differently).
+        // Without the fix, DataFusion would reuse the Int64 plan against a Utf8
+        // column and fail.
+        let schema2 = Arc::new(Schema::new(vec![
+            Field::new("level", DataType::Utf8, true),
+            Field::new("status", DataType::Utf8, true),
+        ]));
+        let batch2 = RecordBatch::try_new(
+            Arc::clone(&schema2),
+            vec![
+                Arc::new(StringArray::from(vec!["ERROR"])) as ArrayRef,
+                Arc::new(StringArray::from(vec!["not_a_number"])) as ArrayRef,
+            ],
+        )
+        .unwrap();
+        let r2 = transform.execute_blocking(batch2).unwrap();
+        assert_eq!(r2.num_rows(), 1);
+        let status = r2
+            .column_by_name("status")
+            .expect("'status' column must be present")
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(status.value(0), "not_a_number");
+    }
+
+    // -----------------------------------------------------------------------
+    // Regression tests — #415: IS NULL / IS NOT NULL / LIKE / numeric IN list
+    // -----------------------------------------------------------------------
+
+    /// `WHERE status IS NULL` on a plain Utf8 batch.
+    /// collect_column_refs must collect "status" from an IsNull expression so
+    /// the scanner requests the field, and DataFusion must filter correctly.
+    #[test]
+    fn test_where_is_null() {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "status",
+            DataType::Utf8,
+            true,
+        )]));
+        let status: ArrayRef = Arc::new(StringArray::from(vec![Some("200"), None, Some("404")]));
+        let batch = RecordBatch::try_new(schema, vec![status]).unwrap();
+
+        let mut transform =
+            SqlTransform::new("SELECT status FROM logs WHERE status IS NULL").unwrap();
+        let result = transform.execute_blocking(batch).unwrap();
+        // Only the null row should match.
+        assert_eq!(result.num_rows(), 1);
+    }
+
+    /// `WHERE status IS NOT NULL` on a plain Utf8 batch.
+    #[test]
+    fn test_where_is_not_null() {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "status",
+            DataType::Utf8,
+            true,
+        )]));
+        let status: ArrayRef = Arc::new(StringArray::from(vec![Some("200"), None, Some("404")]));
+        let batch = RecordBatch::try_new(schema, vec![status]).unwrap();
+
+        let mut transform =
+            SqlTransform::new("SELECT status FROM logs WHERE status IS NOT NULL").unwrap();
+        let result = transform.execute_blocking(batch).unwrap();
+        // The two non-null rows should match.
+        assert_eq!(result.num_rows(), 2);
+    }
+
+    /// `WHERE level LIKE 'ERR%'` on a plain batch.
+    /// collect_column_refs must collect "level" from a Like expression.
+    #[test]
+    fn test_where_like() {
+        let batch = make_test_batch();
+        let mut transform =
+            SqlTransform::new("SELECT * FROM logs WHERE level LIKE 'ERR%'").unwrap();
+        let result = transform.execute_blocking(batch).unwrap();
+        // make_test_batch has two ERROR rows.
+        assert_eq!(result.num_rows(), 2);
+    }
+
+    /// `WHERE int(status) IN (200, 503)` on a plain batch.
+    /// collect_column_refs must collect "status" from the InList expression's
+    /// function argument.
+    #[test]
+    fn test_where_int_in_list() {
+        let batch = make_test_batch();
+        let mut transform =
+            SqlTransform::new("SELECT * FROM logs WHERE int(status) IN (200, 503)").unwrap();
+        let result = transform.execute_blocking(batch).unwrap();
+        // make_test_batch has status values "200", "500", "not_a_number", "503"
+        // int(status) IN (200, 503) matches rows 0 and 3.
+        assert_eq!(result.num_rows(), 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // Regression tests — QueryAnalyzer column-ref collection for #415 forms
+    // -----------------------------------------------------------------------
+
+    /// QueryAnalyzer must collect column refs from an IS NULL expression.
+    #[test]
+    fn test_query_analyzer_is_null_column_refs() {
+        let a = QueryAnalyzer::new("SELECT level FROM logs WHERE status IS NULL").unwrap();
+        assert!(
+            a.referenced_columns.contains("status"),
+            "IS NULL expr must add 'status' to referenced_columns"
+        );
+        assert!(
+            a.referenced_columns.contains("level"),
+            "'level' from SELECT must be in referenced_columns"
+        );
+    }
+
+    /// QueryAnalyzer must collect column refs from a LIKE expression.
+    #[test]
+    fn test_query_analyzer_like_column_refs() {
+        let a = QueryAnalyzer::new("SELECT * FROM logs WHERE level LIKE 'ERR%'").unwrap();
+        assert!(
+            a.referenced_columns.contains("level"),
+            "LIKE expr must add 'level' to referenced_columns"
+        );
+    }
+
+    /// QueryAnalyzer must collect column refs from an IN list expression.
+    #[test]
+    fn test_query_analyzer_in_list_column_refs() {
+        let a = QueryAnalyzer::new("SELECT * FROM logs WHERE status IN ('200', '404')").unwrap();
+        assert!(
+            a.referenced_columns.contains("status"),
+            "InList expr must add 'status' to referenced_columns"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+
+    /// Verify that a stable schema does NOT trigger repeated context recreation
+    /// (i.e. the hash comparison is correct and equal hashes are treated as
+    /// cache hits).
+    #[test]
+    fn test_stable_schema_does_not_invalidate_cache() {
+        let mut transform = SqlTransform::new("SELECT * FROM logs").unwrap();
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("level", DataType::Utf8, true),
+            Field::new("msg", DataType::Utf8, true),
+        ]));
+
+        // Run 5 batches with the same schema; each must succeed and the context
+        // must still be populated (not None) after each run.
+        for i in 0u32..5 {
+            let val = format!("row{i}");
+            let batch = RecordBatch::try_new(
+                Arc::clone(&schema),
+                vec![
+                    Arc::new(StringArray::from(vec![val.as_str()])) as ArrayRef,
+                    Arc::new(StringArray::from(vec!["msg"])) as ArrayRef,
+                ],
+            )
+            .unwrap();
+            let r = transform.execute_blocking(batch).unwrap();
+            assert_eq!(r.num_rows(), 1, "batch {i} must return 1 row");
+            // The context must still be alive (not wiped by a false hash mismatch).
+            assert!(
+                transform.ctx.is_some(),
+                "ctx must remain populated for stable schema (batch {i})"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Bug #721: validate_plan catches SQL planning errors
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn validate_plan_accepts_valid_sql() {
+        let mut transform = SqlTransform::new("SELECT * FROM logs").unwrap();
+        transform
+            .validate_plan()
+            .expect("valid SQL should pass plan validation");
+    }
+
+    #[test]
+    fn validate_plan_catches_duplicate_aliases() {
+        // "SELECT level AS k, msg AS k FROM logs" produces a duplicate alias error
+        // at DataFusion planning time (not at parse time).
+        let mut transform = SqlTransform::new("SELECT level AS k, msg AS k FROM logs").unwrap();
+        let err = transform.validate_plan();
+        assert!(
+            err.is_err(),
+            "duplicate column alias should be caught by validate_plan"
+        );
+    }
+
+    #[test]
+    fn validate_plan_catches_invalid_function() {
+        // A non-existent function should fail during planning.
+        let mut transform = SqlTransform::new("SELECT nonexistent_fn(level) FROM logs").unwrap();
+        let err = transform.validate_plan();
+        assert!(
+            err.is_err(),
+            "unknown function should be caught by validate_plan"
+        );
+    }
+
+    #[test]
+    fn validate_plan_accepts_filter_query() {
+        let mut transform = SqlTransform::new("SELECT * FROM logs WHERE level = 'ERROR'").unwrap();
+        transform
+            .validate_plan()
+            .expect("filter query should pass plan validation");
+    }
+
+    /// When a WHERE clause filters out every row, execute should return an
+    /// empty RecordBatch with the correct output schema — without calling
+    /// `ctx.sql()` a second time (the original bug).
+    #[test]
+    fn test_where_drops_all_rows_returns_correct_schema() {
+        let batch = make_test_batch(); // has levels: INFO, ERROR, DEBUG, ERROR
+        let mut transform =
+            SqlTransform::new("SELECT level, msg FROM logs WHERE level = 'FATAL'").unwrap();
+        let result = transform.execute_blocking(batch).unwrap();
+
+        assert_eq!(result.num_rows(), 0, "no rows should match");
+        assert_eq!(result.num_columns(), 2, "output should have 2 columns");
+        assert_eq!(result.schema().field(0).name(), "level");
+        assert_eq!(result.schema().field(1).name(), "msg");
     }
 }

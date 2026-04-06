@@ -4,13 +4,17 @@
 
 ```
 crates/
-  logfwd/              Binary crate. CLI, pipeline orchestration.
-  logfwd-core/         Scanner, builders, parsers, diagnostics. The hot path.
+  logfwd/              Binary crate. CLI, async pipeline orchestration.
+  logfwd-core/         Proven kernel. Scanner, parsers, pipeline state machine, OTLP encoding. no_std.
+  logfwd-arrow/        Arrow integration. ScanBuilder impls, SIMD backends, RecordBatch builders.
   logfwd-config/       YAML config parsing and validation.
-  logfwd-transform/    DataFusion SQL transforms, UDFs (grok, regexp_extract).
-  logfwd-output/       Output sinks (OTLP, JSON lines, HTTP, stdout).
+  logfwd-io/           I/O layer. File tailing, TCP/UDP/OTLP inputs, checkpointing, diagnostics.
+  logfwd-transform/    DataFusion SQL transforms, UDFs (grok, regexp_extract, geo_lookup).
+  logfwd-output/       Output sinks (OTLP, Elasticsearch, Loki, JSON lines, stdout).
   logfwd-bench/        Criterion benchmarks for the scanner pipeline.
   logfwd-competitive-bench/  Comparative benchmarks vs other log agents.
+  logfwd-test-utils/   Shared test utilities.
+  logfwd-ebpf-proto/   eBPF log capture protocol definitions (experimental).
 ```
 
 ## Build, test, lint, bench, fuzz
@@ -18,6 +22,7 @@ crates/
 ```bash
 just test                    # All tests
 just lint                    # fmt + clippy + toml + deny + typos
+just bench-framed-input -- --lines 200000 --iterations 5
 cargo test -p logfwd-core    # Core crate only (fastest iteration)
 
 RUSTFLAGS="-C target-cpu=native" cargo bench --bench scanner -p logfwd-core
@@ -44,6 +49,33 @@ To temporarily **disable** sccache (e.g. for debugging):
 ```bash
 RUSTC_WRAPPER="" cargo build
 ```
+
+## Faster linking (optional)
+
+Linking is often 30–50 % of incremental rebuild time. Installing a faster
+linker can significantly speed up the edit-compile cycle.
+
+**Linux — mold (recommended):**
+
+```bash
+# Ubuntu/Debian
+sudo apt install mold
+# Then add to your personal ~/.cargo/config.toml (not the repo config):
+# [target.x86_64-unknown-linux-gnu]
+# rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+```
+
+**macOS — lld via Homebrew:**
+
+```bash
+brew install llvm
+# Then add to your personal ~/.cargo/config.toml:
+# [target.aarch64-apple-darwin]
+# rustflags = ["-C", "link-arg=-fuse-ld=lld"]
+```
+
+This is deliberately not set in the repo's `.cargo/config.toml` to avoid
+breaking builds for developers who have not installed the linker.
 
 ## Local CPU profiling (macOS)
 
@@ -73,6 +105,14 @@ Useful variants:
 just profile-otlp-local 1000000 10
 ```
 
+For FramedInput-specific profiling (newline framing, remainder handling, format
+processing before the scanner), use:
+
+```bash
+just bench-framed-input -- --lines 200000 --iterations 5 --flamegraph /tmp/framed-input.svg
+just bench-framed-input-alloc -- --lines 200000
+```
+
 Caveats:
 
 - Avoid reusing a diagnostics port from another local run; the helper recipe
@@ -92,7 +132,7 @@ See also `dev-docs/ARCHITECTURE.md` for pipeline data flow.
 
 ### The deferred builder pattern exists because incremental null-padding is broken
 
-`StorageBuilder` collects `(row, value)` records during scanning and bulk-builds Arrow columns at `finish_batch`. This seems roundabout — why not write directly to Arrow builders?
+`StreamingBuilder` collects `(row, value)` records during scanning and bulk-builds Arrow columns at `finish_batch`. This seems roundabout — why not write directly to Arrow builders?
 
 Because maintaining column alignment across multiple type builders (str, int, float) per field is a coordination nightmare. When you write an int, you must pad the str and float builders with null. When `end_row` fires, pad all unwritten fields. When a new field appears mid-batch, back-fill all prior rows. We tried this (`IndexedBatchBuilder`); proptest found column length mismatches on multi-line NDJSON with varying field sets.
 
@@ -143,9 +183,9 @@ Every time we thought the scanner was correct, proptest broke it. Escapes crossi
 
 Oracle tests compare against sonic-rs as ground truth. Our scanner does first-writer-wins for duplicate keys; sonic-rs does last-writer-wins. Both valid per RFC 8259; oracle tests skip duplicate-key inputs.
 
-### Two builders serve different purposes
+### Two scan modes serve different purposes
 
-- **`StorageBuilder`**: copies values into self-contained Arrow arrays. Input buffer can be freed. For persistence and compression.
-- **`StreamingBuilder`**: zero-copy `StringViewArray` views into `bytes::Bytes` buffer. 20% faster. Buffer must stay alive. For real-time query-then-discard.
+- **`Scanner::scan_detached`**: produces self-contained `StringArray` columns. Input buffer can be freed. For persistence and compression.
+- **`Scanner::scan`**: zero-copy `StringViewArray` views into `bytes::Bytes` buffer. 20% faster. Buffer must stay alive. For real-time query-then-discard.
 
-Both implement `ScanBuilder` trait, sharing the generic `scan_into()` loop.
+Both use the same `StreamingBuilder` (which implements `ScanBuilder`), sharing the generic `scan_streaming()` loop.

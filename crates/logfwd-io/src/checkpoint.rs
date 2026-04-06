@@ -120,6 +120,8 @@ impl CheckpointStore for FileCheckpointStore {
     /// 2. Write to `checkpoints.json.tmp`.
     /// 3. `fsync` the tmp file.
     /// 4. Rename `checkpoints.json.tmp` → `checkpoints.json`.
+    /// 5. `fsync` the parent directory so the rename is durable on
+    ///    crash (required on Linux/ext4). (#386)
     fn flush(&mut self) -> io::Result<()> {
         use std::io::Write as _;
 
@@ -141,6 +143,14 @@ impl CheckpointStore for FileCheckpointStore {
         }
 
         std::fs::rename(&tmp, &final_path)?;
+
+        // fsync the parent directory so the rename entry is durable.
+        // On ext4, rename metadata lives in the directory — without this
+        // fsync a power failure can revert the rename, losing the checkpoint.
+        // sync_data() suffices: we only need data (directory entries), not
+        // file metadata like mtime/permissions.
+        let dir = std::fs::File::open(&self.data_dir)?;
+        dir.sync_data()?;
 
         Ok(())
     }
@@ -213,6 +223,58 @@ fn libc_getuid() -> u32 {
     {
         // On macOS / other unices, default to non-root path.
         1000
+    }
+}
+
+// ---------------------------------------------------------------------------
+// InMemoryCheckpointStore — for testing
+// ---------------------------------------------------------------------------
+
+/// A `CheckpointStore` backed by an in-memory BTreeMap.
+///
+/// Useful for deterministic testing: no file I/O, inspectable state.
+pub struct InMemoryCheckpointStore {
+    checkpoints: BTreeMap<u64, SourceCheckpoint>,
+    flush_count: u64,
+}
+
+impl InMemoryCheckpointStore {
+    /// Create an empty in-memory store.
+    pub fn new() -> Self {
+        Self {
+            checkpoints: BTreeMap::new(),
+            flush_count: 0,
+        }
+    }
+
+    /// Number of times `flush()` was called.
+    pub fn flush_count(&self) -> u64 {
+        self.flush_count
+    }
+}
+
+impl Default for InMemoryCheckpointStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CheckpointStore for InMemoryCheckpointStore {
+    fn update(&mut self, checkpoint: SourceCheckpoint) {
+        self.checkpoints.insert(checkpoint.source_id, checkpoint);
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.flush_count += 1;
+        Ok(())
+    }
+
+    fn load(&self, source_id: u64) -> Option<SourceCheckpoint> {
+        self.checkpoints.get(&source_id).cloned()
+    }
+
+    fn load_all(&self) -> Vec<SourceCheckpoint> {
+        self.checkpoints.values().cloned().collect()
     }
 }
 
@@ -328,6 +390,26 @@ mod tests {
         let store = FileCheckpointStore::open(dir.path()).unwrap();
         assert!(store.load(1).is_none());
         assert!(store.load_all().is_empty());
+    }
+
+    /// #386: flush performs directory fsync after rename.
+    ///
+    /// We can't directly test fsync semantics (that's a kernel guarantee), but
+    /// we verify flush succeeds and the file exists after a full cycle. The
+    /// code path now opens the parent directory and calls sync_all() on it.
+    #[test]
+    fn test_flush_directory_fsync() {
+        let dir = TempDir::new().unwrap();
+        let mut store = FileCheckpointStore::open(dir.path()).unwrap();
+        store.update(make_checkpoint(1, "/var/log/app.log", 2048));
+        // This exercises the full flush path including directory fsync.
+        store.flush().unwrap();
+
+        // Verify the checkpoint file exists and is valid.
+        let bytes = std::fs::read(store.checkpoints_path()).unwrap();
+        let parsed: Vec<SourceCheckpoint> = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].offset, 2048);
     }
 
     /// `default_data_dir` returns a non-empty path.

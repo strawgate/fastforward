@@ -61,38 +61,33 @@ cargo run -p logfwd -- --config config.yaml
 
 ## Querying with Arrow IPC
 
-### Using the ElasticsearchSink API
+### Using the ElasticsearchSinkFactory API
 
 ```rust
 use std::sync::Arc;
-use logfwd_output::ElasticsearchSink;
+use logfwd_output::ElasticsearchSinkFactory;
+use logfwd_output::sink::SinkFactory;
 use logfwd_io::diagnostics::ComponentStats;
 
-let sink = ElasticsearchSink::new(
+let factory = ElasticsearchSinkFactory::new(
     "query".into(),
     "http://localhost:9200".into(),
     "logs".into(),
     vec![],
+    false,
     Arc::new(ComponentStats::default()),
-);
+)?;
+let sink = factory.create()?;
 
-// Query with ES|QL, receive Arrow IPC response
-let batches = sink.query_arrow(r#"
-    FROM logs
-    | WHERE level == "ERROR"
-    | LIMIT 1000
-"#)?;
-
-for batch in batches {
-    println!("Received {} rows", batch.num_rows());
-}
+// Query with ES|QL uses the async sink's query_arrow method.
+// See ElasticsearchSink::query_arrow for the Arrow IPC query API.
 ```
 
 ### ES|QL Query Examples
 
 **Filter by field:**
 ```
-FROM logs | WHERE status_int >= 500 | LIMIT 100
+FROM logs | WHERE status >= 500 | LIMIT 100
 ```
 
 **Projection (select specific fields):**
@@ -113,7 +108,7 @@ FROM logs
 ```
 FROM logs
 | WHERE timestamp > "2024-01-01"
-| EVAL is_error = status_int >= 400
+| EVAL is_error = status >= 400
 | STATS error_count = count(is_error) BY service
 | SORT error_count DESC
 | LIMIT 10

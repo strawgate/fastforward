@@ -16,6 +16,7 @@ logfwd-output = { path = "../../logfwd-output" }
 logfwd-io = { path = "../../logfwd-io" }
 arrow = { version = "54", default-features = false }
 bytes = "1"
+reqwest = { version = "0.12", default-features = false }
 
 [workspace]
 
@@ -30,8 +31,8 @@ path = "fuzz_targets/pipe_event.rs"
 doc = false
 
 [[bin]]
-name = "fuzz_streaming_scanner"
-path = "fuzz_targets/streaming_scanner.rs"
+name = "fuzz_zero_copy_scanner"
+path = "fuzz_targets/zero_copy_scanner.rs"
 doc = false
 
 [[bin]]
@@ -52,4 +53,9 @@ doc = false
 [[bin]]
 name = "fuzz_scanner_transform"
 path = "fuzz_targets/scanner_transform.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_cri"
+path = "fuzz_targets/cri.rs"
 doc = false

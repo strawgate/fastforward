@@ -161,6 +161,10 @@ fn print_usage() {
     println!("  -h, --help             Show this help");
     println!("  -V, --version          Show version");
     println!();
+    println!("{}ENVIRONMENT:{}", bold(), reset());
+    println!("  LOGFWD_LOG             Set log filter (e.g. LOGFWD_LOG=debug)");
+    println!("  RUST_LOG               Fallback if LOGFWD_LOG is not set");
+    println!();
     println!("{}EXIT CODES:{}", bold(), reset());
     println!("  0  Success");
     println!("  1  Configuration error");
@@ -268,9 +272,7 @@ async fn cmd_config(args: &[String]) -> Result<(), CliError> {
 }
 
 async fn cmd_blackhole(args: &[String]) -> Result<(), CliError> {
-    let addr = args
-        .get(2)
-        .map_or("127.0.0.1:4318", std::string::String::as_str);
+    let addr = args.get(2).map_or("127.0.0.1:4318", String::as_str);
 
     // Validate addr is a parseable socket address before injecting into YAML.
     addr.parse::<std::net::SocketAddr>()
@@ -331,7 +333,19 @@ fn validate_pipelines(
     let mut errors = 0;
     for (name, pipe_cfg) in &config.pipelines {
         match Pipeline::from_config(name, pipe_cfg, &meter, base_path) {
-            Ok(_) => {
+            Ok(mut pipeline) => {
+                // Execute a probe batch through the SQL plan to catch planning
+                // errors (duplicate aliases, bad window specs) that only
+                // surface on the first real batch at runtime.
+                if let Err(e) = pipeline.validate_sql_plan() {
+                    eprintln!(
+                        "  {}error{}: pipeline '{name}' SQL plan: {e}",
+                        red(),
+                        reset()
+                    );
+                    errors += 1;
+                    continue;
+                }
                 // Success output goes to stdout so scripts can capture it.
                 println!("  {}ready{}: {}{name}{}", green(), reset(), bold(), reset());
             }
@@ -380,9 +394,9 @@ fn output_label(o: &logfwd_config::OutputConfig) -> String {
             format!("elasticsearch  {}", o.endpoint.as_deref().unwrap_or(""))
         }
         OutputType::Loki => format!("loki  {}", o.endpoint.as_deref().unwrap_or("")),
-        OutputType::TcpOut => format!("tcp   {}", o.endpoint.as_deref().unwrap_or("")),
-        OutputType::UdpOut => format!("udp   {}", o.endpoint.as_deref().unwrap_or("")),
-        OutputType::FileOut => format!("file  {}", o.path.as_deref().unwrap_or("")),
+        OutputType::Tcp => format!("tcp   {}", o.endpoint.as_deref().unwrap_or("")),
+        OutputType::Udp => format!("udp   {}", o.endpoint.as_deref().unwrap_or("")),
+        OutputType::File => format!("file  {}", o.path.as_deref().unwrap_or("")),
         OutputType::Parquet => format!("parquet  {}", o.path.as_deref().unwrap_or("")),
         OutputType::Stdout => "stdout".to_string(),
         OutputType::Null => "null".to_string(),
@@ -398,8 +412,23 @@ async fn run_pipelines(
 ) -> Result<(), CliError> {
     use logfwd::pipeline::Pipeline;
     use logfwd_io::diagnostics::DiagnosticsServer;
+    use tracing_subscriber::Layer;
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
+
+    // Acquire exclusive lock only when tailing files — OTLP-only and
+    // blackhole pipelines don't need filesystem locking (#737).
+    let has_file_inputs = config.pipelines.values().any(|pipe| {
+        pipe.inputs
+            .iter()
+            .any(|input| matches!(input.input_type, logfwd_config::InputType::File))
+    });
+    let _lock_guard = if has_file_inputs {
+        acquire_instance_lock(&config)?
+    } else {
+        None
+    };
+
     let shutdown = CancellationToken::new();
 
     // Listen for SIGINT (Ctrl-C) and SIGTERM to trigger graceful shutdown.
@@ -472,12 +501,24 @@ async fn run_pipelines(
     let meter = meter_provider.meter("logfwd");
 
     // Set up the tracing subscriber with an OTel layer that routes spans
-    // to our in-process ring buffer (and optionally to an OTLP endpoint).
+    // to our in-process ring buffer (and optionally to an OTLP endpoint),
+    // plus a stderr fmt layer so tracing events are visible on the console.
     let trace_buf = logfwd_io::span_exporter::SpanBuffer::new();
     let tracer_provider = build_tracer_provider(trace_buf.clone(), &config)?;
     let tracer = opentelemetry::trace::TracerProvider::tracer(&tracer_provider, "logfwd");
     let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
-    let _ = tracing_subscriber::registry().with(otel_layer).try_init(); // ignore error if a subscriber is already installed (e.g. in tests)
+
+    let env_filter = tracing_subscriber::EnvFilter::try_from_env("LOGFWD_LOG")
+        .or_else(|_| tracing_subscriber::EnvFilter::try_from_default_env())
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    let fmt_layer = tracing_subscriber::fmt::layer()
+        .with_writer(io::stderr)
+        .with_target(true);
+    // Apply env_filter only to the fmt layer so it doesn't suppress OTel spans.
+    let _ = tracing_subscriber::registry()
+        .with(fmt_layer.with_filter(env_filter))
+        .with(otel_layer)
+        .try_init(); // ignore error if a subscriber is already installed (e.g. in tests)
     opentelemetry::global::set_tracer_provider(tracer_provider.clone());
 
     let mut pipelines = Vec::new();
@@ -616,6 +657,59 @@ async fn run_pipelines(
 }
 
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Instance lock (#737)
+// ---------------------------------------------------------------------------
+
+/// Acquire an exclusive lock file to prevent multiple logfwd instances from
+/// processing the same data directory. Returns a guard that holds the lock
+/// for the lifetime of the caller.
+///
+/// On non-Unix platforms, logs a warning and returns a dummy guard.
+fn acquire_instance_lock(
+    config: &logfwd_config::Config,
+) -> Result<Option<std::fs::File>, CliError> {
+    let data_dir = config.storage.data_dir.as_ref().map_or_else(
+        logfwd_io::checkpoint::default_data_dir,
+        std::path::PathBuf::from,
+    );
+    std::fs::create_dir_all(&data_dir)?;
+    let lock_path = data_dir.join("logfwd.lock");
+    let lock_file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        // SAFETY: `lock_file` is an open `File`, so `as_raw_fd()` returns a valid
+        // file descriptor. `libc::flock` is safe to call on any valid fd — it only
+        // manipulates the kernel-level advisory lock, no memory mutation.
+        let ret = unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if ret != 0 {
+            let err = io::Error::last_os_error();
+            if err.kind() == io::ErrorKind::WouldBlock || err.raw_os_error() == Some(libc::EAGAIN) {
+                return Err(CliError::Runtime(io::Error::other(format!(
+                    "another logfwd instance is already running (lock: {})",
+                    lock_path.display()
+                ))));
+            }
+            return Err(CliError::Runtime(err));
+        }
+        // Note: tracing subscriber not yet initialized at this point.
+    }
+
+    #[cfg(not(unix))]
+    eprintln!("warn: file-based instance locking not supported on this platform");
+
+    // Return the File so the lock is held until the caller drops it.
+    Ok(Some(lock_file))
+}
+
+// ---------------------------------------------------------------------------
 // OTel metrics
 // ---------------------------------------------------------------------------
 
@@ -739,16 +833,18 @@ fn generate_json_log_file(num_lines: usize, output: &str) -> io::Result<()> {
         let id = 10000 + (i * 7) % 90000;
         let dur = 1 + (i * 13) % 500;
         let rid = format!("{:016x}", (i as u64).wrapping_mul(0x517cc1b727220a95));
+        let status = [200, 201, 400, 404, 500, 503][i % 6];
 
         write!(
             writer,
-            r#"{{"timestamp":"2024-01-15T10:30:00.{:03}Z","level":"{}","message":"request handled GET {}/{}","duration_ms":{},"request_id":"{}","service":"myapp"}}"#,
+            r#"{{"timestamp":"2024-01-15T10:30:00.{:03}Z","level":"{}","message":"request handled GET {}/{}","duration_ms":{},"request_id":"{}","service":"myapp","status":{}}}"#,
             i % 1000,
             level,
             path,
             id,
             dur,
             rid,
+            status,
         )?;
         writer.write_all(b"\n")?;
     }

@@ -1,9 +1,12 @@
 [default.extend-words]
 # Intentional partial strings in test data and example error messages.
+caf = "caf"
 hel = "hel"
 leve = "leve"
 # CSS class prefix for pipeline nodes in the dashboard.
 pn = "pn"
+# Intentional "ue" string slice in streaming_builder tests (tail of "value").
+ue = "ue"
 
 [files]
 extend-exclude = [

@@ -79,6 +79,12 @@ impl MetricBuffer {
 
     /// Push a new high-resolution point. Automatically downsamples to lower tiers.
     fn push(&mut self, t: f64, v: f64) {
+        if t.is_nan() {
+            return; // reject NaN timestamps — they break tier trimming
+        }
+        if v.is_nan() {
+            return; // reject NaN values — they are meaningless and pollute history
+        }
         let p = Point { t, v };
 
         // Always push to tier 0 (highest resolution).
@@ -113,7 +119,8 @@ impl MetricBuffer {
         }
 
         // Sort by time and deduplicate close timestamps.
-        all.sort_by(|a, b| a.t.partial_cmp(&b.t).unwrap());
+        all.retain(|p| !p.t.is_nan());
+        all.sort_by(|a, b| a.t.total_cmp(&b.t));
         all.dedup_by(|a, b| (a.t - b.t).abs() < 1.0);
         all
     }
@@ -221,7 +228,19 @@ mod tests {
         }
         let points = buf.points();
         // Should have points from all tiers, deduplicated
-        assert!(points.len() > 0);
+        assert!(!points.is_empty());
         assert!(points.len() < 200); // some dedup happened
+    }
+
+    #[test]
+    fn test_nan_timestamps_do_not_panic() {
+        let mut buf = MetricBuffer::new("test");
+        buf.push(1.0, 10.0);
+        buf.push(f64::NAN, 20.0);
+        buf.push(2.0, 30.0);
+        let points = buf.points();
+        assert_eq!(points.len(), 2);
+        assert!((points[0].t - 1.0).abs() < f64::EPSILON);
+        assert!((points[1].t - 2.0).abs() < f64::EPSILON);
     }
 }

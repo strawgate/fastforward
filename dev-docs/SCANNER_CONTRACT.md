@@ -1,7 +1,7 @@
 # Scanner Contract
 
 This document formalises the contract between callers and the scanner layer
-(`SimdScanner` / `StreamingSimdScanner`).  It covers input requirements,
+(`Scanner`).  It covers input requirements,
 output guarantees, and known limitations.
 
 ---
@@ -40,7 +40,7 @@ The scanner expects **newline-delimited JSON** (`\n`-separated lines):
 
 ### Size limits
 
-- `StorageBuilder` uses `u32` row counters, so a single batch is limited to
+- `StreamingBuilder` uses `u32` row counters, so a single batch is limited to
   **4 294 967 295 rows**.
 - `StreamingBuilder` stores string positions as `u32` offsets into the input
   buffer, limiting the buffer to **4 GB** (2³² bytes).  In practice, the
@@ -64,16 +64,16 @@ Each JSON field `<name>` produces columns based on observed types:
 | Float (only)    | `<name>`    | `Float64`   |
 | String (only)   | `<name>`    | `Utf8` / `Utf8View` |
 
-**Multiple types (conflict):** suffixed columns per observed type.
+**Multiple types (conflict):** a single `StructArray` column with typed children.
 
-| Observed type   | Column name       | Arrow type  |
-|-----------------|-------------------|-------------|
-| Integer         | `<name>_int`      | `Int64`     |
-| Float           | `<name>_float`    | `Float64`   |
-| String / bool / nested object or array | `<name>_str` | `Utf8` / `Utf8View` |
+| Observed types  | Column name | Arrow type  |
+|-----------------|-------------|-------------|
+| Integer + String | `<name>`   | `Struct { int: Int64, str: Utf8View }` |
+| All three       | `<name>`   | `Struct { int: Int64, float: Float64, str: Utf8View }` |
 
-Suffixed columns only appear when a field has multiple types across rows
-within the same batch.
+Conflict structs are detected by `is_conflict_struct()` (child fields named
+from `{"int", "float", "str", "bool"}`). They only appear when a field has
+multiple types across rows within the same batch.
 
 | Special column  | Description       | Arrow type  |
 |-----------------|-------------------|-------------|
@@ -97,12 +97,12 @@ valid JSON object).
 
 If the same field name appears as different JSON types across rows — for
 example `"status": 200` in one row and `"status": "OK"` in another — the
-scanner produces **separate suffixed columns** for each type that was observed:
-`status_int` and `status_str` in this case.  Within each typed column the rows
-that did not supply that type are null.
+builder produces a single **StructArray conflict column** with typed children:
+`status: Struct { int: Int64, str: Utf8View }`. Within each child array the
+rows that did not supply that type are null.
 
 If a field has only one type across all rows in the batch, it gets a bare
-column name with no suffix (e.g., `status` as `Int64`).
+column name with the native Arrow type (e.g., `status` as `Int64`).
 
 ### Duplicate keys
 
@@ -127,8 +127,8 @@ fields.
 
 ### Batch reuse
 
-Both `SimdScanner` and `StreamingSimdScanner` can be reused across batches.
-Each call to `scan()` implicitly calls `begin_batch()` and produces an
+`Scanner` can be reused across batches. Each call to `scan()` or
+`scan_detached()` resets builder state internally and produces an
 independent `RecordBatch`; schema and data from previous batches are not
 carried over.
 
@@ -147,6 +147,5 @@ carried over.
 - **No escape decoding of string values** — string values are stored as
   raw bytes (including any JSON escape sequences such as `\n`, `\uXXXX`).
   Callers that need decoded strings must unescape them.
-- **`_raw` column not supported by `StreamingSimdScanner`** — setting
-  `keep_raw = true` with the streaming variant is a no-op; use `SimdScanner`
-  if a `_raw` column is needed.
+- **`_raw` column** — `keep_raw = true` is supported by both `scan()` and
+  `scan_detached()` modes.

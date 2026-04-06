@@ -46,13 +46,13 @@ struct CompiledGrok {
 }
 
 /// Compile a grok pattern using the `grok` crate's built-in pattern library.
-fn compile_grok(pattern: &str) -> Result<CompiledGrok, String> {
+fn compile_grok(pattern: &str) -> Result<CompiledGrok, crate::TransformError> {
     // alias_only=true: only include user-named captures (%{PATTERN:name}) in match
     // results, not internal pattern group names. Matches VRL/Tremor usage.
     let grok = grok::Grok::with_default_patterns();
     let compiled = grok
         .compile(pattern, true)
-        .map_err(|e| format!("grok pattern compilation failed: {e}"))?;
+        .map_err(|e| crate::TransformError::Sql(format!("grok pattern compilation failed: {e}")))?;
 
     // Derive field names from the compiled pattern's capture groups.
     // With alias_only=true, this returns only user-named captures.
@@ -118,10 +118,16 @@ impl ScalarUDFImpl for GrokUdf {
         Ok(DataType::Utf8)
     }
 
-    fn return_type_from_args(
+    /// Determine the return type at planning time based on the grok pattern.
+    ///
+    /// If the pattern argument is a string literal, compiles the grok pattern
+    /// and returns a nullable Struct type with one Utf8 field per named capture
+    /// group. Falls back to nullable Utf8 if the pattern is not a literal or
+    /// compilation fails.
+    fn return_field_from_args(
         &self,
-        args: datafusion::logical_expr::ReturnTypeArgs,
-    ) -> DfResult<datafusion::logical_expr::ReturnInfo> {
+        args: datafusion::logical_expr::ReturnFieldArgs,
+    ) -> DfResult<arrow::datatypes::FieldRef> {
         // If the pattern argument is a literal, extract field names and return Struct type.
         if args.scalar_arguments.len() >= 2
             && let Some(datafusion::common::ScalarValue::Utf8(Some(pattern_str))) =
@@ -134,15 +140,15 @@ impl ScalarUDFImpl for GrokUdf {
                 .map(|name| Field::new(name, DataType::Utf8, true))
                 .collect();
             if !fields.is_empty() {
-                return Ok(datafusion::logical_expr::ReturnInfo::new_nullable(
+                return Ok(Arc::new(Field::new(
+                    self.name(),
                     DataType::Struct(Fields::from(fields)),
-                ));
+                    true,
+                )));
             }
         }
         // Fallback: can't determine struct fields, return Utf8
-        Ok(datafusion::logical_expr::ReturnInfo::new_nullable(
-            DataType::Utf8,
-        ))
+        Ok(Arc::new(Field::new(self.name(), DataType::Utf8, true)))
     }
 
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DfResult<ColumnarValue> {
@@ -306,7 +312,7 @@ mod tests {
             Some("no match here"),
             None,
         ]));
-        arrow::record_batch::RecordBatch::try_new(schema, vec![msgs]).unwrap()
+        RecordBatch::try_new(schema, vec![msgs]).unwrap()
     }
 
     #[test]
@@ -401,7 +407,7 @@ mod tests {
             Some("Connection from 192.168.1.100 port 22"),
             Some("Request from 10.0.0.1 port 443"),
         ]));
-        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![logs]).unwrap();
+        let batch = RecordBatch::try_new(schema, vec![logs]).unwrap();
 
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()

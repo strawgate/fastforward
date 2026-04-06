@@ -41,6 +41,45 @@ output:
 - **json**: One JSON object per line (machine-parseable)
 - **text**: Raw text (uses `_raw` column if available)
 
+## Elasticsearch
+
+Ship logs to Elasticsearch via the Bulk API.
+
+```yaml
+output:
+  type: elasticsearch
+  endpoint: https://es-cluster:9200
+  index: logs             # default: "logs"
+  compression: gzip       # gzip | none (optional)
+  request_mode: buffered  # buffered | streaming (optional, default buffered)
+```
+
+- **Bulk API**: Per-document error handling with automatic retries.
+- **Batch splitting**: Large payloads are split automatically to stay within Elasticsearch limits.
+- **Compression**: Optional gzip compression for reduced network usage.
+- **Streaming mode**: Experimental chunked HTTP request bodies for benchmarking against hosted/serverless clusters.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `endpoint` | string | Yes | — | Elasticsearch URL |
+| `index` | string | No | `logs` | Target index name |
+| `compression` | string | No | none | `gzip` or `none` |
+| `request_mode` | string | No | `buffered` | `buffered` or experimental `streaming` (streaming currently requires `compression: none`) |
+
+## Loki
+
+Push logs to Grafana Loki with automatic label grouping.
+
+```yaml
+output:
+  type: loki
+  endpoint: http://loki:3100
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `endpoint` | string | Yes | Loki push URL |
+
 ## Multiple outputs (fan-out)
 
 ```yaml

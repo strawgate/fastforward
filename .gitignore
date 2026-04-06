@@ -10,3 +10,6 @@ book/book/
 .DS_Store
 crates/logfwd-io/src/dashboard-dist/
 .playwright-mcp/
+*.env
+.env
+es-flamegraph.svg

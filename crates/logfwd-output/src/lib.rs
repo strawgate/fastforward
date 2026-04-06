@@ -1,56 +1,60 @@
 //! Output sink trait and implementations for serializing Arrow RecordBatches
 //! to various formats: stdout JSON/text, JSON lines over HTTP, OTLP protobuf.
 
-mod fanout;
+mod arrow_ipc_sink;
 mod json_lines;
 mod null;
+mod otap_sink;
 mod otlp_sink;
 pub mod sink;
 mod stdout;
 mod tcp_sink;
 mod udp_sink;
 
+pub mod error;
+
 mod elasticsearch;
 
 mod loki;
-#[allow(dead_code)]
-mod parquet;
 
-pub use elasticsearch::{ElasticsearchAsyncSink, ElasticsearchSink, ElasticsearchSinkFactory};
-pub use fanout::{FanOut, FanOutError};
+pub use arrow_ipc_sink::{ArrowIpcSinkFactory, deserialize_ipc, serialize_ipc};
+pub use elasticsearch::{ElasticsearchRequestMode, ElasticsearchSink, ElasticsearchSinkFactory};
+pub use error::OutputError;
 pub use json_lines::JsonLinesSink;
-pub use loki::{LokiAsyncSink, LokiSinkFactory};
-pub use null::NullSink;
-pub use otlp_sink::{OtlpProtocol, OtlpSink};
-pub use sink::{SendResult, Sink, SinkFactory, SyncSinkAdapter};
+pub use loki::{LokiSink, LokiSinkFactory};
+pub use null::{NullSink, NullSinkFactory};
+pub use otap_sink::{
+    ArrowPayloadType, BatchStatus, DecodedPayload, OtapSinkFactory, StatusCode,
+    decode_batch_arrow_records, decode_batch_status, encode_batch_arrow_records,
+};
+pub use otlp_sink::{OtlpProtocol, OtlpSink, OtlpSinkFactory};
+pub use sink::{
+    AsyncFanoutFactory, AsyncFanoutSink, OnceAsyncFactory, SendResult, Sink, SinkFactory,
+};
+pub use stdout::StdoutSinkFactory;
 use stdout::*;
-pub use tcp_sink::TcpSink;
-pub use udp_sink::UdpSink;
+pub use tcp_sink::{TcpSink, TcpSinkFactory};
+pub use udp_sink::{UdpSink, UdpSinkFactory};
 
 use std::io::{self, Write};
 use std::sync::Arc;
-use std::sync::Mutex;
 
 use arrow::array::{Array, AsArray, StructArray};
 use arrow::datatypes::DataType;
 use arrow::record_batch::RecordBatch;
 
-use logfwd_config::{AuthConfig, Format, OutputConfig, OutputType};
-use logfwd_io::diagnostics::ComponentStats;
+use logfwd_config::{AuthConfig, Format, OutputConfig};
+use logfwd_types::diagnostics::ComponentStats;
 
 // ---------------------------------------------------------------------------
 // HTTP retry helper
 // ---------------------------------------------------------------------------
 
-/// Maximum number of retry attempts for transient HTTP failures.
-pub(crate) const HTTP_MAX_RETRIES: u32 = 3;
-/// Initial retry delay in milliseconds; doubles on each subsequent attempt.
-pub(crate) const HTTP_RETRY_INITIAL_DELAY_MS: u64 = 100;
-
 /// Returns `true` if the ureq error is transient and worth retrying.
 ///
 /// Transient errors are: HTTP 429 Too Many Requests, 5xx server errors, and
 /// network/transport failures (I/O, host not found, connection failed, timeout).
+#[cfg(test)]
 pub(crate) fn is_transient_error(e: &ureq::Error) -> bool {
     match e {
         ureq::Error::StatusCode(status) => *status == 429 || *status >= 500,
@@ -67,44 +71,12 @@ pub(crate) fn is_transient_error(e: &ureq::Error) -> bool {
 // ---------------------------------------------------------------------------
 
 /// Metadata about the batch for output serialization.
+#[derive(Clone)]
 pub struct BatchMetadata {
     /// Resource attributes (k8s pod name, namespace, etc.) — Arc so cloning is cheap.
     pub resource_attrs: Arc<Vec<(String, String)>>,
     /// Observed timestamp in nanoseconds.
     pub observed_time_ns: u64,
-}
-
-/// Every output implements this trait.
-pub trait OutputSink: Send {
-    /// Serialize and send a batch.
-    fn send_batch(&mut self, batch: &RecordBatch, metadata: &BatchMetadata) -> io::Result<()>;
-    /// Flush any buffered data.
-    fn flush(&mut self) -> io::Result<()>;
-    /// Output name (from config).
-    fn name(&self) -> &str;
-}
-
-// ---------------------------------------------------------------------------
-// Column naming helpers
-// ---------------------------------------------------------------------------
-
-/// Parse a typed column name into (field_name, type_suffix).
-///
-/// "duration_ms_int" -> ("duration_ms", "int")
-/// "level_str"       -> ("level", "str")
-/// "_raw"            -> ("_raw", "")
-///
-/// Deprecated: the flat-suffix scheme is being replaced by struct conflict
-/// columns.  This function is kept for backward compatibility with
-/// `otlp_sink.rs` column-role detection.
-pub fn parse_column_name(col_name: &str) -> (&str, &str) {
-    if let Some(pos) = col_name.rfind('_') {
-        let suffix = &col_name[pos + 1..];
-        if suffix == "str" || suffix == "int" || suffix == "float" {
-            return (&col_name[..pos], suffix);
-        }
-    }
-    (col_name, "")
 }
 
 // ---------------------------------------------------------------------------
@@ -195,20 +167,22 @@ pub(crate) fn is_null(batch: &RecordBatch, variant: &ColVariant, row: usize) -> 
             field_idx,
             ..
         } => {
-            let sa = batch
+            let Some(sa) = batch
                 .column(*struct_col_idx)
                 .as_any()
                 .downcast_ref::<StructArray>()
-                .expect("conflict struct column must be StructArray");
+            else {
+                return true;
+            };
             sa.is_null(row) || sa.column(*field_idx).is_null(row)
         }
     }
 }
 
 /// Return a reference to the underlying Arrow array for a `ColVariant`.
-pub(crate) fn get_array<'b>(batch: &'b RecordBatch, variant: &ColVariant) -> &'b dyn Array {
+pub(crate) fn get_array<'b>(batch: &'b RecordBatch, variant: &ColVariant) -> Option<&'b dyn Array> {
     match variant {
-        ColVariant::Flat { col_idx, .. } => batch.column(*col_idx).as_ref(),
+        ColVariant::Flat { col_idx, .. } => Some(batch.column(*col_idx).as_ref()),
         ColVariant::StructField {
             struct_col_idx,
             field_idx,
@@ -217,9 +191,8 @@ pub(crate) fn get_array<'b>(batch: &'b RecordBatch, variant: &ColVariant) -> &'b
             let sa = batch
                 .column(*struct_col_idx)
                 .as_any()
-                .downcast_ref::<StructArray>()
-                .expect("conflict struct column must be StructArray");
-            sa.column(*field_idx).as_ref()
+                .downcast_ref::<StructArray>()?;
+            Some(sa.column(*field_idx).as_ref())
         }
     }
 }
@@ -231,7 +204,7 @@ pub(crate) fn get_array<'b>(batch: &'b RecordBatch, variant: &ColVariant) -> &'b
 /// Used by Loki label extraction to always produce a string value.
 pub(crate) fn coalesce_as_str(batch: &RecordBatch, row: usize, col: &ColInfo) -> Option<String> {
     let variant = col.str_variants.iter().find(|v| !is_null(batch, v, row))?;
-    let arr = get_array(batch, variant);
+    let arr = get_array(batch, variant)?;
     let s = match arr.data_type() {
         DataType::Int64 => {
             let v = arr.as_primitive::<arrow::datatypes::Int64Type>().value(row);
@@ -261,10 +234,10 @@ pub(crate) fn coalesce_as_str(batch: &RecordBatch, row: usize, col: &ColInfo) ->
 
 /// Build a grouped, ordered list of output fields from a RecordBatch schema.
 ///
-/// Handles both struct conflict columns (`status: Struct { int, str }`) and
-/// legacy flat typed columns (`status_int`, `status_str`).  The returned
-/// `ColInfo` items contain two independently ordered variant lists for the
-/// two coalesce strategies.
+/// Handles struct conflict columns (`status: Struct { int, str }`) and plain
+/// flat columns.  Flat column names are used verbatim — no suffix stripping.
+/// The returned `ColInfo` items contain two independently ordered variant
+/// lists for the two coalesce strategies (JSON and string).
 pub fn build_col_infos(batch: &RecordBatch) -> Vec<ColInfo> {
     let schema = batch.schema();
     let mut infos: Vec<ColInfo> = Vec::new();
@@ -302,11 +275,13 @@ pub fn build_col_infos(batch: &RecordBatch) -> Vec<ColInfo> {
                 });
             }
             dt => {
-                // Plain flat column (may be a legacy `_int`/`_str` suffixed column
-                // OR a post-SQL Utf8 coalesced column — both handled identically).
-                let (field_name, _) = parse_column_name(field.name().as_str());
-                // Check if there's already a ColInfo for this logical field name
-                // (for legacy flat `status_int` + `status_str` pairs).
+                // Plain flat column — use the column name verbatim.
+                // The scanner no longer produces `_int`/`_str`/`_float` suffixed
+                // flat columns; single-type fields use the bare JSON key name and
+                // multi-type conflicts use StructArray.  User-defined SQL aliases
+                // (e.g. `SELECT duration_ms_int AS dur_int`) must be preserved
+                // exactly — stripping the suffix would mangle the alias (#705).
+                let field_name = field.name().as_str();
                 if let Some(existing) = infos.iter_mut().find(|c| c.field_name == field_name) {
                     existing.json_variants.push(ColVariant::Flat {
                         col_idx,
@@ -484,10 +459,8 @@ pub fn write_row_json(
         }
         first = false;
 
-        // Key
-        out.push(b'"');
-        out.extend_from_slice(col.field_name.as_bytes());
-        out.push(b'"');
+        // Key — escape to produce valid JSON if field_name contains special chars.
+        write_json_string(out, &col.field_name)?;
         out.push(b':');
 
         let Some(v) = variant else {
@@ -495,7 +468,10 @@ pub fn write_row_json(
             out.extend_from_slice(b"null");
             continue;
         };
-        let arr = get_array(batch, v);
+        let Some(arr) = get_array(batch, v) else {
+            out.extend_from_slice(b"null");
+            continue;
+        };
 
         // Value — dispatch on Arrow DataType, not column name suffix
         write_json_value(arr, row, out)?;
@@ -535,187 +511,29 @@ fn build_auth_headers(auth: Option<&AuthConfig>) -> Vec<(String, String)> {
 }
 
 // ---------------------------------------------------------------------------
-// Output construction (factory)
-// ---------------------------------------------------------------------------
-
-/// Build an output sink from configuration.
-pub fn build_output_sink(
-    name: &str,
-    cfg: &OutputConfig,
-    stats: Arc<ComponentStats>,
-) -> Result<Box<dyn OutputSink>, String> {
-    let auth_headers = build_auth_headers(cfg.auth.as_ref());
-    match cfg.output_type {
-        OutputType::Stdout => {
-            let fmt = match cfg.format.as_ref() {
-                Some(Format::Json) => StdoutFormat::Json,
-                Some(Format::Console) => StdoutFormat::Console,
-                _ => StdoutFormat::Text,
-            };
-            Ok(Box::new(StdoutSink::new(name.to_string(), fmt, stats)))
-        }
-        OutputType::Otlp => {
-            let endpoint = cfg
-                .endpoint
-                .as_ref()
-                .ok_or_else(|| format!("output '{name}': OTLP requires 'endpoint'"))?;
-            let protocol = match cfg.protocol.as_deref() {
-                Some("grpc") => OtlpProtocol::Grpc,
-                _ => OtlpProtocol::Http,
-            };
-            let compression = match cfg.compression.as_deref() {
-                Some("zstd") => Compression::Zstd,
-                Some("gzip") => {
-                    return Err(format!(
-                        "output '{name}': OTLP does not support 'gzip' compression yet"
-                    ));
-                }
-                _ => Compression::None,
-            };
-            Ok(Box::new(OtlpSink::new(
-                name.to_string(),
-                endpoint.clone(),
-                protocol,
-                compression,
-                auth_headers,
-                stats,
-            )))
-        }
-        OutputType::Http => {
-            let endpoint = cfg
-                .endpoint
-                .as_ref()
-                .ok_or_else(|| format!("output '{name}': HTTP requires 'endpoint'"))?;
-            Ok(Box::new(JsonLinesSink::new(
-                name.to_string(),
-                endpoint.clone(),
-                auth_headers,
-                stats,
-            )))
-        }
-        OutputType::Null => Ok(Box::new(NullSink::new(name.to_string(), stats))),
-        OutputType::TcpOut => {
-            let endpoint = cfg
-                .endpoint
-                .as_ref()
-                .ok_or_else(|| format!("output '{name}': tcp_out requires 'endpoint'"))?;
-            Ok(Box::new(TcpSink::new(
-                name.to_string(),
-                endpoint.clone(),
-                stats,
-            )))
-        }
-        OutputType::UdpOut => {
-            let endpoint = cfg
-                .endpoint
-                .as_ref()
-                .ok_or_else(|| format!("output '{name}': udp_out requires 'endpoint'"))?;
-            UdpSink::new(name.to_string(), endpoint.clone(), stats)
-                .map(|s| Box::new(s) as Box<dyn OutputSink>)
-                .map_err(|e| format!("output '{name}': udp_out bind failed: {e}"))
-        }
-        OutputType::Elasticsearch => {
-            let endpoint = cfg
-                .endpoint
-                .as_ref()
-                .ok_or_else(|| format!("output '{name}': elasticsearch requires 'endpoint'"))?;
-            // Index name can come from config.index or config.path, defaulting to "logs"
-            let index = cfg
-                .index
-                .as_ref()
-                .or(cfg.path.as_ref())
-                .map_or("logs", String::as_str)
-                .to_string();
-            Ok(Box::new(ElasticsearchSink::new(
-                name.to_string(),
-                endpoint.clone(),
-                index,
-                auth_headers,
-                stats,
-            )))
-        }
-        _ => Err(format!(
-            "output '{name}': type {:?} not yet supported",
-            cfg.output_type
-        )),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// OnceFactory — wraps a pre-built OutputSink for sync/legacy sinks
-// ---------------------------------------------------------------------------
-
-/// `SinkFactory` implementation for synchronous [`OutputSink`] types.
-///
-/// Wraps one pre-built sink in a `Mutex`. On the first `create()` call it
-/// transfers ownership into a [`SyncSinkAdapter`]; subsequent calls return an
-/// error. This naturally enforces `max_workers = 1` for sync sinks since the
-/// pool will stop spawning workers once the factory starts returning errors.
-///
-/// For most sync sinks (Stdout, TCP, UDP) a single worker is correct —
-/// there is only one connection or file handle anyway.
-pub struct OnceFactory {
-    name: String,
-    inner: Mutex<Option<Box<dyn OutputSink>>>,
-}
-
-impl OnceFactory {
-    pub fn new(name: String, sink: Box<dyn OutputSink>) -> Self {
-        OnceFactory {
-            name,
-            inner: Mutex::new(Some(sink)),
-        }
-    }
-}
-
-impl sink::SinkFactory for OnceFactory {
-    fn create(&self) -> io::Result<Box<dyn sink::Sink>> {
-        let mut guard = self
-            .inner
-            .lock()
-            .map_err(|_| io::Error::other("OnceFactory mutex poisoned"))?;
-        match guard.take() {
-            Some(s) => Ok(Box::new(SyncSinkAdapter::new(s))),
-            None => Err(io::Error::other(
-                "OnceFactory: sync sink already consumed (max_workers must be 1)",
-            )),
-        }
-    }
-
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    fn is_single_use(&self) -> bool {
-        true
-    }
-}
-
-// ---------------------------------------------------------------------------
 // build_sink_factory — produce Arc<dyn SinkFactory> from config
 // ---------------------------------------------------------------------------
 
 /// Build an `Arc<dyn SinkFactory>` from an output configuration.
 ///
-/// For async-native sinks (Elasticsearch, Loki) this returns a factory that
-/// creates a fresh reqwest-based sink per worker. For all other sinks it
-/// builds the sink synchronously and wraps it in a [`OnceFactory`] — those
-/// sinks are limited to one worker.
+/// Returns a factory that creates a fresh sink per worker. Most sink types
+/// support multiple workers; the factory can be called repeatedly.
 pub fn build_sink_factory(
     name: &str,
-    cfg: &logfwd_config::OutputConfig,
+    cfg: &OutputConfig,
     stats: Arc<ComponentStats>,
-) -> Result<Arc<dyn sink::SinkFactory>, String> {
+) -> Result<Arc<dyn SinkFactory>, OutputError> {
     use logfwd_config::OutputType;
 
     let auth_headers = build_auth_headers(cfg.auth.as_ref());
 
     match cfg.output_type {
         OutputType::Elasticsearch => {
-            let endpoint = cfg
-                .endpoint
-                .as_ref()
-                .ok_or_else(|| format!("output '{name}': elasticsearch requires 'endpoint'"))?;
+            let endpoint = cfg.endpoint.as_ref().ok_or_else(|| {
+                OutputError::Construction(format!(
+                    "output '{name}': elasticsearch requires 'endpoint'"
+                ))
+            })?;
             let index = cfg
                 .index
                 .as_ref()
@@ -723,76 +541,135 @@ pub fn build_sink_factory(
                 .map_or("logs", String::as_str)
                 .to_string();
             let compress = cfg.compression.as_deref() == Some("gzip");
+            let request_mode = match cfg.request_mode.as_deref() {
+                Some("streaming") => ElasticsearchRequestMode::Streaming,
+                _ => ElasticsearchRequestMode::Buffered,
+            };
             let factory = ElasticsearchSinkFactory::new(
                 name.to_string(),
                 endpoint.clone(),
                 index,
                 auth_headers,
                 compress,
+                request_mode,
                 stats,
             )
-            .map_err(|e| format!("output '{name}': elasticsearch factory: {e}"))?;
+            .map_err(|e| {
+                OutputError::Construction(format!("output '{name}': elasticsearch factory: {e}"))
+            })?;
             Ok(Arc::new(factory))
         }
         OutputType::Loki => {
-            let endpoint = cfg
-                .endpoint
-                .as_ref()
-                .ok_or_else(|| format!("output '{name}': loki requires 'endpoint'"))?;
+            let endpoint = cfg.endpoint.as_ref().ok_or_else(|| {
+                OutputError::Construction(format!("output '{name}': loki requires 'endpoint'"))
+            })?;
             let factory = LokiSinkFactory::new(
                 name.to_string(),
                 endpoint.clone(),
-                None, // tenant_id: not yet in OutputConfig
-                Vec::new(),
-                Vec::new(),
+                cfg.tenant_id.clone(),
+                cfg.static_labels
+                    .clone()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .collect(),
+                cfg.label_columns.clone().unwrap_or_default(),
                 auth_headers,
                 stats,
             )
-            .map_err(|e| format!("output '{name}': loki factory: {e}"))?;
+            .map_err(|e| {
+                OutputError::Construction(format!("output '{name}': loki factory: {e}"))
+            })?;
             Ok(Arc::new(factory))
         }
-        _ => {
-            // Sync sink — build it once, wrap in OnceFactory (max_workers=1).
-            let sink = build_output_sink(name, cfg, stats)?;
-            Ok(Arc::new(OnceFactory::new(name.to_string(), sink)))
+        OutputType::ArrowIpc => {
+            let endpoint = cfg.endpoint.as_ref().ok_or_else(|| {
+                OutputError::Construction(format!("output '{name}': arrow_ipc requires 'endpoint'"))
+            })?;
+            let compression = match cfg.compression.as_deref() {
+                Some("zstd") => Compression::Zstd,
+                Some(other) => {
+                    return Err(OutputError::Construction(format!(
+                        "output '{name}': arrow_ipc does not support '{other}' compression (use 'zstd' or omit)"
+                    )));
+                }
+                None => Compression::None,
+            };
+            let factory = ArrowIpcSinkFactory::new(
+                name.to_string(),
+                endpoint.clone(),
+                compression,
+                auth_headers,
+                stats,
+            )
+            .map_err(|e| {
+                OutputError::Construction(format!("output '{name}': arrow_ipc factory: {e}"))
+            })?;
+            Ok(Arc::new(factory))
         }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Test helper
-// ---------------------------------------------------------------------------
-
-/// Test helper: captures all sent batches for assertion.
-#[cfg(test)]
-pub struct CaptureSink {
-    name: String,
-    pub batches: Vec<RecordBatch>,
-}
-
-#[cfg(test)]
-impl CaptureSink {
-    pub fn new(name: &str) -> Self {
-        CaptureSink {
-            name: name.to_string(),
-            batches: Vec::new(),
+        OutputType::Udp => {
+            let endpoint = cfg.endpoint.as_ref().ok_or_else(|| {
+                OutputError::Construction(format!("output '{name}': udp requires 'endpoint'"))
+            })?;
+            let factory = UdpSinkFactory::new(name.to_string(), endpoint.clone(), stats);
+            Ok(Arc::new(factory))
         }
-    }
-}
-
-#[cfg(test)]
-impl OutputSink for CaptureSink {
-    fn send_batch(&mut self, batch: &RecordBatch, _metadata: &BatchMetadata) -> io::Result<()> {
-        self.batches.push(batch.clone());
-        Ok(())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-
-    fn name(&self) -> &str {
-        &self.name
+        OutputType::Otlp => {
+            let endpoint = cfg.endpoint.as_ref().ok_or_else(|| {
+                OutputError::Construction(format!("output '{name}': OTLP requires 'endpoint'"))
+            })?;
+            let protocol = match cfg.protocol.as_deref() {
+                Some("grpc") => OtlpProtocol::Grpc,
+                _ => OtlpProtocol::Http,
+            };
+            let compression = match cfg.compression.as_deref() {
+                Some("zstd") => Compression::Zstd,
+                Some("gzip") => {
+                    return Err(OutputError::Construction(format!(
+                        "output '{name}': OTLP does not support 'gzip' compression yet"
+                    )));
+                }
+                _ => Compression::None,
+            };
+            let factory = OtlpSinkFactory::new(
+                name.to_string(),
+                endpoint.clone(),
+                protocol,
+                compression,
+                auth_headers,
+                stats,
+            )
+            .map_err(|e| {
+                OutputError::Construction(format!("output '{name}': otlp factory: {e}"))
+            })?;
+            Ok(Arc::new(factory))
+        }
+        OutputType::Stdout => {
+            let fmt = match cfg.format.as_ref() {
+                Some(Format::Json) => StdoutFormat::Json,
+                Some(Format::Console) => StdoutFormat::Console,
+                _ => StdoutFormat::Text,
+            };
+            Ok(Arc::new(StdoutSinkFactory::new(
+                name.to_string(),
+                fmt,
+                stats,
+            )))
+        }
+        OutputType::Tcp => {
+            let endpoint = cfg.endpoint.as_ref().ok_or_else(|| {
+                OutputError::Construction(format!("output '{name}': tcp requires 'endpoint'"))
+            })?;
+            Ok(Arc::new(TcpSinkFactory::new(
+                name.to_string(),
+                endpoint.clone(),
+                stats,
+            )))
+        }
+        OutputType::Null => Ok(Arc::new(NullSinkFactory::new(name.to_string(), stats))),
+        _ => Err(OutputError::Construction(format!(
+            "output '{name}': type {:?} not yet supported",
+            cfg.output_type
+        ))),
     }
 }
 
@@ -805,13 +682,14 @@ mod tests {
     use super::*;
     use arrow::array::{Float64Array, Int64Array, StringArray};
     use arrow::datatypes::{Field, Schema};
-    use logfwd_io::diagnostics::ComponentStats;
+    use logfwd_config::OutputType;
+    use logfwd_types::diagnostics::ComponentStats;
     use std::sync::Arc;
 
     fn make_test_batch() -> RecordBatch {
         let schema = Arc::new(Schema::new(vec![
-            Field::new("level_str", DataType::Utf8, true),
-            Field::new("status_int", DataType::Int64, true),
+            Field::new("level", DataType::Utf8, true),
+            Field::new("status", DataType::Int64, true),
         ]));
         let level = StringArray::from(vec![Some("ERROR"), Some("INFO")]);
         let status = Int64Array::from(vec![Some(500), Some(200)]);
@@ -823,18 +701,6 @@ mod tests {
             resource_attrs: Arc::default(),
             observed_time_ns: 1_700_000_000_000_000_000,
         }
-    }
-
-    #[test]
-    fn test_parse_column_name() {
-        assert_eq!(parse_column_name("status_int"), ("status", "int"));
-        assert_eq!(parse_column_name("level_str"), ("level", "str"));
-        assert_eq!(
-            parse_column_name("duration_ms_float"),
-            ("duration_ms", "float")
-        );
-        assert_eq!(parse_column_name("_raw"), ("_raw", ""));
-        assert_eq!(parse_column_name("plain"), ("plain", ""));
     }
 
     #[test]
@@ -865,9 +731,8 @@ mod tests {
     }
 
     #[test]
-    fn test_fanout() {
-        // FanOut to two sinks that write to Vec<u8>.
-        // We use StdoutSink with write_batch_to to capture output.
+    fn test_stdout_write_batch_identical_output() {
+        // Two StdoutSinks writing the same batch produce identical output.
         let batch = make_test_batch();
         let meta = make_metadata();
 
@@ -891,73 +756,15 @@ mod tests {
         // Both should have identical output.
         assert_eq!(out1, out2);
         assert!(!out1.is_empty());
-
-        // Also test FanOut trait dispatch works.
-        let fanout_s1 = StdoutSink::new(
-            "f1".to_string(),
-            StdoutFormat::Json,
-            Arc::new(ComponentStats::new()),
-        );
-        let fanout_s2 = StdoutSink::new(
-            "f2".to_string(),
-            StdoutFormat::Json,
-            Arc::new(ComponentStats::new()),
-        );
-        let mut fanout = FanOut::new(vec![Box::new(fanout_s1), Box::new(fanout_s2)]);
-        // send_batch writes to real stdout, but should not error.
-        let result = fanout.send_batch(&batch, &meta);
-        assert!(result.is_ok());
-    }
-
-    struct AlwaysFailSink {
-        name: &'static str,
-    }
-
-    impl OutputSink for AlwaysFailSink {
-        fn send_batch(
-            &mut self,
-            _batch: &RecordBatch,
-            _metadata: &BatchMetadata,
-        ) -> io::Result<()> {
-            Err(io::Error::other(format!("{} failed", self.name)))
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-
-        fn name(&self) -> &str {
-            self.name
-        }
-    }
-
-    #[test]
-    fn test_fanout_error_reports_failed_sink_names() {
-        let batch = make_test_batch();
-        let meta = make_metadata();
-        let mut fanout = FanOut::new(vec![
-            Box::new(AlwaysFailSink { name: "sink-a" }),
-            Box::new(AlwaysFailSink { name: "sink-b" }),
-        ]);
-
-        let err = fanout
-            .send_batch(&batch, &meta)
-            .expect_err("fanout should fail");
-        let fanout_err = err
-            .get_ref()
-            .and_then(|inner| inner.downcast_ref::<FanOutError>())
-            .expect("fanout should wrap failures in FanOutError");
-
-        assert_eq!(fanout_err.failed_sinks(), ["sink-a", "sink-b"]);
     }
 
     #[test]
     fn test_otlp_encoding() {
         let schema = Arc::new(Schema::new(vec![
-            Field::new("timestamp_str", DataType::Utf8, true),
-            Field::new("level_str", DataType::Utf8, true),
-            Field::new("message_str", DataType::Utf8, true),
-            Field::new("status_int", DataType::Int64, true),
+            Field::new("timestamp", DataType::Utf8, true),
+            Field::new("level", DataType::Utf8, true),
+            Field::new("message", DataType::Utf8, true),
+            Field::new("status", DataType::Int64, true),
         ]));
         let ts = StringArray::from(vec![Some("2024-01-15T10:30:00Z")]);
         let level = StringArray::from(vec![Some("ERROR")]);
@@ -985,8 +792,10 @@ mod tests {
             OtlpProtocol::Http,
             Compression::None,
             vec![],
+            reqwest::Client::new(),
             Arc::new(ComponentStats::new()),
-        );
+        )
+        .unwrap();
         sink.encode_batch(&batch, &meta);
 
         // Should produce non-empty protobuf bytes.
@@ -995,8 +804,8 @@ mod tests {
         assert_eq!(sink.encoder_buf[0], 0x0A);
     }
 
-    #[test]
-    fn test_otlp_gzip_send_batch_returns_error() {
+    #[tokio::test]
+    async fn test_otlp_gzip_send_batch_returns_error() {
         let batch = make_test_batch();
         let meta = make_metadata();
         let mut sink = OtlpSink::new(
@@ -1005,11 +814,17 @@ mod tests {
             OtlpProtocol::Http,
             Compression::Gzip,
             vec![],
+            reqwest::Client::new(),
             Arc::new(ComponentStats::new()),
-        );
+        )
+        .unwrap();
 
-        let err = sink.send_batch(&batch, &meta).unwrap_err();
-        assert!(err.to_string().contains("gzip"), "got: {err}");
+        use crate::Sink;
+        use crate::sink::SendResult;
+        match sink.send_batch(&batch, &meta).await {
+            SendResult::IoError(err) => assert!(err.to_string().contains("gzip"), "got: {err}"),
+            other => panic!("gzip compression should return IoError, got: {other:?}"),
+        }
     }
 
     #[test]
@@ -1026,6 +841,7 @@ mod tests {
             "test-jsonl".to_string(),
             "http://localhost:9200".to_string(),
             vec![],
+            Compression::None,
             Arc::new(ComponentStats::new()),
         );
         sink.serialize_batch(&batch).unwrap();
@@ -1042,7 +858,7 @@ mod tests {
     fn test_stdout_text_format() {
         let schema = Arc::new(Schema::new(vec![
             Field::new("_raw", DataType::Utf8, true),
-            Field::new("level_str", DataType::Utf8, true),
+            Field::new("level", DataType::Utf8, true),
         ]));
         let raw = StringArray::from(vec![Some("original log line")]);
         let level = StringArray::from(vec![Some("INFO")]);
@@ -1061,8 +877,10 @@ mod tests {
     }
 
     #[test]
-    fn test_type_preference_dedup() {
-        // When both status_int and status_str exist, int should win.
+    fn test_distinct_column_names_both_emitted() {
+        // Columns with different names are separate fields, even if they share
+        // a base-name prefix.  The old suffix-stripping merged these; now each
+        // column name is preserved verbatim.
         let schema = Arc::new(Schema::new(vec![
             Field::new("status_str", DataType::Utf8, true),
             Field::new("status_int", DataType::Int64, true),
@@ -1081,16 +899,16 @@ mod tests {
         let mut out: Vec<u8> = Vec::new();
         sink.write_batch_to(&batch, &meta, &mut out).unwrap();
         let output = String::from_utf8(out).unwrap();
-        // Should have integer 500, not string "500"
-        assert!(output.contains("\"status\":500"), "got: {}", output);
-        // Should NOT have the string version
-        assert!(!output.contains("\"status\":\"500\""), "got: {}", output);
+        let v: serde_json::Value = serde_json::from_str(output.trim()).unwrap();
+        // Both fields present under their original column names.
+        assert_eq!(v["status_str"], "500", "got: {output}");
+        assert_eq!(v["status_int"], 500, "got: {output}");
     }
 
     #[test]
     fn test_float_column_json() {
         let schema = Arc::new(Schema::new(vec![Field::new(
-            "duration_ms_float",
+            "duration_ms",
             DataType::Float64,
             true,
         )]));
@@ -1110,93 +928,65 @@ mod tests {
     }
 
     #[test]
-    fn test_build_output_sink_stdout() {
+    fn test_build_sink_factory_stdout() {
         let cfg = OutputConfig {
             name: Some("test".to_string()),
             output_type: OutputType::Stdout,
-            endpoint: None,
-            protocol: None,
-            compression: None,
             format: Some(Format::Json),
-            path: None,
-            index: None,
-            auth: None,
+            ..Default::default()
         };
-        let sink = build_output_sink("test", &cfg, Arc::new(ComponentStats::new())).unwrap();
-        assert_eq!(sink.name(), "test");
+        // StdoutSink uses the async pipeline — must use build_sink_factory.
+        let factory = build_sink_factory("test", &cfg, Arc::new(ComponentStats::new())).unwrap();
+        assert_eq!(factory.name(), "test");
     }
 
     #[test]
-    fn test_build_output_sink_otlp() {
-        let cfg = OutputConfig {
-            name: Some("otel".to_string()),
-            output_type: OutputType::Otlp,
-            endpoint: Some("http://localhost:4318".to_string()),
-            protocol: Some("http".to_string()),
-            compression: Some("zstd".to_string()),
-            format: None,
-            path: None,
-            index: None,
-            auth: None,
-        };
-        let sink = build_output_sink("otel", &cfg, Arc::new(ComponentStats::new())).unwrap();
-        assert_eq!(sink.name(), "otel");
-    }
-
-    #[test]
-    fn test_build_output_sink_otlp_rejects_gzip() {
+    fn test_build_sink_factory_otlp_rejects_gzip() {
         let cfg = OutputConfig {
             name: Some("otel".to_string()),
             output_type: OutputType::Otlp,
             endpoint: Some("http://localhost:4318".to_string()),
             protocol: Some("http".to_string()),
             compression: Some("gzip".to_string()),
-            format: None,
-            path: None,
-            index: None,
-            auth: None,
+            ..Default::default()
         };
-        let err = match build_output_sink("otel", &cfg, Arc::new(ComponentStats::new())) {
+        let err = match build_sink_factory("otel", &cfg, Arc::new(ComponentStats::new())) {
             Ok(_) => panic!("expected gzip OTLP compression to be rejected"),
             Err(err) => err,
         };
-        assert!(err.contains("gzip"), "got: {err}");
+        assert!(err.to_string().contains("gzip"), "got: {err}");
     }
 
     #[test]
-    fn test_build_output_sink_http() {
+    fn test_build_sink_factory_http_not_yet_supported() {
         let cfg = OutputConfig {
-            name: Some("es".to_string()),
+            name: Some("http-bad".to_string()),
             output_type: OutputType::Http,
             endpoint: Some("http://localhost:9200".to_string()),
-            protocol: None,
-            compression: None,
-            format: None,
-            path: None,
-            index: None,
-            auth: None,
+            compression: Some("zstd".to_string()),
+            ..Default::default()
         };
-        let sink = build_output_sink("es", &cfg, Arc::new(ComponentStats::new())).unwrap();
-        assert_eq!(sink.name(), "es");
+        let result = build_sink_factory("http-bad", &cfg, Arc::new(ComponentStats::new()));
+        assert!(result.is_err(), "Http type should not be supported yet");
+        let err = result.err().unwrap();
+        assert!(
+            err.to_string().contains("not yet supported"),
+            "error should mention 'not yet supported', got: {err}"
+        );
     }
 
     #[test]
-    fn test_build_output_sink_missing_endpoint() {
+    fn test_build_sink_factory_missing_endpoint() {
         let cfg = OutputConfig {
             name: Some("bad".to_string()),
             output_type: OutputType::Otlp,
-            endpoint: None,
-            protocol: None,
-            compression: None,
-            format: None,
-            path: None,
-            index: None,
-            auth: None,
+            ..Default::default()
         };
-        let result = build_output_sink("bad", &cfg, Arc::new(ComponentStats::new()));
+        // OTLP now uses the async pipeline via build_sink_factory.
+        let result = build_sink_factory("bad", &cfg, Arc::new(ComponentStats::new()));
         assert!(result.is_err());
         let err = result.err().unwrap();
-        assert!(err.contains("endpoint"), "got: {err}");
+        assert!(err.to_string().contains("endpoint"), "got: {err}");
     }
 
     #[test]
@@ -1254,24 +1044,22 @@ mod tests {
     }
 
     #[test]
-    fn test_build_output_sink_http_with_bearer_auth() {
+    fn test_build_sink_factory_elasticsearch_with_bearer_auth() {
         use logfwd_config::AuthConfig;
         let cfg = OutputConfig {
             name: Some("auth-sink".to_string()),
-            output_type: OutputType::Http,
+            output_type: OutputType::Elasticsearch,
             endpoint: Some("http://localhost:9200".to_string()),
-            protocol: None,
-            compression: None,
-            format: None,
-            path: None,
-            index: None,
             auth: Some(AuthConfig {
                 bearer_token: Some("mytoken".to_string()),
                 headers: std::collections::HashMap::new(),
             }),
+            ..Default::default()
         };
-        let sink = build_output_sink("auth-sink", &cfg, Arc::new(ComponentStats::new())).unwrap();
-        assert_eq!(sink.name(), "auth-sink");
+        // Verify the factory builds successfully with auth.
+        let factory =
+            build_sink_factory("auth-sink", &cfg, Arc::new(ComponentStats::new())).unwrap();
+        assert_eq!(factory.name(), "auth-sink");
     }
 
     // -----------------------------------------------------------------------
@@ -1300,8 +1088,10 @@ mod tests {
             OtlpProtocol::Http,
             Compression::None,
             vec![],
+            reqwest::Client::new(),
             Arc::new(ComponentStats::new()),
-        );
+        )
+        .unwrap();
         // Must not panic.
         sink.encode_batch(&batch, &meta);
         assert!(!sink.encoder_buf.is_empty());
@@ -1327,8 +1117,10 @@ mod tests {
             OtlpProtocol::Http,
             Compression::None,
             vec![],
+            reqwest::Client::new(),
             Arc::new(ComponentStats::new()),
-        );
+        )
+        .unwrap();
         // Must not panic, and should produce non-empty output.
         sink.encode_batch(&batch, &meta);
         assert!(!sink.encoder_buf.is_empty());
@@ -1348,6 +1140,7 @@ mod tests {
             "test-jsonl".to_string(),
             "http://localhost:9200".to_string(),
             vec![],
+            Compression::None,
             Arc::new(ComponentStats::new()),
         );
         // Must not panic.
@@ -1401,15 +1194,14 @@ mod write_row_json_tests {
     use arrow::record_batch::RecordBatch;
     use std::sync::Arc;
 
-    fn make_batch(fields: Vec<(&str, Arc<dyn arrow::array::Array>)>) -> RecordBatch {
+    fn make_batch(fields: Vec<(&str, Arc<dyn Array>)>) -> RecordBatch {
         let schema = Schema::new(
             fields
                 .iter()
                 .map(|(name, arr)| Field::new(*name, arr.data_type().clone(), true))
                 .collect::<Vec<_>>(),
         );
-        let arrays: Vec<Arc<dyn arrow::array::Array>> =
-            fields.into_iter().map(|(_, a)| a).collect();
+        let arrays: Vec<Arc<dyn Array>> = fields.into_iter().map(|(_, a)| a).collect();
         RecordBatch::try_new(Arc::new(schema), arrays).unwrap()
     }
 
@@ -1422,10 +1214,7 @@ mod write_row_json_tests {
 
     #[test]
     fn basic_string_field() {
-        let batch = make_batch(vec![(
-            "msg_str",
-            Arc::new(StringArray::from(vec!["hello"])),
-        )]);
+        let batch = make_batch(vec![("msg", Arc::new(StringArray::from(vec!["hello"])))]);
         let json = render(&batch, 0);
         let v: serde_json::Value = serde_json::from_str(&json).expect("must be valid JSON");
         assert_eq!(v["msg"], "hello");
@@ -1433,7 +1222,7 @@ mod write_row_json_tests {
 
     #[test]
     fn integer_field() {
-        let batch = make_batch(vec![("status_int", Arc::new(Int64Array::from(vec![200])))]);
+        let batch = make_batch(vec![("status", Arc::new(Int64Array::from(vec![200])))]);
         let json = render(&batch, 0);
         let v: serde_json::Value = serde_json::from_str(&json).expect("must be valid JSON");
         assert_eq!(v["status"], 200);
@@ -1443,7 +1232,7 @@ mod write_row_json_tests {
     fn float_field() {
         let expected = std::f64::consts::PI;
         let batch = make_batch(vec![(
-            "duration_float",
+            "duration",
             Arc::new(Float64Array::from(vec![expected])),
         )]);
         let json = render(&batch, 0);
@@ -1454,7 +1243,7 @@ mod write_row_json_tests {
     #[test]
     fn null_values_preserved() {
         let batch = make_batch(vec![(
-            "msg_str",
+            "msg",
             Arc::new(StringArray::from(vec![Some("hello"), None])),
         )]);
         let json0 = render(&batch, 0);
@@ -1471,7 +1260,7 @@ mod write_row_json_tests {
     #[test]
     fn string_escaping_quotes_and_backslash() {
         let batch = make_batch(vec![(
-            "msg_str",
+            "msg",
             Arc::new(StringArray::from(vec![r#"say "hello" and \ more"#])),
         )]);
         let json = render(&batch, 0);
@@ -1483,7 +1272,7 @@ mod write_row_json_tests {
     fn string_escaping_control_chars() {
         // Null byte and other control chars must be \uXXXX escaped
         let input = "before\x00after\x01\x1f";
-        let batch = make_batch(vec![("msg_str", Arc::new(StringArray::from(vec![input])))]);
+        let batch = make_batch(vec![("msg", Arc::new(StringArray::from(vec![input])))]);
         let json = render(&batch, 0);
         // Must be valid JSON
         let v: serde_json::Value =
@@ -1494,7 +1283,7 @@ mod write_row_json_tests {
     #[test]
     fn string_escaping_newline_tab_cr() {
         let batch = make_batch(vec![(
-            "msg_str",
+            "msg",
             Arc::new(StringArray::from(vec!["line1\nline2\ttab\rreturn"])),
         )]);
         let json = render(&batch, 0);
@@ -1502,10 +1291,45 @@ mod write_row_json_tests {
         assert_eq!(v["msg"], "line1\nline2\ttab\rreturn");
     }
 
+    /// Regression: field names containing `"`, `\`, and control characters must
+    /// be JSON-escaped in the key position, not written raw.  A raw `"` in the
+    /// key would produce `{"a"b": …}` — structurally invalid JSON.
+    #[test]
+    fn field_name_special_chars_are_escaped() {
+        // Column name `a"b` (with a literal double-quote) must appear in the
+        // output as the JSON key `"a\"b"`, not as raw `"a"b"`.
+        let batch = make_batch(vec![(r#"a"b"#, Arc::new(StringArray::from(vec!["val"])))]);
+        let json = render(&batch, 0);
+        // The output must parse as valid JSON.
+        let v: serde_json::Value =
+            serde_json::from_str(&json).expect("field name with quote must produce valid JSON");
+        // The unescaped key round-trips correctly.
+        assert_eq!(v[r#"a"b"#], "val");
+    }
+
+    #[test]
+    fn field_name_backslash_escaped() {
+        let batch = make_batch(vec![(r"a\b", Arc::new(StringArray::from(vec!["val"])))]);
+        let json = render(&batch, 0);
+        let v: serde_json::Value =
+            serde_json::from_str(&json).expect("field name with backslash must produce valid JSON");
+        assert_eq!(v[r"a\b"], "val");
+    }
+
+    #[test]
+    fn field_name_control_char_escaped() {
+        // A field name containing a newline must be \n-escaped in the key.
+        let batch = make_batch(vec![("a\nb", Arc::new(StringArray::from(vec!["val"])))]);
+        let json = render(&batch, 0);
+        let v: serde_json::Value =
+            serde_json::from_str(&json).expect("field name with newline must produce valid JSON");
+        assert_eq!(v["a\nb"], "val");
+    }
+
     #[test]
     fn float_infinity_nan_emit_null() {
         let batch = make_batch(vec![(
-            "val_float",
+            "val",
             Arc::new(Float64Array::from(vec![
                 f64::INFINITY,
                 f64::NEG_INFINITY,
@@ -1532,9 +1356,9 @@ mod write_row_json_tests {
     #[test]
     fn multiple_fields_valid_json() {
         let batch = make_batch(vec![
-            ("level_str", Arc::new(StringArray::from(vec!["INFO"]))),
-            ("status_int", Arc::new(Int64Array::from(vec![200]))),
-            ("duration_float", Arc::new(Float64Array::from(vec![1.5]))),
+            ("level", Arc::new(StringArray::from(vec!["INFO"]))),
+            ("status", Arc::new(Int64Array::from(vec![200]))),
+            ("duration", Arc::new(Float64Array::from(vec![1.5]))),
         ]);
         let json = render(&batch, 0);
         let v: serde_json::Value = serde_json::from_str(&json).expect("must be valid JSON");
@@ -1543,29 +1367,17 @@ mod write_row_json_tests {
         assert_eq!(v["duration"], 1.5);
     }
 
-    /// Regression: when a field has both int and str variants across rows,
-    /// the old dedup picked one column and silently dropped the other.
-    /// Now both variants are kept, and the first non-null wins per row.
+    /// When a field has both int and str variants, the struct conflict column
+    /// pattern preserves both.  The first non-null variant wins per row.
     #[test]
-    fn mixed_type_field_no_data_loss() {
-        // Row 0: status is integer 200 (int column populated, str null)
-        // Row 1: status is string "ok" (str column populated, int null)
-        let batch = make_batch(vec![
-            (
-                "status_int",
-                Arc::new(Int64Array::from(vec![Some(200), None])),
-            ),
-            (
-                "status_str",
-                Arc::new(StringArray::from(vec![None, Some("ok")])),
-            ),
-        ]);
-        // Row 0: should get the integer value
+    fn mixed_type_struct_conflict_no_data_loss() {
+        // Row 0: status.int=200, status.str=null → integer wins
+        // Row 1: status.int=null, status.str="ok" → string wins
+        let batch = make_int_str_struct_batch(vec![Some(200), None], vec![None, Some("ok")]);
         let json0 = render(&batch, 0);
         let v0: serde_json::Value = serde_json::from_str(&json0).unwrap();
         assert_eq!(v0["status"], 200, "row 0 should be integer 200");
 
-        // Row 1: should get the string value — NOT be missing
         let json1 = render(&batch, 1);
         let v1: serde_json::Value = serde_json::from_str(&json1).unwrap();
         assert_eq!(v1["status"], "ok", "row 1 should be string 'ok'");
@@ -1589,10 +1401,7 @@ mod write_row_json_tests {
     /// Float values like 1.0 should stay as numbers, not become strings.
     #[test]
     fn float_roundtrip_preserves_type() {
-        let batch = make_batch(vec![(
-            "score_float",
-            Arc::new(Float64Array::from(vec![1.0])),
-        )]);
+        let batch = make_batch(vec![("score", Arc::new(Float64Array::from(vec![1.0])))]);
         let json = render(&batch, 0);
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert!(
@@ -1610,7 +1419,7 @@ mod write_row_json_tests {
         use arrow::array::BooleanArray;
         let batch = make_batch(vec![(
             "active",
-            Arc::new(BooleanArray::from(vec![true])) as Arc<dyn arrow::array::Array>,
+            Arc::new(BooleanArray::from(vec![true])) as Arc<dyn Array>,
         )]);
         let json = render(&batch, 0);
         // Boolean columns go through str_value fallback, which returns ""
@@ -1656,7 +1465,7 @@ mod write_row_json_tests {
         use arrow::array::NullArray;
         let batch = make_batch(vec![(
             "empty_val",
-            Arc::new(NullArray::new(1)) as Arc<dyn arrow::array::Array>,
+            Arc::new(NullArray::new(1)) as Arc<dyn Array>,
         )]);
         let json = render(&batch, 0);
         let v: serde_json::Value = serde_json::from_str(&json).expect("must be valid JSON");
@@ -1741,7 +1550,7 @@ mod write_row_json_tests {
         let batch = make_batch(vec![
             (
                 "i8",
-                Arc::new(Int8Array::from(vec![-1_i8])) as Arc<dyn arrow::array::Array>,
+                Arc::new(Int8Array::from(vec![-1_i8])) as Arc<dyn Array>,
             ),
             ("i16", Arc::new(Int16Array::from(vec![1000_i16]))),
             ("u8", Arc::new(UInt8Array::from(vec![255_u8]))),
@@ -1870,6 +1679,32 @@ mod write_row_json_tests {
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["level"], "INFO");
     }
+
+    /// Regression for #705: user-defined SQL aliases ending in `_int`, `_str`,
+    /// or `_float` must appear verbatim in JSON output, not be stripped.
+    #[test]
+    fn user_defined_alias_preserved_verbatim() {
+        let batch = make_batch(vec![
+            ("dur_int", Arc::new(Int64Array::from(vec![42]))),
+            ("label_str", Arc::new(StringArray::from(vec!["hello"]))),
+            ("score_float", Arc::new(Float64Array::from(vec![3.14]))),
+        ]);
+        let json = render(&batch, 0);
+        let v: serde_json::Value = serde_json::from_str(&json).expect("must be valid JSON");
+        // Aliases must NOT be mangled — "dur_int" stays "dur_int", not "dur".
+        assert_eq!(
+            v["dur_int"], 42,
+            "alias 'dur_int' must be preserved, got: {json}"
+        );
+        assert_eq!(
+            v["label_str"], "hello",
+            "alias 'label_str' must be preserved, got: {json}"
+        );
+        assert!(
+            (v["score_float"].as_f64().unwrap() - 3.14).abs() < 0.01,
+            "alias 'score_float' must be preserved, got: {json}"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1895,9 +1730,9 @@ mod write_row_json_proptests {
             values in prop::collection::vec(any::<Option<i64>>(), 1..20usize),
         ) {
             let schema = Arc::new(Schema::new(vec![
-                Field::new("count_int", DataType::Int64, true),
+                Field::new("count", DataType::Int64, true),
             ]));
-            let arr: Int64Array = values.iter().map(|v| *v).collect();
+            let arr: Int64Array = values.iter().copied().collect();
             let batch = RecordBatch::try_new(
                 schema,
                 vec![Arc::new(arr)],
@@ -1906,14 +1741,14 @@ mod write_row_json_proptests {
             for row in 0..batch.num_rows() {
                 let json_str = render_row(&batch, row);
                 let parsed: serde_json::Value = serde_json::from_str(&json_str)
-                    .expect(&format!("row {row} must produce valid JSON, got: {json_str}"));
+                    .unwrap_or_else(|_| panic!("row {row} must produce valid JSON, got: {json_str}"));
                 prop_assert!(parsed.is_object(), "output must be a JSON object");
             }
         }
 
-        /// Type-suffix stripping: _int suffix → field name without suffix.
+        /// Column names are preserved verbatim — no suffix stripping.
         #[test]
-        fn prop_int_field_name_strips_suffix(
+        fn prop_int_field_name_preserved_verbatim(
             raw_values in prop::collection::vec(any::<i64>(), 1..5usize),
             // Only lowercase ASCII + underscore, no leading digit
             field_base in "[a-z][a-z0-9_]{0,15}",
@@ -1929,28 +1764,24 @@ mod write_row_json_proptests {
                 let json_str = render_row(&batch, row);
                 let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
                 let obj = parsed.as_object().unwrap();
-                // Normalized name must exist, raw name must NOT exist
+                // Column name must appear verbatim (no suffix stripping)
                 prop_assert!(
-                    obj.contains_key(field_base.as_str()),
-                    "normalized field '{field_base}' must be present; got keys: {:?}",
+                    obj.contains_key(field_name.as_str()),
+                    "field '{field_name}' must be present verbatim; got keys: {:?}",
                     obj.keys().collect::<Vec<_>>()
-                );
-                prop_assert!(
-                    !obj.contains_key(field_name.as_str()),
-                    "raw field '{field_name}' must NOT appear in output"
                 );
                 // Value must round-trip
                 prop_assert_eq!(
-                    obj[field_base.as_str()].as_i64(),
+                    obj[field_name.as_str()].as_i64(),
                     Some(expected_val),
                     "integer value must round-trip"
                 );
             }
         }
 
-        /// Type-suffix stripping: _str suffix → field name without suffix.
+        /// Column names are preserved verbatim — no suffix stripping for _str.
         #[test]
-        fn prop_str_field_name_strips_suffix(
+        fn prop_str_field_name_preserved_verbatim(
             raw_values in prop::collection::vec(
                 proptest::option::of("[^\n\r]{0,50}"),
                 1..5usize,
@@ -1967,27 +1798,27 @@ mod write_row_json_proptests {
             for (row, expected_val) in raw_values.iter().enumerate() {
                 let json_str = render_row(&batch, row);
                 let parsed: serde_json::Value = serde_json::from_str(&json_str)
-                    .expect(&format!("row {row}: invalid JSON: {json_str}"));
+                    .unwrap_or_else(|_| panic!("row {row}: invalid JSON: {json_str}"));
                 let obj = parsed.as_object().unwrap();
                 prop_assert!(
-                    obj.contains_key(field_base.as_str()),
-                    "normalized field '{field_base}' must be present"
+                    obj.contains_key(field_name.as_str()),
+                    "field '{field_name}' must be present verbatim"
                 );
                 match expected_val {
                     Some(s) => prop_assert_eq!(
-                        obj[field_base.as_str()].as_str(),
+                        obj[field_name.as_str()].as_str(),
                         Some(s.as_str()),
                         "string value must round-trip"
                     ),
                     None => prop_assert!(
-                        obj[field_base.as_str()].is_null(),
+                        obj[field_name.as_str()].is_null(),
                         "null must serialize as JSON null"
                     ),
                 }
             }
         }
 
-        /// float field round-trip: _float suffix stripped, value preserved.
+        /// float field round-trip: column name preserved verbatim, value preserved.
         #[test]
         fn prop_float_field_roundtrip(
             raw_values in prop::collection::vec(
@@ -2007,10 +1838,10 @@ mod write_row_json_proptests {
             for (row, &expected_val) in raw_values.iter().enumerate() {
                 let json_str = render_row(&batch, row);
                 let parsed: serde_json::Value = serde_json::from_str(&json_str)
-                    .expect(&format!("row {row}: invalid JSON: {json_str}"));
+                    .unwrap_or_else(|_| panic!("row {row}: invalid JSON: {json_str}"));
                 let obj = parsed.as_object().unwrap();
-                prop_assert!(obj.contains_key(field_base.as_str()));
-                let got = obj[field_base.as_str()].as_f64().unwrap();
+                prop_assert!(obj.contains_key(field_name.as_str()));
+                let got = obj[field_name.as_str()].as_f64().unwrap();
                 // Allow small floating-point round-trip epsilon
                 prop_assert!(
                     (got - expected_val).abs() <= expected_val.abs() * 1e-10 + 1e-10,
@@ -2029,7 +1860,7 @@ mod write_row_json_proptests {
             ),
         ) {
             let schema = Arc::new(Schema::new(vec![
-                Field::new("msg_str", DataType::Utf8, true),
+                Field::new("msg", DataType::Utf8, true),
             ]));
             let arr: StringArray = values.iter().map(|v| v.as_deref()).collect();
             let batch = RecordBatch::try_new(schema, vec![Arc::new(arr)]).unwrap();
@@ -2059,7 +1890,7 @@ mod kani_proofs {
 
     /// Empty struct is not a conflict struct — the guard requires at least one child.
     #[kani::proof]
-    fn proof_is_conflict_struct_empty_returns_false() {
+    fn verify_is_conflict_struct_empty_returns_false() {
         let fields = Fields::empty();
         assert!(!is_conflict_struct(&fields));
         kani::cover!(true, "empty fields path exercised");
@@ -2068,7 +1899,7 @@ mod kani_proofs {
     /// JSON priority ordering: Int64 wins over Float64 wins over Utf8.
     /// This is the core contract that drives per-row type-preserving serialization.
     #[kani::proof]
-    fn proof_json_priority_total_order() {
+    fn verify_json_priority_total_order() {
         assert!(json_priority(&DataType::Int64) > json_priority(&DataType::Float64));
         assert!(json_priority(&DataType::Float64) > json_priority(&DataType::Utf8));
         assert!(json_priority(&DataType::Int64) > json_priority(&DataType::Utf8));
@@ -2081,7 +1912,7 @@ mod kani_proofs {
     /// String-coalesce priority: Utf8/Utf8View wins over numeric types.
     /// Loki labels and other string consumers depend on this contract.
     #[kani::proof]
-    fn proof_str_priority_string_beats_numerics() {
+    fn verify_str_priority_string_beats_numerics() {
         assert!(str_priority(&DataType::Utf8) > str_priority(&DataType::Int64));
         assert!(str_priority(&DataType::Utf8View) > str_priority(&DataType::Float64));
         assert!(str_priority(&DataType::Utf8) == str_priority(&DataType::Utf8View));
@@ -2094,7 +1925,7 @@ mod kani_proofs {
     /// json_priority and str_priority assign different orderings — they are not equal.
     /// This guards against accidentally returning the same function for both callers.
     #[kani::proof]
-    fn proof_json_and_str_priority_differ_for_int_vs_utf8() {
+    fn verify_json_and_str_priority_differ_for_int_vs_utf8() {
         // In JSON mode, Int64 wins; in string mode, Utf8 wins.
         assert!(json_priority(&DataType::Int64) > json_priority(&DataType::Utf8));
         assert!(str_priority(&DataType::Utf8) > str_priority(&DataType::Int64));
@@ -2102,5 +1933,68 @@ mod kani_proofs {
             true,
             "ordering inversion between json and str priority verified"
         );
+    }
+
+    /// ColVariant::Flat preserves its col_idx and DataType exactly.
+    #[kani::proof]
+    fn verify_col_variant_flat_preserves_idx_and_type() {
+        let col_idx: usize = kani::any();
+        let v = ColVariant::Flat {
+            col_idx,
+            dt: DataType::Int64,
+        };
+        if let ColVariant::Flat { col_idx: idx, dt } = v {
+            assert_eq!(idx, col_idx);
+            assert_eq!(dt, DataType::Int64);
+        }
+        kani::cover!(col_idx > 0, "non-zero col_idx");
+        kani::cover!(col_idx == 0, "zero col_idx");
+    }
+
+    /// ColVariant::StructField preserves struct_col_idx, field_idx, and DataType.
+    #[kani::proof]
+    fn verify_col_variant_struct_field_preserves_indices() {
+        let struct_col_idx: usize = kani::any();
+        let field_idx: usize = kani::any();
+        let v = ColVariant::StructField {
+            struct_col_idx,
+            field_idx,
+            dt: DataType::Utf8,
+        };
+        if let ColVariant::StructField {
+            struct_col_idx: sci,
+            field_idx: fi,
+            dt,
+        } = v
+        {
+            assert_eq!(sci, struct_col_idx);
+            assert_eq!(fi, field_idx);
+            assert_eq!(dt, DataType::Utf8);
+        }
+        kani::cover!(struct_col_idx > 0, "non-zero struct_col_idx");
+        kani::cover!(field_idx > 0, "non-zero field_idx");
+    }
+
+    /// variant_dt extracts the DataType from a Flat variant correctly.
+    #[kani::proof]
+    fn verify_variant_dt_flat() {
+        let v = ColVariant::Flat {
+            col_idx: 0,
+            dt: DataType::Int64,
+        };
+        assert_eq!(variant_dt(&v), &DataType::Int64);
+        kani::cover!(true, "variant_dt(Flat) returns correct type");
+    }
+
+    /// variant_dt extracts the DataType from a StructField variant correctly.
+    #[kani::proof]
+    fn verify_variant_dt_struct_field() {
+        let v = ColVariant::StructField {
+            struct_col_idx: 0,
+            field_idx: 1,
+            dt: DataType::Float64,
+        };
+        assert_eq!(variant_dt(&v), &DataType::Float64);
+        kani::cover!(true, "variant_dt(StructField) returns correct type");
     }
 }

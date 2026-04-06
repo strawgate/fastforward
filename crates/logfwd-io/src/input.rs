@@ -1,20 +1,31 @@
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use logfwd_core::pipeline::SourceId;
+use logfwd_types::pipeline::SourceId;
 
 use crate::filter_hints::FilterHints;
 use crate::tail::{ByteOffset, FileTailer, TailConfig, TailEvent};
 
 /// Events produced by an input source.
-#[non_exhaustive]
 pub enum InputEvent {
     /// New data read from the source.
-    Data { bytes: Vec<u8> },
+    ///
+    /// `source_id` identifies which logical source produced the data (e.g.,
+    /// which tailed file). `None` for push sources that don't track identity.
+    Data {
+        bytes: Vec<u8>,
+        source_id: Option<SourceId>,
+    },
     /// The underlying file was rotated (new inode).
-    Rotated,
+    ///
+    /// `source_id` identifies the source that was rotated. `None` for push
+    /// sources or when the source identity is unknown.
+    Rotated { source_id: Option<SourceId> },
     /// The underlying file was truncated.
-    Truncated,
+    ///
+    /// `source_id` identifies the source that was truncated. `None` for push
+    /// sources or when the source identity is unknown.
+    Truncated { source_id: Option<SourceId> },
     /// The source has been fully consumed and has no new data.
     ///
     /// Emitted once per "caught-up" transition (i.e., after the first poll
@@ -22,7 +33,10 @@ pub enum InputEvent {
     /// `FramedInput`) use this to flush any partial-line remainder that was
     /// not terminated by a newline — a common situation for static files and
     /// for the last line written before a log rotation.
-    EndOfFile,
+    ///
+    /// `source_id` identifies the source that reached EOF. `None` for push
+    /// sources or when the source identity is unknown.
+    EndOfFile { source_id: Option<SourceId> },
 }
 
 /// Trait for input sources that produce raw bytes.
@@ -45,16 +59,11 @@ pub trait InputSource: Send {
         vec![]
     }
 
-    /// Return identity-to-path mappings for checkpoint persistence.
+    /// Restore a file offset by SourceId (fingerprint). Default: no-op.
     ///
-    /// Called on file open/rotation, not per-batch.
-    /// Default: empty (push sources, generators).
-    fn source_paths(&self) -> Vec<(SourceId, PathBuf)> {
-        vec![]
-    }
-
-    /// Restore a file offset from checkpoint. Default: no-op.
-    fn set_offset(&mut self, _path: &Path, _offset: u64) {}
+    /// Used for checkpoint restore — the checkpoint stores fingerprint + offset.
+    /// The input source finds the matching file by fingerprint, not path.
+    fn set_offset_by_source(&mut self, _source_id: SourceId, _offset: u64) {}
 }
 
 /// An input source backed by a `FileTailer`.
@@ -82,21 +91,26 @@ impl FileInput {
 
 impl InputSource for FileInput {
     fn poll(&mut self) -> io::Result<Vec<InputEvent>> {
+        // source_id is embedded in each TailEvent at the time of creation
+        // inside FileTailer::poll(), before any rotation mutates internal
+        // state. No snapshot HashMap is needed here.
         let tail_events = self.tailer.poll()?;
         let mut events = Vec::with_capacity(tail_events.len());
         for te in tail_events {
             match te {
-                TailEvent::Data { bytes, .. } => {
-                    events.push(InputEvent::Data { bytes });
+                TailEvent::Data {
+                    bytes, source_id, ..
+                } => {
+                    events.push(InputEvent::Data { bytes, source_id });
                 }
-                TailEvent::Rotated { .. } => {
-                    events.push(InputEvent::Rotated);
+                TailEvent::Rotated { source_id, .. } => {
+                    events.push(InputEvent::Rotated { source_id });
                 }
-                TailEvent::Truncated { .. } => {
-                    events.push(InputEvent::Truncated);
+                TailEvent::Truncated { source_id, .. } => {
+                    events.push(InputEvent::Truncated { source_id });
                 }
-                TailEvent::EndOfFile { .. } => {
-                    events.push(InputEvent::EndOfFile);
+                TailEvent::EndOfFile { source_id, .. } => {
+                    events.push(InputEvent::EndOfFile { source_id });
                 }
             }
         }
@@ -111,13 +125,9 @@ impl InputSource for FileInput {
         self.tailer.file_offsets()
     }
 
-    fn source_paths(&self) -> Vec<(SourceId, PathBuf)> {
-        self.tailer.file_paths()
-    }
-
-    fn set_offset(&mut self, path: &Path, offset: u64) {
-        if let Err(e) = self.tailer.set_offset(path, offset) {
-            eprintln!("warn: failed to restore offset for {}: {e}", path.display());
+    fn set_offset_by_source(&mut self, source_id: SourceId, offset: u64) {
+        if let Err(e) = self.tailer.set_offset_by_source(source_id, offset) {
+            tracing::warn!(source_id = source_id.0, error = %e, "failed to restore offset");
         }
     }
 }

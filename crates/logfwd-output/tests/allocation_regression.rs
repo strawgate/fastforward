@@ -17,9 +17,9 @@ use logfwd_output::{BatchMetadata, build_col_infos, write_row_json};
 
 fn make_batch(n: usize) -> RecordBatch {
     let schema = Arc::new(Schema::new(vec![
-        Field::new("host_str", DataType::Utf8, true),
-        Field::new("status_int", DataType::Int64, true),
-        Field::new("latency_float", DataType::Float64, true),
+        Field::new("host", DataType::Utf8, true),
+        Field::new("status", DataType::Int64, true),
+        Field::new("latency", DataType::Float64, true),
     ]));
 
     let hosts: Vec<&str> = (0..n)
@@ -50,6 +50,13 @@ fn assert_stable_or_zero(label: &str, alloc1: usize, alloc2: usize) {
     if alloc1 == 0 && alloc2 == 0 {
         return;
     }
+    // Small one-off allocations (< 4 KiB) from the system allocator or
+    // runtime (glibc tcache, thread-local state) are noise, not regressions.
+    // Only check the ratio when both windows report meaningful work.
+    const NOISE_FLOOR: usize = 4096;
+    if alloc1 < NOISE_FLOOR && alloc2 < NOISE_FLOOR {
+        return;
+    }
     let growth = alloc2 as f64 / alloc1.max(1) as f64;
     assert!(
         (0.5..2.0).contains(&growth),
@@ -65,10 +72,16 @@ fn write_row_json_stable_across_batches() {
     let cols = build_col_infos(&batch);
     let mut buf = Vec::with_capacity(4096);
 
-    for row in 0..batch.num_rows() {
-        let _ = write_row_json(&batch, row, &cols, &mut buf);
+    // Warmup: run several passes to flush lazy one-time allocations (Arrow
+    // downcast caches, thread-local state, glibc tcache warming, etc.).
+    // Two passes were not always sufficient on Linux CI — glibc can defer
+    // internal bookkeeping allocations past the second pass.
+    for _ in 0..5 {
+        for row in 0..batch.num_rows() {
+            let _ = write_row_json(&batch, row, &cols, &mut buf);
+        }
+        buf.clear();
     }
-    buf.clear();
 
     let reg1 = Region::new(GLOBAL);
     for row in 0..batch.num_rows() {
@@ -102,8 +115,10 @@ fn otlp_encode_stable_across_batches() {
         OtlpProtocol::Http,
         logfwd_output::Compression::None,
         vec![],
-        Arc::new(logfwd_io::diagnostics::ComponentStats::new()),
-    );
+        reqwest::Client::new(),
+        Arc::new(logfwd_types::diagnostics::ComponentStats::new()),
+    )
+    .unwrap();
 
     let batch = make_batch(500);
     let meta = BatchMetadata {

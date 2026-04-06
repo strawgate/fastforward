@@ -1,4 +1,4 @@
-//! UDFs for extracting fields from raw JSON strings using our SIMD scanner.
+//! UDFs for extracting fields from raw JSON strings using our zero-copy scanner.
 //!
 //! ```sql
 //! SELECT json(_raw, 'status') as status FROM logs
@@ -21,7 +21,7 @@ use datafusion::logical_expr::{
     ColumnarValue, ScalarFunctionArgs, ScalarUDFImpl, Signature, TypeSignature, Volatility,
 };
 
-use logfwd_arrow::StreamingSimdScanner;
+use logfwd_arrow::Scanner;
 use logfwd_core::scan_config::{FieldSpec, ScanConfig};
 
 // ---------------------------------------------------------------------------
@@ -70,7 +70,7 @@ fn is_conflict_struct_fields(fields: &arrow::datatypes::Fields) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Shared: parse raw lines with the SIMD scanner
+// Shared: parse raw lines with the scanner
 // ---------------------------------------------------------------------------
 
 /// Reconstruct an NDJSON buffer from `raw_array`, run the scanner for
@@ -105,7 +105,7 @@ fn parse_raw(raw_array: &StringArray, field_name: &str) -> Result<RecordBatch, D
         validate_utf8: false,
     };
 
-    let mut scanner = StreamingSimdScanner::new(config);
+    let mut scanner = Scanner::new(config);
     let batch = scanner
         .scan(bytes::Bytes::from(buf))
         .map_err(|e| DataFusionError::Execution(format!("scanner error: {e}")))?;

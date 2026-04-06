@@ -4,23 +4,23 @@ use std::sync::Arc;
 use arrow::array::Array;
 use arrow::record_batch::RecordBatch;
 
-use logfwd_io::diagnostics::ComponentStats;
+use logfwd_types::diagnostics::ComponentStats;
 
-use super::{
-    BatchMetadata, HTTP_MAX_RETRIES, HTTP_RETRY_INITIAL_DELAY_MS, OutputSink, build_col_infos,
-    is_transient_error, str_value, write_row_json,
-};
+use super::{Compression, build_col_infos, str_value, write_row_json};
 
 // ---------------------------------------------------------------------------
 // JsonLinesSink
 // ---------------------------------------------------------------------------
 
 /// Writes newline-delimited JSON and POSTs over HTTP.
+#[allow(dead_code)] // HTTP send fields retained for future async Sink migration.
 pub struct JsonLinesSink {
     name: String,
     url: String,
     headers: Vec<(String, String)>,
     pub(crate) batch_buf: Vec<u8>,
+    compress_buf: Vec<u8>,
+    compression: Compression,
     http_agent: ureq::Agent,
     stats: Arc<ComponentStats>,
 }
@@ -30,6 +30,7 @@ impl JsonLinesSink {
         name: String,
         url: String,
         headers: Vec<(String, String)>,
+        compression: Compression,
         stats: Arc<ComponentStats>,
     ) -> Self {
         let http_agent = ureq::config::Config::builder()
@@ -41,6 +42,8 @@ impl JsonLinesSink {
             url,
             headers,
             batch_buf: Vec::with_capacity(64 * 1024),
+            compress_buf: Vec::new(),
+            compression,
             http_agent,
             stats,
         }
@@ -114,53 +117,6 @@ impl JsonLinesSink {
     }
 }
 
-impl OutputSink for JsonLinesSink {
-    fn send_batch(&mut self, batch: &RecordBatch, _metadata: &BatchMetadata) -> io::Result<()> {
-        self.serialize_batch(batch)?;
-        if self.batch_buf.is_empty() {
-            return Ok(());
-        }
-
-        // Retry with exponential backoff for transient failures.
-        // 1 initial attempt + up to HTTP_MAX_RETRIES retries; delays: 100ms → 200ms → 400ms.
-        // Note: `self.batch_buf` is re-sent as `&[u8]` on each attempt — no
-        // allocation, but the full NDJSON payload is retransmitted each time.
-        // This is acceptable as a temporary measure until SinkDriver (#319).
-        let build_req = || {
-            let mut req = self.http_agent.post(&self.url);
-            for (k, v) in &self.headers {
-                req = req.header(k.as_str(), v.as_str());
-            }
-            req.header("Content-Type", "application/x-ndjson")
-        };
-        let mut delay_ms: u64 = HTTP_RETRY_INITIAL_DELAY_MS;
-        let mut attempt: u32 = 0;
-        loop {
-            match build_req().send(&self.batch_buf) {
-                Ok(_) => {
-                    self.stats.inc_lines(batch.num_rows() as u64);
-                    self.stats.inc_bytes(self.batch_buf.len() as u64);
-                    return Ok(());
-                }
-                Err(e) if attempt < HTTP_MAX_RETRIES && is_transient_error(&e) => {
-                    std::thread::sleep(std::time::Duration::from_millis(delay_ms));
-                    delay_ms *= 2;
-                    attempt += 1;
-                }
-                Err(e) => return Err(io::Error::other(e.to_string())),
-            }
-        }
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-
-    fn name(&self) -> &str {
-        &self.name
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -170,13 +126,14 @@ mod tests {
     use super::*;
     use arrow::array::StringArray;
     use arrow::datatypes::{DataType, Field, Schema};
-    use logfwd_io::diagnostics::ComponentStats;
+    use logfwd_types::diagnostics::ComponentStats;
 
     fn make_sink() -> JsonLinesSink {
         JsonLinesSink::new(
             "test".to_string(),
             "http://localhost:1".to_string(), // unreachable — tests only call serialize_batch
             vec![],
+            Compression::None,
             Arc::new(ComponentStats::default()),
         )
     }

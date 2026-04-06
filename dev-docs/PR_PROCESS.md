@@ -9,6 +9,19 @@ Issue filed → Assign to Copilot → Copilot creates draft PR → Mark ready �
   Review (architecture + code quality) → Fix lint/bugs → Merge or Close
 ```
 
+## Pre-PR Checklist (Required)
+
+Before opening a PR, confirm all items:
+
+- [ ] The PR description states exactly what behavior changed.
+- [ ] If behavior changed, docs changed in the same PR (user docs in `book/src/`, contributor docs in `dev-docs/` as needed).
+- [ ] If config semantics changed, `book/src/config/reference.md` was updated.
+- [ ] If pipeline/architecture behavior changed, update `dev-docs/ARCHITECTURE.md` and/or `dev-docs/DESIGN.md`.
+- [ ] If invariants/proofs changed, update `dev-docs/VERIFICATION.md` and related harnesses.
+- [ ] Commands in docs were copy/paste verified in the target environment.
+
+Use [CHANGE_MAP](CHANGE_MAP.md) to identify all required companion updates.
+
 ## 1. Filing Issues for Copilot
 
 Write focused, well-scoped issues. Include:
@@ -110,7 +123,7 @@ Every PR gets reviewed for:
 ### Common Copilot issues to watch for
 - **Lint failures** — Copilot doesn't run `cargo fmt` or `cargo clippy`. Every PR needs lint fixes.
 - **Approx constant test values** — using `3.14` (too close to PI) triggers `clippy::approx_constant`
-- **API drift** — Copilot branches from old commits, uses removed methods (e.g., `Scanner::new` → `SimdScanner::new`, `execute` → `execute_blocking`)
+- **API drift** — Copilot branches from old commits, uses removed methods (e.g., `execute` → `execute_blocking`)
 - **Dead config** — adding config fields that are parsed but never used at runtime
 - **Formatting noise** — 50%+ of diff is `rustfmt` changes to unrelated files
 

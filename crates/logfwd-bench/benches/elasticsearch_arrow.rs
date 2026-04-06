@@ -22,17 +22,19 @@ use std::time::{Duration, Instant};
 
 use arrow::array::{Float64Array, Int64Array, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
+use arrow::ipc::reader::StreamReader;
 use arrow::record_batch::RecordBatch;
 use logfwd_io::diagnostics::ComponentStats;
-use logfwd_output::{BatchMetadata, ElasticsearchSink, OutputSink};
+use logfwd_output::sink::{Sink, SinkFactory};
+use logfwd_output::{BatchMetadata, ElasticsearchRequestMode, ElasticsearchSinkFactory};
+use tokio::runtime::Runtime;
 
 const ES_ENDPOINT: &str = "http://localhost:9200";
 const BENCH_INDEX: &str = "logfwd-bench-arrow";
 
 /// Check if Elasticsearch is running and accessible.
-fn check_elasticsearch_available() -> bool {
-    ureq::get(&format!("{}/_cluster/health", ES_ENDPOINT))
-        .call()
+fn check_elasticsearch_available(rt: &Runtime) -> bool {
+    rt.block_on(async { reqwest::get(format!("{}/_cluster/health", ES_ENDPOINT)).await })
         .is_ok()
 }
 
@@ -98,36 +100,63 @@ fn generate_log_batch(num_rows: usize) -> RecordBatch {
 }
 
 /// Index a batch of data into Elasticsearch.
-fn index_batch(sink: &mut ElasticsearchSink, batch: &RecordBatch) -> Result<(), std::io::Error> {
+fn index_batch(
+    rt: &Runtime,
+    sink: &mut Box<dyn Sink>,
+    batch: &RecordBatch,
+) -> Result<(), std::io::Error> {
     let metadata = BatchMetadata {
         resource_attrs: Arc::new(vec![]),
         observed_time_ns: 0,
     };
-    sink.send_batch(batch, &metadata)
+    rt.block_on(sink.send_batch(batch, &metadata))?;
+    Ok(())
 }
 
 /// Delete and recreate the benchmark index.
-fn reset_index() {
-    let _ = ureq::delete(&format!("{}/{}", ES_ENDPOINT, BENCH_INDEX)).call();
+fn reset_index(rt: &Runtime) {
+    let _ = rt.block_on(async {
+        reqwest::Client::new()
+            .delete(format!("{}/{}", ES_ENDPOINT, BENCH_INDEX))
+            .send()
+            .await
+    });
     std::thread::sleep(Duration::from_millis(500));
 }
 
 /// Benchmark Arrow IPC query performance.
-fn bench_arrow_query(
-    sink: &ElasticsearchSink,
-    query: &str,
-    iterations: usize,
-) -> (f64, usize, f64) {
+fn bench_arrow_query(rt: &Runtime, query: &str, iterations: usize) -> (f64, usize, f64) {
+    let client = reqwest::Client::new();
+    let query_body = serde_json::json!({ "query": query });
+    let query_bytes = serde_json::to_vec(&query_body).expect("serialize query");
+
     let mut total_rows = 0usize;
     let mut total_duration = Duration::ZERO;
 
     for _ in 0..iterations {
         let start = Instant::now();
-        match sink.query_arrow(query) {
-            Ok(batches) => {
-                let elapsed = start.elapsed();
-                total_duration += elapsed;
-                total_rows += batches.iter().map(|b| b.num_rows()).sum::<usize>();
+        match rt.block_on(async {
+            client
+                .post(format!("{}/_query", ES_ENDPOINT))
+                .header("Content-Type", "application/json")
+                .header("Accept", "application/vnd.elasticsearch+arrow+stream")
+                .body(query_bytes.clone())
+                .send()
+                .await
+        }) {
+            Ok(response) => {
+                if let Ok(body) = rt.block_on(response.bytes()) {
+                    let cursor = std::io::Cursor::new(body);
+                    if let Ok(reader) = StreamReader::try_new(cursor, None) {
+                        for batch_result in reader {
+                            if let Ok(batch) = batch_result {
+                                total_rows += batch.num_rows();
+                            }
+                        }
+                    }
+                }
+                // Stop clock after full response read + decode
+                total_duration += start.elapsed();
             }
             Err(e) => {
                 eprintln!("Arrow query failed: {}", e);
@@ -143,26 +172,36 @@ fn bench_arrow_query(
 }
 
 /// Benchmark JSON query performance for comparison.
-fn bench_json_query(endpoint: &str, query: &str, iterations: usize) -> (f64, usize, f64) {
+fn bench_json_query(
+    rt: &Runtime,
+    endpoint: &str,
+    query: &str,
+    iterations: usize,
+) -> (f64, usize, f64) {
+    let client = reqwest::Client::new();
     let query_body = serde_json::json!({
         "query": query
     });
-    let query_bytes = serde_json::to_vec(&query_body).unwrap();
+    let query_bytes = serde_json::to_vec(&query_body).expect("serialize query");
 
     let mut total_rows = 0usize;
     let mut total_duration = Duration::ZERO;
 
     for _ in 0..iterations {
         let start = Instant::now();
-        match ureq::post(&format!("{}/_query", endpoint))
-            .header("Content-Type", "application/json")
-            .send(&query_bytes)
-        {
+        match rt.block_on(async {
+            client
+                .post(format!("{}/_query", endpoint))
+                .header("Content-Type", "application/json")
+                .body(query_bytes.clone())
+                .send()
+                .await
+        }) {
             Ok(response) => {
                 let elapsed = start.elapsed();
                 total_duration += elapsed;
 
-                if let Ok(body) = response.into_body().read_to_vec() {
+                if let Ok(body) = rt.block_on(response.bytes()) {
                     if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&body) {
                         if let Some(values) = json.get("values").and_then(|v| v.as_array()) {
                             total_rows += values.len();
@@ -186,7 +225,9 @@ fn bench_json_query(endpoint: &str, query: &str, iterations: usize) -> (f64, usi
 fn main() {
     println!("=== Elasticsearch ES|QL Arrow IPC Benchmarks ===\n");
 
-    if !check_elasticsearch_available() {
+    let rt = Runtime::new().expect("failed to create tokio runtime");
+
+    if !check_elasticsearch_available(&rt) {
         eprintln!("ERROR: Elasticsearch not available at {}", ES_ENDPOINT);
         eprintln!("Please start Elasticsearch:");
         eprintln!("  cd examples/elasticsearch");
@@ -198,16 +239,20 @@ fn main() {
 
     // Setup
     println!("Setting up test index...");
-    reset_index();
+    reset_index(&rt);
 
     let stats = Arc::new(ComponentStats::default());
-    let mut sink = ElasticsearchSink::new(
+    let factory = ElasticsearchSinkFactory::new(
         "bench_arrow".to_string(),
         ES_ENDPOINT.to_string(),
         BENCH_INDEX.to_string(),
         vec![],
+        false,
+        ElasticsearchRequestMode::Buffered,
         stats.clone(),
-    );
+    )
+    .expect("failed to create sink factory");
+    let mut sink = factory.create().expect("failed to create sink");
 
     // Index test data
     let batch_sizes = [1_000, 10_000, 50_000];
@@ -217,7 +262,7 @@ fn main() {
         let batch = generate_log_batch(size);
 
         let start = Instant::now();
-        if let Err(e) = index_batch(&mut sink, &batch) {
+        if let Err(e) = index_batch(&rt, &mut sink, &batch) {
             eprintln!("Failed to index batch: {}", e);
             continue;
         }
@@ -270,7 +315,7 @@ fn main() {
         print!("  Arrow IPC: ");
         std::io::stdout().flush().ok();
         let (arrow_latency, arrow_rows, arrow_throughput) =
-            bench_arrow_query(&sink, &query, iterations);
+            bench_arrow_query(&rt, &query, iterations);
         println!(
             "{:.2} ms avg, {:.0} rows/sec ({} total rows)",
             arrow_latency, arrow_throughput, arrow_rows
@@ -280,7 +325,7 @@ fn main() {
         print!("  JSON:      ");
         std::io::stdout().flush().ok();
         let (json_latency, json_rows, json_throughput) =
-            bench_json_query(ES_ENDPOINT, &query, iterations);
+            bench_json_query(&rt, ES_ENDPOINT, &query, iterations);
         println!(
             "{:.2} ms avg, {:.0} rows/sec ({} total rows)",
             json_latency, json_throughput, json_rows
@@ -296,7 +341,7 @@ fn main() {
 
     // Cleanup
     println!("Cleaning up...");
-    reset_index();
+    reset_index(&rt);
 
     println!("\n=== Benchmark Complete ===");
 }

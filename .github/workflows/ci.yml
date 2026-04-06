@@ -13,6 +13,7 @@ concurrency:
 
 permissions:
   contents: read
+  pull-requests: read  # needed by dorny/paths-filter to list changed files on bot PRs
 
 # Tool versions — bump these to upgrade across all jobs.
 env:
@@ -29,6 +30,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       core: ${{ steps.filter.outputs.core }}
+      tla: ${{ steps.filter.outputs.tla }}
     steps:
       - uses: actions/checkout@v6
       - uses: dorny/paths-filter@61f87a10cd2c304679af17bb73ef192addf33c1c
@@ -37,20 +39,96 @@ jobs:
           filters: |
             core:
               - 'crates/logfwd-core/**'
+            tla:
+              - 'tla/**'
+              - 'crates/logfwd-core/src/pipeline/**'
+              - 'crates/logfwd/src/pipeline.rs'
 
   # -------------------------------------------------------------------------
-  # Fast checks: format, TOML, typos, actionlint — no Rust build, fail fast
+  # Frontend checks — format, lint, typecheck run in parallel via matrix
   # -------------------------------------------------------------------------
-  fast-checks:
-    name: Fast checks (fmt / TOML / typos / actionlint)
+  frontend-checks:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: dashboard
+    strategy:
+      fail-fast: false
+      matrix:
+        check: [format, lint, typecheck]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: dashboard/package-lock.json
+      - run: npm ci
+
+      - name: biome format check
+        if: matrix.check == 'format'
+        run: npx biome check .
+
+      - name: oxlint
+        if: matrix.check == 'lint'
+        run: npx oxlint .
+
+      - name: typecheck
+        if: matrix.check == 'typecheck'
+        uses: actions/cache@v4
+        with:
+          path: dashboard/tsconfig.tsbuildinfo
+          key: tsc-${{ hashFiles('dashboard/src/**/*.ts', 'dashboard/src/**/*.tsx', 'dashboard/tsconfig.app.json') }}
+      - name: run tsgo
+        if: matrix.check == 'typecheck'
+        working-directory: dashboard
+        run: npx tsgo --noEmit
+
+  # -------------------------------------------------------------------------
+  # Frontend tests — vitest with coverage
+  # -------------------------------------------------------------------------
+  frontend-test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: dashboard
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: dashboard/package-lock.json
+      - run: npm ci
+      - name: vitest
+        run: npx vitest run --coverage
+      - name: upload coverage
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage
+          path: dashboard/coverage/
+
+  # -------------------------------------------------------------------------
+  # Lint: fast checks (fmt, TOML, typos, actionlint) then clippy + audits.
+  # Combined into one job to save a runner — fast checks fail-fast before
+  # the expensive clippy build starts.
+  # -------------------------------------------------------------------------
+  lint:
+    name: Lint
     if: github.event_name == 'push' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: write  # needed by rustsec/audit-check@v2 to create check run annotations
     steps:
       - uses: actions/checkout@v6
+      - uses: ./.github/actions/build-dashboard
+      - uses: mozilla-actions/sccache-action@v0.0.9
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt
+          components: clippy, rustfmt
 
       - name: Format check
         run: cargo fmt --check
@@ -72,21 +150,7 @@ jobs:
       - name: Actionlint
         run: ./actionlint
 
-  # -------------------------------------------------------------------------
-  # Clippy + dependency audits (needs a Rust build, runs in parallel with tests)
-  # -------------------------------------------------------------------------
-  lint:
-    name: Lint (clippy / deny / audit)
-    if: github.event_name == 'push' || github.event.pull_request.draft == false
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: ./.github/actions/build-dashboard
-      - uses: mozilla-actions/sccache-action@v0.0.9
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
+      # --- Expensive steps below — only reached if fast checks pass ---
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -151,25 +215,13 @@ jobs:
           RUSTC_WRAPPER: ""
 
   # -------------------------------------------------------------------------
-  # Build checks — release + cross-compile as a matrix (one job definition)
+  # Build check — aarch64 cross-compile only (release check removed:
+  # clippy already does a full debug build that catches the same errors)
   # -------------------------------------------------------------------------
   build-check:
-    name: Build check (${{ matrix.name }})
+    name: Build check (aarch64)
     if: github.event_name == 'push' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        include:
-          - name: release
-            extra_targets: ""
-            apt: ""
-            linker: ""
-            cargo_args: "--release"
-          - name: aarch64
-            extra_targets: "aarch64-unknown-linux-gnu"
-            apt: "gcc-aarch64-linux-gnu libc6-dev-arm64-cross"
-            linker: "aarch64-linux-gnu-gcc"
-            cargo_args: "--target aarch64-unknown-linux-gnu"
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/build-dashboard
@@ -177,23 +229,22 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.extra_targets }}
+          targets: aarch64-unknown-linux-gnu
 
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/master' }}
-          key: ${{ matrix.name }}
+          key: aarch64
 
       - name: Install cross-compilation toolchain
-        if: matrix.apt != ''
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ${{ matrix.apt }}
+          sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross
 
       - name: Check
-        run: cargo check ${{ matrix.cargo_args }}
+        run: cargo check --target aarch64-unknown-linux-gnu
         env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.linker }}
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
 
   # -------------------------------------------------------------------------
   # Kani formal verification
@@ -206,7 +257,7 @@ jobs:
       (github.event_name == 'push' && github.ref == 'refs/heads/master') ||
       (github.event.pull_request.draft == false && needs.changes.outputs.core == 'true')
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
 
@@ -216,3 +267,67 @@ jobs:
           args: -p logfwd-core -Z function-contracts -Z mem-predicates -Z stubbing
         env:
           RUSTC_WRAPPER: ""
+
+  # -------------------------------------------------------------------------
+  # Turmoil deterministic simulation
+  # -------------------------------------------------------------------------
+  turmoil:
+    name: Turmoil simulation
+    needs: [changes]
+    if: |
+      (github.event_name == 'push' && github.ref == 'refs/heads/master') ||
+      (github.event.pull_request.draft == false)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: mozilla-actions/sccache-action@v0.0.9
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+      - name: Turmoil simulation tests
+        run: cargo test -p logfwd --features turmoil --test turmoil_sim
+
+  # -------------------------------------------------------------------------
+  # TLC: TLA+ model checking for all specs
+  # -------------------------------------------------------------------------
+  tlc:
+    name: TLA+ model checking
+    needs: [changes]
+    if: |
+      (github.event_name == 'push' && github.ref == 'refs/heads/master') ||
+      (github.event.pull_request.draft == false && needs.changes.outputs.tla == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Download tla2tools.jar
+        run: |
+          mkdir -p /tmp/tla
+          curl -sL https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar -o /tmp/tla/tla2tools.jar
+
+      - name: PipelineMachine — safety
+        run: java -cp /tmp/tla/tla2tools.jar tlc2.TLC tla/MCPipelineMachine.tla -config tla/PipelineMachine.cfg -workers auto
+
+      - name: PipelineMachine — liveness
+        run: java -cp /tmp/tla/tla2tools.jar tlc2.TLC tla/MCPipelineMachine.tla -config tla/PipelineMachine.liveness.cfg -workers auto
+
+      - name: ShutdownProtocol — safety
+        run: java -cp /tmp/tla/tla2tools.jar tlc2.TLC tla/MCShutdownProtocol.tla -config tla/ShutdownProtocol.cfg -workers auto
+
+      - name: ShutdownProtocol — liveness
+        run: java -cp /tmp/tla/tla2tools.jar tlc2.TLC tla/MCShutdownProtocol.tla -config tla/ShutdownProtocol.liveness.cfg -workers auto
+
+      - name: PipelineBatch — safety
+        run: java -cp /tmp/tla/tla2tools.jar tlc2.TLC tla/MCPipelineBatch.tla -config tla/PipelineBatch.cfg -workers auto
+
+      - name: PipelineBatch — liveness
+        run: java -cp /tmp/tla/tla2tools.jar tlc2.TLC tla/MCPipelineBatch.tla -config tla/PipelineBatch.liveness.cfg -workers auto

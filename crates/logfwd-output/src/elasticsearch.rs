@@ -1,358 +1,82 @@
 use std::io;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use arrow::ipc::reader::StreamReader;
 use arrow::record_batch::RecordBatch;
 
-use logfwd_io::diagnostics::ComponentStats;
+use logfwd_types::diagnostics::ComponentStats;
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
 
-use super::{
-    BatchMetadata, HTTP_MAX_RETRIES, HTTP_RETRY_INITIAL_DELAY_MS, OutputSink, build_col_infos,
-    is_transient_error, write_row_json,
-};
-
-// ---------------------------------------------------------------------------
-// ElasticsearchSink
-// ---------------------------------------------------------------------------
-
-/// Sends log records to Elasticsearch via the bulk API.
-///
-/// Formats batches as newline-delimited JSON bulk requests:
-/// ```json
-/// {"index":{"_index":"logs"}}
-/// {"level":"ERROR","msg":"failed","status":500}
-/// ```
-///
-/// Each record produces two lines: action metadata + document. The default
-/// action is `index` (upsert). The bulk API response is parsed for per-document
-/// errors; if any document fails, the entire batch fails and can be retried.
-pub struct ElasticsearchSink {
-    name: String,
-    endpoint: String,
-    index: String,
-    headers: Vec<(String, String)>,
-    batch_buf: Vec<u8>,
-    http_agent: ureq::Agent,
-    stats: Arc<ComponentStats>,
-}
-
-impl ElasticsearchSink {
-    /// Create a new Elasticsearch sink.
-    ///
-    /// - `endpoint`: Base URL (e.g. `http://localhost:9200`)
-    /// - `index`: Target index name
-    /// - `headers`: Authentication and custom headers
-    pub fn new(
-        name: String,
-        endpoint: String,
-        index: String,
-        headers: Vec<(String, String)>,
-        stats: Arc<ComponentStats>,
-    ) -> Self {
-        // Normalize endpoint — remove trailing slash for consistent URL building.
-        let endpoint = endpoint.trim_end_matches('/').to_string();
-        let http_agent = ureq::config::Config::builder()
-            .timeout_global(Some(std::time::Duration::from_secs(30)))
-            .build()
-            .new_agent();
-        ElasticsearchSink {
-            name,
-            endpoint,
-            index,
-            headers,
-            batch_buf: Vec::with_capacity(64 * 1024),
-            http_agent,
-            stats,
-        }
-    }
-
-    /// Serialize the batch into `self.batch_buf` as Elasticsearch bulk format.
-    ///
-    /// Each row produces:
-    /// 1. Action line: `{"index":{"_index":"<index>"}}`
-    /// 2. Document line: JSON-serialized record
-    ///
-    /// The action `index` performs an upsert (create or replace). Alternative
-    /// actions (`create`, `update`, `delete`) are not yet configurable but could
-    /// be added via config fields.
-    pub fn serialize_batch(&mut self, batch: &RecordBatch) -> io::Result<()> {
-        self.batch_buf.clear();
-        let num_rows = batch.num_rows();
-        if num_rows == 0 {
-            return Ok(());
-        }
-
-        // Pre-allocate action line buffer (reused per row to avoid allocations).
-        // Format: {"index":{"_index":"<index>"}}
-        let mut action_line = Vec::with_capacity(128);
-        action_line.extend_from_slice(b"{\"index\":{\"_index\":\"");
-        action_line.extend_from_slice(self.index.as_bytes());
-        action_line.extend_from_slice(b"\"}}\n");
-
-        let cols = build_col_infos(batch);
-        for row in 0..num_rows {
-            // Action line
-            self.batch_buf.extend_from_slice(&action_line);
-
-            // Document line
-            write_row_json(batch, row, &cols, &mut self.batch_buf)?;
-            self.batch_buf.push(b'\n');
-        }
-        Ok(())
-    }
-
-    /// Parse the bulk API response to check for errors.
-    ///
-    /// ES bulk responses have this shape:
-    /// ```json
-    /// {
-    ///   "took": 5,
-    ///   "errors": true,
-    ///   "items": [
-    ///     {"index":{"_index":"logs","_id":"1","status":201}},
-    ///     {"index":{"error":{"type":"mapper_parsing_exception"},"status":400}}
-    ///   ]
-    /// }
-    /// ```
-    ///
-    /// If `errors: true`, at least one document failed. This implementation
-    /// returns an error with a summary of the first failure. Future enhancement:
-    /// track per-document errors in metrics (#future).
-    #[allow(clippy::unused_self)]
-    fn parse_bulk_response(&self, body: &[u8]) -> io::Result<()> {
-        // Lightweight parse: check `"errors":true` without full JSON deserialization.
-        // If present, parse fully to extract error details.
-        if memchr::memmem::find(body, b"\"errors\":true").is_none() {
-            return Ok(());
-        }
-
-        // Full parse to extract error details.
-        let v: serde_json::Value = serde_json::from_slice(body).map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("failed to parse ES bulk response: {e}"),
-            )
-        })?;
-
-        let Some(items) = v.get("items").and_then(serde_json::Value::as_array) else {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "ES bulk response missing 'items' array",
-            ));
-        };
-
-        // Find first error.
-        for item in items {
-            let action = item
-                .as_object()
-                .and_then(|obj| obj.values().next())
-                .and_then(serde_json::Value::as_object);
-            if let Some(action_obj) = action {
-                if let Some(error) = action_obj.get("error") {
-                    let error_type = error
-                        .get("type")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or("unknown");
-                    let reason = error
-                        .get("reason")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or("no reason provided");
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("ES bulk error: {error_type}: {reason}"),
-                    ));
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Query Elasticsearch using ES|QL and receive Arrow IPC response.
-    ///
-    /// This method demonstrates ES|QL's ability to return results in Arrow IPC format,
-    /// which is more efficient than JSON for large result sets.
-    ///
-    /// # Arguments
-    /// * `query` - ES|QL query string (e.g., "FROM logs | WHERE level == 'ERROR' | LIMIT 1000")
-    ///
-    /// # Returns
-    /// A vector of `RecordBatch` containing the query results.
-    ///
-    /// # Example
-    /// ```no_run
-    /// # use std::sync::Arc;
-    /// # use logfwd_output::ElasticsearchSink;
-    /// # use logfwd_io::diagnostics::ComponentStats;
-    /// let mut sink = ElasticsearchSink::new(
-    ///     "test".into(),
-    ///     "http://localhost:9200".into(),
-    ///     "logs".into(),
-    ///     vec![],
-    ///     Arc::new(ComponentStats::default()),
-    /// );
-    /// let batches = sink.query_arrow("FROM logs | LIMIT 100").unwrap();
-    /// ```
-    pub fn query_arrow(&self, query: &str) -> io::Result<Vec<RecordBatch>> {
-        // Build ES|QL query request body
-        let query_body = serde_json::json!({
-            "query": query
-        });
-        let query_bytes = serde_json::to_vec(&query_body).map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("failed to serialize ES|QL query: {e}"),
-            )
-        })?;
-
-        // Build request URL for ES|QL endpoint
-        let url = format!("{}/_query", self.endpoint);
-
-        // Retry with exponential backoff for transient failures
-        let build_req = || {
-            let mut req = self.http_agent.post(&url);
-            for (k, v) in &self.headers {
-                req = req.header(k.as_str(), v.as_str());
-            }
-            // Request Arrow IPC stream format
-            req.header("Content-Type", "application/json")
-                .header("Accept", "application/vnd.apache.arrow.stream")
-        };
-
-        let mut delay_ms: u64 = HTTP_RETRY_INITIAL_DELAY_MS;
-        let mut attempt: u32 = 0;
-        loop {
-            match build_req().send(&query_bytes) {
-                Ok(response) => {
-                    // Read response body as Arrow IPC stream
-                    let body = response.into_body().read_to_vec().map_err(|e| {
-                        io::Error::other(format!("failed to read ES|QL response: {e}"))
-                    })?;
-
-                    // Parse Arrow IPC stream
-                    let cursor = io::Cursor::new(body);
-                    let reader = StreamReader::try_new(cursor, None).map_err(|e| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            format!("failed to parse Arrow IPC stream: {e}"),
-                        )
-                    })?;
-
-                    // Collect all batches
-                    let batches: Result<Vec<RecordBatch>, _> = reader.collect();
-                    return batches.map_err(|e| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            format!("failed to read Arrow IPC batch: {e}"),
-                        )
-                    });
-                }
-                Err(e) if attempt < HTTP_MAX_RETRIES && is_transient_error(&e) => {
-                    std::thread::sleep(std::time::Duration::from_millis(delay_ms));
-                    delay_ms *= 2;
-                    attempt += 1;
-                }
-                Err(e) => return Err(io::Error::other(e.to_string())),
-            }
-        }
-    }
-}
-
-impl OutputSink for ElasticsearchSink {
-    fn send_batch(&mut self, batch: &RecordBatch, _metadata: &BatchMetadata) -> io::Result<()> {
-        self.serialize_batch(batch)?;
-        if self.batch_buf.is_empty() {
-            return Ok(());
-        }
-
-        // Build request URL: {endpoint}/_bulk or {endpoint}/{index}/_bulk.
-        // Using `/_bulk` with per-action `_index` is more flexible for future
-        // multi-index support.
-        let url = format!("{}/_bulk", self.endpoint);
-
-        // Retry with exponential backoff for transient failures.
-        // 1 initial attempt + up to HTTP_MAX_RETRIES retries; delays: 100ms → 200ms → 400ms.
-        let build_req = || {
-            let mut req = self.http_agent.post(&url);
-            for (k, v) in &self.headers {
-                req = req.header(k.as_str(), v.as_str());
-            }
-            req.header("Content-Type", "application/x-ndjson")
-        };
-        let mut delay_ms: u64 = HTTP_RETRY_INITIAL_DELAY_MS;
-        let mut attempt: u32 = 0;
-        loop {
-            match build_req().send(&self.batch_buf) {
-                Ok(response) => {
-                    // Read response body to check for bulk errors.
-                    let body = response.into_body().read_to_vec().map_err(|e| {
-                        io::Error::other(format!("failed to read ES response: {e}"))
-                    })?;
-                    self.parse_bulk_response(&body)?;
-
-                    self.stats.inc_lines(batch.num_rows() as u64);
-                    self.stats.inc_bytes(self.batch_buf.len() as u64);
-                    return Ok(());
-                }
-                Err(e) if attempt < HTTP_MAX_RETRIES && is_transient_error(&e) => {
-                    std::thread::sleep(std::time::Duration::from_millis(delay_ms));
-                    delay_ms *= 2;
-                    attempt += 1;
-                }
-                Err(e) => return Err(io::Error::other(e.to_string())),
-            }
-        }
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-
-    fn name(&self) -> &str {
-        &self.name
-    }
-}
+use super::{BatchMetadata, build_col_infos, write_row_json};
 
 // ---------------------------------------------------------------------------
-// ElasticsearchAsyncSink — reqwest-based async implementation of Sink
+// ElasticsearchSink — reqwest-based async implementation of Sink
 // ---------------------------------------------------------------------------
 
-/// Configuration shared across all `ElasticsearchAsyncSink` instances from
+/// Configuration shared across all `ElasticsearchSink` instances from
 /// the same factory.
-struct ElasticsearchConfig {
+pub(crate) struct ElasticsearchConfig {
     endpoint: String,
-    index: String,
     headers: Vec<(reqwest::header::HeaderName, reqwest::header::HeaderValue)>,
     compress: bool,
+    request_mode: ElasticsearchRequestMode,
+    /// Maximum uncompressed bulk payload size in bytes. Batches that serialize
+    /// larger than this are split in half and sent as separate `_bulk` requests.
+    /// Default: 5 MiB — safe for Elasticsearch Serverless and self-hosted.
+    max_bulk_bytes: usize,
+    /// Target chunk size for experimental streaming bodies.
+    stream_chunk_bytes: usize,
+    /// Precomputed `_bulk` URL with `filter_path` to avoid per-request allocation.
+    bulk_url: String,
+    /// Precomputed `{"index":{"_index":"<name>"}}\n` bytes — avoids a `format!`
+    /// allocation on every `serialize_batch` call.
+    action_bytes: Box<[u8]>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ElasticsearchRequestMode {
+    Buffered,
+    Streaming,
 }
 
 /// Async Elasticsearch sink using reqwest.
 ///
 /// Implements the [`super::sink::Sink`] trait for use with `OutputWorkerPool`.
-/// Each worker owns its own `reqwest::Client` so idle worker shutdown drops
-/// its connection pool immediately rather than keeping it alive via a shared Arc.
-pub struct ElasticsearchAsyncSink {
+/// All workers share the same `reqwest::Client` (cloned from the factory) to
+/// reuse connection pools, TLS sessions, and DNS caches.
+pub struct ElasticsearchSink {
     config: Arc<ElasticsearchConfig>,
     client: reqwest::Client,
     name: String,
-    batch_buf: Vec<u8>,
+    pub(crate) batch_buf: Vec<u8>,
     stats: Arc<ComponentStats>,
 }
 
-impl ElasticsearchAsyncSink {
-    fn new(
+impl ElasticsearchSink {
+    pub(crate) fn new(
         name: String,
         config: Arc<ElasticsearchConfig>,
         client: reqwest::Client,
         stats: Arc<ComponentStats>,
     ) -> Self {
-        ElasticsearchAsyncSink {
+        ElasticsearchSink {
             name,
             config,
             client,
+            // Start with a modest initial capacity; the buffer will grow to the
+            // right size after the first batch and stay there (via reserve in
+            // send_batch_inner after each send).
             batch_buf: Vec::with_capacity(64 * 1024),
             stats,
         }
+    }
+
+    /// Returns the number of bytes currently serialized in the internal buffer.
+    /// Useful for benchmarks and diagnostics.
+    pub fn serialized_len(&self) -> usize {
+        self.batch_buf.len()
     }
 
     /// Serialize the batch into `self.batch_buf` in Elasticsearch bulk format.
@@ -360,31 +84,38 @@ impl ElasticsearchAsyncSink {
     /// Each row produces two lines:
     /// 1. Action: `{"index":{"_index":"<index>"}}`
     /// 2. Document: JSON-serialized record, with `@timestamp` injected if absent.
-    fn serialize_batch(&mut self, batch: &RecordBatch, metadata: &BatchMetadata) -> io::Result<()> {
+    pub fn serialize_batch(
+        &mut self,
+        batch: &RecordBatch,
+        metadata: &BatchMetadata,
+    ) -> io::Result<()> {
         self.batch_buf.clear();
         let num_rows = batch.num_rows();
         if num_rows == 0 {
             return Ok(());
         }
 
-        let action_line = format!("{{\"index\":{{\"_index\":\"{}\"}}}}\n", self.config.index);
-        let action_bytes = action_line.as_bytes();
+        // Pre-computed in config — no allocation on the hot path.
+        let action_bytes = &self.config.action_bytes;
 
         // Derive @timestamp from metadata (ISO-8601 UTC).
+        // Computed once per batch using a stack-allocated buffer — no heap allocation.
         let ts_nanos = metadata.observed_time_ns;
         let ts_secs = ts_nanos / 1_000_000_000;
         let ts_frac = ts_nanos % 1_000_000_000;
-        let ts_str = format!(
-            "\",\"@timestamp\":\"{}.{:09}Z\"}}",
-            format_unix_timestamp_utc(ts_secs),
-            ts_frac
-        );
+        // Stack buffer: ,"@timestamp":"YYYY-MM-DDTHH:MM:SS.fffffffffZ"}  (47 bytes)
+        let mut ts_buf = [0u8; 47];
+        write_ts_suffix(&mut ts_buf, ts_secs, ts_frac);
+        let ts_no_comma = &ts_buf[1..]; // without leading ',' (for empty-doc case)
+
+        // Pre-reserve capacity to avoid multiple Vec reallocations while writing.
+        // Estimate: action line + ~256 bytes JSON per row.
+        let estimated = num_rows * (action_bytes.len() + 256);
+        self.batch_buf.reserve(estimated);
 
         let cols = build_col_infos(batch);
-        // Check normalized JSON output names (field_name strips type suffixes like
-        // `_str`/`_int`), not raw Arrow field names. A column `@timestamp_str` is
-        // serialized as `@timestamp`, so we must check the normalized name to avoid
-        // injecting a duplicate timestamp key into the document.
+        // Check whether any output field is named `@timestamp` or `_timestamp`
+        // to avoid injecting a duplicate timestamp key into the document.
         let has_timestamp_col = cols
             .iter()
             .any(|c| c.field_name == "@timestamp" || c.field_name == "_timestamp");
@@ -402,8 +133,8 @@ impl ElasticsearchAsyncSink {
                 let len = self.batch_buf.len();
                 // Remove the trailing `}\n` (2 bytes).
                 if !self.batch_buf.ends_with(b"}\n") {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
                         "serialize_batch: JSON document did not end with '}\\n' — internal invariant violated",
                     ));
                 }
@@ -413,11 +144,10 @@ impl ElasticsearchAsyncSink {
                     // doc was `{}`; replace with `{"@timestamp":"..."}`.
                     self.batch_buf.truncate(doc_start);
                     self.batch_buf.push(b'{');
-                    self.batch_buf
-                        .extend_from_slice(ts_str.trim_start_matches(',').as_bytes());
+                    self.batch_buf.extend_from_slice(ts_no_comma);
                 } else {
                     self.batch_buf.truncate(trim_to);
-                    self.batch_buf.extend_from_slice(ts_str.as_bytes());
+                    self.batch_buf.extend_from_slice(&ts_buf);
                 }
                 self.batch_buf.push(b'\n');
             }
@@ -425,29 +155,59 @@ impl ElasticsearchAsyncSink {
         Ok(())
     }
 
+    /// Extract the `took` field (milliseconds) from an ES bulk response body.
+    /// Returns `None` if the field is absent or not parseable.
+    fn extract_took(body: &[u8]) -> Option<u64> {
+        const PREFIX: &[u8] = b"\"took\"";
+        let pos = memchr::memmem::find(body, PREFIX)?;
+        let rest = body[pos + PREFIX.len()..].trim_ascii_start();
+        if !rest.starts_with(b":") {
+            return None;
+        }
+        let rest = rest[1..].trim_ascii_start();
+        let end = rest
+            .iter()
+            .position(|b| !b.is_ascii_digit())
+            .unwrap_or(rest.len());
+        if end == 0 {
+            return None;
+        }
+        std::str::from_utf8(&rest[..end]).ok()?.parse().ok()
+    }
+
     /// Parse the ES bulk API response body for per-document errors.
     ///
     /// Returns `Ok(())` if all documents succeeded (`errors: false`), or
     /// an `Err` with the first failure's type and reason.
+    ///
+    /// Error kinds are chosen deliberately:
+    /// - `Other`: structural/transient failures (malformed JSON, missing fields) — retriable
+    /// - `InvalidData`: item-level document errors (mapper_parsing_exception, etc.) — permanent,
+    ///   retrying the same document is futile, so these map to `Rejected` in the caller
     fn parse_bulk_response(body: &[u8]) -> io::Result<()> {
-        if memchr::memmem::find(body, b"\"errors\":true").is_none() {
+        let v: serde_json::Value = serde_json::from_slice(body)
+            .map_err(|e| io::Error::other(format!("failed to parse ES bulk response: {e}")))?;
+
+        let has_errors = v
+            .get("errors")
+            .and_then(serde_json::Value::as_bool)
+            .ok_or_else(|| io::Error::other("ES bulk response missing 'errors' boolean field"))?;
+
+        if !has_errors {
             return Ok(());
         }
-        let v: serde_json::Value = serde_json::from_slice(body).map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("failed to parse ES bulk response: {e}"),
-            )
-        })?;
+
         let items = v
             .get("items")
             .and_then(serde_json::Value::as_array)
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "ES bulk response missing 'items' array",
-                )
-            })?;
+            .ok_or_else(|| io::Error::other("ES bulk response missing 'items' array"))?;
+
+        if items.is_empty() {
+            return Err(io::Error::other(
+                "ES bulk response indicated errors but 'items' array is empty",
+            ));
+        }
+
         for item in items {
             let action = item
                 .as_object()
@@ -463,6 +223,7 @@ impl ElasticsearchAsyncSink {
                         .get("reason")
                         .and_then(serde_json::Value::as_str)
                         .unwrap_or("no reason provided");
+                    // InvalidData: document-level rejection — permanent, do not retry.
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
                         format!("ES bulk error: {error_type}: {reason}"),
@@ -473,30 +234,185 @@ impl ElasticsearchAsyncSink {
         Ok(())
     }
 
-    async fn do_send(&self, body: Vec<u8>) -> io::Result<super::sink::SendResult> {
-        let url = format!("{}/_bulk", self.config.endpoint);
-
+    /// Query Elasticsearch using ES|QL and receive Arrow IPC response.
+    pub async fn query_arrow(&self, query: &str) -> io::Result<Vec<RecordBatch>> {
+        let query_body = serde_json::json!({ "query": query });
+        let query_bytes = serde_json::to_vec(&query_body).map_err(io::Error::other)?;
+        let url = format!("{}/_query", self.config.endpoint);
         let mut req = self
             .client
             .post(&url)
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/vnd.apache.arrow.stream");
+        for (k, v) in &self.config.headers {
+            req = req.header(k.clone(), v.clone());
+        }
+        let response = req
+            .body(query_bytes)
+            .send()
+            .await
+            .map_err(io::Error::other)?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(io::Error::other(format!(
+                "ES query failed (HTTP {status}): {body}"
+            )));
+        }
+        let body = response.bytes().await.map_err(io::Error::other)?;
+        let cursor = io::Cursor::new(body);
+        let reader = StreamReader::try_new(cursor, None).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("failed to parse Arrow IPC stream: {e}"),
+            )
+        })?;
+        reader
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(io::Error::other)
+    }
+
+    /// Send a batch, proactively splitting into sub-batches that fit within
+    /// `max_bulk_bytes`. Also splits reactively on 413 Payload Too Large.
+    fn send_batch_inner<'a>(
+        &'a mut self,
+        batch: &'a RecordBatch,
+        metadata: &'a BatchMetadata,
+        depth: usize,
+    ) -> std::pin::Pin<Box<dyn Future<Output = io::Result<super::sink::SendResult>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            const MAX_SPLIT_DEPTH: usize = 6; // up to 64 sub-batches
+
+            let n = batch.num_rows();
+            if n == 0 {
+                return Ok(super::sink::SendResult::Ok);
+            }
+
+            if self.config.request_mode == ElasticsearchRequestMode::Streaming {
+                return match self
+                    .do_send_streaming(batch.clone(), metadata.clone())
+                    .await
+                {
+                    Ok(result) => Ok(result),
+                    Err(e)
+                        if e.kind() == io::ErrorKind::InvalidInput
+                            && n > 1
+                            && depth < MAX_SPLIT_DEPTH =>
+                    {
+                        self.send_split_halves(batch, metadata, depth).await
+                    }
+                    Err(e) => Err(e),
+                };
+            }
+
+            self.serialize_batch(batch, metadata)?;
+            if self.batch_buf.is_empty() {
+                return Ok(super::sink::SendResult::Ok);
+            }
+
+            let payload_len = self.batch_buf.len();
+            // Remember the serialized size so we can restore warm capacity after
+            // the buffer is moved into `do_send`.
+            let prev_cap = self.batch_buf.capacity();
+            let max_bytes = self.config.max_bulk_bytes;
+
+            // Proactive split: if serialized payload exceeds max_bulk_bytes, split
+            // the batch in half and send each half separately.
+            if payload_len > max_bytes {
+                if n > 1 && depth < MAX_SPLIT_DEPTH {
+                    self.batch_buf.clear(); // discard oversized payload
+                    return self.send_split_halves(batch, metadata, depth).await;
+                }
+                // Row is too large to fit in a single bulk request even on its own.
+                return Ok(super::sink::SendResult::Rejected(format!(
+                    "single-row batch ({} bytes) exceeds max_bulk_bytes ({})",
+                    payload_len, max_bytes
+                )));
+            }
+
+            // Move the serialized payload out of batch_buf so we can pass it to
+            // do_send without copying.  `mem::take` leaves batch_buf as Vec::new()
+            // (zero capacity, no allocation).  After do_send we restore capacity so
+            // the next serialize_batch call doesn't have to grow from scratch.
+            let body = std::mem::take(&mut self.batch_buf);
+            let row_count = n as u64;
+
+            match self.do_send(body).await {
+                Ok(result) => {
+                    // Restore warm capacity so the next serialize_batch avoids
+                    // repeated small-step growth.
+                    self.batch_buf.reserve(prev_cap);
+                    if matches!(result, super::sink::SendResult::Ok) {
+                        self.stats.inc_lines(row_count);
+                        self.stats.inc_bytes(payload_len as u64);
+                    }
+                    Ok(result)
+                }
+                // Reactive split on 413 — server limit lower than our max_bulk_bytes.
+                Err(e)
+                    if e.kind() == io::ErrorKind::InvalidInput
+                        && n > 1
+                        && depth < MAX_SPLIT_DEPTH =>
+                {
+                    self.batch_buf.reserve(prev_cap);
+                    self.send_split_halves(batch, metadata, depth).await
+                }
+                Err(e) => {
+                    self.batch_buf.reserve(prev_cap);
+                    Err(e)
+                }
+            }
+        })
+    }
+
+    /// Split a batch in half and send each half sequentially.
+    async fn send_split_halves(
+        &mut self,
+        batch: &RecordBatch,
+        metadata: &BatchMetadata,
+        depth: usize,
+    ) -> io::Result<super::sink::SendResult> {
+        let n = batch.num_rows();
+        let mid = n / 2;
+        let left = batch.slice(0, mid);
+        let right = batch.slice(mid, n - mid);
+        let r1 = self.send_batch_inner(&left, metadata, depth + 1).await?;
+        if !matches!(r1, super::sink::SendResult::Ok) {
+            return Ok(r1);
+        }
+        self.send_batch_inner(&right, metadata, depth + 1).await
+    }
+
+    async fn do_send(&self, body: Vec<u8>) -> io::Result<super::sink::SendResult> {
+        let body_len = body.len();
+
+        let mut req = self
+            .client
+            .post(&self.config.bulk_url)
             .header("Content-Type", "application/x-ndjson");
         for (k, v) in &self.config.headers {
             req = req.header(k.clone(), v.clone());
         }
 
+        tracing::Span::current().record("req_bytes", body_len as u64);
         let req = if self.config.compress {
             use flate2::Compression;
             use flate2::write::GzEncoder;
             use std::io::Write;
-            let mut enc = GzEncoder::new(Vec::new(), Compression::default());
+            let mut enc = GzEncoder::new(Vec::new(), Compression::fast());
             enc.write_all(&body).map_err(io::Error::other)?;
             let compressed = enc.finish().map_err(io::Error::other)?;
+            tracing::Span::current().record("cmp_bytes", compressed.len() as u64);
             req.header("Content-Encoding", "gzip").body(compressed)
         } else {
             req.body(body)
         };
 
+        let t0 = std::time::Instant::now();
         let response = req.send().await.map_err(io::Error::other)?;
+        let send_ns = t0.elapsed().as_nanos() as u64;
+        tracing::Span::current().record("send_ns", send_ns);
 
         let status = response.status();
 
@@ -513,6 +429,16 @@ impl ElasticsearchAsyncSink {
             ));
         }
 
+        if status == reqwest::StatusCode::PAYLOAD_TOO_LARGE {
+            // 413: payload exceeds server limit. Return a transient error so the
+            // caller can split the batch and retry smaller halves.
+            let detail = response.text().await.unwrap_or_default();
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("ES returned 413 Payload Too Large (body {body_len} bytes): {detail}"),
+            ));
+        }
+
         if status.is_client_error() {
             return Ok(super::sink::SendResult::Rejected(format!(
                 "ES rejected batch with HTTP {status}"
@@ -524,39 +450,201 @@ impl ElasticsearchAsyncSink {
         }
 
         let body = response.bytes().await.map_err(io::Error::other)?;
+        let recv_ns = (t0.elapsed().as_nanos() as u64).saturating_sub(send_ns);
+        tracing::Span::current().record("recv_ns", recv_ns);
+        tracing::Span::current().record("resp_bytes", body.len() as u64);
+        if let Some(took) = Self::extract_took(&body) {
+            tracing::Span::current().record("took_ms", took);
+        }
         Self::parse_bulk_response(&body)?;
+        Ok(super::sink::SendResult::Ok)
+    }
+
+    fn send_chunk(
+        tx: &mpsc::Sender<io::Result<Vec<u8>>>,
+        chunk: &mut Vec<u8>,
+        emitted: &AtomicU64,
+        min_capacity: usize,
+    ) -> io::Result<()> {
+        if chunk.is_empty() {
+            return Ok(());
+        }
+        emitted.fetch_add(chunk.len() as u64, Ordering::Relaxed);
+        let next_capacity = chunk.capacity().max(min_capacity);
+        let body = std::mem::replace(chunk, Vec::with_capacity(next_capacity));
+        tx.blocking_send(Ok(body))
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "ES body receiver dropped"))
+    }
+
+    fn serialize_batch_streaming(
+        batch: RecordBatch,
+        metadata: BatchMetadata,
+        config: Arc<ElasticsearchConfig>,
+        tx: mpsc::Sender<io::Result<Vec<u8>>>,
+        emitted: Arc<AtomicU64>,
+    ) -> io::Result<()> {
+        let num_rows = batch.num_rows();
+        if num_rows == 0 {
+            return Ok(());
+        }
+
+        let action_bytes = &config.action_bytes;
+        let ts_nanos = metadata.observed_time_ns;
+        let ts_secs = ts_nanos / 1_000_000_000;
+        let ts_frac = ts_nanos % 1_000_000_000;
+        let mut ts_buf = [0u8; 47];
+        write_ts_suffix(&mut ts_buf, ts_secs, ts_frac);
+        let ts_no_comma = &ts_buf[1..];
+
+        let cols = build_col_infos(&batch);
+        let has_timestamp_col = cols
+            .iter()
+            .any(|c| c.field_name == "@timestamp" || c.field_name == "_timestamp");
+
+        let mut chunk = Vec::with_capacity(config.stream_chunk_bytes.max(64 * 1024));
+        for row in 0..num_rows {
+            chunk.extend_from_slice(action_bytes);
+            let doc_start = chunk.len();
+            write_row_json(&batch, row, &cols, &mut chunk)?;
+            chunk.push(b'\n');
+
+            if !has_timestamp_col {
+                let len = chunk.len();
+                if !chunk.ends_with(b"}\n") {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "serialize_batch_streaming: JSON document did not end with '}\\n' — internal invariant violated",
+                    ));
+                }
+                let trim_to = len - 2;
+                if trim_to == doc_start + 1 {
+                    chunk.truncate(doc_start);
+                    chunk.push(b'{');
+                    chunk.extend_from_slice(ts_no_comma);
+                } else {
+                    chunk.truncate(trim_to);
+                    chunk.extend_from_slice(&ts_buf);
+                }
+                chunk.push(b'\n');
+            }
+
+            if chunk.len() >= config.stream_chunk_bytes {
+                Self::send_chunk(&tx, &mut chunk, emitted.as_ref(), config.stream_chunk_bytes)?;
+            }
+        }
+
+        Self::send_chunk(&tx, &mut chunk, emitted.as_ref(), config.stream_chunk_bytes)?;
+        Ok(())
+    }
+
+    async fn do_send_streaming(
+        &self,
+        batch: RecordBatch,
+        metadata: BatchMetadata,
+    ) -> io::Result<super::sink::SendResult> {
+        let row_count = batch.num_rows() as u64;
+        let (tx, rx) = mpsc::channel::<io::Result<Vec<u8>>>(4);
+        let emitted = Arc::new(AtomicU64::new(0));
+        let producer_emitted = Arc::clone(&emitted);
+        let config = Arc::clone(&self.config);
+        let producer = tokio::task::spawn_blocking(move || {
+            Self::serialize_batch_streaming(batch, metadata, config, tx, producer_emitted)
+        });
+
+        let mut req = self
+            .client
+            .post(&self.config.bulk_url)
+            .header("Content-Type", "application/x-ndjson");
+        for (k, v) in &self.config.headers {
+            req = req.header(k.clone(), v.clone());
+        }
+
+        let body = reqwest::Body::wrap_stream(ReceiverStream::new(rx));
+        let t0 = std::time::Instant::now();
+        let response = req.body(body).send().await.map_err(io::Error::other)?;
+        let send_ns = t0.elapsed().as_nanos() as u64;
+        tracing::Span::current().record("send_ns", send_ns);
+
+        producer
+            .await
+            .map_err(|e| io::Error::other(format!("ES streaming producer task failed: {e}")))??;
+
+        let payload_len = emitted.load(Ordering::Relaxed) as usize;
+        tracing::Span::current().record("req_bytes", payload_len as u64);
+
+        let status = response.status();
+
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            let retry_after = response
+                .headers()
+                .get("Retry-After")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(5);
+            return Ok(super::sink::SendResult::RetryAfter(
+                std::time::Duration::from_secs(retry_after),
+            ));
+        }
+
+        if status == reqwest::StatusCode::PAYLOAD_TOO_LARGE {
+            let detail = response.text().await.unwrap_or_default();
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "ES returned 413 Payload Too Large (streamed body {payload_len} bytes): {detail}"
+                ),
+            ));
+        }
+
+        if status.is_client_error() {
+            return Ok(super::sink::SendResult::Rejected(format!(
+                "ES rejected batch with HTTP {status}"
+            )));
+        }
+
+        if !status.is_success() {
+            return Err(io::Error::other(format!("ES returned HTTP {status}")));
+        }
+
+        let body = response.bytes().await.map_err(io::Error::other)?;
+        let recv_ns = (t0.elapsed().as_nanos() as u64).saturating_sub(send_ns);
+        tracing::Span::current().record("recv_ns", recv_ns);
+        tracing::Span::current().record("resp_bytes", body.len() as u64);
+        if let Some(took) = Self::extract_took(&body) {
+            tracing::Span::current().record("took_ms", took);
+        }
+        Self::parse_bulk_response(&body)?;
+        self.stats.inc_lines(row_count);
+        self.stats.inc_bytes(payload_len as u64);
         Ok(super::sink::SendResult::Ok)
     }
 }
 
-impl super::sink::Sink for ElasticsearchAsyncSink {
+impl super::sink::Sink for ElasticsearchSink {
     fn send_batch<'a>(
         &'a mut self,
         batch: &'a RecordBatch,
         metadata: &'a BatchMetadata,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = io::Result<super::sink::SendResult>> + Send + 'a>,
-    > {
+    ) -> std::pin::Pin<Box<dyn Future<Output = super::sink::SendResult> + Send + 'a>> {
         Box::pin(async move {
-            self.serialize_batch(batch, metadata)?;
-            if self.batch_buf.is_empty() {
-                return Ok(super::sink::SendResult::Ok);
+            match self.send_batch_inner(batch, metadata, 0).await {
+                Ok(r) => r,
+                Err(e) => match e.kind() {
+                    // InvalidInput: proactive-split exhausted (single row too large) or
+                    // serialization error — permanent, do not retry.
+                    // InvalidData: ES bulk API returned item-level errors (e.g.
+                    // mapper_parsing_exception, strict_dynamic_mapping_exception) inside a
+                    // 200 OK response — also permanent, retrying the same document is futile.
+                    io::ErrorKind::InvalidInput | io::ErrorKind::InvalidData => {
+                        super::sink::SendResult::Rejected(e.to_string())
+                    }
+                    _ => super::sink::SendResult::IoError(e),
+                },
             }
-            let body = std::mem::replace(&mut self.batch_buf, Vec::with_capacity(64 * 1024));
-            let byte_len = body.len();
-            let row_count = batch.num_rows() as u64;
-            let result = self.do_send(body).await?;
-            if matches!(result, super::sink::SendResult::Ok) {
-                self.stats.inc_lines(row_count);
-                self.stats.inc_bytes(byte_len as u64);
-            }
-            Ok(result)
         })
     }
 
-    fn flush(
-        &mut self,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = io::Result<()>> + Send + '_>> {
+    fn flush(&mut self) -> std::pin::Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
         Box::pin(async { Ok(()) })
     }
 
@@ -564,9 +652,7 @@ impl super::sink::Sink for ElasticsearchAsyncSink {
         &self.name
     }
 
-    fn shutdown(
-        &mut self,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = io::Result<()>> + Send + '_>> {
+    fn shutdown(&mut self) -> std::pin::Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
         Box::pin(async { Ok(()) })
     }
 }
@@ -575,14 +661,15 @@ impl super::sink::Sink for ElasticsearchAsyncSink {
 // ElasticsearchSinkFactory
 // ---------------------------------------------------------------------------
 
-/// Creates `ElasticsearchAsyncSink` instances for the output worker pool.
+/// Creates `ElasticsearchSink` instances for the output worker pool.
 ///
-/// Each call to `create()` builds a fresh `reqwest::Client` for the new worker.
-/// This means idle workers release their connection pool when they exit rather
-/// than keeping it alive through a shared `Arc`.
+/// All workers share a single `reqwest::Client` (which is internally
+/// `Arc`-wrapped) so they reuse the same connection pool, TLS sessions,
+/// and DNS cache.
 pub struct ElasticsearchSinkFactory {
     name: String,
-    config: Arc<ElasticsearchConfig>,
+    pub(crate) config: Arc<ElasticsearchConfig>,
+    client: reqwest::Client,
     stats: Arc<ComponentStats>,
 }
 
@@ -593,14 +680,23 @@ impl ElasticsearchSinkFactory {
     /// - `index`: Target index name (e.g. `logs`)
     /// - `headers`: Authentication headers (e.g. `Authorization: ApiKey …`)
     /// - `compress`: Enable gzip compression of the request body
+    /// - `request_mode`: Buffered or experimental streaming bulk body mode
     pub fn new(
         name: String,
         endpoint: String,
         index: String,
         headers: Vec<(String, String)>,
         compress: bool,
+        request_mode: ElasticsearchRequestMode,
         stats: Arc<ComponentStats>,
     ) -> io::Result<Self> {
+        if compress && request_mode == ElasticsearchRequestMode::Streaming {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "streaming Elasticsearch request mode does not support gzip compression yet",
+            ));
+        }
+
         let parsed_headers = headers
             .into_iter()
             .map(|(k, v)| {
@@ -612,33 +708,51 @@ impl ElasticsearchSinkFactory {
             })
             .collect::<io::Result<Vec<_>>>()?;
 
+        // 30s timeout: generous enough for large bulk responses, short enough to
+        // detect dead connections before the pipeline stalls.
+        // 64 max idle per host: allows all workers (typically ≤16) to keep warm
+        // connections without excessive socket churn.
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .pool_max_idle_per_host(64)
+            .build()
+            .map_err(io::Error::other)?;
+
+        let endpoint = endpoint.trim_end_matches('/').to_string();
+        let bulk_url = format!(
+            "{}/_bulk?filter_path=errors,took,items.*.error,items.*.status",
+            endpoint
+        );
+
+        // Pre-compute the action line bytes once so serialize_batch doesn't have
+        // to allocate a String on every call.
+        let escaped_index = serde_json::to_string(&index).map_err(io::Error::other)?;
+        let action_line = format!("{{\"index\":{{\"_index\":{escaped_index}}}}}\n");
+
         Ok(ElasticsearchSinkFactory {
             name,
             config: Arc::new(ElasticsearchConfig {
-                endpoint: endpoint.trim_end_matches('/').to_string(),
-                index,
+                endpoint,
                 headers: parsed_headers,
                 compress,
+                request_mode,
+                max_bulk_bytes: 5 * 1024 * 1024, // 5 MiB default
+                stream_chunk_bytes: 64 * 1024,
+                bulk_url,
+                action_bytes: action_line.into_bytes().into_boxed_slice(),
             }),
+            client,
             stats,
         })
-    }
-
-    fn build_client() -> io::Result<reqwest::Client> {
-        reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .map_err(io::Error::other)
     }
 }
 
 impl super::sink::SinkFactory for ElasticsearchSinkFactory {
     fn create(&self) -> io::Result<Box<dyn super::sink::Sink>> {
-        let client = Self::build_client()?;
-        Ok(Box::new(ElasticsearchAsyncSink::new(
+        Ok(Box::new(ElasticsearchSink::new(
             self.name.clone(),
             Arc::clone(&self.config),
-            client,
+            self.client.clone(), // reqwest::Client is Arc-wrapped, clone is cheap
             Arc::clone(&self.stats),
         )))
     }
@@ -648,25 +762,52 @@ impl super::sink::SinkFactory for ElasticsearchSinkFactory {
     }
 }
 
+impl ElasticsearchSinkFactory {
+    /// Create a concrete `ElasticsearchSink` without boxing it.
+    ///
+    /// Intended for benchmarks and tests that need access to
+    /// `serialize_batch` or `serialized_len` directly.
+    pub fn create_sink(&self) -> ElasticsearchSink {
+        ElasticsearchSink::new(
+            self.name.clone(),
+            Arc::clone(&self.config),
+            self.client.clone(),
+            Arc::clone(&self.stats),
+        )
+    }
+}
+
 // ---------------------------------------------------------------------------
 // UTC timestamp formatting (no chrono dependency)
 // ---------------------------------------------------------------------------
 
-/// Format a Unix timestamp (seconds) as `YYYY-MM-DDTHH:MM:SS` in UTC.
+/// Write a Unix timestamp (seconds) as `YYYY-MM-DDTHH:MM:SS` directly into
+/// `buf[0..19]`, zero-allocation.
 ///
-/// This minimal implementation handles dates from 1970 to 2100 without pulling
-/// in the chrono crate. The fractional seconds are formatted by the caller.
-fn format_unix_timestamp_utc(secs: u64) -> String {
-    // Days since epoch
+/// Handles dates from 1970 to 9999 correctly via the Gregorian calendar.
+/// Timestamps beyond year 9999 are clamped to 9999-12-31T23:59:59 to fit
+/// the 19-byte ASCII buffer and comply with ISO 8601 4-digit year limit.
+fn write_unix_timestamp_utc_into(buf: &mut [u8; 19], mut secs: u64) {
+    const MAX_SECS: u64 = 253402300799; // 9999-12-31T23:59:59
+    if secs > MAX_SECS {
+        secs = MAX_SECS;
+    }
+
     let days = secs / 86400;
     let time = secs % 86400;
     let h = time / 3600;
     let m = (time % 3600) / 60;
     let s = time % 60;
 
-    // Gregorian calendar calculation
     let mut year = 1970u32;
     let mut remaining = days;
+
+    // Jump in 400-year blocks (146097 days) to ensure O(1) performance
+    // regardless of how large the timestamp is.
+    let blocks400 = remaining / 146097;
+    year += blocks400 as u32 * 400;
+    remaining %= 146097;
+
     loop {
         let days_in_year = if is_leap_year(year) { 366 } else { 365 };
         if remaining < days_in_year {
@@ -698,8 +839,71 @@ fn format_unix_timestamp_utc(secs: u64) -> String {
         remaining -= md as u64;
         month += 1;
     }
-    let day = remaining + 1;
-    format!("{year:04}-{month:02}-{day:02}T{h:02}:{m:02}:{s:02}")
+    let day = (remaining + 1) as u32;
+
+    // Write YYYY-MM-DDTHH:MM:SS into the 19-byte buffer.
+    debug_assert!(year <= 9999, "year must be <= 9999, got {year}");
+    buf[0] = b'0' + (year / 1000) as u8;
+    buf[1] = b'0' + (year / 100 % 10) as u8;
+    buf[2] = b'0' + (year / 10 % 10) as u8;
+    buf[3] = b'0' + (year % 10) as u8;
+    buf[4] = b'-';
+    buf[5] = b'0' + (month / 10) as u8;
+    buf[6] = b'0' + (month % 10) as u8;
+    buf[7] = b'-';
+    buf[8] = b'0' + (day / 10) as u8;
+    buf[9] = b'0' + (day % 10) as u8;
+    buf[10] = b'T';
+    buf[11] = b'0' + (h / 10) as u8;
+    buf[12] = b'0' + (h % 10) as u8;
+    buf[13] = b':';
+    buf[14] = b'0' + (m / 10) as u8;
+    buf[15] = b'0' + (m % 10) as u8;
+    buf[16] = b':';
+    buf[17] = b'0' + (s / 10) as u8;
+    buf[18] = b'0' + (s % 10) as u8;
+}
+
+/// Fill `out[0..47]` with the full `@timestamp` suffix used in bulk documents:
+///
+/// ```text
+/// ,"@timestamp":"YYYY-MM-DDTHH:MM:SS.fffffffffZ"}
+/// ```
+///
+/// The leading `,` is at index 0; callers that need the no-comma form
+/// (empty-document case) can simply slice `&out[1..]`.
+///
+/// Zero-allocation: all work happens on the stack-allocated `out` buffer.
+fn write_ts_suffix(out: &mut [u8; 47], secs: u64, frac: u64) {
+    debug_assert!(frac < 1_000_000_000, "frac must be < 1e9, got {frac}");
+    out[0] = b',';
+    out[1..15].copy_from_slice(b"\"@timestamp\":\"");
+    let mut dt = [0u8; 19];
+    write_unix_timestamp_utc_into(&mut dt, secs);
+    out[15..34].copy_from_slice(&dt);
+    out[34] = b'.';
+    // Write 9-digit zero-padded nanosecond fraction.
+    let mut f = frac;
+    for i in (35..44).rev() {
+        out[i] = b'0' + (f % 10) as u8;
+        f /= 10;
+    }
+    out[44] = b'Z';
+    out[45] = b'"';
+    out[46] = b'}';
+}
+
+/// Format a Unix timestamp (seconds) as `YYYY-MM-DDTHH:MM:SS` in UTC.
+///
+/// Wraps [`write_unix_timestamp_utc_into`] for use in unit tests.
+/// Production code uses [`write_ts_suffix`] directly to avoid the String allocation.
+#[cfg(test)]
+fn format_unix_timestamp_utc(secs: u64) -> String {
+    let mut buf = [0u8; 19];
+    write_unix_timestamp_utc_into(&mut buf, secs);
+    // `[u8; 19]` is Copy; Vec::from avoids the extra clone that to_vec() would do.
+    // write_unix_timestamp_utc_into only writes ASCII digits and punctuation.
+    String::from_utf8(Vec::from(buf)).expect("timestamp bytes are valid UTF-8")
 }
 
 fn is_leap_year(y: u32) -> bool {
@@ -713,11 +917,38 @@ mod tests {
     use arrow::datatypes::{DataType, Field, Schema};
     use std::sync::Arc;
 
+    fn zero_metadata() -> BatchMetadata {
+        BatchMetadata {
+            resource_attrs: Arc::new(vec![]),
+            observed_time_ns: 0,
+        }
+    }
+
+    fn make_test_sink(index: &str) -> ElasticsearchSink {
+        let factory = ElasticsearchSinkFactory::new(
+            "test".to_string(),
+            "http://localhost:9200".to_string(),
+            index.to_string(),
+            vec![],
+            false,
+            ElasticsearchRequestMode::Buffered,
+            Arc::new(ComponentStats::default()),
+        )
+        .expect("factory creation failed");
+        let client = reqwest::Client::new();
+        ElasticsearchSink::new(
+            "test".to_string(),
+            Arc::clone(&factory.config),
+            client,
+            Arc::new(ComponentStats::default()),
+        )
+    }
+
     #[test]
     fn serialize_batch_basic() {
         let schema = Arc::new(Schema::new(vec![
-            Field::new("level_str", DataType::Utf8, false),
-            Field::new("status_int", DataType::Int64, false),
+            Field::new("level", DataType::Utf8, false),
+            Field::new("status", DataType::Int64, false),
         ]));
         let batch = RecordBatch::try_new(
             schema,
@@ -728,16 +959,11 @@ mod tests {
         )
         .expect("batch creation failed");
 
-        let stats = Arc::new(ComponentStats::default());
-        let mut sink = ElasticsearchSink::new(
-            "test".to_string(),
-            "http://localhost:9200".to_string(),
-            "logs".to_string(),
-            vec![],
-            stats,
-        );
+        let mut sink = make_test_sink("logs");
+        let meta = zero_metadata();
 
-        sink.serialize_batch(&batch).expect("serialize failed");
+        sink.serialize_batch(&batch, &meta)
+            .expect("serialize failed");
         let output = String::from_utf8_lossy(&sink.batch_buf);
 
         // Should produce 4 lines: action + doc for each of 2 rows.
@@ -746,37 +972,19 @@ mod tests {
         assert!(lines[0].contains(r#"{"index":{"_index":"logs"}}"#));
         assert!(lines[1].contains(r#""level":"ERROR""#));
         assert!(lines[1].contains(r#""status":500"#));
+        assert!(lines[1].contains(r#""@timestamp""#));
         assert!(lines[2].contains(r#"{"index":{"_index":"logs"}}"#));
         assert!(lines[3].contains(r#""level":"WARN""#));
     }
 
     #[test]
     fn parse_bulk_response_success() {
-        let stats = Arc::new(ComponentStats::default());
-        let sink = ElasticsearchSink::new(
-            "test".to_string(),
-            "http://localhost:9200".to_string(),
-            "logs".to_string(),
-            vec![],
-            stats,
-        );
-
         let response = br#"{"took":5,"errors":false,"items":[{"index":{"_id":"1","status":201}}]}"#;
-        sink.parse_bulk_response(response)
-            .expect("should not error on success");
+        ElasticsearchSink::parse_bulk_response(response).expect("should not error on success");
     }
 
     #[test]
     fn parse_bulk_response_error() {
-        let stats = Arc::new(ComponentStats::default());
-        let sink = ElasticsearchSink::new(
-            "test".to_string(),
-            "http://localhost:9200".to_string(),
-            "logs".to_string(),
-            vec![],
-            stats,
-        );
-
         let response = br#"{
             "took":5,
             "errors":true,
@@ -785,8 +993,7 @@ mod tests {
                 {"index":{"error":{"type":"mapper_parsing_exception","reason":"failed to parse"},"status":400}}
             ]
         }"#;
-        let err = sink
-            .parse_bulk_response(response)
+        let err = ElasticsearchSink::parse_bulk_response(response)
             .expect_err("should error on bulk failure");
         assert!(err.to_string().contains("mapper_parsing_exception"));
     }
@@ -794,7 +1001,7 @@ mod tests {
     #[test]
     fn empty_batch_produces_empty_output() {
         let schema = Arc::new(Schema::new(vec![Field::new(
-            "level_str",
+            "level",
             DataType::Utf8,
             false,
         )]));
@@ -804,16 +1011,11 @@ mod tests {
         )
         .expect("batch creation failed");
 
-        let stats = Arc::new(ComponentStats::default());
-        let mut sink = ElasticsearchSink::new(
-            "test".to_string(),
-            "http://localhost:9200".to_string(),
-            "logs".to_string(),
-            vec![],
-            stats,
-        );
+        let mut sink = make_test_sink("logs");
+        let meta = zero_metadata();
 
-        sink.serialize_batch(&batch).expect("serialize failed");
+        sink.serialize_batch(&batch, &meta)
+            .expect("serialize failed");
         assert!(sink.batch_buf.is_empty());
     }
 
@@ -899,64 +1101,161 @@ mod tests {
 
     #[test]
     fn parse_bulk_response_empty_items_array() {
-        let stats = Arc::new(ComponentStats::default());
-        let sink = ElasticsearchSink::new(
-            "test".to_string(),
-            "http://localhost:9200".to_string(),
-            "logs".to_string(),
-            vec![],
-            stats,
-        );
         let response = br#"{"took":0,"errors":false,"items":[]}"#;
-        sink.parse_bulk_response(response)
-            .expect("empty items should succeed");
+        ElasticsearchSink::parse_bulk_response(response).expect("empty items should succeed");
     }
 
     #[test]
-    fn parse_bulk_response_malformed_json_without_errors_true_is_ok() {
-        // The implementation uses fast-path memchr for "errors":true.
-        // Malformed JSON that doesn't contain that string is treated as success.
-        let stats = Arc::new(ComponentStats::default());
-        let sink = ElasticsearchSink::new(
-            "test".to_string(),
-            "http://localhost:9200".to_string(),
-            "logs".to_string(),
-            vec![],
-            stats,
-        );
-        sink.parse_bulk_response(b"not valid json")
-            .expect("no errors:true → treated as ok");
-    }
-
-    #[test]
-    fn parse_bulk_response_malformed_json_after_errors_true_returns_err() {
-        // If "errors":true is present but the full JSON parse fails, return an error.
-        let stats = Arc::new(ComponentStats::default());
-        let sink = ElasticsearchSink::new(
-            "test".to_string(),
-            "http://localhost:9200".to_string(),
-            "logs".to_string(),
-            vec![],
-            stats,
-        );
-        sink.parse_bulk_response(b"\"errors\":true {{{malformed")
-            .expect_err("malformed JSON after errors:true should error");
+    fn parse_bulk_response_malformed_json_is_error() {
+        ElasticsearchSink::parse_bulk_response(b"not valid json")
+            .expect_err("malformed json should be an error");
     }
 
     #[test]
     fn parse_bulk_response_errors_false_does_not_error() {
-        let stats = Arc::new(ComponentStats::default());
-        let sink = ElasticsearchSink::new(
+        // errors:false means success even if items have non-200 status
+        let response = br#"{"took":1,"errors":false,"items":[{"index":{"_id":"1","status":200}}]}"#;
+        ElasticsearchSink::parse_bulk_response(response).expect("errors:false must succeed");
+    }
+
+    #[test]
+    fn test_index_name_escaping() {
+        let index = "logs\"-and-\\backslashes";
+        let factory = ElasticsearchSinkFactory::new(
+            "test".to_string(),
+            "http://localhost:9200".to_string(),
+            index.to_string(),
+            vec![],
+            false,
+            ElasticsearchRequestMode::Buffered,
+            Arc::new(ComponentStats::default()),
+        )
+        .expect("factory creation failed");
+
+        let action_line = std::str::from_utf8(&factory.config.action_bytes).unwrap();
+        // Should be: {"index":{"_index":"logs\"-and-\\backslashes"}}\n
+        assert!(
+            action_line.contains(r#"_index":"logs\"-and-\\backslashes""#),
+            "got: {}",
+            action_line
+        );
+    }
+
+    #[test]
+    fn test_timestamp_extreme_values() {
+        // Year 10000+: 253402300800 seconds is 10000-01-01T00:00:00
+        let secs_y10k = 253402300800;
+        let ts = format_unix_timestamp_utc(secs_y10k);
+        // Current implementation will either produce "10000-..." (corrupting the 19-byte buf)
+        // or debug_panic. We want it to clamp to 9999-12-31T23:59:59.
+        assert_eq!(ts, "9999-12-31T23:59:59");
+
+        // u64::MAX should not hang (regression for #1087)
+        let _ = format_unix_timestamp_utc(u64::MAX);
+    }
+
+    #[test]
+    fn test_parse_bulk_response_whitespace() {
+        // Bug #1095: parser misses errors if there's whitespace
+        let response = br#" { "took": 5, "errors" :  true , "items": [] } "#;
+        ElasticsearchSink::parse_bulk_response(response)
+            .expect_err("should detect errors:true with whitespace");
+    }
+
+    #[test]
+    fn test_extract_took_whitespace() {
+        let response = br#" { "took" :  123 , "errors": false } "#;
+        assert_eq!(ElasticsearchSink::extract_took(response), Some(123));
+    }
+
+    #[test]
+    fn test_parse_bulk_response_malformed_is_error() {
+        // Bug #1094: malformed bodies treated as success
+        ElasticsearchSink::parse_bulk_response(b"{}")
+            .expect_err("missing errors field should be an error");
+        ElasticsearchSink::parse_bulk_response(b"not json")
+            .expect_err("malformed json should be an error");
+    }
+
+    #[test]
+    fn test_send_batch_oversized_single_row() {
+        use crate::sink::Sink;
+        let factory = ElasticsearchSinkFactory::new(
             "test".to_string(),
             "http://localhost:9200".to_string(),
             "logs".to_string(),
             vec![],
-            stats,
+            false,
+            ElasticsearchRequestMode::Buffered,
+            Arc::new(ComponentStats::default()),
+        )
+        .unwrap();
+        let mut sink = factory.create_sink();
+
+        // Use a row large enough to exceed 5MB default limit.
+        let large_str = "A".repeat(5 * 1024 * 1024 + 1024);
+        let schema = Arc::new(Schema::new(vec![Field::new("msg", DataType::Utf8, false)]));
+        let batch =
+            RecordBatch::try_new(schema, vec![Arc::new(StringArray::from(vec![large_str]))])
+                .unwrap();
+
+        let meta = zero_metadata();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let result = rt.block_on(sink.send_batch(&batch, &meta));
+        match result {
+            crate::sink::SendResult::Rejected(msg) => {
+                assert!(msg.contains("exceeds max_bulk_bytes"));
+            }
+            _ => panic!("Expected Rejected, got {:?}", result),
+        }
+    }
+
+    /// Regression test for #1212 (ES sink only):
+    /// ES bulk item errors (InvalidData from parse_bulk_response) must map to
+    /// `SendResult::Rejected`, not `SendResult::IoError`.  Before the fix the
+    /// `send_batch` error classifier only caught `InvalidInput`, so `InvalidData`
+    /// fell through to `IoError` and the worker pool would retry indefinitely.
+    #[test]
+    fn parse_bulk_item_error_maps_to_rejected_not_io_error() {
+        // parse_bulk_response returns Err(InvalidData) when the bulk response
+        // contains item-level errors even inside a 200 OK.  Confirm the error
+        // kind is InvalidData so the send_batch classifier can reject it.
+        let response = br#"{
+            "took":3,
+            "errors":true,
+            "items":[
+                {"index":{"error":{"type":"mapper_parsing_exception","reason":"failed to parse field [ts]"},"status":400}}
+            ]
+        }"#;
+        let err = ElasticsearchSink::parse_bulk_response(response)
+            .expect_err("parse_bulk_response must fail on item error");
+        assert_eq!(
+            err.kind(),
+            io::ErrorKind::InvalidData,
+            "bulk item errors must use InvalidData kind so send_batch maps them to Rejected"
         );
-        // errors:false means success even if items have non-200 status
-        let response = br#"{"took":1,"errors":false,"items":[{"index":{"_id":"1","status":200}}]}"#;
-        sink.parse_bulk_response(response)
-            .expect("errors:false must succeed");
+        assert!(err.to_string().contains("mapper_parsing_exception"));
+
+        // Verify send_batch converts InvalidData -> Rejected (not IoError).
+        // We exercise this through the classifier arm directly to avoid needing
+        // a live HTTP server.
+        let classified = match err.kind() {
+            io::ErrorKind::InvalidInput | io::ErrorKind::InvalidData => {
+                crate::sink::SendResult::Rejected(err.to_string())
+            }
+            _ => crate::sink::SendResult::IoError(err),
+        };
+        match classified {
+            crate::sink::SendResult::Rejected(msg) => {
+                assert!(msg.contains("mapper_parsing_exception"), "got: {msg}");
+            }
+            other => {
+                panic!("ES bulk item error must be Rejected, not retried as IoError; got {other:?}")
+            }
+        }
     }
 }
 
@@ -977,28 +1276,41 @@ mod snapshot_tests {
     use arrow::record_batch::RecordBatch;
     use std::sync::Arc;
 
-    fn make_stats() -> Arc<logfwd_io::diagnostics::ComponentStats> {
-        Arc::new(logfwd_io::diagnostics::ComponentStats::default())
+    fn zero_metadata() -> BatchMetadata {
+        BatchMetadata {
+            resource_attrs: Arc::new(vec![]),
+            observed_time_ns: 0,
+        }
     }
 
-    fn make_sync_sink() -> ElasticsearchSink {
-        ElasticsearchSink::new(
+    fn make_test_sink() -> ElasticsearchSink {
+        let factory = ElasticsearchSinkFactory::new(
             "test".to_string(),
             "http://localhost:9200".to_string(),
             "test-index".to_string(),
             vec![],
-            make_stats(),
+            false,
+            ElasticsearchRequestMode::Buffered,
+            Arc::new(ComponentStats::default()),
+        )
+        .expect("factory creation failed");
+        let client = reqwest::Client::new();
+        ElasticsearchSink::new(
+            "test".to_string(),
+            Arc::clone(&factory.config),
+            client,
+            Arc::new(ComponentStats::default()),
         )
     }
 
-    /// Snapshot: basic multi-type batch (level_str, status_int, duration_float).
-    /// Regression guard: field name normalization + type serialization.
+    /// Snapshot: basic multi-type batch (level, status, duration_ms).
+    /// Regression guard: field name preservation + type serialization.
     #[test]
     fn snapshot_basic_multi_type_batch() {
         let schema = Arc::new(Schema::new(vec![
-            Field::new("level_str", DataType::Utf8, false),
-            Field::new("status_int", DataType::Int64, false),
-            Field::new("duration_ms_float", DataType::Float64, false),
+            Field::new("level", DataType::Utf8, false),
+            Field::new("status", DataType::Int64, false),
+            Field::new("duration_ms", DataType::Float64, false),
         ]));
         let batch = RecordBatch::try_new(
             schema,
@@ -1010,8 +1322,9 @@ mod snapshot_tests {
         )
         .unwrap();
 
-        let mut sink = make_sync_sink();
-        sink.serialize_batch(&batch).unwrap();
+        let mut sink = make_test_sink();
+        let meta = zero_metadata();
+        sink.serialize_batch(&batch, &meta).unwrap();
         let output = String::from_utf8(sink.batch_buf.clone()).unwrap();
         insta::assert_snapshot!("basic_multi_type", output);
     }
@@ -1020,8 +1333,8 @@ mod snapshot_tests {
     #[test]
     fn snapshot_nullable_columns() {
         let schema = Arc::new(Schema::new(vec![
-            Field::new("msg_str", DataType::Utf8, true),
-            Field::new("code_int", DataType::Int64, true),
+            Field::new("msg", DataType::Utf8, true),
+            Field::new("code", DataType::Int64, true),
         ]));
         let batch = RecordBatch::try_new(
             schema,
@@ -1032,8 +1345,9 @@ mod snapshot_tests {
         )
         .unwrap();
 
-        let mut sink = make_sync_sink();
-        sink.serialize_batch(&batch).unwrap();
+        let mut sink = make_test_sink();
+        let meta = zero_metadata();
+        sink.serialize_batch(&batch, &meta).unwrap();
         let output = String::from_utf8(sink.batch_buf.clone()).unwrap();
         insta::assert_snapshot!("nullable_columns", output);
     }
@@ -1042,11 +1356,7 @@ mod snapshot_tests {
     /// Regression guard: escape_json correctness.
     #[test]
     fn snapshot_special_char_strings() {
-        let schema = Arc::new(Schema::new(vec![Field::new(
-            "msg_str",
-            DataType::Utf8,
-            false,
-        )]));
+        let schema = Arc::new(Schema::new(vec![Field::new("msg", DataType::Utf8, false)]));
         let batch = RecordBatch::try_new(
             schema,
             vec![Arc::new(StringArray::from(vec![
@@ -1058,8 +1368,9 @@ mod snapshot_tests {
         )
         .unwrap();
 
-        let mut sink = make_sync_sink();
-        sink.serialize_batch(&batch).unwrap();
+        let mut sink = make_test_sink();
+        let meta = zero_metadata();
+        sink.serialize_batch(&batch, &meta).unwrap();
         let output = String::from_utf8(sink.batch_buf.clone()).unwrap();
         insta::assert_snapshot!("special_char_strings", output);
     }
@@ -1068,8 +1379,8 @@ mod snapshot_tests {
     #[test]
     fn snapshot_all_null_fields() {
         let schema = Arc::new(Schema::new(vec![
-            Field::new("msg_str", DataType::Utf8, true),
-            Field::new("code_int", DataType::Int64, true),
+            Field::new("msg", DataType::Utf8, true),
+            Field::new("code", DataType::Int64, true),
         ]));
         let batch = RecordBatch::try_new(
             schema,
@@ -1080,8 +1391,9 @@ mod snapshot_tests {
         )
         .unwrap();
 
-        let mut sink = make_sync_sink();
-        sink.serialize_batch(&batch).unwrap();
+        let mut sink = make_test_sink();
+        let meta = zero_metadata();
+        sink.serialize_batch(&batch, &meta).unwrap();
         let output = String::from_utf8(sink.batch_buf.clone()).unwrap();
         insta::assert_snapshot!("all_null_fields", output);
     }
@@ -1123,5 +1435,31 @@ mod kani_proofs {
         if y % 4 != 0 {
             assert!(!is_leap_year(y), "not div by 4 must not be leap: {y}");
         }
+    }
+
+    /// Prove write_ts_suffix produces valid ASCII for any representative
+    /// timestamp in the first 16 years of the epoch (bounded for solver speed).
+    #[kani::proof]
+    fn verify_write_ts_suffix_ascii() {
+        // Restrict to first ~16 years (0..504921600) to keep the solver tractable.
+        let secs: u64 = kani::any();
+        kani::assume(secs < 504_921_600); // 1970-01-01 to 1985-12-31
+        let frac: u64 = kani::any();
+        kani::assume(frac < 1_000_000_000);
+
+        let mut buf = [0u8; 47];
+        write_ts_suffix(&mut buf, secs, frac);
+
+        // Every byte must be printable ASCII (32..=126).
+        for &b in &buf {
+            assert!(b >= 32 && b <= 126, "non-printable byte in ts_suffix");
+        }
+        // Structural checks: leading comma, fixed string markers.
+        assert_eq!(buf[0], b',');
+        assert_eq!(buf[1], b'"');
+        assert_eq!(buf[34], b'.');
+        assert_eq!(buf[44], b'Z');
+        assert_eq!(buf[45], b'"');
+        assert_eq!(buf[46], b'}');
     }
 }

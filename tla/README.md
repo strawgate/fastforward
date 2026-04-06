@@ -29,7 +29,7 @@ Models `PipelineMachine<S, C>` from
 | `BeginDrainReachable` | Reachability (invariant ~P) | Draining phase is reachable (vacuity guard) |
 | `StopReachable` | Reachability (invariant ~P) | Stopped phase is reachable (vacuity guard) |
 | `AckOccurs` | Reachability (invariant ~P) | at least one batch is acked (AckBatch fires) |
-| `CommitAdvances` | Reachability (invariant ~P) | committed checkpoint advances at least once |
+| `CheckpointAdvances` | Reachability (invariant ~P) | committed checkpoint advances at least once |
 | `ForcedReachable` | Reachability (invariant ~P) | ForceStop path is reachable (vacuity guard) |
 
 ### File structure (two-file pattern)
@@ -39,12 +39,28 @@ This spec follows the industry-standard two-file pattern used by etcd-io/raft
 
 ```text
 tla/
-  PipelineMachine.tla           — clean algorithm spec, no TLC-specific overrides
-  MCPipelineMachine.tla         — TLC config: symmetry sets, model constants, bounds
-  PipelineMachine.cfg           — safety model (fast, ~50K states)
+  # Lifecycle state machine (ordered ACK, checkpoint ordering, drain guarantee)
+  PipelineMachine.tla           — clean algorithm spec
+  MCPipelineMachine.tla         — TLC config: symmetry sets, model constants
+  PipelineMachine.cfg           — safety model (~50K states)
   PipelineMachine.liveness.cfg  — liveness model (smaller constants, no SYMMETRY)
   PipelineMachine.thorough.cfg  — thorough safety model (3 sources, 4 batches)
-  PipelineMachine.coverage.cfg  — reachability / vacuity guards (kani::cover! equiv)
+  PipelineMachine.coverage.cfg  — reachability / vacuity guards
+
+  # Shutdown coordination (multi-process drain protocol)
+  ShutdownProtocol.tla          — N inputs + channel + consumer + pool
+  MCShutdownProtocol.tla        — TLC config
+  ShutdownProtocol.cfg          — safety model
+  ShutdownProtocol.liveness.cfg — liveness model
+  ShutdownProtocol.coverage.cfg — reachability guards
+
+  # Batching protocol (multi-source, checkpoint merge, reject handling)
+  PipelineBatch.tla             — batch accumulation + flush + ack/reject
+  MCPipelineBatch.tla           — TLC config
+  PipelineBatch.cfg             — safety model
+  PipelineBatch.liveness.cfg    — liveness model
+  PipelineBatch.coverage.cfg    — reachability guards
+
   README.md                     — this file
 ```
 
@@ -86,7 +102,7 @@ the safety config and inspect the `forced=TRUE` traces in TLC's error output.
 ```bash
 java -cp /path/to/tla2tools.jar tlc2.TLC MCPipelineMachine.tla -config PipelineMachine.coverage.cfg
 # TLC will report INVARIANT VIOLATIONS for BeginDrainReachable, StopReachable,
-# AckOccurs, CommitAdvances, ForcedReachable — each violation is a witness
+# AckOccurs, CheckpointAdvances, ForcedReachable — each violation is a witness
 # trace proving the state IS reachable. No violation = state unreachable = bug.
 ```
 

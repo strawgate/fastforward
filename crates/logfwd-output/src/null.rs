@@ -1,15 +1,18 @@
 //! Null output sink — discards all batches. Used for benchmarking and as a
 //! blackhole collector target.
 
+use std::future::Future;
 use std::io;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use arrow::record_batch::RecordBatch;
 
-use logfwd_io::diagnostics::ComponentStats;
+use logfwd_types::diagnostics::ComponentStats;
 
-use crate::{BatchMetadata, OutputSink};
+use crate::BatchMetadata;
+use crate::sink::SendResult;
 
 /// Discards all data. Useful as the output side of a blackhole receiver
 /// or for benchmarking pipeline overhead without network I/O.
@@ -20,9 +23,6 @@ pub struct NullSink {
     name: String,
     batches_discarded: AtomicU64,
     rows_discarded: AtomicU64,
-    // Stored for API consistency with other sinks; not used by NullSink since
-    // discarded data is not worth metering at the byte level.
-    #[allow(dead_code)]
     stats: Arc<ComponentStats>,
 }
 
@@ -47,19 +47,58 @@ impl NullSink {
     }
 }
 
-impl OutputSink for NullSink {
-    fn send_batch(&mut self, batch: &RecordBatch, _metadata: &BatchMetadata) -> io::Result<()> {
+impl crate::Sink for NullSink {
+    fn send_batch<'a>(
+        &'a mut self,
+        batch: &'a RecordBatch,
+        _metadata: &'a BatchMetadata,
+    ) -> Pin<Box<dyn Future<Output = SendResult> + Send + 'a>> {
         self.batches_discarded.fetch_add(1, Ordering::Relaxed);
         let num_rows = batch.num_rows() as u64;
         self.rows_discarded.fetch_add(num_rows, Ordering::Relaxed);
-        // Line counting is done once by the pipeline after send_batch returns
-        // (via PipelineMetrics::inc_output_success). Sinks must not also call
-        // inc_lines or the counter is doubled.
-        Ok(())
+        // Track discarded lines and in-memory byte size so that diagnostics
+        // show non-zero output metrics for null/blackhole pipelines.
+        self.stats.inc_lines(num_rows);
+        self.stats.inc_bytes(batch.get_array_memory_size() as u64);
+        Box::pin(async { SendResult::Ok })
     }
 
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
+    fn flush(&mut self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn shutdown(&mut self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+/// Factory that creates [`NullSink`] instances.
+///
+/// Each call to `create()` returns a fresh `NullSink` that shares the same
+/// `ComponentStats` handle but has independent atomic counters.
+pub struct NullSinkFactory {
+    name: String,
+    stats: Arc<ComponentStats>,
+}
+
+impl NullSinkFactory {
+    /// Create a new factory that will produce null sinks with the given name
+    /// and diagnostics handle.
+    pub fn new(name: String, stats: Arc<ComponentStats>) -> Self {
+        NullSinkFactory { name, stats }
+    }
+}
+
+impl crate::SinkFactory for NullSinkFactory {
+    fn create(&self) -> io::Result<Box<dyn crate::Sink>> {
+        Ok(Box::new(NullSink::new(
+            self.name.clone(),
+            Arc::clone(&self.stats),
+        )))
     }
 
     fn name(&self) -> &str {
@@ -70,28 +109,31 @@ impl OutputSink for NullSink {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use logfwd_io::diagnostics::ComponentStats;
+    use logfwd_types::diagnostics::ComponentStats;
 
-    #[test]
-    fn null_sink_accepts_and_discards() {
+    #[tokio::test]
+    async fn null_sink_accepts_and_discards() {
+        use crate::Sink;
+
         let mut sink = NullSink::new("blackhole", Arc::new(ComponentStats::new()));
-        assert_eq!(sink.name(), "blackhole");
+        assert_eq!(Sink::name(&sink), "blackhole");
 
-        let schema = std::sync::Arc::new(arrow::datatypes::Schema::empty());
+        let schema = Arc::new(arrow::datatypes::Schema::empty());
         let batch = RecordBatch::new_empty(schema);
         let meta = BatchMetadata {
             resource_attrs: Arc::default(),
             observed_time_ns: 0,
         };
-        assert!(sink.send_batch(&batch, &meta).is_ok());
-        assert!(sink.flush().is_ok());
+        let _ = sink.send_batch(&batch, &meta).await.unwrap();
+        assert!(sink.flush().await.is_ok());
 
         assert_eq!(sink.batches_discarded(), 1);
         assert_eq!(sink.rows_discarded(), 0); // empty batch has 0 rows
     }
 
-    #[test]
-    fn null_sink_counts_rows() {
+    #[tokio::test]
+    async fn null_sink_counts_rows() {
+        use crate::Sink;
         use arrow::array::Int32Array;
         use arrow::datatypes::{DataType, Field, Schema};
         use std::sync::Arc;
@@ -105,18 +147,18 @@ mod tests {
         };
 
         let mut sink = NullSink::new("blackhole", Arc::new(ComponentStats::new()));
-        sink.send_batch(&batch, &meta).unwrap();
-        sink.send_batch(&batch, &meta).unwrap();
+        let _ = sink.send_batch(&batch, &meta).await.unwrap();
+        let _ = sink.send_batch(&batch, &meta).await.unwrap();
 
         assert_eq!(sink.batches_discarded(), 2);
         assert_eq!(sink.rows_discarded(), 6);
     }
 
-    #[test]
-    fn null_sink_does_not_increment_lines_total() {
-        // Line counting is the pipeline's responsibility (PipelineMetrics::inc_output_success).
-        // NullSink must NOT call inc_lines, or the counter would be doubled
-        // every time a batch is forwarded.
+    #[tokio::test]
+    async fn null_sink_increments_lines_and_bytes() {
+        // Each sink is responsible for its own line and byte counting —
+        // there is no central pipeline call that does it.
+        use crate::Sink;
         use arrow::array::Int32Array;
         use arrow::datatypes::{DataType, Field, Schema};
         use std::sync::Arc;
@@ -132,16 +174,35 @@ mod tests {
 
         let stats = Arc::new(ComponentStats::new());
         let mut sink = NullSink::new("blackhole", Arc::clone(&stats));
-        sink.send_batch(&batch, &meta).unwrap();
-        sink.send_batch(&batch, &meta).unwrap();
+        let _ = sink.send_batch(&batch, &meta).await.unwrap();
+        let _ = sink.send_batch(&batch, &meta).await.unwrap();
 
-        // Sink must not increment lines_total — that is pipeline.rs's job.
+        // Sink must increment lines_total once per row per batch.
         assert_eq!(
             stats.lines_total.load(Ordering::Relaxed),
-            0,
-            "sink must not double-count lines"
+            6,
+            "sink must increment lines_total for each forwarded row"
+        );
+        // Bytes must be non-zero (in-memory batch size).
+        assert!(
+            stats.bytes_total.load(Ordering::Relaxed) > 0,
+            "sink must report non-zero bytes"
         );
         // Row-level counters on the sink itself are still tracked.
         assert_eq!(sink.rows_discarded(), 6);
+    }
+
+    #[test]
+    fn null_sink_factory_creates_sinks() {
+        use crate::SinkFactory;
+
+        let factory = NullSinkFactory::new("blackhole".into(), Arc::new(ComponentStats::new()));
+        assert_eq!(factory.name(), "blackhole");
+        assert!(!factory.is_single_use());
+
+        let sink1 = factory.create().expect("first create should succeed");
+        let sink2 = factory.create().expect("second create should also succeed");
+        assert_eq!(sink1.name(), "blackhole");
+        assert_eq!(sink2.name(), "blackhole");
     }
 }

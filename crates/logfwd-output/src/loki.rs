@@ -43,7 +43,7 @@ use arrow::array::AsArray;
 use arrow::datatypes::DataType;
 use arrow::record_batch::RecordBatch;
 
-use logfwd_io::diagnostics::ComponentStats;
+use logfwd_types::diagnostics::ComponentStats;
 
 use super::{BatchMetadata, build_col_infos, coalesce_as_str, write_row_json};
 
@@ -103,7 +103,7 @@ pub fn sort_and_dedup_timestamps(entries: &mut Vec<LokiEntry>) -> usize {
 }
 
 // ---------------------------------------------------------------------------
-// LokiAsyncSink
+// LokiSink — reqwest-based async implementation of Sink
 // ---------------------------------------------------------------------------
 
 struct LokiConfig {
@@ -115,21 +115,21 @@ struct LokiConfig {
 }
 
 /// Async Loki sink using reqwest.
-pub struct LokiAsyncSink {
+pub struct LokiSink {
     config: Arc<LokiConfig>,
     client: Arc<reqwest::Client>,
     name: String,
     stats: Arc<ComponentStats>,
 }
 
-impl LokiAsyncSink {
+impl LokiSink {
     fn new(
         name: String,
         config: Arc<LokiConfig>,
         client: Arc<reqwest::Client>,
         stats: Arc<ComponentStats>,
     ) -> Self {
-        LokiAsyncSink {
+        LokiSink {
             config,
             client,
             name,
@@ -180,7 +180,9 @@ impl LokiAsyncSink {
                 let col = batch.column(ts_idx);
                 match col.data_type() {
                     DataType::Int64 => {
-                        col.as_primitive::<arrow::datatypes::Int64Type>().value(row) as u64
+                        let val = col.as_primitive::<arrow::datatypes::Int64Type>().value(row);
+                        // Bug #1084: clamp negative timestamps to 0 to avoid u64 wrap.
+                        if val < 0 { 0 } else { val as u64 }
                     }
                     DataType::UInt64 => col
                         .as_primitive::<arrow::datatypes::UInt64Type>()
@@ -331,28 +333,30 @@ impl LokiAsyncSink {
     }
 }
 
-impl super::sink::Sink for LokiAsyncSink {
+impl super::sink::Sink for LokiSink {
     fn send_batch<'a>(
         &'a mut self,
         batch: &'a RecordBatch,
         metadata: &'a BatchMetadata,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = io::Result<super::sink::SendResult>> + Send + 'a>,
-    > {
+    ) -> std::pin::Pin<Box<dyn Future<Output = super::sink::SendResult> + Send + 'a>> {
         Box::pin(async move {
             if batch.num_rows() == 0 {
-                return Ok(super::sink::SendResult::Ok);
+                return super::sink::SendResult::Ok;
             }
-            let mut stream_map = self.build_stream_map(batch, metadata)?;
+            let mut stream_map = match self.build_stream_map(batch, metadata) {
+                Ok(m) => m,
+                Err(e) => return super::sink::SendResult::IoError(e),
+            };
             let (payload, retained_rows) =
                 Self::serialize_loki_json(&mut stream_map, &self.config.static_labels);
-            self.do_send(payload, retained_rows).await
+            match self.do_send(payload, retained_rows).await {
+                Ok(r) => r,
+                Err(e) => super::sink::SendResult::IoError(e),
+            }
         })
     }
 
-    fn flush(
-        &mut self,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = io::Result<()>> + Send + '_>> {
+    fn flush(&mut self) -> std::pin::Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
         Box::pin(async { Ok(()) })
     }
 
@@ -360,9 +364,7 @@ impl super::sink::Sink for LokiAsyncSink {
         &self.name
     }
 
-    fn shutdown(
-        &mut self,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = io::Result<()>> + Send + '_>> {
+    fn shutdown(&mut self) -> std::pin::Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
         Box::pin(async { Ok(()) })
     }
 }
@@ -371,7 +373,7 @@ impl super::sink::Sink for LokiAsyncSink {
 // LokiSinkFactory
 // ---------------------------------------------------------------------------
 
-/// Creates `LokiAsyncSink` instances for the output worker pool.
+/// Creates `LokiSink` instances for the output worker pool.
 pub struct LokiSinkFactory {
     name: String,
     config: Arc<LokiConfig>,
@@ -429,45 +431,12 @@ impl LokiSinkFactory {
 
 impl super::sink::SinkFactory for LokiSinkFactory {
     fn create(&self) -> io::Result<Box<dyn super::sink::Sink>> {
-        Ok(Box::new(LokiAsyncSink::new(
+        Ok(Box::new(LokiSink::new(
             self.name.clone(),
             Arc::clone(&self.config),
             Arc::clone(&self.client),
             Arc::clone(&self.stats),
         )))
-    }
-
-    fn name(&self) -> &str {
-        &self.name
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Old placeholder (kept for backward compat with lib.rs exports if any)
-// ---------------------------------------------------------------------------
-
-/// Synchronous placeholder Loki sink.
-///
-/// Deprecated: use `LokiSinkFactory` with the async worker pool instead.
-#[allow(dead_code)]
-pub struct LokiSink {
-    name: String,
-}
-
-#[allow(dead_code)]
-impl LokiSink {
-    pub fn new(name: String, _endpoint: String) -> Self {
-        LokiSink { name }
-    }
-}
-
-impl super::OutputSink for LokiSink {
-    fn send_batch(&mut self, _batch: &RecordBatch, _metadata: &BatchMetadata) -> io::Result<()> {
-        Ok(())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
     }
 
     fn name(&self) -> &str {
@@ -504,11 +473,13 @@ fn escape_json(s: &str) -> String {
 /// If it already starts with `"`, return as-is (already a JSON string).
 fn escape_json_raw(s: &str) -> String {
     let trimmed = s.trim();
-    if trimmed.starts_with('"') {
-        // Already a JSON string.
+    // Bug #1048: leading quote is not enough to guarantee valid JSON string.
+    // Verify it actually parses as a JSON string.
+    if trimmed.starts_with('"') && serde_json::from_str::<String>(trimmed).is_ok() {
+        // Already a valid JSON string.
         trimmed.to_string()
     } else {
-        // A JSON object or array — escape it as a string value.
+        // A JSON object/array or plain string — escape it as a string value.
         format!("\"{}\"", escape_json(trimmed))
     }
 }
@@ -604,7 +575,7 @@ mod tests {
     #[test]
     fn stream_key_encoding_roundtrip_with_special_chars() {
         // These characters were lossy in the old k=v,... format.
-        let labels = vec![
+        let labels = [
             ("env".to_string(), "prod=us-east,eu-west".to_string()),
             ("app".to_string(), r#"my"app"#.to_string()),
             ("path".to_string(), r"C:\Users\log".to_string()),
@@ -674,9 +645,9 @@ mod tests {
     fn label_extraction_from_struct_conflict_column() {
         // status: Struct{int=200, str=null} — label should be "200" (int cast to str).
         let batch = make_status_struct_batch(Some(200), None);
-        let cols = super::build_col_infos(&batch);
+        let cols = build_col_infos(&batch);
         let status_info = cols.iter().find(|c| c.field_name == "status").unwrap();
-        let val = super::coalesce_as_str(&batch, 0, status_info);
+        let val = coalesce_as_str(&batch, 0, status_info);
         assert_eq!(val.as_deref(), Some("200"), "int label must be stringified");
     }
 
@@ -684,14 +655,84 @@ mod tests {
     fn label_extraction_prefers_str_over_int() {
         // status: Struct{int=200, str="OK"} — str wins in str_variants ordering.
         let batch = make_status_struct_batch(Some(200), Some("OK"));
-        let cols = super::build_col_infos(&batch);
+        let cols = build_col_infos(&batch);
         let status_info = cols.iter().find(|c| c.field_name == "status").unwrap();
-        let val = super::coalesce_as_str(&batch, 0, status_info);
+        let val = coalesce_as_str(&batch, 0, status_info);
         assert_eq!(
             val.as_deref(),
             Some("OK"),
             "str variant must win over int in str_variants ordering"
         );
+    }
+
+    #[test]
+    fn test_escape_json_raw_malformed() {
+        // Bug #1048: starts with quote but not valid JSON string
+        let malformed = "\"not valid json";
+        let escaped = escape_json_raw(malformed);
+
+        // Should be properly escaped and wrapped.
+        assert_ne!(
+            escaped, malformed,
+            "malformed JSON starting with quote should be escaped and wrapped"
+        );
+        assert_eq!(escaped, "\"\\\"not valid json\"", "should be fully escaped");
+    }
+
+    #[test]
+    fn test_escape_json_raw_valid_string() {
+        // Valid JSON string should be returned as-is
+        let valid = "\"valid json string\"";
+        let escaped = escape_json_raw(valid);
+        assert_eq!(escaped, valid);
+    }
+
+    #[test]
+    fn test_escape_json_raw_object() {
+        // JSON object should be escaped and wrapped
+        let obj = "{\"key\": \"value\"}";
+        let escaped = escape_json_raw(obj);
+        assert_eq!(escaped, "\"{\\\"key\\\": \\\"value\\\"}\"");
+    }
+
+    #[test]
+    fn test_negative_timestamp_handling() {
+        // Bug #1084: negative i64 timestamps wrap to far-future u64 values
+        use arrow::array::Int64Array;
+        use arrow::datatypes::{Field, Schema};
+
+        let config = Arc::new(LokiConfig {
+            endpoint: "http://localhost".to_string(),
+            tenant_id: None,
+            static_labels: vec![],
+            label_columns: vec![],
+            headers: vec![],
+        });
+        let sink = LokiSink::new(
+            "test".to_string(),
+            config,
+            Arc::new(reqwest::Client::new()),
+            Arc::new(ComponentStats::new()),
+        );
+
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "_timestamp",
+            DataType::Int64,
+            true,
+        )]));
+        let ts_arr = Int64Array::from(vec![Some(-100i64), Some(100i64)]);
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(ts_arr)]).unwrap();
+        let metadata = BatchMetadata {
+            resource_attrs: Arc::new(vec![]),
+            observed_time_ns: 12345,
+        };
+
+        let stream_map = sink.build_stream_map(&batch, &metadata).unwrap();
+        let mut entries: Vec<LokiEntry> = stream_map.values().flatten().cloned().collect();
+        entries.sort_by_key(|(ts, _)| *ts);
+
+        assert_eq!(entries[0].0, 0, "Negative timestamp should be clamped to 0");
+        assert_eq!(entries[1].0, 100, "Positive timestamp should be preserved");
     }
 }
 

@@ -1,10 +1,15 @@
 //! TCP input source. Listens on a TCP socket and produces newline-delimited
 //! log lines from connected clients. Multiple concurrent connections supported.
+//!
+//! Each accepted connection receives a unique `SourceId` derived from a
+//! monotonic counter so that `FramedInput`'s per-source remainder tracking
+//! can distinguish data from different peers.
 
 use std::io::{self, Read};
 use std::net::{TcpListener, TcpStream};
 use std::time::{Duration, Instant};
 
+use logfwd_types::pipeline::SourceId;
 use socket2::SockRef;
 
 use crate::input::{InputEvent, InputSource};
@@ -13,8 +18,8 @@ use crate::input::{InputEvent, InputSource};
 const MAX_CLIENTS: usize = 1024;
 
 /// Per-poll read buffer size (64 KiB). Shared across all connections within a
-/// single `poll` call; data is copied into `all_data` immediately, so one
-/// moderate buffer is sufficient.
+/// single `poll` call; data is copied into per-client buffers immediately, so
+/// one moderate buffer is sufficient.
 const READ_BUF_SIZE: usize = 64 * 1024;
 
 /// Default disconnect timeout for idle clients (no data received).
@@ -24,21 +29,49 @@ const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 /// Prevents a misbehaving sender from consuming unbounded memory.
 const MAX_LINE_LENGTH: usize = 1024 * 1024; // 1 MiB
 
+/// Maximum total bytes buffered across all client `client_data` vecs within a
+/// single `poll` call.  When this budget is exhausted we stop reading from
+/// further clients in that poll, deferring them to the next call.  This
+/// propagates TCP backpressure to senders and prevents OOM when many clients
+/// flood data faster than the pipeline can drain it (fix for #576).
+const MAX_TOTAL_BUFFERED_BYTES: usize = 256 * 1024 * 1024; // 256 MiB
+
+/// Derive a `SourceId` for a TCP connection from a monotonic counter.
+///
+/// The counter is hashed to avoid trivially predictable identifiers and to
+/// spread keys evenly in hash maps.
+fn source_id_for_connection(connection_seq: u64) -> SourceId {
+    // Use a domain-separated hash so TCP source ids never collide with
+    // file-based source ids (which hash device+inode+fingerprint).
+    let mut h = xxhash_rust::xxh64::Xxh64::new(0);
+    h.update(b"tcp:");
+    h.update(&connection_seq.to_le_bytes());
+    SourceId(h.digest())
+}
+
 /// A connected TCP client with an associated last-data timestamp.
 struct Client {
     stream: TcpStream,
+    source_id: SourceId,
     last_data: Instant,
     /// Bytes received since the last newline. Reset to 0 on every `\n`.
     bytes_since_newline: usize,
 }
 
 /// TCP input that accepts connections and reads newline-delimited data.
+///
+/// Each connection is assigned a unique `SourceId` so downstream components
+/// can track per-connection state (e.g., partial-line remainders).
 pub struct TcpInput {
     name: String,
     listener: TcpListener,
     clients: Vec<Client>,
     buf: Vec<u8>,
     idle_timeout: Duration,
+    /// Total connections accepted since creation (never decreases).
+    connections_accepted: u64,
+    /// Monotonic counter for generating per-connection `SourceId` values.
+    next_connection_seq: u64,
 }
 
 impl TcpInput {
@@ -61,6 +94,8 @@ impl TcpInput {
             clients: Vec::new(),
             buf: vec![0u8; READ_BUF_SIZE],
             idle_timeout,
+            connections_accepted: 0,
+            next_connection_seq: 0,
         })
     }
 
@@ -72,6 +107,14 @@ impl TcpInput {
     /// Returns the number of currently tracked client connections.
     pub fn client_count(&self) -> usize {
         self.clients.len()
+    }
+
+    /// Returns the total number of connections accepted since creation.
+    /// Monotonically increasing — useful for tests that need to verify a
+    /// connection was accepted even if it was immediately disconnected.
+    #[cfg(test)]
+    pub fn connections_accepted(&self) -> u64 {
+        self.connections_accepted
     }
 }
 
@@ -101,8 +144,12 @@ impl InputSource for TcpInput {
                         .with_interval(Duration::from_secs(10));
                     let _ = sock_ref.set_tcp_keepalive(&keepalive);
 
+                    let sid = source_id_for_connection(self.next_connection_seq);
+                    self.next_connection_seq += 1;
+                    self.connections_accepted += 1;
                     self.clients.push(Client {
                         stream,
+                        source_id: sid,
                         last_data: Instant::now(),
                         bytes_since_newline: 0,
                     });
@@ -115,13 +162,26 @@ impl InputSource for TcpInput {
             }
         }
 
-        // Read from all clients.
-        let mut all_data = Vec::new();
+        // Read from all clients, collecting per-connection buffers.
         let now = Instant::now();
         // Track which connections are dead using a bitmap for O(1) lookup.
         let mut alive = vec![true; self.clients.len()];
+        // Per-client data buffers — only allocated when data arrives.
+        let mut client_data: Vec<Option<Vec<u8>>> = vec![None; self.clients.len()];
+
+        // Running total of bytes stored in client_data during this poll.
+        // When this reaches MAX_TOTAL_BUFFERED_BYTES we stop reading from
+        // further clients (backpressure — fix for #576).
+        let mut total_buffered: usize = 0;
 
         for (i, client) in self.clients.iter_mut().enumerate() {
+            // If the global per-poll budget is exhausted, stop reading more
+            // clients this poll.  They will be read on the next poll call,
+            // which propagates TCP flow-control back to the senders.
+            if total_buffered >= MAX_TOTAL_BUFFERED_BYTES {
+                break;
+            }
+
             let mut got_data = false;
             loop {
                 match client.stream.read(&mut self.buf) {
@@ -156,7 +216,19 @@ impl InputSource for TcpInput {
                                 break;
                             }
                         }
-                        all_data.extend_from_slice(chunk);
+                        client_data[i]
+                            .get_or_insert_with(Vec::new)
+                            .extend_from_slice(chunk);
+                        total_buffered += n;
+
+                        // We must store bytes we have already read from the
+                        // socket (discarding them would be data loss), so the
+                        // budget check necessarily happens after the increment.
+                        // The maximum overage is one READ_BUF_SIZE chunk
+                        // (64 KiB), which is negligible relative to 256 MiB.
+                        if total_buffered >= MAX_TOTAL_BUFFERED_BYTES {
+                            break;
+                        }
                     }
                     Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
                     Err(e) if e.kind() == io::ErrorKind::ConnectionReset => {
@@ -177,6 +249,36 @@ impl InputSource for TcpInput {
             }
         }
 
+        // Build events before removing dead connections — we need client_data
+        // indices to match the current clients vec.
+        let mut events = Vec::new();
+
+        // Step 1: Data events.
+        for (i, data) in client_data.into_iter().enumerate() {
+            if let Some(bytes) = data {
+                if !bytes.is_empty() {
+                    events.push(InputEvent::Data {
+                        bytes,
+                        source_id: Some(self.clients[i].source_id),
+                    });
+                }
+            }
+        }
+
+        // Step 2: EndOfFile events for every connection that is dying.
+        //
+        // A dying connection's SourceId may have an associated partial-line
+        // remainder in FramedInput.  Emitting EndOfFile (after any Data for
+        // the same source) signals FramedInput to flush that remainder so the
+        // last unterminated record is not silently dropped — fixes #804/#580.
+        for (i, &is_alive) in alive.iter().enumerate() {
+            if !is_alive {
+                events.push(InputEvent::EndOfFile {
+                    source_id: Some(self.clients[i].source_id),
+                });
+            }
+        }
+
         // Remove dead connections, preserving order of remaining ones.
         // `retain` is cleaner than manual swap_remove with index tracking.
         let mut idx = 0;
@@ -185,11 +287,6 @@ impl InputSource for TcpInput {
             idx += 1;
             keep
         });
-
-        let mut events = Vec::new();
-        if !all_data.is_empty() {
-            events.push(InputEvent::Data { bytes: all_data });
-        }
 
         Ok(events)
     }
@@ -215,17 +312,18 @@ mod tests {
         client.write_all(b"{\"msg\":\"world\"}\n").unwrap();
         client.flush().unwrap();
 
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        std::thread::sleep(Duration::from_millis(50));
 
         let mut input = input; // make mutable
         let events = input.poll().unwrap();
 
         // Should have accepted the connection and read data.
         assert_eq!(events.len(), 1);
-        if let InputEvent::Data { bytes } = &events[0] {
+        if let InputEvent::Data { bytes, source_id } = &events[0] {
             let text = String::from_utf8_lossy(bytes);
             assert!(text.contains("hello"), "got: {text}");
             assert!(text.contains("world"), "got: {text}");
+            assert!(source_id.is_some(), "TCP data must have a source_id");
         }
     }
 
@@ -237,17 +335,83 @@ mod tests {
         {
             let mut client = StdTcpStream::connect(addr).unwrap();
             client.write_all(b"line1\n").unwrap();
-        } // client drops here → connection closed
+        } // client drops here -> connection closed
 
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        std::thread::sleep(Duration::from_millis(50));
 
         let events = input.poll().unwrap();
-        assert_eq!(events.len(), 1);
+
+        // After the clean disconnect we expect both a Data event and an
+        // EndOfFile event.  The EndOfFile signals FramedInput to flush any
+        // partial-line remainder held for this SourceId.
+        let data_count = events
+            .iter()
+            .filter(|e| matches!(e, InputEvent::Data { .. }))
+            .count();
+        let eof_count = events
+            .iter()
+            .filter(|e| matches!(e, InputEvent::EndOfFile { .. }))
+            .count();
+        assert_eq!(data_count, 1, "expected 1 data event");
+        assert_eq!(eof_count, 1, "expected 1 EndOfFile event on disconnect");
 
         // Second poll should clean up the closed connection.
         let events = input.poll().unwrap();
         assert!(events.is_empty());
         assert!(input.clients.is_empty());
+    }
+
+    /// A TCP client that sends a partial line (no trailing newline) and then
+    /// disconnects must cause an EndOfFile event so that FramedInput can flush
+    /// the partial remainder — fixes #804 / #580.
+    #[test]
+    fn tcp_partial_line_on_disconnect_emits_eof() {
+        let mut input = TcpInput::new("test", "127.0.0.1:0").unwrap();
+        let addr = input.local_addr().unwrap();
+
+        {
+            let mut client = StdTcpStream::connect(addr).unwrap();
+            // Intentionally no trailing newline — this is the partial line.
+            client.write_all(b"partial line without newline").unwrap();
+            client.flush().unwrap();
+        } // client drops here -> EOF
+
+        std::thread::sleep(Duration::from_millis(50));
+
+        let events = input.poll().unwrap();
+
+        let has_data = events
+            .iter()
+            .any(|e| matches!(e, InputEvent::Data { bytes, .. } if !bytes.is_empty()));
+        let has_eof = events
+            .iter()
+            .any(|e| matches!(e, InputEvent::EndOfFile { source_id } if source_id.is_some()));
+
+        assert!(has_data, "should have received the partial line bytes");
+        assert!(
+            has_eof,
+            "should emit EndOfFile on disconnect so FramedInput can flush the partial line"
+        );
+
+        // EndOfFile source_id must match the Data source_id.
+        let data_sid = events.iter().find_map(|e| {
+            if let InputEvent::Data { source_id, .. } = e {
+                *source_id
+            } else {
+                None
+            }
+        });
+        let eof_sid = events.iter().find_map(|e| {
+            if let InputEvent::EndOfFile { source_id } = e {
+                *source_id
+            } else {
+                None
+            }
+        });
+        assert_eq!(
+            data_sid, eof_sid,
+            "Data and EndOfFile must carry the same SourceId"
+        );
     }
 
     #[test]
@@ -292,27 +456,25 @@ mod tests {
             let _ = client.write_all(&big);
         });
 
-        // Interleave polls so the kernel send buffer can drain and the
-        // writer thread makes progress.
+        // Poll until the writer finishes (connection accepted and data read) or
+        // deadline. The accept and disconnect may happen in the same poll() call
+        // when the data arrives faster than the poll loop iterates, so we track
+        // total connections_accepted() rather than the transient client_count().
         let deadline = Instant::now() + Duration::from_secs(10);
-        let mut was_connected = false;
         while Instant::now() < deadline {
             let _ = input.poll().unwrap();
-            if input.client_count() > 0 {
-                was_connected = true;
-            }
-            if was_connected && input.client_count() == 0 {
+            if input.connections_accepted() > 0 && input.client_count() == 0 {
                 break;
             }
             std::thread::sleep(Duration::from_millis(10));
         }
 
-        assert!(
-            was_connected,
-            "connect→disconnect transition was never observed"
-        );
         let _ = writer.join();
 
+        assert!(
+            input.connections_accepted() > 0,
+            "server must have accepted the connection"
+        );
         assert_eq!(
             input.client_count(),
             0,
@@ -336,24 +498,20 @@ mod tests {
         });
 
         let deadline = Instant::now() + Duration::from_secs(10);
-        let mut was_connected = false;
         while Instant::now() < deadline {
             let _ = input.poll().unwrap();
-            if input.client_count() > 0 {
-                was_connected = true;
-            }
-            if was_connected && input.client_count() == 0 {
+            if input.connections_accepted() > 0 && input.client_count() == 0 {
                 break;
             }
             std::thread::sleep(Duration::from_millis(10));
         }
 
-        assert!(
-            was_connected,
-            "connect→disconnect transition was never observed"
-        );
         let _ = writer.join();
 
+        assert!(
+            input.connections_accepted() > 0,
+            "server must have accepted the connection"
+        );
         assert_eq!(
             input.client_count(),
             0,
@@ -384,6 +542,49 @@ mod tests {
             input.client_count(),
             0,
             "all storm connections should be cleaned up (no fd leak)"
+        );
+    }
+
+    /// Two concurrent TCP connections must receive distinct `SourceId` values
+    /// so that `FramedInput` can track per-connection remainders independently.
+    #[test]
+    fn distinct_source_ids_per_connection() {
+        let mut input = TcpInput::new("test", "127.0.0.1:0").unwrap();
+        let addr = input.local_addr().unwrap();
+
+        let mut client_a = StdTcpStream::connect(addr).unwrap();
+        let mut client_b = StdTcpStream::connect(addr).unwrap();
+
+        client_a.write_all(b"from_a\n").unwrap();
+        client_b.write_all(b"from_b\n").unwrap();
+        client_a.flush().unwrap();
+        client_b.flush().unwrap();
+
+        std::thread::sleep(Duration::from_millis(50));
+
+        let events = input.poll().unwrap();
+
+        // Collect all source_ids from data events.
+        let source_ids: Vec<SourceId> = events
+            .iter()
+            .filter_map(|e| match e {
+                InputEvent::Data { source_id, .. } => *source_id,
+                _ => None,
+            })
+            .collect();
+
+        assert!(
+            source_ids.len() >= 2,
+            "expected at least 2 data events (one per connection), got {}",
+            source_ids.len()
+        );
+
+        // All source_ids must be distinct.
+        let unique: std::collections::HashSet<u64> = source_ids.iter().map(|s| s.0).collect();
+        assert_eq!(
+            unique.len(),
+            source_ids.len(),
+            "each TCP connection must have a distinct SourceId"
         );
     }
 }

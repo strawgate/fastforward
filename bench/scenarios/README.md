@@ -8,6 +8,9 @@ Each scenario tests a different input/output path end-to-end using two logfwd pi
 # Self-contained (no network, measures raw pipeline throughput)
 just bench-self
 
+# Throughput ceiling (no filter, no network, measures theoretical max)
+just bench-ceiling-self
+
 # TCP end-to-end
 just bench-tcp
 
@@ -16,6 +19,10 @@ just bench-udp
 
 # OTLP end-to-end
 just bench-otlp
+
+# Elasticsearch end-to-end
+just bench-es
+just bench-es-streaming
 
 # All scenarios
 just bench-pipelines
@@ -26,9 +33,12 @@ just bench-pipelines
 | Scenario | Sender | Receiver | What it measures |
 |----------|--------|----------|-----------------|
 | self | generator → null | — | Raw pipeline: scanner + DataFusion |
-| tcp | generator → tcp_out | tcp → null | TCP serialization + deserialization |
-| udp | generator → udp_out | udp → null | UDP per-datagram overhead |
+| ceiling | generator → null | — | Throughput ceiling: passthrough only (SELECT *) |
+| tcp | generator → tcp | tcp → null | TCP serialization + deserialization |
+| udp | generator → udp | udp → null | UDP per-datagram overhead |
 | otlp | generator → otlp | otlp → null | OTLP protobuf encode + HTTP + decode |
+| es | generator → elasticsearch | Elasticsearch | Bulk NDJSON serialization + HTTP |
+| es-streaming | generator → elasticsearch (streaming) | Elasticsearch | Chunked bulk streaming vs buffered HTTP |
 
 ## CPU limiting
 

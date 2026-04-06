@@ -1,0 +1,17 @@
+//! Stable pipeline types for logfwd.
+//!
+//! Provides cross-cutting types that multiple crates need without pulling in
+//! heavy I/O or transform dependencies. Includes pure state-machine types
+//! (pipeline) and lock-free diagnostic counters.
+#![warn(missing_docs)]
+
+extern crate alloc;
+
+/// Pipeline state machine — typestate batch lifecycle + ordered offset tracking.
+pub mod pipeline;
+
+/// Component-level diagnostic counters (lock-free, hot-path friendly).
+pub mod diagnostics;
+
+/// Hints that input sources and parsers can use to filter early.
+pub mod filter_hints;

@@ -217,18 +217,23 @@ logfwd-core is the proven kernel. All rules are CI-enforced.
 | `structural.rs` | Escape detection, quote classification, SIMD structural detection | Kani exhaustive (12 proofs) + proptest (SIMD ≡ scalar) |
 | `structural_iter.rs` | Streaming structural position iterator | Kani exhaustive (3 proofs) |
 | `framer.rs` | Newline framing, line boundary detection | Kani exhaustive + oracle (4 proofs) |
-| `aggregator.rs` | CRI partial line reassembly (P/F merging) | Kani exhaustive (5 proofs) |
+| `reassembler.rs` | CRI partial line reassembly (P/F merging) | Kani exhaustive (8 proofs) |
 | `byte_search.rs` | Proven byte search (find_byte, rfind_byte) | Kani exhaustive + oracle (3 proofs) |
 | `scanner.rs` | JSON field extraction (ScanBuilder trait) | Kani bounded (1 proof) + proptest oracle |
 | `json_scanner.rs` | Streaming JSON field scanner via bitmask iteration | Kani bounded (5 proofs) + proptest oracle |
 | `scan_config.rs` | `parse_int_fast`, `parse_float_fast`, `ScanConfig` | Kani exhaustive (2 proofs) |
 | `cri.rs` | CRI log parsing + partial line reassembly | Kani exhaustive (8 proofs) |
-| `otlp.rs` | Protobuf wire format + OTLP encoding + timestamp parsing | Kani exhaustive (25 proofs incl. 3 contract verifications) |
+| `otlp.rs` | Protobuf wire format + OTLP encoding + timestamp parsing | Kani mixed exhaustive + bounded (30 proofs incl. 3 contract verifications) |
 | `pipeline/lifecycle.rs` | Pipeline state machine (ordered ACK, drain, shutdown) | Kani exhaustive (6 proofs) + proptest + **TLA+** |
 | `pipeline/batch.rs` | BatchTicket typestate (ack/nack/fail/reject) | Kani exhaustive (5 proofs) + compile-time |
-| `logfwd-output/lib.rs` | Conflict struct detection, ColVariant priority ordering | Kani (4 proofs: is_conflict_struct, json/str priority contracts) |
+| `logfwd-output/lib.rs` | Conflict struct detection, ColVariant priority ordering | Kani (8 proofs: ColVariant field preservation, variant_dt, is_conflict_struct, json/str priority contracts) |
+| `logfwd-output/sink.rs` | SendResult outcome variants for the async Sink trait | Kani (4 proofs: Ok/RetryAfter/Rejected variant invariants, mutual exclusion) |
+| `logfwd-io/otlp_receiver.rs` | OTLP proto→JSON transcoding helpers (from_utf8_unchecked safety) | Kani (4 proofs: write_i64 ASCII-only, write_f64 ASCII-only, hex encoding, JSON escaping) |
+| `logfwd-io/format.rs` | CRI metadata injection, Auto-mode fallthrough to passthrough | Kani (4 proofs: inject_cri_metadata output structure, JSON vs plain-text path dispatch) |
+| `logfwd-io/tail.rs` | File tailer EOF emission state machine (eof_emitted flag) | Kani (4 proofs: at-most-once emission per streak, data-reset invariant, two-poll sequence, reset-cycle) |
 | `logfwd-arrow/storage_builder.rs` | StructArray conflict column assembly | Kani (2 proofs: duplicate name guard, row count invariant) + unit tests |
 | `logfwd-arrow/streaming_builder.rs` | StructArray conflict column assembly (StringView) | Kani (2 proofs: duplicate name guard, row count invariant) + unit tests |
+| `scanner_conformance.rs` (accumulation) | BytesMut accumulation → Bytes → Scanner equivalence | proptest (3 tests × 256 cases: random split, single chunk, per-line split; full value comparison) |
 
 ### Verification tiers
 
@@ -241,7 +246,7 @@ u64 bitmask operations, integer parsing, varint roundtrip, pipeline state machin
 
 **Tier 2 — Bounded (Kani proves for inputs up to size N):**
 `parse_cri_line` (≤32 bytes), `NewlineFramer` (all 32-byte inputs), `skip_nested`
-(all 16-byte inputs), `CriAggregator` P+P+F (8-byte messages, max_size ≤32).
+(all 16-byte inputs), `CriReassembler` P+P+F (8-byte messages, max_size ≤32).
 
 **Tier 3 — Statistical (proptest, high confidence):**
 SIMD ≡ scalar structural detection, scanner oracle vs sonic-rs, pipeline event sequences,

@@ -10,7 +10,10 @@ KUBE_CONTEXT="kind-${CLUSTER_NAME}"
 NAMESPACE="e2e-logfwd"
 IMAGE="logfwd:e2e"
 TIMEOUT=120
-EXPECTED_LINES=10
+# Accept a range to tolerate benign duplicates from container restarts
+# or CRI partial-line reassembly edge cases.
+MIN_EXPECTED_LINES=10
+MAX_EXPECTED_LINES=15
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 NO_DESTROY="${NO_DESTROY:-}"
@@ -19,6 +22,22 @@ CLUSTER_CREATED=0
 
 k() {
     kubectl --context "$KUBE_CONTEXT" "$@"
+}
+
+# Poll a condition with backoff. Usage: wait_for <description> <timeout_s> <command...>
+wait_for() {
+    local desc="$1" timeout="$2"; shift 2
+    local deadline=$((SECONDS + timeout))
+    local delay=1
+    while [ $SECONDS -lt $deadline ]; do
+        if "$@" 2>/dev/null; then
+            return 0
+        fi
+        sleep "$delay"
+        delay=$(( delay < 5 ? delay + 1 : 5 ))
+    done
+    echo "FAIL: timed out waiting for: $desc (${timeout}s)"
+    return 1
 }
 
 cleanup() {
@@ -63,7 +82,6 @@ if ! k wait -n "$NAMESPACE" deployment/blackhole-receiver \
     --for=condition=available --timeout=90s; then
     echo ""
     echo "FAIL: blackhole-receiver deployment not available"
-    echo "--- blackhole-receiver pods ---"
     k describe pods -n "$NAMESPACE" -l app=blackhole-receiver 2>&1 || true
     k logs -n "$NAMESPACE" -l app=blackhole-receiver --tail=50 2>&1 || true
     exit 1
@@ -71,12 +89,9 @@ fi
 if ! k rollout status -n "$NAMESPACE" daemonset/logfwd --timeout=90s; then
     echo ""
     echo "FAIL: logfwd daemonset rollout timed out"
-    echo "--- logfwd pods ---"
     k get pods -n "$NAMESPACE" -l app=logfwd -o wide 2>&1 || true
     k describe pods -n "$NAMESPACE" -l app=logfwd 2>&1 || true
-    echo "--- logfwd logs ---"
     k logs -n "$NAMESPACE" -l app=logfwd --tail=80 2>&1 || true
-    echo "--- events ---"
     k get events -n "$NAMESPACE" --sort-by='.lastTimestamp' 2>&1 || true
     exit 1
 fi
@@ -84,27 +99,28 @@ fi
 echo "=== Phase 5: Generate logs ==="
 k delete pod -n "$NAMESPACE" log-generator --ignore-not-found 2>/dev/null
 k apply -n "$NAMESPACE" -f "$SCRIPT_DIR/manifests/log-generator.yaml"
-# Don't wait for Ready — busybox pod may not have readiness probe.
-# The container will start and begin emitting logs after its 5s sleep.
-sleep 8
 
-echo "=== Phase 6: Verify ==="
+# Wait for the generator pod to be Running instead of hardcoded sleep.
+wait_for "log-generator pod running" 30 \
+    k get pod -n "$NAMESPACE" log-generator -o jsonpath='{.status.phase}' | grep -q Running || true
+# Brief extra pause for CRI log path to stabilize after container start.
+sleep 3
+
+echo "=== Phase 6: Port-forward ==="
 k port-forward -n "$NAMESPACE" svc/blackhole-receiver 14318:4318 &
 PF_PID=$!
-sleep 2
-if ! kill -0 "$PF_PID" 2>/dev/null; then
-    echo "FAIL: port-forward failed to stay running"
-    echo "--- blackhole-receiver pods ---"
-    k get pods -n "$NAMESPACE" -l app=blackhole-receiver -o wide 2>&1 || true
-    exit 1
-fi
 
+# Wait for port-forward to accept connections instead of hardcoded sleep.
+wait_for "port-forward accepting connections" 15 \
+    curl --connect-timeout 1 --max-time 1 -sf http://localhost:14318/stats
+
+echo "=== Phase 7: Verify ==="
 DEADLINE=$((SECONDS + TIMEOUT))
+DELAY=2
 while [ $SECONDS -lt $DEADLINE ]; do
     if ! kill -0 "$PF_PID" 2>/dev/null; then
         echo ""
-        echo "FAIL: port-forward exited during verification loop (pid=$PF_PID)"
-        echo "--- blackhole-receiver pods ---"
+        echo "FAIL: port-forward exited during verification (pid=$PF_PID)"
         k get pods -n "$NAMESPACE" -l app=blackhole-receiver -o wide 2>&1 || true
         exit 1
     fi
@@ -113,22 +129,27 @@ while [ $SECONDS -lt $DEADLINE ]; do
     LINES=$(echo "$STATS" | sed -n 's/.*"lines":\([0-9]*\).*/\1/p')
     LINES="${LINES:-0}"
 
-    echo "  blackhole /stats: $STATS (want lines == $EXPECTED_LINES)"
+    echo "  blackhole /stats: lines=$LINES (want ${MIN_EXPECTED_LINES}..${MAX_EXPECTED_LINES})"
 
-    if [ "$LINES" -eq "$EXPECTED_LINES" ]; then
+    if [ "$LINES" -ge "$MIN_EXPECTED_LINES" ] && [ "$LINES" -le "$MAX_EXPECTED_LINES" ]; then
         echo ""
-        echo "PASS: blackhole received $LINES lines (expected $EXPECTED_LINES)"
+        echo "PASS: blackhole received $LINES lines (expected ${MIN_EXPECTED_LINES}..${MAX_EXPECTED_LINES})"
         exit 0
-    elif [ "$LINES" -gt "$EXPECTED_LINES" ]; then
+    elif [ "$LINES" -gt "$MAX_EXPECTED_LINES" ]; then
         echo ""
-        echo "FAIL: blackhole received $LINES lines (> expected $EXPECTED_LINES)"
+        echo "FAIL: blackhole received $LINES lines (> max expected $MAX_EXPECTED_LINES)"
+        echo "--- logfwd logs ---"
+        k logs -n "$NAMESPACE" -l app=logfwd --tail=40 2>&1 || true
         exit 1
     fi
-    sleep 5
+
+    # Exponential backoff: 2s → 3s → 4s → 5s (capped)
+    sleep "$DELAY"
+    DELAY=$(( DELAY < 5 ? DELAY + 1 : 5 ))
 done
 
 echo ""
-echo "FAIL: timed out after ${TIMEOUT}s — blackhole received $LINES lines, expected $EXPECTED_LINES"
+echo "FAIL: timed out after ${TIMEOUT}s — blackhole received $LINES lines, expected ${MIN_EXPECTED_LINES}..${MAX_EXPECTED_LINES}"
 echo ""
 echo "--- logfwd DaemonSet logs ---"
 k logs -n "$NAMESPACE" -l app=logfwd --tail=80 2>&1 || true

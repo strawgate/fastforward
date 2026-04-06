@@ -16,7 +16,7 @@ transform: |
 
 output:
   type: otlp
-  endpoint: https://otel-collector:4318
+  endpoint: https://otel-collector:4318/v1/logs
   protocol: http
   compression: zstd
 
@@ -36,8 +36,8 @@ logfwd --config pipeline.yaml
 # Health check
 curl http://localhost:9090/health
 
-# Live metrics
-curl http://localhost:9090/metrics
+# Aggregate stats (JSON)
+curl http://localhost:9090/api/stats | jq .
 
 # Pipeline details (JSON)
 curl http://localhost:9090/api/pipelines | jq .

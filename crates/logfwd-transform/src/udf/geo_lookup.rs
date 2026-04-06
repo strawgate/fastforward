@@ -31,7 +31,7 @@ use datafusion::logical_expr::{
     ColumnarValue, ScalarFunctionArgs, ScalarUDFImpl, Signature, TypeSignature, Volatility,
 };
 
-use logfwd_io::enrichment::{GeoDatabase, GeoResult};
+use crate::enrichment::{GeoDatabase, GeoResult};
 
 // ---------------------------------------------------------------------------
 // Schema helper
@@ -314,7 +314,7 @@ fn geo_result_to_scalar(result: Option<&GeoResult>) -> DfResult<datafusion::comm
 /// The database is loaded into memory once at construction time.
 ///
 /// ```rust,no_run
-/// use logfwd_io::enrichment::GeoDatabase as _;
+/// use logfwd_transform::enrichment::GeoDatabase as _;
 /// use logfwd_transform::udf::geo_lookup::MmdbDatabase;
 ///
 /// let db = MmdbDatabase::open("/etc/logfwd/GeoLite2-City.mmdb").unwrap();
@@ -334,18 +334,18 @@ impl MmdbDatabase {
     /// Open an MMDB file at the given path and load it into memory.
     ///
     /// Returns an error if the file cannot be read or is not a valid MMDB.
-    pub fn open<P: AsRef<std::path::Path>>(path: P) -> Result<Self, String> {
+    pub fn open<P: AsRef<std::path::Path>>(path: P) -> Result<Self, crate::TransformError> {
         let data = std::fs::read(path.as_ref()).map_err(|e| {
-            format!(
+            crate::TransformError::Enrichment(format!(
                 "failed to read MMDB file '{}': {e}",
                 path.as_ref().display()
-            )
+            ))
         })?;
         let reader = maxminddb::Reader::from_source(data).map_err(|e| {
-            format!(
+            crate::TransformError::Enrichment(format!(
                 "failed to parse MMDB file '{}': {e}",
                 path.as_ref().display()
-            )
+            ))
         })?;
         Ok(Self { reader })
     }

@@ -1,4 +1,4 @@
-# SIMD Scanner
+# Zero-Copy Scanner
 
 The scanner converts newline-delimited JSON into Apache Arrow RecordBatches
 using SIMD-accelerated structural classification.
@@ -15,7 +15,7 @@ using SIMD-accelerated structural classification.
 
 ## Zero-copy mode
 
-`StreamingSimdScanner` uses Arrow's `StringViewArray` to create 16-byte views
+`Scanner` uses Arrow's `StringViewArray` to create 16-byte views
 into the input buffer. String data is never copied — the original input buffer
 is shared via reference counting.
 

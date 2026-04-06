@@ -1,6 +1,6 @@
 //! Fuzz the scanner-to-output-sink pipeline.
 //!
-//! Feeds arbitrary bytes through `SimdScanner` and then serializes the
+//! Feeds arbitrary bytes through `Scanner` and then serializes the
 //! resulting `RecordBatch` with both `JsonLinesSink` and `OtlpSink`.
 //!
 //! Verifies that:
@@ -12,19 +12,19 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 use logfwd_core::scan_config::ScanConfig;
-use logfwd_arrow::scanner::SimdScanner;
+use logfwd_arrow::scanner::Scanner;
 use logfwd_io::diagnostics::ComponentStats;
 use logfwd_output::{BatchMetadata, Compression, JsonLinesSink, OtlpProtocol, OtlpSink};
 use std::sync::Arc;
 
-fuzz_target!(|data: &[u8]| {
-    let mut scanner = SimdScanner::new(ScanConfig {
+fn run_sinks(data: &[u8], validate_utf8: bool) {
+    let mut scanner = Scanner::new(ScanConfig {
         wanted_fields: vec![],
         extract_all: true,
         keep_raw: false,
-        validate_utf8: false,
+        validate_utf8,
     });
-    let Ok(batch) = scanner.scan(data) else { return; };
+    let Ok(batch) = scanner.scan_detached(bytes::Bytes::copy_from_slice(data)) else { return; };
 
     let metadata = BatchMetadata {
         resource_attrs: Arc::new(vec![]),
@@ -36,6 +36,7 @@ fuzz_target!(|data: &[u8]| {
         "fuzz".to_string(),
         "http://localhost/".to_string(),
         vec![],
+        Compression::None,
         Arc::new(ComponentStats::new()),
     );
     json_sink.serialize_batch(&batch);
@@ -62,6 +63,7 @@ fuzz_target!(|data: &[u8]| {
         OtlpProtocol::Http,
         Compression::None,
         vec![],
+        reqwest::Client::new(),
         Arc::new(ComponentStats::new()),
     );
     otlp_sink.encode_batch(&batch, &metadata);
@@ -73,4 +75,9 @@ fuzz_target!(|data: &[u8]| {
             "OtlpSink: non-empty output for 0-row batch"
         );
     }
+}
+
+fuzz_target!(|data: &[u8]| {
+    run_sinks(data, false);
+    run_sinks(data, true);
 });

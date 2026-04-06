@@ -1,43 +1,52 @@
-//! Cross-builder consistency fuzz target.
+//! Cross-mode consistency fuzz target.
 //!
-//! Runs the same input through both `SimdScanner` (StorageBuilder) and
-//! `StreamingSimdScanner` (StreamingBuilder) and asserts that:
+//! Runs the same input through both `scan_detached` (StringArray) and
+//! `scan` (StringViewArray) and asserts that:
 //! - Row counts match.
 //! - The same set of column names is produced.
 //! - For every column, the null pattern matches.
-//! - For string columns, non-null values are identical (StorageBuilder copies
-//!   into `StringArray`; StreamingBuilder stores zero-copy `StringViewArray`
+//! - For string columns, non-null values are identical (scan_detached copies
+//!   into `StringArray`; scan stores zero-copy `StringViewArray`
 //!   views — the string content must be the same).
 
 #![no_main]
 use libfuzzer_sys::fuzz_target;
+use logfwd_arrow::scanner::Scanner;
 use logfwd_core::scan_config::ScanConfig;
-use logfwd_arrow::scanner::{SimdScanner, StreamingSimdScanner};
 
 use arrow::array::{Array, AsArray};
 use arrow::datatypes::DataType;
 use std::collections::BTreeSet;
 
-fuzz_target!(|data: &[u8]| {
-    let mut storage_scanner = SimdScanner::new(ScanConfig::default());
-    let Ok(storage_batch) = storage_scanner.scan(data) else { return; };
+fn check_consistency(data: &[u8], validate_utf8: bool) {
+    let config = ScanConfig {
+        validate_utf8,
+        ..ScanConfig::default()
+    };
+    let buf = bytes::Bytes::copy_from_slice(data);
 
-    let mut streaming_scanner = StreamingSimdScanner::new(ScanConfig::default());
-    let Ok(streaming_batch) = streaming_scanner.scan(bytes::Bytes::copy_from_slice(data)) else { return; };
+    let mut detached_scanner = Scanner::new(config);
+    let Ok(detached_batch) = detached_scanner.scan_detached(buf.clone()) else { return; };
+
+    let mut streaming_scanner = Scanner::new(ScanConfig {
+        validate_utf8,
+        ..ScanConfig::default()
+    });
+    let Ok(streaming_batch) = streaming_scanner.scan(buf) else { return; };
 
     // Row counts must match.
     assert_eq!(
-        storage_batch.num_rows(),
+        detached_batch.num_rows(),
         streaming_batch.num_rows(),
         "row count mismatch"
     );
 
-    let num_rows = storage_batch.num_rows();
+    let num_rows = detached_batch.num_rows();
 
     // Column name sets must match.
-    let storage_schema = storage_batch.schema();
+    let detached_schema = detached_batch.schema();
     let streaming_schema = streaming_batch.schema();
-    let storage_names: BTreeSet<&str> = storage_schema
+    let detached_names: BTreeSet<&str> = detached_schema
         .fields()
         .iter()
         .map(|f| f.name().as_str())
@@ -47,11 +56,11 @@ fuzz_target!(|data: &[u8]| {
         .iter()
         .map(|f| f.name().as_str())
         .collect();
-    assert_eq!(storage_names, streaming_names, "column name sets differ");
+    assert_eq!(detached_names, streaming_names, "column name sets differ");
 
     // For each column, null patterns and values must match.
-    for name in &storage_names {
-        let sc = storage_batch.column_by_name(name).unwrap();
+    for name in &detached_names {
+        let sc = detached_batch.column_by_name(name).unwrap();
         let st = streaming_batch.column_by_name(name).unwrap();
 
         for row in 0..num_rows {
@@ -62,7 +71,7 @@ fuzz_target!(|data: &[u8]| {
             );
         }
 
-        // Compare string values: StorageBuilder → Utf8, StreamingBuilder → Utf8View.
+        // Compare string values: scan_detached -> Utf8, scan -> Utf8View.
         let sc_type = sc.data_type();
         let st_type = st.data_type();
         match (sc_type, st_type) {
@@ -79,7 +88,7 @@ fuzz_target!(|data: &[u8]| {
                     }
                 }
             }
-            // Int and float columns have the same Arrow type in both builders.
+            // Int and float columns have the same Arrow type in both modes.
             (DataType::Int64, DataType::Int64) => {
                 let sa = sc.as_primitive::<arrow::datatypes::Int64Type>();
                 let sv = st.as_primitive::<arrow::datatypes::Int64Type>();
@@ -98,7 +107,7 @@ fuzz_target!(|data: &[u8]| {
                 let sv = st.as_primitive::<arrow::datatypes::Float64Type>();
                 for row in 0..num_rows {
                     if !sa.is_null(row) {
-                        // NaN != NaN, but both builders should produce the same
+                        // NaN != NaN, but both modes should produce the same
                         // bit pattern for any given input so this is safe.
                         assert_eq!(
                             sa.value(row).to_bits(),
@@ -114,4 +123,9 @@ fuzz_target!(|data: &[u8]| {
             }
         }
     }
+}
+
+fuzz_target!(|data: &[u8]| {
+    check_consistency(data, false);
+    check_consistency(data, true);
 });

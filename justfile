@@ -19,7 +19,7 @@ clippy:
 
 # Run all tests
 test:
-    cargo test
+    cargo nextest run --profile ci
 
 # Run Kani formal verification proofs (logfwd-core only)
 # Requires: cargo install --locked kani-verifier && cargo kani setup
@@ -56,6 +56,12 @@ dashboard:
 
 
 
+# Extended testing: 10K proptest cases + turmoil simulation + ignored benchmarks/scaling tests
+test-extended:
+    PROPTEST_CASES=10000 cargo nextest run --profile ci
+    cargo nextest run --profile ci --run-ignored ignored-only
+    cargo test -p logfwd --features turmoil --test turmoil_sim
+
 # Build release binary
 build:
     cargo build --release
@@ -90,7 +96,13 @@ _bench-pair name rx_config tx_config seconds="10":
     set -euo pipefail
     LOGFWD=./target/release/logfwd
     $LOGFWD --config {{rx_config}} &
-    RX=$!; sleep 1
+    RX=$!; sleep 5
+    for i in $(seq 1 10); do
+        if curl -sf http://127.0.0.1:9091/api/stats > /dev/null 2>&1; then
+            break
+        fi
+        sleep 1
+    done
     $LOGFWD --config {{tx_config}} &
     TX=$!; sleep {{seconds}}
     STATS=$(curl -s http://127.0.0.1:9091/api/stats 2>/dev/null || echo '{}')
@@ -108,20 +120,85 @@ bench-self seconds="10":
     @echo "==> Self benchmark (generator → filter → null)"
     just _bench-run self bench/scenarios/self-bench.yaml {{seconds}}
 
+# Throughput ceiling: generator → SELECT * → null (no filter, no network)
+bench-ceiling-self seconds="10":
+    @echo "==> Ceiling benchmark (generator → passthrough → null)"
+    just _bench-run ceiling bench/scenarios/self-ceiling.yaml {{seconds}}
+
 # TCP end-to-end
 bench-tcp seconds="10":
-    @echo "==> TCP benchmark (generator → tcp_out → tcp → null)"
+    @echo "==> TCP benchmark (generator → tcp → tcp → null)"
     just _bench-pair tcp bench/scenarios/tcp-receiver.yaml bench/scenarios/tcp-sender.yaml {{seconds}}
 
 # UDP end-to-end
 bench-udp seconds="10":
-    @echo "==> UDP benchmark (generator → udp_out → udp → null)"
+    @echo "==> UDP benchmark (generator → udp → udp → null)"
     just _bench-pair udp bench/scenarios/udp-receiver.yaml bench/scenarios/udp-sender.yaml {{seconds}}
 
 # OTLP end-to-end
 bench-otlp seconds="10":
     @echo "==> OTLP benchmark (generator → otlp → otlp_receiver → null)"
     just _bench-pair otlp bench/scenarios/otlp-receiver.yaml bench/scenarios/otlp-sender.yaml {{seconds}}
+
+# Elasticsearch end-to-end: starts ES in Docker, sends generator output to it, then stops ES.
+# Requires Docker.  Skips gracefully if Docker or the ES image is unavailable.
+bench-es seconds="10":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! command -v docker &>/dev/null; then
+        echo "==> Docker not found — skipping ES benchmark"
+        exit 0
+    fi
+    echo "==> Starting Elasticsearch (Docker)"
+    docker compose -f examples/elasticsearch/docker-compose.yml up -d
+    echo "==> Waiting for Elasticsearch health (up to 120s)..."
+    for i in $(seq 1 60); do
+        if curl -sf http://localhost:9200/_cluster/health > /dev/null 2>&1; then
+            echo "    Elasticsearch ready (${i}×2s)"
+            break
+        fi
+        sleep 2
+    done
+    if ! curl -sf http://localhost:9200/_cluster/health > /dev/null 2>&1; then
+        echo "ERROR: Elasticsearch did not become healthy in time"
+        docker compose -f examples/elasticsearch/docker-compose.yml down
+        exit 1
+    fi
+    cargo build --release -p logfwd
+    echo "==> ES benchmark (generator → elasticsearch)"
+    just _bench-run es bench/scenarios/es-sender.yaml {{seconds}}
+    echo "==> Stopping Elasticsearch"
+    docker compose -f examples/elasticsearch/docker-compose.yml down
+
+# Elasticsearch end-to-end using streaming request bodies.
+# Requires Docker. Skips gracefully if Docker or the ES image is unavailable.
+bench-es-streaming seconds="10":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! command -v docker &>/dev/null; then
+        echo "==> Docker not found — skipping streaming ES benchmark"
+        exit 0
+    fi
+    echo "==> Starting Elasticsearch (Docker)"
+    docker compose -f examples/elasticsearch/docker-compose.yml up -d
+    echo "==> Waiting for Elasticsearch health (up to 120s)..."
+    for i in $(seq 1 60); do
+        if curl -sf http://localhost:9200/_cluster/health > /dev/null 2>&1; then
+            echo "    Elasticsearch ready (${i}×2s)"
+            break
+        fi
+        sleep 2
+    done
+    if ! curl -sf http://localhost:9200/_cluster/health > /dev/null 2>&1; then
+        echo "ERROR: Elasticsearch did not become healthy in time"
+        docker compose -f examples/elasticsearch/docker-compose.yml down
+        exit 1
+    fi
+    cargo build --release -p logfwd
+    echo "==> ES streaming benchmark (generator → elasticsearch)"
+    just _bench-run es-streaming bench/scenarios/es-sender-streaming.yaml {{seconds}}
+    echo "==> Stopping Elasticsearch"
+    docker compose -f examples/elasticsearch/docker-compose.yml down
 
 # Run all pipeline benchmarks (alias: bench-pipelines)
 bench-e2e seconds="10":
@@ -157,9 +234,23 @@ build-pgo:
     cp target/release/logfwd target/release/logfwd-pgo
     echo "PGO binary written to target/release/logfwd-pgo"
 
-# Run criterion microbenchmarks
+# Run Tier 1 criterion benchmarks (fast, ~30s — composed functions, no heavy I/O)
 bench:
-    cargo bench -p logfwd-bench
+    cargo bench -p logfwd-bench --bench pipeline --bench output_encode --bench full_chain
+
+# Run throughput ceiling benchmark (generator → scan → null, no transform)
+bench-ceiling:
+    cargo bench -p logfwd-bench --bench throughput_ceiling
+
+# Run all criterion benchmarks (Tier 1 + Tier 2 — includes I/O and batch scaling, ~2-5min)
+# Excludes elasticsearch_arrow which requires a running ES instance.
+bench-full:
+    cargo bench -p logfwd-bench --bench pipeline --bench output_encode --bench full_chain --bench builder_compare --bench batch_formation --bench file_io --bench throughput_ceiling
+
+# Run system-level benchmarks (pipeline, contention, backpressure — requires running services)
+bench-system:
+    @echo "System-level benchmarks: pipeline end-to-end with real I/O"
+    just bench-pipelines
 
 # Run competitive benchmarks (binary mode, local dev)
 bench-competitive *ARGS:
@@ -237,10 +328,23 @@ profile-otlp-local lines="500000" seconds="6":
 bench-report:
     cargo run -p logfwd-bench
 
+# Profile FramedInput / format processing overhead and print a markdown report.
+bench-framed-input *ARGS:
+    cargo run -p logfwd-bench --release --bin framed_input_profile -- {{ARGS}}
+
+# Allocation-focused FramedInput profiling (dhat-backed, slower; no throughput numbers).
+bench-framed-input-alloc *ARGS:
+    cargo run -p logfwd-bench --release --features dhat-heap --bin framed_input_profile -- --alloc-only {{ARGS}}
+
 # Run low-and-slow rate-ingest benchmark (logfwd only, measures memory and CPU at each eps)
 bench-rate *ARGS:
     cargo build --release -p logfwd
     LOGFWD=./target/release/logfwd cargo run -p logfwd-competitive-bench --release -- --rate-bench {{ARGS}}
+
+# Run sustained-load memory profiler (generator → SQL → null, default 5 minutes).
+# Use --quick (30s) for CI or --medium (120s) for quick checks.
+bench-memory *ARGS:
+    cargo run -p logfwd-bench --release --bin memory-profile -- {{ARGS}}
 
 # Install development tools
 install-tools:
@@ -265,4 +369,3 @@ uninstall-hooks:
     HOOKS_DIR=$(git rev-parse --git-common-dir)/hooks
     rm -f "$HOOKS_DIR/pre-commit"
     echo "Pre-commit hook removed"
-

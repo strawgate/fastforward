@@ -1,6 +1,6 @@
 # Configuration Reference
 
-logfwd is configured with a YAML file passed via `--config <path>`.
+logfwd is configured with a YAML file passed via `--config <config.yaml>`.
 
 ## Overview
 
@@ -22,7 +22,7 @@ input:
   path: /var/log/app/*.log
   format: json
 
-transform: SELECT level_str, msg_str, status_int FROM logs WHERE status_int >= 400
+transform: SELECT level, message, status FROM logs WHERE status >= 400
 
 output:
   type: otlp
@@ -44,7 +44,7 @@ pipelines:
         type: file
         path: /var/log/pods/**/*.log
         format: cri
-    transform: SELECT * FROM logs WHERE level_str = 'ERROR'
+    transform: SELECT * FROM logs WHERE level = 'ERROR'
     outputs:
       - type: otlp
         endpoint: otel-collector:4317
@@ -107,7 +107,7 @@ Listen for log lines on a UDP socket.
 input:
   type: udp
   listen: 0.0.0.0:514
-  format: syslog
+  format: json
 ```
 
 ### `tcp` input *(not yet implemented)*
@@ -155,7 +155,6 @@ The `format` field controls how raw bytes from the input are parsed into log rec
 | `json` | Newline-delimited JSON. Each line must be a single JSON object. |
 | `raw` | Treat each line as an opaque string stored in `_raw_str`. |
 | `logfmt` | Key=value pairs (e.g. `level=info msg="hello"`). *Not yet implemented.* |
-| `syslog` | RFC 5424 syslog. *Not yet implemented.* |
 | `console` | Human-readable coloured output for interactive debugging. Output mode only. |
 
 ---
@@ -196,13 +195,12 @@ POST log records as newline-delimited JSON to an HTTP endpoint.
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `endpoint` | string | Yes | Full URL, e.g. `http://ingest.example.com/logs`. |
-| `compression` | string | No | `zstd` to compress the request body. |
+| `compression` | string | No | Reserved for future use. HTTP output is not yet implemented. |
 
 ```yaml
 output:
   type: http
   endpoint: http://ingest.example.com/logs
-  compression: zstd
 ```
 
 ### `stdout` output
@@ -258,7 +256,7 @@ Write records to Parquet files. Not yet functional.
 | Value | Status | Description |
 |-------|--------|-------------|
 | `otlp` | Implemented | OTLP protobuf over HTTP or gRPC. |
-| `http` | Implemented | JSON lines over HTTP POST. |
+| `http` | Planned | JSON lines over HTTP POST (not yet implemented). |
 | `stdout` | Implemented | Print to stdout (JSON or coloured text). |
 | `elasticsearch` | Stub | Elasticsearch bulk API. |
 | `loki` | Stub | Grafana Loki push API. |
@@ -273,7 +271,7 @@ The optional `transform` field contains a DataFusion SQL query that is applied t
 Arrow `RecordBatch` produced by the scanner. The source table is always named `logs`.
 
 ```yaml
-transform: SELECT level_str, msg_str, status_int FROM logs WHERE status_int >= 400
+transform: SELECT level, message, status FROM logs WHERE status >= 400
 ```
 
 Multi-line SQL is supported with YAML block scalars:
@@ -281,31 +279,33 @@ Multi-line SQL is supported with YAML block scalars:
 ```yaml
 transform: |
   SELECT
-    level_str,
-    msg_str,
-    regexp_extract(msg_str, 'request_id=([a-f0-9-]+)', 1) AS request_id_str,
-    status_int
+    level,
+    message,
+    regexp_extract(message, 'request_id=([a-f0-9-]+)', 1) AS request_id,
+    status
   FROM logs
-  WHERE level_str IN ('ERROR', 'WARN')
-    AND status_int >= 400
+  WHERE level IN ('ERROR', 'WARN')
+    AND status >= 400
 ```
 
 ### Column naming convention
 
-The scanner maps each JSON field to one or more typed Arrow columns following the
-`{field}_{type}` naming convention:
+The scanner maps each JSON field to a typed Arrow column using the field's base
+name (no type suffix):
 
-| JSON value type | Arrow column type | Column name pattern | Example |
-|-----------------|-------------------|---------------------|---------|
-| String | StringArray | `{field}_str` | `level_str` |
-| Integer | Int64Array | `{field}_int` | `status_int` |
-| Float | Float64Array | `{field}_float` | `latency_ms_float` |
-| Boolean | StringArray (`"true"`/`"false"`) | `{field}_str` | `enabled_str` |
-| Null | null in all type columns | — | — |
-| Object / Array | StringArray (raw JSON) | `{field}_str` | `metadata_str` |
+| JSON value type | Arrow column type | Column name | Example |
+|-----------------|-------------------|-------------|---------|
+| String | StringArray | `{field}` | `level` |
+| Integer | Int64Array | `{field}` | `status` |
+| Float | Float64Array | `{field}` | `latency_ms` |
+| Boolean | StringArray (`"true"`/`"false"`) | `{field}` | `enabled` |
+| Null | null in column | `{field}` | — |
+| Object / Array | StringArray (raw JSON) | `{field}` | `metadata` |
 
-When a field contains mixed types across rows, separate columns are emitted:
-`status_int` and `status_str` can coexist in the same batch.
+When a field contains mixed types across rows, the scanner emits a single
+**Struct column** under the field's base name containing one child per observed
+type (e.g., a `status` Struct with `int` and `str` children). Legacy
+single-underscore suffixed columns (`status_int`, `level_str`) are not emitted.
 
 Special columns added by the scanner:
 
@@ -329,16 +329,16 @@ Examples:
 
 ```sql
 -- Cast a string column to int
-SELECT int(status_str) AS status_int FROM logs
+SELECT int(status) AS status FROM logs
 
 -- Extract a field with Grok
-SELECT grok('%{IP:client} %{WORD:method} %{URIPATHPARAM:path}', msg_str) AS parsed_str FROM logs
+SELECT grok('%{IP:client} %{WORD:method} %{URIPATHPARAM:path}', message) AS parsed FROM logs
 
 -- Extract a named group with regex
-SELECT regexp_extract(msg_str, 'user=([a-z]+)', 1) AS user_str FROM logs
+SELECT regexp_extract(message, 'user=([a-z]+)', 1) AS user FROM logs
 
 -- Type-cast from environment-injected string
-SELECT float(duration_str) AS duration_ms_float FROM logs
+SELECT float(duration) AS duration_ms FROM logs
 ```
 
 ---
@@ -369,7 +369,7 @@ Parses Kubernetes pod log paths (e.g.
 `/var/log/pods/<namespace>_<pod>_<uid>/<container>/`) to extract metadata.
 
 ```sql
-SELECT l.level_str, l.msg_str, k.namespace, k.pod_name, k.container_name
+SELECT l.level, l.message, k.namespace, k.pod_name, k.container_name
 FROM logs l
 JOIN k8s k ON l._file_str = k.log_path_prefix
 ```
@@ -419,7 +419,7 @@ The optional `server` block controls the diagnostics server and observability se
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `diagnostics` | string | none | `host:port` to listen for HTTP diagnostics. Exposes `/metrics` and `/api/pipelines`. |
+| `diagnostics` | string | none | `host:port` to listen for HTTP diagnostics. See [Diagnostics API](#diagnostics-api). |
 | `log_level` | string | `info` | Log verbosity. One of `error`, `warn`, `info`, `debug`, `trace`. |
 | `metrics_endpoint` | string | none | OTLP endpoint for periodic metrics push, e.g. `http://otel-collector:4318`. |
 | `metrics_interval_secs` | integer | `60` | Push interval for OTLP metrics in seconds. |
@@ -431,6 +431,24 @@ server:
   metrics_endpoint: http://otel-collector:4318
   metrics_interval_secs: 30
 ```
+
+---
+
+## Diagnostics API
+
+When `server.diagnostics` is configured, logfwd exposes an HTTP API for monitoring and troubleshooting.
+
+| Route | Method | Description |
+|-------|--------|-------------|
+| `/` | GET | Dashboard HTML (visual explorer for metrics and traces). |
+| `/health` | GET | Liveness probe. Returns 200 OK if the server is running. |
+| `/ready` | GET | Readiness probe. Returns 200 OK once pipelines are initialized. |
+| `/api/pipelines` | GET | Per-pipeline counters (lines, bytes, errors, batches, stage timing). |
+| `/api/stats` | GET | Aggregate process stats (uptime, RSS, CPU, aggregate line counts). |
+| `/api/config` | GET | Currently loaded YAML configuration and its file path. |
+| `/api/logs` | GET | Recent log lines from logfwd's own stderr (ring buffer). |
+| `/api/history` | GET | Time-series data (1-hour window) for dashboard charts. |
+| `/api/traces` | GET | Recent batch processing spans for detailed latency analysis. |
 
 ---
 
@@ -479,9 +497,9 @@ pipelines:
         format: cri
     transform: |
       SELECT
-        l.level_str,
-        l.msg_str,
-        l.status_int,
+        l.level,
+        l.message,
+        l.status,
         k.namespace,
         k.pod_name,
         k.container_name,
@@ -489,8 +507,8 @@ pipelines:
       FROM logs l
       LEFT JOIN k8s k ON l._file_str = k.log_path_prefix
       CROSS JOIN labels lbl
-      WHERE l.level_str IN ('ERROR', 'WARN')
-        OR l.status_int >= 500
+      WHERE l.level IN ('ERROR', 'WARN')
+        OR l.status >= 500
     outputs:
       - name: collector
         type: otlp

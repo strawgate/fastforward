@@ -10,7 +10,7 @@ Sources (file / TCP / UDP / OTLP receiver)
 Format Parser (CRI / JSON / Raw)  ─per source─
     │  strips CRI timestamp/stream prefix, accumulates NDJSON
     ▼
-SIMD Scanner  ─per source─
+Scanner  ─per source─
     │  one pass classifies entire buffer via ChunkIndex
     │  walks structural positions directly into Arrow columns
     │  injects _resource_* columns from source metadata
@@ -152,16 +152,17 @@ This design:
 
 ## Column naming conventions
 
-| Prefix | Purpose | Example |
+| Column | Purpose | Example |
 |--------|---------|---------|
-| `{field}_str` | String value from JSON | `message_str` |
-| `{field}_int` | Integer value from JSON | `status_int` |
-| `{field}_float` | Float value from JSON | `latency_float` |
+| `{field}` | Bare name, native Arrow type | `message` (Utf8View), `status` (Int64) |
+| `{field}` (conflict) | StructArray with typed children | `status: Struct { int: Int64, str: Utf8View }` |
 | `_raw` | Raw input line (optional) | `_raw` |
+| `_timestamp` | CRI timestamp (RFC 3339 string) | `_timestamp` |
+| `_stream` | CRI stream name | `_stream` |
 | `_resource_*` | Source/resource metadata | `_resource_k8s_pod_name` |
 
-Type conflicts produce separate columns: `status_int` and `status_str`
-can coexist.
+Type conflicts produce a single `StructArray` column with typed children,
+not separate flat columns.
 
 ## Arrow IPC segment format
 
@@ -225,10 +226,9 @@ builder via `append_*_by_idx`. String scanning uses the pre-computed
 
 The scan loop is generic over the `ScanBuilder` trait:
 
-- **`StorageBuilder`**: collects `(row, value)` records. Builds columns
-  independently at `finish_batch`. Correct by construction. For
-  persistence path (Arrow IPC segments).
-- **`StreamingBuilder`**: stores `(row, offset, len)` views into a
+- **`StreamingBuilder`** (via `Scanner::scan_detached`): builds detached
+  `StringArray` columns. For the persistence path (Arrow IPC segments).
+- **`StreamingBuilder`** (via `Scanner::scan`): stores `(row, offset, len)` views into a
   `bytes::Bytes` buffer. Builds `StringViewArray` columns with zero
   copies. 20% faster. For real-time hot path when persistence is
   disabled.
@@ -259,7 +259,7 @@ The pipeline runs on a tokio multi-thread runtime. Key components:
 
 ## What's implemented vs not yet
 
-**Implemented:** file input, CRI/JSON/Raw parsing, SIMD scanner, two
+**Implemented:** file input, CRI/JSON/Raw parsing, zero-copy scanner, two
 builder backends (StreamingBuilder default), DataFusion SQL transforms
 (async), custom UDFs (grok, regexp_extract, int, float), enrichment
 (K8s path, host info, static labels), OTLP output, JSON lines output,

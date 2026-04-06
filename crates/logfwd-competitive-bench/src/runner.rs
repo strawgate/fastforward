@@ -435,6 +435,8 @@ pub fn run_agent_dhat(
     // dhat writes its output on clean exit, so send SIGTERM first.
     #[cfg(unix)]
     {
+        // SAFETY: `child.id()` returns the PID of a live child process that
+        // we spawned. Sending `SIGTERM` to a valid PID is safe.
         unsafe {
             libc::kill(child.id() as i32, libc::SIGTERM);
         }
@@ -578,7 +580,7 @@ fn procfs_stats(pid: u32) -> (u64, u64, u64) {
 fn clock_ticks_per_second() -> u64 {
     static TICKS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     *TICKS.get_or_init(|| {
-        std::process::Command::new("getconf")
+        Command::new("getconf")
             .arg("CLK_TCK")
             .output()
             .ok()

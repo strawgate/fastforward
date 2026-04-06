@@ -5,8 +5,8 @@ use std::io::Write;
 use std::sync::Arc;
 use std::time::Instant;
 
+use logfwd_arrow::scanner::Scanner;
 use logfwd_core::scan_config::ScanConfig;
-use logfwd_core::scanner::StreamingSimdScanner;
 use logfwd_io::compress::ChunkCompressor;
 use logfwd_transform::SqlTransform;
 use logfwd_output::BatchMetadata;
@@ -20,7 +20,7 @@ fn main() {
 
     // Stage 1: Scan
     let t0 = Instant::now();
-    let mut scanner = StreamingSimdScanner::new(ScanConfig::default());
+    let mut scanner = Scanner::new(ScanConfig::default());
     let batch = scanner.scan(bytes::Bytes::from(data)).unwrap();
     let scan_ms = t0.elapsed().as_millis();
 
@@ -36,6 +36,7 @@ fn main() {
         "bench".to_string(),
         "http://localhost:19877".to_string(),
         vec![],
+        logfwd_output::Compression::None,
         std::sync::Arc::new(logfwd_io::diagnostics::ComponentStats::new()),
     );
     json_sink.serialize_batch(&result);
@@ -50,6 +51,7 @@ fn main() {
         logfwd_output::OtlpProtocol::Http,
         logfwd_output::Compression::None,
         vec![],
+        reqwest::Client::new(),
         std::sync::Arc::new(logfwd_io::diagnostics::ComponentStats::new()),
     );
     let metadata = BatchMetadata {
@@ -91,7 +93,7 @@ fn main() {
         let data = generate_simple(n);
         
         let t = Instant::now();
-        let mut s = StreamingSimdScanner::new(ScanConfig::default());
+        let mut s = Scanner::new(ScanConfig::default());
         let batch = s.scan(bytes::Bytes::from(data)).unwrap();
         let scan = t.elapsed().as_millis();
         
@@ -101,7 +103,7 @@ fn main() {
         let xform = t.elapsed().as_millis();
         
         let t = Instant::now();
-        let mut sink = logfwd_output::OtlpSink::new("b".into(), "http://x".into(), logfwd_output::OtlpProtocol::Http, logfwd_output::Compression::None, vec![], std::sync::Arc::new(logfwd_io::diagnostics::ComponentStats::new()));
+        let mut sink = logfwd_output::OtlpSink::new("b".into(), "http://x".into(), logfwd_output::OtlpProtocol::Http, logfwd_output::Compression::None, vec![], reqwest::Client::new(), std::sync::Arc::new(logfwd_io::diagnostics::ComponentStats::new()));
         let meta = BatchMetadata { resource_attrs: Arc::new(vec![]), observed_time_ns: 0 };
         sink.encode_batch(&result, &meta);
         let encode = t.elapsed().as_millis();

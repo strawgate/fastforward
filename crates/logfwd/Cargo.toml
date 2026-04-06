@@ -5,13 +5,19 @@ edition.workspace = true
 rust-version.workspace = true
 publish = false
 
+[lib]
+doctest = false
+
 [features]
 dhat-heap = ["dhat"]
 cpu-profiling = ["pprof"]
+turmoil = ["dep:turmoil"]
 
 [dependencies]
+bytes = { workspace = true }
 logfwd-config = { version = "0.1.0", path = "../logfwd-config" }
 logfwd-core = { version = "0.1.0", path = "../logfwd-core" }
+logfwd-types = { version = "0.1.0", path = "../logfwd-types" }
 logfwd-arrow = { version = "0.1.0", path = "../logfwd-arrow" }
 logfwd-transform = { version = "0.1.0", path = "../logfwd-transform" }
 logfwd-output = { version = "0.1.0", path = "../logfwd-output" }
@@ -29,6 +35,7 @@ arrow = { workspace = true }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "sync"] }
 tokio-util = { version = "0.7" }
 logfwd-io = { version = "0.1.0", path = "../logfwd-io" }
+turmoil = { workspace = true, optional = true }
 
 [target.'cfg(unix)'.dependencies]
 tikv-jemallocator = { version = "0.6", features = ["stats"] }
@@ -36,11 +43,13 @@ tikv-jemalloc-ctl = { version = "0.6", features = ["stats"] }
 
 [dev-dependencies]
 arrow = { workspace = true }
+bytes = { workspace = true }
 logfwd-test-utils = { version = "0.1.0", path = "../logfwd-test-utils" }
 proptest = "1.11.0"
 stats_alloc = "0.1"
 tempfile = "3"
 tiny_http = "0.12"
+turmoil = { workspace = true }
 
 [lints]
 workspace = true

@@ -11,9 +11,14 @@ server:
 
 | Endpoint | Description |
 |----------|-------------|
-| `GET /health` | Health check (uptime, version) |
-| `GET /metrics` | Prometheus exposition format |
+| `GET /health` | Liveness probe (uptime, version) |
+| `GET /ready` | Readiness probe (200 once initialized) |
 | `GET /api/pipelines` | Detailed JSON with per-stage metrics |
+| `GET /api/stats` | Flattened JSON for polling/benchmarks |
+| `GET /api/config` | View active YAML configuration |
+| `GET /api/logs` | View recent log lines from stderr |
+| `GET /api/history` | Time-series data for dashboard charts |
+| `GET /api/traces` | Detailed latency spans for recent batches |
 | `GET /` | HTML dashboard |
 
 ## Key metrics

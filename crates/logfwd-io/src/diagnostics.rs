@@ -8,113 +8,28 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use opentelemetry::KeyValue;
 use opentelemetry::metrics::{Counter, Meter};
 
-// ---------------------------------------------------------------------------
-// Atomic stats structures (lock-free, hot-path friendly)
-// ---------------------------------------------------------------------------
-
-/// Stats for one component. Dual-write: atomics for /api/pipelines,
-/// OTel counters for OTLP push. Both are lock-free on the hot path.
-pub struct ComponentStats {
-    pub lines_total: AtomicU64,
-    pub bytes_total: AtomicU64,
-    pub errors_total: AtomicU64,
-    /// Expected input lifecycle events (rotation/truncation).
-    pub rotations_total: AtomicU64,
-    /// Lines that failed format parsing (e.g. malformed CRI lines).
-    pub parse_errors_total: AtomicU64,
-    // OTel counters (for OTLP push)
-    otel_lines: Counter<u64>,
-    otel_bytes: Counter<u64>,
-    otel_errors: Counter<u64>,
-    otel_rotations: Counter<u64>,
-    otel_parse_errors: Counter<u64>,
-    otel_attrs: Vec<KeyValue>,
-}
-
-impl ComponentStats {
-    /// Create stats with OTel counters. `prefix` is e.g. "logfwd_input" or "logfwd_output".
-    pub fn with_meter(meter: &Meter, prefix: &str, attrs: Vec<KeyValue>) -> Self {
-        Self {
-            lines_total: AtomicU64::new(0),
-            bytes_total: AtomicU64::new(0),
-            errors_total: AtomicU64::new(0),
-            rotations_total: AtomicU64::new(0),
-            parse_errors_total: AtomicU64::new(0),
-            otel_lines: meter.u64_counter(format!("{prefix}_lines")).build(),
-            otel_bytes: meter.u64_counter(format!("{prefix}_bytes")).build(),
-            otel_errors: meter.u64_counter(format!("{prefix}_errors")).build(),
-            otel_rotations: meter.u64_counter(format!("{prefix}_rotations")).build(),
-            otel_parse_errors: meter.u64_counter(format!("{prefix}_parse_errors")).build(),
-            otel_attrs: attrs,
-        }
-    }
-
-    /// Create stats without OTel (for tests and standalone use).
-    pub fn new() -> Self {
-        let noop = opentelemetry::global::meter("noop");
-        Self::with_meter(&noop, "noop", vec![])
-    }
-
-    pub fn inc_lines(&self, n: u64) {
-        self.lines_total.fetch_add(n, Ordering::Relaxed);
-        self.otel_lines.add(n, &self.otel_attrs);
-    }
-
-    pub fn inc_bytes(&self, n: u64) {
-        self.bytes_total.fetch_add(n, Ordering::Relaxed);
-        self.otel_bytes.add(n, &self.otel_attrs);
-    }
-
-    pub fn inc_errors(&self) {
-        self.errors_total.fetch_add(1, Ordering::Relaxed);
-        self.otel_errors.add(1, &self.otel_attrs);
-    }
-
-    /// Increment input rollover count for both file rotations and truncations.
-    ///
-    /// This updates the in-process atomic counter (`rotations_total`) and emits
-    /// the corresponding OpenTelemetry metric (`otel_rotations`) with the
-    /// component attributes.
-    pub fn inc_rotations(&self) {
-        self.rotations_total.fetch_add(1, Ordering::Relaxed);
-        self.otel_rotations.add(1, &self.otel_attrs);
-    }
-
-    pub fn inc_parse_errors(&self, n: u64) {
-        self.parse_errors_total.fetch_add(n, Ordering::Relaxed);
-        self.otel_parse_errors.add(n, &self.otel_attrs);
-    }
-
-    fn lines(&self) -> u64 {
-        self.lines_total.load(Ordering::Relaxed)
-    }
-
-    fn bytes(&self) -> u64 {
-        self.bytes_total.load(Ordering::Relaxed)
-    }
-
-    fn errors(&self) -> u64 {
-        self.errors_total.load(Ordering::Relaxed)
-    }
-
-    fn rotations(&self) -> u64 {
-        self.rotations_total.load(Ordering::Relaxed)
-    }
-
-    fn parse_errors(&self) -> u64 {
-        self.parse_errors_total.load(Ordering::Relaxed)
-    }
-}
-
-impl Default for ComponentStats {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+// Re-export ComponentStats from logfwd-types so existing `logfwd_io::diagnostics::ComponentStats`
+// paths keep working.
+pub use logfwd_types::diagnostics::ComponentStats;
 
 // ---------------------------------------------------------------------------
 // Pipeline-level metrics (shared between pipeline thread and diagnostics)
 // ---------------------------------------------------------------------------
+
+/// In-flight batch being processed right now.
+pub struct ActiveBatch {
+    pub start_unix_ns: u64,
+    pub scan_ns: u64,
+    pub transform_ns: u64,
+    /// Current stage: "scan" | "transform" | "output"
+    pub stage: &'static str,
+    /// Unix ns when the current stage started (for frontend live duration)
+    pub stage_start_unix_ns: u64,
+    /// Worker id once assigned (-1 = not yet assigned / in queue)
+    pub worker_id: i64,
+    /// Unix ns when the worker actually started processing (0 = not yet)
+    pub output_start_unix_ns: u64,
+}
 
 /// Stats for a full pipeline. Dual-write: atomics for local endpoints,
 /// OTel counters for OTLP push.
@@ -142,9 +57,20 @@ pub struct PipelineMetrics {
     pub scan_nanos_total: AtomicU64,
     pub transform_nanos_total: AtomicU64,
     pub output_nanos_total: AtomicU64,
+    /// Cumulative nanoseconds spent waiting in the pool queue before a worker
+    /// picks up the batch.
+    pub queue_wait_nanos_total: AtomicU64,
+    /// Cumulative nanoseconds of pure `send_batch` wall time (per-attempt).
+    pub send_nanos_total: AtomicU64,
+    /// Cumulative nanoseconds of total batch latency (submission to ack).
+    pub batch_latency_nanos_total: AtomicU64,
     /// Unix timestamp (nanoseconds) of the last successfully processed batch.
     /// Zero means no batch has been processed yet.
     pub last_batch_time_ns: AtomicU64,
+    /// Number of batches currently submitted to workers but not yet acked.
+    pub inflight_batches: AtomicU64,
+    pub active_batches: std::sync::Mutex<std::collections::HashMap<u64, ActiveBatch>>,
+    pub next_batch_id: AtomicU64,
     // OTel counters (for OTLP push)
     meter: Meter,
     otel_attrs: Vec<KeyValue>,
@@ -158,6 +84,9 @@ pub struct PipelineMetrics {
     otel_scan_nanos: Counter<u64>,
     otel_transform_nanos: Counter<u64>,
     otel_output_nanos: Counter<u64>,
+    otel_queue_wait_nanos: Counter<u64>,
+    otel_send_nanos: Counter<u64>,
+    otel_batch_latency_nanos: Counter<u64>,
     otel_backpressure_stalls: Counter<u64>,
 }
 
@@ -190,7 +119,13 @@ impl PipelineMetrics {
             scan_nanos_total: AtomicU64::new(0),
             transform_nanos_total: AtomicU64::new(0),
             output_nanos_total: AtomicU64::new(0),
+            queue_wait_nanos_total: AtomicU64::new(0),
+            send_nanos_total: AtomicU64::new(0),
+            batch_latency_nanos_total: AtomicU64::new(0),
             last_batch_time_ns: AtomicU64::new(0),
+            inflight_batches: AtomicU64::new(0),
+            active_batches: std::sync::Mutex::new(std::collections::HashMap::new()),
+            next_batch_id: AtomicU64::new(0),
             otel_transform_errors: meter.u64_counter("logfwd_transform_errors").build(),
             otel_batches: meter.u64_counter("logfwd_batches").build(),
             otel_batch_rows: meter.u64_counter("logfwd_batch_rows").build(),
@@ -201,6 +136,9 @@ impl PipelineMetrics {
             otel_scan_nanos: meter.u64_counter("logfwd_stage_scan_nanos").build(),
             otel_transform_nanos: meter.u64_counter("logfwd_stage_transform_nanos").build(),
             otel_output_nanos: meter.u64_counter("logfwd_stage_output_nanos").build(),
+            otel_queue_wait_nanos: meter.u64_counter("logfwd_stage_queue_wait_nanos").build(),
+            otel_send_nanos: meter.u64_counter("logfwd_stage_send_nanos").build(),
+            otel_batch_latency_nanos: meter.u64_counter("logfwd_batch_latency_nanos").build(),
             otel_backpressure_stalls: meter.u64_counter("logfwd_backpressure_stalls").build(),
             meter: meter.clone(),
             otel_attrs: attrs,
@@ -301,6 +239,27 @@ impl PipelineMetrics {
         self.otel_output_nanos.add(output_ns, &self.otel_attrs);
     }
 
+    /// Record cumulative queue-wait time (time a batch spent waiting in the
+    /// pool queue before a worker picked it up).
+    pub fn record_queue_wait(&self, nanos: u64) {
+        self.queue_wait_nanos_total
+            .fetch_add(nanos, Ordering::Relaxed);
+        self.otel_queue_wait_nanos.add(nanos, &self.otel_attrs);
+    }
+
+    /// Record cumulative pure `send_batch` wall time (per-attempt).
+    pub fn record_send_latency(&self, nanos: u64) {
+        self.send_nanos_total.fetch_add(nanos, Ordering::Relaxed);
+        self.otel_send_nanos.add(nanos, &self.otel_attrs);
+    }
+
+    /// Record total batch latency (submission to ack).
+    pub fn record_batch_latency(&self, nanos: u64) {
+        self.batch_latency_nanos_total
+            .fetch_add(nanos, Ordering::Relaxed);
+        self.otel_batch_latency_nanos.add(nanos, &self.otel_attrs);
+    }
+
     pub fn inc_backpressure_stall(&self) {
         self.backpressure_stalls.fetch_add(1, Ordering::Relaxed);
         self.otel_backpressure_stalls.add(1, &self.otel_attrs);
@@ -317,6 +276,64 @@ impl PipelineMetrics {
     pub fn inc_scan_error(&self) {
         self.scan_errors_total.fetch_add(1, Ordering::Relaxed);
         self.otel_scan_errors.add(1, &self.otel_attrs);
+    }
+
+    pub fn alloc_batch_id(&self) -> u64 {
+        self.next_batch_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    pub fn begin_active_batch(&self, id: u64, start_unix_ns: u64) {
+        if let Ok(mut m) = self.active_batches.lock() {
+            m.insert(
+                id,
+                ActiveBatch {
+                    start_unix_ns,
+                    scan_ns: 0,
+                    transform_ns: 0,
+                    stage: "scan",
+                    stage_start_unix_ns: start_unix_ns,
+                    worker_id: -1,
+                    output_start_unix_ns: 0,
+                },
+            );
+        }
+    }
+
+    /// Called by the worker pool when a worker picks up a batch for output.
+    pub fn assign_worker_to_active_batch(&self, batch_id: u64, worker_id: usize, now_unix_ns: u64) {
+        if let Ok(mut m) = self.active_batches.lock() {
+            if let Some(b) = m.get_mut(&batch_id) {
+                b.worker_id = worker_id as i64;
+                b.output_start_unix_ns = now_unix_ns;
+                b.stage_start_unix_ns = now_unix_ns;
+            }
+        }
+    }
+
+    pub fn advance_active_batch(
+        &self,
+        id: u64,
+        next_stage: &'static str,
+        elapsed_ns: u64,
+        now_unix_ns: u64,
+    ) {
+        if let Ok(mut m) = self.active_batches.lock() {
+            if let Some(b) = m.get_mut(&id) {
+                match b.stage {
+                    "scan" => b.scan_ns = elapsed_ns,
+                    "transform" => b.transform_ns = elapsed_ns,
+                    _ => {}
+                }
+                b.stage = next_stage;
+                b.stage_start_unix_ns = now_unix_ns;
+            }
+        }
+    }
+
+    pub fn finish_active_batch(&self, id: u64) {
+        if let Ok(mut m) = self.active_batches.lock() {
+            m.remove(&id);
+        }
     }
 }
 
@@ -419,7 +436,7 @@ impl DiagnosticsServer {
         // log lines emitted before the first /api/logs request are not lost.
         // Non-fatal: if capture setup fails (e.g. out of fds), log to real stderr.
         if let Err(e) = self.stderr.start() {
-            eprintln!("logfwd: stderr capture failed: {e}");
+            tracing::warn!(error = %e, "stderr capture failed");
         }
 
         // Background metric sampler — records pipeline + process metrics
@@ -573,6 +590,7 @@ impl DiagnosticsServer {
         let mut total_transform_ns: u64 = 0;
         let mut total_output_ns: u64 = 0;
         let mut total_backpressure: u64 = 0;
+        let mut total_inflight: u64 = 0;
 
         for pm in &self.pipelines {
             for (_, _, stats) in &pm.inputs {
@@ -589,6 +607,7 @@ impl DiagnosticsServer {
             total_transform_ns += pm.transform_nanos_total.load(Ordering::Relaxed);
             total_output_ns += pm.output_nanos_total.load(Ordering::Relaxed);
             total_backpressure += pm.backpressure_stalls.load(Ordering::Relaxed);
+            total_inflight += pm.inflight_batches.load(Ordering::Relaxed);
         }
 
         // Include jemalloc stats if available.
@@ -601,7 +620,7 @@ impl DiagnosticsServer {
         };
 
         let body = format!(
-            r#"{{"uptime_sec":{:.3}{},"input_lines":{},"input_bytes":{},"output_lines":{},"output_bytes":{},"output_errors":{},"batches":{},"scan_sec":{:.6},"transform_sec":{:.6},"output_sec":{:.6},"backpressure_stalls":{}{}}}"#,
+            r#"{{"uptime_sec":{:.3}{},"input_lines":{},"input_bytes":{},"output_lines":{},"output_bytes":{},"output_errors":{},"batches":{},"scan_sec":{:.6},"transform_sec":{:.6},"output_sec":{:.6},"backpressure_stalls":{},"inflight_batches":{}{}}}"#,
             uptime_s,
             process_json,
             total_input_lines,
@@ -614,6 +633,7 @@ impl DiagnosticsServer {
             total_transform_ns as f64 / 1e9,
             total_output_ns as f64 / 1e9,
             total_backpressure,
+            total_inflight,
             mem_json,
         );
 
@@ -710,6 +730,15 @@ impl DiagnosticsServer {
                 let mut scan_rows = 0u64;
                 let mut transform_ns = 0u64;
                 let mut output_ns = 0u64;
+                let mut output_start_unix_ns = 0u64;
+                let mut worker_id: i64 = -1;
+                let mut send_ns = 0u64;
+                let mut recv_ns = 0u64;
+                let mut took_ms = 0u64;
+                let mut retries = 0u64;
+                let mut req_bytes = 0u64;
+                let mut cmp_bytes = 0u64;
+                let mut resp_bytes = 0u64;
                 if let Some(kids) = children.get(root.trace_id.as_str()) {
                     for kid in kids {
                         let kid_attr = |key: &str| -> u64 {
@@ -725,7 +754,23 @@ impl DiagnosticsServer {
                                 scan_rows = kid_attr("rows");
                             }
                             "transform" => transform_ns = kid.duration_ns,
-                            "output" => output_ns = kid.duration_ns,
+                            "output" => {
+                                output_ns = kid.duration_ns;
+                                output_start_unix_ns = kid.start_unix_ns;
+                                worker_id = kid
+                                    .attrs
+                                    .iter()
+                                    .find(|kv| kv[0] == "worker_id")
+                                    .and_then(|kv| kv[1].parse().ok())
+                                    .unwrap_or(-1);
+                                send_ns = kid_attr("send_ns");
+                                recv_ns = kid_attr("recv_ns");
+                                took_ms = kid_attr("took_ms");
+                                retries = kid_attr("retries");
+                                req_bytes = kid_attr("req_bytes");
+                                cmp_bytes = kid_attr("cmp_bytes");
+                                resp_bytes = kid_attr("resp_bytes");
+                            }
                             _ => {}
                         }
                     }
@@ -756,11 +801,20 @@ impl DiagnosticsServer {
                         \"scan_ns\":{scan},\
                         \"transform_ns\":{xfm},\
                         \"output_ns\":{out_ns},\
+                        \"output_start_unix_ns\":{out_st},\
                         \"scan_rows\":{sr},\
                         \"input_rows\":{ir},\
                         \"output_rows\":{or},\
                         \"bytes_in\":{bi},\
                         \"queue_wait_ns\":{qw},\
+                        \"worker_id\":{wid},\
+                        \"send_ns\":{snd},\
+                        \"recv_ns\":{rcv},\
+                        \"took_ms\":{tk},\
+                        \"retries\":{ret},\
+                        \"req_bytes\":{rb},\
+                        \"cmp_bytes\":{cb},\
+                        \"resp_bytes\":{rspb},\
                         \"flush_reason\":\"{fr}\",\
                         \"errors\":{err},\
                         \"status\":\"{status}\"\
@@ -772,15 +826,76 @@ impl DiagnosticsServer {
                     scan = scan_ns,
                     xfm = transform_ns,
                     out_ns = output_ns,
+                    out_st = output_start_unix_ns,
                     sr = scan_rows,
                     ir = input_rows,
                     or = output_rows,
                     bi = bytes_in,
                     qw = queue_wait_ns,
+                    wid = worker_id,
+                    snd = send_ns,
+                    rcv = recv_ns,
+                    tk = took_ms,
+                    ret = retries,
+                    rb = req_bytes,
+                    cb = cmp_bytes,
+                    rspb = resp_bytes,
                     fr = esc(flush_reason),
                     err = errors,
                     status = root.status,
                 );
+            }
+            // In-progress batches — live entries shown before completion.
+            for pm in &self.pipelines {
+                if let Ok(active) = pm.active_batches.lock() {
+                    for (id, b) in active.iter() {
+                        if !first {
+                            out.push(',');
+                        }
+                        first = false;
+                        let _ = write!(
+                            out,
+                            "{{\
+                                \"trace_id\":\"live-{id}\",\
+                                \"pipeline\":\"{pl}\",\
+                                \"start_unix_ns\":{st},\
+                                \"total_ns\":0,\
+                                \"scan_ns\":{scan},\
+                                \"transform_ns\":{xfm},\
+                                \"output_ns\":0,\
+                                \"output_start_unix_ns\":{out_st},\
+                                \"scan_rows\":0,\
+                                \"input_rows\":0,\
+                                \"output_rows\":0,\
+                                \"bytes_in\":0,\
+                                \"queue_wait_ns\":0,\
+                                \"worker_id\":{wid},\
+                                \"send_ns\":0,\
+                                \"recv_ns\":0,\
+                                \"took_ms\":0,\
+                                \"retries\":0,\
+                                \"req_bytes\":0,\
+                                \"cmp_bytes\":0,\
+                                \"resp_bytes\":0,\
+                                \"flush_reason\":\"\",\
+                                \"errors\":0,\
+                                \"status\":\"unset\",\
+                                \"in_progress\":true,\
+                                \"stage\":\"{stage}\",\
+                                \"stage_start_unix_ns\":{ss}\
+                            }}",
+                            id = id,
+                            pl = esc(&pm.name),
+                            st = b.start_unix_ns,
+                            scan = b.scan_ns,
+                            xfm = b.transform_ns,
+                            out_st = b.output_start_unix_ns,
+                            wid = b.worker_id,
+                            stage = b.stage,
+                            ss = b.stage_start_unix_ns,
+                        );
+                    }
+                }
             }
             out.push_str("]}");
             out
@@ -821,7 +936,18 @@ impl DiagnosticsServer {
                 .collect();
 
             let lines_in = pm.transform_in.lines();
-            let lines_out = pm.transform_out.lines();
+            // lines_out: derived from output-sink stats (single increment path —
+            // each sink calls inc_lines once on successful delivery). For fan-out
+            // pipelines, the maximum across all outputs is used as a proxy for
+            // "lines delivered to the most successful output". This may undercount
+            // in partial-failure fan-out scenarios where outputs succeed at
+            // different rates.
+            let lines_out: u64 = pm
+                .outputs
+                .iter()
+                .map(|(_, _, s)| s.lines())
+                .max()
+                .unwrap_or(0);
             let drop_rate = if lines_in > 0 {
                 1.0 - (lines_out as f64 / lines_in as f64)
             } else {
@@ -853,11 +979,38 @@ impl DiagnosticsServer {
             let scan_s = pm.scan_nanos_total.load(Ordering::Relaxed) as f64 / 1e9;
             let transform_s = pm.transform_nanos_total.load(Ordering::Relaxed) as f64 / 1e9;
             let output_s = pm.output_nanos_total.load(Ordering::Relaxed) as f64 / 1e9;
+            let queue_wait_s = pm.queue_wait_nanos_total.load(Ordering::Relaxed) as f64 / 1e9;
+            let send_s = pm.send_nanos_total.load(Ordering::Relaxed) as f64 / 1e9;
 
             let last_batch_ns = pm.last_batch_time_ns.load(Ordering::Relaxed);
 
+            // Compute batch latency using a consistent snapshot since they are
+            // updated at different times. We retry until batches remains the same,
+            // capping at 64 attempts to avoid spinning indefinitely under contention.
+            let mut latency_batches = pm.batches_total.load(Ordering::Acquire);
+            let mut batch_latency_total;
+            let mut attempts = 0;
+            loop {
+                batch_latency_total = pm.batch_latency_nanos_total.load(Ordering::Acquire);
+                let current_batches = pm.batches_total.load(Ordering::Acquire);
+                if current_batches == latency_batches || attempts >= 64 {
+                    latency_batches = current_batches;
+                    break;
+                }
+                latency_batches = current_batches;
+                attempts += 1;
+            }
+
+            let batch_latency_avg_ns = if latency_batches > 0 {
+                batch_latency_total / latency_batches
+            } else {
+                0
+            };
+            let inflight = pm.inflight_batches.load(Ordering::Relaxed);
+            let backpressure = pm.backpressure_stalls.load(Ordering::Relaxed);
+
             pipelines_json.push(format!(
-                r#"{{"name":"{}","inputs":[{}],"transform":{{"sql":"{}","lines_in":{},"lines_out":{},"errors":{},"filter_drop_rate":{:.3}}},"outputs":[{}],"batches":{{"total":{},"avg_rows":{:.1},"flush_by_size":{},"flush_by_timeout":{},"dropped_batches_total":{},"scan_errors_total":{},"last_batch_time_ns":{}}},"stage_seconds":{{"scan":{:.6},"transform":{:.6},"output":{:.6}}}}}"#,
+                r#"{{"name":"{}","inputs":[{}],"transform":{{"sql":"{}","lines_in":{},"lines_out":{},"errors":{},"filter_drop_rate":{:.3}}},"outputs":[{}],"batches":{{"total":{},"avg_rows":{:.1},"flush_by_size":{},"flush_by_timeout":{},"dropped_batches_total":{},"scan_errors_total":{},"last_batch_time_ns":{},"batch_latency_avg_ns":{},"inflight":{},"rows_total":{}}},"stage_seconds":{{"scan":{:.6},"transform":{:.6},"output":{:.6},"queue_wait":{:.6},"send":{:.6}}},"backpressure_stalls":{}}}"#,
                 esc(&pm.name),
                 inputs_json.join(","),
                 esc(&pm.transform_sql),
@@ -873,9 +1026,15 @@ impl DiagnosticsServer {
                 pm.dropped_batches_total.load(Ordering::Relaxed),
                 pm.scan_errors_total.load(Ordering::Relaxed),
                 last_batch_ns,
+                batch_latency_avg_ns,
+                inflight,
+                batch_rows,
                 scan_s,
                 transform_s,
                 output_s,
+                queue_wait_s,
+                send_s,
+                backpressure,
             ));
         }
 
@@ -930,6 +1089,9 @@ fn get_process_metrics_linux() -> Option<(u64, u64, u64)> {
 /// Fallback using getrusage (macOS, BSDs).
 #[cfg(unix)]
 fn get_process_metrics_unix() -> Option<(u64, u64, u64)> {
+    // SAFETY: `zeroed()` is valid for `rusage` (all-zero is a valid bit pattern),
+    // and `getrusage` is called with a valid `RUSAGE_SELF` flag and a valid
+    // mutable pointer. No other invariants are required.
     unsafe {
         let mut usage: libc::rusage = std::mem::zeroed();
         if libc::getrusage(libc::RUSAGE_SELF, &raw mut usage) != 0 {
@@ -1056,10 +1218,13 @@ fn sample_metrics(
     let mut input_lines: u64 = 0;
     let mut input_bytes: u64 = 0;
     let mut output_lines: u64 = 0;
+    let mut output_bytes: u64 = 0;
     let mut output_errors: u64 = 0;
     let mut scan_ns: u64 = 0;
     let mut transform_ns: u64 = 0;
     let mut output_ns: u64 = 0;
+    let mut batches: u64 = 0;
+    let mut inflight_batches: u64 = 0;
 
     for pm in pipelines {
         for (_, _, s) in &pm.inputs {
@@ -1068,20 +1233,26 @@ fn sample_metrics(
         }
         for (_, _, s) in &pm.outputs {
             output_lines += s.lines();
+            output_bytes += s.bytes();
             output_errors += s.errors();
         }
         scan_ns += pm.scan_nanos_total.load(Ordering::Relaxed);
         transform_ns += pm.transform_nanos_total.load(Ordering::Relaxed);
         output_ns += pm.output_nanos_total.load(Ordering::Relaxed);
+        batches += pm.batches_total.load(Ordering::Relaxed);
+        inflight_batches += pm.inflight_batches.load(Ordering::Relaxed);
     }
 
     history.record("input_lines", input_lines as f64);
     history.record("input_bytes", input_bytes as f64);
     history.record("output_lines", output_lines as f64);
+    history.record("output_bytes", output_bytes as f64);
     history.record("output_errors", output_errors as f64);
     history.record("scan_sec", scan_ns as f64 / 1e9);
     history.record("transform_sec", transform_ns as f64 / 1e9);
     history.record("output_sec", output_ns as f64 / 1e9);
+    history.record("batches", batches as f64);
+    history.record("inflight_batches", inflight_batches as f64);
 
     if let Some((rss, cpu_user, cpu_sys)) = process_metrics() {
         history.record("rss_bytes", rss as f64);
@@ -1122,7 +1293,8 @@ mod tests {
         inp.inc_rotations();
 
         pm.transform_in.inc_lines(1000);
-        pm.transform_out.inc_lines(900);
+        // transform_out.inc_lines is no longer called in the pipeline hot path;
+        // lines_out is derived from output-sink stats instead.
 
         let out = pm.add_output("collector", "otlp");
         out.inc_lines(900);
@@ -1141,6 +1313,13 @@ mod tests {
         pm.transform_nanos_total
             .store(500_000_000, Ordering::Relaxed); // 0.5s
         pm.output_nanos_total.store(200_000_000, Ordering::Relaxed); // 0.2s
+        pm.queue_wait_nanos_total
+            .store(50_000_000, Ordering::Relaxed); // 0.05s
+        pm.send_nanos_total.store(150_000_000, Ordering::Relaxed); // 0.15s
+        pm.batch_latency_nanos_total
+            .store(500_000_000, Ordering::Relaxed); // avg = 500_000_000/50 = 10_000_000
+        pm.inflight_batches.store(3, Ordering::Relaxed);
+        pm.backpressure_stalls.store(7, Ordering::Relaxed);
         pm.transform_errors.store(3, Ordering::Relaxed);
 
         let mut server = DiagnosticsServer::new("127.0.0.1:0");
@@ -1162,7 +1341,7 @@ mod tests {
                     stream = Some(s);
                     break;
                 }
-                Err(_) => std::thread::sleep(std::time::Duration::from_millis(50)),
+                Err(_) => thread::sleep(std::time::Duration::from_millis(50)),
             }
         }
         let mut stream = stream.unwrap_or_else(|| {
@@ -1223,7 +1402,7 @@ mod tests {
         let port = addr.port();
 
         // Give the server a moment to bind.
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        thread::sleep(std::time::Duration::from_millis(100));
 
         let (status, body) = http_get(port, "/health");
         assert_eq!(status, 200);
@@ -1242,7 +1421,7 @@ mod tests {
         let (_handle, addr) = server.start().expect("server bind failed");
         let port = addr.port();
 
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        thread::sleep(std::time::Duration::from_millis(100));
 
         let (status, body) = http_get(port, "/api/pipelines");
         assert_eq!(status, 200);
@@ -1268,6 +1447,21 @@ mod tests {
             "body: {}",
             body
         );
+        // New observability fields (#521, #522, #524)
+        assert!(
+            body.contains(r#""batch_latency_avg_ns":10000000"#),
+            "body: {}",
+            body
+        );
+        assert!(body.contains(r#""inflight":3"#), "body: {}", body);
+        assert!(body.contains(r#""rows_total":4500"#), "body: {}", body);
+        assert!(
+            body.contains(r#""backpressure_stalls":7"#),
+            "body: {}",
+            body
+        );
+        assert!(body.contains(r#""queue_wait":0.050000"#), "body: {}", body);
+        assert!(body.contains(r#""send":0.150000"#), "body: {}", body);
     }
 
     #[test]
@@ -1283,7 +1477,7 @@ mod tests {
         let (_handle, addr) = server.start().expect("server bind failed");
         let port = addr.port();
 
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        thread::sleep(std::time::Duration::from_millis(100));
 
         let (status, body) = http_get(port, "/api/stats");
         assert_eq!(status, 200);
@@ -1355,12 +1549,48 @@ mod tests {
     }
 
     #[test]
+    fn test_pipeline_metrics_record_queue_wait() {
+        let meter = opentelemetry::global::meter("test");
+        let pm = PipelineMetrics::new("test", "", &meter);
+        assert_eq!(pm.queue_wait_nanos_total.load(Ordering::Relaxed), 0);
+
+        pm.record_queue_wait(1_000_000);
+        pm.record_queue_wait(2_000_000);
+        assert_eq!(pm.queue_wait_nanos_total.load(Ordering::Relaxed), 3_000_000);
+    }
+
+    #[test]
+    fn test_pipeline_metrics_record_send_latency() {
+        let meter = opentelemetry::global::meter("test");
+        let pm = PipelineMetrics::new("test", "", &meter);
+        assert_eq!(pm.send_nanos_total.load(Ordering::Relaxed), 0);
+
+        pm.record_send_latency(5_000_000);
+        pm.record_send_latency(3_000_000);
+        assert_eq!(pm.send_nanos_total.load(Ordering::Relaxed), 8_000_000);
+    }
+
+    #[test]
+    fn test_pipeline_metrics_record_batch_latency() {
+        let meter = opentelemetry::global::meter("test");
+        let pm = PipelineMetrics::new("test", "", &meter);
+        assert_eq!(pm.batch_latency_nanos_total.load(Ordering::Relaxed), 0);
+
+        pm.record_batch_latency(10_000_000);
+        pm.record_batch_latency(20_000_000);
+        assert_eq!(
+            pm.batch_latency_nanos_total.load(Ordering::Relaxed),
+            30_000_000
+        );
+    }
+
+    #[test]
     fn test_not_found() {
         let server = server_with_test_pipeline();
         let (_handle, addr) = server.start().expect("server bind failed");
         let port = addr.port();
 
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        thread::sleep(std::time::Duration::from_millis(100));
 
         let (status, _body) = http_get(port, "/nonexistent");
         assert_eq!(status, 404);
@@ -1374,7 +1604,7 @@ mod tests {
         let (_handle, addr) = server.start().expect("server bind failed");
         let port = addr.port();
 
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        thread::sleep(std::time::Duration::from_millis(100));
 
         let (status, body) = http_get(port, "/api/pipelines");
         assert_eq!(status, 200);
@@ -1401,7 +1631,7 @@ mod tests {
         let (_handle, addr) = server.start().expect("server bind failed");
         let port = addr.port();
 
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        thread::sleep(std::time::Duration::from_millis(100));
 
         let (status, body) = http_get(port, "/api/pipelines");
         assert_eq!(status, 200);
@@ -1419,7 +1649,7 @@ mod tests {
         let (_handle, addr) = server.start().expect("server bind failed");
         let port = addr.port();
 
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        thread::sleep(std::time::Duration::from_millis(100));
 
         let (status, body) = http_get(port, "/ready");
         assert_eq!(status, 503, "body: {}", body);
@@ -1439,7 +1669,7 @@ mod tests {
         let (_handle, addr) = server.start().expect("server bind failed");
         let port = addr.port();
 
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        thread::sleep(std::time::Duration::from_millis(100));
 
         let (status, body) = http_get(port, "/ready");
         assert_eq!(status, 200, "body: {}", body);
@@ -1465,7 +1695,7 @@ mod tests {
         let (_handle, addr) = server.start().expect("server bind failed");
         let port = addr.port();
 
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        thread::sleep(std::time::Duration::from_millis(100));
 
         let (status, body) = http_get(port, "/api/pipelines");
         assert_eq!(status, 200);
@@ -1488,7 +1718,7 @@ mod tests {
         let (_handle, addr) = server.start().expect("server bind failed");
         let port = addr.port();
 
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        thread::sleep(std::time::Duration::from_millis(100));
 
         let (status, body) = http_get(port, "/api/traces");
         assert_eq!(status, 200);
@@ -1537,7 +1767,7 @@ mod tests {
         let (_handle, addr) = server.start().expect("server bind failed");
         let port = addr.port();
 
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        thread::sleep(std::time::Duration::from_millis(100));
 
         let (status, body) = http_get(port, "/api/traces");
         assert_eq!(status, 200);
@@ -1573,7 +1803,7 @@ mod tests {
                     stream = Some(s);
                     break;
                 }
-                Err(_) => std::thread::sleep(std::time::Duration::from_millis(50)),
+                Err(_) => thread::sleep(std::time::Duration::from_millis(50)),
             }
         }
         let mut stream = stream.unwrap_or_else(|| panic!("connect failed after retries to {addr}"));
@@ -1602,7 +1832,7 @@ mod tests {
         let (_handle, addr) = server.start().expect("server bind failed");
         let port = addr.port();
 
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        thread::sleep(std::time::Duration::from_millis(100));
 
         for path in &["/health", "/api/pipelines", "/api/stats"] {
             let status = http_post(port, path);
@@ -1618,7 +1848,7 @@ mod tests {
         let (_handle, addr) = server.start().expect("server bind failed");
         let port = addr.port();
 
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        thread::sleep(std::time::Duration::from_millis(100));
 
         let (status, body) = http_get(port, "/metrics");
         assert_eq!(status, 410, "expected 410 Gone for /metrics, got {status}");
