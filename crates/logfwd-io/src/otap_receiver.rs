@@ -563,6 +563,16 @@ fn encode_batch_status(batch_id: i64, status_code: u32) -> Vec<u8> {
 // Protobuf encode helpers (encode_tag, encode_varint) are imported from
 // logfwd_core::otlp.
 
+impl Drop for OtapReceiver {
+    fn drop(&mut self) {
+        self.rx.take();
+        self.server.unblock();
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -1048,16 +1058,6 @@ mod tests {
             let (decoded, end) = decode_varint(&buf, 0).expect("decode");
             assert_eq!(decoded, value, "varint roundtrip failed for {value}");
             assert_eq!(end, buf.len());
-        }
-    }
-}
-
-impl Drop for OtapReceiver {
-    fn drop(&mut self) {
-        self.rx.take();
-        self.server.unblock();
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
         }
     }
 }
