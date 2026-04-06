@@ -15,7 +15,11 @@ use std::sync::mpsc;
 use arrow::ipc::reader::StreamReader;
 use arrow::record_batch::RecordBatch;
 use logfwd_arrow::star_schema::{StarSchema, attrs_schema, star_to_flat};
-use logfwd_core::otlp::{decode_tag, decode_varint, encode_tag, encode_varint, skip_field};
+use logfwd_otap_proto::otap::{
+    ArrowPayloadType as ProtoArrowPayloadType, BatchArrowRecords as ProtoBatchArrowRecords,
+    BatchStatus as ProtoBatchStatus, StatusCode as ProtoStatusCode,
+};
+use prost::Message;
 
 use crate::InputError;
 
@@ -30,27 +34,20 @@ const CHANNEL_BOUND: usize = 256;
 // ---------------------------------------------------------------------------
 
 /// LOGS fact table payload.
-const PAYLOAD_TYPE_LOGS: u32 = 0;
+const PAYLOAD_TYPE_LOGS: u32 = ProtoArrowPayloadType::Logs as u32;
 /// LOG_ATTRS dimension table payload.
-const PAYLOAD_TYPE_LOG_ATTRS: u32 = 30;
+const PAYLOAD_TYPE_LOG_ATTRS: u32 = ProtoArrowPayloadType::LogAttrs as u32;
 /// RESOURCE_ATTRS dimension table payload.
-const PAYLOAD_TYPE_RESOURCE_ATTRS: u32 = 40;
+const PAYLOAD_TYPE_RESOURCE_ATTRS: u32 = ProtoArrowPayloadType::ResourceAttrs as u32;
 /// SCOPE_ATTRS dimension table payload.
-const PAYLOAD_TYPE_SCOPE_ATTRS: u32 = 50;
+const PAYLOAD_TYPE_SCOPE_ATTRS: u32 = ProtoArrowPayloadType::ScopeAttrs as u32;
 
 // ---------------------------------------------------------------------------
 // BatchStatus status codes
 // ---------------------------------------------------------------------------
 
 /// Batch processed successfully.
-const BATCH_STATUS_OK: u32 = 1;
-
-// ---------------------------------------------------------------------------
-// Protobuf wire types
-// ---------------------------------------------------------------------------
-
-const WIRE_TYPE_VARINT: u8 = 0;
-const WIRE_TYPE_LENGTH_DELIMITED: u8 = 2;
+const BATCH_STATUS_OK: u32 = ProtoStatusCode::Ok as u32;
 
 // ---------------------------------------------------------------------------
 // OtapReceiver
@@ -313,10 +310,6 @@ impl OtapReceiver {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Decoded protobuf types
-// ---------------------------------------------------------------------------
-
 /// Decoded `BatchArrowRecords` message.
 struct BatchArrowRecords {
     batch_id: i64,
@@ -329,9 +322,6 @@ struct ArrowPayload {
     record: Vec<u8>,
 }
 
-// Protobuf decode helpers (decode_varint, decode_tag, skip_field) are
-// imported from logfwd_core::otlp.
-
 /// Decode `BatchArrowRecords` from protobuf bytes.
 ///
 /// ```text
@@ -342,124 +332,19 @@ struct ArrowPayload {
 /// }
 /// ```
 fn decode_batch_arrow_records(buf: &[u8]) -> Result<BatchArrowRecords, InputError> {
-    let mut batch_id: i64 = 0;
-    let mut payloads: Vec<ArrowPayload> = Vec::new();
-    let mut pos = 0;
-
-    while pos < buf.len() {
-        let (field_number, wire_type, new_pos) =
-            decode_tag(buf, pos).map_err(|e| InputError::Receiver(e.to_string()))?;
-        pos = new_pos;
-
-        match (field_number, wire_type) {
-            // batch_id: int64, field 1, wire type 0 (varint)
-            (1, WIRE_TYPE_VARINT) => {
-                let (val, new_pos) =
-                    decode_varint(buf, pos).map_err(|e| InputError::Receiver(e.to_string()))?;
-                batch_id = val as i64;
-                pos = new_pos;
-            }
-            // arrow_payloads: repeated ArrowPayload, field 2, wire type 2
-            (2, WIRE_TYPE_LENGTH_DELIMITED) => {
-                let (len, new_pos) =
-                    decode_varint(buf, pos).map_err(|e| InputError::Receiver(e.to_string()))?;
-                let len_usize = usize::try_from(len).map_err(|_| {
-                    InputError::Receiver("ArrowPayload: length too large".to_string())
-                })?;
-                let end = new_pos.checked_add(len_usize).ok_or_else(|| {
-                    InputError::Receiver("ArrowPayload: length overflow".to_string())
-                })?;
-                if end > buf.len() {
-                    return Err(InputError::Receiver(
-                        "ArrowPayload: length overflow".to_string(),
-                    ));
-                }
-                let payload = decode_arrow_payload(&buf[new_pos..end])?;
-                payloads.push(payload);
-                pos = end;
-            }
-            // headers or unknown — skip
-            _ => {
-                pos = skip_field(buf, wire_type, pos)
-                    .map_err(|e| InputError::Receiver(e.to_string()))?;
-            }
-        }
-    }
-
-    Ok(BatchArrowRecords { batch_id, payloads })
-}
-
-/// Decode an `ArrowPayload` from protobuf bytes.
-///
-/// ```text
-/// message ArrowPayload {
-///   string schema_id = 1;
-///   ArrowPayloadType type = 2;
-///   bytes record = 3;
-/// }
-/// ```
-fn decode_arrow_payload(buf: &[u8]) -> Result<ArrowPayload, InputError> {
-    let mut payload_type: u32 = 0;
-    let mut record: Vec<u8> = Vec::new();
-    let mut pos = 0;
-
-    while pos < buf.len() {
-        let (field_number, wire_type, new_pos) =
-            decode_tag(buf, pos).map_err(|e| InputError::Receiver(e.to_string()))?;
-        pos = new_pos;
-
-        match (field_number, wire_type) {
-            // schema_id: string, field 1 — skip (not needed for decode)
-            (1, WIRE_TYPE_LENGTH_DELIMITED) => {
-                let (len, new_pos) =
-                    decode_varint(buf, pos).map_err(|e| InputError::Receiver(e.to_string()))?;
-                let len_usize = usize::try_from(len).map_err(|_| {
-                    InputError::Receiver("ArrowPayload.schema_id: length too large".to_string())
-                })?;
-                pos = new_pos.checked_add(len_usize).ok_or_else(|| {
-                    InputError::Receiver("ArrowPayload.schema_id: length overflow".to_string())
-                })?;
-                if pos > buf.len() {
-                    return Err(InputError::Receiver(
-                        "ArrowPayload.schema_id: length overflow".to_string(),
-                    ));
-                }
-            }
-            // type: ArrowPayloadType enum, field 2, wire type 0
-            (2, WIRE_TYPE_VARINT) => {
-                let (val, new_pos) =
-                    decode_varint(buf, pos).map_err(|e| InputError::Receiver(e.to_string()))?;
-                payload_type = val as u32;
-                pos = new_pos;
-            }
-            // record: bytes, field 3, wire type 2
-            (3, WIRE_TYPE_LENGTH_DELIMITED) => {
-                let (len, new_pos) =
-                    decode_varint(buf, pos).map_err(|e| InputError::Receiver(e.to_string()))?;
-                let len_usize = usize::try_from(len).map_err(|_| {
-                    InputError::Receiver("ArrowPayload.record: length too large".to_string())
-                })?;
-                let end = new_pos.checked_add(len_usize).ok_or_else(|| {
-                    InputError::Receiver("ArrowPayload.record: length overflow".to_string())
-                })?;
-                if end > buf.len() {
-                    return Err(InputError::Receiver(
-                        "ArrowPayload.record: length overflow".to_string(),
-                    ));
-                }
-                record = buf[new_pos..end].to_vec();
-                pos = end;
-            }
-            _ => {
-                pos = skip_field(buf, wire_type, pos)
-                    .map_err(|e| InputError::Receiver(e.to_string()))?;
-            }
-        }
-    }
-
-    Ok(ArrowPayload {
-        payload_type,
-        record,
+    let decoded =
+        ProtoBatchArrowRecords::decode(buf).map_err(|e| InputError::Receiver(e.to_string()))?;
+    let payloads = decoded
+        .arrow_payloads
+        .into_iter()
+        .map(|payload| ArrowPayload {
+            payload_type: payload.r#type as u32,
+            record: payload.record,
+        })
+        .collect();
+    Ok(BatchArrowRecords {
+        batch_id: decoded.batch_id,
+        payloads,
     })
 }
 
@@ -560,16 +445,14 @@ fn assemble_star_schema(payloads: &[ArrowPayload]) -> Result<StarSchema, InputEr
 /// ```
 fn encode_batch_status(batch_id: i64, status_code: u32) -> Vec<u8> {
     let mut buf = Vec::with_capacity(16);
-    // field 1: batch_id (varint)
-    if batch_id != 0 {
-        encode_tag(&mut buf, 1, 0);
-        encode_varint(&mut buf, batch_id as u64);
-    }
-    // field 2: status_code (varint)
-    if status_code != 0 {
-        encode_tag(&mut buf, 2, 0);
-        encode_varint(&mut buf, status_code as u64);
-    }
+    let message = ProtoBatchStatus {
+        batch_id,
+        status_code: status_code as i32,
+        status_message: String::new(),
+    };
+    message
+        .encode(&mut buf)
+        .expect("vec-backed encode cannot fail");
     buf
 }
 
@@ -626,41 +509,27 @@ mod tests {
         assert!(result.is_ok(), "Failed to bind to port {} after drop", port);
     }
 
-    // --- Test-only protobuf encoding helpers ---
-
-    /// Encode a length-delimited field (tag + length + bytes).
-    fn encode_bytes_field(buf: &mut Vec<u8>, field_number: u32, data: &[u8]) {
-        encode_tag(buf, field_number, 2);
-        encode_varint(buf, data.len() as u64);
-        buf.extend_from_slice(data);
-    }
-
     /// Build a `BatchArrowRecords` protobuf from components.
     fn encode_batch_arrow_records(
         batch_id: i64,
         payloads: &[(u32, &[u8])], // (payload_type, arrow_ipc_bytes)
     ) -> Vec<u8> {
         let mut buf = Vec::new();
-        // field 1: batch_id
-        if batch_id != 0 {
-            encode_tag(&mut buf, 1, 0);
-            encode_varint(&mut buf, batch_id as u64);
-        }
-        // field 2: repeated ArrowPayload
-        for (payload_type, record) in payloads {
-            let mut payload_buf = Vec::new();
-            // ArrowPayload.type = field 2 (varint)
-            if *payload_type != 0 {
-                encode_tag(&mut payload_buf, 2, 0);
-                encode_varint(&mut payload_buf, *payload_type as u64);
-            }
-            // ArrowPayload.record = field 3 (bytes)
-            if !record.is_empty() {
-                encode_bytes_field(&mut payload_buf, 3, record);
-            }
-            // Wrap as length-delimited field 2 of BatchArrowRecords.
-            encode_bytes_field(&mut buf, 2, &payload_buf);
-        }
+        let message = ProtoBatchArrowRecords {
+            batch_id,
+            arrow_payloads: payloads
+                .iter()
+                .map(|(payload_type, record)| logfwd_otap_proto::otap::ArrowPayload {
+                    schema_id: String::new(),
+                    r#type: *payload_type as i32,
+                    record: record.to_vec(),
+                })
+                .collect(),
+            headers: Vec::new(),
+        };
+        message
+            .encode(&mut buf)
+            .expect("vec-backed encode cannot fail");
         buf
     }
 
@@ -1058,43 +927,8 @@ mod tests {
     #[test]
     fn batch_status_response_is_valid_protobuf() {
         let resp = encode_batch_status(42, BATCH_STATUS_OK);
-        // Decode it back.
-        let mut pos = 0;
-        let mut batch_id: i64 = 0;
-        let mut status_code: u32 = 0;
-
-        while pos < resp.len() {
-            let (field_number, wire_type, new_pos) = decode_tag(&resp, pos).expect("decode tag");
-            pos = new_pos;
-            match (field_number, wire_type) {
-                (1, WIRE_TYPE_VARINT) => {
-                    let (val, new_pos) = decode_varint(&resp, pos).expect("varint");
-                    batch_id = val as i64;
-                    pos = new_pos;
-                }
-                (2, WIRE_TYPE_VARINT) => {
-                    let (val, new_pos) = decode_varint(&resp, pos).expect("varint");
-                    status_code = val as u32;
-                    pos = new_pos;
-                }
-                _ => {
-                    pos = skip_field(&resp, wire_type, pos).expect("skip");
-                }
-            }
-        }
-
-        assert_eq!(batch_id, 42);
-        assert_eq!(status_code, BATCH_STATUS_OK);
-    }
-
-    #[test]
-    fn varint_roundtrip() {
-        for value in [0u64, 1, 127, 128, 255, 300, 16383, 16384, u64::MAX] {
-            let mut buf = Vec::new();
-            encode_varint(&mut buf, value);
-            let (decoded, end) = decode_varint(&buf, 0).expect("decode");
-            assert_eq!(decoded, value, "varint roundtrip failed for {value}");
-            assert_eq!(end, buf.len());
-        }
+        let decoded = ProtoBatchStatus::decode(resp.as_slice()).expect("decode status");
+        assert_eq!(decoded.batch_id, 42);
+        assert_eq!(decoded.status_code, BATCH_STATUS_OK as i32);
     }
 }
