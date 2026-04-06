@@ -677,13 +677,15 @@ mod tests {
 
     #[test]
     fn parse_timestamp_matches_chrono() {
-        use chrono::NaiveDateTime;
-        let cases = [
+        use chrono::{DateTime, NaiveDateTime};
+
+        // UTC cases — parse with NaiveDateTime + .and_utc()
+        let utc_cases = [
             b"2024-01-15T10:30:00Z" as &[u8],
             b"2000-02-29T00:00:00Z",
             b"2099-12-31T23:59:59Z",
         ];
-        for ts in cases {
+        for ts in utc_cases {
             let our_nanos = parse_timestamp_nanos(ts).unwrap();
             let s = core::str::from_utf8(ts).unwrap().trim_end_matches('Z');
             let chrono_nanos = NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S")
@@ -694,6 +696,36 @@ mod tests {
             assert_eq!(
                 our_nanos, chrono_nanos,
                 "timestamp mismatch for {s}: ours={our_nanos}, chrono={chrono_nanos}"
+            );
+        }
+
+        // Offset cases — normalize trailing 'Z'/'z' to "+00:00" then use
+        // DateTime::parse_from_str so chrono can handle non-UTC offsets.
+        use alloc::string::String;
+        let offset_cases = [
+            b"2024-01-15T10:30:00+05:30" as &[u8],
+            b"2024-01-15T10:30:00-05:00",
+            b"2024-01-15T10:30:00+14:00",
+            b"2024-01-15T10:30:00-12:00",
+        ];
+        for ts in offset_cases {
+            let our_nanos = parse_timestamp_nanos(ts).unwrap();
+            let s = core::str::from_utf8(ts).unwrap();
+            let s_norm: String = if s.ends_with('Z') || s.ends_with('z') {
+                let prefix = s.trim_end_matches(['Z', 'z']);
+                let mut owned = String::from(prefix);
+                owned.push_str("+00:00");
+                owned
+            } else {
+                String::from(s)
+            };
+            let chrono_nanos = DateTime::parse_from_str(&s_norm, "%Y-%m-%dT%H:%M:%S%:z")
+                .unwrap()
+                .timestamp_nanos_opt()
+                .unwrap() as u64;
+            assert_eq!(
+                our_nanos, chrono_nanos,
+                "offset timestamp mismatch for {s}: ours={our_nanos}, chrono={chrono_nanos}"
             );
         }
     }
