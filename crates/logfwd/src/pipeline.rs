@@ -1475,7 +1475,6 @@ mod tests {
     use logfwd_io::diagnostics::ComponentStats;
     use logfwd_test_utils::sinks::{DevNullSink, FailingSink, FrozenSink, SlowSink};
     use logfwd_test_utils::test_meter;
-    use serial_test::serial;
 
     #[test]
     fn test_build_sink_factory_stdout() {
