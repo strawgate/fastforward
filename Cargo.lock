@@ -2335,6 +2335,7 @@ dependencies = [
  "datafusion",
  "dhat",
  "fastrand",
+ "libc",
  "logfwd-arrow",
  "logfwd-core",
  "logfwd-io",

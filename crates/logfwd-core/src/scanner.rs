@@ -200,20 +200,62 @@ fn scan_line<B: ScanBuilder>(
                     builder.append_str_by_idx(idx, &buf[s..pos]);
                 }
             }
-            b't' | b'f' => {
-                let is_true = buf[pos] == b't';
-                while pos < end
-                    && buf[pos] != b','
-                    && buf[pos] != b'}'
-                    && buf[pos] != b' '
-                    && buf[pos] != b'\t'
-                    && buf[pos] != b'\r'
+            b't' => {
+                if pos + 4 <= end
+                    && &buf[pos..pos + 4] == b"true"
+                    && (pos + 4 >= end
+                        || matches!(buf[pos + 4], b',' | b'}' | b' ' | b'\t' | b'\r' | b'\n'))
                 {
-                    pos += 1;
+                    if wanted {
+                        let idx = builder.resolve_field(key);
+                        builder.append_bool_by_idx(idx, true);
+                    }
+                    pos += 4;
+                } else {
+                    let s = pos;
+                    while pos < end
+                        && buf[pos] != b','
+                        && buf[pos] != b'}'
+                        && buf[pos] != b' '
+                        && buf[pos] != b'\t'
+                        && buf[pos] != b'\r'
+                        && buf[pos] != b'\n'
+                    {
+                        pos += 1;
+                    }
+                    if wanted {
+                        let idx = builder.resolve_field(key);
+                        builder.append_str_by_idx(idx, &buf[s..pos]);
+                    }
                 }
-                if wanted {
-                    let idx = builder.resolve_field(key);
-                    builder.append_bool_by_idx(idx, is_true);
+            }
+            b'f' => {
+                if pos + 5 <= end
+                    && &buf[pos..pos + 5] == b"false"
+                    && (pos + 5 >= end
+                        || matches!(buf[pos + 5], b',' | b'}' | b' ' | b'\t' | b'\r' | b'\n'))
+                {
+                    if wanted {
+                        let idx = builder.resolve_field(key);
+                        builder.append_bool_by_idx(idx, false);
+                    }
+                    pos += 5;
+                } else {
+                    let s = pos;
+                    while pos < end
+                        && buf[pos] != b','
+                        && buf[pos] != b'}'
+                        && buf[pos] != b' '
+                        && buf[pos] != b'\t'
+                        && buf[pos] != b'\r'
+                        && buf[pos] != b'\n'
+                    {
+                        pos += 1;
+                    }
+                    if wanted {
+                        let idx = builder.resolve_field(key);
+                        builder.append_str_by_idx(idx, &buf[s..pos]);
+                    }
                 }
             }
             b'n' => {

@@ -554,7 +554,7 @@ fn resolve_batch_columns(batch: &RecordBatch) -> BatchColumns<'_> {
             DataType::Struct(_) => continue,
             _ => AttrArray::Str(batch.column(idx).as_ref()),
         };
-        attribute_cols.push((field_name.to_string(), attr));
+        attribute_cols.push((field_name.clone(), attr));
     }
 
     BatchColumns {

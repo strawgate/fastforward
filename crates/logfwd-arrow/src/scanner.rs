@@ -124,7 +124,7 @@ impl Scanner {
 #[cfg(test)]
 mod tests {
     use crate::scanner::Scanner;
-    use arrow::array::{Array, Int64Array, StringArray};
+    use arrow::array::{Array, BooleanArray, Int64Array, StringArray};
     use bytes::Bytes;
     use logfwd_core::scan_config::{FieldSpec, ScanConfig};
 
@@ -288,17 +288,27 @@ mod tests {
                 b"{\"a\":true,\"b\":false,\"c\":null}\n".to_vec(),
             ))
             .unwrap();
-        // Single-type string field: bare name
-        assert_eq!(
+        // Booleans are stored as BooleanArray
+        assert!(
             batch
                 .column_by_name("a")
                 .unwrap()
                 .as_any()
-                .downcast_ref::<StringArray>()
+                .downcast_ref::<BooleanArray>()
                 .unwrap()
                 .value(0),
-            "true"
         );
+        assert!(
+            !batch
+                .column_by_name("b")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<BooleanArray>()
+                .unwrap()
+                .value(0),
+        );
+        // null-only fields are not emitted as columns
+        assert!(batch.column_by_name("c").is_none());
     }
     #[test]
     fn test_duplicate_keys() {
@@ -377,15 +387,14 @@ mod tests {
                 .to_vec(),
             ))
             .unwrap();
-        assert_eq!(
+        assert!(
             batch
                 .column_by_name("ok")
                 .unwrap()
                 .as_any()
-                .downcast_ref::<StringArray>()
+                .downcast_ref::<BooleanArray>()
                 .unwrap()
                 .value(0),
-            "true"
         );
     }
     #[test]

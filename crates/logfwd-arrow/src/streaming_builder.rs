@@ -10,7 +10,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use arrow::array::{ArrayRef, BooleanArray, Float64Array, Int64Array, StringViewBuilder, StructArray};
+use arrow::array::{
+    ArrayRef, BooleanArray, Float64Array, Int64Array, StringViewBuilder, StructArray,
+};
 use arrow::buffer::{Buffer, NullBuffer};
 use arrow::datatypes::{DataType, Field, Fields, Schema};
 use arrow::error::ArrowError;
@@ -386,7 +388,6 @@ impl StreamingBuilder {
         }
     }
 
-
     #[inline(always)]
     pub fn append_bool_by_idx(&mut self, idx: usize, value: bool) {
         debug_assert_eq!(
@@ -504,7 +505,11 @@ impl StreamingBuilder {
 
             // Emit a StructArray when the same field has multiple types in this
             // batch. Single-type fields use the bare field name as a flat column.
-            let conflict = (fc.has_int as u8) + (fc.has_float as u8) + (fc.has_str as u8) + (fc.has_bool as u8) > 1;
+            let conflict = (fc.has_int as u8)
+                + (fc.has_float as u8)
+                + (fc.has_str as u8)
+                + (fc.has_bool as u8)
+                > 1;
 
             if conflict {
                 let mut child_fields: Vec<Arc<Field>> = Vec::new();
@@ -543,7 +548,6 @@ impl StreamingBuilder {
                     child_fields.push(Arc::new(Field::new("float", DataType::Float64, true)));
                     child_arrays.push(Arc::new(array) as ArrayRef);
                 }
-
 
                 if fc.has_bool {
                     let mut values = vec![false; num_rows];
@@ -632,7 +636,6 @@ impl StreamingBuilder {
                     schema_fields.push(Field::new(name.as_ref(), DataType::Float64, true));
                     arrays.push(Arc::new(array) as ArrayRef);
                 }
-
 
                 if fc.has_bool {
                     reserve_name(name.as_ref())?;
@@ -748,7 +751,11 @@ impl StreamingBuilder {
 
         for fc in &self.fields[..self.num_active] {
             let name = String::from_utf8_lossy(&fc.name);
-            let conflict = (fc.has_int as u8) + (fc.has_float as u8) + (fc.has_str as u8) + (fc.has_bool as u8) > 1;
+            let conflict = (fc.has_int as u8)
+                + (fc.has_float as u8)
+                + (fc.has_str as u8)
+                + (fc.has_bool as u8)
+                > 1;
 
             if conflict {
                 let mut child_fields: Vec<Arc<Field>> = Vec::new();
@@ -785,7 +792,6 @@ impl StreamingBuilder {
                     child_fields.push(Arc::new(Field::new("float", DataType::Float64, true)));
                     child_arrays.push(Arc::new(array) as ArrayRef);
                 }
-
 
                 if fc.has_bool {
                     let mut values = vec![false; num_rows];
@@ -868,7 +874,6 @@ impl StreamingBuilder {
                     schema_fields.push(Field::new(name.as_ref(), DataType::Float64, true));
                     arrays.push(Arc::new(array) as ArrayRef);
                 }
-
 
                 if fc.has_bool {
                     reserve_name(name.as_ref())?;
