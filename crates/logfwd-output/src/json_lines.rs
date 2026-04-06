@@ -12,8 +12,10 @@ use super::{Compression, build_col_infos, str_value, write_row_json};
 // JsonLinesSink
 // ---------------------------------------------------------------------------
 
+use std::future::Future;
+use std::pin::Pin;
+
 /// Writes newline-delimited JSON and POSTs over HTTP.
-#[allow(dead_code)] // HTTP send fields retained for future async Sink migration.
 pub struct JsonLinesSink {
     name: String,
     url: String,
@@ -21,7 +23,7 @@ pub struct JsonLinesSink {
     pub(crate) batch_buf: Vec<u8>,
     compress_buf: Vec<u8>,
     compression: Compression,
-    http_agent: ureq::Agent,
+    client: reqwest::Client,
     stats: Arc<ComponentStats>,
 }
 
@@ -31,12 +33,9 @@ impl JsonLinesSink {
         url: String,
         headers: Vec<(String, String)>,
         compression: Compression,
+        client: reqwest::Client,
         stats: Arc<ComponentStats>,
     ) -> Self {
-        let http_agent = ureq::config::Config::builder()
-            .timeout_global(Some(std::time::Duration::from_secs(30)))
-            .build()
-            .new_agent();
         JsonLinesSink {
             name,
             url,
@@ -44,7 +43,7 @@ impl JsonLinesSink {
             batch_buf: Vec::with_capacity(64 * 1024),
             compress_buf: Vec::new(),
             compression,
-            http_agent,
+            client,
             stats,
         }
     }
@@ -115,6 +114,177 @@ impl JsonLinesSink {
         }
         Ok(())
     }
+
+    async fn send_payload(&mut self, row_count: u64) -> io::Result<super::sink::SendResult> {
+        if self.batch_buf.is_empty() {
+            return Ok(super::sink::SendResult::Ok);
+        }
+
+        let payload: &[u8] = match self.compression {
+            Compression::Zstd => {
+                let bound = zstd::zstd_safe::compress_bound(self.batch_buf.len());
+                self.compress_buf.clear();
+                self.compress_buf.reserve(bound);
+                let compressed_len = zstd::bulk::compress_to_buffer(
+                    &self.batch_buf,
+                    &mut self.compress_buf,
+                    1,
+                )
+                .map_err(io::Error::other)?;
+                self.compress_buf.truncate(compressed_len);
+                &self.compress_buf
+            }
+            Compression::Gzip => {
+                use flate2::Compression as FlateCompression;
+                use flate2::write::GzEncoder;
+                use std::io::Write;
+                self.compress_buf.clear();
+                let mut enc = GzEncoder::new(&mut self.compress_buf, FlateCompression::fast());
+                enc.write_all(&self.batch_buf).map_err(io::Error::other)?;
+                enc.finish().map_err(io::Error::other)?;
+                &self.compress_buf
+            }
+            Compression::None => &self.batch_buf,
+        };
+
+        let mut req = self
+            .client
+            .post(&self.url)
+            .header("Content-Type", "application/x-ndjson");
+
+        for (k, v) in &self.headers {
+            req = req.header(k.clone(), v.clone());
+        }
+
+        match self.compression {
+            Compression::Zstd => {
+                req = req.header("Content-Encoding", "zstd");
+            }
+            Compression::Gzip => {
+                req = req.header("Content-Encoding", "gzip");
+            }
+            Compression::None => {}
+        }
+
+        let response = req.body(payload.to_vec()).send().await.map_err(io::Error::other)?;
+
+        let status = response.status();
+
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            let retry_after = response
+                .headers()
+                .get("Retry-After")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(5);
+            return Ok(super::sink::SendResult::RetryAfter(
+                std::time::Duration::from_secs(retry_after),
+            ));
+        }
+
+        if status.is_client_error() {
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "<unreadable>".to_string());
+            return Ok(super::sink::SendResult::Rejected(format!(
+                "HTTP rejected push with status {status}: {body}"
+            )));
+        }
+
+        if !status.is_success() {
+            return Err(io::Error::other(format!("HTTP returned status {status}")));
+        }
+
+        self.stats.inc_lines(row_count);
+        self.stats.inc_bytes(payload.len() as u64);
+        Ok(super::sink::SendResult::Ok)
+    }
+}
+
+impl super::sink::Sink for JsonLinesSink {
+    fn send_batch<'a>(
+        &'a mut self,
+        batch: &'a RecordBatch,
+        _metadata: &'a super::BatchMetadata,
+    ) -> Pin<Box<dyn Future<Output = super::sink::SendResult> + Send + 'a>> {
+        Box::pin(async move {
+            if let Err(e) = self.serialize_batch(batch) {
+                return super::sink::SendResult::IoError(e);
+            }
+            let rows = batch.num_rows() as u64;
+            match self.send_payload(rows).await {
+                Ok(r) => r,
+                Err(e) => super::sink::SendResult::IoError(e),
+            }
+        })
+    }
+
+    fn flush(&mut self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn shutdown(&mut self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// JsonLinesSinkFactory
+// ---------------------------------------------------------------------------
+
+pub struct JsonLinesSinkFactory {
+    name: String,
+    url: String,
+    headers: Vec<(String, String)>,
+    compression: Compression,
+    client: reqwest::Client,
+    stats: Arc<ComponentStats>,
+}
+
+impl JsonLinesSinkFactory {
+    pub fn new(
+        name: String,
+        url: String,
+        headers: Vec<(String, String)>,
+        compression: Compression,
+        stats: Arc<ComponentStats>,
+    ) -> io::Result<Self> {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .pool_max_idle_per_host(64)
+            .build()
+            .map_err(io::Error::other)?;
+        Ok(JsonLinesSinkFactory {
+            name,
+            url,
+            headers,
+            compression,
+            client,
+            stats,
+        })
+    }
+}
+
+impl super::sink::SinkFactory for JsonLinesSinkFactory {
+    fn create(&self) -> io::Result<Box<dyn super::sink::Sink>> {
+        Ok(Box::new(JsonLinesSink::new(
+            self.name.clone(),
+            self.url.clone(),
+            self.headers.clone(),
+            self.compression,
+            self.client.clone(),
+            Arc::clone(&self.stats),
+        )))
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -134,6 +304,7 @@ mod tests {
             "http://localhost:1".to_string(), // unreachable — tests only call serialize_batch
             vec![],
             Compression::None,
+            reqwest::Client::new(),
             Arc::new(ComponentStats::default()),
         )
     }

@@ -129,12 +129,22 @@ pub trait SinkFactory: Send + Sync + 'static {
 /// rejection is never masked by a later transient I/O error.
 pub struct AsyncFanoutSink {
     sinks: Vec<Box<dyn Sink>>,
+    /// Tracks which sinks have successfully delivered or permanently rejected the current batch.
+    /// A `true` value means the sink is "done" with this batch and should be skipped on retry.
+    /// Resets when a new batch arrives (detected by `last_observed_time_ns`).
+    completed: Vec<bool>,
+    last_observed_time_ns: u64,
 }
 
 impl AsyncFanoutSink {
     /// Create a fanout sink wrapping the given child sinks.
     pub fn new(sinks: Vec<Box<dyn Sink>>) -> Self {
-        AsyncFanoutSink { sinks }
+        let len = sinks.len();
+        AsyncFanoutSink {
+            sinks,
+            completed: vec![false; len],
+            last_observed_time_ns: 0,
+        }
     }
 }
 
@@ -145,14 +155,37 @@ impl Sink for AsyncFanoutSink {
         metadata: &'a BatchMetadata,
     ) -> Pin<Box<dyn Future<Output = SendResult> + Send + 'a>> {
         Box::pin(async move {
+            // If this is a new batch, reset the completion tracking.
+            if metadata.observed_time_ns != self.last_observed_time_ns {
+                self.completed.fill(false);
+                self.last_observed_time_ns = metadata.observed_time_ns;
+            }
+
             // Precedence: Rejected(3) > IoError(2) > RetryAfter(1) > Ok(0).
             // We track the highest-priority failure seen so far; a later result
             // can only raise the severity, never lower it.
             let mut worst: SendResult = SendResult::Ok;
             let mut max_retry: Option<Duration> = None;
-            for sink in &mut self.sinks {
+
+            // Use futures::future::join_all to send concurrently? The `Sink` trait has `&mut self`
+            // which prevents concurrent calls to multiple sinks from a single fanout sink without
+            // interior mutability. We will process them sequentially for now, but skip completed ones.
+            for (i, sink) in self.sinks.iter_mut().enumerate() {
+                if self.completed[i] {
+                    continue;
+                }
+
                 match sink.send_batch(batch, metadata).await {
-                    SendResult::Ok => {}
+                    SendResult::Ok => {
+                        self.completed[i] = true;
+                    }
+                    SendResult::Rejected(reason) => {
+                        // Mark as completed so we don't retry a permanently rejected batch
+                        // to this specific sink.
+                        self.completed[i] = true;
+                        // Rejected is the highest precedence — always overwrite.
+                        worst = SendResult::Rejected(reason);
+                    }
                     SendResult::RetryAfter(d) => {
                         if max_retry.is_none_or(|prev| d > prev) {
                             max_retry = Some(d);
@@ -164,12 +197,22 @@ impl Sink for AsyncFanoutSink {
                             worst = SendResult::IoError(e);
                         }
                     }
-                    SendResult::Rejected(reason) => {
-                        // Rejected is the highest precedence — always overwrite.
-                        worst = SendResult::Rejected(reason);
-                    }
                 }
             }
+
+            // Check if all sinks are completed.
+            if self.completed.iter().all(|&c| c) {
+                // If worst is Rejected, we still want to return it to the caller,
+                // but since all are completed, next time we would reset?
+                // Wait, if all are completed, we are done. If some were rejected,
+                // should we return Ok or Rejected?
+                // Returning Ok means the worker moves on to the next batch.
+                // Returning Rejected means the worker will drop the batch.
+                // Both result in moving on, but Rejected might increment a failure counter.
+                // However, `worst` is calculated above. If we return `worst`, the worker handles it.
+                // Let's just return `worst` with the max_retry logic.
+            }
+
             match worst {
                 SendResult::Ok => match max_retry {
                     Some(d) => SendResult::RetryAfter(d),

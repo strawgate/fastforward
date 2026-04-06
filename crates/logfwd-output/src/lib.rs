@@ -20,7 +20,7 @@ mod loki;
 pub use arrow_ipc_sink::{ArrowIpcSinkFactory, deserialize_ipc, serialize_ipc};
 pub use elasticsearch::{ElasticsearchRequestMode, ElasticsearchSink, ElasticsearchSinkFactory};
 pub use error::OutputError;
-pub use json_lines::JsonLinesSink;
+pub use json_lines::{JsonLinesSink, JsonLinesSinkFactory};
 pub use loki::{LokiSink, LokiSinkFactory};
 pub use null::{NullSink, NullSinkFactory};
 pub use otap_sink::{
@@ -665,6 +665,27 @@ pub fn build_sink_factory(
                 stats,
             )))
         }
+        OutputType::Http => {
+            let endpoint = cfg.endpoint.as_ref().ok_or_else(|| {
+                OutputError::Construction(format!("output '{name}': http requires 'endpoint'"))
+            })?;
+            let compression = match cfg.compression.as_deref() {
+                Some("zstd") => Compression::Zstd,
+                Some("gzip") => Compression::Gzip,
+                _ => Compression::None,
+            };
+            let factory = JsonLinesSinkFactory::new(
+                name.to_string(),
+                endpoint.clone(),
+                auth_headers,
+                compression,
+                stats,
+            )
+            .map_err(|e| {
+                OutputError::Construction(format!("output '{name}': http factory: {e}"))
+            })?;
+            Ok(Arc::new(factory))
+        }
         OutputType::Null => Ok(Arc::new(NullSinkFactory::new(name.to_string(), stats))),
         _ => Err(OutputError::Construction(format!(
             "output '{name}': type {:?} not yet supported",
@@ -842,6 +863,7 @@ mod tests {
             "http://localhost:9200".to_string(),
             vec![],
             Compression::None,
+            reqwest::Client::new(),
             Arc::new(ComponentStats::new()),
         );
         sink.serialize_batch(&batch).unwrap();
@@ -958,21 +980,16 @@ mod tests {
     }
 
     #[test]
-    fn test_build_sink_factory_http_not_yet_supported() {
+    fn test_build_sink_factory_http_supported() {
         let cfg = OutputConfig {
-            name: Some("http-bad".to_string()),
+            name: Some("http-good".to_string()),
             output_type: OutputType::Http,
             endpoint: Some("http://localhost:9200".to_string()),
             compression: Some("zstd".to_string()),
             ..Default::default()
         };
-        let result = build_sink_factory("http-bad", &cfg, Arc::new(ComponentStats::new()));
-        assert!(result.is_err(), "Http type should not be supported yet");
-        let err = result.err().unwrap();
-        assert!(
-            err.to_string().contains("not yet supported"),
-            "error should mention 'not yet supported', got: {err}"
-        );
+        let factory = build_sink_factory("http-good", &cfg, Arc::new(ComponentStats::new())).unwrap();
+        assert_eq!(factory.name(), "http-good");
     }
 
     #[test]
@@ -1141,6 +1158,7 @@ mod tests {
             "http://localhost:9200".to_string(),
             vec![],
             Compression::None,
+            reqwest::Client::new(),
             Arc::new(ComponentStats::new()),
         );
         // Must not panic.
@@ -1507,17 +1525,17 @@ mod write_row_json_tests {
     #[test]
     fn float32_serializes_as_number() {
         use arrow::array::Float32Array;
-        let batch = make_batch(vec![("val", Arc::new(Float32Array::from(vec![3.14_f32])))]);
+        let batch = make_batch(vec![("val", Arc::new(Float32Array::from(vec![1.23_f32])))]);
         let json = render(&batch, 0);
         let v: serde_json::Value = serde_json::from_str(&json).expect("must be valid JSON");
         assert!(
             v["val"].is_number(),
             "Float32 should serialize as JSON number, got {json}"
         );
-        let diff = (v["val"].as_f64().unwrap() - 3.14_f64).abs();
+        let diff = (v["val"].as_f64().unwrap() - 1.23_f64).abs();
         assert!(
             diff < 0.001,
-            "Float32 value should be ~3.14, got {}",
+            "Float32 value should be ~1.23, got {}",
             v["val"]
         );
     }
@@ -1687,7 +1705,7 @@ mod write_row_json_tests {
         let batch = make_batch(vec![
             ("dur_int", Arc::new(Int64Array::from(vec![42]))),
             ("label_str", Arc::new(StringArray::from(vec!["hello"]))),
-            ("score_float", Arc::new(Float64Array::from(vec![3.14]))),
+            ("score_float", Arc::new(Float64Array::from(vec![1.23]))),
         ]);
         let json = render(&batch, 0);
         let v: serde_json::Value = serde_json::from_str(&json).expect("must be valid JSON");
@@ -1701,7 +1719,7 @@ mod write_row_json_tests {
             "alias 'label_str' must be preserved, got: {json}"
         );
         assert!(
-            (v["score_float"].as_f64().unwrap() - 3.14).abs() < 0.01,
+            (v["score_float"].as_f64().unwrap() - 1.23).abs() < 0.01,
             "alias 'score_float' must be preserved, got: {json}"
         );
     }

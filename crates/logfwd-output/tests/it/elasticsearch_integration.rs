@@ -132,9 +132,8 @@ fn elasticsearch_sink_sends_bulk_data() {
 
     // Send batch
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let _ = rt
-        .block_on(sink.send_batch(&batch, &metadata))
-        .expect("send_batch failed");
+    let res = rt.block_on(sink.send_batch(&batch, &metadata));
+    assert!(res.is_ok(), "send_batch failed: {res:?}");
 
     // Give server time to process
     std::thread::sleep(Duration::from_millis(200));
@@ -186,9 +185,8 @@ fn elasticsearch_sink_handles_empty_batch() {
 
     // Send empty batch
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let _ = rt
-        .block_on(sink.send_batch(&batch, &metadata))
-        .expect("send_batch failed");
+    let res = rt.block_on(sink.send_batch(&batch, &metadata));
+    assert!(res.is_ok(), "send_batch failed: {res:?}");
 
     // Empty batch should not increment stats
     assert_eq!(
@@ -243,9 +241,8 @@ fn elasticsearch_sink_multiple_batches() {
         )
         .expect("batch creation failed");
 
-        let _ = rt
-            .block_on(sink.send_batch(&batch, &metadata))
-            .expect("send_batch failed");
+        let res = rt.block_on(sink.send_batch(&batch, &metadata));
+        assert!(res.is_ok(), "send_batch failed: {res:?}");
     }
 
     // Give server time to process
@@ -300,9 +297,8 @@ fn elasticsearch_streaming_mode_uses_chunked_transfer() {
     };
 
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let _ = rt
-        .block_on(sink.send_batch(&batch, &metadata))
-        .expect("send_batch failed");
+    let res = rt.block_on(sink.send_batch(&batch, &metadata));
+    assert!(res.is_ok(), "send_batch failed: {res:?}");
 
     std::thread::sleep(Duration::from_millis(200));
 

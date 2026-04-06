@@ -256,7 +256,7 @@ impl LokiSink {
             // Build stream JSON.
             let labels_str = labels_map
                 .iter()
-                .map(|(k, v)| format!("\"{}\":\"{}\"", escape_json(k), escape_json(v)))
+                .map(|(k, v)| format!("\"{}\":\"{}\"", escape_json(&sanitize_label_name(k)), escape_json(v)))
                 .collect::<Vec<_>>()
                 .join(",");
 
@@ -447,6 +447,29 @@ impl super::sink::SinkFactory for LokiSinkFactory {
 // ---------------------------------------------------------------------------
 // JSON escaping helpers
 // ---------------------------------------------------------------------------
+
+/// Sanitize a Loki label name.
+/// Label names must match the regex `[a-zA-Z_:][a-zA-Z0-9_:]*`.
+/// Invalid characters are replaced with `_`.
+fn sanitize_label_name(name: &str) -> String {
+    if name.is_empty() {
+        return "label".to_string();
+    }
+    let mut out = String::with_capacity(name.len());
+    for (i, c) in name.chars().enumerate() {
+        let is_valid = if i == 0 {
+            c.is_ascii_alphabetic() || c == '_' || c == ':'
+        } else {
+            c.is_ascii_alphanumeric() || c == '_' || c == ':'
+        };
+        if is_valid {
+            out.push(c);
+        } else {
+            out.push('_');
+        }
+    }
+    out
+}
 
 /// Escape a string for use as a JSON string value (without wrapping quotes).
 fn escape_json(s: &str) -> String {
