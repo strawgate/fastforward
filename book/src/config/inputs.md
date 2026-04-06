@@ -22,12 +22,27 @@ data source is required.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `listen` | string | No | (unlimited) | Target events per second, e.g. `"50000"`. Omit for maximum throughput. |
+| `listen` | string | No | (unlimited) | Backward-compatible shorthand for target events per second. Prefer `generator.events_per_sec` for new configs. |
+| `generator.events_per_sec` | integer | No | `0` | Target events per second. `0` means unlimited. |
+| `generator.batch_size` | integer | No | `1000` | Events emitted per poll/batch. |
+| `generator.total_events` | integer | No | `0` | Total events to emit before stopping. `0` means infinite. |
+| `generator.profile` | string | No | `logs` | `logs` for generic synthetic request logs, `benchmark` for stable benchmark envelope rows. |
+| `generator.complexity` | string | No | `simple` | Size/shape for the `logs` profile: `simple` or `complex`. |
+| `generator.benchmark_id` | string | No | unset | Included on every `benchmark` row. |
+| `generator.pod_name` | string | No | input name | Source identity used by the `benchmark` profile. |
+| `generator.stream_id` | string | No | `pod_name` | Stable stream identity used to build `event_id`. |
+| `generator.service` | string | No | `bench-emitter` | Service name for the `benchmark` profile. |
 
 ```yaml
 input:
   type: generator
-  listen: "50000"   # ~50,000 events/sec; omit for unlimited
+  generator:
+    events_per_sec: 50000
+    batch_size: 4096
+    profile: benchmark
+    benchmark_id: ${BENCHMARK_ID}
+    pod_name: ${POD_NAME}
+    stream_id: ${POD_NAME}
 ```
 
 Use `--generate-json <num_lines> <output_file>` on the CLI to write a fixed number of lines to a file instead.

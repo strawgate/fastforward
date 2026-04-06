@@ -24,7 +24,8 @@ use crate::processor::Processor;
 use crate::worker_pool::{AckItem, OutputWorkerPool, WorkItem};
 use logfwd_arrow::scanner::Scanner;
 use logfwd_config::{
-    EnrichmentConfig, Format, GeoDatabaseFormat, InputConfig, InputType, PipelineConfig,
+    EnrichmentConfig, Format, GeneratorComplexityConfig, GeneratorProfileConfig, GeoDatabaseFormat,
+    InputConfig, InputType, PipelineConfig,
 };
 use logfwd_io::checkpoint::{
     CheckpointStore, FileCheckpointStore, SourceCheckpoint, default_data_dir,
@@ -1517,19 +1518,39 @@ fn build_input_state(
             (Box::new(source), format, 4 * 1024 * 1024)
         }
         InputType::Generator => {
-            use logfwd_io::generator::{GeneratorConfig, GeneratorInput};
-            let events_per_sec = match cfg.listen.as_deref() {
-                    Some(s) => s.parse().map_err(|_| {
-                        format!(
-                            "input '{name}': generator 'listen' must be a valid integer (events/sec), got '{s}'"
-                        )
-                    })?,
-                    None => 0,
-                };
+            use logfwd_io::generator::{
+                GeneratorComplexity, GeneratorConfig, GeneratorInput, GeneratorProfile,
+            };
+            let generator_cfg = cfg.generator.as_ref();
+            let events_per_sec = match (
+                cfg.listen.as_deref(),
+                generator_cfg.and_then(|c| c.events_per_sec),
+            ) {
+                (Some(s), None) => s.parse().map_err(|_| {
+                    format!(
+                        "input '{name}': generator 'listen' must be a valid integer (events/sec), got '{s}'"
+                    )
+                })?,
+                (None, Some(v)) => v,
+                (None, None) => 0,
+                (Some(_), Some(_)) => unreachable!("validated in config"),
+            };
             let config = GeneratorConfig {
                 events_per_sec,
-                batch_size: 1000,
-                total_events: 0,
+                batch_size: generator_cfg.and_then(|c| c.batch_size).unwrap_or(1000),
+                total_events: generator_cfg.and_then(|c| c.total_events).unwrap_or(0),
+                complexity: match generator_cfg.and_then(|c| c.complexity.clone()) {
+                    Some(GeneratorComplexityConfig::Complex) => GeneratorComplexity::Complex,
+                    _ => GeneratorComplexity::Simple,
+                },
+                profile: match generator_cfg.and_then(|c| c.profile.clone()) {
+                    Some(GeneratorProfileConfig::Benchmark) => GeneratorProfile::Benchmark,
+                    _ => GeneratorProfile::Logs,
+                },
+                benchmark_id: generator_cfg.and_then(|c| c.benchmark_id.clone()),
+                pod_name: generator_cfg.and_then(|c| c.pod_name.clone()),
+                stream_id: generator_cfg.and_then(|c| c.stream_id.clone()),
+                service: generator_cfg.and_then(|c| c.service.clone()),
                 ..Default::default()
             };
             let format = cfg.format.clone().unwrap_or(Format::Json);
@@ -1623,7 +1644,6 @@ mod tests {
     use logfwd_io::diagnostics::ComponentStats;
     use logfwd_test_utils::sinks::{DevNullSink, FailingSink, FrozenSink, SlowSink};
     use logfwd_test_utils::test_meter;
-    use serial_test::serial;
 
     #[test]
     fn test_build_sink_factory_stdout() {
@@ -1762,6 +1782,27 @@ pipelines:
         assert_eq!(pipeline.batch_target_bytes, 8192);
         assert_eq!(pipeline.batch_timeout, Duration::from_millis(250));
         assert_eq!(pipeline.poll_interval, Duration::from_millis(42));
+    }
+
+    #[test]
+    fn test_pipeline_from_config_generator_benchmark_profile() {
+        let yaml = r#"
+input:
+  type: generator
+  generator:
+    events_per_sec: 25000
+    batch_size: 1024
+    profile: benchmark
+    benchmark_id: run-123
+    pod_name: emitter-0
+    stream_id: emitter-0
+output:
+  type: null
+"#;
+        let config = logfwd_config::Config::load_str(yaml).unwrap();
+        let pipe_cfg = &config.pipelines["default"];
+        let pipeline = Pipeline::from_config("default", pipe_cfg, &test_meter(), None);
+        assert!(pipeline.is_ok(), "got: {:?}", pipeline.err());
     }
 
     #[test]

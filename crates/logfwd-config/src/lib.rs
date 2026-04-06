@@ -214,6 +214,50 @@ impl fmt::Display for Format {
 // Input / Output descriptors
 // ---------------------------------------------------------------------------
 
+/// Named generator output profiles.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum GeneratorProfileConfig {
+    /// Synthetic request-like JSON logs.
+    #[default]
+    Logs,
+    /// Deterministic benchmark envelope with stable stream/event identity.
+    Benchmark,
+}
+
+/// Controls the size and shape of synthetic generator rows.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum GeneratorComplexityConfig {
+    #[default]
+    Simple,
+    Complex,
+}
+
+/// Generator-specific configuration.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct GeneratorInputConfig {
+    /// Target events per second. 0 or omitted means unlimited.
+    pub events_per_sec: Option<u64>,
+    /// Number of events emitted on each input poll.
+    pub batch_size: Option<usize>,
+    /// Total events to emit before the generator finishes. 0 or omitted means infinite.
+    pub total_events: Option<u64>,
+    /// Controls size/shape for the `logs` profile.
+    pub complexity: Option<GeneratorComplexityConfig>,
+    /// Which event shape to emit.
+    pub profile: Option<GeneratorProfileConfig>,
+    /// Benchmark run identifier included on every `benchmark` profile row.
+    pub benchmark_id: Option<String>,
+    /// Source identity included on `benchmark` rows.
+    pub pod_name: Option<String>,
+    /// Stable stream identity used for `event_id` generation on `benchmark` rows.
+    pub stream_id: Option<String>,
+    /// Service name for `benchmark` rows. Defaults to `bench-emitter`.
+    pub service: Option<String>,
+}
+
 /// A single input source.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -233,6 +277,9 @@ pub struct InputConfig {
     /// Applies only to glob `file` inputs. Defaults to 5000ms when not set.
     /// Set to a small value (e.g. 50) in tests to avoid long waits.
     pub glob_rescan_interval_ms: Option<u64>,
+    /// Generator-specific configuration.
+    #[serde(default)]
+    pub generator: Option<GeneratorInputConfig>,
 }
 
 /// A single output destination.
@@ -718,6 +765,11 @@ impl Config {
                 // Reject fields that don't apply to this input type.
                 match input.input_type {
                     InputType::File => {
+                        if input.generator.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'generator' settings are only supported for generator inputs"
+                            )));
+                        }
                         if input.listen.is_some() {
                             return Err(ConfigError::Validation(format!(
                                 "pipeline '{name}' input '{label}': 'listen' is not supported for file inputs"
@@ -725,6 +777,11 @@ impl Config {
                         }
                     }
                     InputType::Tcp | InputType::Udp => {
+                        if input.generator.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'generator' settings are only supported for generator inputs"
+                            )));
+                        }
                         if input.path.is_some() {
                             return Err(ConfigError::Validation(format!(
                                 "pipeline '{name}' input '{label}': 'path' is not supported for tcp/udp inputs"
@@ -742,6 +799,11 @@ impl Config {
                         }
                     }
                     InputType::Otlp => {
+                        if input.generator.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'generator' settings are only supported for generator inputs"
+                            )));
+                        }
                         if input.path.is_some() {
                             return Err(ConfigError::Validation(format!(
                                 "pipeline '{name}' input '{label}': 'path' is not supported for otlp inputs"
@@ -774,8 +836,29 @@ impl Config {
                                 "pipeline '{name}' input '{label}': 'glob_rescan_interval_ms' is not supported for generator inputs"
                             )));
                         }
+                        if input.listen.is_some()
+                            && input
+                                .generator
+                                .as_ref()
+                                .is_some_and(|cfg| cfg.events_per_sec.is_some())
+                        {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': configure generator rate with either 'listen' or 'generator.events_per_sec', not both"
+                            )));
+                        }
+                        if input.generator.as_ref().and_then(|cfg| cfg.batch_size) == Some(0) {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': generator.batch_size must be at least 1"
+                            )));
+                        }
                     }
-                    InputType::ArrowIpc => {}
+                    InputType::ArrowIpc => {
+                        if input.generator.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'generator' settings are only supported for generator inputs"
+                            )));
+                        }
+                    }
                 }
 
                 // Reject input formats that are not yet implemented.
@@ -2680,6 +2763,79 @@ pipelines:
         assert_eq!(
             cfg.pipelines["test"].inputs[0].listen.as_deref(),
             Some("1000")
+        );
+    }
+
+    #[test]
+    fn generator_input_accepts_explicit_generator_block() {
+        let yaml = r#"
+pipelines:
+  test:
+    inputs:
+      - type: generator
+        generator:
+          events_per_sec: 25000
+          batch_size: 2048
+          total_events: 123
+          profile: benchmark
+          benchmark_id: run-123
+          pod_name: emitter-0
+          stream_id: emitter-0
+          service: bench-emitter
+    outputs:
+      - type: null
+"#;
+        let cfg = Config::load_str(yaml).expect("generator block should be valid");
+        let generator = cfg.pipelines["test"].inputs[0]
+            .generator
+            .as_ref()
+            .expect("generator config");
+        assert_eq!(generator.events_per_sec, Some(25000));
+        assert_eq!(generator.batch_size, Some(2048));
+        assert_eq!(generator.total_events, Some(123));
+        assert_eq!(generator.profile, Some(GeneratorProfileConfig::Benchmark));
+        assert_eq!(generator.pod_name.as_deref(), Some("emitter-0"));
+        assert_eq!(generator.stream_id.as_deref(), Some("emitter-0"));
+    }
+
+    #[test]
+    fn generator_input_rejects_duplicate_rate_settings() {
+        let yaml = r#"
+pipelines:
+  test:
+    inputs:
+      - type: generator
+        listen: "1000"
+        generator:
+          events_per_sec: 2000
+    outputs:
+      - type: null
+"#;
+        let err = Config::load_str(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("generator.events_per_sec"),
+            "expected duplicate generator rate rejection: {err}"
+        );
+    }
+
+    #[test]
+    fn non_generator_input_rejects_generator_block() {
+        let yaml = r#"
+pipelines:
+  test:
+    inputs:
+      - type: file
+        path: /tmp/test.log
+        generator:
+          profile: benchmark
+    outputs:
+      - type: null
+"#;
+        let err = Config::load_str(yaml).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("only supported for generator inputs"),
+            "expected generator block rejection: {err}"
         );
     }
 
