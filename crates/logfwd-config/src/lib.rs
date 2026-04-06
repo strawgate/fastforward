@@ -1000,8 +1000,11 @@ fn validate_bind_addr(addr: &str) -> Result<(), String> {
 }
 
 /// Validate that a string has a valid `host:port` format where port is a u16.
-/// This allows hostnames as well as IP addresses.
-fn validate_host_port(addr: &str) -> Result<(), String> {
+///
+/// Accepts IP addresses (v4 and v6) as well as hostnames, consistent with the
+/// runtime `TcpListener::bind` behaviour.  Use this function anywhere an
+/// address is validated so that CLI and config validation remain in sync.
+pub fn validate_host_port(addr: &str) -> Result<(), String> {
     if addr.starts_with("http://") || addr.starts_with("https://") {
         return Err(format!("'{addr}' is a URL, expected host:port"));
     }
