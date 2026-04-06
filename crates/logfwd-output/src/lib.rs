@@ -620,12 +620,7 @@ pub fn build_sink_factory(
             })?;
             let protocol = match cfg.protocol.as_deref() {
                 Some("grpc") => OtlpProtocol::Grpc,
-                Some("http") | None => OtlpProtocol::Http,
-                Some(other) => {
-                    return Err(OutputError::Construction(format!(
-                        "output '{name}': unknown OTLP protocol '{other}' (expected 'http' or 'grpc')"
-                    )));
-                }
+                _ => OtlpProtocol::Http,
             };
             let compression = match cfg.compression.as_deref() {
                 Some("zstd") => Compression::Zstd,
@@ -634,12 +629,7 @@ pub fn build_sink_factory(
                         "output '{name}': OTLP does not support 'gzip' compression yet"
                     )));
                 }
-                Some("none") | None => Compression::None,
-                Some(other) => {
-                    return Err(OutputError::Construction(format!(
-                        "output '{name}': unknown OTLP compression '{other}' (expected 'zstd' or 'none')"
-                    )));
-                }
+                _ => Compression::None,
             };
             let factory = OtlpSinkFactory::new(
                 name.to_string(),
