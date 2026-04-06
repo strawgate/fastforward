@@ -240,8 +240,9 @@ pub fn skip_field(buf: &[u8], wire_type: u8, pos: usize) -> Result<usize, &'stat
         2 => {
             // Length-delimited.
             let (len, new_pos) = decode_varint(buf, pos)?;
+            let len = usize::try_from(len).map_err(|_| "skip: length-delimited overflow")?;
             let end = new_pos
-                .checked_add(len as usize)
+                .checked_add(len)
                 .ok_or("skip: length-delimited overflow")?;
             if end > buf.len() {
                 return Err("skip: length-delimited overflow");
@@ -428,17 +429,19 @@ pub fn parse_timestamp_nanos(ts: &[u8]) -> Option<u64> {
             frac_end += 1;
         }
         let frac_digits = frac_end - frac_start;
-        if frac_digits > 0 {
-            let mut frac_val = 0u64;
-            for &b in &ts[frac_start..frac_end.min(frac_start + 9)] {
-                frac_val = frac_val * 10 + (b - b'0') as u64;
-            }
-            // Pad or truncate to 9 digits (nanoseconds).
-            for _ in frac_digits..9 {
-                frac_val *= 10;
-            }
-            nanos += frac_val;
+        // A bare '.' with no following digits (e.g. "T10:30:00.Z") is invalid.
+        if frac_digits == 0 {
+            return None;
         }
+        let mut frac_val = 0u64;
+        for &b in &ts[frac_start..frac_end.min(frac_start + 9)] {
+            frac_val = frac_val * 10 + (b - b'0') as u64;
+        }
+        // Pad or truncate to 9 digits (nanoseconds).
+        for _ in frac_digits..9 {
+            frac_val *= 10;
+        }
+        nanos += frac_val;
         tz_pos = frac_end;
     }
 
@@ -841,6 +844,26 @@ mod tests {
             parse_timestamp_nanos(b"2024-01-15T10:30:00+05:30X"),
             None,
             "trailing byte after +HH:MM should be rejected"
+        );
+    }
+
+    #[test]
+    fn test_parse_timestamp_bare_dot_rejected() {
+        // A lone '.' with no following fractional digits is not a valid timestamp.
+        assert_eq!(
+            parse_timestamp_nanos(b"2024-01-15T10:30:00."),
+            None,
+            "bare '.' at end of timestamp must be rejected"
+        );
+        assert_eq!(
+            parse_timestamp_nanos(b"2024-01-15T10:30:00.Z"),
+            None,
+            "bare '.' before Z must be rejected"
+        );
+        assert_eq!(
+            parse_timestamp_nanos(b"2024-01-15T10:30:00.+05:30"),
+            None,
+            "bare '.' before +HH:MM must be rejected"
         );
     }
 

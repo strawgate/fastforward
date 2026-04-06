@@ -99,6 +99,24 @@ pub fn parse_int_fast(bytes: &[u8]) -> Option<i64> {
     }
 }
 
+/// Returns `true` if `bytes` is a valid integer lexeme: an optional leading
+/// `'-'` followed by one or more ASCII digits and nothing else.
+///
+/// Used to distinguish "integer that overflowed i64" (safe to store as string)
+/// from malformed tokens like `"12x"` or `"+1"` that should not be emitted.
+#[inline(always)]
+pub fn is_integer_lexeme(bytes: &[u8]) -> bool {
+    if bytes.is_empty() {
+        return false;
+    }
+    let start = usize::from(bytes[0] == b'-');
+    // Must have at least one digit after the optional sign.
+    if start >= bytes.len() {
+        return false;
+    }
+    bytes[start..].iter().all(u8::is_ascii_digit)
+}
+
 /// Parse a byte slice as f64 using the standard library.
 #[inline(always)]
 pub fn parse_float_fast(bytes: &[u8]) -> Option<f64> {

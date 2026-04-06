@@ -326,6 +326,31 @@ fn compliance_integer_boundaries() {
 }
 
 #[test]
+fn compliance_integer_negative_underflow() {
+    // i64::MIN - 1 = -9223372036854775809; too negative for i64 but valid JSON integer.
+    // Pair it with a normal i64 to force the conflict-struct schema so we can inspect
+    // the int/float/str slots individually.
+    let input = b"{\"n\":1}\n{\"n\":-9223372036854775809}\n";
+    assert_both_scanners(input, |batch| {
+        assert_eq!(batch.num_rows(), 2);
+
+        // Row 0: normal i64 — int slot is populated, float and str are null.
+        assert_eq!(get_struct_int(batch, "n", 0), Some(1));
+
+        // Row 1: underflow — int and float slots must be null.
+        assert_struct_child_null(batch, "n", "int", 1);
+        assert_struct_child_null(batch, "n", "float", 1);
+
+        // The string slot must hold the exact original digit string, including the '-'.
+        let s = get_struct_str(batch, "n", 1).expect("n.str should exist for underflow integer");
+        assert_eq!(
+            s, "-9223372036854775809",
+            "underflow integer not preserved as string: {s}"
+        );
+    });
+}
+
+#[test]
 fn compliance_float_precision() {
     let input = b"{\"f\":3.141592653589793}\n{\"f\":1e308}\n{\"f\":-1e308}\n{\"f\":5e-324}\n";
     assert_both_scanners(input, |batch| {

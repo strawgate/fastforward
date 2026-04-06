@@ -20,6 +20,8 @@ use zstd::bulk::Compressor as ZstdCompressor;
 
 use super::{BatchMetadata, Compression, str_value};
 
+use tracing::warn;
+
 // ---------------------------------------------------------------------------
 // InstrumentationScope constants
 // ---------------------------------------------------------------------------
@@ -689,7 +691,12 @@ fn encode_row_as_log_record(
             if arr.is_null(row) {
                 None
             } else {
-                parse_timestamp_nanos(str_value(arr, row).as_bytes())
+                let raw = str_value(arr, row);
+                let nanos = parse_timestamp_nanos(raw.as_bytes());
+                if nanos.is_none() {
+                    warn!(timestamp = %raw, "OTLP sink: unparseable timestamp; emitting 0 (epoch)");
+                }
+                nanos
             }
         })
         .unwrap_or(0);
