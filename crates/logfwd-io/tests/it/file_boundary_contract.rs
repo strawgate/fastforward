@@ -10,12 +10,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use logfwd_types::pipeline::SourceId;
 use logfwd_io::format::FormatDecoder;
 use logfwd_io::framed::FramedInput;
 use logfwd_io::input::{FileInput, InputEvent, InputSource};
 use logfwd_io::tail::{ByteOffset, TailConfig};
 use logfwd_types::diagnostics::ComponentStats;
+use logfwd_types::pipeline::SourceId;
 
 fn make_stats() -> Arc<ComponentStats> {
     Arc::new(ComponentStats::new())
