@@ -127,18 +127,18 @@ fn otlp_encode_stable_across_batches() {
     };
 
     for _ in 0..3 {
-        sink.encode_batch(&batch, &meta);
+        sink.encode_batch(&batch, &meta).unwrap();
     }
 
     let reg1 = Region::new(GLOBAL);
     for _ in 0..5 {
-        sink.encode_batch(&batch, &meta);
+        sink.encode_batch(&batch, &meta).unwrap();
     }
     let stats1 = reg1.change();
 
     let reg2 = Region::new(GLOBAL);
     for _ in 0..5 {
-        sink.encode_batch(&batch, &meta);
+        sink.encode_batch(&batch, &meta).unwrap();
     }
     let stats2 = reg2.change();
 

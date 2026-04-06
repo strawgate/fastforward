@@ -619,7 +619,12 @@ pub fn build_sink_factory(
             })?;
             let protocol = match cfg.protocol.as_deref() {
                 Some("grpc") => OtlpProtocol::Grpc,
-                _ => OtlpProtocol::Http,
+                Some("http") | None => OtlpProtocol::Http,
+                Some(other) => {
+                    return Err(OutputError::Construction(format!(
+                        "output '{name}': OTLP does not support protocol '{other}' (use 'http', 'grpc', or omit)"
+                    )));
+                }
             };
             let compression = match cfg.compression.as_deref() {
                 Some("zstd") => Compression::Zstd,
@@ -628,11 +633,26 @@ pub fn build_sink_factory(
                         "output '{name}': OTLP does not support 'gzip' compression yet"
                     )));
                 }
-                _ => Compression::None,
+                Some("none") | None => Compression::None,
+                Some(other) => {
+                    return Err(OutputError::Construction(format!(
+                        "output '{name}': OTLP does not support compression '{other}' (use 'zstd', 'none', or omit)"
+                    )));
+                }
             };
+            let mut final_endpoint = endpoint.clone();
+            if protocol == OtlpProtocol::Grpc {
+                if let Ok(mut parsed_url) = reqwest::Url::parse(&final_endpoint) {
+                    if parsed_url.path() == "" || parsed_url.path() == "/" {
+                        parsed_url.set_path("/opentelemetry.proto.collector.logs.v1.LogsService/Export");
+                        final_endpoint = parsed_url.to_string();
+                    }
+                }
+            }
+
             let factory = OtlpSinkFactory::new(
                 name.to_string(),
-                endpoint.clone(),
+                final_endpoint,
                 protocol,
                 compression,
                 auth_headers,
@@ -796,7 +816,7 @@ mod tests {
             Arc::new(ComponentStats::new()),
         )
         .unwrap();
-        sink.encode_batch(&batch, &meta);
+        sink.encode_batch(&batch, &meta).unwrap();
 
         // Should produce non-empty protobuf bytes.
         assert!(!sink.encoder_buf.is_empty());
@@ -1093,7 +1113,7 @@ mod tests {
         )
         .unwrap();
         // Must not panic.
-        sink.encode_batch(&batch, &meta);
+        sink.encode_batch(&batch, &meta).unwrap();
         assert!(!sink.encoder_buf.is_empty());
     }
 
@@ -1122,7 +1142,7 @@ mod tests {
         )
         .unwrap();
         // Must not panic, and should produce non-empty output.
-        sink.encode_batch(&batch, &meta);
+        sink.encode_batch(&batch, &meta).unwrap();
         assert!(!sink.encoder_buf.is_empty());
     }
 

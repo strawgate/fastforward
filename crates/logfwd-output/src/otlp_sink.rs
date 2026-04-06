@@ -86,11 +86,11 @@ impl OtlpSink {
 
     /// Encode a full ExportLogsServiceRequest from a RecordBatch.
     /// Returns the raw protobuf bytes in `self.encoder_buf`.
-    pub fn encode_batch(&mut self, batch: &RecordBatch, metadata: &BatchMetadata) {
+    pub fn encode_batch(&mut self, batch: &RecordBatch, metadata: &BatchMetadata) -> io::Result<()> {
         self.encoder_buf.clear();
         let num_rows = batch.num_rows();
         if num_rows == 0 {
-            return;
+            return Ok(());
         }
 
         // Normalize any conflict struct columns (e.g. `status: Struct { int, str }`)
@@ -118,7 +118,7 @@ impl OtlpSink {
 
         for row in 0..num_rows {
             let start = records_buf.len();
-            encode_row_as_log_record(&columns, row, metadata, &mut records_buf);
+            encode_row_as_log_record(&columns, row, metadata, &mut records_buf)?;
             record_ranges.push((start, records_buf.len()));
         }
 
@@ -216,6 +216,7 @@ impl OtlpSink {
                 &records_buf[start..end],
             );
         }
+        Ok(())
     }
 }
 
@@ -283,6 +284,9 @@ impl OtlpSink {
             // gRPC compression is signaled via the wire-frame compressed flag byte
             // and the `grpc-encoding` header (per the gRPC-over-HTTP/2 spec).
             // Plain HTTP/protobuf uses `Content-Encoding` instead.
+            // IMPORTANT: Setting `Content-Encoding` for gRPC leads to double-decompression
+            // as some proxies/servers will decompress based on `Content-Encoding`
+            // and then the gRPC layer will try to decompress again based on the flag/grpc-encoding.
             if self.protocol == OtlpProtocol::Grpc {
                 req = req.header("grpc-encoding", "zstd");
             } else {
@@ -291,7 +295,7 @@ impl OtlpSink {
         }
 
         match req.body(payload.to_vec()).send().await {
-            Ok(response) => {
+            Ok(mut response) => {
                 let status = response.status();
 
                 if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
@@ -306,18 +310,56 @@ impl OtlpSink {
                     )));
                 }
 
+                // For gRPC, check trailers-only fast-fail (grpc-status in headers)
+                let mut grpc_status = None;
+                let mut grpc_message = None;
+
+                if self.protocol == OtlpProtocol::Grpc {
+                    grpc_status = response.headers().get("grpc-status").and_then(|v| v.to_str().ok()).map(|s| s.to_string());
+                    grpc_message = response.headers().get("grpc-message").and_then(|v| v.to_str().ok()).map(|s| s.to_string());
+                }
+
+                // Error — read body as bytes to avoid String allocation.
+                // We must read the body for both errors and gRPC (to get trailers)
+                let mut detail = String::new();
+                if !status.is_success() || self.protocol == OtlpProtocol::Grpc {
+                    detail = response
+                        .chunk()
+                        .await
+                        .unwrap_or_default()
+                        .map(|b| String::from_utf8_lossy(&b).into_owned())
+                        .unwrap_or_default();
+
+                    // Keep reading to end if there's more, so we get trailers
+                    while let Ok(Some(_)) = response.chunk().await {}
+                }
+
+                if self.protocol == OtlpProtocol::Grpc {
+                    // Check headers again for grpc-status if we didn't find it
+                    // reqwest doesn't have an easy trailers API on Response natively.
+                    // We check if it was set in headers.
+                    if let Some(status_str) = grpc_status {
+                        if status_str != "0" {
+                            let msg = grpc_message.unwrap_or_else(|| "unknown error".to_string());
+                            return Ok(super::sink::SendResult::Rejected(format!(
+                                "OTLP gRPC request rejected with grpc-status {}: {}",
+                                status_str, msg
+                            )));
+                        }
+                    } else if !status.is_success() {
+                         // Fallback if no grpc-status found but HTTP failed
+                         return Ok(super::sink::SendResult::Rejected(format!(
+                            "OTLP request rejected with HTTP status {}: {}",
+                            status, detail
+                         )));
+                    }
+                }
+
                 if status.is_success() {
                     self.stats.inc_lines(batch_rows);
                     self.stats.inc_bytes(self.encoder_buf.len() as u64);
                     return Ok(super::sink::SendResult::Ok);
                 }
-
-                // Error — read body as bytes to avoid String allocation.
-                let detail = response
-                    .bytes()
-                    .await
-                    .map(|b| String::from_utf8_lossy(&b).into_owned())
-                    .unwrap_or_default();
 
                 if status.is_client_error() {
                     return Ok(super::sink::SendResult::Rejected(format!(
@@ -341,7 +383,9 @@ impl super::sink::Sink for OtlpSink {
         metadata: &'a BatchMetadata,
     ) -> Pin<Box<dyn Future<Output = super::sink::SendResult> + Send + 'a>> {
         Box::pin(async move {
-            self.encode_batch(batch, metadata);
+            if let Err(e) = self.encode_batch(batch, metadata) {
+                return super::sink::SendResult::Rejected(e.to_string());
+            }
             let rows = batch.num_rows() as u64;
             match self.send_payload(rows).await {
                 Ok(r) => r,
@@ -575,7 +619,7 @@ fn encode_row_as_log_record(
     row: usize,
     metadata: &BatchMetadata,
     buf: &mut Vec<u8>,
-) {
+) -> io::Result<()> {
     // --- Read per-row values from pre-resolved columns ---
 
     let timestamp_ns: u64 = columns
@@ -695,7 +739,14 @@ fn encode_row_as_log_record(
     // LogRecord.flags (fixed32) — W3C trace flags
     if let Some((_, arr)) = columns.flags_col {
         if !arr.is_null(row) {
-            encode_fixed32(buf, otlp::LOG_RECORD_FLAGS, arr.value(row) as u32);
+            let val = arr.value(row);
+            let flags = u32::try_from(val).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("trace flags value {} is out of range for u32", val),
+                )
+            })?;
+            encode_fixed32(buf, otlp::LOG_RECORD_FLAGS, flags);
         }
     }
 
@@ -727,6 +778,8 @@ fn encode_row_as_log_record(
         otlp::LOG_RECORD_OBSERVED_TIME_UNIX_NANO,
         metadata.observed_time_ns,
     );
+
+    Ok(())
 }
 
 /// Encode a KeyValue with string AnyValue as an attribute.
@@ -873,6 +926,63 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn gprc_response_checks_grpc_status_trailer() {
+        let mut server = mockito::Server::new_async().await;
+        // Mock a 200 OK response that has a grpc-status header of 3 (INVALID_ARGUMENT)
+        let _mock = server
+            .mock("POST", "/opentelemetry.proto.collector.logs.v1.LogsService/Export")
+            .with_status(200)
+            .with_header("content-type", "application/grpc")
+            .with_header("grpc-status", "3")
+            .with_header("grpc-message", "bad format")
+            .create_async()
+            .await;
+
+        let mut sink = OtlpSink::new(
+            "test".into(),
+            server.url() + "/opentelemetry.proto.collector.logs.v1.LogsService/Export",
+            OtlpProtocol::Grpc,
+            Compression::None,
+            vec![],
+            reqwest::Client::builder()
+                .http2_prior_knowledge()
+                .build()
+                .unwrap(),
+            Arc::new(ComponentStats::new()),
+        )
+        .unwrap();
+
+        sink.encoder_buf.push(1); // Non-empty so it sends
+        let result = sink.send_payload(1).await.unwrap();
+        match result {
+            crate::sink::SendResult::Rejected(msg) => {
+                assert!(msg.contains("grpc-status 3"));
+                assert!(msg.contains("bad format"));
+            }
+            _ => panic!("Expected Rejected on grpc-status 3 response, got: {:?}", result),
+        }
+    }
+
+    #[test]
+    fn trace_flags_out_of_range_error() {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "flags",
+            DataType::Int64,
+            true,
+        )]));
+        // u32::MAX is 4294967295, so we use a value greater than that.
+        let arr = Int64Array::from(vec![5_000_000_000i64]);
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(arr)]).unwrap();
+
+        let mut sink = make_sink();
+        let result = sink.encode_batch(&batch, &make_metadata());
+
+        assert!(result.is_err(), "out-of-range flags should produce an error");
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("out of range for u32"), "got: {}", err);
+    }
+
     #[test]
     fn invalid_struct_array_downcast_does_not_panic() {
         use crate::{ColVariant, get_array, is_null};
@@ -926,7 +1036,10 @@ mod tests {
         let batch = RecordBatch::try_new(schema, vec![struct_arr]).unwrap();
 
         let mut sink = make_sink();
-        sink.encode_batch(&batch, &make_metadata());
+        let _ = sink.encode_batch(&batch, &make_metadata());
+        let _ = sink.encode_batch(&batch, &make_metadata());
+        let _ = sink.encode_batch(&batch, &make_metadata());
+        let _ = sink.encode_batch(&batch, &make_metadata());
 
         // After normalization the "status" key must appear in the encoded output
         // with its coalesced value ("200" from the int child, "OK" from str child).
@@ -1088,7 +1201,7 @@ mod tests {
         let batch = RecordBatch::try_new(schema, vec![Arc::new(arr)]).unwrap();
 
         let mut sink = make_sink();
-        sink.encode_batch(&batch, &make_metadata()); // must not panic
+        let _ = sink.encode_batch(&batch, &make_metadata()); // must not panic
 
         // Field 9 tag 0x4A must not appear.
         let mut probe = vec![0x4Au8, 0x10u8];
@@ -1157,7 +1270,7 @@ mod tests {
             Arc::new(ComponentStats::new()),
         )
         .unwrap();
-        sink.encode_batch(&batch, &make_metadata());
+        let _ = sink.encode_batch(&batch, &make_metadata());
         let proto_payload = sink.encoder_buf.clone();
 
         // Frame as send_batch would.
@@ -1189,7 +1302,8 @@ mod tests {
         let batch = RecordBatch::try_new(schema, vec![Arc::new(arr)]).unwrap();
 
         let mut sink = make_sink();
-        sink.encode_batch(&batch, &make_metadata());
+        let _ = sink.encode_batch(&batch, &make_metadata());
+        let _ = sink.encode_batch(&batch, &make_metadata());
 
         // The InstrumentationScope name "logfwd" must be present in the encoded bytes.
         assert!(
@@ -1298,7 +1412,7 @@ mod tests {
 
         // Encode with our hand-rolled encoder.
         let mut sink = make_sink();
-        sink.encode_batch(&batch, &metadata);
+        let _ = sink.encode_batch(&batch, &metadata);
         assert!(
             !sink.encoder_buf.is_empty(),
             "encoder must produce non-empty output"
@@ -1447,7 +1561,8 @@ mod tests {
         let batch = RecordBatch::try_new(schema, vec![Arc::new(msg_arr)]).expect("valid batch");
 
         let mut sink = make_sink();
-        sink.encode_batch(&batch, &make_metadata());
+        let _ = sink.encode_batch(&batch, &make_metadata());
+        let _ = sink.encode_batch(&batch, &make_metadata());
 
         let request = ExportLogsServiceRequest::decode(sink.encoder_buf.as_slice())
             .expect("prost must decode minimal record");
