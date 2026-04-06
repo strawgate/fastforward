@@ -201,16 +201,30 @@ fn identify_file(path: &Path, fingerprint_bytes: usize) -> io::Result<FileIdenti
 fn glob_root(pattern: &str) -> PathBuf {
     let wildcard_pos = pattern.find(['*', '?', '[', '{']).unwrap_or(pattern.len());
     let prefix = &pattern[..wildcard_pos];
-    let root = Path::new(prefix).parent().unwrap_or_else(|| Path::new("."));
-    if root.as_os_str().is_empty() {
-        PathBuf::from(".")
+    if prefix.is_empty() {
+        return PathBuf::from(".");
+    }
+    // If the prefix ends with `/`, the wildcard starts a new path segment,
+    // so everything before that `/` is a concrete directory.
+    // E.g. "/var/log/*.log" → prefix "/var/log/" → root "/var/log"
+    // If it doesn't end with `/`, the wildcard is mid-filename.
+    // E.g. "/var/log/app*.log" → prefix "/var/log/app" → root "/var/log"
+    if prefix.ends_with('/') {
+        let trimmed = prefix.trim_end_matches('/');
+        if trimmed.is_empty() {
+            PathBuf::from("/")
+        } else {
+            PathBuf::from(trimmed)
+        }
     } else {
-        root.to_path_buf()
+        Path::new(prefix)
+            .parent()
+            .map_or_else(|| PathBuf::from("."), Path::to_path_buf)
     }
 }
 
 /// Compute the maximum directory depth a glob pattern can match.
-/// Counts path separators after the first wildcard, adds 1 for the file itself.
+/// Counts path components below the root directory.
 /// Returns `None` if the pattern contains `**` (unbounded depth).
 fn glob_max_depth(pattern: &str) -> Option<usize> {
     if pattern.contains("**") {
@@ -219,7 +233,8 @@ fn glob_max_depth(pattern: &str) -> Option<usize> {
     let root = glob_root(pattern);
     let root_depth = root.components().count();
     let total_depth = Path::new(pattern).components().count();
-    Some(total_depth.saturating_sub(root_depth))
+    // Ensure at least depth 1 — a file is always at depth ≥1 from its directory.
+    Some(total_depth.saturating_sub(root_depth).max(1))
 }
 
 /// Expand a list of glob patterns into the set of matching `PathBuf` values.
@@ -1104,6 +1119,54 @@ impl FileTailer {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    // ---- glob_root / glob_max_depth unit tests ----
+
+    #[test]
+    fn glob_root_absolute_star() {
+        assert_eq!(glob_root("/var/log/*.log"), PathBuf::from("/var/log"));
+    }
+
+    #[test]
+    fn glob_root_absolute_double_star() {
+        assert_eq!(glob_root("/var/log/**/*.log"), PathBuf::from("/var/log"));
+    }
+
+    #[test]
+    fn glob_root_relative_star() {
+        assert_eq!(glob_root("*.log"), PathBuf::from("."));
+    }
+
+    #[test]
+    fn glob_root_mid_filename_wildcard() {
+        // Wildcard in the middle of a filename component.
+        assert_eq!(glob_root("/var/log/app*.log"), PathBuf::from("/var/log"));
+    }
+
+    #[test]
+    fn glob_root_no_wildcard() {
+        // A literal path has no wildcard, so parent dir is the walk root.
+        assert_eq!(glob_root("/var/log/app.log"), PathBuf::from("/var/log"));
+    }
+
+    #[test]
+    fn glob_max_depth_single_level() {
+        // /var/log/*.log → root=/var/log, pattern has 3 components, root has 2 → depth 1
+        assert_eq!(glob_max_depth("/var/log/*.log"), Some(1));
+    }
+
+    #[test]
+    fn glob_max_depth_double_star_unbounded() {
+        assert_eq!(glob_max_depth("/var/log/**/*.log"), None);
+    }
+
+    #[test]
+    fn glob_max_depth_relative_is_at_least_1() {
+        // *.log → root=., 1 component each, but max(0,1) = 1
+        assert_eq!(glob_max_depth("*.log"), Some(1));
+    }
+
+    // ---- end glob helper tests ----
 
     #[test]
     fn test_tail_new_data() {

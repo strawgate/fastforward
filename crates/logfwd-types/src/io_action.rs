@@ -142,8 +142,14 @@ impl fmt::Display for IoAction {
 /// |---------------|-------------------------|
 /// | 2xx           | Success (not an error)  |
 /// | 429           | Retry with delay hint   |
+/// | 408           | Retry (request timeout) |
 /// | 5xx           | Retry (server error)    |
-/// | 4xx (not 429) | Reject (client error)   |
+/// | 4xx (other)   | Reject (client error)   |
+///
+/// **Design note on 401 (Unauthorized):** classified as `Reject` because
+/// retrying with the same credentials is futile. Callers that support token
+/// refresh should catch 401 before calling this classifier, refresh the
+/// token, then retry with new credentials.
 ///
 /// Returns `None` for success (2xx) since success is not an error action.
 pub fn classify_http_status(status: u16, detail: &str) -> Option<IoAction> {
@@ -154,6 +160,13 @@ pub fn classify_http_status(status: u16, detail: &str) -> Option<IoAction> {
     if status == 429 {
         return Some(IoAction::retry(format!(
             "rate limited (HTTP 429): {detail}"
+        )));
+    }
+
+    // 408 Request Timeout — server explicitly says it timed out waiting.
+    if status == 408 {
+        return Some(IoAction::retry(format!(
+            "request timeout (HTTP 408): {detail}"
         )));
     }
 
@@ -199,6 +212,18 @@ mod tests {
     fn classify_429_is_retry() {
         let action = classify_http_status(429, "rate limited").unwrap();
         assert!(action.is_retryable());
+    }
+
+    #[test]
+    fn classify_408_is_retry() {
+        let action = classify_http_status(408, "request timeout").unwrap();
+        assert!(action.is_retryable());
+    }
+
+    #[test]
+    fn classify_401_is_reject() {
+        let action = classify_http_status(401, "unauthorized").unwrap();
+        assert!(action.is_rejected());
     }
 
     #[test]

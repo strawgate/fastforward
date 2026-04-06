@@ -17,7 +17,14 @@ use std::path::Path;
 /// process crashes at any point, `path` either contains the old data
 /// (or doesn't exist yet) — never a partial write.
 pub fn atomic_write_file(path: &Path, data: &[u8]) -> io::Result<()> {
-    let tmp_path = path.with_extension("tmp");
+    // Append `.tmp` to the full filename — do NOT use `with_extension` which
+    // would *replace* the last extension (e.g., `foo.json` → `foo.tmp`).
+    let mut tmp_name = path
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no filename"))?
+        .to_os_string();
+    tmp_name.push(".tmp");
+    let tmp_path = path.with_file_name(tmp_name);
 
     {
         let mut file = fs::OpenOptions::new()
@@ -75,6 +82,7 @@ mod tests {
         atomic_write_file(&path, b"data").unwrap();
 
         // The .tmp file should not exist after a successful write.
-        assert!(!path.with_extension("tmp").exists());
+        let tmp = dir.path().join("test.json.tmp");
+        assert!(!tmp.exists());
     }
 }
