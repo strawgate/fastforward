@@ -191,21 +191,97 @@ fn identify_file(path: &Path, fingerprint_bytes: usize) -> io::Result<FileIdenti
     })
 }
 
+/// Extract the root directory from a glob pattern — the longest prefix path
+/// before the first wildcard character (`*`, `?`, `[`, `{`).
+///
+/// Examples:
+/// - `/var/log/*.log` → `/var/log`
+/// - `/var/log/**/*.log` → `/var/log`
+/// - `*.log` → `.`
+fn glob_root(pattern: &str) -> PathBuf {
+    let wildcard_pos = pattern.find(['*', '?', '[', '{']).unwrap_or(pattern.len());
+    let prefix = &pattern[..wildcard_pos];
+    let root = Path::new(prefix).parent().unwrap_or_else(|| Path::new("."));
+    if root.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        root.to_path_buf()
+    }
+}
+
+/// Compute the maximum directory depth a glob pattern can match.
+/// Counts path separators after the first wildcard, adds 1 for the file itself.
+/// Returns `None` if the pattern contains `**` (unbounded depth).
+fn glob_max_depth(pattern: &str) -> Option<usize> {
+    if pattern.contains("**") {
+        return None;
+    }
+    let root = glob_root(pattern);
+    let root_depth = root.components().count();
+    let total_depth = Path::new(pattern).components().count();
+    Some(total_depth.saturating_sub(root_depth))
+}
+
 /// Expand a list of glob patterns into the set of matching `PathBuf` values.
 ///
-/// Patterns that match no files are silently skipped. Errors from the glob
-/// iterator (e.g., permission denied on individual entries) are also skipped.
+/// Uses `globset::GlobSet` for fast multi-pattern matching and `walkdir` for
+/// directory traversal with symlink loop detection.
+///
+/// Patterns that match no files are silently skipped. Errors from directory
+/// traversal (e.g., permission denied) are also skipped.
 fn expand_glob_patterns(patterns: &[&str]) -> Vec<PathBuf> {
-    let mut paths = Vec::new();
+    if patterns.is_empty() {
+        return Vec::new();
+    }
+
+    // Build a GlobSet for multi-pattern matching.
+    let mut builder = globset::GlobSetBuilder::new();
     for pattern in patterns {
-        match glob::glob(pattern) {
-            Ok(entries) => {
-                for entry in entries.flatten() {
-                    paths.push(entry);
-                }
+        match globset::GlobBuilder::new(pattern)
+            .literal_separator(true) // `*` does not cross `/`
+            .build()
+        {
+            Ok(g) => {
+                builder.add(g);
             }
             Err(e) => {
                 tracing::warn!(pattern, error = %e, "tail.invalid_glob_pattern");
+            }
+        }
+    }
+    let glob_set = match builder.build() {
+        Ok(gs) => gs,
+        Err(e) => {
+            tracing::warn!(error = %e, "tail.globset_build_failed");
+            return Vec::new();
+        }
+    };
+
+    // Collect root directories and per-root max depth for bounded traversal.
+    let mut roots: Vec<(PathBuf, Option<usize>)> = Vec::new();
+    for pattern in patterns {
+        let root = glob_root(pattern);
+        let depth = glob_max_depth(pattern);
+        // Merge: if the same root already exists, take the larger depth.
+        if let Some(existing) = roots.iter_mut().find(|(r, _)| r == &root) {
+            existing.1 = match (existing.1, depth) {
+                (None, _) | (_, None) => None, // unbounded wins
+                (Some(a), Some(b)) => Some(a.max(b)),
+            };
+        } else {
+            roots.push((root, depth));
+        }
+    }
+
+    let mut paths = Vec::new();
+    for (root, max_depth) in &roots {
+        let mut walker = walkdir::WalkDir::new(root).follow_links(true);
+        if let Some(d) = max_depth {
+            walker = walker.max_depth(*d);
+        }
+        for entry in walker.into_iter().filter_map(Result::ok) {
+            if entry.file_type().is_file() && glob_set.is_match(entry.path()) {
+                paths.push(entry.into_path());
             }
         }
     }
