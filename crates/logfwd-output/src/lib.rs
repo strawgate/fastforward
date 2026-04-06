@@ -644,7 +644,8 @@ pub fn build_sink_factory(
             if protocol == OtlpProtocol::Grpc {
                 if let Ok(mut parsed_url) = reqwest::Url::parse(&final_endpoint) {
                     if parsed_url.path() == "" || parsed_url.path() == "/" {
-                        parsed_url.set_path("/opentelemetry.proto.collector.logs.v1.LogsService/Export");
+                        parsed_url
+                            .set_path("/opentelemetry.proto.collector.logs.v1.LogsService/Export");
                         final_endpoint = parsed_url.to_string();
                     }
                 }
