@@ -96,13 +96,17 @@ _bench-pair name rx_config tx_config seconds="10":
     set -euo pipefail
     LOGFWD=./target/release/logfwd
     $LOGFWD --config {{rx_config}} &
-    RX=$!; sleep 5
-    for i in $(seq 1 10); do
-        if curl -sf http://127.0.0.1:9091/api/stats > /dev/null 2>&1; then
+    RX=$!;
+
+    # Wait for the receiver to be ready, up to 5 seconds
+    for i in {1..5}; do
+        if curl -s http://127.0.0.1:9091/api/stats >/dev/null; then
             break
         fi
         sleep 1
     done
+
+
     $LOGFWD --config {{tx_config}} &
     TX=$!; sleep {{seconds}}
     STATS=$(curl -s http://127.0.0.1:9091/api/stats 2>/dev/null || echo '{}')
