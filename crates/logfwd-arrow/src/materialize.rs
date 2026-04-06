@@ -124,11 +124,10 @@ fn cast_column(field: &Arc<Field>, col: &ArrayRef) -> (Arc<Field>, ArrayRef) {
     match field.data_type() {
         DataType::Utf8View => {
             let utf8_col = arrow::compute::cast(col, &DataType::Utf8).expect("Utf8View→Utf8 cast");
-            let new_field = Arc::new(Field::new(
-                field.name(),
-                DataType::Utf8,
-                field.is_nullable(),
-            ).with_metadata(field.metadata().clone()));
+            let new_field = Arc::new(
+                Field::new(field.name(), DataType::Utf8, field.is_nullable())
+                    .with_metadata(field.metadata().clone()),
+            );
             (new_field, utf8_col)
         }
         DataType::Struct(struct_fields) => {
@@ -158,11 +157,14 @@ fn cast_column(field: &Arc<Field>, col: &ArrayRef) -> (Arc<Field>, ArrayRef) {
                 new_children,
                 struct_arr.nulls().cloned(),
             );
-            let new_field = Arc::new(Field::new(
-                field.name(),
-                DataType::Struct(new_struct_fields),
-                field.is_nullable(),
-            ).with_metadata(field.metadata().clone()));
+            let new_field = Arc::new(
+                Field::new(
+                    field.name(),
+                    DataType::Struct(new_struct_fields),
+                    field.is_nullable(),
+                )
+                .with_metadata(field.metadata().clone()),
+            );
             (new_field, Arc::new(new_struct) as ArrayRef)
         }
         _ => (Arc::clone(field), Arc::clone(col)),
@@ -314,12 +316,15 @@ mod tests {
         let old_schema = batch.schema();
         let mut fields = Vec::with_capacity(old_schema.fields().len());
         for field in old_schema.fields() {
-            fields.push(Arc::new(field.as_ref().clone().with_metadata(field_meta.clone())));
+            fields.push(Arc::new(
+                field.as_ref().clone().with_metadata(field_meta.clone()),
+            ));
         }
         let new_schema = Arc::new(Schema::new_with_metadata(fields, schema_meta));
 
         // Rebuild batch with metadata
-        let batch_with_meta = RecordBatch::try_new(new_schema.clone(), batch.columns().to_vec()).unwrap();
+        let batch_with_meta =
+            RecordBatch::try_new(new_schema.clone(), batch.columns().to_vec()).unwrap();
 
         let owned = detach(&batch_with_meta);
 

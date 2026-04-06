@@ -323,11 +323,7 @@ mod tests {
             Field::new("bool", DataType::Boolean, true),
         ]);
 
-        let struct_arr = StructArray::new(
-            struct_fields.clone(),
-            vec![int_arr, bool_arr],
-            None,
-        );
+        let struct_arr = StructArray::new(struct_fields.clone(), vec![int_arr, bool_arr], None);
 
         let schema = Arc::new(Schema::new(vec![Field::new(
             "status",
@@ -335,7 +331,8 @@ mod tests {
             true,
         )]));
 
-        let batch = RecordBatch::try_new(schema, vec![Arc::new(struct_arr) as Arc<dyn Array>]).unwrap();
+        let batch =
+            RecordBatch::try_new(schema, vec![Arc::new(struct_arr) as Arc<dyn Array>]).unwrap();
 
         let normalized = normalize_conflict_columns(batch);
         let status = normalized.column_by_name("status").unwrap();
