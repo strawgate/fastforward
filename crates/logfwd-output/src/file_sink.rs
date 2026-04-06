@@ -57,7 +57,7 @@ impl Sink for FileSink {
             }
 
             let bytes_written = self.output_buf.len() as u64;
-            let lines_written = self.output_buf.iter().filter(|&&b| b == b'\n').count() as u64;
+            let lines_written = memchr::memchr_iter(b'\n', &self.output_buf).count() as u64;
             let mut file = self.file.lock().await;
             if let Err(e) = file.write_all(&self.output_buf).await {
                 return SendResult::IoError(e);
