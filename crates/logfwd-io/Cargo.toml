@@ -9,6 +9,7 @@ publish = false
 doctest = false
 
 [dependencies]
+base64 = { workspace = true }
 logfwd-core = { version = "0.1.0", path = "../logfwd-core" }
 logfwd-arrow = { version = "0.1.0", path = "../logfwd-arrow" }
 logfwd-types = { version = "0.1.0", path = "../logfwd-types" }
