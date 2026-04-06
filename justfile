@@ -98,14 +98,25 @@ _bench-pair name rx_config tx_config seconds="10":
     $LOGFWD --config {{rx_config}} &
     RX=$!;
 
-    # Wait for the receiver to be ready, up to 5 seconds
+    # Wait for the diagnostics server to respond (up to 5 s), then give the
+    # pipeline a 1 s grace period for inputs to bind.  DiagnosticsServer::start()
+    # runs before pipeline.run_async(), so /api/stats can respond while receiver
+    # sockets are still unbound; the extra sleep closes that window.
+    READY=0
     for i in {1..5}; do
-        if curl -s http://127.0.0.1:9091/api/stats >/dev/null; then
+        if curl --fail --silent --connect-timeout 1 --max-time 1 http://127.0.0.1:9091/api/stats >/dev/null; then
+            READY=1
             break
         fi
         sleep 1
     done
-
+    if [ "$READY" -ne 1 ]; then
+        echo "receiver did not become ready within 5 seconds" >&2
+        kill $RX 2>/dev/null || true
+        wait $RX 2>/dev/null || true
+        exit 1
+    fi
+    sleep 1  # allow pipeline inputs to finish binding after diagnostics server is up
 
     $LOGFWD --config {{tx_config}} &
     TX=$!; sleep {{seconds}}
