@@ -317,7 +317,7 @@ fn probe_row_predicates(
 
     // Bitmask can only track up to 64 predicates. If a query somehow has
     // more, pass the row through and let DataFusion handle full evaluation.
-    if num_predicates > 64 {
+    if num_predicates >= 64 {
         return true;
     }
 
@@ -1780,5 +1780,27 @@ mod predicate_tests {
         let mut builder = TestBuilder::new();
         scan_streaming(buf, &config, &mut builder);
         assert_eq!(builder.rows.len(), 1);
+    }
+
+    #[test]
+    fn predicate_64_predicates_passes_through() {
+        // With exactly 64 predicates, the bitmask cannot represent them
+        // (1u64 << 64 would overflow). The guard should pass all rows
+        // through to DataFusion for evaluation.
+        let preds: Vec<RowPredicate> = (0..64)
+            .map(|i| RowPredicate::Eq {
+                field: alloc::format!("f{i}").into_bytes(),
+                value: b"v".to_vec(),
+            })
+            .collect();
+        let buf = b"{\"f0\":\"v\"}\n{\"f0\":\"x\"}\n";
+        let config = ScanConfig {
+            row_predicates: preds,
+            ..ScanConfig::default()
+        };
+        let mut builder = TestBuilder::new();
+        scan_streaming(buf, &config, &mut builder);
+        // Both rows pass through (no filtering at scanner level)
+        assert_eq!(builder.rows.len(), 2);
     }
 }
