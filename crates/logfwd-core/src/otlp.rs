@@ -420,6 +420,7 @@ pub fn parse_timestamp_nanos(ts: &[u8]) -> Option<u64> {
     nanos *= 1_000_000_000;
 
     // Parse fractional seconds if present.
+    let mut tz_pos = 19; // position where timezone suffix (Z / +HH:MM / -HH:MM) may start
     if ts.len() > 19 && ts[19] == b'.' {
         let frac_start = 20;
         let mut frac_end = frac_start;
@@ -437,6 +438,39 @@ pub fn parse_timestamp_nanos(ts: &[u8]) -> Option<u64> {
                 frac_val *= 10;
             }
             nanos += frac_val;
+        }
+        tz_pos = frac_end;
+    }
+
+    // Parse optional timezone suffix: Z | +HH:MM | -HH:MM
+    if tz_pos < ts.len() {
+        match ts[tz_pos] {
+            b'Z' | b'z' => {
+                // UTC — nothing to adjust
+            }
+            sign @ (b'+' | b'-') => {
+                // Expect +HH:MM or -HH:MM
+                if tz_pos + 5 > ts.len() {
+                    return None;
+                }
+                let tz_hour = parse_2digits(ts, tz_pos + 1) as u64;
+                let tz_min = parse_2digits(ts, tz_pos + 4) as u64;
+                if tz_hour > 23 || tz_min > 59 {
+                    return None;
+                }
+                let offset_nanos = tz_hour * 3_600_000_000_000 + tz_min * 60_000_000_000;
+                if sign == b'+' {
+                    // Local time is ahead of UTC; subtract to get UTC.
+                    nanos = nanos.checked_sub(offset_nanos)?;
+                } else {
+                    // Local time is behind UTC; add to get UTC.
+                    nanos = nanos.checked_add(offset_nanos)?;
+                }
+            }
+            _ => {
+                // Unrecognised suffix — reject
+                return None;
+            }
         }
     }
 
@@ -505,6 +539,7 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
 
     #[test]
     fn skip_field_length_overflow_rejected() {
@@ -677,6 +712,31 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_timestamp_timezone_offset_positive() {
+        // 10:30:00+05:30 → UTC 05:00:00 on same day
+        // 2024-01-15T05:00:00Z in nanos
+        let utc_nanos = parse_timestamp_nanos(b"2024-01-15T05:00:00Z").unwrap();
+        let offset_nanos = parse_timestamp_nanos(b"2024-01-15T10:30:00+05:30").unwrap();
+        assert_eq!(utc_nanos, offset_nanos, "+05:30 offset not applied");
+    }
+
+    #[test]
+    fn test_parse_timestamp_timezone_offset_negative() {
+        // 10:30:00-05:00 → UTC 15:30:00 on same day
+        let utc_nanos = parse_timestamp_nanos(b"2024-01-15T15:30:00Z").unwrap();
+        let offset_nanos = parse_timestamp_nanos(b"2024-01-15T10:30:00-05:00").unwrap();
+        assert_eq!(utc_nanos, offset_nanos, "-05:00 offset not applied");
+    }
+
+    #[test]
+    fn test_parse_timestamp_z_suffix() {
+        // Z suffix should parse same as no suffix
+        let with_z = parse_timestamp_nanos(b"2024-01-15T10:30:00Z").unwrap();
+        let no_tz = parse_timestamp_nanos(b"2024-01-15T10:30:00").unwrap();
+        assert_eq!(with_z, no_tz, "Z suffix changed result");
+    }
+
+    #[test]
     fn wire_format_fixed32() {
         let mut buf = Vec::new();
         // field 8, wire type 5 = (8 << 3) | 5 = 0x45
@@ -772,6 +832,7 @@ mod tests {
         assert_eq!(INSTRUMENTATION_SCOPE_NAME, 1);
         assert_eq!(INSTRUMENTATION_SCOPE_VERSION, 2);
     }
+
 }
 
 // ---------------------------------------------------------------------------
