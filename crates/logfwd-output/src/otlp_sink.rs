@@ -434,6 +434,9 @@ impl super::sink::Sink for OtlpSink {
     ) -> Pin<Box<dyn Future<Output = super::sink::SendResult> + Send + 'a>> {
         Box::pin(async move {
             let encoded_rows = self.encode_batch(batch, metadata) as u64;
+            if encoded_rows == 0 {
+                return super::sink::SendResult::Ok;
+            }
             match self.send_payload(encoded_rows).await {
                 Ok(r) => r,
                 Err(e) => super::sink::SendResult::IoError(e),
