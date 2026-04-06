@@ -377,31 +377,40 @@ fn probe_row_predicates(
         }
 
         if let Some(pi) = predicate_idx {
-            // This is a predicate field — extract value and check
-            match buf[pos] {
-                b'"' => {
-                    let val_start = pos + 1;
-                    let val_end = match next_quote(pos + 1, end, blocks) {
-                        Some(p) => p,
-                        None => break,
-                    };
-                    let val = &buf[val_start..val_end];
-                    // For escaped strings, pass through conservatively
-                    // (the decoded content may differ from the raw bytes).
-                    // For unescaped strings, check the predicate directly.
-                    if memchr::memchr(b'\\', val).is_some() || predicates[pi].matches_bytes(val) {
-                        matched |= 1u64 << pi;
-                    } else {
-                        // Predicate failed — skip this row immediately.
-                        return false;
+            // First-writer-wins: skip duplicate occurrences of a key that was
+            // already evaluated. Re-evaluating a duplicate could cause false
+            // negatives — the second value might fail the predicate even though
+            // the scanner exposes the first value to DataFusion.
+            if matched & (1u64 << pi) != 0 {
+                pos = skip_value_fast(buf, pos, end, blocks);
+            } else {
+                // This is a predicate field — extract value and check
+                match buf[pos] {
+                    b'"' => {
+                        let val_start = pos + 1;
+                        let val_end = match next_quote(pos + 1, end, blocks) {
+                            Some(p) => p,
+                            None => break,
+                        };
+                        let val = &buf[val_start..val_end];
+                        // For escaped strings, pass through conservatively
+                        // (the decoded content may differ from the raw bytes).
+                        // For unescaped strings, check the predicate directly.
+                        if memchr::memchr(b'\\', val).is_some() || predicates[pi].matches_bytes(val)
+                        {
+                            matched |= 1u64 << pi;
+                        } else {
+                            // Predicate failed — skip this row immediately.
+                            return false;
+                        }
+                        pos = val_end + 1;
                     }
-                    pos = val_end + 1;
-                }
-                _ => {
-                    // Non-string value for a string predicate.
-                    // Conservative: pass it through to DataFusion.
-                    matched |= 1u64 << pi;
-                    pos = skip_value_fast(buf, pos, end, blocks);
+                    _ => {
+                        // Non-string value for a string predicate.
+                        // Conservative: pass it through to DataFusion.
+                        matched |= 1u64 << pi;
+                        pos = skip_value_fast(buf, pos, end, blocks);
+                    }
                 }
             }
 
