@@ -929,7 +929,7 @@ mod tests {
     }
 
     #[test]
-    fn test_skip_nested_mismatch_at_depth_32() {
+    fn test_skip_nested_balanced_at_depth_32() {
         let mut buf = alloc::string::String::new();
         for _ in 0..32 {
             buf.push('{');

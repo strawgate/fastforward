@@ -595,8 +595,12 @@ async fn main() {
             if i > 0 {
                 records.push(',');
             }
-            let _ = write!(&mut records, r#"{{"timeUnixNano":"1700000000000000000","severityNumber":9,"severityText":"INFO","body":{{"stringValue":"Log line {} with some realistic content that includes host=bench-host service=api latency=42ms"}},"attributes":[{{"key":"host","value":{{"stringValue":"bench-host-{}"}}}}]}}"#,
-                i, i % 100);
+            let _ = write!(
+                &mut records,
+                r#"{{"timeUnixNano":"1700000000000000000","severityNumber":9,"severityText":"INFO","body":{{"stringValue":"Log line {} with some realistic content that includes host=bench-host service=api latency=42ms"}},"attributes":[{{"key":"host","value":{{"stringValue":"bench-host-{}"}}}}]}}"#,
+                i,
+                i % 100
+            );
         }
         format!(r#"{{"resourceLogs":[{{"scopeLogs":[{{"logRecords":[{records}]}}]}}]}}"#)
             .into_bytes()

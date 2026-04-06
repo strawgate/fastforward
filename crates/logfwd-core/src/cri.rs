@@ -472,6 +472,20 @@ mod tests {
     }
 
     #[test]
+    fn test_write_json_line_empty_object_prefix_trailing_whitespace_after_comma() {
+        // Regression: prefix like `"k":"v", ` (comma then whitespace) must have
+        // the comma stripped and the trailing whitespace preserved.
+        let mut out = Vec::new();
+        write_json_line(b"{}", Some(b"\"k\":\"v\", "), &mut out);
+        assert_eq!(out, b"{\"k\":\"v\" }\n");
+
+        // Tab and CRLF after comma
+        let mut out = Vec::new();
+        write_json_line(b"{}", Some(b"\"k\":\"v\",\t\r\n"), &mut out);
+        assert_eq!(out, b"{\"k\":\"v\"\t\r\n}\n");
+    }
+
+    #[test]
     fn test_write_json_line_plain_text_wrapped_as_raw() {
         // Plain-text (non-JSON) messages must be wrapped as {"_raw":"..."}.
         let mut out = Vec::new();
