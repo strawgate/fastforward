@@ -406,7 +406,7 @@ fn run_pipeline_once(scenario: &Scenario) -> StageSample {
         resource_attrs: Arc::new(vec![]),
         observed_time_ns: 0,
     };
-    sink.encode_batch(&batch, &metadata);
+    let _ = sink.encode_batch(&batch, &metadata);
     let encode_ns = encode_start.elapsed().as_nanos() as u64;
 
     let total_ns = framed_ns + scanner_ns + encode_ns;

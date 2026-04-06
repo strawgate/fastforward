@@ -70,7 +70,7 @@ fn bench_json_chain(c: &mut Criterion) {
                     .scan_detached(data_bytes.clone())
                     .expect("scan should not fail");
                 let result = transform.execute_blocking(batch).unwrap();
-                std::hint::black_box(sink.encode_batch(&result, &meta));
+                sink.encode_batch(&result, &meta);
             });
         });
 
@@ -81,11 +81,9 @@ fn bench_json_chain(c: &mut Criterion) {
             let data_bytes = bytes::Bytes::from(data.clone());
             let mut scanner = Scanner::new(ScanConfig::default());
             b.iter(|| {
-                std::hint::black_box(
-                    scanner
-                        .scan_detached(data_bytes.clone())
-                        .expect("scan should not fail"),
-                )
+                scanner
+                    .scan_detached(data_bytes.clone())
+                    .expect("scan should not fail")
             });
         });
 
@@ -107,7 +105,7 @@ fn bench_json_chain(c: &mut Criterion) {
             &transformed,
             |b, batch| {
                 let mut sink = make_otlp_sink(Compression::None);
-                b.iter(|| std::hint::black_box(sink.encode_batch(batch, &meta)));
+                b.iter(|| sink.encode_batch(batch, &meta));
             },
         );
     }
@@ -142,7 +140,7 @@ fn bench_cri_chain(c: &mut Criterion) {
                     .scan_detached(bytes::Bytes::from(json))
                     .expect("scan should not fail");
                 let result = transform.execute_blocking(batch).unwrap();
-                std::hint::black_box(sink.encode_batch(&result, &meta));
+                sink.encode_batch(&result, &meta);
             });
         });
 
@@ -186,7 +184,7 @@ fn bench_grok_chain(c: &mut Criterion) {
                     .scan_detached(data_bytes.clone())
                     .expect("scan should not fail");
                 let result = transform.execute_blocking(batch).unwrap();
-                std::hint::black_box(sink.send_batch(&result, &meta).unwrap());
+                sink.send_batch(&result, &meta).unwrap();
                 // Also serialize to JSON to measure the full output path
                 let cols = logfwd_output::build_col_infos(&result);
                 buf.clear();

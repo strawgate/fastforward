@@ -36,7 +36,7 @@ Requires the Rust stable toolchain (1.85+).
 ```bash
 git clone https://github.com/strawgate/memagent.git
 cd memagent
-cargo build --release --bin logfwd
+cargo build --release -p logfwd
 ```
 
 The binary is at `./target/release/logfwd`. Copy it wherever you need:
