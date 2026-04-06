@@ -253,16 +253,26 @@ impl LokiSink {
                 }
             }
 
-            // Build stream JSON.
-            let labels_str = labels_map
+            // Build stream JSON — sanitize label names and detect collisions.
+            let mut sanitized_labels: HashMap<String, String> = HashMap::new();
+            for (k, v) in &labels_map {
+                let sanitized = sanitize_label_name(k);
+                if let Some(prev) = sanitized_labels.get(&sanitized) {
+                    tracing::warn!(
+                        original_key = %k,
+                        sanitized_key = %sanitized,
+                        kept_value = %prev,
+                        dropped_value = %v,
+                        "Loki label collision: multiple keys sanitize to the same name; keeping first occurrence",
+                    );
+                } else {
+                    sanitized_labels.insert(sanitized, v.clone());
+                }
+            }
+
+            let labels_str = sanitized_labels
                 .iter()
-                .map(|(k, v)| {
-                    format!(
-                        "\"{}\":\"{}\"",
-                        escape_json(&sanitize_label_name(k)),
-                        escape_json(v)
-                    )
-                })
+                .map(|(k, v)| format!("\"{}\":\"{}\"", escape_json(k), escape_json(v)))
                 .collect::<Vec<_>>()
                 .join(",");
 
@@ -762,6 +772,47 @@ mod tests {
 
         assert_eq!(entries[0].0, 0, "Negative timestamp should be clamped to 0");
         assert_eq!(entries[1].0, 100, "Positive timestamp should be preserved");
+    }
+
+    // -----------------------------------------------------------------------
+    // sanitize_label_name
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn sanitize_empty_string() {
+        assert_eq!(sanitize_label_name(""), "label");
+    }
+
+    #[test]
+    fn sanitize_leading_digit() {
+        // Leading digit is invalid — replaced with `_`.
+        assert_eq!(sanitize_label_name("1foo"), "_foo");
+    }
+
+    #[test]
+    fn sanitize_all_special_chars() {
+        assert_eq!(sanitize_label_name("!@#$%"), "_____");
+    }
+
+    #[test]
+    fn sanitize_already_valid() {
+        assert_eq!(sanitize_label_name("valid_name"), "valid_name");
+    }
+
+    #[test]
+    fn sanitize_dots_and_dashes() {
+        assert_eq!(sanitize_label_name("foo-bar"), "foo_bar");
+        assert_eq!(sanitize_label_name("foo.bar"), "foo_bar");
+        // Both map to the same sanitized name — collision scenario.
+        assert_eq!(
+            sanitize_label_name("foo-bar"),
+            sanitize_label_name("foo.bar"),
+        );
+    }
+
+    #[test]
+    fn sanitize_colon_allowed() {
+        assert_eq!(sanitize_label_name("__name__:suffix"), "__name__:suffix");
     }
 }
 

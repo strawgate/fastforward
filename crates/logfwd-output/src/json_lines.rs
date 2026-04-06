@@ -72,15 +72,20 @@ impl JsonLinesSink {
 
     /// Serialize the batch into `self.batch_buf` as newline-delimited JSON.
     ///
+    /// Returns the number of rows actually serialized (which may be less than
+    /// `batch.num_rows()` when the raw-passthrough path skips null `_raw` rows).
+    ///
     /// Returns `Err` if the schema claims `_raw` passthrough but the column is
     /// unexpectedly absent — this indicates a logic error and should not be
     /// silently swallowed (issue #317).
-    pub fn serialize_batch(&mut self, batch: &RecordBatch) -> io::Result<()> {
+    pub fn serialize_batch(&mut self, batch: &RecordBatch) -> io::Result<usize> {
         self.batch_buf.clear();
         let num_rows = batch.num_rows();
         if num_rows == 0 {
-            return Ok(());
+            return Ok(0);
         }
+
+        let mut serialized = 0usize;
 
         if Self::is_raw_passthrough(batch) {
             // Fast path: memcpy _raw values directly.
@@ -103,6 +108,7 @@ impl JsonLinesSink {
                     self.batch_buf
                         .extend_from_slice(str_value(col, row).as_bytes());
                     self.batch_buf.push(b'\n');
+                    serialized += 1;
                 }
             }
         } else {
@@ -110,9 +116,10 @@ impl JsonLinesSink {
             for row in 0..num_rows {
                 write_row_json(batch, row, &cols, &mut self.batch_buf)?;
                 self.batch_buf.push(b'\n');
+                serialized += 1;
             }
         }
-        Ok(())
+        Ok(serialized)
     }
 
     async fn send_payload(&mut self, row_count: u64) -> io::Result<super::sink::SendResult> {
@@ -124,7 +131,7 @@ impl JsonLinesSink {
             Compression::Zstd => {
                 let bound = zstd::zstd_safe::compress_bound(self.batch_buf.len());
                 self.compress_buf.clear();
-                self.compress_buf.reserve(bound);
+                self.compress_buf.resize(bound, 0);
                 let compressed_len =
                     zstd::bulk::compress_to_buffer(&self.batch_buf, &mut self.compress_buf, 1)
                         .map_err(io::Error::other)?;
@@ -210,10 +217,10 @@ impl super::sink::Sink for JsonLinesSink {
         _metadata: &'a super::BatchMetadata,
     ) -> Pin<Box<dyn Future<Output = super::sink::SendResult> + Send + 'a>> {
         Box::pin(async move {
-            if let Err(e) = self.serialize_batch(batch) {
-                return super::sink::SendResult::IoError(e);
-            }
-            let rows = batch.num_rows() as u64;
+            let rows = match self.serialize_batch(batch) {
+                Ok(n) => n as u64,
+                Err(e) => return super::sink::SendResult::IoError(e),
+            };
             match self.send_payload(rows).await {
                 Ok(r) => r,
                 Err(e) => super::sink::SendResult::IoError(e),
@@ -238,6 +245,8 @@ impl super::sink::Sink for JsonLinesSink {
 // JsonLinesSinkFactory
 // ---------------------------------------------------------------------------
 
+/// Factory for creating [`JsonLinesSink`] instances that serialize record
+/// batches as newline-delimited JSON and POST them over HTTP.
 pub struct JsonLinesSinkFactory {
     name: String,
     url: String,
