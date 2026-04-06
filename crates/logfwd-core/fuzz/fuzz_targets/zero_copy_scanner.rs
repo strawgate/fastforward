@@ -33,10 +33,13 @@ fuzz_target!(|data: &[u8]| {
         wanted_fields: vec![],
         extract_all: true,
         keep_raw: false,
-        validate_utf8: false, row_predicates: vec![],
+        validate_utf8: false,
+        row_predicates: vec![],
     };
     let mut scanner = Scanner::new(config);
-    let Ok(batch) = scanner.scan(bytes::Bytes::copy_from_slice(data)) else { return; };
+    let Ok(batch) = scanner.scan(bytes::Bytes::copy_from_slice(data)) else {
+        return;
+    };
     validate_batch(&batch, "streaming_extract_all");
 
     // Field pushdown mode.
@@ -53,10 +56,13 @@ fuzz_target!(|data: &[u8]| {
         ],
         extract_all: false,
         keep_raw: false,
-        validate_utf8: false, row_predicates: vec![],
+        validate_utf8: false,
+        row_predicates: vec![],
     };
     let mut scanner2 = Scanner::new(config2);
-    let Ok(batch2) = scanner2.scan(bytes::Bytes::copy_from_slice(data)) else { return; };
+    let Ok(batch2) = scanner2.scan(bytes::Bytes::copy_from_slice(data)) else {
+        return;
+    };
     validate_batch(&batch2, "streaming_pushdown");
 
     // --- validate_utf8: true variants ---
@@ -67,6 +73,7 @@ fuzz_target!(|data: &[u8]| {
         extract_all: true,
         keep_raw: false,
         validate_utf8: true,
+        row_predicates: vec![],
     };
     let mut scanner_v = Scanner::new(config_v);
     if let Ok(batch_v) = scanner_v.scan(bytes::Bytes::copy_from_slice(data)) {
@@ -88,6 +95,7 @@ fuzz_target!(|data: &[u8]| {
         extract_all: false,
         keep_raw: false,
         validate_utf8: true,
+        row_predicates: vec![],
     };
     let mut scanner2_v = Scanner::new(config2_v);
     if let Ok(batch2_v) = scanner2_v.scan(bytes::Bytes::copy_from_slice(data)) {
