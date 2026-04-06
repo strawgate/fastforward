@@ -630,12 +630,12 @@ impl Config {
             }
             if pipe.workers == Some(0) {
                 return Err(ConfigError::Validation(format!(
-                    "pipeline '{name}': workers must be >= 1"
+                    "pipeline '{name}': workers must be greater than 0"
                 )));
             }
             if pipe.batch_target_bytes == Some(0) {
                 return Err(ConfigError::Validation(format!(
-                    "pipeline '{name}': batch_target_bytes must be > 0"
+                    "pipeline '{name}': batch_target_bytes must be greater than 0"
                 )));
             }
             if let Some(sql) = &pipe.transform {
@@ -2707,8 +2707,8 @@ pipelines:
             "expected 'workers' in error: {msg}"
         );
         assert!(
-            msg.contains("must be >= 1"),
-            "expected '>= 1' in error: {msg}"
+            msg.contains("must be greater than 0"),
+            "expected 'must be greater than 0' in error: {msg}"
         );
     }
 

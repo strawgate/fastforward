@@ -405,8 +405,8 @@ impl FileDiscovery {
     /// Check for new or rotated files among the watched paths.
     ///
     /// For rotated files, drains remaining data from the old fd before
-    /// switching to the new file. For newly-appeared files, opens them
-    /// from the beginning.
+    /// switching to the new file (always read from the beginning).
+    /// For newly-appeared files, respects `config.start_from_end`.
     fn detect_changes(&self, reader: &mut FileReader, events: &mut Vec<TailEvent>) {
         let watch_paths = self.watch_paths.clone();
         for path in &watch_paths {
@@ -2394,7 +2394,7 @@ mod tests {
         );
     }
 
-    /// #730: Non-existent file paths should not prevent construction.
+    /// Glob-discovered files must respect start_from_end config.
     #[test]
     fn glob_rescan_respects_start_from_end() {
         // Verify that files discovered during glob rescan (new pods, new log files)
@@ -2484,6 +2484,7 @@ mod tests {
         );
     }
 
+    /// #730: Non-existent file paths should not prevent construction.
     #[test]
     fn test_nonexistent_path_does_not_panic() {
         let dir = tempfile::tempdir().unwrap();
