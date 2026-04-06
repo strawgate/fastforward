@@ -27,7 +27,7 @@ data source is required.
 | `generator.batch_size` | integer | No | `1000` | Events emitted per poll/batch. |
 | `generator.total_events` | integer | No | `0` | Total events to emit before stopping. `0` means infinite. |
 | `generator.profile` | string | No | `logs` | `logs` for generic synthetic request logs, `benchmark` for stable benchmark envelope rows. |
-| `generator.complexity` | string | No | `simple` | Size/shape for the `logs` profile: `simple` or `complex`. |
+| `generator.complexity` | string | No | `simple` | Size/shape for the `logs` profile: `simple` or `complex`. Ignored by the `benchmark` profile. |
 | `generator.benchmark_id` | string | No | unset | Included on every `benchmark` row. |
 | `generator.pod_name` | string | No | input name | Source identity used by the `benchmark` profile. |
 | `generator.stream_id` | string | No | `pod_name` | Stable stream identity used to build `event_id`. |

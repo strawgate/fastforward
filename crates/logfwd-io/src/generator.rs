@@ -733,5 +733,52 @@ mod tests {
         assert_eq!(row["pod_name"], "bench-input");
         assert_eq!(row["stream_id"], "bench-input");
         assert_eq!(row["event_id"], "bench-input:00000001");
+        assert_eq!(row["service"], "bench-emitter");
+    }
+
+    #[test]
+    fn benchmark_profile_escapes_string_fields() {
+        let mut input = GeneratorInput::new(
+            "bench",
+            GeneratorConfig {
+                batch_size: 1,
+                total_events: 1,
+                profile: GeneratorProfile::Benchmark,
+                benchmark_id: Some("run-\"quoted\"\nline".to_string()),
+                pod_name: Some("pod-\\name".to_string()),
+                stream_id: Some("stream-\"id\"".to_string()),
+                service: Some("svc\tname".to_string()),
+                ..Default::default()
+            },
+        );
+
+        let events = input.poll().unwrap();
+        let InputEvent::Data { bytes, .. } = &events[0] else {
+            panic!("expected Data event");
+        };
+        let row: serde_json::Value =
+            serde_json::from_slice(bytes.split(|b| *b == b'\n').next().unwrap()).unwrap();
+        assert_eq!(row["benchmark_id"], "run-\"quoted\"\nline");
+        assert_eq!(row["pod_name"], "pod-\\name");
+        assert_eq!(row["stream_id"], "stream-\"id\"");
+        assert_eq!(row["event_id"], "stream-\"id\":00000001");
+        assert_eq!(row["service"], "svc\tname");
+    }
+
+    #[test]
+    fn rfc3339_like_utc_formats_known_instants() {
+        let mut out = Vec::new();
+        write_rfc3339_like_utc(&mut out, 0, 1).unwrap();
+        assert_eq!(
+            std::str::from_utf8(&out).unwrap(),
+            "1970-01-01T00:00:00.000000001Z"
+        );
+
+        out.clear();
+        write_rfc3339_like_utc(&mut out, 1_709_251_200, 123_456_789).unwrap();
+        assert_eq!(
+            std::str::from_utf8(&out).unwrap(),
+            "2024-03-01T00:00:00.123456789Z"
+        );
     }
 }
