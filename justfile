@@ -112,7 +112,7 @@ _bench-pair name rx_config tx_config seconds="10":
         sleep 1
     done
     if [ "$READY" -ne 1 ]; then
-        echo "receiver pipeline did not become ready within 10 seconds" >&2
+        echo "receiver pipeline did not become ready after 10 retries (~20s)" >&2
         kill $RX 2>/dev/null || true
         wait $RX 2>/dev/null || true
         exit 1
