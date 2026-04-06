@@ -68,6 +68,22 @@ The enrichment implementation itself is real:
 
 That makes enrichment-based prototypes realistic, not hypothetical.
 
+## Prior Art
+
+Other collectors tend to expose source metadata directly on the event, not only out-of-band:
+
+- Vector's `file` source documents event context keys like `file`, `host`, `container_name`, and `pod_name`, and its file source configuration exposes `file_key` and `offset_key`. Source: [Vector file source docs](https://vector.dev/docs/reference/configuration/sources/file/).
+- Fluent Bit's `tail` input exposes `path_key` and `offset_key`, and its docs describe those as keys appended to each record. Source: [Fluent Bit tail input docs](https://docs.fluentbit.io/manual/data-pipeline/inputs/tail).
+- OpenTelemetry Collector's `filelog` receiver commonly uses `include_file_path: true` in Kubernetes log collection examples, which means file path is carried as record attributes before later parsing/enrichment. One example appears in the upstream Kubernetes logs discussion: [open-telemetry/opentelemetry-collector-contrib#25251](https://github.com/open-telemetry/opentelemetry-collector-contrib/issues/25251).
+
+The common theme is:
+
+- stable file identity for checkpointing lives in the collector internals;
+- human-meaningful path/host/container metadata is attached to events early;
+- downstream parsing and enrichment operate on that attached metadata.
+
+That makes a pure "metadata only exists outside the row/event" design unusual from a user-experience standpoint.
+
 ## Prototype A: Direct Row Columns
 
 ### Idea
@@ -206,17 +222,55 @@ LEFT JOIN k8s k ON l._source_path LIKE concat(k.log_path_prefix, '%')
 
 This is the weakest long-term option. If we are going to do row injection work at all, path-only does not buy enough.
 
+## Prototype D: Source-Partitioned Batches + Batch Metadata
+
+### Idea
+
+Instead of injecting source metadata into each row, keep accumulation partitioned by source.
+
+Then each flushed sub-batch has a single source, which means:
+
+- `BatchMetadata.resource_attrs` could carry source-level attributes;
+- output formats like OTLP could model source metadata as resource attributes naturally;
+- a dynamic enrichment table could still exist for SQL if the transform executed per-source batch.
+
+### Where it fits
+
+- replace `BatchAccumulator`'s single merged buffer with per-source buffers;
+- scan/transform/output one source-partitioned sub-batch at a time;
+- optionally promote source metadata into `BatchMetadata` rather than row columns
+
+### Pros
+
+- aligns nicely with OTLP resource semantics
+- no need to rewrite each row just to add metadata
+- preserves a very clean notion of "this batch came from this source"
+- avoids mixed-source ambiguity entirely
+
+### Cons
+
+- fights the current throughput strategy of cross-source coalescing into large batches
+- can dramatically increase the number of scanner/DataFusion executions
+- hurts fairness/load behavior when many low-volume sources are active
+- makes cross-source SQL behavior more fragmented in time
+- still does not help SQL joins unless we also expose source metadata inside the queryable row/table surface
+
+### Assessment
+
+This is the most architecturally elegant option, but probably the worst trade for the current performance model. It only becomes compelling if we decide source-partitioned batching is a goal in its own right.
+
 ## Comparison
 
-| Criterion | A: Direct row columns | B: `_source_id` + enrichment | C: Path-only enrichment |
-|---|---|---|---|
-| User ergonomics | best | good | good |
-| Stable identity | good | best | weak |
-| Hot-path overhead | highest | medium | high |
-| K8s join fit | good | good | good |
-| Rotation/churn behavior | medium | best | weak |
-| Fit for TCP/UDP later | medium | best | weak |
-| Contract clarity | medium | best | medium |
+| Criterion | A: Direct row columns | B: `_source_id` + enrichment | C: Path-only enrichment | D: Source-partitioned batches |
+|---|---|---|---|---|
+| User ergonomics | best | good | good | weak |
+| Stable identity | good | best | weak | best |
+| Hot-path overhead | highest | medium | high | medium |
+| K8s join fit | good | good | good | medium |
+| Rotation/churn behavior | medium | best | weak | best |
+| Fit for TCP/UDP later | medium | best | weak | medium |
+| Contract clarity | medium | best | medium | medium |
+| Fit for current batching model | medium | best | medium | weak |
 
 ## Recommendation
 
@@ -232,6 +286,7 @@ Why this is the best first prototype:
 - it solves the stable identity problem directly;
 - it avoids forcing `_source_path` into every row as the primary contract;
 - it fits the current `SqlTransform` enrichment model;
+- it preserves the current cross-source batching strategy;
 - it leaves us free to add `_source_path` later if we want a convenience column for users.
 
 ## Suggested Prototype Plan
@@ -289,6 +344,9 @@ LEFT JOIN sources s ON l._source_id = s.source_id
 
 4. Should `k8s_path` stay path-based?
    Long term, I would rather expose a `source_id`-keyed Kubernetes enrichment surface than keep teaching users to join on string prefixes.
+
+5. Should source metadata live in row columns, resource attrs, or both?
+   My current leaning is: row surface for queryability, resource attrs as an export mirror where appropriate. Resource attrs alone are not enough for SQL in the current architecture.
 
 ## Recommendation Summary
 
