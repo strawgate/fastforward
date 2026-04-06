@@ -23,7 +23,8 @@
 pub const TIMESTAMP: &str = "timestamp";
 
 /// Additional names sinks accept for timestamps from external sources.
-pub const TIMESTAMP_VARIANTS: &[&str] = &["time", "ts"];
+/// Includes Elasticsearch-style `@timestamp` and pipeline-style `_timestamp`.
+pub const TIMESTAMP_VARIANTS: &[&str] = &["time", "ts", "@timestamp", "_timestamp"];
 
 /// Elasticsearch-style timestamp field (`@timestamp`).
 pub const TIMESTAMP_AT: &str = "@timestamp";
