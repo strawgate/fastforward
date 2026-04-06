@@ -399,12 +399,6 @@ impl StateMachineTest for TailCheckpointTest {
             }
         }
 
-        // PROPERTY 4 (informational): Coverage.
-        // Count how many unique written lines were emitted at least once.
-        let emitted_set: std::collections::HashSet<u64> = sut.emitted_ids.iter().copied().collect();
-        let total_written = ref_state.written_line_ids.len();
-        let total_emitted_unique = emitted_set.len();
-
         // We don't assert 100% coverage because rotation and truncation
         // can lose data that was overwritten before being read.
 
