@@ -1866,6 +1866,10 @@ mod tests {
         let (status, body) = http_get(port, "/api/pipelines");
         assert_eq!(status, 200);
         // Expect avg latency 500
-        assert!(body.contains(r#""batch_latency_avg_ns":500"#), "body: {}", body);
+        assert!(
+            body.contains(r#""batch_latency_avg_ns":500"#),
+            "body: {}",
+            body
+        );
     }
 }
