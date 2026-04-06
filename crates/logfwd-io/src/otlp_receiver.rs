@@ -361,14 +361,16 @@ fn decode_otlp_logs_json(body: &[u8]) -> Result<Vec<u8>, InputError> {
                 out.push(b'{');
 
                 if let Some(ts) = record.get("timeUnixNano") {
-                    let parsed = parse_protojson_u64(ts).filter(|&n| n > 0).ok_or_else(|| {
+                    let parsed = parse_protojson_u64(ts).ok_or_else(|| {
                         InputError::Receiver(
-                            "invalid OTLP JSON timeUnixNano: not a valid positive uint64".into(),
+                            "invalid OTLP JSON timeUnixNano: not a valid uint64".into(),
                         )
                     })?;
-                    write_json_key(&mut out, OTLP_TIMESTAMP_FIELD);
-                    write_u64_to_buf(&mut out, parsed);
-                    out.push(b',');
+                    if parsed > 0 {
+                        write_json_key(&mut out, OTLP_TIMESTAMP_FIELD);
+                        write_u64_to_buf(&mut out, parsed);
+                        out.push(b',');
+                    }
                 }
 
                 if let Some(sev) = record.get("severityText").and_then(|v| v.as_str()) {
@@ -1330,6 +1332,34 @@ mod tests {
         );
 
         assert!(result.is_err(), "invalid timeUnixNano must fail");
+    }
+
+    #[test]
+    fn zero_json_time_unix_nano_is_accepted_and_omitted() {
+        let json_lines = decode_otlp_logs_json(
+            br#"{
+                "resourceLogs": [{
+                    "scopeLogs": [{
+                        "logRecords": [{
+                            "timeUnixNano": "0",
+                            "body": {"stringValue": "hello"}
+                        }]
+                    }]
+                }]
+            }"#,
+        )
+        .expect("zero timeUnixNano should be accepted");
+
+        let line = String::from_utf8(json_lines).expect("utf8");
+        let row: serde_json::Value = serde_json::from_str(line.lines().next().unwrap()).unwrap();
+        assert_eq!(
+            row.get(field_names::BODY).and_then(serde_json::Value::as_str),
+            Some("hello")
+        );
+        assert!(
+            row.get(OTLP_TIMESTAMP_FIELD).is_none(),
+            "unknown timestamp should be omitted, not emitted as 0"
+        );
     }
 
     #[test]
