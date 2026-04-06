@@ -78,10 +78,13 @@ impl ArrowIpcReceiver {
                 while !shutdown_clone.load(std::sync::atomic::Ordering::Relaxed) {
                     let mut request = match server_clone.try_recv() {
                         Ok(Some(req)) => req,
-                        Ok(None) | Err(_) => {
+                        Ok(None) => {
                             std::thread::sleep(std::time::Duration::from_millis(10));
                             continue;
                         }
+                        // Exit the worker thread on accept-side I/O failure instead of
+                        // spinning forever and silently dropping all future requests.
+                        Err(_) => break,
                     };
 
                     let url = request.url().to_string();
