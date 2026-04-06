@@ -1001,9 +1001,23 @@ impl Pipeline {
         let total_rows: u64 = results.iter().map(|b| b.num_rows() as u64).sum();
         self.metrics.transform_out.inc_lines(total_rows);
 
-        // Handle zero-row results (SQL WHERE filtered all rows, or processor
-        // buffered everything). Still ack — data was processed, just not forwarded.
+        // Handle zero-row results (SQL WHERE filtered all rows).
+        //
+        // SAFETY: ACKing here is correct ONLY when no stateful processor is
+        // present. A stateful processor that returns an empty vec has buffered
+        // the batch internally; ACKing would advance the checkpoint past data
+        // that has not yet been written, which is a data-loss risk on restart.
+        //
+        // This path is currently safe because no stateful processors exist yet.
+        // Once stateful processors are introduced the two cases (filtered vs
+        // buffered) must be distinguished — either via a richer return type from
+        // run_chain or by deferring the ACK until ticketless submission drains.
+        // TODO(#1404): guard this ACK behind "no stateful processor buffered"
         if total_rows == 0 {
+            debug_assert!(
+                !self.processors.iter().any(|p| p.is_stateful()),
+                "ACKing on empty output is unsafe when stateful processors are present"
+            );
             self.ack_all_tickets(sending, true);
             self.metrics.record_batch(
                 0,
