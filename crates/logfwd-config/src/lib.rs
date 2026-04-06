@@ -2035,7 +2035,7 @@ pipelines:
 
     #[test]
     fn enrichment_static_config_accepted() {
-        let yaml = r#"
+        let yaml = r"
 pipelines:
   app:
     inputs:
@@ -2049,7 +2049,7 @@ pipelines:
         labels:
           dc: us-east-1
           team: platform
-"#;
+";
         let cfg = Config::load_str(yaml).expect("static enrichment should parse");
         let pipe = &cfg.pipelines["app"];
         assert_eq!(pipe.enrichment.len(), 1);
@@ -2296,7 +2296,7 @@ enrichment:
 
     #[test]
     fn file_input_rejects_listen() {
-        let yaml = r#"
+        let yaml = r"
 pipelines:
   test:
     inputs:
@@ -2305,7 +2305,7 @@ pipelines:
         listen: 127.0.0.1:9999
     outputs:
       - type: null
-"#;
+";
         let err = Config::load_str(yaml).unwrap_err();
         assert!(
             err.to_string().contains("listen"),
@@ -2315,7 +2315,7 @@ pipelines:
 
     #[test]
     fn tcp_input_rejects_path() {
-        let yaml = r#"
+        let yaml = r"
 pipelines:
   test:
     inputs:
@@ -2324,7 +2324,7 @@ pipelines:
         path: /tmp/test.log
     outputs:
       - type: null
-"#;
+";
         let err = Config::load_str(yaml).unwrap_err();
         assert!(
             err.to_string().contains("path"),
@@ -2334,7 +2334,7 @@ pipelines:
 
     #[test]
     fn tcp_input_rejects_max_open_files() {
-        let yaml = r#"
+        let yaml = r"
 pipelines:
   test:
     inputs:
@@ -2343,7 +2343,7 @@ pipelines:
         max_open_files: 128
     outputs:
       - type: null
-"#;
+";
         let err = Config::load_str(yaml).unwrap_err();
         assert!(
             err.to_string().contains("max_open_files"),
@@ -2353,7 +2353,7 @@ pipelines:
 
     #[test]
     fn tcp_input_rejects_glob_rescan_interval_ms() {
-        let yaml = r#"
+        let yaml = r"
 pipelines:
   test:
     inputs:
@@ -2362,7 +2362,7 @@ pipelines:
         glob_rescan_interval_ms: 5000
     outputs:
       - type: null
-"#;
+";
         let err = Config::load_str(yaml).unwrap_err();
         assert!(
             err.to_string().contains("glob_rescan_interval_ms"),
@@ -2372,7 +2372,7 @@ pipelines:
 
     #[test]
     fn generator_input_rejects_path() {
-        let yaml = r#"
+        let yaml = r"
 pipelines:
   test:
     inputs:
@@ -2380,7 +2380,7 @@ pipelines:
         path: /tmp/test.log
     outputs:
       - type: null
-"#;
+";
         let err = Config::load_str(yaml).unwrap_err();
         assert!(
             err.to_string().contains("path"),
@@ -2432,7 +2432,7 @@ pipelines:
 
     #[test]
     fn non_elasticsearch_output_rejects_index() {
-        let yaml = r#"
+        let yaml = r"
 pipelines:
   test:
     inputs:
@@ -2442,7 +2442,7 @@ pipelines:
       - type: otlp
         endpoint: http://localhost:4317
         index: my-index
-"#;
+";
         let err = Config::load_str(yaml).unwrap_err();
         assert!(
             err.to_string().contains("index"),
@@ -2452,7 +2452,7 @@ pipelines:
 
     #[test]
     fn non_otlp_output_rejects_protocol() {
-        let yaml = r#"
+        let yaml = r"
 pipelines:
   test:
     inputs:
@@ -2462,7 +2462,7 @@ pipelines:
       - type: http
         endpoint: http://localhost:9200
         protocol: grpc
-"#;
+";
         let err = Config::load_str(yaml).unwrap_err();
         assert!(
             err.to_string().contains("protocol"),
@@ -2472,7 +2472,7 @@ pipelines:
 
     #[test]
     fn stdout_output_rejects_compression() {
-        let yaml = r#"
+        let yaml = r"
 pipelines:
   test:
     inputs:
@@ -2481,7 +2481,7 @@ pipelines:
     outputs:
       - type: stdout
         compression: zstd
-"#;
+";
         let err = Config::load_str(yaml).unwrap_err();
         assert!(
             err.to_string().contains("compression"),
@@ -2553,7 +2553,7 @@ output:
 
     #[test]
     fn non_loki_output_rejects_tenant_id() {
-        let yaml = r#"
+        let yaml = r"
 pipelines:
   test:
     inputs:
@@ -2562,7 +2562,7 @@ pipelines:
     outputs:
       - type: stdout
         tenant_id: my-tenant
-"#;
+";
         let err = Config::load_str(yaml).unwrap_err();
         assert!(
             err.to_string().contains("tenant_id"),
@@ -2576,7 +2576,7 @@ pipelines:
 
     #[test]
     fn non_loki_output_rejects_static_labels() {
-        let yaml = r#"
+        let yaml = r"
 pipelines:
   test:
     inputs:
@@ -2586,7 +2586,7 @@ pipelines:
       - type: stdout
         static_labels:
           env: prod
-"#;
+";
         let err = Config::load_str(yaml).unwrap_err();
         assert!(
             err.to_string().contains("static_labels"),
@@ -2600,7 +2600,7 @@ pipelines:
 
     #[test]
     fn non_loki_output_rejects_label_columns() {
-        let yaml = r#"
+        let yaml = r"
 pipelines:
   test:
     inputs:
@@ -2610,7 +2610,7 @@ pipelines:
       - type: stdout
         label_columns:
           - container_name
-"#;
+";
         let err = Config::load_str(yaml).unwrap_err();
         assert!(
             err.to_string().contains("label_columns"),

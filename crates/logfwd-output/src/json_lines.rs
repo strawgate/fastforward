@@ -125,18 +125,21 @@ impl JsonLinesSink {
                 let bound = zstd::zstd_safe::compress_bound(self.batch_buf.len());
                 self.compress_buf.clear();
                 self.compress_buf.reserve(bound);
-                let compressed_len =
-                    zstd::bulk::compress_to_buffer(&self.batch_buf, &mut self.compress_buf, 1)
-                        .map_err(io::Error::other)?;
+                let compressed_len = zstd::bulk::compress_to_buffer(
+                    &self.batch_buf,
+                    &mut self.compress_buf,
+                    1,
+                )
+                .map_err(io::Error::other)?;
                 self.compress_buf.truncate(compressed_len);
                 &self.compress_buf
             }
             Compression::Gzip => {
-                use flate2::Compression as FlateCompression;
+                use flate2::Compression as FlatCompression;
                 use flate2::write::GzEncoder;
                 use std::io::Write;
                 self.compress_buf.clear();
-                let mut enc = GzEncoder::new(&mut self.compress_buf, FlateCompression::fast());
+                let mut enc = GzEncoder::new(&mut self.compress_buf, FlatCompression::fast());
                 enc.write_all(&self.batch_buf).map_err(io::Error::other)?;
                 enc.finish().map_err(io::Error::other)?;
                 &self.compress_buf
@@ -163,11 +166,7 @@ impl JsonLinesSink {
             Compression::None => {}
         }
 
-        let response = req
-            .body(payload.to_vec())
-            .send()
-            .await
-            .map_err(io::Error::other)?;
+        let response = req.body(payload.to_vec()).send().await.map_err(io::Error::other)?;
 
         let status = response.status();
 

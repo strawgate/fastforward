@@ -256,13 +256,7 @@ impl LokiSink {
             // Build stream JSON.
             let labels_str = labels_map
                 .iter()
-                .map(|(k, v)| {
-                    format!(
-                        "\"{}\":\"{}\"",
-                        escape_json(&sanitize_label_name(k)),
-                        escape_json(v)
-                    )
-                })
+                .map(|(k, v)| format!("\"{}\":\"{}\"", escape_json(&sanitize_label_name(k)), escape_json(v)))
                 .collect::<Vec<_>>()
                 .join(",");
 
