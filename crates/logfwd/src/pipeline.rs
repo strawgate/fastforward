@@ -685,7 +685,7 @@ impl Pipeline {
                                 let total_rows: u64 =
                                     batches.iter().map(|b| b.num_rows() as u64).sum();
                                 if total_rows > 0 {
-                                    // TODO(#0): submit timed-out processor output to
+                                    // TODO(#1404): submit timed-out processor output to
                                     // output pool without BatchTickets (ticketless
                                     // submission). For now, stateful processor output
                                     // during heartbeats is only emitted at flush.
@@ -761,7 +761,7 @@ impl Pipeline {
             let flushed = crate::processor::cascading_flush(&mut self.processors, &meta);
             let total_rows: u64 = flushed.iter().map(|b| b.num_rows() as u64).sum();
             if total_rows > 0 {
-                // TODO(#0): submit flushed processor batches to output pool
+                // TODO(#1404): submit flushed processor batches to output pool
                 // without BatchTickets (ticketless submission). This will be
                 // needed when the first stateful processor (TailSampling) is
                 // implemented. For now, log that data was flushed.
@@ -990,7 +990,7 @@ impl Pipeline {
                     tracing::error!(error = %e, "fatal processor error, shutting down");
                     self.ack_all_tickets(sending, false);
                     self.metrics.finish_active_batch(batch_id);
-                    // TODO(#0): trigger pipeline shutdown on fatal processor error
+                    // TODO(#1404): trigger pipeline shutdown on fatal processor error
                     return;
                 }
             }

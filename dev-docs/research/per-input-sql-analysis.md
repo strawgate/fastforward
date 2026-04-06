@@ -1,6 +1,6 @@
 # Per-Input SQL: Design Analysis
 
-> **Status:** Research — not a committed design  
+> **Status:** Active  
 > **Date:** 2025-07-06  
 > **Context:** logfwd currently has one `SqlTransform` per pipeline. This analysis explores moving SQL to each input.
 
@@ -12,7 +12,7 @@
 
 All inputs in a pipeline share **one Scanner** and **one SqlTransform**. The flow:
 
-```
+```text
 Input A ─bytes─┐
                ├─▶ BatchAccumulator ─▶ Scanner ─▶ SqlTransform ─▶ Outputs
 Input B ─bytes─┘        (merge)        (shared)     (shared)
@@ -366,7 +366,7 @@ If an input has `sql:`, it runs **before** the pipeline-level `transform:`. If a
 
 Today's pipeline is a fixed linear chain:
 
-```
+```text
 Inputs → Scanner → SqlTransform → Outputs
 ```
 
@@ -388,7 +388,7 @@ There is no step chain, no step compiler, no step types. The `SqlTransform` **is
 
 **Yes, and we should.** The pipeline becomes:
 
-```
+```text
 Input A ──Scanner A──SQL A──┐
                             ├──▶ union schema ──▶ Pipeline SQL ──▶ Outputs
 Input B ──Scanner B──SQL B──┘
@@ -519,7 +519,7 @@ If a user doesn't JOIN an enrichment table in their SQL, it's registered but nev
 
 ### Architecture
 
-```
+```text
                     Per-Input Layer                    Pipeline Layer
               ┌─────────────────────────┐        ┌──────────────────┐
 Input A ───▶  │ Scanner A → SQL A       │──┐     │                  │
