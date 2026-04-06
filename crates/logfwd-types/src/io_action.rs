@@ -191,7 +191,7 @@ pub fn classify_http_status(status: u16, detail: &str) -> Option<IoAction> {
 /// Parse a `Retry-After` header value into a [`Duration`].
 ///
 /// Supports integer seconds (RFC 9110 §10.2.3). HTTP-date format is not
-/// currently supported — returns `None` for unparseable values.
+/// currently supported — returns `None` for unparsable values.
 pub fn parse_retry_after(header_value: Option<&str>) -> Option<Duration> {
     header_value
         .and_then(|v| v.trim().parse::<u64>().ok())
