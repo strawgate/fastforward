@@ -853,6 +853,8 @@ mod verification {
     /// oracle serves as the Kani-compatible reference. A chrono-based
     /// oracle test below covers the same property in test mode.
     #[kani::proof]
+    #[kani::unwind(142)] // naive_days_from_epoch: up to 130 year-loop + 11 month-loop iterations + 1
+    #[kani::solver(kissat)]
     fn verify_days_from_civil_oracle() {
         let year: i64 = kani::any();
         let month: u32 = kani::any();

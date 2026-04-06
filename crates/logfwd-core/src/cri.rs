@@ -38,12 +38,18 @@ pub fn parse_cri_line(line: &[u8]) -> Option<CriLine<'_>> {
     // Format: "TIMESTAMP STREAM FLAGS MESSAGE"
     // Find first space (after timestamp).
     let sp1 = find_byte(line, b' ', 0)?;
+    if sp1 == 0 {
+        return None; // empty timestamp is invalid
+    }
     if sp1 + 1 >= line.len() {
         return None;
     }
 
     // Find second space (after stream).
     let sp2 = find_byte(line, b' ', sp1 + 1)?;
+    if sp2 == sp1 + 1 {
+        return None; // empty stream name is invalid
+    }
     if sp2 + 1 >= line.len() {
         return None;
     }
@@ -761,16 +767,26 @@ mod verification {
 
         if msg[0] == b'{' {
             // Output should be: { + prefix + msg[1..] + \n
+            // Compare byte-by-byte to avoid memcmp unwind assertion inside Kani.
             assert_eq!(out[0], b'{');
-            assert_eq!(&out[1..3], &prefix);
+            assert_eq!(out[1], prefix[0]);
+            assert_eq!(out[2], prefix[1]);
             assert_eq!(out[3], msg[1]);
             assert_eq!(out[4], b'\n');
             assert_eq!(out.len(), 5);
         } else {
             // Non-JSON: wrapped as {"_raw":"..."}\n — ends with \n
             assert_eq!(out[out.len() - 1], b'\n');
-            // Output starts with {"_raw":"
-            assert_eq!(&out[..9], b"{\"_raw\":\"");
+            // Output starts with {"_raw":"  — check byte-by-byte (no memcmp).
+            assert_eq!(out[0], b'{');
+            assert_eq!(out[1], b'"');
+            assert_eq!(out[2], b'_');
+            assert_eq!(out[3], b'r');
+            assert_eq!(out[4], b'a');
+            assert_eq!(out[5], b'w');
+            assert_eq!(out[6], b'"');
+            assert_eq!(out[7], b':');
+            assert_eq!(out[8], b'"');
         }
     }
 
