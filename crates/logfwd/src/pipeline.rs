@@ -1034,8 +1034,22 @@ impl Pipeline {
         let result = if results.len() == 1 {
             results.into_iter().next().expect("checked len == 1")
         } else {
-            arrow::compute::concat_batches(&results[0].schema(), results.iter())
-                .expect("concat_batches failed — schema mismatch in processor chain")
+            match arrow::compute::concat_batches(&results[0].schema(), results.iter()) {
+                Ok(batch) => batch,
+                Err(e) => {
+                    // A schema mismatch here indicates a processor bug — processors must
+                    // emit batches with a consistent schema.  Treat it as a fatal processor
+                    // error: reject the tickets (no checkpoint advance) and abort this batch
+                    // so the pipeline can continue rather than crashing the process.
+                    tracing::error!(
+                        error = %e,
+                        "processor chain returned incompatible schemas; rejecting batch"
+                    );
+                    self.ack_all_tickets(sending, false);
+                    self.metrics.finish_active_batch(batch_id);
+                    return;
+                }
+            }
         };
 
         let out_rows = result.num_rows() as u64;
