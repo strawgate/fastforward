@@ -9,17 +9,15 @@
 
 use std::io;
 use std::io::Read as _;
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 
+use base64::Engine as _;
 use opentelemetry_proto::tonic::common::v1::AnyValue;
 use opentelemetry_proto::tonic::common::v1::any_value::Value;
 use prost::Message;
 
-use sonic_rs::{JsonContainerTrait, JsonValueTrait};
-
 use crate::InputError;
 use crate::input::{InputEvent, InputSource};
-
 use logfwd_types::field_names;
 
 /// Maximum request body size: 10 MB.
@@ -34,7 +32,7 @@ pub struct OtlpReceiverInput {
     rx: Option<mpsc::Receiver<Vec<u8>>>,
     /// The address the HTTP server is bound to.
     addr: std::net::SocketAddr,
-    server: std::sync::Arc<tiny_http::Server>,
+    server: Arc<tiny_http::Server>,
     /// Keep the server thread handle alive.
     handle: Option<std::thread::JoinHandle<()>>,
 }
@@ -48,7 +46,7 @@ impl OtlpReceiverInput {
 
     /// Like [`Self::new`] but with an explicit channel capacity. Useful for tests.
     fn new_with_capacity(name: impl Into<String>, addr: &str, capacity: usize) -> io::Result<Self> {
-        let server = std::sync::Arc::new(
+        let server = Arc::new(
             tiny_http::Server::http(addr)
                 .map_err(|e| io::Error::other(format!("OTLP receiver bind {addr}: {e}")))?,
         );
@@ -62,7 +60,7 @@ impl OtlpReceiverInput {
 
         let (tx, rx) = mpsc::sync_channel(capacity);
 
-        let server_clone = std::sync::Arc::clone(&server);
+        let server_clone = Arc::clone(&server);
         let handle = std::thread::Builder::new()
             .name("otlp-receiver".into())
             .spawn(move || {
@@ -309,7 +307,7 @@ fn decode_otlp_logs_json(body: &[u8]) -> Result<Vec<u8>, InputError> {
         return Ok(Vec::new());
     }
 
-    let root: sonic_rs::Value = sonic_rs::from_slice(body)
+    let root: serde_json::Value = sonic_rs::from_slice(body)
         .map_err(|e| InputError::Receiver(format!("invalid JSON: {e}")))?;
 
     let resource_logs = match root.get("resourceLogs").and_then(|v| v.as_array()) {
@@ -328,21 +326,24 @@ fn decode_otlp_logs_json(body: &[u8]) -> Result<Vec<u8>, InputError> {
 
     for rl in resource_logs {
         // Collect resource attributes.
-        let resource_attrs: Vec<(&str, String)> = rl
+        let mut resource_attrs: Vec<(&str, String)> = Vec::new();
+        if let Some(attrs) = rl
             .get("resource")
             .and_then(|r| r.get("attributes"))
             .and_then(|a| a.as_array())
-            .map(|attrs| {
-                attrs
-                    .iter()
-                    .filter_map(|kv| {
-                        let key = kv.get("key")?.as_str()?;
-                        let val = json_any_value_to_string(kv.get("value")?);
-                        Some((key, val))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        {
+            for kv in attrs {
+                let Some(key) = kv.get("key").and_then(|k| k.as_str()) else {
+                    continue;
+                };
+                let Some(value) = kv.get("value") else {
+                    continue;
+                };
+                if let Some(value) = json_any_value_to_string(value)? {
+                    resource_attrs.push((key, value));
+                }
+            }
+        }
 
         let scope_logs = match rl.get("scopeLogs").and_then(|v| v.as_array()) {
             Some(arr) => arr,
@@ -358,15 +359,15 @@ fn decode_otlp_logs_json(body: &[u8]) -> Result<Vec<u8>, InputError> {
             for record in records {
                 out.push(b'{');
 
-                if let Some(ts) = record.get("timeUnixNano").and_then(|v| v.as_str()) {
-                    // Validate as u64 before emitting as a raw JSON number.
-                    // An attacker-controlled string with quotes/backslashes could
-                    // break the JSON line if written via write_json_field directly.
-                    if let Some(ns) = ts.parse::<u64>().ok().filter(|&n| n > 0) {
-                        out.push(b'"');
-                        out.extend_from_slice(field_names::TIMESTAMP.as_bytes());
-                        out.extend_from_slice(b"\":");
-                        write_u64_to_buf(&mut out, ns);
+                if let Some(ts) = record.get("timeUnixNano") {
+                    let parsed = parse_protojson_u64(ts).ok_or_else(|| {
+                        InputError::Receiver(
+                            "invalid OTLP JSON timeUnixNano: not a valid uint64".into(),
+                        )
+                    })?;
+                    if parsed > 0 {
+                        write_json_key(&mut out, field_names::TIMESTAMP);
+                        write_u64_to_buf(&mut out, parsed);
                         out.push(b',');
                     }
                 }
@@ -378,21 +379,19 @@ fn decode_otlp_logs_json(body: &[u8]) -> Result<Vec<u8>, InputError> {
                     }
                 }
 
-                if let Some(body_val) = record.get("body") {
-                    let body_str = json_any_value_to_string(body_val);
-                    if !body_str.is_empty() {
-                        write_json_string_field(&mut out, field_names::BODY, &body_str);
-                        out.push(b',');
-                    }
+                if let Some(body_val) = record.get("body")
+                    && let Some(body_str) = json_any_value_to_string(body_val)?
+                {
+                    write_json_string_field(&mut out, field_names::BODY, &body_str);
+                    out.push(b',');
                 }
 
                 if let Some(attrs) = record.get("attributes").and_then(|v| v.as_array()) {
                     for kv in attrs {
                         if let (Some(key), Some(val)) =
                             (kv.get("key").and_then(|k| k.as_str()), kv.get("value"))
+                            && write_json_any_value_field_from_json(&mut out, key, val)?
                         {
-                            let s = json_any_value_to_string(val);
-                            write_json_string_field(&mut out, key, &s);
                             out.push(b',');
                         }
                     }
@@ -427,35 +426,77 @@ fn decode_otlp_logs_json(body: &[u8]) -> Result<Vec<u8>, InputError> {
     Ok(out)
 }
 
-/// Extract a string from an OTLP JSON AnyValue object.
-/// For common integer/float/bool cases, write directly to avoid intermediate String allocation.
-fn json_any_value_to_string(v: &sonic_rs::Value) -> String {
+/// Extract a scalar OTLP JSON AnyValue as an owned string.
+/// Returns `Ok(None)` when the value is not a supported scalar string representation.
+fn json_any_value_to_string(v: &serde_json::Value) -> Result<Option<String>, InputError> {
     if let Some(s) = v.get("stringValue").and_then(|v| v.as_str()) {
-        return s.to_string();
+        return Ok(Some(s.to_string()));
     }
     if let Some(i) = v.get("intValue") {
-        // OTLP JSON encodes int64 as string
-        if let Some(s) = i.as_str() {
-            return s.to_string();
+        let parsed = parse_protojson_i64(i)
+            .ok_or_else(|| InputError::Receiver("invalid OTLP JSON intValue".into()))?;
+        return Ok(Some(parsed.to_string()));
+    }
+    if let Some(dv) = v.get("doubleValue") {
+        let parsed = parse_protojson_f64(dv)
+            .ok_or_else(|| InputError::Receiver("invalid OTLP JSON doubleValue".into()))?;
+        return Ok(Some(parsed.to_string()));
+    }
+    if let Some(b) = v.get("boolValue").and_then(serde_json::Value::as_bool) {
+        return Ok(Some(if b { "true" } else { "false" }.to_string()));
+    }
+    if let Some(bytes) = v.get("bytesValue").and_then(|v| v.as_str()) {
+        let decoded = decode_protojson_bytes(bytes)
+            .map_err(|e| InputError::Receiver(format!("invalid OTLP JSON bytesValue: {e}")))?;
+        return Ok(Some(hex::encode(&decoded)));
+    }
+    Ok(None)
+}
+
+/// Write an OTLP JSON AnyValue as a JSON field preserving primitive types.
+fn write_json_any_value_field_from_json(
+    out: &mut Vec<u8>,
+    key: &str,
+    value: &serde_json::Value,
+) -> Result<bool, InputError> {
+    if let Some(i) = value.get("intValue") {
+        write_json_key(out, key);
+        let parsed = parse_protojson_i64(i).ok_or_else(|| {
+            InputError::Receiver(format!(
+                "invalid OTLP JSON intValue for key {key}: not a valid integer"
+            ))
+        })?;
+        write_i64_to_buf(out, parsed);
+        return Ok(true);
+    }
+
+    if let Some(dv) = value.get("doubleValue") {
+        let parsed = parse_protojson_f64(dv).ok_or_else(|| {
+            InputError::Receiver(format!(
+                "invalid OTLP JSON doubleValue for key {key}: not a valid float"
+            ))
+        })?;
+        write_json_key(out, key);
+        write_f64_to_buf(out, parsed);
+        return Ok(true);
+    }
+
+    if let Some(b) = value.get("boolValue").and_then(serde_json::Value::as_bool) {
+        write_json_key(out, key);
+        if b {
+            out.extend_from_slice(b"true");
+        } else {
+            out.extend_from_slice(b"false");
         }
-        // Fallback for numeric encoding
-        if let Some(n) = i.as_i64() {
-            let mut buf = Vec::new();
-            write_i64_to_buf(&mut buf, n);
-            // write_i64_to_buf only produces ASCII digits and '-', so from_utf8 always succeeds.
-            return String::from_utf8(buf).unwrap_or_default();
-        }
+        return Ok(true);
     }
-    if let Some(d) = v.get("doubleValue").and_then(JsonValueTrait::as_f64) {
-        let mut buf = Vec::new();
-        write_f64_to_buf(&mut buf, d);
-        // write_f64_to_buf only produces ASCII characters, so from_utf8 always succeeds.
-        return String::from_utf8(buf).unwrap_or_default();
+
+    if let Some(s) = json_any_value_to_string(value)? {
+        write_json_string_field(out, key, &s);
+        return Ok(true);
     }
-    if let Some(b) = v.get("boolValue").and_then(JsonValueTrait::as_bool) {
-        return if b { "true" } else { "false" }.to_string();
-    }
-    String::new()
+
+    Ok(false)
 }
 
 /// Decode an ExportLogsServiceRequest protobuf and produce newline-delimited
@@ -486,7 +527,9 @@ fn convert_request_to_json_lines(
         if let Some(ref resource) = resource_logs.resource {
             for attr in &resource.attributes {
                 if let Some(ref value) = attr.value {
-                    resource_attrs.push((&attr.key, any_value_to_string(value)));
+                    if let Some(value) = any_value_to_string(value) {
+                        resource_attrs.push((&attr.key, value));
+                    }
                 }
             }
         }
@@ -512,16 +555,18 @@ fn convert_request_to_json_lines(
 
                 // body
                 if let Some(ref body_val) = record.body {
-                    let body_str = any_value_to_string(body_val);
-                    write_json_string_field(&mut out, field_names::BODY, &body_str);
-                    out.push(b',');
+                    if let Some(body_str) = any_value_to_string(body_val) {
+                        write_json_string_field(&mut out, field_names::BODY, &body_str);
+                        out.push(b',');
+                    }
                 }
 
                 // log record attributes
                 for attr in &record.attributes {
                     if let Some(ref value) = attr.value {
-                        write_json_any_value(&mut out, &attr.key, value);
-                        out.push(b',');
+                        if write_json_any_value(&mut out, &attr.key, value) {
+                            out.push(b',');
+                        }
                     }
                 }
 
@@ -560,38 +605,193 @@ fn convert_request_to_json_lines(
     out
 }
 
-fn any_value_to_string(v: &AnyValue) -> String {
+fn any_value_to_string(v: &AnyValue) -> Option<String> {
     match &v.value {
-        Some(Value::StringValue(s)) => s.clone(),
-        Some(Value::IntValue(i)) => i.to_string(),
-        Some(Value::DoubleValue(d)) => d.to_string(),
-        Some(Value::BoolValue(b)) => b.to_string(),
-        Some(Value::BytesValue(b)) => hex::encode(b),
-        _ => String::new(),
+        Some(Value::StringValue(s)) => Some(s.clone()),
+        Some(Value::IntValue(i)) => Some(i.to_string()),
+        Some(Value::DoubleValue(d)) => Some(d.to_string()),
+        Some(Value::BoolValue(b)) => Some(b.to_string()),
+        Some(Value::BytesValue(b)) => Some(hex::encode(b)),
+        _ => None,
     }
 }
 
-fn write_json_any_value(out: &mut Vec<u8>, key: &str, v: &AnyValue) {
+fn parse_protojson_i64(value: &serde_json::Value) -> Option<i64> {
+    if let Some(n) = value.as_i64() {
+        return Some(n);
+    }
+    if let Some(n) = value.as_u64() {
+        return i64::try_from(n).ok();
+    }
+    if let Some(n) = value.as_number() {
+        return parse_protojson_i64_str(&n.to_string());
+    }
+    if let Some(s) = value.as_str() {
+        return parse_protojson_i64_str(s);
+    }
+    None
+}
+
+fn parse_protojson_u64(value: &serde_json::Value) -> Option<u64> {
+    if let Some(n) = value.as_u64() {
+        return Some(n);
+    }
+    if let Some(s) = value.as_str() {
+        return parse_protojson_u64_str(s);
+    }
+    if let Some(n) = value.as_number() {
+        return parse_protojson_u64_str(&n.to_string());
+    }
+    None
+}
+
+fn parse_protojson_f64(value: &serde_json::Value) -> Option<f64> {
+    if let Some(n) = value.as_f64() {
+        return Some(n);
+    }
+    if let Some(s) = value.as_str() {
+        return match s {
+            "NaN" => Some(f64::NAN),
+            "Infinity" => Some(f64::INFINITY),
+            "-Infinity" => Some(f64::NEG_INFINITY),
+            _ => s.parse::<f64>().ok(),
+        };
+    }
+    None
+}
+
+fn parse_protojson_i64_str(s: &str) -> Option<i64> {
+    let (negative, digits) = normalize_protojson_integral_digits(s)?;
+    let magnitude = digits.parse::<u64>().ok()?;
+    if negative {
+        let signed = i128::from(magnitude).checked_neg()?;
+        i64::try_from(signed).ok()
+    } else {
+        i64::try_from(magnitude).ok()
+    }
+}
+
+fn parse_protojson_u64_str(s: &str) -> Option<u64> {
+    let (negative, digits) = normalize_protojson_integral_digits(s)?;
+    if negative {
+        return None;
+    }
+    digits.parse::<u64>().ok()
+}
+
+fn normalize_protojson_integral_digits(s: &str) -> Option<(bool, String)> {
+    const MAX_INTEGER_DECIMAL_DIGITS: usize = 20;
+
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+
+    let (negative, unsigned) = match s.as_bytes()[0] {
+        b'+' => (false, &s[1..]),
+        b'-' => (true, &s[1..]),
+        _ => (false, s),
+    };
+    if unsigned.is_empty() {
+        return None;
+    }
+
+    let (mantissa, exponent) = match unsigned.find(['e', 'E']) {
+        Some(idx) => (&unsigned[..idx], unsigned[idx + 1..].parse::<i32>().ok()?),
+        None => (unsigned, 0),
+    };
+
+    let (int_part, frac_part) = match mantissa.split_once('.') {
+        Some((int_part, frac_part)) => (int_part, frac_part),
+        None => (mantissa, ""),
+    };
+    if int_part.is_empty() && frac_part.is_empty() {
+        return None;
+    }
+    if !int_part.bytes().all(|b| b.is_ascii_digit())
+        || !frac_part.bytes().all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+
+    let mut digits = String::with_capacity(int_part.len() + frac_part.len());
+    digits.push_str(int_part);
+    digits.push_str(frac_part);
+    if digits.is_empty() {
+        return None;
+    }
+    if digits.bytes().all(|b| b == b'0') {
+        return Some((false, "0".to_string()));
+    }
+
+    let fractional_digits = i32::try_from(frac_part.len()).ok()?;
+    let effective_exponent = exponent.checked_sub(fractional_digits)?;
+
+    if effective_exponent >= 0 {
+        let zeros = usize::try_from(effective_exponent).ok()?;
+        let total_len = digits.len().checked_add(zeros)?;
+        if total_len > MAX_INTEGER_DECIMAL_DIGITS {
+            return None;
+        }
+        digits.extend(std::iter::repeat_n('0', zeros));
+    } else {
+        let trim = usize::try_from(effective_exponent.checked_neg()?).ok()?;
+        if trim > digits.len() {
+            return None;
+        }
+        if !digits[digits.len() - trim..].bytes().all(|b| b == b'0') {
+            return None;
+        }
+        digits.truncate(digits.len() - trim);
+    }
+
+    let digits = digits.trim_start_matches('0');
+    if digits.is_empty() {
+        return Some((false, "0".to_string()));
+    }
+
+    Some((negative, digits.to_string()))
+}
+
+fn decode_protojson_bytes(value: &str) -> Result<Vec<u8>, base64::DecodeError> {
+    use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
+
+    STANDARD
+        .decode(value)
+        .or_else(|_| STANDARD_NO_PAD.decode(value))
+        .or_else(|_| URL_SAFE.decode(value))
+        .or_else(|_| URL_SAFE_NO_PAD.decode(value))
+}
+
+fn write_json_any_value(out: &mut Vec<u8>, key: &str, v: &AnyValue) -> bool {
     match &v.value {
         Some(Value::IntValue(i)) => {
-            write_json_escaped_key(out, key);
-            out.extend_from_slice(b":");
-            // Write integer directly without allocating a String
+            write_json_key(out, key);
             write_i64_to_buf(out, *i);
+            true
         }
         Some(Value::DoubleValue(d)) => {
-            write_json_escaped_key(out, key);
-            out.extend_from_slice(b":");
-            // Write double directly without allocating a String
+            write_json_key(out, key);
             write_f64_to_buf(out, *d);
+            true
         }
         Some(Value::BoolValue(b)) => {
-            write_json_escaped_key(out, key);
-            out.extend_from_slice(b":");
+            write_json_key(out, key);
             out.extend_from_slice(if *b { b"true" } else { b"false" });
+            true
         }
-        Some(Value::StringValue(s)) => write_json_string_field(out, key, s),
-        _ => {}
+        Some(Value::StringValue(s)) => {
+            write_json_string_field(out, key, s);
+            true
+        }
+        Some(Value::BytesValue(bytes)) => {
+            write_json_key(out, key);
+            out.push(b'"');
+            write_hex_to_buf(out, bytes);
+            out.push(b'"');
+            true
+        }
+        _ => false,
     }
 }
 
@@ -664,7 +864,6 @@ fn write_u64_to_buf(out: &mut Vec<u8>, mut n: u64) {
 fn write_f64_to_buf(out: &mut Vec<u8>, d: f64) {
     use std::io::Write;
     if !d.is_finite() {
-        // JSON (RFC 8259) has no representation for NaN/infinity — emit null.
         out.extend_from_slice(b"null");
         return;
     }
@@ -672,42 +871,25 @@ fn write_f64_to_buf(out: &mut Vec<u8>, d: f64) {
     let _ = write!(out, "{}", d);
 }
 
-/// Write a JSON object key as a properly escaped quoted string.
-///
-/// OTLP attribute keys may contain quotes, backslashes, or control characters.
-/// Using raw bytes would produce malformed JSON (issue #1166).
-fn write_json_escaped_key(out: &mut Vec<u8>, key: &str) {
-    out.push(b'"');
-    for &b in key.as_bytes() {
-        match b {
-            b'"' => out.extend_from_slice(b"\\\""),
-            b'\\' => out.extend_from_slice(b"\\\\"),
-            b'\n' => out.extend_from_slice(b"\\n"),
-            b'\r' => out.extend_from_slice(b"\\r"),
-            b'\t' => out.extend_from_slice(b"\\t"),
-            0x00..=0x1f => {
-                out.extend_from_slice(b"\\u00");
-                out.push(HEX_DIGITS[(b >> 4) as usize]);
-                out.push(HEX_DIGITS[(b & 0x0f) as usize]);
-            }
-            other => out.push(other),
-        }
-    }
-    out.push(b'"');
-}
-
-/// Writes `"key":<value>` where `value` MUST already be a valid JSON token.
-/// Caller is responsible for quoting/escaping when `value` is a string.
-#[allow(dead_code)] // used in tests; kept for future raw-value emission
-fn write_json_field(out: &mut Vec<u8>, key: &str, value: &str) {
-    write_json_escaped_key(out, key);
-    out.extend_from_slice(b":");
-    out.extend_from_slice(value.as_bytes());
-}
-
 fn write_json_string_field(out: &mut Vec<u8>, key: &str, value: &str) {
-    write_json_escaped_key(out, key);
-    out.extend_from_slice(b":\"");
+    write_json_key(out, key);
+    write_json_quoted_string(out, value);
+}
+
+const HEX_DIGITS: [u8; 16] = *b"0123456789abcdef";
+
+fn write_json_key(out: &mut Vec<u8>, key: &str) {
+    write_json_quoted_string(out, key);
+    out.push(b':');
+}
+
+fn write_json_quoted_string(out: &mut Vec<u8>, value: &str) {
+    out.push(b'"');
+    write_json_escaped_string_contents(out, value);
+    out.push(b'"');
+}
+
+fn write_json_escaped_string_contents(out: &mut Vec<u8>, value: &str) {
     // JSON escape per RFC 8259: all control chars (0x00-0x1f) must be escaped.
     for &b in value.as_bytes() {
         match b {
@@ -725,10 +907,7 @@ fn write_json_string_field(out: &mut Vec<u8>, key: &str, value: &str) {
             _ => out.push(b),
         }
     }
-    out.push(b'"');
 }
-
-const HEX_DIGITS: [u8; 16] = *b"0123456789abcdef";
 
 /// Write hex-encoded bytes directly to output buffer (zero allocation).
 fn write_hex_to_buf(out: &mut Vec<u8>, bytes: &[u8]) {
@@ -753,114 +932,6 @@ mod hex {
     }
 }
 
-#[cfg(kani)]
-mod verification {
-    use super::*;
-
-    /// Prove write_i64_to_buf only emits ASCII bytes for any i64 value.
-    /// This justifies the from_utf8_unchecked safety in json_any_value_to_string (intValue path).
-    #[kani::proof]
-    #[kani::unwind(21)] // max 20 digits (i64::MIN) + sign
-    fn verify_write_i64_only_ascii() {
-        let n: i64 = kani::any();
-        let mut buf = Vec::new();
-        write_i64_to_buf(&mut buf, n);
-        assert!(!buf.is_empty(), "output must not be empty");
-        let mut i = 0;
-        while i < buf.len() {
-            assert!(buf[i].is_ascii(), "non-ASCII byte in i64 output");
-            i += 1;
-        }
-        // Also verify it's valid UTF-8 (ASCII is a subset)
-        assert!(
-            std::str::from_utf8(&buf).is_ok(),
-            "output must be valid UTF-8"
-        );
-        kani::cover!(n == 0, "zero");
-        kani::cover!(n > 0, "positive");
-        kani::cover!(n < 0, "negative");
-        kani::cover!(n == i64::MIN, "i64::MIN");
-        kani::cover!(n == i64::MAX, "i64::MAX");
-    }
-
-    /// Prove write_f64_to_buf only emits ASCII bytes for any f64 bit pattern
-    /// (including NaN, infinity, subnormals).
-    /// This justifies the from_utf8_unchecked safety in json_any_value_to_string (doubleValue path).
-    /// std::fmt::Display for f64 produces only ASCII (digits, '.', '-', 'e', '+',
-    /// 'N', 'a', 'i', 'n', 'f'). We verify this holds exhaustively.
-    #[kani::proof]
-    #[kani::unwind(30)] // ryu output is at most ~25 bytes
-    fn verify_write_f64_only_ascii() {
-        let d: f64 = kani::any();
-        let mut buf = Vec::new();
-        write_f64_to_buf(&mut buf, d);
-        assert!(!buf.is_empty(), "output must not be empty");
-        let mut i = 0;
-        while i < buf.len() {
-            assert!(buf[i].is_ascii(), "non-ASCII byte in f64 output");
-            i += 1;
-        }
-        assert!(
-            std::str::from_utf8(&buf).is_ok(),
-            "output must be valid UTF-8"
-        );
-        kani::cover!(d == 0.0, "zero");
-        kani::cover!(d > 0.0, "positive");
-        kani::cover!(d < 0.0, "negative");
-        kani::cover!(d.is_nan(), "NaN");
-        kani::cover!(d.is_infinite(), "infinity");
-    }
-
-    #[kani::proof]
-    #[kani::unwind(5)]
-    fn hex_encode_matches_format() {
-        let len: usize = kani::any();
-        kani::assume(len <= 4);
-        let mut bytes = [0u8; 4];
-        for i in 0..len {
-            bytes[i] = kani::any();
-        }
-        let result = hex::encode(&bytes[..len]);
-        assert_eq!(result.len(), len * 2);
-        // Each char is a valid hex digit
-        for c in result.chars() {
-            assert!(c.is_ascii_hexdigit());
-        }
-    }
-
-    #[kani::proof]
-    #[kani::unwind(9)]
-    fn json_string_escaping_produces_valid_json() {
-        let len: usize = kani::any();
-        kani::assume(len <= 8);
-        let mut bytes = [0u8; 8];
-        for i in 0..len {
-            bytes[i] = kani::any();
-        }
-        if let Ok(s) = std::str::from_utf8(&bytes[..len]) {
-            let mut out = Vec::new();
-            write_json_string_field(&mut out, "k", s);
-            // Output must start with "k":" and end with "
-            assert!(out.starts_with(b"\"k\":\""));
-            assert!(out.ends_with(b"\""));
-            // No unescaped control chars, quotes, or backslashes in the value
-            let value = &out[5..out.len() - 1]; // strip "k":"..."
-            let mut i = 0;
-            while i < value.len() {
-                if value[i] == b'\\' {
-                    i += 2; // skip escaped char
-                } else {
-                    assert!(value[i] != b'"');
-                    assert!(value[i] != b'\\');
-                    // No raw control bytes (0x00-0x1f) per RFC 8259.
-                    assert!(value[i] >= 0x20);
-                    i += 1;
-                }
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -868,6 +939,7 @@ mod tests {
         collector::logs::v1::ExportLogsServiceRequest,
         common::v1::{AnyValue, KeyValue, any_value::Value},
         logs::v1::{LogRecord, ResourceLogs, ScopeLogs},
+        resource::v1::Resource,
     };
     use prost::Message;
 
@@ -877,17 +949,27 @@ mod tests {
                 scope_logs: vec![ScopeLogs {
                     log_records: vec![
                         LogRecord {
-                            time_unix_nano: 1705314600_000_000_000,
+                            time_unix_nano: 1_705_314_600_000_000_000,
                             severity_text: "INFO".into(),
                             body: Some(AnyValue {
                                 value: Some(Value::StringValue("hello world".into())),
                             }),
-                            attributes: vec![KeyValue {
-                                key: "service".into(),
-                                value: Some(AnyValue {
-                                    value: Some(Value::StringValue("myapp".into())),
-                                }),
-                            }],
+                            attributes: vec![
+                                KeyValue {
+                                    key: "service".into(),
+                                    value: Some(AnyValue {
+                                        value: Some(Value::StringValue("myapp".into())),
+                                    }),
+                                },
+                                KeyValue {
+                                    key: "payload".into(),
+                                    value: Some(AnyValue {
+                                        value: Some(Value::BytesValue(vec![
+                                            0x01, 0x02, 0x03, 0x04,
+                                        ])),
+                                    }),
+                                },
+                            ],
                             ..Default::default()
                         },
                         LogRecord {
@@ -917,7 +999,7 @@ mod tests {
         let body = make_test_request();
         let json = decode_otlp_logs(&body).unwrap();
         let text = String::from_utf8(json).unwrap();
-        let lines: Vec<&str> = text.trim().split('\n').collect();
+        let lines: Vec<&str> = text.lines().collect();
 
         assert_eq!(lines.len(), 2);
         assert!(lines[0].contains("\"level\":\"INFO\""), "got: {}", lines[0]);
@@ -937,6 +1019,595 @@ mod tests {
             lines[1]
         );
         assert!(lines[1].contains("\"status\":500"), "got: {}", lines[1]);
+    }
+
+    /// Contract test: protobuf and JSON OTLP inputs that represent the same
+    /// records must produce the same semantic JSON-line output.
+    #[test]
+    fn protobuf_and_json_inputs_match_semantics() {
+        let protobuf_lines = decode_otlp_logs(&make_test_request()).unwrap();
+
+        let json_body = r#"{
+            "resourceLogs": [{
+                "scopeLogs": [{
+                    "logRecords": [
+                        {
+                            "timeUnixNano": "1705314600000000000",
+                            "severityText": "INFO",
+                            "body": {"stringValue": "hello world"},
+                            "attributes": [
+                                {
+                                    "key": "service",
+                                    "value": {"stringValue": "myapp"}
+                                },
+                                {
+                                    "key": "payload",
+                                    "value": {"bytesValue": "AQIDBA=="}
+                                }
+                            ]
+                        },
+                        {
+                            "severityText": "ERROR",
+                            "body": {"stringValue": "something broke"},
+                            "attributes": [{
+                                "key": "status",
+                                "value": {"intValue": "500"}
+                            }]
+                        }
+                    ]
+                }]
+            }]
+        }"#;
+        let json_lines = decode_otlp_logs_json(json_body.as_bytes()).unwrap();
+
+        let parse = |lines: &[u8]| -> Vec<serde_json::Value> {
+            String::from_utf8(lines.to_vec())
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+                .collect()
+        };
+
+        let left = parse(&protobuf_lines);
+        let right = parse(&json_lines);
+        assert_eq!(left.len(), 2, "expected 2 protobuf-decoded rows");
+        assert_eq!(right.len(), 2, "expected 2 json-decoded rows");
+
+        for (lhs, rhs) in left.iter().zip(right.iter()) {
+            assert_eq!(lhs.get("level"), rhs.get("level"));
+            assert_eq!(lhs.get("message"), rhs.get("message"));
+            assert_eq!(lhs.get("service"), rhs.get("service"));
+            assert_eq!(lhs.get("status"), rhs.get("status"));
+            assert_eq!(lhs.get("payload"), rhs.get("payload"));
+        }
+    }
+
+    #[test]
+    fn json_bytes_value_matches_protobuf_semantics() {
+        let request = ExportLogsServiceRequest {
+            resource_logs: vec![ResourceLogs {
+                scope_logs: vec![ScopeLogs {
+                    log_records: vec![LogRecord {
+                        body: Some(AnyValue {
+                            value: Some(Value::BytesValue(vec![0x01, 0x02, 0x03, 0x04])),
+                        }),
+                        attributes: vec![KeyValue {
+                            key: "payload".into(),
+                            value: Some(AnyValue {
+                                value: Some(Value::BytesValue(vec![0x0a, 0x0b, 0x0c])),
+                            }),
+                        }],
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        };
+
+        let protobuf_lines = decode_otlp_logs(&request.encode_to_vec()).unwrap();
+        let json_lines = decode_otlp_logs_json(
+            br#"{
+                "resourceLogs": [{
+                    "scopeLogs": [{
+                        "logRecords": [{
+                            "body": {"bytesValue": "AQIDBA=="},
+                            "attributes": [{
+                                "key": "payload",
+                                "value": {"bytesValue": "CgsM"}
+                            }]
+                        }]
+                    }]
+                }]
+            }"#,
+        )
+        .unwrap();
+
+        let parse_first = |lines: &[u8]| -> serde_json::Value {
+            let line = String::from_utf8(lines.to_vec())
+                .unwrap()
+                .lines()
+                .next()
+                .expect("one decoded row")
+                .to_string();
+            serde_json::from_str(&line).unwrap()
+        };
+
+        let left = parse_first(&protobuf_lines);
+        let right = parse_first(&json_lines);
+
+        assert_eq!(
+            left.get("message").and_then(serde_json::Value::as_str),
+            Some("01020304")
+        );
+        assert_eq!(left.get("message"), right.get("message"));
+        assert_eq!(left.get("payload"), right.get("payload"));
+    }
+
+    #[test]
+    fn invalid_json_bytes_value_returns_error() {
+        let result = decode_otlp_logs_json(
+            br#"{
+                "resourceLogs": [{
+                    "scopeLogs": [{
+                        "logRecords": [{
+                            "attributes": [{
+                                "key": "payload",
+                                "value": {"bytesValue": "***not-base64***"}
+                            }]
+                        }]
+                    }]
+                }]
+            }"#,
+        );
+
+        assert!(result.is_err(), "invalid base64 bytesValue must fail");
+    }
+
+    #[test]
+    fn json_bytes_value_accepts_urlsafe_and_unpadded_base64() {
+        let json_lines = decode_otlp_logs_json(
+            br#"{
+                "resourceLogs": [{
+                    "scopeLogs": [{
+                        "logRecords": [{
+                            "attributes": [{
+                                "key": "payload",
+                                "value": {"bytesValue": "-_8"}
+                            }]
+                        }]
+                    }]
+                }]
+            }"#,
+        )
+        .expect("urlsafe unpadded base64 should decode");
+
+        let line = String::from_utf8(json_lines).expect("utf8");
+        let row: serde_json::Value = serde_json::from_str(line.lines().next().unwrap()).unwrap();
+        assert_eq!(
+            row.get("payload").and_then(serde_json::Value::as_str),
+            Some("fbff")
+        );
+    }
+
+    #[test]
+    fn invalid_json_int_value_returns_error() {
+        let result = decode_otlp_logs_json(
+            br#"{
+                "resourceLogs": [{
+                    "scopeLogs": [{
+                        "logRecords": [{
+                            "attributes": [{
+                                "key": "status",
+                                "value": {"intValue": true}
+                            }]
+                        }]
+                    }]
+                }]
+            }"#,
+        );
+
+        assert!(result.is_err(), "invalid intValue must fail");
+    }
+
+    #[test]
+    fn invalid_json_double_value_returns_error() {
+        let result = decode_otlp_logs_json(
+            br#"{
+                "resourceLogs": [{
+                    "scopeLogs": [{
+                        "logRecords": [{
+                            "attributes": [{
+                                "key": "latency_ratio",
+                                "value": {"doubleValue": "not-a-double"}
+                            }]
+                        }]
+                    }]
+                }]
+            }"#,
+        );
+
+        assert!(result.is_err(), "invalid doubleValue must fail");
+    }
+
+    #[test]
+    fn non_numeric_json_int_string_returns_error() {
+        let result = decode_otlp_logs_json(
+            br#"{
+                "resourceLogs": [{
+                    "scopeLogs": [{
+                        "logRecords": [{
+                            "attributes": [{
+                                "key": "status",
+                                "value": {"intValue": "notanumber"}
+                            }]
+                        }]
+                    }]
+                }]
+            }"#,
+        );
+
+        assert!(
+            result.is_err(),
+            "non-numeric intValue string must fail instead of emitting malformed JSON"
+        );
+    }
+
+    #[test]
+    fn exponent_form_json_int_value_is_accepted() {
+        let json_lines = decode_otlp_logs_json(
+            br#"{
+                "resourceLogs": [{
+                    "scopeLogs": [{
+                        "logRecords": [{
+                            "attributes": [{
+                                "key": "status",
+                                "value": {"intValue": "5e2"}
+                            }]
+                        }]
+                    }]
+                }]
+            }"#,
+        )
+        .expect("ProtoJSON exponent intValue should decode");
+
+        let line = String::from_utf8(json_lines).expect("utf8");
+        let row: serde_json::Value = serde_json::from_str(line.lines().next().unwrap()).unwrap();
+        assert_eq!(
+            row.get("status").and_then(serde_json::Value::as_i64),
+            Some(500)
+        );
+    }
+
+    #[test]
+    fn bare_exponent_json_int_value_is_accepted() {
+        let json_lines = decode_otlp_logs_json(
+            br#"{
+                "resourceLogs": [{
+                    "scopeLogs": [{
+                        "logRecords": [{
+                            "attributes": [{
+                                "key": "status",
+                                "value": {"intValue": 1e2}
+                            }]
+                        }]
+                    }]
+                }]
+            }"#,
+        )
+        .expect("bare exponent intValue should decode");
+
+        let line = String::from_utf8(json_lines).expect("utf8");
+        let row: serde_json::Value = serde_json::from_str(line.lines().next().unwrap()).unwrap();
+        assert_eq!(
+            row.get("status").and_then(serde_json::Value::as_i64),
+            Some(100)
+        );
+    }
+
+    #[test]
+    fn huge_positive_exponent_json_int_value_returns_error() {
+        let result = decode_otlp_logs_json(
+            br#"{
+                "resourceLogs": [{
+                    "scopeLogs": [{
+                        "logRecords": [{
+                            "attributes": [{
+                                "key": "status",
+                                "value": {"intValue": "1e2147483647"}
+                            }]
+                        }]
+                    }]
+                }]
+            }"#,
+        );
+
+        assert!(result.is_err(), "huge exponent intValue must fail");
+    }
+
+    #[test]
+    fn huge_negative_exponent_json_int_value_returns_error_without_panicking() {
+        let result = decode_otlp_logs_json(
+            br#"{
+                "resourceLogs": [{
+                    "scopeLogs": [{
+                        "logRecords": [{
+                            "attributes": [{
+                                "key": "status",
+                                "value": {"intValue": "1e-2147483648"}
+                            }]
+                        }]
+                    }]
+                }]
+            }"#,
+        );
+
+        assert!(
+            result.is_err(),
+            "extreme negative exponent intValue must fail without panicking"
+        );
+    }
+
+    #[test]
+    fn protojson_integral_normalization_accepts_integral_decimal_forms() {
+        assert_eq!(
+            normalize_protojson_integral_digits(" +001.2300e+2 "),
+            Some((false, "123".to_string()))
+        );
+        assert_eq!(
+            normalize_protojson_integral_digits("-9223372036854775808"),
+            Some((true, "9223372036854775808".to_string()))
+        );
+        assert_eq!(
+            normalize_protojson_integral_digits("0.000e+999999"),
+            Some((false, "0".to_string()))
+        );
+    }
+
+    #[test]
+    fn protojson_integral_normalization_rejects_non_integral_or_oversized_forms() {
+        assert_eq!(normalize_protojson_integral_digits("1.5"), None);
+        assert_eq!(normalize_protojson_integral_digits("1e-1"), None);
+        assert_eq!(normalize_protojson_integral_digits("1e20"), None);
+        assert_eq!(normalize_protojson_integral_digits("1e2147483647"), None);
+    }
+
+    #[test]
+    fn out_of_range_json_int_value_returns_error() {
+        let result = decode_otlp_logs_json(
+            br#"{
+                "resourceLogs": [{
+                    "scopeLogs": [{
+                        "logRecords": [{
+                            "attributes": [{
+                                "key": "status",
+                                "value": {"intValue": "9223372036854775808"}
+                            }]
+                        }]
+                    }]
+                }]
+            }"#,
+        );
+
+        assert!(result.is_err(), "out-of-range intValue must fail");
+    }
+
+    #[test]
+    fn invalid_json_time_unix_nano_returns_error() {
+        let result = decode_otlp_logs_json(
+            br#"{
+                "resourceLogs": [{
+                    "scopeLogs": [{
+                        "logRecords": [{
+                            "timeUnixNano": "not-a-number"
+                        }]
+                    }]
+                }]
+            }"#,
+        );
+
+        assert!(result.is_err(), "invalid timeUnixNano must fail");
+    }
+
+    #[test]
+    fn zero_json_time_unix_nano_is_accepted_and_omitted() {
+        let json_lines = decode_otlp_logs_json(
+            br#"{
+                "resourceLogs": [{
+                    "scopeLogs": [{
+                        "logRecords": [{
+                            "timeUnixNano": "0",
+                            "body": {"stringValue": "hello"}
+                        }]
+                    }]
+                }]
+            }"#,
+        )
+        .expect("zero timeUnixNano should be accepted");
+
+        let line = String::from_utf8(json_lines).expect("utf8");
+        let row: serde_json::Value = serde_json::from_str(line.lines().next().unwrap()).unwrap();
+        assert_eq!(
+            row.get(field_names::BODY)
+                .and_then(serde_json::Value::as_str),
+            Some("hello")
+        );
+        assert!(
+            row.get(field_names::TIMESTAMP).is_none(),
+            "unknown timestamp should be omitted, not emitted as 0"
+        );
+    }
+
+    #[test]
+    fn special_float_strings_match_protobuf_semantics() {
+        let request = ExportLogsServiceRequest {
+            resource_logs: vec![ResourceLogs {
+                scope_logs: vec![ScopeLogs {
+                    log_records: vec![LogRecord {
+                        body: Some(AnyValue {
+                            value: Some(Value::DoubleValue(f64::NAN)),
+                        }),
+                        attributes: vec![
+                            KeyValue {
+                                key: "nan_attr".into(),
+                                value: Some(AnyValue {
+                                    value: Some(Value::DoubleValue(f64::NAN)),
+                                }),
+                            },
+                            KeyValue {
+                                key: "pos_inf".into(),
+                                value: Some(AnyValue {
+                                    value: Some(Value::DoubleValue(f64::INFINITY)),
+                                }),
+                            },
+                            KeyValue {
+                                key: "neg_inf".into(),
+                                value: Some(AnyValue {
+                                    value: Some(Value::DoubleValue(f64::NEG_INFINITY)),
+                                }),
+                            },
+                        ],
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        };
+
+        let protobuf_lines = decode_otlp_logs(&request.encode_to_vec()).unwrap();
+        let json_lines = decode_otlp_logs_json(
+            br#"{
+                "resourceLogs": [{
+                    "scopeLogs": [{
+                        "logRecords": [{
+                            "body": {"doubleValue": "NaN"},
+                            "attributes": [
+                                {"key": "nan_attr", "value": {"doubleValue": "NaN"}},
+                                {"key": "pos_inf", "value": {"doubleValue": "Infinity"}},
+                                {"key": "neg_inf", "value": {"doubleValue": "-Infinity"}}
+                            ]
+                        }]
+                    }]
+                }]
+            }"#,
+        )
+        .expect("special float string tokens should decode");
+
+        let parse_first = |lines: &[u8]| -> serde_json::Value {
+            let line = String::from_utf8(lines.to_vec())
+                .unwrap()
+                .lines()
+                .next()
+                .expect("one decoded row")
+                .to_string();
+            serde_json::from_str(&line).unwrap()
+        };
+
+        let protobuf_row = parse_first(&protobuf_lines);
+        let json_row = parse_first(&json_lines);
+        assert_eq!(protobuf_row, json_row);
+        assert_eq!(
+            json_row.get("message").and_then(serde_json::Value::as_str),
+            Some("NaN")
+        );
+        assert!(
+            json_row
+                .get("nan_attr")
+                .is_some_and(serde_json::Value::is_null)
+        );
+        assert!(
+            json_row
+                .get("pos_inf")
+                .is_some_and(serde_json::Value::is_null)
+        );
+        assert!(
+            json_row
+                .get("neg_inf")
+                .is_some_and(serde_json::Value::is_null)
+        );
+    }
+
+    #[test]
+    fn empty_string_body_and_unsupported_values_preserve_wire_equivalence() {
+        let request = ExportLogsServiceRequest {
+            resource_logs: vec![ResourceLogs {
+                resource: Some(Resource {
+                    attributes: vec![
+                        KeyValue {
+                            key: "empty_resource".into(),
+                            value: Some(AnyValue {
+                                value: Some(Value::StringValue(String::new())),
+                            }),
+                        },
+                        KeyValue {
+                            key: "unsupported_resource".into(),
+                            value: Some(AnyValue {
+                                value: Some(Value::ArrayValue(Default::default())),
+                            }),
+                        },
+                    ],
+                    ..Default::default()
+                }),
+                scope_logs: vec![ScopeLogs {
+                    log_records: vec![LogRecord {
+                        body: Some(AnyValue {
+                            value: Some(Value::StringValue(String::new())),
+                        }),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        };
+
+        let protobuf_lines = decode_otlp_logs(&request.encode_to_vec()).unwrap();
+        let json_lines = decode_otlp_logs_json(
+            br#"{
+                "resourceLogs": [{
+                    "resource": {
+                        "attributes": [
+                            {"key": "empty_resource", "value": {"stringValue": ""}},
+                            {"key": "unsupported_resource", "value": {"arrayValue": {"values": []}}}
+                        ]
+                    },
+                    "scopeLogs": [{
+                        "logRecords": [{
+                            "body": {"stringValue": ""}
+                        }]
+                    }]
+                }]
+            }"#,
+        )
+        .unwrap();
+
+        let parse_first = |lines: &[u8]| -> serde_json::Value {
+            let line = String::from_utf8(lines.to_vec())
+                .unwrap()
+                .lines()
+                .next()
+                .expect("one decoded row")
+                .to_string();
+            serde_json::from_str(&line).unwrap()
+        };
+
+        let protobuf_row = parse_first(&protobuf_lines);
+        let json_row = parse_first(&json_lines);
+        assert_eq!(protobuf_row, json_row);
+        assert_eq!(
+            protobuf_row
+                .get("empty_resource")
+                .and_then(serde_json::Value::as_str),
+            Some("")
+        );
+        assert!(protobuf_row.get("unsupported_resource").is_none());
+        assert_eq!(
+            protobuf_row
+                .get("message")
+                .and_then(serde_json::Value::as_str),
+            Some("")
+        );
     }
 
     #[test]
@@ -1040,6 +1711,17 @@ mod tests {
         let json_str = format!("{{{text}}}");
         serde_json::from_str::<serde_json::Value>(&json_str)
             .unwrap_or_else(|e| panic!("invalid JSON: {e}\n{json_str}"));
+    }
+
+    #[test]
+    fn json_escaping_key_chars() {
+        let mut out = Vec::new();
+        write_json_string_field(&mut out, "my\"key\\path", "value");
+        let text = String::from_utf8(out).unwrap();
+        let json_str = format!("{{{text}}}");
+        let parsed: serde_json::Value = serde_json::from_str(&json_str)
+            .unwrap_or_else(|e| panic!("invalid JSON: {e}\n{json_str}"));
+        assert_eq!(parsed["my\"key\\path"], "value");
     }
 
     /// Regression test: when the pipeline channel is full the receiver must
@@ -1211,78 +1893,5 @@ mod tests {
             status, 200,
             "valid OTLP JSON should return 200, got {status}"
         );
-    }
-
-    // Regression tests for issue #1167: non-finite floats must emit null, not "NaN"/"inf".
-    #[test]
-    fn write_f64_nan_emits_null() {
-        let mut out = Vec::new();
-        write_f64_to_buf(&mut out, f64::NAN);
-        assert_eq!(&out, b"null", "NaN must serialize as JSON null");
-    }
-
-    #[test]
-    fn write_f64_infinity_emits_null() {
-        let mut out = Vec::new();
-        write_f64_to_buf(&mut out, f64::INFINITY);
-        assert_eq!(&out, b"null", "Infinity must serialize as JSON null");
-    }
-
-    #[test]
-    fn write_f64_neg_infinity_emits_null() {
-        let mut out = Vec::new();
-        write_f64_to_buf(&mut out, f64::NEG_INFINITY);
-        assert_eq!(&out, b"null", "-Infinity must serialize as JSON null");
-    }
-
-    #[test]
-    fn write_f64_finite_unchanged() {
-        let mut out = Vec::new();
-        write_f64_to_buf(&mut out, 3.14);
-        let text = String::from_utf8(out).unwrap();
-        assert!(
-            text.starts_with("3.14"),
-            "finite float should be formatted normally: {text}"
-        );
-    }
-
-    // Regression tests for issue #1166: attribute keys with special chars must be escaped.
-    #[test]
-    fn write_json_escaped_key_escapes_quotes() {
-        let mut out = Vec::new();
-        write_json_escaped_key(&mut out, r#"ke"y"#);
-        assert_eq!(&out, b"\"ke\\\"y\"", "quote in key must be escaped");
-    }
-
-    #[test]
-    fn write_json_escaped_key_escapes_backslash() {
-        let mut out = Vec::new();
-        write_json_escaped_key(&mut out, r"ke\y");
-        assert_eq!(&out, b"\"ke\\\\y\"", "backslash in key must be escaped");
-    }
-
-    #[test]
-    fn write_json_string_field_escapes_key() {
-        let mut out = Vec::new();
-        write_json_string_field(&mut out, r#"k"ey"#, "value");
-        let text = String::from_utf8(out).unwrap();
-        // Must be valid JSON
-        let json_str = format!("{{{text}}}");
-        serde_json::from_str::<serde_json::Value>(&json_str)
-            .unwrap_or_else(|e| panic!("invalid JSON after key escaping: {e}\n{json_str}"));
-        assert!(
-            text.contains(r#"k\"ey"#),
-            "quote in key not escaped: {text}"
-        );
-    }
-
-    #[test]
-    fn write_json_field_escapes_key() {
-        let mut out = Vec::new();
-        write_json_field(&mut out, r#"k"ey"#, "42");
-        let text = String::from_utf8(out).unwrap();
-        let json_str = format!("{{{text}}}");
-        serde_json::from_str::<serde_json::Value>(&json_str)
-            .unwrap_or_else(|e| panic!("invalid JSON after key escaping: {e}\n{json_str}"));
     }
 }

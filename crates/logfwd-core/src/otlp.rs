@@ -240,7 +240,9 @@ pub fn skip_field(buf: &[u8], wire_type: u8, pos: usize) -> Result<usize, &'stat
         2 => {
             // Length-delimited.
             let (len, new_pos) = decode_varint(buf, pos)?;
-            let end = new_pos + len as usize;
+            let end = new_pos
+                .checked_add(len as usize)
+                .ok_or("skip: length-delimited overflow")?;
             if end > buf.len() {
                 return Err("skip: length-delimited overflow");
             }
@@ -399,6 +401,10 @@ pub fn parse_timestamp_nanos(ts: &[u8]) -> Option<u64> {
         return None;
     }
 
+    if hour > 23 || min > 59 || sec > 60 {
+        return None;
+    }
+
     // Reject years that would overflow u64 nanos (year > ~584 from epoch).
     // Year 2554 can exceed u64::MAX nanos; 2553-12-31T23:59:59.999999999Z fits.
     if year > 2553 {
@@ -499,6 +505,22 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn skip_field_length_overflow_rejected() {
+        // wire_type 2 (length-delimited) with a varint that encodes a length
+        // large enough that new_pos + len wraps usize — must return Err, not Ok.
+        use alloc::vec;
+        let mut buf = vec![0u8; 16];
+        // Encode varint for usize::MAX - 1 at position 0.
+        let big: u64 = (usize::MAX as u64) - 1;
+        let mut tmp = Vec::new();
+        encode_varint(&mut tmp, big);
+        buf[..tmp.len()].copy_from_slice(&tmp);
+        // new_pos = tmp.len() (~10); len = usize::MAX-1 → overflows
+        let result = skip_field(&buf, 2, 0);
+        assert!(result.is_err(), "expected overflow error, got {:?}", result);
+    }
 
     #[test]
     fn test_parse_timestamp() {
@@ -640,6 +662,18 @@ mod tests {
         assert_eq!(parse_timestamp_nanos(b"not a timestamp"), None);
         assert_eq!(parse_timestamp_nanos(b""), None);
         assert_eq!(parse_timestamp_nanos(b"2024"), None);
+    }
+
+    #[test]
+    fn test_parse_timestamp_nanos_invalid_time() {
+        // Bug #1047: Invalid time of day should return None
+        assert_eq!(parse_timestamp_nanos(b"2024-01-01T99:99:99Z"), None);
+        // Invalid hour
+        assert_eq!(parse_timestamp_nanos(b"2024-01-01T24:00:00Z"), None);
+        // Invalid minute
+        assert_eq!(parse_timestamp_nanos(b"2024-01-01T23:60:00Z"), None);
+        // Invalid second (leap second 60 is allowed, 61 is not)
+        assert_eq!(parse_timestamp_nanos(b"2024-01-01T23:59:61Z"), None);
     }
 
     #[test]

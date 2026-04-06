@@ -796,20 +796,20 @@ impl DiagnosticsServer {
                     "{{\
                         \"trace_id\":\"{tid}\",\
                         \"pipeline\":\"{pl}\",\
-                        \"start_unix_ns\":{st},\
-                        \"total_ns\":{tot},\
-                        \"scan_ns\":{scan},\
-                        \"transform_ns\":{xfm},\
-                        \"output_ns\":{out_ns},\
-                        \"output_start_unix_ns\":{out_st},\
+                        \"start_unix_ns\":\"{st}\",\
+                        \"total_ns\":\"{tot}\",\
+                        \"scan_ns\":\"{scan}\",\
+                        \"transform_ns\":\"{xfm}\",\
+                        \"output_ns\":\"{out_ns}\",\
+                        \"output_start_unix_ns\":\"{out_st}\",\
                         \"scan_rows\":{sr},\
                         \"input_rows\":{ir},\
                         \"output_rows\":{or},\
                         \"bytes_in\":{bi},\
-                        \"queue_wait_ns\":{qw},\
+                        \"queue_wait_ns\":\"{qw}\",\
                         \"worker_id\":{wid},\
-                        \"send_ns\":{snd},\
-                        \"recv_ns\":{rcv},\
+                        \"send_ns\":\"{snd}\",\
+                        \"recv_ns\":\"{rcv}\",\
                         \"took_ms\":{tk},\
                         \"retries\":{ret},\
                         \"req_bytes\":{rb},\
@@ -858,20 +858,20 @@ impl DiagnosticsServer {
                             "{{\
                                 \"trace_id\":\"live-{id}\",\
                                 \"pipeline\":\"{pl}\",\
-                                \"start_unix_ns\":{st},\
-                                \"total_ns\":0,\
-                                \"scan_ns\":{scan},\
-                                \"transform_ns\":{xfm},\
-                                \"output_ns\":0,\
-                                \"output_start_unix_ns\":{out_st},\
+                                \"start_unix_ns\":\"{st}\",\
+                                \"total_ns\":\"0\",\
+                                \"scan_ns\":\"{scan}\",\
+                                \"transform_ns\":\"{xfm}\",\
+                                \"output_ns\":\"0\",\
+                                \"output_start_unix_ns\":\"{out_st}\",\
                                 \"scan_rows\":0,\
                                 \"input_rows\":0,\
                                 \"output_rows\":0,\
                                 \"bytes_in\":0,\
-                                \"queue_wait_ns\":0,\
+                                \"queue_wait_ns\":\"0\",\
                                 \"worker_id\":{wid},\
-                                \"send_ns\":0,\
-                                \"recv_ns\":0,\
+                                \"send_ns\":\"0\",\
+                                \"recv_ns\":\"0\",\
                                 \"took_ms\":0,\
                                 \"retries\":0,\
                                 \"req_bytes\":0,\
@@ -882,7 +882,7 @@ impl DiagnosticsServer {
                                 \"status\":\"unset\",\
                                 \"in_progress\":true,\
                                 \"stage\":\"{stage}\",\
-                                \"stage_start_unix_ns\":{ss}\
+                                \"stage_start_unix_ns\":\"{ss}\"\
                             }}",
                             id = id,
                             pl = esc(&pm.name),
@@ -1785,8 +1785,14 @@ mod tests {
         assert_eq!(t["output_rows"], 75);
         assert_eq!(t["errors"], 0);
         assert_eq!(t["flush_reason"], "size");
-        assert_eq!(t["scan_ns"], 150_000_000u64);
-        assert_eq!(t["total_ns"], 200_000_000u64);
+        assert_eq!(t["scan_ns"], "150000000");
+        assert_eq!(t["total_ns"], "200000000");
+        // All nanosecond fields must be serialized as JSON strings to avoid
+        // JavaScript 53-bit precision loss.
+        assert_eq!(t["start_unix_ns"], "1000000000");
+        assert_eq!(t["transform_ns"], "0");
+        assert_eq!(t["output_ns"], "0");
+        assert_eq!(t["queue_wait_ns"], "5000000");
         assert_eq!(t["status"], "ok");
     }
 
