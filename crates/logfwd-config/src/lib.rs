@@ -221,8 +221,8 @@ pub enum GeneratorProfileConfig {
     /// Synthetic request-like JSON logs.
     #[default]
     Logs,
-    /// Deterministic benchmark envelope with stable stream/event identity.
-    Benchmark,
+    /// Flat JSON records built from static attributes and generated fields.
+    Record,
 }
 
 /// Controls the size and shape of synthetic generator rows.
@@ -232,6 +232,26 @@ pub enum GeneratorComplexityConfig {
     #[default]
     Simple,
     Complex,
+}
+
+/// Static scalar attribute value for generated `record` rows.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(untagged)]
+pub enum GeneratorAttributeValueConfig {
+    String(String),
+    Integer(i64),
+    Float(f64),
+    Bool(bool),
+}
+
+/// Monotonic sequence field generation.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GeneratorSequenceConfig {
+    /// Output field name for the generated sequence.
+    pub field: String,
+    /// Initial sequence value. Defaults to 1.
+    pub start: Option<u64>,
 }
 
 /// Generator-specific configuration.
@@ -248,14 +268,13 @@ pub struct GeneratorInputConfig {
     pub complexity: Option<GeneratorComplexityConfig>,
     /// Which event shape to emit.
     pub profile: Option<GeneratorProfileConfig>,
-    /// Benchmark run identifier included on every `benchmark` profile row.
-    pub benchmark_id: Option<String>,
-    /// Source identity included on `benchmark` rows.
-    pub pod_name: Option<String>,
-    /// Stable stream identity used for `event_id` generation on `benchmark` rows.
-    pub stream_id: Option<String>,
-    /// Service name for `benchmark` rows. Defaults to `bench-emitter`.
-    pub service: Option<String>,
+    /// Static scalar attributes written into generated rows.
+    #[serde(default)]
+    pub attributes: HashMap<String, GeneratorAttributeValueConfig>,
+    /// Monotonic sequence field for `record` rows.
+    pub sequence: Option<GeneratorSequenceConfig>,
+    /// Source-created timestamp field for `record` rows.
+    pub event_created_unix_nano_field: Option<String>,
 }
 
 /// A single input source.
@@ -850,6 +869,60 @@ impl Config {
                             return Err(ConfigError::Validation(format!(
                                 "pipeline '{name}' input '{label}': generator.batch_size must be at least 1"
                             )));
+                        }
+                        if let Some(generator) = &input.generator {
+                            if generator.attributes.keys().any(|key| key.trim().is_empty()) {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': generator.attributes keys must not be empty"
+                                )));
+                            }
+                            if generator
+                                .attributes
+                                .values()
+                                .any(|value| matches!(value, GeneratorAttributeValueConfig::Float(v) if !v.is_finite()))
+                            {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': generator.attributes float values must be finite"
+                                )));
+                            }
+                            if let Some(sequence) = &generator.sequence {
+                                if sequence.field.trim().is_empty() {
+                                    return Err(ConfigError::Validation(format!(
+                                        "pipeline '{name}' input '{label}': generator.sequence.field must not be empty"
+                                    )));
+                                }
+                                if generator.attributes.contains_key(&sequence.field) {
+                                    return Err(ConfigError::Validation(format!(
+                                        "pipeline '{name}' input '{label}': generator.sequence.field must not duplicate a generator.attributes key"
+                                    )));
+                                }
+                            }
+                            if generator
+                                .event_created_unix_nano_field
+                                .as_deref()
+                                .is_some_and(|field| field.trim().is_empty())
+                            {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': generator.event_created_unix_nano_field must not be empty"
+                                )));
+                            }
+                            if let Some(field) = generator.event_created_unix_nano_field.as_deref()
+                            {
+                                if generator.attributes.contains_key(field) {
+                                    return Err(ConfigError::Validation(format!(
+                                        "pipeline '{name}' input '{label}': generator.event_created_unix_nano_field must not duplicate a generator.attributes key"
+                                    )));
+                                }
+                                if generator
+                                    .sequence
+                                    .as_ref()
+                                    .is_some_and(|sequence| sequence.field == field)
+                                {
+                                    return Err(ConfigError::Validation(format!(
+                                        "pipeline '{name}' input '{label}': generator.event_created_unix_nano_field must not duplicate generator.sequence.field"
+                                    )));
+                                }
+                            }
                         }
                     }
                     InputType::ArrowIpc => {
@@ -2777,11 +2850,16 @@ pipelines:
           events_per_sec: 25000
           batch_size: 2048
           total_events: 123
-          profile: benchmark
-          benchmark_id: run-123
-          pod_name: emitter-0
-          stream_id: emitter-0
-          service: bench-emitter
+          profile: record
+          attributes:
+            benchmark_id: run-123
+            pod_name: emitter-0
+            stream_id: emitter-0
+            service: bench-emitter
+            status: 200
+            sampled: true
+          sequence:
+            field: seq
     outputs:
       - type: null
 "#;
@@ -2793,9 +2871,37 @@ pipelines:
         assert_eq!(generator.events_per_sec, Some(25000));
         assert_eq!(generator.batch_size, Some(2048));
         assert_eq!(generator.total_events, Some(123));
-        assert_eq!(generator.profile, Some(GeneratorProfileConfig::Benchmark));
-        assert_eq!(generator.pod_name.as_deref(), Some("emitter-0"));
-        assert_eq!(generator.stream_id.as_deref(), Some("emitter-0"));
+        assert_eq!(generator.profile, Some(GeneratorProfileConfig::Record));
+        assert_eq!(
+            generator.attributes.get("benchmark_id"),
+            Some(&GeneratorAttributeValueConfig::String(
+                "run-123".to_string()
+            ))
+        );
+        assert_eq!(
+            generator.attributes.get("pod_name"),
+            Some(&GeneratorAttributeValueConfig::String(
+                "emitter-0".to_string()
+            ))
+        );
+        assert_eq!(
+            generator.attributes.get("stream_id"),
+            Some(&GeneratorAttributeValueConfig::String(
+                "emitter-0".to_string()
+            ))
+        );
+        assert_eq!(
+            generator.attributes.get("status"),
+            Some(&GeneratorAttributeValueConfig::Integer(200))
+        );
+        assert_eq!(
+            generator.attributes.get("sampled"),
+            Some(&GeneratorAttributeValueConfig::Bool(true))
+        );
+        assert_eq!(
+            generator.sequence.as_ref().map(|seq| seq.field.as_str()),
+            Some("seq")
+        );
     }
 
     #[test]
@@ -2827,7 +2933,7 @@ pipelines:
       - type: file
         path: /tmp/test.log
         generator:
-          profile: benchmark
+          profile: record
     outputs:
       - type: null
 "#;
@@ -2836,6 +2942,51 @@ pipelines:
             err.to_string()
                 .contains("only supported for generator inputs"),
             "expected generator block rejection: {err}"
+        );
+    }
+
+    #[test]
+    fn generator_input_rejects_empty_sequence_field() {
+        let yaml = r#"
+pipelines:
+  test:
+    inputs:
+      - type: generator
+        generator:
+          profile: record
+          sequence:
+            field: " "
+    outputs:
+      - type: null
+"#;
+        let err = Config::load_str(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("generator.sequence.field"),
+            "expected empty sequence field rejection: {err}"
+        );
+    }
+
+    #[test]
+    fn generator_input_rejects_duplicate_generated_field_names() {
+        let yaml = r#"
+pipelines:
+  test:
+    inputs:
+      - type: generator
+        generator:
+          profile: record
+          attributes:
+            seq: already-here
+          sequence:
+            field: seq
+    outputs:
+      - type: null
+"#;
+        let err = Config::load_str(yaml).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("must not duplicate a generator.attributes key"),
+            "expected duplicate generated field rejection: {err}"
         );
     }
 

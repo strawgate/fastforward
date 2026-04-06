@@ -26,12 +26,12 @@ data source is required.
 | `generator.events_per_sec` | integer | No | `0` | Target events per second. `0` means unlimited. |
 | `generator.batch_size` | integer | No | `1000` | Events emitted per poll/batch. |
 | `generator.total_events` | integer | No | `0` | Total events to emit before stopping. `0` means infinite. |
-| `generator.profile` | string | No | `logs` | `logs` for generic synthetic request logs, `benchmark` for stable benchmark envelope rows. |
-| `generator.complexity` | string | No | `simple` | Size/shape for the `logs` profile: `simple` or `complex`. Ignored by the `benchmark` profile. |
-| `generator.benchmark_id` | string | No | unset | Included on every `benchmark` row. |
-| `generator.pod_name` | string | No | input name | Source identity used by the `benchmark` profile. |
-| `generator.stream_id` | string | No | `pod_name` | Stable stream identity used to build `event_id`. |
-| `generator.service` | string | No | `bench-emitter` | Service name for the `benchmark` profile. |
+| `generator.profile` | string | No | `logs` | `logs` for generic synthetic request logs, `record` for flat JSON rows assembled from attributes and generated fields. |
+| `generator.complexity` | string | No | `simple` | Size/shape for the `logs` profile: `simple` or `complex`. Ignored by the `record` profile. |
+| `generator.attributes` | object | No | `{}` | Static scalar JSON fields written into every `record` row. |
+| `generator.sequence.field` | string | No | unset | Output field name for a monotonic generated sequence in `record` rows. |
+| `generator.sequence.start` | integer | No | `1` | Initial value for the generated sequence. |
+| `generator.event_created_unix_nano_field` | string | No | unset | Adds a source-created nanosecond timestamp field to each `record` row. |
 
 ```yaml
 input:
@@ -39,10 +39,17 @@ input:
   generator:
     events_per_sec: 50000
     batch_size: 4096
-    profile: benchmark
-    benchmark_id: ${BENCHMARK_ID}
-    pod_name: ${POD_NAME}
-    stream_id: ${POD_NAME}
+    profile: record
+    attributes:
+      benchmark_id: ${BENCHMARK_ID}
+      pod_name: ${POD_NAME}
+      stream_id: ${POD_NAME}
+      service: bench-emitter
+      status: 200
+      sampled: true
+    sequence:
+      field: seq
+    event_created_unix_nano_field: event_created_unix_nano
 ```
 
 Use `--generate-json <num_lines> <output_file>` on the CLI to write a fixed number of lines to a file instead.

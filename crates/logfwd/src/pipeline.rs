@@ -24,8 +24,8 @@ use crate::processor::Processor;
 use crate::worker_pool::{AckItem, OutputWorkerPool, WorkItem};
 use logfwd_arrow::scanner::Scanner;
 use logfwd_config::{
-    EnrichmentConfig, Format, GeneratorComplexityConfig, GeneratorProfileConfig, GeoDatabaseFormat,
-    InputConfig, InputType, PipelineConfig,
+    EnrichmentConfig, Format, GeneratorAttributeValueConfig, GeneratorComplexityConfig,
+    GeneratorProfileConfig, GeoDatabaseFormat, InputConfig, InputType, PipelineConfig,
 };
 use logfwd_io::checkpoint::{
     CheckpointStore, FileCheckpointStore, SourceCheckpoint, default_data_dir,
@@ -1519,7 +1519,8 @@ fn build_input_state(
         }
         InputType::Generator => {
             use logfwd_io::generator::{
-                GeneratorComplexity, GeneratorConfig, GeneratorInput, GeneratorProfile,
+                GeneratorAttributeValue, GeneratorComplexity, GeneratorConfig,
+                GeneratorGeneratedField, GeneratorInput, GeneratorProfile,
             };
             let generator_cfg = cfg.generator.as_ref();
             let events_per_sec = match (
@@ -1544,13 +1545,41 @@ fn build_input_state(
                     _ => GeneratorComplexity::Simple,
                 },
                 profile: match generator_cfg.and_then(|c| c.profile.clone()) {
-                    Some(GeneratorProfileConfig::Benchmark) => GeneratorProfile::Benchmark,
+                    Some(GeneratorProfileConfig::Record) => GeneratorProfile::Record,
                     _ => GeneratorProfile::Logs,
                 },
-                benchmark_id: generator_cfg.and_then(|c| c.benchmark_id.clone()),
-                pod_name: generator_cfg.and_then(|c| c.pod_name.clone()),
-                stream_id: generator_cfg.and_then(|c| c.stream_id.clone()),
-                service: generator_cfg.and_then(|c| c.service.clone()),
+                attributes: generator_cfg
+                    .map(|c| {
+                        c.attributes
+                            .iter()
+                            .map(|(k, v)| {
+                                let value = match v {
+                                    GeneratorAttributeValueConfig::String(v) => {
+                                        GeneratorAttributeValue::String(v.clone())
+                                    }
+                                    GeneratorAttributeValueConfig::Integer(v) => {
+                                        GeneratorAttributeValue::Integer(*v)
+                                    }
+                                    GeneratorAttributeValueConfig::Float(v) => {
+                                        GeneratorAttributeValue::Float(*v)
+                                    }
+                                    GeneratorAttributeValueConfig::Bool(v) => {
+                                        GeneratorAttributeValue::Bool(*v)
+                                    }
+                                };
+                                (k.clone(), value)
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                sequence: generator_cfg.and_then(|c| {
+                    c.sequence.as_ref().map(|seq| GeneratorGeneratedField {
+                        field: seq.field.clone(),
+                        start: seq.start.unwrap_or(1),
+                    })
+                }),
+                event_created_unix_nano_field: generator_cfg
+                    .and_then(|c| c.event_created_unix_nano_field.clone()),
                 ..Default::default()
             };
             let format = cfg.format.clone().unwrap_or(Format::Json);
@@ -1785,17 +1814,21 @@ pipelines:
     }
 
     #[test]
-    fn test_pipeline_from_config_generator_benchmark_profile() {
+    fn test_pipeline_from_config_generator_record_profile() {
         let yaml = r#"
 input:
   type: generator
   generator:
     events_per_sec: 25000
     batch_size: 1024
-    profile: benchmark
-    benchmark_id: run-123
-    pod_name: emitter-0
-    stream_id: emitter-0
+    profile: record
+    attributes:
+      benchmark_id: run-123
+      pod_name: emitter-0
+      stream_id: emitter-0
+    sequence:
+      field: seq
+    event_created_unix_nano_field: event_created_unix_nano
 output:
   type: null
 "#;

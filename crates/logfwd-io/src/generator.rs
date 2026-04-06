@@ -3,6 +3,7 @@
 //! Produces JSON log lines at a configurable rate. Used for benchmarking
 //! and testing pipelines without external data sources.
 
+use std::collections::HashMap;
 use std::io;
 use std::io::Write;
 
@@ -24,8 +25,23 @@ pub enum GeneratorProfile {
     /// Synthetic request-like JSON logs.
     #[default]
     Logs,
-    /// Deterministic benchmark envelope with stable stream/event identity.
-    Benchmark,
+    /// Flat JSON records built from static attributes and generated fields.
+    Record,
+}
+
+/// Monotonic generated field configuration.
+pub struct GeneratorGeneratedField {
+    pub field: String,
+    pub start: u64,
+}
+
+/// Static scalar attribute value written into generated `record` rows.
+#[derive(Debug, Clone, PartialEq)]
+pub enum GeneratorAttributeValue {
+    String(String),
+    Integer(i64),
+    Float(f64),
+    Bool(bool),
 }
 
 /// Configuration for the generator input.
@@ -40,14 +56,12 @@ pub struct GeneratorConfig {
     pub complexity: GeneratorComplexity,
     /// Which event shape to emit.
     pub profile: GeneratorProfile,
-    /// Benchmark run identifier included on every `benchmark` profile row.
-    pub benchmark_id: Option<String>,
-    /// Source identity included on `benchmark` rows.
-    pub pod_name: Option<String>,
-    /// Stable stream identity used for benchmark `event_id` generation.
-    pub stream_id: Option<String>,
-    /// Service name for `benchmark` rows. Defaults to `bench-emitter`.
-    pub service: Option<String>,
+    /// Static scalar attributes written into generated rows.
+    pub attributes: HashMap<String, GeneratorAttributeValue>,
+    /// Monotonic sequence field for `record` rows.
+    pub sequence: Option<GeneratorGeneratedField>,
+    /// Source-created timestamp field for `record` rows.
+    pub event_created_unix_nano_field: Option<String>,
 }
 
 impl Default for GeneratorConfig {
@@ -58,10 +72,9 @@ impl Default for GeneratorConfig {
             total_events: 0,
             complexity: GeneratorComplexity::default(),
             profile: GeneratorProfile::default(),
-            benchmark_id: None,
-            pod_name: None,
-            stream_id: None,
-            service: None,
+            attributes: HashMap::new(),
+            sequence: None,
+            event_created_unix_nano_field: None,
         }
     }
 }
@@ -74,7 +87,7 @@ pub struct GeneratorInput {
     buf: Vec<u8>,
     done: bool,
     last_batch: std::time::Instant,
-    benchmark_fields: BenchmarkFields,
+    record_fields: RecordFields,
 }
 
 const LEVELS: [&str; 4] = ["INFO", "DEBUG", "WARN", "ERROR"];
@@ -89,30 +102,37 @@ const METHODS: [&str; 4] = ["GET", "POST", "PUT", "DELETE"];
 const SERVICES: [&str; 3] = ["myapp", "gateway", "auth-svc"];
 
 #[derive(Debug, Clone)]
-struct BenchmarkFields {
-    benchmark_id: Option<String>,
-    pod_name: String,
-    stream_id: String,
-    service: String,
+struct RecordFields {
+    attributes: Vec<Vec<u8>>,
+    sequence: Option<GeneratorGeneratedFieldState>,
+    event_created_unix_nano_field: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct GeneratorGeneratedFieldState {
+    field: String,
+    start: u64,
 }
 
 impl GeneratorInput {
     pub fn new(name: impl Into<String>, config: GeneratorConfig) -> Self {
         let name = name.into();
-        let stream_id = config
-            .stream_id
-            .clone()
-            .or_else(|| config.pod_name.clone())
-            .unwrap_or_else(|| name.clone());
-        let pod_name = config.pod_name.clone().unwrap_or_else(|| stream_id.clone());
-        let benchmark_fields = BenchmarkFields {
-            benchmark_id: config.benchmark_id.clone(),
-            pod_name,
-            stream_id,
-            service: config
-                .service
-                .clone()
-                .unwrap_or_else(|| "bench-emitter".to_string()),
+        let mut attributes: Vec<(&String, &GeneratorAttributeValue)> =
+            config.attributes.iter().collect();
+        attributes.sort_by(|a, b| a.0.cmp(b.0));
+        let record_fields = RecordFields {
+            attributes: attributes
+                .into_iter()
+                .map(|(key, value)| encode_static_field(key, value))
+                .collect(),
+            sequence: config
+                .sequence
+                .as_ref()
+                .map(|seq| GeneratorGeneratedFieldState {
+                    field: seq.field.clone(),
+                    start: seq.start,
+                }),
+            event_created_unix_nano_field: config.event_created_unix_nano_field.clone(),
         };
         Self {
             name,
@@ -120,7 +140,7 @@ impl GeneratorInput {
             config,
             counter: 0,
             done: false,
-            benchmark_fields,
+            record_fields,
             // Use a time far in the past so the first poll() always succeeds.
             last_batch: std::time::Instant::now()
                 .checked_sub(std::time::Duration::from_secs(3600))
@@ -150,7 +170,7 @@ impl GeneratorInput {
     fn write_event(&mut self) {
         match self.config.profile {
             GeneratorProfile::Logs => self.write_logs_event(),
-            GeneratorProfile::Benchmark => self.write_benchmark_event(),
+            GeneratorProfile::Record => self.write_record_event(),
         }
     }
 
@@ -211,86 +231,26 @@ impl GeneratorInput {
         }
     }
 
-    fn write_benchmark_event(&mut self) {
-        let i = self.counter as usize;
-        let seq = self.counter + 1;
-        let level = LEVELS[i % LEVELS.len()];
-        let status = if level == "ERROR" { 500 } else { 200 };
-        let duration_ms = (i % 250) + 1;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default();
-        let emit_ts_unix_nano = now.as_nanos();
-        let secs = now.as_secs();
-        let nanos = now.subsec_nanos();
-
+    fn write_record_event(&mut self) {
         self.buf.push(b'{');
         let mut first = true;
-        if let Some(benchmark_id) = &self.benchmark_fields.benchmark_id {
-            write_json_string_field(&mut self.buf, "benchmark_id", benchmark_id, &mut first);
+        for encoded_field in &self.record_fields.attributes {
+            if !first {
+                self.buf.push(b',');
+            }
+            first = false;
+            self.buf.extend_from_slice(encoded_field);
         }
-        write_json_string_field(
-            &mut self.buf,
-            "pod_name",
-            &self.benchmark_fields.pod_name,
-            &mut first,
-        );
-        write_json_string_field(
-            &mut self.buf,
-            "stream_id",
-            &self.benchmark_fields.stream_id,
-            &mut first,
-        );
-
-        if !first {
-            self.buf.push(b',');
+        if let Some(sequence) = &self.record_fields.sequence {
+            let value = sequence.start.saturating_add(self.counter);
+            write_json_u64_field(&mut self.buf, &sequence.field, value, &mut first);
         }
-        first = false;
-        write_json_key(&mut self.buf, "event_id");
-        self.buf.push(b':');
-        self.buf.push(b'"');
-        write_json_escaped_string_contents(&mut self.buf, &self.benchmark_fields.stream_id);
-        let _ = write!(&mut self.buf, ":{seq:08}");
-        self.buf.push(b'"');
-
-        write_json_u64_field(&mut self.buf, "seq", seq, &mut first);
-        write_json_u128_field(
-            &mut self.buf,
-            "emit_ts_unix_nano",
-            emit_ts_unix_nano,
-            &mut first,
-        );
-
-        if !first {
-            self.buf.push(b',');
+        if let Some(field) = &self.record_fields.event_created_unix_nano_field {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default();
+            write_json_u128_field(&mut self.buf, field, now.as_nanos(), &mut first);
         }
-        first = false;
-        write_json_key(&mut self.buf, "timestamp");
-        self.buf.push(b':');
-        self.buf.push(b'"');
-        let _ = write_rfc3339_like_utc(&mut self.buf, secs, nanos);
-        self.buf.push(b'"');
-
-        write_json_string_field(&mut self.buf, "level", level, &mut first);
-
-        if !first {
-            self.buf.push(b',');
-        }
-        first = false;
-        write_json_key(&mut self.buf, "message");
-        self.buf.push(b':');
-        self.buf.push(b'"');
-        let _ = write!(&mut self.buf, "bench event {seq}");
-        self.buf.push(b'"');
-
-        write_json_u64_field(&mut self.buf, "status", status, &mut first);
-        write_json_u64_field(&mut self.buf, "duration_ms", duration_ms as u64, &mut first);
-        write_json_string_field(
-            &mut self.buf,
-            "service",
-            &self.benchmark_fields.service,
-            &mut first,
-        );
         self.buf.push(b'}');
     }
 }
@@ -333,16 +293,6 @@ impl InputSource for GeneratorInput {
     fn name(&self) -> &str {
         &self.name
     }
-}
-
-fn write_json_string_field(out: &mut Vec<u8>, key: &str, value: &str, first: &mut bool) {
-    if !*first {
-        out.push(b',');
-    }
-    *first = false;
-    write_json_key(out, key);
-    out.push(b':');
-    write_json_quoted_string(out, value);
 }
 
 fn write_json_u64_field(out: &mut Vec<u8>, key: &str, value: u64, first: &mut bool) {
@@ -392,28 +342,27 @@ fn write_json_escaped_string_contents(out: &mut Vec<u8>, value: &str) {
     }
 }
 
-fn write_rfc3339_like_utc(out: &mut Vec<u8>, secs: u64, nanos: u32) -> io::Result<()> {
-    // Fast, dependency-light UTC formatting good enough for synthetic rows.
-    let total_days = secs / 86_400;
-    let seconds_of_day = secs % 86_400;
-    let hour = seconds_of_day / 3600;
-    let minute = (seconds_of_day % 3600) / 60;
-    let second = seconds_of_day % 60;
-    let z = total_days as i64 + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = mp + if mp < 10 { 3 } else { -9 };
-    let year = y + if month <= 2 { 1 } else { 0 };
-    write!(
-        out,
-        "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{:09}Z",
-        nanos
-    )
+fn encode_static_field(key: &str, value: &GeneratorAttributeValue) -> Vec<u8> {
+    let mut out = Vec::new();
+    write_json_key(&mut out, key);
+    out.push(b':');
+    match value {
+        GeneratorAttributeValue::String(value) => {
+            out.push(b'"');
+            write_json_escaped_string_contents(&mut out, value);
+            out.push(b'"');
+        }
+        GeneratorAttributeValue::Integer(value) => {
+            let _ = write!(&mut out, "{value}");
+        }
+        GeneratorAttributeValue::Float(value) => {
+            let _ = write!(&mut out, "{value}");
+        }
+        GeneratorAttributeValue::Bool(value) => {
+            out.extend_from_slice(if *value { b"true" } else { b"false" });
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -678,17 +627,38 @@ mod tests {
     }
 
     #[test]
-    fn benchmark_profile_emits_stable_identity_fields() {
+    fn record_profile_emits_attributes_and_generated_fields() {
         let mut input = GeneratorInput::new(
             "bench",
             GeneratorConfig {
                 batch_size: 3,
                 total_events: 3,
-                profile: GeneratorProfile::Benchmark,
-                benchmark_id: Some("run-123".to_string()),
-                pod_name: Some("emitter-0".to_string()),
-                stream_id: Some("emitter-0".to_string()),
-                service: Some("bench-emitter".to_string()),
+                profile: GeneratorProfile::Record,
+                attributes: HashMap::from([
+                    (
+                        "benchmark_id".to_string(),
+                        GeneratorAttributeValue::String("run-123".to_string()),
+                    ),
+                    (
+                        "pod_name".to_string(),
+                        GeneratorAttributeValue::String("emitter-0".to_string()),
+                    ),
+                    (
+                        "stream_id".to_string(),
+                        GeneratorAttributeValue::String("emitter-0".to_string()),
+                    ),
+                    (
+                        "service".to_string(),
+                        GeneratorAttributeValue::String("bench-emitter".to_string()),
+                    ),
+                    ("status".to_string(), GeneratorAttributeValue::Integer(200)),
+                    ("sampled".to_string(), GeneratorAttributeValue::Bool(true)),
+                ]),
+                sequence: Some(GeneratorGeneratedField {
+                    field: "seq".to_string(),
+                    start: 1,
+                }),
+                event_created_unix_nano_field: Some("event_created_unix_nano".to_string()),
                 ..Default::default()
             },
         );
@@ -705,21 +675,25 @@ mod tests {
         assert_eq!(first["benchmark_id"], "run-123");
         assert_eq!(first["pod_name"], "emitter-0");
         assert_eq!(first["stream_id"], "emitter-0");
-        assert_eq!(first["event_id"], "emitter-0:00000001");
         assert_eq!(first["seq"], 1);
         assert_eq!(first["service"], "bench-emitter");
-        assert!(first.get("emit_ts_unix_nano").is_some());
-        assert!(first.get("timestamp").is_some());
+        assert_eq!(first["status"], 200);
+        assert_eq!(first["sampled"], true);
+        assert!(first.get("event_created_unix_nano").is_some());
     }
 
     #[test]
-    fn benchmark_profile_defaults_stream_identity_from_input_name() {
+    fn record_profile_supports_custom_sequence_start() {
         let mut input = GeneratorInput::new(
             "bench-input",
             GeneratorConfig {
-                batch_size: 1,
-                total_events: 1,
-                profile: GeneratorProfile::Benchmark,
+                batch_size: 2,
+                total_events: 2,
+                profile: GeneratorProfile::Record,
+                sequence: Some(GeneratorGeneratedField {
+                    field: "seq".to_string(),
+                    start: 10,
+                }),
                 ..Default::default()
             },
         );
@@ -728,26 +702,43 @@ mod tests {
         let InputEvent::Data { bytes, .. } = &events[0] else {
             panic!("expected Data event");
         };
-        let row: serde_json::Value =
-            serde_json::from_slice(bytes.split(|b| *b == b'\n').next().unwrap()).unwrap();
-        assert_eq!(row["pod_name"], "bench-input");
-        assert_eq!(row["stream_id"], "bench-input");
-        assert_eq!(row["event_id"], "bench-input:00000001");
-        assert_eq!(row["service"], "bench-emitter");
+        let rows: Vec<serde_json::Value> = bytes
+            .split(|b| *b == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_slice(line).unwrap())
+            .collect();
+        assert_eq!(rows[0]["seq"], 10);
+        assert_eq!(rows[1]["seq"], 11);
     }
 
     #[test]
-    fn benchmark_profile_escapes_string_fields() {
+    fn record_profile_escapes_string_fields() {
         let mut input = GeneratorInput::new(
             "bench",
             GeneratorConfig {
                 batch_size: 1,
                 total_events: 1,
-                profile: GeneratorProfile::Benchmark,
-                benchmark_id: Some("run-\"quoted\"\nline".to_string()),
-                pod_name: Some("pod-\\name".to_string()),
-                stream_id: Some("stream-\"id\"".to_string()),
-                service: Some("svc\tname".to_string()),
+                profile: GeneratorProfile::Record,
+                attributes: HashMap::from([
+                    (
+                        "benchmark_id".to_string(),
+                        GeneratorAttributeValue::String("run-\"quoted\"\nline".to_string()),
+                    ),
+                    (
+                        "pod_name".to_string(),
+                        GeneratorAttributeValue::String("pod-\\name".to_string()),
+                    ),
+                    (
+                        "stream_id".to_string(),
+                        GeneratorAttributeValue::String("stream-\"id\"".to_string()),
+                    ),
+                    (
+                        "service".to_string(),
+                        GeneratorAttributeValue::String("svc\tname".to_string()),
+                    ),
+                    ("ratio".to_string(), GeneratorAttributeValue::Float(1.25)),
+                    ("sampled".to_string(), GeneratorAttributeValue::Bool(false)),
+                ]),
                 ..Default::default()
             },
         );
@@ -761,24 +752,8 @@ mod tests {
         assert_eq!(row["benchmark_id"], "run-\"quoted\"\nline");
         assert_eq!(row["pod_name"], "pod-\\name");
         assert_eq!(row["stream_id"], "stream-\"id\"");
-        assert_eq!(row["event_id"], "stream-\"id\":00000001");
         assert_eq!(row["service"], "svc\tname");
-    }
-
-    #[test]
-    fn rfc3339_like_utc_formats_known_instants() {
-        let mut out = Vec::new();
-        write_rfc3339_like_utc(&mut out, 0, 1).unwrap();
-        assert_eq!(
-            std::str::from_utf8(&out).unwrap(),
-            "1970-01-01T00:00:00.000000001Z"
-        );
-
-        out.clear();
-        write_rfc3339_like_utc(&mut out, 1_709_251_200, 123_456_789).unwrap();
-        assert_eq!(
-            std::str::from_utf8(&out).unwrap(),
-            "2024-03-01T00:00:00.123456789Z"
-        );
+        assert_eq!(row["ratio"], 1.25);
+        assert_eq!(row["sampled"], false);
     }
 }
