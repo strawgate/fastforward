@@ -889,7 +889,8 @@ mod tests {
         let mut entries: Vec<LokiEntry> = stream_map.values().flatten().cloned().collect();
         entries.sort_by_key(|(ts, _)| *ts);
 
-        // After sorting, the valid timestamp (100) comes first, then the fallback observed_time_ns (12345).
+        // Sorted by timestamp: the non-null row (100) comes before the
+        // null row's fallback value (observed_time_ns = 12345).
         assert_eq!(entries[0].0, 100, "Valid timestamp should be preserved");
         assert_eq!(
             entries[1].0, metadata.observed_time_ns,
