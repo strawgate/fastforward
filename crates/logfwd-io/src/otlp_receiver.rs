@@ -28,6 +28,11 @@ const MAX_BODY_SIZE: usize = 10 * 1024 * 1024;
 /// Bounded channel capacity — limits memory when the pipeline falls behind.
 const CHANNEL_BOUND: usize = 4096;
 
+/// How long the receiver thread waits for the next request before checking
+/// the `is_running` flag.  Shorter values speed up shutdown; longer values
+/// reduce CPU overhead.  100 ms is a good balance.
+const SHUTDOWN_POLL_TIMEOUT: Duration = Duration::from_millis(100);
+
 /// OTLP receiver that listens for log exports via HTTP.
 pub struct OtlpReceiverInput {
     name: String,
@@ -72,7 +77,7 @@ impl OtlpReceiverInput {
             .name("otlp-receiver".into())
             .spawn(move || {
                 while is_running_clone.load(Ordering::Relaxed) {
-                    let mut request = match server_clone.recv_timeout(Duration::from_millis(100)) {
+                    let mut request = match server_clone.recv_timeout(SHUTDOWN_POLL_TIMEOUT) {
                         Ok(Some(req)) => req,
                         Ok(None) | Err(_) => continue,
                     };
@@ -1890,8 +1895,8 @@ mod tests {
     #[test]
     fn receiver_shuts_down_cleanly_on_drop() {
         // Create an input receiver binding to port 0 (OS assigns port).
-        let receiver = OtlpReceiverInput::new("test-drop", "127.0.0.1:0")
-            .expect("should bind successfully");
+        let receiver =
+            OtlpReceiverInput::new("test-drop", "127.0.0.1:0").expect("should bind successfully");
         let local_addr = receiver.local_addr();
 
         // Drop the receiver. This should trigger `Drop`, set `is_running` to false,
