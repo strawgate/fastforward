@@ -735,16 +735,18 @@ mod verification {
     /// Prove write_json_line with prefix correctly injects after opening brace,
     /// and wraps non-JSON messages as {"_raw":"..."}.
     ///
-    /// Input: 4-byte msg + 4-byte prefix = 8 symbolic bytes. Reduced from 8+4
-    /// to keep symex under CI timeout while still covering all escape paths.
+    /// Input: 2-byte msg + 2-byte prefix = 4 symbolic bytes. Reduced from 8+4→4+4→2+2
+    /// to keep SAT solving under CI timeout (4+4 bytes caused runner cancellation
+    /// during CBMC solving). 2+2 bytes still covers both JSON/non-JSON branches,
+    /// the prefix injection property, and all escape arms in the non-JSON path.
     /// Vec::with_capacity pre-allocates to avoid realloc VCC explosion.
     #[kani::proof]
-    #[kani::unwind(6)] // 4 iterations + 2 margin
-    #[kani::solver(kissat)] // json_escape_bytes loop × 8 symbolic bytes: kissat outperforms cadical
+    #[kani::unwind(4)] // 2 iterations + 2 margin
+    #[kani::solver(kissat)] // json_escape_bytes loop × 4 symbolic bytes: kissat outperforms cadical
     fn verify_write_json_line_prefix_injection() {
-        let msg: [u8; 4] = kani::any();
-        let prefix: [u8; 4] = kani::any();
-        // Pre-allocate: { (1) + prefix (4) + msg[1..] (3) + \n (1) = 9 bytes JSON path;
+        let msg: [u8; 2] = kani::any();
+        let prefix: [u8; 2] = kani::any();
+        // Pre-allocate: { (1) + prefix (2) + msg[1..] (1) + \n (1) = 5 bytes JSON path;
         // or {"_raw":"..."} path up to 64 bytes. Capacity 64 avoids all reallocs.
         let mut out = Vec::with_capacity(64);
 
@@ -757,10 +759,10 @@ mod verification {
         if msg[0] == b'{' {
             // Output should be: { + prefix + msg[1..] + \n
             assert_eq!(out[0], b'{');
-            assert_eq!(&out[1..5], &prefix);
-            assert_eq!(&out[5..8], &msg[1..]);
-            assert_eq!(out[8], b'\n');
-            assert_eq!(out.len(), 9);
+            assert_eq!(&out[1..3], &prefix);
+            assert_eq!(out[3], msg[1]);
+            assert_eq!(out[4], b'\n');
+            assert_eq!(out.len(), 5);
         } else {
             // Non-JSON: wrapped as {"_raw":"..."}\n — ends with \n
             assert_eq!(out[out.len() - 1], b'\n');
