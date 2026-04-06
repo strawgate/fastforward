@@ -1005,6 +1005,7 @@ mod verification {
     /// Prove parse_severity ONLY returns non-Unspecified for the 6
     /// standard level strings (any case). No false positives.
     #[kani::proof]
+    #[kani::unwind(6)] // eq_ignore_case_match: Zip over ≤5-byte targets + 1 terminator
     fn verify_parse_severity_no_false_positives() {
         let bytes: [u8; 8] = kani::any();
         let len: usize = kani::any_where(|&l: &usize| l <= 8);
@@ -1260,6 +1261,7 @@ mod verification {
     /// that only valid severity strings produce a match. This proof is kept
     /// as a structural consistency check between eq_ignore_case_4 and the oracle.
     #[kani::proof]
+    #[kani::unwind(5)] // eq_ignore_case_match: Zip over 4-byte slice + 1 terminator
     fn verify_eq_ignore_case_4_no_false_positives_info() {
         let input: [u8; 4] = kani::any();
         let target = b"INFO";
@@ -1275,6 +1277,7 @@ mod verification {
     /// verify_parse_severity_no_false_positives which exhaustively validates
     /// that parse_severity only matches valid severity level strings.
     #[kani::proof]
+    #[kani::unwind(6)] // eq_ignore_case_match: Zip over 5-byte slice + 1 terminator
     fn verify_eq_ignore_case_5_no_false_positives_error() {
         let input: [u8; 5] = kani::any();
         let target = b"ERROR";
