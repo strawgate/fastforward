@@ -365,13 +365,20 @@ If an input has `sql:`, it runs **before** the pipeline-level `transform:`. If a
 
 ### Current state: there is no step compiler
 
-Today's pipeline is a fixed linear chain:
+Today's pipeline is a fixed linear chain (as of the original research; a
+post-transform `Processor` chain was added in PR #1402):
 
 ```text
-Inputs → Scanner → SqlTransform → Outputs
+Inputs → Scanner → SqlTransform → [Processors...] → Outputs
 ```
 
-There is no step chain, no step compiler, no step types. The `SqlTransform` **is** the entire transform layer. All filtering, projection, renaming, enrichment joins, and computed columns are expressed as SQL.
+The `SqlTransform` **is** the primary transform layer for user-visible SQL.
+The post-SQL `Processor` chain is reserved for internal pipeline stages
+(e.g. stateless sampling or enrichment steps) and is currently stateless-only
+(stateful processors require deferred-ACK checkpointing; see #1404).
+
+Historically (before PR #1402), there was no step chain, no step compiler, and
+no step types; SQL was the only transform.
 
 ### If SQL moves to inputs, what does the pipeline-level transform contain?
 

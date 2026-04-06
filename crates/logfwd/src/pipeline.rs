@@ -421,7 +421,18 @@ impl Pipeline {
     }
 
     /// Add a post-transform processor to the chain.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `processor.is_stateful()` returns `true`. Stateful processors
+    /// require deferred-ACK checkpointing support that is not yet implemented
+    /// (tracked in #1404). Register only stateless processors until then.
     pub fn with_processor(mut self, processor: Box<dyn Processor>) -> Self {
+        assert!(
+            !processor.is_stateful(),
+            "stateful processors are not yet supported: checkpointing path is incomplete \
+             (see #1404). Register only stateless processors."
+        );
         self.processors.push(processor);
         self
     }
@@ -429,7 +440,19 @@ impl Pipeline {
     /// Append a chain of post-transform processors to any already registered via
     /// `with_processor`.  Calling `with_processor(a).with_processors(vec![b, c])`
     /// produces the three-stage chain `[a, b, c]`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any processor in `processors` returns `is_stateful() == true`.
+    /// See [`with_processor`](Self::with_processor) for details.
     pub fn with_processors(mut self, processors: Vec<Box<dyn Processor>>) -> Self {
+        for p in &processors {
+            assert!(
+                !p.is_stateful(),
+                "stateful processors are not yet supported: checkpointing path is incomplete \
+                 (see #1404). Register only stateless processors."
+            );
+        }
         self.processors.extend(processors);
         self
     }
