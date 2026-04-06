@@ -373,14 +373,14 @@ fn skip_nested(buf: &[u8], mut pos: usize, end: usize, blocks: &StoredBitmasks<'
                 let opener = if prev_depth > MAX_TRACKED_DEPTH {
                     match overflow_stack.as_mut().and_then(alloc::vec::Vec::pop) {
                         Some(opener) => opener,
-                        None => b'{', // fallback to continue gracefully
+                        None => return pos, // missing opener
                     }
                 } else {
                     opener_stack[depth as usize]
                 };
                 let expected = if opener == b'{' { b'}' } else { b']' };
                 if b != expected {
-                    // mismatch — handle gracefully instead of bailing to line end
+                    return pos; // mismatch
                 }
                 pos += 1;
                 if depth == 0 {

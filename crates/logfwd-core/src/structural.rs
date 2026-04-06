@@ -390,7 +390,7 @@ impl StructuralIndex {
                             b']'
                         };
                         if b != expected_close {
-                            // mismatch — handle gracefully instead of bailing to line end
+                            return pos; // mismatch — stop and let caller handle
                         }
                     }
                     pos += 1;
@@ -882,8 +882,12 @@ mod tests {
     #[test]
     fn test_skip_nested_bug_repro() {
         let mut buf = alloc::string::String::new();
-        for _ in 0..33 { buf.push('{'); }
-        for _ in 0..33 { buf.push('}'); }
+        for _ in 0..33 {
+            buf.push('{');
+        }
+        for _ in 0..33 {
+            buf.push('}');
+        }
         let buf = buf.as_bytes();
         let (idx, _) = StructuralIndex::new(buf);
         let result = idx.skip_nested(buf, 0, buf.len());
@@ -893,8 +897,12 @@ mod tests {
     #[test]
     fn test_skip_valid_json() {
         let mut buf = alloc::string::String::new();
-        for _ in 0..100 { buf.push('{'); }
-        for _ in 0..100 { buf.push('}'); }
+        for _ in 0..100 {
+            buf.push('{');
+        }
+        for _ in 0..100 {
+            buf.push('}');
+        }
         buf.push_str("after");
         let buf = buf.as_bytes();
         let (idx, _) = StructuralIndex::new(buf);
@@ -906,8 +914,12 @@ mod tests {
     fn test_depths() {
         for depth in 30..40 {
             let mut buf = alloc::string::String::new();
-            for _ in 0..depth { buf.push('{'); }
-            for _ in 0..depth { buf.push('}'); }
+            for _ in 0..depth {
+                buf.push('{');
+            }
+            for _ in 0..depth {
+                buf.push('}');
+            }
             buf.push_str("after");
             let buf = buf.as_bytes();
             let (idx, _) = StructuralIndex::new(buf);
@@ -919,8 +931,12 @@ mod tests {
     #[test]
     fn test_skip_nested_mismatch_at_depth_32() {
         let mut buf = alloc::string::String::new();
-        for _ in 0..32 { buf.push('{'); }
-        for _ in 0..32 { buf.push('}'); }
+        for _ in 0..32 {
+            buf.push('{');
+        }
+        for _ in 0..32 {
+            buf.push('}');
+        }
         buf.push_str("after");
         let buf = buf.as_bytes();
         let (idx, _) = StructuralIndex::new(buf);
@@ -932,8 +948,12 @@ mod tests {
     fn test_skip_nested_bug_repro_2() {
         let mut buf = alloc::string::String::new();
         buf.push('{');
-        for _ in 0..33 { buf.push('['); }
-        for _ in 0..33 { buf.push(']'); }
+        for _ in 0..33 {
+            buf.push('[');
+        }
+        for _ in 0..33 {
+            buf.push(']');
+        }
         buf.push('}');
         let buf = buf.as_bytes();
         let (idx, _) = StructuralIndex::new(buf);
