@@ -780,7 +780,8 @@ mod verification {
     /// 2+2 still covers:
     ///   - msg[0] drives JSON vs non-JSON branch
     ///   - msg[1] (non-JSON: through json_escape_bytes; JSON: verbatim copy)
-    ///   - prefix is always written verbatim - 2 bytes suffice to verify injection
+    ///   - prefix injection, including the empty-object path that strips a
+    ///     trailing comma when the JSON payload is just "{}"
     /// Vec::with_capacity(64) pre-allocates to avoid realloc VCC explosion.
     #[kani::proof]
     #[kani::unwind(4)] // 2 iterations + 2 margin
@@ -814,14 +815,22 @@ mod verification {
         write_json_line(&msg, Some(&prefix), &mut out);
 
         if msg[0] == b'{' {
-            // Output should be: { + prefix + msg[1..] + \n
-            // Compare byte-by-byte to avoid memcmp unwind assertion inside Kani.
+            let strips_trailing_comma = msg[1] == b'}' && prefix[1] == b',';
+
+            // Output should be: { + prefix + msg[1..] + \n, except that the
+            // empty-object path strips a trailing comma from prefix.
             assert_eq!(out[0], b'{');
             assert_eq!(out[1], prefix[0]);
-            assert_eq!(out[2], prefix[1]);
-            assert_eq!(out[3], msg[1]);
-            assert_eq!(out[4], b'\n');
-            assert_eq!(out.len(), 5);
+            if strips_trailing_comma {
+                assert_eq!(out[2], msg[1]);
+                assert_eq!(out[3], b'\n');
+                assert_eq!(out.len(), 4);
+            } else {
+                assert_eq!(out[2], prefix[1]);
+                assert_eq!(out[3], msg[1]);
+                assert_eq!(out[4], b'\n');
+                assert_eq!(out.len(), 5);
+            }
         } else {
             // Non-JSON: wrapped as {"_raw":"..."}\n — ends with \n
             assert_eq!(out[out.len() - 1], b'\n');

@@ -336,6 +336,9 @@ fn skip_nested(buf: &[u8], mut pos: usize, end: usize, blocks: &StoredBitmasks<'
     const MAX_TRACKED_DEPTH: u32 = 32;
     let mut depth: u32 = 0;
     let mut opener_stack = [0u8; MAX_TRACKED_DEPTH as usize];
+    // Overflow stack is allocated only for pathological nesting that exceeds
+    // MAX_TRACKED_DEPTH so the common path stays allocation-free.
+    let mut overflow_stack: Option<alloc::vec::Vec<u8>> = None;
 
     while pos < end {
         let block = pos >> 6;
@@ -351,6 +354,10 @@ fn skip_nested(buf: &[u8], mut pos: usize, end: usize, blocks: &StoredBitmasks<'
             b'{' | b'[' if (blocks.open_brace[block] | blocks.open_bracket[block]) & mask != 0 => {
                 if depth < MAX_TRACKED_DEPTH {
                     opener_stack[depth as usize] = b;
+                } else {
+                    overflow_stack
+                        .get_or_insert_with(alloc::vec::Vec::new)
+                        .push(b);
                 }
                 depth += 1;
                 pos += 1;
@@ -361,16 +368,19 @@ fn skip_nested(buf: &[u8], mut pos: usize, end: usize, blocks: &StoredBitmasks<'
                 if depth == 0 {
                     return pos;
                 }
+                let prev_depth = depth;
                 depth -= 1;
-                if depth < MAX_TRACKED_DEPTH {
-                    let expected = if opener_stack[depth as usize] == b'{' {
-                        b'}'
-                    } else {
-                        b']'
-                    };
-                    if b != expected {
-                        return end; // mismatch
+                let opener = if prev_depth > MAX_TRACKED_DEPTH {
+                    match overflow_stack.as_mut().and_then(|stack| stack.pop()) {
+                        Some(opener) => opener,
+                        None => return end,
                     }
+                } else {
+                    opener_stack[depth as usize]
+                };
+                let expected = if opener == b'{' { b'}' } else { b']' };
+                if b != expected {
+                    return end; // mismatch
                 }
                 pos += 1;
                 if depth == 0 {
@@ -564,6 +574,7 @@ mod tests {
     use crate::scan_config::ScanConfig;
     use alloc::string::String;
     use alloc::vec::Vec;
+    use proptest::prelude::*;
 
     /// Minimal ScanBuilder for testing — captures fields as strings.
     struct TestBuilder {
@@ -994,6 +1005,75 @@ mod tests {
         assert_eq!(builder.rows.len(), 1);
         let row = &builder.rows[0];
         assert!(row.iter().any(|(k, v)| k == "b" && v == "int:2"));
+    }
+
+    #[test]
+    fn deeply_nested_mismatch_rejects_trailing_fields() {
+        let mut buf = String::from("{\"a\":");
+        for _ in 0..33 {
+            buf.push('[');
+        }
+        buf.push_str("{1]}");
+        for _ in 0..33 {
+            buf.push(']');
+        }
+        buf.push_str(",\"b\":2}");
+
+        let config = ScanConfig::default();
+        let mut builder = TestBuilder::new();
+        scan_streaming(buf.as_bytes(), &config, &mut builder);
+
+        assert_eq!(builder.rows.len(), 1);
+        let row = &builder.rows[0];
+        assert!(
+            !row.iter().any(|(k, _)| k == "b"),
+            "malformed deeply nested value must not leak trailing sibling fields"
+        );
+    }
+
+    fn alternating_nested_value(extra_depth: usize) -> String {
+        let mut s = String::new();
+        let total_depth = 32 + extra_depth;
+        for depth in 0..total_depth {
+            if depth % 2 == 0 {
+                s.push('{');
+                s.push_str("\"x\":");
+            } else {
+                s.push('[');
+            }
+        }
+        s.push('1');
+        for depth in (0..total_depth).rev() {
+            if depth % 2 == 0 {
+                s.push('}');
+            } else {
+                s.push(']');
+            }
+        }
+        s
+    }
+
+    proptest! {
+        #[test]
+        fn deep_nesting_preserves_sibling_fields(extra_depth in 1usize..8, nested_first in any::<bool>()) {
+            let nested = alternating_nested_value(extra_depth);
+            let buf = if nested_first {
+                alloc::format!("{{\"a\":{nested},\"b\":2}}")
+            } else {
+                alloc::format!("{{\"b\":2,\"a\":{nested}}}")
+            };
+
+            let config = ScanConfig::default();
+            let mut builder = TestBuilder::new();
+            scan_streaming(buf.as_bytes(), &config, &mut builder);
+
+            prop_assert_eq!(builder.rows.len(), 1);
+            let row = &builder.rows[0];
+            prop_assert!(
+                row.iter().any(|(k, v)| k == "b" && v == "int:2"),
+                "valid deeply nested JSON should preserve sibling fields past MAX_TRACKED_DEPTH"
+            );
+        }
     }
 }
 
