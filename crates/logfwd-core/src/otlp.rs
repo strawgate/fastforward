@@ -467,8 +467,10 @@ fn parse_2digits(s: &[u8], off: usize) -> u8 {
 
 /// Days from 1970-01-01 to the given civil date. Algorithm from Howard Hinnant.
 #[cfg_attr(kani, kani::ensures(|result: &i64|
-    // Lower bound: pre-epoch dates are negative; post-1970 dates are ≥ -366.
-    (year < 1970 || *result >= -366)
+    // Pre-epoch dates (year < 1970) are always negative; epoch-1970-01-01 = day 0.
+    (year >= 1970 || *result < 0)
+    // Post-1970 lower bound: at most one leap-year worth before epoch boundary.
+    && (year < 1970 || *result >= -366)
     // Upper bound: days_from_civil(2553, 12, 31) ≈ 213_301; 213_400 gives margin.
     // Required so `stub_verified(days_from_civil)` keeps nanos arithmetic within u64.
     && *result <= 213_400
