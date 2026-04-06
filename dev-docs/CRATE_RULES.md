@@ -21,6 +21,15 @@ Rules and constraints for each crate. Enforced by CI, not just convention.
 | Implements core's ScanBuilder + CharDetector traits | Compilation |
 | proptest: SIMD output == scalar output | CI test suite |
 | Deps: core + arrow + bytes | Cargo.toml |
+| Pure seam Kani boundary status tracked in `dev-docs/verification/kani-boundary-contract.toml` | CI script: `python3 scripts/verify_kani_boundary_contract.py` |
+
+## logfwd-types
+
+| Rule | Enforcement |
+|------|-------------|
+| Shared pure state-machine and diagnostics value semantics live here | Architecture |
+| Lock-free stats storage may live alongside pure value modules, but not inside them | Code review |
+| Pure seam Kani boundary status tracked in `dev-docs/verification/kani-boundary-contract.toml` | CI script: `python3 scripts/verify_kani_boundary_contract.py` |
 
 ## logfwd-io
 
@@ -29,6 +38,7 @@ Rules and constraints for each crate. Enforced by CI, not just convention.
 | IO is expected here | — |
 | Tests use tempfiles, not real filesystems | Convention |
 | Deps: core + arrow + notify + serde | Cargo.toml |
+| Pure seam Kani boundary status tracked in `dev-docs/verification/kani-boundary-contract.toml` | CI script: `python3 scripts/verify_kani_boundary_contract.py` |
 
 ## logfwd-transform
 
@@ -45,6 +55,7 @@ Rules and constraints for each crate. Enforced by CI, not just convention.
 | Uses core for encoding (OTLP protobuf) | Architecture |
 | Transport is separate from serialization | Convention |
 | Deps: core + arrow + ureq/reqwest | Cargo.toml |
+| Pure seam Kani boundary status tracked in `dev-docs/verification/kani-boundary-contract.toml` | CI script: `python3 scripts/verify_kani_boundary_contract.py` |
 
 ## logfwd (binary)
 
@@ -54,6 +65,7 @@ Rules and constraints for each crate. Enforced by CI, not just convention.
 | Pipeline decisions go through core state machine | Architecture |
 | Deps: everything + tokio + bytes | Cargo.toml |
 | BytesMut/Bytes used for pipeline buffer accumulation | Architecture |
+| Pure seam Kani boundary status tracked in `dev-docs/verification/kani-boundary-contract.toml` | CI script: `python3 scripts/verify_kani_boundary_contract.py` |
 
 ## Adding a new crate
 

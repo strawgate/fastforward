@@ -26,12 +26,16 @@ test:
 kani:
     RUSTC_WRAPPER="" cargo kani -p logfwd-core -Z function-contracts -Z mem-predicates -Z stubbing
 
+# Validate the non-core Kani boundary contract.
+kani-boundary:
+    python3 scripts/verify_kani_boundary_contract.py
+
 # Run all tests with nextest (parallel, faster output)
 nextest:
     cargo nextest run
 
 # Lint everything: format, clippy, TOML, deny (matches CI Lint job)
-lint: fmt-check clippy toml-check deny
+lint: fmt-check kani-boundary clippy toml-check deny
 
 # Full CI suite: lint + test (run before pushing)
 ci: lint test

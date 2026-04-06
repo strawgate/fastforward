@@ -150,6 +150,9 @@ jobs:
       - name: Actionlint
         run: ./actionlint
 
+      - name: Kani boundary contract
+        run: python3 scripts/verify_kani_boundary_contract.py
+
       # --- Expensive steps below — only reached if fast checks pass ---
 
       - uses: Swatinem/rust-cache@v2
