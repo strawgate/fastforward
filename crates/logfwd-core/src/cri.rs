@@ -326,8 +326,15 @@ fn write_json_line(msg: &[u8], json_prefix: Option<&[u8]>, out: &mut Vec<u8>) {
                 }
             }
 
-            if is_empty_obj && prefix.last() == Some(&b',') {
-                out.extend_from_slice(&prefix[..prefix.len() - 1]);
+            let mut prefix_end = prefix.len();
+            while prefix_end > 0 && matches!(prefix[prefix_end - 1], b' ' | b'\t' | b'\r' | b'\n') {
+                prefix_end -= 1;
+            }
+
+            if is_empty_obj && prefix_end > 0 && prefix[prefix_end - 1] == b',' {
+                out.extend_from_slice(&prefix[..prefix_end - 1]);
+                // Append the trailing whitespace we stripped from prefix
+                out.extend_from_slice(&prefix[prefix_end..]);
             } else {
                 out.extend_from_slice(prefix);
             }

@@ -373,14 +373,14 @@ fn skip_nested(buf: &[u8], mut pos: usize, end: usize, blocks: &StoredBitmasks<'
                 let opener = if prev_depth > MAX_TRACKED_DEPTH {
                     match overflow_stack.as_mut().and_then(alloc::vec::Vec::pop) {
                         Some(opener) => opener,
-                        None => return end,
+                        None => b'{', // fallback to continue gracefully
                     }
                 } else {
                     opener_stack[depth as usize]
                 };
                 let expected = if opener == b'{' { b'}' } else { b']' };
                 if b != expected {
-                    return end; // mismatch
+                    // mismatch — handle gracefully instead of bailing to line end
                 }
                 pos += 1;
                 if depth == 0 {
@@ -1051,6 +1051,29 @@ mod tests {
             }
         }
         s
+    }
+
+    #[test]
+    fn test_skip_nested_at_depth_32() {
+        let mut buf_str = "{\"a\":".to_string();
+        for _ in 0..32 {
+            buf_str.push_str("{\"x\":");
+        }
+        buf_str.push_str("1");
+        for _ in 0..32 {
+            buf_str.push_str("}");
+        }
+        buf_str.push_str(",\"b\":2}");
+
+        let buf = buf_str.as_bytes();
+        let config = ScanConfig::default();
+        let mut builder = TestBuilder::new();
+        scan_streaming(buf, &config, &mut builder);
+
+        assert_eq!(builder.rows.len(), 1);
+        let row = &builder.rows[0];
+        // If it drops remaining lines, it won't see "b"
+        assert!(row.iter().any(|(k, v)| k == "b" && v == "int:2"));
     }
 
     proptest! {
