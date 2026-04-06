@@ -128,12 +128,14 @@ impl OtlpSink {
     }
 
     /// Encode a full ExportLogsServiceRequest from a RecordBatch.
-    /// Returns the raw protobuf bytes in `self.encoder_buf`.
-    pub fn encode_batch(&mut self, batch: &RecordBatch, metadata: &BatchMetadata) {
+    /// Returns the raw protobuf bytes in `self.encoder_buf` and the number of rows encoded.
+    /// Rows with unparseable timestamps are silently dropped; the returned count reflects
+    /// only the rows that were actually encoded.
+    pub fn encode_batch(&mut self, batch: &RecordBatch, metadata: &BatchMetadata) -> usize {
         self.encoder_buf.clear();
         let num_rows = batch.num_rows();
         if num_rows == 0 {
-            return;
+            return 0;
         }
 
         // Normalize any conflict struct columns (e.g. `status: Struct { int, str }`)
@@ -260,6 +262,8 @@ impl OtlpSink {
                 &records_buf[start..end],
             );
         }
+
+        record_ranges.len()
     }
 }
 
@@ -429,9 +433,8 @@ impl super::sink::Sink for OtlpSink {
         metadata: &'a BatchMetadata,
     ) -> Pin<Box<dyn Future<Output = super::sink::SendResult> + Send + 'a>> {
         Box::pin(async move {
-            self.encode_batch(batch, metadata);
-            let rows = batch.num_rows() as u64;
-            match self.send_payload(rows).await {
+            let encoded_rows = self.encode_batch(batch, metadata) as u64;
+            match self.send_payload(encoded_rows).await {
                 Ok(r) => r,
                 Err(e) => super::sink::SendResult::IoError(e),
             }
