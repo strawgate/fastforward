@@ -181,8 +181,14 @@ impl LokiSink {
                 match col.data_type() {
                     DataType::Int64 => {
                         let val = col.as_primitive::<arrow::datatypes::Int64Type>().value(row);
-                        // Bug #1084: clamp negative timestamps to 0 to avoid u64 wrap.
-                        if val < 0 { 0 } else { val as u64 }
+                        // Negative nanosecond timestamps are invalid for Loki (u64 wire
+                        // type). Fall back to observed time rather than sending epoch-zero
+                        // or wrapping to a far-future value. (#1084)
+                        if val >= 0 {
+                            val as u64
+                        } else {
+                            metadata.observed_time_ns
+                        }
                     }
                     DataType::UInt64 => col
                         .as_primitive::<arrow::datatypes::UInt64Type>()
@@ -731,8 +737,12 @@ mod tests {
         let mut entries: Vec<LokiEntry> = stream_map.values().flatten().cloned().collect();
         entries.sort_by_key(|(ts, _)| *ts);
 
-        assert_eq!(entries[0].0, 0, "Negative timestamp should be clamped to 0");
-        assert_eq!(entries[1].0, 100, "Positive timestamp should be preserved");
+        // After sorting, the positive (100) comes first, then observed_time_ns (12345).
+        assert_eq!(entries[0].0, 100, "Positive timestamp should be preserved");
+        assert_eq!(
+            entries[1].0, metadata.observed_time_ns,
+            "Negative timestamp should fall back to observed_time_ns"
+        );
     }
 }
 
