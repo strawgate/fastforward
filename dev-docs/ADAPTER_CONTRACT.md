@@ -55,7 +55,7 @@ The receiver must preserve these semantic roles when they are present and
 valid:
 
 - OTLP HTTP/JSON uses `timeUnixNano`; generated/protobuf code may expose the
-  same semantic field as `time_unix_nano`. Both map to `timestamp_int`, but
+  same semantic field as `time_unix_nano`. Both map to `timestamp`, but
   `time_unix_nano` is not itself an accepted HTTP/JSON key.
 - `severityText` -> `level`
 - `body` -> `message`

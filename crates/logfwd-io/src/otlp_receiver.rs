@@ -25,7 +25,6 @@ const MAX_BODY_SIZE: usize = 10 * 1024 * 1024;
 
 /// Bounded channel capacity — limits memory when the pipeline falls behind.
 const CHANNEL_BOUND: usize = 4096;
-const OTLP_TIMESTAMP_FIELD: &str = "timestamp_int";
 
 /// OTLP receiver that listens for log exports via HTTP.
 pub struct OtlpReceiverInput {
@@ -367,7 +366,7 @@ fn decode_otlp_logs_json(body: &[u8]) -> Result<Vec<u8>, InputError> {
                         )
                     })?;
                     if parsed > 0 {
-                        write_json_key(&mut out, OTLP_TIMESTAMP_FIELD);
+                        write_json_key(&mut out, field_names::TIMESTAMP);
                         write_u64_to_buf(&mut out, parsed);
                         out.push(b',');
                     }
@@ -542,7 +541,7 @@ fn convert_request_to_json_lines(
                 // timestamp (write directly without allocation)
                 if record.time_unix_nano > 0 {
                     out.push(b'"');
-                    out.extend_from_slice(OTLP_TIMESTAMP_FIELD.as_bytes());
+                    out.extend_from_slice(field_names::TIMESTAMP.as_bytes());
                     out.extend_from_slice(b"\":");
                     write_u64_to_buf(&mut out, record.time_unix_nano);
                     out.push(b',');
@@ -1357,7 +1356,7 @@ mod tests {
             Some("hello")
         );
         assert!(
-            row.get(OTLP_TIMESTAMP_FIELD).is_none(),
+            row.get(field_names::TIMESTAMP).is_none(),
             "unknown timestamp should be omitted, not emitted as 0"
         );
     }
