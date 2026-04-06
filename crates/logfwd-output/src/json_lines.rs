@@ -1,5 +1,6 @@
 use std::io;
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use arrow::array::Array;
 use arrow::record_batch::RecordBatch;
@@ -179,14 +180,13 @@ impl JsonLinesSink {
         let status = response.status();
 
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            let retry_after = response
+            let retry_secs = response
                 .headers()
                 .get("Retry-After")
                 .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(5);
+                .map_or(5, parse_retry_after_secs);
             return Ok(super::sink::SendResult::RetryAfter(
-                std::time::Duration::from_secs(retry_after),
+                std::time::Duration::from_secs(retry_secs),
             ));
         }
 
@@ -257,6 +257,10 @@ pub struct JsonLinesSinkFactory {
 }
 
 impl JsonLinesSinkFactory {
+    /// Create a new factory.
+    ///
+    /// Builds a shared [`reqwest::Client`] (30 s timeout, 64 idle connections)
+    /// that all sinks produced by this factory reuse.
     pub fn new(
         name: String,
         url: String,
@@ -295,6 +299,29 @@ impl super::sink::SinkFactory for JsonLinesSinkFactory {
     fn name(&self) -> &str {
         &self.name
     }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Parse the value of a `Retry-After` header as a number of seconds.
+///
+/// Accepts both integer-seconds form (`120`) and HTTP-date form
+/// (`Wed, 21 Oct 2015 07:28:00 GMT`). Falls back to 5 seconds when
+/// parsing fails or the date is in the past.
+fn parse_retry_after_secs(s: &str) -> u64 {
+    // Fast path: integer seconds
+    if let Ok(n) = s.parse::<u64>() {
+        return n;
+    }
+    // Slow path: HTTP-date (RFC 7231)
+    if let Ok(dt) = httpdate::parse_http_date(s) {
+        if let Ok(dur) = dt.duration_since(SystemTime::now()) {
+            return dur.as_secs().max(1);
+        }
+    }
+    5
 }
 
 // ---------------------------------------------------------------------------

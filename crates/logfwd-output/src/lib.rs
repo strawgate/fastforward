@@ -672,7 +672,12 @@ pub fn build_sink_factory(
             let compression = match cfg.compression.as_deref() {
                 Some("zstd") => Compression::Zstd,
                 Some("gzip") => Compression::Gzip,
-                _ => Compression::None,
+                None => Compression::None,
+                Some(other) => {
+                    return Err(OutputError::Construction(format!(
+                        "output '{name}': http does not support '{other}' compression (use 'zstd', 'gzip', or omit)"
+                    )));
+                }
             };
             let factory = JsonLinesSinkFactory::new(
                 name.to_string(),
