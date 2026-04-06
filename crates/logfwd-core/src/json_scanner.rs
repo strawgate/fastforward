@@ -1142,6 +1142,200 @@ mod tests {
         assert_eq!(builder.rows.len(), 1);
         assert!(builder.rows[0].is_empty());
     }
+
+    // -------------------------------------------------------------------------
+    // Proptest coverage for row predicate pushdown at SIMD block boundaries
+    // -------------------------------------------------------------------------
+
+    #[cfg(test)]
+    mod predicate_pushdown_proptests {
+        use super::*;
+        use crate::scan_config::{RowPredicate, ScanConfig};
+        use proptest::prelude::*;
+
+        /// Build a `ScanConfig` with a single `Eq` predicate on `field` = `value`.
+        fn eq_config(field: &str, value: &str) -> ScanConfig {
+            ScanConfig {
+                row_predicates: alloc::vec![RowPredicate::Eq {
+                    field: field.as_bytes().to_vec(),
+                    value: value.as_bytes().to_vec(),
+                }],
+                ..ScanConfig::default()
+            }
+        }
+
+        /// Count how many rows `scan_streaming` returns for `buf` with `config`.
+        fn row_count(buf: &[u8], config: &ScanConfig) -> usize {
+            let mut builder = TestBuilder::new();
+            scan_streaming(buf, config, &mut builder);
+            builder.rows.len()
+        }
+
+        // ------------------------------------------------------------------
+        // Test 1: field spanning SIMD 64-byte block boundaries
+        //
+        // Strategy: pick a `boundary` in [1, 3] (so boundaries at 64, 128,
+        // 192), then pad the JSON up to that boundary with a filler field so
+        // the *target* field's key or value straddles the block edge.
+        // The predicate must pass for matching rows and fail for non-matching
+        // rows regardless of byte alignment.
+        // ------------------------------------------------------------------
+        proptest! {
+            #[test]
+            fn field_at_simd_boundary(
+                boundary in 1usize..=3usize,
+                match_value in prop::bool::ANY,
+            ) {
+                // Target field value
+                let target_val = "hit";
+                let other_val  = "miss";
+
+                // We want the *opening quote of the target key* to land at byte
+                // `boundary * 64`.  We'll insert enough filler so that happens.
+                //
+                // JSON prefix we'll build: `{"pad":"<filler>","tgt":"<val>"}`
+                //
+                // Fixed overhead before filler content:
+                //   { " p a d " : "              => 9 bytes
+                //   closing  " , " t g t " : "   => 10 bytes after filler
+                //   val + " }                    => varies
+                //
+                // We want:  9 + filler_len + 10 = boundary * 64
+                // => filler_len = boundary * 64 - 19
+                //
+                // If that's negative we just use 0 (boundary == 0 excluded above).
+                let target_offset = boundary * 64;
+                let prefix_overhead = 9usize; // `{"pad":"`
+                let mid_overhead    = 10usize; // `","tgt":"`
+                let filler_len = target_offset
+                    .saturating_sub(prefix_overhead + mid_overhead);
+
+                let filler: alloc::string::String = "x".repeat(filler_len);
+                let val = if match_value { target_val } else { other_val };
+                let json = alloc::format!(
+                    r#"{{"pad":"{filler}","tgt":"{val}"}}"#
+                );
+
+                let config = eq_config("tgt", target_val);
+                let rows = row_count(json.as_bytes(), &config);
+
+                if match_value {
+                    // Row satisfies predicate → must be emitted
+                    prop_assert_eq!(rows, 1, "expected row at boundary={}, json={}", boundary, json);
+                } else {
+                    // Row fails predicate → must be filtered
+                    prop_assert_eq!(rows, 0, "expected no row at boundary={}, json={}", boundary, json);
+                }
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // Test 2: escaped value crossing a 64-byte boundary
+        //
+        // The scanner passes escaped strings through conservatively (it does
+        // not decode them during predicate evaluation). This test verifies
+        // that rows containing escaped values are *never* incorrectly
+        // filtered out — regardless of where in the buffer the escape
+        // sequence lands.
+        // ------------------------------------------------------------------
+        proptest! {
+            #[test]
+            fn escaped_value_at_boundary(
+                boundary in 1usize..=3usize,
+            ) {
+                // We embed an escape sequence (`\"`) inside the target value.
+                // The predicate is for a plain (unescaped) value; because the
+                // scanner is conservative about escaped strings it must pass
+                // the row through to DataFusion.
+                //
+                // JSON: {"pad":"<filler>","tgt":"say \"hi\""}
+                // Fixed overhead: `{"pad":"` = 9, `","tgt":"` = 9, `say \"hi\""}` = 12
+                let target_offset = boundary * 64;
+                let prefix_overhead = 9usize;
+                let mid_overhead    = 9usize;
+                let suffix_overhead = 12usize; // `say \"hi\""}`
+                let filler_len = target_offset
+                    .saturating_sub(prefix_overhead + mid_overhead + suffix_overhead);
+
+                let filler: alloc::string::String = "x".repeat(filler_len);
+                // Build a raw byte string that contains an actual escape.
+                // The JSON value is:  say \"hi\"
+                let json = alloc::format!(
+                    r#"{{"pad":"{filler}","tgt":"say \"hi\""}}"#
+                );
+
+                // Predicate for the *decoded* value — conservative pushdown
+                // must NOT drop this row even though raw bytes don't match.
+                let config = eq_config("tgt", r#"say "hi""#);
+                let rows = row_count(json.as_bytes(), &config);
+
+                // Conservative: escaped values are passed through → row count = 1
+                prop_assert_eq!(
+                    rows, 1,
+                    "escaped value at boundary={} was incorrectly filtered; json={}",
+                    boundary,
+                    json
+                );
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // Test 3: random field ordering
+        //
+        // The predicate is for a specific (field, value) pair. We generate
+        // a JSON object that places the target field at a random position
+        // among a fixed set of "other" fields. The predicate result must be
+        // the same regardless of field order.
+        // ------------------------------------------------------------------
+        proptest! {
+            #[test]
+            fn random_field_ordering(
+                position in 0usize..5usize,
+                match_value in prop::bool::ANY,
+            ) {
+                let target_val  = "sentinel";
+                let other_val   = "nope";
+                let target_field = "level";
+
+                // Build 5 fields; insert the target at `position`.
+                let other_fields = [
+                    ("host",   "webserver-01"),
+                    ("env",    "production"),
+                    ("region", "us-east-1"),
+                    ("svc",    "api"),
+                    ("status", "ok"),
+                ];
+                let val = if match_value { target_val } else { other_val };
+                let target_pair = alloc::format!(r#""{target_field}":"{val}""#);
+
+                let mut parts: alloc::vec::Vec<alloc::string::String> =
+                    other_fields.iter().map(|(k, v)| alloc::format!(r#""{k}":"{v}""#)).collect();
+                let insert_pos = position.min(parts.len());
+                parts.insert(insert_pos, target_pair);
+
+                let json = alloc::format!("{{{}}}", parts.join(","));
+
+                let config = eq_config(target_field, target_val);
+                let rows = row_count(json.as_bytes(), &config);
+
+                if match_value {
+                    prop_assert_eq!(
+                        rows, 1,
+                        "predicate missed target at position={}; json={}",
+                        position,
+                        json
+                    );
+                } else {
+                    prop_assert_eq!(
+                        rows, 0,
+                        "predicate incorrectly passed row at position={}; json={}",
+                        position,
+                        json
+                    );
+                }
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
