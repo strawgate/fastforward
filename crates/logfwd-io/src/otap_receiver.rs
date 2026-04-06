@@ -259,10 +259,7 @@ impl OtapReceiver {
     /// Try to receive all available RecordBatches (non-blocking).
     pub fn try_recv_all(&self) -> Vec<RecordBatch> {
         let mut batches = Vec::new();
-        let Some(rx) = self.rx.as_ref() else {
-            return batches;
-        };
-        while let Ok(batch) = rx.try_recv() {
+        while let Ok(batch) = self.rx.as_ref().expect("rx is Some until drop").try_recv() {
             batches.push(batch);
         }
         batches
@@ -270,28 +267,27 @@ impl OtapReceiver {
 
     /// Blocking receive of the next RecordBatch.
     pub fn recv(&self) -> io::Result<RecordBatch> {
-        let rx = self
-            .rx
+        self.rx
             .as_ref()
-            .ok_or_else(|| io::Error::other("OTAP receiver: channel disconnected (dropped)"))?;
-        rx.recv()
+            .expect("rx is Some until drop")
+            .recv()
             .map_err(|_| io::Error::other("OTAP receiver: channel disconnected"))
     }
 
     /// Receive with a timeout.
     pub fn recv_timeout(&self, timeout: std::time::Duration) -> io::Result<RecordBatch> {
-        let rx = self
-            .rx
+        self.rx
             .as_ref()
-            .ok_or_else(|| io::Error::other("OTAP receiver: channel disconnected (dropped)"))?;
-        rx.recv_timeout(timeout).map_err(|e| match e {
-            mpsc::RecvTimeoutError::Timeout => {
-                io::Error::new(io::ErrorKind::TimedOut, "OTAP receiver: timed out")
-            }
-            mpsc::RecvTimeoutError::Disconnected => {
-                io::Error::other("OTAP receiver: channel disconnected")
-            }
-        })
+            .expect("rx is Some until drop")
+            .recv_timeout(timeout)
+            .map_err(|e| match e {
+                mpsc::RecvTimeoutError::Timeout => {
+                    io::Error::new(io::ErrorKind::TimedOut, "OTAP receiver: timed out")
+                }
+                mpsc::RecvTimeoutError::Disconnected => {
+                    io::Error::other("OTAP receiver: channel disconnected")
+                }
+            })
     }
 
     /// Return the name of this receiver.
