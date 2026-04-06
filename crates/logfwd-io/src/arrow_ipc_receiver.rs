@@ -308,6 +308,16 @@ fn decode_ipc_stream(body: &[u8]) -> Result<Vec<RecordBatch>, InputError> {
         .map_err(|e| InputError::Receiver(format!("failed to read Arrow IPC batch: {e}")))
 }
 
+impl Drop for ArrowIpcReceiver {
+    fn drop(&mut self) {
+        self.rx.take();
+        self.server.unblock();
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -426,15 +436,5 @@ mod tests {
     fn decode_ipc_stream_invalid_body() {
         let result = decode_ipc_stream(b"not arrow data");
         assert!(result.is_err());
-    }
-}
-
-impl Drop for ArrowIpcReceiver {
-    fn drop(&mut self) {
-        self.rx.take();
-        self.server.unblock();
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
-        }
     }
 }
