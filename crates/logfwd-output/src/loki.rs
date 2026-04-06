@@ -160,11 +160,23 @@ impl LokiSink {
             f.name() == field_names::TIMESTAMP_UNDERSCORE || f.name() == field_names::TIMESTAMP_AT
         });
 
-        // Find label ColInfos for configured label columns.
+        // Collect static label key names for exclusion from stream key.
+        let static_keys: std::collections::HashSet<&str> = self
+            .config
+            .static_labels
+            .iter()
+            .map(|(k, _)| k.as_str())
+            .collect();
+
+        // Find label ColInfos for configured label columns, excluding keys
+        // that are overridden by static labels. Including overridden keys in
+        // the stream key would split rows with different dynamic values into
+        // separate streams even though the static label always wins. (#1459)
         let label_col_infos: Vec<(String, &super::ColInfo)> = self
             .config
             .label_columns
             .iter()
+            .filter(|label_col| !static_keys.contains(label_col.as_str()))
             .filter_map(|label_col| {
                 cols.iter()
                     .find(|c| &c.field_name == label_col)

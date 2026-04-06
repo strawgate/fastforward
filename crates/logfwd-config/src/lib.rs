@@ -869,7 +869,16 @@ impl Config {
                             )));
                         }
                     }
-                    OutputType::Stdout | OutputType::Null => {}
+                    OutputType::Stdout => {
+                        if let Some(fmt) = &output.format
+                            && !matches!(fmt, Format::Json | Format::Text)
+                        {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' output '{label}': stdout output only supports format json or text"
+                            )));
+                        }
+                    }
+                    OutputType::Null => {}
                     OutputType::Tcp | OutputType::Udp => {
                         if output.endpoint.is_none() {
                             return Err(ConfigError::Validation(format!(
@@ -1054,6 +1063,19 @@ pub fn validate_host_port(addr: &str) -> Result<(), String> {
 
     if host.is_empty() {
         return Err(format!("'{addr}' has an empty host"));
+    }
+
+    // Reject path-like hosts (e.g. "host/path:80") — these are likely
+    // malformed URLs rather than intentional host:port values. (#1461)
+    if host.contains('/') {
+        return Err(format!(
+            "'{addr}' host contains a '/' (expected host:port, not a URL path)"
+        ));
+    }
+
+    // Reject unmatched closing bracket outside of IPv6 brackets (e.g. "host]:80").
+    if !addr.starts_with('[') && host.contains(']') {
+        return Err(format!("'{addr}' has an unmatched ']' in the host"));
     }
 
     if !addr.starts_with('[') && host.contains(':') {
