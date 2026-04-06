@@ -63,28 +63,33 @@ fn make_framed_glob_input(pattern: &str) -> FramedInput {
     )
 }
 
+/// Poll `input` until at least `min_items` data events are collected or `timeout` elapses.
+///
+/// Keeps polling through multiple rounds so tests that expect data from N files
+/// are not flaky when one file delivers its data on an earlier poll than another.
 fn poll_until_data(
     input: &mut dyn InputSource,
     timeout: Duration,
+    min_items: usize,
 ) -> Vec<(Option<SourceId>, Vec<u8>)> {
     let deadline = Instant::now() + timeout;
+    let mut collected = Vec::new();
 
     while Instant::now() < deadline {
-        let mut emitted = Vec::new();
         for event in input.poll().expect("poll file input") {
             if let InputEvent::Data { bytes, source_id } = event {
-                emitted.push((source_id, bytes));
+                collected.push((source_id, bytes));
             }
         }
 
-        if !emitted.is_empty() {
-            return emitted;
+        if collected.len() >= min_items {
+            return collected;
         }
 
         std::thread::sleep(Duration::from_millis(20));
     }
 
-    panic!("timed out waiting for file input data");
+    panic!("timed out waiting for {} file input items", min_items);
 }
 
 #[test]
@@ -95,7 +100,7 @@ fn checkpoint_advances_only_at_real_newline_boundaries() {
 
     let mut input = make_framed_file_input(std::slice::from_ref(&log_path));
 
-    let emitted = poll_until_data(&mut input, Duration::from_secs(2));
+    let emitted = poll_until_data(&mut input, Duration::from_secs(2), 1);
     assert_eq!(emitted.len(), 1, "expected one completed line");
     let (source_id, bytes) = &emitted[0];
     let source_id = source_id.expect("file input must carry source id");
@@ -114,7 +119,7 @@ fn checkpoint_advances_only_at_real_newline_boundaries() {
     file.write_all(b"avo\n").unwrap();
     file.flush().unwrap();
 
-    let emitted = poll_until_data(&mut input, Duration::from_secs(2));
+    let emitted = poll_until_data(&mut input, Duration::from_secs(2), 1);
     assert_eq!(emitted.len(), 1, "expected the resumed partial line");
     assert_eq!(emitted[0].1, b"bravo\n");
 
@@ -169,7 +174,7 @@ fn glob_sources_keep_partial_lines_and_checkpoints_isolated() {
     b_file.write_all(b"-done\n").unwrap();
     b_file.flush().unwrap();
 
-    let emitted = poll_until_data(&mut input, Duration::from_secs(2));
+    let emitted = poll_until_data(&mut input, Duration::from_secs(2), 2);
     assert_eq!(emitted.len(), 2, "expected one completed line per source");
 
     let mut emitted_by_source: HashMap<SourceId, Vec<u8>> = HashMap::new();
