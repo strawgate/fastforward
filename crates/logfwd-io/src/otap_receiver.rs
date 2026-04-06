@@ -60,9 +60,10 @@ const WIRE_TYPE_LENGTH_DELIMITED: u8 = 2;
 /// and produces flat `RecordBatch` for the pipeline.
 pub struct OtapReceiver {
     name: String,
-    rx: mpsc::Receiver<RecordBatch>,
+    rx: Option<mpsc::Receiver<RecordBatch>>,
     addr: std::net::SocketAddr,
-    _handle: std::thread::JoinHandle<()>,
+    server: std::sync::Arc<tiny_http::Server>,
+    handle: Option<std::thread::JoinHandle<()>>,
 }
 
 impl OtapReceiver {
@@ -77,8 +78,10 @@ impl OtapReceiver {
         addr: &str,
         capacity: usize,
     ) -> io::Result<Self> {
-        let server = tiny_http::Server::http(addr)
-            .map_err(|e| io::Error::other(format!("OTAP receiver bind {addr}: {e}")))?;
+        let server = std::sync::Arc::new(
+            tiny_http::Server::http(addr)
+                .map_err(|e| io::Error::other(format!("OTAP receiver bind {addr}: {e}")))?,
+        );
 
         let bound_addr = match server.server_addr() {
             tiny_http::ListenAddr::IP(a) => a,
@@ -89,10 +92,11 @@ impl OtapReceiver {
 
         let (tx, rx) = mpsc::sync_channel(capacity);
 
+        let server_clone = std::sync::Arc::clone(&server);
         let handle = std::thread::Builder::new()
             .name("otap-receiver".into())
             .spawn(move || {
-                for mut request in server.incoming_requests() {
+                for mut request in server_clone.incoming_requests() {
                     let url = request.url().to_string();
 
                     let path = url.split('?').next().unwrap_or(&url);
@@ -240,9 +244,10 @@ impl OtapReceiver {
 
         Ok(Self {
             name: name.into(),
-            rx,
+            rx: Some(rx),
             addr: bound_addr,
-            _handle: handle,
+            server,
+            handle: Some(handle),
         })
     }
 
@@ -254,7 +259,7 @@ impl OtapReceiver {
     /// Try to receive all available RecordBatches (non-blocking).
     pub fn try_recv_all(&self) -> Vec<RecordBatch> {
         let mut batches = Vec::new();
-        while let Ok(batch) = self.rx.try_recv() {
+        while let Ok(batch) = self.rx.as_ref().expect("rx is Some until drop").try_recv() {
             batches.push(batch);
         }
         batches
@@ -263,20 +268,26 @@ impl OtapReceiver {
     /// Blocking receive of the next RecordBatch.
     pub fn recv(&self) -> io::Result<RecordBatch> {
         self.rx
+            .as_ref()
+            .expect("rx is Some until drop")
             .recv()
             .map_err(|_| io::Error::other("OTAP receiver: channel disconnected"))
     }
 
     /// Receive with a timeout.
     pub fn recv_timeout(&self, timeout: std::time::Duration) -> io::Result<RecordBatch> {
-        self.rx.recv_timeout(timeout).map_err(|e| match e {
-            mpsc::RecvTimeoutError::Timeout => {
-                io::Error::new(io::ErrorKind::TimedOut, "OTAP receiver: timed out")
-            }
-            mpsc::RecvTimeoutError::Disconnected => {
-                io::Error::other("OTAP receiver: channel disconnected")
-            }
-        })
+        self.rx
+            .as_ref()
+            .expect("rx is Some until drop")
+            .recv_timeout(timeout)
+            .map_err(|e| match e {
+                mpsc::RecvTimeoutError::Timeout => {
+                    io::Error::new(io::ErrorKind::TimedOut, "OTAP receiver: timed out")
+                }
+                mpsc::RecvTimeoutError::Disconnected => {
+                    io::Error::other("OTAP receiver: channel disconnected")
+                }
+            })
     }
 
     /// Return the name of this receiver.
@@ -335,7 +346,12 @@ fn decode_batch_arrow_records(buf: &[u8]) -> Result<BatchArrowRecords, InputErro
             (2, WIRE_TYPE_LENGTH_DELIMITED) => {
                 let (len, new_pos) =
                     decode_varint(buf, pos).map_err(|e| InputError::Receiver(e.to_string()))?;
-                let end = new_pos + len as usize;
+                let len_usize = usize::try_from(len).map_err(|_| {
+                    InputError::Receiver("ArrowPayload: length too large".to_string())
+                })?;
+                let end = new_pos.checked_add(len_usize).ok_or_else(|| {
+                    InputError::Receiver("ArrowPayload: length overflow".to_string())
+                })?;
                 if end > buf.len() {
                     return Err(InputError::Receiver(
                         "ArrowPayload: length overflow".to_string(),
@@ -380,7 +396,12 @@ fn decode_arrow_payload(buf: &[u8]) -> Result<ArrowPayload, InputError> {
             (1, WIRE_TYPE_LENGTH_DELIMITED) => {
                 let (len, new_pos) =
                     decode_varint(buf, pos).map_err(|e| InputError::Receiver(e.to_string()))?;
-                pos = new_pos + len as usize;
+                let len_usize = usize::try_from(len).map_err(|_| {
+                    InputError::Receiver("ArrowPayload.schema_id: length too large".to_string())
+                })?;
+                pos = new_pos.checked_add(len_usize).ok_or_else(|| {
+                    InputError::Receiver("ArrowPayload.schema_id: length overflow".to_string())
+                })?;
                 if pos > buf.len() {
                     return Err(InputError::Receiver(
                         "ArrowPayload.schema_id: length overflow".to_string(),
@@ -398,7 +419,12 @@ fn decode_arrow_payload(buf: &[u8]) -> Result<ArrowPayload, InputError> {
             (3, WIRE_TYPE_LENGTH_DELIMITED) => {
                 let (len, new_pos) =
                     decode_varint(buf, pos).map_err(|e| InputError::Receiver(e.to_string()))?;
-                let end = new_pos + len as usize;
+                let len_usize = usize::try_from(len).map_err(|_| {
+                    InputError::Receiver("ArrowPayload.record: length too large".to_string())
+                })?;
+                let end = new_pos.checked_add(len_usize).ok_or_else(|| {
+                    InputError::Receiver("ArrowPayload.record: length overflow".to_string())
+                })?;
                 if end > buf.len() {
                     return Err(InputError::Receiver(
                         "ArrowPayload.record: length overflow".to_string(),
@@ -1018,6 +1044,16 @@ mod tests {
             let (decoded, end) = decode_varint(&buf, 0).expect("decode");
             assert_eq!(decoded, value, "varint roundtrip failed for {value}");
             assert_eq!(end, buf.len());
+        }
+    }
+}
+
+impl Drop for OtapReceiver {
+    fn drop(&mut self) {
+        self.rx.take();
+        self.server.unblock();
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
         }
     }
 }

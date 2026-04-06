@@ -623,6 +623,18 @@ impl Config {
         }
 
         for (name, pipe) in &self.pipelines {
+            if pipe.batch_timeout_ms == Some(0) {
+                return Err(ConfigError::Validation(format!(
+                    "pipeline '{name}': batch_timeout_ms must be greater than 0"
+                )));
+            }
+            if let Some(sql) = &pipe.transform {
+                if sql.trim().is_empty() {
+                    return Err(ConfigError::Validation(format!(
+                        "pipeline '{name}': transform SQL cannot be empty"
+                    )));
+                }
+            }
             if pipe.inputs.is_empty() {
                 return Err(ConfigError::Validation(format!(
                     "pipeline '{name}' has no inputs"
@@ -653,6 +665,13 @@ impl Config {
                                 "pipeline '{name}' input '{label}': udp/tcp input requires 'listen'"
                             )));
                         }
+                        if let Some(addr) = &input.listen {
+                            if let Err(msg) = validate_bind_addr(addr) {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': {msg}"
+                                )));
+                            }
+                        }
                     }
                     InputType::Otlp => {
                         if input.listen.is_none() {
@@ -660,15 +679,17 @@ impl Config {
                                 "pipeline '{name}' input '{label}': 'listen' is required for otlp inputs"
                             )));
                         }
-                    }
-                    InputType::ArrowIpc => {
-                        if input.listen.is_none() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'listen' is required for arrow_ipc inputs"
-                            )));
+                        if let Some(addr) = &input.listen {
+                            if let Err(msg) = validate_bind_addr(addr) {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': {msg}"
+                                )));
+                            }
                         }
                     }
-                    InputType::Generator => {}
+                    // ArrowIpc is always rejected below as "not yet supported";
+                    // skip listen validation to avoid a misleading error message.
+                    InputType::ArrowIpc | InputType::Generator => {}
                 }
 
                 // Reject fields that don't apply to this input type.
@@ -691,6 +712,11 @@ impl Config {
                                 "pipeline '{name}' input '{label}': 'max_open_files' is not supported for tcp/udp inputs"
                             )));
                         }
+                        if input.glob_rescan_interval_ms.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'glob_rescan_interval_ms' is not supported for tcp/udp inputs"
+                            )));
+                        }
                     }
                     InputType::Otlp => {
                         if input.path.is_some() {
@@ -701,6 +727,11 @@ impl Config {
                         if input.max_open_files.is_some() {
                             return Err(ConfigError::Validation(format!(
                                 "pipeline '{name}' input '{label}': 'max_open_files' is not supported for otlp inputs"
+                            )));
+                        }
+                        if input.glob_rescan_interval_ms.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'glob_rescan_interval_ms' is not supported for otlp inputs"
                             )));
                         }
                     }
@@ -715,9 +746,9 @@ impl Config {
                                 "pipeline '{name}' input '{label}': 'max_open_files' is not supported for generator inputs"
                             )));
                         }
-                        if input.listen.is_some() {
+                        if input.glob_rescan_interval_ms.is_some() {
                             return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'listen' is not supported for generator inputs"
+                                "pipeline '{name}' input '{label}': 'glob_rescan_interval_ms' is not supported for generator inputs"
                             )));
                         }
                     }
@@ -822,6 +853,13 @@ impl Config {
                                 "pipeline '{name}' output '{label}': {} output requires 'endpoint'",
                                 output.output_type,
                             )));
+                        }
+                        if let Some(ep) = &output.endpoint {
+                            if let Err(msg) = validate_host_port(ep) {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' output '{label}': {msg}",
+                                )));
+                            }
                         }
                     }
                     OutputType::Parquet => {
@@ -947,6 +985,18 @@ fn validate_bind_addr(addr: &str) -> Result<(), String> {
     addr.parse::<std::net::SocketAddr>()
         .map(|_| ())
         .map_err(|e| format!("'{addr}' is not a valid host:port address: {e}"))
+}
+
+/// Validate that a string has a valid `host:port` format where port is a u16.
+/// This allows hostnames as well as IP addresses.
+fn validate_host_port(addr: &str) -> Result<(), String> {
+    let (_, port_str) = addr
+        .rsplit_once(':')
+        .ok_or_else(|| format!("'{addr}' is missing a port (expected format host:port)"))?;
+    port_str
+        .parse::<u16>()
+        .map_err(|_| format!("'{addr}' has an invalid port '{port_str}'"))?;
+    Ok(())
 }
 
 /// Validate that a log level string is a recognised tracing level.
@@ -1267,7 +1317,10 @@ output:
     }
 
     #[test]
-    fn validation_arrow_ipc_requires_listen() {
+    fn validation_arrow_ipc_not_supported() {
+        // arrow_ipc is always rejected as "not yet supported" regardless of
+        // whether 'listen' is specified — the 'listen' check must not fire
+        // first and give a misleading error.
         let yaml = r"
 input:
   type: arrow_ipc
@@ -1276,7 +1329,10 @@ output:
 ";
         let err = Config::load_str(yaml).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("listen"), "expected 'listen' in error: {msg}");
+        assert!(
+            msg.contains("not yet supported"),
+            "expected 'not yet supported' in error: {msg}"
+        );
     }
 
     #[test]
@@ -2341,6 +2397,25 @@ pipelines:
     }
 
     #[test]
+    fn tcp_input_rejects_glob_rescan_interval_ms() {
+        let yaml = r#"
+pipelines:
+  test:
+    inputs:
+      - type: tcp
+        listen: 0.0.0.0:514
+        glob_rescan_interval_ms: 5000
+    outputs:
+      - type: null
+"#;
+        let err = Config::load_str(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("glob_rescan_interval_ms"),
+            "expected glob_rescan_interval_ms rejection: {err}"
+        );
+    }
+
+    #[test]
     fn generator_input_rejects_path() {
         let yaml = r#"
 pipelines:
@@ -2359,20 +2434,22 @@ pipelines:
     }
 
     #[test]
-    fn generator_input_rejects_listen() {
+    fn generator_input_accepts_listen_as_rate_limit() {
+        // `listen` is reused as events/sec for generators (pipeline.rs reads
+        // cfg.listen at runtime). The validation guard must not reject it.
         let yaml = r#"
 pipelines:
   test:
     inputs:
       - type: generator
-        listen: 0.0.0.0:514
+        listen: "1000"
     outputs:
       - type: null
 "#;
-        let err = Config::load_str(yaml).unwrap_err();
-        assert!(
-            err.to_string().contains("listen"),
-            "expected listen rejection: {err}"
+        let cfg = Config::load_str(yaml).expect("generator with listen should be valid");
+        assert_eq!(
+            cfg.pipelines["test"].inputs[0].listen.as_deref(),
+            Some("1000")
         );
     }
 

@@ -28,11 +28,12 @@ const CHANNEL_BOUND: usize = 4096;
 /// OTLP receiver that listens for log exports via HTTP.
 pub struct OtlpReceiverInput {
     name: String,
-    rx: mpsc::Receiver<Vec<u8>>,
+    rx: Option<mpsc::Receiver<Vec<u8>>>,
     /// The address the HTTP server is bound to.
     addr: std::net::SocketAddr,
+    server: std::sync::Arc<tiny_http::Server>,
     /// Keep the server thread handle alive.
-    _handle: std::thread::JoinHandle<()>,
+    handle: Option<std::thread::JoinHandle<()>>,
 }
 
 impl OtlpReceiverInput {
@@ -44,8 +45,10 @@ impl OtlpReceiverInput {
 
     /// Like [`Self::new`] but with an explicit channel capacity. Useful for tests.
     fn new_with_capacity(name: impl Into<String>, addr: &str, capacity: usize) -> io::Result<Self> {
-        let server = tiny_http::Server::http(addr)
-            .map_err(|e| io::Error::other(format!("OTLP receiver bind {addr}: {e}")))?;
+        let server = std::sync::Arc::new(
+            tiny_http::Server::http(addr)
+                .map_err(|e| io::Error::other(format!("OTLP receiver bind {addr}: {e}")))?,
+        );
 
         let bound_addr = match server.server_addr() {
             tiny_http::ListenAddr::IP(a) => a,
@@ -56,10 +59,11 @@ impl OtlpReceiverInput {
 
         let (tx, rx) = mpsc::sync_channel(capacity);
 
+        let server_clone = std::sync::Arc::clone(&server);
         let handle = std::thread::Builder::new()
             .name("otlp-receiver".into())
             .spawn(move || {
-                for mut request in server.incoming_requests() {
+                for mut request in server_clone.incoming_requests() {
                     let url = request.url().to_string();
 
                     // Only accept the exact OTLP endpoint path (with optional query string).
@@ -247,9 +251,10 @@ impl OtlpReceiverInput {
 
         Ok(Self {
             name: name.into(),
-            rx,
+            rx: Some(rx),
             addr: bound_addr,
-            _handle: handle,
+            server,
+            handle: Some(handle),
         })
     }
 
@@ -259,12 +264,22 @@ impl OtlpReceiverInput {
     }
 }
 
+impl Drop for OtlpReceiverInput {
+    fn drop(&mut self) {
+        self.rx.take();
+        self.server.unblock();
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
 impl InputSource for OtlpReceiverInput {
     fn poll(&mut self) -> io::Result<Vec<InputEvent>> {
         let mut all = Vec::new();
 
         // Drain all available decoded batches.
-        while let Ok(data) = self.rx.try_recv() {
+        while let Ok(data) = self.rx.as_ref().expect("rx is Some until drop").try_recv() {
             all.extend_from_slice(&data);
         }
 
@@ -344,8 +359,15 @@ fn decode_otlp_logs_json(body: &[u8]) -> Result<Vec<u8>, InputError> {
                 out.push(b'{');
 
                 if let Some(ts) = record.get("timeUnixNano").and_then(|v| v.as_str()) {
-                    write_json_field(&mut out, "timestamp_int", ts);
-                    out.push(b',');
+                    // Validate as u64 before emitting as a raw JSON number.
+                    // An attacker-controlled string with quotes/backslashes could
+                    // break the JSON line if written via write_json_field directly.
+                    if let Some(ns) = ts.parse::<u64>().ok().filter(|&n| n > 0) {
+                        out.push(b'"');
+                        out.extend_from_slice(b"timestamp_int\":");
+                        write_u64_to_buf(&mut out, ns);
+                        out.push(b',');
+                    }
                 }
 
                 if let Some(sev) = record.get("severityText").and_then(|v| v.as_str()) {
@@ -447,7 +469,8 @@ fn write_json_any_value_field_from_json(
     value: &serde_json::Value,
 ) -> Result<bool, InputError> {
     if let Some(i) = value.get("intValue") {
-        write_json_key(out, key);
+        write_json_escaped_key(out, key);
+        out.extend_from_slice(b":");
         if let Some(s) = i.as_str() {
             if let Ok(parsed) = s.parse::<i64>() {
                 write_i64_to_buf(out, parsed);
@@ -467,13 +490,15 @@ fn write_json_any_value_field_from_json(
     }
 
     if let Some(d) = value.get("doubleValue").and_then(serde_json::Value::as_f64) {
-        write_json_key(out, key);
+        write_json_escaped_key(out, key);
+        out.extend_from_slice(b":");
         write_f64_to_buf(out, d);
         return Ok(true);
     }
 
     if let Some(b) = value.get("boolValue").and_then(serde_json::Value::as_bool) {
-        write_json_key(out, key);
+        write_json_escaped_key(out, key);
+        out.extend_from_slice(b":");
         if b {
             out.extend_from_slice(b"true");
         } else {
@@ -607,17 +632,22 @@ fn any_value_to_string(v: &AnyValue) -> String {
 fn write_json_any_value(out: &mut Vec<u8>, key: &str, v: &AnyValue) -> bool {
     match &v.value {
         Some(Value::IntValue(i)) => {
-            write_json_key(out, key);
+            write_json_escaped_key(out, key);
+            out.extend_from_slice(b":");
+            // Write integer directly without allocating a String
             write_i64_to_buf(out, *i);
             true
         }
         Some(Value::DoubleValue(d)) => {
-            write_json_key(out, key);
+            write_json_escaped_key(out, key);
+            out.extend_from_slice(b":");
+            // Write double directly without allocating a String
             write_f64_to_buf(out, *d);
             true
         }
         Some(Value::BoolValue(b)) => {
-            write_json_key(out, key);
+            write_json_escaped_key(out, key);
+            out.extend_from_slice(b":");
             out.extend_from_slice(if *b { b"true" } else { b"false" });
             true
         }
@@ -701,34 +731,51 @@ fn write_u64_to_buf(out: &mut Vec<u8>, mut n: u64) {
 #[inline]
 fn write_f64_to_buf(out: &mut Vec<u8>, d: f64) {
     use std::io::Write;
+    if !d.is_finite() {
+        // JSON (RFC 8259) has no representation for NaN/infinity — emit null.
+        out.extend_from_slice(b"null");
+        return;
+    }
     // Use ryu for optimal float formatting (available in std)
     let _ = write!(out, "{}", d);
 }
 
+/// Write a JSON object key as a properly escaped quoted string.
+///
+/// OTLP attribute keys may contain quotes, backslashes, or control characters.
+/// Using raw bytes would produce malformed JSON (issue #1166).
+fn write_json_escaped_key(out: &mut Vec<u8>, key: &str) {
+    out.push(b'"');
+    for &b in key.as_bytes() {
+        match b {
+            b'"' => out.extend_from_slice(b"\\\""),
+            b'\\' => out.extend_from_slice(b"\\\\"),
+            b'\n' => out.extend_from_slice(b"\\n"),
+            b'\r' => out.extend_from_slice(b"\\r"),
+            b'\t' => out.extend_from_slice(b"\\t"),
+            0x00..=0x1f => {
+                out.extend_from_slice(b"\\u00");
+                out.push(HEX_DIGITS[(b >> 4) as usize]);
+                out.push(HEX_DIGITS[(b & 0x0f) as usize]);
+            }
+            other => out.push(other),
+        }
+    }
+    out.push(b'"');
+}
+
+/// Writes `"key":<value>` where `value` MUST already be a valid JSON token.
+/// Caller is responsible for quoting/escaping when `value` is a string.
+#[allow(dead_code)] // used in tests; kept for future raw-value emission
 fn write_json_field(out: &mut Vec<u8>, key: &str, value: &str) {
-    write_json_key(out, key);
+    write_json_escaped_key(out, key);
+    out.extend_from_slice(b":");
     out.extend_from_slice(value.as_bytes());
 }
 
 fn write_json_string_field(out: &mut Vec<u8>, key: &str, value: &str) {
-    write_json_key(out, key);
-    write_json_quoted_string(out, value);
-}
-
-const HEX_DIGITS: [u8; 16] = *b"0123456789abcdef";
-
-fn write_json_key(out: &mut Vec<u8>, key: &str) {
-    write_json_quoted_string(out, key);
-    out.push(b':');
-}
-
-fn write_json_quoted_string(out: &mut Vec<u8>, value: &str) {
-    out.push(b'"');
-    write_json_escaped_string_contents(out, value);
-    out.push(b'"');
-}
-
-fn write_json_escaped_string_contents(out: &mut Vec<u8>, value: &str) {
+    write_json_escaped_key(out, key);
+    out.extend_from_slice(b":\"");
     // JSON escape per RFC 8259: all control chars (0x00-0x1f) must be escaped.
     for &b in value.as_bytes() {
         match b {
@@ -746,7 +793,10 @@ fn write_json_escaped_string_contents(out: &mut Vec<u8>, value: &str) {
             _ => out.push(b),
         }
     }
+    out.push(b'"');
 }
+
+const HEX_DIGITS: [u8; 16] = *b"0123456789abcdef";
 
 /// Write hex-encoded bytes directly to output buffer (zero allocation).
 fn write_hex_to_buf(out: &mut Vec<u8>, bytes: &[u8]) {
@@ -1436,5 +1486,78 @@ mod tests {
             status, 200,
             "valid OTLP JSON should return 200, got {status}"
         );
+    }
+
+    // Regression tests for issue #1167: non-finite floats must emit null, not "NaN"/"inf".
+    #[test]
+    fn write_f64_nan_emits_null() {
+        let mut out = Vec::new();
+        write_f64_to_buf(&mut out, f64::NAN);
+        assert_eq!(&out, b"null", "NaN must serialize as JSON null");
+    }
+
+    #[test]
+    fn write_f64_infinity_emits_null() {
+        let mut out = Vec::new();
+        write_f64_to_buf(&mut out, f64::INFINITY);
+        assert_eq!(&out, b"null", "Infinity must serialize as JSON null");
+    }
+
+    #[test]
+    fn write_f64_neg_infinity_emits_null() {
+        let mut out = Vec::new();
+        write_f64_to_buf(&mut out, f64::NEG_INFINITY);
+        assert_eq!(&out, b"null", "-Infinity must serialize as JSON null");
+    }
+
+    #[test]
+    fn write_f64_finite_unchanged() {
+        let mut out = Vec::new();
+        write_f64_to_buf(&mut out, 3.14);
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.starts_with("3.14"),
+            "finite float should be formatted normally: {text}"
+        );
+    }
+
+    // Regression tests for issue #1166: attribute keys with special chars must be escaped.
+    #[test]
+    fn write_json_escaped_key_escapes_quotes() {
+        let mut out = Vec::new();
+        write_json_escaped_key(&mut out, r#"ke"y"#);
+        assert_eq!(&out, b"\"ke\\\"y\"", "quote in key must be escaped");
+    }
+
+    #[test]
+    fn write_json_escaped_key_escapes_backslash() {
+        let mut out = Vec::new();
+        write_json_escaped_key(&mut out, r"ke\y");
+        assert_eq!(&out, b"\"ke\\\\y\"", "backslash in key must be escaped");
+    }
+
+    #[test]
+    fn write_json_string_field_escapes_key() {
+        let mut out = Vec::new();
+        write_json_string_field(&mut out, r#"k"ey"#, "value");
+        let text = String::from_utf8(out).unwrap();
+        // Must be valid JSON
+        let json_str = format!("{{{text}}}");
+        serde_json::from_str::<serde_json::Value>(&json_str)
+            .unwrap_or_else(|e| panic!("invalid JSON after key escaping: {e}\n{json_str}"));
+        assert!(
+            text.contains(r#"k\"ey"#),
+            "quote in key not escaped: {text}"
+        );
+    }
+
+    #[test]
+    fn write_json_field_escapes_key() {
+        let mut out = Vec::new();
+        write_json_field(&mut out, r#"k"ey"#, "42");
+        let text = String::from_utf8(out).unwrap();
+        let json_str = format!("{{{text}}}");
+        serde_json::from_str::<serde_json::Value>(&json_str)
+            .unwrap_or_else(|e| panic!("invalid JSON after key escaping: {e}\n{json_str}"));
     }
 }

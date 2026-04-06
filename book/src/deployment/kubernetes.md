@@ -67,6 +67,19 @@ docker run -d \
 
 ---
 
+## Production safe defaults
+
+Use these defaults unless you have measured reasons to change them:
+
+- Run as a DaemonSet with one pod per node.
+- Read host logs from `/var/log` as `readOnly: true`.
+- Set OTLP compression to `zstd` for lower egress cost.
+- Enable diagnostics endpoint (`server.diagnostics`) for triage.
+- Start with resource requests of `cpu: 250m`, `memory: 128Mi` and tune from observed load.
+- Keep transform filters conservative first, then tighten once observability confirms behavior.
+
+These defaults prioritize stability and debuggability over premature optimization.
+
 ## Kubernetes — DaemonSet
 
 A DaemonSet is the recommended way to deploy logfwd in a Kubernetes cluster. Each
@@ -181,6 +194,37 @@ kubectl apply -f deploy/daemonset.yml
 kubectl -n collectors rollout status daemonset/logfwd
 ```
 
+### Validate rollout
+
+```bash
+# Pod health
+kubectl -n collectors get pods -l app=logfwd -o wide
+
+# Runtime logs
+kubectl -n collectors logs daemonset/logfwd --tail=100
+
+# Diagnostics endpoint (port-forward one pod)
+POD=$(kubectl -n collectors get pods -l app=logfwd -o jsonpath='{.items[0].metadata.name}')
+kubectl -n collectors port-forward "$POD" 9090:9090
+curl -s http://localhost:9090/api/pipelines | jq .
+```
+
+### Rollback
+
+If a new deployment causes dropped logs or sustained output errors, revert quickly:
+
+```bash
+# Roll back DaemonSet to previous revision
+kubectl -n collectors rollout undo daemonset/logfwd
+
+# Verify rollback completion
+kubectl -n collectors rollout status daemonset/logfwd
+
+# Confirm forwarding resumes
+kubectl -n collectors logs daemonset/logfwd --tail=100
+```
+
+
 ### Kubernetes metadata enrichment
 
 Use the `k8s_path` enrichment table to attach namespace, pod, and container labels to
@@ -218,13 +262,6 @@ transform: |
 
 Expose port 9090 in the pod spec to make the diagnostics API reachable from
 within the cluster.
-
-```yaml
-# Note: logfwd's /metrics endpoint returns HTTP 410 Gone (intentionally disabled).
-# Use /api/pipelines for JSON diagnostics instead.
-# To integrate with Prometheus, use a custom adapter or wait for a future
-# /metrics endpoint.
-```
 
 To scrape `/api/pipelines`, configure a Prometheus adapter (such as
 `json_exporter`) that converts the JSON response into Prometheus metrics, or

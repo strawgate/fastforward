@@ -11,8 +11,8 @@ You need the `logfwd` binary. See [Installation](./installation.md) for all opti
 curl -fsSL https://github.com/strawgate/memagent/releases/latest/download/logfwd-darwin-arm64 -o logfwd
 chmod +x logfwd
 
-# Or build from source (Rust 1.86+)
-cargo build --release -p logfwd && cp target/release/logfwd .
+# Or build from source (Rust 1.85+)
+cargo build --release --bin logfwd && cp target/release/logfwd .
 ```
 
 Verify it works:

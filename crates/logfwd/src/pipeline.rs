@@ -25,7 +25,6 @@ use logfwd_arrow::scanner::Scanner;
 use logfwd_config::{
     EnrichmentConfig, Format, GeoDatabaseFormat, InputConfig, InputType, PipelineConfig,
 };
-use logfwd_core::pipeline::{PipelineMachine, Running, SourceId};
 use logfwd_io::checkpoint::{
     CheckpointStore, FileCheckpointStore, SourceCheckpoint, default_data_dir,
 };
@@ -38,6 +37,7 @@ use logfwd_output::{
     AsyncFanoutFactory, BatchMetadata, OnceAsyncFactory, SinkFactory, build_sink_factory,
 };
 use logfwd_transform::SqlTransform;
+use logfwd_types::pipeline::{PipelineMachine, Running, SourceId};
 use tokio_util::sync::CancellationToken;
 
 // ---------------------------------------------------------------------------
@@ -719,7 +719,7 @@ impl Pipeline {
                                 offset: *offset,
                             });
                         }
-                        flush_checkpoint_with_retry(store.as_mut());
+                        flush_checkpoint_with_retry(store.as_mut()).await;
                     }
                 }
                 Err(still_draining) => {
@@ -739,7 +739,7 @@ impl Pipeline {
                                 offset: *offset,
                             });
                         }
-                        flush_checkpoint_with_retry(store.as_mut());
+                        flush_checkpoint_with_retry(store.as_mut()).await;
                     }
                 }
             }
@@ -966,7 +966,7 @@ impl Pipeline {
     /// Flushes are throttled to at most once per 5 seconds to avoid fsync storms.
     fn ack_all_tickets(
         &mut self,
-        tickets: Vec<logfwd_core::pipeline::BatchTicket<logfwd_core::pipeline::Sending, u64>>,
+        tickets: Vec<logfwd_types::pipeline::BatchTicket<logfwd_types::pipeline::Sending, u64>>,
         success: bool,
     ) {
         let Some(ref mut machine) = self.machine else {
@@ -1111,10 +1111,10 @@ fn input_poll_loop(
 /// A single failure here loses all checkpoint advancement from the run.
 /// Retry with brief sleeps to handle transient I/O errors (disk busy, NFS glitch).
 ///
-/// Uses `std::thread::sleep` (not `tokio::time::sleep`) because this runs
-/// during shutdown after all async work is drained, and `CheckpointStore::flush`
-/// is itself synchronous I/O — there is no benefit to yielding.
-fn flush_checkpoint_with_retry(store: &mut dyn CheckpointStore) {
+/// Uses `tokio::time::sleep` for the retry delay so the async task yields
+/// between attempts (Turmoil-compatible). Note: `store.flush()` itself is
+/// synchronous I/O; only the inter-retry sleep is non-blocking.
+async fn flush_checkpoint_with_retry(store: &mut dyn CheckpointStore) {
     const MAX_ATTEMPTS: u32 = 3;
     const RETRY_DELAY: Duration = Duration::from_millis(100);
 
@@ -1133,7 +1133,7 @@ fn flush_checkpoint_with_retry(store: &mut dyn CheckpointStore) {
                         error = %e,
                         "pipeline: checkpoint flush failed, retrying"
                     );
-                    std::thread::sleep(RETRY_DELAY);
+                    tokio::time::sleep(RETRY_DELAY).await;
                 } else {
                     tracing::error!(
                         attempts = MAX_ATTEMPTS,
@@ -1424,6 +1424,9 @@ fn now_nanos() -> u64 {
 mod tests {
     use super::*;
     use std::sync::atomic::Ordering;
+    // std::time::Instant is cfg-gated in the parent module for turmoil compatibility,
+    // but tests need it for timeout deadlines regardless of the turmoil feature flag.
+    use std::time::Instant;
 
     use logfwd_config::{Format, OutputConfig, OutputType};
     use logfwd_io::diagnostics::ComponentStats;

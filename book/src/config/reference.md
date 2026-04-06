@@ -1,6 +1,6 @@
 # Configuration Reference
 
-logfwd is configured with a YAML file passed via `--config <path>`.
+logfwd is configured with a YAML file passed via `--config <config.yaml>`.
 
 ## Overview
 
@@ -107,7 +107,7 @@ Listen for log lines on a UDP socket.
 input:
   type: udp
   listen: 0.0.0.0:514
-  format: syslog
+  format: json
 ```
 
 ### `tcp` input *(not yet implemented)*
@@ -155,7 +155,6 @@ The `format` field controls how raw bytes from the input are parsed into log rec
 | `json` | Newline-delimited JSON. Each line must be a single JSON object. |
 | `raw` | Treat each line as an opaque string stored in `_raw_str`. |
 | `logfmt` | Key=value pairs (e.g. `level=info msg="hello"`). *Not yet implemented.* |
-| `syslog` | RFC 5424 syslog. *Not yet implemented.* |
 | `console` | Human-readable coloured output for interactive debugging. Output mode only. |
 
 ---
@@ -196,13 +195,12 @@ POST log records as newline-delimited JSON to an HTTP endpoint.
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `endpoint` | string | Yes | Full URL, e.g. `http://ingest.example.com/logs`. |
-| `compression` | string | No | `zstd` to compress the request body. |
+| `compression` | string | No | Reserved for future use. HTTP output is not yet implemented. |
 
 ```yaml
 output:
   type: http
   endpoint: http://ingest.example.com/logs
-  compression: zstd
 ```
 
 ### `stdout` output
@@ -258,7 +256,7 @@ Write records to Parquet files. Not yet functional.
 | Value | Status | Description |
 |-------|--------|-------------|
 | `otlp` | Implemented | OTLP protobuf over HTTP or gRPC. |
-| `http` | Implemented | JSON lines over HTTP POST. |
+| `http` | Planned | JSON lines over HTTP POST (not yet implemented). |
 | `stdout` | Implemented | Print to stdout (JSON or coloured text). |
 | `elasticsearch` | Stub | Elasticsearch bulk API. |
 | `loki` | Stub | Grafana Loki push API. |
@@ -451,8 +449,6 @@ When `server.diagnostics` is configured, logfwd exposes an HTTP API for monitori
 | `/api/logs` | GET | Recent log lines from logfwd's own stderr (ring buffer). |
 | `/api/history` | GET | Time-series data (1-hour window) for dashboard charts. |
 | `/api/traces` | GET | Recent batch processing spans for detailed latency analysis. |
-
-Note: The `/metrics` (Prometheus) endpoint was removed in favor of `/api/pipelines`. It returns `410 Gone`. The `/api/system` route mentioned in some older documentation does not exist.
 
 ---
 

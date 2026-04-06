@@ -21,7 +21,7 @@ use logfwd_transform::SqlTransform;
 
 fn bench_batch_scan(c: &mut Criterion) {
     let mut group = c.benchmark_group("batch_scan");
-    group.sample_size(20);
+    group.sample_size(50);
 
     let batch_sizes: &[usize] = &[100, 500, 1_000, 5_000, 10_000, 50_000, 100_000];
 
@@ -33,9 +33,11 @@ fn bench_batch_scan(c: &mut Criterion) {
             let data_bytes = bytes::Bytes::from(data.clone());
             let mut scanner = Scanner::new(ScanConfig::default());
             b.iter(|| {
-                scanner
-                    .scan_detached(data_bytes.clone())
-                    .expect("scan should not fail")
+                std::hint::black_box(
+                    scanner
+                        .scan_detached(data_bytes.clone())
+                        .expect("scan should not fail"),
+                )
             });
         });
     }
@@ -49,7 +51,7 @@ fn bench_batch_scan(c: &mut Criterion) {
 
 fn bench_batch_transform(c: &mut Criterion) {
     let mut group = c.benchmark_group("batch_transform");
-    group.sample_size(20);
+    group.sample_size(50);
 
     let meta = generators::make_metadata();
     let batch_sizes: &[usize] = &[100, 500, 1_000, 5_000, 10_000, 50_000];
@@ -70,7 +72,7 @@ fn bench_batch_transform(c: &mut Criterion) {
                     .scan_detached(data_bytes.clone())
                     .expect("scan should not fail");
                 let result = transform.execute_blocking(batch).unwrap();
-                sink.send_batch(&result, &meta).unwrap();
+                std::hint::black_box(sink.send_batch(&result, &meta).unwrap());
             });
         });
 
@@ -86,7 +88,7 @@ fn bench_batch_transform(c: &mut Criterion) {
                     .scan_detached(data_bytes.clone())
                     .expect("scan should not fail");
                 let result = transform.execute_blocking(batch).unwrap();
-                sink.send_batch(&result, &meta).unwrap();
+                std::hint::black_box(sink.send_batch(&result, &meta).unwrap());
             });
         });
     }
@@ -100,7 +102,7 @@ fn bench_batch_transform(c: &mut Criterion) {
 
 fn bench_batch_pipeline(c: &mut Criterion) {
     let mut group = c.benchmark_group("batch_pipeline");
-    group.sample_size(20);
+    group.sample_size(50);
 
     let meta = generators::make_metadata();
     let batch_sizes: &[usize] = &[100, 500, 1_000, 5_000, 10_000, 50_000];
@@ -124,6 +126,8 @@ fn bench_batch_pipeline(c: &mut Criterion) {
                         .scan_detached(data_bytes.clone())
                         .expect("scan should not fail");
                     let result = transform.execute_blocking(batch).unwrap();
+                    // encode_batch writes to sink's internal buffer (side effect);
+                    // no black_box needed — sink is observable outside the closure.
                     sink.encode_batch(&result, &meta);
                 });
             },

@@ -1,14 +1,24 @@
 name: Deploy Docs
 
 on:
+  pull_request:
+    paths:
+      - "book/**"
+      - "dev-docs/**"
+      - "docs/**"
+      - "README.md"
+      - "scripts/docs/**"
+      - ".github/workflows/docs.yml"
   push:
     branches: [master]
     paths:
       - "book/**"
+      - "dev-docs/**"
       - "bench/dashboard/**"
       - "crates/**"
       - "docs/**"
       - "README.md"
+      - "scripts/docs/**"
       - ".github/workflows/docs.yml"
   workflow_dispatch:
 
@@ -35,6 +45,21 @@ jobs:
         uses: peaceiris/actions-mdbook@v2
         with:
           mdbook-version: latest
+
+      - name: Link check (book + docs + README)
+        uses: lycheeverse/lychee-action@v2
+        with:
+          args: >-
+            --no-progress
+            --accept 200,429
+            --max-retries 3
+            README.md book/src dev-docs docs
+
+      - name: Validate required operational doc sections
+        run: python3 scripts/docs/validate_operational_sections.py
+
+      - name: Report stale operational docs
+        run: python3 scripts/docs/report_stale_docs.py
 
       - name: Build mdBook
         run: mdbook build book
@@ -63,6 +88,7 @@ jobs:
 
   deploy:
     needs: build
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     environment:
       name: github-pages
