@@ -94,6 +94,24 @@ fn reset() -> &'static str {
     if use_color() { "\x1b[0m" } else { "" }
 }
 
+/// Print a usage example with a dim comment aligned to column 42.
+fn print_example(cmd: &str, comment: &str) {
+    let pad = 42usize.saturating_sub(cmd.len());
+    println!("  {cmd}{:pad$}{}# {comment}{}", "", dim(), reset());
+}
+
+/// Print a "did you mean ...?" hint on stderr.
+fn print_hint(suggestion: &str) {
+    eprintln!(
+        "{}hint{}: did you mean {}{}{}?",
+        dim(),
+        reset(),
+        bold(),
+        suggestion,
+        reset()
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
@@ -126,13 +144,11 @@ async fn main_inner() -> i32 {
                 reset()
             );
             eprintln!();
-            let mut synth_args = vec![
+            let synth_args = vec![
                 args[0].clone(),
                 "--config".to_string(),
                 path.to_string_lossy().to_string(),
             ];
-            synth_args.extend(args.iter().skip(1).cloned());
-            let synth_args = normalize_args(synth_args);
             return match cmd_config(&synth_args).await {
                 Ok(()) => EXIT_OK,
                 Err(e) => {
@@ -171,14 +187,7 @@ async fn main_inner() -> i32 {
         other => {
             eprintln!("{}error{}: unknown command: {other}", red(), reset());
             if let Some(suggestion) = suggest_flag(other) {
-                eprintln!(
-                    "{}hint{}: did you mean {}{}{}?",
-                    dim(),
-                    reset(),
-                    bold(),
-                    suggestion,
-                    reset()
-                );
+                print_hint(suggestion);
             }
             eprintln!("Run {}logfwd --help{} for usage.", bold(), reset());
             return EXIT_CONFIG;
@@ -224,42 +233,14 @@ fn print_usage() {
     println!("  -V, --version          Show version");
     println!();
     println!("{}EXAMPLES:{}", bold(), reset());
-    println!(
-        "  logfwd -c config.yaml              {}# run pipelines{}",
-        dim(),
-        reset()
-    );
-    println!(
-        "  logfwd -c config.yaml --validate   {}# validate config only{}",
-        dim(),
-        reset()
-    );
-    println!(
-        "  logfwd -c config.yaml --dry-run    {}# test SQL planning{}",
-        dim(),
-        reset()
-    );
-    println!(
-        "  logfwd --blackhole                 {}# start OTLP test receiver{}",
-        dim(),
-        reset()
-    );
-    println!("  logfwd --generate-json 10000 test.json");
-    println!(
-        "  logfwd --dump-config config.yaml   {}# show resolved config{}",
-        dim(),
-        reset()
-    );
-    println!(
-        "  logfwd --init                      {}# generate starter config{}",
-        dim(),
-        reset()
-    );
-    println!(
-        "  logfwd --completions bash           {}# output bash completions{}",
-        dim(),
-        reset()
-    );
+    print_example("logfwd -c config.yaml", "run pipelines");
+    print_example("logfwd -c config.yaml --validate", "validate config only");
+    print_example("logfwd -c config.yaml --dry-run", "test SQL planning");
+    print_example("logfwd --blackhole", "start OTLP test receiver");
+    print_example("logfwd --generate-json 10000 test.json", "synthetic data");
+    print_example("logfwd --dump-config config.yaml", "show resolved config");
+    print_example("logfwd --init", "generate starter config");
+    print_example("logfwd --completions bash", "output bash completions");
     println!();
     println!("{}ENVIRONMENT:{}", bold(), reset());
     println!("  LOGFWD_CONFIG          Config file path (auto-discovered if not set)");
@@ -267,21 +248,9 @@ fn print_usage() {
     println!("  RUST_LOG               Fallback if LOGFWD_LOG is not set");
     println!();
     println!("{}CONFIG SEARCH ORDER:{}", bold(), reset());
-    println!(
-        "  1. --config <path>         {}# explicit flag always wins{}",
-        dim(),
-        reset()
-    );
-    println!(
-        "  2. $LOGFWD_CONFIG          {}# environment variable{}",
-        dim(),
-        reset()
-    );
-    println!(
-        "  3. ./logfwd.yaml           {}# current directory{}",
-        dim(),
-        reset()
-    );
+    print_example("1. --config <path>", "explicit flag always wins");
+    print_example("2. $LOGFWD_CONFIG", "environment variable");
+    print_example("3. ./logfwd.yaml", "current directory");
     println!("  4. ~/.config/logfwd/config.yaml");
     println!("  5. /etc/logfwd/config.yaml");
     println!();
@@ -366,14 +335,7 @@ async fn cmd_config(args: &[String]) -> Result<(), CliError> {
                 eprintln!("{}error{}: unknown flag: {other}", red(), reset());
                 let config_flags = &["--validate", "--check", "--dry-run"];
                 if let Some(closest) = closest_match(other, config_flags) {
-                    eprintln!(
-                        "{}hint{}: did you mean {}{}{}?",
-                        dim(),
-                        reset(),
-                        bold(),
-                        closest,
-                        reset()
-                    );
+                    print_hint(closest);
                 }
                 eprintln!("  logfwd --config <config.yaml> [--validate] [--dry-run]");
                 return Err(CliError::Config(format!("unknown flag: {other}")));
@@ -461,14 +423,11 @@ fn cmd_dump_config(args: &[String]) -> Result<(), CliError> {
     let config_yaml = std::fs::read_to_string(&config_path)
         .map_err(|e| CliError::Config(format!("cannot read {config_path}: {e}")))?;
 
-    // Parse and re-serialize to show fully resolved config (env vars expanded).
-    let config = logfwd_config::Config::load_str(&config_yaml)
-        .map_err(|e| CliError::Config(e.to_string()))?;
+    // Validate that the config parses before dumping.
+    logfwd_config::Config::load_str(&config_yaml).map_err(|e| CliError::Config(e.to_string()))?;
 
-    eprintln!("{}# resolved from {config_path}{}", dim(), reset(),);
-    // Pretty-print the config structure. We use Debug for now since Config
-    // doesn't implement Serialize — this still shows the resolved values.
-    println!("{config:#?}");
+    eprintln!("{}# validated from {config_path}{}", dim(), reset());
+    print!("{config_yaml}");
     Ok(())
 }
 
@@ -675,10 +634,9 @@ fn discover_config() -> Option<std::path::PathBuf> {
         .map(PathBuf::from)
         .ok()
         .or_else(|| {
-            dirs_fallback_home().map(|mut h| {
-                h.push(".config");
-                h
-            })
+            env::var("HOME")
+                .ok()
+                .map(|h| PathBuf::from(h).join(".config"))
         });
     if let Some(xdg) = xdg_base.map(|b| b.join("logfwd/config.yaml")) {
         if xdg.is_file() {
@@ -693,12 +651,6 @@ fn discover_config() -> Option<std::path::PathBuf> {
     }
 
     None
-}
-
-/// Fallback home directory lookup (avoids adding a `dirs` dependency).
-/// Returns `None` when `$HOME` is unset so callers can skip home-relative probes.
-fn dirs_fallback_home() -> Option<std::path::PathBuf> {
-    env::var("HOME").ok().map(std::path::PathBuf::from)
 }
 
 // ---------------------------------------------------------------------------
@@ -735,7 +687,7 @@ fn closest_match<'a>(input: &str, candidates: &[&'a str]) -> Option<&'a str> {
     best.map(|(s, _)| s)
 }
 
-/// Simple Levenshtein edit distance (no allocations beyond a single Vec).
+/// Levenshtein edit distance between two strings.
 fn edit_distance(a: &str, b: &str) -> usize {
     let a: Vec<char> = a.chars().collect();
     let b: Vec<char> = b.chars().collect();

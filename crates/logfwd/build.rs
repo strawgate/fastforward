@@ -1,4 +1,5 @@
 /// Capture build-time metadata for rich `--version` output.
+use std::path::PathBuf;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -9,6 +10,13 @@ fn git_output(args: &[&str]) -> Option<Vec<u8>> {
         .ok()
         .filter(|o| o.status.success())
         .map(|o| o.stdout)
+}
+
+fn git_string(args: &[&str]) -> String {
+    git_output(args).map_or_else(
+        || "unknown".to_string(),
+        |o| String::from_utf8_lossy(&o).trim().to_string(),
+    )
 }
 
 /// Compute UTC date as YYYY-MM-DD from the current system time.
@@ -24,7 +32,7 @@ fn build_date() -> String {
                 .unwrap_or(0)
         });
 
-    // Days since Unix epoch → calendar date (proleptic Gregorian)
+    // Days since Unix epoch -> calendar date (proleptic Gregorian)
     let mut days = (epoch_secs / 86400) as u32;
     let mut year = 1970u32;
     loop {
@@ -63,41 +71,53 @@ fn build_date() -> String {
 }
 
 fn main() {
-    // Short git hash
-    let git_hash = git_output(&["rev-parse", "--short", "HEAD"]).map_or_else(
-        || "unknown".to_string(),
-        |o| String::from_utf8_lossy(&o).trim().to_string(),
+    println!(
+        "cargo:rustc-env=LOGFWD_GIT_HASH={}",
+        git_string(&["rev-parse", "--short", "HEAD"])
     );
-    println!("cargo:rustc-env=LOGFWD_GIT_HASH={git_hash}");
 
-    // Dirty flag
     let dirty = git_output(&["status", "--porcelain"]).is_some_and(|o| !o.is_empty());
-    if dirty {
-        println!("cargo:rustc-env=LOGFWD_GIT_DIRTY=-dirty");
-    } else {
-        println!("cargo:rustc-env=LOGFWD_GIT_DIRTY=");
-    }
+    println!(
+        "cargo:rustc-env=LOGFWD_GIT_DIRTY={}",
+        if dirty { "-dirty" } else { "" }
+    );
 
-    // Build date (cross-platform; no external `date` command)
     println!("cargo:rustc-env=LOGFWD_BUILD_DATE={}", build_date());
 
-    // Target triple (set by cargo)
     println!(
         "cargo:rustc-env=LOGFWD_TARGET={}",
         std::env::var("TARGET").unwrap_or_else(|_| "unknown".to_string())
     );
 
-    // Build profile
     println!(
         "cargo:rustc-env=LOGFWD_PROFILE={}",
         std::env::var("PROFILE").unwrap_or_else(|_| "unknown".to_string())
     );
 
-    // Re-run when HEAD, refs, or the index changes.
-    // .git/index tracks staged/unstaged changes so LOGFWD_GIT_DIRTY stays fresh.
-    println!("cargo:rerun-if-changed=../../.git/HEAD");
-    println!("cargo:rerun-if-changed=../../.git/refs/heads/");
-    println!("cargo:rerun-if-changed=../../.git/index");
-    // SOURCE_DATE_EPOCH override for reproducible builds
+    // Re-run when git state changes. Compute .git path from CARGO_MANIFEST_DIR
+    // so this works regardless of workspace nesting depth.
+    let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+    if let Some(git_dir) = find_git_dir(&manifest_dir) {
+        println!("cargo:rerun-if-changed={}", git_dir.join("HEAD").display());
+        println!(
+            "cargo:rerun-if-changed={}",
+            git_dir.join("refs/heads").display()
+        );
+        println!("cargo:rerun-if-changed={}", git_dir.join("index").display());
+    }
     println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
+}
+
+/// Walk up from `start` to find the `.git` directory.
+fn find_git_dir(start: &std::path::Path) -> Option<PathBuf> {
+    let mut dir = start.to_path_buf();
+    loop {
+        let candidate = dir.join(".git");
+        if candidate.is_dir() {
+            return Some(candidate);
+        }
+        if !dir.pop() {
+            return None;
+        }
+    }
 }
