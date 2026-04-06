@@ -270,8 +270,11 @@ impl OtapReceiver {
 
     /// Try to receive all available RecordBatches (non-blocking).
     pub fn try_recv_all(&self) -> Vec<RecordBatch> {
+        let Some(rx) = self.rx.as_ref() else {
+            return Vec::new();
+        };
         let mut batches = Vec::new();
-        while let Ok(batch) = self.rx.as_ref().expect("rx is Some until drop").try_recv() {
+        while let Ok(batch) = rx.try_recv() {
             batches.push(batch);
         }
         batches
@@ -279,27 +282,26 @@ impl OtapReceiver {
 
     /// Blocking receive of the next RecordBatch.
     pub fn recv(&self) -> io::Result<RecordBatch> {
-        self.rx
-            .as_ref()
-            .expect("rx is Some until drop")
-            .recv()
+        let Some(rx) = self.rx.as_ref() else {
+            return Err(io::Error::other("OTAP receiver: already closed"));
+        };
+        rx.recv()
             .map_err(|_| io::Error::other("OTAP receiver: channel disconnected"))
     }
 
     /// Receive with a timeout.
     pub fn recv_timeout(&self, timeout: std::time::Duration) -> io::Result<RecordBatch> {
-        self.rx
-            .as_ref()
-            .expect("rx is Some until drop")
-            .recv_timeout(timeout)
-            .map_err(|e| match e {
-                mpsc::RecvTimeoutError::Timeout => {
-                    io::Error::new(io::ErrorKind::TimedOut, "OTAP receiver: timed out")
-                }
-                mpsc::RecvTimeoutError::Disconnected => {
-                    io::Error::other("OTAP receiver: channel disconnected")
-                }
-            })
+        let Some(rx) = self.rx.as_ref() else {
+            return Err(io::Error::other("OTAP receiver: already closed"));
+        };
+        rx.recv_timeout(timeout).map_err(|e| match e {
+            mpsc::RecvTimeoutError::Timeout => {
+                io::Error::new(io::ErrorKind::TimedOut, "OTAP receiver: timed out")
+            }
+            mpsc::RecvTimeoutError::Disconnected => {
+                io::Error::other("OTAP receiver: channel disconnected")
+            }
+        })
     }
 
     /// Return the name of this receiver.
@@ -570,6 +572,18 @@ fn encode_batch_status(batch_id: i64, status_code: u32) -> Vec<u8> {
 
 // Protobuf encode helpers (encode_tag, encode_varint) are imported from
 // logfwd_core::otlp.
+
+impl Drop for OtapReceiver {
+    fn drop(&mut self) {
+        self.shutdown
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        self.rx.take();
+        self.server.unblock();
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -1078,18 +1092,6 @@ mod tests {
             let (decoded, end) = decode_varint(&buf, 0).expect("decode");
             assert_eq!(decoded, value, "varint roundtrip failed for {value}");
             assert_eq!(end, buf.len());
-        }
-    }
-}
-
-impl Drop for OtapReceiver {
-    fn drop(&mut self) {
-        self.shutdown
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-        self.rx.take();
-        self.server.unblock();
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
         }
     }
 }
