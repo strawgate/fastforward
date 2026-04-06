@@ -781,14 +781,11 @@ impl Config {
                     .map_or_else(|| format!("#{i}"), String::from);
 
                 // Reject placeholder output types that are not yet implemented.
-                match output.output_type {
-                    OutputType::Parquet => {
-                        return Err(ConfigError::Validation(format!(
-                            "pipeline '{name}' output '{label}': {} output type is not yet implemented",
-                            output.output_type,
-                        )));
-                    }
-                    _ => {}
+                if output.output_type == OutputType::Parquet {
+                    return Err(ConfigError::Validation(format!(
+                        "pipeline '{name}' output '{label}': {} output type is not yet implemented",
+                        output.output_type,
+                    )));
                 }
 
                 match output.output_type {
@@ -1491,7 +1488,10 @@ output:
     fn file_output_accepts_path() {
         let yaml = "input:\n  type: file\n  path: /tmp/x.log\noutput:\n  type: file\n  path: /tmp/out.ndjson\n";
         let cfg = Config::load_str(yaml).unwrap();
-        assert_eq!(cfg.pipelines["default"].outputs[0].output_type, OutputType::File);
+        assert_eq!(
+            cfg.pipelines["default"].outputs[0].output_type,
+            OutputType::File
+        );
     }
 
     #[test]
