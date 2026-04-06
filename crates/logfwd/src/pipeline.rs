@@ -80,12 +80,27 @@ enum ChannelMsg {
         /// Uses tokio::time::Instant so elapsed() measures simulated time
         /// under Turmoil, not wall-clock time.
         queued_at: tokio::time::Instant,
+        /// Which input config produced this data, indexing into
+        /// `Pipeline::input_transforms`.
+        input_index: usize,
     },
 }
 
 // ---------------------------------------------------------------------------
 // Per-input state
 // ---------------------------------------------------------------------------
+
+/// Per-input scanning + SQL transform pair.
+///
+/// Each input gets its own `Scanner` (driven by `ScanConfig` derived from
+/// its SQL) and `SqlTransform`. This enables per-input field extraction,
+/// filtering, and schema reshaping with natural predicate pushdown.
+struct InputTransform {
+    scanner: Scanner,
+    transform: SqlTransform,
+    #[allow(dead_code)]
+    input_name: String,
+}
 
 struct InputState {
     /// The input source, wrapped in FramedInput for line framing + format processing.
@@ -101,12 +116,13 @@ struct InputState {
 // Pipeline
 // ---------------------------------------------------------------------------
 
-/// A single pipeline: inputs → Scanner → SQL transform → async output pool.
+/// A single pipeline: inputs → per-input Scanner + SQL transform → async output pool.
 pub struct Pipeline {
     name: String,
     inputs: Vec<InputState>,
-    scanner: Scanner,
-    transform: SqlTransform,
+    /// Per-input Scanner + SqlTransform pairs. One per input config,
+    /// indexed by the same order as `inputs`.
+    input_transforms: Vec<InputTransform>,
     /// Optional post-transform processor chain (e.g., tail-based sampling).
     /// Batches flow through each processor in order. Empty vec = no processors.
     processors: Vec<Box<dyn Processor>>,
@@ -146,10 +162,13 @@ impl Pipeline {
         if config.batch_target_bytes == Some(0) {
             return Err("batch_target_bytes must be > 0".to_string());
         }
-        let transform_sql = config.transform.as_deref().unwrap_or("SELECT * FROM logs");
-        let mut transform = SqlTransform::new(transform_sql).map_err(|e| e.to_string())?;
 
-        // Wire up enrichment sources.
+        // Collect enrichment sources once — they are shared across all
+        // per-input transforms.
+        let mut enrichment_tables: Vec<Arc<dyn logfwd_transform::enrichment::EnrichmentTable>> =
+            Vec::new();
+        let mut geo_database: Option<Arc<dyn logfwd_transform::enrichment::GeoDatabase>> = None;
+
         for enrichment in &config.enrichment {
             match enrichment {
                 EnrichmentConfig::GeoDatabase(geo_cfg) => {
@@ -182,7 +201,7 @@ impl Pipeline {
                             "geo_database refresh_interval is not yet implemented, database will not auto-reload"
                         );
                     }
-                    transform.set_geo_database(db);
+                    geo_database = Some(db);
                 }
                 EnrichmentConfig::Static(cfg) => {
                     let labels: Vec<(String, String)> = cfg
@@ -194,23 +213,17 @@ impl Pipeline {
                         logfwd_transform::enrichment::StaticTable::new(&cfg.table_name, &labels)
                             .map_err(|e| format!("enrichment '{}': {e}", cfg.table_name))?,
                     );
-                    transform
-                        .add_enrichment_table(table)
-                        .map_err(|e| format!("enrichment '{}': {e}", cfg.table_name))?;
+                    enrichment_tables.push(table);
                 }
                 EnrichmentConfig::HostInfo(_) => {
                     let table = Arc::new(logfwd_transform::enrichment::HostInfoTable::new());
-                    transform
-                        .add_enrichment_table(table)
-                        .map_err(|e| format!("enrichment host_info: {e}"))?;
+                    enrichment_tables.push(table);
                 }
                 EnrichmentConfig::K8sPath(cfg) => {
                     let table = Arc::new(logfwd_transform::enrichment::K8sPathTable::new(
                         &cfg.table_name,
                     ));
-                    transform
-                        .add_enrichment_table(table)
-                        .map_err(|e| format!("enrichment '{}': {e}", cfg.table_name))?;
+                    enrichment_tables.push(table);
                 }
                 EnrichmentConfig::Csv(cfg) => {
                     let mut path = PathBuf::from(&cfg.path);
@@ -226,9 +239,7 @@ impl Pipeline {
                     table
                         .reload()
                         .map_err(|e| format!("enrichment '{}': {e}", cfg.table_name))?;
-                    transform
-                        .add_enrichment_table(table)
-                        .map_err(|e| format!("enrichment '{}': {e}", cfg.table_name))?;
+                    enrichment_tables.push(table);
                 }
                 EnrichmentConfig::Jsonl(cfg) => {
                     let mut path = PathBuf::from(&cfg.path);
@@ -244,30 +255,18 @@ impl Pipeline {
                     table
                         .reload()
                         .map_err(|e| format!("enrichment '{}': {e}", cfg.table_name))?;
-                    transform
-                        .add_enrichment_table(table)
-                        .map_err(|e| format!("enrichment '{}': {e}", cfg.table_name))?;
+                    enrichment_tables.push(table);
                 }
             }
         }
 
-        let mut scan_config = transform.scan_config();
-        // Raw format sends non-JSON lines to the scanner. Without keep_raw,
-        // these produce empty rows. Force keep_raw so every line is captured.
-        if config
-            .inputs
-            .iter()
-            .any(|i| matches!(i.format, Some(Format::Raw)))
-        {
-            scan_config.keep_raw = true;
-        }
-        let scanner = Scanner::new(scan_config);
+        // The pipeline-level SQL is the fallback for inputs without their own.
+        let pipeline_sql = config.transform.as_deref().unwrap_or("SELECT * FROM logs");
 
-        let mut metrics = PipelineMetrics::new(name, transform_sql, meter);
+        // For PipelineMetrics, use the pipeline-level SQL as the label.
+        let mut metrics = PipelineMetrics::new(name, pipeline_sql, meter);
 
         // Open checkpoint store scoped to this pipeline name.
-        // Only create the directory if LOGFWD_DATA_DIR is explicitly set
-        // (prevents tests from polluting the default data dir).
         let checkpoint_dir = default_data_dir().join(name);
         let checkpoint_store = if checkpoint_dir.exists()
             || std::env::var_os("LOGFWD_DATA_DIR").is_some()
@@ -287,8 +286,14 @@ impl Pipeline {
             .map(|s| s.load_all())
             .unwrap_or_default();
 
-        // Build inputs (file only for now).
+        // Build per-input InputTransform and InputState.
         let mut inputs = Vec::new();
+        let mut input_transforms = Vec::new();
+        let has_raw_format = config
+            .inputs
+            .iter()
+            .any(|i| matches!(i.format, Some(Format::Raw)));
+
         for (i, input_cfg) in config.inputs.iter().enumerate() {
             let mut resolved_cfg = input_cfg.clone();
             if let Some(path_str) = &input_cfg.path {
@@ -298,7 +303,6 @@ impl Pipeline {
                 {
                     path = base.join(path);
                 }
-                // Try to canonicalize for better error reporting/stability, but don't fail if it doesn't exist yet (glob)
                 if let Ok(abs_path) = std::fs::canonicalize(&path) {
                     resolved_cfg.path = Some(abs_path.to_string_lossy().into_owned());
                 } else {
@@ -312,11 +316,40 @@ impl Pipeline {
                 .unwrap_or_else(|| format!("input_{i}"));
             let input_type_str = format!("{:?}", input_cfg.input_type).to_lowercase();
             let input_stats = metrics.add_input(&input_name, &input_type_str);
+
+            // Determine the SQL for this input: per-input > pipeline-level > passthrough.
+            let input_sql = input_cfg.sql.as_deref().unwrap_or(pipeline_sql);
+
+            let mut transform = SqlTransform::new(input_sql).map_err(|e| e.to_string())?;
+
+            // Wire up shared enrichment sources to this transform.
+            if let Some(ref db) = geo_database {
+                transform.set_geo_database(Arc::clone(db));
+            }
+            for table in &enrichment_tables {
+                transform
+                    .add_enrichment_table(Arc::clone(table))
+                    .map_err(|e| e.to_string())?;
+            }
+
+            let mut scan_config = transform.scan_config();
+            // Raw format sends non-JSON lines to the scanner. Without keep_raw,
+            // these produce empty rows. Force keep_raw so every line is captured.
+            if has_raw_format {
+                scan_config.keep_raw = true;
+            }
+            let scanner = Scanner::new(scan_config);
+
+            input_transforms.push(InputTransform {
+                scanner,
+                transform,
+                input_name: input_name.clone(),
+            });
+
             inputs.push(build_input_state(&input_name, &resolved_cfg, input_stats)?);
         }
 
         // Restore previously saved file offsets by fingerprint (SourceId).
-        // No path needed — the tailer finds the matching file by fingerprint.
         for cp in &saved_checkpoints {
             let source_id = SourceId(cp.source_id);
             for input in &mut inputs {
@@ -325,8 +358,6 @@ impl Pipeline {
         }
 
         // Build output sink factory → pool.
-        // For multiple outputs we create an AsyncFanoutFactory that delegates
-        // to one child SinkFactory per output config.
         let factory: Arc<dyn SinkFactory> = if config.outputs.len() == 1 {
             let output_cfg = &config.outputs[0];
             let output_name = output_cfg
@@ -355,12 +386,8 @@ impl Pipeline {
             Arc::new(AsyncFanoutFactory::new(fanout_name, factories))
         };
 
-        // Single-use factories (e.g. OnceAsyncFactory wrapping a pre-built
-        // sink) can only create one worker and that worker must never
-        // idle-expire — if it exits, create() returns an error and the
-        // output stops permanently.
         let (max_workers, idle_timeout) = if factory.is_single_use() {
-            (1, Duration::MAX) // never idle-expire the sole worker
+            (1, Duration::MAX)
         } else {
             (config.workers.unwrap_or(4), Duration::from_secs(30))
         };
@@ -378,8 +405,7 @@ impl Pipeline {
         Ok(Pipeline {
             name: name.to_string(),
             inputs,
-            scanner,
-            transform,
+            input_transforms,
             processors: vec![],
             pool,
             metrics,
@@ -461,12 +487,18 @@ impl Pipeline {
         &self.metrics
     }
 
-    /// Validate the SQL plan by running a probe batch through the transform.
+    /// Validate the SQL plan by running a probe batch through each
+    /// per-input transform.
     ///
     /// Called by `--dry-run` to surface planning errors (duplicate aliases,
     /// bad window specs, etc.) before the first real batch arrives.
     pub fn validate_sql_plan(&mut self) -> Result<(), String> {
-        self.transform.validate_plan().map_err(|e| e.to_string())
+        for it in &mut self.input_transforms {
+            it.transform
+                .validate_plan()
+                .map_err(|e| format!("input '{}': {e}", it.input_name))?;
+        }
+        Ok(())
     }
 
     /// Override the batch flush timeout (for testing).
@@ -504,8 +536,11 @@ impl Pipeline {
         Pipeline {
             name: name.to_string(),
             inputs: vec![],
-            scanner,
-            transform,
+            input_transforms: vec![InputTransform {
+                scanner,
+                transform,
+                input_name: "simulation".to_string(),
+            }],
             processors: vec![],
             pool,
             metrics,
@@ -542,8 +577,11 @@ impl Pipeline {
         Pipeline {
             name: name.to_string(),
             inputs: vec![],
-            scanner,
-            transform,
+            input_transforms: vec![InputTransform {
+                scanner,
+                transform,
+                input_name: "simulation".to_string(),
+            }],
             processors: vec![],
             pool,
             metrics,
@@ -612,7 +650,7 @@ impl Pipeline {
         #[cfg(feature = "turmoil")]
         let mut input_tasks = tokio::task::JoinSet::<()>::new();
 
-        for input in self.inputs.drain(..) {
+        for (input_index, input) in self.inputs.drain(..).enumerate() {
             let tx = tx.clone();
             let sd = shutdown.clone();
             let metrics = Arc::clone(&self.metrics);
@@ -628,6 +666,7 @@ impl Pipeline {
                         batch_target,
                         batch_timeout,
                         poll_interval,
+                        input_index,
                     );
                 }));
             }
@@ -642,12 +681,18 @@ impl Pipeline {
                     batch_target,
                     batch_timeout,
                     poll_interval,
+                    input_index,
                 ));
             }
         }
         drop(tx); // Drop our copy so rx.recv() returns None when all inputs exit.
 
-        let mut accumulator = BatchAccumulator::new(self.batch_target_bytes);
+        // Per-input accumulators: one per input, indexed by input_index.
+        let num_inputs = self.input_transforms.len();
+        let mut accumulators: Vec<BatchAccumulator> = (0..num_inputs)
+            .map(|_| BatchAccumulator::new(self.batch_target_bytes))
+            .collect();
+
         let mut flush_interval = tokio::time::interval(self.batch_timeout);
         flush_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
@@ -670,12 +715,12 @@ impl Pipeline {
 
                 msg = rx.recv() => {
                     match msg {
-                        Some(ChannelMsg::Data { bytes, checkpoints, queued_at }) => {
+                        Some(ChannelMsg::Data { bytes, checkpoints, queued_at, input_index }) => {
                             if let AccumulatorAction::Flush { data, checkpoints, queued_at, .. } =
-                                accumulator.ingest(bytes, checkpoints, queued_at)
+                                accumulators[input_index].ingest(bytes, checkpoints, queued_at)
                             {
                                 self.metrics.inc_flush_by_size();
-                                self.flush_batch_from(data, checkpoints, "size", queued_at).await;
+                                self.flush_batch_from(data, checkpoints, "size", queued_at, input_index).await;
                                 flush_interval.reset();
                             }
                         }
@@ -684,11 +729,13 @@ impl Pipeline {
                 }
 
                 _ = flush_interval.tick() => {
-                    if let AccumulatorAction::Flush { data, checkpoints, queued_at, .. } =
-                        accumulator.check_timeout()
-                    {
-                        self.metrics.inc_flush_by_timeout();
-                        self.flush_batch_from(data, checkpoints, "timeout", queued_at).await;
+                    for (idx, acc) in accumulators.iter_mut().enumerate() {
+                        if let AccumulatorAction::Flush { data, checkpoints, queued_at, .. } =
+                            acc.check_timeout()
+                        {
+                            self.metrics.inc_flush_by_timeout();
+                            self.flush_batch_from(data, checkpoints, "timeout", queued_at, idx).await;
+                        }
                     }
 
                     // Heartbeat for stateful processors: send an empty batch through
@@ -696,7 +743,7 @@ impl Pipeline {
                     // and emit timed-out data.
                     if !self.processors.is_empty()
                         && self.processors.iter().any(|p| p.is_stateful())
-                        && accumulator.is_empty()
+                        && accumulators.iter().all(BatchAccumulator::is_empty)
                     {
                         let empty = arrow::record_batch::RecordBatch::new_empty(
                             Arc::new(arrow::datatypes::Schema::empty()),
@@ -710,10 +757,6 @@ impl Pipeline {
                                 let total_rows: u64 =
                                     batches.iter().map(|b| b.num_rows() as u64).sum();
                                 if total_rows > 0 {
-                                    // TODO(#1404): submit timed-out processor output to
-                                    // output pool without BatchTickets (ticketless
-                                    // submission). For now, stateful processor output
-                                    // during heartbeats is only emitted at flush.
                                     tracing::debug!(
                                         rows = total_rows,
                                         "stateful processor emitted rows during heartbeat (not yet submitted)"
@@ -730,25 +773,22 @@ impl Pipeline {
         }
 
         // Drain channel messages before joining input threads.
-        // This prevents deadlock during shutdown if a producer is blocked in
-        // `blocking_send` while the bounded channel is full.
-        // Flush in batch_target_bytes increments to avoid unbounded memory
-        // growth when the channel has many buffered messages.
         while let Some(msg) = rx.recv().await {
             match msg {
                 ChannelMsg::Data {
                     bytes,
                     checkpoints,
                     queued_at,
+                    input_index,
                 } => {
                     if let AccumulatorAction::Flush {
                         data,
                         checkpoints,
                         queued_at,
                         ..
-                    } = accumulator.ingest(bytes, checkpoints, queued_at)
+                    } = accumulators[input_index].ingest(bytes, checkpoints, queued_at)
                     {
-                        self.flush_batch_from(data, checkpoints, "drain", queued_at)
+                        self.flush_batch_from(data, checkpoints, "drain", queued_at, input_index)
                             .await;
                     }
                 }
@@ -770,10 +810,12 @@ impl Pipeline {
             }
         }
 
-        // Flush any remaining buffered data.
-        if let Some((data, checkpoints, queued_at)) = accumulator.drain() {
-            self.flush_batch_from(data, checkpoints, "drain", queued_at)
-                .await;
+        // Flush any remaining buffered data from all accumulators.
+        for (idx, acc) in accumulators.iter_mut().enumerate() {
+            if let Some((data, checkpoints, queued_at)) = acc.drain() {
+                self.flush_batch_from(data, checkpoints, "drain", queued_at, idx)
+                    .await;
+            }
         }
 
         // Cascading flush: drain all buffered state from stateful processors.
@@ -873,6 +915,7 @@ impl Pipeline {
         checkpoints: HashMap<SourceId, ByteOffset>,
         flush_reason: &'static str,
         queued_at: Option<tokio::time::Instant>,
+        input_index: usize,
     ) {
         if data.is_empty() {
             return;
@@ -911,7 +954,10 @@ impl Pipeline {
             let scan_span =
                 tracing::info_span!("scan", pipeline = %self.name, rows = tracing::field::Empty);
             let _entered = scan_span.enter();
-            let b = match scan_maybe_blocking(&mut self.scanner, combined) {
+            let b = match scan_maybe_blocking(
+                &mut self.input_transforms[input_index].scanner,
+                combined,
+            ) {
                 Ok(b) => b,
                 Err(e) => {
                     // Queued tickets dropped here — safe, not tracked by machine.
@@ -965,7 +1011,7 @@ impl Pipeline {
         // Transform (already async).
         // Use tokio::time::Instant so elapsed() measures simulated time under Turmoil.
         let t1 = tokio::time::Instant::now();
-        let result = match self
+        let result = match self.input_transforms[input_index]
             .transform
             .execute(batch)
             .instrument(tracing::info_span!("transform", pipeline = %self.name, rows_in = num_rows))
@@ -1182,6 +1228,7 @@ impl Pipeline {
 /// after `batch_timeout` of accumulated data, whichever comes first.
 /// This avoids flooding the channel with tiny fragments.
 #[cfg(not(feature = "turmoil"))]
+#[allow(clippy::too_many_arguments)]
 fn input_poll_loop(
     mut input: InputState,
     tx: tokio::sync::mpsc::Sender<ChannelMsg>,
@@ -1190,6 +1237,7 @@ fn input_poll_loop(
     batch_target_bytes: usize,
     batch_timeout: Duration,
     poll_interval: Duration,
+    input_index: usize,
 ) {
     // Track when the buffer first became non-empty, not when we last
     // sent. This ensures batch_timeout measures "time since first data
@@ -1252,6 +1300,7 @@ fn input_poll_loop(
                 bytes: data,
                 checkpoints,
                 queued_at: tokio::time::Instant::now(),
+                input_index,
             };
             if blocking_send_channel_msg(input.source.name(), &tx, &metrics, msg).is_err() {
                 break;
@@ -1268,6 +1317,7 @@ fn input_poll_loop(
             bytes: data,
             checkpoints,
             queued_at: tokio::time::Instant::now(),
+            input_index,
         };
         send_shutdown_drain_msg_blocking(input.source.name(), &tx, &metrics, msg);
     }
@@ -1355,6 +1405,7 @@ fn send_shutdown_drain_msg_blocking(
 /// Uses `tokio::time::sleep` instead of `std::thread::sleep` so that
 /// Turmoil's simulated time advances deterministically.
 #[cfg(feature = "turmoil")]
+#[allow(clippy::too_many_arguments)]
 async fn async_input_poll_loop(
     mut input: InputState,
     tx: tokio::sync::mpsc::Sender<ChannelMsg>,
@@ -1363,6 +1414,7 @@ async fn async_input_poll_loop(
     batch_target_bytes: usize,
     batch_timeout: Duration,
     poll_interval: Duration,
+    input_index: usize,
 ) {
     // Use tokio::time::Instant (not std::time::Instant) so that elapsed()
     // measures simulated time under Turmoil, not real wall-clock time.
@@ -1414,6 +1466,7 @@ async fn async_input_poll_loop(
                 bytes: data,
                 checkpoints,
                 queued_at: tokio::time::Instant::now(),
+                input_index,
             };
             if tx.send(msg).await.is_err() {
                 break;
@@ -1430,6 +1483,7 @@ async fn async_input_poll_loop(
             bytes: data,
             checkpoints,
             queued_at: tokio::time::Instant::now(),
+            input_index,
         };
         if let Err(e) = tx.send(msg).await {
             tracing::warn!(
@@ -1623,7 +1677,6 @@ mod tests {
     use logfwd_io::diagnostics::ComponentStats;
     use logfwd_test_utils::sinks::{DevNullSink, FailingSink, FrozenSink, SlowSink};
     use logfwd_test_utils::test_meter;
-    use serial_test::serial;
 
     #[test]
     fn test_build_sink_factory_stdout() {
@@ -1678,6 +1731,7 @@ mod tests {
             bytes: Bytes::from_static(b"{\"level\":\"INFO\"}\n"),
             checkpoints: vec![],
             queued_at: tokio::time::Instant::now(),
+            input_index: 0,
         };
         send_shutdown_drain_msg_blocking("test-input", &tx, &metrics, msg);
     }
@@ -2304,6 +2358,7 @@ output:
             bytes: Bytes::from_static(&[1]),
             checkpoints: vec![],
             queued_at: tokio::time::Instant::now(),
+            input_index: 0,
         })
         .unwrap();
 
@@ -2318,6 +2373,7 @@ output:
                     bytes: Bytes::from_static(&[2]),
                     checkpoints: vec![],
                     queued_at: tokio::time::Instant::now(),
+                    input_index: 0,
                 },
             )
         });
@@ -3208,6 +3264,7 @@ output:
             bytes: Bytes::from_static(b"test\n"),
             checkpoints: vec![(SourceId(42), ByteOffset(1000))],
             queued_at: tokio::time::Instant::now(),
+            input_index: 0,
         })
         .unwrap();
 

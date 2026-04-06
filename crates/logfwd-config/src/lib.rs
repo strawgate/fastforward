@@ -233,6 +233,10 @@ pub struct InputConfig {
     /// Applies only to glob `file` inputs. Defaults to 5000ms when not set.
     /// Set to a small value (e.g. 50) in tests to avoid long waits.
     pub glob_rescan_interval_ms: Option<u64>,
+    /// Per-input SQL transform. When set, this input gets its own Scanner +
+    /// `SqlTransform` pair. Overrides the pipeline-level `transform` field
+    /// for this input only.
+    pub sql: Option<String>,
 }
 
 /// A single output destination.
