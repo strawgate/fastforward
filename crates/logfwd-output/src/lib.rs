@@ -664,6 +664,11 @@ pub fn build_sink_factory(
             let path = cfg.path.as_ref().ok_or_else(|| {
                 OutputError::Construction(format!("output '{name}': file requires 'path'"))
             })?;
+            if let Some(compression) = cfg.compression.as_deref() {
+                return Err(OutputError::Construction(format!(
+                    "output '{name}': file does not support '{compression}' compression"
+                )));
+            }
             let mut resolved_path = PathBuf::from(path);
             if resolved_path.is_relative()
                 && let Some(base) = base_path
@@ -1021,6 +1026,26 @@ mod tests {
         let _ = std::fs::remove_file(base_dir.join("capture.ndjson"));
         let _ = std::fs::remove_dir(&base_dir);
         let _ = std::fs::remove_dir(&cwd_dir);
+    }
+
+    #[test]
+    fn test_build_sink_factory_file_rejects_compression() {
+        let cfg = OutputConfig {
+            name: Some("capture".to_string()),
+            output_type: OutputType::File,
+            path: Some("/tmp/capture.ndjson".to_string()),
+            compression: Some("zstd".to_string()),
+            ..Default::default()
+        };
+
+        let err = match build_sink_factory("capture", &cfg, None, Arc::new(ComponentStats::new())) {
+            Ok(_) => panic!("expected file compression to be rejected"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string()
+                .contains("does not support 'zstd' compression")
+        );
     }
 
     #[test]

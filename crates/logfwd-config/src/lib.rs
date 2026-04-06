@@ -923,7 +923,11 @@ impl Config {
                 // compression: only valid for outputs that support it
                 if matches!(
                     output.output_type,
-                    OutputType::Stdout | OutputType::Null | OutputType::Tcp | OutputType::Udp
+                    OutputType::Stdout
+                        | OutputType::Null
+                        | OutputType::Tcp
+                        | OutputType::Udp
+                        | OutputType::File
                 ) && output.compression.is_some()
                 {
                     return Err(ConfigError::Validation(format!(
@@ -1375,7 +1379,7 @@ server:
     }
 
     #[test]
-    fn file_rejected_as_unimplemented() {
+    fn file_output_requires_path() {
         let yaml = r"
 input:
   type: file
@@ -1386,8 +1390,8 @@ output:
         let err = Config::load_str(yaml).unwrap_err();
         let msg = err.to_string();
         assert!(
-            msg.contains("not yet implemented"),
-            "expected 'not yet implemented' in error: {msg}"
+            msg.contains("file output requires 'path'"),
+            "expected missing path validation in error: {msg}"
         );
     }
 
@@ -1500,6 +1504,14 @@ output:
         let err = Config::load_str(yaml).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("file output only supports format json or text"));
+    }
+
+    #[test]
+    fn file_output_rejects_compression() {
+        let yaml = "input:\n  type: file\n  path: /tmp/x.log\noutput:\n  type: file\n  path: /tmp/out.ndjson\n  compression: zstd\n";
+        let err = Config::load_str(yaml).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("'compression' is not supported"));
     }
 
     #[test]
