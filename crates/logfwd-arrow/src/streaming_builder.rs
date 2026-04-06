@@ -388,6 +388,7 @@ impl StreamingBuilder {
         }
     }
 
+    /// Append a boolean value for field `idx` in the current row.
     #[inline(always)]
     pub fn append_bool_by_idx(&mut self, idx: usize, value: bool) {
         debug_assert_eq!(

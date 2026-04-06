@@ -266,6 +266,7 @@ fn scan_line<B: ScanBuilder>(
                     && buf[pos] != b' '
                     && buf[pos] != b'\t'
                     && buf[pos] != b'\r'
+                    && buf[pos] != b'\n'
                 {
                     pos += 1;
                 }
