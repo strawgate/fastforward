@@ -663,7 +663,10 @@ pub fn build_sink_factory(
             let fmt = match cfg.format.as_ref() {
                 Some(Format::Json) => StdoutFormat::Json,
                 Some(Format::Console) => StdoutFormat::Console,
-                _ => StdoutFormat::Text,
+                Some(Format::Text) => StdoutFormat::Text,
+                // Default to console output for stdout if no format is specified.
+                None => StdoutFormat::Console,
+                _ => StdoutFormat::Console,
             };
             Ok(Arc::new(StdoutSinkFactory::new(
                 name.to_string(),

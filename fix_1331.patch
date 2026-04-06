@@ -1,0 +1,47 @@
+--- crates/logfwd-config/src/lib.rs
++++ crates/logfwd-config/src/lib.rs
+@@ -651,6 +651,12 @@
+                     .name
+                     .as_deref()
+                     .map_or_else(|| format!("#{i}"), String::from);
++
++                if input.input_type == InputType::ArrowIpc {
++                    return Err(ConfigError::Validation(format!(
++                        "pipeline '{name}' input '{label}': arrow_ipc input type is not yet supported"
++                    )));
++                }
+                 match input.input_type {
+                     InputType::File => {
+                         if input.path.is_none() {
+@@ -673,7 +679,7 @@
+                             }
+                         }
+                     }
+-                    InputType::Otlp => {
++                    InputType::Otlp | InputType::ArrowIpc => {
+                         if input.listen.is_none() {
+                             return Err(ConfigError::Validation(format!(
+                                 "pipeline '{name}' input '{label}': 'listen' is required for {} inputs", input.input_type
+@@ -687,9 +693,7 @@
+                             }
+                         }
+                     }
+-                    // ArrowIpc is always rejected below as "not yet supported";
+-                    // skip listen validation to avoid a misleading error message.
+-                    InputType::ArrowIpc | InputType::Generator => {}
++                    InputType::Generator => {}
+                 }
+
+                 // Reject fields that don't apply to this input type.
+@@ -750,11 +754,6 @@
+                             )));
+                         }
+                     }
+-                    InputType::ArrowIpc => {
+-                        return Err(ConfigError::Validation(format!(
+-                            "pipeline '{name}' input '{label}': arrow_ipc input type is not yet supported"
+-                        )));
+-                    }
+                 }
+
+                 // Reject input formats that are not yet implemented.

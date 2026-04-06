@@ -1,0 +1,41 @@
+--- crates/logfwd-config/src/lib.rs
++++ crates/logfwd-config/src/lib.rs
+@@ -1023,6 +1023,38 @@
+     Ok(())
+ }
+
++#[cfg(test)]
++mod validate_host_port_tests {
++    use super::*;
++
++    #[test]
++    fn validate_host_port_works() {
++        assert!(validate_host_port("127.0.0.1:4317").is_ok());
++        assert!(validate_host_port("localhost:4317").is_ok());
++        assert!(validate_host_port("my-host.internal:8080").is_ok());
++        assert!(validate_host_port("[::1]:4317").is_ok());
++        assert!(validate_host_port("[2001:db8::1]:80").is_ok());
++
++        assert!(validate_host_port(":4317").unwrap_err().contains("empty host"));
++        assert!(validate_host_port("http://localhost:4317").unwrap_err().contains("URL"));
++        assert!(validate_host_port("https://localhost:4317").unwrap_err().contains("URL"));
++        assert!(validate_host_port("foo:bar:4317").unwrap_err().contains("multiple colons"));
++        assert!(validate_host_port("localhost").unwrap_err().contains("missing a port"));
++        assert!(validate_host_port("localhost:").unwrap_err().contains("invalid port"));
++        assert!(validate_host_port("localhost:999999").unwrap_err().contains("invalid port"));
++        assert!(validate_host_port("[::1]").unwrap_err().contains("missing a port"));
++        assert!(validate_host_port("[::1]:").unwrap_err().contains("invalid port"));
++    }
++
++    #[test]
++    fn validate_bind_addr_works() {
++        assert!(validate_bind_addr("127.0.0.1:4317").is_ok());
++        assert!(validate_bind_addr("localhost:4317").is_ok());
++        assert!(validate_bind_addr("[::1]:4317").is_ok());
++        assert!(validate_bind_addr("http://localhost:4317").is_err());
++    }
++}
++
+ /// Validate that an endpoint URL has a recognised scheme and a non-empty host.
+ ///
+ /// Accepts `http://` or `https://` followed by at least one character.
