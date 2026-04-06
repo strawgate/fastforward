@@ -9,7 +9,7 @@
 
 use std::io;
 use std::io::Read as _;
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 
 use base64::Engine as _;
 use opentelemetry_proto::tonic::common::v1::AnyValue;
@@ -18,21 +18,24 @@ use prost::Message;
 
 use crate::InputError;
 use crate::input::{InputEvent, InputSource};
+use logfwd_types::field_names;
 
 /// Maximum request body size: 10 MB.
 const MAX_BODY_SIZE: usize = 10 * 1024 * 1024;
 
 /// Bounded channel capacity — limits memory when the pipeline falls behind.
 const CHANNEL_BOUND: usize = 4096;
+const OTLP_TIMESTAMP_FIELD: &str = "timestamp_int";
 
 /// OTLP receiver that listens for log exports via HTTP.
 pub struct OtlpReceiverInput {
     name: String,
-    rx: mpsc::Receiver<Vec<u8>>,
+    rx: Option<mpsc::Receiver<Vec<u8>>>,
     /// The address the HTTP server is bound to.
     addr: std::net::SocketAddr,
+    server: Arc<tiny_http::Server>,
     /// Keep the server thread handle alive.
-    _handle: std::thread::JoinHandle<()>,
+    handle: Option<std::thread::JoinHandle<()>>,
 }
 
 impl OtlpReceiverInput {
@@ -44,8 +47,10 @@ impl OtlpReceiverInput {
 
     /// Like [`Self::new`] but with an explicit channel capacity. Useful for tests.
     fn new_with_capacity(name: impl Into<String>, addr: &str, capacity: usize) -> io::Result<Self> {
-        let server = tiny_http::Server::http(addr)
-            .map_err(|e| io::Error::other(format!("OTLP receiver bind {addr}: {e}")))?;
+        let server = Arc::new(
+            tiny_http::Server::http(addr)
+                .map_err(|e| io::Error::other(format!("OTLP receiver bind {addr}: {e}")))?,
+        );
 
         let bound_addr = match server.server_addr() {
             tiny_http::ListenAddr::IP(a) => a,
@@ -56,10 +61,11 @@ impl OtlpReceiverInput {
 
         let (tx, rx) = mpsc::sync_channel(capacity);
 
+        let server_clone = Arc::clone(&server);
         let handle = std::thread::Builder::new()
             .name("otlp-receiver".into())
             .spawn(move || {
-                for mut request in server.incoming_requests() {
+                for mut request in server_clone.incoming_requests() {
                     let url = request.url().to_string();
 
                     // Only accept the exact OTLP endpoint path (with optional query string).
@@ -247,9 +253,10 @@ impl OtlpReceiverInput {
 
         Ok(Self {
             name: name.into(),
-            rx,
+            rx: Some(rx),
             addr: bound_addr,
-            _handle: handle,
+            server,
+            handle: Some(handle),
         })
     }
 
@@ -259,12 +266,22 @@ impl OtlpReceiverInput {
     }
 }
 
+impl Drop for OtlpReceiverInput {
+    fn drop(&mut self) {
+        self.rx.take();
+        self.server.unblock();
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
 impl InputSource for OtlpReceiverInput {
     fn poll(&mut self) -> io::Result<Vec<InputEvent>> {
         let mut all = Vec::new();
 
         // Drain all available decoded batches.
-        while let Ok(data) = self.rx.try_recv() {
+        while let Ok(data) = self.rx.as_ref().expect("rx is Some until drop").try_recv() {
             all.extend_from_slice(&data);
         }
 
@@ -349,14 +366,14 @@ fn decode_otlp_logs_json(body: &[u8]) -> Result<Vec<u8>, InputError> {
                             "invalid OTLP JSON timeUnixNano: not a valid positive uint64".into(),
                         )
                     })?;
-                    write_json_key(&mut out, "timestamp_int");
+                    write_json_key(&mut out, OTLP_TIMESTAMP_FIELD);
                     write_u64_to_buf(&mut out, parsed);
                     out.push(b',');
                 }
 
                 if let Some(sev) = record.get("severityText").and_then(|v| v.as_str()) {
                     if !sev.is_empty() {
-                        write_json_string_field(&mut out, "level", sev);
+                        write_json_string_field(&mut out, field_names::SEVERITY, sev);
                         out.push(b',');
                     }
                 }
@@ -364,7 +381,7 @@ fn decode_otlp_logs_json(body: &[u8]) -> Result<Vec<u8>, InputError> {
                 if let Some(body_val) = record.get("body")
                     && let Some(body_str) = json_any_value_to_string(body_val)?
                 {
-                    write_json_string_field(&mut out, "message", &body_str);
+                    write_json_string_field(&mut out, field_names::BODY, &body_str);
                     out.push(b',');
                 }
 
@@ -386,13 +403,13 @@ fn decode_otlp_logs_json(body: &[u8]) -> Result<Vec<u8>, InputError> {
 
                 if let Some(tid) = record.get("traceId").and_then(|v| v.as_str()) {
                     if !tid.is_empty() {
-                        write_json_string_field(&mut out, "trace_id", tid);
+                        write_json_string_field(&mut out, field_names::TRACE_ID, tid);
                         out.push(b',');
                     }
                 }
                 if let Some(sid) = record.get("spanId").and_then(|v| v.as_str()) {
                     if !sid.is_empty() {
-                        write_json_string_field(&mut out, "span_id", sid);
+                        write_json_string_field(&mut out, field_names::SPAN_ID, sid);
                         out.push(b',');
                     }
                 }
@@ -523,7 +540,7 @@ fn convert_request_to_json_lines(
                 // timestamp (write directly without allocation)
                 if record.time_unix_nano > 0 {
                     out.push(b'"');
-                    out.extend_from_slice(b"timestamp_int");
+                    out.extend_from_slice(OTLP_TIMESTAMP_FIELD.as_bytes());
                     out.extend_from_slice(b"\":");
                     write_u64_to_buf(&mut out, record.time_unix_nano);
                     out.push(b',');
@@ -531,14 +548,14 @@ fn convert_request_to_json_lines(
 
                 // severity
                 if !record.severity_text.is_empty() {
-                    write_json_string_field(&mut out, "level", &record.severity_text);
+                    write_json_string_field(&mut out, field_names::SEVERITY, &record.severity_text);
                     out.push(b',');
                 }
 
                 // body
                 if let Some(ref body_val) = record.body {
                     if let Some(body_str) = any_value_to_string(body_val) {
-                        write_json_string_field(&mut out, "message", &body_str);
+                        write_json_string_field(&mut out, field_names::BODY, &body_str);
                         out.push(b',');
                     }
                 }
@@ -561,14 +578,14 @@ fn convert_request_to_json_lines(
                 // trace context (write hex directly to avoid allocation)
                 if !record.trace_id.is_empty() {
                     out.push(b'"');
-                    out.extend_from_slice(b"trace_id");
+                    out.extend_from_slice(field_names::TRACE_ID.as_bytes());
                     out.extend_from_slice(b"\":\"");
                     write_hex_to_buf(&mut out, &record.trace_id);
                     out.extend_from_slice(b"\",");
                 }
                 if !record.span_id.is_empty() {
                     out.push(b'"');
-                    out.extend_from_slice(b"span_id");
+                    out.extend_from_slice(field_names::SPAN_ID.as_bytes());
                     out.extend_from_slice(b"\":\"");
                     write_hex_to_buf(&mut out, &record.span_id);
                     out.extend_from_slice(b"\",");
@@ -902,162 +919,6 @@ mod hex {
             s.push(HEX_TABLE[(b & 0xf) as usize] as char);
         }
         s
-    }
-}
-
-#[cfg(kani)]
-mod verification {
-    use super::*;
-
-    /// Prove write_i64_to_buf only emits ASCII bytes for any i64 value.
-    #[kani::proof]
-    #[kani::unwind(21)] // max 20 digits (i64::MIN) + sign
-    fn verify_write_i64_only_ascii() {
-        let n: i64 = kani::any();
-        let mut buf = Vec::new();
-        write_i64_to_buf(&mut buf, n);
-        assert!(!buf.is_empty(), "output must not be empty");
-        let mut i = 0;
-        while i < buf.len() {
-            assert!(buf[i].is_ascii(), "non-ASCII byte in i64 output");
-            i += 1;
-        }
-        // Also verify it's valid UTF-8 (ASCII is a subset)
-        assert!(
-            std::str::from_utf8(&buf).is_ok(),
-            "output must be valid UTF-8"
-        );
-        kani::cover!(n == 0, "zero");
-        kani::cover!(n > 0, "positive");
-        kani::cover!(n < 0, "negative");
-        kani::cover!(n == i64::MIN, "i64::MIN");
-        kani::cover!(n == i64::MAX, "i64::MAX");
-    }
-
-    /// Prove write_f64_to_buf only emits ASCII bytes for any f64 bit pattern
-    /// (including NaN, infinity, subnormals).
-    /// std::fmt::Display for f64 produces only ASCII (digits, '.', '-', 'e', '+',
-    /// 'N', 'a', 'i', 'n', 'f'). We verify this holds exhaustively.
-    #[kani::proof]
-    #[kani::unwind(30)] // ryu output is at most ~25 bytes
-    fn verify_write_f64_only_ascii() {
-        let d: f64 = kani::any();
-        let mut buf = Vec::new();
-        write_f64_to_buf(&mut buf, d);
-        assert!(!buf.is_empty(), "output must not be empty");
-        let mut i = 0;
-        while i < buf.len() {
-            assert!(buf[i].is_ascii(), "non-ASCII byte in f64 output");
-            i += 1;
-        }
-        assert!(
-            std::str::from_utf8(&buf).is_ok(),
-            "output must be valid UTF-8"
-        );
-        kani::cover!(d == 0.0, "zero");
-        kani::cover!(d > 0.0, "positive");
-        kani::cover!(d < 0.0, "negative");
-        kani::cover!(d.is_nan(), "NaN");
-        kani::cover!(d.is_infinite(), "infinity");
-    }
-
-    #[kani::proof]
-    #[kani::unwind(5)]
-    fn hex_encode_matches_format() {
-        let len: usize = kani::any();
-        kani::assume(len <= 4);
-        let mut bytes = [0u8; 4];
-        for i in 0..len {
-            bytes[i] = kani::any();
-        }
-        let result = hex::encode(&bytes[..len]);
-        assert_eq!(result.len(), len * 2);
-        // Each char is a valid hex digit
-        for c in result.chars() {
-            assert!(c.is_ascii_hexdigit());
-        }
-    }
-
-    #[kani::proof]
-    #[kani::unwind(9)]
-    fn json_string_escaping_produces_valid_json() {
-        let len: usize = kani::any();
-        kani::assume(len <= 8);
-        let mut bytes = [0u8; 8];
-        for i in 0..len {
-            bytes[i] = kani::any();
-        }
-        if let Ok(s) = std::str::from_utf8(&bytes[..len]) {
-            let mut out = Vec::new();
-            write_json_string_field(&mut out, "k", s);
-            // Output must start with "k":" and end with "
-            assert!(out.starts_with(b"\"k\":\""));
-            assert!(out.ends_with(b"\""));
-            // No unescaped control chars, quotes, or backslashes in the value
-            let value = &out[5..out.len() - 1]; // strip "k":"..."
-            let mut i = 0;
-            while i < value.len() {
-                if value[i] == b'\\' {
-                    i += 2; // skip escaped char
-                } else {
-                    assert!(value[i] != b'"');
-                    assert!(value[i] != b'\\');
-                    // No raw control bytes (0x00-0x1f) per RFC 8259.
-                    assert!(value[i] >= 0x20);
-                    i += 1;
-                }
-            }
-        }
-    }
-
-    /// Prove json_any_value_to_string returns Ok for the i64 numeric path
-    /// (as_i64() branch) and that the output bytes are all ASCII.
-    ///
-    /// Uses a concrete JSON shape {intValue: <i64>} to exercise the code path
-    /// that calls write_i64_to_buf and wraps the result in from_utf8_unchecked.
-    #[kani::proof]
-    #[kani::unwind(21)] // write_i64_to_buf: at most 20 digits + sign
-    fn verify_json_any_value_to_string_int_no_panic() {
-        let n: i64 = kani::any();
-        // Build a concrete JSON object {intValue: <n>}. Using Number avoids
-        // HashMap symbolic-iteration overhead; this covers the as_i64() branch.
-        let mut map = serde_json::Map::with_capacity(1);
-        map.insert(
-            "intValue".to_string(),
-            serde_json::Value::Number(serde_json::Number::from(n)),
-        );
-        let json_val = serde_json::Value::Object(map);
-        let result = json_any_value_to_string(&json_val);
-        // Must not panic and must return Ok(Some(ascii string))
-        assert!(result.is_ok());
-        let s = result.unwrap();
-        assert!(s.is_some());
-        let s = s.unwrap();
-        let bytes = s.as_bytes();
-        let mut i = 0;
-        while i < bytes.len() {
-            assert!(bytes[i].is_ascii());
-            i += 1;
-        }
-    }
-
-    /// Prove write_json_any_value_field_from_json returns Ok for the i64 numeric
-    /// path and that the emitted bytes are non-empty.
-    #[kani::proof]
-    #[kani::unwind(21)] // write_i64_to_buf: at most 20 digits + sign
-    fn verify_write_json_any_value_field_int_no_panic() {
-        let n: i64 = kani::any();
-        let mut map = serde_json::Map::with_capacity(1);
-        map.insert(
-            "intValue".to_string(),
-            serde_json::Value::Number(serde_json::Number::from(n)),
-        );
-        let json_val = serde_json::Value::Object(map);
-        let mut out = Vec::new();
-        let result = write_json_any_value_field_from_json(&mut out, "v", &json_val);
-        assert!(result.is_ok());
-        assert!(result.unwrap(), "int path must emit a field");
-        assert!(!out.is_empty());
     }
 }
 

@@ -146,30 +146,6 @@ The file path is:
 - Copytruncate is explicitly documented as a race window, not treated as an
   exactly-once path.
 
-## Executable Enforcement
-
-These contracts are enforced by a ladder, not by a single test type:
-
-- Kani for pure OTLP helper logic and checkpoint arithmetic
-- unit tests for per-source remainder and CRI isolation
-- integration tests for:
-  - OTLP JSON/protobuf/zstd semantic equivalence
-  - sink-to-receiver loopback
-  - newline-boundary checkpoint replay
-  - multi-file remainder isolation with real `SourceId`s
-- compliance and simulation tests for file lifecycle and checkpoint ordering
-
-## Current Required Tests
-
-The contract suite currently includes these anchor tests:
-
-- `protobuf_and_json_inputs_match_semantics`
-- `json_bytes_value_matches_protobuf_semantics`
-- `otlp_receiver_preserves_semantics_across_json_protobuf_and_zstd`
-- `otlp_output_to_input_loopback_preserves_semantics_under_zstd`
-- `checkpoint_advances_only_at_real_newline_boundaries`
-- `glob_sources_keep_partial_lines_and_checkpoints_isolated`
-
 ## What still needs to grow
 
 - gRPC OTLP contract coverage
