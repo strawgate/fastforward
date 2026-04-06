@@ -1112,6 +1112,14 @@ mod validate_host_port_tests {
                 .unwrap_err()
                 .contains("invalid port")
         );
+        // Empty IPv6 brackets — []:8080 has no host
+        assert!(validate_host_port("[]:8080").unwrap_err().contains("empty"));
+        // Double closing bracket — [::1]]:4317 is malformed
+        assert!(
+            validate_host_port("[::1]]:4317")
+                .unwrap_err()
+                .contains("missing a port")
+        );
     }
 
     #[test]
