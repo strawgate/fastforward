@@ -1418,9 +1418,20 @@ fn build_input_state(
         }
     };
 
+    if cfg.source_metadata && !matches!(format, Format::Json | Format::Cri | Format::Auto) {
+        return Err(format!(
+            "input '{name}': experimental source_metadata currently only supports format json, cri, or auto"
+        ));
+    }
+
     // Wrap the raw transport with framing + format processing.
     let format_proc = make_format(name, cfg.input_type.clone(), &format, &stats)?;
-    let framed = FramedInput::new(raw_source, format_proc, Arc::clone(&stats));
+    let framed = FramedInput::new_with_source_metadata(
+        raw_source,
+        format_proc,
+        Arc::clone(&stats),
+        cfg.source_metadata,
+    );
 
     Ok(InputState {
         source: Box::new(framed),
@@ -1519,6 +1530,34 @@ output:
         let pipe_cfg = &config.pipelines["default"];
         let pipeline = Pipeline::from_config("default", pipe_cfg, &test_meter(), None);
         assert!(pipeline.is_ok(), "got: {:?}", pipeline.err());
+    }
+
+    #[test]
+    fn source_metadata_rejects_raw_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("test.log");
+        std::fs::write(&log_path, b"plain text\n").unwrap();
+
+        let yaml = format!(
+            r"
+input:
+  type: file
+  path: {}
+  format: raw
+  source_metadata: true
+output:
+  type: stdout
+  format: json
+",
+            log_path.display()
+        );
+        let config = logfwd_config::Config::load_str(&yaml).unwrap();
+        let pipe_cfg = &config.pipelines["default"];
+        let err = match Pipeline::from_config("default", pipe_cfg, &test_meter(), None) {
+            Ok(_) => panic!("raw source metadata should be rejected"),
+            Err(err) => err,
+        };
+        assert!(err.contains("source_metadata currently only supports format json, cri, or auto"));
     }
 
     #[test]

@@ -226,6 +226,11 @@ pub struct InputConfig {
     pub path: Option<String>,
     pub listen: Option<String>,
     pub format: Option<Format>,
+    /// Experimental: inject `_source_id` and `_input` into JSON-like rows
+    /// before they enter the scanner. Intended only for source metadata
+    /// prototyping; not a stable contract yet.
+    #[serde(default)]
+    pub source_metadata: bool,
     /// Maximum number of file descriptors to keep open simultaneously.
     /// Applies only to `file` inputs. Defaults to 1024 when not set.
     pub max_open_files: Option<usize>,

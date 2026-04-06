@@ -184,7 +184,12 @@ fn source_metadata_injection_benchmark() {
         memchr::memchr_iter(b'\n', &chunk_1m).count(),
         chunk_1m.len()
     );
-    bench_case("baseline passthrough (1 MiB)", &chunk_1m, 9, passthrough_copy);
+    bench_case(
+        "baseline passthrough (1 MiB)",
+        &chunk_1m,
+        9,
+        passthrough_copy,
+    );
     bench_case("inject _source_id (1 MiB)", &chunk_1m, 9, |chunk, out| {
         inject_source_id_only(chunk, "1432949071", out);
     });
@@ -208,7 +213,12 @@ fn source_metadata_injection_benchmark() {
         memchr::memchr_iter(b'\n', &chunk_4m).count(),
         chunk_4m.len()
     );
-    bench_case("baseline passthrough (4 MiB)", &chunk_4m, 9, passthrough_copy);
+    bench_case(
+        "baseline passthrough (4 MiB)",
+        &chunk_4m,
+        9,
+        passthrough_copy,
+    );
     bench_case("inject _source_id (4 MiB)", &chunk_4m, 9, |chunk, out| {
         inject_source_id_only(chunk, "1432949071", out);
     });
