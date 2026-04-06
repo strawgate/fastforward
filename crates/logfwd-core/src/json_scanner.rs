@@ -371,7 +371,7 @@ fn skip_nested(buf: &[u8], mut pos: usize, end: usize, blocks: &StoredBitmasks<'
                 let prev_depth = depth;
                 depth -= 1;
                 let opener = if prev_depth > MAX_TRACKED_DEPTH {
-                    match overflow_stack.as_mut().and_then(|stack| stack.pop()) {
+                    match overflow_stack.as_mut().and_then(alloc::vec::Vec::pop) {
                         Some(opener) => opener,
                         None => return end,
                     }
