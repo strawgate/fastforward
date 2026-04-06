@@ -15,6 +15,8 @@ use opentelemetry_proto::tonic::common::v1::AnyValue;
 use opentelemetry_proto::tonic::common::v1::any_value::Value;
 use prost::Message;
 
+use sonic_rs::{JsonContainerTrait, JsonValueTrait};
+
 use crate::InputError;
 use crate::input::{InputEvent, InputSource};
 
@@ -307,7 +309,7 @@ fn decode_otlp_logs_json(body: &[u8]) -> Result<Vec<u8>, InputError> {
         return Ok(Vec::new());
     }
 
-    let root: serde_json::Value = serde_json::from_slice(body)
+    let root: sonic_rs::Value = sonic_rs::from_slice(body)
         .map_err(|e| InputError::Receiver(format!("invalid JSON: {e}")))?;
 
     let resource_logs = match root.get("resourceLogs").and_then(|v| v.as_array()) {
@@ -427,7 +429,7 @@ fn decode_otlp_logs_json(body: &[u8]) -> Result<Vec<u8>, InputError> {
 
 /// Extract a string from an OTLP JSON AnyValue object.
 /// For common integer/float/bool cases, write directly to avoid intermediate String allocation.
-fn json_any_value_to_string(v: &serde_json::Value) -> String {
+fn json_any_value_to_string(v: &sonic_rs::Value) -> String {
     if let Some(s) = v.get("stringValue").and_then(|v| v.as_str()) {
         return s.to_string();
     }
@@ -444,13 +446,13 @@ fn json_any_value_to_string(v: &serde_json::Value) -> String {
             return unsafe { String::from_utf8_unchecked(buf) };
         }
     }
-    if let Some(d) = v.get("doubleValue").and_then(serde_json::Value::as_f64) {
+    if let Some(d) = v.get("doubleValue").and_then(JsonValueTrait::as_f64) {
         let mut buf = Vec::new();
         write_f64_to_buf(&mut buf, d);
         // SAFETY: write_f64_to_buf only writes ASCII characters
         return unsafe { String::from_utf8_unchecked(buf) };
     }
-    if let Some(b) = v.get("boolValue").and_then(serde_json::Value::as_bool) {
+    if let Some(b) = v.get("boolValue").and_then(JsonValueTrait::as_bool) {
         return if b { "true" } else { "false" }.to_string();
     }
     String::new()
