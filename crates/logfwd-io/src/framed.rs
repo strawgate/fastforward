@@ -250,16 +250,12 @@ impl InputSource for FramedInput {
                                 remainder.push(b'\n');
 
                                 self.out_buf.clear();
-                                let state =
-                                    self.sources.get_mut(&key).expect("just checked existence");
                                 state.format.process_lines(&remainder, &mut self.out_buf);
 
                                 // For CRI/Auto formats a remainder P-line may leave data
                                 // buffered in the aggregator without emitting output.
                                 // Flush pending aggregator state so it is not silently
                                 // dropped when the source is removed below.
-                                let state =
-                                    self.sources.get_mut(&key).expect("just checked existence");
                                 state.format.flush_pending(&mut self.out_buf);
 
                                 // Only count a line when output was actually produced.
@@ -270,8 +266,6 @@ impl InputSource for FramedInput {
                                 // Remainder was flushed — update tracker so
                                 // checkpointable_offset advances past the
                                 // flushed bytes.
-                                let state =
-                                    self.sources.get_mut(&key).expect("just checked existence");
                                 state.tracker.apply_remainder_consumed();
 
                                 if !self.out_buf.is_empty() {
@@ -310,8 +304,6 @@ impl InputSource for FramedInput {
                                 remainder.push(b'\n');
 
                                 self.out_buf.clear();
-                                let state =
-                                    self.sources.get_mut(&key).expect("just checked existence");
                                 state.format.process_lines(&remainder, &mut self.out_buf);
 
                                 self.stats.inc_lines(1);
@@ -319,8 +311,6 @@ impl InputSource for FramedInput {
                                 // Remainder was flushed — update tracker so
                                 // checkpointable_offset advances past the
                                 // flushed bytes.
-                                let state =
-                                    self.sources.get_mut(&key).expect("just checked existence");
                                 state.tracker.apply_remainder_consumed();
 
                                 if !self.out_buf.is_empty() {
