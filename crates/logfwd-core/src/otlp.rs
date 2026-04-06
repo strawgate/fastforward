@@ -707,6 +707,8 @@ mod tests {
             b"2024-01-15T10:30:00-05:00",
             b"2024-01-15T10:30:00+14:00",
             b"2024-01-15T10:30:00-12:00",
+            // Z-suffix: exercises the ends_with('Z') normalization branch.
+            b"2024-01-15T10:30:00Z",
         ];
         for ts in offset_cases {
             let our_nanos = parse_timestamp_nanos(ts).unwrap();
@@ -948,7 +950,6 @@ mod tests {
         assert_eq!(INSTRUMENTATION_SCOPE_NAME, 1);
         assert_eq!(INSTRUMENTATION_SCOPE_VERSION, 2);
     }
-
 }
 
 // ---------------------------------------------------------------------------
