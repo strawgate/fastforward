@@ -355,8 +355,15 @@ fn decode_otlp_logs_json(body: &[u8]) -> Result<Vec<u8>, InputError> {
                 out.push(b'{');
 
                 if let Some(ts) = record.get("timeUnixNano").and_then(|v| v.as_str()) {
-                    write_json_field(&mut out, "timestamp_int", ts);
-                    out.push(b',');
+                    // Validate as u64 before emitting as a raw JSON number.
+                    // An attacker-controlled string with quotes/backslashes could
+                    // break the JSON line if written via write_json_field directly.
+                    if let Some(ns) = ts.parse::<u64>().ok().filter(|&n| n > 0) {
+                        out.push(b'"');
+                        out.extend_from_slice(b"timestamp_int\":");
+                        write_u64_to_buf(&mut out, ns);
+                        out.push(b',');
+                    }
                 }
 
                 if let Some(sev) = record.get("severityText").and_then(|v| v.as_str()) {
@@ -684,6 +691,9 @@ fn write_json_escaped_key(out: &mut Vec<u8>, key: &str) {
     out.push(b'"');
 }
 
+/// Writes `"key":<value>` where `value` MUST already be a valid JSON token.
+/// Caller is responsible for quoting/escaping when `value` is a string.
+#[allow(dead_code)] // used in tests; kept for future raw-value emission
 fn write_json_field(out: &mut Vec<u8>, key: &str, value: &str) {
     write_json_escaped_key(out, key);
     out.extend_from_slice(b":");

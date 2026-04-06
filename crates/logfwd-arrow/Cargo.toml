@@ -10,7 +10,6 @@ doctest = false
 
 [dependencies]
 logfwd-core = { version = "0.1.0", path = "../logfwd-core" }
-ahash = "0.8"
 arrow = { workspace = true }
 bytes = "1"
 
