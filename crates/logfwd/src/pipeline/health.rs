@@ -140,6 +140,15 @@ mod verification {
         ) {
             assert_eq!(out, current);
         }
+
+        kani::cover!(
+            current == ComponentHealth::Stopped && next == ComponentHealth::Healthy,
+            "stopped ignores healthy observation"
+        );
+        kani::cover!(
+            current == ComponentHealth::Starting && next == ComponentHealth::Healthy,
+            "starting accepts healthy observation"
+        );
     }
 
     #[kani::proof]
@@ -151,6 +160,15 @@ mod verification {
             ComponentHealth::Stopped | ComponentHealth::Failed => assert_eq!(out, current),
             _ => assert_eq!(out, ComponentHealth::Stopping),
         }
+
+        kani::cover!(
+            current == ComponentHealth::Healthy,
+            "healthy transitions to stopping"
+        );
+        kani::cover!(
+            current == ComponentHealth::Failed,
+            "failed preserves on shutdown request"
+        );
     }
 
     #[kani::proof]
@@ -164,5 +182,14 @@ mod verification {
             }
             _ => assert_eq!(out, ComponentHealth::Degraded),
         }
+
+        kani::cover!(
+            current == ComponentHealth::Healthy,
+            "healthy degrades on poll failure"
+        );
+        kani::cover!(
+            current == ComponentHealth::Stopped,
+            "stopped preserves on poll failure"
+        );
     }
 }
