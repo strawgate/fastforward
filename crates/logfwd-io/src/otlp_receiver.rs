@@ -1352,7 +1352,8 @@ mod tests {
         let line = String::from_utf8(json_lines).expect("utf8");
         let row: serde_json::Value = serde_json::from_str(line.lines().next().unwrap()).unwrap();
         assert_eq!(
-            row.get(field_names::BODY).and_then(serde_json::Value::as_str),
+            row.get(field_names::BODY)
+                .and_then(serde_json::Value::as_str),
             Some("hello")
         );
         assert!(

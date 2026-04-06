@@ -28,6 +28,7 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 httpdate = "1"
 flate2 = "1"
 tokio-stream = "0.1.18"
+serde = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]
 proptest = "1"
