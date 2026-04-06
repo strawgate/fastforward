@@ -1101,6 +1101,7 @@ mod verification {
     }
 
     /// Prove encode_varint_field produces tag + varint value.
+    #[kani::solver(kissat)]
     #[kani::proof]
     #[kani::unwind(12)]
     fn verify_encode_varint_field() {
@@ -1165,6 +1166,7 @@ mod verification {
     }
 
     /// Prove encode_bytes_field content correctness: tag + length + exact data.
+    #[kani::solver(kissat)]
     #[kani::proof]
     #[kani::unwind(12)]
     fn verify_encode_bytes_field_content() {

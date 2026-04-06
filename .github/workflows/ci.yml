@@ -247,10 +247,12 @@ jobs:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
 
   # -------------------------------------------------------------------------
-  # Kani formal verification
+  # Kani formal verification — split into two parallel jobs to stay within 45-minute budget.
+  # Job A: byte_search, checkpoint_tracker, cri, framer, json_scanner, otlp, scan_config (59 proofs)
+  # Job B: reassembler, scanner, structural, structural_iter (29 proofs)
   # -------------------------------------------------------------------------
-  kani:
-    name: Kani proofs
+  kani-a:
+    name: Kani proofs (A — byte_search/checkpoint/cri/framer/json_scanner/otlp/scan_config)
     needs: [changes]
     # Always run on push to master; on PRs only when logfwd-core changed.
     if: |
@@ -261,10 +263,35 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Run Kani verification
+      - name: Run Kani verification (A)
         uses: model-checking/kani-github-action@v1
         with:
-          args: -p logfwd-core -Z function-contracts -Z mem-predicates -Z stubbing
+          args: >-
+            -p logfwd-core
+            -Z function-contracts -Z mem-predicates -Z stubbing
+            --harness-filter "byte_search|checkpoint|cri|framer|json_scanner|otlp|scan_config"
+        env:
+          RUSTC_WRAPPER: ""
+
+  kani-b:
+    name: Kani proofs (B — reassembler/scanner/structural/structural_iter)
+    needs: [changes]
+    # Always run on push to master; on PRs only when logfwd-core changed.
+    if: |
+      (github.event_name == 'push' && github.ref == 'refs/heads/master') ||
+      (github.event.pull_request.draft == false && needs.changes.outputs.core == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Run Kani verification (B)
+        uses: model-checking/kani-github-action@v1
+        with:
+          args: >-
+            -p logfwd-core
+            -Z function-contracts -Z mem-predicates -Z stubbing
+            --harness-filter "reassembler|scanner|structural"
         env:
           RUSTC_WRAPPER: ""
 
