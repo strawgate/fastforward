@@ -43,7 +43,7 @@ pub fn parse_retry_after(header: Option<&reqwest::header::HeaderValue>) -> Optio
 /// | 429         | `RetryAfter` (from header, or default 5s)                  |
 /// | 408         | `RetryAfter` (from header, or default 5s)                  |
 /// | 4xx (other) | `Rejected` (permanent, do not retry)                       |
-/// | 5xx         | `IoError` if no Retry-After, `RetryAfter` if present       |
+/// | 5xx         | `IoError` if no Retry-After, `RetryAfter` if parseable and not in the past |
 /// | Other       | `IoError` (transient)                                      |
 ///
 /// # Arguments

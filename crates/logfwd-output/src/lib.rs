@@ -14,7 +14,7 @@ mod udp_sink;
 
 pub mod error;
 
-pub mod http_classify;
+pub(crate) mod http_classify;
 
 mod elasticsearch;
 

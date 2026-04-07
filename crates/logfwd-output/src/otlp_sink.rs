@@ -19,6 +19,7 @@ use logfwd_types::field_names;
 use zstd::bulk::Compressor as ZstdCompressor;
 
 use super::{BatchMetadata, Compression, str_value};
+use crate::http_classify::{self, DEFAULT_RETRY_AFTER_SECS};
 
 // ---------------------------------------------------------------------------
 // InstrumentationScope constants
@@ -28,7 +29,6 @@ use super::{BatchMetadata, Compression, str_value};
 const SCOPE_NAME: &[u8] = b"logfwd";
 /// Version emitted in the OTLP `InstrumentationScope.version` field (from Cargo.toml).
 const SCOPE_VERSION: &[u8] = env!("CARGO_PKG_VERSION").as_bytes();
-use crate::http_classify::{self, DEFAULT_RETRY_AFTER_SECS};
 
 // ---------------------------------------------------------------------------
 // OtlpSink
