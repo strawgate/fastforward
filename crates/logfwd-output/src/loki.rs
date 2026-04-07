@@ -144,8 +144,6 @@ struct LokiConfig {
     endpoint: String,
     tenant_id: Option<String>,
     static_labels: Vec<(String, String)>,
-    /// Pre-computed set of static label key names for stream-key exclusion.
-    static_label_keys: std::collections::HashSet<String>,
     label_columns: Vec<String>,
     headers: Vec<(reqwest::header::HeaderName, reqwest::header::HeaderValue)>,
 }
@@ -473,12 +471,10 @@ impl LokiSinkFactory {
         Ok(LokiSinkFactory {
             name,
             config: Arc::new({
-                let static_label_keys = static_labels.iter().map(|(k, _)| k.clone()).collect();
                 LokiConfig {
                     endpoint: endpoint.trim_end_matches('/').to_string(),
                     tenant_id,
                     static_labels,
-                    static_label_keys,
                     label_columns,
                     headers: parsed_headers,
                 }
@@ -824,7 +820,7 @@ mod tests {
     }
 
     #[test]
-    fn static_label_keys_are_sanitized_in_streams() {
+    fn static_labels_are_sanitized_in_streams() {
         use arrow::array::StringArray;
         use arrow::datatypes::{Field, Schema};
 
@@ -910,7 +906,6 @@ mod tests {
             endpoint: "http://localhost".to_string(),
             tenant_id: None,
             static_labels: vec![],
-            static_label_keys: std::collections::HashSet::new(),
             label_columns: vec![],
             headers: vec![],
         });
@@ -954,7 +949,6 @@ mod tests {
             endpoint: "http://localhost".to_string(),
             tenant_id: None,
             static_labels: vec![("env".to_string(), "prod".to_string())],
-            static_label_keys: ["env".to_string()].into_iter().collect(),
             label_columns: vec!["env".to_string()],
             headers: vec![],
         });
@@ -1035,7 +1029,6 @@ mod tests {
             endpoint: "http://localhost".to_string(),
             tenant_id: None,
             static_labels: vec![],
-            static_label_keys: std::collections::HashSet::new(),
             label_columns: vec!["namespace".to_string()],
             headers: vec![],
         });
@@ -1078,7 +1071,6 @@ mod tests {
             endpoint: "http://localhost".to_string(),
             tenant_id: None,
             static_labels: vec![],
-            static_label_keys: std::collections::HashSet::new(),
             label_columns: vec![],
             headers: vec![],
         });
