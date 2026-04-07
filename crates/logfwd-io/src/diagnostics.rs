@@ -400,7 +400,7 @@ pub struct DiagnosticsServer {
     /// Raw YAML config text for the /admin/v1/config endpoint.
     config_yaml: String,
     config_path: String,
-    /// Lazy stderr capture — activated on first /admin/v1/logs request.
+    /// Stderr capture for /admin/v1/logs; started when diagnostics starts.
     stderr: crate::stderr_capture::StderrCapture,
     /// Server-side metric history (1 hour, reducing precision).
     history: Arc<crate::metric_history::MetricHistory>,
