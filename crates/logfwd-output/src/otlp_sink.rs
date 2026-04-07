@@ -1692,4 +1692,66 @@ mod tests {
         let severities: Vec<i32> = records.iter().map(|lr| lr.severity_number).collect();
         assert_eq!(severities, vec![9, 13, 17], "INFO=9, WARN=13, ERROR=17");
     }
+
+    #[test]
+    fn generated_fast_otlp_matches_handwritten_encoder() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("timestamp", DataType::Utf8, true),
+            Field::new("level", DataType::Utf8, true),
+            Field::new("message", DataType::Utf8, true),
+            Field::new("trace_id", DataType::Utf8, true),
+            Field::new("span_id", DataType::Utf8, true),
+            Field::new("flags", DataType::Int64, true),
+            Field::new("host", DataType::Utf8, true),
+            Field::new("count", DataType::Int64, true),
+            Field::new("latency", DataType::Float64, true),
+            Field::new("active", DataType::Boolean, true),
+        ]));
+
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec![
+                    Some("2024-01-15T10:30:00Z"),
+                    Some("2024-01-15T10:30:01Z"),
+                ])),
+                Arc::new(StringArray::from(vec![Some("INFO"), Some("ERROR")])),
+                Arc::new(StringArray::from(vec![Some("first"), Some("second")])),
+                Arc::new(StringArray::from(vec![
+                    Some("0102030405060708090a0b0c0d0e0f10"),
+                    Some("1112131415161718191a1b1c1d1e1f20"),
+                ])),
+                Arc::new(StringArray::from(vec![
+                    Some("0102030405060708"),
+                    Some("1112131415161718"),
+                ])),
+                Arc::new(Int64Array::from(vec![Some(1), Some(255)])),
+                Arc::new(StringArray::from(vec![Some("web-01"), Some("web-02")])),
+                Arc::new(Int64Array::from(vec![Some(42), Some(7)])),
+                Arc::new(arrow::array::Float64Array::from(vec![Some(1.5), Some(2.5)])),
+                Arc::new(arrow::array::BooleanArray::from(vec![
+                    Some(true),
+                    Some(false),
+                ])),
+            ],
+        )
+        .expect("valid batch");
+
+        let metadata = BatchMetadata {
+            resource_attrs: Arc::new(vec![("service.name".to_string(), "otlp-test".to_string())]),
+            observed_time_ns: 1_700_000_000_000_000_000,
+        };
+
+        let mut handwritten = make_sink();
+        handwritten.encode_batch(&batch, &metadata);
+
+        let mut generated = make_sink();
+        generated.encode_batch_generated_fast(&batch, &metadata);
+
+        assert_eq!(
+            generated.encoded_payload(),
+            handwritten.encoded_payload(),
+            "generated-fast OTLP payload drifted from handwritten encoder",
+        );
+    }
 }
