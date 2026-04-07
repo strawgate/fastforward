@@ -196,8 +196,9 @@ README and task-oriented guides intentionally avoid duplicating status claims.
 
 ```
 logfwd run --config <file>               Run the pipeline
-logfwd validate --config <file>          Validate config syntax
-logfwd dry-run --config <file>           Build pipeline, check SQL, don't start
+logfwd validate --config <file>          Validate config and environment-dependent pipeline requirements
+logfwd dry-run --config <file>           Build and validate the pipeline without starting the runtime
+logfwd init                              Generate a starter config from built-in templates
 logfwd blackhole [bind_addr]             Start OTLP blackhole receiver for testing
 logfwd generate-json <n> <file>          Generate synthetic JSON log data
 logfwd effective-config [--config file]  Validate and print effective runnable config

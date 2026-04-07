@@ -991,7 +991,7 @@ impl Config {
                     .map_or_else(|| format!("#{i}"), String::from);
 
                 // Reject placeholder output types that are not yet implemented.
-                if output.output_type == OutputType::Parquet {
+                if matches!(output.output_type, OutputType::Parquet | OutputType::Http) {
                     return Err(ConfigError::Validation(format!(
                         "pipeline '{name}' output '{label}': {} output type is not yet implemented",
                         output.output_type,
@@ -1000,7 +1000,6 @@ impl Config {
 
                 match output.output_type {
                     OutputType::Otlp
-                    | OutputType::Http
                     | OutputType::Elasticsearch
                     | OutputType::Loki
                     | OutputType::ArrowIpc => {
@@ -1080,6 +1079,9 @@ impl Config {
                     }
                     OutputType::Parquet => {
                         // Parquet output not yet implemented
+                    }
+                    OutputType::Http => {
+                        unreachable!("http outputs are rejected before per-type validation")
                     }
                 }
 
@@ -1799,10 +1801,9 @@ output:
 
     #[test]
     fn all_output_types() {
-        // Implemented output types should parse and validate successfully.
+        // Supported output types should parse and validate successfully.
         for (otype, extra) in [
             ("otlp", "endpoint: http://x:4317"),
-            ("http", "endpoint: http://x"),
             ("stdout", ""),
             ("null", ""),
             ("elasticsearch", "endpoint: http://x"),
@@ -1816,7 +1817,7 @@ output:
         }
 
         // Placeholder output types must be rejected at validation time.
-        for otype in ["parquet"] {
+        for otype in ["http", "parquet"] {
             let yaml = format!(
                 "input:\n  type: file\n  path: /tmp/x.log\noutput:\n  type: {otype}\n  endpoint: http://x\n  path: /tmp/x\n"
             );
@@ -1831,6 +1832,24 @@ output:
                 "expected 'not yet implemented' for {otype}: {msg}"
             );
         }
+    }
+
+    #[test]
+    fn http_output_rejected_at_validation_boundary() {
+        let yaml = r"
+input:
+  type: file
+  path: /tmp/x.log
+output:
+  type: http
+  endpoint: http://localhost:9200
+";
+        let err = Config::load_str(yaml).expect_err("http output should fail validation");
+        assert!(
+            err.to_string()
+                .contains("http output type is not yet implemented"),
+            "expected explicit unsupported message: {err}"
+        );
     }
 
     #[test]
@@ -1924,8 +1943,8 @@ input:
   type: file
   path: /var/log/test.log
 output:
-  type: http
-  endpoint: http://localhost:9200
+  type: otlp
+  endpoint: http://localhost:4318/v1/logs
   auth:
     bearer_token: "my-secret-token"
 "#;
@@ -1943,8 +1962,8 @@ input:
   type: file
   path: /var/log/test.log
 output:
-  type: http
-  endpoint: http://localhost:9200
+  type: otlp
+  endpoint: http://localhost:4318/v1/logs
   auth:
     headers:
       X-API-Key: "supersecret"
@@ -1973,8 +1992,8 @@ input:
   type: file
   path: /var/log/test.log
 output:
-  type: http
-  endpoint: http://localhost:9200
+  type: otlp
+  endpoint: http://localhost:4318/v1/logs
   auth:
     bearer_token: "${LOGFWD_TEST_TOKEN}"
 "#;
@@ -1994,8 +2013,8 @@ input:
   type: file
   path: /var/log/test.log
 output:
-  type: http
-  endpoint: http://localhost:9200
+  type: otlp
+  endpoint: http://localhost:4318/v1/logs
 ";
         let cfg = Config::load_str(yaml).expect("no auth");
         let pipe = &cfg.pipelines["default"];
@@ -2056,8 +2075,8 @@ input:
   type: file
   path: /var/log/test.log
 output:
-  type: http
-  endpoint: http://localhost:9200
+  type: otlp
+  endpoint: http://localhost:4318/v1/logs
   request_mode: streaming
 ";
         let err = Config::load_str(yaml).expect_err("request_mode should be es-only");
@@ -2066,8 +2085,8 @@ output:
 
     #[test]
     fn validation_endpoint_missing_scheme() {
-        // Scheme-less endpoints must be rejected for both otlp and http outputs.
-        for otype in ["otlp", "http"] {
+        // Scheme-less endpoints must be rejected for supported URL-based outputs.
+        for otype in ["otlp", "elasticsearch"] {
             let yaml = format!(
                 "input:\n  type: file\n  path: /tmp/x.log\noutput:\n  type: {otype}\n  endpoint: collector:4317\n"
             );
@@ -2086,12 +2105,12 @@ output:
 
     #[test]
     fn validation_endpoint_valid_schemes() {
-        // Both http:// and https:// must be accepted for otlp and http outputs.
+        // Both http:// and https:// must be accepted for supported URL-based outputs.
         for (otype, scheme) in [
             ("otlp", "http://"),
             ("otlp", "https://"),
-            ("http", "http://"),
-            ("http", "https://"),
+            ("elasticsearch", "http://"),
+            ("elasticsearch", "https://"),
         ] {
             let yaml = format!(
                 "input:\n  type: file\n  path: /tmp/x.log\noutput:\n  type: {otype}\n  endpoint: {scheme}collector:4317\n"
@@ -3234,7 +3253,7 @@ pipelines:
       - type: file
         path: /tmp/test.log
     outputs:
-      - type: http
+      - type: elasticsearch
         endpoint: http://localhost:9200
         protocol: grpc
 "#;
@@ -3304,7 +3323,7 @@ pipelines:
     }
 
     // -----------------------------------------------------------------------
-    // Format: text alias for console
+    // Format: text is accepted as a distinct raw-text mode
     // -----------------------------------------------------------------------
 
     #[test]

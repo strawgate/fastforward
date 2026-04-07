@@ -185,13 +185,7 @@ fn test_query_arrow_all_documents() {
 
                 println!("Successfully queried {} rows via Arrow IPC", total_rows);
             }
-            Err(e) => {
-                eprintln!(
-                    "Query failed (ES|QL might not be enabled or version < 8.11): {}",
-                    e
-                );
-                // Don't fail the test - ES|QL might not be available
-            }
+            Err(e) => panic!("ES|QL Arrow query failed: {e}"),
         }
 
         cleanup_test_index().await;
@@ -247,12 +241,7 @@ fn test_query_arrow_with_filter() {
                     total_rows
                 );
             }
-            Err(e) => {
-                eprintln!(
-                    "Query failed (ES|QL might not be enabled or version < 8.11): {}",
-                    e
-                );
-            }
+            Err(e) => panic!("ES|QL Arrow filter query failed: {e}"),
         }
 
         cleanup_test_index().await;
@@ -316,12 +305,7 @@ fn test_query_arrow_with_projection() {
 
                 println!("Successfully projected 2 columns via Arrow IPC");
             }
-            Err(e) => {
-                eprintln!(
-                    "Query failed (ES|QL might not be enabled or version < 8.11): {}",
-                    e
-                );
-            }
+            Err(e) => panic!("ES|QL Arrow projection query failed: {e}"),
         }
 
         cleanup_test_index().await;
@@ -353,10 +337,7 @@ fn test_query_arrow_empty_result() {
                 assert_eq!(total_rows, 0, "expected 0 rows from non-existent index");
                 println!("Empty result handled correctly");
             }
-            Err(e) => {
-                // Error is acceptable for non-existent index
-                println!("Empty result error handled: {}", e);
-            }
+            Err(e) => panic!("empty-result ES|QL query should return zero rows, got error: {e}"),
         }
     });
 }
