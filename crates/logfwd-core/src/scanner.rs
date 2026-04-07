@@ -328,7 +328,7 @@ mod kani_proofs {
     use super::BuilderState;
 
     /// Operations for the Builder protocol.
-    #[derive(Clone, Copy, Debug, PartialEq)]
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     enum BuilderOp {
         BeginBatch,
         BeginRow,
