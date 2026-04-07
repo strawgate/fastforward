@@ -291,22 +291,32 @@ export function App() {
     if (tracesData) {
       setTraces((prev) => {
         const incoming = tracesData.traces;
-        // Fast path: if trace_ids haven't changed and lengths match, keep prev reference
-        if (
-          prev.length === incoming.length &&
-          prev.every((t, i) => t.trace_id === incoming[i].trace_id)
-        ) {
-          // Update in-place fields that may have changed (total_ns, status, etc.)
-          let changed = false;
-          for (let i = 0; i < prev.length; i++) {
-            if (prev[i].total_ns !== incoming[i].total_ns || prev[i].status !== incoming[i].status) {
-              changed = true;
-              break;
-            }
+        // Build next array keyed by trace_id, reusing previous objects when all
+        // render-affecting fields are unchanged to preserve referential stability.
+        const prevById = new Map(prev.map((t) => [t.trace_id, t]));
+        let anyChanged = false;
+        const next = incoming.map((t) => {
+          const p = prevById.get(t.trace_id);
+          if (
+            p &&
+            p.total_ns === t.total_ns &&
+            p.status === t.status &&
+            p.in_progress === t.in_progress &&
+            p.stage === t.stage &&
+            p.errors === t.errors &&
+            p.scan_ns === t.scan_ns &&
+            p.transform_ns === t.transform_ns &&
+            p.output_ns === t.output_ns &&
+            p.queue_wait_ns === t.queue_wait_ns &&
+            p.worker_id === t.worker_id
+          ) {
+            return p;
           }
-          return changed ? incoming : prev;
-        }
-        return incoming;
+          anyChanged = true;
+          return t;
+        });
+        if (!anyChanged && next.length === prev.length) return prev;
+        return next;
       });
     }
 
