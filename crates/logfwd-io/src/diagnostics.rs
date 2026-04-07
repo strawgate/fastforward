@@ -408,6 +408,7 @@ pub struct DiagnosticsServer {
     trace_buf: Option<crate::span_exporter::SpanBuffer>,
     server: Option<Arc<tiny_http::Server>>,
     handle: Option<JoinHandle<()>>,
+    sampler_handle: Option<JoinHandle<()>>,
     shutdown: Arc<AtomicBool>,
 }
 
@@ -425,6 +426,7 @@ impl DiagnosticsServer {
             trace_buf: None,
             server: None,
             handle: None,
+            sampler_handle: None,
             shutdown: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -453,16 +455,21 @@ impl DiagnosticsServer {
         self.memory_stats_fn = Some(f);
     }
 
-    /// Spawn the server on a background thread. Binds synchronously before
-    /// returning so that port-in-use errors are reported at startup.
+    /// Spawn the HTTP server and metric-sampler threads. Binds synchronously
+    /// before returning so that port-in-use errors are reported at startup.
     ///
-    /// Returns the bound address on success. The address reflects the actual
-    /// OS-assigned port (useful when `bind_addr` uses port 0). Returns an
-    /// `io::Error` on bind failure.
+    /// Returns the bound socket address on success. The address reflects the
+    /// actual OS-assigned port (useful when `bind_addr` uses port 0). The
+    /// background thread handles are retained internally and are cleaned up
+    /// when this `DiagnosticsServer` is dropped.
+    ///
+    /// Returns `AlreadyExists` if `start()` has already been called without
+    /// an intervening drop. Returns an `io::Error` on bind failure.
     pub fn start(&mut self) -> io::Result<std::net::SocketAddr> {
         if self.handle.is_some() {
-            return Err(io::Error::other(
-                "diagnostics server already started",
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "DiagnosticsServer::start() called while already running",
             ));
         }
 
@@ -486,18 +493,23 @@ impl DiagnosticsServer {
 
         // Background metric sampler — records pipeline + process metrics
         // every 2s into the history buffer, regardless of dashboard activity.
+        // Checks the shared shutdown flag so it exits cleanly when dropped.
         let sampler_pipelines = self.pipelines.clone();
         let sampler_history = Arc::clone(&self.history);
         let sampler_mem_fn = self.memory_stats_fn;
-        thread::Builder::new()
+        let sampler_shutdown = Arc::clone(&self.shutdown);
+        let sampler_handle = thread::Builder::new()
             .name("metric-sampler".into())
             .spawn(move || {
-                loop {
+                while !sampler_shutdown.load(Ordering::Relaxed) {
                     thread::sleep(std::time::Duration::from_secs(2));
-                    sample_metrics(&sampler_pipelines, &sampler_history, sampler_mem_fn);
+                    if !sampler_shutdown.load(Ordering::Relaxed) {
+                        sample_metrics(&sampler_pipelines, &sampler_history, sampler_mem_fn);
+                    }
                 }
             })
             .ok();
+        self.sampler_handle = sampler_handle;
 
         let server_clone = Arc::clone(&server);
         let shutdown_clone = Arc::clone(&self.shutdown);
@@ -509,8 +521,8 @@ impl DiagnosticsServer {
                     Ok(Some(request)) => {
                         let _ = handler.handle_request(request);
                     }
-                    Ok(None) => continue, // timeout — check shutdown and retry
-                    Err(_) => break,       // server error — exit loop
+                    Ok(None) => {}   // timeout — loop back to check shutdown flag
+                    Err(_) => break, // server error — exit loop
                 }
             }
         });
@@ -531,6 +543,7 @@ impl DiagnosticsServer {
             trace_buf: self.trace_buf.clone(),
             server: None,
             handle: None,
+            sampler_handle: None,
             shutdown: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -1170,11 +1183,19 @@ impl DiagnosticsServer {
 
 impl Drop for DiagnosticsServer {
     fn drop(&mut self) {
+        // Signal both threads to exit.
         self.shutdown.store(true, Ordering::Relaxed);
+        // Unblock the HTTP accept loop so it sees the shutdown flag.
         if let Some(server) = self.server.as_ref() {
             server.unblock();
         }
+        // Join the HTTP handler thread.
         if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+        // Join the metric-sampler thread. The sampler sleeps for 2s per iteration,
+        // so worst-case wait is ~2s; acceptable since Drop is not on a hot path.
+        if let Some(handle) = self.sampler_handle.take() {
             let _ = handle.join();
         }
     }
