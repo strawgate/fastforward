@@ -34,13 +34,13 @@ logfwd --config pipeline.yaml
 
 ```bash
 # Health check
-curl http://localhost:9090/health
+curl http://localhost:9090/live
 
 # Aggregate stats (JSON)
 curl http://localhost:9090/api/stats | jq .
 
 # Pipeline details (JSON)
-curl http://localhost:9090/api/pipelines | jq .
+curl http://localhost:9090/admin/v1/status | jq .
 ```
 
 ## Validate config without running

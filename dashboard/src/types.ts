@@ -45,11 +45,31 @@ export interface PipelineData {
   backpressure_stalls?: number;
 }
 
-export interface PipelinesResponse {
+export type HealthState =
+  | "starting"
+  | "healthy"
+  | "degraded"
+  | "stopping"
+  | "stopped"
+  | "failed";
+
+export interface StatusResponse {
+  live: {
+    status: "live";
+  };
+  ready: {
+    status: "ready" | "not_ready";
+  };
+  component_health: HealthState;
   pipelines: PipelineData[];
   system: {
     uptime_seconds: number;
     version: string;
+    memory?: {
+      resident: number;
+      allocated: number;
+      active: number;
+    };
   };
 }
 

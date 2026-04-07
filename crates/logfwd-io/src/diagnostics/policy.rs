@@ -29,7 +29,7 @@ pub(super) fn aggregate_component_health(pipelines: &[Arc<PipelineMetrics>]) -> 
         .fold(ComponentHealth::Healthy, ComponentHealth::combine)
 }
 
-/// Return the health view exposed for the transform section in `/api/pipelines`.
+/// Return the health view exposed for the transform section in `/admin/v1/status`.
 pub(super) fn transform_health(pipeline: &PipelineMetrics) -> ComponentHealth {
     pipeline
         .transform_in

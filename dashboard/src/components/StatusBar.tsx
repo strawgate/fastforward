@@ -2,20 +2,28 @@ import { fmtDuration } from "../lib/format";
 
 interface Props {
   connected: boolean;
+  componentHealth: string;
+  ready: "ready" | "not_ready";
   totalErrors: number;
   version: string;
   uptime: number;
 }
 
-export function StatusBar({ connected, totalErrors, version, uptime }: Props) {
+export function StatusBar({ connected, componentHealth, ready, totalErrors, version, uptime }: Props) {
   const pillClass = connected
-    ? totalErrors > 0
+    ? ready !== "ready" || componentHealth === "failed" || componentHealth === "stopped"
+      ? "pill pill-off"
+      : totalErrors > 0 || componentHealth === "degraded"
       ? "pill pill-err"
       : "pill pill-ok"
     : "pill pill-off";
   const pillText = connected
-    ? totalErrors > 0
+    ? ready !== "ready"
+      ? "not ready"
+      : totalErrors > 0
       ? `${totalErrors} errors`
+      : componentHealth === "degraded"
+      ? "degraded"
       : "healthy"
     : "disconnected";
 

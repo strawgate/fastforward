@@ -1379,7 +1379,7 @@ fn generate_json_log_file(num_lines: usize, output: &str) -> io::Result<()> {
 /// Read jemalloc memory stats: resident, allocated, and active bytes.
 ///
 /// Returns `None` if the stats are unavailable (e.g. the epoch refresh fails).
-/// This function is passed to [`DiagnosticsServer`] so the `/api/pipelines`
+/// This function is passed to [`DiagnosticsServer`] so the `/admin/v1/status`
 /// endpoint can expose live allocator metrics.
 fn jemalloc_stats() -> Option<logfwd_io::diagnostics::MemoryStats> {
     use tikv_jemalloc_ctl::{epoch, stats};

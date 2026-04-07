@@ -31,8 +31,8 @@ docker ps --filter name=logfwd
 docker logs --tail=100 logfwd
 
 # Diagnostics
-curl -s http://localhost:9090/health | jq .
-curl -s http://localhost:9090/api/pipelines | jq .
+curl -s http://localhost:9090/live | jq .
+curl -s http://localhost:9090/admin/v1/status | jq .
 ```
 
 You should see increasing `inputs[*].lines_total` and `outputs[*].lines_total` when logs are present.

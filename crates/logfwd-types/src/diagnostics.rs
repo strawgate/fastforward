@@ -9,7 +9,7 @@ use opentelemetry::metrics::{Counter, Meter};
 
 pub use health::ComponentHealth;
 
-/// Stats for one component. Dual-write: atomics for /api/pipelines,
+/// Stats for one component. Dual-write: atomics for /admin/v1/status,
 /// OTel counters for OTLP push. Both are lock-free on the hot path.
 pub struct ComponentStats {
     /// Total lines processed by this component.

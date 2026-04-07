@@ -11,9 +11,9 @@ server:
 
 | Endpoint | Description |
 |----------|-------------|
-| `GET /health` | Liveness probe (uptime, version) |
+| `GET /live` | Liveness probe (process/control-plane only) |
 | `GET /ready` | Readiness probe (200 once initialized) |
-| `GET /api/pipelines` | Detailed JSON with per-stage metrics |
+| `GET /admin/v1/status` | Canonical rich status JSON (live, ready, component health, per-pipeline detail) |
 | `GET /api/stats` | Flattened JSON for polling/benchmarks |
 | `GET /api/config` | View active YAML configuration |
 | `GET /api/logs` | View recent log lines from stderr |
