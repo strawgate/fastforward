@@ -1,11 +1,11 @@
 # logfwd example
-# Use case: TCP syslog to Elasticsearch
+# Use case: TCP raw line logs to Elasticsearch
 # Replace paths/endpoints with values for your environment.
 
 input:
   type: tcp
   listen: 0.0.0.0:1514
-  format: syslog
+  format: raw
 
 transform: |
   SELECT * FROM logs

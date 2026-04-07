@@ -450,12 +450,13 @@ fn cmd_effective_config(args: &[String]) -> Result<(), CliError> {
     let effective_yaml = logfwd_config::Config::expand_env_str(&config_yaml)
         .map_err(|e| CliError::Config(e.to_string()))?;
 
-    // Validate that the config parses and can build runtime pipelines before printing.
-    // This keeps --effective-config consistent with --validate behavior.
+    // Read-only validation for inspection flows: reject configs that would
+    // fail format or SQL-plan checks without constructing runtime inputs that
+    // bind sockets or touch long-lived resources.
     let config = logfwd_config::Config::load_str(&config_yaml)
         .map_err(|e| CliError::Config(e.to_string()))?;
     let base_path = std::path::Path::new(&config_path).parent();
-    validate_pipelines_inner(
+    validate_pipelines_read_only(
         &config,
         base_path,
         |_name| {},
@@ -492,7 +493,7 @@ transform: |
 
 output:
   type: otlp
-  endpoint: http://localhost:4318
+  endpoint: http://localhost:4318/v1/logs
 
 # Optional: diagnostics dashboard
 # server:
@@ -531,6 +532,11 @@ fn cmd_wizard(args: &[String]) -> Result<(), CliError> {
     if args.len() > 2 {
         eprintln!("  logfwd --wizard");
         return Err(CliError::Config(format!("unknown argument: {}", args[2])));
+    }
+    if !io::stdin().is_terminal() {
+        return Err(CliError::Config(
+            "--wizard requires an interactive terminal on stdin".to_owned(),
+        ));
     }
 
     println!("{}logfwd config wizard{}", bold(), reset());
@@ -590,6 +596,7 @@ fn cmd_wizard(args: &[String]) -> Result<(), CliError> {
 fn prompt_select(prompt: &str, options: &[&str]) -> Result<usize, CliError> {
     let mut stdout = io::stdout();
     let stdin = io::stdin();
+    let mut stdin = stdin.lock();
     loop {
         println!("{prompt}");
         for (i, option) in options.iter().enumerate() {
@@ -598,13 +605,7 @@ fn prompt_select(prompt: &str, options: &[&str]) -> Result<usize, CliError> {
         print!("Enter choice [1-{}]: ", options.len());
         stdout.flush()?;
 
-        let mut line = String::new();
-        let bytes_read = stdin.read_line(&mut line)?;
-        if bytes_read == 0 {
-            return Err(CliError::Config(
-                "stdin closed while reading --wizard input".to_owned(),
-            ));
-        }
+        let line = read_wizard_line(&mut stdin)?;
         let trimmed = line.trim();
         if let Ok(v) = trimmed.parse::<usize>()
             && (1..=options.len()).contains(&v)
@@ -625,14 +626,25 @@ fn prompt_text(prompt: &str, default: &str) -> Result<String, CliError> {
     let mut stdout = io::stdout();
     print!("{prompt} [{default}]: ");
     stdout.flush()?;
-    let mut line = String::new();
-    io::stdin().read_line(&mut line)?;
+    let stdin = io::stdin();
+    let mut stdin = stdin.lock();
+    let line = read_wizard_line(&mut stdin)?;
     let trimmed = line.trim();
     if trimmed.is_empty() {
         Ok(default.to_owned())
     } else {
         Ok(trimmed.to_owned())
     }
+}
+
+fn read_wizard_line<R: io::BufRead>(reader: &mut R) -> Result<String, CliError> {
+    let mut line = String::new();
+    if reader.read_line(&mut line)? == 0 {
+        return Err(CliError::Config(
+            "stdin closed while reading --wizard input".to_owned(),
+        ));
+    }
+    Ok(line)
 }
 
 fn cmd_completions(args: &[String]) -> Result<(), CliError> {
@@ -922,6 +934,198 @@ where
     }
 
     Ok(())
+}
+
+fn validate_pipelines_read_only<FReady, FError>(
+    config: &logfwd_config::Config,
+    base_path: Option<&std::path::Path>,
+    mut on_ready: FReady,
+    mut on_error: FError,
+) -> Result<(), CliError>
+where
+    FReady: FnMut(&str),
+    FError: FnMut(String),
+{
+    let mut errors = 0;
+    for (name, pipe_cfg) in &config.pipelines {
+        match validate_pipeline_read_only(pipe_cfg, base_path) {
+            Ok(()) => on_ready(name),
+            Err(err) => {
+                on_error(format!("pipeline '{name}': {err}"));
+                errors += 1;
+            }
+        }
+    }
+
+    if errors > 0 {
+        return Err(CliError::Config(format!(
+            "{errors} error(s) during validation"
+        )));
+    }
+
+    Ok(())
+}
+
+fn validate_pipeline_read_only(
+    config: &logfwd_config::PipelineConfig,
+    base_path: Option<&std::path::Path>,
+) -> Result<(), String> {
+    use logfwd_config::{EnrichmentConfig, Format, GeoDatabaseFormat, InputType};
+    use logfwd_transform::SqlTransform;
+    use std::path::PathBuf;
+
+    if config.workers == Some(0) {
+        return Err("workers must be >= 1".to_owned());
+    }
+    if config.batch_target_bytes == Some(0) {
+        return Err("batch_target_bytes must be > 0".to_owned());
+    }
+
+    let mut enrichment_tables: Vec<Arc<dyn logfwd_transform::enrichment::EnrichmentTable>> =
+        Vec::new();
+    let mut geo_database: Option<Arc<dyn logfwd_transform::enrichment::GeoDatabase>> = None;
+
+    for enrichment in &config.enrichment {
+        match enrichment {
+            EnrichmentConfig::GeoDatabase(geo_cfg) => {
+                let mut path = PathBuf::from(&geo_cfg.path);
+                if path.is_relative()
+                    && let Some(base) = base_path
+                {
+                    path = base.join(path);
+                }
+                let db: Arc<dyn logfwd_transform::enrichment::GeoDatabase> = match geo_cfg.format {
+                    GeoDatabaseFormat::Mmdb => {
+                        let mmdb = logfwd_transform::udf::geo_lookup::MmdbDatabase::open(&path)
+                            .map_err(|e| {
+                                format!("failed to open geo database '{}': {e}", path.display())
+                            })?;
+                        Arc::new(mmdb)
+                    }
+                    _ => {
+                        return Err(format!(
+                            "unsupported geo database format: {:?}",
+                            geo_cfg.format
+                        ));
+                    }
+                };
+                geo_database = Some(db);
+            }
+            EnrichmentConfig::Static(cfg) => {
+                let labels: Vec<(String, String)> = cfg
+                    .labels
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                let table = Arc::new(
+                    logfwd_transform::enrichment::StaticTable::new(&cfg.table_name, &labels)
+                        .map_err(|e| format!("enrichment '{}': {e}", cfg.table_name))?,
+                );
+                enrichment_tables.push(table);
+            }
+            EnrichmentConfig::HostInfo(_) => {
+                enrichment_tables
+                    .push(Arc::new(logfwd_transform::enrichment::HostInfoTable::new()));
+            }
+            EnrichmentConfig::K8sPath(cfg) => {
+                enrichment_tables.push(Arc::new(logfwd_transform::enrichment::K8sPathTable::new(
+                    &cfg.table_name,
+                )));
+            }
+            EnrichmentConfig::Csv(cfg) => {
+                let mut path = PathBuf::from(&cfg.path);
+                if path.is_relative()
+                    && let Some(base) = base_path
+                {
+                    path = base.join(path);
+                }
+                let table = Arc::new(logfwd_transform::enrichment::CsvFileTable::new(
+                    &cfg.table_name,
+                    &path,
+                ));
+                table
+                    .reload()
+                    .map_err(|e| format!("enrichment '{}': {e}", cfg.table_name))?;
+                enrichment_tables.push(table);
+            }
+            EnrichmentConfig::Jsonl(cfg) => {
+                let mut path = PathBuf::from(&cfg.path);
+                if path.is_relative()
+                    && let Some(base) = base_path
+                {
+                    path = base.join(path);
+                }
+                let table = Arc::new(logfwd_transform::enrichment::JsonLinesFileTable::new(
+                    &cfg.table_name,
+                    &path,
+                ));
+                table
+                    .reload()
+                    .map_err(|e| format!("enrichment '{}': {e}", cfg.table_name))?;
+                enrichment_tables.push(table);
+            }
+        }
+    }
+
+    let pipeline_sql = config.transform.as_deref().unwrap_or("SELECT * FROM logs");
+    for (i, input_cfg) in config.inputs.iter().enumerate() {
+        let input_name = input_cfg
+            .name
+            .clone()
+            .unwrap_or_else(|| format!("input_{i}"));
+        let format = input_cfg
+            .format
+            .clone()
+            .unwrap_or(match input_cfg.input_type {
+                InputType::File => Format::Auto,
+                _ => Format::Json,
+            });
+        validate_input_format_read_only(&input_name, input_cfg.input_type.clone(), &format)?;
+
+        let input_sql = input_cfg.sql.as_deref().unwrap_or(pipeline_sql);
+        let mut transform = SqlTransform::new(input_sql).map_err(|e| e.to_string())?;
+        if let Some(ref db) = geo_database {
+            transform.set_geo_database(Arc::clone(db));
+        }
+        for table in &enrichment_tables {
+            transform
+                .add_enrichment_table(Arc::clone(table))
+                .map_err(|e| format!("input '{}': enrichment error: {e}", input_name))?;
+        }
+        transform
+            .validate_plan()
+            .map_err(|e| format!("input '{}': {e}", input_name))?;
+    }
+
+    Ok(())
+}
+
+fn validate_input_format_read_only(
+    name: &str,
+    input_type: logfwd_config::InputType,
+    format: &logfwd_config::Format,
+) -> Result<(), String> {
+    use logfwd_config::{Format, InputType};
+
+    let supported = match input_type {
+        InputType::File => matches!(
+            format,
+            Format::Cri | Format::Auto | Format::Json | Format::Raw
+        ),
+        InputType::Generator | InputType::Otlp => matches!(format, Format::Json),
+        InputType::Udp | InputType::Tcp => matches!(format, Format::Json | Format::Raw),
+        InputType::ArrowIpc => false,
+        _ => false,
+    };
+
+    if supported {
+        return Ok(());
+    }
+
+    Err(format!(
+        "input '{name}': format {:?} is not supported for {:?} inputs",
+        format, input_type
+    ))
 }
 
 fn validate_pipelines(
@@ -1751,7 +1955,7 @@ mod cli_tests {
     }
 
     #[test]
-    fn validate_pipelines_inner_rejects_otlp_raw() {
+    fn validate_pipelines_read_only_rejects_otlp_raw() {
         let yaml = r#"
 input:
   type: otlp
@@ -1761,8 +1965,63 @@ output:
   type: null
 "#;
         let config = logfwd_config::Config::load_str(yaml).expect("config should parse");
-        let result = validate_pipelines_inner(&config, None, |_name| {}, |_err| {});
+        let result = validate_pipelines_read_only(&config, None, |_name| {}, |_err| {});
         assert!(matches!(result, Err(CliError::Config(_))));
+    }
+
+    #[test]
+    fn read_wizard_line_rejects_eof() {
+        let mut cursor = io::Cursor::new(Vec::<u8>::new());
+        let err = read_wizard_line(&mut cursor).expect_err("EOF should fail");
+        assert_eq!(err.to_string(), "stdin closed while reading --wizard input");
+    }
+
+    #[test]
+    fn effective_config_validation_does_not_bind_runtime_ports() {
+        use std::io::Write as _;
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test port");
+        let port = listener.local_addr().expect("local addr").port();
+
+        let mut file = tempfile::NamedTempFile::new().expect("temp config");
+        writeln!(
+            file,
+            r#"input:
+  type: otlp
+  listen: 127.0.0.1:{port}
+output:
+  type: null
+"#
+        )
+        .expect("write config");
+
+        let args = vec![
+            "logfwd".to_string(),
+            "--effective-config".to_string(),
+            file.path().display().to_string(),
+        ];
+        cmd_effective_config(&args)
+            .expect("read-only validation should not bind the configured port");
+    }
+
+    #[test]
+    fn templates_avoid_unsupported_syslog_and_bare_otlp_http_endpoints() {
+        for input in config_templates::INPUT_TEMPLATES {
+            assert!(
+                !input.snippet.contains("format: syslog"),
+                "wizard input template should not emit unsupported syslog format: {}",
+                input.id
+            );
+        }
+        for output in config_templates::OUTPUT_TEMPLATES {
+            if output.id == "otlp" {
+                assert!(
+                    output.snippet.contains("/v1/logs"),
+                    "wizard OTLP output should include the HTTP logs path"
+                );
+            }
+        }
     }
 
     #[test]
