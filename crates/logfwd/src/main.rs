@@ -819,6 +819,9 @@ fn suggest_flag(input: &str) -> Option<&'static str> {
     if input == "--dump-config" {
         return Some("--effective-config");
     }
+    if matches!(input, "--validate" | "--dry-run" | "--check") {
+        return Some("--config");
+    }
 
     let known = &[
         "--config",
@@ -1625,6 +1628,8 @@ mod cli_tests {
         assert_eq!(suggest_flag("--blackhol"), Some("--blackhole"));
         assert_eq!(suggest_flag("--versin"), Some("--version"));
         assert_eq!(suggest_flag("--dump-config"), Some("--effective-config"));
+        assert_eq!(suggest_flag("--validate"), Some("--config"));
+        assert_eq!(suggest_flag("--dry-run"), Some("--config"));
         assert_eq!(
             suggest_flag("--effective-confi"),
             Some("--effective-config")
