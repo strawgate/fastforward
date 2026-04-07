@@ -222,6 +222,11 @@ impl InputSource for FramedInput {
                         });
                     }
                 }
+                InputEvent::Batch { batch, source_id } => {
+                    self.stats.inc_lines(batch.num_rows() as u64);
+                    self.stats.inc_bytes(batch.get_array_memory_size() as u64);
+                    result_events.push(InputEvent::Batch { batch, source_id });
+                }
                 // Rotation/truncation: clear framing state + forward event.
                 //
                 // When source_id is known, clear only the affected source's
@@ -340,6 +345,9 @@ impl InputSource for FramedInput {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arrow::array::{Int64Array, StringArray};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
     use std::collections::VecDeque;
 
     /// Mock input source for testing.
@@ -425,6 +433,16 @@ mod tests {
         Arc::new(ComponentStats::new())
     }
 
+    fn make_batch() -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("msg", DataType::Utf8, true),
+            Field::new("seq", DataType::Int64, true),
+        ]));
+        let msg = StringArray::from(vec![Some("alpha"), Some("beta")]);
+        let seq = Int64Array::from(vec![Some(1), Some(2)]);
+        RecordBatch::try_new(schema, vec![Arc::new(msg), Arc::new(seq)]).expect("batch")
+    }
+
     fn collect_data(events: Vec<InputEvent>) -> Vec<u8> {
         let mut out = Vec::new();
         for e in events {
@@ -498,6 +516,29 @@ mod tests {
         // Second poll: remainder + new data → complete line
         let events2 = framed.poll().unwrap();
         assert_eq!(collect_data(events2), b"partialmore\n");
+    }
+
+    #[test]
+    fn batch_events_increment_stats() {
+        let stats = make_stats();
+        let batch = make_batch();
+        let expected_rows = batch.num_rows() as u64;
+        let expected_bytes = batch.get_array_memory_size() as u64;
+        let source = MockSource::new(vec![vec![InputEvent::Batch {
+            batch,
+            source_id: None,
+        }]]);
+        let mut framed = FramedInput::new(
+            Box::new(source),
+            FormatDecoder::passthrough(Arc::clone(&stats)),
+            Arc::clone(&stats),
+        );
+
+        let events = framed.poll().unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0], InputEvent::Batch { .. }));
+        assert_eq!(stats.lines(), expected_rows);
+        assert_eq!(stats.bytes(), expected_bytes);
     }
 
     #[test]

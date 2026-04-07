@@ -2611,8 +2611,10 @@ version = "0.1.0"
 dependencies = [
  "arrow",
  "base64",
+ "bytes",
  "crossbeam-channel",
  "dhat",
+ "flate2",
  "globset",
  "libc",
  "logfwd-arrow",

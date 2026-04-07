@@ -1,5 +1,6 @@
 use std::future::Future;
 use std::io;
+use std::io::Write as _;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -9,6 +10,8 @@ use arrow::array::{
 };
 use arrow::datatypes::{DataType, Float64Type, Int64Type};
 use arrow::record_batch::RecordBatch;
+use flate2::Compression as GzipLevel;
+use flate2::write::GzEncoder;
 
 use logfwd_arrow::conflict_schema::normalize_conflict_columns;
 use logfwd_core::otlp::{
@@ -343,10 +346,12 @@ impl OtlpSink {
                 }
             }
             Compression::Gzip => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "OTLP gzip compression is not yet implemented",
-                ));
+                let mut compress_buf = std::mem::take(&mut self.compress_buf);
+                compress_buf.clear();
+                let mut encoder = GzEncoder::new(compress_buf, GzipLevel::fast());
+                encoder.write_all(&self.encoder_buf)?;
+                self.compress_buf = encoder.finish()?;
+                &self.compress_buf
             }
             Compression::None => &self.encoder_buf,
         };
@@ -363,8 +368,11 @@ impl OtlpSink {
         // (i.e. Zstd was configured AND the compressor is present). If the compressor
         // was not initialized for some reason, the payload falls back to uncompressed
         // and the flag must be 0x00.
-        let payload_is_compressed =
-            self.compression == Compression::Zstd && self.compressor.is_some();
+        let payload_is_compressed = match self.compression {
+            Compression::Zstd => self.compressor.is_some(),
+            Compression::Gzip => true,
+            Compression::None => false,
+        };
         let payload: &[u8] = if self.protocol == OtlpProtocol::Grpc {
             write_grpc_frame(&mut self.grpc_buf, payload, payload_is_compressed)?;
             &self.grpc_buf
@@ -382,9 +390,19 @@ impl OtlpSink {
             // and the `grpc-encoding` header (per the gRPC-over-HTTP/2 spec).
             // Plain HTTP/protobuf uses `Content-Encoding` instead.
             if self.protocol == OtlpProtocol::Grpc {
-                req = req.header("grpc-encoding", "zstd");
+                let encoding = match self.compression {
+                    Compression::Zstd => "zstd",
+                    Compression::Gzip => "gzip",
+                    Compression::None => unreachable!("header only set when compressed"),
+                };
+                req = req.header("grpc-encoding", encoding);
             } else {
-                req = req.header("Content-Encoding", "zstd");
+                let encoding = match self.compression {
+                    Compression::Zstd => "zstd",
+                    Compression::Gzip => "gzip",
+                    Compression::None => unreachable!("header only set when compressed"),
+                };
+                req = req.header("Content-Encoding", encoding);
             }
         }
 

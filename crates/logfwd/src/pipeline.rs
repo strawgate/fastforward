@@ -17,9 +17,6 @@ use std::sync::Arc;
 
 use arrow::record_batch::RecordBatch;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-// std::time::Instant is used in test helpers (deadline loops, timing assertions).
-#[cfg(test)]
-use std::time::Instant;
 
 #[cfg(any(test, feature = "turmoil"))]
 use bytes::Bytes;
@@ -51,7 +48,7 @@ use logfwd_transform::SqlTransform;
 use logfwd_types::pipeline::{PipelineMachine, Running, SourceId};
 use tokio_util::sync::CancellationToken;
 
-#[cfg(any(test, feature = "turmoil"))]
+#[cfg(feature = "turmoil")]
 use self::health::{HealthTransitionEvent, reduce_component_health};
 
 // ---------------------------------------------------------------------------
@@ -345,6 +342,7 @@ impl Pipeline {
             if matches!(input_cfg.format, Some(Format::Raw)) {
                 scan_config.keep_raw = true;
             }
+            let otlp_structured_ingress = otlp_uses_structured_ingress(&scan_config);
             let scanner = Scanner::new(scan_config);
 
             input_transforms.push(InputTransform {
@@ -353,7 +351,12 @@ impl Pipeline {
                 input_name: input_name.clone(),
             });
 
-            inputs.push(build_input_state(&input_name, &resolved_cfg, input_stats)?);
+            inputs.push(build_input_state(
+                &input_name,
+                &resolved_cfg,
+                input_stats,
+                otlp_structured_ingress,
+            )?);
         }
 
         // Restore previously saved file offsets by fingerprint (SourceId).
@@ -931,7 +934,6 @@ impl Pipeline {
             self.metrics.finish_active_batch(batch_id);
             return;
         }
-
         // Run through processor chain.
         let metadata = BatchMetadata {
             resource_attrs: Arc::clone(&self.resource_attrs),
@@ -1156,7 +1158,7 @@ async fn async_input_poll_loop(
     input_index: usize,
 ) {
     let mut buffered_since: Option<tokio::time::Instant> = None;
-    loop {
+    'poll_loop: loop {
         if shutdown.is_cancelled() {
             input.stats.set_health(reduce_component_health(
                 input.stats.health(),
@@ -1190,6 +1192,37 @@ async fn async_input_poll_loop(
                 match event {
                     InputEvent::Data { bytes, .. } => {
                         input.buf.extend_from_slice(&bytes);
+                    }
+                    InputEvent::Batch { batch, .. } => {
+                        if !input.buf.is_empty() {
+                            if let Some(msg) = scan_and_transform_for_send(
+                                &mut input,
+                                &mut transform,
+                                &metrics,
+                                input_index,
+                            )
+                            .await
+                            {
+                                if tx.send(msg).await.is_err() {
+                                    break 'poll_loop;
+                                }
+                            }
+                            buffered_since = None;
+                        }
+
+                        if let Some(msg) = transform_direct_batch_for_send(
+                            &mut input,
+                            &mut transform,
+                            &metrics,
+                            input_index,
+                            batch,
+                        )
+                        .await
+                        {
+                            if tx.send(msg).await.is_err() {
+                                break 'poll_loop;
+                            }
+                        }
                     }
                     InputEvent::Rotated { .. } => {
                         input.stats.inc_rotations();
@@ -1299,6 +1332,49 @@ async fn scan_and_transform_for_send(
     })
 }
 
+#[cfg(feature = "turmoil")]
+async fn transform_direct_batch_for_send(
+    input: &mut InputState,
+    transform: &mut InputTransform,
+    metrics: &PipelineMetrics,
+    input_index: usize,
+    batch: RecordBatch,
+) -> Option<ChannelMsg> {
+    let checkpoints: HashMap<SourceId, ByteOffset> =
+        input.source.checkpoint_data().into_iter().collect();
+    let queued_at = tokio::time::Instant::now();
+
+    let num_rows = batch.num_rows();
+    if num_rows > 0 {
+        metrics.transform_in.inc_lines(num_rows as u64);
+    }
+
+    let t0 = tokio::time::Instant::now();
+    let result = match transform.transform.execute(batch).await {
+        Ok(r) => r,
+        Err(e) => {
+            metrics.inc_transform_error();
+            metrics.inc_dropped_batch();
+            tracing::warn!(
+                input = transform.input_name.as_str(),
+                error = %e,
+                "transform error"
+            );
+            return None;
+        }
+    };
+    let transform_ns = t0.elapsed().as_nanos() as u64;
+
+    Some(ChannelMsg {
+        batch: result,
+        checkpoints,
+        queued_at: Some(queued_at),
+        input_index,
+        scan_ns: 0,
+        transform_ns,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Input construction
 // ---------------------------------------------------------------------------
@@ -1345,6 +1421,7 @@ fn build_input_state(
     name: &str,
     cfg: &InputConfig,
     stats: Arc<ComponentStats>,
+    otlp_structured_ingress: bool,
 ) -> Result<InputState, String> {
     let (raw_source, format, buf_cap): (Box<dyn InputSource>, Format, usize) = match cfg.input_type
     {
@@ -1443,8 +1520,12 @@ fn build_input_state(
                 .ok_or_else(|| format!("input '{name}': otlp input requires 'listen'"))?;
             let format = cfg.format.clone().unwrap_or(Format::Json);
             validate_input_format(name, InputType::Otlp, &format)?;
-            let source = logfwd_io::otlp_receiver::OtlpReceiverInput::new(name, addr)
-                .map_err(|e| format!("input '{name}': failed to start OTLP receiver: {e}"))?;
+            let source = if otlp_structured_ingress {
+                logfwd_io::otlp_receiver::OtlpReceiverInput::new_structured(name, addr)
+            } else {
+                logfwd_io::otlp_receiver::OtlpReceiverInput::new(name, addr)
+            }
+            .map_err(|e| format!("input '{name}': failed to start OTLP receiver: {e}"))?;
             (Box::new(source), format, 4 * 1024 * 1024)
         }
         InputType::Udp => {
@@ -1498,6 +1579,13 @@ fn build_input_state(
     })
 }
 
+fn otlp_uses_structured_ingress(scan_config: &logfwd_core::scan_config::ScanConfig) -> bool {
+    // Structured OTLP ingress preserves typed log fields, but it does not yet
+    // synthesize scanner-owned `_raw`. Keep legacy JSON-lines -> scanner mode
+    // whenever the SQL plan requires `_raw` semantics.
+    !scan_config.keep_raw
+}
+
 fn now_nanos() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1512,7 +1600,6 @@ fn now_nanos() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::VecDeque;
     use std::sync::atomic::Ordering;
     // std::time::Instant is cfg-gated in the parent module for turmoil compatibility,
     // but tests need it for timeout deadlines regardless of the turmoil feature flag.
@@ -1814,6 +1901,24 @@ output:
     }
 
     #[test]
+    fn otlp_structured_ingress_is_disabled_when_keep_raw_is_required() {
+        let scan_config = ScanConfig {
+            keep_raw: true,
+            ..ScanConfig::default()
+        };
+        assert!(!otlp_uses_structured_ingress(&scan_config));
+    }
+
+    #[test]
+    fn otlp_structured_ingress_is_enabled_when_keep_raw_is_not_required() {
+        let scan_config = ScanConfig {
+            keep_raw: false,
+            ..ScanConfig::default()
+        };
+        assert!(otlp_uses_structured_ingress(&scan_config));
+    }
+
+    #[test]
     fn test_pipeline_with_processor() {
         use std::sync::atomic::Ordering;
 
@@ -1850,12 +1955,10 @@ output:
         impl Processor for DropOddProcessor {
             fn process(
                 &mut self,
-                batch: arrow::record_batch::RecordBatch,
+                batch: RecordBatch,
                 _meta: &BatchMetadata,
-            ) -> Result<
-                smallvec::SmallVec<[arrow::record_batch::RecordBatch; 1]>,
-                crate::processor::ProcessorError,
-            > {
+            ) -> Result<smallvec::SmallVec<[RecordBatch; 1]>, crate::processor::ProcessorError>
+            {
                 // Drop rows where seq is odd
                 let seq_array = batch
                     .column_by_name("seq")
@@ -1874,7 +1977,7 @@ output:
                 Ok(smallvec::smallvec![filtered])
             }
 
-            fn flush(&mut self) -> smallvec::SmallVec<[arrow::record_batch::RecordBatch; 1]> {
+            fn flush(&mut self) -> smallvec::SmallVec<[RecordBatch; 1]> {
                 smallvec::SmallVec::new()
             }
 

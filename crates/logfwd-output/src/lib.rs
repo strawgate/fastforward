@@ -638,15 +638,11 @@ pub fn build_sink_factory(
             };
             let compression = match cfg.compression.as_deref() {
                 Some("zstd") => Compression::Zstd,
-                Some("gzip") => {
-                    return Err(OutputError::Construction(format!(
-                        "output '{name}': OTLP does not support 'gzip' compression yet"
-                    )));
-                }
+                Some("gzip") => Compression::Gzip,
                 Some("none") | None => Compression::None,
                 Some(other) => {
                     return Err(OutputError::Construction(format!(
-                        "output '{name}': unknown OTLP compression '{other}' (expected 'zstd' or 'none')"
+                        "output '{name}': unknown OTLP compression '{other}' (expected 'zstd', 'gzip', or 'none')"
                     )));
                 }
             };
@@ -881,12 +877,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_otlp_gzip_send_batch_returns_error() {
+    async fn test_otlp_gzip_send_batch_sets_content_encoding() {
         let batch = make_test_batch();
         let meta = make_metadata();
+        let server = tiny_http::Server::http("127.0.0.1:0").expect("server");
+        let addr = match server.server_addr() {
+            tiny_http::ListenAddr::IP(addr) => addr,
+            tiny_http::ListenAddr::Unix(_) => panic!("expected tcp listener"),
+        };
+        let handle = std::thread::spawn(move || {
+            let request = server.recv().expect("request");
+            let encoding = request
+                .headers()
+                .iter()
+                .find(|h| h.field.equiv("Content-Encoding"))
+                .map(|h| h.value.as_str().to_string())
+                .unwrap_or_default();
+            assert_eq!(encoding, "gzip");
+            request
+                .respond(tiny_http::Response::from_string("{}").with_status_code(200))
+                .expect("response");
+        });
         let mut sink = OtlpSink::new(
             "test-otlp".to_string(),
-            "http://localhost:4318".to_string(),
+            format!("http://{addr}"),
             OtlpProtocol::Http,
             Compression::Gzip,
             vec![],
@@ -898,9 +912,10 @@ mod tests {
         use crate::Sink;
         use crate::sink::SendResult;
         match sink.send_batch(&batch, &meta).await {
-            SendResult::IoError(err) => assert!(err.to_string().contains("gzip"), "got: {err}"),
-            other => panic!("gzip compression should return IoError, got: {other:?}"),
+            SendResult::Ok => {}
+            other => panic!("gzip compression should succeed, got: {other:?}"),
         }
+        handle.join().expect("server thread");
     }
 
     #[test]
@@ -1088,7 +1103,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_sink_factory_otlp_rejects_gzip() {
+    fn test_build_sink_factory_otlp_accepts_gzip() {
         let cfg = OutputConfig {
             name: Some("otel".to_string()),
             output_type: OutputType::Otlp,
@@ -1097,11 +1112,8 @@ mod tests {
             compression: Some("gzip".to_string()),
             ..Default::default()
         };
-        let err = match build_sink_factory("otel", &cfg, None, Arc::new(ComponentStats::new())) {
-            Ok(_) => panic!("expected gzip OTLP compression to be rejected"),
-            Err(err) => err,
-        };
-        assert!(err.to_string().contains("gzip"), "got: {err}");
+        build_sink_factory("otel", &cfg, None, Arc::new(ComponentStats::new()))
+            .expect("gzip OTLP compression should be accepted");
     }
 
     #[test]
