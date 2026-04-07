@@ -314,10 +314,13 @@ impl Drop for OtlpReceiverInput {
 
 impl InputSource for OtlpReceiverInput {
     fn poll(&mut self) -> io::Result<Vec<InputEvent>> {
+        let Some(rx) = self.rx.as_ref() else {
+            return Ok(vec![]);
+        };
         let mut all = Vec::new();
 
         // Drain all available decoded batches.
-        while let Ok(data) = self.rx.as_ref().expect("rx is Some until drop").try_recv() {
+        while let Ok(data) = rx.try_recv() {
             all.extend_from_slice(&data);
         }
 
