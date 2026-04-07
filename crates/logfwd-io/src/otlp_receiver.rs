@@ -391,7 +391,7 @@ impl OtlpReceiverInput {
                                 .with_header(
                                     "Content-Type: application/json"
                                         .parse::<tiny_http::Header>()
-                                        .unwrap(),
+                                        .expect("static Content-Type header is valid"),
                                 )
                                 .with_status_code(200);
                             let _ = request.respond(response);
