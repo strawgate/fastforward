@@ -13,9 +13,14 @@
 use std::io;
 use std::io::Read as _;
 use std::sync::mpsc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, AtomicU8, Ordering},
+};
 
 use arrow::ipc::reader::StreamReader;
 use arrow::record_batch::RecordBatch;
+use logfwd_types::diagnostics::ComponentHealth;
 
 use crate::InputError;
 
@@ -34,8 +39,9 @@ pub struct ArrowIpcReceiver {
     rx: Option<mpsc::Receiver<RecordBatch>>,
     /// The address the HTTP server is bound to.
     addr: std::net::SocketAddr,
-    server: std::sync::Arc<tiny_http::Server>,
-    shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    server: Arc<tiny_http::Server>,
+    shutdown: Arc<AtomicBool>,
+    health: Arc<AtomicU8>,
     /// Keep the server thread handle alive.
     handle: Option<std::thread::JoinHandle<()>>,
 }
@@ -53,7 +59,7 @@ impl ArrowIpcReceiver {
         addr: &str,
         capacity: usize,
     ) -> io::Result<Self> {
-        let server = std::sync::Arc::new(
+        let server = Arc::new(
             tiny_http::Server::http(addr)
                 .map_err(|e| io::Error::other(format!("Arrow IPC receiver bind {addr}: {e}")))?,
         );
@@ -68,14 +74,16 @@ impl ArrowIpcReceiver {
         };
 
         let (tx, rx) = mpsc::sync_channel(capacity);
-        let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let shutdown_clone = std::sync::Arc::clone(&shutdown);
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown_clone = Arc::clone(&shutdown);
+        let health = Arc::new(AtomicU8::new(ComponentHealth::Healthy.as_repr()));
+        let health_clone = Arc::clone(&health);
 
-        let server_clone = std::sync::Arc::clone(&server);
+        let server_clone = Arc::clone(&server);
         let handle = std::thread::Builder::new()
             .name("arrow-ipc-receiver".into())
             .spawn(move || {
-                while !shutdown_clone.load(std::sync::atomic::Ordering::Relaxed) {
+                while !shutdown_clone.load(Ordering::Relaxed) {
                     let mut request = match server_clone.try_recv() {
                         Ok(Some(req)) => req,
                         Ok(None) => {
@@ -84,7 +92,11 @@ impl ArrowIpcReceiver {
                         }
                         // Exit the worker thread on accept-side I/O failure instead of
                         // spinning forever and silently dropping all future requests.
-                        Err(_) => break,
+                        Err(_) => {
+                            health_clone
+                                .store(ComponentHealth::Failed.as_repr(), Ordering::Relaxed);
+                            break;
+                        }
                     };
 
                     let url = request.url().to_string();
@@ -209,6 +221,8 @@ impl ArrowIpcReceiver {
 
                     match send_error {
                         Some(429) => {
+                            health_clone
+                                .store(ComponentHealth::Degraded.as_repr(), Ordering::Relaxed);
                             let _ = request.respond(
                                 tiny_http::Response::from_string(
                                     "too many requests: pipeline backpressure",
@@ -217,6 +231,10 @@ impl ArrowIpcReceiver {
                             );
                         }
                         Some(503) => {
+                            if !shutdown_clone.load(Ordering::Relaxed) {
+                                health_clone
+                                    .store(ComponentHealth::Failed.as_repr(), Ordering::Relaxed);
+                            }
                             let _ = request.respond(
                                 tiny_http::Response::from_string(
                                     "service unavailable: pipeline disconnected",
@@ -226,6 +244,8 @@ impl ArrowIpcReceiver {
                         }
                         Some(_) => unreachable!(),
                         None => {
+                            health_clone
+                                .store(ComponentHealth::Healthy.as_repr(), Ordering::Relaxed);
                             let _ = request.respond(
                                 tiny_http::Response::from_string("").with_status_code(200),
                             );
@@ -241,6 +261,7 @@ impl ArrowIpcReceiver {
             addr: bound_addr,
             server,
             shutdown,
+            health,
             handle: Some(handle),
         })
     }
@@ -288,6 +309,21 @@ impl ArrowIpcReceiver {
     pub fn name(&self) -> &str {
         &self.name
     }
+
+    /// Coarse runtime health for readiness and diagnostics integration.
+    pub fn health(&self) -> ComponentHealth {
+        let stored = ComponentHealth::from_repr(self.health.load(Ordering::Relaxed));
+        if self
+            .handle
+            .as_ref()
+            .is_some_and(std::thread::JoinHandle::is_finished)
+            && !self.shutdown.load(Ordering::Relaxed)
+        {
+            ComponentHealth::Failed
+        } else {
+            stored
+        }
+    }
 }
 
 /// Decompress zstd body with size limit.
@@ -325,13 +361,16 @@ fn decode_ipc_stream(body: &[u8]) -> Result<Vec<RecordBatch>, InputError> {
 
 impl Drop for ArrowIpcReceiver {
     fn drop(&mut self) {
-        self.shutdown
-            .store(true, std::sync::atomic::Ordering::Relaxed);
+        self.health
+            .store(ComponentHealth::Stopping.as_repr(), Ordering::Relaxed);
+        self.shutdown.store(true, Ordering::Relaxed);
         self.rx.take();
         self.server.unblock();
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
+        self.health
+            .store(ComponentHealth::Stopped.as_repr(), Ordering::Relaxed);
     }
 }
 
@@ -393,6 +432,7 @@ mod tests {
         let receiver = ArrowIpcReceiver::new_with_capacity("test", "127.0.0.1:0", 16)
             .expect("bind should succeed");
         let addr = receiver.local_addr();
+        assert_eq!(receiver.health(), ComponentHealth::Healthy);
 
         let batch = make_test_batch();
         let ipc_bytes = serialize_batch(&batch);
@@ -412,6 +452,7 @@ mod tests {
         assert_eq!(received.num_rows(), 2);
         assert_eq!(received.num_columns(), 2);
         assert_eq!(received.schema(), batch.schema());
+        assert_eq!(receiver.health(), ComponentHealth::Healthy);
     }
 
     #[test]
@@ -463,6 +504,45 @@ mod tests {
             Err(ureq::Error::StatusCode(code)) => assert_eq!(code, 405),
             other => panic!("expected 405, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn receiver_reports_degraded_on_backpressure_and_recovers() {
+        let receiver = ArrowIpcReceiver::new_with_capacity("test-429", "127.0.0.1:0", 1)
+            .expect("bind should succeed");
+        let addr = receiver.local_addr();
+
+        let batch = make_test_batch();
+        let ipc_bytes = serialize_batch(&batch);
+        let url = format!("http://{addr}/v1/arrow");
+
+        let response = ureq::post(&url)
+            .header("Content-Type", "application/vnd.apache.arrow.stream")
+            .send(&ipc_bytes)
+            .expect("first POST should succeed");
+        assert_eq!(response.status().as_u16(), 200);
+        assert_eq!(receiver.health(), ComponentHealth::Healthy);
+
+        let result = ureq::post(&url)
+            .header("Content-Type", "application/vnd.apache.arrow.stream")
+            .send(&ipc_bytes);
+        let status = match result {
+            Ok(resp) => resp.status().as_u16(),
+            Err(ureq::Error::StatusCode(code)) => code,
+            Err(e) => panic!("unexpected error: {e}"),
+        };
+        assert_eq!(status, 429);
+        assert_eq!(receiver.health(), ComponentHealth::Degraded);
+
+        let _ = receiver.try_recv_all();
+
+        let response = ureq::post(&url)
+            .header("Content-Type", "application/vnd.apache.arrow.stream")
+            .send(&ipc_bytes)
+            .expect("recovery POST should succeed");
+        assert_eq!(response.status().as_u16(), 200);
+        let _ = receiver.recv_timeout(std::time::Duration::from_secs(2));
+        assert_eq!(receiver.health(), ComponentHealth::Healthy);
     }
 
     #[test]
