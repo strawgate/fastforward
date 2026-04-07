@@ -214,6 +214,80 @@ impl fmt::Display for Format {
 // Input / Output descriptors
 // ---------------------------------------------------------------------------
 
+/// Named generator output profiles.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum GeneratorProfileConfig {
+    /// Synthetic request-like JSON logs.
+    #[default]
+    Logs,
+    /// Flat JSON records built from static attributes and generated fields.
+    Record,
+}
+
+/// Controls the size and shape of synthetic generator rows.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum GeneratorComplexityConfig {
+    /// Flat request-style logs around a couple hundred bytes.
+    #[default]
+    Simple,
+    /// Request-style logs with occasional nested objects and arrays.
+    Complex,
+}
+
+/// Static scalar attribute value for generated `record` rows.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(untagged)]
+pub enum GeneratorAttributeValueConfig {
+    /// JSON null scalar.
+    Null,
+    /// UTF-8 text scalar.
+    String(String),
+    /// Signed 64-bit integer scalar.
+    Integer(i64),
+    /// 64-bit floating point scalar.
+    Float(f64),
+    /// Boolean scalar.
+    Bool(bool),
+}
+
+/// Monotonic sequence field generation.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GeneratorSequenceConfig {
+    /// Output field name for the generated sequence.
+    pub field: String,
+    /// Initial sequence value. Defaults to 1.
+    pub start: Option<u64>,
+}
+
+/// Generator-specific configuration.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct GeneratorInputConfig {
+    /// Target events per second. 0 or omitted means unlimited.
+    pub events_per_sec: Option<u64>,
+    /// Number of events emitted on each input poll.
+    pub batch_size: Option<usize>,
+    /// Total events to emit before the generator finishes. 0 or omitted means infinite.
+    pub total_events: Option<u64>,
+    /// Controls size/shape for the `logs` profile.
+    pub complexity: Option<GeneratorComplexityConfig>,
+    /// Which event shape to emit.
+    pub profile: Option<GeneratorProfileConfig>,
+    /// Static scalar attributes written into generated rows.
+    #[serde(default)]
+    pub attributes: HashMap<String, GeneratorAttributeValueConfig>,
+    /// Monotonic sequence field for `record` rows.
+    pub sequence: Option<GeneratorSequenceConfig>,
+    /// Source-created timestamp field for `record` rows.
+    pub event_created_unix_nano_field: Option<String>,
+}
+
 /// A single input source.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -233,6 +307,9 @@ pub struct InputConfig {
     /// Applies only to glob `file` inputs. Defaults to 5000ms when not set.
     /// Set to a small value (e.g. 50) in tests to avoid long waits.
     pub glob_rescan_interval_ms: Option<u64>,
+    /// Generator-specific configuration.
+    #[serde(default)]
+    pub generator: Option<GeneratorInputConfig>,
 }
 
 /// A single output destination.
@@ -718,6 +795,11 @@ impl Config {
                 // Reject fields that don't apply to this input type.
                 match input.input_type {
                     InputType::File => {
+                        if input.generator.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'generator' settings are only supported for generator inputs"
+                            )));
+                        }
                         if input.listen.is_some() {
                             return Err(ConfigError::Validation(format!(
                                 "pipeline '{name}' input '{label}': 'listen' is not supported for file inputs"
@@ -725,6 +807,11 @@ impl Config {
                         }
                     }
                     InputType::Tcp | InputType::Udp => {
+                        if input.generator.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'generator' settings are only supported for generator inputs"
+                            )));
+                        }
                         if input.path.is_some() {
                             return Err(ConfigError::Validation(format!(
                                 "pipeline '{name}' input '{label}': 'path' is not supported for tcp/udp inputs"
@@ -742,6 +829,11 @@ impl Config {
                         }
                     }
                     InputType::Otlp => {
+                        if input.generator.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'generator' settings are only supported for generator inputs"
+                            )));
+                        }
                         if input.path.is_some() {
                             return Err(ConfigError::Validation(format!(
                                 "pipeline '{name}' input '{label}': 'path' is not supported for otlp inputs"
@@ -759,6 +851,11 @@ impl Config {
                         }
                     }
                     InputType::Generator => {
+                        if input.listen.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'listen' is not supported for generator inputs; use generator.events_per_sec"
+                            )));
+                        }
                         if input.path.is_some() {
                             return Err(ConfigError::Validation(format!(
                                 "pipeline '{name}' input '{label}': 'path' is not supported for generator inputs"
@@ -774,8 +871,84 @@ impl Config {
                                 "pipeline '{name}' input '{label}': 'glob_rescan_interval_ms' is not supported for generator inputs"
                             )));
                         }
+                        if input.generator.as_ref().and_then(|cfg| cfg.batch_size) == Some(0) {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': generator.batch_size must be at least 1"
+                            )));
+                        }
+                        if let Some(generator) = &input.generator {
+                            let is_record_profile =
+                                matches!(generator.profile, Some(GeneratorProfileConfig::Record));
+                            if generator.attributes.keys().any(|key| key.trim().is_empty()) {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': generator.attributes keys must not be empty"
+                                )));
+                            }
+                            if generator
+                                .attributes
+                                .values()
+                                .any(|value| matches!(value, GeneratorAttributeValueConfig::Float(v) if !v.is_finite()))
+                            {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': generator.attributes float values must be finite"
+                                )));
+                            }
+                            if !is_record_profile
+                                && (!generator.attributes.is_empty()
+                                    || generator.sequence.is_some()
+                                    || generator.event_created_unix_nano_field.is_some())
+                            {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': generator.attributes, generator.sequence, and generator.event_created_unix_nano_field require generator.profile=record"
+                                )));
+                            }
+                            if let Some(sequence) = &generator.sequence {
+                                if sequence.field.trim().is_empty() {
+                                    return Err(ConfigError::Validation(format!(
+                                        "pipeline '{name}' input '{label}': generator.sequence.field must not be empty"
+                                    )));
+                                }
+                                if generator.attributes.contains_key(&sequence.field) {
+                                    return Err(ConfigError::Validation(format!(
+                                        "pipeline '{name}' input '{label}': generator.sequence.field must not duplicate a generator.attributes key"
+                                    )));
+                                }
+                            }
+                            if generator
+                                .event_created_unix_nano_field
+                                .as_deref()
+                                .is_some_and(|field| field.trim().is_empty())
+                            {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': generator.event_created_unix_nano_field must not be empty"
+                                )));
+                            }
+                            if let Some(field) = generator.event_created_unix_nano_field.as_deref()
+                            {
+                                if generator.attributes.contains_key(field) {
+                                    return Err(ConfigError::Validation(format!(
+                                        "pipeline '{name}' input '{label}': generator.event_created_unix_nano_field must not duplicate a generator.attributes key"
+                                    )));
+                                }
+                                if generator
+                                    .sequence
+                                    .as_ref()
+                                    .is_some_and(|sequence| sequence.field == field)
+                                {
+                                    return Err(ConfigError::Validation(format!(
+                                        "pipeline '{name}' input '{label}': generator.event_created_unix_nano_field must not duplicate generator.sequence.field"
+                                    )));
+                                }
+                            }
+                        }
                     }
-                    InputType::ArrowIpc => {}
+                    InputType::ArrowIpc => {
+                        if input.generator.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'generator' settings are only supported for generator inputs"
+                            )));
+                        }
+                    }
                 }
 
                 // Reject input formats that are not yet implemented.
@@ -2702,9 +2875,77 @@ pipelines:
     }
 
     #[test]
-    fn generator_input_accepts_listen_as_rate_limit() {
-        // `listen` is reused as events/sec for generators (pipeline.rs reads
-        // cfg.listen at runtime). The validation guard must not reject it.
+    fn generator_input_accepts_explicit_generator_block() {
+        let yaml = r#"
+pipelines:
+  test:
+    inputs:
+      - type: generator
+        generator:
+          events_per_sec: 25000
+          batch_size: 2048
+          total_events: 123
+          profile: record
+          attributes:
+            benchmark_id: run-123
+            pod_name: emitter-0
+            stream_id: emitter-0
+            service: bench-emitter
+            status: 200
+            sampled: true
+            deleted_at: null
+          sequence:
+            field: seq
+    outputs:
+      - type: null
+"#;
+        let cfg = Config::load_str(yaml).expect("generator block should be valid");
+        let generator = cfg.pipelines["test"].inputs[0]
+            .generator
+            .as_ref()
+            .expect("generator config");
+        assert_eq!(generator.events_per_sec, Some(25000));
+        assert_eq!(generator.batch_size, Some(2048));
+        assert_eq!(generator.total_events, Some(123));
+        assert_eq!(generator.profile, Some(GeneratorProfileConfig::Record));
+        assert_eq!(
+            generator.attributes.get("benchmark_id"),
+            Some(&GeneratorAttributeValueConfig::String(
+                "run-123".to_string()
+            ))
+        );
+        assert_eq!(
+            generator.attributes.get("pod_name"),
+            Some(&GeneratorAttributeValueConfig::String(
+                "emitter-0".to_string()
+            ))
+        );
+        assert_eq!(
+            generator.attributes.get("stream_id"),
+            Some(&GeneratorAttributeValueConfig::String(
+                "emitter-0".to_string()
+            ))
+        );
+        assert_eq!(
+            generator.attributes.get("status"),
+            Some(&GeneratorAttributeValueConfig::Integer(200))
+        );
+        assert_eq!(
+            generator.attributes.get("sampled"),
+            Some(&GeneratorAttributeValueConfig::Bool(true))
+        );
+        assert_eq!(
+            generator.attributes.get("deleted_at"),
+            Some(&GeneratorAttributeValueConfig::Null)
+        );
+        assert_eq!(
+            generator.sequence.as_ref().map(|seq| seq.field.as_str()),
+            Some("seq")
+        );
+    }
+
+    #[test]
+    fn generator_input_rejects_listen() {
         let yaml = r#"
 pipelines:
   test:
@@ -2714,10 +2955,226 @@ pipelines:
     outputs:
       - type: null
 "#;
-        let cfg = Config::load_str(yaml).expect("generator with listen should be valid");
-        assert_eq!(
-            cfg.pipelines["test"].inputs[0].listen.as_deref(),
-            Some("1000")
+        let err = Config::load_str(yaml).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("'listen' is not supported for generator inputs"),
+            "expected generator listen rejection: {err}"
+        );
+    }
+
+    #[test]
+    fn non_generator_input_rejects_generator_block() {
+        let yaml = r#"
+pipelines:
+  test:
+    inputs:
+      - type: file
+        path: /tmp/test.log
+        generator:
+          profile: record
+    outputs:
+      - type: null
+"#;
+        let err = Config::load_str(yaml).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("only supported for generator inputs"),
+            "expected generator block rejection: {err}"
+        );
+    }
+
+    #[test]
+    fn generator_input_rejects_empty_sequence_field() {
+        let yaml = r#"
+pipelines:
+  test:
+    inputs:
+      - type: generator
+        generator:
+          profile: record
+          sequence:
+            field: " "
+    outputs:
+      - type: null
+"#;
+        let err = Config::load_str(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("generator.sequence.field"),
+            "expected empty sequence field rejection: {err}"
+        );
+    }
+
+    #[test]
+    fn generator_input_rejects_duplicate_generated_field_names() {
+        let yaml = r#"
+pipelines:
+  test:
+    inputs:
+      - type: generator
+        generator:
+          profile: record
+          attributes:
+            seq: already-here
+          sequence:
+            field: seq
+    outputs:
+      - type: null
+"#;
+        let err = Config::load_str(yaml).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("must not duplicate a generator.attributes key"),
+            "expected duplicate generated field rejection: {err}"
+        );
+    }
+
+    #[test]
+    fn generator_input_rejects_zero_batch_size() {
+        let yaml = r#"
+pipelines:
+  test:
+    inputs:
+      - type: generator
+        generator:
+          batch_size: 0
+    outputs:
+      - type: null
+"#;
+        let err = Config::load_str(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("batch_size must be at least 1"),
+            "expected zero batch size rejection: {err}"
+        );
+    }
+
+    #[test]
+    fn generator_input_rejects_empty_attribute_key() {
+        let yaml = r#"
+pipelines:
+  test:
+    inputs:
+      - type: generator
+        generator:
+          profile: record
+          attributes:
+            "": run-123
+    outputs:
+      - type: null
+"#;
+        let err = Config::load_str(yaml).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("attributes keys must not be empty"),
+            "expected empty attribute key rejection: {err}"
+        );
+    }
+
+    #[test]
+    fn generator_input_rejects_non_finite_attribute_values() {
+        let yaml = r#"
+pipelines:
+  test:
+    inputs:
+      - type: generator
+        generator:
+          profile: record
+          attributes:
+            ratio: .nan
+    outputs:
+      - type: null
+"#;
+        let err = Config::load_str(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("float values must be finite"),
+            "expected non-finite attribute rejection: {err}"
+        );
+    }
+
+    #[test]
+    fn generator_input_rejects_empty_event_created_field_name() {
+        let yaml = r#"
+pipelines:
+  test:
+    inputs:
+      - type: generator
+        generator:
+          profile: record
+          event_created_unix_nano_field: " "
+    outputs:
+      - type: null
+"#;
+        let err = Config::load_str(yaml).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("event_created_unix_nano_field must not be empty"),
+            "expected empty event_created field rejection: {err}"
+        );
+    }
+
+    #[test]
+    fn generator_input_rejects_event_created_field_name_duplicate_with_attribute() {
+        let yaml = r#"
+pipelines:
+  test:
+    inputs:
+      - type: generator
+        generator:
+          profile: record
+          attributes:
+            created: run-123
+          event_created_unix_nano_field: created
+    outputs:
+      - type: null
+"#;
+        let err = Config::load_str(yaml).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("must not duplicate a generator.attributes key"),
+            "expected event_created/attribute duplication rejection: {err}"
+        );
+    }
+
+    #[test]
+    fn generator_input_rejects_event_created_field_name_duplicate_with_sequence() {
+        let yaml = r#"
+pipelines:
+  test:
+    inputs:
+      - type: generator
+        generator:
+          profile: record
+          sequence:
+            field: seq
+          event_created_unix_nano_field: seq
+    outputs:
+      - type: null
+"#;
+        let err = Config::load_str(yaml).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("must not duplicate generator.sequence.field"),
+            "expected event_created/sequence duplication rejection: {err}"
+        );
+    }
+
+    #[test]
+    fn generator_input_rejects_record_fields_without_record_profile() {
+        let yaml = r#"
+pipelines:
+  test:
+    inputs:
+      - type: generator
+        generator:
+          attributes:
+            benchmark_id: run-123
+    outputs:
+      - type: null
+"#;
+        let err = Config::load_str(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("require generator.profile=record"),
+            "expected record profile requirement rejection: {err}"
         );
     }
 

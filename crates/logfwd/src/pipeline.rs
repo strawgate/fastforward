@@ -24,7 +24,8 @@ use crate::processor::Processor;
 use crate::worker_pool::{AckItem, OutputWorkerPool, WorkItem};
 use logfwd_arrow::scanner::Scanner;
 use logfwd_config::{
-    EnrichmentConfig, Format, GeoDatabaseFormat, InputConfig, InputType, PipelineConfig,
+    EnrichmentConfig, Format, GeneratorAttributeValueConfig, GeneratorComplexityConfig,
+    GeneratorProfileConfig, GeoDatabaseFormat, InputConfig, InputType, PipelineConfig,
 };
 use logfwd_io::checkpoint::{
     CheckpointStore, FileCheckpointStore, SourceCheckpoint, default_data_dir,
@@ -1517,19 +1518,61 @@ fn build_input_state(
             (Box::new(source), format, 4 * 1024 * 1024)
         }
         InputType::Generator => {
-            use logfwd_io::generator::{GeneratorConfig, GeneratorInput};
-            let events_per_sec = match cfg.listen.as_deref() {
-                    Some(s) => s.parse().map_err(|_| {
-                        format!(
-                            "input '{name}': generator 'listen' must be a valid integer (events/sec), got '{s}'"
-                        )
-                    })?,
-                    None => 0,
-                };
+            use logfwd_io::generator::{
+                GeneratorAttributeValue, GeneratorComplexity, GeneratorConfig,
+                GeneratorGeneratedField, GeneratorInput, GeneratorProfile,
+            };
+            let generator_cfg = cfg.generator.as_ref();
             let config = GeneratorConfig {
-                events_per_sec,
-                batch_size: 1000,
-                total_events: 0,
+                events_per_sec: generator_cfg.and_then(|c| c.events_per_sec).unwrap_or(0),
+                batch_size: generator_cfg.and_then(|c| c.batch_size).unwrap_or(1000),
+                total_events: generator_cfg.and_then(|c| c.total_events).unwrap_or(0),
+                complexity: match generator_cfg.and_then(|c| c.complexity.clone()) {
+                    Some(GeneratorComplexityConfig::Complex) => GeneratorComplexity::Complex,
+                    Some(GeneratorComplexityConfig::Simple) | None => GeneratorComplexity::Simple,
+                    Some(_) => GeneratorComplexity::Simple,
+                },
+                profile: match generator_cfg.and_then(|c| c.profile.clone()) {
+                    Some(GeneratorProfileConfig::Record) => GeneratorProfile::Record,
+                    Some(GeneratorProfileConfig::Logs) | None => GeneratorProfile::Logs,
+                    Some(_) => GeneratorProfile::Logs,
+                },
+                attributes: generator_cfg
+                    .map(|c| {
+                        c.attributes
+                            .iter()
+                            .map(|(k, v)| {
+                                let value = match v {
+                                    GeneratorAttributeValueConfig::String(v) => {
+                                        GeneratorAttributeValue::String(v.clone())
+                                    }
+                                    GeneratorAttributeValueConfig::Null => {
+                                        GeneratorAttributeValue::Null
+                                    }
+                                    GeneratorAttributeValueConfig::Integer(v) => {
+                                        GeneratorAttributeValue::Integer(*v)
+                                    }
+                                    GeneratorAttributeValueConfig::Float(v) => {
+                                        GeneratorAttributeValue::Float(*v)
+                                    }
+                                    GeneratorAttributeValueConfig::Bool(v) => {
+                                        GeneratorAttributeValue::Bool(*v)
+                                    }
+                                    _ => GeneratorAttributeValue::Null,
+                                };
+                                (k.clone(), value)
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                sequence: generator_cfg.and_then(|c| {
+                    c.sequence.as_ref().map(|seq| GeneratorGeneratedField {
+                        field: seq.field.clone(),
+                        start: seq.start.unwrap_or(1),
+                    })
+                }),
+                event_created_unix_nano_field: generator_cfg
+                    .and_then(|c| c.event_created_unix_nano_field.clone()),
                 ..Default::default()
             };
             let format = cfg.format.clone().unwrap_or(Format::Json);
@@ -1619,7 +1662,9 @@ mod tests {
     use serial_test::serial;
     use std::time::Instant;
 
+    use logfwd_arrow::scanner::Scanner;
     use logfwd_config::{Format, OutputConfig, OutputType};
+    use logfwd_core::scan_config::ScanConfig;
     use logfwd_io::diagnostics::ComponentStats;
     use logfwd_test_utils::sinks::{DevNullSink, FailingSink, FrozenSink, SlowSink};
     use logfwd_test_utils::test_meter;
@@ -1761,6 +1806,73 @@ pipelines:
         assert_eq!(pipeline.batch_target_bytes, 8192);
         assert_eq!(pipeline.batch_timeout, Duration::from_millis(250));
         assert_eq!(pipeline.poll_interval, Duration::from_millis(42));
+    }
+
+    #[test]
+    fn test_pipeline_from_config_generator_record_profile() {
+        let yaml = r#"
+input:
+  type: generator
+  generator:
+    events_per_sec: 25000
+    batch_size: 1024
+    profile: record
+    attributes:
+      benchmark_id: run-123
+      pod_name: emitter-0
+      stream_id: emitter-0
+    sequence:
+      field: seq
+    event_created_unix_nano_field: event_created_unix_nano
+output:
+  type: null
+"#;
+        let config = logfwd_config::Config::load_str(yaml).unwrap();
+        let pipe_cfg = &config.pipelines["default"];
+        let mut pipeline = Pipeline::from_config("default", pipe_cfg, &test_meter(), None)
+            .unwrap_or_else(|err| panic!("unexpected pipeline build error: {err}"));
+        let events = pipeline.inputs[0].source.poll().unwrap();
+        let bytes = match &events[0] {
+            InputEvent::Data { bytes, .. } => bytes,
+            _ => panic!("expected generator data event"),
+        };
+        let mut scanner = Scanner::new(ScanConfig {
+            wanted_fields: vec![],
+            extract_all: true,
+            keep_raw: false,
+            validate_utf8: false,
+        });
+        let batch = scanner.scan_detached(Bytes::from(bytes.clone())).unwrap();
+        let benchmark_id = batch
+            .column_by_name("benchmark_id")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::StringArray>()
+            .unwrap();
+        let pod_name = batch
+            .column_by_name("pod_name")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::StringArray>()
+            .unwrap();
+        let stream_id = batch
+            .column_by_name("stream_id")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::StringArray>()
+            .unwrap();
+        let seq = batch
+            .column_by_name("seq")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::Int64Array>()
+            .unwrap();
+
+        assert_eq!(benchmark_id.value(0), "run-123");
+        assert_eq!(pod_name.value(0), "emitter-0");
+        assert_eq!(stream_id.value(0), "emitter-0");
+        assert_eq!(seq.value(0), 1);
+        assert!(batch.column_by_name("event_created_unix_nano").is_some());
     }
 
     #[test]

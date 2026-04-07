@@ -22,12 +22,34 @@ data source is required.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `listen` | string | No | (unlimited) | Target events per second, e.g. `"50000"`. Omit for maximum throughput. |
+| `generator.events_per_sec` | integer | No | `0` | Target events per second. `0` means unlimited. |
+| `generator.batch_size` | integer | No | `1000` | Events emitted per poll/batch. |
+| `generator.total_events` | integer | No | `0` | Total events to emit before stopping. `0` means infinite. |
+| `generator.profile` | string | No | `logs` | `logs` for generic synthetic request logs, `record` for flat JSON rows assembled from attributes and generated fields. |
+| `generator.complexity` | string | No | `simple` | Size/shape for the `logs` profile: `simple` or `complex`. Ignored by the `record` profile. |
+| `generator.attributes` | object | No | `{}` | Static scalar JSON fields written into every `record` row (`string`, `number`, `boolean`, or `null`). |
+| `generator.sequence.field` | string | No | unset | Output field name for a monotonic generated sequence in `record` rows. |
+| `generator.sequence.start` | integer | No | `1` | Initial value for the generated sequence. |
+| `generator.event_created_unix_nano_field` | string | No | unset | Adds a source-created nanosecond timestamp field to each `record` row. |
 
 ```yaml
 input:
   type: generator
-  listen: "50000"   # ~50,000 events/sec; omit for unlimited
+  generator:
+    events_per_sec: 50000
+    batch_size: 4096
+    profile: record
+    attributes:
+      benchmark_id: ${BENCHMARK_ID}
+      pod_name: ${POD_NAME}
+      stream_id: ${POD_NAME}
+      service: bench-emitter
+      status: 200
+      sampled: true
+      deleted_at: null
+    sequence:
+      field: seq
+    event_created_unix_nano_field: event_created_unix_nano
 ```
 
 Use `--generate-json <num_lines> <output_file>` on the CLI to write a fixed number of lines to a file instead.
