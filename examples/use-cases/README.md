@@ -9,7 +9,7 @@ This folder contains 20 starter configurations for common collection targets (Re
 3. Validate before running:
 
 ```bash
-logfwd --config logfwd.yaml --validate
+logfwd validate --config logfwd.yaml
 ```
 
 ## Included examples
@@ -35,4 +35,4 @@ logfwd --config logfwd.yaml --validate
 19. `syslog-udp-to-otlp.yaml`
 20. `system-journal-export-to-otlp.yaml`
 
-The CLI wizard (`logfwd --wizard`) uses the same template ideas so examples and generated configs stay aligned.
+The CLI wizard (`logfwd wizard`) uses the same template ideas so examples and generated configs stay aligned.

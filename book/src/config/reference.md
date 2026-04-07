@@ -1,6 +1,6 @@
 # Configuration Reference
 
-logfwd is configured with a YAML file passed via `--config <config.yaml>`.
+logfwd is configured with a YAML file passed via `run --config <config.yaml>`.
 
 ## Overview
 

@@ -689,7 +689,7 @@ impl Config {
         }
 
         // Validate server.diagnostics bind address at config time so that
-        // `--validate` catches typos before the server tries to bind at runtime.
+        // `validate` catches typos before the server tries to bind at runtime.
         if let Some(addr) = &self.server.diagnostics {
             if let Err(msg) = validate_bind_addr(addr) {
                 return Err(ConfigError::Validation(format!(
@@ -2281,7 +2281,7 @@ server:
     #[test]
     fn invalid_diagnostics_address_rejected_at_validate() {
         // Before the fix, an invalid server.diagnostics address would pass
-        // --validate and only fail at runtime when the server tried to bind.
+        // `validate` and only fail at runtime when the server tried to bind.
         let yaml = r"
 input:
   type: file
