@@ -30,6 +30,10 @@ pub const HEADER_SIZE: usize = 32;
 pub const FOOTER_SIZE: usize = 32;
 /// Flag: Arrow IPC bodies use zstd compression.
 pub const FLAG_ZSTD: u16 = 0x0001;
+/// All currently supported segment flags.
+const SUPPORTED_FLAGS: u16 = FLAG_ZSTD;
+/// Hard upper bound for segment IPC payload bytes.
+const MAX_SEGMENT_DATA_SIZE: u64 = 1024 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // Header
@@ -184,6 +188,14 @@ pub enum SegmentStatus {
     Corrupt(PathBuf, String),
     /// Header magic or version is wrong — not a segment file.
     NotASegment(PathBuf),
+    /// Segment uses a known magic with unsupported format version.
+    UnsupportedVersion { path: PathBuf, version: u16 },
+    /// OS-level I/O error while opening or validating segment bytes.
+    IoError {
+        path: PathBuf,
+        kind: io::ErrorKind,
+        message: String,
+    },
     /// SQL hash does not match current pipeline config.
     SchemaMismatch {
         path: PathBuf,
@@ -206,7 +218,13 @@ impl SegmentFile {
     pub fn open(path: &Path, expected_sql_hash: Option<u64>) -> SegmentStatus {
         let meta = match fs::metadata(path) {
             Ok(m) => m,
-            Err(_) => return SegmentStatus::NotASegment(path.to_path_buf()),
+            Err(e) => {
+                return SegmentStatus::IoError {
+                    path: path.to_path_buf(),
+                    kind: e.kind(),
+                    message: e.to_string(),
+                };
+            }
         };
         let file_size = meta.len();
 
@@ -216,7 +234,13 @@ impl SegmentFile {
 
         let mut file = match File::open(path) {
             Ok(f) => f,
-            Err(_) => return SegmentStatus::NotASegment(path.to_path_buf()),
+            Err(e) => {
+                return SegmentStatus::IoError {
+                    path: path.to_path_buf(),
+                    kind: e.kind(),
+                    message: e.to_string(),
+                };
+            }
         };
 
         // Read footer (last FOOTER_SIZE bytes).
@@ -241,7 +265,16 @@ impl SegmentFile {
         }
         let header = match SegmentHeader::from_bytes(&header_buf) {
             Ok(h) => h,
-            Err(_) => return SegmentStatus::NotASegment(path.to_path_buf()),
+            Err(_) => {
+                if header_buf[0..4] == SEGMENT_MAGIC {
+                    let version = u16::from_le_bytes([header_buf[4], header_buf[5]]);
+                    return SegmentStatus::UnsupportedVersion {
+                        path: path.to_path_buf(),
+                        version,
+                    };
+                }
+                return SegmentStatus::NotASegment(path.to_path_buf());
+            }
         };
 
         // Verify sizes are consistent.
@@ -310,18 +343,13 @@ impl SegmentFile {
     /// Each `append()` wrote an independent IPC stream (schema + batch + EOS),
     /// so we create a new `StreamReader` for each sub-stream using a shared
     /// cursor that tracks the read position across streams.
-    /// Maximum data_size we'll allocate for reading (1 GiB).
-    /// Defense-in-depth against corrupt footer claiming enormous size.
-    const MAX_READ_DATA_SIZE: u64 = 1024 * 1024 * 1024;
-
     pub fn read_batches(&self) -> io::Result<Vec<RecordBatch>> {
-        if self.footer.data_size > Self::MAX_READ_DATA_SIZE {
+        if self.footer.data_size > MAX_SEGMENT_DATA_SIZE {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
                     "segment data_size {} exceeds maximum {} — likely corrupt",
-                    self.footer.data_size,
-                    Self::MAX_READ_DATA_SIZE,
+                    self.footer.data_size, MAX_SEGMENT_DATA_SIZE,
                 ),
             ));
         }
@@ -429,6 +457,22 @@ pub struct SegmentWriter {
 impl SegmentWriter {
     /// Create a new segment file and write the header.
     pub fn create(dir: &Path, header: SegmentHeader) -> io::Result<Self> {
+        if header.version != SEGMENT_VERSION {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "unsupported segment header version {} (expected {})",
+                    header.version, SEGMENT_VERSION
+                ),
+            ));
+        }
+        if header.flags & !SUPPORTED_FLAGS != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("unsupported segment header flags {:#06x}", header.flags),
+            ));
+        }
+
         let filename = segment_filename(header.segment_id);
         let path = dir.join(filename);
 
@@ -478,6 +522,17 @@ impl SegmentWriter {
         ipc_writer
             .finish()
             .map_err(|e| io::Error::other(e.to_string()))?;
+
+        let appended_size = self.ipc_buf.len() as u64;
+        if self.data_size.saturating_add(appended_size) > MAX_SEGMENT_DATA_SIZE {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "segment write would exceed maximum data_size {} (current={}, append={})",
+                    MAX_SEGMENT_DATA_SIZE, self.data_size, appended_size
+                ),
+            ));
+        }
 
         self.writer.write_all(&self.ipc_buf)?;
         self.hasher.update(&self.ipc_buf);
@@ -737,6 +792,27 @@ pub fn recover_segments(
                     path = %p.display(),
                     "ignoring non-segment .lchk file in segment directory"
                 );
+            }
+            SegmentStatus::UnsupportedVersion { path, version } => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "segment {} has unsupported version {}; upgrade/downgrade mismatch or corrupt segment directory {}",
+                        path.display(),
+                        version,
+                        segment_dir.display()
+                    ),
+                ));
+            }
+            SegmentStatus::IoError {
+                path,
+                kind,
+                message,
+            } => {
+                return Err(io::Error::new(
+                    kind,
+                    format!("segment {} cannot be read: {}", path.display(), message),
+                ));
             }
             SegmentStatus::SchemaMismatch {
                 path,
@@ -1149,6 +1225,156 @@ mod tests {
     fn segment_filename_zero_padded() {
         assert_eq!(segment_filename(1), "seg-0000000001.lchk");
         assert_eq!(segment_filename(999999), "seg-0000999999.lchk");
+    }
+
+    #[test]
+    fn create_rejects_unsupported_header_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let header = SegmentHeader {
+            version: SEGMENT_VERSION + 1,
+            flags: FLAG_ZSTD,
+            segment_id: 1,
+            sql_hash: 0,
+            created_epoch_ms: 0,
+        };
+
+        let err = SegmentWriter::create(dir.path(), header)
+            .err()
+            .expect("create must reject unsupported version");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert!(
+            err.to_string()
+                .contains("unsupported segment header version")
+        );
+    }
+
+    #[test]
+    fn create_rejects_unknown_header_flags() {
+        let dir = tempfile::tempdir().unwrap();
+        let header = SegmentHeader {
+            version: SEGMENT_VERSION,
+            flags: FLAG_ZSTD | 0x0040,
+            segment_id: 1,
+            sql_hash: 0,
+            created_epoch_ms: 0,
+        };
+
+        let err = SegmentWriter::create(dir.path(), header)
+            .err()
+            .expect("create must reject unknown flags");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("unsupported segment header flags"));
+    }
+
+    #[test]
+    fn unsupported_version_is_not_treated_as_non_segment() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("seg-0000000001.lchk");
+        let header = SegmentHeader {
+            version: SEGMENT_VERSION,
+            flags: FLAG_ZSTD,
+            segment_id: 1,
+            sql_hash: 0,
+            created_epoch_ms: 0,
+        };
+        let mut writer = SegmentWriter::create(dir.path(), header).unwrap();
+        writer.append(&make_batch(1)).unwrap();
+        let seg = writer.finish().unwrap();
+        let mut bytes = fs::read(seg.path).unwrap();
+        bytes[4..6].copy_from_slice(&(SEGMENT_VERSION + 1).to_le_bytes());
+        fs::write(&path, bytes).unwrap();
+
+        assert!(matches!(
+            SegmentFile::open(&path, None),
+            SegmentStatus::UnsupportedVersion { version, .. } if version == SEGMENT_VERSION + 1
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn permission_denied_reports_io_error_status() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let is_root = fs::read_to_string("/proc/self/status")
+            .ok()
+            .and_then(|status| {
+                status
+                    .lines()
+                    .find_map(|line| line.strip_prefix("Uid:"))
+                    .and_then(|rest| rest.split_whitespace().next())
+                    .and_then(|uid| uid.parse::<u32>().ok())
+            })
+            == Some(0);
+        if is_root {
+            // Root can read regardless of mode bits; this assertion is not meaningful.
+            return;
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("seg-0000000001.lchk");
+        fs::write(&path, [0u8; HEADER_SIZE + FOOTER_SIZE]).unwrap();
+
+        let mut perms = fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o000);
+        fs::set_permissions(&path, perms).unwrap();
+
+        let status = SegmentFile::open(&path, None);
+
+        let mut restore = fs::metadata(&path).unwrap().permissions();
+        restore.set_mode(0o644);
+        fs::set_permissions(&path, restore).unwrap();
+
+        assert!(matches!(
+            status,
+            SegmentStatus::IoError {
+                kind: io::ErrorKind::PermissionDenied,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn recovery_errors_on_unsupported_version_segment() {
+        let dir = tempfile::tempdir().unwrap();
+        let seg_dir = dir.path().join("segments");
+        fs::create_dir_all(&seg_dir).unwrap();
+
+        let path = seg_dir.join("seg-0000000001.lchk");
+        let header = SegmentHeader {
+            version: SEGMENT_VERSION,
+            flags: FLAG_ZSTD,
+            segment_id: 1,
+            sql_hash: 0,
+            created_epoch_ms: 0,
+        };
+        let mut writer = SegmentWriter::create(&seg_dir, header).unwrap();
+        writer.append(&make_batch(1)).unwrap();
+        let seg = writer.finish().unwrap();
+        let mut bytes = fs::read(seg.path).unwrap();
+        bytes[4..6].copy_from_slice(&(SEGMENT_VERSION + 1).to_le_bytes());
+        fs::write(&path, bytes).unwrap();
+
+        let err = recover_segments(&seg_dir, None).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("unsupported version"));
+    }
+
+    #[test]
+    fn append_rejects_writes_beyond_read_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let header = SegmentHeader {
+            version: SEGMENT_VERSION,
+            flags: FLAG_ZSTD,
+            segment_id: 1,
+            sql_hash: 0,
+            created_epoch_ms: 0,
+        };
+        let mut writer = SegmentWriter::create(dir.path(), header).unwrap();
+        writer.data_size = MAX_SEGMENT_DATA_SIZE;
+
+        let err = writer.append(&make_batch(1)).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("would exceed maximum data_size"));
     }
 
     #[test]
