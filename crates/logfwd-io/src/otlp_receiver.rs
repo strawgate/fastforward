@@ -880,7 +880,7 @@ fn append_attribute_value(
         Some(Value::IntValue(v)) => builder.append_i64_value_by_idx(idx, *v),
         Some(Value::DoubleValue(v)) => builder.append_f64_value_by_idx(idx, *v),
         Some(Value::BoolValue(v)) => {
-            builder.append_decoded_str_by_idx(idx, if *v { b"true" } else { b"false" })
+            builder.append_decoded_str_by_idx(idx, if *v { b"true" } else { b"false" });
         }
         Some(Value::StringValue(v)) => builder.append_decoded_str_by_idx(idx, v.as_bytes()),
         Some(Value::BytesValue(v)) => append_hex_field(builder, idx, v, hex_buf),
@@ -916,7 +916,7 @@ fn append_any_value_as_string(
             builder.append_decoded_str_by_idx(idx, value.as_bytes());
         }
         Some(Value::BoolValue(v)) => {
-            builder.append_decoded_str_by_idx(idx, if *v { b"true" } else { b"false" })
+            builder.append_decoded_str_by_idx(idx, if *v { b"true" } else { b"false" });
         }
         Some(Value::BytesValue(v)) => append_hex_field(builder, idx, v, hex_buf),
         _ => {}
@@ -1289,7 +1289,10 @@ mod verification {
                 HEX_DIGITS[(bytes[1] & 0x0f) as usize],
             ]
         );
-        assert!(out.iter().all(|&b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()));
+        assert!(
+            out.iter()
+                .all(|&b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+        );
         kani::cover!(bytes[0] == 0, "hex encoding covers low nibble zeros");
         kani::cover!(bytes[1] == u8::MAX, "hex encoding covers ff");
     }
@@ -2127,7 +2130,10 @@ mod tests {
 
         out.clear();
         write_u64_to_buf(&mut out, u64::MAX);
-        assert_eq!(String::from_utf8(out.clone()).unwrap(), u64::MAX.to_string());
+        assert_eq!(
+            String::from_utf8(out.clone()).unwrap(),
+            u64::MAX.to_string()
+        );
 
         out.clear();
         write_i64_to_buf(&mut out, -17);

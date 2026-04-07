@@ -355,6 +355,7 @@ fn poll_until_payload(
     );
 }
 
+#[allow(clippy::naive_bytecount)] // bench-only helper; not worth adding bytecount dep
 fn newline_count(bytes: &[u8]) -> usize {
     bytes.iter().filter(|&&b| b == b'\n').count()
 }
