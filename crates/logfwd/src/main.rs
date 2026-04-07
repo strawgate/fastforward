@@ -187,7 +187,7 @@ async fn main_inner() -> i32 {
         "--config" | "-c" => cmd_config(&args).await,
         "--blackhole" => cmd_blackhole(&args).await,
         "--generate-json" => cmd_generate_json(&args),
-        "--effective-config" | "--dump-config" => cmd_effective_config(&args),
+        "--effective-config" => cmd_effective_config(&args),
         "--init" => cmd_init(),
         "--wizard" => cmd_wizard(),
         "--completions" => cmd_completions(&args),
@@ -230,12 +230,11 @@ fn print_usage() {
     println!();
     println!("{}OPTIONS:{}", bold(), reset());
     println!("  -c, --config <path>    Run pipeline from YAML config");
-    println!("      --validate         Validate config and exit (alias: --check)");
+    println!("      --validate         Validate config and exit");
     println!("      --dry-run          Build pipelines without running");
     println!("      --blackhole [addr] OTLP blackhole receiver (default: 127.0.0.1:4318)");
     println!("      --generate-json    Generate synthetic JSON log file");
     println!("      --effective-config Validate and print effective runnable config");
-    println!("      --dump-config      Deprecated alias for --effective-config");
     println!("      --init             Generate starter config in current directory");
     println!("      --wizard           Interactive config wizard");
     println!("      --completions      Print shell completions (bash, zsh, fish)");
@@ -331,9 +330,8 @@ fn normalize_args(args: Vec<String>) -> Vec<String> {
 
 async fn cmd_config(args: &[String]) -> Result<(), CliError> {
     if args.len() < 3 {
-        eprintln!("{}error{}: --config requires a path", red(), reset(),);
         eprintln!("  logfwd --config <config.yaml> [--validate] [--dry-run]");
-        return Err(CliError::Config("missing config path".to_owned()));
+        return Err(CliError::Config("--config requires a path".to_owned()));
     }
 
     let config_path = &args[2];
@@ -343,12 +341,13 @@ async fn cmd_config(args: &[String]) -> Result<(), CliError> {
     // Parse flags after the config path — reject unknown flags with suggestions.
     for arg in &args[3..] {
         match arg.as_str() {
-            "--validate" | "--check" => validate_only = true,
+            "--validate" => validate_only = true,
             "--dry-run" => dry_run = true,
             other => {
-                eprintln!("{}error{}: unknown flag: {other}", red(), reset());
-                let config_flags = &["--validate", "--check", "--dry-run"];
-                if let Some(closest) = closest_match(other, config_flags) {
+                let config_flags = &["--validate", "--dry-run"];
+                if other == "--check" {
+                    print_hint("--validate");
+                } else if let Some(closest) = closest_match(other, config_flags) {
                     print_hint(closest);
                 }
                 eprintln!("  logfwd --config <config.yaml> [--validate] [--dry-run]");
@@ -425,12 +424,9 @@ fn cmd_generate_json(args: &[String]) -> Result<(), CliError> {
 }
 
 fn cmd_effective_config(args: &[String]) -> Result<(), CliError> {
-    if matches!(args.get(1).map(String::as_str), Some("--dump-config")) {
-        eprintln!(
-            "{}warning{}: --dump-config is deprecated; use --effective-config",
-            yellow(),
-            reset()
-        );
+    if args.len() > 3 {
+        eprintln!("  logfwd --effective-config <config.yaml>");
+        return Err(CliError::Config(format!("unknown argument: {}", args[3])));
     }
 
     let config_path = if args.len() >= 3 {
@@ -438,17 +434,14 @@ fn cmd_effective_config(args: &[String]) -> Result<(), CliError> {
     } else if let Some(path) = discover_config() {
         path.to_string_lossy().to_string()
     } else {
-        eprintln!(
-            "{}error{}: --effective-config requires a config file",
-            red(),
-            reset()
-        );
         eprintln!("  logfwd --effective-config <config.yaml>");
         return Err(CliError::Config("no config file found".to_owned()));
     };
 
     let config_yaml = std::fs::read_to_string(&config_path)
         .map_err(|e| CliError::Config(format!("cannot read {config_path}: {e}")))?;
+    let effective_yaml = logfwd_config::Config::expand_env_str(&config_yaml)
+        .map_err(|e| CliError::Config(e.to_string()))?;
 
     // Validate that the config parses and can build runtime pipelines before printing.
     // This keeps --effective-config consistent with --validate behavior.
@@ -463,7 +456,7 @@ fn cmd_effective_config(args: &[String]) -> Result<(), CliError> {
     )?;
 
     eprintln!("{}# validated from {config_path}{}", dim(), reset());
-    print!("{config_yaml}");
+    print!("{effective_yaml}");
     Ok(())
 }
 
@@ -637,7 +630,6 @@ fn cmd_completions(args: &[String]) -> Result<(), CliError> {
             } else {
                 format!("unknown shell: {other}")
             };
-            eprintln!("{}error{}: {msg}", red(), reset());
             eprintln!("  logfwd --completions <bash|zsh|fish>");
             return Err(CliError::Config(msg));
         }
@@ -651,10 +643,10 @@ _logfwd() {
     local cur prev commands
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
-    commands="--config -c --blackhole --generate-json --effective-config --dump-config --init --wizard --completions --help -h --version -V"
+    commands="--config -c --blackhole --generate-json --effective-config --init --wizard --completions --help -h --version -V"
 
     case "$prev" in
-        --config|-c|--effective-config|--dump-config)
+        --config|-c|--effective-config)
             COMPREPLY=( $(compgen -f -X '!*.yaml' -- "$cur") $(compgen -f -X '!*.yml' -- "$cur") $(compgen -d -- "$cur") )
             return 0
             ;;
@@ -672,7 +664,7 @@ _logfwd() {
         esac
     done
     if (( has_config )); then
-        COMPREPLY=( $(compgen -W "--validate --check --dry-run" -- "$cur") )
+        COMPREPLY=( $(compgen -W "--validate --dry-run" -- "$cur") )
         return 0
     fi
 
@@ -694,7 +686,6 @@ _logfwd() {
         '--blackhole[OTLP blackhole receiver]:bind addr:'
         '--generate-json[Generate synthetic JSON log file]:lines: :output file:_files'
         '--effective-config[Validate and print effective runnable config]:config file:_files -g "*.y(a|)ml"'
-        '--dump-config[Deprecated alias for --effective-config]:config file:_files -g "*.y(a|)ml"'
         '--init[Generate starter config]'
         '--wizard[Interactive config wizard]'
         '--completions[Print shell completions]:shell:(bash zsh fish)'
@@ -705,7 +696,6 @@ _logfwd() {
     )
     subflags=(
         '--validate[Validate config and exit]'
-        '--check[Validate config and exit]'
         '--dry-run[Build pipelines without running]'
     )
 
@@ -732,7 +722,6 @@ complete -c logfwd -l config -s c -d 'Run pipeline from YAML config' -rF
 complete -c logfwd -l blackhole -d 'OTLP blackhole receiver'
 complete -c logfwd -l generate-json -d 'Generate synthetic JSON log file'
 complete -c logfwd -l effective-config -d 'Validate and print effective runnable config' -rF
-complete -c logfwd -l dump-config -d 'Deprecated alias for --effective-config' -rF
 complete -c logfwd -l init -d 'Generate starter config'
 complete -c logfwd -l wizard -d 'Interactive config wizard'
 complete -c logfwd -l completions -d 'Print shell completions' -xa 'bash zsh fish'
@@ -741,7 +730,6 @@ complete -c logfwd -l version -s V -d 'Show version'
 
 # Sub-flags for --config
 complete -c logfwd -l validate -d 'Validate config and exit' -n '__fish_seen_argument -l config -s c'
-complete -c logfwd -l check -d 'Validate config and exit' -n '__fish_seen_argument -l config -s c'
 complete -c logfwd -l dry-run -d 'Build pipelines without running' -n '__fish_seen_argument -l config -s c'
 "
 }
@@ -804,13 +792,16 @@ fn discover_config() -> Option<std::path::PathBuf> {
 
 /// Suggest the closest known top-level command flag for a mistyped input.
 fn suggest_flag(input: &str) -> Option<&'static str> {
+    if input == "--dump-config" {
+        return Some("--effective-config");
+    }
+
     let known = &[
         "--config",
         "-c",
         "--blackhole",
         "--generate-json",
         "--effective-config",
-        "--dump-config",
         "--init",
         "--wizard",
         "--completions",
@@ -1609,6 +1600,7 @@ mod cli_tests {
         assert_eq!(suggest_flag("--confi"), Some("--config"));
         assert_eq!(suggest_flag("--blackhol"), Some("--blackhole"));
         assert_eq!(suggest_flag("--versin"), Some("--version"));
+        assert_eq!(suggest_flag("--dump-config"), Some("--effective-config"));
         assert_eq!(
             suggest_flag("--effective-confi"),
             Some("--effective-config")
@@ -1622,15 +1614,14 @@ mod cli_tests {
 
     #[test]
     fn closest_match_prefers_exact() {
-        let candidates = &["--check", "--config"];
-        assert_eq!(closest_match("--check", candidates), Some("--check"));
+        let candidates = &["--validate", "--config"];
+        assert_eq!(closest_match("--validate", candidates), Some("--validate"));
     }
 
     #[test]
     fn closest_match_within_threshold() {
-        let flags = &["--validate", "--check", "--dry-run"];
+        let flags = &["--validate", "--dry-run"];
         assert_eq!(closest_match("--validat", flags), Some("--validate"));
-        assert_eq!(closest_match("--chck", flags), Some("--check"));
         assert_eq!(closest_match("--dry-ru", flags), Some("--dry-run"));
     }
 
@@ -1703,7 +1694,6 @@ mod cli_tests {
         assert_eq!(suggest_flag("--ini"), Some("--init"));
         assert_eq!(suggest_flag("--wizar"), Some("--wizard"));
         assert_eq!(suggest_flag("--completion"), Some("--completions"));
-        assert_eq!(suggest_flag("--dump-confi"), Some("--dump-config"));
         assert_eq!(
             suggest_flag("--effective-confi"),
             Some("--effective-config")
@@ -1744,5 +1734,17 @@ output:
         let config = logfwd_config::Config::load_str(yaml).expect("config should parse");
         let result = validate_pipelines_inner(&config, None, |_name| {}, |_err| {});
         assert!(matches!(result, Err(CliError::Config(_))));
+    }
+
+    #[test]
+    fn effective_config_rejects_extra_args() {
+        let args = vec![
+            "logfwd".to_string(),
+            "--effective-config".to_string(),
+            "logfwd.yaml".to_string(),
+            "--validate".to_string(),
+        ];
+        let err = cmd_effective_config(&args).expect_err("expected extra-arg rejection");
+        assert_eq!(err.to_string(), "unknown argument: --validate");
     }
 }

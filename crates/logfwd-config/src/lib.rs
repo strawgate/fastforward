@@ -606,6 +606,11 @@ impl Config {
         Self::from_raw(raw)
     }
 
+    /// Expand `${VAR}` references in YAML values using process environment vars.
+    pub fn expand_env_str(yaml: &str) -> Result<String, ConfigError> {
+        expand_env_vars(yaml)
+    }
+
     // Normalise the two layout variants into a single representation.
     fn from_raw(raw: RawConfig) -> Result<Self, ConfigError> {
         let pipelines = match (raw.pipelines, raw.input, raw.output) {
