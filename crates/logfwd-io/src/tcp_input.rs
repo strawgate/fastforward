@@ -9,6 +9,7 @@ use std::io::{self, Read};
 use std::net::{TcpListener, TcpStream};
 use std::time::{Duration, Instant};
 
+use logfwd_types::diagnostics::ComponentHealth;
 use logfwd_types::pipeline::SourceId;
 use socket2::SockRef;
 
@@ -72,6 +73,8 @@ pub struct TcpInput {
     connections_accepted: u64,
     /// Monotonic counter for generating per-connection `SourceId` values.
     next_connection_seq: u64,
+    /// Coarse control-plane health derived from the most recent poll cycle.
+    health: ComponentHealth,
 }
 
 impl TcpInput {
@@ -96,6 +99,7 @@ impl TcpInput {
             idle_timeout,
             connections_accepted: 0,
             next_connection_seq: 0,
+            health: ComponentHealth::Healthy,
         })
     }
 
@@ -120,13 +124,18 @@ impl TcpInput {
 
 impl InputSource for TcpInput {
     fn poll(&mut self) -> io::Result<Vec<InputEvent>> {
+        let mut under_pressure = false;
+
         // Accept new connections up to the limit.
         loop {
             if self.clients.len() >= MAX_CLIENTS {
                 // Drain (and drop) any pending connections beyond the limit so
                 // the kernel accept queue does not fill up and stall.
                 match self.listener.accept() {
-                    Ok((_stream, _addr)) => continue, // dropped immediately
+                    Ok((_stream, _addr)) => {
+                        under_pressure = true;
+                        continue; // dropped immediately
+                    }
                     Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
                     Err(_) => break, // transient accept error, not fatal
                 }
@@ -227,6 +236,7 @@ impl InputSource for TcpInput {
                         // The maximum overage is one READ_BUF_SIZE chunk
                         // (64 KiB), which is negligible relative to 256 MiB.
                         if total_buffered >= MAX_TOTAL_BUFFERED_BYTES {
+                            under_pressure = true;
                             break;
                         }
                     }
@@ -288,11 +298,21 @@ impl InputSource for TcpInput {
             keep
         });
 
+        self.health = if under_pressure {
+            ComponentHealth::Degraded
+        } else {
+            ComponentHealth::Healthy
+        };
+
         Ok(events)
     }
 
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn health(&self) -> ComponentHealth {
+        self.health
     }
 }
 
@@ -359,6 +379,16 @@ mod tests {
         let events = input.poll().unwrap();
         assert!(events.is_empty());
         assert!(input.clients.is_empty());
+    }
+
+    #[test]
+    fn tcp_health_recovers_after_clean_poll() {
+        let mut input = TcpInput::new("test", "127.0.0.1:0").unwrap();
+        input.health = ComponentHealth::Degraded;
+
+        let events = input.poll().unwrap();
+        assert!(events.is_empty());
+        assert_eq!(input.health(), ComponentHealth::Healthy);
     }
 
     /// A TCP client that sends a partial line (no trailing newline) and then

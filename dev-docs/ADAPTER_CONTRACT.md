@@ -167,6 +167,11 @@ The file path is:
 - Tailer watcher/file I/O error bursts that trigger poll backoff should surface
   as `degraded` control-plane health, and a later clean poll should recover the
   file input to `healthy`.
+- TCP inputs should surface `degraded` when they are actively shedding load,
+  such as dropping accepts past `MAX_CLIENTS` or hitting the per-poll read
+  budget, and recover to `healthy` after a clean poll.
+- UDP inputs should surface `degraded` when the kernel reports receive-buffer
+  pressure (`ENOBUFS`/`ENOMEM`) and recover to `healthy` after a clean poll.
 
 ### Delivery semantics
 
