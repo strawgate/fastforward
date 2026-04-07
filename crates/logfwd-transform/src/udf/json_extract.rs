@@ -230,7 +230,16 @@ impl ScalarUDFImpl for JsonExtractUdf {
 
         let target_dt = self.mode.return_type();
         let num_rows = raw_array.len();
-        let (raw_to_parse, take_indices) = build_non_null_raw(&raw_array);
+        let has_nulls = raw_array.null_count() > 0;
+
+        // Only build the filter/take indices when there are actual nulls to handle.
+        let (filtered, take_indices) = if has_nulls {
+            let (f, indices) = build_non_null_raw(&raw_array);
+            (Some(f), Some(indices))
+        } else {
+            (None, None)
+        };
+        let raw_to_parse = filtered.as_ref().unwrap_or(&raw_array);
         if raw_to_parse.is_empty() {
             return Ok(ColumnarValue::Array(arrow::array::new_null_array(
                 &target_dt, num_rows,
@@ -238,7 +247,7 @@ impl ScalarUDFImpl for JsonExtractUdf {
         }
 
         // --- parse ---
-        let batch = parse_raw(&raw_to_parse, key)?;
+        let batch = parse_raw(raw_to_parse, key)?;
 
         // --- coerce to the declared return type ---
         let result_rows = raw_to_parse.len();
@@ -274,7 +283,11 @@ impl ScalarUDFImpl for JsonExtractUdf {
                         }
                     }
                 };
-                let projected = arrow::compute::take(result.as_ref(), &take_indices, None)?;
+                let projected = if let Some(ref indices) = take_indices {
+                    arrow::compute::take(result.as_ref(), indices, None)?
+                } else {
+                    result
+                };
                 return Ok(ColumnarValue::Array(projected));
             } // end non-struct flat column branch
         }
@@ -345,7 +358,11 @@ impl ScalarUDFImpl for JsonExtractUdf {
                     }
                 }
             };
-            let projected = arrow::compute::take(result.as_ref(), &take_indices, None)?;
+            let projected = if let Some(ref indices) = take_indices {
+                arrow::compute::take(result.as_ref(), indices, None)?
+            } else {
+                result
+            };
             return Ok(ColumnarValue::Array(projected));
         }
 

@@ -880,7 +880,7 @@ fn append_attribute_value(
         Some(Value::IntValue(v)) => builder.append_i64_value_by_idx(idx, *v),
         Some(Value::DoubleValue(v)) => builder.append_f64_value_by_idx(idx, *v),
         Some(Value::BoolValue(v)) => {
-            builder.append_decoded_str_by_idx(idx, if *v { b"true" } else { b"false" })
+            builder.append_decoded_str_by_idx(idx, if *v { b"true" } else { b"false" });
         }
         Some(Value::StringValue(v)) => builder.append_decoded_str_by_idx(idx, v.as_bytes()),
         Some(Value::BytesValue(v)) => append_hex_field(builder, idx, v, hex_buf),
@@ -916,7 +916,7 @@ fn append_any_value_as_string(
             builder.append_decoded_str_by_idx(idx, value.as_bytes());
         }
         Some(Value::BoolValue(v)) => {
-            builder.append_decoded_str_by_idx(idx, if *v { b"true" } else { b"false" })
+            builder.append_decoded_str_by_idx(idx, if *v { b"true" } else { b"false" });
         }
         Some(Value::BytesValue(v)) => append_hex_field(builder, idx, v, hex_buf),
         _ => {}
@@ -1265,6 +1265,36 @@ fn write_hex_to_buf(out: &mut Vec<u8>, bytes: &[u8]) {
     for &b in bytes {
         out.push(HEX_TABLE[(b >> 4) as usize]);
         out.push(HEX_TABLE[(b & 0xf) as usize]);
+    }
+}
+
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    #[kani::proof]
+    #[kani::unwind(5)]
+    fn verify_write_hex_to_buf_lower_hex_pairs() {
+        let bytes: [u8; 2] = kani::any();
+        let mut out = Vec::new();
+        write_hex_to_buf(&mut out, &bytes);
+
+        assert_eq!(out.len(), bytes.len() * 2);
+        assert_eq!(
+            out.as_slice(),
+            &[
+                HEX_DIGITS[(bytes[0] >> 4) as usize],
+                HEX_DIGITS[(bytes[0] & 0x0f) as usize],
+                HEX_DIGITS[(bytes[1] >> 4) as usize],
+                HEX_DIGITS[(bytes[1] & 0x0f) as usize],
+            ]
+        );
+        assert!(
+            out.iter()
+                .all(|&b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+        );
+        kani::cover!(bytes[0] == 0, "hex encoding covers low nibble zeros");
+        kani::cover!(bytes[1] == u8::MAX, "hex encoding covers ff");
     }
 }
 
@@ -2078,6 +2108,40 @@ mod tests {
     #[test]
     fn hex_encode_empty() {
         assert_eq!(hex::encode(&[]), "");
+    }
+
+    #[test]
+    fn write_hex_to_buf_uses_lowercase_pairs() {
+        let mut out = Vec::new();
+        write_hex_to_buf(&mut out, &[0x00, 0xab, 0xff]);
+        assert_eq!(String::from_utf8(out).unwrap(), "00abff");
+    }
+
+    #[test]
+    fn integer_writers_emit_canonical_decimal_strings() {
+        let mut out = Vec::new();
+
+        write_u64_to_buf(&mut out, 0);
+        assert_eq!(String::from_utf8(out.clone()).unwrap(), "0");
+
+        out.clear();
+        write_u64_to_buf(&mut out, 42);
+        assert_eq!(String::from_utf8(out.clone()).unwrap(), "42");
+
+        out.clear();
+        write_u64_to_buf(&mut out, u64::MAX);
+        assert_eq!(
+            String::from_utf8(out.clone()).unwrap(),
+            u64::MAX.to_string()
+        );
+
+        out.clear();
+        write_i64_to_buf(&mut out, -17);
+        assert_eq!(String::from_utf8(out.clone()).unwrap(), "-17");
+
+        out.clear();
+        write_i64_to_buf(&mut out, i64::MIN);
+        assert_eq!(String::from_utf8(out).unwrap(), i64::MIN.to_string());
     }
 
     #[test]
