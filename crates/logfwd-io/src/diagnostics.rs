@@ -1949,6 +1949,27 @@ mod tests {
             "components_degraded_but_operational",
             200,
         );
+
+        assert_ready_snapshot_sync(
+            server_with_single_input_health(ComponentHealth::Stopping),
+            "not_ready",
+            "components_stopping",
+            503,
+        );
+
+        assert_ready_snapshot_sync(
+            server_with_single_input_health(ComponentHealth::Stopped),
+            "not_ready",
+            "components_stopped",
+            503,
+        );
+
+        assert_ready_snapshot_sync(
+            server_with_single_input_health(ComponentHealth::Failed),
+            "not_ready",
+            "components_failed",
+            503,
+        );
     }
 
     #[test]
