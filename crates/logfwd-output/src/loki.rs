@@ -404,12 +404,12 @@ impl super::sink::Sink for LokiSink {
             }
             let mut stream_map = match self.build_stream_map(batch, metadata) {
                 Ok(m) => m,
-                Err(e) => return super::sink::SendResult::IoError(e),
+                Err(e) => return super::sink::SendResult::from_io_error(e),
             };
             let (payload, retained_rows) = Self::serialize_loki_json(&mut stream_map);
             match self.do_send(payload, retained_rows).await {
                 Ok(r) => r,
-                Err(e) => super::sink::SendResult::IoError(e),
+                Err(e) => super::sink::SendResult::from_io_error(e),
             }
         })
     }

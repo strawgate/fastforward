@@ -24,7 +24,7 @@ pub use arrow_ipc_sink::{ArrowIpcSinkFactory, deserialize_ipc, serialize_ipc};
 pub use elasticsearch::{ElasticsearchRequestMode, ElasticsearchSink, ElasticsearchSinkFactory};
 pub use error::OutputError;
 pub use file_sink::{FileSink, FileSinkFactory};
-pub use json_lines::JsonLinesSink;
+pub use json_lines::{JsonLinesSink, JsonLinesSinkFactory};
 pub use loki::{LokiSink, LokiSinkFactory};
 pub use null::{NullSink, NullSinkFactory};
 pub use otap_sink::{
@@ -616,6 +616,28 @@ pub fn build_sink_factory(
             })?;
             Ok(Arc::new(factory))
         }
+        OutputType::Http => {
+            let endpoint = cfg.endpoint.as_ref().ok_or_else(|| {
+                OutputError::Construction(format!("output '{name}': http requires 'endpoint'"))
+            })?;
+            let compression = match cfg.compression.as_deref() {
+                Some("zstd") => Compression::Zstd,
+                Some("gzip") => Compression::Gzip,
+                Some("none") | None => Compression::None,
+                Some(other) => {
+                    return Err(OutputError::Construction(format!(
+                        "output '{name}': unknown HTTP compression '{other}' (expected 'zstd', 'gzip', or 'none')"
+                    )));
+                }
+            };
+            Ok(Arc::new(JsonLinesSinkFactory::new(
+                name.to_string(),
+                endpoint.clone(),
+                auth_headers,
+                compression,
+                stats,
+            )))
+        }
         OutputType::Udp => {
             let endpoint = cfg.endpoint.as_ref().ok_or_else(|| {
                 OutputError::Construction(format!("output '{name}': udp requires 'endpoint'"))
@@ -1117,21 +1139,16 @@ mod tests {
     }
 
     #[test]
-    fn test_build_sink_factory_http_not_yet_supported() {
+    fn test_build_sink_factory_http_supported() {
         let cfg = OutputConfig {
-            name: Some("http-bad".to_string()),
+            name: Some("http-ok".to_string()),
             output_type: OutputType::Http,
             endpoint: Some("http://localhost:9200".to_string()),
-            compression: Some("zstd".to_string()),
+            compression: Some("gzip".to_string()),
             ..Default::default()
         };
-        let result = build_sink_factory("http-bad", &cfg, None, Arc::new(ComponentStats::new()));
-        assert!(result.is_err(), "Http type should not be supported yet");
-        let err = result.err().unwrap();
-        assert!(
-            err.to_string().contains("not yet supported"),
-            "error should mention 'not yet supported', got: {err}"
-        );
+        let result = build_sink_factory("http-ok", &cfg, None, Arc::new(ComponentStats::new()));
+        assert!(result.is_ok(), "Http type should be supported");
     }
 
     #[test]

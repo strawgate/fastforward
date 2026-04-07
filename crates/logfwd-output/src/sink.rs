@@ -58,6 +58,21 @@ impl SendResult {
             "called `SendResult::unwrap()` on a non-Ok value: {self:?}"
         );
     }
+
+    /// Convert an `io::Error` into a delivery outcome.
+    ///
+    /// `InvalidInput`/`InvalidData` are treated as permanent serialization or
+    /// payload-shape errors and mapped to `Rejected` so the worker pool does
+    /// not retry forever on an un-sendable batch. Other error kinds are
+    /// treated as transient I/O and mapped to `IoError`.
+    pub fn from_io_error(error: io::Error) -> Self {
+        match error.kind() {
+            io::ErrorKind::InvalidInput | io::ErrorKind::InvalidData => {
+                SendResult::Rejected(error.to_string())
+            }
+            _ => SendResult::IoError(error),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -688,5 +703,21 @@ mod tests {
                 "error should mention 'already consumed': {err}"
             ),
         }
+    }
+
+    #[test]
+    fn from_io_error_maps_invalid_input_to_rejected() {
+        let result =
+            SendResult::from_io_error(io::Error::new(io::ErrorKind::InvalidInput, "bad payload"));
+        assert!(matches!(result, SendResult::Rejected(_)));
+    }
+
+    #[test]
+    fn from_io_error_maps_connection_reset_to_io_error() {
+        let result = SendResult::from_io_error(io::Error::new(
+            io::ErrorKind::ConnectionReset,
+            "connection reset",
+        ));
+        assert!(matches!(result, SendResult::IoError(_)));
     }
 }

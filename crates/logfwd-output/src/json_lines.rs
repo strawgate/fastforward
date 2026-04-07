@@ -1,10 +1,16 @@
+use std::future::Future;
 use std::io;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 
 use arrow::array::Array;
 use arrow::record_batch::RecordBatch;
 
 use logfwd_types::diagnostics::ComponentStats;
+
+use crate::http_classify;
+use crate::sink::{SendResult, Sink, SinkFactory};
 
 use super::{Compression, build_col_infos, str_value, write_row_json};
 
@@ -13,7 +19,6 @@ use super::{Compression, build_col_infos, str_value, write_row_json};
 // ---------------------------------------------------------------------------
 
 /// Writes newline-delimited JSON and POSTs over HTTP.
-#[allow(dead_code)] // HTTP send fields retained for future async Sink migration.
 pub struct JsonLinesSink {
     name: String,
     url: String,
@@ -21,7 +26,7 @@ pub struct JsonLinesSink {
     pub(crate) batch_buf: Vec<u8>,
     compress_buf: Vec<u8>,
     compression: Compression,
-    http_agent: ureq::Agent,
+    client: reqwest::Client,
     stats: Arc<ComponentStats>,
 }
 
@@ -33,10 +38,11 @@ impl JsonLinesSink {
         compression: Compression,
         stats: Arc<ComponentStats>,
     ) -> Self {
-        let http_agent = ureq::config::Config::builder()
-            .timeout_global(Some(std::time::Duration::from_secs(30)))
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .pool_max_idle_per_host(64)
             .build()
-            .new_agent();
+            .unwrap_or_else(|_| reqwest::Client::new());
         JsonLinesSink {
             name,
             url,
@@ -44,7 +50,7 @@ impl JsonLinesSink {
             batch_buf: Vec::with_capacity(64 * 1024),
             compress_buf: Vec::new(),
             compression,
-            http_agent,
+            client,
             stats,
         }
     }
@@ -114,6 +120,146 @@ impl JsonLinesSink {
             }
         }
         Ok(())
+    }
+
+    async fn post_payload(&self, payload: Vec<u8>) -> io::Result<SendResult> {
+        let mut req = self.client.post(&self.url);
+        for (k, v) in &self.headers {
+            req = req.header(k, v);
+        }
+
+        if self.compression == Compression::Gzip {
+            req = req.header("Content-Encoding", "gzip");
+        } else if self.compression == Compression::Zstd {
+            req = req.header("Content-Encoding", "zstd");
+        }
+        req = req.header("Content-Type", "application/x-ndjson");
+
+        let response = req.body(payload).send().await.map_err(io::Error::other)?;
+        if response.status().is_success() {
+            return Ok(SendResult::Ok);
+        }
+
+        let retry_after = response.headers().get("Retry-After").cloned();
+        let status = response.status().as_u16();
+        let body = response.text().await.unwrap_or_default();
+        if let Some(result) = http_classify::classify_http_status(
+            status,
+            retry_after.as_ref(),
+            &format!("HTTP output: {body}"),
+        ) {
+            return Ok(result);
+        }
+        Err(io::Error::other(format!(
+            "HTTP output failed with {status}: {body}"
+        )))
+    }
+
+    fn maybe_compress(&mut self) -> io::Result<Vec<u8>> {
+        self.compress_buf.clear();
+        match self.compression {
+            Compression::None => Ok(self.batch_buf.clone()),
+            Compression::Gzip => {
+                let mut encoder = flate2::write::GzEncoder::new(
+                    Vec::with_capacity(self.batch_buf.len() / 2),
+                    flate2::Compression::default(),
+                );
+                use std::io::Write as _;
+                encoder.write_all(&self.batch_buf)?;
+                encoder.finish()
+            }
+            Compression::Zstd => {
+                zstd::stream::copy_encode(&self.batch_buf[..], &mut self.compress_buf, 1)
+                    .map_err(io::Error::other)?;
+                Ok(self.compress_buf.clone())
+            }
+        }
+    }
+}
+
+impl Sink for JsonLinesSink {
+    fn send_batch<'a>(
+        &'a mut self,
+        batch: &'a RecordBatch,
+        _metadata: &'a crate::BatchMetadata,
+    ) -> Pin<Box<dyn Future<Output = SendResult> + Send + 'a>> {
+        Box::pin(async move {
+            if let Err(e) = self.serialize_batch(batch) {
+                return SendResult::from_io_error(e);
+            }
+            if self.batch_buf.is_empty() {
+                return SendResult::Ok;
+            }
+            let rows = batch.num_rows() as u64;
+            let payload = match self.maybe_compress() {
+                Ok(p) => p,
+                Err(e) => return SendResult::from_io_error(e),
+            };
+            let bytes = payload.len() as u64;
+            match self.post_payload(payload).await {
+                Ok(SendResult::Ok) => {
+                    self.stats.inc_lines(rows);
+                    self.stats.inc_bytes(bytes);
+                    SendResult::Ok
+                }
+                Ok(other) => other,
+                Err(e) => SendResult::from_io_error(e),
+            }
+        })
+    }
+
+    fn flush(&mut self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn shutdown(&mut self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+pub struct JsonLinesSinkFactory {
+    name: String,
+    endpoint: String,
+    headers: Vec<(String, String)>,
+    compression: Compression,
+    stats: Arc<ComponentStats>,
+}
+
+impl JsonLinesSinkFactory {
+    pub fn new(
+        name: String,
+        endpoint: String,
+        headers: Vec<(String, String)>,
+        compression: Compression,
+        stats: Arc<ComponentStats>,
+    ) -> Self {
+        Self {
+            name,
+            endpoint,
+            headers,
+            compression,
+            stats,
+        }
+    }
+}
+
+impl SinkFactory for JsonLinesSinkFactory {
+    fn create(&self) -> io::Result<Box<dyn Sink>> {
+        Ok(Box::new(JsonLinesSink::new(
+            self.name.clone(),
+            self.endpoint.clone(),
+            self.headers.clone(),
+            self.compression,
+            Arc::clone(&self.stats),
+        )))
+    }
+
+    fn name(&self) -> &str {
+        &self.name
     }
 }
 

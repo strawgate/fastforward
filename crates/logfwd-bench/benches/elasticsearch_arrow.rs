@@ -110,13 +110,19 @@ fn index_batch(
         observed_time_ns: 0,
     };
     let result = rt.block_on(sink.send_batch(batch, &metadata));
-    if let logfwd_output::SendResult::Rejected(_) = result {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "batch rejected",
-        ));
+    match result {
+        logfwd_output::SendResult::Ok => Ok(()),
+        logfwd_output::SendResult::Rejected(reason) => {
+            Err(std::io::Error::other(format!("batch rejected: {reason}")))
+        }
+        logfwd_output::SendResult::RetryAfter(delay) => Err(std::io::Error::other(format!(
+            "batch not accepted: retry after {}s",
+            delay.as_secs()
+        ))),
+        logfwd_output::SendResult::IoError(error) => Err(std::io::Error::other(format!(
+            "batch not accepted: io error: {error}"
+        ))),
     }
-    Ok(())
 }
 
 /// Delete and recreate the benchmark index.

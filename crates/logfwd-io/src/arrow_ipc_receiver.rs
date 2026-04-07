@@ -209,6 +209,7 @@ impl ArrowIpcReceiver {
 
                     // Send all batches to the pipeline.
                     let mut send_error: Option<u16> = None;
+                    let mut sent_batches = 0usize;
                     let mut sent_rows = false;
                     for batch in batches {
                         if batch.num_rows() == 0 {
@@ -216,9 +217,14 @@ impl ArrowIpcReceiver {
                         }
                         sent_rows = true;
                         match tx.try_send(batch) {
-                            Ok(()) => {}
+                            Ok(()) => {
+                                sent_batches += 1;
+                            }
                             Err(mpsc::TrySendError::Full(_)) => {
-                                send_error = Some(429);
+                                // Return 429 only if nothing from this request
+                                // has been committed yet; otherwise acknowledge
+                                // partial acceptance to avoid duplicate retries.
+                                send_error = Some(if sent_batches == 0 { 429 } else { 200 });
                                 break;
                             }
                             Err(mpsc::TrySendError::Disconnected(_)) => {
@@ -236,6 +242,15 @@ impl ArrowIpcReceiver {
                                     "too many requests: pipeline backpressure",
                                 )
                                 .with_status_code(429),
+                            );
+                        }
+                        Some(200) => {
+                            store_event(&health_clone, ReceiverHealthEvent::DeliveryAccepted);
+                            let _ = request.respond(
+                                tiny_http::Response::from_string(
+                                    "partial request accepted before backpressure",
+                                )
+                                .with_status_code(200),
                             );
                         }
                         Some(503) => {
@@ -448,6 +463,17 @@ mod tests {
         buf
     }
 
+    fn serialize_batches(batches: &[RecordBatch]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        let mut writer = arrow::ipc::writer::StreamWriter::try_new(&mut buf, &batches[0].schema())
+            .expect("writer init");
+        for batch in batches {
+            writer.write(batch).expect("write batch");
+        }
+        writer.finish().expect("finish");
+        buf
+    }
+
     #[test]
     fn receiver_accepts_arrow_ipc_post() {
         let receiver = ArrowIpcReceiver::new_with_capacity("test", "127.0.0.1:0", 16)
@@ -563,6 +589,31 @@ mod tests {
             .expect("recovery POST should succeed");
         assert_eq!(response.status().as_u16(), 200);
         let _ = receiver.recv_timeout(std::time::Duration::from_secs(2));
+        assert_eq!(receiver.health(), ComponentHealth::Healthy);
+    }
+
+    #[test]
+    fn receiver_returns_200_after_partial_accept_to_avoid_duplicate_retry() {
+        let receiver = ArrowIpcReceiver::new_with_capacity("test-partial", "127.0.0.1:0", 1)
+            .expect("bind should succeed");
+        let addr = receiver.local_addr();
+        let url = format!("http://{addr}/v1/arrow");
+
+        let batches = vec![make_test_batch(), make_test_batch()];
+        let ipc_bytes = serialize_batches(&batches);
+
+        let response = ureq::post(&url)
+            .header("Content-Type", "application/vnd.apache.arrow.stream")
+            .send(&ipc_bytes)
+            .expect("POST should return 200 when at least one batch was accepted");
+        assert_eq!(response.status().as_u16(), 200);
+
+        let received = receiver.try_recv_all();
+        assert_eq!(
+            received.len(),
+            1,
+            "exactly one batch should have been accepted before backpressure"
+        );
         assert_eq!(receiver.health(), ComponentHealth::Healthy);
     }
 
