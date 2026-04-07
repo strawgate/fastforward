@@ -460,6 +460,12 @@ impl DiagnosticsServer {
     /// OS-assigned port (useful when `bind_addr` uses port 0). Returns an
     /// `io::Error` on bind failure.
     pub fn start(&mut self) -> io::Result<std::net::SocketAddr> {
+        if self.handle.is_some() {
+            return Err(io::Error::other(
+                "diagnostics server already started",
+            ));
+        }
+
         let server = Arc::new(
             tiny_http::Server::http(&self.bind_addr)
                 .map_err(|e| io::Error::other(e.to_string()))?,
@@ -499,10 +505,12 @@ impl DiagnosticsServer {
 
         let handle = thread::spawn(move || {
             while !shutdown_clone.load(Ordering::Relaxed) {
-                if let Ok(Some(request)) =
-                    server_clone.recv_timeout(std::time::Duration::from_millis(100))
-                {
-                    let _ = handler.handle_request(request);
+                match server_clone.recv_timeout(std::time::Duration::from_millis(100)) {
+                    Ok(Some(request)) => {
+                        let _ = handler.handle_request(request);
+                    }
+                    Ok(None) => continue, // timeout — check shutdown and retry
+                    Err(_) => break,       // server error — exit loop
                 }
             }
         });

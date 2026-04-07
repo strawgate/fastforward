@@ -967,9 +967,9 @@ async fn run_pipelines(
         }
         #[cfg(unix)]
         server.set_memory_stats_fn(jemalloc_stats);
-        let _bound_addr = server.start()?;
+        let bound_addr = server.start()?;
         _diag_server = Some(server);
-        Some(addr.clone())
+        Some(bound_addr)
     } else {
         None
     };
