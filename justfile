@@ -4,9 +4,15 @@
 
 # Default recipe: run all checks (same as CI)
 
-# Limit cargo parallelism to avoid starving other processes.
-# Override with: JOBS=8 just test-all
+# Limit all parallelism to 2 vCPU to avoid starving other processes.
+# This caps cargo compilation, test execution, rayon workers, and any Tokio
+# runtime that reads TOKIO_WORKER_THREADS (including Pipeline::run()).
+# Override with: JOBS=8 just test
 export CARGO_BUILD_JOBS := env("JOBS", "2")
+export RUST_TEST_THREADS := env("JOBS", "2")
+export NEXTEST_TEST_THREADS := env("JOBS", "2")
+export TOKIO_WORKER_THREADS := env("JOBS", "2")
+export RAYON_NUM_THREADS := env("JOBS", "2")
 default: ci
 
 # Format all Rust code
@@ -28,7 +34,7 @@ test:
 # Run Kani formal verification proofs (logfwd-core only)
 # Requires: cargo install --locked kani-verifier && cargo kani setup
 kani:
-    RUSTC_WRAPPER="" cargo kani -p logfwd-core -Z function-contracts -Z mem-predicates -Z stubbing
+    RUSTC_WRAPPER="" cargo kani -p logfwd-core -Z function-contracts -Z mem-predicates -Z stubbing -j $CARGO_BUILD_JOBS
 
 # Validate the non-core Kani boundary contract.
 kani-boundary:
@@ -87,7 +93,7 @@ _bench-run name config seconds="10" diag="http://127.0.0.1:9090":
     $LOGFWD run --config {{config}} &
     PID=$!
     sleep {{seconds}}
-    STATS=$(curl -s {{diag}}/api/stats 2>/dev/null || echo '{}')
+    STATS=$(curl -s {{diag}}/admin/v1/stats 2>/dev/null || echo '{}')
     kill $PID 2>/dev/null; wait $PID 2>/dev/null || true
     echo "$STATS" | python3 -c "
     import sys,json; d=json.load(sys.stdin)
@@ -130,7 +136,7 @@ _bench-pair name rx_config tx_config seconds="10":
 
     $LOGFWD run --config {{tx_config}} &
     TX=$!; sleep {{seconds}}
-    STATS=$(curl -s http://127.0.0.1:9091/api/stats 2>/dev/null || echo '{}')
+    STATS=$(curl -s http://127.0.0.1:9091/admin/v1/stats 2>/dev/null || echo '{}')
     kill $TX $RX 2>/dev/null; wait $TX $RX 2>/dev/null || true
     echo "$STATS" | python3 -c "
     import sys,json; d=json.load(sys.stdin)

@@ -37,7 +37,7 @@ logfwd run --config pipeline.yaml
 curl http://localhost:9090/live
 
 # Aggregate stats (JSON)
-curl http://localhost:9090/api/stats | jq .
+curl http://localhost:9090/admin/v1/stats | jq .
 
 # Pipeline details (JSON)
 curl http://localhost:9090/admin/v1/status | jq .

@@ -10,7 +10,6 @@ export default defineConfig({
   },
   server: {
     proxy: {
-      "/api": "http://127.0.0.1:9090",
       "/admin": "http://127.0.0.1:9090",
       "/live": "http://127.0.0.1:9090",
       "/ready": "http://127.0.0.1:9090",

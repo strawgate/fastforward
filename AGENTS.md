@@ -33,13 +33,13 @@ User-facing documentation lives in `book/src/`. See `book/src/SUMMARY.md` for th
 
 ## Issue labels
 
-| Label | Meaning |
-|-------|---------|
-| `bug` | Broken behavior |
-| `enhancement` | New feature or improvement |
-| `performance` | Performance optimization |
-| `production` | Required for production readiness |
-| `research` | Needs investigation before implementation |
+See [`CONTRIBUTING.md`](CONTRIBUTING.md#issues-and-labels) for the full label taxonomy, triage process, and work-unit rules.
+
+Quick reference — every issue needs **type + priority + component(s)**:
+
+| Type | Priority |
+|------|----------|
+| `bug`, `enhancement`, `performance`, `architecture`, `research`, `documentation`, `work-unit` | `P0` critical, `P1` high, `P2` medium, `P3` low |
 
 ## Before submitting
 

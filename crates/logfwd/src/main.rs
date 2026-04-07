@@ -191,6 +191,7 @@ enum Commands {
         output_file: String,
     },
     /// Validate and print effective runnable config.
+    #[command(alias = "dump-config")]
     EffectiveConfig {
         #[arg(short = 'c', long = "config", value_name = "FILE")]
         config: Option<String>,
@@ -219,6 +220,16 @@ fn main() {
 
 #[tokio::main]
 async fn main_inner() -> i32 {
+    // Emit a deprecation notice before clap parses so the alias still works
+    // transparently while guiding scripts to the new subcommand name.
+    if env::args().any(|a| a == "dump-config") {
+        eprintln!(
+            "{}warning{}: `dump-config` is deprecated — use `effective-config` instead",
+            yellow(),
+            reset()
+        );
+    }
+
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(err) => {

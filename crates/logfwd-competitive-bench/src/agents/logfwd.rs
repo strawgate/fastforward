@@ -62,7 +62,7 @@ pipelines:
     }
 
     fn stats_url(&self) -> Option<String> {
-        Some("http://127.0.0.1:19876/api/stats".to_string())
+        Some("http://127.0.0.1:19876/admin/v1/stats".to_string())
     }
 
     fn parse_stats(&self, body: &str) -> Option<AgentSample> {
