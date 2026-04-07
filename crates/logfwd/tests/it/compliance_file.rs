@@ -162,12 +162,7 @@ fn compliance_file_rotate_create() {
     }
 
     // Poll until all 10000 lines are processed or 5s safety deadline.
-    wait_for_lines_and_cancel(
-        &shutdown,
-        &metrics,
-        10000,
-        Duration::from_secs(5),
-    );
+    wait_for_lines_and_cancel(&shutdown, &metrics, 10000, Duration::from_secs(5));
     let pipeline = handle.join().expect("pipeline thread panicked");
 
     let lines_in = pipeline
@@ -225,12 +220,7 @@ fn compliance_file_rotate_copytruncate() {
     }
 
     // Poll until all 10000 lines are processed or 5s safety deadline.
-    wait_for_lines_and_cancel(
-        &shutdown,
-        &metrics,
-        10000,
-        Duration::from_secs(5),
-    );
+    wait_for_lines_and_cancel(&shutdown, &metrics, 10000, Duration::from_secs(5));
     let pipeline = handle.join().expect("pipeline thread panicked");
 
     let lines_in = pipeline
@@ -290,12 +280,7 @@ fn compliance_file_truncate() {
     }
 
     // Poll until >= 2000 lines processed or 5s safety deadline.
-    wait_for_lines_and_cancel(
-        &shutdown,
-        &metrics,
-        2000,
-        Duration::from_secs(5),
-    );
+    wait_for_lines_and_cancel(&shutdown, &metrics, 2000, Duration::from_secs(5));
     let pipeline = handle.join().expect("pipeline thread panicked");
 
     let lines_in = pipeline
@@ -349,12 +334,7 @@ fn compliance_file_delete_recreate() {
     }
 
     // Poll until >= 2000 lines processed or 5s safety deadline.
-    wait_for_lines_and_cancel(
-        &shutdown,
-        &metrics,
-        2000,
-        Duration::from_secs(5),
-    );
+    wait_for_lines_and_cancel(&shutdown, &metrics, 2000, Duration::from_secs(5));
     let pipeline = handle.join().expect("pipeline thread panicked");
 
     let lines_in = pipeline
@@ -418,12 +398,7 @@ fn compliance_file_grows_while_running() {
     writer_handle.join().expect("writer thread panicked");
 
     // Poll until all 4100 lines are processed or 5s safety deadline.
-    wait_for_lines_and_cancel(
-        &shutdown,
-        &metrics,
-        4100,
-        Duration::from_secs(5),
-    );
+    wait_for_lines_and_cancel(&shutdown, &metrics, 4100, Duration::from_secs(5));
     let pipeline = handle.join().expect("pipeline thread panicked");
 
     let lines_in = pipeline
@@ -473,12 +448,7 @@ fn compliance_glob_new_files() {
     // Poll until both files are processed or 3s safety deadline.
     // glob_rescan_interval_ms is set to 50ms in glob_pipeline_yaml(), so the
     // new file is discovered quickly rather than waiting the default 5s.
-    wait_for_lines_and_cancel(
-        &shutdown,
-        &metrics,
-        2000,
-        Duration::from_secs(3),
-    );
+    wait_for_lines_and_cancel(&shutdown, &metrics, 2000, Duration::from_secs(3));
     let pipeline = handle.join().expect("pipeline thread panicked");
 
     let lines_in = pipeline
@@ -512,12 +482,7 @@ fn compliance_file_no_trailing_newline() {
 
     // Poll until all 4 lines are processed or 3s safety deadline.
     // The EndOfFile event flushes the partial line without a trailing newline.
-    wait_for_lines_and_cancel(
-        &shutdown,
-        &metrics,
-        4,
-        Duration::from_secs(3),
-    );
+    wait_for_lines_and_cancel(&shutdown, &metrics, 4, Duration::from_secs(3));
     let pipeline = handle.join().expect("pipeline thread panicked");
 
     let lines_in = pipeline
