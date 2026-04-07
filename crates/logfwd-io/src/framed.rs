@@ -15,6 +15,7 @@ use crate::format::FormatDecoder;
 use crate::input::{InputEvent, InputSource};
 use crate::tail::ByteOffset;
 use logfwd_core::checkpoint_tracker::CheckpointTracker;
+use logfwd_core::cri::json_escape_bytes;
 use logfwd_types::diagnostics::ComponentHealth;
 use logfwd_types::pipeline::SourceId;
 use std::collections::HashMap;
@@ -90,6 +91,8 @@ impl InputSource for FramedInput {
         }
 
         let mut result_events: Vec<InputEvent> = Vec::new();
+        let source_path_by_id: HashMap<SourceId, std::path::PathBuf> =
+            self.inner.source_paths().into_iter().collect();
 
         for event in raw_events {
             match event {
@@ -210,6 +213,12 @@ impl InputSource for FramedInput {
                     self.out_buf.clear();
                     let state = self.sources.get_mut(&key).expect("just inserted");
                     state.format.process_lines(&chunk, &mut self.out_buf);
+                    if let Some(source_path) = key.and_then(|sid| source_path_by_id.get(&sid)) {
+                        let mut with_source = std::mem::take(&mut self.spare_buf);
+                        with_source.clear();
+                        inject_source_path_metadata(&self.out_buf, source_path, &mut with_source);
+                        self.out_buf = with_source;
+                    }
 
                     let line_count = memchr::memchr_iter(b'\n', &chunk).count();
                     self.stats.inc_lines(line_count as u64);
@@ -351,8 +360,34 @@ impl InputSource for FramedInput {
             .collect()
     }
 
+    fn source_paths(&self) -> Vec<(SourceId, std::path::PathBuf)> {
+        self.inner.source_paths()
+    }
+
     fn set_offset_by_source(&mut self, source_id: SourceId, offset: u64) {
         self.inner.set_offset_by_source(source_id, offset);
+    }
+}
+
+fn inject_source_path_metadata(chunk: &[u8], source_path: &std::path::Path, out: &mut Vec<u8>) {
+    let source_path_bytes = source_path.to_string_lossy();
+    let source_path_bytes = source_path_bytes.as_bytes();
+    let mut pos = 0;
+    while pos < chunk.len() {
+        let eol = memchr::memchr(b'\n', &chunk[pos..]).map_or(chunk.len(), |o| pos + o);
+        let line = &chunk[pos..eol];
+        if line.first() == Some(&b'{') {
+            out.extend_from_slice(b"{\"_source_path\":\"");
+            json_escape_bytes(source_path_bytes, out);
+            out.extend_from_slice(b"\",");
+            out.extend_from_slice(&line[1..]);
+        } else {
+            out.extend_from_slice(line);
+        }
+        if eol < chunk.len() {
+            out.push(b'\n');
+        }
+        pos = eol + 1;
     }
 }
 
@@ -369,6 +404,7 @@ mod tests {
         name: String,
         events: VecDeque<Vec<InputEvent>>,
         offsets: Vec<(SourceId, ByteOffset)>,
+        source_paths: Vec<(SourceId, std::path::PathBuf)>,
         health: ComponentHealth,
     }
 
@@ -378,6 +414,7 @@ mod tests {
                 name: "mock".to_string(),
                 events: batches.into(),
                 offsets: vec![],
+                source_paths: vec![],
                 health: ComponentHealth::Healthy,
             }
         }
@@ -421,6 +458,11 @@ mod tests {
             self
         }
 
+        fn with_source_paths(mut self, source_paths: Vec<(SourceId, std::path::PathBuf)>) -> Self {
+            self.source_paths = source_paths;
+            self
+        }
+
         fn with_health(mut self, health: ComponentHealth) -> Self {
             self.health = health;
             self
@@ -442,6 +484,10 @@ mod tests {
 
         fn checkpoint_data(&self) -> Vec<(SourceId, ByteOffset)> {
             self.offsets.clone()
+        }
+
+        fn source_paths(&self) -> Vec<(SourceId, std::path::PathBuf)> {
+            self.source_paths.clone()
         }
     }
 
@@ -1203,5 +1249,51 @@ mod tests {
         // Checkpoint should reflect: 12 - 0 = 12
         let cp = framed.checkpoint_data();
         assert_eq!(cp[0].1, ByteOffset(12));
+    }
+
+    #[test]
+    fn file_json_injects_source_path_column() {
+        let stats = make_stats();
+        let sid = SourceId(7);
+        let source = MockSource::new(vec![vec![InputEvent::Data {
+            bytes: b"{\"msg\":\"hello\"}\n".to_vec(),
+            source_id: Some(sid),
+        }]])
+        .with_source_paths(vec![(sid, "/var/log/pods/ns_pod_uid/c/main.log".into())]);
+
+        let mut framed = FramedInput::new(
+            Box::new(source),
+            FormatDecoder::passthrough_json(Arc::clone(&stats)),
+            stats,
+        );
+
+        let out = collect_data(framed.poll().unwrap());
+        assert_eq!(
+            out,
+            b"{\"_source_path\":\"/var/log/pods/ns_pod_uid/c/main.log\",\"msg\":\"hello\"}\n"
+        );
+    }
+
+    #[test]
+    fn file_cri_injects_source_path_alongside_cri_metadata() {
+        let stats = make_stats();
+        let sid = SourceId(8);
+        let source = MockSource::new(vec![vec![InputEvent::Data {
+            bytes: b"2024-01-15T10:30:00Z stdout F {\"msg\":\"hello\"}\n".to_vec(),
+            source_id: Some(sid),
+        }]])
+        .with_source_paths(vec![(sid, "/var/log/pods/ns_pod_uid/c/0.log".into())]);
+
+        let mut framed = FramedInput::new(
+            Box::new(source),
+            FormatDecoder::cri(2 * 1024 * 1024, Arc::clone(&stats)),
+            stats,
+        );
+
+        let out = collect_data(framed.poll().unwrap());
+        assert_eq!(
+            out,
+            b"{\"_source_path\":\"/var/log/pods/ns_pod_uid/c/0.log\",\"_timestamp\":\"2024-01-15T10:30:00Z\",\"_stream\":\"stdout\",\"msg\":\"hello\"}\n"
+        );
     }
 }
