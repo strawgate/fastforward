@@ -4,9 +4,14 @@
 
 # Default recipe: run all checks (same as CI)
 
-# Limit cargo parallelism to avoid starving other processes.
-# Override with: JOBS=8 just test-all
+# Limit all parallelism to 2 vCPU to avoid starving other processes.
+# This caps: cargo compilation, test execution, and tokio runtime threads.
+# Override with: JOBS=8 just test
 export CARGO_BUILD_JOBS := env("JOBS", "2")
+export RUST_TEST_THREADS := env("JOBS", "2")
+export NEXTEST_TEST_THREADS := env("JOBS", "2")
+export TOKIO_WORKER_THREADS := env("JOBS", "2")
+export RAYON_NUM_THREADS := env("JOBS", "2")
 default: ci
 
 # Format all Rust code
@@ -28,7 +33,7 @@ test:
 # Run Kani formal verification proofs (logfwd-core only)
 # Requires: cargo install --locked kani-verifier && cargo kani setup
 kani:
-    RUSTC_WRAPPER="" cargo kani -p logfwd-core -Z function-contracts -Z mem-predicates -Z stubbing
+    RUSTC_WRAPPER="" cargo kani -p logfwd-core -Z function-contracts -Z mem-predicates -Z stubbing -j 2
 
 # Validate the non-core Kani boundary contract.
 kani-boundary:
