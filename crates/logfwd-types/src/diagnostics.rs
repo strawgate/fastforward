@@ -35,14 +35,19 @@ pub struct ComponentStats {
 
 impl ComponentStats {
     /// Create stats with OTel counters. `prefix` is e.g. "logfwd_input" or "logfwd_output".
-    pub fn with_meter(meter: &Meter, prefix: &str, attrs: Vec<KeyValue>) -> Self {
+    pub fn with_meter(
+        meter: &Meter,
+        prefix: &str,
+        attrs: Vec<KeyValue>,
+        initial_health: ComponentHealth,
+    ) -> Self {
         Self {
             lines_total: AtomicU64::new(0),
             bytes_total: AtomicU64::new(0),
             errors_total: AtomicU64::new(0),
             rotations_total: AtomicU64::new(0),
             parse_errors_total: AtomicU64::new(0),
-            health: AtomicU8::new(ComponentHealth::Healthy.as_repr()),
+            health: AtomicU8::new(initial_health.as_repr()),
             otel_lines: meter.u64_counter(format!("{prefix}_lines")).build(),
             otel_bytes: meter.u64_counter(format!("{prefix}_bytes")).build(),
             otel_errors: meter.u64_counter(format!("{prefix}_errors")).build(),
@@ -54,8 +59,13 @@ impl ComponentStats {
 
     /// Create stats without OTel (for tests and standalone use).
     pub fn new() -> Self {
+        Self::new_with_health(ComponentHealth::Healthy)
+    }
+
+    /// Create stats without OTel and an explicit initial health.
+    pub fn new_with_health(initial_health: ComponentHealth) -> Self {
         let noop = opentelemetry::global::meter("noop");
-        Self::with_meter(&noop, "noop", vec![])
+        Self::with_meter(&noop, "noop", vec![], initial_health)
     }
 
     /// Increment line counter by `n` (atomic + OTel).

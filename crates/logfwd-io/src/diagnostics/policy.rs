@@ -89,8 +89,9 @@ mod tests {
     fn pipeline_with_io() -> PipelineMetrics {
         let meter = opentelemetry::global::meter("policy-test");
         let mut pm = PipelineMetrics::new("pipe", "SELECT * FROM logs", &meter);
-        pm.add_input("input", "otlp");
+        let input = pm.add_input("input", "otlp");
         pm.add_output("output", "otlp");
+        input.set_health(ComponentHealth::Healthy);
         pm
     }
 

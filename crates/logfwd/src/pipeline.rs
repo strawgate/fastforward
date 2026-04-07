@@ -410,8 +410,7 @@ impl Pipeline {
 
     /// Add an input source for testing. Bypasses config-based input construction.
     pub fn with_input(mut self, _name: &str, source: Box<dyn InputSource>) -> Self {
-        let stats = Arc::new(ComponentStats::new());
-        stats.set_health(ComponentHealth::Starting);
+        let stats = Arc::new(ComponentStats::new_with_health(ComponentHealth::Starting));
         self.inputs.push(InputState {
             source,
             buf: BytesMut::with_capacity(self.batch_target_bytes),
@@ -1201,11 +1200,6 @@ fn input_poll_loop(
     // sent. This ensures batch_timeout measures "time since first data
     // arrived in this batch", preventing tiny flushes after idle periods.
     let mut buffered_since: Option<Instant> = None;
-    input.stats.set_health(reduce_component_health(
-        input.stats.health(),
-        HealthTransitionEvent::Observed(input.source.health()),
-    ));
-
     loop {
         if shutdown.is_cancelled() {
             input.stats.set_health(reduce_component_health(
@@ -1214,11 +1208,6 @@ fn input_poll_loop(
             ));
             break;
         }
-
-        input.stats.set_health(reduce_component_health(
-            input.stats.health(),
-            HealthTransitionEvent::Observed(input.source.health()),
-        ));
 
         // FramedInput handles newline framing, remainder management, and
         // format processing (CRI/Auto/passthrough). Events arriving here
@@ -1235,6 +1224,11 @@ fn input_poll_loop(
                 continue;
             }
         };
+
+        input.stats.set_health(reduce_component_health(
+            input.stats.health(),
+            HealthTransitionEvent::Observed(input.source.health()),
+        ));
 
         if events.is_empty() {
             std::thread::sleep(poll_interval);
@@ -1394,11 +1388,6 @@ async fn async_input_poll_loop(
     // Use tokio::time::Instant (not std::time::Instant) so that elapsed()
     // measures simulated time under Turmoil, not real wall-clock time.
     let mut buffered_since: Option<tokio::time::Instant> = None;
-    input.stats.set_health(reduce_component_health(
-        input.stats.health(),
-        HealthTransitionEvent::Observed(input.source.health()),
-    ));
-
     loop {
         if shutdown.is_cancelled() {
             input.stats.set_health(reduce_component_health(
@@ -1407,11 +1396,6 @@ async fn async_input_poll_loop(
             ));
             break;
         }
-
-        input.stats.set_health(reduce_component_health(
-            input.stats.health(),
-            HealthTransitionEvent::Observed(input.source.health()),
-        ));
 
         let events = match input.source.poll() {
             Ok(e) => e,
@@ -1425,6 +1409,11 @@ async fn async_input_poll_loop(
                 continue;
             }
         };
+
+        input.stats.set_health(reduce_component_health(
+            input.stats.health(),
+            HealthTransitionEvent::Observed(input.source.health()),
+        ));
 
         if events.is_empty() {
             tokio::time::sleep(poll_interval).await;
@@ -1536,7 +1525,6 @@ fn build_input_state(
     cfg: &InputConfig,
     stats: Arc<ComponentStats>,
 ) -> Result<InputState, String> {
-    stats.set_health(ComponentHealth::Starting);
     let (raw_source, format, buf_cap): (Box<dyn InputSource>, Format, usize) = match cfg.input_type
     {
         InputType::File => {

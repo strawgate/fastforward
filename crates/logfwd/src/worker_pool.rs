@@ -547,12 +547,17 @@ async fn worker_task(
                     None => break, // idle timeout or channel closed
                     Some(WorkerMsg::Shutdown) => break,
                     Some(WorkerMsg::Work(item)) => {
-                        let num_rows = item.num_rows;
-                        let submitted_at = item.submitted_at;
-                        let scan_ns = item.scan_ns;
-                        let transform_ns = item.transform_ns;
-                        let batch_id = item.batch_id;
-                        let span = item.span;
+                        let WorkItem {
+                            batch,
+                            metadata,
+                            tickets,
+                            num_rows,
+                            submitted_at,
+                            scan_ns,
+                            transform_ns,
+                            batch_id,
+                            span,
+                        } = item;
                         let queue_wait_ns = submitted_at.elapsed().as_nanos() as u64;
                         // Record which worker picked up this batch for the live dashboard.
                         let now_ns = std::time::SystemTime::now()
@@ -575,8 +580,8 @@ async fn worker_task(
                             id,
                             &mut *sink,
                             &metrics,
-                            item.batch.clone(),
-                            &item.metadata,
+                            batch,
+                            &metadata,
                             max_retry_delay,
                         )
                         .instrument(output_span.clone())
@@ -589,7 +594,7 @@ async fn worker_task(
                         drop(span);
                         if ack_tx
                             .send(AckItem {
-                                tickets: item.tickets,
+                                tickets,
                                 success,
                                 num_rows,
                                 submitted_at,

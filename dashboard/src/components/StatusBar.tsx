@@ -1,8 +1,9 @@
 import { fmtDuration } from "../lib/format";
+import type { HealthState } from "../types";
 
 interface Props {
   connected: boolean;
-  componentHealth: string;
+  componentHealth: HealthState;
   ready: "ready" | "not_ready";
   statusReason: string;
   totalErrors: number;

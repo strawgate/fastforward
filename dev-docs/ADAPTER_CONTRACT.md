@@ -196,6 +196,14 @@ and rich component health snapshots exist.
 - `stopped` means the component has finished shutting down and is not ready.
 - `failed` means the component hit a fatal condition and is not ready.
 
+The stable ordering is:
+
+`healthy < degraded < starting < stopping < stopped < failed`
+
+Status roll-ups use that ordering and keep the less-ready state. `starting` is
+therefore less ready than `healthy` or `degraded`, and aggregate status must
+not hide startup behind an otherwise healthy component.
+
 ### Readiness rules
 
 - `degraded` is visible in status and does not fail readiness by default.

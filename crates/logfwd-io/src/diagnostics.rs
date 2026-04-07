@@ -105,11 +105,13 @@ impl PipelineMetrics {
                 meter,
                 "logfwd_transform_in",
                 attrs.clone(),
+                ComponentHealth::Healthy,
             )),
             transform_out: Arc::new(ComponentStats::with_meter(
                 meter,
                 "logfwd_transform_out",
                 attrs.clone(),
+                ComponentHealth::Healthy,
             )),
             transform_errors: AtomicU64::new(0),
             inputs: Vec::new(),
@@ -168,6 +170,7 @@ impl PipelineMetrics {
             &self.meter,
             "logfwd_input",
             attrs,
+            ComponentHealth::Starting,
         ));
         self.inputs.push((name, typ, Arc::clone(&stats)));
         stats
@@ -188,6 +191,7 @@ impl PipelineMetrics {
             &self.meter,
             "logfwd_output",
             attrs,
+            ComponentHealth::Healthy,
         ));
         self.outputs.push((name, typ, Arc::clone(&stats)));
         stats
@@ -1321,6 +1325,7 @@ mod tests {
         );
 
         let inp = pm.add_input("pod_logs", "file");
+        inp.set_health(ComponentHealth::Healthy);
         inp.inc_lines(1000);
         inp.inc_bytes(50000);
         inp.inc_rotations();

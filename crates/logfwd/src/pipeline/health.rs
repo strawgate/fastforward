@@ -10,7 +10,7 @@ use logfwd_io::diagnostics::ComponentHealth;
 pub(super) enum HealthTransitionEvent {
     /// Adopt the latest health reported by the component itself.
     Observed(ComponentHealth),
-    /// A poll or fetch attempt failed, so the component is temporarily degraded.
+    /// A poll or fetch attempt failed.
     PollFailed,
     /// Shutdown or drain has started.
     ShutdownRequested,
@@ -35,9 +35,10 @@ pub(super) const fn reduce_component_health(
             _ => next,
         },
         HealthTransitionEvent::PollFailed => match current {
-            ComponentHealth::Stopping | ComponentHealth::Stopped | ComponentHealth::Failed => {
-                current
-            }
+            ComponentHealth::Starting
+            | ComponentHealth::Stopping
+            | ComponentHealth::Stopped
+            | ComponentHealth::Failed => current,
             _ => ComponentHealth::Degraded,
         },
         HealthTransitionEvent::ShutdownRequested => match current {
@@ -114,7 +115,7 @@ mod tests {
         );
         assert_eq!(
             reduce_component_health(ComponentHealth::Starting, HealthTransitionEvent::PollFailed),
-            ComponentHealth::Degraded
+            ComponentHealth::Starting
         );
         assert_eq!(
             reduce_component_health(ComponentHealth::Stopped, HealthTransitionEvent::PollFailed),
@@ -177,7 +178,10 @@ mod verification {
         let out = reduce_component_health(current, HealthTransitionEvent::PollFailed);
 
         match current {
-            ComponentHealth::Stopping | ComponentHealth::Stopped | ComponentHealth::Failed => {
+            ComponentHealth::Starting
+            | ComponentHealth::Stopping
+            | ComponentHealth::Stopped
+            | ComponentHealth::Failed => {
                 assert_eq!(out, current)
             }
             _ => assert_eq!(out, ComponentHealth::Degraded),
@@ -186,6 +190,10 @@ mod verification {
         kani::cover!(
             current == ComponentHealth::Healthy,
             "healthy degrades on poll failure"
+        );
+        kani::cover!(
+            current == ComponentHealth::Starting,
+            "starting preserves on poll failure"
         );
         kani::cover!(
             current == ComponentHealth::Stopped,
