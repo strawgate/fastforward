@@ -106,6 +106,10 @@ fn use_json_logs_for_stderr(is_terminal: bool) -> bool {
     !is_terminal
 }
 
+fn wizard_uses_interactive_terminals(stdin_is_terminal: bool, stdout_is_terminal: bool) -> bool {
+    stdin_is_terminal && stdout_is_terminal
+}
+
 macro_rules! style {
     ($color:expr, $bold:expr) => {
         if use_color() {
@@ -473,9 +477,9 @@ output:
 fn cmd_wizard() -> Result<(), CliError> {
     use config_templates::{INPUT_TEMPLATES, OUTPUT_TEMPLATES, render_config};
 
-    if !io::stdin().is_terminal() {
+    if !wizard_uses_interactive_terminals(io::stdin().is_terminal(), io::stdout().is_terminal()) {
         return Err(CliError::Config(
-            "wizard requires an interactive terminal on stdin".to_owned(),
+            "wizard requires an interactive terminal on stdin and stdout".to_owned(),
         ));
     }
     println!("{}logfwd config wizard{}", bold(), reset());
@@ -986,10 +990,13 @@ fn validate_input_format_read_only(
         InputType::Generator | InputType::Otlp => matches!(format, Format::Json),
         InputType::Udp | InputType::Tcp => matches!(format, Format::Json | Format::Raw),
         InputType::ArrowIpc => false,
-        _ => {
+        other => {
+            tracing::warn!(
+                "validate_input_format_read_only: unhandled input type {other:?} for input {name}"
+            );
             return Err(format!(
                 "input '{name}': type {:?} is not yet supported in read-only validation",
-                input_type
+                other
             ));
         }
     };
@@ -1019,6 +1026,37 @@ fn collect_yaml_files_recursive(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+fn replace_env_placeholders_for_example_validation(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut cursor = 0usize;
+
+    while let Some(rel_start) = input[cursor..].find("${") {
+        let start = cursor + rel_start;
+        out.push_str(&input[cursor..start]);
+        let value_start = start + 2;
+        if let Some(rel_end) = input[value_start..].find('}') {
+            let end = value_start + rel_end;
+            if end > value_start {
+                out.push_str("example-env-value");
+            } else {
+                out.push_str("${}");
+            }
+            cursor = end + 1;
+        } else {
+            out.push_str(&input[start..]);
+            cursor = input.len();
+            break;
+        }
+    }
+
+    if cursor < input.len() {
+        out.push_str(&input[cursor..]);
+    }
+
+    out
 }
 
 fn validate_pipelines(
@@ -1834,6 +1872,24 @@ mod cli_tests {
     }
 
     #[test]
+    fn wizard_requires_interactive_stdin_and_stdout() {
+        assert!(!wizard_uses_interactive_terminals(false, false));
+        assert!(!wizard_uses_interactive_terminals(true, false));
+        assert!(!wizard_uses_interactive_terminals(false, true));
+        assert!(wizard_uses_interactive_terminals(true, true));
+    }
+
+    #[test]
+    fn replace_env_placeholders_rewrites_all_braced_vars() {
+        let input = "a: ${FOO}\nb: ${BAR_BAZ}\nc: ${}\nd: ${UNTERMINATED";
+        let actual = replace_env_placeholders_for_example_validation(input);
+        assert_eq!(
+            actual,
+            "a: example-env-value\nb: example-env-value\nc: ${}\nd: ${UNTERMINATED"
+        );
+    }
+
+    #[test]
     fn wizard_template_renders_with_sql() {
         let input = &config_templates::INPUT_TEMPLATES[0];
         let output = &config_templates::OUTPUT_TEMPLATES[0];
@@ -1984,7 +2040,7 @@ transform: |
             };
 
             // Keep example validation hermetic: inline secrets placeholders with dummy values.
-            let raw = raw.replace("${ELASTICSEARCH_API_KEY}", "example-api-key");
+            let raw = replace_env_placeholders_for_example_validation(&raw);
 
             let config = match logfwd_config::Config::load_str(&raw) {
                 Ok(cfg) => cfg,
