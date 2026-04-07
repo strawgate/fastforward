@@ -351,7 +351,8 @@ impl SegmentFile {
         file.read_exact(&mut ipc_data)?;
 
         // Do not pre-allocate with batch_count — a corrupt footer could claim
-        // an enormous count and cause an OOM before we read a single byte.
+        // an enormous count and cause an OOM before we parse or validate any
+        // IPC batches from the already-read payload.
         let mut batches = Vec::new();
 
         // Use a single Cursor over the whole IPC data. Each StreamReader
@@ -999,13 +1000,15 @@ mod tests {
         };
         let err = corrupt.read_batches().unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
-        // Either the 1 GiB cap or the file-size cross-check fires first.
+        // With u64::MAX the 1 GiB absolute cap fires before the file-size
+        // cross-check is ever reached.
         assert!(
             err.to_string().contains("exceeds maximum"),
             "unexpected error: {err}"
         );
 
-        // Smaller lie: claim more data than fits in the file.
+        // Smaller lie: claim more data than fits in the file — this validates
+        // the file-size cross-check path rather than the absolute cap.
         let mut fake_footer2 = seg.footer;
         fake_footer2.data_size = (len * 2) as u64;
         let fake_bytes2 = fake_footer2.to_bytes();
@@ -1023,6 +1026,39 @@ mod tests {
             err2.to_string().contains("exceeds maximum"),
             "unexpected error: {err2}"
         );
+    }
+
+    #[test]
+    fn truncated_segment_returns_invalid_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let header = SegmentHeader {
+            version: SEGMENT_VERSION,
+            flags: FLAG_ZSTD,
+            segment_id: 1,
+            sql_hash: 0,
+            created_epoch_ms: 0,
+        };
+
+        let mut writer = SegmentWriter::create(dir.path(), header).unwrap();
+        writer.append(&make_batch(10)).unwrap();
+        let seg = writer.finish().unwrap();
+
+        // Truncate the file so the footer's data_size no longer fits.
+        let len = fs::metadata(&seg.path).unwrap().len();
+        OpenOptions::new()
+            .write(true)
+            .open(&seg.path)
+            .unwrap()
+            .set_len(len - 1)
+            .unwrap();
+
+        let truncated = SegmentFile {
+            path: seg.path.clone(),
+            header: seg.header,
+            footer: seg.footer,
+        };
+        let err = truncated.read_batches().unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 
     #[test]
