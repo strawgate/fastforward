@@ -19,7 +19,7 @@ members = [
 # default-members: crates that compile without datafusion (~30s vs ~3min).
 # Bare `cargo check/clippy` uses these. Use `--workspace` or `-p logfwd`
 # to include logfwd-transform (datafusion) and the binary crate.
-# CI always uses --workspace.
+# CI and `just ci-all` always use --workspace.
 default-members = [
     "crates/logfwd-config",
     "crates/logfwd-types",
