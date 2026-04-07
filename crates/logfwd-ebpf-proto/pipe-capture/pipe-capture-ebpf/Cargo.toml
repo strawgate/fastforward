@@ -3,13 +3,8 @@ name = "pipe-capture-ebpf"
 version = "0.1.0"
 edition = "2021"
 
-[package.metadata.cargo-machete]
-# Documented ignores: used conceptually in eBPF design even if not directly referenced.
-ignored = ["aya-log-ebpf"]
-
 [dependencies]
 aya-ebpf = "0.1"
-aya-log-ebpf = "0.1"
 pipe-capture-common = { path = "../pipe-capture-common" }
 
 [[bin]]

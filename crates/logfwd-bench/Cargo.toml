@@ -5,11 +5,6 @@ edition.workspace = true
 rust-version.workspace = true
 publish = false
 
-[package.metadata.cargo-machete]
-# Documented ignores: These crates are used for evaluating server alternatives in comments/benchmarking reports
-# and should be tracked here even if not directly imported into the current code path.
-ignored = ["hyper", "hyper-util", "tiny_http", "tower-http"]
-
 [features]
 dhat-heap = ["dep:dhat"]
 
@@ -40,13 +35,9 @@ dhat = { version = "0.3", optional = true }
 
 # Research: library evaluation candidates
 axum = "0.8"
-tower-http = { version = "0.6", features = ["limit", "decompression-zstd", "decompression-gzip"] }
 async-compression = { version = "0.4", features = ["tokio", "zstd", "gzip"] }
 backon = { version = "1", features = ["tokio-sleep"] }
-hyper = { version = "1", features = ["server", "http1"] }
-hyper-util = { version = "0.1", features = ["tokio"] }
 zstd = "0.13"
-tiny_http = "0.12"
 prost = "0.14"
 opentelemetry-proto = { version = "0.31", features = ["logs", "gen-tonic-messages"] }
 globset = "0.4"

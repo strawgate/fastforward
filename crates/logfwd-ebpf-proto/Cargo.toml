@@ -5,10 +5,6 @@ edition.workspace = true
 rust-version.workspace = true
 publish = false
 
-[package.metadata.cargo-machete]
-# Documented ignores: used by test helpers.
-ignored = ["serde_json"]
-
 [lib]
 doctest = false
 
@@ -19,7 +15,6 @@ doctest = false
 # - Userspace integration design (lib.rs)
 
 [dependencies]
-serde_json = "1"  # for test helpers only
 
 [dev-dependencies]
 

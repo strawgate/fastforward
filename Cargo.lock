@@ -2444,8 +2444,6 @@ dependencies = [
  "fastrand",
  "glob",
  "globset",
- "hyper",
- "hyper-util",
  "libc",
  "logfwd-arrow",
  "logfwd-core",
@@ -2463,9 +2461,7 @@ dependencies = [
  "sonic-rs",
  "stats_alloc",
  "tempfile",
- "tiny_http",
  "tokio",
- "tower-http",
  "zstd",
 ]
 
@@ -2515,9 +2511,6 @@ dependencies = [
 [[package]]
 name = "logfwd-ebpf-proto"
 version = "0.1.0"
-dependencies = [
- "serde_json",
-]
 
 [[package]]
 name = "logfwd-io"
