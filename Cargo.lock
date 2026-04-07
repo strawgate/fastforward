@@ -2614,6 +2614,7 @@ dependencies = [
  "bytes",
  "crossbeam-channel",
  "dhat",
+ "flate2",
  "globset",
  "libc",
  "logfwd-arrow",

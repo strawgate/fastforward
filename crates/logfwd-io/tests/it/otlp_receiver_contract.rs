@@ -128,7 +128,7 @@ fn semantic_request() -> ExportLogsServiceRequest {
 }
 
 #[test]
-fn otlp_receiver_preserves_semantics_across_json_protobuf_and_zstd() {
+fn otlp_receiver_preserves_semantics_across_json_protobuf_zstd_and_gzip() {
     let mut receiver = OtlpReceiverInput::new("contract", "127.0.0.1:0").unwrap();
     let url = format!("http://{}/v1/logs", receiver.local_addr());
 
@@ -180,7 +180,22 @@ fn otlp_receiver_preserves_semantics_across_json_protobuf_and_zstd() {
     assert_eq!(status, 200, "zstd OTLP request should succeed");
     let zstd_row = poll_single_row(&mut receiver, Duration::from_secs(2));
 
-    for row in [&json_row, &protobuf_row, &zstd_row] {
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    use std::io::Write as _;
+    encoder
+        .write_all(&protobuf_body)
+        .expect("gzip write should succeed");
+    let gzip_body = encoder.finish().expect("gzip finish should succeed");
+    let status = send_status(
+        &url,
+        &gzip_body,
+        "application/x-protobuf",
+        Some("gzip"),
+    );
+    assert_eq!(status, 200, "gzip OTLP request should succeed");
+    let gzip_row = poll_single_row(&mut receiver, Duration::from_secs(2));
+
+    for row in [&json_row, &protobuf_row, &zstd_row, &gzip_row] {
         assert_eq!(
             row, &expected_row,
             "receiver output must match the official OTLP protobuf oracle"
@@ -191,6 +206,10 @@ fn otlp_receiver_preserves_semantics_across_json_protobuf_and_zstd() {
     assert_eq!(
         protobuf_row, zstd_row,
         "compressed protobuf must match uncompressed protobuf"
+    );
+    assert_eq!(
+        protobuf_row, gzip_row,
+        "gzip protobuf must match uncompressed protobuf"
     );
 }
 

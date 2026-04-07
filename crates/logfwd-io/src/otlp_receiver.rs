@@ -16,6 +16,7 @@ use std::time::Duration;
 use arrow::record_batch::RecordBatch;
 use base64::Engine as _;
 use bytes::Bytes;
+use flate2::read::GzDecoder;
 use logfwd_arrow::{Scanner, StreamingBuilder};
 use logfwd_core::scan_config::ScanConfig;
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
@@ -190,44 +191,52 @@ impl OtlpReceiverInput {
                         .map(|h| h.value.as_str().to_lowercase());
 
                     let body = match content_encoding.as_deref() {
-                        Some("zstd") => {
-                            let decoder = match zstd::Decoder::new(&body[..]) {
-                                Ok(d) => d,
-                                Err(_) => {
-                                    let _ = request.respond(
-                                        tiny_http::Response::from_string(
-                                            "zstd decompression failed",
-                                        )
-                                        .with_status_code(400),
-                                    );
-                                    continue;
-                                }
-                            };
-                            let mut decompressed =
-                                Vec::with_capacity(body.len().min(MAX_BODY_SIZE));
-                            match decoder
-                                .take(MAX_BODY_SIZE as u64 + 1)
-                                .read_to_end(&mut decompressed)
-                            {
-                                Ok(n) if n > MAX_BODY_SIZE => {
-                                    let _ = request.respond(
-                                        tiny_http::Response::from_string("payload too large")
-                                            .with_status_code(413),
-                                    );
-                                    continue;
-                                }
-                                Ok(_) => decompressed,
-                                Err(_) => {
-                                    let _ = request.respond(
-                                        tiny_http::Response::from_string(
-                                            "zstd decompression failed",
-                                        )
-                                        .with_status_code(400),
-                                    );
-                                    continue;
-                                }
+                        Some("zstd") => match decompress_zstd(&body) {
+                            Ok(body) => body,
+                            Err(InputError::Receiver(msg)) => {
+                                let _ = request.respond(
+                                    tiny_http::Response::from_string(msg).with_status_code(400),
+                                );
+                                continue;
                             }
-                        }
+                            Err(InputError::Io(e)) if e.kind() == io::ErrorKind::InvalidData => {
+                                let _ = request.respond(
+                                    tiny_http::Response::from_string(e.to_string())
+                                        .with_status_code(413),
+                                );
+                                continue;
+                            }
+                            Err(_) => {
+                                let _ = request.respond(
+                                    tiny_http::Response::from_string("zstd decompression failed")
+                                        .with_status_code(400),
+                                );
+                                continue;
+                            }
+                        },
+                        Some("gzip") => match decompress_gzip(&body) {
+                            Ok(body) => body,
+                            Err(InputError::Receiver(msg)) => {
+                                let _ = request.respond(
+                                    tiny_http::Response::from_string(msg).with_status_code(400),
+                                );
+                                continue;
+                            }
+                            Err(InputError::Io(e)) if e.kind() == io::ErrorKind::InvalidData => {
+                                let _ = request.respond(
+                                    tiny_http::Response::from_string(e.to_string())
+                                        .with_status_code(413),
+                                );
+                                continue;
+                            }
+                            Err(_) => {
+                                let _ = request.respond(
+                                    tiny_http::Response::from_string("gzip decompression failed")
+                                        .with_status_code(400),
+                                );
+                                continue;
+                            }
+                        },
                         None | Some("identity") => body,
                         Some(other) => {
                             let _ = request.respond(
@@ -404,6 +413,36 @@ impl ReceiverPayload {
             ReceiverPayload::JsonLines(lines) => lines.is_empty(),
             ReceiverPayload::Batch(batch) => batch.num_rows() == 0,
         }
+    }
+}
+
+fn decompress_zstd(body: &[u8]) -> Result<Vec<u8>, InputError> {
+    let decoder = zstd::Decoder::new(body)
+        .map_err(|_| InputError::Receiver("zstd decompression failed".to_string()))?;
+    read_decompressed_body(decoder, body.len(), "zstd decompression failed")
+}
+
+fn decompress_gzip(body: &[u8]) -> Result<Vec<u8>, InputError> {
+    let decoder = GzDecoder::new(body);
+    read_decompressed_body(decoder, body.len(), "gzip decompression failed")
+}
+
+fn read_decompressed_body(
+    reader: impl io::Read,
+    compressed_len: usize,
+    error_label: &str,
+) -> Result<Vec<u8>, InputError> {
+    let mut decompressed = Vec::with_capacity(compressed_len.min(MAX_BODY_SIZE));
+    match reader
+        .take(MAX_BODY_SIZE as u64 + 1)
+        .read_to_end(&mut decompressed)
+    {
+        Ok(n) if n > MAX_BODY_SIZE => Err(InputError::Io(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "payload too large",
+        ))),
+        Ok(_) => Ok(decompressed),
+        Err(_) => Err(InputError::Receiver(error_label.to_string())),
     }
 }
 

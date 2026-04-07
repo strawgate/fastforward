@@ -490,6 +490,72 @@ fn otlp_protobuf_roundtrip() {
 }
 
 #[test]
+fn otlp_gzip_protobuf_roundtrip() {
+    use opentelemetry_proto::tonic::{
+        collector::logs::v1::ExportLogsServiceRequest,
+        common::v1::{AnyValue, KeyValue, any_value::Value},
+        logs::v1::{LogRecord, ResourceLogs, ScopeLogs},
+    };
+    use prost::Message;
+    use std::io::Write as _;
+
+    let mut input = OtlpReceiverInput::new("test", "127.0.0.1:0").unwrap();
+    let addr = input.local_addr();
+    let url = format!("http://{addr}/v1/logs");
+
+    let request = ExportLogsServiceRequest {
+        resource_logs: vec![ResourceLogs {
+            scope_logs: vec![ScopeLogs {
+                log_records: vec![LogRecord {
+                    time_unix_nano: 1_700_000_000_000_000_000,
+                    severity_text: "INFO".into(),
+                    body: Some(AnyValue {
+                        value: Some(Value::StringValue("test gzip".into())),
+                    }),
+                    attributes: vec![KeyValue {
+                        key: "env".into(),
+                        value: Some(AnyValue {
+                            value: Some(Value::StringValue("prod".into())),
+                        }),
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+    };
+
+    let body = request.encode_to_vec();
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    encoder.write_all(&body).expect("gzip write");
+    let gzipped = encoder.finish().expect("gzip finish");
+
+    let resp = ureq::post(&url)
+        .header("Content-Type", "application/x-protobuf")
+        .header("Content-Encoding", "gzip")
+        .send(&gzipped)
+        .expect("OTLP POST should succeed");
+    assert_eq!(resp.status(), 200);
+
+    let data = poll_until_data(&mut input, Duration::from_secs(5));
+    let text = String::from_utf8_lossy(&data);
+
+    assert!(
+        text.contains("\"level\":\"INFO\""),
+        "expected level field, got: {text}"
+    );
+    assert!(
+        text.contains("\"message\":\"test gzip\""),
+        "expected message field, got: {text}"
+    );
+    assert!(
+        text.contains("\"env\":\"prod\""),
+        "expected env attribute, got: {text}"
+    );
+}
+
+#[test]
 fn otlp_oversized_body() {
     let receiver = OtlpReceiverInput::new("test", "127.0.0.1:0").unwrap();
     let addr = receiver.local_addr();
