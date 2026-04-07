@@ -116,7 +116,10 @@ fn assert_accounted_bytes_for_payload(
         assert_eq!(status, 200, "request should succeed");
 
         let events = poll_until_events(&mut input, Duration::from_secs(2));
-        assert!(!events.is_empty(), "receiver should emit at least one event");
+        assert!(
+            !events.is_empty(),
+            "receiver should emit at least one event"
+        );
         assert_eq!(
             stats.bytes(),
             body.len() as u64,
@@ -390,11 +393,7 @@ fn otlp_receiver_legacy_and_structured_account_gzip_body_bytes() {
         .expect("gzip write should succeed");
     let gzip_body = encoder.finish().expect("gzip finish should succeed");
 
-    assert_accounted_bytes_for_payload(
-        &gzip_body,
-        "application/x-protobuf",
-        Some("gzip"),
-    );
+    assert_accounted_bytes_for_payload(&gzip_body, "application/x-protobuf", Some("gzip"));
 }
 
 #[test]
@@ -403,11 +402,7 @@ fn otlp_receiver_legacy_and_structured_account_zstd_body_bytes() {
     let protobuf_body = request.encode_to_vec();
     let zstd_body = zstd::bulk::compress(&protobuf_body, 1).expect("zstd compress");
 
-    assert_accounted_bytes_for_payload(
-        &zstd_body,
-        "application/x-protobuf",
-        Some("zstd"),
-    );
+    assert_accounted_bytes_for_payload(&zstd_body, "application/x-protobuf", Some("zstd"));
 }
 
 #[test]
