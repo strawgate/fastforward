@@ -626,7 +626,6 @@ async fn worker_task(
     // permanently unready because the pool can respawn workers on demand.
     if let Err(e) = sink.shutdown().await {
         tracing::error!(worker_id = id, error = %e, "worker_pool: sink shutdown failed");
-        apply_output_health_event(&metrics, sink.name(), OutputHealthEvent::FatalFailure);
         metrics.output_error(sink.name());
     }
 }
@@ -1425,6 +1424,11 @@ mod tests {
             out_stats.errors(),
             1,
             "expected output_error to increment stats when shutdown fails"
+        );
+        assert_eq!(
+            out_stats.health(),
+            ComponentHealth::Stopped,
+            "shutdown failure should not make the output look permanently failed"
         );
     }
 

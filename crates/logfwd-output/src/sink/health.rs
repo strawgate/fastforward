@@ -41,8 +41,14 @@ pub const fn reduce_output_health(
             | ComponentHealth::Failed => current,
             _ => ComponentHealth::Starting,
         },
-        OutputHealthEvent::StartupSucceeded | OutputHealthEvent::DeliverySucceeded => match current
-        {
+        OutputHealthEvent::StartupSucceeded => match current {
+            ComponentHealth::Degraded => ComponentHealth::Degraded,
+            ComponentHealth::Stopping | ComponentHealth::Stopped | ComponentHealth::Failed => {
+                current
+            }
+            _ => ComponentHealth::Healthy,
+        },
+        OutputHealthEvent::DeliverySucceeded => match current {
             ComponentHealth::Stopping | ComponentHealth::Stopped | ComponentHealth::Failed => {
                 current
             }
@@ -139,6 +145,24 @@ mod tests {
     }
 
     #[test]
+    fn startup_success_does_not_clear_retrying_degradation() {
+        assert_eq!(
+            reduce_output_health(
+                ComponentHealth::Degraded,
+                OutputHealthEvent::StartupSucceeded
+            ),
+            ComponentHealth::Degraded
+        );
+        assert_eq!(
+            reduce_output_health(
+                ComponentHealth::Starting,
+                OutputHealthEvent::StartupSucceeded
+            ),
+            ComponentHealth::Healthy
+        );
+    }
+
+    #[test]
     fn retrying_degrades_non_terminal_outputs() {
         assert_eq!(
             reduce_output_health(ComponentHealth::Healthy, OutputHealthEvent::Retrying),
@@ -211,6 +235,20 @@ mod verification {
             assert_eq!(out, ComponentHealth::Failed);
         } else {
             assert_eq!(out, ComponentHealth::Stopped);
+        }
+    }
+
+    #[kani::proof]
+    fn verify_startup_succeeded_preserves_retrying_degradation() {
+        let current = ComponentHealth::from_repr(kani::any());
+        let out = reduce_output_health(current, OutputHealthEvent::StartupSucceeded);
+
+        match current {
+            ComponentHealth::Degraded => assert_eq!(out, ComponentHealth::Degraded),
+            ComponentHealth::Stopping | ComponentHealth::Stopped | ComponentHealth::Failed => {
+                assert_eq!(out, current)
+            }
+            _ => assert_eq!(out, ComponentHealth::Healthy),
         }
     }
 

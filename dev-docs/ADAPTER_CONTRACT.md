@@ -200,6 +200,11 @@ and rich component health snapshots exist.
 - `stopping` means shutdown or drain has started and readiness should fail.
 - `stopped` means the component has finished shutting down and is not ready.
 - `failed` means the component hit a fatal condition and is not ready.
+- output startup success must not clear an already-`degraded` retrying state;
+  only a later successful delivery may recover that output to `healthy`.
+- per-worker sink shutdown errors during idle exit or scale-in should count as
+  output errors, but must not by themselves make the shared output health
+  permanently `failed`.
 
 The stable ordering is:
 
