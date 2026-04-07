@@ -3,6 +3,10 @@
 # Usage:  just --list
 
 # Default recipe: run all checks (same as CI)
+
+# Limit cargo parallelism to avoid starving other processes.
+# Override with: JOBS=8 just test-all
+export CARGO_BUILD_JOBS := env("JOBS", "2")
 default: ci
 
 # Format all Rust code
