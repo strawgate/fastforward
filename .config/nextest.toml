@@ -9,4 +9,5 @@ test-threads = 2
 status-level = "fail"
 final-status-level = "fail"
 failure-output = "immediate"
-test-threads = 2
+# CI runners have 4 vCPU; NEXTEST_TEST_THREADS env var overrides this.
+test-threads = 4
