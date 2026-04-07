@@ -1387,6 +1387,17 @@ mod tests {
         server
     }
 
+    fn server_with_single_input_health(health: ComponentHealth) -> DiagnosticsServer {
+        let meter = opentelemetry::global::meter("test");
+        let mut pm = PipelineMetrics::new("default", "SELECT * FROM logs", &meter);
+        let input = pm.add_input("receiver", "tcp");
+        input.set_health(health);
+
+        let mut server = DiagnosticsServer::new("127.0.0.1:0");
+        server.add_pipeline(Arc::new(pm));
+        server
+    }
+
     /// Simple HTTP GET helper using raw TCP. Retries connection up to 20
     /// times with 50ms backoff to handle server startup race on macOS.
     fn http_get(port: u16, path: &str) -> (u16, String) {
@@ -1863,6 +1874,80 @@ mod tests {
             body.contains(r#""reason":"components_degraded_but_operational""#),
             "body: {}",
             body
+        );
+    }
+
+    #[test]
+    fn test_ready_endpoint_stays_in_sync_with_admin_ready_snapshot() {
+        fn assert_ready_snapshot_sync(
+            server: DiagnosticsServer,
+            expected_status: &str,
+            expected_reason: &str,
+            expected_http_status: u16,
+        ) {
+            let (_handle, addr) = server.start().expect("server bind failed");
+            let port = addr.port();
+            thread::sleep(std::time::Duration::from_millis(100));
+
+            let (ready_http_status, ready_body) = http_get(port, "/ready");
+            let (status_http_status, status_body) = http_get(port, "/admin/v1/status");
+
+            assert_eq!(status_http_status, 200, "status body: {status_body}");
+            assert_eq!(
+                ready_http_status, expected_http_status,
+                "ready body: {ready_body}"
+            );
+
+            let ready_json: serde_json::Value =
+                serde_json::from_str(&ready_body).expect("invalid /ready JSON");
+            let status_json: serde_json::Value =
+                serde_json::from_str(&status_body).expect("invalid /admin/v1/status JSON");
+
+            let ready_state = ready_json["status"]
+                .as_str()
+                .expect("missing /ready status");
+            let ready_reason = ready_json["reason"]
+                .as_str()
+                .expect("missing /ready reason");
+            let admin_state = status_json["ready"]["status"]
+                .as_str()
+                .expect("missing /admin/v1/status ready.status");
+            let admin_reason = status_json["ready"]["reason"]
+                .as_str()
+                .expect("missing /admin/v1/status ready.reason");
+
+            assert_eq!(ready_state, expected_status);
+            assert_eq!(ready_reason, expected_reason);
+            assert_eq!(ready_state, admin_state);
+            assert_eq!(ready_reason, admin_reason);
+        }
+
+        assert_ready_snapshot_sync(
+            DiagnosticsServer::new("127.0.0.1:0"),
+            "not_ready",
+            "no_pipelines_registered",
+            503,
+        );
+
+        assert_ready_snapshot_sync(
+            server_with_single_input_health(ComponentHealth::Healthy),
+            "ready",
+            "all_components_healthy",
+            200,
+        );
+
+        assert_ready_snapshot_sync(
+            server_with_single_input_health(ComponentHealth::Starting),
+            "not_ready",
+            "components_starting",
+            503,
+        );
+
+        assert_ready_snapshot_sync(
+            server_with_single_input_health(ComponentHealth::Degraded),
+            "ready",
+            "components_degraded_but_operational",
+            200,
         );
     }
 

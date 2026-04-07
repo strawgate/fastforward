@@ -264,7 +264,7 @@ mod tests {
 #[cfg(kani)]
 mod verification {
     use super::{
-        HealthReasonTag, ReadyReasonTag, ReadinessImpactTag, health_reason_tag,
+        HealthReasonTag, ReadinessImpactTag, ReadyReasonTag, health_reason_tag,
         readiness_impact_tag, readiness_snapshot_from_state,
     };
     use logfwd_types::diagnostics::ComponentHealth;
