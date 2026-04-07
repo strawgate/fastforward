@@ -61,6 +61,7 @@ use self::health::{
 const DRAIN_CANCEL_GRACE: Duration = Duration::from_secs(5);
 #[cfg(test)]
 const DRAIN_CANCEL_GRACE: Duration = Duration::from_millis(50);
+const MAX_REJECTION_REASON_BYTES: usize = 256;
 
 // ---------------------------------------------------------------------------
 // Public message types
@@ -114,6 +115,19 @@ impl DeliveryOutcome {
     pub const fn is_delivered(&self) -> bool {
         matches!(self, Self::Delivered)
     }
+}
+
+fn bound_rejection_reason(mut reason: String) -> String {
+    if reason.len() <= MAX_REJECTION_REASON_BYTES {
+        return reason;
+    }
+    let mut boundary = MAX_REJECTION_REASON_BYTES;
+    while boundary > 0 && !reason.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    reason.truncate(boundary);
+    reason.push_str("...");
+    reason
 }
 
 pub struct AckItem {
@@ -726,26 +740,25 @@ async fn worker_task(
                         // ack select loop, which can be starved by flush_batch.await blocking.
                         metrics.finish_active_batch(batch_id);
                         drop(span);
-                        if ack_tx
-                            .send(AckItem {
-                                tickets,
-                                outcome: outcome.clone(),
-                                num_rows,
-                                submitted_at,
-                                scan_ns,
-                                transform_ns,
-                                output_ns,
-                                queue_wait_ns,
-                                send_latency_ns,
-                                batch_id,
-                                output_name: sink.name().to_string(),
-                            })
-                            .is_err()
-                        {
+                        let ack = AckItem {
+                            tickets,
+                            outcome,
+                            num_rows,
+                            submitted_at,
+                            scan_ns,
+                            transform_ns,
+                            output_ns,
+                            queue_wait_ns,
+                            send_latency_ns,
+                            batch_id,
+                            output_name: sink.name().to_string(),
+                        };
+                        if let Err(send_err) = ack_tx.send(ack) {
+                            let lost_ack = send_err.0;
                             tracing::warn!(
                                 worker_id = id,
-                                num_rows,
-                                "outcome" = ?outcome,
+                                num_rows = lost_ack.num_rows,
+                                "outcome" = ?lost_ack.outcome,
                                 "worker: ack channel closed, ack lost"
                             );
                         }
@@ -833,7 +846,9 @@ async fn process_item(
                 tracing::warn!(worker_id, %reason, "worker_pool: batch rejected");
                 output_health.apply_worker_event(worker_id, OutputHealthEvent::FatalFailure);
                 return (
-                    DeliveryOutcome::Rejected { reason },
+                    DeliveryOutcome::Rejected {
+                        reason: bound_rejection_reason(reason),
+                    },
                     send_latency_ns,
                     retries_count,
                 );
@@ -1161,6 +1176,20 @@ mod tests {
     // -----------------------------------------------------------------------
     // Pure dispatch_step tests (no async required)
     // -----------------------------------------------------------------------
+
+    #[test]
+    fn rejection_reason_bound_keeps_short_messages() {
+        let reason = "bad request".to_string();
+        assert_eq!(bound_rejection_reason(reason.clone()), reason);
+    }
+
+    #[test]
+    fn rejection_reason_bound_truncates_long_messages() {
+        let reason = "x".repeat(MAX_REJECTION_REASON_BYTES + 32);
+        let bounded = bound_rejection_reason(reason);
+        assert!(bounded.ends_with("..."));
+        assert!(bounded.len() <= MAX_REJECTION_REASON_BYTES + 3);
+    }
 
     #[test]
     fn dispatch_empty_pool_spawns() {
