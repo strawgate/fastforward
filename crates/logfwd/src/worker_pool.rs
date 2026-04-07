@@ -183,7 +183,6 @@ impl OutputHealthTracker {
         state.idle_health = idle_health_after_worker_insert(state.idle_health);
         state.worker_slots.insert(worker_id, initial);
         let aggregate = Self::aggregate(&state);
-        drop(state);
         self.publish(aggregate);
         aggregate
     }
@@ -205,7 +204,6 @@ impl OutputHealthTracker {
         let next = reduce_worker_slot_health(current, event);
         state.worker_slots.insert(worker_id, next);
         let aggregate = Self::aggregate(&state);
-        drop(state);
         self.publish(aggregate);
         aggregate
     }
@@ -217,7 +215,6 @@ impl OutputHealthTracker {
             .expect("output health tracker mutex poisoned during worker removal");
         state.worker_slots.remove(&worker_id);
         let aggregate = Self::aggregate(&state);
-        drop(state);
         self.publish(aggregate);
         aggregate
     }
@@ -238,8 +235,19 @@ impl OutputHealthTracker {
             .expect("output health tracker mutex poisoned during pool health update");
         state.idle_health = health;
         let aggregate = Self::aggregate(&state);
-        drop(state);
         self.publish(aggregate);
+    }
+
+    fn clear_workers_and_set_pool_health(&self, health: ComponentHealth) -> ComponentHealth {
+        let mut state = self
+            .state
+            .lock()
+            .expect("output health tracker mutex poisoned during forced worker clear");
+        state.worker_slots.clear();
+        state.idle_health = health;
+        let aggregate = Self::aggregate(&state);
+        self.publish(aggregate);
+        aggregate
     }
 
     #[cfg(test)]
@@ -498,6 +506,7 @@ impl OutputWorkerPool {
     pub async fn drain(&mut self, graceful_timeout: Duration) {
         self.output_health
             .set_pool_health(ComponentHealth::Stopping);
+        let mut forced_abort = false;
         // Phase 1 — signal all workers.
         // Use try_send to avoid blocking if a worker's channel is full (e.g.,
         // it is stuck in send_batch). Dropping the Sender below also signals
@@ -547,9 +556,15 @@ impl OutputWorkerPool {
             // abort them. AckItems for their in-flight batches are lost —
             // callers must treat a forced drain as a hard failure.
             self.join_set.shutdown().await;
+            forced_abort = true;
         }
         // After this point all workers have exited and sent their final acks.
-        self.output_health.set_pool_health(ComponentHealth::Stopped);
+        if forced_abort {
+            self.output_health
+                .clear_workers_and_set_pool_health(ComponentHealth::Stopped);
+        } else {
+            self.output_health.set_pool_health(ComponentHealth::Stopped);
+        }
     }
 
     /// Spawn a new worker task and return a handle.
@@ -1704,6 +1719,28 @@ mod tests {
         assert_eq!(out_stats.health(), ComponentHealth::Healthy);
         assert_eq!(tracker.slot_health(1), Some(ComponentHealth::Healthy));
         assert_eq!(tracker.slot_health(999), None);
+    }
+
+    #[test]
+    fn output_health_tracker_force_clear_drops_stale_worker_slots() {
+        let meter = logfwd_test_utils::test_meter();
+        let mut pm = PipelineMetrics::new("pipe", "", &meter);
+        let out_stats = pm.add_output("output_0", "http");
+        let tracker = OutputHealthTracker::new(vec![Arc::clone(&out_stats)]);
+
+        tracker.insert_worker(1, ComponentHealth::Healthy);
+        tracker.insert_worker(2, ComponentHealth::Healthy);
+        tracker.apply_worker_event(2, OutputHealthEvent::FatalFailure);
+        assert!(tracker.has_active_workers());
+        assert_eq!(out_stats.health(), ComponentHealth::Failed);
+
+        let aggregate = tracker.clear_workers_and_set_pool_health(ComponentHealth::Stopped);
+
+        assert_eq!(aggregate, ComponentHealth::Stopped);
+        assert_eq!(out_stats.health(), ComponentHealth::Stopped);
+        assert!(!tracker.has_active_workers());
+        assert_eq!(tracker.slot_health(1), None);
+        assert_eq!(tracker.slot_health(2), None);
     }
 
     #[tokio::test]

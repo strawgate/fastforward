@@ -102,6 +102,11 @@ Kani is NOT required for: I/O operations, async runtime logic, complex state mac
 > 8-10 transitions (use proptest), heap-heavy `Vec`/`HashMap` code (use proptest + Miri),
 simple getters/setters.
 
+If a review tool or human review finds a state-machine bug in mixed async/runtime code,
+do not stop at patching the shell. Extract the transition policy into a local pure
+reducer or state module when feasible, then add Kani proofs for single-step invariants
+and proptest sequence coverage for multi-step behavior.
+
 ### Running proofs
 
 ```bash
