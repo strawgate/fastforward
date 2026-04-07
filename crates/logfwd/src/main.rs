@@ -188,8 +188,8 @@ async fn main_inner() -> i32 {
         "--blackhole" => cmd_blackhole(&args).await,
         "--generate-json" => cmd_generate_json(&args),
         "--effective-config" => cmd_effective_config(&args),
-        "--init" => cmd_init(),
-        "--wizard" => cmd_wizard(),
+        "--init" => cmd_init(&args),
+        "--wizard" => cmd_wizard(&args),
         "--completions" => cmd_completions(&args),
         other => {
             eprintln!("{}error{}: unknown command: {other}", red(), reset());
@@ -376,6 +376,11 @@ async fn cmd_config(args: &[String]) -> Result<(), CliError> {
 }
 
 async fn cmd_blackhole(args: &[String]) -> Result<(), CliError> {
+    if args.len() > 3 {
+        eprintln!("  logfwd --blackhole [bind_addr]");
+        return Err(CliError::Config(format!("unknown argument: {}", args[3])));
+    }
+
     let addr = args.get(2).map_or("127.0.0.1:4318", String::as_str);
 
     // Validate addr using the same hostname-accepting logic as the config
@@ -407,12 +412,14 @@ async fn cmd_blackhole(args: &[String]) -> Result<(), CliError> {
 
 fn cmd_generate_json(args: &[String]) -> Result<(), CliError> {
     if args.len() < 4 {
-        eprintln!(
-            "{}error{}: --generate-json requires <num_lines> <output_file>",
-            red(),
-            reset(),
-        );
-        return Err(CliError::Config("missing arguments".to_owned()));
+        eprintln!("  logfwd --generate-json <num_lines> <output_file>");
+        return Err(CliError::Config(
+            "--generate-json requires <num_lines> <output_file>".to_owned(),
+        ));
+    }
+    if args.len() > 4 {
+        eprintln!("  logfwd --generate-json <num_lines> <output_file>");
+        return Err(CliError::Config(format!("unknown argument: {}", args[4])));
     }
     let num_lines: usize = match args[2].parse() {
         Ok(n) => n,
@@ -460,7 +467,12 @@ fn cmd_effective_config(args: &[String]) -> Result<(), CliError> {
     Ok(())
 }
 
-fn cmd_init() -> Result<(), CliError> {
+fn cmd_init(args: &[String]) -> Result<(), CliError> {
+    if args.len() > 2 {
+        eprintln!("  logfwd --init");
+        return Err(CliError::Config(format!("unknown argument: {}", args[2])));
+    }
+
     let path = std::path::Path::new("logfwd.yaml");
 
     let template = r#"# logfwd configuration
@@ -513,8 +525,13 @@ output:
     Ok(())
 }
 
-fn cmd_wizard() -> Result<(), CliError> {
+fn cmd_wizard(args: &[String]) -> Result<(), CliError> {
     use config_templates::{INPUT_TEMPLATES, OUTPUT_TEMPLATES, render_config};
+
+    if args.len() > 2 {
+        eprintln!("  logfwd --wizard");
+        return Err(CliError::Config(format!("unknown argument: {}", args[2])));
+    }
 
     println!("{}logfwd config wizard{}", bold(), reset());
     println!("Pick what you want to collect and where to send it.");
@@ -619,17 +636,24 @@ fn prompt_text(prompt: &str, default: &str) -> Result<String, CliError> {
 }
 
 fn cmd_completions(args: &[String]) -> Result<(), CliError> {
-    let shell = args.get(2).map_or("", String::as_str);
+    if args.len() < 3 {
+        eprintln!("  logfwd --completions <bash|zsh|fish>");
+        return Err(CliError::Config(
+            "--completions requires a shell name".to_string(),
+        ));
+    }
+    if args.len() > 3 {
+        eprintln!("  logfwd --completions <bash|zsh|fish>");
+        return Err(CliError::Config(format!("unknown argument: {}", args[3])));
+    }
+
+    let shell = args[2].as_str();
     match shell {
         "bash" => print!("{}", completions_bash()),
         "zsh" => print!("{}", completions_zsh()),
         "fish" => print!("{}", completions_fish()),
         other => {
-            let msg = if other.is_empty() {
-                "--completions requires a shell name".to_string()
-            } else {
-                format!("unknown shell: {other}")
-            };
+            let msg = format!("unknown shell: {other}");
             eprintln!("  logfwd --completions <bash|zsh|fish>");
             return Err(CliError::Config(msg));
         }
@@ -1746,5 +1770,67 @@ output:
         ];
         let err = cmd_effective_config(&args).expect_err("expected extra-arg rejection");
         assert_eq!(err.to_string(), "unknown argument: --validate");
+    }
+
+    #[test]
+    fn completions_rejects_extra_args() {
+        let args = vec![
+            "logfwd".to_string(),
+            "--completions".to_string(),
+            "bash".to_string(),
+            "extra".to_string(),
+        ];
+        let err = cmd_completions(&args).expect_err("expected extra-arg rejection");
+        assert_eq!(err.to_string(), "unknown argument: extra");
+    }
+
+    #[test]
+    fn generate_json_rejects_extra_args() {
+        let args = vec![
+            "logfwd".to_string(),
+            "--generate-json".to_string(),
+            "1".to_string(),
+            "out.json".to_string(),
+            "extra".to_string(),
+        ];
+        let err = cmd_generate_json(&args).expect_err("expected extra-arg rejection");
+        assert_eq!(err.to_string(), "unknown argument: extra");
+    }
+
+    #[test]
+    fn init_rejects_extra_args() {
+        let args = vec![
+            "logfwd".to_string(),
+            "--init".to_string(),
+            "extra".to_string(),
+        ];
+        let err = cmd_init(&args).expect_err("expected extra-arg rejection");
+        assert_eq!(err.to_string(), "unknown argument: extra");
+    }
+
+    #[test]
+    fn wizard_rejects_extra_args() {
+        let args = vec![
+            "logfwd".to_string(),
+            "--wizard".to_string(),
+            "extra".to_string(),
+        ];
+        let err = cmd_wizard(&args).expect_err("expected extra-arg rejection");
+        assert_eq!(err.to_string(), "unknown argument: extra");
+    }
+
+    #[test]
+    fn blackhole_rejects_extra_args() {
+        let args = vec![
+            "logfwd".to_string(),
+            "--blackhole".to_string(),
+            "127.0.0.1:4318".to_string(),
+            "extra".to_string(),
+        ];
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        let err = rt
+            .block_on(cmd_blackhole(&args))
+            .expect_err("expected extra-arg rejection");
+        assert_eq!(err.to_string(), "unknown argument: extra");
     }
 }
