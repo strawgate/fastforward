@@ -49,6 +49,12 @@ reason = "Standalone receiver lifecycle reduction is now an isolated pure seam a
 issue = 1314
 
 [[seams]]
+path = "crates/logfwd-io/src/polling_input_health.rs"
+status = "required"
+reason = "Polling input source-origin lifecycle reduction is an isolated local seam for tail, TCP, and UDP health."
+issue = 1415
+
+[[seams]]
 path = "crates/logfwd-io/src/tail.rs"
 status = "required"
 reason = "The EOF emission state machine is a local proof seam despite living in an IO crate."
