@@ -308,7 +308,21 @@ export function App() {
             p.transform_ns === t.transform_ns &&
             p.output_ns === t.output_ns &&
             p.queue_wait_ns === t.queue_wait_ns &&
-            p.worker_id === t.worker_id
+            p.worker_id === t.worker_id &&
+            p.send_ns === t.send_ns &&
+            p.recv_ns === t.recv_ns &&
+            p.took_ms === t.took_ms &&
+            p.retries === t.retries &&
+            p.req_bytes === t.req_bytes &&
+            p.cmp_bytes === t.cmp_bytes &&
+            p.resp_bytes === t.resp_bytes &&
+            p.flush_reason === t.flush_reason &&
+            p.output_start_unix_ns === t.output_start_unix_ns &&
+            p.stage_start_unix_ns === t.stage_start_unix_ns &&
+            p.scan_rows === t.scan_rows &&
+            p.input_rows === t.input_rows &&
+            p.output_rows === t.output_rows &&
+            p.bytes_in === t.bytes_in
           ) {
             return p;
           }
