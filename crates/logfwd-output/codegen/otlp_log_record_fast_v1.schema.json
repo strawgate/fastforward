@@ -1,6 +1,10 @@
 {
   "name": "otlp_log_record_fast",
   "version": 1,
+  "emit": {
+    "row_encoder": true,
+    "batch_envelope": true
+  },
   "roles": [
     { "name": "timestamp", "sources": ["timestamp", "time"] },
     { "name": "severity", "sources": ["level", "severity_text"] },

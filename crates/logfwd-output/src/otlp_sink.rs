@@ -113,10 +113,31 @@ impl OtlpSink {
 
     /// Benchmark/reference path: encode using the generated fast-row encoder.
     pub fn encode_batch_generated_fast(&mut self, batch: &RecordBatch, metadata: &BatchMetadata) {
-        self.encode_batch_with_row_encoder(
-            batch,
+        self.encoder_buf.clear();
+        let num_rows = batch.num_rows();
+        if num_rows == 0 {
+            return;
+        }
+
+        let normalized;
+        let batch = if batch
+            .schema()
+            .fields()
+            .iter()
+            .any(|f| matches!(f.data_type(), DataType::Struct(_)))
+        {
+            normalized = normalize_conflict_columns(batch.clone());
+            &normalized
+        } else {
+            batch
+        };
+
+        let columns = resolve_batch_columns(batch);
+        generated::encode_batch_generated_fast_v1(
+            &columns,
             metadata,
-            generated::encode_row_as_log_record_fast_v1,
+            num_rows,
+            &mut self.encoder_buf,
         );
     }
 
