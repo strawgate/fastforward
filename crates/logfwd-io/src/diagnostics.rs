@@ -498,7 +498,7 @@ impl DiagnosticsServer {
                     }
                 }
             })
-            .ok();
+            .map_err(|e| io::Error::other(format!("failed to spawn metric-sampler: {e}")))?;
 
         let http_server = Arc::clone(&server);
         let http_handle = thread::Builder::new()
@@ -508,14 +508,14 @@ impl DiagnosticsServer {
                     let _ = self.handle_request(request);
                 }
             })
-            .ok();
+            .map_err(|e| io::Error::other(format!("failed to spawn diagnostics-http: {e}")))?;
 
         Ok((
             ServerHandle {
                 running,
-                sampler_handle,
+                sampler_handle: Some(sampler_handle),
                 http_server,
-                http_handle,
+                http_handle: Some(http_handle),
             },
             bound_addr,
         ))
