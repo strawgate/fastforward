@@ -1594,7 +1594,9 @@ mod tests {
                         KeyValue {
                             key: "unsupported_resource".into(),
                             value: Some(AnyValue {
-                                value: Some(Value::ArrayValue(Default::default())),
+                                value: Some(Value::ArrayValue(
+                                    opentelemetry_proto::tonic::common::v1::ArrayValue::default(),
+                                )),
                             }),
                         },
                     ],
