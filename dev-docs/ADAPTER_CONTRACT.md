@@ -82,7 +82,7 @@ scanner-ready JSON lines.
   body size at the receiver boundary as received on the wire, not from
   downstream Arrow memory estimates or post-decompression payload size.
 - Legacy OTLP JSON-lines ingress and structured OTLP batch ingress must report
-  the same `lines_total` and comparable `bytes_total` for the same accepted
+  the same `lines_total` and same `bytes_total` for the same accepted
   request body.
 - Rejected OTLP payloads must not increment `lines_total` or `bytes_total`.
 - Malformed OTLP payloads must increment input `parse_errors_total`.

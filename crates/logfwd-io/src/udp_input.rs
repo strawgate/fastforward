@@ -239,6 +239,8 @@ mod tests {
             assert_eq!(*accounted_bytes, 10);
             assert_eq!(bytes.len(), 11);
             assert!(bytes.ends_with(b"\n"), "expected trailing newline");
+        } else {
+            panic!("expected InputEvent::Data variant");
         }
     }
 
