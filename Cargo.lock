@@ -2504,13 +2504,19 @@ dependencies = [
  "criterion",
  "logfwd-arrow",
  "logfwd-test-utils",
- "logfwd-types",
  "memchr",
  "memmap2",
  "proptest",
  "sonic-rs",
  "tempfile",
  "wide",
+]
+
+[[package]]
+name = "logfwd-ebpf-proto"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]

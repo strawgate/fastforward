@@ -3,6 +3,10 @@ name = "pipe-capture"
 version = "0.1.0"
 edition = "2021"
 
+[package.metadata.cargo-machete]
+# Documented ignores: currently unused or under active testing for future eBPF logging.
+ignored = ["env_logger", "log", "tokio"]
+
 [dependencies]
 aya = "0.13"
 pipe-capture-common = { path = "pipe-capture-common" }
