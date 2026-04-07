@@ -342,6 +342,10 @@ impl InputSource for MockSource {
     fn name(&self) -> &'static str {
         "mock"
     }
+
+    fn health(&self) -> logfwd_io::diagnostics::ComponentHealth {
+        logfwd_io::diagnostics::ComponentHealth::Healthy
+    }
 }
 
 struct StageSummary {
