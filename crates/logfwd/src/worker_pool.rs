@@ -23,10 +23,10 @@
 //!   or async-waited until a worker has capacity. Items are never dropped.
 //! - Every in-flight batch ticket is acked or rejected before shutdown
 //!   completes. The `drain` method joins all worker tasks.
-//! - Worker panic is caught by [`JoinSet::join_next`]; the pool logs it,
-//!   rejects any buffered-but-unprocessed items from the dispatch log, and
-//!   continues. The pipeline's `PipelineMachine` then advances checkpoints
-//!   with `delivered=false` for those batches.
+//! - Worker panic is surfaced when the pool joins worker tasks during
+//!   [`OutputWorkerPool::drain`]. Closed worker channels are pruned lazily on
+//!   the next submit, and worker-slot cleanup is drop-guarded so control-plane
+//!   health does not retain stale live-worker state after abrupt exits.
 //!
 //! # Kani proofs
 //!
@@ -56,6 +56,11 @@ use arrow::record_batch::RecordBatch;
 use self::health::{
     aggregate_output_health, idle_health_after_worker_insert, reduce_worker_slot_health,
 };
+
+#[cfg(not(test))]
+const DRAIN_CANCEL_GRACE: Duration = Duration::from_secs(5);
+#[cfg(test)]
+const DRAIN_CANCEL_GRACE: Duration = Duration::from_millis(50);
 
 // ---------------------------------------------------------------------------
 // Public message types
@@ -134,6 +139,17 @@ struct WorkerConfig {
     max_retry_delay: Duration,
     metrics: Arc<PipelineMetrics>,
     output_health: Arc<OutputHealthTracker>,
+}
+
+struct WorkerSlotCleanup {
+    output_health: Arc<OutputHealthTracker>,
+    worker_id: usize,
+}
+
+impl Drop for WorkerSlotCleanup {
+    fn drop(&mut self) {
+        self.output_health.remove_worker(self.worker_id);
+    }
 }
 
 // Worker handle (held by pool)
@@ -542,7 +558,7 @@ impl OutputWorkerPool {
             // process_item() is 60 s, so 5 s here catches most cases where
             // the network hung after the batch was already sent.
             self.cancel.cancel();
-            let _ = tokio::time::timeout(Duration::from_secs(5), async {
+            let _ = tokio::time::timeout(DRAIN_CANCEL_GRACE, async {
                 while let Some(res) = self.join_set.join_next().await {
                     if let Err(e) = res {
                         if e.is_panic() {
@@ -569,9 +585,14 @@ impl OutputWorkerPool {
 
     /// Spawn a new worker task and return a handle.
     fn spawn_worker(&mut self) -> io::Result<WorkerHandle> {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.output_health
+            .insert_worker(id, ComponentHealth::Starting);
         let sink = match self.factory.create() {
             Ok(sink) => sink,
             Err(err) => {
+                self.output_health.remove_worker(id);
                 if !self.output_health.has_active_workers() {
                     self.output_health.set_pool_health(ComponentHealth::Failed);
                 }
@@ -580,10 +601,6 @@ impl OutputWorkerPool {
         };
         let (tx, rx) = mpsc::channel::<WorkerMsg>(self.channel_capacity);
         let ack_tx = self.ack_tx.clone();
-        let id = self.next_id;
-        self.next_id += 1;
-        self.output_health
-            .insert_worker(id, ComponentHealth::Starting);
         self.output_health
             .apply_worker_event(id, OutputHealthEvent::StartupSucceeded);
         let cfg = WorkerConfig {
@@ -632,6 +649,10 @@ async fn worker_task(
         metrics,
         output_health,
     } = cfg;
+    let _slot_cleanup = WorkerSlotCleanup {
+        output_health: Arc::clone(&output_health),
+        worker_id: id,
+    };
     loop {
         tokio::select! {
             biased; // check cancel first
@@ -716,7 +737,6 @@ async fn worker_task(
         tracing::error!(worker_id = id, error = %e, "worker_pool: sink shutdown failed");
         metrics.output_error(sink.name());
     }
-    output_health.remove_worker(id);
 }
 
 /// Receive with idle timeout — returns `None` on timeout or channel close.
@@ -1168,6 +1188,7 @@ mod tests {
     use logfwd_output::BatchMetadata;
     use logfwd_output::sink::{SendResult, Sink, SinkFactory};
     use std::collections::VecDeque;
+    use std::future::pending;
     use std::pin::Pin;
     use std::sync::Arc;
     use std::sync::Mutex;
@@ -1327,6 +1348,126 @@ mod tests {
         }
     }
 
+    struct HangingSink {
+        name: String,
+        entered_send: Arc<AtomicBool>,
+    }
+
+    impl Sink for HangingSink {
+        fn send_batch<'a>(
+            &'a mut self,
+            _batch: &'a RecordBatch,
+            _metadata: &'a BatchMetadata,
+        ) -> Pin<Box<dyn Future<Output = SendResult> + Send + 'a>> {
+            let entered_send = Arc::clone(&self.entered_send);
+            Box::pin(async move {
+                entered_send.store(true, Ordering::Release);
+                pending::<SendResult>().await
+            })
+        }
+
+        fn flush(&mut self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        fn shutdown(&mut self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    struct HangingSinkFactory {
+        entered_send: Arc<AtomicBool>,
+    }
+
+    impl SinkFactory for HangingSinkFactory {
+        fn create(&self) -> io::Result<Box<dyn Sink>> {
+            Ok(Box::new(HangingSink {
+                name: "hanging".into(),
+                entered_send: Arc::clone(&self.entered_send),
+            }))
+        }
+
+        fn name(&self) -> &'static str {
+            "hanging"
+        }
+    }
+
+    struct PanicSink {
+        name: String,
+        entered_send: Arc<AtomicBool>,
+    }
+
+    impl Sink for PanicSink {
+        fn send_batch<'a>(
+            &'a mut self,
+            _batch: &'a RecordBatch,
+            _metadata: &'a BatchMetadata,
+        ) -> Pin<Box<dyn Future<Output = SendResult> + Send + 'a>> {
+            let entered_send = Arc::clone(&self.entered_send);
+            Box::pin(async move {
+                entered_send.store(true, Ordering::Release);
+                panic!("injected send_batch panic");
+            })
+        }
+
+        fn flush(&mut self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        fn shutdown(&mut self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    struct PanicSinkFactory {
+        entered_send: Arc<AtomicBool>,
+    }
+
+    impl SinkFactory for PanicSinkFactory {
+        fn create(&self) -> io::Result<Box<dyn Sink>> {
+            Ok(Box::new(PanicSink {
+                name: "panic".into(),
+                entered_send: Arc::clone(&self.entered_send),
+            }))
+        }
+
+        fn name(&self) -> &'static str {
+            "panic"
+        }
+    }
+
+    struct SlowCreateFactory {
+        entered_create: Arc<AtomicBool>,
+        release_create: Arc<AtomicBool>,
+    }
+
+    impl SinkFactory for SlowCreateFactory {
+        fn create(&self) -> io::Result<Box<dyn Sink>> {
+            self.entered_create.store(true, Ordering::Release);
+            while !self.release_create.load(Ordering::Acquire) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Ok(Box::new(CountingSink {
+                name: "slow-create".into(),
+                calls: Arc::new(AtomicU32::new(0)),
+                fail: false,
+                fail_shutdown: false,
+            }))
+        }
+
+        fn name(&self) -> &'static str {
+            "slow-create"
+        }
+    }
+
     fn make_batch() -> RecordBatch {
         let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Utf8, true)]));
         RecordBatch::try_new(schema, vec![Arc::new(StringArray::from(vec!["hello"]))]).unwrap()
@@ -1361,6 +1502,28 @@ mod tests {
         {
             let meter = logfwd_test_utils::test_meter();
             Arc::new(PipelineMetrics::new("test", "", &meter))
+        }
+    }
+
+    async fn wait_for_flag(flag: &AtomicBool) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        while !flag.load(Ordering::Acquire) {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed out waiting for flag to become true"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    async fn wait_for_no_active_workers(pool: &OutputWorkerPool) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        while pool.output_health.has_active_workers() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed out waiting for worker slots to clear"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
 
@@ -1782,6 +1945,89 @@ mod tests {
 
         let err = pool.spawn_worker().err().expect("second spawn should fail");
         assert_eq!(err.kind(), io::ErrorKind::Other);
+        assert_eq!(out_stats.health(), ComponentHealth::Healthy);
+
+        pool.drain(Duration::from_secs(5)).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn spawn_worker_reports_starting_while_create_is_in_flight() {
+        let meter = logfwd_test_utils::test_meter();
+        let mut pm = PipelineMetrics::new("pipe", "", &meter);
+        let out_stats = pm.add_output("slow-create", "http");
+        let metrics = Arc::new(pm);
+        let entered_create = Arc::new(AtomicBool::new(false));
+        let release_create = Arc::new(AtomicBool::new(false));
+        let factory = Arc::new(SlowCreateFactory {
+            entered_create: Arc::clone(&entered_create),
+            release_create: Arc::clone(&release_create),
+        });
+        let mut pool = OutputWorkerPool::new(factory, 1, Duration::from_secs(60), metrics);
+
+        let submit = tokio::spawn(async move {
+            pool.submit(empty_work_item()).await;
+            pool
+        });
+
+        wait_for_flag(&entered_create).await;
+        assert_eq!(out_stats.health(), ComponentHealth::Starting);
+
+        release_create.store(true, Ordering::Release);
+        let mut pool = submit.await.expect("submit task should complete");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(out_stats.health(), ComponentHealth::Healthy);
+
+        pool.drain(Duration::from_secs(5)).await;
+    }
+
+    #[tokio::test]
+    async fn pool_forced_abort_clears_stale_worker_slots() {
+        let meter = logfwd_test_utils::test_meter();
+        let mut pm = PipelineMetrics::new("pipe", "", &meter);
+        let out_stats = pm.add_output("hanging", "http");
+        let metrics = Arc::new(pm);
+        let entered_send = Arc::new(AtomicBool::new(false));
+        let factory = Arc::new(HangingSinkFactory {
+            entered_send: Arc::clone(&entered_send),
+        });
+        let mut pool = OutputWorkerPool::new(factory, 1, Duration::from_secs(60), metrics);
+
+        pool.submit(empty_work_item()).await;
+        wait_for_flag(&entered_send).await;
+        assert!(pool.output_health.has_active_workers());
+        assert_eq!(
+            pool.output_health.slot_health(0),
+            Some(ComponentHealth::Healthy)
+        );
+
+        pool.drain(Duration::from_millis(10)).await;
+
+        assert_eq!(out_stats.health(), ComponentHealth::Stopped);
+        assert!(!pool.output_health.has_active_workers());
+        assert_eq!(pool.output_health.slot_health(0), None);
+        assert!(
+            pool.ack_rx_mut().try_recv().is_err(),
+            "forced-abort path should not emit a success ack for the hung batch"
+        );
+    }
+
+    #[tokio::test]
+    async fn worker_panic_does_not_leave_stale_output_slot() {
+        let meter = logfwd_test_utils::test_meter();
+        let mut pm = PipelineMetrics::new("pipe", "", &meter);
+        let out_stats = pm.add_output("panic", "http");
+        let metrics = Arc::new(pm);
+        let entered_send = Arc::new(AtomicBool::new(false));
+        let factory = Arc::new(PanicSinkFactory {
+            entered_send: Arc::clone(&entered_send),
+        });
+        let mut pool = OutputWorkerPool::new(factory, 1, Duration::from_secs(60), metrics);
+
+        pool.submit(empty_work_item()).await;
+        wait_for_flag(&entered_send).await;
+        wait_for_no_active_workers(&pool).await;
+
+        assert_eq!(pool.output_health.slot_health(0), None);
         assert_eq!(out_stats.health(), ComponentHealth::Healthy);
 
         pool.drain(Duration::from_secs(5)).await;
