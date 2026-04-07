@@ -141,7 +141,7 @@ impl InputSource for FramedInput {
                         Some(pos) => {
                             if pos + 1 < chunk.len() {
                                 // Move tail to remainder without allocating.
-                                let mut tail = chunk.split_off(pos + 1);
+                                let tail = chunk.split_off(pos + 1);
                                 if tail.len() > MAX_REMAINDER_BYTES {
                                     // Tail exceeds the per-source cap. Discard the
                                     // oldest bytes and keep the most recent
@@ -153,8 +153,7 @@ impl InputSource for FramedInput {
                                         tail_bytes = tail.len(),
                                         max_remainder_bytes = MAX_REMAINDER_BYTES,
                                         "framed.remainder_overflow — partial line exceeds \
-                                         MAX_REMAINDER_BYTES; keeping last MAX_REMAINDER_BYTES \
-                                         bytes and resetting format state"
+                                         MAX_REMAINDER_BYTES; discarding remainder and resetting format state"
                                     );
                                     self.stats.inc_parse_errors(1);
                                     let state = self.sources.get_mut(&key).expect("just inserted");
@@ -162,12 +161,10 @@ impl InputSource for FramedInput {
                                     // state (the discarded prefix may have broken CRI P/F
                                     // sequence alignment).
                                     state.format.reset();
-                                    // Keep the tail of the overflow data in the remainder
-                                    // buffer so the next newline can complete it. Do NOT
-                                    // call apply_remainder_consumed() — the data is still
-                                    // pending and the checkpoint must not advance past it.
-                                    let start = tail.len() - MAX_REMAINDER_BYTES;
-                                    state.remainder = tail.split_off(start);
+                                    // Discard the remainder entirely to avoid garbling the next record
+                                    // (#1030) and advance the checkpoint tracker so it does not rewind (#973).
+                                    state.remainder.clear();
+                                    state.tracker.apply_remainder_consumed();
                                 } else {
                                     let state = self.sources.get_mut(&key).expect("just inserted");
                                     state.remainder = tail;
@@ -179,21 +176,19 @@ impl InputSource for FramedInput {
                             // No newline at all — entire chunk is remainder.
                             if chunk.len() > MAX_REMAINDER_BYTES {
                                 // Same overflow policy as the tail case: warn, reset
-                                // format state, and keep the most recent bytes.
+                                // format state, and discard the chunk.
                                 tracing::warn!(
                                     source_id = ?key,
                                     chunk_bytes = chunk.len(),
                                     max_remainder_bytes = MAX_REMAINDER_BYTES,
                                     "framed.remainder_overflow — partial line exceeds \
-                                     MAX_REMAINDER_BYTES; keeping last MAX_REMAINDER_BYTES \
-                                     bytes and resetting format state"
+                                     MAX_REMAINDER_BYTES; discarding remainder and resetting format state"
                                 );
                                 self.stats.inc_parse_errors(1);
                                 let state = self.sources.get_mut(&key).expect("just inserted");
                                 state.format.reset();
-                                let start = chunk.len() - MAX_REMAINDER_BYTES;
-                                state.remainder = chunk.split_off(start);
-                                // Do NOT call apply_remainder_consumed() — data is preserved.
+                                state.remainder.clear();
+                                state.tracker.apply_remainder_consumed();
                             } else {
                                 let state = self.sources.get_mut(&key).expect("just inserted");
                                 state.remainder = chunk;
@@ -483,11 +478,15 @@ mod tests {
     }
 
     #[test]
-    fn remainder_capped_at_max() {
+    fn remainder_discarded_on_overflow() {
         let stats = make_stats();
         // Send > 2 MiB without a newline.
         let big = vec![b'x'; MAX_REMAINDER_BYTES + 1];
-        let source = MockSource::from_chunks(vec![&big, b"\n"]);
+        let source = MockSource::from_chunks(vec![&big, b"\n"]).with_offsets(vec![(
+            SourceId(1),
+            ByteOffset((MAX_REMAINDER_BYTES + 1) as u64),
+        )]);
+
         let mut framed = FramedInput::new(
             Box::new(source),
             FormatDecoder::passthrough(Arc::clone(&stats)),
@@ -503,25 +502,32 @@ mod tests {
                 .load(std::sync::atomic::Ordering::Relaxed),
             1
         );
-        // The overflow remainder is capped but NOT discarded.
+
+        // The overflow remainder is discarded.
         let state = framed.sources.get(&None).unwrap();
         assert_eq!(
             state.remainder.len(),
-            MAX_REMAINDER_BYTES,
-            "overflow remainder must be capped to MAX_REMAINDER_BYTES, not dropped"
+            0,
+            "overflow remainder must be discarded entirely"
         );
 
-        // Second poll: a newline terminates the preserved data.
+        // Checkpoint must advance to the read offset (so it does not rewind).
+        let cp = framed.checkpoint_data();
+        assert_eq!(cp[0].1, ByteOffset((MAX_REMAINDER_BYTES + 1) as u64));
+
+        // Second poll: a newline terminates the discarded data, emitting an empty line
+        // (which collect_data doesn't see since we didn't send any more bytes before \n,
+        // so it's a 0-length record or ignored depending on passthrough).
         let events2 = framed.poll().unwrap();
         let data2 = collect_data(events2);
         assert!(
-            !data2.is_empty(),
-            "preserved overflow remainder must be emitted when a newline arrives"
+            data2.is_empty() || data2 == b"\n",
+            "no garbled prefix should be emitted"
         );
     }
 
     #[test]
-    fn tail_after_newline_is_capped_at_max() {
+    fn tail_after_newline_is_discarded_on_overflow() {
         let stats = make_stats();
         let mut chunk = b"ok\n".to_vec();
         chunk.extend(vec![b'x'; MAX_REMAINDER_BYTES + 1]);
@@ -533,7 +539,7 @@ mod tests {
         );
 
         // First poll: "ok\n" emitted; overflow tail triggers parse_error and
-        // is preserved as remainder (last MAX_REMAINDER_BYTES bytes).
+        // is discarded completely.
         let events = framed.poll().unwrap();
         assert_eq!(collect_data(events), b"ok\n");
         assert_eq!(
@@ -542,21 +548,21 @@ mod tests {
                 .load(std::sync::atomic::Ordering::Relaxed),
             1
         );
-        // The overflow remainder is preserved (not silently dropped).
+        // The overflow remainder is discarded.
         let state = framed.sources.get(&None).unwrap();
         assert_eq!(
             state.remainder.len(),
-            MAX_REMAINDER_BYTES,
-            "overflow tail must be truncated to MAX_REMAINDER_BYTES, not dropped"
+            0,
+            "overflow tail must be discarded entirely"
         );
 
-        // Second poll: a newline terminates the preserved remainder — the line
-        // is emitted (proves data was preserved, not silently dropped).
+        // Second poll: a newline terminates the discarded remainder — the line
+        // is empty (avoids garbled record).
         let events2 = framed.poll().unwrap();
         let data2 = collect_data(events2);
         assert!(
-            !data2.is_empty(),
-            "preserved overflow remainder must be emitted when a newline arrives"
+            data2.is_empty() || data2 == b"\n",
+            "no garbled prefix should be emitted"
         );
     }
 

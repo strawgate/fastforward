@@ -327,12 +327,32 @@ impl SegmentFile {
         }
 
         let mut file = File::open(&self.path)?;
+        let file_size = file.metadata()?.len();
+
+        // Validate data_size against actual file size to prevent large allocations
+        // if the file is smaller than what the footer claims (e.g. truncated).
+        // A segment has a header (32 bytes), data, and footer (32 bytes).
+        let max_possible_data_size = file_size
+            .saturating_sub(HEADER_SIZE as u64)
+            .saturating_sub(FOOTER_SIZE as u64);
+
+        if self.footer.data_size > max_possible_data_size {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "segment data_size {} exceeds maximum possible data size {} for file size {}",
+                    self.footer.data_size, max_possible_data_size, file_size
+                ),
+            ));
+        }
+
         file.seek(SeekFrom::Start(HEADER_SIZE as u64))?;
 
         let mut ipc_data = vec![0u8; self.footer.data_size as usize];
         file.read_exact(&mut ipc_data)?;
 
-        let mut batches = Vec::with_capacity(self.footer.batch_count as usize);
+        // Do not pre-allocate with batch_count as it could be corrupt and cause OOM (#1211).
+        let mut batches = Vec::new();
 
         // Use a single Cursor over the whole IPC data. Each StreamReader
         // consumes one sub-stream and advances the cursor position.
@@ -945,6 +965,67 @@ mod tests {
             SegmentFile::open(&seg.path, Some(0xBBBB)),
             SegmentStatus::SchemaMismatch { .. }
         ));
+    }
+
+    #[test]
+    fn corrupt_data_size_prevents_oom() {
+        let dir = tempfile::tempdir().unwrap();
+        let batch = make_batch(10);
+
+        let header = SegmentHeader {
+            version: SEGMENT_VERSION,
+            flags: FLAG_ZSTD,
+            segment_id: 1,
+            sql_hash: 0,
+            created_epoch_ms: 0,
+        };
+        let mut writer = SegmentWriter::create(dir.path(), header).unwrap();
+        writer.append(&batch).unwrap();
+        let seg = writer.finish().unwrap();
+
+        // Modify the footer to claim an enormous data size.
+        let mut data = fs::read(&seg.path).unwrap();
+        let len = data.len();
+        // The data_size is stored in the footer at an offset (record_count(8) + batch_count(4) -> 12 bytes in).
+        // Let's just create a new footer and overwrite the last 32 bytes.
+        let mut fake_footer = seg.footer.clone();
+        fake_footer.data_size = u64::MAX; // Extremely large value to trigger overflow/OOM if not handled
+        let fake_bytes = fake_footer.to_bytes();
+        data[(len - FOOTER_SIZE)..].copy_from_slice(&fake_bytes);
+        fs::write(&seg.path, &data).unwrap();
+
+        // Reading the batches should fail with an InvalidData error, not panic or OOM.
+        let seg_corrupt1 = SegmentFile {
+            path: seg.path.clone(),
+            header: seg.header.clone(),
+            footer: fake_footer,
+        };
+        let err = seg_corrupt1.read_batches().unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(
+            err.to_string()
+                .contains("exceeds maximum possible data size")
+                || err.to_string().contains("exceeds maximum")
+        );
+
+        // Also test a value slightly less than max, but larger than the file.
+        let mut fake_footer2 = seg.footer.clone();
+        fake_footer2.data_size = (len * 2) as u64;
+        let fake_bytes2 = fake_footer2.to_bytes();
+        data[(len - FOOTER_SIZE)..].copy_from_slice(&fake_bytes2);
+        fs::write(&seg.path, &data).unwrap();
+
+        let seg_corrupt2 = SegmentFile {
+            path: seg.path.clone(),
+            header: seg.header.clone(),
+            footer: fake_footer2,
+        };
+        let err2 = seg_corrupt2.read_batches().unwrap_err();
+        assert_eq!(err2.kind(), io::ErrorKind::InvalidData);
+        assert!(
+            err2.to_string()
+                .contains("exceeds maximum possible data size")
+        );
     }
 
     #[test]
