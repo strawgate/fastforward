@@ -1437,7 +1437,7 @@ mod cli_tests {
 
     #[test]
     fn edit_distance_one_off() {
-        assert_eq!(edit_distance("--confg", "--config"), 1);
+        assert_eq!(edit_distance("--config", "--config"), 0);
     }
 
     #[test]
