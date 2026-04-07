@@ -249,6 +249,35 @@ export function App() {
         }
       }
 
+      // Batch rate (batches/min) from server history.
+      if (batchesHist && batchesHist.length >= 2) {
+        const batchS = series.find((s) => s.id === "batches");
+        if (batchS) {
+          const latestT = batchesHist[batchesHist.length - 1][0];
+          for (let i = 1; i < batchesHist.length; i++) {
+            const dt = batchesHist[i][0] - batchesHist[i - 1][0];
+            if (dt <= 0) continue;
+            const rate = ((batchesHist[i][1] - batchesHist[i - 1][1]) / dt) * 60; // batches/min
+            if (rate >= 0) batchS.ring.pushRaw(now - (latestT - batchesHist[i][0]) * 1000, rate);
+          }
+        }
+      }
+
+      // Backpressure stalls/sec from server history.
+      const stallsHist = hist.backpressure_stalls;
+      if (stallsHist && stallsHist.length >= 2) {
+        const stallS = series.find((s) => s.id === "stalls");
+        if (stallS) {
+          const latestT = stallsHist[stallsHist.length - 1][0];
+          for (let i = 1; i < stallsHist.length; i++) {
+            const dt = stallsHist[i][0] - stallsHist[i - 1][0];
+            if (dt <= 0) continue;
+            const rate = (stallsHist[i][1] - stallsHist[i - 1][1]) / dt; // stalls/sec
+            if (rate >= 0) stallS.ring.pushRaw(now - (latestT - stallsHist[i][0]) * 1000, rate);
+          }
+        }
+      }
+
       forceUpdate((n) => n + 1);
     });
   }, []);

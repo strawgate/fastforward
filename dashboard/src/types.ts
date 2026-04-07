@@ -29,6 +29,11 @@ export interface BatchesData {
   rows_total?: number;
 }
 
+export interface BottleneckData {
+  stage: "output" | "input" | "transform" | "scan" | "none";
+  reason: string;
+}
+
 export interface PipelineData {
   name: string;
   inputs: ComponentData[];
@@ -43,6 +48,7 @@ export interface PipelineData {
     send?: number;
   };
   backpressure_stalls?: number;
+  bottleneck?: BottleneckData;
 }
 
 export type HealthState =
