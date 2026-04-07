@@ -48,7 +48,7 @@ tla/
   PipelineMachine.coverage.cfg  — reachability / vacuity guards
 
   # Shutdown coordination (multi-process drain protocol)
-  ShutdownProtocol.tla          — N inputs + channel + consumer + pool
+  ShutdownProtocol.tla          — N inputs with I/O+CPU workers, per-input io channels, shared pipeline channel, and pool drain
   MCShutdownProtocol.tla        — TLC config
   ShutdownProtocol.cfg          — safety model
   ShutdownProtocol.liveness.cfg — liveness model

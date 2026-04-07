@@ -6,19 +6,22 @@
 
 EXTENDS ShutdownProtocol
 
-\* Safety model: 2 inputs, channel capacity 2, max 3 items each
+\* Safety model: 2 inputs, io channel capacity 4, pipeline channel capacity 16, max 3 items each
 MCNumInputsFast == 2
-MCChannelCapacityFast == 2
+MCIoChannelCapacityFast == 4
+MCPipelineChannelCapacityFast == 16
 MCMaxItemsFast == 3
 
 \* Liveness model: smaller constants (O(states^2) for liveness)
 MCNumInputsLiveness == 2
-MCChannelCapacityLiveness == 2
+MCIoChannelCapacityLiveness == 4
+MCPipelineChannelCapacityLiveness == 16
 MCMaxItemsLiveness == 2
 
 \* Thorough model: 3 inputs
 MCNumInputsThorough == 3
-MCChannelCapacityThorough == 3
+MCIoChannelCapacityThorough == 4
+MCPipelineChannelCapacityThorough == 16
 MCMaxItemsThorough == 3
 
 ======================================================================
