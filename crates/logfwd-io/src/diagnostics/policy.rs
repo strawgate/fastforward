@@ -122,10 +122,10 @@ const fn readiness_impact_tag(health: ComponentHealth) -> ReadinessImpactTag {
 }
 
 const fn ready_reason_tag(has_pipelines: bool, aggregate: ComponentHealth) -> ReadyReasonTag {
-    if !has_pipelines {
-        ReadyReasonTag::NoPipelines
-    } else {
+    if has_pipelines {
         ReadyReasonTag::Health(health_reason_tag(aggregate))
+    } else {
+        ReadyReasonTag::NoPipelines
     }
 }
 
