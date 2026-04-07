@@ -422,6 +422,12 @@ mod tests {
     use super::*;
 
     #[test]
+    fn generator_health_is_explicitly_healthy() {
+        let input = GeneratorInput::new("test", GeneratorConfig::default());
+        assert_eq!(input.health(), ComponentHealth::Healthy);
+    }
+
+    #[test]
     fn generates_valid_json_lines() {
         let mut input = GeneratorInput::new(
             "test",
