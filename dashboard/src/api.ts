@@ -14,8 +14,8 @@ export type HistoryResponse = Record<string, [number, number][]>;
 
 export const api = {
   status: () => get<StatusResponse>("/admin/v1/status"),
-  stats: () => get<StatsResponse>("/api/stats"),
-  config: () => get<ConfigResponse>("/api/config"),
-  history: () => get<HistoryResponse>("/api/history"),
-  traces: () => get<TracesResponse>("/api/traces"),
+  stats: () => get<StatsResponse>("/admin/v1/stats"),
+  config: () => get<ConfigResponse>("/admin/v1/config"),
+  history: () => get<HistoryResponse>("/admin/v1/history"),
+  traces: () => get<TracesResponse>("/admin/v1/traces"),
 };

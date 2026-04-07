@@ -201,5 +201,5 @@ curl -s http://localhost:9090/ready | jq .
 curl -s http://localhost:9090/admin/v1/status | jq .
 
 # Flattened stats snapshot
-curl -s http://localhost:9090/api/stats | jq .
+curl -s http://localhost:9090/admin/v1/stats | jq .
 ```

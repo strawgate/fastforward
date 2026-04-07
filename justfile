@@ -87,7 +87,7 @@ _bench-run name config seconds="10" diag="http://127.0.0.1:9090":
     $LOGFWD --config {{config}} &
     PID=$!
     sleep {{seconds}}
-    STATS=$(curl -s {{diag}}/api/stats 2>/dev/null || echo '{}')
+    STATS=$(curl -s {{diag}}/admin/v1/stats 2>/dev/null || echo '{}')
     kill $PID 2>/dev/null; wait $PID 2>/dev/null || true
     echo "$STATS" | python3 -c "
     import sys,json; d=json.load(sys.stdin)
@@ -130,7 +130,7 @@ _bench-pair name rx_config tx_config seconds="10":
 
     $LOGFWD --config {{tx_config}} &
     TX=$!; sleep {{seconds}}
-    STATS=$(curl -s http://127.0.0.1:9091/api/stats 2>/dev/null || echo '{}')
+    STATS=$(curl -s http://127.0.0.1:9091/admin/v1/stats 2>/dev/null || echo '{}')
     kill $TX $RX 2>/dev/null; wait $TX $RX 2>/dev/null || true
     echo "$STATS" | python3 -c "
     import sys,json; d=json.load(sys.stdin)
