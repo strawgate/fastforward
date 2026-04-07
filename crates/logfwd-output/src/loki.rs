@@ -175,21 +175,37 @@ impl LokiSink {
             f.name() == field_names::TIMESTAMP_UNDERSCORE || f.name() == field_names::TIMESTAMP_AT
         });
 
-        // Find label ColInfos for configured label columns, excluding keys
-        // that are overridden by static labels. Including overridden keys in
-        // the stream key would split rows with different dynamic values into
-        // separate streams even though the static label always wins. (#1459)
-        let label_col_infos: Vec<(String, &super::ColInfo)> = self
+        // Track all label sources (static + dynamic) for collision detection.
+        // Static labels are sanitized too so collisions like "a.b" (static) vs
+        // "a_b" (dynamic) are caught. (#1459, #1470)
+        let mut sanitized_label_sources: HashMap<String, String> = self
             .config
-            .label_columns
+            .static_labels
             .iter()
-            .filter(|label_col| !self.config.static_label_keys.contains(label_col.as_str()))
-            .filter_map(|label_col| {
-                cols.iter()
-                    .find(|c| &c.field_name == label_col)
-                    .map(|ci| (sanitize_loki_label_name(label_col), ci))
+            .map(|(key, _)| {
+                (
+                    sanitize_loki_label_name(key),
+                    format!("static label '{key}'"),
+                )
             })
             .collect();
+        let mut label_col_infos: Vec<(String, &super::ColInfo)> = Vec::new();
+        for label_col in &self.config.label_columns {
+            if let Some(ci) = cols.iter().find(|c| &c.field_name == label_col) {
+                let sanitized = sanitize_loki_label_name(label_col);
+                if let Some(existing) = sanitized_label_sources.get(&sanitized) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "duplicate Loki label key after sanitization: '{label_col}' conflicts with {existing} as '{sanitized}'"
+                        ),
+                    ));
+                }
+                sanitized_label_sources
+                    .insert(sanitized.clone(), format!("label column '{label_col}'"));
+                label_col_infos.push((sanitized, ci));
+            }
+        }
 
         let mut stream_map: StreamMap = HashMap::new();
 
@@ -793,6 +809,45 @@ mod tests {
     }
 
     #[test]
+    fn colliding_sanitized_label_columns_error() {
+        use arrow::array::{ArrayRef, StringArray};
+        use arrow::datatypes::{Field, Schema};
+
+        let config = Arc::new(LokiConfig {
+            endpoint: "http://localhost".to_string(),
+            tenant_id: None,
+            static_labels: vec![],
+            label_columns: vec!["service.name".to_string(), "service-name".to_string()],
+            headers: vec![],
+        });
+        let sink = LokiSink::new(
+            "test".to_string(),
+            config,
+            Arc::new(reqwest::Client::new()),
+            Arc::new(ComponentStats::new()),
+        );
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("service.name", DataType::Utf8, true),
+            Field::new("service-name", DataType::Utf8, true),
+        ]));
+        let left: ArrayRef = Arc::new(StringArray::from(vec![Some("checkout")]));
+        let right: ArrayRef = Arc::new(StringArray::from(vec![Some("payments")]));
+        let batch = RecordBatch::try_new(schema, vec![left, right]).unwrap();
+        let metadata = BatchMetadata {
+            resource_attrs: Arc::new(vec![]),
+            observed_time_ns: 1_000,
+        };
+
+        let err = sink.build_stream_map(&batch, &metadata).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("duplicate Loki label key after sanitization"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
     fn test_negative_timestamp_handling() {
         // Bug #1084: negative i64 timestamps wrap to far-future u64 values
         use arrow::array::Int64Array;
@@ -838,9 +893,7 @@ mod tests {
     }
 
     #[test]
-    fn static_label_not_overwritten_by_dynamic() {
-        // Bug #1385: static labels were seeded into labels_map first; dynamic
-        // labels from stream_key were inserted on top, silently overwriting them.
+    fn dynamic_label_colliding_with_static_label_errors() {
         use arrow::array::StringArray;
         use arrow::datatypes::{Field, Schema};
 
@@ -868,15 +921,11 @@ mod tests {
             observed_time_ns: 1_000,
         };
 
-        let mut stream_map = sink.build_stream_map(&batch, &metadata).unwrap();
-        let (payload, _) = LokiSink::serialize_loki_json(
-            &mut stream_map,
-            &[("env".to_string(), "prod".to_string())],
-        );
-        // The static label "prod" must not be overwritten by the dynamic "staging".
+        let err = sink.build_stream_map(&batch, &metadata).unwrap_err();
         assert!(
-            payload.contains("\"env\":\"prod\""),
-            "static label must not be overwritten; payload: {payload}"
+            err.to_string()
+                .contains("duplicate Loki label key after sanitization"),
+            "unexpected error: {err}"
         );
     }
 

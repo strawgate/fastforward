@@ -318,15 +318,19 @@ fn parse_positive_flag<T>(
 where
     T: PartialEq + From<u8> + Copy + std::fmt::Display,
 {
-    match args
-        .iter()
-        .position(|arg| arg == flag)
-        .and_then(|idx| args.get(idx + 1))
-    {
-        Some(raw) => match parse(raw) {
-            Some(value) if value != T::from(0) => value,
-            _ => {
-                eprintln!("warning: {flag} expects a positive integer; using default {default}",);
+    match args.iter().rposition(|arg| arg == flag) {
+        Some(idx) => match args.get(idx + 1) {
+            Some(raw) => match parse(raw) {
+                Some(value) if value != T::from(0) => value,
+                _ => {
+                    eprintln!(
+                        "warning: {flag} expects a positive integer; using default {default}"
+                    );
+                    default
+                }
+            },
+            None => {
+                eprintln!("warning: {flag} expects a value; using default {default}");
                 default
             }
         },
@@ -758,6 +762,26 @@ mod tests {
 
         assert_eq!(parse_positive_u64_flag(&args, "--duration", 300), 300);
         assert_eq!(parse_positive_usize_flag(&args, "--batch", 10_000), 10_000);
+    }
+
+    #[test]
+    fn parse_positive_flags_use_last_occurrence() {
+        let args = vec![
+            "memory-profile".to_string(),
+            "--duration".to_string(),
+            "0".to_string(),
+            "--duration".to_string(),
+            "60".to_string(),
+        ];
+
+        assert_eq!(parse_positive_u64_flag(&args, "--duration", 300), 60);
+    }
+
+    #[test]
+    fn parse_positive_flags_fall_back_for_missing_values() {
+        let args = vec!["memory-profile".to_string(), "--duration".to_string()];
+
+        assert_eq!(parse_positive_u64_flag(&args, "--duration", 300), 300);
     }
 
     #[test]

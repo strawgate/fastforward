@@ -76,6 +76,11 @@ output:
   endpoint: http://loki:3100
 ```
 
+When `label_columns` are used, logfwd sanitizes source column names into
+Loki-compatible label keys. Configurations are rejected if two source columns,
+or a source column and a `static_labels` entry, would collapse to the same
+sanitized Loki label key.
+
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `endpoint` | string | Yes | Loki push URL |

@@ -192,7 +192,10 @@ fn parse_positive_usize_arg(raw: Option<String>, flag: &str, default: usize) -> 
                 default
             }
         },
-        None => default,
+        None => {
+            eprintln!("warning: {flag} expects a positive integer; using default {default}");
+            default
+        }
     }
 }
 
@@ -751,6 +754,13 @@ mod tests {
             "--iterations".to_string(),
             "0".to_string(),
         ]);
+        assert_eq!(cli.lines, DEFAULT_LINES);
+        assert_eq!(cli.iterations, DEFAULT_ITERATIONS);
+    }
+
+    #[test]
+    fn cli_missing_values_fall_back_to_defaults() {
+        let cli = Cli::parse_from(vec!["--lines".to_string(), "--iterations".to_string()]);
         assert_eq!(cli.lines, DEFAULT_LINES);
         assert_eq!(cli.iterations, DEFAULT_ITERATIONS);
     }
