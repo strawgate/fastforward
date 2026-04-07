@@ -67,10 +67,11 @@ jobs:
           RUSTFLAGS: "-Ctarget-cpu=x86-64-v3"
         run: |
           cargo build --release -p logfwd
+          cp target/release/logfwd target/release/logfwd-clean
           cargo build --release -p logfwd-competitive-bench
           cargo build --release --features dhat-heap -p logfwd
           cp target/release/logfwd target/release/logfwd-dhat
-          cargo build --release -p logfwd
+          cp target/release/logfwd-clean target/release/logfwd
           mkdir -p cached-binaries
           cp target/release/logfwd cached-binaries/
           cp target/release/logfwd-dhat cached-binaries/

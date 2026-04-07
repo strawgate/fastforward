@@ -19,6 +19,12 @@ permissions:
 env:
   TAPLO_VERSION: "0.10.0"
   CARGO_DENY_VERSION: "0.19.0"
+  # CI runners have 4 vCPU — use all of them.
+  CARGO_BUILD_JOBS: "4"
+  NEXTEST_TEST_THREADS: "4"
+  RUST_TEST_THREADS: "4"
+  TOKIO_WORKER_THREADS: "4"
+  RAYON_NUM_THREADS: "4"
 
 jobs:
   # -------------------------------------------------------------------------
@@ -45,7 +51,7 @@ jobs:
               - 'crates/logfwd/src/pipeline.rs'
 
   # -------------------------------------------------------------------------
-  # Frontend checks — format, lint, typecheck run in parallel via matrix
+  # Frontend checks — format, lint, typecheck in one job (single npm install)
   # -------------------------------------------------------------------------
   frontend-checks:
     if: github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'ci:full')
@@ -53,10 +59,6 @@ jobs:
     defaults:
       run:
         working-directory: dashboard
-    strategy:
-      fail-fast: false
-      matrix:
-        check: [format, lint, typecheck]
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -67,22 +69,16 @@ jobs:
       - run: npm ci
 
       - name: biome format check
-        if: matrix.check == 'format'
         run: npx biome check .
 
       - name: oxlint
-        if: matrix.check == 'lint'
         run: npx oxlint .
 
-      - name: typecheck
-        if: matrix.check == 'typecheck'
-        uses: actions/cache@v5
+      - uses: actions/cache@v5
         with:
           path: dashboard/tsconfig.tsbuildinfo
           key: tsc-${{ hashFiles('dashboard/src/**/*.ts', 'dashboard/src/**/*.tsx', 'dashboard/tsconfig.app.json') }}
-      - name: run tsgo
-        if: matrix.check == 'typecheck'
-        working-directory: dashboard
+      - name: typecheck
         run: npx tsgo --noEmit
 
   # -------------------------------------------------------------------------
@@ -126,7 +122,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/build-dashboard
-      - uses: mozilla-actions/sccache-action@v0.0.9
+
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -202,7 +198,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/build-dashboard
-      - uses: mozilla-actions/sccache-action@v0.0.9
+
       - uses: dtolnay/rust-toolchain@stable
       - uses: taiki-e/install-action@nextest
 
@@ -220,7 +216,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/build-dashboard
-      - uses: mozilla-actions/sccache-action@v0.0.9
+
       - uses: dtolnay/rust-toolchain@stable
       - uses: taiki-e/install-action@nextest
 
@@ -230,8 +226,6 @@ jobs:
 
       - name: Tests
         run: cargo nextest run --profile ci
-        env:
-          RUSTC_WRAPPER: ""
 
   # -------------------------------------------------------------------------
   # Build check — aarch64 cross-compile only (release check removed:
@@ -244,7 +238,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/build-dashboard
-      - uses: mozilla-actions/sccache-action@v0.0.9
+
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -281,6 +275,11 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          key: kani
+
       - name: Run Kani verification
         uses: model-checking/kani-github-action@v1
         with:
@@ -301,7 +300,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
-      - uses: mozilla-actions/sccache-action@v0.0.9
+
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -310,17 +309,45 @@ jobs:
         run: cargo test -p logfwd --features turmoil --test turmoil_sim
 
   # -------------------------------------------------------------------------
-  # TLC: TLA+ model checking for all specs
+  # TLC: TLA+ model checking for all specs (parallelized via matrix)
   # -------------------------------------------------------------------------
   tlc:
-    name: TLA+ model checking
+    name: "TLA+ ${{ matrix.spec }} (${{ matrix.property }})"
     needs: [changes]
     if: |
       github.event_name == 'push' ||
       contains(github.event.pull_request.labels.*.name, 'ci:full') ||
       (github.event.pull_request.draft == false && needs.changes.outputs.tla == 'true')
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - spec: PipelineMachine
+            tla_file: tla/MCPipelineMachine.tla
+            config: tla/PipelineMachine.cfg
+            property: safety
+          - spec: PipelineMachine
+            tla_file: tla/MCPipelineMachine.tla
+            config: tla/PipelineMachine.liveness.cfg
+            property: liveness
+          - spec: ShutdownProtocol
+            tla_file: tla/MCShutdownProtocol.tla
+            config: tla/ShutdownProtocol.cfg
+            property: safety
+          - spec: ShutdownProtocol
+            tla_file: tla/MCShutdownProtocol.tla
+            config: tla/ShutdownProtocol.liveness.cfg
+            property: liveness
+          - spec: PipelineBatch
+            tla_file: tla/MCPipelineBatch.tla
+            config: tla/PipelineBatch.cfg
+            property: safety
+          - spec: PipelineBatch
+            tla_file: tla/MCPipelineBatch.tla
+            config: tla/PipelineBatch.liveness.cfg
+            property: liveness
     steps:
       - uses: actions/checkout@v6
 
@@ -335,23 +362,8 @@ jobs:
           mkdir -p /tmp/tla
           curl -sL https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar -o /tmp/tla/tla2tools.jar
 
-      - name: PipelineMachine — safety
-        run: java -cp /tmp/tla/tla2tools.jar tlc2.TLC tla/MCPipelineMachine.tla -config tla/PipelineMachine.cfg -workers auto
-
-      - name: PipelineMachine — liveness
-        run: java -cp /tmp/tla/tla2tools.jar tlc2.TLC tla/MCPipelineMachine.tla -config tla/PipelineMachine.liveness.cfg -workers auto
-
-      - name: ShutdownProtocol — safety
-        run: java -cp /tmp/tla/tla2tools.jar tlc2.TLC tla/MCShutdownProtocol.tla -config tla/ShutdownProtocol.cfg -workers auto
-
-      - name: ShutdownProtocol — liveness
-        run: java -cp /tmp/tla/tla2tools.jar tlc2.TLC tla/MCShutdownProtocol.tla -config tla/ShutdownProtocol.liveness.cfg -workers auto
-
-      - name: PipelineBatch — safety
-        run: java -cp /tmp/tla/tla2tools.jar tlc2.TLC tla/MCPipelineBatch.tla -config tla/PipelineBatch.cfg -workers auto
-
-      - name: PipelineBatch — liveness
-        run: java -cp /tmp/tla/tla2tools.jar tlc2.TLC tla/MCPipelineBatch.tla -config tla/PipelineBatch.liveness.cfg -workers auto
+      - name: "TLC: ${{ matrix.spec }} — ${{ matrix.property }}"
+        run: java -cp /tmp/tla/tla2tools.jar tlc2.TLC ${{ matrix.tla_file }} -config ${{ matrix.config }} -workers auto
 
   # -------------------------------------------------------------------------
   # Conclusion — single required status check for branch protection.
