@@ -378,6 +378,7 @@ jobs:
   # -------------------------------------------------------------------------
   coverage:
     name: Code Coverage
+    needs: [test-linux]
     if: github.event_name == 'push' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     continue-on-error: true
