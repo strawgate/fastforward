@@ -444,13 +444,28 @@ impl Pipeline {
     }
 
     /// Add an input source for testing. Bypasses config-based input construction.
-    pub fn with_input(mut self, _name: &str, source: Box<dyn InputSource>) -> Self {
+    /// Add an input source for testing. Bypasses config-based input construction.
+    ///
+    /// Each new input gets its own passthrough `Scanner + SqlTransform` pair
+    /// (`SELECT * FROM logs`) to keep `input_transforms` in sync with `inputs`.
+    pub fn with_input(mut self, name: &str, source: Box<dyn InputSource>) -> Self {
         let stats = Arc::new(ComponentStats::new_with_health(ComponentHealth::Starting));
         self.inputs.push(InputState {
             source,
             buf: BytesMut::with_capacity(self.batch_target_bytes),
             stats,
         });
+        // Keep input_transforms in sync: one transform per input.
+        while self.input_transforms.len() < self.inputs.len() {
+            let transform =
+                SqlTransform::new("SELECT * FROM logs").expect("default passthrough SQL");
+            let scanner = Scanner::new(transform.scan_config());
+            self.input_transforms.push(InputTransform {
+                scanner,
+                transform,
+                input_name: name.to_string(),
+            });
+        }
         self
     }
 
@@ -651,6 +666,13 @@ impl Pipeline {
     ///   when ureq is replaced with an async HTTP client.
     /// - self.inputs.drain(..) makes this method non-reentrant.
     pub async fn run_async(&mut self, shutdown: &CancellationToken) -> io::Result<()> {
+        assert_eq!(
+            self.inputs.len(),
+            self.input_transforms.len(),
+            "run_async: inputs ({}) and input_transforms ({}) must match",
+            self.inputs.len(),
+            self.input_transforms.len(),
+        );
         // Spawn input threads. Each polls its source, parses format, and
         // sends accumulated JSON lines through a bounded channel.
         // Backpressure: when the channel is full, the input thread blocks.

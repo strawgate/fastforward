@@ -968,6 +968,15 @@ impl Config {
                         "pipeline '{name}' input '{label}': max_open_files must be at least 1"
                     )));
                 }
+
+                // Reject whitespace-only per-input SQL (mirrors pipeline-level check).
+                if let Some(sql) = &input.sql {
+                    if sql.trim().is_empty() {
+                        return Err(ConfigError::Validation(format!(
+                            "pipeline '{name}' input '{label}': per-input sql cannot be empty"
+                        )));
+                    }
+                }
             }
 
             for (i, output) in pipe.outputs.iter().enumerate() {
