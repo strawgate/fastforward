@@ -12,6 +12,7 @@ doctest = false
 base64 = { workspace = true }
 logfwd-core = { version = "0.1.0", path = "../logfwd-core" }
 logfwd-arrow = { version = "0.1.0", path = "../logfwd-arrow" }
+logfwd-otap-proto = { version = "0.1.0", path = "../logfwd-otap-proto" }
 logfwd-types = { version = "0.1.0", path = "../logfwd-types" }
 arrow = { workspace = true }
 crossbeam-channel = "0.5"
