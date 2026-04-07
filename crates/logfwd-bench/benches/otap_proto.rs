@@ -10,7 +10,9 @@ use logfwd_core::otlp::{
 };
 use logfwd_output::{
     ArrowPayloadType, BatchStatus, DecodedPayload, StatusCode, decode_batch_arrow_records,
-    decode_batch_status, encode_batch_arrow_records,
+    decode_batch_arrow_records_generated_fast, decode_batch_status,
+    decode_batch_status_generated_fast, encode_batch_arrow_records,
+    encode_batch_arrow_records_generated_fast,
 };
 
 fn manual_encode_arrow_payload(
@@ -269,6 +271,15 @@ fn bench_otap_proto(c: &mut Criterion) {
             });
         });
 
+        group.bench_function(BenchmarkId::new("encode_generated_fast", label), |b| {
+            let mut buf = Vec::with_capacity(total_bytes + 512);
+            b.iter(|| {
+                buf.clear();
+                encode_batch_arrow_records_generated_fast(&mut buf, 42, &payloads, headers);
+                std::hint::black_box(&buf);
+            });
+        });
+
         let mut encoded = Vec::with_capacity(total_bytes + 512);
         encode_batch_arrow_records(&mut encoded, 42, &payloads, headers);
 
@@ -282,6 +293,14 @@ fn bench_otap_proto(c: &mut Criterion) {
         group.bench_function(BenchmarkId::new("decode_generated", label), |b| {
             b.iter(|| {
                 let decoded = decode_batch_arrow_records(&encoded).expect("generated decode");
+                std::hint::black_box(decoded);
+            });
+        });
+
+        group.bench_function(BenchmarkId::new("decode_generated_fast", label), |b| {
+            b.iter(|| {
+                let decoded = decode_batch_arrow_records_generated_fast(&encoded)
+                    .expect("generated fast decode");
                 std::hint::black_box(decoded);
             });
         });
@@ -302,6 +321,14 @@ fn bench_otap_proto(c: &mut Criterion) {
     group.bench_function("status_decode_generated", |b| {
         b.iter(|| {
             let decoded = decode_batch_status(&status_buf).expect("generated status decode");
+            std::hint::black_box(decoded);
+        });
+    });
+
+    group.bench_function("status_decode_generated_fast", |b| {
+        b.iter(|| {
+            let decoded = decode_batch_status_generated_fast(&status_buf)
+                .expect("generated fast status decode");
             std::hint::black_box(decoded);
         });
     });

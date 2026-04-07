@@ -62,6 +62,10 @@ use super::arrow_ipc_sink::serialize_ipc;
 use super::sink::{SendResult, Sink, SinkFactory};
 use super::{BatchMetadata, Compression};
 
+mod generated_fast {
+    include!("generated/otap_fast_v1.rs");
+}
+
 /// Content-Type for protobuf-encoded OTAP messages.
 const CONTENT_TYPE_PROTOBUF: &str = "application/x-protobuf";
 
@@ -177,6 +181,16 @@ pub fn encode_batch_arrow_records(
     message.encode(buf).expect("vec-backed encode cannot fail");
 }
 
+/// Benchmark/reference path: encode OTAP with the checked-in fast generator.
+pub fn encode_batch_arrow_records_generated_fast(
+    buf: &mut Vec<u8>,
+    batch_id: i64,
+    payloads: &[(String, ArrowPayloadType, Vec<u8>)],
+    headers: &[u8],
+) {
+    generated_fast::encode_batch_arrow_records_generated_fast(buf, batch_id, payloads, headers);
+}
+
 /// Decode a `BatchStatus` response from protobuf bytes.
 ///
 /// ```text
@@ -208,6 +222,11 @@ pub fn decode_batch_status(data: &[u8]) -> io::Result<BatchStatus> {
     })
 }
 
+/// Benchmark/reference path: decode OTAP `BatchStatus` with the checked-in fast generator.
+pub fn decode_batch_status_generated_fast(data: &[u8]) -> io::Result<BatchStatus> {
+    generated_fast::decode_batch_status_generated_fast(data)
+}
+
 /// Decode a `BatchArrowRecords` from protobuf bytes.
 ///
 /// Returns the batch_id and a list of (schema_id, payload_type, ipc_bytes)
@@ -221,6 +240,13 @@ pub fn decode_batch_arrow_records(data: &[u8]) -> io::Result<(i64, Vec<DecodedPa
         .map(|payload| (payload.schema_id, payload.r#type as u32, payload.record))
         .collect();
     Ok((decoded.batch_id, payloads, decoded.headers))
+}
+
+/// Benchmark/reference path: decode `BatchArrowRecords` with the checked-in fast generator.
+pub fn decode_batch_arrow_records_generated_fast(
+    data: &[u8],
+) -> io::Result<(i64, Vec<DecodedPayload>, Vec<u8>)> {
+    generated_fast::decode_batch_arrow_records_generated_fast(data)
 }
 
 // ---------------------------------------------------------------------------
@@ -643,6 +669,43 @@ mod tests {
     }
 
     #[test]
+    fn generated_fast_batch_arrow_records_matches_generated_prost() {
+        let payloads = vec![
+            (
+                "logs".to_string(),
+                ArrowPayloadType::Logs,
+                b"fake-ipc-logs".to_vec(),
+            ),
+            (
+                "log_attrs".to_string(),
+                ArrowPayloadType::LogAttrs,
+                b"fake-ipc-attrs".to_vec(),
+            ),
+            (
+                "resource_attrs".to_string(),
+                ArrowPayloadType::ResourceAttrs,
+                b"fake-ipc-resource".to_vec(),
+            ),
+            (
+                "scope_attrs".to_string(),
+                ArrowPayloadType::ScopeAttrs,
+                b"fake-ipc-scope".to_vec(),
+            ),
+        ];
+
+        let mut generated = Vec::new();
+        encode_batch_arrow_records(&mut generated, 42, &payloads, b"custom-headers");
+
+        let mut fast = Vec::new();
+        encode_batch_arrow_records_generated_fast(&mut fast, 42, &payloads, b"custom-headers");
+
+        assert_eq!(
+            fast, generated,
+            "generated-fast OTAP encoding drifted from prost path"
+        );
+    }
+
+    #[test]
     fn encode_decode_batch_status_roundtrip() {
         let mut buf = Vec::new();
         ProtoBatchStatus {
@@ -909,5 +972,40 @@ mod tests {
         assert_eq!(status.batch_id, 10);
         assert_eq!(status.status_code, StatusCode::Ok);
         assert_eq!(status.status_message, "ok");
+    }
+
+    #[test]
+    fn generated_fast_decoders_match_generated_prost() {
+        let payloads = vec![
+            ("logs".to_string(), ArrowPayloadType::Logs, b"data".to_vec()),
+            (
+                "resource_attrs".to_string(),
+                ArrowPayloadType::ResourceAttrs,
+                b"resource".to_vec(),
+            ),
+        ];
+
+        let mut buf = Vec::new();
+        encode_batch_arrow_records(&mut buf, 11, &payloads, b"headers");
+
+        let generated = decode_batch_arrow_records(&buf).expect("generated decode");
+        let fast = decode_batch_arrow_records_generated_fast(&buf).expect("generated fast decode");
+        assert_eq!(fast, generated, "generated-fast OTAP batch decode drifted");
+
+        let mut status_buf = Vec::new();
+        ProtoBatchStatus {
+            batch_id: 99,
+            status_code: ProtoStatusCode::Unavailable as i32,
+            status_message: "busy".to_string(),
+        }
+        .encode(&mut status_buf)
+        .expect("vec-backed encode cannot fail");
+
+        let generated_status = decode_batch_status(&status_buf).expect("generated status decode");
+        let fast_status =
+            decode_batch_status_generated_fast(&status_buf).expect("generated fast status decode");
+        assert_eq!(fast_status.batch_id, generated_status.batch_id);
+        assert_eq!(fast_status.status_code as u32, generated_status.status_code as u32);
+        assert_eq!(fast_status.status_message, generated_status.status_message);
     }
 }

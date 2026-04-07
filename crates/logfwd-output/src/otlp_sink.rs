@@ -21,6 +21,10 @@ use zstd::bulk::Compressor as ZstdCompressor;
 use super::{BatchMetadata, Compression, str_value};
 use crate::http_classify::{self, DEFAULT_RETRY_AFTER_SECS};
 
+mod generated {
+    include!("generated/otlp_log_record_fast_v1.rs");
+}
+
 // ---------------------------------------------------------------------------
 // InstrumentationScope constants
 // ---------------------------------------------------------------------------
@@ -102,6 +106,44 @@ impl OtlpSink {
     /// Encode a full ExportLogsServiceRequest from a RecordBatch.
     /// Returns the raw protobuf bytes in `self.encoder_buf`.
     pub fn encode_batch(&mut self, batch: &RecordBatch, metadata: &BatchMetadata) {
+        self.encode_batch_with_row_encoder(batch, metadata, encode_row_as_log_record);
+    }
+
+    /// Benchmark/reference path: encode using the generated fast-row encoder.
+    pub fn encode_batch_generated_fast(&mut self, batch: &RecordBatch, metadata: &BatchMetadata) {
+        self.encode_batch_with_row_encoder(
+            batch,
+            metadata,
+            generated::encode_row_as_log_record_fast_v1,
+        );
+    }
+
+    /// Benchmark/reference path: encode only the concatenated LogRecord payloads using the
+    /// handwritten row encoder.
+    pub fn encode_rows_only_for_bench(&mut self, batch: &RecordBatch, metadata: &BatchMetadata) {
+        self.encode_rows_only_with_row_encoder(batch, metadata, encode_row_as_log_record);
+    }
+
+    /// Benchmark/reference path: encode only the concatenated LogRecord payloads using the
+    /// generated fast row encoder.
+    pub fn encode_rows_only_generated_fast_for_bench(
+        &mut self,
+        batch: &RecordBatch,
+        metadata: &BatchMetadata,
+    ) {
+        self.encode_rows_only_with_row_encoder(
+            batch,
+            metadata,
+            generated::encode_row_as_log_record_fast_v1,
+        );
+    }
+
+    fn encode_batch_with_row_encoder(
+        &mut self,
+        batch: &RecordBatch,
+        metadata: &BatchMetadata,
+        mut encode_row: impl FnMut(&BatchColumns<'_>, usize, &BatchMetadata, &mut Vec<u8>),
+    ) {
         self.encoder_buf.clear();
         let num_rows = batch.num_rows();
         if num_rows == 0 {
@@ -133,7 +175,7 @@ impl OtlpSink {
 
         for row in 0..num_rows {
             let start = records_buf.len();
-            encode_row_as_log_record(&columns, row, metadata, &mut records_buf);
+            encode_row(&columns, row, metadata, &mut records_buf);
             record_ranges.push((start, records_buf.len()));
         }
 
@@ -233,7 +275,41 @@ impl OtlpSink {
         }
     }
 
-    /// Returns the raw encoded OTLP protobuf payload produced by [`Self::encode_batch`].
+    fn encode_rows_only_with_row_encoder(
+        &mut self,
+        batch: &RecordBatch,
+        metadata: &BatchMetadata,
+        mut encode_row: impl FnMut(&BatchColumns<'_>, usize, &BatchMetadata, &mut Vec<u8>),
+    ) {
+        self.encoder_buf.clear();
+        let num_rows = batch.num_rows();
+        if num_rows == 0 {
+            return;
+        }
+
+        let normalized;
+        let batch = if batch
+            .schema()
+            .fields()
+            .iter()
+            .any(|f| matches!(f.data_type(), DataType::Struct(_)))
+        {
+            normalized = normalize_conflict_columns(batch.clone());
+            &normalized
+        } else {
+            batch
+        };
+
+        let columns = resolve_batch_columns(batch);
+        self.encoder_buf.reserve(num_rows * 128);
+
+        for row in 0..num_rows {
+            encode_row(&columns, row, metadata, &mut self.encoder_buf);
+        }
+    }
+
+    /// Returns the raw encoded OTLP protobuf payload produced by one of the
+    /// encode methods on this sink.
     pub fn encoded_payload(&self) -> &[u8] {
         &self.encoder_buf
     }
@@ -1615,5 +1691,67 @@ mod tests {
 
         let severities: Vec<i32> = records.iter().map(|lr| lr.severity_number).collect();
         assert_eq!(severities, vec![9, 13, 17], "INFO=9, WARN=13, ERROR=17");
+    }
+
+    #[test]
+    fn generated_fast_otlp_matches_handwritten_encoder() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("timestamp", DataType::Utf8, true),
+            Field::new("level", DataType::Utf8, true),
+            Field::new("message", DataType::Utf8, true),
+            Field::new("trace_id", DataType::Utf8, true),
+            Field::new("span_id", DataType::Utf8, true),
+            Field::new("flags", DataType::Int64, true),
+            Field::new("host", DataType::Utf8, true),
+            Field::new("count", DataType::Int64, true),
+            Field::new("latency", DataType::Float64, true),
+            Field::new("active", DataType::Boolean, true),
+        ]));
+
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec![
+                    Some("2024-01-15T10:30:00Z"),
+                    Some("2024-01-15T10:30:01Z"),
+                ])),
+                Arc::new(StringArray::from(vec![Some("INFO"), Some("ERROR")])),
+                Arc::new(StringArray::from(vec![Some("first"), Some("second")])),
+                Arc::new(StringArray::from(vec![
+                    Some("0102030405060708090a0b0c0d0e0f10"),
+                    Some("1112131415161718191a1b1c1d1e1f20"),
+                ])),
+                Arc::new(StringArray::from(vec![
+                    Some("0102030405060708"),
+                    Some("1112131415161718"),
+                ])),
+                Arc::new(Int64Array::from(vec![Some(1), Some(255)])),
+                Arc::new(StringArray::from(vec![Some("web-01"), Some("web-02")])),
+                Arc::new(Int64Array::from(vec![Some(42), Some(7)])),
+                Arc::new(arrow::array::Float64Array::from(vec![Some(1.5), Some(2.5)])),
+                Arc::new(arrow::array::BooleanArray::from(vec![
+                    Some(true),
+                    Some(false),
+                ])),
+            ],
+        )
+        .expect("valid batch");
+
+        let metadata = BatchMetadata {
+            resource_attrs: Arc::new(vec![("service.name".to_string(), "otlp-test".to_string())]),
+            observed_time_ns: 1_700_000_000_000_000_000,
+        };
+
+        let mut handwritten = make_sink();
+        handwritten.encode_batch(&batch, &metadata);
+
+        let mut generated = make_sink();
+        generated.encode_batch_generated_fast(&batch, &metadata);
+
+        assert_eq!(
+            generated.encoded_payload(),
+            handwritten.encoded_payload(),
+            "generated-fast OTLP payload drifted from handwritten encoder",
+        );
     }
 }
