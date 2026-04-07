@@ -187,7 +187,7 @@ async fn main_inner() -> i32 {
         "--config" | "-c" => cmd_config(&args).await,
         "--blackhole" => cmd_blackhole(&args).await,
         "--generate-json" => cmd_generate_json(&args),
-        "--dump-config" => cmd_dump_config(&args),
+        "--effective-config" | "--dump-config" => cmd_effective_config(&args),
         "--init" => cmd_init(),
         "--wizard" => cmd_wizard(),
         "--completions" => cmd_completions(&args),
@@ -223,7 +223,7 @@ fn print_usage() {
     println!("  logfwd --config <config.yaml> [--validate] [--dry-run]");
     println!("  logfwd --blackhole [bind_addr]");
     println!("  logfwd --generate-json <num_lines> <output_file>");
-    println!("  logfwd --dump-config [config.yaml]");
+    println!("  logfwd --effective-config [config.yaml]");
     println!("  logfwd --init");
     println!("  logfwd --wizard");
     println!("  logfwd --completions <shell>");
@@ -234,7 +234,8 @@ fn print_usage() {
     println!("      --dry-run          Build pipelines without running");
     println!("      --blackhole [addr] OTLP blackhole receiver (default: 127.0.0.1:4318)");
     println!("      --generate-json    Generate synthetic JSON log file");
-    println!("      --dump-config      Print resolved config to stdout");
+    println!("      --effective-config Validate and print effective runnable config");
+    println!("      --dump-config      Deprecated alias for --effective-config");
     println!("      --init             Generate starter config in current directory");
     println!("      --wizard           Interactive config wizard");
     println!("      --completions      Print shell completions (bash, zsh, fish)");
@@ -247,7 +248,10 @@ fn print_usage() {
     print_example("logfwd -c config.yaml --dry-run", "test SQL planning");
     print_example("logfwd --blackhole", "start OTLP test receiver");
     print_example("logfwd --generate-json 10000 test.json", "synthetic data");
-    print_example("logfwd --dump-config config.yaml", "show resolved config");
+    print_example(
+        "logfwd --effective-config config.yaml",
+        "validate and show effective runnable config",
+    );
     print_example("logfwd --init", "generate starter config");
     print_example("logfwd --wizard", "interactive config generator");
     print_example("logfwd --completions bash", "output bash completions");
@@ -420,26 +424,34 @@ fn cmd_generate_json(args: &[String]) -> Result<(), CliError> {
     generate_json_log_file(num_lines, &args[3]).map_err(CliError::Runtime)
 }
 
-fn cmd_dump_config(args: &[String]) -> Result<(), CliError> {
+fn cmd_effective_config(args: &[String]) -> Result<(), CliError> {
+    if matches!(args.get(1).map(String::as_str), Some("--dump-config")) {
+        eprintln!(
+            "{}warning{}: --dump-config is deprecated; use --effective-config",
+            yellow(),
+            reset()
+        );
+    }
+
     let config_path = if args.len() >= 3 {
         args[2].clone()
     } else if let Some(path) = discover_config() {
         path.to_string_lossy().to_string()
     } else {
         eprintln!(
-            "{}error{}: --dump-config requires a config file",
+            "{}error{}: --effective-config requires a config file",
             red(),
             reset()
         );
-        eprintln!("  logfwd --dump-config <config.yaml>");
+        eprintln!("  logfwd --effective-config <config.yaml>");
         return Err(CliError::Config("no config file found".to_owned()));
     };
 
     let config_yaml = std::fs::read_to_string(&config_path)
         .map_err(|e| CliError::Config(format!("cannot read {config_path}: {e}")))?;
 
-    // Validate that the config parses and can build runtime pipelines before dumping.
-    // This keeps --dump-config consistent with --validate behavior.
+    // Validate that the config parses and can build runtime pipelines before printing.
+    // This keeps --effective-config consistent with --validate behavior.
     let config = logfwd_config::Config::load_str(&config_yaml)
         .map_err(|e| CliError::Config(e.to_string()))?;
     let base_path = std::path::Path::new(&config_path).parent();
@@ -577,7 +589,12 @@ fn prompt_select(prompt: &str, options: &[&str]) -> Result<usize, CliError> {
         stdout.flush()?;
 
         let mut line = String::new();
-        stdin.read_line(&mut line)?;
+        let bytes_read = stdin.read_line(&mut line)?;
+        if bytes_read == 0 {
+            return Err(CliError::Config(
+                "stdin closed while reading --wizard input".to_owned(),
+            ));
+        }
         let trimmed = line.trim();
         if let Ok(v) = trimmed.parse::<usize>()
             && (1..=options.len()).contains(&v)
@@ -634,10 +651,10 @@ _logfwd() {
     local cur prev commands
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
-    commands="--config -c --blackhole --generate-json --dump-config --init --wizard --completions --help -h --version -V"
+    commands="--config -c --blackhole --generate-json --effective-config --dump-config --init --wizard --completions --help -h --version -V"
 
     case "$prev" in
-        --config|-c|--dump-config)
+        --config|-c|--effective-config|--dump-config)
             COMPREPLY=( $(compgen -f -X '!*.yaml' -- "$cur") $(compgen -f -X '!*.yml' -- "$cur") $(compgen -d -- "$cur") )
             return 0
             ;;
@@ -676,7 +693,8 @@ _logfwd() {
         '-c[Run pipeline from YAML config]:config file:_files -g "*.y(a|)ml"'
         '--blackhole[OTLP blackhole receiver]:bind addr:'
         '--generate-json[Generate synthetic JSON log file]:lines: :output file:_files'
-        '--dump-config[Print resolved config]:config file:_files -g "*.y(a|)ml"'
+        '--effective-config[Validate and print effective runnable config]:config file:_files -g "*.y(a|)ml"'
+        '--dump-config[Deprecated alias for --effective-config]:config file:_files -g "*.y(a|)ml"'
         '--init[Generate starter config]'
         '--wizard[Interactive config wizard]'
         '--completions[Print shell completions]:shell:(bash zsh fish)'
@@ -713,7 +731,8 @@ complete -c logfwd -f
 complete -c logfwd -l config -s c -d 'Run pipeline from YAML config' -rF
 complete -c logfwd -l blackhole -d 'OTLP blackhole receiver'
 complete -c logfwd -l generate-json -d 'Generate synthetic JSON log file'
-complete -c logfwd -l dump-config -d 'Print resolved config' -rF
+complete -c logfwd -l effective-config -d 'Validate and print effective runnable config' -rF
+complete -c logfwd -l dump-config -d 'Deprecated alias for --effective-config' -rF
 complete -c logfwd -l init -d 'Generate starter config'
 complete -c logfwd -l wizard -d 'Interactive config wizard'
 complete -c logfwd -l completions -d 'Print shell completions' -xa 'bash zsh fish'
@@ -790,6 +809,7 @@ fn suggest_flag(input: &str) -> Option<&'static str> {
         "-c",
         "--blackhole",
         "--generate-json",
+        "--effective-config",
         "--dump-config",
         "--init",
         "--wizard",
@@ -1589,6 +1609,10 @@ mod cli_tests {
         assert_eq!(suggest_flag("--confi"), Some("--config"));
         assert_eq!(suggest_flag("--blackhol"), Some("--blackhole"));
         assert_eq!(suggest_flag("--versin"), Some("--version"));
+        assert_eq!(
+            suggest_flag("--effective-confi"),
+            Some("--effective-config")
+        );
     }
 
     #[test]
@@ -1680,6 +1704,10 @@ mod cli_tests {
         assert_eq!(suggest_flag("--wizar"), Some("--wizard"));
         assert_eq!(suggest_flag("--completion"), Some("--completions"));
         assert_eq!(suggest_flag("--dump-confi"), Some("--dump-config"));
+        assert_eq!(
+            suggest_flag("--effective-confi"),
+            Some("--effective-config")
+        );
     }
 
     #[test]
