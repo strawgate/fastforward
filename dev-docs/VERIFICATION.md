@@ -139,9 +139,10 @@ just kani-boundary
 ```
 
 CI runs this check in the dedicated `Verification guardrail` job, and the
-required `CI conclusion` status depends on that guardrail passing. This keeps
-required seam drift visible as its own blocking check instead of burying it
-inside the broader lint job.
+required `CI conclusion` status depends on that guardrail passing. CI also runs
+`cargo kani` for the required production crates (`logfwd-core`, `logfwd-arrow`,
+`logfwd-io`, `logfwd-output`) whenever those areas change so missing in-file
+proofs fail with a direct Kani signal rather than only contract drift.
 
 ### Proof quality requirements
 
