@@ -198,7 +198,9 @@ impl LokiSink {
         // Find label ColInfos for configured label columns.
         // Static labels are sanitized before collision detection (#1459, #1470).
         let static_labels = sanitize_static_labels(&self.config.static_labels)?;
-        let mut sanitized_label_sources: HashMap<String, String> = static_labels
+        let mut sanitized_label_sources: HashMap<String, String> = self
+            .config
+            .static_labels
             .iter()
             .map(|(key, _)| {
                 (
@@ -823,12 +825,36 @@ mod tests {
 
     #[test]
     fn static_label_keys_are_sanitized_in_streams() {
-        let mut stream_map: StreamMap = HashMap::new();
-        stream_map.insert(
-            "[[\"service_name\",\"frontend\"]]".to_string(),
-            vec![(1_000, "{\"message\":\"ok\"}".to_string())],
+        use arrow::array::StringArray;
+        use arrow::datatypes::{Field, Schema};
+
+        let config = Arc::new(LokiConfig {
+            endpoint: "http://localhost".to_string(),
+            tenant_id: None,
+            static_labels: vec![("service.name".to_string(), "frontend".to_string())],
+            label_columns: vec![],
+            headers: vec![],
+        });
+        let sink = LokiSink::new(
+            "test".to_string(),
+            config,
+            Arc::new(reqwest::Client::new()),
+            Arc::new(ComponentStats::new()),
         );
 
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "message",
+            DataType::Utf8,
+            true,
+        )]));
+        let values = StringArray::from(vec![Some("ok")]);
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(values)]).unwrap();
+        let metadata = BatchMetadata {
+            resource_attrs: Arc::new(vec![]),
+            observed_time_ns: 1_000,
+        };
+
+        let mut stream_map = sink.build_stream_map(&batch, &metadata).unwrap();
         let (payload, retained) = LokiSink::serialize_loki_json(&mut stream_map);
         assert_eq!(retained, 1);
         assert!(payload.contains("\"service_name\":\"frontend\""));
@@ -991,6 +1017,10 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("duplicate Loki label key after sanitization"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            err.to_string().contains("static label 'service.name'"),
             "unexpected error: {err}"
         );
     }
