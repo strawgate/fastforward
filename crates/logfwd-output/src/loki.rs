@@ -71,6 +71,26 @@ fn sanitize_loki_label_name(name: &str) -> String {
     if out.is_empty() { "_".to_string() } else { out }
 }
 
+fn sanitize_static_labels(static_labels: &[(String, String)]) -> io::Result<Vec<(String, String)>> {
+    let mut sanitized = Vec::with_capacity(static_labels.len());
+    let mut sanitized_sources: HashMap<String, String> =
+        HashMap::with_capacity(static_labels.len());
+    for (key, value) in static_labels {
+        let sanitized_key = sanitize_loki_label_name(key);
+        if let Some(existing) = sanitized_sources.get(&sanitized_key) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "duplicate Loki static label key after sanitization: '{key}' conflicts with {existing} as '{sanitized_key}'"
+                ),
+            ));
+        }
+        sanitized_sources.insert(sanitized_key.clone(), format!("static label '{key}'"));
+        sanitized.push((sanitized_key, value.clone()));
+    }
+    Ok(sanitized)
+}
+
 /// Sort entries by timestamp and deduplicate by incrementing conflicting timestamps.
 ///
 /// Loki rejects any push where `entries[i].timestamp <= entries[i-1].timestamp`
@@ -175,12 +195,10 @@ impl LokiSink {
             f.name() == field_names::TIMESTAMP_UNDERSCORE || f.name() == field_names::TIMESTAMP_AT
         });
 
-        // Track all label sources (static + dynamic) for collision detection.
-        // Static labels are sanitized too so collisions like "a.b" (static) vs
-        // "a_b" (dynamic) are caught. (#1459, #1470)
-        let mut sanitized_label_sources: HashMap<String, String> = self
-            .config
-            .static_labels
+        // Find label ColInfos for configured label columns.
+        // Static labels are sanitized before collision detection (#1459, #1470).
+        let static_labels = sanitize_static_labels(&self.config.static_labels)?;
+        let mut sanitized_label_sources: HashMap<String, String> = static_labels
             .iter()
             .map(|(key, _)| {
                 (
@@ -241,7 +259,7 @@ impl LokiSink {
             // --- Labels ---
             // Use coalesce_as_str so that struct conflict columns (and plain Utf8
             // columns alike) always produce a string value for the label.
-            let mut labels: Vec<(String, String)> = self.config.static_labels.clone();
+            let mut labels = static_labels.clone();
             for (label_name, col_info) in &label_col_infos {
                 if let Some(val) = coalesce_as_str(batch, row, col_info) {
                     // Skip empty label values — Loki API rejects them with HTTP 400.
@@ -283,10 +301,7 @@ impl LokiSink {
     /// Returns `(payload, retained_row_count)`. The retained count may be less than
     /// the original row count if overflow truncation occurred in any stream
     /// (see [`sort_and_dedup_timestamps`]).
-    fn serialize_loki_json(
-        stream_map: &mut StreamMap,
-        static_labels: &[(String, String)],
-    ) -> (String, u64) {
+    fn serialize_loki_json(stream_map: &mut StreamMap) -> (String, u64) {
         let mut streams_json = Vec::new();
         let mut retained: u64 = 0;
 
@@ -294,9 +309,8 @@ impl LokiSink {
             retained += sort_and_dedup_timestamps(entries) as u64;
 
             // Parse stream_key (JSON array of [key, value] pairs) back into label map.
-            // Static labels are seeded first as immutable identifiers; dynamic labels
-            // from the stream_key fill in any remaining keys but cannot override statics.
-            let mut labels_map: HashMap<String, String> = static_labels.iter().cloned().collect();
+            // The stream key already includes sanitized static and dynamic labels.
+            let mut labels_map: HashMap<String, String> = HashMap::new();
             if let Ok(pairs) = serde_json::from_str::<Vec<[String; 2]>>(stream_key.as_str()) {
                 for [k, v] in pairs {
                     labels_map.entry(k).or_insert(v);
@@ -388,8 +402,7 @@ impl super::sink::Sink for LokiSink {
                 Ok(m) => m,
                 Err(e) => return super::sink::SendResult::IoError(e),
             };
-            let (payload, retained_rows) =
-                Self::serialize_loki_json(&mut stream_map, &self.config.static_labels);
+            let (payload, retained_rows) = Self::serialize_loki_json(&mut stream_map);
             match self.do_send(payload, retained_rows).await {
                 Ok(r) => r,
                 Err(e) => super::sink::SendResult::IoError(e),
@@ -809,6 +822,20 @@ mod tests {
     }
 
     #[test]
+    fn static_label_keys_are_sanitized_in_streams() {
+        let mut stream_map: StreamMap = HashMap::new();
+        stream_map.insert(
+            "[[\"service_name\",\"frontend\"]]".to_string(),
+            vec![(1_000, "{\"message\":\"ok\"}".to_string())],
+        );
+
+        let (payload, retained) = LokiSink::serialize_loki_json(&mut stream_map);
+        assert_eq!(retained, 1);
+        assert!(payload.contains("\"service_name\":\"frontend\""));
+        assert!(!payload.contains("\"service.name\":\"frontend\""));
+    }
+
+    #[test]
     fn colliding_sanitized_label_columns_error() {
         use arrow::array::{ArrayRef, StringArray};
         use arrow::datatypes::{Field, Schema};
@@ -916,6 +943,45 @@ mod tests {
         let schema = Arc::new(Schema::new(vec![Field::new("env", DataType::Utf8, true)]));
         let env_arr = StringArray::from(vec![Some("staging")]);
         let batch = RecordBatch::try_new(schema, vec![Arc::new(env_arr)]).unwrap();
+        let metadata = BatchMetadata {
+            resource_attrs: Arc::new(vec![]),
+            observed_time_ns: 1_000,
+        };
+
+        let err = sink.build_stream_map(&batch, &metadata).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("duplicate Loki label key after sanitization"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn sanitized_static_label_colliding_with_dynamic_errors() {
+        use arrow::array::StringArray;
+        use arrow::datatypes::{Field, Schema};
+
+        let config = Arc::new(LokiConfig {
+            endpoint: "http://localhost".to_string(),
+            tenant_id: None,
+            static_labels: vec![("service.name".to_string(), "frontend".to_string())],
+            label_columns: vec!["service_name".to_string()],
+            headers: vec![],
+        });
+        let sink = LokiSink::new(
+            "test".to_string(),
+            config,
+            Arc::new(reqwest::Client::new()),
+            Arc::new(ComponentStats::new()),
+        );
+
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "service_name",
+            DataType::Utf8,
+            true,
+        )]));
+        let values = StringArray::from(vec![Some("checkout")]);
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(values)]).unwrap();
         let metadata = BatchMetadata {
             resource_attrs: Arc::new(vec![]),
             observed_time_ns: 1_000,

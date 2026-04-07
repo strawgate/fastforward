@@ -149,31 +149,17 @@ impl Cli {
     }
 
     fn parse_from(args: Vec<String>) -> Self {
-        let mut lines = DEFAULT_LINES;
-        let mut iterations = DEFAULT_ITERATIONS;
-        let mut alloc_only = false;
-        let mut flamegraph = None;
-        let mut args = args.into_iter();
-        while let Some(arg) = args.next() {
-            match arg.as_str() {
-                "--lines" => {
-                    lines = parse_positive_usize_arg(args.next(), "--lines", DEFAULT_LINES);
-                }
-                "--iterations" => {
-                    iterations =
-                        parse_positive_usize_arg(args.next(), "--iterations", DEFAULT_ITERATIONS);
-                }
-                "--alloc-only" => alloc_only = true,
-                "--flamegraph" => {
-                    flamegraph = args.next().map(PathBuf::from);
-                }
-                "--help" | "-h" => {
-                    print_help();
-                    std::process::exit(0);
-                }
-                _ => {}
+        for arg in &args {
+            if matches!(arg.as_str(), "--help" | "-h") {
+                print_help();
+                std::process::exit(0);
             }
         }
+
+        let lines = parse_positive_usize_flag(&args, "--lines", DEFAULT_LINES);
+        let iterations = parse_positive_usize_flag(&args, "--iterations", DEFAULT_ITERATIONS);
+        let alloc_only = args.iter().any(|arg| arg == "--alloc-only");
+        let flamegraph = parse_path_flag(&args, "--flamegraph");
         Self {
             lines,
             iterations,
@@ -183,19 +169,37 @@ impl Cli {
     }
 }
 
-fn parse_positive_usize_arg(raw: Option<String>, flag: &str, default: usize) -> usize {
-    match raw.as_deref() {
-        Some(value) => match value.parse::<usize>() {
-            Ok(parsed) if parsed > 0 => parsed,
-            _ => {
-                eprintln!("warning: {flag} expects a positive integer; using default {default}");
+fn parse_positive_usize_flag(args: &[String], flag: &str, default: usize) -> usize {
+    match args.iter().rposition(|arg| arg == flag) {
+        Some(idx) => match args.get(idx + 1) {
+            Some(value) => match value.parse::<usize>() {
+                Ok(parsed) if parsed > 0 => parsed,
+                _ => {
+                    eprintln!(
+                        "warning: {flag} expects a positive integer; using default {default}"
+                    );
+                    default
+                }
+            },
+            None => {
+                eprintln!("warning: {flag} expects a value; using default {default}");
                 default
             }
         },
-        None => {
-            eprintln!("warning: {flag} expects a positive integer; using default {default}");
-            default
-        }
+        None => default,
+    }
+}
+
+fn parse_path_flag(args: &[String], flag: &str) -> Option<PathBuf> {
+    match args.iter().rposition(|arg| arg == flag) {
+        Some(idx) => match args.get(idx + 1) {
+            Some(value) if !value.starts_with('-') => Some(PathBuf::from(value)),
+            _ => {
+                eprintln!("warning: {flag} expects a value; ignoring");
+                None
+            }
+        },
+        None => None,
     }
 }
 
@@ -763,6 +767,17 @@ mod tests {
         let cli = Cli::parse_from(vec!["--lines".to_string(), "--iterations".to_string()]);
         assert_eq!(cli.lines, DEFAULT_LINES);
         assert_eq!(cli.iterations, DEFAULT_ITERATIONS);
+    }
+
+    #[test]
+    fn cli_missing_value_does_not_swallow_next_flag() {
+        let cli = Cli::parse_from(vec![
+            "--lines".to_string(),
+            "--iterations".to_string(),
+            "5".to_string(),
+        ]);
+        assert_eq!(cli.lines, DEFAULT_LINES);
+        assert_eq!(cli.iterations, 5);
     }
 
     #[test]
