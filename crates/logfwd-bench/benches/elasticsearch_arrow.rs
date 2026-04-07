@@ -109,7 +109,13 @@ fn index_batch(
         resource_attrs: Arc::new(vec![]),
         observed_time_ns: 0,
     };
-    let _ = rt.block_on(sink.send_batch(batch, &metadata));
+    let result = rt.block_on(sink.send_batch(batch, &metadata));
+    if let logfwd_output::SendResult::Rejected(_) = result {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "batch rejected",
+        ));
+    }
     Ok(())
 }
 
@@ -148,8 +154,10 @@ fn bench_arrow_query(rt: &Runtime, query: &str, iterations: usize) -> (f64, usiz
                 if let Ok(body) = rt.block_on(response.bytes()) {
                     let cursor = std::io::Cursor::new(body);
                     if let Ok(reader) = StreamReader::try_new(cursor, None) {
-                        for batch in reader.flatten() {
-                            total_rows += batch.num_rows();
+                        for batch_result in reader {
+                            if let Ok(batch) = batch_result {
+                                total_rows += batch.num_rows();
+                            }
                         }
                     }
                 }
