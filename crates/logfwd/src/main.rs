@@ -766,6 +766,41 @@ where
     Ok(())
 }
 
+fn validate_transform_probe_read_only(
+    transform: &mut logfwd_transform::SqlTransform,
+) -> Result<(), String> {
+    use arrow::array::{ArrayRef, StringArray};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
+
+    let fields: Vec<Field> = if transform.analyzer().referenced_columns.is_empty() {
+        vec![
+            Field::new("_raw", DataType::Utf8, true),
+            Field::new("level", DataType::Utf8, true),
+            Field::new("msg", DataType::Utf8, true),
+        ]
+    } else {
+        transform
+            .analyzer()
+            .referenced_columns
+            .iter()
+            .map(|name| Field::new(name, DataType::Utf8, true))
+            .collect()
+    };
+
+    let schema = Arc::new(Schema::new(fields.clone()));
+    let arrays: Vec<ArrayRef> = fields
+        .iter()
+        .map(|_| Arc::new(StringArray::from(vec![Some("x")])) as ArrayRef)
+        .collect();
+    let batch = RecordBatch::try_new(schema, arrays)
+        .map_err(|e| format!("failed to build probe batch: {e}"))?;
+    transform
+        .execute_blocking(batch)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
 fn validate_pipeline_read_only(
     config: &logfwd_config::PipelineConfig,
     base_path: Option<&std::path::Path>,
@@ -892,8 +927,7 @@ fn validate_pipeline_read_only(
                 .add_enrichment_table(Arc::clone(table))
                 .map_err(|e| format!("input '{}': enrichment error: {e}", input_name))?;
         }
-        transform
-            .validate_plan()
+        validate_transform_probe_read_only(&mut transform)
             .map_err(|e| format!("input '{}': {e}", input_name))?;
     }
 
