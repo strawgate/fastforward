@@ -289,7 +289,7 @@ This section maps the I/O contracts to the expected enforcement style.
 | Performance goals | disciplined benchmark validation |
 
 This table is normative for planning,
-not a claim that every item is already complete on `master`.
+not a claim that every item is already complete on `main`.
 
 ## Update Rules
 
