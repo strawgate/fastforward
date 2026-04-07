@@ -988,7 +988,7 @@ mod tests {
         let len = data.len();
         // The data_size is stored in the footer at an offset (record_count(8) + batch_count(4) -> 12 bytes in).
         // Let's just create a new footer and overwrite the last 32 bytes.
-        let mut fake_footer = seg.footer.clone();
+        let mut fake_footer = seg.footer;
         fake_footer.data_size = u64::MAX; // Extremely large value to trigger overflow/OOM if not handled
         let fake_bytes = fake_footer.to_bytes();
         data[(len - FOOTER_SIZE)..].copy_from_slice(&fake_bytes);
@@ -997,7 +997,7 @@ mod tests {
         // Reading the batches should fail with an InvalidData error, not panic or OOM.
         let seg_corrupt1 = SegmentFile {
             path: seg.path.clone(),
-            header: seg.header.clone(),
+            header: seg.header,
             footer: fake_footer,
         };
         let err = seg_corrupt1.read_batches().unwrap_err();
@@ -1009,7 +1009,7 @@ mod tests {
         );
 
         // Also test a value slightly less than max, but larger than the file.
-        let mut fake_footer2 = seg.footer.clone();
+        let mut fake_footer2 = seg.footer;
         fake_footer2.data_size = (len * 2) as u64;
         let fake_bytes2 = fake_footer2.to_bytes();
         data[(len - FOOTER_SIZE)..].copy_from_slice(&fake_bytes2);
@@ -1017,7 +1017,7 @@ mod tests {
 
         let seg_corrupt2 = SegmentFile {
             path: seg.path.clone(),
-            header: seg.header.clone(),
+            header: seg.header,
             footer: fake_footer2,
         };
         let err2 = seg_corrupt2.read_batches().unwrap_err();
