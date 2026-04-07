@@ -1018,6 +1018,7 @@ impl DiagnosticsServer {
 
     fn status_body(&self) -> String {
         let uptime = self.start_time.elapsed().as_secs();
+        let uptime_s = self.start_time.elapsed().as_secs_f64();
         let observed_at_unix_ns = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -1121,8 +1122,52 @@ impl DiagnosticsServer {
             let backpressure = pm.backpressure_stalls.load(Ordering::Relaxed);
             let transform_health = policy::transform_health(pm);
 
+            // Compute bottleneck classification.
+            // Ratios are relative to uptime_s so they represent "per wall-second"
+            // accumulated stage time across all workers. queue_wait > 0.5 × uptime
+            // means workers are spending more than half their time blocked waiting
+            // to dispatch, a clear sign the output sink is the ceiling.
+            let uptime_s_nonzero = uptime_s.max(1e-9);
+            let queue_wait_ratio = queue_wait_s / uptime_s_nonzero;
+            let transform_ratio = transform_s / uptime_s_nonzero;
+            let scan_ratio = scan_s / uptime_s_nonzero;
+            let stalls_per_sec = backpressure as f64 / uptime_s_nonzero;
+
+            let (bottleneck_stage, bottleneck_reason): (&str, String) = if queue_wait_ratio > 0.5 {
+                (
+                    "output",
+                    format!(
+                        "workers spending {:.0}% of uptime in output queue",
+                        queue_wait_ratio * 100.0
+                    ),
+                )
+            } else if stalls_per_sec > 10.0 {
+                (
+                    "input",
+                    format!(
+                        "backpressure stalls at {:.1}/sec — input faster than pipeline can drain",
+                        stalls_per_sec
+                    ),
+                )
+            } else if transform_ratio > 0.3 {
+                (
+                    "transform",
+                    format!(
+                        "transform consuming {:.0}% of uptime",
+                        transform_ratio * 100.0
+                    ),
+                )
+            } else if scan_ratio > 0.3 {
+                (
+                    "scan",
+                    format!("scan consuming {:.0}% of uptime", scan_ratio * 100.0),
+                )
+            } else {
+                ("none", "running well within capacity".to_string())
+            };
+
             pipelines_json.push(format!(
-                r#"{{"name":"{}","inputs":[{}],"transform":{{"sql":"{}","health":"{}","lines_in":{},"lines_out":{},"errors":{},"filter_drop_rate":{:.3}}},"outputs":[{}],"batches":{{"total":{},"avg_rows":{:.1},"flush_by_size":{},"flush_by_timeout":{},"dropped_batches_total":{},"scan_errors_total":{},"parse_errors_total":{},"last_batch_time_ns":{},"batch_latency_avg_ns":{},"inflight":{},"rows_total":{}}},"stage_seconds":{{"scan":{:.6},"transform":{:.6},"output":{:.6},"queue_wait":{:.6},"send":{:.6}}},"backpressure_stalls":{}}}"#,
+                r#"{{"name":"{}","inputs":[{}],"transform":{{"sql":"{}","health":"{}","lines_in":{},"lines_out":{},"errors":{},"filter_drop_rate":{:.3}}},"outputs":[{}],"batches":{{"total":{},"avg_rows":{:.1},"flush_by_size":{},"flush_by_timeout":{},"dropped_batches_total":{},"scan_errors_total":{},"parse_errors_total":{},"last_batch_time_ns":{},"batch_latency_avg_ns":{},"inflight":{},"rows_total":{}}},"stage_seconds":{{"scan":{:.6},"transform":{:.6},"output":{:.6},"queue_wait":{:.6},"send":{:.6}}},"backpressure_stalls":{},"bottleneck":{{"stage":"{}","reason":"{}"}}}}"#,
                 esc(&pm.name),
                 inputs_json.join(","),
                 esc(&pm.transform_sql),
@@ -1149,6 +1194,8 @@ impl DiagnosticsServer {
                 queue_wait_s,
                 send_s,
                 backpressure,
+                bottleneck_stage,
+                esc(bottleneck_reason.as_str()),
             ));
         }
 
@@ -1352,6 +1399,7 @@ fn sample_metrics(
     let mut output_ns: u64 = 0;
     let mut batches: u64 = 0;
     let mut inflight_batches: u64 = 0;
+    let mut backpressure_stalls: u64 = 0;
 
     for pm in pipelines {
         for (_, _, s) in &pm.inputs {
@@ -1368,6 +1416,7 @@ fn sample_metrics(
         output_ns += pm.output_nanos_total.load(Ordering::Relaxed);
         batches += pm.batches_total.load(Ordering::Relaxed);
         inflight_batches += pm.inflight_batches.load(Ordering::Relaxed);
+        backpressure_stalls += pm.backpressure_stalls.load(Ordering::Relaxed);
     }
 
     history.record("input_lines", input_lines as f64);
@@ -1380,6 +1429,7 @@ fn sample_metrics(
     history.record("output_sec", output_ns as f64 / 1e9);
     history.record("batches", batches as f64);
     history.record("inflight_batches", inflight_batches as f64);
+    history.record("backpressure_stalls", backpressure_stalls as f64);
 
     if let Some((rss, cpu_user, cpu_sys)) = process_metrics() {
         history.record("rss_bytes", rss as f64);
@@ -1629,6 +1679,8 @@ mod tests {
         );
         assert!(body.contains(r#""queue_wait":0.050000"#), "body: {}", body);
         assert!(body.contains(r#""send":0.150000"#), "body: {}", body);
+        // Bottleneck field must be present and well-formed.
+        assert!(body.contains(r#""bottleneck":{"stage":"#), "body: {}", body);
     }
 
     #[test]
