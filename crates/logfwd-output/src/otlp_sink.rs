@@ -741,9 +741,10 @@ fn resolve_batch_columns(batch: &RecordBatch) -> BatchColumns<'_> {
             // Conflict structs (Struct { int, str, float, bool }) are already normalized
             // to flat Utf8 by `encode_batch` before this function is called.
             DataType::Struct(_) => continue,
-            _ => resolve_otlp_str_col(batch.column(idx).as_ref())
-                .map(AttrArray::Str)
-                .unwrap_or_else(|| AttrArray::OtherStr(batch.column(idx).as_ref())),
+            _ => resolve_otlp_str_col(batch.column(idx).as_ref()).map_or_else(
+                || AttrArray::OtherStr(batch.column(idx).as_ref()),
+                AttrArray::Str,
+            ),
         };
         attribute_cols.push((field_name.to_string(), attr));
     }
