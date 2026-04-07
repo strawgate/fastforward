@@ -34,7 +34,8 @@ Write a TLA+ spec when:
 
 ### What's in `tla/`
 
-> **Branch:** `tla/` is on `feat/tla-pipeline-machine` (PR #651), pending merge to master.
+> `tla/` lives in this repository on `main`. CI runs the checked-in TLC models
+> according to `.github/workflows/ci.yml`.
 
 `tla/PipelineMachine.tla` models the `PipelineMachine<S, C>` lifecycle. It proves:
 

@@ -9,8 +9,8 @@ logfwd supports two layout styles:
 - **Simple** — single pipeline with top-level `input`, `transform`, and `output` keys.
 - **Advanced** — multiple named pipelines under a `pipelines` map.
 
-Environment variables are expanded using `${VAR}` syntax anywhere in the file. If a
-variable is not set the placeholder is left as-is.
+Environment variables are expanded using `${VAR}` syntax anywhere in the file.
+If a variable is not set, config loading fails fast with a validation error.
 
 This page is the canonical source for config support and status. Other docs may
 show examples or task-oriented guidance, but support-status claims for inputs,
@@ -213,7 +213,7 @@ Send log records as OTLP protobuf to an OpenTelemetry collector.
 |-------|------|----------|---------|-------------|
 | `endpoint` | string | Yes | — | Collector address, e.g. `otel-collector:4317` (gRPC) or `http://otel-collector:4318` (HTTP). |
 | `protocol` | string | No | `http` | `http` or `grpc`. |
-| `compression` | string | No | none | `zstd` to compress the request body. |
+| `compression` | string | No | none | `zstd`, `gzip`, or `none` for the request body. |
 
 ```yaml
 output:
@@ -534,7 +534,7 @@ server:
   metrics_endpoint: ${METRICS_PUSH_URL}
 ```
 
-If the variable is not set, the placeholder is left as-is (no error).
+If the variable is not set, config loading fails fast with a validation error.
 
 ---
 
