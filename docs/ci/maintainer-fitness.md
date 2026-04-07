@@ -139,8 +139,8 @@ conditional based on paths, labels, or event type. Do not assume they always
 ran; first confirm whether they were expected to run in the current CI context.
 
 If CI is red, identify the specific failing job from the CI output and ask the
-author to fix it. Do not suggest merging with a failing required job on the
-grounds that "it's probably flaky" — investigate first. If a test passes on
+author to fix it. Do not suggest merging with a failing required job because
+"it's probably flaky" — investigate first. If a test passes on
 Linux but fails on macOS, it is likely a target-specific SIMD path, a
 filesystem case-sensitivity issue, or a timing-dependent test.
 

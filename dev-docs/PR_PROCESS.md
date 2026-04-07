@@ -91,11 +91,13 @@ gh pr list --author "app/copilot-swe-agent" --state open \
 PRs with `[WIP]` in the title are still being worked on by Copilot. Leave them as drafts.
 
 ### c. Mark non-WIP drafts as ready
+
 ```bash
 gh pr ready ISSUE_NUMBER
 ```
 
 ### d. Update branches with main
+
 ```bash
 gh api repos/{owner}/{repo}/pulls/ISSUE_NUMBER/update-branch \
   -X PUT -f update_method=merge
@@ -252,6 +254,7 @@ Periodically check if WIP PRs are still relevant:
 ## 10. Main CI Health
 
 After merging batches, verify main CI is green:
+
 ```bash
 gh run list --branch main --workflow CI --limit 1 \
   --json conclusion -q '.[0].conclusion'
