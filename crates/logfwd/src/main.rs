@@ -724,7 +724,10 @@ fn edit_distance(a: &str, b: &str) -> usize {
 // Pipeline runner
 // ---------------------------------------------------------------------------
 
-/// Validate config by building all pipelines. Used by --validate and --dry-run.
+/// Validate config by building all pipelines. Used by `--validate`, `--dry-run`,
+/// and `--dump-config`. When `quiet` is true, success output is suppressed
+/// (errors are still printed); this is used by `--dump-config` to avoid
+/// polluting stdout with per-pipeline status lines.
 fn validate_pipelines(
     config: &logfwd_config::Config,
     dry_run: bool,
