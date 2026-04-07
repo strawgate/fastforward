@@ -12,12 +12,16 @@ output:
   type: otlp
   endpoint: https://collector:4318
   protocol: http       # http | grpc
-  compression: zstd    # zstd | none (gzip not yet supported)
+  compression: zstd    # zstd | gzip | none
   auth:
     bearer_token: "${OTEL_TOKEN}"
 ```
 
 ## HTTP (JSON Lines)
+
+> Not yet supported. `type: http` is still documented in the configuration
+> reference so support status is explicit, but runtime sink construction
+> currently rejects it.
 
 POST newline-delimited JSON to any HTTP endpoint.
 
