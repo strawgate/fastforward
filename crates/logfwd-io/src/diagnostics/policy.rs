@@ -32,6 +32,7 @@ enum ReadyReasonTag {
     Health(HealthReasonTag),
 }
 
+/// Snapshot of readiness state derived from the current pipeline health view.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct ReadinessSnapshot {
     pub ready: bool,
