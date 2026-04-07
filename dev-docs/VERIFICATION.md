@@ -112,6 +112,29 @@ cargo build -p logfwd-core \
   --target thumbv6m-none-eabi          # Verify no_std compliance
 ```
 
+### Non-core pure seam boundary contract
+
+Non-core Kani scope is explicitly tracked in:
+
+- `dev-docs/verification/kani-boundary-contract.toml` as the source of truth
+- `scripts/verify_kani_boundary_contract.py` as the fast validator
+
+Status values in the contract:
+
+- `required` — this seam must include in-file Kani harnesses (`#[cfg(kani)]` + `#[kani::proof]`)
+- `recommended` — pure seam where Kani is encouraged, but not a hard gate
+- `exempt` — intentionally not a Kani target, usually because the file is async/IO-heavy or still mixes shell code with policy
+
+Run locally:
+
+```bash
+python3 scripts/verify_kani_boundary_contract.py
+just kani-boundary
+```
+
+CI runs this check from the lint workflow so boundary drift is caught before
+the more expensive build and test jobs.
+
 ### Proof quality requirements
 
 Every Kani proof MUST:
@@ -226,6 +249,7 @@ logfwd-core is the proven kernel. All rules are CI-enforced.
 | `otlp.rs` | Protobuf wire format + OTLP encoding + timestamp parsing | Kani mixed exhaustive + bounded (30 proofs incl. 3 contract verifications) |
 | `pipeline/lifecycle.rs` | Pipeline state machine (ordered ACK, drain, shutdown) | Kani exhaustive (6 proofs) + proptest + **TLA+** |
 | `pipeline/batch.rs` | BatchTicket typestate (ack/nack/fail/reject) | Kani exhaustive (5 proofs) + compile-time |
+| `logfwd-types/diagnostics/health.rs` | `ComponentHealth` lattice (`combine`, readiness, storage repr) | Kani exhaustive (4 proofs) + unit tests |
 | `logfwd-output/lib.rs` | Conflict struct detection, ColVariant priority ordering | Kani (8 proofs: ColVariant field preservation, variant_dt, is_conflict_struct, json/str priority contracts) |
 | `logfwd-output/sink.rs` | SendResult outcome variants for the async Sink trait | Kani (4 proofs: Ok/RetryAfter/Rejected variant invariants, mutual exclusion) |
 | `logfwd-io/otlp_receiver.rs` | OTLP proto→JSON transcoding helpers (from_utf8_unchecked safety) | Kani (4 proofs: write_i64 ASCII-only, write_f64 ASCII-only, hex encoding, JSON escaping) |

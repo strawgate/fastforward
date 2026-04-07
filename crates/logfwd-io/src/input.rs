@@ -1,6 +1,7 @@
 use std::io;
 use std::path::PathBuf;
 
+use logfwd_types::diagnostics::ComponentHealth;
 use logfwd_types::pipeline::SourceId;
 
 use crate::filter_hints::FilterHints;
@@ -45,6 +46,14 @@ pub trait InputSource: Send {
     fn poll(&mut self) -> io::Result<Vec<InputEvent>>;
     /// Name of this input (from config).
     fn name(&self) -> &str;
+
+    /// Coarse runtime health for readiness and diagnostics.
+    ///
+    /// The default is optimistic until a concrete input type wires explicit
+    /// lifecycle state into the control plane.
+    fn health(&self) -> ComponentHealth {
+        ComponentHealth::Healthy
+    }
 
     /// Apply filter hints for predicate pushdown. Inputs that support
     /// pushdown use these to skip data early (e.g., XDP severity filtering).
@@ -119,6 +128,10 @@ impl InputSource for FileInput {
 
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn health(&self) -> ComponentHealth {
+        self.tailer.health()
     }
 
     fn checkpoint_data(&self) -> Vec<(SourceId, ByteOffset)> {

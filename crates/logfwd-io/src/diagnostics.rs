@@ -10,7 +10,9 @@ use opentelemetry::metrics::{Counter, Meter};
 
 // Re-export ComponentStats from logfwd-types so existing `logfwd_io::diagnostics::ComponentStats`
 // paths keep working.
-pub use logfwd_types::diagnostics::ComponentStats;
+pub use logfwd_types::diagnostics::{ComponentHealth, ComponentStats};
+
+mod policy;
 
 // ---------------------------------------------------------------------------
 // Pipeline-level metrics (shared between pipeline thread and diagnostics)
@@ -103,11 +105,13 @@ impl PipelineMetrics {
                 meter,
                 "logfwd_transform_in",
                 attrs.clone(),
+                ComponentHealth::Healthy,
             )),
             transform_out: Arc::new(ComponentStats::with_meter(
                 meter,
                 "logfwd_transform_out",
                 attrs.clone(),
+                ComponentHealth::Healthy,
             )),
             transform_errors: AtomicU64::new(0),
             inputs: Vec::new(),
@@ -166,6 +170,7 @@ impl PipelineMetrics {
             &self.meter,
             "logfwd_input",
             attrs,
+            ComponentHealth::Starting,
         ));
         self.inputs.push((name, typ, Arc::clone(&stats)));
         stats
@@ -186,6 +191,7 @@ impl PipelineMetrics {
             &self.meter,
             "logfwd_output",
             attrs,
+            ComponentHealth::Healthy,
         ));
         self.outputs.push((name, typ, Arc::clone(&stats)));
         stats
@@ -358,7 +364,7 @@ const DASHBOARD_HTML: &str = include_str!("dashboard.html");
 /// Snapshot of allocator memory statistics in bytes.
 ///
 /// Populated by the jemalloc stats reader in the binary crate and surfaced on
-/// `/api/pipelines` under `system.memory`.
+/// `/admin/v1/status` under `system.memory`.
 #[derive(Debug, Clone, Copy)]
 pub struct MemoryStats {
     /// Total memory mapped by the allocator that is still mapped to resident
@@ -377,7 +383,7 @@ pub struct DiagnosticsServer {
     start_time: Instant,
     bind_addr: String,
     /// Optional callback that returns a snapshot of allocator memory stats.
-    /// Set this to expose jemalloc (or any allocator) metrics on `/api/pipelines`.
+    /// Set this to expose jemalloc (or any allocator) metrics on `/admin/v1/status`.
     memory_stats_fn: Option<fn() -> Option<MemoryStats>>,
     /// Raw YAML config text for the /api/config endpoint.
     config_yaml: String,
@@ -422,7 +428,7 @@ impl DiagnosticsServer {
 
     /// Register a callback that returns allocator memory statistics.
     ///
-    /// When set, the `/api/pipelines` endpoint includes a `memory` object in
+    /// When set, the `/admin/v1/status` endpoint includes a `memory` object in
     /// the `system` section with `resident`, `allocated`, and `active` fields
     /// (all in bytes).
     pub fn set_memory_stats_fn(&mut self, f: fn() -> Option<MemoryStats>) {
@@ -494,28 +500,14 @@ impl DiagnosticsServer {
 
         match route {
             "/" => Self::serve_dashboard(request),
-            "/health" => self.serve_health(request),
+            "/live" => self.serve_live(request),
             "/ready" => self.serve_ready(request),
-            "/api/pipelines" => self.serve_pipelines(request),
+            "/admin/v1/status" => self.serve_status(request),
             "/api/stats" => self.serve_stats(request),
             "/api/config" => self.serve_config(request),
             "/api/logs" => self.serve_logs(request),
             "/api/history" => self.serve_history(request),
             "/api/traces" => self.serve_traces(request),
-            // Prometheus /metrics was removed. Return 410 Gone with a pointer
-            // to the replacement endpoint so monitoring tools get a clear signal.
-            "/metrics" => {
-                let header =
-                    tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/plain"[..])
-                        .map_err(|()| io::Error::other("invalid HTTP header"))?;
-                let resp = tiny_http::Response::from_string(
-                    "Prometheus /metrics endpoint removed. Use /api/pipelines for JSON metrics.",
-                )
-                .with_status_code(410)
-                .with_header(header);
-                request.respond(resp)?;
-                Ok(())
-            }
             _ => {
                 let header =
                     tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/plain"[..])
@@ -540,10 +532,10 @@ impl DiagnosticsServer {
         Ok(())
     }
 
-    fn serve_health(&self, request: tiny_http::Request) -> Result<(), Box<dyn std::error::Error>> {
+    fn serve_live(&self, request: tiny_http::Request) -> Result<(), Box<dyn std::error::Error>> {
         let uptime = self.start_time.elapsed().as_secs();
         let body = format!(
-            r#"{{"status":"ok","uptime_seconds":{},"version":"{}"}}"#,
+            r#"{{"status":"live","uptime_seconds":{},"version":"{}"}}"#,
             uptime, VERSION,
         );
         let header = tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
@@ -554,15 +546,20 @@ impl DiagnosticsServer {
     }
 
     /// Returns 200 `{"status":"ready"}` when at least one pipeline is
-    /// registered (i.e., the agent has finished initialization and is
-    /// functional). Returns 503 before any pipelines are configured.
+    /// registered and the current explicit component health snapshots are
+    /// ready. Returns 503 before any pipelines are configured or while a
+    /// component is still starting, stopping, stopped, or failed.
     ///
     /// Per-pipeline data-flow freshness (`last_batch_time_ns`) is exposed
-    /// via `/api/pipelines` for monitoring dashboards, but is NOT a
+    /// via `/admin/v1/status` for monitoring dashboards, but is NOT a
     /// readiness gate — a quiet log source should not cause Kubernetes
     /// to mark the pod as unready.
+    ///
+    /// Some component kinds still inherit optimistic default health until
+    /// explicit lifecycle wiring lands, so this endpoint is only as honest as
+    /// the currently wired health sources.
     fn serve_ready(&self, request: tiny_http::Request) -> Result<(), Box<dyn std::error::Error>> {
-        let ready = !self.pipelines.is_empty();
+        let ready = policy::is_ready(&self.pipelines);
 
         let header = tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
             .map_err(|()| io::Error::other("invalid HTTP header"))?;
@@ -921,11 +918,21 @@ impl DiagnosticsServer {
         Ok(())
     }
 
-    fn serve_pipelines(
-        &self,
-        request: tiny_http::Request,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    fn serve_status(&self, request: tiny_http::Request) -> Result<(), Box<dyn std::error::Error>> {
+        let body = self.status_body();
+        let header = tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+            .map_err(|()| io::Error::other("invalid HTTP header"))?;
+        let resp = tiny_http::Response::from_string(body).with_header(header);
+        request.respond(resp)?;
+        Ok(())
+    }
+
+    fn status_body(&self) -> String {
         let uptime = self.start_time.elapsed().as_secs();
+        let observed_at_unix_ns = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
         let mut pipelines_json = Vec::new();
 
         for pm in &self.pipelines {
@@ -934,9 +941,10 @@ impl DiagnosticsServer {
                 .iter()
                 .map(|(name, typ, stats)| {
                     format!(
-                        r#"{{"name":"{}","type":"{}","lines_total":{},"bytes_total":{},"errors":{},"rotations":{},"parse_errors":{}}}"#,
+                        r#"{{"name":"{}","type":"{}","health":"{}","lines_total":{},"bytes_total":{},"errors":{},"rotations":{},"parse_errors":{}}}"#,
                         esc(name),
                         esc(typ),
+                        stats.health().as_str(),
                         stats.lines(),
                         stats.bytes(),
                         stats.errors(),
@@ -970,9 +978,10 @@ impl DiagnosticsServer {
                 .iter()
                 .map(|(name, typ, stats)| {
                     format!(
-                        r#"{{"name":"{}","type":"{}","lines_total":{},"bytes_total":{},"errors":{}}}"#,
+                        r#"{{"name":"{}","type":"{}","health":"{}","lines_total":{},"bytes_total":{},"errors":{}}}"#,
                         esc(name),
                         esc(typ),
+                        stats.health().as_str(),
                         stats.lines(),
                         stats.bytes(),
                         stats.errors(),
@@ -1021,12 +1030,14 @@ impl DiagnosticsServer {
             };
             let inflight = pm.inflight_batches.load(Ordering::Relaxed);
             let backpressure = pm.backpressure_stalls.load(Ordering::Relaxed);
+            let transform_health = policy::transform_health(pm);
 
             pipelines_json.push(format!(
-                r#"{{"name":"{}","inputs":[{}],"transform":{{"sql":"{}","lines_in":{},"lines_out":{},"errors":{},"filter_drop_rate":{:.3}}},"outputs":[{}],"batches":{{"total":{},"avg_rows":{:.1},"flush_by_size":{},"flush_by_timeout":{},"dropped_batches_total":{},"scan_errors_total":{},"parse_errors_total":{},"last_batch_time_ns":{},"batch_latency_avg_ns":{},"inflight":{},"rows_total":{}}},"stage_seconds":{{"scan":{:.6},"transform":{:.6},"output":{:.6},"queue_wait":{:.6},"send":{:.6}}},"backpressure_stalls":{}}}"#,
+                r#"{{"name":"{}","inputs":[{}],"transform":{{"sql":"{}","health":"{}","lines_in":{},"lines_out":{},"errors":{},"filter_drop_rate":{:.3}}},"outputs":[{}],"batches":{{"total":{},"avg_rows":{:.1},"flush_by_size":{},"flush_by_timeout":{},"dropped_batches_total":{},"scan_errors_total":{},"parse_errors_total":{},"last_batch_time_ns":{},"batch_latency_avg_ns":{},"inflight":{},"rows_total":{}}},"stage_seconds":{{"scan":{:.6},"transform":{:.6},"output":{:.6},"queue_wait":{:.6},"send":{:.6}}},"backpressure_stalls":{}}}"#,
                 esc(&pm.name),
                 inputs_json.join(","),
                 esc(&pm.transform_sql),
+                transform_health.as_str(),
                 lines_in,
                 lines_out,
                 pm.transform_errors.load(Ordering::Relaxed),
@@ -1052,19 +1063,31 @@ impl DiagnosticsServer {
             ));
         }
 
-        let body = format!(
-            r#"{{"pipelines":[{}],"system":{{"uptime_seconds":{},"version":"{}"{}}}}}"#,
+        let ready = if policy::is_ready(&self.pipelines) {
+            "ready"
+        } else {
+            "not_ready"
+        };
+        let component_health = policy::aggregate_component_health(&self.pipelines);
+        let ready_reason = policy::ready_reason(&self.pipelines);
+        let component_reason = policy::health_reason(component_health);
+        let readiness_impact = policy::readiness_impact(component_health);
+
+        format!(
+            r#"{{"live":{{"status":"live","reason":"process_running","observed_at_unix_ns":"{}"}},"ready":{{"status":"{}","reason":"{}","observed_at_unix_ns":"{}"}},"component_health":{{"status":"{}","reason":"{}","readiness_impact":"{}","observed_at_unix_ns":"{}"}},"pipelines":[{}],"system":{{"uptime_seconds":{},"version":"{}"{}}}}}"#,
+            observed_at_unix_ns,
+            ready,
+            ready_reason,
+            observed_at_unix_ns,
+            component_health.as_str(),
+            component_reason,
+            readiness_impact,
+            observed_at_unix_ns,
             pipelines_json.join(","),
             uptime,
             VERSION,
             self.memory_json(),
-        );
-
-        let header = tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
-            .map_err(|()| io::Error::other("invalid HTTP header"))?;
-        let resp = tiny_http::Response::from_string(body).with_header(header);
-        request.respond(resp)?;
-        Ok(())
+        )
     }
 
     /// Returns a JSON fragment (starting with a comma) for allocator memory
@@ -1302,6 +1325,7 @@ mod tests {
         );
 
         let inp = pm.add_input("pod_logs", "file");
+        inp.set_health(ComponentHealth::Healthy);
         inp.inc_lines(1000);
         inp.inc_bytes(50000);
         inp.inc_rotations();
@@ -1395,6 +1419,7 @@ mod tests {
         assert_eq!(stats.lines(), 0);
         assert_eq!(stats.bytes(), 0);
         assert_eq!(stats.errors(), 0);
+        assert_eq!(stats.health(), ComponentHealth::Healthy);
 
         stats.inc_lines(10);
         stats.inc_lines(5);
@@ -1408,10 +1433,13 @@ mod tests {
         stats.inc_errors();
         stats.inc_errors();
         assert_eq!(stats.errors(), 3);
+
+        stats.set_health(ComponentHealth::Degraded);
+        assert_eq!(stats.health(), ComponentHealth::Degraded);
     }
 
     #[test]
-    fn test_health_endpoint() {
+    fn test_live_endpoint() {
         let server = server_with_test_pipeline();
         let (_handle, addr) = server.start().expect("server bind failed");
         let port = addr.port();
@@ -1419,9 +1447,9 @@ mod tests {
         // Give the server a moment to bind.
         thread::sleep(std::time::Duration::from_millis(100));
 
-        let (status, body) = http_get(port, "/health");
+        let (status, body) = http_get(port, "/live");
         assert_eq!(status, 200);
-        assert!(body.contains(r#""status":"ok""#), "body: {}", body);
+        assert!(body.contains(r#""status":"live""#), "body: {}", body);
         assert!(
             body.contains(&format!(r#""version":"{}""#, env!("CARGO_PKG_VERSION"))),
             "body: {}",
@@ -1431,16 +1459,38 @@ mod tests {
     }
 
     #[test]
-    fn test_pipelines_endpoint() {
+    fn test_status_endpoint() {
         let server = server_with_test_pipeline();
         let (_handle, addr) = server.start().expect("server bind failed");
         let port = addr.port();
 
         thread::sleep(std::time::Duration::from_millis(100));
 
-        let (status, body) = http_get(port, "/api/pipelines");
+        let (status, body) = http_get(port, "/admin/v1/status");
         assert_eq!(status, 200);
+        assert!(
+            body.contains(
+                r#""component_health":{"status":"healthy","reason":"all_components_healthy","readiness_impact":"ready","observed_at_unix_ns":""#
+            ),
+            "body: {}",
+            body
+        );
+        assert!(
+            body.contains(
+                r#""ready":{"status":"ready","reason":"all_components_healthy","observed_at_unix_ns":""#
+            ),
+            "body: {}",
+            body
+        );
+        assert!(
+            body.contains(
+                r#""live":{"status":"live","reason":"process_running","observed_at_unix_ns":""#
+            ),
+            "body: {}",
+            body
+        );
         assert!(body.contains(r#""name":"default""#), "body: {}", body);
+        assert!(body.contains(r#""health":"healthy""#), "body: {}", body);
         assert!(body.contains(r#""lines_total":1000"#), "body: {}", body);
         assert!(body.contains(r#""lines_in":1000"#), "body: {}", body);
         assert!(body.contains(r#""lines_out":900"#), "body: {}", body);
@@ -1632,7 +1682,7 @@ mod tests {
     }
 
     #[test]
-    fn test_pipelines_endpoint_no_memory_stats() {
+    fn test_status_endpoint_no_memory_stats() {
         // Without a memory_stats_fn set, the system section must NOT contain
         // a "memory" key — no partial or null fields.
         let server = server_with_test_pipeline();
@@ -1641,7 +1691,7 @@ mod tests {
 
         thread::sleep(std::time::Duration::from_millis(100));
 
-        let (status, body) = http_get(port, "/api/pipelines");
+        let (status, body) = http_get(port, "/admin/v1/status");
         assert_eq!(status, 200);
         assert!(body.contains(r#""rotations":1"#), "body: {}", body);
         assert!(
@@ -1652,7 +1702,7 @@ mod tests {
     }
 
     #[test]
-    fn test_pipelines_endpoint_with_memory_stats() {
+    fn test_status_endpoint_with_memory_stats() {
         // With a memory_stats_fn set, the system section must include
         // "memory" with resident/allocated/active fields.
         let mut server = server_with_test_pipeline();
@@ -1668,7 +1718,7 @@ mod tests {
 
         thread::sleep(std::time::Duration::from_millis(100));
 
-        let (status, body) = http_get(port, "/api/pipelines");
+        let (status, body) = http_get(port, "/admin/v1/status");
         assert_eq!(status, 200);
         assert!(body.contains(r#""memory""#), "missing memory key: {}", body);
         assert!(body.contains(r#""resident":1000000"#), "body: {}", body);
@@ -1712,6 +1762,25 @@ mod tests {
     }
 
     #[test]
+    fn test_ready_endpoint_with_starting_component_returns_503() {
+        let meter = opentelemetry::global::meter("test");
+        let mut pm = PipelineMetrics::new("default", "SELECT * FROM logs", &meter);
+        let input = pm.add_input("receiver", "otlp");
+        input.set_health(ComponentHealth::Starting);
+
+        let mut server = DiagnosticsServer::new("127.0.0.1:0");
+        server.add_pipeline(Arc::new(pm));
+        let (_handle, addr) = server.start().expect("server bind failed");
+        let port = addr.port();
+
+        thread::sleep(std::time::Duration::from_millis(100));
+
+        let (status, body) = http_get(port, "/ready");
+        assert_eq!(status, 503, "body: {}", body);
+        assert!(body.contains(r#""status":"not_ready""#), "body: {}", body);
+    }
+
+    #[test]
     fn test_esc_control_chars() {
         assert_eq!(esc("hello\0world"), "hello\\u0000world");
         assert_eq!(esc("tab\tnewline\nreturn\r"), "tab\\tnewline\\nreturn\\r");
@@ -1720,7 +1789,7 @@ mod tests {
     }
 
     #[test]
-    fn test_pipelines_endpoint_escaping() {
+    fn test_status_endpoint_escaping() {
         let meter = opentelemetry::global::meter("test");
         // Control character in pipeline name.
         let pm = PipelineMetrics::new("pipe\x01line", "SELECT * FROM logs", &meter);
@@ -1732,7 +1801,7 @@ mod tests {
 
         thread::sleep(std::time::Duration::from_millis(100));
 
-        let (status, body) = http_get(port, "/api/pipelines");
+        let (status, body) = http_get(port, "/admin/v1/status");
         assert_eq!(status, 200);
         // The name should be escaped as "pipe\u0001line".
         assert!(
@@ -1743,7 +1812,7 @@ mod tests {
 
         // Check that the overall JSON is valid (can be parsed).
         let _v: serde_json::Value =
-            serde_json::from_str(&body).expect("invalid JSON output from /api/pipelines");
+            serde_json::from_str(&body).expect("invalid JSON output from /admin/v1/status");
     }
 
     #[test]
@@ -1875,27 +1944,26 @@ mod tests {
 
         thread::sleep(std::time::Duration::from_millis(100));
 
-        for path in &["/health", "/api/pipelines", "/api/stats"] {
+        for path in &["/live", "/admin/v1/status", "/ready", "/api/stats"] {
             let status = http_post(port, path);
             assert_eq!(status, 405, "POST {path} should return 405, got {status}");
         }
     }
 
-    // Bug #715: /metrics should return 410 Gone with a helpful message,
-    // not a generic 404 that gives no hint about what happened.
     #[test]
-    fn metrics_endpoint_returns_410() {
+    fn removed_legacy_endpoints_return_404() {
         let server = server_with_test_pipeline();
         let (_handle, addr) = server.start().expect("server bind failed");
         let port = addr.port();
 
         thread::sleep(std::time::Duration::from_millis(100));
 
-        let (status, body) = http_get(port, "/metrics");
-        assert_eq!(status, 410, "expected 410 Gone for /metrics, got {status}");
-        assert!(
-            body.contains("/api/pipelines"),
-            "/metrics 410 body should mention /api/pipelines: {body}"
-        );
+        for path in ["/health", "/api/pipelines", "/metrics"] {
+            let (status, body) = http_get(port, path);
+            assert_eq!(
+                status, 404,
+                "expected 404 for {path}, got {status} body={body}"
+            );
+        }
     }
 }

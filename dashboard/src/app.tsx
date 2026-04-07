@@ -9,7 +9,7 @@ import { StatusBar } from "./components/StatusBar";
 import { fmt, fmtBytes, fmtBytesCompact, fmtCompact } from "./lib/format";
 import { RateTracker } from "./lib/rates";
 import { RingBuffer } from "./lib/ring";
-import type { PipelinesResponse, StatsResponse, TraceRecord } from "./types";
+import type { StatsResponse, StatusResponse, TraceRecord } from "./types";
 
 const POLL_OPTIONS = [
   { label: "500ms", ms: 500 },
@@ -150,7 +150,7 @@ const HISTORY_MAP: Record<string, { series: string; mode: "gauge" | "counter" }>
 
 export function App() {
   const [connected, setConnected] = useState(false);
-  const [pipes, setPipes] = useState<PipelinesResponse | null>(null);
+  const [status, setStatus] = useState<StatusResponse | null>(null);
   const [stats, setStats] = useState<StatsResponse | null>(null);
   const [traces, setTraces] = useState<TraceRecord[]>([]);
   const [totalErrors, setTotalErrors] = useState(0);
@@ -254,21 +254,21 @@ export function App() {
   }, []);
 
   const poll = useCallback(async () => {
-    const [pipeData, statsData, tracesData] = await Promise.all([
-      api.pipelines(),
+    const [statusData, statsData, tracesData] = await Promise.all([
+      api.status(),
       api.stats(),
       api.traces(),
     ]);
     if (tracesData) setTraces(tracesData.traces);
 
-    if (pipeData) {
+    if (statusData) {
       setConnected(true);
-      setPipes(pipeData);
+      setStatus(statusData);
 
       let tl = 0,
         tb = 0,
         te = 0;
-      for (const p of pipeData.pipelines) {
+      for (const p of statusData.pipelines) {
         tl += p.transform.lines_in;
         for (const i of p.inputs) tb += i.bytes_total;
         for (const o of p.outputs) te += o.errors;
@@ -294,6 +294,7 @@ export function App() {
       }
     } else {
       setConnected(false);
+      setStatus(null);
     }
 
     if (statsData) {
@@ -388,8 +389,11 @@ export function App() {
     };
   }, [poll, pollMs]);
 
-  const version = pipes?.system?.version ?? "?";
-  const uptime = stats?.uptime_sec ?? pipes?.system?.uptime_seconds ?? 0;
+  const version = status?.system?.version ?? "?";
+  const uptime = stats?.uptime_sec ?? status?.system?.uptime_seconds ?? 0;
+  const componentHealth = status?.component_health.status ?? "failed";
+  const ready = status?.ready.status ?? "not_ready";
+  const statusReason = status?.ready.reason ?? status?.component_health.reason ?? "";
 
   // Stable references — series composition never changes, only data mutated in place.
   const pipelineSeries = useMemo(
@@ -408,6 +412,9 @@ export function App() {
     <>
       <StatusBar
         connected={connected}
+        componentHealth={componentHealth}
+        ready={ready}
+        statusReason={statusReason}
         totalErrors={totalErrors}
         version={version}
         uptime={uptime}
@@ -427,7 +434,7 @@ export function App() {
 
         <LogViewer />
 
-        {pipes?.pipelines.map((p) => (
+        {status?.pipelines.map((p) => (
           <PipelineView
             key={p.name}
             pipeline={p}

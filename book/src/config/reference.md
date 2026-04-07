@@ -450,9 +450,9 @@ When `server.diagnostics` is configured, logfwd exposes an HTTP API for monitori
 | Route | Method | Description |
 |-------|--------|-------------|
 | `/` | GET | Dashboard HTML (visual explorer for metrics and traces). |
-| `/health` | GET | Liveness probe. Returns 200 OK if the server is running. |
-| `/ready` | GET | Readiness probe. Returns 200 OK once pipelines are initialized. |
-| `/api/pipelines` | GET | Per-pipeline counters (lines, bytes, errors, batches, stage timing). |
+| `/live` | GET | Liveness probe. Returns 200 OK if the process and control plane are running. |
+| `/ready` | GET | Readiness probe. Returns 200 OK when required components are initialized and in a ready health state; returns 503 while components are still starting, stopping, stopped, failed, or otherwise not ready. |
+| `/admin/v1/status` | GET | Canonical rich status payload with live/ready state, component health, and per-pipeline counters. |
 | `/api/stats` | GET | Aggregate process stats (uptime, RSS, CPU, aggregate line counts). |
 | `/api/config` | GET | Currently loaded YAML configuration and its file path. |
 | `/api/logs` | GET | Recent log lines from logfwd's own stderr (ring buffer). |

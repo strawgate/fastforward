@@ -5,6 +5,8 @@
 //! This costs one heap allocation per call but allows heterogeneous sink
 //! collections in the worker pool.
 
+mod health;
+
 use std::future::Future;
 use std::io;
 use std::pin::Pin;
@@ -12,7 +14,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use arrow::record_batch::RecordBatch;
+use logfwd_types::diagnostics::ComponentHealth;
 
+pub use self::health::{OutputHealthEvent, aggregate_fanout_health, reduce_output_health};
 use super::BatchMetadata;
 
 // ---------------------------------------------------------------------------
@@ -84,6 +88,14 @@ pub trait Sink: Send {
 
     /// Return the human-readable name of this sink (from config).
     fn name(&self) -> &str;
+
+    /// Coarse runtime health for readiness and diagnostics.
+    ///
+    /// The default is optimistic until a concrete sink wires explicit
+    /// startup, degradation, and failure state into the control plane.
+    fn health(&self) -> ComponentHealth {
+        ComponentHealth::Healthy
+    }
 
     /// Gracefully shut down the sink, flushing and releasing resources.
     fn shutdown(&mut self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>>;
@@ -197,6 +209,10 @@ impl Sink for AsyncFanoutSink {
 
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn health(&self) -> ComponentHealth {
+        aggregate_fanout_health(self.sinks.iter().map(|sink| sink.health()))
     }
 
     fn shutdown(&mut self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {

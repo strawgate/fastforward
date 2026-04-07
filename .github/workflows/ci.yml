@@ -150,6 +150,14 @@ jobs:
       - name: Actionlint
         run: ./actionlint
 
+      - name: Set up Python for Kani boundary contract
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Kani boundary contract
+        run: python3 scripts/verify_kani_boundary_contract.py
+
       # --- Expensive steps below — only reached if fast checks pass ---
 
       - uses: Swatinem/rust-cache@v2

@@ -6,6 +6,7 @@ use std::net::UdpSocket;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use logfwd_types::diagnostics::ComponentHealth;
 use socket2::{Domain, Protocol, Socket, Type};
 
 use crate::input::{InputEvent, InputSource};
@@ -27,6 +28,8 @@ pub struct UdpInput {
     actual_recv_buf: usize,
     /// Counter for detected drops (ENOBUFS or similar errors).
     drops_detected: Arc<AtomicU64>,
+    /// Coarse control-plane health derived from the most recent poll cycle.
+    health: ComponentHealth,
 }
 
 impl UdpInput {
@@ -62,6 +65,7 @@ impl UdpInput {
             buf: vec![0u8; MAX_UDP_PAYLOAD],
             actual_recv_buf,
             drops_detected: Arc::new(AtomicU64::new(0)),
+            health: ComponentHealth::Healthy,
         })
     }
 
@@ -92,6 +96,8 @@ impl UdpInput {
 
 impl InputSource for UdpInput {
     fn poll(&mut self) -> io::Result<Vec<InputEvent>> {
+        let mut under_pressure = false;
+
         // Accumulate into a single byte buffer; avoid per-datagram Vec alloc.
         // We re-use `self.buf` for recv and build the output in a separate vec
         // only when data actually arrives.
@@ -127,11 +133,18 @@ impl InputSource for UdpInput {
                         || e.raw_os_error() == Some(libc::ENOMEM) =>
                 {
                     self.drops_detected.fetch_add(1, Ordering::Relaxed);
+                    under_pressure = true;
                     break;
                 }
                 Err(e) => return Err(e),
             }
         }
+
+        self.health = if under_pressure {
+            ComponentHealth::Degraded
+        } else {
+            ComponentHealth::Healthy
+        };
 
         match total {
             Some(bytes) => Ok(vec![InputEvent::Data {
@@ -144,6 +157,10 @@ impl InputSource for UdpInput {
 
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn health(&self) -> ComponentHealth {
+        self.health
     }
 }
 
@@ -334,5 +351,15 @@ mod tests {
     fn drops_detected_starts_at_zero() {
         let input = UdpInput::new("test", "127.0.0.1:0").unwrap();
         assert_eq!(input.drops_detected(), 0);
+    }
+
+    #[test]
+    fn udp_health_recovers_after_clean_poll() {
+        let mut input = UdpInput::new("test", "127.0.0.1:0").unwrap();
+        input.health = ComponentHealth::Degraded;
+
+        let events = input.poll().unwrap();
+        assert!(events.is_empty());
+        assert_eq!(input.health(), ComponentHealth::Healthy);
     }
 }

@@ -3,6 +3,8 @@
 //! Single thread per pipeline. All components are already built and tested;
 //! this module wires them together.
 
+mod health;
+
 use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
@@ -30,7 +32,7 @@ use logfwd_config::{
 use logfwd_io::checkpoint::{
     CheckpointStore, FileCheckpointStore, SourceCheckpoint, default_data_dir,
 };
-use logfwd_io::diagnostics::{ComponentStats, PipelineMetrics};
+use logfwd_io::diagnostics::{ComponentHealth, ComponentStats, PipelineMetrics};
 use logfwd_io::format::FormatDecoder;
 use logfwd_io::framed::FramedInput;
 use logfwd_io::input::{FileInput, InputEvent, InputSource};
@@ -41,6 +43,8 @@ use logfwd_output::{
 use logfwd_transform::SqlTransform;
 use logfwd_types::pipeline::{PipelineMachine, Running, SourceId};
 use tokio_util::sync::CancellationToken;
+
+use self::health::{HealthTransitionEvent, reduce_component_health};
 
 // ---------------------------------------------------------------------------
 // block_in_place shim for simulation
@@ -407,10 +411,11 @@ impl Pipeline {
 
     /// Add an input source for testing. Bypasses config-based input construction.
     pub fn with_input(mut self, _name: &str, source: Box<dyn InputSource>) -> Self {
+        let stats = Arc::new(ComponentStats::new_with_health(ComponentHealth::Starting));
         self.inputs.push(InputState {
             source,
             buf: BytesMut::with_capacity(self.batch_target_bytes),
-            stats: Arc::new(ComponentStats::new()),
+            stats,
         });
         self
     }
@@ -1196,9 +1201,12 @@ fn input_poll_loop(
     // sent. This ensures batch_timeout measures "time since first data
     // arrived in this batch", preventing tiny flushes after idle periods.
     let mut buffered_since: Option<Instant> = None;
-
     loop {
         if shutdown.is_cancelled() {
+            input.stats.set_health(reduce_component_health(
+                input.stats.health(),
+                HealthTransitionEvent::ShutdownRequested,
+            ));
             break;
         }
 
@@ -1208,11 +1216,20 @@ fn input_poll_loop(
         let events = match input.source.poll() {
             Ok(e) => e,
             Err(e) => {
+                input.stats.set_health(reduce_component_health(
+                    input.stats.health(),
+                    HealthTransitionEvent::PollFailed,
+                ));
                 tracing::warn!(input = input.source.name(), error = %e, "input.poll_error");
                 std::thread::sleep(Duration::from_millis(100));
                 continue;
             }
         };
+
+        input.stats.set_health(reduce_component_health(
+            input.stats.health(),
+            HealthTransitionEvent::Observed(input.source.health()),
+        ));
 
         if events.is_empty() {
             std::thread::sleep(poll_interval);
@@ -1272,6 +1289,10 @@ fn input_poll_loop(
         };
         send_shutdown_drain_msg_blocking(input.source.name(), &tx, &metrics, msg);
     }
+    input.stats.set_health(reduce_component_health(
+        input.stats.health(),
+        HealthTransitionEvent::ShutdownCompleted,
+    ));
 }
 
 /// Flush checkpoint store with bounded retry (3 attempts, 100ms between).
@@ -1368,20 +1389,32 @@ async fn async_input_poll_loop(
     // Use tokio::time::Instant (not std::time::Instant) so that elapsed()
     // measures simulated time under Turmoil, not real wall-clock time.
     let mut buffered_since: Option<tokio::time::Instant> = None;
-
     loop {
         if shutdown.is_cancelled() {
+            input.stats.set_health(reduce_component_health(
+                input.stats.health(),
+                HealthTransitionEvent::ShutdownRequested,
+            ));
             break;
         }
 
         let events = match input.source.poll() {
             Ok(e) => e,
             Err(e) => {
+                input.stats.set_health(reduce_component_health(
+                    input.stats.health(),
+                    HealthTransitionEvent::PollFailed,
+                ));
                 tracing::warn!(input = input.source.name(), error = %e, "input.poll_error");
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 continue;
             }
         };
+
+        input.stats.set_health(reduce_component_health(
+            input.stats.health(),
+            HealthTransitionEvent::Observed(input.source.health()),
+        ));
 
         if events.is_empty() {
             tokio::time::sleep(poll_interval).await;
@@ -1440,6 +1473,10 @@ async fn async_input_poll_loop(
             );
         }
     }
+    input.stats.set_health(reduce_component_health(
+        input.stats.health(),
+        HealthTransitionEvent::ShutdownCompleted,
+    ));
 }
 
 // ---------------------------------------------------------------------------
