@@ -346,8 +346,9 @@ impl OtlpSink {
                 }
             }
             Compression::Gzip => {
-                self.compress_buf.clear();
-                let mut encoder = GzEncoder::new(Vec::new(), GzipLevel::fast());
+                let mut compress_buf = std::mem::take(&mut self.compress_buf);
+                compress_buf.clear();
+                let mut encoder = GzEncoder::new(compress_buf, GzipLevel::fast());
                 encoder.write_all(&self.encoder_buf)?;
                 self.compress_buf = encoder.finish()?;
                 &self.compress_buf

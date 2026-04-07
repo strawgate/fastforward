@@ -342,6 +342,7 @@ impl Pipeline {
             if matches!(input_cfg.format, Some(Format::Raw)) {
                 scan_config.keep_raw = true;
             }
+            let otlp_structured_ingress = otlp_uses_structured_ingress(&scan_config);
             let scanner = Scanner::new(scan_config);
 
             input_transforms.push(InputTransform {
@@ -350,7 +351,12 @@ impl Pipeline {
                 input_name: input_name.clone(),
             });
 
-            inputs.push(build_input_state(&input_name, &resolved_cfg, input_stats)?);
+            inputs.push(build_input_state(
+                &input_name,
+                &resolved_cfg,
+                input_stats,
+                otlp_structured_ingress,
+            )?);
         }
 
         // Restore previously saved file offsets by fingerprint (SourceId).
@@ -1415,6 +1421,7 @@ fn build_input_state(
     name: &str,
     cfg: &InputConfig,
     stats: Arc<ComponentStats>,
+    otlp_structured_ingress: bool,
 ) -> Result<InputState, String> {
     let (raw_source, format, buf_cap): (Box<dyn InputSource>, Format, usize) = match cfg.input_type
     {
@@ -1513,8 +1520,12 @@ fn build_input_state(
                 .ok_or_else(|| format!("input '{name}': otlp input requires 'listen'"))?;
             let format = cfg.format.clone().unwrap_or(Format::Json);
             validate_input_format(name, InputType::Otlp, &format)?;
-            let source = logfwd_io::otlp_receiver::OtlpReceiverInput::new_structured(name, addr)
-                .map_err(|e| format!("input '{name}': failed to start OTLP receiver: {e}"))?;
+            let source = if otlp_structured_ingress {
+                logfwd_io::otlp_receiver::OtlpReceiverInput::new_structured(name, addr)
+            } else {
+                logfwd_io::otlp_receiver::OtlpReceiverInput::new(name, addr)
+            }
+            .map_err(|e| format!("input '{name}': failed to start OTLP receiver: {e}"))?;
             (Box::new(source), format, 4 * 1024 * 1024)
         }
         InputType::Udp => {
@@ -1566,6 +1577,13 @@ fn build_input_state(
         buf: BytesMut::with_capacity(buf_cap),
         stats,
     })
+}
+
+fn otlp_uses_structured_ingress(scan_config: &logfwd_core::scan_config::ScanConfig) -> bool {
+    // Structured OTLP ingress preserves typed log fields, but it does not yet
+    // synthesize scanner-owned `_raw`. Keep legacy JSON-lines -> scanner mode
+    // whenever the SQL plan requires `_raw` semantics.
+    !scan_config.keep_raw
 }
 
 fn now_nanos() -> u64 {
@@ -1880,6 +1898,24 @@ output:
         let pipe_cfg = &config.pipelines["default"];
         let pipeline = Pipeline::from_config("default", pipe_cfg, &test_meter(), None);
         assert!(pipeline.is_ok(), "got: {:?}", pipeline.err());
+    }
+
+    #[test]
+    fn otlp_structured_ingress_is_disabled_when_keep_raw_is_required() {
+        let scan_config = ScanConfig {
+            keep_raw: true,
+            ..ScanConfig::default()
+        };
+        assert!(!otlp_uses_structured_ingress(&scan_config));
+    }
+
+    #[test]
+    fn otlp_structured_ingress_is_enabled_when_keep_raw_is_not_required() {
+        let scan_config = ScanConfig {
+            keep_raw: false,
+            ..ScanConfig::default()
+        };
+        assert!(otlp_uses_structured_ingress(&scan_config));
     }
 
     #[test]
