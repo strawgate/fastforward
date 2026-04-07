@@ -397,14 +397,14 @@ pub struct DiagnosticsServer {
     /// Optional callback that returns a snapshot of allocator memory stats.
     /// Set this to expose jemalloc (or any allocator) metrics on `/admin/v1/status`.
     memory_stats_fn: Option<fn() -> Option<MemoryStats>>,
-    /// Raw YAML config text for the /api/config endpoint.
+    /// Raw YAML config text for the /admin/v1/config endpoint.
     config_yaml: String,
     config_path: String,
-    /// Lazy stderr capture — activated on first /api/logs request.
+    /// Stderr capture for /admin/v1/logs; started when diagnostics starts.
     stderr: crate::stderr_capture::StderrCapture,
     /// Server-side metric history (1 hour, reducing precision).
     history: Arc<crate::metric_history::MetricHistory>,
-    /// Ring buffer of recent batch spans for /api/traces.
+    /// Ring buffer of recent batch spans for /admin/v1/traces.
     trace_buf: Option<crate::span_exporter::SpanBuffer>,
 }
 
@@ -423,12 +423,12 @@ impl DiagnosticsServer {
         }
     }
 
-    /// Attach a span buffer so `/api/traces` can serve batch trace data.
+    /// Attach a span buffer so `/admin/v1/traces` can serve batch trace data.
     pub fn set_trace_buffer(&mut self, buf: crate::span_exporter::SpanBuffer) {
         self.trace_buf = Some(buf);
     }
 
-    /// Store the raw config YAML and file path for the /api/config endpoint.
+    /// Store the raw config YAML and file path for the /admin/v1/config endpoint.
     pub fn set_config(&mut self, path: &str, yaml: &str) {
         self.config_path = path.to_string();
         self.config_yaml = yaml.to_string();
@@ -462,7 +462,7 @@ impl DiagnosticsServer {
             .ok_or_else(|| io::Error::other("diagnostics server bound to non-IP address"))?;
 
         // Start capturing stderr into the 1 MiB ring buffer immediately so
-        // log lines emitted before the first /api/logs request are not lost.
+        // log lines emitted before the first /admin/v1/logs request are not lost.
         // Non-fatal: if capture setup fails (e.g. out of fds), log to real stderr.
         if let Err(e) = self.stderr.start() {
             tracing::warn!(error = %e, "stderr capture failed");
@@ -515,11 +515,11 @@ impl DiagnosticsServer {
             "/live" => self.serve_live(request),
             "/ready" => self.serve_ready(request),
             "/admin/v1/status" => self.serve_status(request),
-            "/api/stats" => self.serve_stats(request),
-            "/api/config" => self.serve_config(request),
-            "/api/logs" => self.serve_logs(request),
-            "/api/history" => self.serve_history(request),
-            "/api/traces" => self.serve_traces(request),
+            "/admin/v1/stats" => self.serve_stats(request),
+            "/admin/v1/config" => self.serve_config(request),
+            "/admin/v1/logs" => self.serve_logs(request),
+            "/admin/v1/history" => self.serve_history(request),
+            "/admin/v1/traces" => self.serve_traces(request),
             _ => {
                 let header =
                     tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/plain"[..])
@@ -1577,7 +1577,7 @@ mod tests {
 
         thread::sleep(std::time::Duration::from_millis(100));
 
-        let (status, body) = http_get(port, "/api/stats");
+        let (status, body) = http_get(port, "/admin/v1/stats");
         assert_eq!(status, 200);
         assert!(body.contains(r#""uptime_sec":"#), "body: {}", body);
         assert!(body.contains(r#""rss_bytes":"#), "body: {}", body);
@@ -2034,7 +2034,7 @@ mod tests {
 
         thread::sleep(std::time::Duration::from_millis(100));
 
-        let (status, body) = http_get(port, "/api/traces");
+        let (status, body) = http_get(port, "/admin/v1/traces");
         assert_eq!(status, 200);
         assert_eq!(body, r#"{"traces":[]}"#, "unexpected body: {body}");
     }
@@ -2083,12 +2083,12 @@ mod tests {
 
         thread::sleep(std::time::Duration::from_millis(100));
 
-        let (status, body) = http_get(port, "/api/traces");
+        let (status, body) = http_get(port, "/admin/v1/traces");
         assert_eq!(status, 200);
 
         // Must parse as valid JSON.
         let v: serde_json::Value =
-            serde_json::from_str(&body).expect("invalid JSON from /api/traces");
+            serde_json::from_str(&body).expect("invalid JSON from /admin/v1/traces");
 
         let traces = v["traces"].as_array().expect("traces must be array");
         assert_eq!(traces.len(), 1, "expected 1 trace, got {}", traces.len());
@@ -2154,7 +2154,7 @@ mod tests {
 
         thread::sleep(std::time::Duration::from_millis(100));
 
-        for path in &["/live", "/admin/v1/status", "/ready", "/api/stats"] {
+        for path in &["/live", "/admin/v1/status", "/ready", "/admin/v1/stats"] {
             let status = http_post(port, path);
             assert_eq!(status, 405, "POST {path} should return 405, got {status}");
         }
@@ -2168,7 +2168,16 @@ mod tests {
 
         thread::sleep(std::time::Duration::from_millis(100));
 
-        for path in ["/health", "/api/pipelines", "/metrics"] {
+        for path in [
+            "/health",
+            "/api/pipelines",
+            "/api/stats",
+            "/api/config",
+            "/api/logs",
+            "/api/history",
+            "/api/traces",
+            "/metrics",
+        ] {
             let (status, body) = http_get(port, path);
             assert_eq!(
                 status, 404,

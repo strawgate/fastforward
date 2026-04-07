@@ -3,7 +3,7 @@
 //! [`RingBufferExporter`] implements [`SpanExporter`] and stores the last
 //! [`MAX_SPANS`] completed spans in an `Arc<Mutex<VecDeque>>`. The
 //! [`SpanBuffer`] handle is shared with [`DiagnosticsServer`] which reads
-//! from it to serve `/api/traces`.
+//! from it to serve `/admin/v1/traces`.
 //!
 //! Spans are converted to [`TraceSpan`] (a lightweight, serde-serializable
 //! snapshot) on export so the raw SDK types don't escape this module.

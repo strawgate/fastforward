@@ -14,11 +14,11 @@ server:
 | `GET /live` | Liveness probe (process/control-plane only) |
 | `GET /ready` | Readiness probe (200 once initialized) |
 | `GET /admin/v1/status` | Canonical rich status JSON (live, ready, component health, per-pipeline detail) |
-| `GET /api/stats` | Flattened JSON for polling/benchmarks |
-| `GET /api/config` | View active YAML configuration |
-| `GET /api/logs` | View recent log lines from stderr |
-| `GET /api/history` | Time-series data for dashboard charts |
-| `GET /api/traces` | Detailed latency spans for recent batches |
+| `GET /admin/v1/stats` | Flattened JSON for polling/benchmarks |
+| `GET /admin/v1/config` | View active YAML configuration |
+| `GET /admin/v1/logs` | View recent log lines from stderr |
+| `GET /admin/v1/history` | Time-series data for dashboard charts |
+| `GET /admin/v1/traces` | Detailed latency spans for recent batches |
 | `GET /` | HTML dashboard |
 
 ## Key metrics
