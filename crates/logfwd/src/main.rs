@@ -957,6 +957,7 @@ async fn run_pipelines(
         }
     }
 
+    let mut _diag_server = None;
     let diag_handle = if let Some(ref addr) = config.server.diagnostics {
         let mut server = DiagnosticsServer::new(addr);
         server.set_config(config_path, config_yaml);
@@ -966,8 +967,9 @@ async fn run_pipelines(
         }
         #[cfg(unix)]
         server.set_memory_stats_fn(jemalloc_stats);
-        let (handle, _) = server.start()?;
-        Some((handle, addr.clone()))
+        let _bound_addr = server.start()?;
+        _diag_server = Some(server);
+        Some(addr.clone())
     } else {
         None
     };
@@ -998,7 +1000,7 @@ async fn run_pipelines(
             eprintln!("     {}out{}  {}", dim(), reset(), output_label(output));
         }
     }
-    if let Some((_, ref addr)) = diag_handle {
+    if let Some(ref addr) = diag_handle {
         eprintln!();
         eprintln!("  {}dashboard{}  http://{addr}", bold(), reset());
     }

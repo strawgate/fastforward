@@ -1,7 +1,7 @@
 use std::io;
 use std::sync::Arc;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -406,6 +406,9 @@ pub struct DiagnosticsServer {
     history: Arc<crate::metric_history::MetricHistory>,
     /// Ring buffer of recent batch spans for /api/traces.
     trace_buf: Option<crate::span_exporter::SpanBuffer>,
+    server: Option<Arc<tiny_http::Server>>,
+    handle: Option<JoinHandle<()>>,
+    shutdown: Arc<AtomicBool>,
 }
 
 impl DiagnosticsServer {
@@ -420,6 +423,9 @@ impl DiagnosticsServer {
             stderr: crate::stderr_capture::StderrCapture::new(),
             history: Arc::new(crate::metric_history::MetricHistory::new()),
             trace_buf: None,
+            server: None,
+            handle: None,
+            shutdown: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -453,9 +459,11 @@ impl DiagnosticsServer {
     /// Returns `(handle, bound_addr)` on success. `bound_addr` reflects the
     /// actual address after OS port assignment (useful when `bind_addr` uses
     /// port 0). Returns an `io::Error` on bind failure.
-    pub fn start(self) -> io::Result<(JoinHandle<()>, std::net::SocketAddr)> {
-        let server = tiny_http::Server::http(&self.bind_addr)
-            .map_err(|e| io::Error::other(e.to_string()))?;
+    pub fn start(&mut self) -> io::Result<std::net::SocketAddr> {
+        let server = Arc::new(tiny_http::Server::http(&self.bind_addr)
+            .map_err(|e| io::Error::other(e.to_string()))?);
+        self.server = Some(Arc::clone(&server));
+        self.shutdown.store(false, Ordering::Relaxed);
         let bound_addr = server
             .server_addr()
             .to_ip()
@@ -483,12 +491,36 @@ impl DiagnosticsServer {
             })
             .ok();
 
+        let server_clone = Arc::clone(&server);
+        let shutdown_clone = Arc::clone(&self.shutdown);
+        let handler = Arc::new(self.clone_for_handler());
+
         let handle = thread::spawn(move || {
-            for request in server.incoming_requests() {
-                let _ = self.handle_request(request);
+            while !shutdown_clone.load(Ordering::Relaxed) {
+                if let Ok(Some(request)) = server_clone.recv_timeout(std::time::Duration::from_millis(100)) {
+                    let _ = handler.handle_request(request);
+                }
             }
         });
-        Ok((handle, bound_addr))
+        self.handle = Some(handle);
+        Ok(bound_addr)
+    }
+
+    fn clone_for_handler(&self) -> Self {
+        Self {
+            pipelines: self.pipelines.clone(),
+            start_time: self.start_time,
+            bind_addr: self.bind_addr.clone(),
+            memory_stats_fn: self.memory_stats_fn,
+            config_yaml: self.config_yaml.clone(),
+            config_path: self.config_path.clone(),
+            stderr: self.stderr.clone(),
+            history: Arc::clone(&self.history),
+            trace_buf: self.trace_buf.clone(),
+            server: None,
+            handle: None,
+            shutdown: Arc::new(AtomicBool::new(false)),
+        }
     }
 
     fn handle_request(
@@ -1124,6 +1156,19 @@ impl DiagnosticsServer {
     }
 }
 
+
+impl Drop for DiagnosticsServer {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::Relaxed);
+        if let Some(server) = self.server.as_ref() {
+            server.unblock();
+        }
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Process-level metrics (RSS, CPU)
 // ---------------------------------------------------------------------------
@@ -1461,8 +1506,8 @@ mod tests {
 
     #[test]
     fn test_live_endpoint() {
-        let server = server_with_test_pipeline();
-        let (_handle, addr) = server.start().expect("server bind failed");
+        let mut server = server_with_test_pipeline();
+        let addr = server.start().expect("server bind failed");
         let port = addr.port();
 
         // Give the server a moment to bind.
@@ -1481,8 +1526,8 @@ mod tests {
 
     #[test]
     fn test_status_endpoint() {
-        let server = server_with_test_pipeline();
-        let (_handle, addr) = server.start().expect("server bind failed");
+        let mut server = server_with_test_pipeline();
+        let addr = server.start().expect("server bind failed");
         let port = addr.port();
 
         thread::sleep(std::time::Duration::from_millis(100));
@@ -1561,7 +1606,7 @@ mod tests {
                 active: 900_000,
             })
         });
-        let (_handle, addr) = server.start().expect("server bind failed");
+        let addr = server.start().expect("server bind failed");
         let port = addr.port();
 
         thread::sleep(std::time::Duration::from_millis(100));
@@ -1718,8 +1763,8 @@ mod tests {
 
     #[test]
     fn test_not_found() {
-        let server = server_with_test_pipeline();
-        let (_handle, addr) = server.start().expect("server bind failed");
+        let mut server = server_with_test_pipeline();
+        let addr = server.start().expect("server bind failed");
         let port = addr.port();
 
         thread::sleep(std::time::Duration::from_millis(100));
@@ -1732,8 +1777,8 @@ mod tests {
     fn test_status_endpoint_no_memory_stats() {
         // Without a memory_stats_fn set, the system section must NOT contain
         // a "memory" key — no partial or null fields.
-        let server = server_with_test_pipeline();
-        let (_handle, addr) = server.start().expect("server bind failed");
+        let mut server = server_with_test_pipeline();
+        let addr = server.start().expect("server bind failed");
         let port = addr.port();
 
         thread::sleep(std::time::Duration::from_millis(100));
@@ -1760,7 +1805,7 @@ mod tests {
                 active: 900_000,
             })
         });
-        let (_handle, addr) = server.start().expect("server bind failed");
+        let addr = server.start().expect("server bind failed");
         let port = addr.port();
 
         thread::sleep(std::time::Duration::from_millis(100));
@@ -1776,9 +1821,9 @@ mod tests {
     #[test]
     fn test_ready_endpoint_no_pipelines_returns_503() {
         // No pipelines registered yet → not ready.
-        let server = DiagnosticsServer::new("127.0.0.1:0");
+        let mut server = DiagnosticsServer::new("127.0.0.1:0");
         // Don't add any pipelines.
-        let (_handle, addr) = server.start().expect("server bind failed");
+        let addr = server.start().expect("server bind failed");
         let port = addr.port();
 
         thread::sleep(std::time::Duration::from_millis(100));
@@ -1803,7 +1848,7 @@ mod tests {
 
         let mut server = DiagnosticsServer::new("127.0.0.1:0");
         server.add_pipeline(Arc::new(pm));
-        let (_handle, addr) = server.start().expect("server bind failed");
+        let addr = server.start().expect("server bind failed");
         let port = addr.port();
 
         thread::sleep(std::time::Duration::from_millis(100));
@@ -1827,7 +1872,7 @@ mod tests {
 
         let mut server = DiagnosticsServer::new("127.0.0.1:0");
         server.add_pipeline(Arc::new(pm));
-        let (_handle, addr) = server.start().expect("server bind failed");
+        let addr = server.start().expect("server bind failed");
         let port = addr.port();
 
         thread::sleep(std::time::Duration::from_millis(100));
@@ -1915,7 +1960,7 @@ mod tests {
 
         let mut server = DiagnosticsServer::new("127.0.0.1:0");
         server.add_pipeline(Arc::new(pm));
-        let (_handle, addr) = server.start().expect("server bind failed");
+        let addr = server.start().expect("server bind failed");
         let port = addr.port();
 
         thread::sleep(std::time::Duration::from_millis(100));
@@ -1937,8 +1982,8 @@ mod tests {
     #[test]
     fn test_traces_endpoint_empty() {
         // Server with no trace buffer attached — should return empty array.
-        let server = server_with_test_pipeline();
-        let (_handle, addr) = server.start().expect("server bind failed");
+        let mut server = server_with_test_pipeline();
+        let addr = server.start().expect("server bind failed");
         let port = addr.port();
 
         thread::sleep(std::time::Duration::from_millis(100));
@@ -1987,7 +2032,7 @@ mod tests {
 
         let mut server = server_with_test_pipeline();
         server.set_trace_buffer(trace_buf);
-        let (_handle, addr) = server.start().expect("server bind failed");
+        let addr = server.start().expect("server bind failed");
         let port = addr.port();
 
         thread::sleep(std::time::Duration::from_millis(100));
@@ -2057,8 +2102,8 @@ mod tests {
     // Bug #728: diagnostics server should return 405 for non-GET methods.
     #[test]
     fn non_get_returns_405() {
-        let server = server_with_test_pipeline();
-        let (_handle, addr) = server.start().expect("server bind failed");
+        let mut server = server_with_test_pipeline();
+        let addr = server.start().expect("server bind failed");
         let port = addr.port();
 
         thread::sleep(std::time::Duration::from_millis(100));
@@ -2071,8 +2116,8 @@ mod tests {
 
     #[test]
     fn removed_legacy_endpoints_return_404() {
-        let server = server_with_test_pipeline();
-        let (_handle, addr) = server.start().expect("server bind failed");
+        let mut server = server_with_test_pipeline();
+        let addr = server.start().expect("server bind failed");
         let port = addr.port();
 
         thread::sleep(std::time::Duration::from_millis(100));
