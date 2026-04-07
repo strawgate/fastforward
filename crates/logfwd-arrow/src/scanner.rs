@@ -69,6 +69,7 @@ impl ScanBuilder for StreamingBuilder {
 pub struct Scanner {
     builder: StreamingBuilder,
     config: ScanConfig,
+    resource_attrs: Vec<(String, String)>,
 }
 
 impl Scanner {
@@ -77,6 +78,16 @@ impl Scanner {
         Scanner {
             builder: StreamingBuilder::new(config.keep_raw),
             config,
+            resource_attrs: Vec::new(),
+        }
+    }
+
+    /// Create a scanner that injects constant `_resource_*` columns per row.
+    pub fn with_resource_attrs(config: ScanConfig, resource_attrs: Vec<(String, String)>) -> Self {
+        Scanner {
+            builder: StreamingBuilder::new(config.keep_raw),
+            config,
+            resource_attrs,
         }
     }
     /// Scan an NDJSON buffer into a zero-copy `RecordBatch`.
@@ -91,6 +102,8 @@ impl Scanner {
             })?;
         }
         self.builder.begin_batch(buf.clone());
+        self.builder
+            .set_resource_attributes(self.resource_attrs.as_slice());
         scan_streaming(&buf, &self.config, &mut self.builder);
         self.builder.finish_batch()
     }
@@ -110,6 +123,8 @@ impl Scanner {
             })?;
         }
         self.builder.begin_batch(buf.clone());
+        self.builder
+            .set_resource_attributes(self.resource_attrs.as_slice());
         scan_streaming(&buf, &self.config, &mut self.builder);
         self.builder.finish_batch_detached()
     }
@@ -263,6 +278,42 @@ mod tests {
             .scan_detached(Bytes::from(b"{\"msg\":\"hi\"}\n".to_vec()))
             .unwrap();
         assert!(batch.column_by_name("_raw").is_some());
+    }
+
+    #[test]
+    fn test_resource_columns_injected_detached() {
+        let input = br#"{"message":"a"}
+{"message":"b"}
+"#;
+        let scanner = Scanner::with_resource_attrs(
+            ScanConfig::default(),
+            vec![
+                ("service.name".to_string(), "checkout".to_string()),
+                ("k8s.namespace".to_string(), "prod".to_string()),
+            ],
+        );
+        let mut scanner = scanner;
+        let batch = scanner
+            .scan_detached(Bytes::from(input.to_vec()))
+            .expect("batch");
+
+        let service = batch
+            .column_by_name("_resource_service_name")
+            .expect("resource service col")
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("utf8");
+        assert_eq!(service.value(0), "checkout");
+        assert_eq!(service.value(1), "checkout");
+
+        let ns = batch
+            .column_by_name("_resource_k8s_namespace")
+            .expect("resource namespace col")
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("utf8");
+        assert_eq!(ns.value(0), "prod");
+        assert_eq!(ns.value(1), "prod");
     }
     #[test]
     fn test_batch_reuse() {

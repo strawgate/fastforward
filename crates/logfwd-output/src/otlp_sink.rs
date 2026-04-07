@@ -174,36 +174,51 @@ impl OtlpSink {
         // Resolve column roles and downcast arrays once for the whole batch.
         let columns = resolve_batch_columns(batch);
 
-        // Phase 1: encode all LogRecords into a temp buffer.
+        // Phase 1: encode all LogRecords and assign each row to a resource group.
         let mut records_buf: Vec<u8> = Vec::with_capacity(num_rows * 128);
-        let mut record_ranges: Vec<(usize, usize)> = Vec::with_capacity(num_rows);
+        let mut grouped_ranges: Vec<(Vec<Option<String>>, Vec<(usize, usize)>)> = Vec::new();
+        let mut group_index_by_key: std::collections::HashMap<Vec<Option<String>>, usize> =
+            std::collections::HashMap::new();
 
         for row in 0..num_rows {
+            let key: Vec<Option<String>> = columns
+                .resource_cols
+                .iter()
+                .map(|(_, attr)| attr_value_as_string(attr, row))
+                .collect();
+            let group_idx = if let Some(existing) = group_index_by_key.get(&key).copied() {
+                existing
+            } else {
+                let idx = grouped_ranges.len();
+                group_index_by_key.insert(key.clone(), idx);
+                grouped_ranges.push((key, Vec::new()));
+                idx
+            };
+
             let start = records_buf.len();
             encode_row(&columns, row, metadata, &mut records_buf);
-            record_ranges.push((start, records_buf.len()));
+            grouped_ranges[group_idx].1.push((start, records_buf.len()));
         }
 
-        // Phase 2: compute sizes bottom-up.
-        // ScopeLogs inner = scope (InstrumentationScope) + repeated log_records (LogRecord)
+        // Phase 2: compute sizes bottom-up per resource group.
         let instrumentation_scope_inner_size =
             bytes_field_size(otlp::INSTRUMENTATION_SCOPE_NAME, SCOPE_NAME.len())
                 + bytes_field_size(otlp::INSTRUMENTATION_SCOPE_VERSION, SCOPE_VERSION.len());
 
-        let mut scope_logs_inner_size =
-            bytes_field_size(otlp::SCOPE_LOGS_SCOPE, instrumentation_scope_inner_size);
-        for &(start, end) in &record_ranges {
-            let record_len = end - start;
-            scope_logs_inner_size += bytes_field_size(otlp::SCOPE_LOGS_LOG_RECORDS, record_len);
-        }
+        let mut grouped_resource_msgs: Vec<Vec<u8>> = Vec::with_capacity(grouped_ranges.len());
+        let mut grouped_resource_inner_sizes: Vec<usize> = Vec::with_capacity(grouped_ranges.len());
+        let mut grouped_scope_inner_sizes: Vec<usize> = Vec::with_capacity(grouped_ranges.len());
+        let mut request_size = 0usize;
 
-        // ResourceLogs inner = resource (field 1) + scope_logs (field 2)
-        let mut resource_inner_size =
-            bytes_field_size(otlp::RESOURCE_LOGS_SCOPE_LOGS, scope_logs_inner_size);
+        for (key, record_ranges) in &grouped_ranges {
+            let mut scope_logs_inner_size =
+                bytes_field_size(otlp::SCOPE_LOGS_SCOPE, instrumentation_scope_inner_size);
+            for &(start, end) in record_ranges {
+                scope_logs_inner_size +=
+                    bytes_field_size(otlp::SCOPE_LOGS_LOG_RECORDS, end - start);
+            }
 
-        // Encode resource attributes as Resource message
-        let mut resource_msg: Vec<u8> = Vec::new();
-        if !metadata.resource_attrs.is_empty() {
+            let mut resource_msg: Vec<u8> = Vec::new();
             for (k, v) in metadata.resource_attrs.as_ref() {
                 encode_key_value_string(
                     &mut resource_msg,
@@ -212,71 +227,90 @@ impl OtlpSink {
                     v.as_bytes(),
                 );
             }
-        }
-        if !resource_msg.is_empty() {
-            resource_inner_size +=
-                bytes_field_size(otlp::RESOURCE_LOGS_RESOURCE, resource_msg.len());
+            for ((key_name, _), value) in columns.resource_cols.iter().zip(key.iter()) {
+                if let Some(v) = value {
+                    encode_key_value_string(
+                        &mut resource_msg,
+                        otlp::RESOURCE_ATTRIBUTES,
+                        key_name.as_bytes(),
+                        v.as_bytes(),
+                    );
+                }
+            }
+
+            let mut resource_inner_size =
+                bytes_field_size(otlp::RESOURCE_LOGS_SCOPE_LOGS, scope_logs_inner_size);
+            if !resource_msg.is_empty() {
+                resource_inner_size +=
+                    bytes_field_size(otlp::RESOURCE_LOGS_RESOURCE, resource_msg.len());
+            }
+            request_size +=
+                bytes_field_size(otlp::EXPORT_LOGS_REQUEST_RESOURCE_LOGS, resource_inner_size);
+
+            grouped_resource_msgs.push(resource_msg);
+            grouped_resource_inner_sizes.push(resource_inner_size);
+            grouped_scope_inner_sizes.push(scope_logs_inner_size);
         }
 
-        let request_size =
-            bytes_field_size(otlp::EXPORT_LOGS_REQUEST_RESOURCE_LOGS, resource_inner_size);
-
-        // Phase 3: write the final protobuf.
+        // Phase 3: write final protobuf with one ResourceLogs per group.
         self.encoder_buf.reserve(request_size + 16);
+        for (group_idx, (_key, record_ranges)) in grouped_ranges.iter().enumerate() {
+            encode_tag(
+                &mut self.encoder_buf,
+                otlp::EXPORT_LOGS_REQUEST_RESOURCE_LOGS,
+                otlp::WIRE_TYPE_LEN,
+            );
+            encode_varint(
+                &mut self.encoder_buf,
+                grouped_resource_inner_sizes[group_idx] as u64,
+            );
 
-        // ExportLogsServiceRequest.resource_logs
-        encode_tag(
-            &mut self.encoder_buf,
-            otlp::EXPORT_LOGS_REQUEST_RESOURCE_LOGS,
-            otlp::WIRE_TYPE_LEN,
-        );
-        encode_varint(&mut self.encoder_buf, resource_inner_size as u64);
+            let resource_msg = &grouped_resource_msgs[group_idx];
+            if !resource_msg.is_empty() {
+                encode_bytes_field(
+                    &mut self.encoder_buf,
+                    otlp::RESOURCE_LOGS_RESOURCE,
+                    resource_msg,
+                );
+            }
 
-        // Resource (field 1 of ResourceLogs)
-        if !resource_msg.is_empty() {
+            encode_tag(
+                &mut self.encoder_buf,
+                otlp::RESOURCE_LOGS_SCOPE_LOGS,
+                otlp::WIRE_TYPE_LEN,
+            );
+            encode_varint(
+                &mut self.encoder_buf,
+                grouped_scope_inner_sizes[group_idx] as u64,
+            );
+
+            encode_tag(
+                &mut self.encoder_buf,
+                otlp::SCOPE_LOGS_SCOPE,
+                otlp::WIRE_TYPE_LEN,
+            );
+            encode_varint(
+                &mut self.encoder_buf,
+                instrumentation_scope_inner_size as u64,
+            );
             encode_bytes_field(
                 &mut self.encoder_buf,
-                otlp::RESOURCE_LOGS_RESOURCE,
-                &resource_msg,
+                otlp::INSTRUMENTATION_SCOPE_NAME,
+                SCOPE_NAME,
             );
-        }
-
-        // ScopeLogs (field 2 of ResourceLogs)
-        encode_tag(
-            &mut self.encoder_buf,
-            otlp::RESOURCE_LOGS_SCOPE_LOGS,
-            otlp::WIRE_TYPE_LEN,
-        );
-        encode_varint(&mut self.encoder_buf, scope_logs_inner_size as u64);
-
-        // InstrumentationScope (field 1 of ScopeLogs)
-        encode_tag(
-            &mut self.encoder_buf,
-            otlp::SCOPE_LOGS_SCOPE,
-            otlp::WIRE_TYPE_LEN,
-        );
-        encode_varint(
-            &mut self.encoder_buf,
-            instrumentation_scope_inner_size as u64,
-        );
-        encode_bytes_field(
-            &mut self.encoder_buf,
-            otlp::INSTRUMENTATION_SCOPE_NAME,
-            SCOPE_NAME,
-        );
-        encode_bytes_field(
-            &mut self.encoder_buf,
-            otlp::INSTRUMENTATION_SCOPE_VERSION,
-            SCOPE_VERSION,
-        );
-
-        // LogRecords (repeated, field 2 of ScopeLogs)
-        for &(start, end) in &record_ranges {
             encode_bytes_field(
                 &mut self.encoder_buf,
-                otlp::SCOPE_LOGS_LOG_RECORDS,
-                &records_buf[start..end],
+                otlp::INSTRUMENTATION_SCOPE_VERSION,
+                SCOPE_VERSION,
             );
+
+            for &(start, end) in record_ranges {
+                encode_bytes_field(
+                    &mut self.encoder_buf,
+                    otlp::SCOPE_LOGS_LOG_RECORDS,
+                    &records_buf[start..end],
+                );
+            }
         }
     }
 
@@ -634,6 +668,8 @@ struct BatchColumns<'a> {
     flags_col: Option<(usize, &'a PrimitiveArray<Int64Type>)>,
     /// Non-special attribute columns: (field_name, pre-downcast array).
     attribute_cols: Vec<(String, AttrArray<'a>)>,
+    /// `_resource_*` columns promoted to OTLP Resource attributes.
+    resource_cols: Vec<(String, AttrArray<'a>)>,
 }
 
 fn resolve_otlp_str_col(col: &dyn Array) -> Option<OtlpStrCol<'_>> {
@@ -741,6 +777,7 @@ fn resolve_batch_columns(batch: &RecordBatch) -> BatchColumns<'_> {
     }
 
     let mut attribute_cols: Vec<(String, AttrArray<'_>)> = Vec::new();
+    let mut resource_cols: Vec<(String, AttrArray<'_>)> = Vec::new();
     for (idx, field) in schema.fields().iter().enumerate() {
         if excluded.contains(&idx) {
             continue;
@@ -764,6 +801,10 @@ fn resolve_batch_columns(batch: &RecordBatch) -> BatchColumns<'_> {
                 AttrArray::Str,
             ),
         };
+        if let Some(stripped) = field_name.strip_prefix("_resource_") {
+            resource_cols.push((stripped.to_string(), attr));
+            continue;
+        }
         attribute_cols.push((field_name.to_string(), attr));
     }
 
@@ -776,6 +817,17 @@ fn resolve_batch_columns(batch: &RecordBatch) -> BatchColumns<'_> {
         span_id_col,
         flags_col,
         attribute_cols,
+        resource_cols,
+    }
+}
+
+fn attr_value_as_string(attr: &AttrArray<'_>, row: usize) -> Option<String> {
+    match attr {
+        AttrArray::Str(arr) => (!arr.is_null(row)).then(|| arr.value(row).to_string()),
+        AttrArray::OtherStr(arr) => (!arr.is_null(row)).then(|| str_value(*arr, row).to_string()),
+        AttrArray::Int(arr) => (!arr.is_null(row)).then(|| arr.value(row).to_string()),
+        AttrArray::Float(arr) => (!arr.is_null(row)).then(|| arr.value(row).to_string()),
+        AttrArray::Bool(arr) => (!arr.is_null(row)).then(|| arr.value(row).to_string()),
     }
 }
 
@@ -1814,6 +1866,156 @@ mod tests {
 
         let severities: Vec<i32> = records.iter().map(|lr| lr.severity_number).collect();
         assert_eq!(severities, vec![9, 13, 17], "INFO=9, WARN=13, ERROR=17");
+    }
+
+    #[test]
+    fn resource_columns_group_rows_into_distinct_resource_logs() {
+        use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
+        use opentelemetry_proto::tonic::common::v1::any_value::Value;
+        use prost::Message;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("message", DataType::Utf8, true),
+            Field::new("_resource_service_name", DataType::Utf8, true),
+            Field::new("_resource_k8s_namespace", DataType::Utf8, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec![
+                    Some("a1"),
+                    Some("b1"),
+                    Some("a2"),
+                    Some("b2"),
+                ])),
+                Arc::new(StringArray::from(vec![
+                    Some("checkout"),
+                    Some("payments"),
+                    Some("checkout"),
+                    Some("payments"),
+                ])),
+                Arc::new(StringArray::from(vec![
+                    Some("prod"),
+                    Some("prod"),
+                    Some("prod"),
+                    Some("prod"),
+                ])),
+            ],
+        )
+        .expect("valid batch");
+
+        let mut sink = make_sink();
+        sink.encode_batch(
+            &batch,
+            &BatchMetadata {
+                resource_attrs: Arc::new(vec![(
+                    "deployment.environment".to_string(),
+                    "test".to_string(),
+                )]),
+                observed_time_ns: 1,
+            },
+        );
+
+        let request =
+            ExportLogsServiceRequest::decode(sink.encoder_buf.as_slice()).expect("decode request");
+        assert_eq!(request.resource_logs.len(), 2, "two resource groups");
+
+        let first_records = &request.resource_logs[0].scope_logs[0].log_records;
+        let second_records = &request.resource_logs[1].scope_logs[0].log_records;
+        let first_bodies: Vec<&str> = first_records
+            .iter()
+            .map(|lr| {
+                lr.body
+                    .as_ref()
+                    .and_then(|v| match &v.value {
+                        Some(Value::StringValue(s)) => Some(s.as_str()),
+                        _ => None,
+                    })
+                    .unwrap_or("")
+            })
+            .collect();
+        let second_bodies: Vec<&str> = second_records
+            .iter()
+            .map(|lr| {
+                lr.body
+                    .as_ref()
+                    .and_then(|v| match &v.value {
+                        Some(Value::StringValue(s)) => Some(s.as_str()),
+                        _ => None,
+                    })
+                    .unwrap_or("")
+            })
+            .collect();
+        assert_eq!(first_bodies, vec!["a1", "a2"], "group keeps row order");
+        assert_eq!(second_bodies, vec!["b1", "b2"], "group keeps row order");
+
+        let first_resource = request.resource_logs[0]
+            .resource
+            .as_ref()
+            .expect("resource");
+        let second_resource = request.resource_logs[1]
+            .resource
+            .as_ref()
+            .expect("resource");
+        assert!(
+            first_resource
+                .attributes
+                .iter()
+                .any(|kv| kv.key == "service_name"),
+            "resource key stripped from _resource_ prefix"
+        );
+        assert!(
+            first_resource
+                .attributes
+                .iter()
+                .any(|kv| kv.key == "deployment.environment"),
+            "metadata resource attrs retained"
+        );
+        assert!(
+            second_resource
+                .attributes
+                .iter()
+                .any(|kv| kv.key == "service_name"),
+            "second group carries service_name"
+        );
+    }
+
+    #[test]
+    fn resource_columns_not_emitted_as_log_record_attributes() {
+        use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
+        use prost::Message;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("message", DataType::Utf8, true),
+            Field::new("_resource_service_name", DataType::Utf8, true),
+            Field::new("host", DataType::Utf8, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec![Some("hello")])),
+                Arc::new(StringArray::from(vec![Some("checkout")])),
+                Arc::new(StringArray::from(vec![Some("host-a")])),
+            ],
+        )
+        .expect("valid batch");
+
+        let mut sink = make_sink();
+        sink.encode_batch(&batch, &make_metadata());
+
+        let request =
+            ExportLogsServiceRequest::decode(sink.encoder_buf.as_slice()).expect("decode request");
+        let lr = &request.resource_logs[0].scope_logs[0].log_records[0];
+        assert!(
+            lr.attributes.iter().any(|kv| kv.key == "host"),
+            "normal attrs remain log record attrs"
+        );
+        assert!(
+            lr.attributes
+                .iter()
+                .all(|kv| kv.key != "_resource_service_name"),
+            "resource columns must not be log record attrs"
+        );
     }
 
     #[test]
