@@ -246,7 +246,7 @@ fn inject_cri_metadata(msg: &[u8], timestamp: &[u8], stream: &[u8], out: &mut Ve
             .unwrap_or(body.len());
         let rest = &body[trimmed_start..];
         let is_empty_object =
-            rest.first() == Some(&b'}') && rest[1..].iter().all(|b| b.is_ascii_whitespace());
+            rest.first() == Some(&b'}') && rest[1..].iter().all(u8::is_ascii_whitespace);
         if is_empty_object {
             // Empty JSON object: close the metadata stream value then preserve
             // the original body bytes (including whitespace before/after '}')
@@ -703,7 +703,7 @@ mod verification {
             .unwrap_or(body.len());
         let rest = &body[trimmed_start..];
         let is_empty_object =
-            rest.first() == Some(&b'}') && rest[1..].iter().all(|b| b.is_ascii_whitespace());
+            rest.first() == Some(&b'}') && rest[1..].iter().all(u8::is_ascii_whitespace);
 
         if is_empty_object {
             assert!(suffix.starts_with(b"\""));
