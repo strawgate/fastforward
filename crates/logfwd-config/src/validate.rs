@@ -949,6 +949,17 @@ pipelines:
         );
     }
 
+    /// Whitespace-only path must also be rejected (validates trim().is_empty() branch).
+    #[test]
+    fn file_input_whitespace_path_rejected() {
+        let yaml = "pipelines:\n  test:\n    inputs:\n      - type: file\n        path: \"   \"\n    outputs:\n      - type: stdout\n";
+        let err = Config::load_str(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("path") && err.to_string().contains("must not be empty"),
+            "whitespace-only path must be rejected: {err}"
+        );
+    }
+
     /// Regression test for #1653: elasticsearch index: "" must be rejected by validate().
     #[test]
     fn elasticsearch_empty_index_rejected() {
@@ -971,6 +982,17 @@ pipelines:
         assert!(
             err.to_string().contains("must not be empty"),
             "expected 'must not be empty' message: {err}"
+        );
+    }
+
+    /// Whitespace-only elasticsearch index must also be rejected.
+    #[test]
+    fn elasticsearch_whitespace_index_rejected() {
+        let yaml = "pipelines:\n  test:\n    inputs:\n      - type: file\n        path: /tmp/test.log\n    outputs:\n      - type: elasticsearch\n        endpoint: http://localhost:9200\n        index: \"   \"\n";
+        let err = Config::load_str(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("index") && err.to_string().contains("must not be empty"),
+            "whitespace-only index must be rejected: {err}"
         );
     }
 }
