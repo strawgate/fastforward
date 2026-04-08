@@ -1079,7 +1079,7 @@ impl Config {
                             )));
                         }
                         if let Some(ep) = &output.endpoint
-                            && let Err(msg) = validate_endpoint_url(ep)
+                            && let Err(msg) = validate_output_endpoint_url(ep)
                         {
                             return Err(ConfigError::Validation(format!(
                                 "pipeline '{name}' output '{label}': {msg}",
@@ -1450,18 +1450,61 @@ mod validate_host_port_tests {
 ///
 /// Accepts `http://` or `https://` followed by at least one character.
 fn validate_endpoint_url(endpoint: &str) -> Result<(), String> {
-    let rest = if let Some(r) = endpoint.strip_prefix("https://") {
-        r
-    } else if let Some(r) = endpoint.strip_prefix("http://") {
-        r
-    } else {
+    let url = endpoint
+        .parse::<url::Url>()
+        .map_err(|e| format!("endpoint '{endpoint}' is not a valid URL: {e}"))?;
+
+    match url.scheme() {
+        "http" | "https" => {}
+        other => {
+            return Err(format!(
+                "endpoint '{endpoint}' has unsupported scheme '{other}'; expected 'http' or 'https'"
+            ));
+        }
+    }
+
+    if url.host_str().is_none() {
         return Err(format!(
-            "endpoint '{endpoint}' has no recognised scheme; expected 'http://' or 'https://'"
+            "endpoint '{endpoint}' has no host (expected e.g. https://collector:4318)"
         ));
-    };
-    if rest.is_empty() {
+    }
+
+    if !url.username().is_empty() || url.password().is_some() {
         return Err(format!(
-            "endpoint '{endpoint}' has no host after the scheme"
+            "endpoint '{endpoint}' must not include credentials in the URL; use output.auth instead"
+        ));
+    }
+
+    Ok(())
+}
+
+fn is_loopback_endpoint(endpoint: &str) -> bool {
+    let Ok(url) = endpoint.parse::<url::Url>() else {
+        return false;
+    };
+    let Some(host) = url.host() else {
+        return false;
+    };
+    match host {
+        url::Host::Domain(domain) => domain.eq_ignore_ascii_case("localhost"),
+        url::Host::Ipv4(ip) => ip.is_loopback(),
+        url::Host::Ipv6(ip) => ip.is_loopback(),
+    }
+}
+
+/// Output endpoint validation policy:
+/// - URL must be parseable and use http/https.
+/// - URL must not include embedded credentials.
+/// - Non-loopback endpoints must use HTTPS.
+pub fn validate_output_endpoint_url(endpoint: &str) -> Result<(), String> {
+    validate_endpoint_url(endpoint)?;
+    let is_https = endpoint
+        .parse::<url::Url>()
+        .map(|u| u.scheme() == "https")
+        .map_err(|e| format!("endpoint '{endpoint}' is not a valid URL: {e}"))?;
+    if !is_https && !is_loopback_endpoint(endpoint) {
+        return Err(format!(
+            "endpoint '{endpoint}' uses insecure HTTP; use 'https://' for non-loopback output endpoints"
         ));
     }
     Ok(())
@@ -1549,7 +1592,7 @@ transform: |
 
 output:
   type: otlp
-  endpoint: http://otel-collector:4317
+  endpoint: https://otel-collector:4317
   compression: zstd
 
 server:
@@ -1573,7 +1616,7 @@ storage:
         assert_eq!(pipe.outputs[0].output_type, OutputType::Otlp);
         assert_eq!(
             pipe.outputs[0].endpoint.as_deref(),
-            Some("http://otel-collector:4317")
+            Some("https://otel-collector:4317")
         );
         assert_eq!(cfg.server.diagnostics.as_deref(), Some("0.0.0.0:9090"));
         assert_eq!(cfg.storage.data_dir.as_deref(), Some("/var/lib/logfwd"));
@@ -1598,7 +1641,7 @@ pipelines:
     outputs:
       - name: collector
         type: otlp
-        endpoint: http://otel-collector:4317
+        endpoint: https://otel-collector:4317
         protocol: grpc
         compression: zstd
       - name: debug
@@ -1625,7 +1668,7 @@ server:
     fn env_var_substitution() {
         // SAFETY: this test is not run concurrently with other tests that
         // depend on the same environment variable.
-        unsafe { std::env::set_var("LOGFWD_TEST_ENDPOINT", "http://my-collector:4317") };
+        unsafe { std::env::set_var("LOGFWD_TEST_ENDPOINT", "https://my-collector:4317") };
         let yaml = r"
 input:
   type: file
@@ -1638,7 +1681,7 @@ output:
         let pipe = &cfg.pipelines["default"];
         assert_eq!(
             pipe.outputs[0].endpoint.as_deref(),
-            Some("http://my-collector:4317")
+            Some("https://my-collector:4317")
         );
         // SAFETY: this test is not run concurrently with other tests that
         // depend on the same environment variable.
@@ -1713,7 +1756,7 @@ input:
   path: /var/log/test.log
 output:
   type: otlp
-  endpoint: http://collector:4318
+  endpoint: https://collector:4318
   compression: gzip
 ";
         Config::load_str(yaml).expect("gzip OTLP compression should validate");
@@ -1877,12 +1920,12 @@ output:
     fn all_output_types() {
         // Supported output types should parse and validate successfully.
         for (otype, extra) in [
-            ("otlp", "endpoint: http://x:4317"),
+            ("otlp", "endpoint: https://x:4317"),
             ("stdout", ""),
             ("null", ""),
-            ("elasticsearch", "endpoint: http://x"),
-            ("loki", "endpoint: http://x"),
-            ("arrow_ipc", "endpoint: http://x"),
+            ("elasticsearch", "endpoint: https://x"),
+            ("loki", "endpoint: https://x"),
+            ("arrow_ipc", "endpoint: https://x"),
             ("file", "path: /tmp/x.ndjson"),
             ("tcp", "endpoint: 127.0.0.1:5140"),
             ("udp", "endpoint: 127.0.0.1:5140"),
@@ -2201,19 +2244,61 @@ output:
 
     #[test]
     fn validation_endpoint_valid_schemes() {
-        // Both http:// and https:// must be accepted for supported URL-based outputs.
-        for (otype, scheme) in [
-            ("otlp", "http://"),
-            ("otlp", "https://"),
-            ("elasticsearch", "http://"),
-            ("elasticsearch", "https://"),
-        ] {
+        // HTTPS is required for non-loopback output endpoints.
+        for (otype, scheme) in [("otlp", "https://"), ("elasticsearch", "https://")] {
             let yaml = format!(
                 "input:\n  type: file\n  path: /tmp/x.log\noutput:\n  type: {otype}\n  endpoint: {scheme}collector:4317\n"
             );
             Config::load_str(&yaml)
                 .unwrap_or_else(|e| panic!("scheme '{scheme}' should be valid for '{otype}': {e}"));
         }
+    }
+
+    #[test]
+    fn validation_endpoint_http_non_loopback_rejected() {
+        for otype in ["otlp", "elasticsearch", "loki", "arrow_ipc"] {
+            let yaml = format!(
+                "input:\n  type: file\n  path: /tmp/x.log\noutput:\n  type: {otype}\n  endpoint: http://collector:4317\n"
+            );
+            let err = Config::load_str(&yaml).expect_err("non-loopback http must be rejected");
+            assert!(
+                err.to_string().contains("insecure HTTP"),
+                "expected insecure HTTP rejection for '{otype}': {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn validation_endpoint_http_loopback_allowed() {
+        for endpoint in [
+            "http://localhost:4318/v1/logs",
+            "http://127.0.0.1:4318/v1/logs",
+            "http://[::1]:4318/v1/logs",
+        ] {
+            let yaml = format!(
+                "input:\n  type: file\n  path: /tmp/x.log\noutput:\n  type: otlp\n  endpoint: {endpoint}\n"
+            );
+            Config::load_str(&yaml).unwrap_or_else(|e| {
+                panic!("loopback HTTP endpoint '{endpoint}' should be accepted: {e}")
+            });
+        }
+    }
+
+    #[test]
+    fn validation_endpoint_credentials_rejected() {
+        let yaml = r"
+input:
+  type: file
+  path: /tmp/x.log
+output:
+  type: otlp
+  endpoint: https://user:pass@collector:4318/v1/logs
+";
+        let err = Config::load_str(yaml).expect_err("endpoint credentials must be rejected");
+        assert!(
+            err.to_string().contains("must not include credentials"),
+            "expected credentials rejection: {err}"
+        );
     }
 
     #[test]
@@ -2245,7 +2330,7 @@ input:
 
 output:
   type: otlp
-  endpoint: http://otel-collector:4317
+  endpoint: https://otel-collector:4317
 
 resource_attrs:
   service.name: my-service
@@ -2285,7 +2370,7 @@ pipelines:
         path: /var/log/app.log
     outputs:
       - type: otlp
-        endpoint: http://otel-collector:4317
+        endpoint: https://otel-collector:4317
 ";
         let cfg = Config::load_str(yaml).expect("should parse advanced config with resource_attrs");
         let pipe = &cfg.pipelines["app_logs"];
@@ -2309,7 +2394,7 @@ input:
   path: /var/log/app.log
 output:
   type: otlp
-  endpoint: http://otel-collector:4317
+  endpoint: https://otel-collector:4317
 ";
         let cfg = Config::load_str(yaml).expect("should parse config without resource_attrs");
         let pipe = &cfg.pipelines["default"];

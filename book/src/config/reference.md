@@ -30,7 +30,7 @@ transform: SELECT level, message, status FROM logs WHERE status >= 400
 
 output:
   type: otlp
-  endpoint: http://otel-collector:4318/v1/logs
+  endpoint: https://otel-collector:4318/v1/logs
   compression: zstd
 
 server:
@@ -51,7 +51,7 @@ pipelines:
     transform: SELECT * FROM logs WHERE level = 'ERROR'
     outputs:
       - type: otlp
-        endpoint: http://otel-collector:4318/v1/logs
+        endpoint: https://otel-collector:4318/v1/logs
 
   debug:
     inputs:
@@ -216,20 +216,27 @@ Each pipeline requires at least one output.
 | `type` | string | Yes | Output type. See [Output types](#output-types). |
 | `name` | string | No | Friendly name shown in diagnostics. |
 
+For URL-based outputs (`otlp`, `elasticsearch`, `loki`, `arrow_ipc`, and `http`),
+endpoints must be valid `http://` or `https://` URLs. Embedded credentials
+(`https://user:pass@host/...`) are rejected; use `output.auth` instead. For
+transport safety, non-loopback endpoints must use `https://`. Plain `http://`
+is only accepted for loopback targets (`localhost`, `127.0.0.1`, `[::1]`) for
+local development.
+
 ### `otlp` output
 
 Send log records as OTLP protobuf to an OpenTelemetry collector.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `endpoint` | string | Yes | — | Full collector URL, e.g. `http://otel-collector:4317` (gRPC) or `http://otel-collector:4318/v1/logs` (HTTP). |
+| `endpoint` | string | Yes | — | Full collector URL, e.g. `https://otel-collector:4317` (gRPC) or `https://otel-collector:4318/v1/logs` (HTTP). |
 | `protocol` | string | No | `http` | `http` or `grpc`. |
 | `compression` | string | No | none | `zstd`, `gzip`, or `none` for the request body. |
 
 ```yaml
 output:
   type: otlp
-  endpoint: http://otel-collector:4317
+  endpoint: https://otel-collector:4317
   protocol: grpc
   compression: zstd
 ```
@@ -242,13 +249,13 @@ lands.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `endpoint` | string | Yes | Full URL, e.g. `http://ingest.example.com/logs`. |
+| `endpoint` | string | Yes | Full URL, e.g. `https://ingest.example.com/logs`. |
 | `compression` | string | No | Reserved for future use. |
 
 ```yaml
 output:
   type: http
-  endpoint: http://ingest.example.com/logs
+  endpoint: https://ingest.example.com/logs
 ```
 
 ### `stdout` output
@@ -479,14 +486,14 @@ The optional `server` block controls the diagnostics server and observability se
 |-------|------|---------|-------------|
 | `diagnostics` | string | none | `host:port` to listen for HTTP diagnostics. See [Diagnostics API](#diagnostics-api). |
 | `log_level` | string | `info` | Log verbosity. One of `error`, `warn`, `info`, `debug`, `trace`. |
-| `metrics_endpoint` | string | none | OTLP endpoint for periodic metrics push, e.g. `http://otel-collector:4318`. |
+| `metrics_endpoint` | string | none | OTLP endpoint for periodic metrics push, e.g. `https://otel-collector:4318`. |
 | `metrics_interval_secs` | integer | `60` | Push interval for OTLP metrics in seconds. |
 
 ```yaml
 server:
   diagnostics: 0.0.0.0:9090
   log_level: info
-  metrics_endpoint: http://otel-collector:4318
+  metrics_endpoint: https://otel-collector:4318
   metrics_interval_secs: 30
 ```
 
