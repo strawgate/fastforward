@@ -235,19 +235,26 @@ fn inject_cri_metadata(msg: &[u8], timestamp: &[u8], stream: &[u8], out: &mut Ve
         out.extend_from_slice(timestamp);
         out.extend_from_slice(b"\",\"_stream\":\"");
         out.extend_from_slice(stream);
-        // The message body is everything after the opening '{'. If it starts
-        // with '}' (possibly with whitespace), the original message is an empty
-        // JSON object — close without a trailing comma to avoid `{...,}` (invalid JSON).
+        // The message body is everything after the opening '{'. Treat it as an
+        // empty object only when the first non-whitespace byte is '}' and the
+        // remainder is whitespace-only. Otherwise preserve original bytes
+        // (including malformed payloads) to avoid silent data loss.
         let body = &msg[1..];
         let trimmed_start = body
             .iter()
             .position(|b| !b.is_ascii_whitespace())
             .unwrap_or(body.len());
-        if body[trimmed_start..].starts_with(b"}") {
-            // Empty JSON object: close the metadata object without a trailing comma.
-            out.extend_from_slice(b"\"}");
+        let rest = &body[trimmed_start..];
+        let is_empty_object =
+            rest.first() == Some(&b'}') && rest[1..].iter().all(|b| b.is_ascii_whitespace());
+        if is_empty_object {
+            // Empty JSON object: close the metadata stream value then preserve
+            // the original body bytes (including whitespace before/after '}')
+            // without inserting a trailing comma.
+            out.push(b'"');
+            out.extend_from_slice(body);
         } else {
-            // Non-empty JSON object: inject comma then remaining fields.
+            // Non-empty or malformed JSON object: inject comma then preserve body.
             out.extend_from_slice(b"\",");
             out.extend_from_slice(body);
         }
@@ -318,22 +325,41 @@ mod tests {
     #[test]
     fn cri_empty_json_object_produces_valid_json() {
         let stats = make_stats();
+        let mut proc = FormatDecoder::cri(2 * 1024 * 1024, Arc::clone(&stats));
+
+        for input in [
+            b"2024-01-15T10:30:00Z stdout F {}\n".as_slice(),
+            b"2024-01-15T10:30:00Z stdout F {   }\n".as_slice(),
+            b"2024-01-15T10:30:00Z stdout F {\t\r }\n".as_slice(),
+        ] {
+            let mut out = Vec::new();
+            proc.process_lines(input, &mut out);
+            // Must produce valid JSON — not {"_timestamp":"...","_stream":"...",}
+            assert!(!out.is_empty(), "should emit a record");
+            let line = &out[..out.len() - 1]; // trim trailing \n
+            let parsed = serde_json::from_slice::<serde_json::Value>(line);
+            assert!(
+                parsed.is_ok(),
+                "empty JSON object must produce valid JSON output; got: {}",
+                String::from_utf8_lossy(line)
+            );
+            let obj = parsed.unwrap();
+            assert_eq!(obj["_timestamp"], "2024-01-15T10:30:00Z");
+            assert_eq!(obj["_stream"], "stdout");
+        }
+    }
+
+    #[test]
+    fn cri_malformed_object_with_trailing_bytes_preserved() {
+        let stats = make_stats();
         let mut proc = FormatDecoder::cri(2 * 1024 * 1024, stats);
-        let input = b"2024-01-15T10:30:00Z stdout F {}\n";
+        let input = b"2024-01-15T10:30:00Z stdout F { }garbage\n";
         let mut out = Vec::new();
         proc.process_lines(input, &mut out);
-        // Must produce valid JSON — not {"_timestamp":"...","_stream":"...",}
-        assert!(!out.is_empty(), "should emit a record");
-        let line = &out[..out.len() - 1]; // trim trailing \n
-        let parsed = serde_json::from_slice::<serde_json::Value>(line);
-        assert!(
-            parsed.is_ok(),
-            "empty JSON object must produce valid JSON output; got: {}",
-            String::from_utf8_lossy(line)
+        assert_eq!(
+            out,
+            b"{\"_timestamp\":\"2024-01-15T10:30:00Z\",\"_stream\":\"stdout\", }garbage\n"
         );
-        let obj = parsed.unwrap();
-        assert_eq!(obj["_timestamp"], "2024-01-15T10:30:00Z");
-        assert_eq!(obj["_stream"], "stdout");
     }
 
     #[test]
@@ -662,7 +688,30 @@ mod verification {
         let mut out = Vec::new();
         inject_cri_metadata(&msg, ts, stream, &mut out);
         // Output must start with the timestamp+stream injection prefix.
-        assert!(out.starts_with(b"{\"_timestamp\":\"TS\",\"_stream\":\"S\","));
+        let prefix = b"{\"_timestamp\":\"TS\",\"_stream\":\"S";
+        assert!(out.starts_with(prefix));
+
+        // After the stream value, we either inject:
+        // - `",` for non-empty/malformed object payloads, or
+        // - `"` + original body for empty-object payloads (`{}` with optional
+        //   whitespace around the closing brace).
+        let suffix = &out[prefix.len()..];
+        let body = &msg[1..];
+        let trimmed_start = body
+            .iter()
+            .position(|b| !b.is_ascii_whitespace())
+            .unwrap_or(body.len());
+        let rest = &body[trimmed_start..];
+        let is_empty_object =
+            rest.first() == Some(&b'}') && rest[1..].iter().all(|b| b.is_ascii_whitespace());
+
+        if is_empty_object {
+            assert!(suffix.starts_with(b"\""));
+            assert!(suffix[1..].starts_with(body));
+        } else {
+            assert!(suffix.starts_with(b"\","));
+            assert!(suffix[2..].starts_with(body));
+        }
         kani::cover!(true, "JSON path metadata prefix verified");
     }
 
