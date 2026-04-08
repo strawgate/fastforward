@@ -2,7 +2,9 @@ use std::collections::{HashMap, HashSet, hash_map::Entry};
 use std::sync::Arc;
 use std::time::Duration;
 
-use arrow::array::{Array, LargeStringArray, StringArray, StringViewArray, UInt32Array};
+use arrow::array::{
+    Array, LargeStringArray, StringArray, StringViewArray, UInt32Array, new_null_array,
+};
 use arrow::compute::{concat_batches, take};
 use arrow::datatypes::{DataType, Schema};
 use arrow::record_batch::RecordBatch;
@@ -238,13 +240,50 @@ impl TailSamplingProcessor {
             let merged =
                 Schema::try_merge(state.batches.iter().map(|b| b.schema().as_ref().clone()))
                     .map_err(|e| {
-                        ProcessorError::Transient(format!(
+                        ProcessorError::Permanent(format!(
                             "failed to merge buffered trace schemas: {e}"
                         ))
                     })?;
             Arc::new(merged)
         };
-        let combined = concat_batches(&merged_schema, &state.batches).map_err(|e| {
+
+        let mut aligned_batches: Vec<RecordBatch> = Vec::with_capacity(state.batches.len());
+        for batch in &state.batches {
+            let mut aligned_cols = Vec::with_capacity(merged_schema.fields().len());
+            for field in merged_schema.fields() {
+                match batch.schema().index_of(field.name()) {
+                    Ok(col_idx) => {
+                        let col = batch.column(col_idx);
+                        if col.data_type() == field.data_type() {
+                            aligned_cols.push(Arc::clone(col));
+                        } else {
+                            let casted = arrow::compute::cast(col.as_ref(), field.data_type())
+                                .map_err(|e| {
+                                    ProcessorError::Permanent(format!(
+                                        "failed to align buffered trace column '{}' from {:?} to {:?}: {e}",
+                                        field.name(),
+                                        col.data_type(),
+                                        field.data_type()
+                                    ))
+                                })?;
+                            aligned_cols.push(casted);
+                        }
+                    }
+                    Err(_) => {
+                        aligned_cols.push(new_null_array(field.data_type(), batch.num_rows()));
+                    }
+                }
+            }
+            let aligned =
+                RecordBatch::try_new(Arc::clone(&merged_schema), aligned_cols).map_err(|e| {
+                    ProcessorError::Permanent(format!(
+                        "failed to align buffered trace batch to merged schema: {e}"
+                    ))
+                })?;
+            aligned_batches.push(aligned);
+        }
+
+        let combined = concat_batches(&merged_schema, &aligned_batches).map_err(|e| {
             ProcessorError::Transient(format!("failed to concat buffered trace batches: {e}"))
         })?;
         let out = self.decision.execute_blocking(combined).map_err(|e| {
@@ -280,6 +319,17 @@ impl TailSamplingProcessor {
             match self.run_decision_for_state(&state) {
                 Ok(batch) => decided.push((key, state, batch)),
                 Err(e) => {
+                    // Deterministic schema/type incompatibilities should not
+                    // retry forever. Drop only the failing group and continue.
+                    if let ProcessorError::Permanent(permanent) = e {
+                        tracing::warn!(
+                            group = %key,
+                            error = %permanent,
+                            "dropping tail-sampling group due to permanent decision error"
+                        );
+                        continue;
+                    }
+
                     // Keep timeout drain transactional: on transient decision
                     // failure, restore all previously removed groups so retry
                     // can reevaluate the exact same buffered state.
@@ -716,22 +766,24 @@ mod tests {
         )
         .expect("append drifted schema to b");
 
-        let err = p
+        let out = p
             .process(
                 RecordBatch::new_empty(Arc::new(Schema::empty())),
                 &meta(200),
             )
-            .expect_err("mixed-schema timed-out group should error transiently");
-        assert!(
-            matches!(err, ProcessorError::Transient(_)),
-            "expected transient error"
-        );
+            .expect("permanent per-group decision errors should not fail the full batch");
 
-        // No drained group should be lost when one timed-out decision fails.
-        assert_eq!(p.traces.len(), 2);
-        let a = p.traces.get("a").expect("group a still buffered");
-        let b = p.traces.get("b").expect("group b still buffered");
-        assert_eq!(a.batches.len(), 1);
-        assert_eq!(b.batches.len(), 2);
+        // Group "a" should still flush successfully.
+        assert_eq!(out.len(), 1);
+        let trace_col = out[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("trace_id utf8 column");
+        assert_eq!(trace_col.value(0), "a");
+
+        // Group "b" has irreconcilable schema drift and should be dropped, not
+        // retried forever.
+        assert!(p.traces.is_empty());
     }
 }
