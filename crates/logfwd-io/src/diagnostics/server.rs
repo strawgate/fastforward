@@ -13,6 +13,71 @@ use crate::background_http_task::BackgroundHttpTask;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const DASHBOARD_HTML: &str = include_str!("../dashboard.html");
+const REDACTED_SECRET: &str = "***redacted***";
+
+fn redact_endpoint_credentials(endpoint: &str) -> String {
+    let Ok(mut parsed) = url::Url::parse(endpoint) else {
+        return endpoint.to_string();
+    };
+    if parsed.username().is_empty() && parsed.password().is_none() {
+        return endpoint.to_string();
+    }
+    let _ = parsed.set_username("");
+    let _ = parsed.set_password(None);
+    parsed.to_string()
+}
+
+fn redact_yaml_value(value: &mut serde_yaml_ng::Value, in_auth_block: bool) {
+    match value {
+        serde_yaml_ng::Value::Mapping(map) => {
+            for (key, val) in map.iter_mut() {
+                let Some(key_str) = key.as_str() else {
+                    redact_yaml_value(val, in_auth_block);
+                    continue;
+                };
+
+                let next_in_auth = in_auth_block || key_str == "auth";
+
+                if in_auth_block && key_str == "bearer_token" {
+                    *val = serde_yaml_ng::Value::String(REDACTED_SECRET.to_string());
+                    continue;
+                }
+
+                if in_auth_block && key_str == "headers" {
+                    if let serde_yaml_ng::Value::Mapping(headers) = val {
+                        for (_, header_value) in headers.iter_mut() {
+                            *header_value =
+                                serde_yaml_ng::Value::String(REDACTED_SECRET.to_string());
+                        }
+                    }
+                    continue;
+                }
+
+                if key_str == "endpoint"
+                    && let serde_yaml_ng::Value::String(endpoint) = val
+                {
+                    *endpoint = redact_endpoint_credentials(endpoint);
+                }
+
+                redact_yaml_value(val, next_in_auth);
+            }
+        }
+        serde_yaml_ng::Value::Sequence(seq) => {
+            for item in seq.iter_mut() {
+                redact_yaml_value(item, in_auth_block);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn redact_config_yaml(raw_yaml: &str) -> String {
+    let Ok(mut parsed) = serde_yaml_ng::from_str::<serde_yaml_ng::Value>(raw_yaml) else {
+        return raw_yaml.to_string();
+    };
+    redact_yaml_value(&mut parsed, false);
+    serde_yaml_ng::to_string(&parsed).unwrap_or_else(|_| raw_yaml.to_string())
+}
 
 // ---------------------------------------------------------------------------
 // ServerHandle — owns the background threads spawned by DiagnosticsServer::start
@@ -387,10 +452,11 @@ impl DiagnosticsServer {
             return Ok(());
         }
 
+        let redacted_yaml = redact_config_yaml(&self.config_yaml);
         let body = format!(
             r#"{{"path":"{}","raw_yaml":"{}"}}"#,
             esc(&self.config_path),
-            esc(&self.config_yaml),
+            esc(&redacted_yaml),
         );
         let header = tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
             .map_err(|()| io::Error::other("invalid HTTP header"))?;
@@ -1084,6 +1150,52 @@ mod tests {
         let body = text.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
 
         (status, body)
+    }
+
+    #[test]
+    fn redact_config_yaml_masks_auth_and_endpoint_credentials() {
+        let raw = r#"
+output:
+  type: http
+  endpoint: "https://user:pass@example.com/ingest"
+  auth:
+    bearer_token: "super-secret"
+    headers:
+      X-Api-Key: "api-secret"
+      Authorization: "Basic abc123"
+"#;
+        let redacted = redact_config_yaml(raw);
+        assert!(
+            !redacted.contains("super-secret"),
+            "bearer token must not be exposed"
+        );
+        assert!(
+            !redacted.contains("api-secret"),
+            "auth header values must not be exposed"
+        );
+        assert!(
+            !redacted.contains("abc123"),
+            "authorization header value must not be exposed"
+        );
+        assert!(
+            !redacted.contains("user:pass@"),
+            "endpoint credentials must not be exposed"
+        );
+        assert!(
+            redacted.contains(REDACTED_SECRET),
+            "expected redacted marker in output"
+        );
+        assert!(
+            redacted.contains("https://example.com/ingest"),
+            "expected endpoint to preserve host/path after redaction"
+        );
+    }
+
+    #[test]
+    fn redact_config_yaml_passthroughs_non_yaml_input() {
+        let raw = "not: [valid: yaml";
+        let redacted = redact_config_yaml(raw);
+        assert_eq!(redacted, raw);
     }
 
     #[test]
