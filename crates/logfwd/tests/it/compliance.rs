@@ -30,6 +30,13 @@ use logfwd_output::sink::{SendResult, Sink};
 use logfwd_test_utils::{generate_json_lines, test_meter};
 use tokio_util::sync::CancellationToken;
 
+/// Generous timeout for compliance tests.
+/// Coverage instrumentation and busy CI hosts introduce significant
+/// scheduling jitter — keep headroom to avoid flaky failures.
+fn wait_timeout() -> Duration {
+    Duration::from_secs(30)
+}
+
 // ---------------------------------------------------------------------------
 // CaptureSink (thread-safe, usable from integration tests)
 // ---------------------------------------------------------------------------
@@ -316,7 +323,7 @@ output:
         log_path.display()
     );
 
-    let batches = run_compliance_pipeline(&yaml, count, Duration::from_secs(10));
+    let batches = run_compliance_pipeline(&yaml, count, wait_timeout());
     let report = verify_batches(&batches, count, "");
 
     assert!(
@@ -357,7 +364,7 @@ pipelines:
     );
 
     let total_rows = sources.len() * per_source;
-    let batches = run_compliance_pipeline(&yaml, total_rows, Duration::from_secs(15));
+    let batches = run_compliance_pipeline(&yaml, total_rows, wait_timeout());
 
     for source in &sources {
         let report = verify_batches(&batches, per_source, source);
@@ -397,7 +404,7 @@ output:
     );
 
     // The WHERE filter halves the output: only odd sequence_ids pass.
-    let batches = run_compliance_pipeline(&yaml, count / 2, Duration::from_secs(10));
+    let batches = run_compliance_pipeline(&yaml, count / 2, wait_timeout());
 
     // ERROR lines are the odd-numbered sequence_ids (1, 3, 5, ...).
     let mut all_ids: Vec<i64> = Vec::new();
