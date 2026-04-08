@@ -73,7 +73,7 @@ reason = "The file still mixes HTTP/runtime shell code with pure protojson parsi
 issue = 1484
 
 [[seams]]
-path = "crates/logfwd-io/src/tail.rs"
+path = "crates/logfwd-io/src/tail/mod.rs"
 status = "required"
 reason = "The EOF emission state machine is a local proof seam despite living in an IO crate."
 issue = 1314
@@ -103,9 +103,9 @@ reason = "Output lifecycle reduction and fanout health aggregation are isolated 
 issue = 1439
 
 [[seams]]
-path = "crates/logfwd-runtime/src/worker_pool.rs"
+path = "crates/logfwd-runtime/src/worker_pool/dispatch.rs"
 status = "required"
-reason = "Worker dispatch helpers already expose bounded local proof seams."
+reason = "Worker dispatch helpers are isolated in this module and remain bounded local proof seams."
 issue = 1314
 
 [[seams]]
@@ -133,7 +133,7 @@ reason = "IO-heavy sink implementation; proof-worthy helpers should be extracted
 issue = 1313
 
 [[seams]]
-path = "crates/logfwd-runtime/src/pipeline.rs"
+path = "crates/logfwd-runtime/src/pipeline/mod.rs"
 status = "exempt"
 reason = "Async orchestration shell remains mixed; local proof seams are being extracted incrementally."
 issue = 1449

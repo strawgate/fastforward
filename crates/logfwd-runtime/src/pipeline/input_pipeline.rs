@@ -767,7 +767,7 @@ output:
         );
     }
 
-    /// Processor that returns a Transient error — tickets should be rejected
+    /// Processor that returns a Transient error — tickets should be held
     /// (checkpoint does NOT advance), and the pipeline continues.
     #[cfg(not(feature = "turmoil"))]
     #[test]

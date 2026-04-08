@@ -33,9 +33,11 @@ opentelemetry-proto = { version = "0.31", features = ["logs", "gen-tonic-message
 prost = "0.14"
 serde = { workspace = true }
 serde_json = "1"
+serde_yaml_ng = "0.10"
 sonic-rs = { workspace = true }
 socket2 = { version = "0.6", features = ["all"] }
 tiny_http = "0.12"
+url = { workspace = true }
 zstd = "0.13"
 xxhash-rust = { version = "0.8.15", features = ["xxh32", "xxh64"] }
 walkdir = { workspace = true }
