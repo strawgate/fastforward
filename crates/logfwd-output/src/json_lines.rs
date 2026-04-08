@@ -42,7 +42,10 @@ impl JsonLinesSink {
             .timeout(Duration::from_secs(30))
             .pool_max_idle_per_host(64)
             .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+            .unwrap_or_else(|e| {
+                tracing::warn!("reqwest client builder failed: {e}");
+                reqwest::Client::new()
+            });
         JsonLinesSink {
             name,
             url,
@@ -228,6 +231,10 @@ impl Sink for JsonLinesSink {
     }
 }
 
+/// Factory that creates [`JsonLinesSink`] instances for a named HTTP endpoint.
+///
+/// Implements [`SinkFactory`] so the pipeline can spawn per-worker sinks that
+/// each own their own HTTP client and serialisation buffers.
 pub struct JsonLinesSinkFactory {
     name: String,
     endpoint: String,
@@ -237,6 +244,14 @@ pub struct JsonLinesSinkFactory {
 }
 
 impl JsonLinesSinkFactory {
+    /// Create a new factory for a JSON-Lines-over-HTTP sink.
+    ///
+    /// # Arguments
+    /// * `name`        – Human-readable component name used in logs and metrics.
+    /// * `endpoint`    – Target URL that batches are POSTed to.
+    /// * `headers`     – Extra HTTP headers forwarded on every request.
+    /// * `compression` – Compression scheme applied before sending.
+    /// * `stats`       – Shared stats handle for recording delivery metrics.
     pub fn new(
         name: String,
         endpoint: String,
