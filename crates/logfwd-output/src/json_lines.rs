@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use arrow::array::Array;
 use arrow::record_batch::RecordBatch;
-use reqwest::header::{HeaderName, HeaderValue};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 
 use logfwd_types::diagnostics::ComponentStats;
 
@@ -23,7 +23,7 @@ use super::{Compression, build_col_infos, str_value, write_row_json};
 pub struct JsonLinesSink {
     name: String,
     url: String,
-    headers: Vec<(HeaderName, HeaderValue)>,
+    headers: HeaderMap,
     pub(crate) batch_buf: Vec<u8>,
     compress_buf: Vec<u8>,
     compression: Compression,
@@ -31,13 +31,33 @@ pub struct JsonLinesSink {
     stats: Arc<ComponentStats>,
 }
 
-impl JsonLinesSink {
-    const ERROR_BODY_LIMIT_BYTES: usize = 8 * 1024;
+const MAX_ERROR_BODY_BYTES: usize = 8 * 1024;
 
+fn parse_headers(headers: &[(String, String)]) -> io::Result<HeaderMap> {
+    let mut parsed = HeaderMap::with_capacity(headers.len());
+    for (k, v) in headers {
+        let name = HeaderName::from_bytes(k.as_bytes()).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("invalid HTTP header name '{k}': {e}"),
+            )
+        })?;
+        let value = HeaderValue::from_str(v).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("invalid HTTP header value for '{k}': {e}"),
+            )
+        })?;
+        parsed.append(name, value);
+    }
+    Ok(parsed)
+}
+
+impl JsonLinesSink {
     pub fn new(
         name: String,
         url: String,
-        headers: Vec<(HeaderName, HeaderValue)>,
+        headers: HeaderMap,
         compression: Compression,
         stats: Arc<ComponentStats>,
     ) -> Self {
@@ -54,7 +74,7 @@ impl JsonLinesSink {
             url,
             headers,
             batch_buf: Vec::with_capacity(64 * 1024),
-            compress_buf: Vec::with_capacity(64 * 1024),
+            compress_buf: Vec::new(),
             compression,
             client,
             stats,
@@ -135,10 +155,7 @@ impl JsonLinesSink {
     }
 
     async fn post_payload(&self, payload: Vec<u8>) -> io::Result<SendResult> {
-        let mut req = self.client.post(&self.url);
-        for (k, v) in &self.headers {
-            req = req.header(k, v);
-        }
+        let mut req = self.client.post(&self.url).headers(self.headers.clone());
 
         if self.compression == Compression::Gzip {
             req = req.header("Content-Encoding", "gzip");
@@ -147,14 +164,35 @@ impl JsonLinesSink {
         }
         req = req.header("Content-Type", "application/x-ndjson");
 
-        let mut response = req.body(payload).send().await.map_err(io::Error::other)?;
+        let response = req.body(payload).send().await.map_err(io::Error::other)?;
         if response.status().is_success() {
             return Ok(SendResult::Ok);
         }
 
         let retry_after = response.headers().get("Retry-After").cloned();
         let status = response.status().as_u16();
-        let body = Self::read_error_body_limited(&mut response).await;
+        let mut body_bytes = Vec::new();
+        let mut truncated = false;
+        let mut response = response;
+        while let Some(chunk) = response.chunk().await.map_err(io::Error::other)? {
+            if body_bytes.len() < MAX_ERROR_BODY_BYTES {
+                let remaining = MAX_ERROR_BODY_BYTES - body_bytes.len();
+                if chunk.len() <= remaining {
+                    body_bytes.extend_from_slice(&chunk);
+                } else {
+                    body_bytes.extend_from_slice(&chunk[..remaining]);
+                    truncated = true;
+                    break;
+                }
+            } else {
+                truncated = true;
+                break;
+            }
+        }
+        let mut body = String::from_utf8_lossy(&body_bytes).into_owned();
+        if truncated {
+            body.push_str("…[truncated]");
+        }
         if let Some(result) = http_classify::classify_http_status(
             status,
             retry_after.as_ref(),
@@ -167,68 +205,30 @@ impl JsonLinesSink {
         )))
     }
 
-    async fn read_error_body_limited(response: &mut reqwest::Response) -> String {
-        let mut buf = Vec::with_capacity(512);
-        let mut truncated = false;
-
-        while buf.len() < Self::ERROR_BODY_LIMIT_BYTES {
-            match response.chunk().await {
-                Ok(Some(chunk)) => {
-                    let remain = Self::ERROR_BODY_LIMIT_BYTES - buf.len();
-                    if chunk.len() <= remain {
-                        buf.extend_from_slice(&chunk);
-                    } else {
-                        buf.extend_from_slice(&chunk[..remain]);
-                        truncated = true;
-                        break;
-                    }
-                }
-                Ok(None) => break,
-                Err(e) => {
-                    if buf.is_empty() {
-                        return format!("<failed to read response body: {e}>");
-                    }
-                    truncated = true;
-                    break;
-                }
-            }
-        }
-
-        let mut out = String::from_utf8_lossy(&buf).into_owned();
-        if truncated {
-            out.push_str("…[truncated]");
-        }
-        out
-    }
-
     fn maybe_compress(&mut self) -> io::Result<Vec<u8>> {
+        self.compress_buf.clear();
         match self.compression {
             Compression::None => {
-                if self.compress_buf.capacity() == 0 {
-                    self.compress_buf =
-                        Vec::with_capacity(self.batch_buf.capacity().max(64 * 1024));
-                } else {
-                    self.compress_buf.clear();
-                }
                 std::mem::swap(&mut self.batch_buf, &mut self.compress_buf);
                 Ok(std::mem::take(&mut self.compress_buf))
             }
             Compression::Gzip => {
-                self.compress_buf.clear();
                 let mut encoder = flate2::write::GzEncoder::new(
-                    &mut self.compress_buf,
+                    Vec::with_capacity(self.batch_buf.len() / 2),
                     flate2::Compression::default(),
                 );
                 use std::io::Write as _;
                 encoder.write_all(&self.batch_buf)?;
-                encoder.finish().map_err(io::Error::other)?;
-                Ok(std::mem::take(&mut self.compress_buf))
+                encoder.finish()
             }
             Compression::Zstd => {
-                self.compress_buf.clear();
                 zstd::stream::copy_encode(&self.batch_buf[..], &mut self.compress_buf, 1)
                     .map_err(io::Error::other)?;
-                Ok(std::mem::take(&mut self.compress_buf))
+                let cap = self.compress_buf.capacity();
+                Ok(std::mem::replace(
+                    &mut self.compress_buf,
+                    Vec::with_capacity(cap),
+                ))
             }
         }
     }
@@ -286,7 +286,7 @@ impl Sink for JsonLinesSink {
 pub struct JsonLinesSinkFactory {
     name: String,
     endpoint: String,
-    headers: Vec<(HeaderName, HeaderValue)>,
+    headers: Vec<(String, String)>,
     compression: Compression,
     stats: Arc<ComponentStats>,
 }
@@ -306,40 +306,24 @@ impl JsonLinesSinkFactory {
         headers: Vec<(String, String)>,
         compression: Compression,
         stats: Arc<ComponentStats>,
-    ) -> io::Result<Self> {
-        let mut parsed_headers = Vec::with_capacity(headers.len());
-        for (raw_name, raw_value) in headers {
-            let name = HeaderName::from_bytes(raw_name.as_bytes()).map_err(|e| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("invalid header name '{raw_name}': {e}"),
-                )
-            })?;
-            let value = HeaderValue::from_str(&raw_value).map_err(|e| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("invalid header value for '{raw_name}': {e}"),
-                )
-            })?;
-            parsed_headers.push((name, value));
-        }
-
-        Ok(Self {
+    ) -> Self {
+        Self {
             name,
             endpoint,
-            headers: parsed_headers,
+            headers,
             compression,
             stats,
-        })
+        }
     }
 }
 
 impl SinkFactory for JsonLinesSinkFactory {
     fn create(&self) -> io::Result<Box<dyn Sink>> {
+        let headers = parse_headers(&self.headers)?;
         Ok(Box::new(JsonLinesSink::new(
             self.name.clone(),
             self.endpoint.clone(),
-            self.headers.clone(),
+            headers,
             self.compression,
             Arc::clone(&self.stats),
         )))
@@ -365,7 +349,7 @@ mod tests {
         JsonLinesSink::new(
             "test".to_string(),
             "http://localhost:1".to_string(), // unreachable — tests only call serialize_batch
-            vec![],
+            HeaderMap::new(),
             Compression::None,
             Arc::new(ComponentStats::default()),
         )
@@ -522,17 +506,16 @@ mod tests {
     }
 
     #[test]
-    fn factory_rejects_invalid_header_name() {
-        let result = JsonLinesSinkFactory::new(
-            "test".to_string(),
-            "http://localhost:1".to_string(),
-            vec![("bad header".to_string(), "value".to_string())],
-            Compression::None,
-            Arc::new(ComponentStats::default()),
-        );
-        assert!(result.is_err(), "invalid header names must fail fast");
-        if let Err(err) = result {
-            assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
-        }
+    fn parse_headers_rejects_invalid_name() {
+        let err = parse_headers(&[("bad header".to_string(), "v".to_string())])
+            .expect_err("invalid header names should fail");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn parse_headers_rejects_invalid_value() {
+        let err = parse_headers(&[("x-test".to_string(), "bad\r\nvalue".to_string())])
+            .expect_err("invalid header values should fail");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
     }
 }

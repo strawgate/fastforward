@@ -630,17 +630,13 @@ pub fn build_sink_factory(
                     )));
                 }
             };
-            let factory = JsonLinesSinkFactory::new(
+            Ok(Arc::new(JsonLinesSinkFactory::new(
                 name.to_string(),
                 endpoint.clone(),
                 auth_headers,
                 compression,
                 stats,
-            )
-            .map_err(|e| {
-                OutputError::Construction(format!("output '{name}': http factory: {e}"))
-            })?;
-            Ok(Arc::new(factory))
+            )))
         }
         OutputType::Udp => {
             let endpoint = cfg.endpoint.as_ref().ok_or_else(|| {
@@ -957,7 +953,7 @@ mod tests {
         let mut sink = JsonLinesSink::new(
             "test-jsonl".to_string(),
             "http://localhost:9200".to_string(),
-            vec![],
+            reqwest::header::HeaderMap::new(),
             Compression::None,
             Arc::new(ComponentStats::new()),
         );
@@ -1319,7 +1315,7 @@ mod tests {
         let mut sink = JsonLinesSink::new(
             "test-jsonl".to_string(),
             "http://localhost:9200".to_string(),
-            vec![],
+            reqwest::header::HeaderMap::new(),
             Compression::None,
             Arc::new(ComponentStats::new()),
         );
