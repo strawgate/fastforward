@@ -220,11 +220,11 @@ output:
 }
 
 // ---------------------------------------------------------------------------
-// 4. HTTP output: unsupported configs fail early at validation time
+// 4. HTTP output: supported config validates at load time
 // ---------------------------------------------------------------------------
 
 #[test]
-fn test_http_output_rejected_at_config_load() {
+fn test_http_output_is_valid_at_config_load() {
     let yaml = r#"
 input:
   type: file
@@ -234,12 +234,7 @@ output:
   type: http
   endpoint: "http://127.0.0.1:9999/logs"
 "#;
-    let err = Config::load_str(yaml).expect_err("http output should fail validation");
-    assert!(
-        err.to_string()
-            .contains("http output type is not yet implemented"),
-        "unexpected error: {err}"
-    );
+    Config::load_str(yaml).expect("http output should pass validation");
 }
 
 // ---------------------------------------------------------------------------
