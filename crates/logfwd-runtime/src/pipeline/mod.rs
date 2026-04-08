@@ -650,6 +650,11 @@ impl Pipeline {
                 TicketDisposition::Ack => Some(ticket.ack()),
                 TicketDisposition::Reject => Some(ticket.reject()),
                 TicketDisposition::Hold => {
+                    // Convert Sending -> Queued to satisfy the typestate
+                    // contract without acknowledging the batch. We
+                    // intentionally do not re-dispatch yet; the machine keeps
+                    // this batch in-flight so checkpoints do not advance.
+                    let _ = ticket.fail();
                     held += 1;
                     None
                 }
