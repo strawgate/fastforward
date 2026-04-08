@@ -1019,13 +1019,19 @@ mod tests {
         if bytes.is_empty() {
             return Vec::new();
         }
-        bytes
-            .split(|b| *b == b'\n')
-            .filter(|line| !line.is_empty())
-            .map(|line| {
-                serde_json::from_slice::<serde_json::Value>(line).expect("valid ndjson line")
-            })
-            .collect()
+        let mut out = Vec::new();
+        let mut lines = bytes.split(|b| *b == b'\n').peekable();
+        while let Some(line) = lines.next() {
+            if line.is_empty() {
+                assert!(
+                    lines.peek().is_none(),
+                    "ndjson must not contain interior blank lines"
+                );
+                continue;
+            }
+            out.push(serde_json::from_slice::<serde_json::Value>(line).expect("valid ndjson line"));
+        }
+        out
     }
 
     fn build_random_batch(
