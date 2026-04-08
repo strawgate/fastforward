@@ -652,13 +652,19 @@ impl Config {
                     .as_deref()
                     .map_or_else(|| format!("#{i}"), String::from);
                 match input.input_type {
-                    InputType::File => {
-                        if input.path.is_none() {
+                    InputType::File => match &input.path {
+                        None => {
                             return Err(ConfigError::Validation(format!(
                                 "pipeline '{name}' input '{label}': file input requires 'path'"
                             )));
                         }
-                    }
+                        Some(p) if p.trim().is_empty() => {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': file input 'path' must not be empty"
+                            )));
+                        }
+                        _ => {}
+                    },
                     InputType::Udp | InputType::Tcp => {
                         if input.listen.is_none() {
                             return Err(ConfigError::Validation(format!(
@@ -815,6 +821,13 @@ impl Config {
                             )));
                         }
                         if output.output_type == OutputType::Elasticsearch {
+                            if let Some(idx) = &output.index
+                                && idx.trim().is_empty()
+                            {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' output '{label}': elasticsearch 'index' must not be empty"
+                                )));
+                            }
                             if let Some(mode) = output.request_mode.as_deref()
                                 && !matches!(mode, "buffered" | "streaming")
                             {
@@ -2699,6 +2712,54 @@ pipelines:
         assert!(
             err.to_string().contains("only supported for loki"),
             "expected loki-only message: {err}"
+        );
+    }
+
+    /// Regression test for #1654: file input path: "" must be rejected by validate().
+    #[test]
+    fn file_input_empty_path_rejected() {
+        let yaml = r#"
+pipelines:
+  test:
+    inputs:
+      - type: file
+        path: ""
+    outputs:
+      - type: stdout
+"#;
+        let err = Config::load_str(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("path"),
+            "expected path rejection: {err}"
+        );
+        assert!(
+            err.to_string().contains("must not be empty"),
+            "expected 'must not be empty' message: {err}"
+        );
+    }
+
+    /// Regression test for #1653: elasticsearch index: "" must be rejected by validate().
+    #[test]
+    fn elasticsearch_empty_index_rejected() {
+        let yaml = r#"
+pipelines:
+  test:
+    inputs:
+      - type: file
+        path: /tmp/test.log
+    outputs:
+      - type: elasticsearch
+        endpoint: http://localhost:9200
+        index: ""
+"#;
+        let err = Config::load_str(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("index"),
+            "expected index rejection: {err}"
+        );
+        assert!(
+            err.to_string().contains("must not be empty"),
+            "expected 'must not be empty' message: {err}"
         );
     }
 }
