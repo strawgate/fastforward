@@ -454,11 +454,20 @@ fn inject_source_path_metadata(chunk: &[u8], source_path: &std::path::Path, out:
             .iter()
             .position(|&b| !matches!(b, b' ' | b'\t' | b'\r'));
         if let Some(obj_start) = first_nonws.filter(|&idx| line[idx] == b'{') {
+            let after_open = &line[obj_start + 1..];
+            // Detect empty object: only whitespace between `{` and `}`.
+            let is_empty_obj = after_open
+                .iter()
+                .position(|&b| !matches!(b, b' ' | b'\t' | b'\r' | b'\n'))
+                .is_some_and(|i| after_open[i] == b'}');
             out.extend_from_slice(&line[..obj_start]);
             out.extend_from_slice(b"{\"_source_path\":\"");
             json_escape_bytes(source_path_bytes, out);
-            out.extend_from_slice(b"\",");
-            out.extend_from_slice(&line[obj_start + 1..]);
+            out.push(b'"');
+            if !is_empty_obj {
+                out.push(b',');
+            }
+            out.extend_from_slice(after_open);
         } else {
             out.extend_from_slice(line);
         }
@@ -1461,6 +1470,33 @@ mod tests {
         assert_eq!(
             out,
             b"  \t{\"_source_path\":\"/var/log/pods/ns_pod_uid/c/1.log\",\"msg\":\"hello\"}\n"
+        );
+    }
+
+    #[test]
+    fn file_json_injects_source_path_into_empty_object() {
+        // Regression test for issue #1607: inject_source_path_metadata produced
+        // {"_source_path":"...",} for empty objects — invalid JSON trailing comma.
+        let stats = make_stats();
+        let sid = SourceId(11);
+        let source = MockSource::new(vec![vec![InputEvent::Data {
+            bytes: b"{}\n".to_vec(),
+            source_id: Some(sid),
+            accounted_bytes: 0,
+        }]])
+        .with_source_paths(vec![(sid, "/var/log/pods/ns_pod_uid/c/2.log".into())]);
+
+        let mut framed = FramedInput::new(
+            Box::new(source),
+            FormatDecoder::passthrough_json(Arc::clone(&stats)),
+            stats,
+        );
+
+        let out = collect_data(framed.poll().unwrap());
+        // Must be valid JSON — no trailing comma before `}`.
+        assert_eq!(
+            out,
+            b"{\"_source_path\":\"/var/log/pods/ns_pod_uid/c/2.log\"}\n"
         );
     }
 
