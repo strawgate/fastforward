@@ -568,7 +568,13 @@ fn resolve_batch_columns(batch: &RecordBatch) -> BatchColumns<'_> {
             ) =>
             {
                 if timestamp_col.is_none()
-                    && matches!(field.data_type(), DataType::Utf8 | DataType::Utf8View)
+                    && matches!(
+                        field.data_type(),
+                        DataType::Utf8
+                            | DataType::Utf8View
+                            | DataType::Int64
+                            | DataType::Timestamp(_, _)
+                    )
                 {
                     timestamp_col = Some((idx, batch.column(idx).as_ref()));
                     excluded.push(idx);
@@ -687,9 +693,35 @@ fn encode_row_as_log_record(
         .timestamp_col
         .and_then(|(_, arr)| {
             if arr.is_null(row) {
-                None
-            } else {
-                parse_timestamp_nanos(str_value(arr, row).as_bytes())
+                return None;
+            }
+            match arr.data_type() {
+                DataType::Int64 => u64::try_from(arr.as_primitive::<Int64Type>().value(row)).ok(),
+                DataType::Timestamp(unit, _) => {
+                    use arrow::datatypes::{
+                        TimeUnit, TimestampMicrosecondType, TimestampMillisecondType,
+                        TimestampNanosecondType, TimestampSecondType,
+                    };
+                    let raw_ns = match unit {
+                        TimeUnit::Nanosecond => {
+                            Some(arr.as_primitive::<TimestampNanosecondType>().value(row))
+                        }
+                        TimeUnit::Microsecond => arr
+                            .as_primitive::<TimestampMicrosecondType>()
+                            .value(row)
+                            .checked_mul(1_000),
+                        TimeUnit::Millisecond => arr
+                            .as_primitive::<TimestampMillisecondType>()
+                            .value(row)
+                            .checked_mul(1_000_000),
+                        TimeUnit::Second => arr
+                            .as_primitive::<TimestampSecondType>()
+                            .value(row)
+                            .checked_mul(1_000_000_000),
+                    };
+                    raw_ns.and_then(|ns| u64::try_from(ns).ok())
+                }
+                _ => parse_timestamp_nanos(str_value(arr, row).as_bytes()),
             }
         })
         .unwrap_or(0);
@@ -1652,5 +1684,70 @@ mod tests {
 
         let severities: Vec<i32> = records.iter().map(|lr| lr.severity_number).collect();
         assert_eq!(severities, vec![9, 13, 17], "INFO=9, WARN=13, ERROR=17");
+    }
+
+    /// An Int64 timestamp column (as produced by the OTLP receiver for `time_unix_nano`)
+    /// must be recognised as the timestamp field and encoded into LogRecord.time_unix_nano.
+    /// Before the fix, `resolve_batch_columns` rejected Int64 columns, so time_unix_nano
+    /// was always 0 in OTLP→pipeline→OTLP pipelines.
+    #[test]
+    fn int64_timestamp_column_is_recognised() {
+        use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
+        use prost::Message;
+
+        // 2024-01-15T10:30:00Z expressed as raw nanoseconds (as OTLP receiver produces).
+        const EXPECTED_NS: u64 = 1_705_314_600_000_000_000;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("timestamp", DataType::Int64, true),
+            Field::new("body", DataType::Utf8, true),
+        ]));
+        let ts_arr = Int64Array::from(vec![EXPECTED_NS as i64]);
+        let body_arr = StringArray::from(vec!["hello"]);
+        let batch =
+            RecordBatch::try_new(schema, vec![Arc::new(ts_arr), Arc::new(body_arr)]).unwrap();
+
+        let mut sink = make_sink();
+        sink.encode_batch(&batch, &make_metadata());
+
+        let request = ExportLogsServiceRequest::decode(sink.encoder_buf.as_slice())
+            .expect("prost must decode Int64-timestamp batch");
+
+        let lr = &request.resource_logs[0].scope_logs[0].log_records[0];
+        assert_eq!(
+            lr.time_unix_nano, EXPECTED_NS,
+            "Int64 time_unix_nano column must be encoded as LogRecord.time_unix_nano"
+        );
+    }
+
+    /// A Timestamp(Nanosecond) Arrow column must also be recognised as the timestamp field.
+    #[test]
+    fn timestamp_nanosecond_column_is_recognised() {
+        use arrow::array::TimestampNanosecondArray;
+        use arrow::datatypes::TimeUnit;
+        use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
+        use prost::Message;
+
+        const EXPECTED_NS: u64 = 1_705_314_600_000_000_000;
+
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "timestamp",
+            DataType::Timestamp(TimeUnit::Nanosecond, None),
+            true,
+        )]));
+        let ts_arr = TimestampNanosecondArray::from(vec![EXPECTED_NS as i64]);
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(ts_arr)]).unwrap();
+
+        let mut sink = make_sink();
+        sink.encode_batch(&batch, &make_metadata());
+
+        let request = ExportLogsServiceRequest::decode(sink.encoder_buf.as_slice())
+            .expect("prost must decode Timestamp(Nanosecond) batch");
+
+        let lr = &request.resource_logs[0].scope_logs[0].log_records[0];
+        assert_eq!(
+            lr.time_unix_nano, EXPECTED_NS,
+            "Timestamp(Nanosecond) column must be encoded as LogRecord.time_unix_nano"
+        );
     }
 }
