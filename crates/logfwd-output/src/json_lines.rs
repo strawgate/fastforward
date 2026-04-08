@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use arrow::array::Array;
 use arrow::record_batch::RecordBatch;
+use reqwest::header::{HeaderName, HeaderValue};
 
 use logfwd_types::diagnostics::ComponentStats;
 
@@ -22,7 +23,7 @@ use super::{Compression, build_col_infos, str_value, write_row_json};
 pub struct JsonLinesSink {
     name: String,
     url: String,
-    headers: Vec<(String, String)>,
+    headers: Vec<(HeaderName, HeaderValue)>,
     pub(crate) batch_buf: Vec<u8>,
     compress_buf: Vec<u8>,
     compression: Compression,
@@ -31,10 +32,12 @@ pub struct JsonLinesSink {
 }
 
 impl JsonLinesSink {
+    const ERROR_BODY_LIMIT_BYTES: usize = 8 * 1024;
+
     pub fn new(
         name: String,
         url: String,
-        headers: Vec<(String, String)>,
+        headers: Vec<(HeaderName, HeaderValue)>,
         compression: Compression,
         stats: Arc<ComponentStats>,
     ) -> Self {
@@ -51,7 +54,7 @@ impl JsonLinesSink {
             url,
             headers,
             batch_buf: Vec::with_capacity(64 * 1024),
-            compress_buf: Vec::new(),
+            compress_buf: Vec::with_capacity(64 * 1024),
             compression,
             client,
             stats,
@@ -144,14 +147,14 @@ impl JsonLinesSink {
         }
         req = req.header("Content-Type", "application/x-ndjson");
 
-        let response = req.body(payload).send().await.map_err(io::Error::other)?;
+        let mut response = req.body(payload).send().await.map_err(io::Error::other)?;
         if response.status().is_success() {
             return Ok(SendResult::Ok);
         }
 
         let retry_after = response.headers().get("Retry-After").cloned();
         let status = response.status().as_u16();
-        let body = response.text().await.unwrap_or_default();
+        let body = Self::read_error_body_limited(&mut response).await;
         if let Some(result) = http_classify::classify_http_status(
             status,
             retry_after.as_ref(),
@@ -164,23 +167,68 @@ impl JsonLinesSink {
         )))
     }
 
+    async fn read_error_body_limited(response: &mut reqwest::Response) -> String {
+        let mut buf = Vec::with_capacity(512);
+        let mut truncated = false;
+
+        while buf.len() < Self::ERROR_BODY_LIMIT_BYTES {
+            match response.chunk().await {
+                Ok(Some(chunk)) => {
+                    let remain = Self::ERROR_BODY_LIMIT_BYTES - buf.len();
+                    if chunk.len() <= remain {
+                        buf.extend_from_slice(&chunk);
+                    } else {
+                        buf.extend_from_slice(&chunk[..remain]);
+                        truncated = true;
+                        break;
+                    }
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    if buf.is_empty() {
+                        return format!("<failed to read response body: {e}>");
+                    }
+                    truncated = true;
+                    break;
+                }
+            }
+        }
+
+        let mut out = String::from_utf8_lossy(&buf).into_owned();
+        if truncated {
+            out.push_str("…[truncated]");
+        }
+        out
+    }
+
     fn maybe_compress(&mut self) -> io::Result<Vec<u8>> {
-        self.compress_buf.clear();
         match self.compression {
-            Compression::None => Ok(self.batch_buf.clone()),
+            Compression::None => {
+                if self.compress_buf.capacity() == 0 {
+                    self.compress_buf =
+                        Vec::with_capacity(self.batch_buf.capacity().max(64 * 1024));
+                } else {
+                    self.compress_buf.clear();
+                }
+                std::mem::swap(&mut self.batch_buf, &mut self.compress_buf);
+                Ok(std::mem::take(&mut self.compress_buf))
+            }
             Compression::Gzip => {
+                self.compress_buf.clear();
                 let mut encoder = flate2::write::GzEncoder::new(
-                    Vec::with_capacity(self.batch_buf.len() / 2),
+                    &mut self.compress_buf,
                     flate2::Compression::default(),
                 );
                 use std::io::Write as _;
                 encoder.write_all(&self.batch_buf)?;
-                encoder.finish()
+                encoder.finish().map_err(io::Error::other)?;
+                Ok(std::mem::take(&mut self.compress_buf))
             }
             Compression::Zstd => {
+                self.compress_buf.clear();
                 zstd::stream::copy_encode(&self.batch_buf[..], &mut self.compress_buf, 1)
                     .map_err(io::Error::other)?;
-                Ok(self.compress_buf.clone())
+                Ok(std::mem::take(&mut self.compress_buf))
             }
         }
     }
@@ -238,7 +286,7 @@ impl Sink for JsonLinesSink {
 pub struct JsonLinesSinkFactory {
     name: String,
     endpoint: String,
-    headers: Vec<(String, String)>,
+    headers: Vec<(HeaderName, HeaderValue)>,
     compression: Compression,
     stats: Arc<ComponentStats>,
 }
@@ -258,14 +306,31 @@ impl JsonLinesSinkFactory {
         headers: Vec<(String, String)>,
         compression: Compression,
         stats: Arc<ComponentStats>,
-    ) -> Self {
-        Self {
+    ) -> io::Result<Self> {
+        let mut parsed_headers = Vec::with_capacity(headers.len());
+        for (raw_name, raw_value) in headers {
+            let name = HeaderName::from_bytes(raw_name.as_bytes()).map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("invalid header name '{raw_name}': {e}"),
+                )
+            })?;
+            let value = HeaderValue::from_str(&raw_value).map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("invalid header value for '{raw_name}': {e}"),
+                )
+            })?;
+            parsed_headers.push((name, value));
+        }
+
+        Ok(Self {
             name,
             endpoint,
-            headers,
+            headers: parsed_headers,
             compression,
             stats,
-        }
+        })
     }
 }
 
@@ -454,5 +519,20 @@ mod tests {
             sink.batch_buf.is_empty(),
             "buf should be cleared between calls"
         );
+    }
+
+    #[test]
+    fn factory_rejects_invalid_header_name() {
+        let result = JsonLinesSinkFactory::new(
+            "test".to_string(),
+            "http://localhost:1".to_string(),
+            vec![("bad header".to_string(), "value".to_string())],
+            Compression::None,
+            Arc::new(ComponentStats::default()),
+        );
+        assert!(result.is_err(), "invalid header names must fail fast");
+        if let Err(err) = result {
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        }
     }
 }
