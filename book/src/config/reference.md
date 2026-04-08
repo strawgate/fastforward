@@ -420,7 +420,7 @@ Join file-backed logs on `_source_path`:
 ```sql
 SELECT l.*, k.namespace, k.pod_name, k.container_name
 FROM logs l
-LEFT JOIN k8s k ON l._source_path = k.log_path_prefix
+LEFT JOIN k8s k ON starts_with(l._source_path, k.log_path_prefix)
 ```
 
 Columns exposed by `k8s`:

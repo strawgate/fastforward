@@ -91,8 +91,8 @@ impl InputSource for FramedInput {
         }
 
         let mut result_events: Vec<InputEvent> = Vec::new();
-        let source_path_by_id: HashMap<SourceId, std::path::PathBuf> =
-            self.inner.source_paths().into_iter().collect();
+        let inject_source_path = self.format_template.supports_source_path_injection();
+        let mut source_path_by_id: Option<HashMap<SourceId, std::path::PathBuf>> = None;
 
         for event in raw_events {
             match event {
@@ -213,14 +213,22 @@ impl InputSource for FramedInput {
                     self.out_buf.clear();
                     let state = self.sources.get_mut(&key).expect("just inserted");
                     state.format.process_lines(&chunk, &mut self.out_buf);
-                    if let Some(source_path) = key.and_then(|sid| source_path_by_id.get(&sid)) {
-                        let mut with_source = std::mem::take(&mut self.spare_buf);
-                        with_source.clear();
-                        inject_source_path_metadata(&self.out_buf, source_path, &mut with_source);
-                        // Reclaim out_buf's capacity as spare_buf before replacing it,
-                        // preserving the buffer-bouncing optimization (no allocation per poll).
-                        self.out_buf.clear();
-                        self.spare_buf = std::mem::replace(&mut self.out_buf, with_source);
+                    if inject_source_path {
+                        if let Some(source_path) =
+                            source_path_for(key, &mut source_path_by_id, self.inner.as_ref())
+                        {
+                            let mut with_source = std::mem::take(&mut self.spare_buf);
+                            with_source.clear();
+                            inject_source_path_metadata(
+                                &self.out_buf,
+                                source_path,
+                                &mut with_source,
+                            );
+                            // Reclaim out_buf's capacity as spare_buf before replacing it,
+                            // preserving the buffer-bouncing optimization (no allocation per poll).
+                            self.out_buf.clear();
+                            self.spare_buf = std::mem::replace(&mut self.out_buf, with_source);
+                        }
                     }
 
                     let line_count = memchr::memchr_iter(b'\n', &chunk).count();
@@ -294,19 +302,23 @@ impl InputSource for FramedInput {
                                 let state =
                                     self.sources.get_mut(&key).expect("just checked existence");
                                 state.format.process_lines(&remainder, &mut self.out_buf);
-                                if let Some(source_path) =
-                                    key.and_then(|sid| source_path_by_id.get(&sid))
-                                {
-                                    let mut with_source = std::mem::take(&mut self.spare_buf);
-                                    with_source.clear();
-                                    inject_source_path_metadata(
-                                        &self.out_buf,
-                                        source_path,
-                                        &mut with_source,
-                                    );
-                                    self.out_buf.clear();
-                                    self.spare_buf =
-                                        std::mem::replace(&mut self.out_buf, with_source);
+                                if inject_source_path {
+                                    if let Some(source_path) = source_path_for(
+                                        key,
+                                        &mut source_path_by_id,
+                                        self.inner.as_ref(),
+                                    ) {
+                                        let mut with_source = std::mem::take(&mut self.spare_buf);
+                                        with_source.clear();
+                                        inject_source_path_metadata(
+                                            &self.out_buf,
+                                            source_path,
+                                            &mut with_source,
+                                        );
+                                        self.out_buf.clear();
+                                        self.spare_buf =
+                                            std::mem::replace(&mut self.out_buf, with_source);
+                                    }
                                 }
 
                                 self.stats.inc_lines(1);
@@ -386,6 +398,18 @@ impl InputSource for FramedInput {
     }
 }
 
+fn source_path_for<'a>(
+    source_id: Option<SourceId>,
+    source_path_by_id: &'a mut Option<HashMap<SourceId, std::path::PathBuf>>,
+    inner: &dyn InputSource,
+) -> Option<&'a std::path::PathBuf> {
+    let sid = source_id?;
+    if source_path_by_id.is_none() {
+        *source_path_by_id = Some(inner.source_paths().into_iter().collect());
+    }
+    source_path_by_id.as_ref()?.get(&sid)
+}
+
 fn inject_source_path_metadata(chunk: &[u8], source_path: &std::path::Path, out: &mut Vec<u8>) {
     let source_path_bytes = source_path.to_string_lossy();
     let source_path_bytes = source_path_bytes.as_bytes();
@@ -393,11 +417,15 @@ fn inject_source_path_metadata(chunk: &[u8], source_path: &std::path::Path, out:
     while pos < chunk.len() {
         let eol = memchr::memchr(b'\n', &chunk[pos..]).map_or(chunk.len(), |o| pos + o);
         let line = &chunk[pos..eol];
-        if line.first() == Some(&b'{') {
+        let first_nonws = line
+            .iter()
+            .position(|&b| !matches!(b, b' ' | b'\t' | b'\r'));
+        if let Some(obj_start) = first_nonws.filter(|&idx| line[idx] == b'{') {
+            out.extend_from_slice(&line[..obj_start]);
             out.extend_from_slice(b"{\"_source_path\":\"");
             json_escape_bytes(source_path_bytes, out);
             out.extend_from_slice(b"\",");
-            out.extend_from_slice(&line[1..]);
+            out.extend_from_slice(&line[obj_start + 1..]);
         } else {
             out.extend_from_slice(line);
         }
@@ -1314,5 +1342,50 @@ mod tests {
             out,
             b"{\"_source_path\":\"/var/log/pods/ns_pod_uid/c/0.log\",\"_timestamp\":\"2024-01-15T10:30:00Z\",\"_stream\":\"stdout\",\"msg\":\"hello\"}\n"
         );
+    }
+
+    #[test]
+    fn file_json_injects_source_path_after_leading_whitespace() {
+        let stats = make_stats();
+        let sid = SourceId(9);
+        let source = MockSource::new(vec![vec![InputEvent::Data {
+            bytes: b"  \t{\"msg\":\"hello\"}\n".to_vec(),
+            source_id: Some(sid),
+            accounted_bytes: 0,
+        }]])
+        .with_source_paths(vec![(sid, "/var/log/pods/ns_pod_uid/c/1.log".into())]);
+
+        let mut framed = FramedInput::new(
+            Box::new(source),
+            FormatDecoder::passthrough_json(Arc::clone(&stats)),
+            stats,
+        );
+
+        let out = collect_data(framed.poll().unwrap());
+        assert_eq!(
+            out,
+            b"  \t{\"_source_path\":\"/var/log/pods/ns_pod_uid/c/1.log\",\"msg\":\"hello\"}\n"
+        );
+    }
+
+    #[test]
+    fn file_raw_passthrough_does_not_inject_source_path() {
+        let stats = make_stats();
+        let sid = SourceId(10);
+        let source = MockSource::new(vec![vec![InputEvent::Data {
+            bytes: b"{\"msg\":\"hello\"}\n".to_vec(),
+            source_id: Some(sid),
+            accounted_bytes: 0,
+        }]])
+        .with_source_paths(vec![(sid, "/var/log/pods/ns_pod_uid/c/raw.log".into())]);
+
+        let mut framed = FramedInput::new(
+            Box::new(source),
+            FormatDecoder::passthrough(Arc::clone(&stats)),
+            stats,
+        );
+
+        let out = collect_data(framed.poll().unwrap());
+        assert_eq!(out, b"{\"msg\":\"hello\"}\n");
     }
 }
