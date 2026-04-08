@@ -1282,6 +1282,29 @@ mod tests {
         assert!(builder.rows.is_empty());
         assert!(builder.raws.is_empty());
     }
+
+    /// A bare LF empty line is skipped even with keep_raw=true.
+    /// Empty lines never produce rows — there is no content to capture.
+    #[test]
+    fn empty_lf_line_skipped_even_with_keep_raw() {
+        let buf = b"\n{\"x\":\"1\"}\n\n";
+        let config = ScanConfig {
+            wanted_fields: alloc::vec![],
+            extract_all: true,
+            keep_raw: true,
+            validate_utf8: false,
+        };
+        let mut builder = TestBuilder::new();
+        scan_streaming(buf, &config, &mut builder);
+
+        assert_eq!(
+            builder.rows.len(),
+            1,
+            "only the JSON row, empty lines skipped"
+        );
+        assert_eq!(builder.raws.len(), 1, "one _raw for the JSON row");
+        assert_eq!(builder.raws[0].as_deref(), Some("{\"x\":\"1\"}"));
+    }
 }
 
 // ---------------------------------------------------------------------------
