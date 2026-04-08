@@ -187,11 +187,17 @@ impl LokiSink {
         let num_rows = batch.num_rows();
         let cols = build_col_infos(batch);
 
-        // Find timestamp column index (prefer `_timestamp`, fall back to `@timestamp`).
-        // Timestamp columns are always flat Int64/UInt64 — no struct conflict expected.
-        // Use two separate position() calls so `_timestamp` wins regardless of schema
-        // order — a single position() with `||` would return whichever field appears
-        // first in the schema, which may be `@timestamp`. (fixes #1661)
+        // Find timestamp column index.
+        //
+        // Priority (highest first):
+        //   1. `_timestamp`  — logfwd canonical pipeline column
+        //   2. `@timestamp`  — Elasticsearch convention
+        //   3. Any other variant recognised by field_names::TIMESTAMP_VARIANTS
+        //      (canonical "timestamp", "time", "ts") — covers OTLP receiver output
+        //
+        // Separate position() calls preserve priority regardless of schema order.
+        // A single position() with `||` would return the first schema match, which
+        // may not be the highest-priority name. (fixes #1661, #1670)
         let ts_col_idx = schema
             .fields()
             .iter()
@@ -201,6 +207,15 @@ impl LokiSink {
                     .fields()
                     .iter()
                     .position(|f| f.name() == field_names::TIMESTAMP_AT)
+            })
+            .or_else(|| {
+                schema.fields().iter().position(|f| {
+                    field_names::matches_any(
+                        f.name(),
+                        field_names::TIMESTAMP,
+                        field_names::TIMESTAMP_VARIANTS,
+                    )
+                })
             });
 
         // Find label ColInfos for configured label columns.
@@ -777,6 +792,54 @@ mod tests {
         let obj = "{\"key\": \"value\"}";
         let escaped = escape_json_raw(obj);
         assert_eq!(escaped, "\"{\\\"key\\\": \\\"value\\\"}\"");
+    }
+
+    /// Regression test for #1670: canonical "timestamp" column must be used as
+    /// the Loki entry timestamp when neither `_timestamp` nor `@timestamp` exist.
+    #[test]
+    fn test_canonical_timestamp_col_used_as_loki_ts() {
+        use arrow::array::Int64Array;
+        use arrow::datatypes::{Field, Schema};
+
+        let config = Arc::new(LokiConfig {
+            endpoint: "http://localhost".to_string(),
+            tenant_id: None,
+            static_labels: vec![],
+            label_columns: vec![],
+            headers: vec![],
+        });
+        let sink = LokiSink::new(
+            "test".to_string(),
+            config,
+            Arc::new(reqwest::Client::new()),
+            Arc::new(ComponentStats::new()),
+        );
+
+        // Batch uses the canonical "timestamp" name (OTLP receiver output).
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("timestamp", DataType::Int64, true),
+            Field::new("message", DataType::Utf8, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int64Array::from(vec![5_000i64])),
+                Arc::new(arrow::array::StringArray::from(vec!["msg"])),
+            ],
+        )
+        .unwrap();
+        let metadata = BatchMetadata {
+            resource_attrs: Arc::new(vec![]),
+            observed_time_ns: 99_999,
+        };
+
+        let stream_map = sink.build_stream_map(&batch, &metadata).unwrap();
+        let entries: Vec<LokiEntry> = stream_map.values().flatten().cloned().collect();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].0, 5_000,
+            "canonical 'timestamp' column value (5000) must be used, not observed_time_ns (99999)"
+        );
     }
 
     /// Regression test for #1661: when both `@timestamp` and `_timestamp` exist

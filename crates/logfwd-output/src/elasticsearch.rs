@@ -115,11 +115,15 @@ impl ElasticsearchSink {
         self.batch_buf.reserve(estimated);
 
         let cols = build_col_infos(batch);
-        // Check whether any output field is named `@timestamp` or `_timestamp`
+        // Check whether any output field is a recognised timestamp column
+        // (any of: `_timestamp`, `@timestamp`, `timestamp`, `time`, `ts`)
         // to avoid injecting a duplicate timestamp key into the document.
         let has_timestamp_col = cols.iter().any(|c| {
-            c.field_name == field_names::TIMESTAMP_AT
-                || c.field_name == field_names::TIMESTAMP_UNDERSCORE
+            field_names::matches_any(
+                &c.field_name,
+                field_names::TIMESTAMP,
+                field_names::TIMESTAMP_VARIANTS,
+            )
         });
 
         for row in 0..num_rows {
@@ -1124,6 +1128,45 @@ mod tests {
         assert!(lines[1].contains(r#""@timestamp""#));
         assert!(lines[2].contains(r#"{"index":{"_index":"logs"}}"#));
         assert!(lines[3].contains(r#""level":"WARN""#));
+    }
+
+    /// Regression test: batches with a canonical timestamp column name (`timestamp`,
+    /// `time`, `ts`) must NOT have a synthetic `@timestamp` injected.
+    ///
+    /// Before the fix, `has_timestamp_col` only checked `@timestamp`/`_timestamp`,
+    /// so a column named `timestamp`, `time`, or `ts` would cause two timestamp
+    /// fields in the ES document — the user's original field plus the injected
+    /// `@timestamp` derived from `metadata.observed_time_ns`.
+    #[test]
+    fn canonical_timestamp_variants_suppress_at_timestamp_injection() {
+        for col_name in &["timestamp", "time", "ts"] {
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("msg", DataType::Utf8, false),
+                Field::new(*col_name, DataType::Utf8, false),
+            ]));
+            let batch = RecordBatch::try_new(
+                schema,
+                vec![
+                    Arc::new(StringArray::from(vec!["hello"])),
+                    Arc::new(StringArray::from(vec!["2024-01-01T00:00:00Z"])),
+                ],
+            )
+            .expect("batch creation failed");
+
+            let mut sink = make_test_sink("logs");
+            let meta = zero_metadata();
+            sink.serialize_batch(&batch, &meta)
+                .expect("serialize failed");
+            let output = String::from_utf8_lossy(&sink.batch_buf);
+            let lines: Vec<&str> = output.lines().collect();
+            // doc line is index 1
+            assert!(
+                !lines[1].contains(r#""@timestamp""#),
+                "column '{}': expected no @timestamp injection but got: {}",
+                col_name,
+                lines[1]
+            );
+        }
     }
 
     #[test]
