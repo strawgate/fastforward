@@ -274,7 +274,7 @@ impl GeneratorInput {
         let service = SERVICES[(seq % SERVICES.len() as u64) as usize];
         let id = 10000 + seq.wrapping_mul(7) % 90000;
         let dur = 1 + seq.wrapping_mul(13) % 500;
-        let rid = self.counter.wrapping_mul(0x517c_c1b7_2722_0a95);
+        let rid = seq.wrapping_mul(0x517c_c1b7_2722_0a95);
         let status = match seq % 20 {
             0 => 500,
             1 | 2 => 404,
