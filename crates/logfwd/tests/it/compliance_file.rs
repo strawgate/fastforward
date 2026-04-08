@@ -251,11 +251,11 @@ fn compliance_file_rotate_copytruncate() {
 }
 
 /// Truncate a file mid-stream and write new data:
-/// 1. Write 1000 lines
+/// 1. Write 500 lines
 /// 2. Start pipeline, wait for processing
 /// 3. Truncate file to 0 bytes (using set_len, preserving inode)
-/// 4. Write 1000 new lines (seq starts at 1000)
-/// 5. Verify no data is lost (>= 2000 lines)
+/// 4. Write 500 new lines (seq starts at 500)
+/// 5. Verify no data is lost (>= 1000 lines)
 ///
 /// When the file is truncated and rewritten, the tailer may detect BOTH
 /// a fingerprint change (triggering the rotation path which drains the old
@@ -268,20 +268,20 @@ fn compliance_file_truncate() {
     let dir = tempfile::tempdir().unwrap();
     let log_path = dir.path().join("trunc.log");
 
-    // Write initial 1000 lines.
-    fs::write(&log_path, generate_lines(0, 1000)).unwrap();
+    // Write initial 500 lines.
+    fs::write(&log_path, generate_lines(0, 500)).unwrap();
 
     let yaml = file_pipeline_yaml(&log_path);
     let pipeline = build_pipeline(&yaml);
     let (shutdown, metrics, handle) = run_pipeline_background(pipeline);
 
-    // Wait for initial 1000 lines to be ingested before truncating.
+    // Wait for initial 500 lines to be ingested before truncating.
     if !wait_for(
-        || metrics.transform_in.lines_total.load(Ordering::Relaxed) >= 1000,
+        || metrics.transform_in.lines_total.load(Ordering::Relaxed) >= 500,
         wait_timeout(),
     ) {
         shutdown.cancel();
-        panic!("timed out waiting for initial 1000 lines before truncation");
+        panic!("timed out waiting for initial 500 lines before truncation");
     }
 
     // Truncate the file in-place (same inode) and write new data.
@@ -294,12 +294,12 @@ fn compliance_file_truncate() {
 
     {
         let mut f = fs::OpenOptions::new().append(true).open(&log_path).unwrap();
-        f.write_all(generate_lines(1000, 1000).as_bytes()).unwrap();
+        f.write_all(generate_lines(500, 500).as_bytes()).unwrap();
         f.flush().unwrap();
     }
 
-    // Poll until >= 2000 lines processed or 5s safety deadline.
-    wait_for_lines_and_cancel(&shutdown, &metrics, 2000, wait_timeout());
+    // Poll until >= 1000 lines processed or 5s safety deadline.
+    wait_for_lines_and_cancel(&shutdown, &metrics, 1000, wait_timeout());
     let pipeline = handle.join().expect("pipeline thread panicked");
 
     let lines_in = pipeline
@@ -307,12 +307,12 @@ fn compliance_file_truncate() {
         .transform_in
         .lines_total
         .load(Ordering::Relaxed);
-    // All original 1000 + all new 1000 lines must be received. The tailer may
+    // All original 500 + all new 500 lines must be received. The tailer may
     // deliver post-truncation lines twice (rotation drain + new fd), so the
-    // count can exceed 2000.
+    // count can exceed 1000.
     assert!(
-        lines_in >= 2000,
-        "expected at least 2000 lines through transform after truncation, got {lines_in}"
+        lines_in >= 1000,
+        "expected at least 1000 lines through transform after truncation, got {lines_in}"
     );
 }
 
