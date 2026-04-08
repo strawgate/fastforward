@@ -25,6 +25,11 @@ fn main() {
         .with_region_mix(cli.region_mix)
         .with_optional_field_density(cli.optional_field_density);
 
+    if cli.mode != Mode::Both {
+        run_single_mode(&cli, profile);
+        return;
+    }
+
     let gen_started = Instant::now();
     let data = gen_cloudtrail_audit_with_profile(cli.lines, cli.seed, profile);
     let generation = gen_started.elapsed();
@@ -142,9 +147,46 @@ fn main() {
     print_top("recipientAccountId", summary.lines, &summary.accounts);
 }
 
+fn run_single_mode(cli: &Cli, profile: CloudTrailProfile) {
+    let started = Instant::now();
+    match cli.mode {
+        Mode::Ndjson => {
+            for i in 0..cli.iterations {
+                let _ = std::hint::black_box(gen_cloudtrail_audit_with_profile(
+                    cli.lines,
+                    cli.seed.wrapping_add(i as u64),
+                    profile,
+                ));
+            }
+        }
+        Mode::Batch => {
+            for i in 0..cli.iterations {
+                let _ = std::hint::black_box(gen_cloudtrail_batch_with_profile(
+                    cli.lines,
+                    cli.seed.wrapping_add(i as u64),
+                    profile,
+                ));
+            }
+        }
+        Mode::Both => unreachable!("single-mode runner is only used for isolated modes"),
+    }
+    let elapsed = started.elapsed();
+    let rows = cli.lines.saturating_mul(cli.iterations.max(1));
+    println!(
+        "mode={:?} iterations={} lines={} elapsed={} rows_per_sec={:.1}",
+        cli.mode,
+        cli.iterations,
+        cli.lines,
+        format_duration(elapsed),
+        rows as f64 / elapsed.as_secs_f64()
+    );
+}
+
 struct Cli {
     lines: usize,
     seed: u64,
+    iterations: usize,
+    mode: Mode,
     account_count: usize,
     principal_count: usize,
     account_tenure: usize,
@@ -152,6 +194,13 @@ struct Cli {
     service_mix: CloudTrailServiceMix,
     region_mix: CloudTrailRegionMix,
     optional_field_density: u8,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Mode {
+    Both,
+    Ndjson,
+    Batch,
 }
 
 impl Cli {
@@ -167,6 +216,8 @@ impl Cli {
         Self {
             lines: parse_usize(&args, "--lines", DEFAULT_LINES),
             seed: parse_u64(&args, "--seed", DEFAULT_SEED),
+            iterations: parse_usize(&args, "--iterations", 1).max(1),
+            mode: parse_mode(&args, "--mode").unwrap_or(Mode::Both),
             account_count: parse_usize(&args, "--account-count", DEFAULT_ACCOUNT_COUNT).max(1),
             principal_count: parse_usize(&args, "--principal-count", DEFAULT_PRINCIPAL_COUNT)
                 .max(1),
@@ -405,10 +456,24 @@ fn parse_region_mix(args: &[String], flag: &str) -> Option<CloudTrailRegionMix> 
         })
 }
 
+fn parse_mode(args: &[String], flag: &str) -> Option<Mode> {
+    args.iter()
+        .rposition(|arg| arg == flag)
+        .and_then(|idx| args.get(idx + 1))
+        .and_then(|value| match value.as_str() {
+            "both" => Some(Mode::Both),
+            "ndjson" => Some(Mode::Ndjson),
+            "batch" => Some(Mode::Batch),
+            _ => None,
+        })
+}
+
 fn print_help() {
     println!("Usage: cargo run -p logfwd-bench --release --bin cloudtrail_profile -- [OPTIONS]");
     println!("  --lines <N>              Number of CloudTrail records (default: {DEFAULT_LINES})");
     println!("  --seed <N>               RNG seed (default: {DEFAULT_SEED})");
+    println!("  --iterations <N>         Repeat the selected generation path (default: 1)");
+    println!("  --mode <both|ndjson|batch>  Which generation path to run (default: both)");
     println!("  --account-count <N>      Number of account IDs in the rotating pool");
     println!("  --principal-count <N>    Number of principals in the rotating pool");
     println!("  --account-tenure <N>    Rows to keep an account hot before rotating");
