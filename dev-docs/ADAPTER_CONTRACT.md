@@ -9,9 +9,6 @@ defines what `Scanner` expects and produces. This document defines what the
 OTLP, file, diagnostics, and pipeline adapters must preserve before data
 reaches the scanner and after data leaves the `RecordBatch` pipeline.
 
-If you were looking for the older `IO_CONTRACTS.md` name, that file now points
-here.
-
 ## Scope
 
 In-scope:
@@ -70,11 +67,25 @@ scanner-ready JSON lines.
 - Unsupported paths return `404`.
 - Wrong methods return `405`.
 - Bodies over the configured hard cap are rejected with `413`.
-- Supported encodings are `identity` and `zstd`.
+- Supported encodings are `identity`, `zstd`, and `gzip`.
 - Malformed JSON, malformed protobuf, or malformed OTLP JSON field encodings
   are rejected with `400`.
 - Backpressure returns `429`.
 - A disconnected pipeline returns `503`.
+
+### Diagnostics accounting rules
+
+- Input diagnostics must charge OTLP request bytes from the accepted request
+  body size at the receiver boundary as received on the wire, not from
+  downstream Arrow memory estimates or post-decompression payload size.
+- Legacy OTLP JSON-lines ingress and structured OTLP batch ingress must report
+  the same `lines_total` and same `bytes_total` for the same accepted
+  request body.
+- Rejected OTLP payloads must not increment `lines_total` or `bytes_total`.
+- Malformed OTLP payloads must increment input `parse_errors_total`.
+- Transport and request-handling failures (read errors, unsupported encodings,
+  disconnected downstream channel, oversized compressed bodies) must increment
+  input `errors_total`.
 
 ### Semantic field rules
 
@@ -159,14 +170,17 @@ The file path is:
 
 ### Lifecycle rules
 
-- Rotate, truncate, delete/recreate, and terminal EOF are explicit events.
+- Rotate, truncate, delete/recreate, and EOF/stall notifications are explicit events.
 - `Truncated` must be emitted before post-truncate data so framing state can be
   cleared safely.
 - Every `InputSource` implementation must define its control-plane `health()`
   semantics explicitly; input lifecycle truth must not rely on a trait-level
   default.
-- Only terminal EOF may flush a trailing partial line; transient “no new bytes
-  right now” states must not flush buffered partial lines.
+- The current tailer emits `EndOfFile` once per no-data streak so downstream
+  framing can flush a trailing partial line for that source without waiting for
+  permanent file closure.
+- Fresh data resets that no-data streak, allowing a later `EndOfFile` signal to
+  flush a new trailing remainder if reads stall again.
 - Tailer watcher/file I/O error bursts that trigger poll backoff should surface
   as `degraded` control-plane health, and a later clean poll should recover the
   file input to `healthy`.
@@ -252,6 +266,9 @@ not hide startup behind an otherwise healthy component.
   gating readiness.
 - status roll-ups should be deterministic and local to the semantic seam that owns them.
 - HTTP shell code should not own the policy for deciding what health means.
+- input `bytes_total` is a source-accounting metric, not an Arrow-memory
+  metric. Structured receivers must propagate source payload size explicitly
+  rather than deriving bytes from `RecordBatch::get_array_memory_size()`.
 
 ## Verification Mapping
 
@@ -269,7 +286,7 @@ This section maps the I/O contracts to the expected enforcement style.
 | Performance goals | disciplined benchmark validation |
 
 This table is normative for planning,
-not a claim that every item is already complete on `master`.
+not a claim that every item is already complete on `main`.
 
 ## Update Rules
 

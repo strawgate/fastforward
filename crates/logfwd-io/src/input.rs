@@ -14,14 +14,24 @@ pub enum InputEvent {
     ///
     /// `source_id` identifies which logical source produced the data (e.g.,
     /// which tailed file). `None` for push sources that don't track identity.
+    /// `accounted_bytes` is the source-side byte count that should be charged
+    /// to input diagnostics for this event. For raw byte inputs this is
+    /// usually `bytes.len()`. Wrappers like `FramedInput` may consume this for
+    /// accounting and forward downstream data with `accounted_bytes = 0`.
     Data {
         bytes: Vec<u8>,
         source_id: Option<SourceId>,
+        accounted_bytes: u64,
     },
     /// New structured rows produced directly by the source.
+    ///
+    /// `accounted_bytes` is the source-side byte count represented by this
+    /// batch for diagnostics. Structured receivers should set this from their
+    /// accepted payload size rather than relying on Arrow memory-size proxies.
     Batch {
         batch: RecordBatch,
         source_id: Option<SourceId>,
+        accounted_bytes: u64,
     },
     /// The underlying file was rotated (new inode).
     ///
@@ -69,6 +79,13 @@ pub trait InputSource: Send {
         vec![]
     }
 
+    /// Return source-id to canonical-path mappings for active file-backed sources.
+    ///
+    /// Default: empty (push sources, generators).
+    fn source_paths(&self) -> Vec<(SourceId, PathBuf)> {
+        vec![]
+    }
+
     /// Restore a file offset by SourceId (fingerprint). Default: no-op.
     ///
     /// Used for checkpoint restore — the checkpoint stores fingerprint + offset.
@@ -111,7 +128,12 @@ impl InputSource for FileInput {
                 TailEvent::Data {
                     bytes, source_id, ..
                 } => {
-                    events.push(InputEvent::Data { bytes, source_id });
+                    let accounted_bytes = bytes.len() as u64;
+                    events.push(InputEvent::Data {
+                        bytes,
+                        source_id,
+                        accounted_bytes,
+                    });
                 }
                 TailEvent::Rotated { source_id, .. } => {
                     events.push(InputEvent::Rotated { source_id });
@@ -137,6 +159,10 @@ impl InputSource for FileInput {
 
     fn checkpoint_data(&self) -> Vec<(SourceId, ByteOffset)> {
         self.tailer.file_offsets()
+    }
+
+    fn source_paths(&self) -> Vec<(SourceId, PathBuf)> {
+        self.tailer.file_paths()
     }
 
     fn set_offset_by_source(&mut self, source_id: SourceId, offset: u64) {

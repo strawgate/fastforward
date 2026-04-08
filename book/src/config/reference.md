@@ -9,8 +9,8 @@ logfwd supports two layout styles:
 - **Simple** — single pipeline with top-level `input`, `transform`, and `output` keys.
 - **Advanced** — multiple named pipelines under a `pipelines` map.
 
-Environment variables are expanded using `${VAR}` syntax anywhere in the file. If a
-variable is not set the placeholder is left as-is.
+Environment variables are expanded using `${VAR}` syntax anywhere in the file.
+If a variable is not set, config loading fails fast with a validation error.
 
 This page is the canonical source for config support and status. Other docs may
 show examples or task-oriented guidance, but support-status claims for inputs,
@@ -30,7 +30,7 @@ transform: SELECT level, message, status FROM logs WHERE status >= 400
 
 output:
   type: otlp
-  endpoint: otel-collector:4317
+  endpoint: http://otel-collector:4318/v1/logs
   compression: zstd
 
 server:
@@ -51,7 +51,7 @@ pipelines:
     transform: SELECT * FROM logs WHERE level = 'ERROR'
     outputs:
       - type: otlp
-        endpoint: otel-collector:4317
+        endpoint: http://otel-collector:4318/v1/logs
 
   debug:
     inputs:
@@ -123,6 +123,9 @@ Listen for log lines on a UDP socket.
 |-------|------|----------|-------------|
 | `listen` | string | Yes | `host:port`, e.g. `0.0.0.0:514`. |
 
+`udp` treats each datagram as one or more newline-delimited records. TLS is
+not supported for UDP inputs (DTLS is not implemented).
+
 ```yaml
 input:
   type: udp
@@ -137,6 +140,14 @@ Accept log lines on a TCP socket.
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `listen` | string | Yes | `host:port`, e.g. `0.0.0.0:5140`. |
+| `tls.cert_file` | string | No | PEM server certificate chain (must be paired with `tls.key_file`). |
+| `tls.key_file` | string | No | PEM private key (must be paired with `tls.cert_file`). |
+| `tls.require_client_auth` | bool | No | Require mTLS client cert verification. |
+| `tls.client_ca_file` | string | Cond. | Required when `tls.require_client_auth: true`. |
+
+TCP framing uses RFC 6587 octet-counting when a valid `<len><space>` prefix is
+present, and falls back to legacy newline framing otherwise. Oversized frames
+(`> 1 MiB`) are discarded.
 
 ```yaml
 input:
@@ -238,21 +249,23 @@ Send log records as OTLP protobuf to an OpenTelemetry collector.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `endpoint` | string | Yes | — | Collector address, e.g. `otel-collector:4317` (gRPC) or `http://otel-collector:4318` (HTTP). |
+| `endpoint` | string | Yes | — | Full collector URL, e.g. `http://otel-collector:4317` (gRPC) or `http://otel-collector:4318/v1/logs` (HTTP). |
 | `protocol` | string | No | `http` | `http` or `grpc`. |
-| `compression` | string | No | none | `zstd` to compress the request body. |
+| `compression` | string | No | none | `zstd`, `gzip`, or `none` for the request body. |
 
 ```yaml
 output:
   type: otlp
-  endpoint: otel-collector:4317
+  endpoint: http://otel-collector:4317
   protocol: grpc
   compression: zstd
 ```
 
 ### `http` output *(not yet supported)*
 
-POST log records as newline-delimited JSON to an HTTP endpoint.
+Reserved for newline-delimited JSON over HTTP POST. Config parsing recognizes
+the type, but config validation currently rejects it until runtime support
+lands.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
@@ -271,7 +284,7 @@ Print records to standard output for local debugging.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `format` | string | No | `json` | `json` (newline-delimited JSON) or `console` (coloured text). |
+| `format` | string | No | `console` | `json` (newline-delimited JSON), `console` (coloured text), or `text` (raw text). |
 
 ```yaml
 output:
@@ -295,7 +308,7 @@ Push to Grafana Loki.
 |-------|------|----------|-------------|
 | `endpoint` | string | Yes | Loki push URL. |
 
-### `file` output *(`file_out` alias supported)*
+### `file` output
 
 Write records to a file.
 
@@ -327,10 +340,10 @@ Write records to Parquet files.
 |-------|--------|-------------|
 | `otlp` | Implemented | OTLP protobuf over HTTP or gRPC. |
 | `http` | Not yet supported | Reserved for newline-delimited JSON over HTTP POST. |
-| `stdout` | Implemented | Print to stdout (JSON or coloured text). |
+| `stdout` | Implemented | Print to stdout (JSON, console, or text). |
 | `elasticsearch` | Implemented | Elasticsearch Bulk API with retry and request-mode controls. |
 | `loki` | Implemented | Grafana Loki push API with label grouping. |
-| `file` | Implemented | Write NDJSON or text to a local file (`file_out` alias supported). |
+| `file` | Implemented | Write NDJSON or text to a local file. |
 | `null` | Implemented | Drop records intentionally for tests and benchmark baselines. |
 | `tcp` | Implemented | Send records to a TCP endpoint. |
 | `udp` | Implemented | Send records to a UDP endpoint. |
@@ -388,9 +401,7 @@ Special columns added by the scanner / input format layer:
 | `_raw` | string | Original input line (only when `keep_raw: true`, or when a non-JSON CRI line is wrapped for scanner safety). |
 | `_timestamp` | string | Timestamp from the CRI header as an RFC 3339 string (CRI inputs only). |
 | `_stream` | string | CRI stream name (`stdout` / `stderr`). |
-
-File-backed source-path metadata is not yet exposed as a SQL column. Track that
-gap in [issue #1346](https://github.com/strawgate/memagent/issues/1346).
+| `_source_path` | string | Canonical file path for file-backed rows (JSON and CRI file inputs). |
 
 ### Built-in UDFs
 
@@ -426,15 +437,11 @@ query. They are declared under the top-level `enrichment` key.
 
 ```yaml
 enrichment:
-  k8s:
-    type: k8s_path
-
-  host:
-    type: host_info
-
-  labels:
-    type: static
-    fields:
+  - type: k8s_path
+  - type: host_info
+  - type: static
+    table_name: labels
+    labels:
       environment: production
       region: us-east-1
 ```
@@ -444,10 +451,13 @@ enrichment:
 Parses Kubernetes pod log paths (e.g.
 `/var/log/pods/<namespace>_<pod>_<uid>/<container>/`) to extract metadata.
 
-This enrichment table is ready to expose path-derived metadata, but file-backed
-inputs do not yet inject a source-path column into the `logs` table. The join
-shown in older docs is therefore not wired end to end today. Track that runtime
-gap in [issue #1346](https://github.com/strawgate/memagent/issues/1346).
+Join file-backed logs on `_source_path`:
+
+```sql
+SELECT l.*, k.namespace, k.pod_name, k.container_name
+FROM logs l
+LEFT JOIN k8s k ON starts_with(l._source_path, k.log_path_prefix)
+```
 
 Columns exposed by `k8s`:
 
@@ -473,9 +483,9 @@ A table with one row containing user-defined label columns.
 
 ```yaml
 enrichment:
-  labels:
-    type: static
-    fields:
+  - type: static
+    table_name: labels
+    labels:
       environment: production
       cluster: us-east-1
       tier: backend
@@ -525,6 +535,11 @@ When `server.diagnostics` is configured, logfwd exposes an HTTP API for monitori
 | `/admin/v1/history` | GET | Time-series data (1-hour window) for dashboard charts. |
 | `/admin/v1/traces` | GET | Recent batch processing spans for detailed latency analysis. |
 
+For input diagnostics, `bytes_total` reflects source payload bytes accepted at
+the input boundary. For structured receivers such as OTLP, this is the
+accepted request-body size as received on the wire, not the in-memory Arrow
+batch footprint or the post-decompression payload size.
+
 ---
 
 ## Storage configuration
@@ -556,7 +571,7 @@ server:
   metrics_endpoint: ${METRICS_PUSH_URL}
 ```
 
-If the variable is not set, the placeholder is left as-is (no error).
+If the variable is not set, config loading fails fast with a validation error.
 
 ---
 
@@ -591,9 +606,9 @@ pipelines:
         format: console
 
 enrichment:
-  labels:
-    type: static
-    fields:
+  - type: static
+    table_name: labels
+    labels:
       environment: ${ENVIRONMENT}
       cluster: ${CLUSTER_NAME}
 

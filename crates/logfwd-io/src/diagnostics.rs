@@ -8,6 +8,8 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use opentelemetry::KeyValue;
 use opentelemetry::metrics::{Counter, Meter};
 
+use crate::background_http_task::BackgroundHttpTask;
+
 // Re-export ComponentStats from logfwd-types so existing `logfwd_io::diagnostics::ComponentStats`
 // paths keep working.
 pub use logfwd_types::diagnostics::{ComponentHealth, ComponentStats};
@@ -401,21 +403,16 @@ pub struct MemoryStats {
 pub struct ServerHandle {
     running: Arc<AtomicBool>,
     sampler_handle: Option<JoinHandle<()>>,
-    http_server: Arc<tiny_http::Server>,
-    http_handle: Option<JoinHandle<()>>,
+    _http_task: BackgroundHttpTask,
 }
 
 impl Drop for ServerHandle {
     fn drop(&mut self) {
         // Signal the sampler loop to exit.
         self.running.store(false, Ordering::Relaxed);
-        // Unblock the HTTP thread's `incoming_requests()` iterator.
-        self.http_server.unblock();
-        // Join both threads (ignore panics — we're in Drop).
+        // Join sampler thread; HTTP thread is unblocked and joined by
+        // `BackgroundHttpTask` during field drop.
         if let Some(h) = self.sampler_handle.take() {
-            let _ = h.join();
-        }
-        if let Some(h) = self.http_handle.take() {
             let _ = h.join();
         }
     }
@@ -553,8 +550,7 @@ impl DiagnosticsServer {
             ServerHandle {
                 running,
                 sampler_handle: Some(sampler_handle),
-                http_server,
-                http_handle: Some(http_handle),
+                _http_task: BackgroundHttpTask::new(Arc::clone(&http_server), http_handle),
             },
             bound_addr,
         ))
@@ -873,6 +869,22 @@ impl DiagnosticsServer {
                     }
                 }
 
+                // Fallback: read scan/transform timing from root span attributes
+                // (batch span carries these directly when child spans are absent)
+                let root_attr_u64 = |key: &str| -> u64 {
+                    root.attrs
+                        .iter()
+                        .find(|kv| kv[0] == key)
+                        .and_then(|kv| kv[1].parse().ok())
+                        .unwrap_or(0)
+                };
+                if scan_ns == 0 {
+                    scan_ns = root_attr_u64("scan_ns");
+                }
+                if transform_ns == 0 {
+                    transform_ns = root_attr_u64("transform_ns");
+                }
+
                 // Extract well-known attributes from root span.
                 let attr = |key: &str| -> &str {
                     root.attrs
@@ -1018,6 +1030,7 @@ impl DiagnosticsServer {
 
     fn status_body(&self) -> String {
         let uptime = self.start_time.elapsed().as_secs();
+        let uptime_s = self.start_time.elapsed().as_secs_f64();
         let observed_at_unix_ns = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -1121,8 +1134,56 @@ impl DiagnosticsServer {
             let backpressure = pm.backpressure_stalls.load(Ordering::Relaxed);
             let transform_health = policy::transform_health(pm);
 
+            // Compute bottleneck classification.
+            // Ratios are cumulative worker-seconds divided by wall-clock uptime, so
+            // they can exceed 1.0 when multiple workers run in parallel (e.g. 4
+            // workers each spending 100% of wall-time → ratio = 4.0). We express
+            // the result in "worker-seconds per wall-second" to avoid the misleading
+            // "% of uptime" framing.
+            let uptime_s_nonzero = uptime_s.max(1e-9);
+            let queue_wait_ratio = queue_wait_s / uptime_s_nonzero;
+            let transform_ratio = transform_s / uptime_s_nonzero;
+            let scan_ratio = scan_s / uptime_s_nonzero;
+            let stalls_per_sec = backpressure as f64 / uptime_s_nonzero;
+
+            let (bottleneck_stage, bottleneck_reason): (&str, String) = if queue_wait_ratio > 0.5 {
+                (
+                    "output",
+                    format!(
+                        "workers spending {:.0}% of wall-time in output queue",
+                        queue_wait_ratio * 100.0
+                    ),
+                )
+            } else if stalls_per_sec > 10.0 {
+                (
+                    "input",
+                    format!(
+                        "backpressure stalls at {:.1}/sec — input faster than pipeline can drain",
+                        stalls_per_sec
+                    ),
+                )
+            } else if transform_ratio > 0.3 {
+                (
+                    "transform",
+                    format!(
+                        "transform consuming {:.0}% of wall-time across workers",
+                        transform_ratio * 100.0
+                    ),
+                )
+            } else if scan_ratio > 0.3 {
+                (
+                    "scan",
+                    format!(
+                        "scan consuming {:.0}% of wall-time across workers",
+                        scan_ratio * 100.0
+                    ),
+                )
+            } else {
+                ("none", "running well within capacity".to_string())
+            };
+
             pipelines_json.push(format!(
-                r#"{{"name":"{}","inputs":[{}],"transform":{{"sql":"{}","health":"{}","lines_in":{},"lines_out":{},"errors":{},"filter_drop_rate":{:.3}}},"outputs":[{}],"batches":{{"total":{},"avg_rows":{:.1},"flush_by_size":{},"flush_by_timeout":{},"dropped_batches_total":{},"scan_errors_total":{},"parse_errors_total":{},"last_batch_time_ns":{},"batch_latency_avg_ns":{},"inflight":{},"rows_total":{}}},"stage_seconds":{{"scan":{:.6},"transform":{:.6},"output":{:.6},"queue_wait":{:.6},"send":{:.6}}},"backpressure_stalls":{}}}"#,
+                r#"{{"name":"{}","inputs":[{}],"transform":{{"sql":"{}","health":"{}","lines_in":{},"lines_out":{},"errors":{},"filter_drop_rate":{:.3}}},"outputs":[{}],"batches":{{"total":{},"avg_rows":{:.1},"flush_by_size":{},"flush_by_timeout":{},"dropped_batches_total":{},"scan_errors_total":{},"parse_errors_total":{},"last_batch_time_ns":{},"batch_latency_avg_ns":{},"inflight":{},"rows_total":{}}},"stage_seconds":{{"scan":{:.6},"transform":{:.6},"output":{:.6},"queue_wait":{:.6},"send":{:.6}}},"backpressure_stalls":{},"bottleneck":{{"stage":"{}","reason":"{}"}}}}"#,
                 esc(&pm.name),
                 inputs_json.join(","),
                 esc(&pm.transform_sql),
@@ -1149,6 +1210,8 @@ impl DiagnosticsServer {
                 queue_wait_s,
                 send_s,
                 backpressure,
+                bottleneck_stage,
+                esc(bottleneck_reason.as_str()),
             ));
         }
 
@@ -1352,6 +1415,7 @@ fn sample_metrics(
     let mut output_ns: u64 = 0;
     let mut batches: u64 = 0;
     let mut inflight_batches: u64 = 0;
+    let mut backpressure_stalls: u64 = 0;
 
     for pm in pipelines {
         for (_, _, s) in &pm.inputs {
@@ -1368,6 +1432,7 @@ fn sample_metrics(
         output_ns += pm.output_nanos_total.load(Ordering::Relaxed);
         batches += pm.batches_total.load(Ordering::Relaxed);
         inflight_batches += pm.inflight_batches.load(Ordering::Relaxed);
+        backpressure_stalls += pm.backpressure_stalls.load(Ordering::Relaxed);
     }
 
     history.record("input_lines", input_lines as f64);
@@ -1380,6 +1445,7 @@ fn sample_metrics(
     history.record("output_sec", output_ns as f64 / 1e9);
     history.record("batches", batches as f64);
     history.record("inflight_batches", inflight_batches as f64);
+    history.record("backpressure_stalls", backpressure_stalls as f64);
 
     if let Some((rss, cpu_user, cpu_sys)) = process_metrics() {
         history.record("rss_bytes", rss as f64);
@@ -1421,8 +1487,8 @@ mod tests {
         inp.inc_rotations();
 
         pm.transform_in.inc_lines(1000);
-        // transform_out.inc_lines is no longer called in the pipeline hot path;
-        // lines_out is derived from output-sink stats instead.
+        // The status endpoint derives lines_out from output-sink stats, so the
+        // fixture only needs output lines populated here.
 
         let out = pm.add_output("collector", "otlp");
         out.inc_lines(900);
@@ -1512,6 +1578,23 @@ mod tests {
         let body = text.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
 
         (status, body)
+    }
+
+    #[test]
+    fn diagnostics_server_handle_drop_releases_port() {
+        let server = DiagnosticsServer::new("127.0.0.1:0");
+        let (handle, addr) = server.start().expect("server bind failed");
+        let port = addr.port();
+
+        drop(handle);
+        thread::sleep(std::time::Duration::from_millis(50));
+
+        let rebound_addr = format!("127.0.0.1:{port}");
+        let result = tiny_http::Server::http(&rebound_addr);
+        assert!(
+            result.is_ok(),
+            "failed to rebind diagnostics port {port} after drop"
+        );
     }
 
     #[test]
@@ -1629,6 +1712,8 @@ mod tests {
         );
         assert!(body.contains(r#""queue_wait":0.050000"#), "body: {}", body);
         assert!(body.contains(r#""send":0.150000"#), "body: {}", body);
+        // Bottleneck field must be present and well-formed.
+        assert!(body.contains(r#""bottleneck":{"stage":"#), "body: {}", body);
     }
 
     #[test]

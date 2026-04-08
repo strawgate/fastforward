@@ -23,6 +23,7 @@ use arrow::record_batch::RecordBatch;
 use logfwd_types::diagnostics::ComponentHealth;
 
 use crate::InputError;
+use crate::background_http_task::BackgroundHttpTask;
 use crate::receiver_health::{ReceiverHealthEvent, reduce_receiver_health};
 
 /// Maximum request body size: 10 MB.
@@ -40,11 +41,9 @@ pub struct ArrowIpcReceiver {
     rx: Option<mpsc::Receiver<RecordBatch>>,
     /// The address the HTTP server is bound to.
     addr: std::net::SocketAddr,
-    server: Arc<tiny_http::Server>,
+    background_task: BackgroundHttpTask,
     shutdown: Arc<AtomicBool>,
     health: Arc<AtomicU8>,
-    /// Keep the server thread handle alive.
-    handle: Option<std::thread::JoinHandle<()>>,
 }
 
 impl ArrowIpcReceiver {
@@ -218,6 +217,9 @@ impl ArrowIpcReceiver {
                         match tx.try_send(batch) {
                             Ok(()) => {}
                             Err(mpsc::TrySendError::Full(_)) => {
+                                // Always return 429 regardless of how many batches
+                                // were already sent; a partial send must never be
+                                // acknowledged as success to avoid data loss on retry.
                                 send_error = Some(429);
                                 break;
                             }
@@ -272,10 +274,9 @@ impl ArrowIpcReceiver {
             name: name.into(),
             rx: Some(rx),
             addr: bound_addr,
-            server,
+            background_task: BackgroundHttpTask::new(server, handle),
             shutdown,
             health,
-            handle: Some(handle),
         })
     }
 
@@ -328,12 +329,7 @@ impl ArrowIpcReceiver {
     /// Coarse runtime health for readiness and diagnostics integration.
     pub fn health(&self) -> ComponentHealth {
         let stored = ComponentHealth::from_repr(self.health.load(Ordering::Relaxed));
-        if self
-            .handle
-            .as_ref()
-            .is_some_and(std::thread::JoinHandle::is_finished)
-            && !self.shutdown.load(Ordering::Relaxed)
-        {
+        if self.background_task.is_finished() && !self.shutdown.load(Ordering::Relaxed) {
             ComponentHealth::Failed
         } else {
             stored
@@ -383,10 +379,6 @@ impl Drop for ArrowIpcReceiver {
         );
         self.shutdown.store(true, Ordering::Relaxed);
         self.rx.take();
-        self.server.unblock();
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
-        }
         let current = ComponentHealth::from_repr(self.health.load(Ordering::Relaxed));
         self.health.store(
             reduce_receiver_health(current, ReceiverHealthEvent::ShutdownCompleted).as_repr(),
@@ -444,6 +436,20 @@ mod tests {
         let mut writer = arrow::ipc::writer::StreamWriter::try_new(&mut buf, &batch.schema())
             .expect("writer init");
         writer.write(batch).expect("write batch");
+        writer.finish().expect("finish");
+        buf
+    }
+
+    fn serialize_batches(batches: &[RecordBatch]) -> Vec<u8> {
+        let Some(first) = batches.first() else {
+            return Vec::new();
+        };
+        let mut buf = Vec::new();
+        let mut writer = arrow::ipc::writer::StreamWriter::try_new(&mut buf, &first.schema())
+            .expect("writer init");
+        for batch in batches {
+            writer.write(batch).expect("write batch");
+        }
         writer.finish().expect("finish");
         buf
     }
@@ -564,6 +570,41 @@ mod tests {
         assert_eq!(response.status().as_u16(), 200);
         let _ = receiver.recv_timeout(std::time::Duration::from_secs(2));
         assert_eq!(receiver.health(), ComponentHealth::Healthy);
+    }
+
+    #[test]
+    fn receiver_returns_429_on_backpressure_to_force_retry() {
+        // When the channel fills up mid-request (partial accept), we return 429 so the
+        // client retries the full request. This avoids silent data loss from unretried
+        // remainder batches that were never accepted.
+        let receiver = ArrowIpcReceiver::new_with_capacity("test-partial", "127.0.0.1:0", 1)
+            .expect("bind should succeed");
+        let addr = receiver.local_addr();
+        let url = format!("http://{addr}/v1/arrow");
+
+        let batches = vec![make_test_batch(), make_test_batch()];
+        let ipc_bytes = serialize_batches(&batches);
+
+        let result = ureq::post(&url)
+            .header("Content-Type", "application/vnd.apache.arrow.stream")
+            .send(&ipc_bytes);
+        let status = match result {
+            Ok(resp) => resp.status().as_u16(),
+            Err(ureq::Error::StatusCode(code)) => code,
+            Err(e) => panic!("unexpected error: {e}"),
+        };
+        assert_eq!(
+            status, 429,
+            "POST should return 429 when channel fills up to force client retry"
+        );
+
+        let received = receiver.try_recv_all();
+        assert_eq!(
+            received.len(),
+            1,
+            "exactly one batch should have been accepted before backpressure"
+        );
+        assert_eq!(receiver.health(), ComponentHealth::Degraded);
     }
 
     #[test]

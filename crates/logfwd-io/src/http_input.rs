@@ -357,9 +357,11 @@ impl InputSource for HttpInput {
         if all.is_empty() {
             return Ok(vec![]);
         }
+        let accounted_bytes = all.len() as u64;
         Ok(vec![InputEvent::Data {
             bytes: all,
             source_id: None,
+            accounted_bytes,
         }])
     }
 

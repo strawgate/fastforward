@@ -15,6 +15,7 @@ use crate::format::FormatDecoder;
 use crate::input::{InputEvent, InputSource};
 use crate::tail::ByteOffset;
 use logfwd_core::checkpoint_tracker::CheckpointTracker;
+use logfwd_core::cri::json_escape_bytes;
 use logfwd_types::diagnostics::ComponentHealth;
 use logfwd_types::pipeline::SourceId;
 use std::collections::HashMap;
@@ -39,6 +40,10 @@ struct SourceState {
     /// Kani-proven checkpoint offset tracker. Tracks the relationship
     /// between file read position and the last complete newline boundary.
     tracker: CheckpointTracker,
+    /// True when remainder bytes are known to start mid-line due to overflow
+    /// truncation. The first completed line formed from this remainder must be
+    /// discarded to avoid emitting a garbled fragment (#1030).
+    overflow_tainted: bool,
 }
 
 /// Wraps a raw [`InputSource`] with newline framing and format processing.
@@ -90,11 +95,17 @@ impl InputSource for FramedInput {
         }
 
         let mut result_events: Vec<InputEvent> = Vec::new();
+        let inject_source_path = self.format_template.supports_source_path_injection();
+        let mut source_path_by_id: Option<HashMap<SourceId, std::path::PathBuf>> = None;
 
         for event in raw_events {
             match event {
-                InputEvent::Data { bytes, source_id } => {
-                    self.stats.inc_bytes(bytes.len() as u64);
+                InputEvent::Data {
+                    bytes,
+                    source_id,
+                    accounted_bytes,
+                } => {
+                    self.stats.inc_bytes(accounted_bytes);
 
                     let key = source_id;
                     let n_bytes = bytes.len() as u64;
@@ -106,8 +117,10 @@ impl InputSource for FramedInput {
                             remainder: Vec::new(),
                             format: template.new_instance(),
                             tracker: CheckpointTracker::new(0),
+                            overflow_tainted: false,
                         })
                     };
+                    let tainted_on_entry = state.overflow_tainted;
 
                     // Prepend remainder from last poll for this source,
                     // reusing the Vec's capacity.
@@ -168,6 +181,7 @@ impl InputSource for FramedInput {
                                     // pending and the checkpoint must not advance past it.
                                     let start = tail.len() - MAX_REMAINDER_BYTES;
                                     state.remainder = tail.split_off(start);
+                                    state.overflow_tainted = true;
                                 } else {
                                     let state = self.sources.get_mut(&key).expect("just inserted");
                                     state.remainder = tail;
@@ -193,6 +207,7 @@ impl InputSource for FramedInput {
                                 state.format.reset();
                                 let start = chunk.len() - MAX_REMAINDER_BYTES;
                                 state.remainder = chunk.split_off(start);
+                                state.overflow_tainted = true;
                                 // Do NOT call apply_remainder_consumed() — data is preserved.
                             } else {
                                 let state = self.sources.get_mut(&key).expect("just inserted");
@@ -205,9 +220,40 @@ impl InputSource for FramedInput {
                     // Process complete lines through per-source format handler.
                     self.out_buf.clear();
                     let state = self.sources.get_mut(&key).expect("just inserted");
-                    state.format.process_lines(&chunk, &mut self.out_buf);
+                    let mut process_start = 0usize;
+                    if tainted_on_entry {
+                        // Overflow truncation preserves a suffix of a long line.
+                        // Once a newline arrives, that first "line" is a
+                        // synthetic mid-line fragment and must be dropped.
+                        if let Some(first_newline) = memchr::memchr(b'\n', &chunk) {
+                            process_start = first_newline + 1;
+                            state.overflow_tainted = false;
+                        }
+                    }
+                    if process_start < chunk.len() {
+                        state
+                            .format
+                            .process_lines(&chunk[process_start..], &mut self.out_buf);
+                    }
+                    if inject_source_path {
+                        if let Some(source_path) =
+                            source_path_for(key, &mut source_path_by_id, self.inner.as_ref())
+                        {
+                            let mut with_source = std::mem::take(&mut self.spare_buf);
+                            with_source.clear();
+                            inject_source_path_metadata(
+                                &self.out_buf,
+                                source_path,
+                                &mut with_source,
+                            );
+                            // Reclaim out_buf's capacity as spare_buf before replacing it,
+                            // preserving the buffer-bouncing optimization (no allocation per poll).
+                            self.out_buf.clear();
+                            self.spare_buf = std::mem::replace(&mut self.out_buf, with_source);
+                        }
+                    }
 
-                    let line_count = memchr::memchr_iter(b'\n', &chunk).count();
+                    let line_count = memchr::memchr_iter(b'\n', &chunk[process_start..]).count();
                     self.stats.inc_lines(line_count as u64);
 
                     if !self.out_buf.is_empty() {
@@ -219,13 +265,22 @@ impl InputSource for FramedInput {
                         result_events.push(InputEvent::Data {
                             bytes: data,
                             source_id,
+                            accounted_bytes: 0,
                         });
                     }
                 }
-                InputEvent::Batch { batch, source_id } => {
+                InputEvent::Batch {
+                    batch,
+                    source_id,
+                    accounted_bytes,
+                } => {
                     self.stats.inc_lines(batch.num_rows() as u64);
-                    self.stats.inc_bytes(batch.get_array_memory_size() as u64);
-                    result_events.push(InputEvent::Batch { batch, source_id });
+                    self.stats.inc_bytes(accounted_bytes);
+                    result_events.push(InputEvent::Batch {
+                        batch,
+                        source_id,
+                        accounted_bytes: 0,
+                    });
                 }
                 // Rotation/truncation: clear framing state + forward event.
                 //
@@ -264,11 +319,40 @@ impl InputSource for FramedInput {
                             if !state.remainder.is_empty() {
                                 let mut remainder = std::mem::take(&mut state.remainder);
                                 remainder.push(b'\n');
+                                let mut process_start = 0usize;
+                                if state.overflow_tainted {
+                                    process_start =
+                                        memchr::memchr(b'\n', &remainder).map_or(0, |i| i + 1);
+                                    state.overflow_tainted = false;
+                                }
 
                                 self.out_buf.clear();
                                 let state =
                                     self.sources.get_mut(&key).expect("just checked existence");
-                                state.format.process_lines(&remainder, &mut self.out_buf);
+                                if process_start < remainder.len() {
+                                    state.format.process_lines(
+                                        &remainder[process_start..],
+                                        &mut self.out_buf,
+                                    );
+                                }
+                                if inject_source_path {
+                                    if let Some(source_path) = source_path_for(
+                                        key,
+                                        &mut source_path_by_id,
+                                        self.inner.as_ref(),
+                                    ) {
+                                        let mut with_source = std::mem::take(&mut self.spare_buf);
+                                        with_source.clear();
+                                        inject_source_path_metadata(
+                                            &self.out_buf,
+                                            source_path,
+                                            &mut with_source,
+                                        );
+                                        self.out_buf.clear();
+                                        self.spare_buf =
+                                            std::mem::replace(&mut self.out_buf, with_source);
+                                    }
+                                }
 
                                 self.stats.inc_lines(1);
 
@@ -285,6 +369,7 @@ impl InputSource for FramedInput {
                                     result_events.push(InputEvent::Data {
                                         bytes: data,
                                         source_id: key,
+                                        accounted_bytes: 0,
                                     });
                                 }
                             }
@@ -337,8 +422,50 @@ impl InputSource for FramedInput {
             .collect()
     }
 
+    fn source_paths(&self) -> Vec<(SourceId, std::path::PathBuf)> {
+        self.inner.source_paths()
+    }
+
     fn set_offset_by_source(&mut self, source_id: SourceId, offset: u64) {
         self.inner.set_offset_by_source(source_id, offset);
+    }
+}
+
+fn source_path_for<'a>(
+    source_id: Option<SourceId>,
+    source_path_by_id: &'a mut Option<HashMap<SourceId, std::path::PathBuf>>,
+    inner: &dyn InputSource,
+) -> Option<&'a std::path::PathBuf> {
+    let sid = source_id?;
+    if source_path_by_id.is_none() {
+        *source_path_by_id = Some(inner.source_paths().into_iter().collect());
+    }
+    source_path_by_id.as_ref()?.get(&sid)
+}
+
+fn inject_source_path_metadata(chunk: &[u8], source_path: &std::path::Path, out: &mut Vec<u8>) {
+    let source_path_bytes = source_path.to_string_lossy();
+    let source_path_bytes = source_path_bytes.as_bytes();
+    let mut pos = 0;
+    while pos < chunk.len() {
+        let eol = memchr::memchr(b'\n', &chunk[pos..]).map_or(chunk.len(), |o| pos + o);
+        let line = &chunk[pos..eol];
+        let first_nonws = line
+            .iter()
+            .position(|&b| !matches!(b, b' ' | b'\t' | b'\r'));
+        if let Some(obj_start) = first_nonws.filter(|&idx| line[idx] == b'{') {
+            out.extend_from_slice(&line[..obj_start]);
+            out.extend_from_slice(b"{\"_source_path\":\"");
+            json_escape_bytes(source_path_bytes, out);
+            out.extend_from_slice(b"\",");
+            out.extend_from_slice(&line[obj_start + 1..]);
+        } else {
+            out.extend_from_slice(line);
+        }
+        if eol < chunk.len() {
+            out.push(b'\n');
+        }
+        pos = eol + 1;
     }
 }
 
@@ -355,6 +482,7 @@ mod tests {
         name: String,
         events: VecDeque<Vec<InputEvent>>,
         offsets: Vec<(SourceId, ByteOffset)>,
+        source_paths: Vec<(SourceId, std::path::PathBuf)>,
         health: ComponentHealth,
     }
 
@@ -364,6 +492,7 @@ mod tests {
                 name: "mock".to_string(),
                 events: batches.into(),
                 offsets: vec![],
+                source_paths: vec![],
                 health: ComponentHealth::Healthy,
             }
         }
@@ -376,6 +505,7 @@ mod tests {
                         vec![InputEvent::Data {
                             bytes: c.to_vec(),
                             source_id: None,
+                            accounted_bytes: c.len() as u64,
                         }]
                     })
                     .collect(),
@@ -394,6 +524,7 @@ mod tests {
                         vec![InputEvent::Data {
                             bytes: c.to_vec(),
                             source_id: Some(sid),
+                            accounted_bytes: c.len() as u64,
                         }]
                     })
                     .collect(),
@@ -402,6 +533,11 @@ mod tests {
 
         fn with_offsets(mut self, offsets: Vec<(SourceId, ByteOffset)>) -> Self {
             self.offsets = offsets;
+            self
+        }
+
+        fn with_source_paths(mut self, source_paths: Vec<(SourceId, std::path::PathBuf)>) -> Self {
+            self.source_paths = source_paths;
             self
         }
 
@@ -426,6 +562,10 @@ mod tests {
 
         fn checkpoint_data(&self) -> Vec<(SourceId, ByteOffset)> {
             self.offsets.clone()
+        }
+
+        fn source_paths(&self) -> Vec<(SourceId, std::path::PathBuf)> {
+            self.source_paths.clone()
         }
     }
 
@@ -523,10 +663,11 @@ mod tests {
         let stats = make_stats();
         let batch = make_batch();
         let expected_rows = batch.num_rows() as u64;
-        let expected_bytes = batch.get_array_memory_size() as u64;
+        let expected_bytes = 1234;
         let source = MockSource::new(vec![vec![InputEvent::Batch {
             batch,
             source_id: None,
+            accounted_bytes: expected_bytes,
         }]]);
         let mut framed = FramedInput::new(
             Box::new(source),
@@ -542,7 +683,27 @@ mod tests {
     }
 
     #[test]
-    fn remainder_capped_at_max() {
+    fn data_events_use_accounted_bytes_for_stats() {
+        let stats = make_stats();
+        let source = MockSource::new(vec![vec![InputEvent::Data {
+            bytes: b"line\n".to_vec(),
+            source_id: None,
+            accounted_bytes: 99,
+        }]]);
+        let mut framed = FramedInput::new(
+            Box::new(source),
+            FormatDecoder::passthrough(Arc::clone(&stats)),
+            Arc::clone(&stats),
+        );
+
+        let events = framed.poll().unwrap();
+        assert_eq!(collect_data(events), b"line\n");
+        assert_eq!(stats.lines(), 1);
+        assert_eq!(stats.bytes(), 99);
+    }
+
+    #[test]
+    fn remainder_capped_at_max_and_tainted_line_is_dropped() {
         let stats = make_stats();
         // Send > 2 MiB without a newline.
         let big = vec![b'x'; MAX_REMAINDER_BYTES + 1];
@@ -570,17 +731,17 @@ mod tests {
             "overflow remainder must be capped to MAX_REMAINDER_BYTES, not dropped"
         );
 
-        // Second poll: a newline terminates the preserved data.
+        // Second poll: newline completes only the tainted fragment; it must be dropped.
         let events2 = framed.poll().unwrap();
         let data2 = collect_data(events2);
         assert!(
-            !data2.is_empty(),
-            "preserved overflow remainder must be emitted when a newline arrives"
+            data2.is_empty(),
+            "tainted overflow remainder must be discarded when the first newline arrives"
         );
     }
 
     #[test]
-    fn tail_after_newline_is_capped_at_max() {
+    fn tail_after_newline_is_capped_at_max_and_tainted_line_is_dropped() {
         let stats = make_stats();
         let mut chunk = b"ok\n".to_vec();
         chunk.extend(vec![b'x'; MAX_REMAINDER_BYTES + 1]);
@@ -609,14 +770,77 @@ mod tests {
             "overflow tail must be truncated to MAX_REMAINDER_BYTES, not dropped"
         );
 
-        // Second poll: a newline terminates the preserved remainder — the line
-        // is emitted (proves data was preserved, not silently dropped).
+        // Second poll: newline terminates only tainted overflow bytes; that
+        // line must be discarded.
         let events2 = framed.poll().unwrap();
         let data2 = collect_data(events2);
         assert!(
-            !data2.is_empty(),
-            "preserved overflow remainder must be emitted when a newline arrives"
+            data2.is_empty(),
+            "tainted overflow remainder must be discarded when the first newline arrives"
         );
+    }
+
+    /// Regression for #1030: after remainder overflow, the first completed
+    /// line is a truncated mid-line fragment and must be discarded.
+    #[test]
+    fn overflow_fragment_is_discarded_when_newline_arrives() {
+        let stats = make_stats();
+        let big = vec![b'x'; MAX_REMAINDER_BYTES + 1];
+        let source = MockSource::from_chunks(vec![&big, b"\nreal-line\n"]);
+        let mut framed = FramedInput::new(
+            Box::new(source),
+            FormatDecoder::passthrough(Arc::clone(&stats)),
+            Arc::clone(&stats),
+        );
+
+        // First poll: overflow, nothing emitted.
+        let events1 = framed.poll().unwrap();
+        assert!(collect_data(events1).is_empty());
+
+        // Second poll: truncated overflow fragment must be dropped, while the
+        // next complete real line is preserved.
+        let events2 = framed.poll().unwrap();
+        assert_eq!(collect_data(events2), b"real-line\n");
+    }
+
+    #[test]
+    fn checkpoint_advances_after_tainted_fragment_is_discarded() {
+        let stats = make_stats();
+        let sid = SourceId(9);
+        let big = vec![b'x'; MAX_REMAINDER_BYTES + 1];
+        let first = big.len() as u64;
+        let second_bytes = b"\nreal-line\n";
+        let total = first + second_bytes.len() as u64;
+        let source = MockSource::new(vec![
+            vec![InputEvent::Data {
+                bytes: big,
+                source_id: Some(sid),
+                accounted_bytes: 0,
+            }],
+            vec![InputEvent::Data {
+                bytes: second_bytes.to_vec(),
+                source_id: Some(sid),
+                accounted_bytes: 0,
+            }],
+        ])
+        .with_offsets(vec![(sid, ByteOffset(total))]);
+        let mut framed = FramedInput::new(
+            Box::new(source),
+            FormatDecoder::passthrough(Arc::clone(&stats)),
+            Arc::clone(&stats),
+        );
+
+        let _ = framed.poll().unwrap();
+        let cp1 = framed.checkpoint_data();
+        assert!(
+            cp1[0].1.0 < total,
+            "checkpoint must stay behind raw offset while overflow remainder is buffered"
+        );
+
+        let events2 = framed.poll().unwrap();
+        assert_eq!(collect_data(events2), b"real-line\n");
+        let cp2 = framed.checkpoint_data();
+        assert_eq!(cp2[0].1, ByteOffset(total));
     }
 
     /// `checkpoint_data()` must account for overflow remainder when the source
@@ -717,11 +941,13 @@ mod tests {
             vec![InputEvent::Data {
                 bytes: b"partial".to_vec(),
                 source_id: None,
+                accounted_bytes: 7,
             }],
             vec![InputEvent::Rotated { source_id: None }],
             vec![InputEvent::Data {
                 bytes: b"fresh\n".to_vec(),
                 source_id: None,
+                accounted_bytes: 6,
             }],
         ]);
         let mut framed = FramedInput::new(
@@ -810,6 +1036,7 @@ mod tests {
             vec![InputEvent::Data {
                 bytes: b"no-newline".to_vec(),
                 source_id: None,
+                accounted_bytes: 10,
             }],
             vec![InputEvent::EndOfFile { source_id: None }],
         ]);
@@ -837,6 +1064,7 @@ mod tests {
             vec![InputEvent::Data {
                 bytes: b"complete\npartial".to_vec(),
                 source_id: None,
+                accounted_bytes: 16,
             }],
             vec![InputEvent::EndOfFile { source_id: None }],
         ]);
@@ -863,6 +1091,7 @@ mod tests {
             vec![InputEvent::Data {
                 bytes: b"line\n".to_vec(),
                 source_id: None,
+                accounted_bytes: 5,
             }],
             vec![InputEvent::EndOfFile { source_id: None }],
         ]);
@@ -896,10 +1125,12 @@ mod tests {
                 InputEvent::Data {
                     bytes: b"hello-from-A".to_vec(),
                     source_id: Some(sid_a),
+                    accounted_bytes: 12,
                 },
                 InputEvent::Data {
                     bytes: b"hello-from-B".to_vec(),
                     source_id: Some(sid_b),
+                    accounted_bytes: 12,
                 },
             ],
             // Poll 2: complete the lines from each source
@@ -907,10 +1138,12 @@ mod tests {
                 InputEvent::Data {
                     bytes: b"-done\n".to_vec(),
                     source_id: Some(sid_a),
+                    accounted_bytes: 6,
                 },
                 InputEvent::Data {
                     bytes: b"-done\n".to_vec(),
                     source_id: Some(sid_b),
+                    accounted_bytes: 6,
                 },
             ],
         ]);
@@ -930,7 +1163,10 @@ mod tests {
         let mut output_a = Vec::new();
         let mut output_b = Vec::new();
         for e in events2 {
-            if let InputEvent::Data { bytes, source_id } = e {
+            if let InputEvent::Data {
+                bytes, source_id, ..
+            } = e
+            {
                 match source_id {
                     Some(sid) if sid == sid_a => output_a.extend_from_slice(&bytes),
                     Some(sid) if sid == sid_b => output_b.extend_from_slice(&bytes),
@@ -955,10 +1191,12 @@ mod tests {
                 InputEvent::Data {
                     bytes: b"partial-A".to_vec(),
                     source_id: Some(sid_a),
+                    accounted_bytes: 9,
                 },
                 InputEvent::Data {
                     bytes: b"partial-B".to_vec(),
                     source_id: Some(sid_b),
+                    accounted_bytes: 9,
                 },
             ],
             // Truncation
@@ -967,6 +1205,7 @@ mod tests {
             vec![InputEvent::Data {
                 bytes: b"fresh-A\n".to_vec(),
                 source_id: Some(sid_a),
+                accounted_bytes: 8,
             }],
         ]);
 
@@ -997,6 +1236,7 @@ mod tests {
         let source = MockSource::new(vec![vec![InputEvent::Data {
             bytes: b"hello\nwor".to_vec(),
             source_id: Some(sid),
+            accounted_bytes: 9,
         }]])
         .with_offsets(vec![(sid, ByteOffset(1000))]);
 
@@ -1025,6 +1265,7 @@ mod tests {
         let source = MockSource::new(vec![vec![InputEvent::Data {
             bytes: b"complete\n".to_vec(),
             source_id: Some(sid),
+            accounted_bytes: 9,
         }]])
         .with_offsets(vec![(sid, ByteOffset(500))]);
 
@@ -1061,16 +1302,19 @@ mod tests {
             vec![InputEvent::Data {
                 bytes: b"2024-01-15T10:30:00Z stdout P hello \n".to_vec(),
                 source_id: Some(sid_a),
+                accounted_bytes: 38,
             }],
             // Source B: CRI full line (must NOT merge with A's partial)
             vec![InputEvent::Data {
                 bytes: b"2024-01-15T10:30:01Z stderr F {\"msg\":\"world\"}\n".to_vec(),
                 source_id: Some(sid_b),
+                accounted_bytes: 50,
             }],
             // Source A: CRI full line (completes A's partial)
             vec![InputEvent::Data {
                 bytes: b"2024-01-15T10:30:02Z stdout F from-A\n".to_vec(),
                 source_id: Some(sid_a),
+                accounted_bytes: 39,
             }],
         ]);
 
@@ -1116,11 +1360,13 @@ mod tests {
             vec![InputEvent::Data {
                 bytes: b"hello\nwor".to_vec(),
                 source_id: Some(sid),
+                accounted_bytes: 9,
             }],
             // Second read: 3 bytes, newline at position 1 (the 'd\n')
             vec![InputEvent::Data {
                 bytes: b"ld\n".to_vec(),
                 source_id: Some(sid),
+                accounted_bytes: 3,
             }],
         ])
         .with_offsets(vec![(sid, ByteOffset(12))]);
@@ -1144,5 +1390,98 @@ mod tests {
         // Checkpoint should reflect: 12 - 0 = 12
         let cp = framed.checkpoint_data();
         assert_eq!(cp[0].1, ByteOffset(12));
+    }
+
+    #[test]
+    fn file_json_injects_source_path_column() {
+        let stats = make_stats();
+        let sid = SourceId(7);
+        let source = MockSource::new(vec![vec![InputEvent::Data {
+            bytes: b"{\"msg\":\"hello\"}\n".to_vec(),
+            source_id: Some(sid),
+            accounted_bytes: 0,
+        }]])
+        .with_source_paths(vec![(sid, "/var/log/pods/ns_pod_uid/c/main.log".into())]);
+
+        let mut framed = FramedInput::new(
+            Box::new(source),
+            FormatDecoder::passthrough_json(Arc::clone(&stats)),
+            stats,
+        );
+
+        let out = collect_data(framed.poll().unwrap());
+        assert_eq!(
+            out,
+            b"{\"_source_path\":\"/var/log/pods/ns_pod_uid/c/main.log\",\"msg\":\"hello\"}\n"
+        );
+    }
+
+    #[test]
+    fn file_cri_injects_source_path_alongside_cri_metadata() {
+        let stats = make_stats();
+        let sid = SourceId(8);
+        let source = MockSource::new(vec![vec![InputEvent::Data {
+            bytes: b"2024-01-15T10:30:00Z stdout F {\"msg\":\"hello\"}\n".to_vec(),
+            source_id: Some(sid),
+            accounted_bytes: 0,
+        }]])
+        .with_source_paths(vec![(sid, "/var/log/pods/ns_pod_uid/c/0.log".into())]);
+
+        let mut framed = FramedInput::new(
+            Box::new(source),
+            FormatDecoder::cri(2 * 1024 * 1024, Arc::clone(&stats)),
+            stats,
+        );
+
+        let out = collect_data(framed.poll().unwrap());
+        assert_eq!(
+            out,
+            b"{\"_source_path\":\"/var/log/pods/ns_pod_uid/c/0.log\",\"_timestamp\":\"2024-01-15T10:30:00Z\",\"_stream\":\"stdout\",\"msg\":\"hello\"}\n"
+        );
+    }
+
+    #[test]
+    fn file_json_injects_source_path_after_leading_whitespace() {
+        let stats = make_stats();
+        let sid = SourceId(9);
+        let source = MockSource::new(vec![vec![InputEvent::Data {
+            bytes: b"  \t{\"msg\":\"hello\"}\n".to_vec(),
+            source_id: Some(sid),
+            accounted_bytes: 0,
+        }]])
+        .with_source_paths(vec![(sid, "/var/log/pods/ns_pod_uid/c/1.log".into())]);
+
+        let mut framed = FramedInput::new(
+            Box::new(source),
+            FormatDecoder::passthrough_json(Arc::clone(&stats)),
+            stats,
+        );
+
+        let out = collect_data(framed.poll().unwrap());
+        assert_eq!(
+            out,
+            b"  \t{\"_source_path\":\"/var/log/pods/ns_pod_uid/c/1.log\",\"msg\":\"hello\"}\n"
+        );
+    }
+
+    #[test]
+    fn file_raw_passthrough_does_not_inject_source_path() {
+        let stats = make_stats();
+        let sid = SourceId(10);
+        let source = MockSource::new(vec![vec![InputEvent::Data {
+            bytes: b"{\"msg\":\"hello\"}\n".to_vec(),
+            source_id: Some(sid),
+            accounted_bytes: 0,
+        }]])
+        .with_source_paths(vec![(sid, "/var/log/pods/ns_pod_uid/c/raw.log".into())]);
+
+        let mut framed = FramedInput::new(
+            Box::new(source),
+            FormatDecoder::passthrough(Arc::clone(&stats)),
+            stats,
+        );
+
+        let out = collect_data(framed.poll().unwrap());
+        assert_eq!(out, b"{\"msg\":\"hello\"}\n");
     }
 }

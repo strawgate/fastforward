@@ -12,8 +12,6 @@ use std::sync::Arc;
 
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum, error::ErrorKind};
 use opentelemetry::metrics::MeterProvider;
-use opentelemetry_otlp::WithExportConfig;
-use tokio_util::sync::CancellationToken;
 
 mod config_templates;
 
@@ -93,6 +91,15 @@ impl From<io::Error> for CliError {
     }
 }
 
+impl From<logfwd_runtime::bootstrap::RuntimeError> for CliError {
+    fn from(value: logfwd_runtime::bootstrap::RuntimeError) -> Self {
+        match value {
+            logfwd_runtime::bootstrap::RuntimeError::Config(msg) => Self::Config(msg),
+            logfwd_runtime::bootstrap::RuntimeError::Io(err) => Self::Runtime(err),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Color support (respects NO_COLOR, checks stderr TTY)
 // ---------------------------------------------------------------------------
@@ -104,6 +111,10 @@ fn use_color() -> bool {
 
 fn use_json_logs_for_stderr(is_terminal: bool) -> bool {
     !is_terminal
+}
+
+fn wizard_uses_interactive_terminals(stdin_is_terminal: bool, stdout_is_terminal: bool) -> bool {
+    stdin_is_terminal && stdout_is_terminal
 }
 
 macro_rules! style {
@@ -212,7 +223,6 @@ enum Commands {
         output_file: String,
     },
     /// Validate and print effective runnable config.
-    #[command(alias = "dump-config")]
     EffectiveConfig {
         #[arg(
             short = 'c',
@@ -246,16 +256,6 @@ fn main() {
 
 #[tokio::main]
 async fn main_inner() -> i32 {
-    // Emit a deprecation notice before clap parses so the alias still works
-    // transparently while guiding scripts to the new subcommand name.
-    if env::args().any(|a| a == "dump-config") {
-        eprintln!(
-            "{}warning{}: `dump-config` is deprecated — use `effective-config` instead",
-            yellow(),
-            reset()
-        );
-    }
-
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(err) => {
@@ -473,9 +473,9 @@ output:
 fn cmd_wizard() -> Result<(), CliError> {
     use config_templates::{INPUT_TEMPLATES, OUTPUT_TEMPLATES, render_config};
 
-    if !io::stdin().is_terminal() {
+    if !wizard_uses_interactive_terminals(io::stdin().is_terminal(), io::stdout().is_terminal()) {
         return Err(CliError::Config(
-            "wizard requires an interactive terminal on stdin".to_owned(),
+            "wizard requires an interactive terminal on stdin and stdout".to_owned(),
         ));
     }
     println!("{}logfwd config wizard{}", bold(), reset());
@@ -804,7 +804,7 @@ where
 }
 
 fn validate_transform_probe_read_only(
-    transform: &mut logfwd_transform::SqlTransform,
+    transform: &mut logfwd::transform::SqlTransform,
 ) -> Result<(), String> {
     use arrow::array::{ArrayRef, StringArray};
     use arrow::datatypes::{DataType, Field, Schema};
@@ -842,8 +842,11 @@ fn validate_pipeline_read_only(
     config: &logfwd_config::PipelineConfig,
     base_path: Option<&std::path::Path>,
 ) -> Result<(), String> {
-    use logfwd_config::{EnrichmentConfig, Format, GeoDatabaseFormat, InputType};
-    use logfwd_transform::SqlTransform;
+    use logfwd::transform::SqlTransform;
+    #[cfg(feature = "datafusion")]
+    use logfwd_config::{EnrichmentConfig, GeoDatabaseFormat};
+    use logfwd_config::{Format, InputType};
+    #[cfg(feature = "datafusion")]
     use std::path::PathBuf;
 
     if config.workers == Some(0) {
@@ -852,91 +855,112 @@ fn validate_pipeline_read_only(
     if config.batch_target_bytes == Some(0) {
         return Err("batch_target_bytes must be > 0".to_owned());
     }
+    #[cfg(not(feature = "datafusion"))]
+    let _ = base_path;
 
-    let mut enrichment_tables: Vec<Arc<dyn logfwd_transform::enrichment::EnrichmentTable>> =
-        Vec::new();
-    let mut geo_database: Option<Arc<dyn logfwd_transform::enrichment::GeoDatabase>> = None;
+    #[cfg(feature = "datafusion")]
+    let (enrichment_tables, geo_database) = {
+        let mut enrichment_tables: Vec<Arc<dyn logfwd::transform::enrichment::EnrichmentTable>> =
+            Vec::new();
+        let mut geo_database: Option<Arc<dyn logfwd::transform::enrichment::GeoDatabase>> = None;
 
-    for enrichment in &config.enrichment {
-        match enrichment {
-            EnrichmentConfig::GeoDatabase(geo_cfg) => {
-                let mut path = PathBuf::from(&geo_cfg.path);
-                if path.is_relative()
-                    && let Some(base) = base_path
-                {
-                    path = base.join(path);
-                }
-                let db: Arc<dyn logfwd_transform::enrichment::GeoDatabase> = match geo_cfg.format {
-                    GeoDatabaseFormat::Mmdb => {
-                        let mmdb = logfwd_transform::udf::geo_lookup::MmdbDatabase::open(&path)
-                            .map_err(|e| {
-                                format!("failed to open geo database '{}': {e}", path.display())
-                            })?;
-                        Arc::new(mmdb)
+        for enrichment in &config.enrichment {
+            match enrichment {
+                EnrichmentConfig::GeoDatabase(geo_cfg) => {
+                    let mut path = PathBuf::from(&geo_cfg.path);
+                    if path.is_relative()
+                        && let Some(base) = base_path
+                    {
+                        path = base.join(path);
                     }
-                    _ => {
-                        return Err(format!(
-                            "unsupported geo database format: {:?}",
-                            geo_cfg.format
-                        ));
+                    let db: Arc<dyn logfwd::transform::enrichment::GeoDatabase> =
+                        match geo_cfg.format {
+                            GeoDatabaseFormat::Mmdb => {
+                                let mmdb =
+                                    logfwd::transform::udf::geo_lookup::MmdbDatabase::open(&path)
+                                        .map_err(|e| {
+                                        format!(
+                                            "failed to open geo database '{}': {e}",
+                                            path.display()
+                                        )
+                                    })?;
+                                Arc::new(mmdb)
+                            }
+                            _ => {
+                                return Err(format!(
+                                    "unsupported geo database format: {:?}",
+                                    geo_cfg.format
+                                ));
+                            }
+                        };
+                    geo_database = Some(db);
+                }
+                EnrichmentConfig::Static(cfg) => {
+                    let labels: Vec<(String, String)> = cfg
+                        .labels
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect();
+                    let table = Arc::new(
+                        logfwd::transform::enrichment::StaticTable::new(&cfg.table_name, &labels)
+                            .map_err(|e| format!("enrichment '{}': {e}", cfg.table_name))?,
+                    );
+                    enrichment_tables.push(table);
+                }
+                EnrichmentConfig::HostInfo(_) => {
+                    enrichment_tables
+                        .push(Arc::new(logfwd::transform::enrichment::HostInfoTable::new()));
+                }
+                EnrichmentConfig::K8sPath(cfg) => {
+                    enrichment_tables.push(Arc::new(
+                        logfwd::transform::enrichment::K8sPathTable::new(&cfg.table_name),
+                    ));
+                }
+                EnrichmentConfig::Csv(cfg) => {
+                    let mut path = PathBuf::from(&cfg.path);
+                    if path.is_relative()
+                        && let Some(base) = base_path
+                    {
+                        path = base.join(path);
                     }
-                };
-                geo_database = Some(db);
-            }
-            EnrichmentConfig::Static(cfg) => {
-                let labels: Vec<(String, String)> = cfg
-                    .labels
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect();
-                let table = Arc::new(
-                    logfwd_transform::enrichment::StaticTable::new(&cfg.table_name, &labels)
-                        .map_err(|e| format!("enrichment '{}': {e}", cfg.table_name))?,
-                );
-                enrichment_tables.push(table);
-            }
-            EnrichmentConfig::HostInfo(_) => {
-                enrichment_tables
-                    .push(Arc::new(logfwd_transform::enrichment::HostInfoTable::new()));
-            }
-            EnrichmentConfig::K8sPath(cfg) => {
-                enrichment_tables.push(Arc::new(logfwd_transform::enrichment::K8sPathTable::new(
-                    &cfg.table_name,
-                )));
-            }
-            EnrichmentConfig::Csv(cfg) => {
-                let mut path = PathBuf::from(&cfg.path);
-                if path.is_relative()
-                    && let Some(base) = base_path
-                {
-                    path = base.join(path);
+                    let table = Arc::new(logfwd::transform::enrichment::CsvFileTable::new(
+                        &cfg.table_name,
+                        &path,
+                    ));
+                    table
+                        .reload()
+                        .map_err(|e| format!("enrichment '{}': {e}", cfg.table_name))?;
+                    enrichment_tables.push(table);
                 }
-                let table = Arc::new(logfwd_transform::enrichment::CsvFileTable::new(
-                    &cfg.table_name,
-                    &path,
-                ));
-                table
-                    .reload()
-                    .map_err(|e| format!("enrichment '{}': {e}", cfg.table_name))?;
-                enrichment_tables.push(table);
-            }
-            EnrichmentConfig::Jsonl(cfg) => {
-                let mut path = PathBuf::from(&cfg.path);
-                if path.is_relative()
-                    && let Some(base) = base_path
-                {
-                    path = base.join(path);
+                EnrichmentConfig::Jsonl(cfg) => {
+                    let mut path = PathBuf::from(&cfg.path);
+                    if path.is_relative()
+                        && let Some(base) = base_path
+                    {
+                        path = base.join(path);
+                    }
+                    let table = Arc::new(logfwd::transform::enrichment::JsonLinesFileTable::new(
+                        &cfg.table_name,
+                        &path,
+                    ));
+                    table
+                        .reload()
+                        .map_err(|e| format!("enrichment '{}': {e}", cfg.table_name))?;
+                    enrichment_tables.push(table);
                 }
-                let table = Arc::new(logfwd_transform::enrichment::JsonLinesFileTable::new(
-                    &cfg.table_name,
-                    &path,
-                ));
-                table
-                    .reload()
-                    .map_err(|e| format!("enrichment '{}': {e}", cfg.table_name))?;
-                enrichment_tables.push(table);
             }
         }
+
+        (enrichment_tables, geo_database)
+    };
+
+    #[cfg(not(feature = "datafusion"))]
+    if !config.enrichment.is_empty() {
+        return Err(
+            "pipeline enrichment requires DataFusion. Build default/full logfwd \
+             (or add `--features datafusion`)"
+                .to_owned(),
+        );
     }
 
     let pipeline_sql = config.transform.as_deref().unwrap_or("SELECT * FROM logs");
@@ -956,13 +980,16 @@ fn validate_pipeline_read_only(
 
         let input_sql = input_cfg.sql.as_deref().unwrap_or(pipeline_sql);
         let mut transform = SqlTransform::new(input_sql).map_err(|e| e.to_string())?;
-        if let Some(ref db) = geo_database {
-            transform.set_geo_database(Arc::clone(db));
-        }
-        for table in &enrichment_tables {
-            transform
-                .add_enrichment_table(Arc::clone(table))
-                .map_err(|e| format!("input '{}': enrichment error: {e}", input_name))?;
+        #[cfg(feature = "datafusion")]
+        {
+            if let Some(ref db) = geo_database {
+                transform.set_geo_database(Arc::clone(db));
+            }
+            for table in &enrichment_tables {
+                transform
+                    .add_enrichment_table(Arc::clone(table))
+                    .map_err(|e| format!("input '{}': enrichment error: {e}", input_name))?;
+            }
         }
         validate_transform_probe_read_only(&mut transform)
             .map_err(|e| format!("input '{}': {e}", input_name))?;
@@ -987,10 +1014,13 @@ fn validate_input_format_read_only(
         InputType::Http => matches!(format, Format::Json | Format::Raw),
         InputType::Udp | InputType::Tcp => matches!(format, Format::Json | Format::Raw),
         InputType::ArrowIpc => false,
-        _ => {
+        other => {
+            tracing::warn!(
+                "validate_input_format_read_only: unhandled input type {other:?} for input {name}"
+            );
             return Err(format!(
                 "input '{name}': type {:?} is not yet supported in read-only validation",
-                input_type
+                other
             ));
         }
     };
@@ -1022,6 +1052,37 @@ fn collect_yaml_files_recursive(
     Ok(())
 }
 
+#[cfg(test)]
+fn replace_env_placeholders_for_example_validation(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut cursor = 0usize;
+
+    while let Some(rel_start) = input[cursor..].find("${") {
+        let start = cursor + rel_start;
+        out.push_str(&input[cursor..start]);
+        let value_start = start + 2;
+        if let Some(rel_end) = input[value_start..].find('}') {
+            let end = value_start + rel_end;
+            if end > value_start {
+                out.push_str("example-env-value");
+            } else {
+                out.push_str("${}");
+            }
+            cursor = end + 1;
+        } else {
+            out.push_str(&input[start..]);
+            cursor = input.len();
+            break;
+        }
+    }
+
+    if cursor < input.len() {
+        out.push_str(&input[cursor..]);
+    }
+
+    out
+}
+
 fn validate_pipelines(
     config: &logfwd_config::Config,
     dry_run: bool,
@@ -1050,566 +1111,40 @@ fn validate_pipelines(
     Ok(())
 }
 
-fn input_label(i: &logfwd_config::InputConfig) -> String {
-    use logfwd_config::InputType;
-    match i.input_type {
-        InputType::File => format!("file  {}", i.path.as_deref().unwrap_or("*")),
-        InputType::Tcp => format!("tcp   {}", i.listen.as_deref().unwrap_or(":514")),
-        InputType::Udp => format!("udp   {}", i.listen.as_deref().unwrap_or(":514")),
-        InputType::Otlp => format!("otlp  {}", i.listen.as_deref().unwrap_or(":4318")),
-        InputType::Http => format!(
-            "http  {}{}",
-            i.listen.as_deref().unwrap_or(":8081"),
-            i.http
-                .as_ref()
-                .and_then(|cfg| cfg.path.as_deref())
-                .unwrap_or("/")
-        ),
-        InputType::Generator => "generator".to_string(),
-        _ => "unknown".to_string(),
-    }
-}
-
-fn output_label(o: &logfwd_config::OutputConfig) -> String {
-    use logfwd_config::OutputType;
-    match o.output_type {
-        OutputType::Otlp => format!("otlp  {}", o.endpoint.as_deref().unwrap_or("")),
-        OutputType::Http => format!("http  {}", o.endpoint.as_deref().unwrap_or("")),
-        OutputType::Elasticsearch => {
-            format!("elasticsearch  {}", o.endpoint.as_deref().unwrap_or(""))
-        }
-        OutputType::Loki => format!("loki  {}", o.endpoint.as_deref().unwrap_or("")),
-        OutputType::Tcp => format!("tcp   {}", o.endpoint.as_deref().unwrap_or("")),
-        OutputType::Udp => format!("udp   {}", o.endpoint.as_deref().unwrap_or("")),
-        OutputType::File => format!("file  {}", o.path.as_deref().unwrap_or("")),
-        OutputType::Parquet => format!("parquet  {}", o.path.as_deref().unwrap_or("")),
-        OutputType::Stdout => "stdout".to_string(),
-        OutputType::Null => "null".to_string(),
-        _ => "unknown".to_string(),
-    }
-}
-
 async fn run_pipelines(
     config: logfwd_config::Config,
     base_path: Option<&std::path::Path>,
     config_path: &str,
     config_yaml: &str,
 ) -> Result<(), CliError> {
-    let startup_start = std::time::Instant::now();
-    use logfwd::pipeline::Pipeline;
-    use logfwd_io::diagnostics::DiagnosticsServer;
-    use tracing_subscriber::Layer;
-    use tracing_subscriber::layer::SubscriberExt;
-    use tracing_subscriber::util::SubscriberInitExt;
-
-    // Acquire exclusive lock only when tailing files — OTLP-only and
-    // blackhole pipelines don't need filesystem locking (#737).
-    let has_file_inputs = config.pipelines.values().any(|pipe| {
-        pipe.inputs
-            .iter()
-            .any(|input| matches!(input.input_type, logfwd_config::InputType::File))
-    });
-    let _lock_guard = if has_file_inputs {
-        acquire_instance_lock(&config)?
-    } else {
-        None
-    };
-
-    let shutdown = CancellationToken::new();
-
-    #[cfg(unix)]
-    let (mut sigterm, mut sighup) = {
-        use tokio::signal::unix::{SignalKind, signal};
-        let sigterm = signal(SignalKind::terminate()).map_err(|err| {
-            CliError::Runtime(io::Error::other(format!(
-                "failed to register SIGTERM handler: {err}"
-            )))
-        })?;
-        let sighup = signal(SignalKind::hangup()).map_err(|err| {
-            CliError::Runtime(io::Error::other(format!(
-                "failed to register SIGHUP handler: {err}"
-            )))
-        })?;
-        (sigterm, sighup)
-    };
-
-    // Listen for SIGINT (Ctrl-C) and SIGTERM to trigger graceful shutdown.
-    #[cfg(feature = "dhat-heap")]
-    let profiler = dhat::Profiler::new_heap();
-
-    #[cfg(feature = "cpu-profiling")]
-    let pprof_guard = pprof::ProfilerGuardBuilder::default()
-        .frequency(999)
-        .blocklist(&["libc", "libgcc", "pthread", "vdso"])
-        .build()
-        .map_err(|e| {
-            CliError::Runtime(io::Error::other(format!(
-                "failed to initialize pprof profiler: {e}"
-            )))
-        })?;
-
-    let shutdown_for_signal = shutdown.clone();
-    tokio::spawn(async move {
-        #[cfg(feature = "dhat-heap")]
-        let _profiler_to_drop = profiler;
-
-        #[cfg(feature = "cpu-profiling")]
-        let _pprof_to_drop = pprof_guard;
-
-        #[cfg(unix)]
-        {
-            // Install a SIGHUP handler so logrotate / supervisors don't kill us.
-            // Config reload is not yet implemented; we ignore SIGHUP and log a warning.
-            loop {
-                tokio::select! {
-                    _ = tokio::signal::ctrl_c() => break,
-                    _ = sigterm.recv() => break,
-                    _ = sighup.recv() => {
-                        eprintln!(
-                            "{}logfwd{}: SIGHUP received — config reload not yet implemented, ignoring",
-                            yellow(), reset(),
-                        );
-                        // Continue the loop — SIGHUP does not trigger shutdown.
-                    }
-                }
-            }
-        }
-        #[cfg(not(unix))]
-        {
-            tokio::signal::ctrl_c().await.ok();
-        }
-
-        #[cfg(feature = "cpu-profiling")]
-        {
-            if let Ok(report) = _pprof_to_drop.report().build() {
-                if let Ok(file) = std::fs::File::create("flamegraph.svg") {
-                    let _ = report.flamegraph(file);
-                }
-            }
-        }
-
-        #[cfg(feature = "dhat-heap")]
-        drop(_profiler_to_drop);
-
-        shutdown_for_signal.cancel();
-    });
-
-    let meter_provider = build_meter_provider(&config)?;
-    let meter = meter_provider.meter("logfwd");
-
-    // Set up the tracing subscriber with an OTel layer that routes spans
-    // to our in-process ring buffer (and optionally to an OTLP endpoint),
-    // plus a stderr fmt layer so tracing events are visible on the console.
-    let trace_buf = logfwd_io::span_exporter::SpanBuffer::new();
-    let tracer_provider = build_tracer_provider(trace_buf.clone(), &config)?;
-    let tracer = opentelemetry::trace::TracerProvider::tracer(&tracer_provider, "logfwd");
-    let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
-
-    let env_filter = tracing_subscriber::EnvFilter::try_from_env("LOGFWD_LOG")
-        .or_else(|_| tracing_subscriber::EnvFilter::try_from_default_env())
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-    let fmt_layer = if use_json_logs_for_stderr(io::stderr().is_terminal()) {
-        tracing_subscriber::fmt::layer()
-            .json()
-            .with_writer(io::stderr)
-            .with_target(true)
-            .boxed()
-    } else {
-        tracing_subscriber::fmt::layer()
-            .with_writer(io::stderr)
-            .with_target(true)
-            .boxed()
-    };
-    // Apply env_filter only to the fmt layer so it doesn't suppress OTel spans.
-    let _ = tracing_subscriber::registry()
-        .with(fmt_layer.with_filter(env_filter))
-        .with(otel_layer)
-        .try_init(); // ignore error if a subscriber is already installed (e.g. in tests)
-    opentelemetry::global::set_tracer_provider(tracer_provider.clone());
-
-    let mut pipelines = Vec::new();
-    for (name, pipe_cfg) in &config.pipelines {
-        match Pipeline::from_config(name, pipe_cfg, &meter, base_path) {
-            Ok(pipeline) => {
-                pipelines.push(pipeline);
-            }
-            Err(e) => {
-                return Err(CliError::Config(format!("pipeline '{name}': {e}")));
-            }
-        }
-    }
-
-    let diag_handle = if let Some(ref addr) = config.server.diagnostics {
-        let mut server = DiagnosticsServer::new(addr);
-        server.set_config(config_path, config_yaml);
-        server.set_trace_buffer(trace_buf);
-        for p in &pipelines {
-            server.add_pipeline(Arc::clone(p.metrics()));
-        }
-        #[cfg(unix)]
-        server.set_memory_stats_fn(jemalloc_stats);
-        let (handle, _) = server.start()?;
-        Some((handle, addr.clone()))
-    } else {
-        None
-    };
-
-    // Save metrics references for shutdown summary.
-    let pipeline_metrics: Vec<_> = pipelines.iter().map(|p| Arc::clone(p.metrics())).collect();
-
-    eprintln!("{}logfwd{} {}v{VERSION}{}", bold(), reset(), dim(), reset());
-
-    // Print startup summary after everything is ready.
-    for (name, pipe_cfg) in &config.pipelines {
-        eprintln!();
-        eprintln!("  {}✓{}  {}{name}{}", green(), reset(), bold(), reset());
-        for input in &pipe_cfg.inputs {
-            eprintln!("     {}in{}   {}", dim(), reset(), input_label(input));
-        }
-        if let Some(sql) = pipe_cfg.transform.as_deref() {
-            let sql = sql.trim();
-            let first_line = sql.lines().next().unwrap_or(sql);
-            let truncated = if first_line.chars().count() > 100 {
-                format!("{}…", first_line.chars().take(100).collect::<String>())
-            } else {
-                first_line.to_string()
-            };
-            eprintln!("     {}sql{}  {truncated}", dim(), reset());
-        }
-        for output in &pipe_cfg.outputs {
-            eprintln!("     {}out{}  {}", dim(), reset(), output_label(output));
-        }
-    }
-    if let Some((_, ref addr)) = diag_handle {
-        eprintln!();
-        eprintln!("  {}dashboard{}  http://{addr}", bold(), reset());
-    }
-    eprintln!();
-    let n = pipelines.len();
-    let startup_ms = startup_start.elapsed().as_millis();
-    eprintln!(
-        "{}ready{} · {n} pipeline{} {}(started in {startup_ms}ms){}",
-        green(),
-        reset(),
-        if n == 1 { "" } else { "s" },
-        dim(),
-        reset(),
-    );
-
-    let mut handles = Vec::new();
-    let main_pipeline = pipelines.pop();
-
-    for mut pipeline in pipelines {
-        let sd = shutdown.clone();
-        handles.push(tokio::spawn(async move { pipeline.run_async(&sd).await }));
-    }
-
-    if let Some(mut main_pipe) = main_pipeline {
-        let result = main_pipe.run_async(&shutdown).await;
-        // Always cancel + join siblings, even if main pipeline errored.
-        shutdown.cancel();
-        let mut had_sibling_error = false;
-        for h in handles {
-            match h.await {
-                Ok(Err(e)) => {
-                    eprintln!("pipeline error: {e}");
-                    had_sibling_error = true;
-                }
-                Err(e) => {
-                    eprintln!("pipeline task panicked: {e}");
-                    had_sibling_error = true;
-                }
-                Ok(Ok(())) => {}
-            }
-        }
-        result?;
-        if had_sibling_error {
-            return Err(CliError::Runtime(io::Error::other(
-                "one or more sibling pipelines failed",
-            )));
-        }
-    } else {
-        let mut had_error = false;
-        for h in handles {
-            match h.await {
-                Ok(Err(e)) => {
-                    eprintln!("pipeline error: {e}");
-                    had_error = true;
-                }
-                Err(e) => {
-                    eprintln!("pipeline task panicked: {e}");
-                    had_error = true;
-                }
-                Ok(Ok(())) => {}
-            }
-        }
-        if had_error {
-            return Err(CliError::Runtime(io::Error::other(
-                "one or more pipelines failed",
-            )));
-        }
-    }
-
-    // Print shutdown summary.
-    print_shutdown_stats(&pipeline_metrics, startup_start.elapsed());
-
-    if let Err(e) = meter_provider.shutdown() {
-        eprintln!(
-            "{}warning{}: meter provider shutdown: {e}",
-            yellow(),
-            reset()
-        );
-    }
-    if let Err(e) = tracer_provider.shutdown() {
-        eprintln!(
-            "{}warning{}: tracer provider shutdown: {e}",
-            yellow(),
-            reset()
-        );
-    }
-
-    Ok(())
+    logfwd_runtime::bootstrap::run_pipelines(
+        config,
+        base_path,
+        logfwd_runtime::bootstrap::RunOptions {
+            config_path,
+            config_yaml,
+            version: VERSION,
+            use_color: use_color(),
+            json_logs_for_stderr: use_json_logs_for_stderr(io::stderr().is_terminal()),
+        },
+    )
+    .await
+    .map_err(Into::into)
 }
 
-// ---------------------------------------------------------------------------
-// Shutdown summary
-// ---------------------------------------------------------------------------
-
-fn print_shutdown_stats(
-    metrics: &[Arc<logfwd_io::diagnostics::PipelineMetrics>],
-    uptime: std::time::Duration,
-) {
-    use std::sync::atomic::Ordering::Relaxed;
-
-    let total_lines_in: u64 = metrics
-        .iter()
-        .map(|m| m.transform_in.lines_total.load(Relaxed))
-        .sum();
-    let total_lines_out: u64 = metrics
-        .iter()
-        .map(|m| m.transform_out.lines_total.load(Relaxed))
-        .sum();
-    let total_bytes_in: u64 = metrics
-        .iter()
-        .map(|m| m.transform_in.bytes_total.load(Relaxed))
-        .sum();
-    let total_batches: u64 = metrics.iter().map(|m| m.batches_total.load(Relaxed)).sum();
-    let total_errors: u64 = metrics
-        .iter()
-        .map(|m| m.transform_errors.load(Relaxed))
-        .sum();
-    let total_dropped: u64 = metrics
-        .iter()
-        .map(|m| m.dropped_batches_total.load(Relaxed))
-        .sum();
-
-    eprintln!();
-    eprintln!(
-        "{}stopped{} · uptime {}",
-        dim(),
-        reset(),
-        format_duration(uptime),
-    );
-
-    if total_lines_in > 0 || total_batches > 0 {
-        eprintln!(
-            "  lines  {} in → {} out  ({} batches)",
-            format_count(total_lines_in),
-            format_count(total_lines_out),
-            format_count(total_batches),
-        );
-        if total_bytes_in > 0 {
-            eprintln!("  bytes  {} in", format_bytes(total_bytes_in));
-        }
-        if total_errors > 0 || total_dropped > 0 {
-            eprintln!(
-                "  {}errors{} {} transform, {} dropped batches",
-                yellow(),
-                reset(),
-                total_errors,
-                total_dropped,
-            );
-        }
-    }
-}
-
+#[cfg(test)]
 fn format_duration(d: std::time::Duration) -> String {
-    let secs = d.as_secs();
-    if secs < 60 {
-        format!("{secs}s")
-    } else if secs < 3600 {
-        format!("{}m {}s", secs / 60, secs % 60)
-    } else {
-        format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
-    }
+    logfwd_runtime::bootstrap::format_duration(d)
 }
 
+#[cfg(test)]
 fn format_count(n: u64) -> String {
-    if n < 1_000 {
-        n.to_string()
-    } else if n < 1_000_000 {
-        format!("{:.1}K", n as f64 / 1_000.0)
-    } else if n < 1_000_000_000 {
-        format!("{:.1}M", n as f64 / 1_000_000.0)
-    } else {
-        format!("{:.1}B", n as f64 / 1_000_000_000.0)
-    }
+    logfwd_runtime::bootstrap::format_count(n)
 }
 
+#[cfg(test)]
 fn format_bytes(b: u64) -> String {
-    if b < 1024 {
-        format!("{b} B")
-    } else if b < 1024 * 1024 {
-        format!("{:.1} KB", b as f64 / 1024.0)
-    } else if b < 1024 * 1024 * 1024 {
-        format!("{:.1} MB", b as f64 / (1024.0 * 1024.0))
-    } else {
-        format!("{:.1} GB", b as f64 / (1024.0 * 1024.0 * 1024.0))
-    }
-}
-
-// ---------------------------------------------------------------------------
-// ---------------------------------------------------------------------------
-// Instance lock (#737)
-// ---------------------------------------------------------------------------
-
-/// Acquire an exclusive lock file to prevent multiple logfwd instances from
-/// processing the same data directory. Returns a guard that holds the lock
-/// for the lifetime of the caller.
-///
-/// On non-Unix platforms, logs a warning and returns a dummy guard.
-fn acquire_instance_lock(
-    config: &logfwd_config::Config,
-) -> Result<Option<std::fs::File>, CliError> {
-    let data_dir = config.storage.data_dir.as_ref().map_or_else(
-        logfwd_io::checkpoint::default_data_dir,
-        std::path::PathBuf::from,
-    );
-    std::fs::create_dir_all(&data_dir)?;
-    let lock_path = data_dir.join("logfwd.lock");
-    let lock_file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&lock_path)?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::io::AsRawFd;
-        // SAFETY: `lock_file` is an open `File`, so `as_raw_fd()` returns a valid
-        // file descriptor. `libc::flock` is safe to call on any valid fd — it only
-        // manipulates the kernel-level advisory lock, no memory mutation.
-        let ret = unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-        if ret != 0 {
-            let err = io::Error::last_os_error();
-            if err.kind() == io::ErrorKind::WouldBlock || err.raw_os_error() == Some(libc::EAGAIN) {
-                return Err(CliError::Runtime(io::Error::other(format!(
-                    "another logfwd instance is already running (lock: {})",
-                    lock_path.display()
-                ))));
-            }
-            return Err(CliError::Runtime(err));
-        }
-        // Note: tracing subscriber not yet initialized at this point.
-    }
-
-    #[cfg(not(unix))]
-    eprintln!("warn: file-based instance locking not supported on this platform");
-
-    // Return the File so the lock is held until the caller drops it.
-    Ok(Some(lock_file))
-}
-
-// ---------------------------------------------------------------------------
-// OTel metrics
-// ---------------------------------------------------------------------------
-
-fn build_meter_provider(
-    config: &logfwd_config::Config,
-) -> io::Result<opentelemetry_sdk::metrics::SdkMeterProvider> {
-    use opentelemetry_sdk::metrics::SdkMeterProvider;
-
-    if let Some(ref endpoint) = config.server.metrics_endpoint {
-        let interval_secs = config.server.metrics_interval_secs.unwrap_or(60);
-
-        let otlp_exporter = opentelemetry_otlp::MetricExporter::builder()
-            .with_http()
-            .with_endpoint(endpoint)
-            .build()
-            .map_err(|e| io::Error::other(format!("OTLP metric exporter: {e}")))?;
-
-        let reader = opentelemetry_sdk::metrics::PeriodicReader::builder(otlp_exporter)
-            .with_interval(std::time::Duration::from_secs(interval_secs))
-            .build();
-
-        eprintln!(
-            "  {}metrics push{}: {endpoint} (every {interval_secs}s)",
-            dim(),
-            reset(),
-        );
-
-        Ok(SdkMeterProvider::builder().with_reader(reader).build())
-    } else {
-        Ok(SdkMeterProvider::builder().build())
-    }
-}
-
-// ---------------------------------------------------------------------------
-// OTel tracing + in-process span buffer
-// ---------------------------------------------------------------------------
-
-/// Build a `SdkTracerProvider` that writes completed spans into `buf`.
-/// If `config.server.traces_endpoint` is set, also pushes via OTLP.
-pub fn build_tracer_provider(
-    buf: logfwd_io::span_exporter::SpanBuffer,
-    config: &logfwd_config::Config,
-) -> io::Result<opentelemetry_sdk::trace::SdkTracerProvider> {
-    use logfwd_io::span_exporter::RingBufferExporter;
-    use opentelemetry_sdk::trace::{SdkTracerProvider, SimpleSpanProcessor};
-
-    let ring_processor = SimpleSpanProcessor::new(RingBufferExporter::new(buf));
-
-    let mut builder = SdkTracerProvider::builder().with_span_processor(ring_processor);
-
-    if let Some(ref endpoint) = config.server.traces_endpoint {
-        let otlp_exporter = opentelemetry_otlp::SpanExporter::builder()
-            .with_http()
-            .with_endpoint(endpoint)
-            .build()
-            .map_err(|e| io::Error::other(format!("OTLP trace exporter: {e}")))?;
-        builder = builder.with_span_processor(
-            opentelemetry_sdk::trace::BatchSpanProcessor::builder(otlp_exporter).build(),
-        );
-        eprintln!(
-            "  {}traces push{}: {}",
-            dim(),
-            reset(),
-            redact_url(endpoint)
-        );
-    }
-
-    Ok(builder.build())
-}
-
-/// Return a URL with credentials and query parameters stripped, for safe logging.
-/// Falls back to the original string if parsing fails.
-fn redact_url(url: &str) -> String {
-    // Find scheme end ("://")
-    let after_scheme = url.find("://").map_or(0, |i| i + 3);
-    let rest = &url[after_scheme..];
-    // Strip userinfo (anything before '@' in the authority)
-    let host_start = rest.find('@').map_or(0, |i| i + 1);
-    let authority_and_path = &rest[host_start..];
-    // Strip path/query/fragment — keep only host:port
-    let host_end = authority_and_path
-        .find(['/', '?', '#'])
-        .unwrap_or(authority_and_path.len());
-    let host = &authority_and_path[..host_end];
-    if host.is_empty() {
-        return url.to_string();
-    }
-    format!("{}://{}", &url[..after_scheme.saturating_sub(3)], host)
+    logfwd_runtime::bootstrap::format_bytes(b)
 }
 
 // ---------------------------------------------------------------------------
@@ -1678,33 +1213,6 @@ fn generate_json_log_file(num_lines: usize, output: &str) -> io::Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// Allocator memory stats
-// ---------------------------------------------------------------------------
-
-#[cfg(unix)]
-/// Read jemalloc memory stats: resident, allocated, and active bytes.
-///
-/// Returns `None` if the stats are unavailable (e.g. the epoch refresh fails).
-/// This function is passed to [`DiagnosticsServer`] so the `/admin/v1/status`
-/// endpoint can expose live allocator metrics.
-fn jemalloc_stats() -> Option<logfwd_io::diagnostics::MemoryStats> {
-    use tikv_jemalloc_ctl::{epoch, stats};
-
-    // Refresh the epoch so subsequent reads reflect current allocator state.
-    epoch::mib().ok()?.advance().ok()?;
-
-    let resident = stats::resident::mib().ok()?.read().ok()?;
-    let allocated = stats::allocated::mib().ok()?.read().ok()?;
-    let active = stats::active::mib().ok()?.read().ok()?;
-
-    Some(logfwd_io::diagnostics::MemoryStats {
-        resident,
-        allocated,
-        active,
-    })
-}
-
-// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1744,6 +1252,13 @@ mod cli_tests {
             Commands::EffectiveConfig { config } => assert!(config.is_none()),
             other => panic!("expected effective-config command, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn clap_rejects_removed_dump_config_alias() {
+        let err = Cli::try_parse_from(["logfwd", "dump-config"])
+            .expect_err("parser should reject removed dump-config alias");
+        assert_eq!(err.kind(), ErrorKind::InvalidSubcommand);
     }
 
     #[test]
@@ -1840,6 +1355,24 @@ mod cli_tests {
     fn json_logs_are_used_only_when_stderr_is_not_a_tty() {
         assert!(!use_json_logs_for_stderr(true));
         assert!(use_json_logs_for_stderr(false));
+    }
+
+    #[test]
+    fn wizard_requires_interactive_stdin_and_stdout() {
+        assert!(!wizard_uses_interactive_terminals(false, false));
+        assert!(!wizard_uses_interactive_terminals(true, false));
+        assert!(!wizard_uses_interactive_terminals(false, true));
+        assert!(wizard_uses_interactive_terminals(true, true));
+    }
+
+    #[test]
+    fn replace_env_placeholders_rewrites_all_braced_vars() {
+        let input = "a: ${FOO}\nb: ${BAR_BAZ}\nc: ${}\nd: ${UNTERMINATED";
+        let actual = replace_env_placeholders_for_example_validation(input);
+        assert_eq!(
+            actual,
+            "a: example-env-value\nb: example-env-value\nc: ${}\nd: ${UNTERMINATED"
+        );
     }
 
     #[test]
@@ -1993,7 +1526,7 @@ transform: |
             };
 
             // Keep example validation hermetic: inline secrets placeholders with dummy values.
-            let raw = raw.replace("${ELASTICSEARCH_API_KEY}", "example-api-key");
+            let raw = replace_env_placeholders_for_example_validation(&raw);
 
             let config = match logfwd_config::Config::load_str(&raw) {
                 Ok(cfg) => cfg,

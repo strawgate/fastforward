@@ -25,6 +25,8 @@ use opentelemetry_proto::tonic::common::v1::any_value::Value;
 use prost::Message;
 
 use crate::InputError;
+use crate::background_http_task::BackgroundHttpTask;
+use crate::diagnostics::ComponentStats;
 use crate::input::{InputEvent, InputSource};
 use logfwd_types::diagnostics::ComponentHealth;
 use logfwd_types::field_names;
@@ -41,9 +43,7 @@ pub struct OtlpReceiverInput {
     rx: Option<mpsc::Receiver<ReceiverPayload>>,
     /// The address the HTTP server is bound to.
     addr: std::net::SocketAddr,
-    server: Arc<tiny_http::Server>,
-    /// Keep the server thread handle alive.
-    handle: Option<std::thread::JoinHandle<()>>,
+    background_task: BackgroundHttpTask,
     /// Shutdown mechanism for the background thread.
     is_running: Arc<AtomicBool>,
     /// Source-owned health snapshot for readiness and diagnostics.
@@ -57,39 +57,101 @@ enum ReceiverMode {
 }
 
 enum ReceiverPayload {
-    JsonLines(Vec<u8>),
-    Batch(RecordBatch),
-}
-
-struct ResolvedStringField {
-    idx: usize,
-    bytes: Vec<u8>,
+    JsonLines {
+        lines: Vec<u8>,
+        accounted_bytes: u64,
+    },
+    Batch {
+        batch: RecordBatch,
+        accounted_bytes: u64,
+    },
 }
 
 impl OtlpReceiverInput {
     /// Bind an HTTP server on `addr` (e.g. "0.0.0.0:4318").
     /// Spawns a background thread to handle requests.
     pub fn new(name: impl Into<String>, addr: &str) -> io::Result<Self> {
-        Self::new_with_capacity_and_mode(name, addr, CHANNEL_BOUND, ReceiverMode::JsonLines)
+        Self::new_with_capacity_mode_and_stats(
+            name,
+            addr,
+            CHANNEL_BOUND,
+            ReceiverMode::JsonLines,
+            None,
+        )
+    }
+
+    /// Like [`Self::new`], but wires input diagnostics into receiver-side
+    /// transport and decode failures.
+    pub fn new_with_stats(
+        name: impl Into<String>,
+        addr: &str,
+        stats: Arc<ComponentStats>,
+    ) -> io::Result<Self> {
+        Self::new_with_capacity_mode_and_stats(
+            name,
+            addr,
+            CHANNEL_BOUND,
+            ReceiverMode::JsonLines,
+            Some(stats),
+        )
     }
 
     /// Like [`Self::new`], but emits structured batches directly instead of
     /// JSON lines.
     pub fn new_structured(name: impl Into<String>, addr: &str) -> io::Result<Self> {
-        Self::new_with_capacity_and_mode(name, addr, CHANNEL_BOUND, ReceiverMode::StructuredBatch)
+        Self::new_with_capacity_mode_and_stats(
+            name,
+            addr,
+            CHANNEL_BOUND,
+            ReceiverMode::StructuredBatch,
+            None,
+        )
+    }
+
+    /// Like [`Self::new_structured`], but wires input diagnostics into
+    /// receiver-side transport and decode failures.
+    pub fn new_structured_with_stats(
+        name: impl Into<String>,
+        addr: &str,
+        stats: Arc<ComponentStats>,
+    ) -> io::Result<Self> {
+        Self::new_with_capacity_mode_and_stats(
+            name,
+            addr,
+            CHANNEL_BOUND,
+            ReceiverMode::StructuredBatch,
+            Some(stats),
+        )
     }
 
     /// Like [`Self::new`] but with an explicit channel capacity. Useful for tests.
     #[cfg(test)]
     fn new_with_capacity(name: impl Into<String>, addr: &str, capacity: usize) -> io::Result<Self> {
-        Self::new_with_capacity_and_mode(name, addr, capacity, ReceiverMode::JsonLines)
+        Self::new_with_capacity_mode_and_stats(name, addr, capacity, ReceiverMode::JsonLines, None)
     }
 
-    fn new_with_capacity_and_mode(
+    #[cfg(test)]
+    fn new_with_capacity_and_stats(
+        name: impl Into<String>,
+        addr: &str,
+        capacity: usize,
+        stats: Arc<ComponentStats>,
+    ) -> io::Result<Self> {
+        Self::new_with_capacity_mode_and_stats(
+            name,
+            addr,
+            capacity,
+            ReceiverMode::JsonLines,
+            Some(stats),
+        )
+    }
+
+    fn new_with_capacity_mode_and_stats(
         name: impl Into<String>,
         addr: &str,
         capacity: usize,
         mode: ReceiverMode,
+        stats: Option<Arc<ComponentStats>>,
     ) -> io::Result<Self> {
         let server = Arc::new(
             tiny_http::Server::http(addr)
@@ -110,15 +172,27 @@ impl OtlpReceiverInput {
         let is_running_clone = Arc::clone(&is_running);
         let health = Arc::new(AtomicU8::new(ComponentHealth::Healthy.as_repr()));
         let health_clone = Arc::clone(&health);
+        let stats_clone = stats;
 
         let handle = std::thread::Builder::new()
             .name("otlp-receiver".into())
             .spawn(move || {
+                let record_error = |stats: &Option<Arc<ComponentStats>>| {
+                    if let Some(stats) = stats {
+                        stats.inc_errors();
+                    }
+                };
+                let record_parse_error = |stats: &Option<Arc<ComponentStats>>| {
+                    if let Some(stats) = stats {
+                        stats.inc_parse_errors(1);
+                    }
+                };
                 while is_running_clone.load(Ordering::Relaxed) {
                     let mut request = match server_clone.recv_timeout(Duration::from_millis(100)) {
                         Ok(Some(req)) => req,
                         Ok(None) => continue, // timeout — check is_running and retry
                         Err(_) => {
+                            record_error(&stats_clone);
                             health_clone
                                 .store(ComponentHealth::Failed.as_repr(), Ordering::Relaxed);
                             break;
@@ -151,6 +225,7 @@ impl OtlpReceiverInput {
 
                     // Reject bodies that declare a size over the limit.
                     if request.body_length().unwrap_or(0) > MAX_BODY_SIZE {
+                        record_error(&stats_clone);
                         let _ = request.respond(
                             tiny_http::Response::from_string("payload too large")
                                 .with_status_code(413),
@@ -167,6 +242,7 @@ impl OtlpReceiverInput {
                         .read_to_end(&mut body)
                     {
                         Ok(n) if n > MAX_BODY_SIZE => {
+                            record_error(&stats_clone);
                             let _ = request.respond(
                                 tiny_http::Response::from_string("payload too large")
                                     .with_status_code(413),
@@ -174,6 +250,7 @@ impl OtlpReceiverInput {
                             continue;
                         }
                         Err(_) => {
+                            record_error(&stats_clone);
                             let _ = request.respond(
                                 tiny_http::Response::from_string("read error")
                                     .with_status_code(400),
@@ -190,16 +267,20 @@ impl OtlpReceiverInput {
                         .find(|h| h.field.equiv("Content-Encoding"))
                         .map(|h| h.value.as_str().to_lowercase());
 
+                    let accounted_bytes = body.len() as u64;
+
                     let body = match content_encoding.as_deref() {
                         Some("zstd") => match decompress_zstd(&body) {
                             Ok(body) => body,
                             Err(InputError::Receiver(msg)) => {
+                                record_error(&stats_clone);
                                 let _ = request.respond(
                                     tiny_http::Response::from_string(msg).with_status_code(400),
                                 );
                                 continue;
                             }
                             Err(InputError::Io(e)) if e.kind() == io::ErrorKind::InvalidData => {
+                                record_error(&stats_clone);
                                 let _ = request.respond(
                                     tiny_http::Response::from_string(e.to_string())
                                         .with_status_code(413),
@@ -207,6 +288,7 @@ impl OtlpReceiverInput {
                                 continue;
                             }
                             Err(_) => {
+                                record_error(&stats_clone);
                                 let _ = request.respond(
                                     tiny_http::Response::from_string("zstd decompression failed")
                                         .with_status_code(400),
@@ -217,12 +299,14 @@ impl OtlpReceiverInput {
                         Some("gzip") => match decompress_gzip(&body) {
                             Ok(body) => body,
                             Err(InputError::Receiver(msg)) => {
+                                record_error(&stats_clone);
                                 let _ = request.respond(
                                     tiny_http::Response::from_string(msg).with_status_code(400),
                                 );
                                 continue;
                             }
                             Err(InputError::Io(e)) if e.kind() == io::ErrorKind::InvalidData => {
+                                record_error(&stats_clone);
                                 let _ = request.respond(
                                     tiny_http::Response::from_string(e.to_string())
                                         .with_status_code(413),
@@ -230,6 +314,7 @@ impl OtlpReceiverInput {
                                 continue;
                             }
                             Err(_) => {
+                                record_error(&stats_clone);
                                 let _ = request.respond(
                                     tiny_http::Response::from_string("gzip decompression failed")
                                         .with_status_code(400),
@@ -239,6 +324,7 @@ impl OtlpReceiverInput {
                         },
                         None | Some("identity") => body,
                         Some(other) => {
+                            record_error(&stats_clone);
                             let _ = request.respond(
                                 tiny_http::Response::from_string(format!(
                                     "unsupported content-encoding: {other}"
@@ -263,14 +349,15 @@ impl OtlpReceiverInput {
 
                     // Decode and convert to the selected downstream shape.
                     let payload = if is_json {
-                        decode_otlp_logs_with_mode_json(&body, mode)
+                        decode_otlp_logs_with_mode_json(&body, mode, accounted_bytes)
                     } else {
-                        decode_otlp_logs_with_mode(&body, mode)
+                        decode_otlp_logs_with_mode(&body, mode, accounted_bytes)
                     };
 
                     let payload = match payload {
                         Ok(payload) => payload,
                         Err(msg) => {
+                            record_parse_error(&stats_clone);
                             let _ = request.respond(
                                 tiny_http::Response::from_string(msg.to_string())
                                     .with_status_code(400),
@@ -294,7 +381,7 @@ impl OtlpReceiverInput {
                                 .with_header(
                                     "Content-Type: application/json"
                                         .parse::<tiny_http::Header>()
-                                        .unwrap(),
+                                        .expect("static Content-Type header is valid"),
                                 )
                                 .with_status_code(200);
                             let _ = request.respond(response);
@@ -310,6 +397,7 @@ impl OtlpReceiverInput {
                             );
                         }
                         Err(mpsc::TrySendError::Disconnected(_)) => {
+                            record_error(&stats_clone);
                             if is_running_clone.load(Ordering::Relaxed) {
                                 health_clone
                                     .store(ComponentHealth::Failed.as_repr(), Ordering::Relaxed);
@@ -330,8 +418,7 @@ impl OtlpReceiverInput {
             name: name.into(),
             rx: Some(rx),
             addr: bound_addr,
-            server,
-            handle: Some(handle),
+            background_task: BackgroundHttpTask::new(server, handle),
             is_running,
             health,
         })
@@ -349,10 +436,6 @@ impl Drop for OtlpReceiverInput {
             .store(ComponentHealth::Stopping.as_repr(), Ordering::Relaxed);
         self.is_running.store(false, Ordering::Relaxed);
         self.rx.take();
-        self.server.unblock();
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
-        }
         self.health
             .store(ComponentHealth::Stopped.as_repr(), Ordering::Relaxed);
     }
@@ -364,13 +447,23 @@ impl InputSource for OtlpReceiverInput {
             return Ok(vec![]);
         };
         let mut all = Vec::new();
+        let mut all_accounted_bytes = 0_u64;
         let mut batches = Vec::new();
 
         // Drain all available decoded payloads.
         while let Ok(data) = rx.try_recv() {
             match data {
-                ReceiverPayload::JsonLines(data) => all.extend_from_slice(&data),
-                ReceiverPayload::Batch(batch) => batches.push(batch),
+                ReceiverPayload::JsonLines {
+                    lines,
+                    accounted_bytes,
+                } => {
+                    all.extend_from_slice(&lines);
+                    all_accounted_bytes = all_accounted_bytes.saturating_add(accounted_bytes);
+                }
+                ReceiverPayload::Batch {
+                    batch,
+                    accounted_bytes,
+                } => batches.push((batch, accounted_bytes)),
             }
         }
 
@@ -379,12 +472,18 @@ impl InputSource for OtlpReceiverInput {
             events.push(InputEvent::Data {
                 bytes: all,
                 source_id: None,
+                accounted_bytes: all_accounted_bytes,
             });
         }
-        events.extend(batches.into_iter().map(|batch| InputEvent::Batch {
-            batch,
-            source_id: None,
-        }));
+        events.extend(
+            batches
+                .into_iter()
+                .map(|(batch, accounted_bytes)| InputEvent::Batch {
+                    batch,
+                    source_id: None,
+                    accounted_bytes,
+                }),
+        );
         Ok(events)
     }
 
@@ -394,12 +493,7 @@ impl InputSource for OtlpReceiverInput {
 
     fn health(&self) -> ComponentHealth {
         let stored = ComponentHealth::from_repr(self.health.load(Ordering::Relaxed));
-        if self
-            .handle
-            .as_ref()
-            .is_some_and(std::thread::JoinHandle::is_finished)
-            && self.is_running.load(Ordering::Relaxed)
-        {
+        if self.background_task.is_finished() && self.is_running.load(Ordering::Relaxed) {
             ComponentHealth::Failed
         } else {
             stored
@@ -410,8 +504,8 @@ impl InputSource for OtlpReceiverInput {
 impl ReceiverPayload {
     fn is_empty(&self) -> bool {
         match self {
-            ReceiverPayload::JsonLines(lines) => lines.is_empty(),
-            ReceiverPayload::Batch(batch) => batch.num_rows() == 0,
+            ReceiverPayload::JsonLines { lines, .. } => lines.is_empty(),
+            ReceiverPayload::Batch { batch, .. } => batch.num_rows() == 0,
         }
     }
 }
@@ -576,11 +670,20 @@ fn decode_otlp_logs_json(body: &[u8]) -> Result<Vec<u8>, InputError> {
 fn decode_otlp_logs_with_mode_json(
     body: &[u8],
     mode: ReceiverMode,
+    accounted_bytes: u64,
 ) -> Result<ReceiverPayload, InputError> {
     match mode {
-        ReceiverMode::JsonLines => decode_otlp_logs_json(body).map(ReceiverPayload::JsonLines),
+        ReceiverMode::JsonLines => {
+            decode_otlp_logs_json(body).map(|lines| ReceiverPayload::JsonLines {
+                lines,
+                accounted_bytes,
+            })
+        }
         ReceiverMode::StructuredBatch => {
-            decode_otlp_logs_json_to_batch(body).map(ReceiverPayload::Batch)
+            decode_otlp_logs_json_to_batch(body).map(|batch| ReceiverPayload::Batch {
+                batch,
+                accounted_bytes,
+            })
         }
     }
 }
@@ -675,11 +778,18 @@ fn decode_otlp_logs(body: &[u8]) -> Result<Vec<u8>, InputError> {
 fn decode_otlp_logs_with_mode(
     body: &[u8],
     mode: ReceiverMode,
+    accounted_bytes: u64,
 ) -> Result<ReceiverPayload, InputError> {
     match mode {
-        ReceiverMode::JsonLines => decode_otlp_logs(body).map(ReceiverPayload::JsonLines),
+        ReceiverMode::JsonLines => decode_otlp_logs(body).map(|lines| ReceiverPayload::JsonLines {
+            lines,
+            accounted_bytes,
+        }),
         ReceiverMode::StructuredBatch => {
-            decode_otlp_logs_to_batch(body).map(ReceiverPayload::Batch)
+            decode_otlp_logs_to_batch(body).map(|batch| ReceiverPayload::Batch {
+                batch,
+                accounted_bytes,
+            })
         }
     }
 }
@@ -814,11 +924,7 @@ fn convert_request_to_batch(request: &ExportLogsServiceRequest) -> Result<Record
         if let Some(ref resource) = resource_logs.resource {
             for attr in &resource.attributes {
                 if let Some(ref value) = attr.value {
-                    if let Some(field) =
-                        resolve_stringified_field(&mut builder, &attr.key, value, &mut hex_buf)
-                    {
-                        resource_attrs.push(field);
-                    }
+                    resource_attrs.push((&attr.key, value));
                 }
             }
         }
@@ -848,8 +954,8 @@ fn convert_request_to_batch(request: &ExportLogsServiceRequest) -> Result<Record
                     }
                 }
 
-                for field in &resource_attrs {
-                    builder.append_decoded_str_by_idx(field.idx, &field.bytes);
+                for (key, value) in &resource_attrs {
+                    append_attribute_value(&mut builder, key, value, &mut hex_buf);
                 }
 
                 if !record.trace_id.is_empty() {
@@ -879,24 +985,11 @@ fn append_attribute_value(
     match &value.value {
         Some(Value::IntValue(v)) => builder.append_i64_value_by_idx(idx, *v),
         Some(Value::DoubleValue(v)) => builder.append_f64_value_by_idx(idx, *v),
-        Some(Value::BoolValue(v)) => {
-            builder.append_decoded_str_by_idx(idx, if *v { b"true" } else { b"false" });
-        }
+        Some(Value::BoolValue(v)) => builder.append_bool_by_idx(idx, *v),
         Some(Value::StringValue(v)) => builder.append_decoded_str_by_idx(idx, v.as_bytes()),
         Some(Value::BytesValue(v)) => append_hex_field(builder, idx, v, hex_buf),
         _ => {}
     }
-}
-
-fn resolve_stringified_field(
-    builder: &mut StreamingBuilder,
-    key: &str,
-    value: &AnyValue,
-    hex_buf: &mut Vec<u8>,
-) -> Option<ResolvedStringField> {
-    let idx = builder.resolve_field(key.as_bytes());
-    let bytes = any_value_to_string_bytes(value, hex_buf)?;
-    Some(ResolvedStringField { idx, bytes })
 }
 
 fn append_any_value_as_string(
@@ -920,26 +1013,6 @@ fn append_any_value_as_string(
         }
         Some(Value::BytesValue(v)) => append_hex_field(builder, idx, v, hex_buf),
         _ => {}
-    }
-}
-
-fn any_value_to_string_bytes(value: &AnyValue, hex_buf: &mut Vec<u8>) -> Option<Vec<u8>> {
-    match &value.value {
-        Some(Value::StringValue(v)) => Some(v.as_bytes().to_vec()),
-        Some(Value::IntValue(v)) => Some(v.to_string().into_bytes()),
-        Some(Value::DoubleValue(v)) => Some(v.to_string().into_bytes()),
-        Some(Value::BoolValue(v)) => Some(if *v {
-            b"true".to_vec()
-        } else {
-            b"false".to_vec()
-        }),
-        Some(Value::BytesValue(v)) => {
-            hex_buf.clear();
-            hex_buf.reserve(v.len() * 2);
-            write_hex_to_buf(hex_buf, v);
-            Some(hex_buf.clone())
-        }
-        _ => None,
     }
 }
 
@@ -1315,7 +1388,8 @@ mod hex {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::array::{Array, Int64Array, StringArray, StringViewArray};
+    use arrow::array::{Array, BooleanArray, Int64Array, StringArray, StringViewArray};
+    use arrow::datatypes::DataType;
     use bytes::Bytes;
     use logfwd_arrow::Scanner;
     use logfwd_core::scan_config::ScanConfig;
@@ -1436,7 +1510,106 @@ mod tests {
                 })
                 .collect();
         }
+        if let Some(array) = array.as_any().downcast_ref::<BooleanArray>() {
+            return (0..array.len())
+                .map(|idx| {
+                    if array.is_null(idx) {
+                        "NULL".to_string()
+                    } else {
+                        array.value(idx).to_string()
+                    }
+                })
+                .collect();
+        }
         panic!("unsupported test array type: {:?}", array.data_type());
+    }
+
+    #[test]
+    fn structured_batch_preserves_boolean_type_and_dotted_attributes() {
+        let request = ExportLogsServiceRequest {
+            resource_logs: vec![ResourceLogs {
+                resource: Some(Resource {
+                    attributes: vec![KeyValue {
+                        key: "service.name".into(),
+                        value: Some(AnyValue {
+                            value: Some(Value::StringValue("checkout-api".into())),
+                        }),
+                    }],
+                    ..Default::default()
+                }),
+                scope_logs: vec![ScopeLogs {
+                    log_records: vec![LogRecord {
+                        attributes: vec![KeyValue {
+                            key: "sampled".into(),
+                            value: Some(AnyValue {
+                                value: Some(Value::BoolValue(true)),
+                            }),
+                        }],
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        };
+
+        let batch = convert_request_to_batch(&request).expect("structured decode succeeds");
+
+        let sampled = batch
+            .column_by_name("sampled")
+            .expect("sampled column must exist");
+        assert_eq!(sampled.data_type(), &DataType::Boolean);
+        let sampled = sampled
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .expect("sampled must be BooleanArray");
+        assert!(sampled.value(0), "sampled=true must be preserved as bool");
+
+        let service_name = batch
+            .column_by_name("service.name")
+            .expect("dotted attribute must keep original column name");
+        let service_name = service_name
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("service.name should remain a flat string column");
+        assert_eq!(service_name.value(0), "checkout-api");
+        assert!(
+            batch.column_by_name("service_name").is_none(),
+            "dotted attributes must not require sanitized internal-name coupling"
+        );
+    }
+
+    #[test]
+    fn structured_batch_preserves_resource_boolean_type() {
+        let request = ExportLogsServiceRequest {
+            resource_logs: vec![ResourceLogs {
+                resource: Some(Resource {
+                    attributes: vec![KeyValue {
+                        key: "resource.sampled".into(),
+                        value: Some(AnyValue {
+                            value: Some(Value::BoolValue(true)),
+                        }),
+                    }],
+                    ..Default::default()
+                }),
+                scope_logs: vec![ScopeLogs {
+                    log_records: vec![LogRecord::default()],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        };
+
+        let batch = convert_request_to_batch(&request).expect("structured decode succeeds");
+        let sampled = batch
+            .column_by_name("resource.sampled")
+            .expect("resource.sampled must exist");
+        assert_eq!(sampled.data_type(), &DataType::Boolean);
+        let sampled = sampled
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .expect("resource.sampled must be BooleanArray");
+        assert!(sampled.value(0), "resource bool attribute must stay typed");
     }
 
     #[test]
@@ -2062,6 +2235,32 @@ mod tests {
     }
 
     #[test]
+    fn invalid_protobuf_increments_parse_errors_when_stats_hooked() {
+        let stats = Arc::new(ComponentStats::new());
+        let receiver = OtlpReceiverInput::new_with_capacity_and_stats(
+            "test",
+            "127.0.0.1:0",
+            16,
+            Arc::clone(&stats),
+        )
+        .unwrap();
+        let url = format!("http://{}/v1/logs", receiver.local_addr());
+
+        let status = match ureq::post(&url)
+            .header("content-type", "application/x-protobuf")
+            .send(b"not valid protobuf".as_slice())
+        {
+            Ok(resp) => resp.status().as_u16(),
+            Err(ureq::Error::StatusCode(code)) => code,
+            Err(e) => panic!("unexpected transport error: {e}"),
+        };
+
+        assert_eq!(status, 400);
+        assert_eq!(stats.parse_errors(), 1);
+        assert_eq!(stats.errors(), 0);
+    }
+
+    #[test]
     fn handles_empty_body() {
         let json = decode_otlp_logs(b"").unwrap();
         assert!(json.is_empty());
@@ -2406,7 +2605,13 @@ mod tests {
     fn receiver_health_reports_failed_when_server_thread_exits() {
         let mut receiver = OtlpReceiverInput::new("test-health-failed", "127.0.0.1:0")
             .expect("should bind successfully");
-        receiver.handle = Some(std::thread::spawn(|| {}));
+        // Ensure the real worker exits before replacing the ownership task in-test.
+        receiver.is_running.store(false, Ordering::Relaxed);
+        receiver.background_task = BackgroundHttpTask::new(
+            Arc::new(tiny_http::Server::http("127.0.0.1:0").expect("bind synthetic test server")),
+            std::thread::spawn(|| {}),
+        );
+        receiver.is_running.store(true, Ordering::Relaxed);
         std::thread::sleep(Duration::from_millis(10));
 
         assert_eq!(receiver.health(), ComponentHealth::Failed);

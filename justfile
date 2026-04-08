@@ -39,10 +39,17 @@ test:
 test-all:
     cargo nextest run --workspace --profile ci
 
-# Run Kani formal verification proofs (logfwd-core only)
+# Run required Kani formal verification proofs for production crates
 # Requires: cargo install --locked kani-verifier && cargo kani setup
 kani:
+    just kani-required
+
+# Run the required Kani crate set enforced by CI guardrails.
+kani-required:
     RUSTC_WRAPPER="" cargo kani -p logfwd-core -Z function-contracts -Z mem-predicates -Z stubbing -j $CARGO_BUILD_JOBS
+    RUSTC_WRAPPER="" cargo kani -p logfwd-arrow -Z function-contracts -Z mem-predicates -Z stubbing -j $CARGO_BUILD_JOBS
+    RUSTC_WRAPPER="" cargo kani -p logfwd-io -Z function-contracts -Z mem-predicates -Z stubbing -j $CARGO_BUILD_JOBS
+    RUSTC_WRAPPER="" cargo kani -p logfwd-output -Z function-contracts -Z mem-predicates -Z stubbing -j $CARGO_BUILD_JOBS
 
 # Validate the non-core Kani boundary contract.
 kani-boundary:
@@ -86,9 +93,14 @@ test-extended:
     cargo nextest run --profile ci --run-ignored ignored-only
     cargo test -p logfwd --features turmoil --test turmoil_sim
 
-# Build release binary
+# Build release binary (full package, includes DataFusion SQL)
 build:
-    cargo build --release
+    cargo build --release -p logfwd
+
+# Build a fast local dev binary without DataFusion SQL.
+# Useful for tighter compile/edit loops; this is NOT the release artifact.
+build-dev-lite:
+    cargo build --release -p logfwd --no-default-features
 
 # ---------------------------------------------------------------------------
 # End-to-end pipeline benchmarks (bench/scenarios/*.yaml)

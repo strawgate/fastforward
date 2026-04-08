@@ -10,7 +10,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use arrow::array::{ArrayRef, Float64Array, Int64Array, StringViewBuilder, StructArray};
+use arrow::array::{
+    ArrayRef, BooleanArray, Float64Array, Int64Array, StringViewBuilder, StructArray,
+};
 use arrow::buffer::{Buffer, NullBuffer};
 use arrow::datatypes::{DataType, Field, Fields, Schema};
 use arrow::error::ArrowError;
@@ -36,9 +38,12 @@ struct FieldColumns {
     int_values: Vec<(u32, i64)>,
     /// Float values: (row, parsed_value).
     float_values: Vec<(u32, f64)>,
+    /// Bool values: (row, value).
+    bool_values: Vec<(u32, bool)>,
     has_str: bool,
     has_int: bool,
     has_float: bool,
+    has_bool: bool,
     /// The last row this field was written to, used for dedup when idx >= 64.
     last_row: u32,
 }
@@ -50,9 +55,11 @@ impl FieldColumns {
             str_views: Vec::with_capacity(256),
             int_values: Vec::with_capacity(256),
             float_values: Vec::with_capacity(256),
+            bool_values: Vec::with_capacity(256),
             has_str: false,
             has_int: false,
             has_float: false,
+            has_bool: false,
             last_row: u32::MAX,
         }
     }
@@ -61,9 +68,11 @@ impl FieldColumns {
         self.str_views.clear();
         self.int_values.clear();
         self.float_values.clear();
+        self.bool_values.clear();
         self.has_str = false;
         self.has_int = false;
         self.has_float = false;
+        self.has_bool = false;
         self.last_row = u32::MAX;
     }
 }
@@ -120,6 +129,8 @@ pub struct StreamingBuilder {
     raw_written_this_row: bool,
     /// Protocol state — enforced via `debug_assert` in each method.
     state: BuilderState,
+    /// Constant per-row resource attributes emitted as `_resource_*` columns.
+    resource_attrs: Vec<(String, String)>,
 }
 
 impl Default for StreamingBuilder {
@@ -142,7 +153,27 @@ impl StreamingBuilder {
             raw_views: Vec::new(),
             raw_written_this_row: false,
             state: BuilderState::Idle,
+            resource_attrs: Vec::new(),
         }
+    }
+
+    /// Configure constant per-row resource attributes for subsequent batches.
+    pub fn set_resource_attributes(&mut self, attrs: &[(String, String)]) {
+        self.resource_attrs.clear();
+        self.resource_attrs.extend(attrs.iter().cloned());
+    }
+
+    fn resource_col_name(key: &str) -> String {
+        let mut out = String::with_capacity("_resource_".len() + key.len());
+        out.push_str("_resource_");
+        for ch in key.chars() {
+            if ch.is_ascii_alphanumeric() {
+                out.push(ch.to_ascii_lowercase());
+            } else {
+                out.push('_');
+            }
+        }
+        out
     }
 
     /// Start a new batch. Takes ownership of the input buffer via Bytes
@@ -423,6 +454,27 @@ impl StreamingBuilder {
     }
 
     #[inline(always)]
+    pub fn append_bool_by_idx(&mut self, idx: usize, value: bool) {
+        debug_assert_eq!(
+            self.state,
+            BuilderState::InRow,
+            "append_bool_by_idx called outside of a row"
+        );
+        if check_dup_bits(&mut self.written_bits, idx) {
+            return;
+        }
+        let fc = &mut self.fields[idx];
+        if idx >= 64 {
+            if fc.last_row == self.row_count {
+                return;
+            }
+            fc.last_row = self.row_count;
+        }
+        fc.has_bool = true;
+        fc.bool_values.push((self.row_count, value));
+    }
+
+    #[inline(always)]
     pub fn append_null_by_idx(&mut self, idx: usize) {
         debug_assert_eq!(
             self.state,
@@ -518,7 +570,11 @@ impl StreamingBuilder {
 
             // Emit a StructArray when the same field has multiple types in this
             // batch. Single-type fields use the bare field name as a flat column.
-            let conflict = (fc.has_int as u8) + (fc.has_float as u8) + (fc.has_str as u8) > 1;
+            let conflict = (fc.has_int as u8)
+                + (fc.has_float as u8)
+                + (fc.has_str as u8)
+                + (fc.has_bool as u8)
+                > 1;
 
             if conflict {
                 let mut child_fields: Vec<Arc<Field>> = Vec::new();
@@ -575,6 +631,23 @@ impl StreamingBuilder {
                     }
                     child_fields.push(Arc::new(Field::new("str", DataType::Utf8View, true)));
                     child_arrays.push(Arc::new(builder.finish()) as ArrayRef);
+                }
+
+                if fc.has_bool {
+                    let mut values = vec![false; num_rows];
+                    let mut valid = vec![false; num_rows];
+                    for &(row, v) in &fc.bool_values {
+                        let row = row as usize;
+                        if row >= num_rows {
+                            continue;
+                        }
+                        values[row] = v;
+                        valid[row] = true;
+                    }
+                    let nulls = NullBuffer::from(valid);
+                    let array = BooleanArray::new(values.into(), Some(nulls));
+                    child_fields.push(Arc::new(Field::new("bool", DataType::Boolean, true)));
+                    child_arrays.push(Arc::new(array) as ArrayRef);
                 }
 
                 // Struct is non-null iff any child is non-null for that row.
@@ -651,6 +724,24 @@ impl StreamingBuilder {
                     schema_fields.push(Field::new(name.as_ref(), DataType::Utf8View, true));
                     arrays.push(Arc::new(builder.finish()) as ArrayRef);
                 }
+
+                if fc.has_bool {
+                    reserve_name(name.as_ref())?;
+                    let mut values = vec![false; num_rows];
+                    let mut valid = vec![false; num_rows];
+                    for &(row, v) in &fc.bool_values {
+                        let row = row as usize;
+                        if row >= num_rows {
+                            continue;
+                        }
+                        values[row] = v;
+                        valid[row] = true;
+                    }
+                    let nulls = NullBuffer::from(valid);
+                    let array = BooleanArray::new(values.into(), Some(nulls));
+                    schema_fields.push(Field::new(name.as_ref(), DataType::Boolean, true));
+                    arrays.push(Arc::new(array) as ArrayRef);
+                }
             }
         }
 
@@ -680,6 +771,29 @@ impl StreamingBuilder {
                 schema_fields.push(Field::new("_raw", DataType::Utf8View, true));
                 arrays.push(Arc::new(builder.finish()) as ArrayRef);
             }
+        }
+
+        // Emit _resource_* columns unconditionally (even for empty batches) so
+        // that the schema is identical regardless of row count. Arrow pipelines
+        // that concatenate or compare batches require a consistent schema; omitting
+        // these columns for num_rows == 0 would cause schema mismatch errors.
+        for (key, value) in &self.resource_attrs {
+            let col_name = Self::resource_col_name(key);
+            reserve_name(&col_name)?;
+            let mut builder = StringViewBuilder::new();
+            if num_rows > 0 {
+                let block = builder.append_block(Buffer::from(value.as_bytes().to_vec()));
+                for _ in 0..num_rows {
+                    builder
+                        .try_append_view(block, 0, value.len() as u32)
+                        .expect("resource attr constant view must be valid");
+                }
+            }
+            let mut metadata = HashMap::new();
+            metadata.insert("logfwd.resource_key".to_string(), key.clone());
+            schema_fields
+                .push(Field::new(col_name, DataType::Utf8View, true).with_metadata(metadata));
+            arrays.push(Arc::new(builder.finish()) as ArrayRef);
         }
 
         let schema = Arc::new(Schema::new(schema_fields));
@@ -727,7 +841,11 @@ impl StreamingBuilder {
 
         for fc in &self.fields[..self.num_active] {
             let name = String::from_utf8_lossy(&fc.name);
-            let conflict = (fc.has_int as u8) + (fc.has_float as u8) + (fc.has_str as u8) > 1;
+            let conflict = (fc.has_int as u8)
+                + (fc.has_float as u8)
+                + (fc.has_str as u8)
+                + (fc.has_bool as u8)
+                > 1;
 
             if conflict {
                 let mut child_fields: Vec<Arc<Field>> = Vec::new();
@@ -782,6 +900,22 @@ impl StreamingBuilder {
                     }
                     child_fields.push(Arc::new(Field::new("str", DataType::Utf8, true)));
                     child_arrays.push(Arc::new(builder.finish()) as ArrayRef);
+                }
+
+                if fc.has_bool {
+                    let mut values = vec![false; num_rows];
+                    let mut valid = vec![false; num_rows];
+                    for &(row, v) in &fc.bool_values {
+                        let r = row as usize;
+                        if r < num_rows {
+                            values[r] = v;
+                            valid[r] = true;
+                        }
+                    }
+                    let nulls = NullBuffer::from(valid);
+                    let array = BooleanArray::new(values.into(), Some(nulls));
+                    child_fields.push(Arc::new(Field::new("bool", DataType::Boolean, true)));
+                    child_arrays.push(Arc::new(array) as ArrayRef);
                 }
 
                 let struct_validity: Vec<bool> = (0..num_rows)
@@ -850,6 +984,23 @@ impl StreamingBuilder {
                     schema_fields.push(Field::new(name.as_ref(), DataType::Utf8, true));
                     arrays.push(Arc::new(builder.finish()) as ArrayRef);
                 }
+
+                if fc.has_bool {
+                    reserve_name(name.as_ref())?;
+                    let mut values = vec![false; num_rows];
+                    let mut valid = vec![false; num_rows];
+                    for &(row, v) in &fc.bool_values {
+                        let r = row as usize;
+                        if r < num_rows {
+                            values[r] = v;
+                            valid[r] = true;
+                        }
+                    }
+                    let nulls = NullBuffer::from(valid);
+                    let array = BooleanArray::new(values.into(), Some(nulls));
+                    schema_fields.push(Field::new(name.as_ref(), DataType::Boolean, true));
+                    arrays.push(Arc::new(array) as ArrayRef);
+                }
             }
         }
 
@@ -877,6 +1028,24 @@ impl StreamingBuilder {
                 schema_fields.push(Field::new("_raw", DataType::Utf8, true));
                 arrays.push(Arc::new(builder.finish()) as ArrayRef);
             }
+        }
+
+        // Emit _resource_* columns unconditionally (even for empty batches) so
+        // that the schema is identical regardless of row count. Arrow pipelines
+        // that concatenate or compare batches require a consistent schema; omitting
+        // these columns for num_rows == 0 would cause schema mismatch errors.
+        for (key, value) in &self.resource_attrs {
+            let col_name = Self::resource_col_name(key);
+            reserve_name(&col_name)?;
+            let mut builder =
+                arrow::array::StringBuilder::with_capacity(num_rows, num_rows * value.len());
+            for _ in 0..num_rows {
+                builder.append_value(value);
+            }
+            let mut metadata = HashMap::new();
+            metadata.insert("logfwd.resource_key".to_string(), key.clone());
+            schema_fields.push(Field::new(col_name, DataType::Utf8, true).with_metadata(metadata));
+            arrays.push(Arc::new(builder.finish()) as ArrayRef);
         }
 
         let schema = Arc::new(Schema::new(schema_fields));
