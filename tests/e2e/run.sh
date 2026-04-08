@@ -105,8 +105,15 @@ k apply -n "$NAMESPACE" -f "$SCRIPT_DIR/manifests/log-generator.yaml"
 
 # Wait for the generator pod to be Running instead of hardcoded sleep.
 export -f k
-wait_for "log-generator pod running" 30 \
-    bash -lc "phase=\$(k get pod -n \"$NAMESPACE\" log-generator -o jsonpath='{.status.phase}' 2>/dev/null); [ \"\$phase\" = \"Running\" ]"
+if ! wait_for "log-generator pod running" 30 \
+    bash -c "phase=\$(k get pod -n \"$NAMESPACE\" log-generator -o jsonpath='{.status.phase}' 2>/dev/null); [ \"\$phase\" = \"Running\" ]"; then
+    GENERATOR_PHASE="$(k get pod -n "$NAMESPACE" log-generator -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+    echo ""
+    echo "FAIL: log-generator phase is '$GENERATOR_PHASE' (expected Running)"
+    k describe pod -n "$NAMESPACE" log-generator 2>&1 || true
+    k logs -n "$NAMESPACE" log-generator --tail=40 2>&1 || true
+    exit 1
+fi
 GENERATOR_PHASE="$(k get pod -n "$NAMESPACE" log-generator -o jsonpath='{.status.phase}' 2>/dev/null || true)"
 if [ "$GENERATOR_PHASE" != "Running" ]; then
     echo ""
