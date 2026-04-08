@@ -1412,6 +1412,14 @@ fn validate_input_format(name: &str, input_type: InputType, format: &Format) -> 
                 ));
             }
         }
+        InputType::Http => {
+            if !matches!(format, Format::Json | Format::Raw) {
+                return Err(format!(
+                    "input '{name}': format {:?} is not supported for {:?} inputs (expected json or raw)",
+                    format, input_type
+                ));
+            }
+        }
         _ => {}
     }
     Ok(())
@@ -1526,6 +1534,17 @@ fn build_input_state(
                 logfwd_io::otlp_receiver::OtlpReceiverInput::new(name, addr)
             }
             .map_err(|e| format!("input '{name}': failed to start OTLP receiver: {e}"))?;
+            (Box::new(source), format, 4 * 1024 * 1024)
+        }
+        InputType::Http => {
+            let addr = cfg
+                .listen
+                .as_ref()
+                .ok_or_else(|| format!("input '{name}': http input requires 'listen'"))?;
+            let format = cfg.format.clone().unwrap_or(Format::Json);
+            validate_input_format(name, InputType::Http, &format)?;
+            let source = logfwd_io::http_input::HttpInput::new(name, addr, cfg.path.as_deref())
+                .map_err(|e| format!("input '{name}': failed to start HTTP input: {e}"))?;
             (Box::new(source), format, 4 * 1024 * 1024)
         }
         InputType::Udp => {

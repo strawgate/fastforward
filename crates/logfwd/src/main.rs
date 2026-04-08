@@ -984,6 +984,7 @@ fn validate_input_format_read_only(
             Format::Cri | Format::Auto | Format::Json | Format::Raw
         ),
         InputType::Generator | InputType::Otlp => matches!(format, Format::Json),
+        InputType::Http => matches!(format, Format::Json | Format::Raw),
         InputType::Udp | InputType::Tcp => matches!(format, Format::Json | Format::Raw),
         InputType::ArrowIpc => false,
         _ => {
@@ -1056,6 +1057,11 @@ fn input_label(i: &logfwd_config::InputConfig) -> String {
         InputType::Tcp => format!("tcp   {}", i.listen.as_deref().unwrap_or(":514")),
         InputType::Udp => format!("udp   {}", i.listen.as_deref().unwrap_or(":514")),
         InputType::Otlp => format!("otlp  {}", i.listen.as_deref().unwrap_or(":4318")),
+        InputType::Http => format!(
+            "http  {}{}",
+            i.listen.as_deref().unwrap_or(":8081"),
+            i.path.as_deref().unwrap_or("/ingest")
+        ),
         InputType::Generator => "generator".to_string(),
         _ => "unknown".to_string(),
     }

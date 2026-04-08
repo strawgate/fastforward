@@ -9,6 +9,7 @@ use std::thread;
 use std::time::Duration;
 
 use logfwd_io::{
+    http_input::HttpInput,
     input::{InputEvent, InputSource},
     otlp_receiver::OtlpReceiverInput,
     tcp_input::TcpInput,
@@ -422,6 +423,42 @@ fn udp_no_trailing_newline() {
 }
 
 // ---------------------------------------------------------------------------
+// HTTP tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn http_ndjson_roundtrip() {
+    let mut input = HttpInput::new("test", "127.0.0.1:0", Some("/ingest")).unwrap();
+    let addr = input.local_addr();
+    let url = format!("http://{addr}/ingest");
+
+    let resp = ureq::post(&url)
+        .header("Content-Type", "application/x-ndjson")
+        .send(b"{\"seq\":1}\n{\"seq\":2}\n")
+        .expect("HTTP POST should succeed");
+    assert_eq!(resp.status(), 200);
+
+    let data = poll_until_data(&mut input, Duration::from_secs(5));
+    let text = String::from_utf8_lossy(&data);
+    assert!(text.contains("\"seq\":1"), "missing seq 1 in: {text}");
+    assert!(text.contains("\"seq\":2"), "missing seq 2 in: {text}");
+}
+
+#[test]
+fn http_wrong_path_rejected() {
+    let input = HttpInput::new("test", "127.0.0.1:0", Some("/ingest")).unwrap();
+    let addr = input.local_addr();
+    let url = format!("http://{addr}/wrong");
+
+    let status = match ureq::post(&url).send(b"{\"x\":1}\n") {
+        Ok(resp) => resp.status().as_u16(),
+        Err(ureq::Error::StatusCode(code)) => code,
+        Err(err) => panic!("unexpected request failure: {err}"),
+    };
+    assert_eq!(status, 404, "wrong path should return 404");
+}
+
+// ---------------------------------------------------------------------------
 // OTLP tests
 // ---------------------------------------------------------------------------
 
@@ -429,7 +466,7 @@ fn udp_no_trailing_newline() {
 fn otlp_protobuf_roundtrip() {
     use opentelemetry_proto::tonic::{
         collector::logs::v1::ExportLogsServiceRequest,
-        common::v1::{AnyValue, KeyValue, any_value::Value},
+        common::v1::{any_value::Value, AnyValue, KeyValue},
         logs::v1::{LogRecord, ResourceLogs, ScopeLogs},
     };
     use prost::Message;
@@ -493,7 +530,7 @@ fn otlp_protobuf_roundtrip() {
 fn otlp_gzip_protobuf_roundtrip() {
     use opentelemetry_proto::tonic::{
         collector::logs::v1::ExportLogsServiceRequest,
-        common::v1::{AnyValue, KeyValue, any_value::Value},
+        common::v1::{any_value::Value, AnyValue, KeyValue},
         logs::v1::{LogRecord, ResourceLogs, ScopeLogs},
     };
     use prost::Message;
@@ -577,7 +614,7 @@ fn otlp_oversized_body() {
 fn otlp_wrong_content_type() {
     use opentelemetry_proto::tonic::{
         collector::logs::v1::ExportLogsServiceRequest,
-        common::v1::{AnyValue, any_value::Value},
+        common::v1::{any_value::Value, AnyValue},
         logs::v1::{LogRecord, ResourceLogs, ScopeLogs},
     };
     use prost::Message;
@@ -629,7 +666,7 @@ fn otlp_wrong_content_type() {
 fn otlp_concurrent_requests() {
     use opentelemetry_proto::tonic::{
         collector::logs::v1::ExportLogsServiceRequest,
-        common::v1::{AnyValue, any_value::Value},
+        common::v1::{any_value::Value, AnyValue},
         logs::v1::{LogRecord, ResourceLogs, ScopeLogs},
     };
     use prost::Message;

@@ -10,6 +10,7 @@ pub mod filter_hints;
 pub mod format;
 pub mod framed;
 pub mod generator;
+pub mod http_input;
 pub mod input;
 pub mod metric_history;
 pub mod otap_receiver;

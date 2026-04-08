@@ -159,6 +159,23 @@ input:
   listen: 0.0.0.0:4318
 ```
 
+### `http` input
+
+Receive newline-delimited payloads over HTTP `POST`.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `listen` | string | Yes | `host:port`, e.g. `0.0.0.0:8081`. |
+| `path` | string | No | Route path. Must start with `/`. Defaults to `/ingest`. |
+
+```yaml
+input:
+  type: http
+  listen: 0.0.0.0:8081
+  path: /ingest
+  format: json
+```
+
 ### `arrow_ipc` input *(not yet supported)*
 
 Reserved for future Arrow IPC ingest. Config parsing recognizes the type, but
@@ -175,6 +192,7 @@ config validation currently rejects it.
 | `udp` | Implemented | Receive log lines over UDP. |
 | `tcp` | Implemented | Accept log lines over TCP. |
 | `otlp` | Implemented | Receive OTLP logs over a bound listen address. |
+| `http` | Implemented | Receive newline-delimited payloads via HTTP `POST`. |
 | `arrow_ipc` | Not yet supported | Reserved for future Arrow IPC ingest. |
 
 ---

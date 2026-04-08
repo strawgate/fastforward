@@ -86,4 +86,17 @@ Receive OTLP log records from another agent or SDK.
 ```yaml
 input:
   type: otlp
+  listen: 0.0.0.0:4318
+```
+
+## HTTP
+
+Receive newline-delimited payloads over HTTP `POST` (NDJSON or raw lines).
+
+```yaml
+input:
+  type: http
+  listen: 0.0.0.0:8081
+  path: /ingest    # optional, defaults to /ingest
+  format: json     # json | raw
 ```
