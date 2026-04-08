@@ -189,7 +189,8 @@ impl ElasticsearchSink {
     /// Error kinds are chosen deliberately:
     /// - `Other`: structural/transient failures (malformed JSON, missing fields) — retriable
     /// - `InvalidData`: item-level document errors (mapper_parsing_exception, etc.) — permanent,
-    ///   retrying the same document is futile, so these map to `Rejected` in the caller
+    ///   retrying the same document is futile, so these map to `Rejected` in the caller.
+    ///   Also used when `errors:true` but no item-level details are present.
     fn parse_bulk_response(body: &[u8]) -> io::Result<()> {
         #[derive(serde::Deserialize)]
         struct BulkHeader {
@@ -244,7 +245,8 @@ impl ElasticsearchSink {
         }
         // errors: true but no specific error found in items — treat as failure rather
         // than silently returning Ok (which would cause data loss by masking the error).
-        Err(io::Error::other(
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
             "ES bulk response indicated errors but no error details found in items",
         ))
     }
@@ -1329,6 +1331,11 @@ mod tests {
         let response = br#"{"took":5,"errors":true,"items":[{"index":{"status":200}}]}"#;
         let err = ElasticsearchSink::parse_bulk_response(response)
             .expect_err("errors:true with no parseable error must return Err");
+        assert_eq!(
+            err.kind(),
+            io::ErrorKind::InvalidData,
+            "errors:true must be classified as InvalidData so send_batch rejects it"
+        );
         assert!(
             err.to_string().contains("no error details found"),
             "error message should mention no error details: {err}"

@@ -47,7 +47,7 @@ use logfwd_core::otlp::parse_timestamp_nanos;
 use logfwd_types::diagnostics::ComponentStats;
 use logfwd_types::field_names;
 
-use super::{BatchMetadata, build_col_infos, coalesce_as_str, str_value, write_row_json};
+use super::{BatchMetadata, build_col_infos, coalesce_as_str, write_row_json};
 
 // ---------------------------------------------------------------------------
 // LokiStream helpers
@@ -281,13 +281,17 @@ impl LokiSink {
                             .value(row),
                         // String timestamp columns (ISO 8601) — produced by the scanner
                         // when tailing log files, and by star_to_flat for `_timestamp`.
-                        DataType::Utf8 | DataType::Utf8View | DataType::LargeUtf8 => {
-                            if col.is_null(row) {
-                                metadata.observed_time_ns
-                            } else {
-                                parse_timestamp_nanos(str_value(col.as_ref(), row).as_bytes())
-                                    .unwrap_or(metadata.observed_time_ns)
-                            }
+                        DataType::Utf8 => {
+                            parse_timestamp_nanos(col.as_string::<i32>().value(row).as_bytes())
+                                .unwrap_or(metadata.observed_time_ns)
+                        }
+                        DataType::Utf8View => {
+                            parse_timestamp_nanos(col.as_string_view().value(row).as_bytes())
+                                .unwrap_or(metadata.observed_time_ns)
+                        }
+                        DataType::LargeUtf8 => {
+                            parse_timestamp_nanos(col.as_string::<i64>().value(row).as_bytes())
+                                .unwrap_or(metadata.observed_time_ns)
                         }
                         _ => metadata.observed_time_ns,
                     }

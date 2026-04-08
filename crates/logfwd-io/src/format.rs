@@ -746,8 +746,16 @@ mod verification {
         let stream = b"S";
         let mut out = Vec::new();
         inject_cri_metadata(&msg, ts, stream, &mut out);
-        // Output must start with the timestamp+stream injection prefix.
-        assert!(out.starts_with(b"{\"_timestamp\":\"TS\",\"_stream\":\"S\","));
+        // Output must start with timestamp+stream. The next byte is:
+        // - ',' for non-empty JSON objects
+        // - '}' for empty object path (`{}` / `{ }`) from issue #1658 fix
+        let prefix = b"{\"_timestamp\":\"TS\",\"_stream\":\"S\"";
+        assert!(out.starts_with(prefix));
+        let next = out.get(prefix.len()).copied();
+        assert!(
+            matches!(next, Some(b',') | Some(b'}')),
+            "expected ',' or '}}' after injected _stream"
+        );
         kani::cover!(true, "JSON path metadata prefix verified");
     }
 

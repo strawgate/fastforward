@@ -159,12 +159,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_hash_deterministic() {
-        // FNV-1a is spec-stable: same input always produces this exact value.
-        assert_eq!(
-            fnv1a_64(b"test-trace-id-12345"),
-            fnv1a_64(b"test-trace-id-12345")
-        );
+    fn test_hash_known_value() {
+        // Representative known-value assertion for determinism across versions.
+        assert_eq!(fnv1a_64(b"test-trace-id-12345"), 10607781026064820607);
     }
 
     /// FNV-1a spec values — these are fixed by the algorithm and must never change.

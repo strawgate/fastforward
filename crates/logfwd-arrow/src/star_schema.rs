@@ -21,7 +21,7 @@ use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use arrow::error::ArrowError;
 use arrow::record_batch::RecordBatch;
 
-use crate::conflict_schema::normalize_conflict_columns;
+use crate::conflict_schema::{has_conflict_struct_columns, normalize_conflict_columns};
 
 /// OTAP star schema representation for Logs.
 ///
@@ -137,12 +137,7 @@ pub fn flat_to_star(batch: &RecordBatch) -> Result<StarSchema, ArrowError> {
     // another).  Without normalization, `build_log_attrs` cannot read their
     // values and silently emits NULL attr rows.
     let normalized;
-    let batch = if batch
-        .schema()
-        .fields()
-        .iter()
-        .any(|f| matches!(f.data_type(), DataType::Struct(_)))
-    {
+    let batch = if has_conflict_struct_columns(batch.schema().as_ref()) {
         normalized = normalize_conflict_columns(batch.clone());
         &normalized
     } else {
