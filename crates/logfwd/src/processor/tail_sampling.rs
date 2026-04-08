@@ -1,4 +1,4 @@
-use std::collections::{HashMap, hash_map::Entry};
+use std::collections::{HashMap, HashSet, hash_map::Entry};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -125,6 +125,13 @@ impl TailSamplingProcessor {
     }
 
     fn partition_by_group(&self, batch: RecordBatch) -> Result<PartitionResult, ProcessorError> {
+        if batch.num_rows() > u32::MAX as usize {
+            return Err(ProcessorError::Permanent(format!(
+                "tail-sampling cannot partition batches larger than {} rows",
+                u32::MAX
+            )));
+        }
+
         let col_idx = batch.schema().index_of(&self.group_by_field).map_err(|_| {
             ProcessorError::Permanent(format!(
                 "tail-sampling group-by column '{}' not found",
@@ -138,15 +145,20 @@ impl TailSamplingProcessor {
         let mut null_rows = Vec::new();
 
         for row in 0..batch.num_rows() {
+            let row_u32 = u32::try_from(row).map_err(|_| {
+                ProcessorError::Permanent(format!(
+                    "tail-sampling row index {row} exceeds u32 range"
+                ))
+            })?;
             match group_col.value(row) {
                 Some(group) => {
                     if let Some((_, rows)) = grouped_rows.get_mut(group) {
-                        rows.push(row as u32);
+                        rows.push(row_u32);
                     } else {
-                        grouped_rows.insert(group.to_string(), (row, vec![row as u32]));
+                        grouped_rows.insert(group.to_string(), (row, vec![row_u32]));
                     }
                 }
-                None => null_rows.push(row as u32),
+                None => null_rows.push(row_u32),
             }
         }
 
@@ -247,7 +259,15 @@ impl TailSamplingProcessor {
         now_ns: u64,
         out: &mut SmallVec<[RecordBatch; 1]>,
     ) -> Result<(), ProcessorError> {
-        for (key, _) in self.timed_out_keys(now_ns) {
+        self.drain_group_keys_into(self.timed_out_keys(now_ns), out)
+    }
+
+    fn drain_group_keys_into(
+        &mut self,
+        keys: Vec<(String, u64)>,
+        out: &mut SmallVec<[RecordBatch; 1]>,
+    ) -> Result<(), ProcessorError> {
+        for (key, _) in keys {
             let Some(state) = self.traces.remove(&key) else {
                 continue;
             };
@@ -277,18 +297,25 @@ impl Processor for TailSamplingProcessor {
         if batch.num_rows() > 0 {
             let (grouped, passthrough) = self.partition_by_group(batch)?;
 
-            self.drain_timed_out_into(now_ns, &mut out)?;
+            let timed_out_keys = self.timed_out_keys(now_ns);
+            let timed_out_set: HashSet<&str> =
+                timed_out_keys.iter().map(|(key, _)| key.as_str()).collect();
+            let existing_after_drain = self.traces.len().saturating_sub(timed_out_keys.len());
 
             let new_group_count = grouped
                 .iter()
-                .filter(|(group, _)| !self.traces.contains_key(group))
+                .filter(|(group, _)| {
+                    !self.traces.contains_key(group) || timed_out_set.contains(group.as_str())
+                })
                 .count();
-            if self.traces.len().saturating_add(new_group_count) > self.max_buffered_traces {
+            if existing_after_drain.saturating_add(new_group_count) > self.max_buffered_traces {
                 return Err(ProcessorError::Transient(format!(
                     "tail-sampling buffered trace limit ({}) reached; retry after timeout drain or raise the limit",
                     self.max_buffered_traces
                 )));
             }
+
+            self.drain_group_keys_into(timed_out_keys, &mut out)?;
 
             for (group, sub_batch) in grouped {
                 self.append_group_batch(group, sub_batch, now_ns);
@@ -600,5 +627,43 @@ mod tests {
             }
             other => panic!("expected transient limit error, got: {other:?}"),
         }
+    }
+
+    #[test]
+    fn transient_limit_error_does_not_drop_timed_out_groups() {
+        let mut p = TailSamplingProcessor::try_new_with_limit(
+            "SELECT * FROM logs",
+            "trace_id",
+            Duration::from_nanos(10),
+            1,
+        )
+        .expect("processor");
+
+        p.process(batch(vec![Some("old")], vec![1]), &meta(100))
+            .expect("seed old group");
+
+        let err = p
+            .process(batch(vec![Some("a"), Some("b")], vec![2, 3]), &meta(111))
+            .expect_err("new groups should exceed configured cap");
+        assert!(
+            matches!(err, ProcessorError::Transient(_)),
+            "expected transient limit error"
+        );
+
+        // The timed-out "old" group must still be buffered after the transient
+        // failure, so a heartbeat can drain it.
+        let drained = p
+            .process(
+                RecordBatch::new_empty(Arc::new(Schema::empty())),
+                &meta(112),
+            )
+            .expect("heartbeat");
+        assert_eq!(drained.len(), 1);
+        let val_col = drained[0]
+            .column(1)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .expect("int64 column");
+        assert_eq!(val_col.value(0), 1);
     }
 }
