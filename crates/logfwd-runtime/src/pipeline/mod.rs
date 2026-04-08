@@ -1285,32 +1285,24 @@ output:
     fn test_pipeline_transform_error_skips_batch_continues() {
         use std::sync::atomic::Ordering;
 
-        let dir = tempfile::tempdir().unwrap();
-        let log_path = dir.path().join("test.log");
-
-        // Write JSON lines that do NOT contain `nonexistent_col`.
-        let mut data = String::new();
-        for i in 0..5 {
-            data.push_str(&format!(r#"{{"level":"INFO","msg":"hello {}"}}"#, i));
-            data.push('\n');
-        }
-        std::fs::write(&log_path, data.as_bytes()).unwrap();
-
-        // SQL references a column that will never be present → DataFusion
-        // returns an error at execution time, not at parse / new() time.
-        let yaml = format!(
-            r#"
+        // SQL references a column that will never be present. Use generator
+        // input so this test only exercises pipeline transform behavior and is
+        // not sensitive to file-tail timing under heavy coverage.
+        let yaml = r#"
 input:
-  type: file
-  path: {}
-  format: json
+  type: generator
+  generator:
+    events_per_sec: 10000
+    batch_size: 64
+    profile: record
+    attributes:
+      benchmark_id: run-123
+      pod_name: emitter-0
+      stream_id: emitter-0
 transform: "SELECT nonexistent_col FROM logs"
 output:
-  type: stdout
-  format: json
-"#,
-            log_path.display()
-        );
+  type: null
+"#;
         let config = logfwd_config::Config::load_str(&yaml).unwrap();
         let pipe_cfg = &config.pipelines["default"];
         let mut pipeline = Pipeline::from_config("default", pipe_cfg, &test_meter(), None).unwrap();
