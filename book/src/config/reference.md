@@ -34,7 +34,7 @@ output:
   compression: zstd
 
 server:
-  diagnostics: 0.0.0.0:9090
+  diagnostics: 127.0.0.1:9090
   log_level: info
 ```
 
@@ -63,7 +63,7 @@ pipelines:
         format: json
 
 server:
-  diagnostics: 0.0.0.0:9090
+  diagnostics: 127.0.0.1:9090
 ```
 
 The two layouts cannot be mixed: specifying both `input`/`output` at the top level and
@@ -511,7 +511,7 @@ The optional `server` block controls the diagnostics server and observability se
 
 ```yaml
 server:
-  diagnostics: 0.0.0.0:9090
+  diagnostics: 127.0.0.1:9090
   log_level: info
   metrics_endpoint: http://otel-collector:4318
   metrics_interval_secs: 30
@@ -530,7 +530,7 @@ When `server.diagnostics` is configured, logfwd exposes an HTTP API for monitori
 | `/ready` | GET | Readiness probe. Returns 200 OK when required components are initialized and in a ready health state; returns 503 while components are still starting, stopping, stopped, failed, or otherwise not ready. |
 | `/admin/v1/status` | GET | Canonical rich status payload with live/ready state, component health, and per-pipeline counters. |
 | `/admin/v1/stats` | GET | Aggregate process stats (uptime, RSS, CPU, aggregate line counts). |
-| `/admin/v1/config` | GET | Currently loaded YAML configuration and its file path. |
+| `/admin/v1/config` | GET | Currently loaded YAML configuration and its file path (disabled by default; see note below). |
 | `/admin/v1/logs` | GET | Recent log lines from logfwd's own stderr (ring buffer). |
 | `/admin/v1/history` | GET | Time-series data (1-hour window) for dashboard charts. |
 | `/admin/v1/traces` | GET | Recent batch processing spans for detailed latency analysis. |
@@ -539,6 +539,14 @@ For input diagnostics, `bytes_total` reflects source payload bytes accepted at
 the input boundary. For structured receivers such as OTLP, this is the
 accepted request-body size as received on the wire, not the in-memory Arrow
 batch footprint or the post-decompression payload size.
+
+Security note:
+
+- Bind diagnostics to loopback unless you intentionally need remote access (for
+  example: `127.0.0.1:9090`).
+- `GET /admin/v1/config` is disabled by default because configs may contain
+  secrets. To enable it for short-lived local debugging, set
+  `LOGFWD_UNSAFE_EXPOSE_CONFIG=1` (or `true`) before starting logfwd.
 
 ---
 
@@ -613,7 +621,7 @@ enrichment:
       cluster: ${CLUSTER_NAME}
 
 server:
-  diagnostics: 0.0.0.0:9090
+  diagnostics: 127.0.0.1:9090
   log_level: info
   metrics_endpoint: ${OTEL_ENDPOINT}
   metrics_interval_secs: 60
