@@ -76,7 +76,7 @@ fn redact_yaml_value(value: &mut serde_yaml_ng::Value, in_auth_block: bool) {
 
 fn redact_config_yaml(raw_yaml: &str) -> String {
     let Ok(mut parsed) = serde_yaml_ng::from_str::<serde_yaml_ng::Value>(raw_yaml) else {
-        return raw_yaml.to_string();
+        return REDACTED_CONFIG_UNAVAILABLE.to_string();
     };
     redact_yaml_value(&mut parsed, false);
     serde_yaml_ng::to_string(&parsed).unwrap_or_else(|_| REDACTED_CONFIG_UNAVAILABLE.to_string())
@@ -1198,10 +1198,10 @@ output:
     }
 
     #[test]
-    fn redact_config_yaml_passthroughs_non_yaml_input() {
+    fn redact_config_yaml_non_yaml_input_fails_closed() {
         let raw = "not: [valid: yaml";
         let redacted = redact_config_yaml(raw);
-        assert_eq!(redacted, raw);
+        assert_eq!(redacted, REDACTED_CONFIG_UNAVAILABLE);
     }
 
     #[test]
