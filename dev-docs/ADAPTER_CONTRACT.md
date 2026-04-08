@@ -191,9 +191,14 @@ The file path is:
   attached as Arrow columns **post-scan**, not injected into raw bytes pre-scan.
 - The existing `inject_source_path_metadata` in `framed.rs` is **deprecated**
   (#1615). It must not be extended or used as a pattern for new metadata.
-- New source metadata fields should follow the `_resource_*` column pattern
-  used by the OTLP output path: constant columns attached to the RecordBatch
-  schema, accessible via SQL, with no raw payload mutation.
+- Legacy exception: `_source_path` raw-byte insertion still exists in
+  `inject_source_path_metadata` for compatibility with current file JSON/CRI
+  paths. Treat this as transitional technical debt until #1615 lands; do not
+  add new `_source_*` raw injection helpers.
+- Canonical pattern for new metadata: scanner-attached `_resource_*` columns
+  (the same resource-column model used by OTLP/OTAP paths), attached at
+  scan/build time in the RecordBatch schema and accessible via SQL without raw
+  payload mutation.
 - Rationale: raw injection mutates user data, causes format-specific edge
   cases (invalid JSON for empty objects), and is 30x slower than post-scan
   column attachment (PR #1370 prototype measurements).
