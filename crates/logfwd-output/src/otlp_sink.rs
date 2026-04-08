@@ -498,7 +498,7 @@ impl super::sink::Sink for OtlpSink {
             let rows = batch.num_rows() as u64;
             match self.send_payload(rows).await {
                 Ok(r) => r,
-                Err(e) => super::sink::SendResult::IoError(e),
+                Err(e) => super::sink::SendResult::from_io_error(e),
             }
         })
     }
