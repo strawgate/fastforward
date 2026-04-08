@@ -207,6 +207,15 @@ impl ArrowIpcReceiver {
                     };
 
                     // Send all batches to the pipeline.
+                    //
+                    // Delivery contract for one HTTP request:
+                    // - If every non-empty batch is accepted: return 200.
+                    // - If backpressure starts after some earlier batches were accepted:
+                    //   return 429 (not 200), so clients retry the entire request.
+                    //
+                    // This intentionally trades possible duplicates (already-accepted
+                    // prefix batches can be resent by the client retry) for no silent
+                    // loss of the unsent suffix.
                     let mut send_error: Option<u16> = None;
                     let mut sent_rows = false;
                     for batch in batches {
@@ -219,7 +228,8 @@ impl ArrowIpcReceiver {
                             Err(mpsc::TrySendError::Full(_)) => {
                                 // Always return 429 regardless of how many batches
                                 // were already sent; a partial send must never be
-                                // acknowledged as success to avoid data loss on retry.
+                                // acknowledged as success. Clients should retry the
+                                // whole request and downstream must tolerate duplicates.
                                 send_error = Some(429);
                                 break;
                             }
@@ -235,7 +245,7 @@ impl ArrowIpcReceiver {
                             store_event(&health_clone, ReceiverHealthEvent::Backpressure);
                             let _ = request.respond(
                                 tiny_http::Response::from_string(
-                                    "too many requests: pipeline backpressure",
+                                    "too many requests: pipeline backpressure; request may have been partially accepted and must be retried (duplicates possible)",
                                 )
                                 .with_status_code(429),
                             );
@@ -420,15 +430,29 @@ mod tests {
     use arrow::datatypes::{DataType, Field, Schema};
     use std::sync::Arc;
 
-    fn make_test_batch() -> RecordBatch {
-        let schema = Arc::new(Schema::new(vec![
+    fn test_schema() -> Arc<Schema> {
+        Arc::new(Schema::new(vec![
             Field::new("msg", DataType::Utf8, true),
             Field::new("code", DataType::Int64, true),
-        ]));
+        ]))
+    }
+
+    fn make_test_batch() -> RecordBatch {
+        let schema = test_schema();
         let msg = StringArray::from(vec![Some("alpha"), Some("beta")]);
         let code = Int64Array::from(vec![Some(1), Some(2)]);
         RecordBatch::try_new(schema, vec![Arc::new(msg), Arc::new(code)])
             .expect("test batch creation should succeed")
+    }
+
+    /// A second test batch with different content so tests can distinguish it
+    /// from the batch produced by `make_test_batch`.
+    fn make_test_batch_b() -> RecordBatch {
+        let schema = test_schema();
+        let msg = StringArray::from(vec![Some("gamma"), Some("delta"), Some("epsilon")]);
+        let code = Int64Array::from(vec![Some(10), Some(20), Some(30)]);
+        RecordBatch::try_new(schema, vec![Arc::new(msg), Arc::new(code)])
+            .expect("test batch B creation should succeed")
     }
 
     fn serialize_batch(batch: &RecordBatch) -> Vec<u8> {
@@ -582,7 +606,11 @@ mod tests {
         let addr = receiver.local_addr();
         let url = format!("http://{addr}/v1/arrow");
 
-        let batches = vec![make_test_batch(), make_test_batch()];
+        // Use two distinct batches so we can verify which one was accepted.
+        // batch_a has 2 rows ("alpha","beta"), batch_b has 3 rows ("gamma","delta","epsilon").
+        let batch_a = make_test_batch();
+        let batch_b = make_test_batch_b();
+        let batches = vec![batch_a, batch_b];
         let ipc_bytes = serialize_batches(&batches);
 
         let result = ureq::post(&url)
@@ -604,7 +632,98 @@ mod tests {
             1,
             "exactly one batch should have been accepted before backpressure"
         );
+        // The accepted batch must be the first (prefix) batch — batch_a with 2 rows.
+        assert_eq!(
+            received[0].num_rows(),
+            2,
+            "the prefix batch (batch_a) should be the one accepted"
+        );
+        let msg_col = received[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("column 0 should be StringArray");
+        assert_eq!(msg_col.value(0), "alpha");
+        assert_eq!(msg_col.value(1), "beta");
         assert_eq!(receiver.health(), ComponentHealth::Degraded);
+    }
+
+    #[test]
+    fn partial_accept_then_retry_can_duplicate_prefix_batches() {
+        // This regression makes duplicate-risk semantics explicit:
+        // 1) first POST partially succeeds then returns 429
+        // 2) retry of the same payload also partially accepts then returns 429
+        // 3) downstream sees duplicated prefix rows from both partial accepts
+        let receiver = ArrowIpcReceiver::new_with_capacity("test-dup-risk", "127.0.0.1:0", 1)
+            .expect("bind should succeed");
+        let addr = receiver.local_addr();
+        let url = format!("http://{addr}/v1/arrow");
+
+        // Use two distinct batches so we can verify which one was re-delivered.
+        // batch_a has 2 rows ("alpha","beta"), batch_b has 3 rows ("gamma","delta","epsilon").
+        let batch_a = make_test_batch();
+        let batch_b = make_test_batch_b();
+        let batches = vec![batch_a, batch_b];
+        let ipc_bytes = serialize_batches(&batches);
+
+        let first_status = match ureq::post(&url)
+            .header("Content-Type", "application/vnd.apache.arrow.stream")
+            .send(&ipc_bytes)
+        {
+            Ok(resp) => resp.status().as_u16(),
+            Err(ureq::Error::StatusCode(code)) => code,
+            Err(e) => panic!("unexpected error: {e}"),
+        };
+        assert_eq!(first_status, 429);
+
+        let accepted_prefix = receiver.try_recv_all();
+        assert_eq!(
+            accepted_prefix.len(),
+            1,
+            "first request should have partially accepted one prefix batch before 429"
+        );
+        // Verify the accepted prefix is batch_a (2 rows, "alpha"/"beta").
+        assert_eq!(accepted_prefix[0].num_rows(), 2);
+        let msg_col = accepted_prefix[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("column 0 should be StringArray");
+        assert_eq!(msg_col.value(0), "alpha");
+        assert_eq!(msg_col.value(1), "beta");
+
+        let retry_status = match ureq::post(&url)
+            .header("Content-Type", "application/vnd.apache.arrow.stream")
+            .send(&ipc_bytes)
+        {
+            Ok(resp) => resp.status().as_u16(),
+            Err(ureq::Error::StatusCode(code)) => code,
+            Err(e) => panic!("unexpected error: {e}"),
+        };
+        assert_eq!(
+            retry_status, 429,
+            "retry also partially accepts then returns 429"
+        );
+
+        let duplicate_prefix = receiver.try_recv_all();
+        assert_eq!(
+            duplicate_prefix.len(),
+            1,
+            "retry should re-deliver the same first prefix batch"
+        );
+        // Verify the duplicate is specifically batch_a again, not batch_b.
+        assert_eq!(
+            duplicate_prefix[0].num_rows(),
+            2,
+            "duplicate prefix batch should be batch_a (2 rows), not batch_b (3 rows)"
+        );
+        let dup_msg_col = duplicate_prefix[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("column 0 should be StringArray");
+        assert_eq!(dup_msg_col.value(0), "alpha");
+        assert_eq!(dup_msg_col.value(1), "beta");
     }
 
     #[test]

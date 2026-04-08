@@ -59,10 +59,16 @@ enum ReceiverMode {
 enum ReceiverPayload {
     JsonLines {
         lines: Vec<u8>,
+        /// Bytes charged to input diagnostics for this accepted request.
+        /// This is the HTTP request-body size as received on the wire
+        /// (possibly compressed), not the decoded/decompressed size.
         accounted_bytes: u64,
     },
     Batch {
         batch: RecordBatch,
+        /// Bytes charged to input diagnostics for this accepted request.
+        /// This is the HTTP request-body size as received on the wire
+        /// (possibly compressed), not the decoded/decompressed size.
         accounted_bytes: u64,
     },
 }
@@ -267,7 +273,9 @@ impl OtlpReceiverInput {
                         .find(|h| h.field.equiv("Content-Encoding"))
                         .map(|h| h.value.as_str().to_lowercase());
 
-                    let accounted_bytes = body.len() as u64;
+                    // Capture accounting at the receiver boundary *before*
+                    // payload normalization. Diagnostics must report wire bytes.
+                    let wire_body_bytes = body.len() as u64;
 
                     let body = match content_encoding.as_deref() {
                         Some("zstd") => match decompress_zstd(&body) {
@@ -349,9 +357,9 @@ impl OtlpReceiverInput {
 
                     // Decode and convert to the selected downstream shape.
                     let payload = if is_json {
-                        decode_otlp_logs_with_mode_json(&body, mode, accounted_bytes)
+                        decode_otlp_logs_with_mode_json(&body, mode, wire_body_bytes)
                     } else {
-                        decode_otlp_logs_with_mode(&body, mode, accounted_bytes)
+                        decode_otlp_logs_with_mode(&body, mode, wire_body_bytes)
                     };
 
                     let payload = match payload {
@@ -367,6 +375,12 @@ impl OtlpReceiverInput {
                     };
 
                     let send_result = if payload.is_empty() {
+                        // Note: `accounted_bytes` for this request are silently
+                        // dropped because no `ReceiverPayload` is enqueued.
+                        // This is acceptable: empty payloads (zero log records
+                        // after decoding) carry negligible wire bytes and occur
+                        // rarely in practice. Inflating byte counters for empty
+                        // payloads would misrepresent actual data throughput.
                         Ok(())
                     } else {
                         tx.try_send(payload)
