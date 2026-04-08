@@ -443,7 +443,7 @@ impl Config {
                     .map_or_else(|| format!("#{i}"), String::from);
 
                 // Reject placeholder output types that are not yet implemented.
-                if matches!(output.output_type, OutputType::Parquet) {
+                if matches!(output.output_type, OutputType::Parquet | OutputType::Http) {
                     return Err(ConfigError::Validation(format!(
                         "pipeline '{name}' output '{label}': {} output type is not yet implemented",
                         output.output_type,
@@ -452,7 +452,6 @@ impl Config {
 
                 match output.output_type {
                     OutputType::Otlp
-                    | OutputType::Http
                     | OutputType::Elasticsearch
                     | OutputType::Loki
                     | OutputType::ArrowIpc => {
@@ -538,9 +537,10 @@ impl Config {
                             }
                         }
                     }
-                    OutputType::Parquet => {
-                        // Parquet output not yet implemented
-                    }
+                    // Http and Parquet are not yet implemented — already
+                    // rejected by the check above; these arms are unreachable
+                    // but required for exhaustiveness.
+                    OutputType::Http | OutputType::Parquet => {}
                 }
 
                 // Reject fields that don't apply to this output type.
