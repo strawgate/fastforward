@@ -8,10 +8,17 @@ use std::io;
 use std::io::Read as _;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, mpsc};
-use std::time::Duration;
 
+use axum::body::Body;
+use axum::extract::State;
+use axum::http::header::{ALLOW, CONTENT_ENCODING, CONTENT_LENGTH};
+use axum::http::{HeaderMap, Method, Request, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::routing::any;
 use flate2::read::GzDecoder;
+use http_body_util::BodyExt as _;
 use logfwd_types::diagnostics::ComponentHealth;
+use tokio::sync::oneshot;
 
 use crate::InputError;
 use crate::input::{InputEvent, InputSource};
@@ -49,17 +56,16 @@ impl HttpInputMethod {
     }
 
     #[must_use]
-    pub fn matches(self, method: &tiny_http::Method) -> bool {
-        matches!(
-            (self, method),
-            (Self::Get, tiny_http::Method::Get)
-                | (Self::Post, tiny_http::Method::Post)
-                | (Self::Put, tiny_http::Method::Put)
-                | (Self::Delete, tiny_http::Method::Delete)
-                | (Self::Patch, tiny_http::Method::Patch)
-                | (Self::Head, tiny_http::Method::Head)
-                | (Self::Options, tiny_http::Method::Options)
-        )
+    pub fn matches(self, method: &Method) -> bool {
+        match self {
+            Self::Get => method == Method::GET,
+            Self::Post => method == Method::POST,
+            Self::Put => method == Method::PUT,
+            Self::Delete => method == Method::DELETE,
+            Self::Patch => method == Method::PATCH,
+            Self::Head => method == Method::HEAD,
+            Self::Options => method == Method::OPTIONS,
+        }
     }
 }
 
@@ -96,12 +102,25 @@ pub struct HttpInput {
     rx: Option<mpsc::Receiver<Vec<u8>>>,
     /// The address the HTTP server is bound to.
     addr: std::net::SocketAddr,
-    server: Arc<tiny_http::Server>,
     /// Keep the server thread handle alive.
     handle: Option<std::thread::JoinHandle<()>>,
+    /// Shutdown signal for the background server task.
+    shutdown_tx: Option<oneshot::Sender<()>>,
     /// Shutdown mechanism for the background thread.
     is_running: Arc<AtomicBool>,
     /// Source-owned health snapshot for readiness and diagnostics.
+    health: Arc<AtomicU8>,
+}
+
+#[derive(Clone)]
+struct HttpServerState {
+    route_path: String,
+    strict_path: bool,
+    accepted_method: HttpInputMethod,
+    max_request_body_size: usize,
+    success_response_code: StatusCode,
+    tx: mpsc::SyncSender<Vec<u8>>,
+    is_running: Arc<AtomicBool>,
     health: Arc<AtomicU8>,
 }
 
@@ -142,172 +161,74 @@ impl HttpInput {
         options: HttpInputOptions,
     ) -> io::Result<Self> {
         let options = normalize_options(options)?;
-        let route_path = options.path.clone();
-        let strict_path = options.strict_path;
-        let accepted_method = options.method;
-        let max_request_body_size = options.max_request_body_size;
-        let success_response_code = options.response_code;
+        let success_response_code = StatusCode::from_u16(options.response_code)
+            .expect("normalize_options validated response code");
 
-        let server = Arc::new(
-            tiny_http::Server::http(addr)
-                .map_err(|e| io::Error::other(format!("HTTP input bind {addr}: {e}")))?,
-        );
-
-        let bound_addr = match server.server_addr() {
-            tiny_http::ListenAddr::IP(a) => a,
-            tiny_http::ListenAddr::Unix(_) => {
-                return Err(io::Error::other("HTTP input: unexpected listen addr"));
-            }
-        };
+        let std_listener = std::net::TcpListener::bind(addr)
+            .map_err(|e| io::Error::other(format!("HTTP input bind {addr}: {e}")))?;
+        let bound_addr = std_listener.local_addr()?;
+        std_listener.set_nonblocking(true).map_err(|e| {
+            io::Error::other(format!("HTTP input set_nonblocking {bound_addr}: {e}"))
+        })?;
 
         let (tx, rx) = mpsc::sync_channel(capacity);
 
-        let server_clone = Arc::clone(&server);
         let is_running = Arc::new(AtomicBool::new(true));
-        let is_running_clone = Arc::clone(&is_running);
         let health = Arc::new(AtomicU8::new(ComponentHealth::Healthy.as_repr()));
-        let health_clone = Arc::clone(&health);
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+
+        let state = Arc::new(HttpServerState {
+            route_path: options.path,
+            strict_path: options.strict_path,
+            accepted_method: options.method,
+            max_request_body_size: options.max_request_body_size,
+            success_response_code,
+            tx,
+            is_running: Arc::clone(&is_running),
+            health: Arc::clone(&health),
+        });
+        let state_for_server = Arc::clone(&state);
+        let is_running_for_server = Arc::clone(&is_running);
+        let health_for_server = Arc::clone(&health);
 
         let handle = std::thread::Builder::new()
             .name("http-input".into())
             .spawn(move || {
-                while is_running_clone.load(Ordering::Relaxed) {
-                    let mut request = match server_clone.recv_timeout(Duration::from_millis(100)) {
-                        Ok(Some(req)) => req,
-                        Ok(None) => continue,
+                let runtime = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(runtime) => runtime,
+                    Err(_) => {
+                        health_for_server
+                            .store(ComponentHealth::Failed.as_repr(), Ordering::Relaxed);
+                        return;
+                    }
+                };
+
+                runtime.block_on(async move {
+                    let listener = match tokio::net::TcpListener::from_std(std_listener) {
+                        Ok(listener) => listener,
                         Err(_) => {
-                            health_clone
+                            health_for_server
                                 .store(ComponentHealth::Failed.as_repr(), Ordering::Relaxed);
-                            break;
+                            return;
                         }
                     };
 
-                    let url = request.url().to_string();
-                    let path_only = url.split('?').next().unwrap_or(&url);
-                    if !path_matches(path_only, &route_path, strict_path) {
-                        let _ = request.respond(
-                            tiny_http::Response::from_string("not found").with_status_code(404),
-                        );
-                        continue;
+                    let app = axum::Router::new()
+                        .fallback(any(handle_request))
+                        .with_state(state_for_server);
+
+                    let server = axum::serve(listener, app).with_graceful_shutdown(async move {
+                        let _ = shutdown_rx.await;
+                    });
+
+                    if server.await.is_err() && is_running_for_server.load(Ordering::Relaxed) {
+                        health_for_server
+                            .store(ComponentHealth::Failed.as_repr(), Ordering::Relaxed);
                     }
-
-                    if !accepted_method.matches(request.method()) {
-                        let allow_header = format!("Allow: {}", accepted_method.as_str())
-                            .parse::<tiny_http::Header>()
-                            .expect("static method header is valid");
-                        let _ = request.respond(
-                            tiny_http::Response::from_string("method not allowed")
-                                .with_status_code(405)
-                                .with_header(allow_header),
-                        );
-                        continue;
-                    }
-
-                    if request.body_length().unwrap_or(0) > max_request_body_size {
-                        let _ = request.respond(
-                            tiny_http::Response::from_string("payload too large")
-                                .with_status_code(413),
-                        );
-                        continue;
-                    }
-
-                    let mut body = Vec::with_capacity(
-                        request.body_length().unwrap_or(0).min(max_request_body_size),
-                    );
-                    match request
-                        .as_reader()
-                        .take(max_request_body_size as u64 + 1)
-                        .read_to_end(&mut body)
-                    {
-                        Ok(n) if n > max_request_body_size => {
-                            let _ = request.respond(
-                                tiny_http::Response::from_string("payload too large")
-                                    .with_status_code(413),
-                            );
-                            continue;
-                        }
-                        Err(_) => {
-                            let _ = request.respond(
-                                tiny_http::Response::from_string("read error")
-                                    .with_status_code(400),
-                            );
-                            continue;
-                        }
-                        Ok(_) => {}
-                    }
-
-                    let content_encoding = request
-                        .headers()
-                        .iter()
-                        .find(|h| h.field.equiv("Content-Encoding"))
-                        .map(|h| h.value.as_str().to_lowercase());
-
-                    let mut body =
-                        match decode_content(body, content_encoding.as_deref(), max_request_body_size)
-                        {
-                            Ok(decoded) => decoded,
-                            Err(InputError::Receiver(msg)) => {
-                                let _ = request.respond(
-                                    tiny_http::Response::from_string(msg).with_status_code(400),
-                                );
-                                continue;
-                            }
-                            Err(InputError::Io(e)) if e.kind() == io::ErrorKind::InvalidData => {
-                                let _ = request.respond(
-                                    tiny_http::Response::from_string(e.to_string())
-                                        .with_status_code(413),
-                                );
-                                continue;
-                            }
-                            Err(_) => {
-                                let _ = request.respond(
-                                    tiny_http::Response::from_string("decode failed")
-                                        .with_status_code(400),
-                                );
-                                continue;
-                            }
-                        };
-
-                    if body.is_empty() {
-                        health_clone.store(ComponentHealth::Healthy.as_repr(), Ordering::Relaxed);
-                        let _ = request.respond(tiny_http::Response::empty(success_response_code));
-                        continue;
-                    }
-
-                    if !body.ends_with(b"\n") {
-                        body.push(b'\n');
-                    }
-
-                    match tx.try_send(body) {
-                        Ok(()) => {
-                            health_clone
-                                .store(ComponentHealth::Healthy.as_repr(), Ordering::Relaxed);
-                            let _ = request.respond(tiny_http::Response::empty(success_response_code));
-                        }
-                        Err(mpsc::TrySendError::Full(_)) => {
-                            health_clone
-                                .store(ComponentHealth::Degraded.as_repr(), Ordering::Relaxed);
-                            let _ = request.respond(
-                                tiny_http::Response::from_string(
-                                    "too many requests: pipeline backpressure",
-                                )
-                                .with_status_code(429),
-                            );
-                        }
-                        Err(mpsc::TrySendError::Disconnected(_)) => {
-                            if is_running_clone.load(Ordering::Relaxed) {
-                                health_clone
-                                    .store(ComponentHealth::Failed.as_repr(), Ordering::Relaxed);
-                            }
-                            let _ = request.respond(
-                                tiny_http::Response::from_string(
-                                    "service unavailable: pipeline disconnected",
-                                )
-                                .with_status_code(503),
-                            );
-                        }
-                    }
-                }
+                });
             })
             .map_err(io::Error::other)?;
 
@@ -315,8 +236,8 @@ impl HttpInput {
             name: name.into(),
             rx: Some(rx),
             addr: bound_addr,
-            server,
             handle: Some(handle),
+            shutdown_tx: Some(shutdown_tx),
             is_running,
             health,
         })
@@ -334,7 +255,9 @@ impl Drop for HttpInput {
             .store(ComponentHealth::Stopping.as_repr(), Ordering::Relaxed);
         self.is_running.store(false, Ordering::Relaxed);
         self.rx.take();
-        self.server.unblock();
+        if let Some(shutdown_tx) = self.shutdown_tx.take() {
+            let _ = shutdown_tx.send(());
+        }
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
@@ -384,6 +307,129 @@ impl InputSource for HttpInput {
     }
 }
 
+async fn handle_request(
+    State(state): State<Arc<HttpServerState>>,
+    request: Request<Body>,
+) -> Response {
+    if !path_matches(request.uri().path(), &state.route_path, state.strict_path) {
+        return (StatusCode::NOT_FOUND, "not found").into_response();
+    }
+
+    if !state.accepted_method.matches(request.method()) {
+        return (
+            StatusCode::METHOD_NOT_ALLOWED,
+            [(ALLOW, state.accepted_method.as_str())],
+            "method not allowed",
+        )
+            .into_response();
+    }
+
+    if declared_content_length(request.headers())
+        .is_some_and(|body_len| body_len > state.max_request_body_size as u64)
+    {
+        return (StatusCode::PAYLOAD_TOO_LARGE, "payload too large").into_response();
+    }
+
+    let content_encoding = request
+        .headers()
+        .get(CONTENT_ENCODING)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_ascii_lowercase);
+
+    let mut body = match read_limited_body(request.into_body(), state.max_request_body_size).await {
+        Ok(body) => body,
+        Err(status) => {
+            let message = if status == StatusCode::PAYLOAD_TOO_LARGE {
+                "payload too large"
+            } else {
+                "read error"
+            };
+            return (status, message).into_response();
+        }
+    };
+
+    body = match decode_content(
+        body,
+        content_encoding.as_deref(),
+        state.max_request_body_size,
+    ) {
+        Ok(decoded) => decoded,
+        Err(InputError::Receiver(msg)) => return (StatusCode::BAD_REQUEST, msg).into_response(),
+        Err(InputError::Io(e)) if e.kind() == io::ErrorKind::InvalidData => {
+            return (StatusCode::PAYLOAD_TOO_LARGE, e.to_string()).into_response();
+        }
+        Err(_) => return (StatusCode::BAD_REQUEST, "decode failed").into_response(),
+    };
+
+    if body.is_empty() {
+        state
+            .health
+            .store(ComponentHealth::Healthy.as_repr(), Ordering::Relaxed);
+        return state.success_response_code.into_response();
+    }
+
+    if !body.ends_with(b"\n") {
+        body.push(b'\n');
+    }
+
+    match state.tx.try_send(body) {
+        Ok(()) => {
+            state
+                .health
+                .store(ComponentHealth::Healthy.as_repr(), Ordering::Relaxed);
+            state.success_response_code.into_response()
+        }
+        Err(mpsc::TrySendError::Full(_)) => {
+            state
+                .health
+                .store(ComponentHealth::Degraded.as_repr(), Ordering::Relaxed);
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                "too many requests: pipeline backpressure",
+            )
+                .into_response()
+        }
+        Err(mpsc::TrySendError::Disconnected(_)) => {
+            if state.is_running.load(Ordering::Relaxed) {
+                state
+                    .health
+                    .store(ComponentHealth::Failed.as_repr(), Ordering::Relaxed);
+            }
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "service unavailable: pipeline disconnected",
+            )
+                .into_response()
+        }
+    }
+}
+
+fn declared_content_length(headers: &HeaderMap) -> Option<u64> {
+    headers
+        .get(CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+}
+
+async fn read_limited_body(
+    body: Body,
+    max_request_body_size: usize,
+) -> Result<Vec<u8>, StatusCode> {
+    let mut body = body;
+    let mut out = Vec::new();
+    while let Some(frame) = body.frame().await {
+        let frame = frame.map_err(|_| StatusCode::BAD_REQUEST)?;
+        let Ok(chunk) = frame.into_data() else {
+            continue;
+        };
+        if out.len().saturating_add(chunk.len()) > max_request_body_size {
+            return Err(StatusCode::PAYLOAD_TOO_LARGE);
+        }
+        out.extend_from_slice(&chunk);
+    }
+    Ok(out)
+}
+
 fn normalize_options(mut options: HttpInputOptions) -> io::Result<HttpInputOptions> {
     options.path = normalize_route(&options.path)?;
     if options.max_request_body_size == 0 {
@@ -422,7 +468,10 @@ fn path_matches(path: &str, route: &str, strict_path: bool) -> bool {
     if route == "/" {
         return true;
     }
-    path == route || path.strip_prefix(route).is_some_and(|suffix| suffix.starts_with('/'))
+    path == route
+        || path
+            .strip_prefix(route)
+            .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
 fn decode_content(
@@ -483,7 +532,7 @@ fn read_decompressed_body(
 
 #[cfg(test)]
 mod tests {
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     use super::*;
 
@@ -523,8 +572,14 @@ mod tests {
 
         let data = poll_until_data(&mut input, Duration::from_secs(2));
         let text = String::from_utf8_lossy(&data);
-        assert!(text.contains("\"msg\":\"hello\""), "expected first row: {text}");
-        assert!(text.contains("\"msg\":\"world\""), "expected second row: {text}");
+        assert!(
+            text.contains("\"msg\":\"hello\""),
+            "expected first row: {text}"
+        );
+        assert!(
+            text.contains("\"msg\":\"world\""),
+            "expected second row: {text}"
+        );
     }
 
     #[test]
@@ -534,12 +589,17 @@ mod tests {
                 .expect("http input binds");
         let url = format!("http://{}/", input.local_addr());
 
-        let resp = ureq::post(&url).send(b"{\"msg\":\"root\"}").expect("POST should succeed");
+        let resp = ureq::post(&url)
+            .send(b"{\"msg\":\"root\"}")
+            .expect("POST should succeed");
         assert_eq!(resp.status(), 200);
 
         let data = poll_until_data(&mut input, Duration::from_secs(2));
         let text = String::from_utf8_lossy(&data);
-        assert!(text.contains("\"msg\":\"root\""), "expected root row: {text}");
+        assert!(
+            text.contains("\"msg\":\"root\""),
+            "expected root row: {text}"
+        );
     }
 
     #[test]
@@ -599,7 +659,10 @@ mod tests {
 
         let data = poll_until_data(&mut input, Duration::from_secs(2));
         let text = String::from_utf8_lossy(&data);
-        assert!(text.contains("\"msg\":\"prefix\""), "expected prefix row: {text}");
+        assert!(
+            text.contains("\"msg\":\"prefix\""),
+            "expected prefix row: {text}"
+        );
     }
 
     #[test]

@@ -2608,12 +2608,14 @@ name = "logfwd-io"
 version = "0.1.0"
 dependencies = [
  "arrow",
+ "axum",
  "base64",
  "bytes",
  "crossbeam-channel",
  "dhat",
  "flate2",
  "globset",
+ "http-body-util",
  "libc",
  "logfwd-arrow",
  "logfwd-core",
@@ -2636,6 +2638,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tiny_http",
+ "tokio",
  "tracing",
  "ureq",
  "walkdir",
