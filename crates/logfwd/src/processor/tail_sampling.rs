@@ -340,8 +340,7 @@ fn group_value(col: &dyn Array, row: usize) -> Result<Option<String>, ProcessorE
             Ok(Some(arr.value(row).to_string()))
         }
         other => Err(ProcessorError::Permanent(format!(
-            "tail-sampling group-by column '{}' has unsupported type: {other:?}",
-            col.data_type()
+            "tail-sampling group-by column has unsupported type: {other:?}"
         ))),
     }
 }
