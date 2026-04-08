@@ -185,6 +185,19 @@ The file path is:
 - When EOF flushes a remainder, or a remainder is explicitly discarded after a
   documented lifecycle event, the checkpoint may then advance.
 
+### Source metadata rules
+
+- Source metadata (`_source_path`, `_source_id`, future fields) must be
+  attached as Arrow columns **post-scan**, not injected into raw bytes pre-scan.
+- The existing `inject_source_path_metadata` in `framed.rs` is **deprecated**
+  (#1615). It must not be extended or used as a pattern for new metadata.
+- New source metadata fields should follow the `_resource_*` column pattern
+  used by the OTLP output path: constant columns attached to the RecordBatch
+  schema, accessible via SQL, with no raw payload mutation.
+- Rationale: raw injection mutates user data, causes format-specific edge
+  cases (invalid JSON for empty objects), and is 30x slower than post-scan
+  column attachment (PR #1370 prototype measurements).
+
 ### Lifecycle rules
 
 - Rotate, truncate, delete/recreate, and EOF/stall notifications are explicit events.
