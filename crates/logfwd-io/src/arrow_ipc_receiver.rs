@@ -207,6 +207,15 @@ impl ArrowIpcReceiver {
                     };
 
                     // Send all batches to the pipeline.
+                    //
+                    // Delivery contract for one HTTP request:
+                    // - If every non-empty batch is accepted: return 200.
+                    // - If backpressure starts after some earlier batches were accepted:
+                    //   return 429 (not 200), so clients retry the entire request.
+                    //
+                    // This intentionally trades possible duplicates (already-accepted
+                    // prefix batches can be resent by the client retry) for no silent
+                    // loss of the unsent suffix.
                     let mut send_error: Option<u16> = None;
                     let mut sent_rows = false;
                     for batch in batches {
@@ -219,7 +228,8 @@ impl ArrowIpcReceiver {
                             Err(mpsc::TrySendError::Full(_)) => {
                                 // Always return 429 regardless of how many batches
                                 // were already sent; a partial send must never be
-                                // acknowledged as success to avoid data loss on retry.
+                                // acknowledged as success. Clients should retry the
+                                // whole request and downstream must tolerate duplicates.
                                 send_error = Some(429);
                                 break;
                             }
@@ -235,7 +245,7 @@ impl ArrowIpcReceiver {
                             store_event(&health_clone, ReceiverHealthEvent::Backpressure);
                             let _ = request.respond(
                                 tiny_http::Response::from_string(
-                                    "too many requests: pipeline backpressure",
+                                    "too many requests: pipeline backpressure; request may have been partially accepted and must be retried (duplicates possible)",
                                 )
                                 .with_status_code(429),
                             );
@@ -605,6 +615,63 @@ mod tests {
             "exactly one batch should have been accepted before backpressure"
         );
         assert_eq!(receiver.health(), ComponentHealth::Degraded);
+    }
+
+    #[test]
+    fn partial_accept_then_retry_can_duplicate_prefix_batches() {
+        // This regression makes duplicate-risk semantics explicit:
+        // 1) first POST partially succeeds then returns 429
+        // 2) retry of the same payload succeeds
+        // 3) downstream sees duplicated prefix rows from the first partial accept
+        let receiver = ArrowIpcReceiver::new_with_capacity("test-dup-risk", "127.0.0.1:0", 1)
+            .expect("bind should succeed");
+        let addr = receiver.local_addr();
+        let url = format!("http://{addr}/v1/arrow");
+
+        let batches = vec![make_test_batch(), make_test_batch()];
+        let ipc_bytes = serialize_batches(&batches);
+
+        let first_status = match ureq::post(&url)
+            .header("Content-Type", "application/vnd.apache.arrow.stream")
+            .send(&ipc_bytes)
+        {
+            Ok(resp) => resp.status().as_u16(),
+            Err(ureq::Error::StatusCode(code)) => code,
+            Err(e) => panic!("unexpected error: {e}"),
+        };
+        assert_eq!(first_status, 429);
+
+        let accepted_prefix = receiver.try_recv_all();
+        assert_eq!(
+            accepted_prefix.len(),
+            1,
+            "first request should have partially accepted one prefix batch before 429"
+        );
+
+        let retry_status = match ureq::post(&url)
+            .header("Content-Type", "application/vnd.apache.arrow.stream")
+            .send(&ipc_bytes)
+        {
+            Ok(resp) => resp.status().as_u16(),
+            Err(ureq::Error::StatusCode(code)) => code,
+            Err(e) => panic!("unexpected error: {e}"),
+        };
+        assert_eq!(
+            retry_status, 429,
+            "retry can also partially accept then 429"
+        );
+
+        let duplicate_prefix = receiver.try_recv_all();
+        assert_eq!(
+            duplicate_prefix.len(),
+            1,
+            "retry should re-deliver the same first prefix batch"
+        );
+        assert_eq!(
+            duplicate_prefix[0].num_rows(),
+            accepted_prefix[0].num_rows(),
+            "duplicate prefix batch row count should match original partial accept"
+        );
     }
 
     #[test]
