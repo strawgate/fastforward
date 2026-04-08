@@ -91,7 +91,7 @@ pub fn scan_streaming<B: ScanBuilder>(buf: &[u8], config: &ScanConfig, builder: 
             let bit_pos = nl.trailing_zeros() as usize;
             let abs_pos = offset + bit_pos;
             // Strip trailing \r (CRLF → LF normalisation).
-            let line_end = if abs_pos > line_start && buf[abs_pos - 1] == b'\r' {
+            let line_end = if abs_pos > line_start && buf.get(abs_pos - 1).copied() == Some(b'\r') {
                 abs_pos - 1
             } else {
                 abs_pos
@@ -106,7 +106,7 @@ pub fn scan_streaming<B: ScanBuilder>(buf: &[u8], config: &ScanConfig, builder: 
 
     if line_start < len {
         // Strip trailing \r from the last (unterminated) line too.
-        let line_end = if len > line_start && buf[len - 1] == b'\r' {
+        let line_end = if len > line_start && buf.get(len - 1).copied() == Some(b'\r') {
             len - 1
         } else {
             len
