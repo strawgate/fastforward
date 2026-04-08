@@ -126,10 +126,17 @@ impl QueryAnalyzer {
         } else {
             use logfwd_core::scan_config::FieldSpec;
             use std::collections::HashSet;
+            // `_raw` is not a JSON field but a special scanner-provided column.
+            // When it is referenced in the SQL (e.g. `json(_raw, 'key')`), the
+            // scanner must include it in the output batch.  Strip it from the
+            // `wanted_fields` list (it is not a JSON key) and enable `keep_raw`
+            // instead (#1627).
+            let keep_raw = self.referenced_columns.contains("_raw");
             let mut seen = HashSet::new();
             let wanted: Vec<FieldSpec> = self
                 .referenced_columns
                 .iter()
+                .filter(|name| *name != "_raw") // _raw is not a JSON key
                 .map(|name| strip_type_suffix(name))
                 .filter(|name| seen.insert(name.clone()))
                 .map(|name| FieldSpec {
@@ -140,7 +147,7 @@ impl QueryAnalyzer {
             ScanConfig {
                 wanted_fields: wanted,
                 extract_all: false,
-                keep_raw: false,
+                keep_raw,
                 validate_utf8: false,
             }
         }
@@ -1772,5 +1779,73 @@ mod tests {
         assert_eq!(result.num_columns(), 2, "output should have 2 columns");
         assert_eq!(result.schema().field(0).name(), "level");
         assert_eq!(result.schema().field(1).name(), "msg");
+    }
+
+    // -----------------------------------------------------------------------
+    // Regression tests for #1627: _raw must be kept when referenced in SQL
+    // -----------------------------------------------------------------------
+
+    /// When a non-wildcard SELECT references `_raw` (e.g. `json(_raw, 'key')`),
+    /// `scan_config()` must set `keep_raw = true` so the scanner includes the raw
+    /// JSON string in the batch.
+    #[test]
+    fn test_scan_config_keep_raw_when_referenced() {
+        let sql = "SELECT level, json(_raw, 'status') AS s FROM logs";
+        let a = QueryAnalyzer::new(sql).unwrap();
+        assert!(
+            a.referenced_columns.contains("_raw"),
+            "expected '_raw' in referenced_columns, got {:?}",
+            a.referenced_columns
+        );
+        let cfg = a.scan_config();
+        assert!(
+            cfg.keep_raw,
+            "scan_config must set keep_raw=true when _raw is referenced"
+        );
+        // _raw must NOT appear in wanted_fields — it is not a JSON key.
+        assert!(
+            cfg.wanted_fields.iter().all(|f| f.name != "_raw"),
+            "_raw must not be in wanted_fields: {:?}",
+            cfg.wanted_fields
+                .iter()
+                .map(|f| &f.name)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// json(_raw, 'key') inside a non-wildcard SELECT must succeed end-to-end.
+    /// Before the fix this produced "Schema error: No field named _raw."
+    #[test]
+    fn test_json_raw_without_select_star() {
+        // Build a batch that simulates scanner output with a _raw column.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("level", DataType::Utf8, true),
+            Field::new("_raw", DataType::Utf8, true),
+        ]));
+        let level: ArrayRef = Arc::new(StringArray::from(vec![Some("INFO"), Some("ERROR")]));
+        let raw: ArrayRef = Arc::new(StringArray::from(vec![
+            Some(r#"{"status":"200","level":"INFO"}"#),
+            Some(r#"{"status":"500","level":"ERROR"}"#),
+        ]));
+        let batch = RecordBatch::try_new(schema, vec![level, raw]).unwrap();
+
+        // This is what the scanner would produce when keep_raw=true is set.
+        // We simulate the end-to-end scenario by running the transform directly
+        // on a batch that already contains _raw.
+        //
+        // With the fix: scan_config() sets keep_raw=true, and the scanner
+        // includes _raw.  The transform can then call json(_raw, 'status').
+        let mut transform =
+            SqlTransform::new("SELECT level, json(_raw, 'status') AS s FROM logs").unwrap();
+        let result = transform.execute_blocking(batch).unwrap();
+        assert_eq!(result.num_rows(), 2);
+        let s = result
+            .column_by_name("s")
+            .expect("column 's' must be present")
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(s.value(0), "200");
+        assert_eq!(s.value(1), "500");
     }
 }
