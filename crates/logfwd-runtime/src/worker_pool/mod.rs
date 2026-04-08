@@ -2,9 +2,9 @@
 //!
 //! # Design
 //!
-//! Workers are long-lived tokio tasks, each owning one [`Sink`] instance
+//! Workers are long-lived tokio tasks, each owning one `Sink` instance
 //! (and therefore its own HTTP connection pool). Workers are kept in a
-//! [`VecDeque`] ordered Most-Recently-Used first. Dispatch always tries the
+//! `std::collections::VecDeque` ordered Most-Recently-Used first. Dispatch always tries the
 //! front worker first; only when that channel is full does it try the next,
 //! and so on. This **consolidates work onto the fewest active workers**,
 //! keeping cold workers idle long enough to hit their `idle_timeout` and
