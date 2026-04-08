@@ -166,14 +166,23 @@ Receive newline-delimited payloads over HTTP `POST`.
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `listen` | string | Yes | `host:port`, e.g. `0.0.0.0:8081`. |
-| `path` | string | No | Route path. Must start with `/`. Defaults to `/ingest`. |
+| `http.path` | string | No | Route path. Must start with `/`. Defaults to `/`. |
+| `http.strict_path` | boolean | No | When `true` (default), require exact path match. |
+| `http.method` | string | No | Accepted method. Defaults to `POST`. |
+| `http.max_request_body_size` | integer | No | Maximum request body size in bytes. Defaults to 20 MiB. |
+| `http.response_code` | integer | No | Success code. One of `200`, `201`, `202`, `204` (default `200`). |
 
 ```yaml
 input:
   type: http
   listen: 0.0.0.0:8081
-  path: /ingest
   format: json
+  http:
+    path: /ingest
+    strict_path: true
+    method: POST
+    max_request_body_size: 20971520
+    response_code: 200
 ```
 
 ### `arrow_ipc` input *(not yet supported)*

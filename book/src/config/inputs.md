@@ -97,6 +97,11 @@ Receive newline-delimited payloads over HTTP `POST` (NDJSON or raw lines).
 input:
   type: http
   listen: 0.0.0.0:8081
-  path: /ingest    # optional, defaults to /ingest
   format: json     # json | raw
+  http:
+    path: /ingest  # optional, defaults to /
+    strict_path: true
+    method: POST
+    max_request_body_size: 20971520
+    response_code: 200
 ```

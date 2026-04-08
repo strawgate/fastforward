@@ -1060,7 +1060,10 @@ fn input_label(i: &logfwd_config::InputConfig) -> String {
         InputType::Http => format!(
             "http  {}{}",
             i.listen.as_deref().unwrap_or(":8081"),
-            i.path.as_deref().unwrap_or("/ingest")
+            i.http
+                .as_ref()
+                .and_then(|cfg| cfg.path.as_deref())
+                .unwrap_or("/")
         ),
         InputType::Generator => "generator".to_string(),
         _ => "unknown".to_string(),

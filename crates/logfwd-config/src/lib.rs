@@ -267,6 +267,35 @@ pub struct GeneratorSequenceConfig {
     pub start: Option<u64>,
 }
 
+/// Accepted HTTP method for `http` inputs.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum HttpMethodConfig {
+    Get,
+    Post,
+    Put,
+    Delete,
+    Patch,
+    Head,
+    Options,
+}
+
+/// HTTP-specific input settings.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct HttpInputConfig {
+    /// Route path. Must start with `/`. Defaults to `/`.
+    pub path: Option<String>,
+    /// Exact path matching when true. Defaults to true.
+    pub strict_path: Option<bool>,
+    /// Accepted method. Defaults to `POST`.
+    pub method: Option<HttpMethodConfig>,
+    /// Maximum HTTP request body size in bytes. Defaults to 20 MiB.
+    pub max_request_body_size: Option<usize>,
+    /// HTTP status code for successful ingest. Defaults to 200.
+    pub response_code: Option<u16>,
+}
+
 /// Generator-specific configuration.
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
@@ -298,7 +327,7 @@ pub struct InputConfig {
     pub name: Option<String>,
     #[serde(rename = "type")]
     pub input_type: InputType,
-    /// File glob (file input) or route path (http input), depending on `input_type`.
+    /// File glob path for `file` inputs.
     pub path: Option<String>,
     /// Socket bind address for networked inputs (udp/tcp/otlp/http).
     pub listen: Option<String>,
@@ -313,6 +342,9 @@ pub struct InputConfig {
     /// Generator-specific configuration.
     #[serde(default)]
     pub generator: Option<GeneratorInputConfig>,
+    /// HTTP-specific settings. Applies only to `http` inputs.
+    #[serde(default)]
+    pub http: Option<HttpInputConfig>,
     /// Per-input SQL transform. When set, this input gets its own Scanner +
     /// `SqlTransform` pair. Overrides the pipeline-level `transform` field
     /// for this input only.
@@ -817,6 +849,11 @@ impl Config {
                                 "pipeline '{name}' input '{label}': 'listen' is not supported for file inputs"
                             )));
                         }
+                        if input.http.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'http' settings are only supported for http inputs"
+                            )));
+                        }
                     }
                     InputType::Tcp | InputType::Udp => {
                         if input.generator.is_some() {
@@ -837,6 +874,11 @@ impl Config {
                         if input.glob_rescan_interval_ms.is_some() {
                             return Err(ConfigError::Validation(format!(
                                 "pipeline '{name}' input '{label}': 'glob_rescan_interval_ms' is not supported for tcp/udp inputs"
+                            )));
+                        }
+                        if input.http.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'http' settings are only supported for http inputs"
                             )));
                         }
                     }
@@ -861,11 +903,21 @@ impl Config {
                                 "pipeline '{name}' input '{label}': 'glob_rescan_interval_ms' is not supported for otlp inputs"
                             )));
                         }
+                        if input.http.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'http' settings are only supported for http inputs"
+                            )));
+                        }
                     }
                     InputType::Http => {
                         if input.generator.is_some() {
                             return Err(ConfigError::Validation(format!(
                                 "pipeline '{name}' input '{label}': 'generator' settings are only supported for generator inputs"
+                            )));
+                        }
+                        if input.path.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'path' is not supported for http inputs; use http.path"
                             )));
                         }
                         if input.max_open_files.is_some() {
@@ -878,12 +930,26 @@ impl Config {
                                 "pipeline '{name}' input '{label}': 'glob_rescan_interval_ms' is not supported for http inputs"
                             )));
                         }
-                        if let Some(path) = &input.path
-                            && (!path.starts_with('/') || path.trim().is_empty())
-                        {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': http input 'path' must start with '/'"
-                            )));
+                        if let Some(http) = &input.http {
+                            if let Some(path) = &http.path
+                                && (!path.starts_with('/') || path.trim().is_empty())
+                            {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': http.path must start with '/'"
+                                )));
+                            }
+                            if http.max_request_body_size == Some(0) {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': http.max_request_body_size must be at least 1"
+                                )));
+                            }
+                            if let Some(code) = http.response_code
+                                && !matches!(code, 200 | 201 | 202 | 204)
+                            {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': http.response_code must be one of 200, 201, 202, 204"
+                                )));
+                            }
                         }
                     }
                     InputType::Generator => {
@@ -905,6 +971,11 @@ impl Config {
                         if input.glob_rescan_interval_ms.is_some() {
                             return Err(ConfigError::Validation(format!(
                                 "pipeline '{name}' input '{label}': 'glob_rescan_interval_ms' is not supported for generator inputs"
+                            )));
+                        }
+                        if input.http.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'http' settings are only supported for http inputs"
                             )));
                         }
                         if input.generator.as_ref().and_then(|cfg| cfg.batch_size) == Some(0) {
@@ -982,6 +1053,11 @@ impl Config {
                         if input.generator.is_some() {
                             return Err(ConfigError::Validation(format!(
                                 "pipeline '{name}' input '{label}': 'generator' settings are only supported for generator inputs"
+                            )));
+                        }
+                        if input.http.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'http' settings are only supported for http inputs"
                             )));
                         }
                     }
@@ -1715,16 +1791,65 @@ output:
 input:
   type: http
   listen: 0.0.0.0:8080
-  path: ingest
+  http:
+    path: ingest
 output:
   type: stdout
 ";
         let err = Config::load_str(yaml).unwrap_err();
         let msg = err.to_string();
         assert!(
-            msg.contains("must start with '/'"),
+            msg.contains("http.path must start with '/'"),
             "expected route-path error: {msg}"
         );
+    }
+
+    #[test]
+    fn validation_http_rejects_legacy_path_field() {
+        let yaml = r"
+input:
+  type: http
+  listen: 0.0.0.0:8080
+  path: /ingest
+output:
+  type: stdout
+";
+        let err = Config::load_str(yaml).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("use http.path"),
+            "expected guidance to use http.path: {msg}"
+        );
+    }
+
+    #[test]
+    fn validation_http_rejects_invalid_response_code() {
+        let yaml = r"
+input:
+  type: http
+  listen: 0.0.0.0:8080
+  http:
+    response_code: 299
+output:
+  type: stdout
+";
+        let err = Config::load_str(yaml).unwrap_err();
+        assert!(err.to_string().contains("http.response_code"));
+    }
+
+    #[test]
+    fn validation_non_http_rejects_http_block() {
+        let yaml = r"
+input:
+  type: tcp
+  listen: 0.0.0.0:5140
+  http:
+    path: /ingest
+output:
+  type: stdout
+";
+        let err = Config::load_str(yaml).unwrap_err();
+        assert!(err.to_string().contains("only supported for http inputs"));
     }
 
     #[test]

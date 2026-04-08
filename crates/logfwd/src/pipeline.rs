@@ -29,7 +29,8 @@ use crate::worker_pool::{AckItem, OutputWorkerPool, WorkItem};
 use logfwd_arrow::scanner::Scanner;
 use logfwd_config::{
     EnrichmentConfig, Format, GeneratorAttributeValueConfig, GeneratorComplexityConfig,
-    GeneratorProfileConfig, GeoDatabaseFormat, InputConfig, InputType, PipelineConfig,
+    GeneratorProfileConfig, GeoDatabaseFormat, HttpMethodConfig, InputConfig, InputType,
+    PipelineConfig,
 };
 use logfwd_io::checkpoint::{
     CheckpointStore, FileCheckpointStore, SourceCheckpoint, default_data_dir,
@@ -1543,7 +1544,37 @@ fn build_input_state(
                 .ok_or_else(|| format!("input '{name}': http input requires 'listen'"))?;
             let format = cfg.format.clone().unwrap_or(Format::Json);
             validate_input_format(name, InputType::Http, &format)?;
-            let source = logfwd_io::http_input::HttpInput::new(name, addr, cfg.path.as_deref())
+            let mut options = logfwd_io::http_input::HttpInputOptions::default();
+            if let Some(http) = &cfg.http {
+                if let Some(path) = &http.path {
+                    options.path = path.clone();
+                }
+                if let Some(strict_path) = http.strict_path {
+                    options.strict_path = strict_path;
+                }
+                if let Some(max_request_body_size) = http.max_request_body_size {
+                    options.max_request_body_size = max_request_body_size;
+                }
+                if let Some(response_code) = http.response_code {
+                    options.response_code = response_code;
+                }
+                if let Some(method) = &http.method {
+                    options.method = match method {
+                        HttpMethodConfig::Get => logfwd_io::http_input::HttpInputMethod::Get,
+                        HttpMethodConfig::Post => logfwd_io::http_input::HttpInputMethod::Post,
+                        HttpMethodConfig::Put => logfwd_io::http_input::HttpInputMethod::Put,
+                        HttpMethodConfig::Delete => {
+                            logfwd_io::http_input::HttpInputMethod::Delete
+                        }
+                        HttpMethodConfig::Patch => logfwd_io::http_input::HttpInputMethod::Patch,
+                        HttpMethodConfig::Head => logfwd_io::http_input::HttpInputMethod::Head,
+                        HttpMethodConfig::Options => {
+                            logfwd_io::http_input::HttpInputMethod::Options
+                        }
+                    };
+                }
+            }
+            let source = logfwd_io::http_input::HttpInput::new_with_options(name, addr, options)
                 .map_err(|e| format!("input '{name}': failed to start HTTP input: {e}"))?;
             (Box::new(source), format, 4 * 1024 * 1024)
         }

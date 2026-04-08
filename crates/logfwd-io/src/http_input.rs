@@ -1,26 +1,94 @@
 //! HTTP input source for newline-delimited payload ingestion.
 //!
-//! Listens for `POST` requests on a configurable path (default `/ingest`),
-//! accepts optionally compressed request bodies, and forwards newline-delimited
-//! bytes to the pipeline scanner path as [`InputEvent::Data`].
+//! Listens for requests on a configurable route (default `/`), accepts
+//! optionally compressed request bodies, and forwards newline-delimited bytes
+//! to the pipeline scanner path as [`InputEvent::Data`].
 
 use std::io;
 use std::io::Read as _;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use flate2::read::GzDecoder;
 use logfwd_types::diagnostics::ComponentHealth;
 
-use crate::input::{InputEvent, InputSource};
 use crate::InputError;
+use crate::input::{InputEvent, InputSource};
 
-/// Maximum request body size: 10 MB.
-const MAX_BODY_SIZE: usize = 10 * 1024 * 1024;
+/// Default max request body size (20 MiB).
+const DEFAULT_MAX_REQUEST_BODY_SIZE: usize = 20 * 1024 * 1024;
 
 /// Bounded channel capacity — limits memory when the pipeline falls behind.
 const CHANNEL_BOUND: usize = 4096;
+
+/// Accepted HTTP method for the input endpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HttpInputMethod {
+    Get,
+    Post,
+    Put,
+    Delete,
+    Patch,
+    Head,
+    Options,
+}
+
+impl HttpInputMethod {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Get => "GET",
+            Self::Post => "POST",
+            Self::Put => "PUT",
+            Self::Delete => "DELETE",
+            Self::Patch => "PATCH",
+            Self::Head => "HEAD",
+            Self::Options => "OPTIONS",
+        }
+    }
+
+    #[must_use]
+    pub fn matches(self, method: &tiny_http::Method) -> bool {
+        matches!(
+            (self, method),
+            (Self::Get, tiny_http::Method::Get)
+                | (Self::Post, tiny_http::Method::Post)
+                | (Self::Put, tiny_http::Method::Put)
+                | (Self::Delete, tiny_http::Method::Delete)
+                | (Self::Patch, tiny_http::Method::Patch)
+                | (Self::Head, tiny_http::Method::Head)
+                | (Self::Options, tiny_http::Method::Options)
+        )
+    }
+}
+
+/// HTTP input behavior and limits.
+#[derive(Debug, Clone)]
+pub struct HttpInputOptions {
+    /// Route path to match, e.g. `/ingest`.
+    pub path: String,
+    /// When true, only exact path matches are accepted.
+    pub strict_path: bool,
+    /// Accepted HTTP method for ingest requests.
+    pub method: HttpInputMethod,
+    /// Max request body size in bytes.
+    pub max_request_body_size: usize,
+    /// HTTP response code for accepted requests.
+    pub response_code: u16,
+}
+
+impl Default for HttpInputOptions {
+    fn default() -> Self {
+        Self {
+            path: "/".to_string(),
+            strict_path: true,
+            method: HttpInputMethod::Post,
+            max_request_body_size: DEFAULT_MAX_REQUEST_BODY_SIZE,
+            response_code: 200,
+        }
+    }
+}
 
 /// HTTP NDJSON receiver that forwards bytes to the scanner pipeline.
 pub struct HttpInput {
@@ -39,9 +107,22 @@ pub struct HttpInput {
 
 impl HttpInput {
     /// Bind an HTTP server on `addr` (e.g. "0.0.0.0:8081").
-    /// Spawns a background thread to handle requests.
+    /// Uses default options with `path` override when supplied.
     pub fn new(name: impl Into<String>, addr: &str, path: Option<&str>) -> io::Result<Self> {
-        Self::new_with_capacity_inner(name, addr, CHANNEL_BOUND, path)
+        let mut options = HttpInputOptions::default();
+        if let Some(path) = path {
+            options.path = path.to_string();
+        }
+        Self::new_with_options(name, addr, options)
+    }
+
+    /// Bind an HTTP server with explicit options.
+    pub fn new_with_options(
+        name: impl Into<String>,
+        addr: &str,
+        options: HttpInputOptions,
+    ) -> io::Result<Self> {
+        Self::new_with_capacity_inner(name, addr, CHANNEL_BOUND, options)
     }
 
     #[cfg(test)]
@@ -49,18 +130,24 @@ impl HttpInput {
         name: impl Into<String>,
         addr: &str,
         capacity: usize,
-        path: Option<&str>,
+        options: HttpInputOptions,
     ) -> io::Result<Self> {
-        Self::new_with_capacity_inner(name, addr, capacity, path)
+        Self::new_with_capacity_inner(name, addr, capacity, options)
     }
 
     fn new_with_capacity_inner(
         name: impl Into<String>,
         addr: &str,
         capacity: usize,
-        path: Option<&str>,
+        options: HttpInputOptions,
     ) -> io::Result<Self> {
-        let route_path = normalize_route(path)?;
+        let options = normalize_options(options)?;
+        let route_path = options.path.clone();
+        let strict_path = options.strict_path;
+        let accepted_method = options.method;
+        let max_request_body_size = options.max_request_body_size;
+        let success_response_code = options.response_code;
+
         let server = Arc::new(
             tiny_http::Server::http(addr)
                 .map_err(|e| io::Error::other(format!("HTTP input bind {addr}: {e}")))?,
@@ -87,7 +174,7 @@ impl HttpInput {
                 while is_running_clone.load(Ordering::Relaxed) {
                     let mut request = match server_clone.recv_timeout(Duration::from_millis(100)) {
                         Ok(Some(req)) => req,
-                        Ok(None) => continue, // timeout — check is_running and retry
+                        Ok(None) => continue,
                         Err(_) => {
                             health_clone
                                 .store(ComponentHealth::Failed.as_repr(), Ordering::Relaxed);
@@ -97,16 +184,17 @@ impl HttpInput {
 
                     let url = request.url().to_string();
                     let path_only = url.split('?').next().unwrap_or(&url);
-                    if path_only != route_path {
+                    if !path_matches(path_only, &route_path, strict_path) {
                         let _ = request.respond(
                             tiny_http::Response::from_string("not found").with_status_code(404),
                         );
                         continue;
                     }
-                    if request.method() != &tiny_http::Method::Post {
-                        let allow_header = "Allow: POST"
+
+                    if !accepted_method.matches(request.method()) {
+                        let allow_header = format!("Allow: {}", accepted_method.as_str())
                             .parse::<tiny_http::Header>()
-                            .expect("static header is valid");
+                            .expect("static method header is valid");
                         let _ = request.respond(
                             tiny_http::Response::from_string("method not allowed")
                                 .with_status_code(405)
@@ -115,7 +203,7 @@ impl HttpInput {
                         continue;
                     }
 
-                    if request.body_length().unwrap_or(0) > MAX_BODY_SIZE {
+                    if request.body_length().unwrap_or(0) > max_request_body_size {
                         let _ = request.respond(
                             tiny_http::Response::from_string("payload too large")
                                 .with_status_code(413),
@@ -123,14 +211,15 @@ impl HttpInput {
                         continue;
                     }
 
-                    let mut body =
-                        Vec::with_capacity(request.body_length().unwrap_or(0).min(MAX_BODY_SIZE));
+                    let mut body = Vec::with_capacity(
+                        request.body_length().unwrap_or(0).min(max_request_body_size),
+                    );
                     match request
                         .as_reader()
-                        .take(MAX_BODY_SIZE as u64 + 1)
+                        .take(max_request_body_size as u64 + 1)
                         .read_to_end(&mut body)
                     {
-                        Ok(n) if n > MAX_BODY_SIZE => {
+                        Ok(n) if n > max_request_body_size => {
                             let _ = request.respond(
                                 tiny_http::Response::from_string("payload too large")
                                     .with_status_code(413),
@@ -153,33 +242,35 @@ impl HttpInput {
                         .find(|h| h.field.equiv("Content-Encoding"))
                         .map(|h| h.value.as_str().to_lowercase());
 
-                    let mut body = match decode_content(body, content_encoding.as_deref()) {
-                        Ok(decoded) => decoded,
-                        Err(InputError::Receiver(msg)) => {
-                            let _ = request.respond(
-                                tiny_http::Response::from_string(msg).with_status_code(400),
-                            );
-                            continue;
-                        }
-                        Err(InputError::Io(e)) if e.kind() == io::ErrorKind::InvalidData => {
-                            let _ = request.respond(
-                                tiny_http::Response::from_string(e.to_string())
-                                    .with_status_code(413),
-                            );
-                            continue;
-                        }
-                        Err(_) => {
-                            let _ = request.respond(
-                                tiny_http::Response::from_string("decode failed")
-                                    .with_status_code(400),
-                            );
-                            continue;
-                        }
-                    };
+                    let mut body =
+                        match decode_content(body, content_encoding.as_deref(), max_request_body_size)
+                        {
+                            Ok(decoded) => decoded,
+                            Err(InputError::Receiver(msg)) => {
+                                let _ = request.respond(
+                                    tiny_http::Response::from_string(msg).with_status_code(400),
+                                );
+                                continue;
+                            }
+                            Err(InputError::Io(e)) if e.kind() == io::ErrorKind::InvalidData => {
+                                let _ = request.respond(
+                                    tiny_http::Response::from_string(e.to_string())
+                                        .with_status_code(413),
+                                );
+                                continue;
+                            }
+                            Err(_) => {
+                                let _ = request.respond(
+                                    tiny_http::Response::from_string("decode failed")
+                                        .with_status_code(400),
+                                );
+                                continue;
+                            }
+                        };
 
                     if body.is_empty() {
                         health_clone.store(ComponentHealth::Healthy.as_repr(), Ordering::Relaxed);
-                        let _ = request.respond(tiny_http::Response::empty(200));
+                        let _ = request.respond(tiny_http::Response::empty(success_response_code));
                         continue;
                     }
 
@@ -191,7 +282,7 @@ impl HttpInput {
                         Ok(()) => {
                             health_clone
                                 .store(ComponentHealth::Healthy.as_repr(), Ordering::Relaxed);
-                            let _ = request.respond(tiny_http::Response::empty(200));
+                            let _ = request.respond(tiny_http::Response::empty(success_response_code));
                         }
                         Err(mpsc::TrySendError::Full(_)) => {
                             health_clone
@@ -291,21 +382,55 @@ impl InputSource for HttpInput {
     }
 }
 
-fn normalize_route(path: Option<&str>) -> io::Result<String> {
-    let route = path.unwrap_or("/ingest");
-    if route.trim().is_empty() || !route.starts_with('/') {
+fn normalize_options(mut options: HttpInputOptions) -> io::Result<HttpInputOptions> {
+    options.path = normalize_route(&options.path)?;
+    if options.max_request_body_size == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "http input max_request_body_size must be >= 1",
+        ));
+    }
+    if !is_valid_success_response_code(options.response_code) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "http input response_code must be one of: 200, 201, 202, 204",
+        ));
+    }
+    Ok(options)
+}
+
+fn is_valid_success_response_code(code: u16) -> bool {
+    matches!(code, 200 | 201 | 202 | 204)
+}
+
+fn normalize_route(path: &str) -> io::Result<String> {
+    if path.trim().is_empty() || !path.starts_with('/') {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "http input path must start with '/'",
         ));
     }
-    Ok(route.to_string())
+    Ok(path.to_string())
 }
 
-fn decode_content(body: Vec<u8>, content_encoding: Option<&str>) -> Result<Vec<u8>, InputError> {
+fn path_matches(path: &str, route: &str, strict_path: bool) -> bool {
+    if strict_path {
+        return path == route;
+    }
+    if route == "/" {
+        return true;
+    }
+    path == route || path.strip_prefix(route).is_some_and(|suffix| suffix.starts_with('/'))
+}
+
+fn decode_content(
+    body: Vec<u8>,
+    content_encoding: Option<&str>,
+    max_request_body_size: usize,
+) -> Result<Vec<u8>, InputError> {
     match content_encoding {
-        Some("zstd") => decompress_zstd(&body),
-        Some("gzip") => decompress_gzip(&body),
+        Some("zstd") => decompress_zstd(&body, max_request_body_size),
+        Some("gzip") => decompress_gzip(&body, max_request_body_size),
         None | Some("identity") => Ok(body),
         Some(other) => Err(InputError::Receiver(format!(
             "unsupported content-encoding: {other}"
@@ -313,28 +438,39 @@ fn decode_content(body: Vec<u8>, content_encoding: Option<&str>) -> Result<Vec<u
     }
 }
 
-fn decompress_zstd(body: &[u8]) -> Result<Vec<u8>, InputError> {
+fn decompress_zstd(body: &[u8], max_request_body_size: usize) -> Result<Vec<u8>, InputError> {
     let decoder = zstd::Decoder::new(body)
         .map_err(|_| InputError::Receiver("zstd decompression failed".to_string()))?;
-    read_decompressed_body(decoder, body.len(), "zstd decompression failed")
+    read_decompressed_body(
+        decoder,
+        body.len(),
+        max_request_body_size,
+        "zstd decompression failed",
+    )
 }
 
-fn decompress_gzip(body: &[u8]) -> Result<Vec<u8>, InputError> {
+fn decompress_gzip(body: &[u8], max_request_body_size: usize) -> Result<Vec<u8>, InputError> {
     let decoder = GzDecoder::new(body);
-    read_decompressed_body(decoder, body.len(), "gzip decompression failed")
+    read_decompressed_body(
+        decoder,
+        body.len(),
+        max_request_body_size,
+        "gzip decompression failed",
+    )
 }
 
 fn read_decompressed_body(
     reader: impl io::Read,
     compressed_len: usize,
+    max_request_body_size: usize,
     error_label: &str,
 ) -> Result<Vec<u8>, InputError> {
-    let mut decompressed = Vec::with_capacity(compressed_len.min(MAX_BODY_SIZE));
+    let mut decompressed = Vec::with_capacity(compressed_len.min(max_request_body_size));
     match reader
-        .take(MAX_BODY_SIZE as u64 + 1)
+        .take(max_request_body_size as u64 + 1)
         .read_to_end(&mut decompressed)
     {
-        Ok(n) if n > MAX_BODY_SIZE => Err(InputError::Io(io::Error::new(
+        Ok(n) if n > max_request_body_size => Err(InputError::Io(io::Error::new(
             io::ErrorKind::InvalidData,
             "payload too large",
         ))),
@@ -368,8 +504,12 @@ mod tests {
 
     #[test]
     fn http_ndjson_roundtrip() {
+        let options = HttpInputOptions {
+            path: "/ingest".to_string(),
+            ..HttpInputOptions::default()
+        };
         let mut input =
-            HttpInput::new("test", "127.0.0.1:0", Some("/ingest")).expect("http input binds");
+            HttpInput::new_with_options("test", "127.0.0.1:0", options).expect("http input binds");
         let url = format!("http://{}/ingest", input.local_addr());
 
         let body = b"{\"msg\":\"hello\"}\n{\"msg\":\"world\"}\n";
@@ -381,20 +521,33 @@ mod tests {
 
         let data = poll_until_data(&mut input, Duration::from_secs(2));
         let text = String::from_utf8_lossy(&data);
-        assert!(
-            text.contains("\"msg\":\"hello\""),
-            "expected first row: {text}"
-        );
-        assert!(
-            text.contains("\"msg\":\"world\""),
-            "expected second row: {text}"
-        );
+        assert!(text.contains("\"msg\":\"hello\""), "expected first row: {text}");
+        assert!(text.contains("\"msg\":\"world\""), "expected second row: {text}");
+    }
+
+    #[test]
+    fn http_default_route_accepts_root() {
+        let mut input =
+            HttpInput::new_with_options("test", "127.0.0.1:0", HttpInputOptions::default())
+                .expect("http input binds");
+        let url = format!("http://{}/", input.local_addr());
+
+        let resp = ureq::post(&url).send(b"{\"msg\":\"root\"}").expect("POST should succeed");
+        assert_eq!(resp.status(), 200);
+
+        let data = poll_until_data(&mut input, Duration::from_secs(2));
+        let text = String::from_utf8_lossy(&data);
+        assert!(text.contains("\"msg\":\"root\""), "expected root row: {text}");
     }
 
     #[test]
     fn http_appends_newline_when_missing() {
+        let options = HttpInputOptions {
+            path: "/ingest".to_string(),
+            ..HttpInputOptions::default()
+        };
         let mut input =
-            HttpInput::new("test", "127.0.0.1:0", Some("/ingest")).expect("http input binds");
+            HttpInput::new_with_options("test", "127.0.0.1:0", options).expect("http input binds");
         let url = format!("http://{}/ingest", input.local_addr());
 
         let body = b"{\"msg\":\"no-newline\"}";
@@ -410,8 +563,12 @@ mod tests {
 
     #[test]
     fn http_rejects_wrong_path() {
+        let options = HttpInputOptions {
+            path: "/ingest".to_string(),
+            ..HttpInputOptions::default()
+        };
         let input =
-            HttpInput::new("test", "127.0.0.1:0", Some("/ingest")).expect("http input binds");
+            HttpInput::new_with_options("test", "127.0.0.1:0", options).expect("http input binds");
         let url = format!("http://{}/not-ingest", input.local_addr());
 
         let status = match ureq::post(&url).send(b"{\"x\":1}\n") {
@@ -423,8 +580,52 @@ mod tests {
     }
 
     #[test]
+    fn http_prefix_path_when_not_strict() {
+        let options = HttpInputOptions {
+            path: "/ingest".to_string(),
+            strict_path: false,
+            ..HttpInputOptions::default()
+        };
+        let mut input =
+            HttpInput::new_with_options("test", "127.0.0.1:0", options).expect("http input binds");
+        let url = format!("http://{}/ingest/team-a", input.local_addr());
+
+        let resp = ureq::post(&url)
+            .send(b"{\"msg\":\"prefix\"}\n")
+            .expect("POST should succeed");
+        assert_eq!(resp.status(), 200);
+
+        let data = poll_until_data(&mut input, Duration::from_secs(2));
+        let text = String::from_utf8_lossy(&data);
+        assert!(text.contains("\"msg\":\"prefix\""), "expected prefix row: {text}");
+    }
+
+    #[test]
+    fn http_rejects_method_mismatch() {
+        let options = HttpInputOptions {
+            path: "/ingest".to_string(),
+            method: HttpInputMethod::Put,
+            ..HttpInputOptions::default()
+        };
+        let input =
+            HttpInput::new_with_options("test", "127.0.0.1:0", options).expect("http input binds");
+        let url = format!("http://{}/ingest", input.local_addr());
+
+        let status = match ureq::post(&url).send(b"{\"x\":1}\n") {
+            Ok(resp) => resp.status().as_u16(),
+            Err(ureq::Error::StatusCode(code)) => code,
+            Err(err) => panic!("unexpected request failure: {err}"),
+        };
+        assert_eq!(status, 405, "POST should be rejected for PUT-only endpoint");
+    }
+
+    #[test]
     fn http_returns_429_when_channel_full() {
-        let mut input = HttpInput::new_with_capacity("test", "127.0.0.1:0", 1, Some("/ingest"))
+        let options = HttpInputOptions {
+            path: "/ingest".to_string(),
+            ..HttpInputOptions::default()
+        };
+        let mut input = HttpInput::new_with_capacity("test", "127.0.0.1:0", 1, options)
             .expect("http input binds");
         let url = format!("http://{}/ingest", input.local_addr());
 
