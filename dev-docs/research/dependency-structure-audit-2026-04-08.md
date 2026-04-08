@@ -18,21 +18,21 @@ Audit focus:
 
 ## Findings (Prioritized)
 
-### 1. P2: Yanked crate in lockfile (`fastrand 2.4.0`)
+### 1. P2: Yanked crate in lockfile (`fastrand 2.4.0`) — resolved
 
-- Evidence: `cargo deny check` reports a yanked crate.
-- Lockfile location: `Cargo.lock` contains the `fastrand 2.4.0` entry (search for `name = "fastrand"` + `version = "2.4.0"`).
-- Validation: `cargo update -p fastrand --dry-run` resolves cleanly to `2.4.1`.
+- Historical evidence (at audit time): `cargo deny check` reported `fastrand 2.4.0` as yanked.
+- Current state: `Cargo.lock` now contains `fastrand 2.4.1`.
+- Validation command: `cargo update -p fastrand --dry-run`.
 
 References:
 
-- `Cargo.lock` — `fastrand 2.4.0` package entry (`name = "fastrand"`, `version = "2.4.0"`)
-- `Cargo.lock` — `fastrand 2.4.0` checksum entry (`checksum = ...` line immediately following the version)
+- `Cargo.lock` package stanza for `name = "fastrand"` (current `version = "2.4.1"`).
+- `cargo deny check` output from this audit run.
 
 Recommendation:
 
-- Update lockfile with `cargo update -p fastrand`.
-- Re-run `cargo deny check` in CI to verify warning is gone.
+- Keep this item as a historical audit note.
+- Continue enforcing with `cargo deny check` in CI.
 
 ---
 
@@ -44,9 +44,9 @@ Recommendation:
 
 References:
 
-- `book/src/development/building.md:19`
-- `justfile:58`
-- `justfile:61`
+- `book/src/development/building.md` command table (`just ci` / `just ci-all`)
+- `justfile` target `ci`
+- `justfile` target `ci-all`
 
 Recommendation:
 
@@ -68,10 +68,9 @@ Recommendation:
 
 References:
 
-- `docs/ci/crate-boundary-and-dependency-integrity.md:94`
-- `docs/ci/crate-boundary-and-dependency-integrity.md:95`
-- `crates/logfwd-transform/Cargo.toml:11`
-- `crates/logfwd-output/Cargo.toml:11`
+- `docs/ci/crate-boundary-and-dependency-integrity.md` section: actual dependency graph
+- `crates/logfwd-transform/Cargo.toml` dependencies section
+- `crates/logfwd-output/Cargo.toml` dependencies section
 
 Recommendation:
 
