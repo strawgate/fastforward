@@ -1367,6 +1367,42 @@ mod write_row_json_tests {
             !v["event_date"].as_str().unwrap().is_empty(),
             "Date32 column must not be empty string, got: {json}"
         );
+        assert!(
+            v["event_date"].as_str().unwrap().contains("2024"),
+            "Date32 string should contain 2024, got: {json}"
+        );
+    }
+
+    /// Additional regression coverage for temporal fallback branches.
+    #[test]
+    fn duration_microsecond_serializes_as_nonempty_string() {
+        use arrow::array::DurationMicrosecondArray;
+        let arr = DurationMicrosecondArray::from(vec![1_234_567_i64]);
+        let batch = make_batch(vec![("event_dur", Arc::new(arr) as Arc<dyn Array>)]);
+        let json = render(&batch, 0);
+        let v: serde_json::Value = serde_json::from_str(&json).expect("must be valid JSON");
+        assert!(
+            v["event_dur"].is_string(),
+            "Duration column must serialize as string, got: {json}"
+        );
+        assert!(
+            !v["event_dur"].as_str().unwrap().is_empty(),
+            "Duration column must not be empty string, got: {json}"
+        );
+    }
+
+    /// Null temporal values must remain JSON null (not empty strings).
+    #[test]
+    fn timestamp_null_serializes_as_null() {
+        use arrow::array::TimestampNanosecondArray;
+        let arr = TimestampNanosecondArray::from(vec![None::<i64>]);
+        let batch = make_batch(vec![("event_ts", Arc::new(arr) as Arc<dyn Array>)]);
+        let json = render(&batch, 0);
+        let v: serde_json::Value = serde_json::from_str(&json).expect("must be valid JSON");
+        assert!(
+            v["event_ts"].is_null(),
+            "null Timestamp must serialize as null, got: {json}"
+        );
     }
 }
 
