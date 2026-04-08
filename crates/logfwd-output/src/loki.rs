@@ -39,7 +39,7 @@ use std::collections::HashMap;
 use std::io;
 use std::sync::Arc;
 
-use arrow::array::AsArray;
+use arrow::array::{Array, AsArray};
 use arrow::datatypes::DataType;
 use arrow::record_batch::RecordBatch;
 
@@ -180,19 +180,29 @@ impl LokiSink {
                 let col = batch.column(ts_idx);
                 match col.data_type() {
                     DataType::Int64 => {
-                        let val = col.as_primitive::<arrow::datatypes::Int64Type>().value(row);
-                        // Negative nanosecond timestamps are invalid for Loki (u64 wire
-                        // type). Fall back to observed time rather than sending epoch-zero
-                        // or wrapping to a far-future value. (#1084)
-                        if val >= 0 {
-                            val as u64
-                        } else {
+                        let arr = col.as_primitive::<arrow::datatypes::Int64Type>();
+                        // Null and negative timestamps are both invalid for Loki (u64
+                        // wire type). Fall back to observed time rather than sending
+                        // epoch-zero or wrapping to a far-future value. (#1084, #1641)
+                        if arr.is_null(row) {
                             metadata.observed_time_ns
+                        } else {
+                            let val = arr.value(row);
+                            if val >= 0 {
+                                val as u64
+                            } else {
+                                metadata.observed_time_ns
+                            }
                         }
                     }
-                    DataType::UInt64 => col
-                        .as_primitive::<arrow::datatypes::UInt64Type>()
-                        .value(row),
+                    DataType::UInt64 => {
+                        let arr = col.as_primitive::<arrow::datatypes::UInt64Type>();
+                        if arr.is_null(row) {
+                            metadata.observed_time_ns
+                        } else {
+                            arr.value(row)
+                        }
+                    }
                     _ => metadata.observed_time_ns,
                 }
             } else {
@@ -742,6 +752,100 @@ mod tests {
         assert_eq!(
             entries[1].0, metadata.observed_time_ns,
             "Negative timestamp should fall back to observed_time_ns"
+        );
+    }
+
+    /// Regression test for #1641: null _timestamp rows must fall back to
+    /// observed_time_ns, not silently emit epoch-zero (0 from uninitialized buffer).
+    #[test]
+    fn test_null_timestamp_falls_back_to_observed_time() {
+        use arrow::array::Int64Array;
+        use arrow::datatypes::{Field, Schema};
+
+        let config = Arc::new(LokiConfig {
+            endpoint: "http://localhost".to_string(),
+            tenant_id: None,
+            static_labels: vec![],
+            label_columns: vec![],
+            headers: vec![],
+        });
+        let sink = LokiSink::new(
+            "test".to_string(),
+            config,
+            Arc::new(reqwest::Client::new()),
+            Arc::new(ComponentStats::new()),
+        );
+
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            field_names::TIMESTAMP_UNDERSCORE,
+            DataType::Int64,
+            true,
+        )]));
+        // Row 0: valid timestamp, Row 1: null timestamp
+        let ts_arr = Int64Array::from(vec![Some(999u64 as i64), None]);
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(ts_arr)]).unwrap();
+        let metadata = BatchMetadata {
+            resource_attrs: Arc::new(vec![]),
+            observed_time_ns: 42_000_000_000,
+        };
+
+        let stream_map = sink.build_stream_map(&batch, &metadata).unwrap();
+        let mut entries: Vec<LokiEntry> = stream_map.values().flatten().cloned().collect();
+        entries.sort_by_key(|(ts, _)| *ts);
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].0, 999, "explicit timestamp must be preserved");
+        assert_eq!(
+            entries[1].0, metadata.observed_time_ns,
+            "null timestamp must fall back to observed_time_ns, not epoch-zero"
+        );
+        assert_ne!(
+            entries[1].0, 0,
+            "null timestamp must not silently become epoch-zero"
+        );
+    }
+
+    /// Same null check for UInt64 timestamp column.
+    #[test]
+    fn test_null_uint64_timestamp_falls_back_to_observed_time() {
+        use arrow::array::UInt64Array;
+        use arrow::datatypes::{Field, Schema};
+
+        let config = Arc::new(LokiConfig {
+            endpoint: "http://localhost".to_string(),
+            tenant_id: None,
+            static_labels: vec![],
+            label_columns: vec![],
+            headers: vec![],
+        });
+        let sink = LokiSink::new(
+            "test".to_string(),
+            config,
+            Arc::new(reqwest::Client::new()),
+            Arc::new(ComponentStats::new()),
+        );
+
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            field_names::TIMESTAMP_UNDERSCORE,
+            DataType::UInt64,
+            true,
+        )]));
+        let ts_arr = UInt64Array::from(vec![Some(500u64), None]);
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(ts_arr)]).unwrap();
+        let metadata = BatchMetadata {
+            resource_attrs: Arc::new(vec![]),
+            observed_time_ns: 99_000_000_000,
+        };
+
+        let stream_map = sink.build_stream_map(&batch, &metadata).unwrap();
+        let mut entries: Vec<LokiEntry> = stream_map.values().flatten().cloned().collect();
+        entries.sort_by_key(|(ts, _)| *ts);
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].0, 500);
+        assert_eq!(
+            entries[1].0, metadata.observed_time_ns,
+            "null UInt64 timestamp must fall back to observed_time_ns"
         );
     }
 }
