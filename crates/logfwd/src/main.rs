@@ -1011,6 +1011,7 @@ fn validate_input_format_read_only(
             Format::Cri | Format::Auto | Format::Json | Format::Raw
         ),
         InputType::Generator | InputType::Otlp => matches!(format, Format::Json),
+        InputType::Http => matches!(format, Format::Json | Format::Raw),
         InputType::Udp | InputType::Tcp => matches!(format, Format::Json | Format::Raw),
         InputType::ArrowIpc => false,
         other => {

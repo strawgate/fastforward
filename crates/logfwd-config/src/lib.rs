@@ -63,6 +63,7 @@ pub enum InputType {
     Udp,
     Tcp,
     Otlp,
+    Http,
     /// Synthetic data generator for benchmarking.
     Generator,
     /// Arrow IPC stream receiver (native Arrow transport).
@@ -76,6 +77,7 @@ impl fmt::Display for InputType {
             InputType::Udp => f.write_str("udp"),
             InputType::Tcp => f.write_str("tcp"),
             InputType::Otlp => f.write_str("otlp"),
+            InputType::Http => f.write_str("http"),
             InputType::Generator => f.write_str("generator"),
             InputType::ArrowIpc => f.write_str("arrow_ipc"),
         }
@@ -265,6 +267,35 @@ pub struct GeneratorSequenceConfig {
     pub start: Option<u64>,
 }
 
+/// Accepted HTTP method for `http` inputs.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum HttpMethodConfig {
+    Get,
+    Post,
+    Put,
+    Delete,
+    Patch,
+    Head,
+    Options,
+}
+
+/// HTTP-specific input settings.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct HttpInputConfig {
+    /// Route path. Must start with `/`. Defaults to `/ingest`.
+    pub path: Option<String>,
+    /// Exact path matching when true. Defaults to true.
+    pub strict_path: Option<bool>,
+    /// Accepted method. Defaults to `POST`.
+    pub method: Option<HttpMethodConfig>,
+    /// Maximum HTTP request body size in bytes. Defaults to 10 MiB.
+    pub max_request_body_size: Option<usize>,
+    /// HTTP status code for successful ingest. Defaults to 200.
+    pub response_code: Option<u16>,
+}
+
 /// Generator-specific configuration.
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
@@ -311,8 +342,9 @@ pub struct InputConfig {
     pub name: Option<String>,
     #[serde(rename = "type")]
     pub input_type: InputType,
-    /// File glob or listen address, depending on `input_type`.
+    /// File glob path for `file` inputs.
     pub path: Option<String>,
+    /// Socket bind address for networked inputs (udp/tcp/otlp/http).
     pub listen: Option<String>,
     pub format: Option<Format>,
     /// Maximum number of file descriptors to keep open simultaneously.
@@ -325,6 +357,9 @@ pub struct InputConfig {
     /// Generator-specific configuration.
     #[serde(default)]
     pub generator: Option<GeneratorInputConfig>,
+    /// HTTP-specific settings. Applies only to `http` inputs.
+    #[serde(default)]
+    pub http: Option<HttpInputConfig>,
     /// Per-input SQL transform. When set, this input gets its own Scanner +
     /// `SqlTransform` pair. Overrides the pipeline-level `transform` field
     /// for this input only.
@@ -837,7 +872,7 @@ impl Config {
                             }
                         }
                     }
-                    InputType::Otlp => {
+                    InputType::Otlp | InputType::Http => {
                         if input.listen.is_none() {
                             return Err(ConfigError::Validation(format!(
                                 "pipeline '{name}' input '{label}': 'listen' is required for {} inputs",
@@ -868,6 +903,11 @@ impl Config {
                                 "pipeline '{name}' input '{label}': 'listen' is not supported for file inputs"
                             )));
                         }
+                        if input.http.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'http' settings are only supported for http inputs"
+                            )));
+                        }
                         if input.tls.is_some() {
                             return Err(ConfigError::Validation(format!(
                                 "pipeline '{name}' input '{label}': 'tls' is not supported for file inputs"
@@ -893,6 +933,11 @@ impl Config {
                         if input.glob_rescan_interval_ms.is_some() {
                             return Err(ConfigError::Validation(format!(
                                 "pipeline '{name}' input '{label}': 'glob_rescan_interval_ms' is not supported for tcp/udp inputs"
+                            )));
+                        }
+                        if input.http.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'http' settings are only supported for http inputs"
                             )));
                         }
                     }
@@ -922,6 +967,59 @@ impl Config {
                                 "pipeline '{name}' input '{label}': 'glob_rescan_interval_ms' is not supported for otlp inputs"
                             )));
                         }
+                        if input.http.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'http' settings are only supported for http inputs"
+                            )));
+                        }
+                    }
+                    InputType::Http => {
+                        if input.tls.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'tls' is not supported for http inputs"
+                            )));
+                        }
+                        if input.generator.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'generator' settings are only supported for generator inputs"
+                            )));
+                        }
+                        if input.path.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'path' is not supported for http inputs; use http.path"
+                            )));
+                        }
+                        if input.max_open_files.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'max_open_files' is not supported for http inputs"
+                            )));
+                        }
+                        if input.glob_rescan_interval_ms.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'glob_rescan_interval_ms' is not supported for http inputs"
+                            )));
+                        }
+                        if let Some(http) = &input.http {
+                            if let Some(path) = &http.path
+                                && (!path.starts_with('/') || path.trim().is_empty())
+                            {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': http.path must start with '/'"
+                                )));
+                            }
+                            if http.max_request_body_size == Some(0) {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': http.max_request_body_size must be at least 1"
+                                )));
+                            }
+                            if let Some(code) = http.response_code
+                                && !matches!(code, 200 | 201 | 202 | 204)
+                            {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': http.response_code must be one of 200, 201, 202, 204"
+                                )));
+                            }
+                        }
                     }
                     InputType::Generator => {
                         if input.tls.is_some() {
@@ -947,6 +1045,11 @@ impl Config {
                         if input.glob_rescan_interval_ms.is_some() {
                             return Err(ConfigError::Validation(format!(
                                 "pipeline '{name}' input '{label}': 'glob_rescan_interval_ms' is not supported for generator inputs"
+                            )));
+                        }
+                        if input.http.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'http' settings are only supported for http inputs"
                             )));
                         }
                         if input.generator.as_ref().and_then(|cfg| cfg.batch_size) == Some(0) {
@@ -1024,6 +1127,11 @@ impl Config {
                         if input.generator.is_some() {
                             return Err(ConfigError::Validation(format!(
                                 "pipeline '{name}' input '{label}': 'generator' settings are only supported for generator inputs"
+                            )));
+                        }
+                        if input.http.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'http' settings are only supported for http inputs"
                             )));
                         }
                     }
@@ -1746,6 +1854,105 @@ output:
     }
 
     #[test]
+    fn validation_http_requires_listen() {
+        let yaml = r"
+input:
+  type: http
+output:
+  type: stdout
+";
+        let err = Config::load_str(yaml).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("listen"), "expected 'listen' in error: {msg}");
+    }
+
+    #[test]
+    fn validation_http_rejects_non_route_path() {
+        let yaml = r"
+input:
+  type: http
+  listen: 0.0.0.0:8080
+  http:
+    path: ingest
+output:
+  type: stdout
+";
+        let err = Config::load_str(yaml).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("http.path must start with '/'"),
+            "expected route-path error: {msg}"
+        );
+    }
+
+    #[test]
+    fn validation_http_rejects_legacy_path_field() {
+        let yaml = r"
+input:
+  type: http
+  listen: 0.0.0.0:8080
+  path: /ingest
+output:
+  type: stdout
+";
+        let err = Config::load_str(yaml).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("use http.path"),
+            "expected guidance to use http.path: {msg}"
+        );
+    }
+
+    #[test]
+    fn validation_http_rejects_invalid_response_code() {
+        let yaml = r"
+input:
+  type: http
+  listen: 0.0.0.0:8080
+  http:
+    response_code: 299
+output:
+  type: stdout
+";
+        let err = Config::load_str(yaml).unwrap_err();
+        assert!(err.to_string().contains("http.response_code"));
+    }
+
+    #[test]
+    fn validation_http_rejects_tls_block() {
+        let yaml = r"
+input:
+  type: http
+  listen: 0.0.0.0:8080
+  tls:
+    cert_file: /tmp/server.crt
+output:
+  type: stdout
+";
+        let err = Config::load_str(yaml).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("tls") && msg.contains("not supported for http inputs"),
+            "expected HTTP tls rejection error: {msg}"
+        );
+    }
+
+    #[test]
+    fn validation_non_http_rejects_http_block() {
+        let yaml = r"
+input:
+  type: tcp
+  listen: 0.0.0.0:5140
+  http:
+    path: /ingest
+output:
+  type: stdout
+";
+        let err = Config::load_str(yaml).unwrap_err();
+        assert!(err.to_string().contains("only supported for http inputs"));
+    }
+
+    #[test]
     fn validation_arrow_ipc_not_supported() {
         // arrow_ipc is always rejected as "not yet supported" regardless of
         // whether 'listen' is specified — the 'listen' check must not fire
@@ -2025,6 +2232,7 @@ output:
             ("udp", "listen: 0.0.0.0:514"),
             ("tcp", "listen: 0.0.0.0:514"),
             ("otlp", "listen: 0.0.0.0:4317"),
+            ("http", "listen: 0.0.0.0:8080"),
             ("generator", ""),
         ] {
             let yaml = format!("input:\n  type: {itype}\n  {extra}\noutput:\n  type: stdout\n");

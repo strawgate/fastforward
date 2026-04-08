@@ -109,3 +109,20 @@ input:
   type: otlp
   listen: 0.0.0.0:4318
 ```
+
+## HTTP
+
+Receive newline-delimited payloads over HTTP `POST` (NDJSON or raw lines).
+
+```yaml
+input:
+  type: http
+  listen: 0.0.0.0:8081
+  format: json     # json | raw
+  http:
+    path: /ingest  # optional, defaults to /
+    strict_path: true
+    method: POST
+    max_request_body_size: 20971520
+    response_code: 200
+```
