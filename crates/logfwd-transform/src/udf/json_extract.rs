@@ -76,23 +76,24 @@ fn is_conflict_struct_fields(fields: &arrow::datatypes::Fields) -> bool {
 /// Reconstruct an NDJSON buffer from `raw_array`, run the scanner for
 /// `field_name`, and return the resulting [`RecordBatch`].
 ///
-/// # NULL handling limitation
+/// # NULL handling
 ///
-/// When `raw_array` contains NULL entries, this function emits an empty line
-/// for each NULL (a bare `\n`) before calling the scanner. The scanner skips
-/// empty lines and therefore produces fewer output rows than the length of
-/// `raw_array`. The row-count check at the end of this function will catch
-/// that mismatch and return a `DataFusionError::Execution` containing the
-/// text `"scanner row count mismatch"`. This is a known limitation: callers
-/// (and tests) that need to handle NULL `_raw` rows must either pre-filter
-/// NULLs or treat the resulting error as expected.
+/// NULL entries in `raw_array` are represented as empty JSON objects (`{}\n`)
+/// so the scanner always produces the same number of rows as `raw_array.len()`.
+/// The extracted field for those rows is NULL (absent from `{}`), which is
+/// the semantically correct result: `json(NULL, 'key')` → NULL.
 fn parse_raw(raw_array: &StringArray, field_name: &str) -> Result<RecordBatch, DataFusionError> {
     let mut buf = Vec::with_capacity(raw_array.len() * 128);
     for i in 0..raw_array.len() {
-        if !raw_array.is_null(i) {
+        if raw_array.is_null(i) {
+            // Emit an empty object so the scanner produces a row with a null
+            // field value rather than skipping the row entirely (which would
+            // cause a row-count mismatch and an error).
+            buf.extend_from_slice(b"{}\n");
+        } else {
             buf.extend_from_slice(raw_array.value(i).as_bytes());
+            buf.push(b'\n');
         }
-        buf.push(b'\n');
     }
 
     let config = ScanConfig {
@@ -510,5 +511,102 @@ mod tests {
             col.is_null(0),
             "json_float on a quoted string must return null"
         );
+    }
+
+    /// Helper: batch with a nullable `_raw` column (some rows NULL).
+    fn make_nullable_raw_batch(rows: Vec<Option<&str>>) -> RecordBatch {
+        let schema = Arc::new(arrow::datatypes::Schema::new(vec![
+            arrow::datatypes::Field::new("_raw", DataType::Utf8, true),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![Arc::new(StringArray::from(rows)) as arrow::array::ArrayRef],
+        )
+        .unwrap()
+    }
+
+    /// NULL `_raw` rows must yield NULL extracted fields, not a row-count
+    /// mismatch error.  Regression test for the bug where null rows emitted a
+    /// bare `\n` that the NDJSON scanner skipped, causing the output batch to
+    /// have fewer rows than the input.
+    #[tokio::test]
+    async fn test_json_null_raw_str_returns_null() {
+        let batch = make_nullable_raw_batch(vec![
+            Some(r#"{"status": "200"}"#),
+            None,
+            Some(r#"{"status": "404"}"#),
+        ]);
+        let result = query("SELECT json(_raw, 'status') as s FROM logs", batch).await;
+        assert_eq!(
+            result.num_rows(),
+            3,
+            "row count must be preserved for null _raw"
+        );
+        let col = result
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(col.value(0), "200");
+        assert!(col.is_null(1), "null _raw must yield null extracted field");
+        assert_eq!(col.value(2), "404");
+    }
+
+    /// Same fix covers `json_int`: NULL `_raw` must yield NULL, not an error.
+    #[tokio::test]
+    async fn test_json_null_raw_int_returns_null() {
+        let batch = make_nullable_raw_batch(vec![
+            Some(r#"{"code": 200}"#),
+            None,
+            Some(r#"{"code": 500}"#),
+        ]);
+        let result = query("SELECT json_int(_raw, 'code') as c FROM logs", batch).await;
+        assert_eq!(result.num_rows(), 3);
+        let col = result
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        assert_eq!(col.value(0), 200);
+        assert!(col.is_null(1), "null _raw must yield null for json_int");
+        assert_eq!(col.value(2), 500);
+    }
+
+    /// Same fix covers `json_float`.
+    #[tokio::test]
+    async fn test_json_null_raw_float_returns_null() {
+        let batch =
+            make_nullable_raw_batch(vec![Some(r#"{"dur": 1.5}"#), None, Some(r#"{"dur": 3.0}"#)]);
+        let result = query("SELECT json_float(_raw, 'dur') as d FROM logs", batch).await;
+        assert_eq!(result.num_rows(), 3);
+        let col = result
+            .column(0)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        assert!((col.value(0) - 1.5).abs() < 0.001);
+        assert!(col.is_null(1), "null _raw must yield null for json_float");
+        assert!((col.value(2) - 3.0).abs() < 0.001);
+    }
+
+    /// A batch where ALL rows are NULL must produce an all-null output column
+    /// without error, and the row count must be preserved.
+    #[tokio::test]
+    async fn test_json_all_null_raw_preserves_row_count() {
+        let batch = make_nullable_raw_batch(vec![None, None, None]);
+        let result = query("SELECT json(_raw, 'status') as s FROM logs", batch).await;
+        assert_eq!(
+            result.num_rows(),
+            3,
+            "row count must be preserved when all _raw rows are null"
+        );
+        let col = result
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        for i in 0..3 {
+            assert!(col.is_null(i), "row {i} must be null");
+        }
     }
 }
