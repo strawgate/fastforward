@@ -770,7 +770,8 @@ pub struct RecoveryPlan {
 ///
 /// Unsupported versions, unreadable files, and SQL-hash mismatches are treated
 /// as hard errors. Recovery aborts with a cleanup message so operators do not
-/// silently skip incompatible checkpoint data.
+/// silently skip incompatible checkpoint data. For downgrades, clear the
+/// segment directory before starting an older binary.
 pub fn recover_segments(
     segment_dir: &Path,
     expected_sql_hash: Option<u64>,
