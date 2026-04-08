@@ -437,6 +437,16 @@ fn collect_column_refs(expr: &SqlExpr, cols: &mut HashSet<String>) {
                 collect_column_refs(f, cols);
             }
         }
+        SqlExpr::Extract { expr, .. } => {
+            collect_column_refs(expr, cols);
+        }
+        SqlExpr::AtTimeZone {
+            timestamp,
+            time_zone,
+        } => {
+            collect_column_refs(timestamp, cols);
+            collect_column_refs(time_zone, cols);
+        }
         // Literals, wildcards, etc. — no column refs.
         _ => {}
     }
@@ -1975,6 +1985,29 @@ mod tests {
         assert!(
             a.referenced_columns.contains("msg"),
             "SUBSTRING(msg, ...) must add 'msg' to referenced_columns, got {:?}",
+            a.referenced_columns
+        );
+    }
+
+    /// `EXTRACT(YEAR FROM ts_col)` must register `ts_col` in referenced_columns.
+    #[test]
+    fn test_extract_col_adds_to_referenced_columns() {
+        let a = QueryAnalyzer::new("SELECT EXTRACT(YEAR FROM event_time) AS yr FROM logs").unwrap();
+        assert!(
+            a.referenced_columns.contains("event_time"),
+            "EXTRACT(... FROM event_time) must add 'event_time' to referenced_columns, got {:?}",
+            a.referenced_columns
+        );
+    }
+
+    /// `col AT TIME ZONE 'tz'` must register `col` in referenced_columns.
+    #[test]
+    fn test_at_time_zone_col_adds_to_referenced_columns() {
+        let a = QueryAnalyzer::new("SELECT event_time AT TIME ZONE 'UTC' AS utc_time FROM logs")
+            .unwrap();
+        assert!(
+            a.referenced_columns.contains("event_time"),
+            "col AT TIME ZONE must add 'event_time' to referenced_columns, got {:?}",
             a.referenced_columns
         );
     }
