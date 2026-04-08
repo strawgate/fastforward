@@ -60,6 +60,8 @@ fn validate_input_format(name: &str, input_type: InputType, format: &Format) -> 
     Ok(())
 }
 
+/// Build the runtime input state (source, staging buffer, and metrics handle)
+/// from a validated input config.
 pub(super) fn build_input_state(
     name: &str,
     cfg: &InputConfig,
@@ -135,6 +137,8 @@ pub(super) fn build_input_state(
                                     GeneratorAttributeValueConfig::Bool(v) => {
                                         GeneratorAttributeValue::Bool(*v)
                                     }
+                                    // Non-exhaustive config enum: preserve current behavior
+                                    // by mapping future variants to JSON null.
                                     _ => GeneratorAttributeValue::Null,
                                 };
                                 (k.clone(), value)

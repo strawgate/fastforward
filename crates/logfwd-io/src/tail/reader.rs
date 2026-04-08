@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use logfwd_types::pipeline::SourceId;
 
-use super::identity::{ByteOffset, FileIdentity, compute_fingerprint, identify_file};
+use super::identity::{ByteOffset, FileIdentity, compute_fingerprint, identify_open_file};
 use super::tailer::{TailConfig, TailEvent};
 
 /// State tracked per tailed file.
@@ -46,8 +46,8 @@ impl FileReader {
     pub(super) const MAX_READ_PER_POLL: usize = 4 * 1024 * 1024;
 
     pub(super) fn open_file_at(&mut self, path: &Path, start_from_end: bool) -> io::Result<()> {
-        let identity = identify_file(path, self.config.fingerprint_bytes)?;
         let mut file = File::open(path)?;
+        let identity = identify_open_file(&mut file, self.config.fingerprint_bytes)?;
         let file_size = file.metadata()?.len();
 
         let offset = if let Some(evicted) = self.evicted_offsets.remove(path) {
@@ -342,6 +342,12 @@ impl FileReader {
                 };
                 tailed.offset = safe_offset;
                 tailed.file.seek(SeekFrom::Start(safe_offset))?;
+                return Ok(());
+            }
+        }
+        for evicted in self.evicted_offsets.values_mut() {
+            if evicted.source_id == source_id {
+                evicted.offset = offset;
                 return Ok(());
             }
         }

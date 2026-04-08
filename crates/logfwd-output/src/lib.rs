@@ -51,16 +51,16 @@ pub use udp_sink::{UdpSink, UdpSinkFactory};
 
 pub use conflict_columns::{ColInfo, ColVariant, build_col_infos};
 pub(crate) use conflict_columns::{get_array, is_null};
-#[cfg(test)]
+#[cfg(any(test, kani))]
 #[allow(unused_imports)]
-pub(crate) use conflict_columns::{is_conflict_struct, json_priority, str_priority};
+pub(crate) use conflict_columns::{is_conflict_struct, json_priority, str_priority, variant_dt};
 pub(crate) use metadata::build_auth_headers;
 pub use row_json::write_row_json;
 pub(crate) use row_json::{coalesce_as_str, str_value};
 
 #[cfg(test)]
 use arrow::array::Array;
-#[cfg(test)]
+#[cfg(any(test, kani))]
 use arrow::datatypes::DataType;
 #[cfg(test)]
 use arrow::record_batch::RecordBatch;

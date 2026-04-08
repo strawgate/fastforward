@@ -63,7 +63,7 @@ pub(crate) fn str_priority(dt: &DataType) -> u8 {
 }
 
 /// Extract the `DataType` from any `ColVariant`.
-fn variant_dt(v: &ColVariant) -> &DataType {
+pub(crate) fn variant_dt(v: &ColVariant) -> &DataType {
     match v {
         ColVariant::Flat { dt, .. } => dt,
         ColVariant::StructField { dt, .. } => dt,

@@ -55,14 +55,22 @@ pub(super) fn compute_fingerprint(file: &mut File, max_bytes: usize) -> io::Resu
     Ok(xxhash_rust::xxh64::xxh64(&buf[..n], 0))
 }
 
-/// Build a FileIdentity for a path.
-pub(super) fn identify_file(path: &Path, fingerprint_bytes: usize) -> io::Result<FileIdentity> {
-    let mut file = File::open(path)?;
+/// Build a FileIdentity from an already-open file handle.
+pub(super) fn identify_open_file(
+    file: &mut File,
+    fingerprint_bytes: usize,
+) -> io::Result<FileIdentity> {
     let meta = file.metadata()?;
-    let fingerprint = compute_fingerprint(&mut file, fingerprint_bytes)?;
+    let fingerprint = compute_fingerprint(file, fingerprint_bytes)?;
     Ok(FileIdentity {
         device: meta.dev(),
         inode: meta.ino(),
         fingerprint,
     })
+}
+
+/// Build a FileIdentity for a path.
+pub(super) fn identify_file(path: &Path, fingerprint_bytes: usize) -> io::Result<FileIdentity> {
+    let mut file = File::open(path)?;
+    identify_open_file(&mut file, fingerprint_bytes)
 }

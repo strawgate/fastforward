@@ -62,6 +62,7 @@ pub fn dispatch_step(states: &[ChannelState], max_workers: usize) -> DispatchOut
 #[cfg(kani)]
 mod kani_proofs {
     use super::*;
+    use crate::worker_pool::types::DeliveryOutcome;
 
     // -----------------------------------------------------------------------
     // Proof 1: Dispatch always sends to a valid index, spawns, or waits.

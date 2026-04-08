@@ -1281,6 +1281,60 @@ mod tests {
         assert_eq!(offset, 0, "stale source offset should reset to 0");
     }
 
+    /// #1600 follow-up: restoring checkpoint offsets by source_id must also
+    /// update evicted entries (not just currently-open files).
+    #[test]
+    fn test_set_offset_by_source_updates_evicted_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut log_paths = Vec::new();
+        for i in 0..3 {
+            let p = dir.path().join(format!("evicted-{i}.log"));
+            {
+                let mut f = File::create(&p).unwrap();
+                writeln!(f, "line-0-{i}").unwrap();
+                writeln!(f, "line-1-{i}").unwrap();
+            }
+            log_paths.push(p);
+        }
+
+        let pattern = format!("{}/*.log", dir.path().display());
+        let config = TailConfig {
+            start_from_end: false,
+            poll_interval_ms: 10,
+            glob_rescan_interval_ms: 60_000,
+            max_open_files: 2,
+            ..Default::default()
+        };
+        let mut tailer = FileTailer::new_with_globs(&[&pattern], config).unwrap();
+
+        // Read initial data and trigger one eviction.
+        std::thread::sleep(Duration::from_millis(50));
+        tailer.poll().unwrap();
+        assert_eq!(tailer.num_files(), 2, "expected one file to be evicted");
+
+        let (evicted_sid, evicted_path) = tailer
+            .file_paths()
+            .into_iter()
+            .find(|(_, path)| tailer.get_offset(path).is_none())
+            .expect("expected one evicted file path");
+        assert!(
+            log_paths.iter().any(|p| p == &evicted_path),
+            "evicted path should come from test set"
+        );
+
+        tailer
+            .set_offset_by_source(evicted_sid, 5)
+            .expect("set offset by source should succeed for evicted entry");
+
+        let updated = tailer
+            .file_offsets()
+            .into_iter()
+            .find(|(sid, _)| *sid == evicted_sid)
+            .map(|(_, off)| off.0)
+            .expect("evicted source id should still be present in checkpoint data");
+        assert_eq!(updated, 5, "evicted checkpoint offset was not updated");
+    }
+
     /// #697: Evicted file offsets must appear in file_offsets() so they are
     /// included in checkpoint data and survive crashes.
     #[test]

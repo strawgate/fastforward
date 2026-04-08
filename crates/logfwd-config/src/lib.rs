@@ -523,6 +523,7 @@ output:
             ("udp", "listen: 0.0.0.0:514"),
             ("tcp", "listen: 0.0.0.0:514"),
             ("otlp", "listen: 0.0.0.0:4317"),
+            ("http", "listen: 0.0.0.0:8080"),
             ("generator", ""),
         ] {
             let yaml = format!("input:\n  type: {itype}\n  {extra}\noutput:\n  type: stdout\n");
