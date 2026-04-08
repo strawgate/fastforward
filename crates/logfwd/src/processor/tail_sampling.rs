@@ -45,6 +45,31 @@ impl std::fmt::Debug for TailSamplingProcessor {
 }
 
 impl TailSamplingProcessor {
+    /// Create a new `TailSamplingProcessor`.
+    ///
+    /// # Parameters
+    ///
+    /// - `query`: A DataFusion SQL query applied to each timed-out trace group as
+    ///   a sampling decision. The query runs against a virtual table named `logs`
+    ///   whose schema matches the buffered record batches. Rows returned by the
+    ///   query are emitted downstream; an empty result means the trace is dropped.
+    ///   Example: `"SELECT * FROM logs WHERE severity = 'ERROR'"`.
+    ///
+    /// - `group_by_field`: Name of the column used to group rows into trace
+    ///   buckets. Must be present in every incoming batch and must have one of
+    ///   the supported string types: `Utf8`, `Utf8View`, or `LargeUtf8`. Rows
+    ///   where this column is null bypass buffering and pass through immediately.
+    ///
+    /// - `trace_timeout`: Inactivity duration after which a trace group is
+    ///   considered complete. The timeout is evaluated against
+    ///   `BatchMetadata::observed_time_ns`: a group times out when
+    ///   `observed_time_ns - last_seen_ns >= timeout_ns`. Durations longer than
+    ///   `u64::MAX` nanoseconds are clamped to `u64::MAX`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ProcessorError::Permanent` if `query` fails to parse or compile
+    /// as a valid DataFusion SQL expression.
     pub fn try_new(
         query: impl Into<String>,
         group_by_field: impl Into<String>,
@@ -116,7 +141,11 @@ impl TailSamplingProcessor {
         }
     }
 
-    fn drain_timed_out(&mut self, now_ns: u64) -> Vec<TraceState> {
+    /// Collect the keys of timed-out trace groups (sorted by arrival order) WITHOUT
+    /// removing them from `self.traces`. Callers must remove entries explicitly
+    /// after a successful decision so that transient errors leave state intact and
+    /// can be retried on the next heartbeat/batch.
+    fn timed_out_keys(&self, now_ns: u64) -> Vec<(String, u64)> {
         let mut timed_out: Vec<(String, u64)> = self
             .traces
             .iter()
@@ -130,24 +159,20 @@ impl TailSamplingProcessor {
             .collect();
 
         timed_out.sort_by_key(|(_, ord)| *ord);
-
-        let mut drained = Vec::with_capacity(timed_out.len());
-        for (k, _) in timed_out {
-            if let Some(state) = self.traces.remove(&k) {
-                drained.push(state);
-            }
-        }
-        drained
+        timed_out
     }
 
     fn run_decision_for_state(
         &mut self,
-        state: TraceState,
+        state: &TraceState,
     ) -> Result<Option<RecordBatch>, ProcessorError> {
         if state.batches.is_empty() {
             return Ok(None);
         }
         let schema = state.batches[0].schema();
+        // TODO: schema drift — if batches were appended across schema changes the
+        // concat will fail with a schema mismatch. Consider normalising to a
+        // canonical schema at append time. Left for human review.
         let combined = concat_batches(&schema, &state.batches).map_err(|e| {
             ProcessorError::Transient(format!("failed to concat buffered trace batches: {e}"))
         })?;
@@ -181,9 +206,44 @@ impl Processor for TailSamplingProcessor {
             }
         }
 
-        for state in self.drain_timed_out(now_ns) {
-            if let Some(decided) = self.run_decision_for_state(state)? {
-                out.push(decided);
+        // TODO: drain-before-append ordering — timed-out groups are drained after
+        // the current batch is appended.  For traces that already timed out, the
+        // new rows would be flushed immediately rather than buffered for another
+        // window.  Consider draining first, then appending. Left for human review.
+        for (key, _) in self.timed_out_keys(now_ns) {
+            // Clone the batches so we can release the shared borrow on self.traces
+            // before calling run_decision_for_state (which needs &mut self for
+            // SqlTransform).  This avoids the borrow-checker conflict while keeping
+            // the entry intact until we know the decision succeeded.
+            //
+            // TODO: per-row key allocation optimisation — avoid cloning Arc<RecordBatch>
+            // here; consider storing Arc<Vec<RecordBatch>> to make cloning cheap.
+            // Left for human review.
+            let snapshot = self.traces.get(&key).map(|st| TraceState {
+                batches: st.batches.clone(),
+                last_seen_ns: st.last_seen_ns,
+                first_seen_ord: st.first_seen_ord,
+            });
+            let Some(snapshot) = snapshot else {
+                continue; // already removed (shouldn't happen in single-threaded context)
+            };
+
+            // Run the decision query against the snapshot.  Only remove the entry
+            // on success so that a transient error leaves the buffered data intact
+            // for the next call — satisfying the retry contract in processor/mod.rs.
+            match self.run_decision_for_state(&snapshot) {
+                Ok(Some(decided)) => {
+                    self.traces.remove(&key);
+                    out.push(decided);
+                }
+                Ok(None) => {
+                    // Decision query returned no rows — drop the trace.
+                    self.traces.remove(&key);
+                }
+                Err(e) => {
+                    // Transient error: leave the entry intact so it can be retried.
+                    return Err(e);
+                }
             }
         }
 
@@ -200,8 +260,18 @@ impl Processor for TailSamplingProcessor {
 
         let mut out = SmallVec::new();
         for (key, _) in keys {
-            if let Some(state) = self.traces.remove(&key) {
-                match self.run_decision_for_state(state) {
+            // Clone the batches so we can release the shared borrow on self.traces
+            // before calling run_decision_for_state (which needs &mut self).
+            let snapshot = self.traces.get(&key).map(|st| TraceState {
+                batches: st.batches.clone(),
+                last_seen_ns: st.last_seen_ns,
+                first_seen_ord: st.first_seen_ord,
+            });
+            if let Some(snapshot) = snapshot {
+                // Always remove during flush — this is a shutdown path, not a
+                // retriable operation.
+                self.traces.remove(&key);
+                match self.run_decision_for_state(&snapshot) {
                     Ok(Some(batch)) => out.push(batch),
                     Ok(None) => {}
                     Err(e) => {
