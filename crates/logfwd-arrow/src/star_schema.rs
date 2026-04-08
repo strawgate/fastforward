@@ -21,6 +21,8 @@ use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use arrow::error::ArrowError;
 use arrow::record_batch::RecordBatch;
 
+use crate::conflict_schema::normalize_conflict_columns;
+
 /// OTAP star schema representation for Logs.
 ///
 /// Contains a fact table (`logs`) and three dimension tables for attributes.
@@ -108,18 +110,41 @@ pub fn attrs_schema() -> Schema {
 
 /// Convert logfwd's flat `RecordBatch` to OTAP star schema.
 ///
-/// 1. Scans columns for `_resource_*` prefix, extracts unique resource
+/// 1. Normalizes conflict struct columns (e.g. `status: Struct { int, str }`)
+///    to flat Utf8 columns so that their values are preserved in LOG_ATTRS.
+///    Without this, `build_log_attrs` would see a StructArray, call
+///    `str_value_at` which returns `""` for unknown types, and emit a NULL
+///    attr row — silently dropping the field value.
+/// 2. Scans columns for `_resource_*` prefix, extracts unique resource
 ///    attribute sets, assigns `resource_id`, builds RESOURCE_ATTRS table.
-/// 2. Maps well-known columns to LOGS fact table fields.
-/// 3. Remaining columns become LOG_ATTRS rows (column-to-row pivot).
-/// 4. Builds a single-row SCOPE_ATTRS (scope_name="logfwd").
-/// 5. Builds the LOGS fact table with foreign keys.
+/// 3. Maps well-known columns to LOGS fact table fields.
+/// 4. Remaining columns become LOG_ATTRS rows (column-to-row pivot).
+/// 5. Builds a single-row SCOPE_ATTRS (scope_name="logfwd").
+/// 6. Builds the LOGS fact table with foreign keys.
 pub fn flat_to_star(batch: &RecordBatch) -> Result<StarSchema, ArrowError> {
     let num_rows = batch.num_rows();
 
     if num_rows == 0 {
         return Ok(empty_star_schema());
     }
+
+    // Normalize conflict struct columns to flat Utf8 before any further
+    // processing.  Conflict structs arise when the scanner sees a field with
+    // mixed types across rows (e.g. status=200 in one row, status="OK" in
+    // another).  Without normalization, `build_log_attrs` cannot read their
+    // values and silently emits NULL attr rows.
+    let normalized;
+    let batch = if batch
+        .schema()
+        .fields()
+        .iter()
+        .any(|f| matches!(f.data_type(), DataType::Struct(_)))
+    {
+        normalized = normalize_conflict_columns(batch.clone());
+        &normalized
+    } else {
+        batch
+    };
 
     let schema = batch.schema();
 
@@ -1959,6 +1984,126 @@ mod tests {
             err.to_string()
                 .contains("time_unix_nano must be Timestamp(Nanosecond)"),
             "unexpected error: {err}"
+        );
+    }
+
+    /// Conflict struct columns (e.g. `status: Struct { int, str }`) must be
+    /// normalized to flat Utf8 before OTAP encoding.
+    ///
+    /// Before the fix, `flat_to_star` passed conflict struct columns directly
+    /// to `build_log_attrs`, where `attr_type_for(DataType::Struct(...))` returned
+    /// `ATTR_TYPE_STR`, `str_value_at` on a StructArray returned `""`, and the
+    /// value was pushed as `None`.  The OTAP receiver would see a LOG_ATTR row
+    /// with type=STR and str=NULL — the actual field value was silently dropped.
+    ///
+    /// After the fix, `flat_to_star` calls `normalize_conflict_columns` first,
+    /// replacing the struct with a flat Utf8 column, so the value is preserved.
+    #[test]
+    fn conflict_struct_column_preserved_in_log_attrs() {
+        use arrow::array::{Int64Array, StructArray};
+
+        // Build a batch with a conflict struct column (status: Struct { int, str })
+        // mirroring what the streaming_builder emits for mixed-type fields.
+        let int_arr: ArrayRef = Arc::new(Int64Array::from(vec![Some(200), None]));
+        let str_arr: ArrayRef = Arc::new(StringArray::from(vec![None::<&str>, Some("NOT_FOUND")]));
+
+        let struct_field = Field::new(
+            "status",
+            DataType::Struct(arrow::datatypes::Fields::from(vec![
+                Field::new("int", DataType::Int64, true),
+                Field::new("str", DataType::Utf8, true),
+            ])),
+            true,
+        );
+        let struct_col: ArrayRef = Arc::new(StructArray::new(
+            arrow::datatypes::Fields::from(vec![
+                Field::new("int", DataType::Int64, true),
+                Field::new("str", DataType::Utf8, true),
+            ]),
+            vec![int_arr, str_arr],
+            None,
+        ));
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("message", DataType::Utf8, true),
+            struct_field,
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec![
+                    Some("request ok"),
+                    Some("not found"),
+                ])),
+                struct_col,
+            ],
+        )
+        .expect("valid batch");
+
+        // Confirm the batch actually has a conflict struct column.
+        assert!(
+            batch.schema().fields().iter().any(|f| {
+                if let DataType::Struct(cf) = f.data_type() {
+                    !cf.is_empty()
+                        && cf
+                            .iter()
+                            .all(|c| matches!(c.name().as_str(), "int" | "float" | "str" | "bool"))
+                } else {
+                    false
+                }
+            }),
+            "test batch must contain a conflict struct column"
+        );
+
+        let star = flat_to_star(&batch).expect("flat_to_star");
+
+        // The conflict struct column `status` must appear in log_attrs with
+        // non-NULL string values ("200" for row 0, "NOT_FOUND" for row 1).
+        let log_attrs = &star.log_attrs;
+        let key_arr = log_attrs
+            .column_by_name("key")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let str_arr = log_attrs
+            .column_by_name("str")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+
+        let mut found_200 = false;
+        let mut found_not_found = false;
+        for i in 0..log_attrs.num_rows() {
+            if key_arr.value(i) == "status" {
+                let val = if str_arr.is_null(i) {
+                    None
+                } else {
+                    Some(str_arr.value(i))
+                };
+                match val {
+                    Some("200") => found_200 = true,
+                    Some("NOT_FOUND") => found_not_found = true,
+                    other => panic!("unexpected status value in log_attrs: {:?}", other),
+                }
+            }
+        }
+        assert!(
+            found_200,
+            "status=200 (from int child) must appear in log_attrs, got: {:?}",
+            (0..log_attrs.num_rows())
+                .filter(|&i| key_arr.value(i) == "status")
+                .map(|i| if str_arr.is_null(i) {
+                    "NULL".to_string()
+                } else {
+                    str_arr.value(i).to_string()
+                })
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            found_not_found,
+            "status=NOT_FOUND (from str child) must appear in log_attrs"
         );
     }
 }
