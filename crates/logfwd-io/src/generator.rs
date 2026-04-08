@@ -112,6 +112,70 @@ const PATHS: [&str; 5] = [
 ];
 const METHODS: [&str; 4] = ["GET", "POST", "PUT", "DELETE"];
 const SERVICES: [&str; 3] = ["myapp", "gateway", "auth-svc"];
+#[cfg(test)]
+const MILLIS_PER_DAY: u64 = 24 * 60 * 60 * 1000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TimestampParts {
+    year: i32,
+    month: u32,
+    day: u32,
+    hour: u64,
+    minute: u64,
+    second: u64,
+    millisecond: u64,
+}
+
+fn timestamp_parts(counter: u64) -> TimestampParts {
+    // 2024-01-15T00:00:00.000Z + counter milliseconds.
+    let total_ms = counter;
+    let millisecond = total_ms % 1000;
+    let total_sec = total_ms / 1000;
+    let second = total_sec % 60;
+    let total_min = total_sec / 60;
+    let minute = total_min % 60;
+    let total_hour = total_min / 60;
+    let hour = total_hour % 24;
+    let day_offset = (total_hour / 24) as i64;
+    let base_days = days_from_civil(2024, 1, 15);
+    let (year, month, day) = civil_from_days(base_days + day_offset);
+
+    TimestampParts {
+        year,
+        month,
+        day,
+        hour,
+        minute,
+        second,
+        millisecond,
+    }
+}
+
+// Howard Hinnant civil-date conversion helpers:
+// https://howardhinnant.github.io/date_algorithms.html
+fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
+    let y = year - i32::from(month <= 2);
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let m = month as i32;
+    let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + day as i32 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    i64::from(era) * 146_097 + i64::from(doe) - 719_468
+}
+
+fn civil_from_days(days_since_epoch: i64) -> (i32, u32, u32) {
+    let z = days_since_epoch + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097; // [0, 146096]
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe as i32 + (era as i32) * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let day = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
+    let month = mp + if mp < 10 { 3 } else { -9 }; // [1, 12]
+    let year = y + i32::from(month <= 2);
+    (year, month as u32, day as u32)
+}
 
 #[derive(Debug, Clone)]
 struct RecordFields {
@@ -203,56 +267,79 @@ impl GeneratorInput {
     }
 
     fn write_logs_event(&mut self) {
-        let i = self.counter as usize;
-        let level = LEVELS[i % LEVELS.len()];
-        let path = PATHS[i % PATHS.len()];
-        let method = METHODS[i % METHODS.len()];
-        let service = SERVICES[i % SERVICES.len()];
-        let id = 10000 + (i.wrapping_mul(7)) % 90000;
-        let dur = 1 + (i.wrapping_mul(13)) % 500;
-        let rid = self.counter.wrapping_mul(0x517c_c1b7_2722_0a95);
-        let status = match i % 20 {
+        let seq = self.counter;
+        let level = LEVELS[(seq % LEVELS.len() as u64) as usize];
+        let path = PATHS[(seq % PATHS.len() as u64) as usize];
+        let method = METHODS[(seq % METHODS.len() as u64) as usize];
+        let service = SERVICES[(seq % SERVICES.len() as u64) as usize];
+        let id = 10000 + seq.wrapping_mul(7) % 90000;
+        let dur = 1 + seq.wrapping_mul(13) % 500;
+        let rid = seq.wrapping_mul(0x517c_c1b7_2722_0a95);
+        let status = match seq % 20 {
             0 => 500,
             1 | 2 => 404,
             3 => 429,
             _ => 200,
         };
-
-        // Vary timestamps: cycle through hours/minutes/seconds for diversity.
-        let hour = i % 24;
-        let min = (i / 24) % 60;
-        let sec = (i / 1440) % 60;
-        let msec = i % 1000;
+        let ts = timestamp_parts(seq);
 
         match self.config.complexity {
             GeneratorComplexity::Simple => {
                 let _ = write!(
                     self.buf,
-                    r#"{{"timestamp":"2024-01-15T{hour:02}:{min:02}:{sec:02}.{msec:03}Z","level":"{level}","message":"{method} {path}/{id} {status}","duration_ms":{dur},"request_id":"{rid:016x}","service":"{service}","status":{status}}}"#,
+                    r#"{{"timestamp":"{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{millisecond:03}Z","level":"{level}","message":"{method} {path}/{id} {status}","duration_ms":{dur},"request_id":"{rid:016x}","service":"{service}","status":{status}}}"#,
+                    year = ts.year,
+                    month = ts.month,
+                    day = ts.day,
+                    hour = ts.hour,
+                    minute = ts.minute,
+                    second = ts.second,
+                    millisecond = ts.millisecond,
                 );
             }
             GeneratorComplexity::Complex => {
-                let bytes_in = 128 + (i.wrapping_mul(17)) % 8192;
-                let bytes_out = 64 + (i.wrapping_mul(31)) % 4096;
+                let bytes_in = 128 + seq.wrapping_mul(17) % 8192;
+                let bytes_out = 64 + seq.wrapping_mul(31) % 4096;
                 // Occasionally add nested objects and arrays to exercise the
                 // scanner and schema inference more thoroughly.
-                if i % 5 == 0 {
+                if seq % 5 == 0 {
                     // Nested: headers object + tags array
                     let _ = write!(
                         self.buf,
-                        r#"{{"timestamp":"2024-01-15T{hour:02}:{min:02}:{sec:02}.{msec:03}Z","level":"{level}","message":"{method} {path}/{id} {status}","duration_ms":{dur},"request_id":"{rid:016x}","service":"{service}","status":{status},"bytes_in":{bytes_in},"bytes_out":{bytes_out},"headers":{{"content-type":"application/json","x-request-id":"{rid:016x}"}},"tags":["web","{service}","{level}"]}}"#,
+                        r#"{{"timestamp":"{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{millisecond:03}Z","level":"{level}","message":"{method} {path}/{id} {status}","duration_ms":{dur},"request_id":"{rid:016x}","service":"{service}","status":{status},"bytes_in":{bytes_in},"bytes_out":{bytes_out},"headers":{{"content-type":"application/json","x-request-id":"{rid:016x}"}},"tags":["web","{service}","{level}"]}}"#,
+                        year = ts.year,
+                        month = ts.month,
+                        day = ts.day,
+                        hour = ts.hour,
+                        minute = ts.minute,
+                        second = ts.second,
+                        millisecond = ts.millisecond,
                     );
-                } else if i % 7 == 0 {
+                } else if seq % 7 == 0 {
                     // Nested: upstream array of objects
-                    let upstream_ms = 1 + (i.wrapping_mul(19)) % 200;
+                    let upstream_ms = 1 + seq.wrapping_mul(19) % 200;
                     let _ = write!(
                         self.buf,
-                        r#"{{"timestamp":"2024-01-15T{hour:02}:{min:02}:{sec:02}.{msec:03}Z","level":"{level}","message":"{method} {path}/{id} {status}","duration_ms":{dur},"request_id":"{rid:016x}","service":"{service}","status":{status},"bytes_in":{bytes_in},"bytes_out":{bytes_out},"upstream":[{{"host":"10.0.0.1","latency_ms":{upstream_ms}}},{{"host":"10.0.0.2","latency_ms":{dur}}}]}}"#,
+                        r#"{{"timestamp":"{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{millisecond:03}Z","level":"{level}","message":"{method} {path}/{id} {status}","duration_ms":{dur},"request_id":"{rid:016x}","service":"{service}","status":{status},"bytes_in":{bytes_in},"bytes_out":{bytes_out},"upstream":[{{"host":"10.0.0.1","latency_ms":{upstream_ms}}},{{"host":"10.0.0.2","latency_ms":{dur}}}]}}"#,
+                        year = ts.year,
+                        month = ts.month,
+                        day = ts.day,
+                        hour = ts.hour,
+                        minute = ts.minute,
+                        second = ts.second,
+                        millisecond = ts.millisecond,
                     );
                 } else {
                     let _ = write!(
                         self.buf,
-                        r#"{{"timestamp":"2024-01-15T{hour:02}:{min:02}:{sec:02}.{msec:03}Z","level":"{level}","message":"{method} {path}/{id} {status}","duration_ms":{dur},"request_id":"{rid:016x}","service":"{service}","status":{status},"bytes_in":{bytes_in},"bytes_out":{bytes_out}}}"#,
+                        r#"{{"timestamp":"{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{millisecond:03}Z","level":"{level}","message":"{method} {path}/{id} {status}","duration_ms":{dur},"request_id":"{rid:016x}","service":"{service}","status":{status},"bytes_in":{bytes_in},"bytes_out":{bytes_out}}}"#,
+                        year = ts.year,
+                        month = ts.month,
+                        day = ts.day,
+                        hour = ts.hour,
+                        minute = ts.minute,
+                        second = ts.second,
+                        millisecond = ts.millisecond,
                     );
                 }
             }
@@ -530,30 +617,69 @@ mod tests {
     }
 
     #[test]
-    fn timestamps_vary_across_events() {
+    fn timestamps_are_monotonically_increasing() {
         let mut input = GeneratorInput::new(
             "test",
             GeneratorConfig {
-                batch_size: 50,
-                total_events: 50,
+                batch_size: 2000,
+                total_events: 0,
                 ..Default::default()
             },
         );
+        // Start just before the 24-hour rollover boundary to validate date carry.
+        input.counter = MILLIS_PER_DAY - 5;
 
         let events = input.poll().unwrap();
         if let InputEvent::Data { bytes, .. } = &events[0] {
             let text = String::from_utf8_lossy(bytes);
-            let lines: Vec<&str> = text.trim().lines().collect();
-            let ts0 = lines[0]
-                .find("\"timestamp\":")
-                .map(|p| &lines[0][p..p + 50]);
-            let ts1 = lines[1]
-                .find("\"timestamp\":")
-                .map(|p| &lines[1][p..p + 50]);
-            // Adjacent lines should have different timestamps because the
-            // hour component changes with (i % 24).
-            assert_ne!(ts0, ts1, "timestamps should vary between events");
+            let lines: Vec<&str> = text.trim().split('\n').collect();
+
+            let extract_ts = |line: &str| -> Option<String> {
+                let start = line.find("\"timestamp\":\"").map(|p| p + 13)?;
+                let end = line[start..].find('"').map(|p| p + start)?;
+                Some(line[start..end].to_string())
+            };
+
+            let mut prev = extract_ts(lines[0]).expect("first line has timestamp");
+            for (i, line) in lines.iter().enumerate().skip(1) {
+                let ts =
+                    extract_ts(line).unwrap_or_else(|| panic!("line {i} has no timestamp: {line}"));
+                assert!(
+                    ts > prev,
+                    "timestamp did not strictly increase at line {i}: {prev} >= {ts}"
+                );
+                prev = ts;
+            }
+
+            assert!(
+                lines
+                    .iter()
+                    .any(|line| line.contains("\"timestamp\":\"2024-01-16T")),
+                "expected rollover into next day near 24h boundary"
+            );
         }
+    }
+
+    #[test]
+    fn timestamp_parts_rolls_day_after_24_hours() {
+        let before = timestamp_parts(MILLIS_PER_DAY - 1);
+        assert_eq!((before.year, before.month, before.day), (2024, 1, 15));
+        assert_eq!(
+            (
+                before.hour,
+                before.minute,
+                before.second,
+                before.millisecond
+            ),
+            (23, 59, 59, 999)
+        );
+
+        let after = timestamp_parts(MILLIS_PER_DAY);
+        assert_eq!((after.year, after.month, after.day), (2024, 1, 16));
+        assert_eq!(
+            (after.hour, after.minute, after.second, after.millisecond),
+            (0, 0, 0, 0)
+        );
     }
 
     #[test]
