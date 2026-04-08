@@ -3537,4 +3537,44 @@ mod tests {
             "array attribute must be skipped entirely"
         );
     }
+
+    /// Regression test for issue #1691: convert_request_to_batch must also
+    /// fall back to observed_time_unix_nano when time_unix_nano is 0.
+    #[test]
+    fn batch_path_uses_observed_time_when_event_time_is_zero() {
+        const OBSERVED_NS: u64 = 1_705_314_600_000_000_000;
+
+        let request = ExportLogsServiceRequest {
+            resource_logs: vec![ResourceLogs {
+                scope_logs: vec![ScopeLogs {
+                    log_records: vec![LogRecord {
+                        time_unix_nano: 0,
+                        observed_time_unix_nano: OBSERVED_NS,
+                        severity_text: "INFO".into(),
+                        body: Some(AnyValue {
+                            value: Some(Value::StringValue("test".into())),
+                        }),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        };
+
+        let batch = convert_request_to_batch(&request).expect("batch build must succeed");
+        let ts_col = batch
+            .column_by_name(field_names::TIMESTAMP)
+            .expect("_timestamp column must exist");
+        let ts_arr = ts_col
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .expect("_timestamp column must be Int64");
+        assert_eq!(ts_arr.len(), 1, "expected exactly one row");
+        assert_eq!(
+            ts_arr.value(0),
+            OBSERVED_NS as i64,
+            "batch path must use observed_time_unix_nano when time_unix_nano is 0"
+        );
+    }
 }
