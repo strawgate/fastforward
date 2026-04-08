@@ -505,9 +505,15 @@ impl ElasticsearchSink {
         let ts_no_comma = &ts_buf[1..];
 
         let cols = build_col_infos(&batch);
+        // Fixes #1680: use the same broad check as `serialize_batch` — canonical
+        // variants (`timestamp`, `time`, `ts`) must suppress synthetic @timestamp
+        // injection in streaming mode too.
         let has_timestamp_col = cols.iter().any(|c| {
-            c.field_name == field_names::TIMESTAMP_AT
-                || c.field_name == field_names::TIMESTAMP_UNDERSCORE
+            field_names::matches_any(
+                &c.field_name,
+                field_names::TIMESTAMP,
+                field_names::TIMESTAMP_VARIANTS,
+            )
         });
 
         let mut chunk = Vec::with_capacity(config.stream_chunk_bytes.max(64 * 1024));
@@ -1166,6 +1172,92 @@ mod tests {
                 col_name,
                 lines[1]
             );
+        }
+    }
+
+    /// Regression test for issue #1680.
+    ///
+    /// `serialize_batch_streaming` used a narrow `has_timestamp_col` check that
+    /// only matched `@timestamp`/`_timestamp`.  A column named `timestamp`, `time`,
+    /// or `ts` caused a spurious `@timestamp` injection alongside the user's column.
+    #[test]
+    fn streaming_canonical_timestamp_variants_suppress_at_timestamp_injection() {
+        use std::sync::atomic::AtomicU64;
+
+        // Build a minimal streaming config.
+        let factory = ElasticsearchSinkFactory::new(
+            "test".to_string(),
+            "http://localhost:9200".to_string(),
+            "test-index".to_string(),
+            vec![],
+            false,
+            ElasticsearchRequestMode::Streaming,
+            Arc::new(ComponentStats::default()),
+        )
+        .expect("factory creation failed");
+        let config = Arc::clone(&factory.config);
+
+        for col_name in &["timestamp", "time", "ts"] {
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("msg", DataType::Utf8, false),
+                Field::new(*col_name, DataType::Utf8, false),
+            ]));
+            let batch = RecordBatch::try_new(
+                schema,
+                vec![
+                    Arc::new(StringArray::from(vec!["hello"])),
+                    Arc::new(StringArray::from(vec!["2024-01-01T00:00:00Z"])),
+                ],
+            )
+            .expect("batch creation failed");
+
+            // We need a tokio runtime to drive the mpsc channel.
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .expect("tokio runtime");
+            let (tx, mut rx) = tokio::sync::mpsc::channel::<io::Result<Vec<u8>>>(16);
+            let emitted = Arc::new(AtomicU64::new(0));
+
+            rt.block_on(async {
+                let config_clone = Arc::clone(&config);
+                let batch_clone = batch.clone();
+                let meta = BatchMetadata {
+                    resource_attrs: Arc::new(vec![]),
+                    observed_time_ns: 0,
+                };
+                let tx_clone = tx.clone();
+                drop(tx); // ensure channel closes when producer is done
+                tokio::task::spawn_blocking(move || {
+                    ElasticsearchSink::serialize_batch_streaming(
+                        batch_clone,
+                        meta,
+                        config_clone,
+                        tx_clone,
+                        emitted,
+                    )
+                    .expect("serialize_batch_streaming should not error")
+                })
+                .await
+                .expect("task must not panic");
+
+                // Collect all chunks.
+                let mut output = Vec::new();
+                while let Some(chunk) = rx.recv().await {
+                    output.extend_from_slice(&chunk.expect("no io error"));
+                }
+
+                let doc_line = String::from_utf8_lossy(&output)
+                    .lines()
+                    .nth(1)
+                    .unwrap_or("")
+                    .to_string();
+                assert!(
+                    !doc_line.contains(r#""@timestamp""#),
+                    "streaming column '{}': expected no @timestamp injection but got: {}",
+                    col_name,
+                    doc_line
+                );
+            });
         }
     }
 
