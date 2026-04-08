@@ -10,8 +10,8 @@ doctest = false
 
 [features]
 default = ["datafusion"]
-dhat-heap = ["dhat"]
-cpu-profiling = ["pprof"]
+dhat-heap = ["dhat", "logfwd-runtime/dhat-heap"]
+cpu-profiling = ["pprof", "logfwd-runtime/cpu-profiling"]
 turmoil = ["dep:turmoil", "logfwd-runtime/turmoil"]
 datafusion = ["dep:logfwd-transform", "logfwd-runtime/datafusion"]
 

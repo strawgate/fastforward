@@ -12,11 +12,14 @@ doctest = false
 default = ["datafusion"]
 turmoil = ["dep:turmoil"]
 datafusion = ["dep:logfwd-transform"]
+dhat-heap = ["dep:dhat"]
+cpu-profiling = ["dep:pprof"]
 
 [dependencies]
 arrow = { workspace = true }
 backon = { workspace = true }
 bytes = { workspace = true }
+dhat = { version = "0.3", optional = true }
 logfwd-config = { version = "0.1.0", path = "../logfwd-config" }
 logfwd-core = { version = "0.1.0", path = "../logfwd-core" }
 logfwd-types = { version = "0.1.0", path = "../logfwd-types" }
@@ -24,14 +27,23 @@ logfwd-arrow = { version = "0.1.0", path = "../logfwd-arrow" }
 logfwd-transform = { version = "0.1.0", path = "../logfwd-transform", optional = true }
 logfwd-output = { version = "0.1.0", path = "../logfwd-output" }
 logfwd-io = { version = "0.1.0", path = "../logfwd-io" }
+libc = "0.2"
 memchr = "2"
 opentelemetry = { workspace = true }
+opentelemetry-otlp = { workspace = true }
+opentelemetry_sdk = { workspace = true }
+pprof = { version = "0.15", features = ["flamegraph"], optional = true }
 smallvec = { workspace = true }
 thiserror = { workspace = true }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "sync"] }
 tokio-util = { version = "0.7" }
 tracing = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+tracing-subscriber = { workspace = true }
 turmoil = { workspace = true, optional = true }
+
+[target.'cfg(unix)'.dependencies]
+tikv-jemalloc-ctl = { version = "0.6", features = ["stats"] }
 
 [dev-dependencies]
 arrow = { workspace = true }

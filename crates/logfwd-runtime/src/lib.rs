@@ -4,6 +4,7 @@
 //! and in-process processor chain so the `logfwd` package can focus on CLI
 //! entrypoints and compatibility re-exports.
 
+pub mod bootstrap;
 pub mod pipeline;
 pub mod processor;
 pub mod transform;
