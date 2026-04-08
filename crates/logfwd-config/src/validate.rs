@@ -90,13 +90,19 @@ impl Config {
                     )));
                 }
                 match input.input_type {
-                    InputType::File => {
-                        if input.path.is_none() {
+                    InputType::File => match &input.path {
+                        None => {
                             return Err(ConfigError::Validation(format!(
                                 "pipeline '{name}' input '{label}': file input requires 'path'"
                             )));
                         }
-                    }
+                        Some(p) if p.trim().is_empty() => {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': file input 'path' must not be empty"
+                            )));
+                        }
+                        _ => {}
+                    },
                     InputType::Udp | InputType::Tcp => {
                         if input.listen.is_none() {
                             return Err(ConfigError::Validation(format!(
@@ -469,6 +475,13 @@ impl Config {
                             )));
                         }
                         if output.output_type == OutputType::Elasticsearch {
+                            if let Some(idx) = &output.index
+                                && idx.trim().is_empty()
+                            {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' output '{label}': elasticsearch 'index' must not be empty"
+                                )));
+                            }
                             if let Some(mode) = output.request_mode.as_deref()
                                 && !matches!(mode, "buffered" | "streaming")
                             {
@@ -921,6 +934,81 @@ mod validate_endpoint_url_tests {
                 "expected endpoint validation error for {bad}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod validate_empty_field_tests {
+    use crate::types::Config;
+
+    /// Regression test for #1654: file input path: "" must be rejected by validate().
+    #[test]
+    fn file_input_empty_path_rejected() {
+        let yaml = r#"
+pipelines:
+  test:
+    inputs:
+      - type: file
+        path: ""
+    outputs:
+      - type: stdout
+"#;
+        let err = Config::load_str(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("path"),
+            "expected path rejection: {err}"
+        );
+        assert!(
+            err.to_string().contains("must not be empty"),
+            "expected 'must not be empty' message: {err}"
+        );
+    }
+
+    /// Whitespace-only path must also be rejected (validates trim().is_empty() branch).
+    #[test]
+    fn file_input_whitespace_path_rejected() {
+        let yaml = "pipelines:\n  test:\n    inputs:\n      - type: file\n        path: \"   \"\n    outputs:\n      - type: stdout\n";
+        let err = Config::load_str(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("path") && err.to_string().contains("must not be empty"),
+            "whitespace-only path must be rejected: {err}"
+        );
+    }
+
+    /// Regression test for #1653: elasticsearch index: "" must be rejected by validate().
+    #[test]
+    fn elasticsearch_empty_index_rejected() {
+        let yaml = r#"
+pipelines:
+  test:
+    inputs:
+      - type: file
+        path: /tmp/test.log
+    outputs:
+      - type: elasticsearch
+        endpoint: http://localhost:9200
+        index: ""
+"#;
+        let err = Config::load_str(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("index"),
+            "expected index rejection: {err}"
+        );
+        assert!(
+            err.to_string().contains("must not be empty"),
+            "expected 'must not be empty' message: {err}"
+        );
+    }
+
+    /// Whitespace-only elasticsearch index must also be rejected.
+    #[test]
+    fn elasticsearch_whitespace_index_rejected() {
+        let yaml = "pipelines:\n  test:\n    inputs:\n      - type: file\n        path: /tmp/test.log\n    outputs:\n      - type: elasticsearch\n        endpoint: http://localhost:9200\n        index: \"   \"\n";
+        let err = Config::load_str(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("index") && err.to_string().contains("must not be empty"),
+            "whitespace-only index must be rejected: {err}"
+        );
     }
 }
 
