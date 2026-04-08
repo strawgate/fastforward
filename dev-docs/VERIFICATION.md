@@ -141,12 +141,23 @@ just kani-boundary
 CI runs this check in the dedicated `Verification guardrail` job, and the
 required `CI conclusion` status depends on that guardrail passing. CI also runs
 `cargo kani` for the required production crates (`logfwd-core`, `logfwd-arrow`,
-`logfwd-io`, `logfwd-output`), but only under specific conditions: on any push
-to a tracked branch, on pull requests tagged `ci:full`, or on non-draft pull
-requests whose changed files match the `kani_required` path filter (the
-production crates, `Cargo.toml`/`Cargo.lock`, or the Kani boundary-contract
-files). Outside those conditions the Kani job is skipped, so missing in-file
-proofs will not surface until the next qualifying run.
+`logfwd-io`, `logfwd-output`) under the following conditions (from the `kani`
+job in `.github/workflows/ci.yml`):
+
+- **any push** to the repository, OR
+- a pull request carrying the **`ci:full` label**, OR
+- a **non-draft pull request** where the path-filter outputs
+  `kani_required == 'true'` — i.e. at least one changed file matches one of:
+  - `crates/logfwd-core/**`
+  - `crates/logfwd-arrow/**`
+  - `crates/logfwd-io/**`
+  - `crates/logfwd-output/**`
+  - `dev-docs/verification/kani-boundary-contract.toml`
+  - `scripts/verify_kani_boundary_contract.py`
+  - `.github/workflows/ci.yml`
+
+A matching path change in a **draft** PR does not trigger the job; the PR must
+be marked ready for review first.
 
 ### Proof quality requirements
 
