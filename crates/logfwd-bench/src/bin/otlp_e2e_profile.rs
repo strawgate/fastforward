@@ -414,20 +414,30 @@ fn newline_count(bytes: &[u8]) -> usize {
 fn read_concurrency_list() -> Vec<usize> {
     let raw = std::env::var("OTLP_E2E_CONCURRENCY").unwrap_or_else(|_| "1".to_string());
     let mut values = Vec::new();
+    let mut invalid = Vec::new();
     for part in raw.split(',') {
-        if let Ok(value) = part.trim().parse::<usize>()
-            && value > 0
-        {
-            values.push(value);
+        let token = part.trim();
+        if token.is_empty() {
+            continue;
+        }
+        match token.parse::<usize>() {
+            Ok(value) if value > 0 => values.push(value),
+            _ => invalid.push(token.to_string()),
         }
     }
-    if values.is_empty() {
-        vec![1]
-    } else {
-        values.sort_unstable();
-        values.dedup();
-        values
+    if !invalid.is_empty() {
+        panic!(
+            "invalid OTLP_E2E_CONCURRENCY value(s): {} (expected comma-separated positive integers)",
+            invalid.join(", ")
+        );
     }
+    assert!(
+        !values.is_empty(),
+        "OTLP_E2E_CONCURRENCY must include at least one positive integer"
+    );
+    values.sort_unstable();
+    values.dedup();
+    values
 }
 
 fn build_request(rows: usize, extra_string_attrs: usize) -> ExportLogsServiceRequest {
