@@ -43,6 +43,25 @@ struct FieldColumns {
     last_row: u32,
 }
 
+#[derive(Clone)]
+struct ResourceAttrColumn {
+    key: String,
+    col_name: String,
+    value: String,
+    value_buffer: Buffer,
+}
+
+impl ResourceAttrColumn {
+    fn new(key: String, value: String) -> Self {
+        Self {
+            col_name: StreamingBuilder::resource_col_name(&key),
+            value_buffer: Buffer::from(value.as_bytes().to_vec()),
+            key,
+            value,
+        }
+    }
+}
+
 impl FieldColumns {
     fn new(name: &[u8]) -> Self {
         FieldColumns {
@@ -121,7 +140,7 @@ pub struct StreamingBuilder {
     /// Protocol state — enforced via `debug_assert` in each method.
     state: BuilderState,
     /// Constant per-row resource attributes emitted as `_resource_*` columns.
-    resource_attrs: Vec<(String, String)>,
+    resource_attrs: Vec<ResourceAttrColumn>,
 }
 
 impl Default for StreamingBuilder {
@@ -151,7 +170,19 @@ impl StreamingBuilder {
     /// Configure constant per-row resource attributes for subsequent batches.
     pub fn set_resource_attributes(&mut self, attrs: &[(String, String)]) {
         self.resource_attrs.clear();
-        self.resource_attrs.extend(attrs.iter().cloned());
+        self.resource_attrs.reserve(attrs.len());
+        for (key, value) in attrs {
+            self.resource_attrs
+                .push(ResourceAttrColumn::new(key.clone(), value.clone()));
+        }
+    }
+
+    /// Configure constant per-row resource attributes with ownership transfer.
+    pub fn set_resource_attributes_owned(&mut self, attrs: Vec<(String, String)>) {
+        self.resource_attrs = attrs
+            .into_iter()
+            .map(|(key, value)| ResourceAttrColumn::new(key, value))
+            .collect();
     }
 
     fn resource_col_name(key: &str) -> String {
@@ -708,20 +739,20 @@ impl StreamingBuilder {
         // that the schema is identical regardless of row count. Arrow pipelines
         // that concatenate or compare batches require a consistent schema; omitting
         // these columns for num_rows == 0 would cause schema mismatch errors.
-        for (key, value) in &self.resource_attrs {
-            let col_name = Self::resource_col_name(key);
+        for attr in &self.resource_attrs {
+            let col_name = attr.col_name.clone();
             reserve_name(&col_name)?;
             let mut builder = StringViewBuilder::new();
             if num_rows > 0 {
-                let block = builder.append_block(Buffer::from(value.as_bytes().to_vec()));
+                let block = builder.append_block(attr.value_buffer.clone());
                 for _ in 0..num_rows {
                     builder
-                        .try_append_view(block, 0, value.len() as u32)
+                        .try_append_view(block, 0, attr.value.len() as u32)
                         .expect("resource attr constant view must be valid");
                 }
             }
             let mut metadata = HashMap::new();
-            metadata.insert("logfwd.resource_key".to_string(), key.clone());
+            metadata.insert("logfwd.resource_key".to_string(), attr.key.clone());
             schema_fields
                 .push(Field::new(col_name, DataType::Utf8View, true).with_metadata(metadata));
             arrays.push(Arc::new(builder.finish()) as ArrayRef);
@@ -928,16 +959,16 @@ impl StreamingBuilder {
         // that the schema is identical regardless of row count. Arrow pipelines
         // that concatenate or compare batches require a consistent schema; omitting
         // these columns for num_rows == 0 would cause schema mismatch errors.
-        for (key, value) in &self.resource_attrs {
-            let col_name = Self::resource_col_name(key);
+        for attr in &self.resource_attrs {
+            let col_name = attr.col_name.clone();
             reserve_name(&col_name)?;
             let mut builder =
-                arrow::array::StringBuilder::with_capacity(num_rows, num_rows * value.len());
+                arrow::array::StringBuilder::with_capacity(num_rows, num_rows * attr.value.len());
             for _ in 0..num_rows {
-                builder.append_value(value);
+                builder.append_value(attr.value.as_str());
             }
             let mut metadata = HashMap::new();
-            metadata.insert("logfwd.resource_key".to_string(), key.clone());
+            metadata.insert("logfwd.resource_key".to_string(), attr.key.clone());
             schema_fields.push(Field::new(col_name, DataType::Utf8, true).with_metadata(metadata));
             arrays.push(Arc::new(builder.finish()) as ArrayRef);
         }

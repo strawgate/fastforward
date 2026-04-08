@@ -66,11 +66,11 @@ pub struct OtlpSink {
     stats: Arc<ComponentStats>,
 }
 
-/// Per-row resource key: one `Option<String>` per `_resource_*` column in the batch.
-type ResourceKey = Vec<Option<String>>;
+/// Per-row resource key: one optional borrowed string per `_resource_*` column.
+type ResourceKey<'a> = Vec<Option<&'a str>>;
 
 /// Per-group state: the resource key and byte-range spans of encoded log records.
-type ResourceGroup = (ResourceKey, Vec<(usize, usize)>);
+type ResourceGroup<'a> = (ResourceKey<'a>, Vec<(usize, usize)>);
 
 impl OtlpSink {
     pub fn new(
@@ -182,16 +182,15 @@ impl OtlpSink {
 
         // Phase 1: encode all LogRecords and assign each row to a resource group.
         let mut records_buf: Vec<u8> = Vec::with_capacity(num_rows * 128);
-        let mut grouped_ranges: Vec<ResourceGroup> = Vec::new();
-        let mut group_index_by_key: std::collections::HashMap<ResourceKey, usize> =
+        let mut grouped_ranges: Vec<ResourceGroup<'_>> = Vec::new();
+        let mut group_index_by_key: std::collections::HashMap<ResourceKey<'_>, usize> =
             std::collections::HashMap::new();
 
         for row in 0..num_rows {
-            let key: ResourceKey = columns
-                .resource_cols
-                .iter()
-                .map(|(_, attr)| attr_value_as_string(attr, row))
-                .collect();
+            let mut key: ResourceKey<'_> = Vec::with_capacity(columns.resource_cols.len());
+            for (_, attr) in &columns.resource_cols {
+                key.push((!attr.is_null(row)).then(|| attr.value(row)));
+            }
             let group_idx = if let Some(existing) = group_index_by_key.get(&key).copied() {
                 existing
             } else {
@@ -675,7 +674,7 @@ struct BatchColumns<'a> {
     /// Non-special attribute columns: (field_name, pre-downcast array).
     attribute_cols: Vec<(String, AttrArray<'a>)>,
     /// `_resource_*` columns promoted to OTLP Resource attributes.
-    resource_cols: Vec<(String, AttrArray<'a>)>,
+    resource_cols: Vec<(String, OtlpStrCol<'a>)>,
 }
 
 fn resolve_otlp_str_col(col: &dyn Array) -> Option<OtlpStrCol<'_>> {
@@ -783,12 +782,32 @@ fn resolve_batch_columns(batch: &RecordBatch) -> BatchColumns<'_> {
     }
 
     let mut attribute_cols: Vec<(String, AttrArray<'_>)> = Vec::new();
-    let mut resource_cols: Vec<(String, AttrArray<'_>)> = Vec::new();
+    let mut resource_cols: Vec<(String, OtlpStrCol<'_>)> = Vec::new();
     for (idx, field) in schema.fields().iter().enumerate() {
         if excluded.contains(&idx) {
             continue;
         }
         let field_name = field.name().as_str();
+        if field_name.starts_with("_resource_") {
+            if let Some(resource_attr) = resolve_otlp_str_col(batch.column(idx).as_ref()) {
+                // Prefer the original key stored in field metadata (reversible).
+                // Fall back to stripping the prefix for backwards-compatibility with
+                // batches that pre-date the metadata annotation.
+                let original_key = field
+                    .metadata()
+                    .get("logfwd.resource_key")
+                    .cloned()
+                    .unwrap_or_else(|| field_name.strip_prefix("_resource_").unwrap().to_string());
+                resource_cols.push((original_key, resource_attr));
+            } else {
+                tracing::warn!(
+                    column = field_name,
+                    data_type = ?field.data_type(),
+                    "dropping non-string _resource_ column; expected Utf8, Utf8View, or LargeUtf8"
+                );
+            }
+            continue;
+        }
         // Dispatch on the actual Arrow DataType, not the column name suffix.
         // A SQL transform may produce a column whose name suffix disagrees with
         // its real type (e.g. `SELECT level_str AS count_int`); using
@@ -807,18 +826,6 @@ fn resolve_batch_columns(batch: &RecordBatch) -> BatchColumns<'_> {
                 AttrArray::Str,
             ),
         };
-        if field_name.starts_with("_resource_") {
-            // Prefer the original key stored in field metadata (reversible).
-            // Fall back to stripping the prefix for backwards-compatibility with
-            // batches that pre-date the metadata annotation.
-            let original_key = field
-                .metadata()
-                .get("logfwd.resource_key")
-                .cloned()
-                .unwrap_or_else(|| field_name.strip_prefix("_resource_").unwrap().to_string());
-            resource_cols.push((original_key, attr));
-            continue;
-        }
         attribute_cols.push((field_name.to_string(), attr));
     }
 
@@ -832,16 +839,6 @@ fn resolve_batch_columns(batch: &RecordBatch) -> BatchColumns<'_> {
         flags_col,
         attribute_cols,
         resource_cols,
-    }
-}
-
-fn attr_value_as_string(attr: &AttrArray<'_>, row: usize) -> Option<String> {
-    match attr {
-        AttrArray::Str(arr) => (!arr.is_null(row)).then(|| arr.value(row).to_string()),
-        AttrArray::OtherStr(arr) => (!arr.is_null(row)).then(|| str_value(*arr, row).to_string()),
-        AttrArray::Int(arr) => (!arr.is_null(row)).then(|| arr.value(row).to_string()),
-        AttrArray::Float(arr) => (!arr.is_null(row)).then(|| arr.value(row).to_string()),
-        AttrArray::Bool(arr) => (!arr.is_null(row)).then(|| arr.value(row).to_string()),
     }
 }
 
