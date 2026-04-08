@@ -1943,7 +1943,7 @@ output:
     }
 
     /// Regression test for #1695: backpressure_stalls was missing from sample_metrics,
-    /// so /api/history never included it even though /api/stats did.
+    /// so /admin/v1/history never included it even though /admin/v1/stats did.
     #[test]
     fn sample_metrics_records_backpressure_stalls() {
         let meter = opentelemetry::global::meter("test");
