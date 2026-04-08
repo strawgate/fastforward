@@ -788,7 +788,7 @@ impl ElasticsearchSinkFactory {
 /// Handles dates from 1970 to 9999 correctly via the Gregorian calendar.
 /// Timestamps beyond year 9999 are clamped to 9999-12-31T23:59:59 to fit
 /// the 19-byte ASCII buffer and comply with ISO 8601 4-digit year limit.
-fn write_unix_timestamp_utc_into(buf: &mut [u8; 19], mut secs: u64) {
+pub(crate) fn write_unix_timestamp_utc_into(buf: &mut [u8; 19], mut secs: u64) {
     const MAX_SECS: u64 = 253402300799; // 9999-12-31T23:59:59
     if secs > MAX_SECS {
         secs = MAX_SECS;
@@ -915,6 +915,7 @@ fn write_ts_suffix_simple(secs: u64, frac: u64) -> Vec<u8> {
 }
 
 fn is_leap_year(y: u32) -> bool {
+pub(crate) fn is_leap_year(y: u32) -> bool {
     (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
 }
 

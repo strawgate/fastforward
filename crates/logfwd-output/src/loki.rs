@@ -189,9 +189,9 @@ impl LokiSink {
 
         // Find timestamp column index (prefer `_timestamp`, fall back to `@timestamp`).
         // Timestamp columns are always flat Int64/UInt64 — no struct conflict expected.
-        // NOTE: must not use a single `position(|| || )` — that returns the first schema
-        // match, which may be `@timestamp` when both fields are present. Look up each
-        // preferred name separately so `_timestamp` always wins.
+        // Use two separate position() calls so `_timestamp` wins regardless of schema
+        // order — a single position() with `||` would return whichever field appears
+        // first in the schema, which may be `@timestamp`. (fixes #1661)
         let ts_col_idx = schema
             .fields()
             .iter()
@@ -777,6 +777,58 @@ mod tests {
         let obj = "{\"key\": \"value\"}";
         let escaped = escape_json_raw(obj);
         assert_eq!(escaped, "\"{\\\"key\\\": \\\"value\\\"}\"");
+    }
+
+    /// Regression test for #1661: when both `@timestamp` and `_timestamp` exist
+    /// and `@timestamp` appears FIRST in the schema, the sink must still use
+    /// `_timestamp` (the preferred field).
+    #[test]
+    fn test_timestamp_underscore_preferred_over_at_timestamp_regardless_of_schema_order() {
+        use arrow::array::Int64Array;
+        use arrow::datatypes::{Field, Schema};
+
+        let config = Arc::new(LokiConfig {
+            endpoint: "http://localhost".to_string(),
+            tenant_id: None,
+            static_labels: vec![],
+            label_columns: vec![],
+            headers: vec![],
+        });
+        let sink = LokiSink::new(
+            "test".to_string(),
+            config,
+            Arc::new(reqwest::Client::new()),
+            Arc::new(ComponentStats::new()),
+        );
+
+        // @timestamp appears BEFORE _timestamp in the schema.
+        // The sink must select _timestamp (1000) not @timestamp (100).
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(field_names::TIMESTAMP_AT, DataType::Int64, true),
+            Field::new(field_names::TIMESTAMP_UNDERSCORE, DataType::Int64, true),
+            Field::new("message", DataType::Utf8, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int64Array::from(vec![100i64])),
+                Arc::new(Int64Array::from(vec![1_000i64])),
+                Arc::new(arrow::array::StringArray::from(vec!["hi"])),
+            ],
+        )
+        .unwrap();
+        let metadata = BatchMetadata {
+            resource_attrs: Arc::new(vec![]),
+            observed_time_ns: 99_999,
+        };
+
+        let stream_map = sink.build_stream_map(&batch, &metadata).unwrap();
+        let entries: Vec<LokiEntry> = stream_map.values().flatten().cloned().collect();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].0, 1_000,
+            "_timestamp (1000) must be preferred over @timestamp (100)"
+        );
     }
 
     #[test]
