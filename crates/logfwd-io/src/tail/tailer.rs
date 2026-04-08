@@ -72,6 +72,15 @@ pub struct FileTailer {
     health: ComponentHealth,
 }
 
+fn watch_parent_for(path: &Path) -> Option<PathBuf> {
+    let parent = path.parent()?;
+    if parent.as_os_str().is_empty() {
+        Some(PathBuf::from("."))
+    } else {
+        Some(parent.to_path_buf())
+    }
+}
+
 impl FileTailer {
     pub fn new(paths: &[PathBuf], config: TailConfig) -> io::Result<Self> {
         let (tx, rx) = crossbeam_channel::unbounded();
@@ -83,12 +92,12 @@ impl FileTailer {
 
         let mut watched_dirs = HashSet::new();
         for path in paths {
-            if let Some(parent) = path.parent()
-                && watched_dirs.insert(parent.to_path_buf())
+            if let Some(parent) = watch_parent_for(path)
+                && watched_dirs.insert(parent.clone())
             {
                 use notify::Watcher;
                 watcher
-                    .watch(parent, notify::RecursiveMode::NonRecursive)
+                    .watch(&parent, notify::RecursiveMode::NonRecursive)
                     .map_err(io::Error::other)?;
             }
         }
@@ -255,5 +264,28 @@ impl FileTailer {
 
     pub fn file_paths(&self) -> Vec<(SourceId, PathBuf)> {
         self.reader.file_paths()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::watch_parent_for;
+
+    #[test]
+    fn watch_parent_for_relative_file_uses_current_dir() {
+        assert_eq!(
+            watch_parent_for(Path::new("app.log")).as_deref(),
+            Some(Path::new("."))
+        );
+    }
+
+    #[test]
+    fn watch_parent_for_nested_path_uses_parent() {
+        assert_eq!(
+            watch_parent_for(Path::new("logs/app.log")).as_deref(),
+            Some(Path::new("logs"))
+        );
     }
 }

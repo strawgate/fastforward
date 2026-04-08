@@ -486,6 +486,25 @@ mod tests {
     }
 
     #[test]
+    fn test_build_sink_factory_elasticsearch_rejects_unknown_compression() {
+        let cfg = OutputConfig {
+            name: Some("es".to_string()),
+            output_type: OutputType::Elasticsearch,
+            endpoint: Some("http://localhost:9200".to_string()),
+            compression: Some("zstd".to_string()),
+            ..Default::default()
+        };
+        let err = match build_sink_factory("es", &cfg, None, Arc::new(ComponentStats::new())) {
+            Ok(_) => panic!("elasticsearch must reject unsupported compression"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string()
+                .contains("elasticsearch does not support 'zstd' compression")
+        );
+    }
+
+    #[test]
     fn test_build_sink_factory_missing_endpoint() {
         let cfg = OutputConfig {
             name: Some("bad".to_string()),
@@ -736,6 +755,17 @@ mod write_row_json_tests {
         let json = render(&batch, 0);
         let v: serde_json::Value = serde_json::from_str(&json).expect("must be valid JSON");
         assert_eq!(v["status"], 200);
+    }
+
+    #[test]
+    fn integer_null_emits_null_literal() {
+        let batch = make_batch(vec![(
+            "status",
+            Arc::new(Int64Array::from(vec![Some(200), None])),
+        )]);
+        let json = render(&batch, 1);
+        let v: serde_json::Value = serde_json::from_str(&json).expect("must be valid JSON");
+        assert!(v["status"].is_null(), "null integer must serialize as null");
     }
 
     #[test]

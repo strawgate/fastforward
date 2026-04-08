@@ -229,6 +229,9 @@ impl FileReader {
                 false
             }
             Ok(ReadResult::Truncated) => {
+                if let Some(tailed) = self.files.get_mut(path) {
+                    tailed.eof_emitted = false;
+                }
                 events.push(TailEvent::Truncated {
                     path: path.to_path_buf(),
                     source_id: pre_read_source_id,
@@ -276,6 +279,9 @@ impl FileReader {
                     });
                 }
                 Ok(ReadResult::Truncated) => {
+                    if let Some(tailed) = self.files.get_mut(&path) {
+                        tailed.eof_emitted = false;
+                    }
                     events.push(TailEvent::Truncated {
                         path: path.clone(),
                         source_id: pre_read_source_id,
@@ -568,5 +574,40 @@ mod tests {
             }
             _ => panic!("unexpected second event kind"),
         }
+    }
+
+    #[test]
+    fn read_all_re_emits_eof_after_truncated_to_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("eof-reset.log");
+        fs::write(&path, b"abc").unwrap();
+
+        let mut reader = test_reader();
+        reader.open_file_at(&path, false).unwrap();
+
+        let mut events = Vec::new();
+        assert!(!reader.read_all(&mut events));
+        assert!(matches!(events.first(), Some(TailEvent::Data { .. })));
+
+        events.clear();
+        assert!(!reader.read_all(&mut events));
+        assert!(matches!(events.first(), Some(TailEvent::EndOfFile { .. })));
+
+        OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(&path)
+            .unwrap();
+
+        events.clear();
+        assert!(!reader.read_all(&mut events));
+        assert!(matches!(events.first(), Some(TailEvent::Truncated { .. })));
+
+        events.clear();
+        assert!(!reader.read_all(&mut events));
+        assert!(
+            matches!(events.first(), Some(TailEvent::EndOfFile { .. })),
+            "expected EOF event after truncation reset"
+        );
     }
 }

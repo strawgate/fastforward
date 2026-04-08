@@ -81,6 +81,11 @@ pub(crate) fn write_json_string(out: &mut Vec<u8>, v: &str) -> io::Result<()> {
 /// quoted string. This preserves JSON type fidelity on roundtrip without
 /// relying on column name suffixes.
 pub(crate) fn write_json_value(arr: &dyn Array, row: usize, out: &mut Vec<u8>) -> io::Result<()> {
+    if arr.is_null(row) {
+        out.extend_from_slice(b"null");
+        return Ok(());
+    }
+
     match arr.data_type() {
         DataType::Null => {
             out.extend_from_slice(b"null");
@@ -144,12 +149,8 @@ pub(crate) fn write_json_value(arr: &dyn Array, row: usize, out: &mut Vec<u8>) -
             }
         }
         DataType::Boolean => {
-            if arr.is_null(row) {
-                out.extend_from_slice(b"null");
-            } else {
-                let v = arr.as_boolean().value(row);
-                out.extend_from_slice(if v { b"true" } else { b"false" });
-            }
+            let v = arr.as_boolean().value(row);
+            out.extend_from_slice(if v { b"true" } else { b"false" });
         }
         _ => {
             write_json_string(out, str_value(arr, row))?;

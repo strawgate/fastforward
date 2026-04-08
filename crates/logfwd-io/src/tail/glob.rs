@@ -118,5 +118,29 @@ pub(super) fn expand_glob_patterns(patterns: &[&str]) -> Vec<PathBuf> {
             }
         }
     }
+    paths.sort_unstable();
+    paths.dedup();
     paths
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use super::expand_glob_patterns;
+
+    #[test]
+    fn expand_glob_patterns_deduplicates_overlapping_roots() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let nested = dir.path().join("logs/app");
+        fs::create_dir_all(&nested).expect("create nested dir");
+        let log_file = nested.join("service.log");
+        fs::write(&log_file, b"line\n").expect("write log");
+
+        let p1 = format!("{}/**/*.log", dir.path().display());
+        let p2 = format!("{}/logs/**/*.log", dir.path().display());
+        let matches = expand_glob_patterns(&[&p1, &p2]);
+
+        assert_eq!(matches, vec![log_file]);
+    }
 }

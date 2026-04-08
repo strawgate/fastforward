@@ -22,12 +22,14 @@ pub(super) struct FileDiscovery {
 
 impl FileDiscovery {
     pub(super) fn watch_dir(&mut self, dir: &Path) -> io::Result<()> {
-        if self.watched_dirs.insert(dir.to_path_buf()) {
-            use notify::Watcher;
-            self.watcher
-                .watch(dir, notify::RecursiveMode::NonRecursive)
-                .map_err(io::Error::other)?;
+        if self.watched_dirs.contains(dir) {
+            return Ok(());
         }
+        use notify::Watcher;
+        self.watcher
+            .watch(dir, notify::RecursiveMode::NonRecursive)
+            .map_err(io::Error::other)?;
+        self.watched_dirs.insert(dir.to_path_buf());
         Ok(())
     }
 

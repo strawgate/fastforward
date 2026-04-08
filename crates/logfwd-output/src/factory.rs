@@ -44,7 +44,15 @@ pub fn build_sink_factory(
                 .or(cfg.path.as_ref())
                 .map_or("logs", String::as_str)
                 .to_string();
-            let compress = cfg.compression.as_deref() == Some("gzip");
+            let compress = match cfg.compression.as_deref() {
+                Some("gzip") => true,
+                Some("none") | None => false,
+                Some(other) => {
+                    return Err(OutputError::Construction(format!(
+                        "output '{name}': elasticsearch does not support '{other}' compression (use 'gzip' or omit)"
+                    )));
+                }
+            };
             let request_mode = match cfg.request_mode.as_deref() {
                 Some("streaming") => ElasticsearchRequestMode::Streaming,
                 _ => ElasticsearchRequestMode::Buffered,
