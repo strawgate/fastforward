@@ -84,10 +84,10 @@ impl Pipeline {
             match crate::processor::run_chain(&mut self.processors, batch, &metadata) {
                 Ok(batches) => batches,
                 Err(crate::processor::ProcessorError::Transient(e)) => {
-                    tracing::warn!(error = %e, "transient processor error, rejecting batch");
+                    tracing::warn!(error = %e, "transient processor error, holding batch");
                     self.ack_all_tickets(
                         sending,
-                        super::checkpoint_policy::TicketDisposition::Reject,
+                        super::checkpoint_policy::TicketDisposition::Hold,
                     );
                     self.metrics.finish_active_batch(batch_id);
                     return;
@@ -99,10 +99,10 @@ impl Pipeline {
                     return;
                 }
                 Err(crate::processor::ProcessorError::Fatal(e)) => {
-                    tracing::error!(error = %e, "fatal processor error");
+                    tracing::error!(error = %e, "fatal processor error, holding batch");
                     self.ack_all_tickets(
                         sending,
-                        super::checkpoint_policy::TicketDisposition::Reject,
+                        super::checkpoint_policy::TicketDisposition::Hold,
                     );
                     self.metrics.finish_active_batch(batch_id);
                     return;
