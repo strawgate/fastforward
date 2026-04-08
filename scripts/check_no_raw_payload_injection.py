@@ -23,7 +23,7 @@ INJECTION_HELPER_PATTERN = re.compile(
 )
 SOURCE_PATH_SUPPORT_PATTERN = re.compile(r"\bsupports_source_path_injection\s*\(")
 RAW_SOURCE_LITERAL_WRITE_PATTERN = re.compile(
-    r"extend_from_slice\(\s*b\"[^\"]*_source_",
+    r'extend_from_slice\(\s*b"(?:[^"\\]|\\.)*_source_',
     re.MULTILINE,
 )
 
