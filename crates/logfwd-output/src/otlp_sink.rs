@@ -807,8 +807,16 @@ fn resolve_batch_columns(batch: &RecordBatch) -> BatchColumns<'_> {
                 AttrArray::Str,
             ),
         };
-        if let Some(stripped) = field_name.strip_prefix("_resource_") {
-            resource_cols.push((stripped.to_string(), attr));
+        if field_name.starts_with("_resource_") {
+            // Prefer the original key stored in field metadata (reversible).
+            // Fall back to stripping the prefix for backwards-compatibility with
+            // batches that pre-date the metadata annotation.
+            let original_key = field
+                .metadata()
+                .get("logfwd.resource_key")
+                .cloned()
+                .unwrap_or_else(|| field_name.strip_prefix("_resource_").unwrap().to_string());
+            resource_cols.push((original_key, attr));
             continue;
         }
         attribute_cols.push((field_name.to_string(), attr));
@@ -1880,10 +1888,25 @@ mod tests {
         use opentelemetry_proto::tonic::common::v1::any_value::Value;
         use prost::Message;
 
+        // Build fields with `logfwd.resource_key` metadata — the same way
+        // `StreamingBuilder` produces them — so that the original OTLP keys
+        // (containing dots) survive the round-trip through Arrow column names.
+        let svc_field = Field::new("_resource_service_name", DataType::Utf8, true).with_metadata(
+            std::collections::HashMap::from([(
+                "logfwd.resource_key".to_string(),
+                "service.name".to_string(),
+            )]),
+        );
+        let ns_field = Field::new("_resource_k8s_namespace", DataType::Utf8, true).with_metadata(
+            std::collections::HashMap::from([(
+                "logfwd.resource_key".to_string(),
+                "k8s.namespace".to_string(),
+            )]),
+        );
         let schema = Arc::new(Schema::new(vec![
             Field::new("message", DataType::Utf8, true),
-            Field::new("_resource_service_name", DataType::Utf8, true),
-            Field::new("_resource_k8s_namespace", DataType::Utf8, true),
+            svc_field,
+            ns_field,
         ]));
         let batch = RecordBatch::try_new(
             schema,
@@ -1967,8 +1990,8 @@ mod tests {
             first_resource
                 .attributes
                 .iter()
-                .any(|kv| kv.key == "service_name"),
-            "resource key stripped from _resource_ prefix"
+                .any(|kv| kv.key == "service.name"),
+            "original dotted resource key preserved (not mangled to service_name)"
         );
         assert!(
             first_resource
@@ -1981,8 +2004,8 @@ mod tests {
             second_resource
                 .attributes
                 .iter()
-                .any(|kv| kv.key == "service_name"),
-            "second group carries service_name"
+                .any(|kv| kv.key == "service.name"),
+            "second group carries service.name"
         );
     }
 

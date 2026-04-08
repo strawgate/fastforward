@@ -720,7 +720,10 @@ impl StreamingBuilder {
                         .expect("resource attr constant view must be valid");
                 }
             }
-            schema_fields.push(Field::new(col_name, DataType::Utf8View, true));
+            let mut metadata = HashMap::new();
+            metadata.insert("logfwd.resource_key".to_string(), key.clone());
+            schema_fields
+                .push(Field::new(col_name, DataType::Utf8View, true).with_metadata(metadata));
             arrays.push(Arc::new(builder.finish()) as ArrayRef);
         }
 
@@ -933,7 +936,9 @@ impl StreamingBuilder {
             for _ in 0..num_rows {
                 builder.append_value(value);
             }
-            schema_fields.push(Field::new(col_name, DataType::Utf8, true));
+            let mut metadata = HashMap::new();
+            metadata.insert("logfwd.resource_key".to_string(), key.clone());
+            schema_fields.push(Field::new(col_name, DataType::Utf8, true).with_metadata(metadata));
             arrays.push(Arc::new(builder.finish()) as ArrayRef);
         }
 
