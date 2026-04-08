@@ -374,8 +374,23 @@ fn collect_column_refs(expr: &SqlExpr, cols: &mut HashSet<String>) {
         SqlExpr::Nested(inner) => {
             collect_column_refs(inner, cols);
         }
-        SqlExpr::IsNull(e) | SqlExpr::IsNotNull(e) => {
+        SqlExpr::IsNull(e)
+        | SqlExpr::IsNotNull(e)
+        | SqlExpr::IsTrue(e)
+        | SqlExpr::IsNotTrue(e)
+        | SqlExpr::IsFalse(e)
+        | SqlExpr::IsNotFalse(e)
+        | SqlExpr::IsUnknown(e)
+        | SqlExpr::IsNotUnknown(e) => {
             collect_column_refs(e, cols);
+        }
+        SqlExpr::IsDistinctFrom(left, right) | SqlExpr::IsNotDistinctFrom(left, right) => {
+            collect_column_refs(left, cols);
+            collect_column_refs(right, cols);
+        }
+        SqlExpr::SimilarTo { expr, pattern, .. } => {
+            collect_column_refs(expr, cols);
+            collect_column_refs(pattern, cols);
         }
         SqlExpr::Between {
             expr, low, high, ..
@@ -2073,6 +2088,57 @@ mod tests {
         assert!(
             a.referenced_columns.contains("ts"),
             "ORDER BY ts must add 'ts' to referenced_columns, got {:?}",
+            a.referenced_columns
+        );
+    }
+
+    /// `col IS TRUE` in WHERE must add `col` to referenced_columns.
+    ///
+    /// Before the fix, `SqlExpr::IsTrue` fell to the catch-all `_ => {}` arm,
+    /// so `is_error` was never added to `referenced_columns`.  The scanner
+    /// therefore never extracted `is_error`, the WHERE filter saw NULLs, and
+    /// all rows were silently dropped.
+    #[test]
+    fn test_is_true_col_in_where_adds_to_referenced_columns() {
+        let a = QueryAnalyzer::new("SELECT message FROM logs WHERE is_error IS TRUE").unwrap();
+        assert!(
+            a.referenced_columns.contains("is_error"),
+            "col IS TRUE must add 'is_error' to referenced_columns, got {:?}",
+            a.referenced_columns
+        );
+    }
+
+    /// `col IS FALSE` in WHERE must add `col` to referenced_columns.
+    #[test]
+    fn test_is_false_col_in_where_adds_to_referenced_columns() {
+        let a = QueryAnalyzer::new("SELECT message FROM logs WHERE is_debug IS FALSE").unwrap();
+        assert!(
+            a.referenced_columns.contains("is_debug"),
+            "col IS FALSE must add 'is_debug' to referenced_columns, got {:?}",
+            a.referenced_columns
+        );
+    }
+
+    /// `col IS DISTINCT FROM value` must add `col` to referenced_columns.
+    #[test]
+    fn test_is_distinct_from_adds_to_referenced_columns() {
+        let a = QueryAnalyzer::new("SELECT message FROM logs WHERE status IS DISTINCT FROM 'ok'")
+            .unwrap();
+        assert!(
+            a.referenced_columns.contains("status"),
+            "col IS DISTINCT FROM must add 'status' to referenced_columns, got {:?}",
+            a.referenced_columns
+        );
+    }
+
+    /// `col SIMILAR TO pattern` must add `col` to referenced_columns.
+    #[test]
+    fn test_similar_to_adds_to_referenced_columns() {
+        let a =
+            QueryAnalyzer::new("SELECT message FROM logs WHERE path SIMILAR TO '/api/%'").unwrap();
+        assert!(
+            a.referenced_columns.contains("path"),
+            "col SIMILAR TO must add 'path' to referenced_columns, got {:?}",
             a.referenced_columns
         );
     }
