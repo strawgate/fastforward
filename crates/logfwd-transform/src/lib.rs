@@ -339,26 +339,38 @@ fn collect_column_refs(expr: &SqlExpr, cols: &mut HashSet<String>) {
         SqlExpr::UnaryOp { expr, .. } => {
             collect_column_refs(expr, cols);
         }
-        SqlExpr::Function(func) => match &func.args {
-            sqlast::FunctionArguments::List(arg_list) => {
-                for arg in &arg_list.args {
-                    match arg {
-                        sqlast::FunctionArg::Unnamed(sqlast::FunctionArgExpr::Expr(e)) => {
-                            collect_column_refs(e, cols);
+        SqlExpr::Function(func) => {
+            match &func.args {
+                sqlast::FunctionArguments::List(arg_list) => {
+                    for arg in &arg_list.args {
+                        match arg {
+                            sqlast::FunctionArg::Unnamed(sqlast::FunctionArgExpr::Expr(e)) => {
+                                collect_column_refs(e, cols);
+                            }
+                            sqlast::FunctionArg::Named {
+                                arg: sqlast::FunctionArgExpr::Expr(e),
+                                ..
+                            } => {
+                                collect_column_refs(e, cols);
+                            }
+                            _ => {}
                         }
-                        sqlast::FunctionArg::Named {
-                            arg: sqlast::FunctionArgExpr::Expr(e),
-                            ..
-                        } => {
-                            collect_column_refs(e, cols);
-                        }
-                        _ => {}
                     }
                 }
+                sqlast::FunctionArguments::None => {}
+                sqlast::FunctionArguments::Subquery(_) => {}
             }
-            sqlast::FunctionArguments::None => {}
-            sqlast::FunctionArguments::Subquery(_) => {}
-        },
+            // Walk OVER clause: columns in PARTITION BY and ORDER BY are
+            // only referenced in func.over, not in func.args.
+            if let Some(sqlast::WindowType::WindowSpec(spec)) = &func.over {
+                for e in &spec.partition_by {
+                    collect_column_refs(e, cols);
+                }
+                for ob in &spec.order_by {
+                    collect_column_refs(&ob.expr, cols);
+                }
+            }
+        }
         SqlExpr::Nested(inner) => {
             collect_column_refs(inner, cols);
         }
@@ -2008,6 +2020,59 @@ mod tests {
         assert!(
             a.referenced_columns.contains("event_time"),
             "col AT TIME ZONE must add 'event_time' to referenced_columns, got {:?}",
+            a.referenced_columns
+        );
+    }
+
+    /// Columns referenced only in a window function's OVER clause (PARTITION BY
+    /// and ORDER BY) must appear in `referenced_columns`.
+    ///
+    /// Before the fix, `collect_column_refs` walked `func.args` but not
+    /// `func.over`, so `level` and `timestamp` were silently dropped from
+    /// `referenced_columns`.  The scanner would never extract those fields,
+    /// causing the window function to see NULLs instead of real values.
+    ///
+    /// Regression test for missing `func.over` traversal in
+    /// `collect_column_refs`.
+    #[test]
+    fn test_window_over_partition_order_cols_added_to_referenced_columns() {
+        let a = QueryAnalyzer::new(
+            "SELECT ROW_NUMBER() OVER (PARTITION BY level ORDER BY timestamp) AS rn FROM logs",
+        )
+        .unwrap();
+        assert!(
+            a.referenced_columns.contains("level"),
+            "PARTITION BY level must add 'level' to referenced_columns, got {:?}",
+            a.referenced_columns
+        );
+        assert!(
+            a.referenced_columns.contains("timestamp"),
+            "ORDER BY timestamp must add 'timestamp' to referenced_columns, got {:?}",
+            a.referenced_columns
+        );
+    }
+
+    /// OVER clause with both a function arg AND window columns — all must be
+    /// collected.
+    #[test]
+    fn test_window_func_arg_and_over_cols_both_collected() {
+        let a = QueryAnalyzer::new(
+            "SELECT SUM(duration) OVER (PARTITION BY service ORDER BY ts) AS rolling FROM logs",
+        )
+        .unwrap();
+        assert!(
+            a.referenced_columns.contains("duration"),
+            "SUM(duration) must add 'duration' to referenced_columns, got {:?}",
+            a.referenced_columns
+        );
+        assert!(
+            a.referenced_columns.contains("service"),
+            "PARTITION BY service must add 'service' to referenced_columns, got {:?}",
+            a.referenced_columns
+        );
+        assert!(
+            a.referenced_columns.contains("ts"),
+            "ORDER BY ts must add 'ts' to referenced_columns, got {:?}",
             a.referenced_columns
         );
     }
