@@ -581,17 +581,25 @@ fn decode_otlp_logs_json(body: &[u8]) -> Result<Vec<u8>, InputError> {
             for record in records {
                 out.push(b'{');
 
+                // timestamp: prefer timeUnixNano, fall back to observedTimeUnixNano
+                // when event time is unknown (fixes #1690).
+                let mut ts_val = 0u64;
                 if let Some(ts) = record.get("timeUnixNano") {
-                    let parsed = parse_protojson_u64(ts).ok_or_else(|| {
+                    ts_val = parse_protojson_u64(ts).ok_or_else(|| {
                         InputError::Receiver(
                             "invalid OTLP JSON timeUnixNano: not a valid uint64".into(),
                         )
                     })?;
-                    if parsed > 0 {
-                        write_json_key(&mut out, field_names::TIMESTAMP);
-                        write_u64_to_buf(&mut out, parsed);
-                        out.push(b',');
+                }
+                if ts_val == 0 {
+                    if let Some(obs) = record.get("observedTimeUnixNano") {
+                        ts_val = parse_protojson_u64(obs).unwrap_or(0);
                     }
+                }
+                if ts_val > 0 {
+                    write_json_key(&mut out, field_names::TIMESTAMP);
+                    write_u64_to_buf(&mut out, ts_val);
+                    out.push(b',');
                 }
 
                 if let Some(sev) = record.get("severityText").and_then(|v| v.as_str()) {
@@ -822,12 +830,18 @@ fn convert_request_to_json_lines(request: &ExportLogsServiceRequest) -> Vec<u8> 
             for record in &scope_logs.log_records {
                 out.push(b'{');
 
-                // timestamp (write directly without allocation)
-                if record.time_unix_nano > 0 {
+                // timestamp: prefer time_unix_nano, fall back to observed_time_unix_nano
+                // when event time is unknown (fixes #1690).
+                let ts = if record.time_unix_nano > 0 {
+                    record.time_unix_nano
+                } else {
+                    record.observed_time_unix_nano
+                };
+                if ts > 0 {
                     out.push(b'"');
                     out.extend_from_slice(field_names::TIMESTAMP.as_bytes());
                     out.extend_from_slice(b"\":");
-                    write_u64_to_buf(&mut out, record.time_unix_nano);
+                    write_u64_to_buf(&mut out, ts);
                     out.push(b',');
                 }
 
@@ -914,10 +928,17 @@ fn convert_request_to_batch(request: &ExportLogsServiceRequest) -> Result<Record
             for record in &scope_logs.log_records {
                 builder.begin_row();
 
-                if record.time_unix_nano > 0
-                    && let Ok(ts) = i64::try_from(record.time_unix_nano)
-                {
-                    builder.append_i64_value_by_idx(timestamp_idx, ts);
+                // timestamp: prefer time_unix_nano, fall back to
+                // observed_time_unix_nano when event time is unknown (#1690).
+                let ts_raw = if record.time_unix_nano > 0 {
+                    record.time_unix_nano
+                } else {
+                    record.observed_time_unix_nano
+                };
+                if let Ok(ts) = i64::try_from(ts_raw) {
+                    if ts > 0 {
+                        builder.append_i64_value_by_idx(timestamp_idx, ts);
+                    }
                 }
 
                 if !record.severity_text.is_empty() {
@@ -2375,6 +2396,35 @@ mod tests {
         );
     }
 
+    /// JSON OTLP path: when timeUnixNano is 0 but observedTimeUnixNano is set,
+    /// the timestamp must use the observed time (issue #1690).
+    #[test]
+    fn json_path_uses_observed_time_when_event_time_is_zero() {
+        let json_lines = decode_otlp_logs_json(
+            br#"{
+                "resourceLogs": [{
+                    "scopeLogs": [{
+                        "logRecords": [{
+                            "timeUnixNano": "0",
+                            "observedTimeUnixNano": "1705314700000000000",
+                            "body": {"stringValue": "hello"}
+                        }]
+                    }]
+                }]
+            }"#,
+        )
+        .expect("valid OTLP JSON");
+
+        let line = String::from_utf8(json_lines).expect("utf8");
+        let row: serde_json::Value = serde_json::from_str(line.lines().next().unwrap()).unwrap();
+        assert_eq!(
+            row.get(field_names::TIMESTAMP)
+                .and_then(serde_json::Value::as_u64),
+            Some(1_705_314_700_000_000_000),
+            "JSON path must fall back to observedTimeUnixNano when timeUnixNano==0"
+        );
+    }
+
     #[test]
     fn special_float_strings_match_protobuf_semantics() {
         let request = ExportLogsServiceRequest {
@@ -3242,6 +3292,76 @@ mod tests {
         assert_eq!(
             status, 200,
             "valid OTLP JSON should return 200, got {status}"
+        );
+    }
+
+    /// Regression test for issue #1690: when time_unix_nano is 0 but
+    /// observed_time_unix_nano is set, the timestamp must use the observed time.
+    #[test]
+    fn uses_observed_time_when_event_time_is_zero() {
+        const OBSERVED_NS: u64 = 1_705_314_700_000_000_000;
+
+        let request = ExportLogsServiceRequest {
+            resource_logs: vec![ResourceLogs {
+                scope_logs: vec![ScopeLogs {
+                    log_records: vec![LogRecord {
+                        time_unix_nano: 0,                    // event time unknown
+                        observed_time_unix_nano: OBSERVED_NS, // observation time known
+                        severity_text: "INFO".into(),
+                        body: Some(AnyValue {
+                            value: Some(Value::StringValue("test".into())),
+                        }),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        };
+
+        let json = convert_request_to_json_lines(&request);
+        let text = String::from_utf8(json).unwrap();
+
+        // Must contain the observed timestamp.
+        assert!(
+            text.contains(&OBSERVED_NS.to_string()),
+            "observed_time_unix_nano not written when time_unix_nano==0: {text}"
+        );
+    }
+
+    /// When time_unix_nano is set, it takes priority over observed_time_unix_nano.
+    #[test]
+    fn prefers_event_time_over_observed_time() {
+        const EVENT_NS: u64 = 1_705_314_600_000_000_000;
+        const OBSERVED_NS: u64 = 1_705_314_700_000_000_000;
+
+        let request = ExportLogsServiceRequest {
+            resource_logs: vec![ResourceLogs {
+                scope_logs: vec![ScopeLogs {
+                    log_records: vec![LogRecord {
+                        time_unix_nano: EVENT_NS,
+                        observed_time_unix_nano: OBSERVED_NS,
+                        body: Some(AnyValue {
+                            value: Some(Value::StringValue("test".into())),
+                        }),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        };
+
+        let json = convert_request_to_json_lines(&request);
+        let text = String::from_utf8(json).unwrap();
+
+        assert!(
+            text.contains(&EVENT_NS.to_string()),
+            "event time_unix_nano should be used when set: {text}"
+        );
+        assert!(
+            !text.contains(&OBSERVED_NS.to_string()),
+            "observed time should not appear when event time is set: {text}"
         );
     }
 }
