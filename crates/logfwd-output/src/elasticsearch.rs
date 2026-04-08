@@ -238,7 +238,11 @@ impl ElasticsearchSink {
                 }
             }
         }
-        Ok(())
+        // errors: true but no specific error found in items — treat as failure rather
+        // than silently returning Ok (which would cause data loss by masking the error).
+        Err(io::Error::other(
+            "ES bulk response indicated errors but no error details found in items",
+        ))
     }
 
     /// Query Elasticsearch using ES|QL and receive Arrow IPC response.
@@ -1407,6 +1411,17 @@ mod tests {
             .expect_err("missing errors field should be an error");
         ElasticsearchSink::parse_bulk_response(b"not json")
             .expect_err("malformed json should be an error");
+    }
+
+    // Regression test for issue #1675: when errors:true but no item has an "error" key,
+    // the function must return Err rather than Ok (which would silently mask the failure).
+    #[test]
+    fn parse_bulk_response_errors_true_no_error_key_is_error() {
+        // ES says errors:true but all items look successful (no "error" key).
+        // This can happen with malformed/truncated responses or unexpected ES formats.
+        let response = br#"{"took":1,"errors":true,"items":[{"index":{"_id":"1","status":200}}]}"#;
+        ElasticsearchSink::parse_bulk_response(response)
+            .expect_err("errors:true must return Err even when no item has an 'error' key");
     }
 
     /// Local microbenchmark for serialize_batch fast path vs simple baseline.
