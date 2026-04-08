@@ -454,11 +454,20 @@ fn inject_source_path_metadata(chunk: &[u8], source_path: &std::path::Path, out:
             .iter()
             .position(|&b| !matches!(b, b' ' | b'\t' | b'\r'));
         if let Some(obj_start) = first_nonws.filter(|&idx| line[idx] == b'{') {
+            let rest = &line[obj_start + 1..];
+            let rest_is_empty_obj = rest
+                .iter()
+                .position(|&b| !matches!(b, b' ' | b'\t' | b'\r'))
+                .is_some_and(|i| rest[i] == b'}');
             out.extend_from_slice(&line[..obj_start]);
             out.extend_from_slice(b"{\"_source_path\":\"");
             json_escape_bytes(source_path_bytes, out);
-            out.extend_from_slice(b"\",");
-            out.extend_from_slice(&line[obj_start + 1..]);
+            if rest_is_empty_obj {
+                out.push(b'"');
+            } else {
+                out.extend_from_slice(b"\",");
+            }
+            out.extend_from_slice(rest);
         } else {
             out.extend_from_slice(line);
         }
@@ -1483,5 +1492,50 @@ mod tests {
 
         let out = collect_data(framed.poll().unwrap());
         assert_eq!(out, b"{\"msg\":\"hello\"}\n");
+    }
+
+    #[test]
+    fn inject_source_path_empty_object() {
+        let path = std::path::Path::new("/var/log/test.log");
+        let mut out = Vec::new();
+        inject_source_path_metadata(b"{}", path, &mut out);
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            r#"{"_source_path":"/var/log/test.log"}"#,
+        );
+    }
+
+    #[test]
+    fn inject_source_path_whitespace_only_object() {
+        let path = std::path::Path::new("/var/log/test.log");
+        let mut out = Vec::new();
+        inject_source_path_metadata(b"{  }", path, &mut out);
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            r#"{"_source_path":"/var/log/test.log"  }"#,
+        );
+    }
+
+    #[test]
+    fn inject_source_path_normal_object() {
+        let path = std::path::Path::new("/var/log/test.log");
+        let mut out = Vec::new();
+        inject_source_path_metadata(b"{\"msg\":\"hi\"}", path, &mut out);
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            r#"{"_source_path":"/var/log/test.log","msg":"hi"}"#,
+        );
+    }
+
+    #[test]
+    fn inject_source_path_multiline_with_empty_object() {
+        let path = std::path::Path::new("/a/b.log");
+        let mut out = Vec::new();
+        inject_source_path_metadata(b"{}\n{\"k\":\"v\"}\n", path, &mut out);
+        let result = String::from_utf8(out).unwrap();
+        assert_eq!(
+            result,
+            "{\"_source_path\":\"/a/b.log\"}\n{\"_source_path\":\"/a/b.log\",\"k\":\"v\"}\n",
+        );
     }
 }
