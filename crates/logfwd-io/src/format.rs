@@ -235,8 +235,22 @@ fn inject_cri_metadata(msg: &[u8], timestamp: &[u8], stream: &[u8], out: &mut Ve
         out.extend_from_slice(timestamp);
         out.extend_from_slice(b"\",\"_stream\":\"");
         out.extend_from_slice(stream);
-        out.extend_from_slice(b"\",");
-        out.extend_from_slice(&msg[1..]);
+        // The message body is everything after the opening '{'. If it starts
+        // with '}' (possibly with whitespace), the original message is an empty
+        // JSON object — close without a trailing comma to avoid `{...,}` (invalid JSON).
+        let body = &msg[1..];
+        let trimmed_start = body
+            .iter()
+            .position(|b| !b.is_ascii_whitespace())
+            .unwrap_or(body.len());
+        if body[trimmed_start..].starts_with(b"}") {
+            // Empty JSON object: close the metadata object without a trailing comma.
+            out.extend_from_slice(b"\"}");
+        } else {
+            // Non-empty JSON object: inject comma then remaining fields.
+            out.extend_from_slice(b"\",");
+            out.extend_from_slice(body);
+        }
     } else {
         // Plain text: wrap as {"_timestamp":"...","_stream":"...","_raw":"<escaped>"}
         // so that message content is preserved and the scanner can ingest the record.
@@ -298,6 +312,28 @@ mod tests {
             out,
             b"{\"_timestamp\":\"2024-01-15T10:30:00Z\",\"_stream\":\"stdout\",\"_raw\":\"hello world\"}\n"
         );
+    }
+
+    /// Regression test for #1658: empty JSON object {} must produce valid JSON.
+    #[test]
+    fn cri_empty_json_object_produces_valid_json() {
+        let stats = make_stats();
+        let mut proc = FormatDecoder::cri(2 * 1024 * 1024, stats);
+        let input = b"2024-01-15T10:30:00Z stdout F {}\n";
+        let mut out = Vec::new();
+        proc.process_lines(input, &mut out);
+        // Must produce valid JSON — not {"_timestamp":"...","_stream":"...",}
+        assert!(!out.is_empty(), "should emit a record");
+        let line = &out[..out.len() - 1]; // trim trailing \n
+        let parsed = serde_json::from_slice::<serde_json::Value>(line);
+        assert!(
+            parsed.is_ok(),
+            "empty JSON object must produce valid JSON output; got: {}",
+            String::from_utf8_lossy(line)
+        );
+        let obj = parsed.unwrap();
+        assert_eq!(obj["_timestamp"], "2024-01-15T10:30:00Z");
+        assert_eq!(obj["_stream"], "stdout");
     }
 
     #[test]
