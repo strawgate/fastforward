@@ -437,6 +437,35 @@ fn write_json_value(arr: &dyn Array, row: usize, out: &mut Vec<u8>) -> io::Resul
                 out.extend_from_slice(if v { b"true" } else { b"false" });
             }
         }
+        DataType::Struct(schema_fields) => {
+            if arr.is_null(row) {
+                out.extend_from_slice(b"null");
+            } else {
+                let struct_arr = arr
+                    .as_any()
+                    .downcast_ref::<StructArray>()
+                    .expect("DataType::Struct must downcast to StructArray");
+                out.push(b'{');
+                let num_fields = struct_arr.num_columns();
+                let mut first = true;
+                for field_idx in 0..num_fields {
+                    if !first {
+                        out.push(b',');
+                    }
+                    first = false;
+                    let field_name = schema_fields[field_idx].name();
+                    write_json_string(out, field_name)?;
+                    out.push(b':');
+                    let child_arr = struct_arr.column(field_idx);
+                    if child_arr.is_null(row) {
+                        out.extend_from_slice(b"null");
+                    } else {
+                        write_json_value(child_arr.as_ref(), row, out)?;
+                    }
+                }
+                out.push(b'}');
+            }
+        }
         _ => {
             write_json_string(out, str_value(arr, row))?;
         }
@@ -1937,6 +1966,110 @@ mod write_row_json_tests {
         assert!(
             (v["score_float"].as_f64().unwrap() - 3.14).abs() < 0.01,
             "alias 'score_float' must be preserved, got: {json}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Regression tests for issue #1592: grok()/geo_lookup() struct columns
+    // -----------------------------------------------------------------------
+
+    /// Build a single-row batch with a top-level grok-like struct column
+    /// containing three nullable Utf8 child fields (`method`, `path`, `id`).
+    /// When `struct_is_null` is true the entire struct cell is null.
+    fn make_grok_struct_batch(
+        method: Option<&str>,
+        path: Option<&str>,
+        id: Option<&str>,
+        struct_is_null: bool,
+    ) -> RecordBatch {
+        use arrow::array::{ArrayRef, StringArray, StructArray};
+        use arrow::buffer::NullBuffer;
+        use arrow::datatypes::{Field, Fields, Schema};
+
+        let method_field = Arc::new(Field::new("method", DataType::Utf8, true));
+        let path_field = Arc::new(Field::new("path", DataType::Utf8, true));
+        let id_field = Arc::new(Field::new("id", DataType::Utf8, true));
+
+        let method_arr: ArrayRef = Arc::new(StringArray::from(vec![method]));
+        let path_arr: ArrayRef = Arc::new(StringArray::from(vec![path]));
+        let id_arr: ArrayRef = Arc::new(StringArray::from(vec![id]));
+
+        let nulls = if struct_is_null {
+            Some(NullBuffer::new(arrow::buffer::BooleanBuffer::collect_bool(
+                1,
+                |_| false,
+            )))
+        } else {
+            None
+        };
+
+        let grok_field = Field::new(
+            "grok",
+            DataType::Struct(Fields::from(vec![
+                method_field.as_ref().clone(),
+                path_field.as_ref().clone(),
+                id_field.as_ref().clone(),
+            ])),
+            true,
+        );
+        let struct_arr: ArrayRef = Arc::new(StructArray::new(
+            Fields::from(vec![method_field, path_field, id_field]),
+            vec![method_arr, path_arr, id_arr],
+            nulls,
+        ));
+
+        RecordBatch::try_new(Arc::new(Schema::new(vec![grok_field])), vec![struct_arr]).unwrap()
+    }
+
+    /// Regression #1592: a grok()-like struct column must serialize as a JSON
+    /// object, not as `""` (empty string).
+    #[test]
+    fn grok_struct_serializes_as_json_object() {
+        let batch = make_grok_struct_batch(Some("GET"), Some("/api/v1"), Some("42"), false);
+        let json = render(&batch, 0);
+        let v: serde_json::Value =
+            serde_json::from_str(&json).expect("grok struct must produce valid JSON");
+        assert!(
+            v["grok"].is_object(),
+            "grok column should serialize as JSON object, got: {json}"
+        );
+        assert_eq!(v["grok"]["method"], "GET");
+        assert_eq!(v["grok"]["path"], "/api/v1");
+        assert_eq!(v["grok"]["id"], "42");
+    }
+
+    /// Regression #1592: a null struct column must serialize as JSON `null`.
+    #[test]
+    fn grok_null_struct_serializes_as_null() {
+        let batch = make_grok_struct_batch(Some("GET"), Some("/"), Some("1"), true);
+        let json = render(&batch, 0);
+        let v: serde_json::Value =
+            serde_json::from_str(&json).expect("null grok struct must produce valid JSON");
+        assert!(
+            v["grok"].is_null(),
+            "null grok struct should serialize as JSON null, got: {json}"
+        );
+    }
+
+    /// Regression #1592: struct fields that are individually null must appear
+    /// as `null` in the serialized object, not be omitted.
+    #[test]
+    fn grok_struct_null_child_field_serializes_as_null() {
+        // method and path present, id is null
+        let batch = make_grok_struct_batch(Some("POST"), Some("/upload"), None, false);
+        let json = render(&batch, 0);
+        let v: serde_json::Value =
+            serde_json::from_str(&json).expect("partial-null grok struct must produce valid JSON");
+        assert!(
+            v["grok"].is_object(),
+            "grok column should still be an object, got: {json}"
+        );
+        assert_eq!(v["grok"]["method"], "POST");
+        assert_eq!(v["grok"]["path"], "/upload");
+        assert!(
+            v["grok"].as_object().unwrap().contains_key("id") && v["grok"]["id"].is_null(),
+            "null child field must be present and serialize as null, got: {}",
+            v["grok"]["id"]
         );
     }
 }
