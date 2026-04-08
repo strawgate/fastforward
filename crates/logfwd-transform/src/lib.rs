@@ -1813,39 +1813,32 @@ mod tests {
         );
     }
 
-    /// json(_raw, 'key') inside a non-wildcard SELECT must succeed end-to-end.
-    /// Before the fix this produced "Schema error: No field named _raw."
+    /// Keep `_raw` only when query text actually references it.
     #[test]
-    fn test_json_raw_without_select_star() {
-        // Build a batch that simulates scanner output with a _raw column.
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("level", DataType::Utf8, true),
-            Field::new("_raw", DataType::Utf8, true),
-        ]));
-        let level: ArrayRef = Arc::new(StringArray::from(vec![Some("INFO"), Some("ERROR")]));
-        let raw: ArrayRef = Arc::new(StringArray::from(vec![
-            Some(r#"{"status":"200","level":"INFO"}"#),
-            Some(r#"{"status":"500","level":"ERROR"}"#),
-        ]));
-        let batch = RecordBatch::try_new(schema, vec![level, raw]).unwrap();
+    fn test_scan_config_keep_raw_only_when_raw_is_referenced() {
+        let with_raw =
+            QueryAnalyzer::new("SELECT level FROM logs WHERE json(_raw, 'status') = '500'")
+                .unwrap();
+        let with_cfg = with_raw.scan_config();
+        assert!(
+            with_cfg.keep_raw,
+            "keep_raw must be true when _raw is referenced in WHERE"
+        );
+        assert!(
+            with_cfg.wanted_fields.iter().all(|f| f.name != "_raw"),
+            "_raw must not be added to wanted_fields"
+        );
+        assert!(
+            with_cfg.wanted_fields.iter().any(|f| f.name == "level"),
+            "regular JSON fields should still be requested"
+        );
 
-        // This is what the scanner would produce when keep_raw=true is set.
-        // We simulate the end-to-end scenario by running the transform directly
-        // on a batch that already contains _raw.
-        //
-        // With the fix: scan_config() sets keep_raw=true, and the scanner
-        // includes _raw.  The transform can then call json(_raw, 'status').
-        let mut transform =
-            SqlTransform::new("SELECT level, json(_raw, 'status') AS s FROM logs").unwrap();
-        let result = transform.execute_blocking(batch).unwrap();
-        assert_eq!(result.num_rows(), 2);
-        let s = result
-            .column_by_name("s")
-            .expect("column 's' must be present")
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        assert_eq!(s.value(0), "200");
-        assert_eq!(s.value(1), "500");
+        let without_raw =
+            QueryAnalyzer::new("SELECT level FROM logs WHERE status = '500'").unwrap();
+        let without_cfg = without_raw.scan_config();
+        assert!(
+            !without_cfg.keep_raw,
+            "keep_raw must remain false when query does not reference _raw"
+        );
     }
 }
