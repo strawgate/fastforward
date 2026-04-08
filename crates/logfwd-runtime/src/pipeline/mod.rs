@@ -1108,9 +1108,18 @@ output:
 
         let shutdown = CancellationToken::new();
         let sd_clone = shutdown.clone();
+        let metrics = Arc::clone(&pipeline.metrics);
 
         std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(500));
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let errors = metrics.transform_errors.load(Ordering::Relaxed);
+                let dropped = metrics.dropped_batches_total.load(Ordering::Relaxed);
+                if errors > 0 || dropped > 0 || Instant::now() >= deadline {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
             sd_clone.cancel();
         });
 
