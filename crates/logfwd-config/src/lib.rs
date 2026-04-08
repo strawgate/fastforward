@@ -2189,4 +2189,48 @@ pipelines:
             "expected loki-only message: {err}"
         );
     }
+
+    /// Regression: `workers: 0` should be rejected at validate time, not only
+    /// at pipeline-build time.  Before the fix, `--validate` reported success
+    /// for this config but the pipeline failed immediately on startup.
+    #[test]
+    fn pipeline_rejects_workers_zero() {
+        let yaml = r#"
+pipelines:
+  test:
+    workers: 0
+    inputs:
+      - type: file
+        path: /tmp/test.log
+    outputs:
+      - type: null
+"#;
+        let err = Config::load_str(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("workers"),
+            "expected workers rejection: {err}"
+        );
+    }
+
+    /// Regression: `batch_target_bytes: 0` should be rejected at validate time.
+    /// Before the fix, `--validate` reported success but the pipeline failed on
+    /// startup with "batch_target_bytes must be > 0".
+    #[test]
+    fn pipeline_rejects_batch_target_bytes_zero() {
+        let yaml = r#"
+pipelines:
+  test:
+    batch_target_bytes: 0
+    inputs:
+      - type: file
+        path: /tmp/test.log
+    outputs:
+      - type: null
+"#;
+        let err = Config::load_str(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("batch_target_bytes"),
+            "expected batch_target_bytes rejection: {err}"
+        );
+    }
 }
