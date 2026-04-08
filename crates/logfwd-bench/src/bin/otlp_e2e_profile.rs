@@ -21,13 +21,13 @@ struct HttpPoster {
 }
 
 impl HttpPoster {
-    fn new() -> Self {
+    fn new(max_idle_per_host: usize) -> Self {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("tokio runtime");
         let client = reqwest::Client::builder()
-            .pool_max_idle_per_host(1)
+            .pool_max_idle_per_host(max_idle_per_host.max(1))
             .build()
             .expect("reqwest client");
         Self { rt, client }
@@ -46,6 +46,37 @@ impl HttpPoster {
             })
             .expect("OTLP POST must succeed");
         assert_eq!(response.status(), 200, "unexpected OTLP status");
+    }
+
+    fn post_many(&self, url: &str, body: &[u8], concurrency: usize) {
+        if concurrency <= 1 {
+            self.post(url, body);
+            return;
+        }
+        self.rt.block_on(async {
+            let payload = Bytes::copy_from_slice(body);
+            let mut handles = Vec::with_capacity(concurrency);
+            for _ in 0..concurrency {
+                let client = self.client.clone();
+                let url = url.to_string();
+                let payload = payload.clone();
+                handles.push(tokio::spawn(async move {
+                    client
+                        .post(url)
+                        .header("Content-Type", "application/x-protobuf")
+                        .body(payload)
+                        .send()
+                        .await
+                }));
+            }
+            for handle in handles {
+                let response = handle
+                    .await
+                    .expect("spawned OTLP POST task must complete")
+                    .expect("OTLP POST must succeed");
+                assert_eq!(response.status(), 200, "unexpected OTLP status");
+            }
+        });
     }
 }
 
@@ -100,6 +131,7 @@ fn main() {
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(10_000);
+    let concurrencies = read_concurrency_list();
     let case_filter = std::env::var("OTLP_E2E_CASE").ok();
     let mode_filter = std::env::var("OTLP_E2E_MODE").ok();
     let timeout = Duration::from_millis(timeout_ms);
@@ -116,7 +148,9 @@ fn main() {
         },
     ];
 
-    println!("=== OTLP Receiver -> Scanner -> OtlpSink EPS Profile (iters={iterations}) ===\n");
+    println!(
+        "=== OTLP Receiver -> Scanner -> OtlpSink EPS Profile (iters={iterations}, concurrency={concurrencies:?}) ===\n"
+    );
 
     for case in cases {
         for mode in [ReceiverMode::LegacyJsonLines, ReceiverMode::StructuredBatch] {
@@ -126,12 +160,20 @@ fn main() {
             if !mode.matches_filter(mode_filter.as_deref()) {
                 continue;
             }
-            run_case(mode, &case, iterations, timeout);
+            for &concurrency in &concurrencies {
+                run_case(mode, &case, iterations, timeout, concurrency);
+            }
         }
     }
 }
 
-fn run_case(mode: ReceiverMode, case: &Case, iterations: usize, timeout: Duration) {
+fn run_case(
+    mode: ReceiverMode,
+    case: &Case,
+    iterations: usize,
+    timeout: Duration,
+    concurrency: usize,
+) {
     let request = build_request(case.rows, case.extra_string_attrs);
     let request_body = request.encode_to_vec();
     let request_mb = request_body.len() as f64 / (1024.0 * 1024.0);
@@ -145,12 +187,13 @@ fn run_case(mode: ReceiverMode, case: &Case, iterations: usize, timeout: Duratio
         }
     };
     let url = format!("http://{}/v1/logs", input.local_addr());
-    let poster = HttpPoster::new();
+    let poster = HttpPoster::new(concurrency);
     let metadata = generators::make_metadata();
     let mut totals = Totals::default();
 
     let scanned_batch = warm_up(
         mode,
+        concurrency,
         &poster,
         &url,
         &request_body,
@@ -161,8 +204,8 @@ fn run_case(mode: ReceiverMode, case: &Case, iterations: usize, timeout: Duratio
 
     for _ in 0..iterations {
         let t0 = Instant::now();
-        poster.post(&url, &request_body);
-        let payload = poll_until_payload(&mut input, case.rows, timeout);
+        poster.post_many(&url, &request_body, concurrency);
+        let payload = poll_until_payload(&mut input, case.rows * concurrency, timeout);
         totals.receiver += t0.elapsed();
 
         let batch = match payload {
@@ -192,15 +235,16 @@ fn run_case(mode: ReceiverMode, case: &Case, iterations: usize, timeout: Duratio
     let sink_only = run_sink_only(&scanned_batch, &metadata, iterations);
 
     println!(
-        "{} [{}]  rows={}  body={:.2} MiB",
+        "{} [{} c={}]  rows={}  body={:.2} MiB",
         case.name,
         mode.label(),
+        concurrency,
         case.rows,
         request_mb
     );
     print_stage_block(
         "e2e manual",
-        case.rows,
+        case.rows * concurrency,
         iterations,
         totals.receiver + totals.scan + totals.encode_manual,
         Some(&[
@@ -211,7 +255,7 @@ fn run_case(mode: ReceiverMode, case: &Case, iterations: usize, timeout: Duratio
     );
     print_stage_block(
         "e2e generated-fast",
-        case.rows,
+        case.rows * concurrency,
         iterations,
         totals.receiver + totals.scan + totals.encode_generated,
         Some(&[
@@ -220,10 +264,16 @@ fn run_case(mode: ReceiverMode, case: &Case, iterations: usize, timeout: Duratio
             ("sink encode", totals.encode_generated),
         ]),
     );
-    print_stage_block("sink-only manual", case.rows, iterations, sink_only.0, None);
+    print_stage_block(
+        "sink-only manual",
+        case.rows * concurrency,
+        iterations,
+        sink_only.0,
+        None,
+    );
     print_stage_block(
         "sink-only generated-fast",
-        case.rows,
+        case.rows * concurrency,
         iterations,
         sink_only.1,
         None,
@@ -233,6 +283,7 @@ fn run_case(mode: ReceiverMode, case: &Case, iterations: usize, timeout: Duratio
 
 fn warm_up(
     mode: ReceiverMode,
+    concurrency: usize,
     poster: &HttpPoster,
     url: &str,
     request_body: &[u8],
@@ -240,8 +291,8 @@ fn warm_up(
     timeout: Duration,
     input: &mut OtlpReceiverInput,
 ) -> arrow::record_batch::RecordBatch {
-    poster.post(url, request_body);
-    match poll_until_payload(input, expected_rows, timeout) {
+    poster.post_many(url, request_body, concurrency);
+    match poll_until_payload(input, expected_rows * concurrency, timeout) {
         ReceiverOutput::JsonLines(lines) => {
             debug_assert!(matches!(mode, ReceiverMode::LegacyJsonLines));
             let mut scanner = Scanner::new(ScanConfig::default());
@@ -358,6 +409,25 @@ fn poll_until_payload(
 #[allow(clippy::naive_bytecount)] // bench-only helper; not worth adding bytecount dep
 fn newline_count(bytes: &[u8]) -> usize {
     bytes.iter().filter(|&&b| b == b'\n').count()
+}
+
+fn read_concurrency_list() -> Vec<usize> {
+    let raw = std::env::var("OTLP_E2E_CONCURRENCY").unwrap_or_else(|_| "1".to_string());
+    let mut values = Vec::new();
+    for part in raw.split(',') {
+        if let Ok(value) = part.trim().parse::<usize>()
+            && value > 0
+        {
+            values.push(value);
+        }
+    }
+    if values.is_empty() {
+        vec![1]
+    } else {
+        values.sort_unstable();
+        values.dedup();
+        values
+    }
 }
 
 fn build_request(rows: usize, extra_string_attrs: usize) -> ExportLogsServiceRequest {
