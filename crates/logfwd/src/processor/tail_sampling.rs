@@ -199,10 +199,18 @@ impl Processor for TailSamplingProcessor {
 
         let mut out = SmallVec::new();
         for (key, _) in keys {
-            if let Some(state) = self.traces.remove(&key)
-                && let Ok(Some(batch)) = self.run_decision_for_state(state)
-            {
-                out.push(batch);
+            if let Some(state) = self.traces.remove(&key) {
+                match self.run_decision_for_state(state) {
+                    Ok(Some(batch)) => out.push(batch),
+                    Ok(None) => {}
+                    Err(e) => {
+                        tracing::warn!(
+                            group = %key,
+                            error = %e,
+                            "tail-sampling decision query failed during flush; buffered group dropped"
+                        );
+                    }
+                }
             }
         }
         out
