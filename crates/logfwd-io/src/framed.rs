@@ -233,7 +233,7 @@ impl InputSource for FramedInput {
                             .process_lines(&chunk[process_start..], &mut self.out_buf);
                     }
 
-                    let line_count = memchr::memchr_iter(b'\n', &chunk).count();
+                    let line_count = memchr::memchr_iter(b'\n', &chunk[process_start..]).count();
                     self.stats.inc_lines(line_count as u64);
 
                     if !self.out_buf.is_empty() {
@@ -724,10 +724,12 @@ mod tests {
             vec![InputEvent::Data {
                 bytes: big,
                 source_id: Some(sid),
+                accounted_bytes: 0,
             }],
             vec![InputEvent::Data {
                 bytes: second_bytes.to_vec(),
                 source_id: Some(sid),
+                accounted_bytes: 0,
             }],
         ])
         .with_offsets(vec![(sid, ByteOffset(total))]);
