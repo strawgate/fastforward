@@ -79,14 +79,17 @@ impl JsonLinesSink {
 
     /// Serialize the batch into `self.batch_buf` as newline-delimited JSON.
     ///
-    /// Returns `Err` if the schema claims `_raw` passthrough but the column is
-    /// unexpectedly absent — this indicates a logic error and should not be
-    /// silently swallowed (issue #317).
-    pub fn serialize_batch(&mut self, batch: &RecordBatch) -> io::Result<()> {
+    /// Returns the number of rows actually written on success, or `Err` if the
+    /// schema claims `_raw` passthrough but the column is unexpectedly absent —
+    /// this indicates a logic error and should not be silently swallowed (issue #317).
+    ///
+    /// Note: in raw-passthrough mode, null `_raw` values are skipped, so the
+    /// returned count may be less than `batch.num_rows()`.
+    pub fn serialize_batch(&mut self, batch: &RecordBatch) -> io::Result<u64> {
         self.batch_buf.clear();
         let num_rows = batch.num_rows();
         if num_rows == 0 {
-            return Ok(());
+            return Ok(0);
         }
 
         if Self::is_raw_passthrough(batch) {
@@ -105,21 +108,24 @@ impl JsonLinesSink {
                     )
                 })?;
             let col = batch.column(raw_idx);
+            let mut rows_written: u64 = 0;
             for row in 0..num_rows {
                 if !col.is_null(row) {
                     self.batch_buf
                         .extend_from_slice(str_value(col, row).as_bytes());
                     self.batch_buf.push(b'\n');
+                    rows_written += 1;
                 }
             }
+            Ok(rows_written)
         } else {
             let cols = build_col_infos(batch);
             for row in 0..num_rows {
                 write_row_json(batch, row, &cols, &mut self.batch_buf)?;
                 self.batch_buf.push(b'\n');
             }
+            Ok(num_rows as u64)
         }
-        Ok(())
     }
 
     async fn post_payload(&self, payload: Vec<u8>) -> io::Result<SendResult> {
@@ -184,13 +190,14 @@ impl Sink for JsonLinesSink {
         _metadata: &'a crate::BatchMetadata,
     ) -> Pin<Box<dyn Future<Output = SendResult> + Send + 'a>> {
         Box::pin(async move {
-            if let Err(e) = self.serialize_batch(batch) {
-                return SendResult::from_io_error(e);
-            }
+            let rows_written = match self.serialize_batch(batch) {
+                Ok(n) => n,
+                Err(e) => return SendResult::from_io_error(e),
+            };
             if self.batch_buf.is_empty() {
                 return SendResult::Ok;
             }
-            let rows = batch.num_rows() as u64;
+            let rows = rows_written;
             let payload = match self.maybe_compress() {
                 Ok(p) => p,
                 Err(e) => return SendResult::from_io_error(e),
