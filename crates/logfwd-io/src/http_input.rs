@@ -23,8 +23,8 @@ use tokio::sync::oneshot;
 use crate::InputError;
 use crate::input::{InputEvent, InputSource};
 
-/// Default max request body size (20 MiB).
-const DEFAULT_MAX_REQUEST_BODY_SIZE: usize = 20 * 1024 * 1024;
+/// Default max request body size (10 MiB).
+const DEFAULT_MAX_REQUEST_BODY_SIZE: usize = 10 * 1024 * 1024;
 
 /// Bounded channel capacity — limits memory when the pipeline falls behind.
 const CHANNEL_BOUND: usize = 4096;
@@ -87,7 +87,7 @@ pub struct HttpInputOptions {
 impl Default for HttpInputOptions {
     fn default() -> Self {
         Self {
-            path: "/".to_string(),
+            path: "/ingest".to_string(),
             strict_path: true,
             method: HttpInputMethod::Post,
             max_request_body_size: DEFAULT_MAX_REQUEST_BODY_SIZE,
@@ -330,11 +330,10 @@ async fn handle_request(
         return (StatusCode::PAYLOAD_TOO_LARGE, "payload too large").into_response();
     }
 
-    let content_encoding = request
-        .headers()
-        .get(CONTENT_ENCODING)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_ascii_lowercase);
+    let content_encoding = match parse_content_encoding(request.headers()) {
+        Ok(content_encoding) => content_encoding,
+        Err(status) => return (status, "invalid content-encoding header").into_response(),
+    };
 
     let mut body = match read_limited_body(request.into_body(), state.max_request_body_size).await {
         Ok(body) => body,
@@ -409,6 +408,14 @@ fn declared_content_length(headers: &HeaderMap) -> Option<u64> {
         .get(CONTENT_LENGTH)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<u64>().ok())
+}
+
+fn parse_content_encoding(headers: &HeaderMap) -> Result<Option<String>, StatusCode> {
+    let Some(value) = headers.get(CONTENT_ENCODING) else {
+        return Ok(None);
+    };
+    let parsed = value.to_str().map_err(|_| StatusCode::BAD_REQUEST)?;
+    Ok(Some(parsed.to_ascii_lowercase()))
 }
 
 async fn read_limited_body(
@@ -532,6 +539,8 @@ fn read_decompressed_body(
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Read as _, Write as _};
+    use std::net::TcpStream;
     use std::time::{Duration, Instant};
 
     use super::*;
@@ -583,11 +592,11 @@ mod tests {
     }
 
     #[test]
-    fn http_default_route_accepts_root() {
+    fn http_default_route_accepts_ingest() {
         let mut input =
             HttpInput::new_with_options("test", "127.0.0.1:0", HttpInputOptions::default())
                 .expect("http input binds");
-        let url = format!("http://{}/", input.local_addr());
+        let url = format!("http://{}/ingest", input.local_addr());
 
         let resp = ureq::post(&url)
             .send(b"{\"msg\":\"root\"}")
@@ -600,6 +609,19 @@ mod tests {
             text.contains("\"msg\":\"root\""),
             "expected root row: {text}"
         );
+    }
+
+    #[test]
+    fn http_default_route_rejects_root() {
+        let input = HttpInput::new_with_options("test", "127.0.0.1:0", HttpInputOptions::default())
+            .expect("http input binds");
+        let url = format!("http://{}/", input.local_addr());
+        let status = match ureq::post(&url).send(b"{\"x\":1}\n") {
+            Ok(resp) => resp.status().as_u16(),
+            Err(ureq::Error::StatusCode(code)) => code,
+            Err(err) => panic!("unexpected request failure: {err}"),
+        };
+        assert_eq!(status, 404, "default route should reject root path");
     }
 
     #[test]
@@ -713,5 +735,35 @@ mod tests {
             .send(b"{\"seq\":3}\n")
             .expect("third POST should succeed after drain");
         assert_eq!(third.status(), 200);
+    }
+
+    #[test]
+    fn http_rejects_malformed_content_encoding_header() {
+        let mut input =
+            HttpInput::new_with_options("test", "127.0.0.1:0", HttpInputOptions::default())
+                .expect("http input binds");
+        let mut stream = TcpStream::connect(input.local_addr()).expect("connect");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("timeout");
+        let request = b"POST /ingest HTTP/1.1\r\n\
+Host: localhost\r\n\
+Content-Type: application/x-ndjson\r\n\
+Content-Encoding: \xff\r\n\
+Content-Length: 8\r\n\
+Connection: close\r\n\
+\r\n\
+{\"x\":1}\n";
+        stream.write_all(request).expect("write request");
+        stream.flush().expect("flush request");
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).expect("read response");
+        let text = String::from_utf8_lossy(&response);
+        assert!(
+            text.starts_with("HTTP/1.1 400"),
+            "expected 400 status line, got: {text}"
+        );
+        let data = poll_until_data(&mut input, Duration::from_millis(100));
+        assert!(data.is_empty(), "malformed requests must not enqueue data");
     }
 }

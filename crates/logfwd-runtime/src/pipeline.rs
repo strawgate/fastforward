@@ -1608,9 +1608,7 @@ fn build_input_state(
                         HttpMethodConfig::Get => logfwd_io::http_input::HttpInputMethod::Get,
                         HttpMethodConfig::Post => logfwd_io::http_input::HttpInputMethod::Post,
                         HttpMethodConfig::Put => logfwd_io::http_input::HttpInputMethod::Put,
-                        HttpMethodConfig::Delete => {
-                            logfwd_io::http_input::HttpInputMethod::Delete
-                        }
+                        HttpMethodConfig::Delete => logfwd_io::http_input::HttpInputMethod::Delete,
                         HttpMethodConfig::Patch => logfwd_io::http_input::HttpInputMethod::Patch,
                         HttpMethodConfig::Head => logfwd_io::http_input::HttpInputMethod::Head,
                         HttpMethodConfig::Options => {

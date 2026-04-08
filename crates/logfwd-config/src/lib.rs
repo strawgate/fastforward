@@ -284,13 +284,13 @@ pub enum HttpMethodConfig {
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct HttpInputConfig {
-    /// Route path. Must start with `/`. Defaults to `/`.
+    /// Route path. Must start with `/`. Defaults to `/ingest`.
     pub path: Option<String>,
     /// Exact path matching when true. Defaults to true.
     pub strict_path: Option<bool>,
     /// Accepted method. Defaults to `POST`.
     pub method: Option<HttpMethodConfig>,
-    /// Maximum HTTP request body size in bytes. Defaults to 20 MiB.
+    /// Maximum HTTP request body size in bytes. Defaults to 10 MiB.
     pub max_request_body_size: Option<usize>,
     /// HTTP status code for successful ingest. Defaults to 200.
     pub response_code: Option<u16>,
@@ -974,6 +974,11 @@ impl Config {
                         }
                     }
                     InputType::Http => {
+                        if input.tls.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'tls' is not supported for http inputs"
+                            )));
+                        }
                         if input.generator.is_some() {
                             return Err(ConfigError::Validation(format!(
                                 "pipeline '{name}' input '{label}': 'generator' settings are only supported for generator inputs"
@@ -1911,6 +1916,25 @@ output:
 ";
         let err = Config::load_str(yaml).unwrap_err();
         assert!(err.to_string().contains("http.response_code"));
+    }
+
+    #[test]
+    fn validation_http_rejects_tls_block() {
+        let yaml = r"
+input:
+  type: http
+  listen: 0.0.0.0:8080
+  tls:
+    cert_file: /tmp/server.crt
+output:
+  type: stdout
+";
+        let err = Config::load_str(yaml).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("tls") && msg.contains("not supported for http inputs"),
+            "expected HTTP tls rejection error: {msg}"
+        );
     }
 
     #[test]

@@ -10,10 +10,10 @@ use std::thread;
 use std::time::Duration;
 
 use logfwd_io::{
-    http_input::HttpInput,
     diagnostics::ComponentStats,
     format::FormatDecoder,
     framed::FramedInput,
+    http_input::HttpInput,
     input::{InputEvent, InputSource},
     otlp_receiver::OtlpReceiverInput,
     tcp_input::TcpInput,
@@ -465,7 +465,10 @@ fn http_ndjson_roundtrip() {
         .expect("HTTP POST should succeed");
     assert_eq!(resp.status(), 200);
 
-    let data = poll_until_data(&mut input, Duration::from_secs(5));
+    let data = poll_until(&mut input, Duration::from_secs(5), |d| {
+        let t = String::from_utf8_lossy(d);
+        t.contains("\"seq\":1") && t.contains("\"seq\":2")
+    });
     let text = String::from_utf8_lossy(&data);
     assert!(text.contains("\"seq\":1"), "missing seq 1 in: {text}");
     assert!(text.contains("\"seq\":2"), "missing seq 2 in: {text}");
@@ -493,7 +496,7 @@ fn http_wrong_path_rejected() {
 fn otlp_protobuf_roundtrip() {
     use opentelemetry_proto::tonic::{
         collector::logs::v1::ExportLogsServiceRequest,
-        common::v1::{any_value::Value, AnyValue, KeyValue},
+        common::v1::{AnyValue, KeyValue, any_value::Value},
         logs::v1::{LogRecord, ResourceLogs, ScopeLogs},
     };
     use prost::Message;
@@ -557,7 +560,7 @@ fn otlp_protobuf_roundtrip() {
 fn otlp_gzip_protobuf_roundtrip() {
     use opentelemetry_proto::tonic::{
         collector::logs::v1::ExportLogsServiceRequest,
-        common::v1::{any_value::Value, AnyValue, KeyValue},
+        common::v1::{AnyValue, KeyValue, any_value::Value},
         logs::v1::{LogRecord, ResourceLogs, ScopeLogs},
     };
     use prost::Message;
@@ -641,7 +644,7 @@ fn otlp_oversized_body() {
 fn otlp_wrong_content_type() {
     use opentelemetry_proto::tonic::{
         collector::logs::v1::ExportLogsServiceRequest,
-        common::v1::{any_value::Value, AnyValue},
+        common::v1::{AnyValue, any_value::Value},
         logs::v1::{LogRecord, ResourceLogs, ScopeLogs},
     };
     use prost::Message;
@@ -693,7 +696,7 @@ fn otlp_wrong_content_type() {
 fn otlp_concurrent_requests() {
     use opentelemetry_proto::tonic::{
         collector::logs::v1::ExportLogsServiceRequest,
-        common::v1::{any_value::Value, AnyValue},
+        common::v1::{AnyValue, any_value::Value},
         logs::v1::{LogRecord, ResourceLogs, ScopeLogs},
     };
     use prost::Message;
