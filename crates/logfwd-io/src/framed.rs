@@ -217,7 +217,10 @@ impl InputSource for FramedInput {
                         let mut with_source = std::mem::take(&mut self.spare_buf);
                         with_source.clear();
                         inject_source_path_metadata(&self.out_buf, source_path, &mut with_source);
-                        self.out_buf = with_source;
+                        // Reclaim out_buf's capacity as spare_buf before replacing it,
+                        // preserving the buffer-bouncing optimization (no allocation per poll).
+                        self.out_buf.clear();
+                        self.spare_buf = std::mem::replace(&mut self.out_buf, with_source);
                     }
 
                     let line_count = memchr::memchr_iter(b'\n', &chunk).count();
@@ -291,6 +294,20 @@ impl InputSource for FramedInput {
                                 let state =
                                     self.sources.get_mut(&key).expect("just checked existence");
                                 state.format.process_lines(&remainder, &mut self.out_buf);
+                                if let Some(source_path) =
+                                    key.and_then(|sid| source_path_by_id.get(&sid))
+                                {
+                                    let mut with_source = std::mem::take(&mut self.spare_buf);
+                                    with_source.clear();
+                                    inject_source_path_metadata(
+                                        &self.out_buf,
+                                        source_path,
+                                        &mut with_source,
+                                    );
+                                    self.out_buf.clear();
+                                    self.spare_buf =
+                                        std::mem::replace(&mut self.out_buf, with_source);
+                                }
 
                                 self.stats.inc_lines(1);
 
@@ -1258,6 +1275,7 @@ mod tests {
         let source = MockSource::new(vec![vec![InputEvent::Data {
             bytes: b"{\"msg\":\"hello\"}\n".to_vec(),
             source_id: Some(sid),
+            accounted_bytes: 0,
         }]])
         .with_source_paths(vec![(sid, "/var/log/pods/ns_pod_uid/c/main.log".into())]);
 
@@ -1281,6 +1299,7 @@ mod tests {
         let source = MockSource::new(vec![vec![InputEvent::Data {
             bytes: b"2024-01-15T10:30:00Z stdout F {\"msg\":\"hello\"}\n".to_vec(),
             source_id: Some(sid),
+            accounted_bytes: 0,
         }]])
         .with_source_paths(vec![(sid, "/var/log/pods/ns_pod_uid/c/0.log".into())]);
 
