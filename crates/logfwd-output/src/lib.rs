@@ -85,6 +85,7 @@ pub(crate) fn is_transient_error(e: &ureq::Error) -> bool {
 #[cfg(test)]
 mod tests;
 
+
 #[cfg(kani)]
 mod kani_proofs {
     use arrow::datatypes::{DataType, Fields};
