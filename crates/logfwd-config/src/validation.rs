@@ -118,15 +118,13 @@ fn validate_endpoint_url(endpoint: &str) -> Result<url::Url, String> {
         "http" | "https" => {}
         other => {
             return Err(format!(
-                "endpoint '{endpoint}' has unsupported scheme '{other}'; expected 'http' or 'https'"
+                "endpoint has unsupported scheme '{other}'; expected 'http' or 'https'"
             ));
         }
     }
 
     if url.host_str().is_none() {
-        return Err(format!(
-            "endpoint '{endpoint}' has no host (expected e.g. https://collector:4318)"
-        ));
+        return Err("endpoint has no host (expected e.g. https://collector:4318)".to_string());
     }
 
     Ok(url)
@@ -150,9 +148,10 @@ fn is_loopback_url(url: &url::Url) -> bool {
 pub fn validate_output_endpoint_url(endpoint: &str) -> Result<(), String> {
     let url = validate_endpoint_url(endpoint)?;
     if url.scheme() != "https" && !is_loopback_url(&url) {
-        return Err(format!(
-            "endpoint '{endpoint}' uses insecure HTTP; use 'https://' for non-loopback output endpoints"
-        ));
+        return Err(
+            "endpoint uses insecure HTTP; use 'https://' for non-loopback output endpoints"
+                .to_string(),
+        );
     }
     Ok(())
 }
@@ -270,17 +269,32 @@ mod tests {
 
     #[test]
     fn endpoint_url_rejects_credentials() {
-        assert!(validate_endpoint_url("https://user:pass@host:443")
-            .unwrap_err()
-            .contains("credentials"));
-        assert!(validate_endpoint_url("http://user@host:443")
-            .unwrap_err()
-            .contains("credentials"));
+        assert!(
+            validate_endpoint_url("https://user:pass@host:443")
+                .unwrap_err()
+                .contains("credentials")
+        );
+        assert!(
+            validate_endpoint_url("http://user@host:443")
+                .unwrap_err()
+                .contains("credentials")
+        );
     }
 
     #[test]
     fn endpoint_url_valid() {
         assert!(validate_endpoint_url("https://collector:4318").is_ok());
         assert!(validate_endpoint_url("http://localhost:4318").is_ok());
+    }
+
+    #[test]
+    fn output_endpoint_insecure_http_never_leaks_query_or_fragment() {
+        let err = validate_output_endpoint_url("http://collector:4318/path?token=secret#frag")
+            .unwrap_err();
+        assert!(
+            !err.contains("secret"),
+            "error message must not contain query/fragment secrets: {err}"
+        );
+        assert!(err.contains("insecure HTTP"));
     }
 }
