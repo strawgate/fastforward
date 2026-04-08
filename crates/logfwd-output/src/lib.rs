@@ -544,6 +544,8 @@ pub fn build_sink_factory(
                     "output '{name}': elasticsearch requires 'endpoint'"
                 ))
             })?;
+            logfwd_config::validate_output_endpoint_url(endpoint)
+                .map_err(|msg| OutputError::Construction(format!("output '{name}': {msg}")))?;
             let index = cfg
                 .index
                 .as_ref()
@@ -573,6 +575,8 @@ pub fn build_sink_factory(
             let endpoint = cfg.endpoint.as_ref().ok_or_else(|| {
                 OutputError::Construction(format!("output '{name}': loki requires 'endpoint'"))
             })?;
+            logfwd_config::validate_output_endpoint_url(endpoint)
+                .map_err(|msg| OutputError::Construction(format!("output '{name}': {msg}")))?;
             let factory = LokiSinkFactory::new(
                 name.to_string(),
                 endpoint.clone(),
@@ -595,6 +599,8 @@ pub fn build_sink_factory(
             let endpoint = cfg.endpoint.as_ref().ok_or_else(|| {
                 OutputError::Construction(format!("output '{name}': arrow_ipc requires 'endpoint'"))
             })?;
+            logfwd_config::validate_output_endpoint_url(endpoint)
+                .map_err(|msg| OutputError::Construction(format!("output '{name}': {msg}")))?;
             let compression = match cfg.compression.as_deref() {
                 Some("zstd") => Compression::Zstd,
                 Some(other) => {
@@ -620,6 +626,8 @@ pub fn build_sink_factory(
             let endpoint = cfg.endpoint.as_ref().ok_or_else(|| {
                 OutputError::Construction(format!("output '{name}': http requires 'endpoint'"))
             })?;
+            logfwd_config::validate_output_endpoint_url(endpoint)
+                .map_err(|msg| OutputError::Construction(format!("output '{name}': {msg}")))?;
             let compression = match cfg.compression.as_deref() {
                 Some("zstd") => Compression::Zstd,
                 Some("gzip") => Compression::Gzip,
@@ -649,6 +657,8 @@ pub fn build_sink_factory(
             let endpoint = cfg.endpoint.as_ref().ok_or_else(|| {
                 OutputError::Construction(format!("output '{name}': OTLP requires 'endpoint'"))
             })?;
+            logfwd_config::validate_output_endpoint_url(endpoint)
+                .map_err(|msg| OutputError::Construction(format!("output '{name}': {msg}")))?;
             let protocol = match cfg.protocol.as_deref() {
                 Some("grpc") => OtlpProtocol::Grpc,
                 Some("http") | None => OtlpProtocol::Http,
@@ -1149,6 +1159,54 @@ mod tests {
         };
         let result = build_sink_factory("http-ok", &cfg, None, Arc::new(ComponentStats::new()));
         assert!(result.is_ok(), "Http type should be supported");
+    }
+
+    #[test]
+    fn test_build_sink_factory_rejects_non_loopback_http_endpoint() {
+        let cfg = OutputConfig {
+            name: Some("otlp-insecure".to_string()),
+            output_type: OutputType::Otlp,
+            endpoint: Some("http://collector:4318/v1/logs".to_string()),
+            protocol: Some("http".to_string()),
+            ..Default::default()
+        };
+        let err = match build_sink_factory(
+            "otlp-insecure",
+            &cfg,
+            None,
+            Arc::new(ComponentStats::new()),
+        ) {
+            Ok(_) => panic!("non-loopback HTTP endpoint should be rejected"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("insecure HTTP"),
+            "expected insecure HTTP validation error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_build_sink_factory_rejects_credentials_in_url() {
+        let cfg = OutputConfig {
+            name: Some("otlp-auth-url".to_string()),
+            output_type: OutputType::Otlp,
+            endpoint: Some("https://user:pass@collector:4318/v1/logs".to_string()),
+            protocol: Some("http".to_string()),
+            ..Default::default()
+        };
+        let err = match build_sink_factory(
+            "otlp-auth-url",
+            &cfg,
+            None,
+            Arc::new(ComponentStats::new()),
+        ) {
+            Ok(_) => panic!("embedded URL credentials should be rejected"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("must not include credentials"),
+            "expected credentials validation error: {err}"
+        );
     }
 
     #[test]
