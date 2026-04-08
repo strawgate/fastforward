@@ -96,7 +96,7 @@ pub fn scan_streaming<B: ScanBuilder>(buf: &[u8], config: &ScanConfig, builder: 
             } else {
                 abs_pos
             };
-            if line_end > line_start || config.keep_raw {
+            if line_end > line_start {
                 line_ranges.push((line_start, line_end));
             }
             line_start = abs_pos + 1;
@@ -111,7 +111,9 @@ pub fn scan_streaming<B: ScanBuilder>(buf: &[u8], config: &ScanConfig, builder: 
         } else {
             len
         };
-        line_ranges.push((line_start, line_end));
+        if line_end > line_start {
+            line_ranges.push((line_start, line_end));
+        }
     }
 
     let bitmasks = StoredBitmasks {
@@ -1199,6 +1201,40 @@ mod tests {
             1,
             "expected only 1 row (empty line skipped)"
         );
+    }
+
+    /// Unterminated trailing CR after a newline must not emit a spurious empty row.
+    #[test]
+    fn trailing_cr_after_newline_no_spurious_empty_row_keep_raw() {
+        let buf = b"{\"x\":\"1\"}\n\r";
+        let config = ScanConfig {
+            wanted_fields: alloc::vec![],
+            extract_all: true,
+            keep_raw: true,
+            validate_utf8: false,
+        };
+        let mut builder = TestBuilder::new();
+        scan_streaming(buf, &config, &mut builder);
+
+        assert_eq!(builder.rows.len(), 1, "expected only the JSON row");
+        assert_eq!(builder.raws.len(), 1, "expected one _raw value");
+        assert_eq!(builder.raws[0].as_deref(), Some("{\"x\":\"1\"}"));
+    }
+
+    /// A buffer containing only `\r` is effectively empty after CRLF normalisation.
+    #[test]
+    fn lone_carriage_return_emits_no_rows_even_with_keep_raw() {
+        let buf = b"\r";
+        let config = ScanConfig {
+            wanted_fields: alloc::vec![],
+            extract_all: true,
+            keep_raw: true,
+            validate_utf8: false,
+        };
+        let mut builder = TestBuilder::new();
+        scan_streaming(buf, &config, &mut builder);
+        assert!(builder.rows.is_empty());
+        assert!(builder.raws.is_empty());
     }
 }
 
