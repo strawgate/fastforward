@@ -129,6 +129,8 @@ pub struct StreamingBuilder {
     raw_written_this_row: bool,
     /// Protocol state — enforced via `debug_assert` in each method.
     state: BuilderState,
+    /// Constant per-row resource attributes emitted as `_resource_*` columns.
+    resource_attrs: Vec<(String, String)>,
 }
 
 impl Default for StreamingBuilder {
@@ -151,7 +153,27 @@ impl StreamingBuilder {
             raw_views: Vec::new(),
             raw_written_this_row: false,
             state: BuilderState::Idle,
+            resource_attrs: Vec::new(),
         }
+    }
+
+    /// Configure constant per-row resource attributes for subsequent batches.
+    pub fn set_resource_attributes(&mut self, attrs: &[(String, String)]) {
+        self.resource_attrs.clear();
+        self.resource_attrs.extend(attrs.iter().cloned());
+    }
+
+    fn resource_col_name(key: &str) -> String {
+        let mut out = String::with_capacity("_resource_".len() + key.len());
+        out.push_str("_resource_");
+        for ch in key.chars() {
+            if ch.is_ascii_alphanumeric() {
+                out.push(ch.to_ascii_lowercase());
+            } else {
+                out.push('_');
+            }
+        }
+        out
     }
 
     /// Start a new batch. Takes ownership of the input buffer via Bytes
@@ -751,6 +773,29 @@ impl StreamingBuilder {
             }
         }
 
+        // Emit _resource_* columns unconditionally (even for empty batches) so
+        // that the schema is identical regardless of row count. Arrow pipelines
+        // that concatenate or compare batches require a consistent schema; omitting
+        // these columns for num_rows == 0 would cause schema mismatch errors.
+        for (key, value) in &self.resource_attrs {
+            let col_name = Self::resource_col_name(key);
+            reserve_name(&col_name)?;
+            let mut builder = StringViewBuilder::new();
+            if num_rows > 0 {
+                let block = builder.append_block(Buffer::from(value.as_bytes().to_vec()));
+                for _ in 0..num_rows {
+                    builder
+                        .try_append_view(block, 0, value.len() as u32)
+                        .expect("resource attr constant view must be valid");
+                }
+            }
+            let mut metadata = HashMap::new();
+            metadata.insert("logfwd.resource_key".to_string(), key.clone());
+            schema_fields
+                .push(Field::new(col_name, DataType::Utf8View, true).with_metadata(metadata));
+            arrays.push(Arc::new(builder.finish()) as ArrayRef);
+        }
+
         let schema = Arc::new(Schema::new(schema_fields));
         let opts = RecordBatchOptions::new().with_row_count(Some(num_rows));
         let result = RecordBatch::try_new_with_options(schema, arrays, &opts);
@@ -983,6 +1028,24 @@ impl StreamingBuilder {
                 schema_fields.push(Field::new("_raw", DataType::Utf8, true));
                 arrays.push(Arc::new(builder.finish()) as ArrayRef);
             }
+        }
+
+        // Emit _resource_* columns unconditionally (even for empty batches) so
+        // that the schema is identical regardless of row count. Arrow pipelines
+        // that concatenate or compare batches require a consistent schema; omitting
+        // these columns for num_rows == 0 would cause schema mismatch errors.
+        for (key, value) in &self.resource_attrs {
+            let col_name = Self::resource_col_name(key);
+            reserve_name(&col_name)?;
+            let mut builder =
+                arrow::array::StringBuilder::with_capacity(num_rows, num_rows * value.len());
+            for _ in 0..num_rows {
+                builder.append_value(value);
+            }
+            let mut metadata = HashMap::new();
+            metadata.insert("logfwd.resource_key".to_string(), key.clone());
+            schema_fields.push(Field::new(col_name, DataType::Utf8, true).with_metadata(metadata));
+            arrays.push(Arc::new(builder.finish()) as ArrayRef);
         }
 
         let schema = Arc::new(Schema::new(schema_fields));
