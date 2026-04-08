@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 
@@ -31,19 +32,24 @@ EXCLUDED_FILES = {
 }
 
 
-def should_check(path: Path) -> bool:
+def should_check(path: Path, repo_root: Path) -> bool:
     if not path.is_file():
         return False
     if path.suffix not in SOURCE_SUFFIXES:
         return False
     if any(part in EXCLUDED_PARTS for part in path.parts):
         return False
-    return path.as_posix() not in EXCLUDED_FILES
+    rel = path.relative_to(repo_root).as_posix()
+    return rel not in EXCLUDED_FILES
 
 
 def tracked_files(repo_root: Path) -> list[Path]:
+    git = shutil.which("git")
+    if git is None:
+        print("error: git not found on PATH", file=sys.stderr)
+        sys.exit(1)
     proc = subprocess.run(
-        ["git", "ls-files"],
+        [git, "ls-files"],
         cwd=repo_root,
         check=True,
         capture_output=True,
@@ -62,7 +68,7 @@ def main() -> int:
     offenders: list[tuple[int, str]] = []
 
     for path in tracked_files(repo_root):
-        if not should_check(path):
+        if not should_check(path, repo_root):
             continue
         lines = line_count(path)
         if lines > MAX_SOURCE_LINES:
