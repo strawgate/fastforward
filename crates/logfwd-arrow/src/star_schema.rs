@@ -47,7 +47,10 @@ pub struct StarSchema {
 // ---------------------------------------------------------------------------
 
 /// Columns that map to the LOGS fact table (not LOG_ATTRS).
-const WELL_KNOWN_TIMESTAMP: &[&str] = &["_timestamp", "timestamp", "time", "ts"];
+// `@timestamp` (Elasticsearch convention) is intentionally included.  Both
+// `field_names::TIMESTAMP_VARIANTS` and the Loki/ES sinks recognise it; the
+// OTAP conversion must be consistent.  Fixes #1669.
+const WELL_KNOWN_TIMESTAMP: &[&str] = &["_timestamp", "@timestamp", "timestamp", "time", "ts"];
 const WELL_KNOWN_SEVERITY: &[&str] = &["level", "severity", "log_level", "loglevel", "lvl"];
 const WELL_KNOWN_BODY: &[&str] = &["message", "msg", "_msg", "body"];
 const WELL_KNOWN_TRACE_ID: &[&str] = &["trace_id"];
@@ -1406,6 +1409,7 @@ fn scatter_resource_attrs(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arrow::array::AsArray;
 
     /// Helper: create a flat RecordBatch with mixed columns.
     fn make_test_batch() -> RecordBatch {
@@ -2104,6 +2108,47 @@ mod tests {
         assert!(
             found_not_found,
             "status=NOT_FOUND (from str child) must appear in log_attrs"
+        );
+    }
+
+    /// Regression test for #1669: `@timestamp` (Elasticsearch convention) must
+    /// map to `time_unix_nano` in the LOGS fact table, not fall through to
+    /// LOG_ATTRS as an unrecognised string attribute.
+    #[test]
+    fn at_timestamp_col_maps_to_time_unix_nano() {
+        let ts_ns: i64 = 1_705_314_600_000_000_000; // 2024-01-15T10:30:00Z
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("@timestamp", DataType::Int64, true),
+            Field::new("message", DataType::Utf8, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int64Array::from(vec![ts_ns])),
+                Arc::new(StringArray::from(vec!["hello"])),
+            ],
+        )
+        .unwrap();
+
+        let star = flat_to_star(&batch).unwrap();
+
+        // time_unix_nano in the LOGS table must be populated.
+        let time_col = star
+            .logs
+            .column_by_name("time_unix_nano")
+            .expect("time_unix_nano column must exist");
+        assert!(!time_col.is_null(0), "time_unix_nano must not be NULL");
+
+        // @timestamp must NOT appear as a LOG_ATTR.
+        let key_col = star
+            .log_attrs
+            .column_by_name("key")
+            .expect("key column must exist")
+            .as_string::<i32>();
+        let has_at_timestamp_attr = (0..key_col.len()).any(|i| key_col.value(i) == "@timestamp");
+        assert!(
+            !has_at_timestamp_attr,
+            "@timestamp must map to time_unix_nano, not appear as a LOG_ATTR"
         );
     }
 }
