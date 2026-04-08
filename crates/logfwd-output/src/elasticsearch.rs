@@ -1318,6 +1318,24 @@ mod tests {
         assert!(err.to_string().contains("mapper_parsing_exception"));
     }
 
+    /// Regression test for issue #1675.
+    ///
+    /// `parse_bulk_response` used to return `Ok(())` when `errors:true` but no
+    /// parseable error could be found in `items[]`.  The batch would then be
+    /// silently treated as successfully delivered.
+    #[test]
+    fn parse_bulk_errors_true_without_parseable_error_returns_err() {
+        // Simulate a malformed ES response where errors:true but no item has
+        // an "error" key — the path that previously fell through to Ok(()).
+        let response = br#"{"took":5,"errors":true,"items":[{"index":{"status":200}}]}"#;
+        let err = ElasticsearchSink::parse_bulk_response(response)
+            .expect_err("errors:true with no parseable error must return Err");
+        assert!(
+            err.to_string().contains("no parseable error found"),
+            "error message should mention no parseable error: {err}"
+        );
+    }
+
     #[test]
     fn empty_batch_produces_empty_output() {
         let schema = Arc::new(Schema::new(vec![Field::new(
