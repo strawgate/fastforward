@@ -21,13 +21,13 @@ Audit focus:
 ### 1. P2: Yanked crate in lockfile (`fastrand 2.4.0`)
 
 - Evidence: `cargo deny check` reports a yanked crate.
-- Lockfile location: `Cargo.lock` shows `fastrand 2.4.0` at line 1566.
+- Lockfile location: `Cargo.lock` contains the `fastrand 2.4.0` entry (search for `name = "fastrand"` + `version = "2.4.0"`).
 - Validation: `cargo update -p fastrand --dry-run` resolves cleanly to `2.4.1`.
 
 References:
 
-- `Cargo.lock:1566`
-- `Cargo.lock:1567`
+- `Cargo.lock` — `fastrand 2.4.0` package entry (`name = "fastrand"`, `version = "2.4.0"`)
+- `Cargo.lock` — `fastrand 2.4.0` checksum entry (`checksum = ...` line immediately following the version)
 
 Recommendation:
 
