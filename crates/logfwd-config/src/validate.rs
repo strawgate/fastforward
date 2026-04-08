@@ -705,9 +705,94 @@ impl Config {
                     EnrichmentConfig::HostInfo(_) => {}
                 }
             }
+
+            // Guard against feedback loops: reject configs where a file output
+            // path matches a file input path in the same pipeline (#1596).
+            let file_input_paths: Vec<std::path::PathBuf> = pipe
+                .inputs
+                .iter()
+                .filter(|i| i.input_type == InputType::File)
+                .filter_map(|i| i.path.as_deref())
+                .filter(|p| !p.contains('*') && !p.contains('?'))
+                .map(std::path::PathBuf::from)
+                .collect();
+
+            let normalized_file_inputs: Vec<(std::path::PathBuf, std::path::PathBuf)> =
+                file_input_paths
+                    .into_iter()
+                    .map(|p| {
+                        let norm = normalize_path_for_compare(&p);
+                        (p, norm)
+                    })
+                    .collect();
+
+            for (j, output) in pipe.outputs.iter().enumerate() {
+                let out_label = output
+                    .name
+                    .as_deref()
+                    .map_or_else(|| format!("#{j}"), String::from);
+
+                if !matches!(output.output_type, OutputType::File | OutputType::Parquet) {
+                    continue;
+                }
+                let Some(out_path) = output.path.as_deref() else {
+                    continue;
+                };
+                let out_pb = std::path::PathBuf::from(out_path);
+                let out_norm = normalize_path_for_compare(&out_pb);
+                for (in_pb, in_norm) in &normalized_file_inputs {
+                    if out_norm == *in_norm {
+                        return Err(ConfigError::Validation(format!(
+                            "pipeline '{name}' output '{out_label}': output path '{}' is the same \
+                             as file input path '{}' — this creates an unbounded feedback loop",
+                            out_path,
+                            in_pb.display(),
+                        )));
+                    }
+                }
+            }
         }
 
         Ok(())
+    }
+}
+
+/// Compare paths for config-level equivalence: prefer canonical paths when they
+/// exist; fall back to lexical normalisation so relative aliases like `./a.log`
+/// and `logs/../a.log` are treated as the same path.
+fn normalize_path_for_compare(path: &Path) -> std::path::PathBuf {
+    path.canonicalize()
+        .unwrap_or_else(|_| normalize_path_lexically(path))
+}
+
+fn normalize_path_lexically(path: &Path) -> std::path::PathBuf {
+    use std::path::Component;
+
+    let mut out = std::path::PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                let mut tail = out.components();
+                match tail.next_back() {
+                    Some(Component::Normal(_)) => {
+                        out.pop();
+                    }
+                    Some(Component::CurDir) => {}
+                    Some(Component::ParentDir) | None => out.push(component.as_os_str()),
+                    Some(Component::RootDir) | Some(Component::Prefix(_)) => {}
+                }
+            }
+            Component::Normal(_) | Component::RootDir | Component::Prefix(_) => {
+                out.push(component.as_os_str());
+            }
+        }
+    }
+
+    if out.as_os_str().is_empty() {
+        std::path::PathBuf::from(".")
+    } else {
+        out
     }
 }
 
@@ -938,10 +1023,72 @@ mod validate_endpoint_url_tests {
 }
 
 #[cfg(test)]
+mod feedback_loop_tests {
+    use crate::types::Config;
+
+    #[test]
+    fn file_output_same_as_input_rejected() {
+        let yaml = r#"
+pipelines:
+  looping:
+    inputs:
+      - type: file
+        path: /tmp/logfwd-feedback-test.log
+    outputs:
+      - type: file
+        path: /tmp/logfwd-feedback-test.log
+        format: json
+"#;
+        let err = Config::load_str(yaml).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("feedback loop") || msg.contains("same as file input"),
+            "expected feedback-loop rejection, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn file_output_different_from_input_allowed() {
+        let yaml = r#"
+pipelines:
+  ok:
+    inputs:
+      - type: file
+        path: /tmp/logfwd-input.log
+    outputs:
+      - type: file
+        path: /tmp/logfwd-output.log
+        format: json
+"#;
+        Config::load_str(yaml).expect("different input/output paths should be allowed");
+    }
+
+    #[test]
+    fn file_output_same_as_input_rejected_after_lexical_normalization() {
+        let yaml = r#"
+pipelines:
+  looping:
+    inputs:
+      - type: file
+        path: ./tmp/logs/../app.log
+    outputs:
+      - type: file
+        path: tmp/./app.log
+        format: json
+"#;
+        let err = Config::load_str(yaml).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("feedback loop") || msg.contains("same as file input"),
+            "expected normalized-path feedback-loop rejection, got: {msg}"
+        );
+    }
+}
+
+#[cfg(test)]
 mod validate_empty_field_tests {
     use crate::types::Config;
 
-    /// Regression test for #1654: file input path: "" must be rejected by validate().
     #[test]
     fn file_input_empty_path_rejected() {
         let yaml = r#"
@@ -964,7 +1111,6 @@ pipelines:
         );
     }
 
-    /// Whitespace-only path must also be rejected (validates trim().is_empty() branch).
     #[test]
     fn file_input_whitespace_path_rejected() {
         let yaml = "pipelines:\n  test:\n    inputs:\n      - type: file\n        path: \"   \"\n    outputs:\n      - type: stdout\n";
@@ -975,7 +1121,6 @@ pipelines:
         );
     }
 
-    /// Regression test for #1653: elasticsearch index: "" must be rejected by validate().
     #[test]
     fn elasticsearch_empty_index_rejected() {
         let yaml = r#"
@@ -1000,7 +1145,6 @@ pipelines:
         );
     }
 
-    /// Whitespace-only elasticsearch index must also be rejected.
     #[test]
     fn elasticsearch_whitespace_index_rejected() {
         let yaml = "pipelines:\n  test:\n    inputs:\n      - type: file\n        path: /tmp/test.log\n    outputs:\n      - type: elasticsearch\n        endpoint: http://localhost:9200\n        index: \"   \"\n";
