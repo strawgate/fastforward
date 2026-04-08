@@ -390,7 +390,7 @@ impl StructuralIndex {
                             b']'
                         };
                         if b != expected_close {
-                            return end; // mismatch — bail to line end
+                            return end; // mismatch — fail-closed to avoid emitting truncated values
                         }
                     }
                     pos += 1;
@@ -878,6 +878,88 @@ mod tests {
         // Only first 10 bits should survive
         assert_eq!(processed.newline, (1u64 << 10) - 1);
     }
+
+    #[test]
+    fn test_skip_nested_bug_repro() {
+        let mut buf = alloc::string::String::new();
+        for _ in 0..33 {
+            buf.push('{');
+        }
+        for _ in 0..33 {
+            buf.push('}');
+        }
+        let buf = buf.as_bytes();
+        let (idx, _) = StructuralIndex::new(buf);
+        let result = idx.skip_nested(buf, 0, buf.len());
+        assert_eq!(result, buf.len());
+    }
+
+    #[test]
+    fn test_skip_valid_json() {
+        let mut buf = alloc::string::String::new();
+        for _ in 0..100 {
+            buf.push('{');
+        }
+        for _ in 0..100 {
+            buf.push('}');
+        }
+        buf.push_str("after");
+        let buf = buf.as_bytes();
+        let (idx, _) = StructuralIndex::new(buf);
+        let pos = idx.skip_nested(buf, 0, buf.len());
+        assert_eq!(pos, 200);
+    }
+
+    #[test]
+    fn test_depths() {
+        for depth in 30..40 {
+            let mut buf = alloc::string::String::new();
+            for _ in 0..depth {
+                buf.push('{');
+            }
+            for _ in 0..depth {
+                buf.push('}');
+            }
+            buf.push_str("after");
+            let buf = buf.as_bytes();
+            let (idx, _) = StructuralIndex::new(buf);
+            let pos = idx.skip_nested(buf, 0, buf.len());
+            assert_eq!(pos, depth * 2, "Failed at depth {}", depth);
+        }
+    }
+
+    #[test]
+    fn test_skip_nested_balanced_at_depth_32() {
+        let mut buf = alloc::string::String::new();
+        for _ in 0..32 {
+            buf.push('{');
+        }
+        for _ in 0..32 {
+            buf.push('}');
+        }
+        buf.push_str("after");
+        let buf = buf.as_bytes();
+        let (idx, _) = StructuralIndex::new(buf);
+        let result = idx.skip_nested(buf, 0, buf.len());
+        assert_eq!(result, 64);
+    }
+
+    #[test]
+    fn test_skip_nested_bug_repro_2() {
+        let mut buf = alloc::string::String::new();
+        buf.push('{');
+        for _ in 0..33 {
+            buf.push('[');
+        }
+        for _ in 0..33 {
+            buf.push(']');
+        }
+        buf.push('}');
+        let buf = buf.as_bytes();
+        let (idx, _) = StructuralIndex::new(buf);
+        let result = idx.skip_nested(buf, 0, buf.len());
+        assert_eq!(result, buf.len());
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -890,6 +972,7 @@ mod verification {
 
     /// Oracle proof: prefix_xor matches naive bit-by-bit running XOR
     /// for ALL u64 inputs. Exhaustive — no gap.
+    #[kani::solver(kissat)]
     #[kani::proof]
     #[kani::unwind(65)] // proof loop: while i < 64
     fn verify_prefix_xor() {
@@ -999,6 +1082,7 @@ mod verification {
 
     /// Crash-freedom: process_block never panics for any combination
     /// of 10 arbitrary u64 bitmasks and any block_len 0..=64.
+    #[kani::solver(kissat)]
     #[kani::proof]
     #[kani::unwind(65)] // compute_real_quotes: while b != 0, up to 64 iters
     fn verify_process_block_no_panic() {
@@ -1021,6 +1105,7 @@ mod verification {
     }
 
     /// Tail masking: no bits set beyond block_len in any output field.
+    #[kani::solver(kissat)]
     #[kani::proof]
     #[kani::unwind(65)] // compute_real_quotes: while b != 0, up to 64 iters
     fn verify_process_block_tail_mask() {
@@ -1052,6 +1137,7 @@ mod verification {
     /// braces) never overlap with in_string mask. Only covers the
     /// no-backslash case — with escapes, the exclusion is verified
     /// by the compositional proof below.
+    #[kani::solver(kissat)]
     #[kani::proof]
     #[kani::unwind(65)] // compute_real_quotes: while b != 0, up to 64 iters
     fn verify_in_string_exclusion() {
