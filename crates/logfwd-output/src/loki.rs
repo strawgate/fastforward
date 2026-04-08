@@ -43,10 +43,11 @@ use arrow::array::AsArray;
 use arrow::datatypes::DataType;
 use arrow::record_batch::RecordBatch;
 
+use logfwd_core::otlp::parse_timestamp_nanos;
 use logfwd_types::diagnostics::ComponentStats;
 use logfwd_types::field_names;
 
-use super::{BatchMetadata, build_col_infos, coalesce_as_str, write_row_json};
+use super::{BatchMetadata, build_col_infos, coalesce_as_str, str_value, write_row_json};
 
 // ---------------------------------------------------------------------------
 // LokiStream helpers
@@ -279,6 +280,16 @@ impl LokiSink {
                             .as_primitive::<arrow::datatypes::UInt64Type>()
                             .value(row),
                         _ => metadata.observed_time_ns,
+                    }
+                    // String timestamp columns (ISO 8601) — produced by the scanner
+                    // when tailing log files, and by star_to_flat for `_timestamp`.
+                    DataType::Utf8 | DataType::Utf8View | DataType::LargeUtf8 => {
+                        if col.is_null(row) {
+                            metadata.observed_time_ns
+                        } else {
+                            parse_timestamp_nanos(str_value(col.as_ref(), row).as_bytes())
+                                .unwrap_or(metadata.observed_time_ns)
+                        }
                     }
                 }
             } else {
@@ -891,6 +902,64 @@ mod tests {
         assert_eq!(
             entries[0].0, 1_000,
             "_timestamp (1000) must be preferred over @timestamp (100)"
+        );
+    }
+
+    /// Regression test for #1676: Loki sink must parse ISO 8601 Utf8 timestamp
+    /// columns rather than falling back to observed_time_ns.
+    ///
+    /// The scanner produces Utf8 columns for string-typed timestamp fields in
+    /// tailed log files. star_to_flat also produces `_timestamp` as Utf8. The
+    /// previous `_ => metadata.observed_time_ns` default silently discarded the
+    /// actual log timestamp and stamped all records with the batch ingestion time.
+    #[test]
+    fn test_utf8_timestamp_column_used_as_loki_ts() {
+        use arrow::array::StringArray;
+        use arrow::datatypes::{Field, Schema};
+
+        let config = Arc::new(LokiConfig {
+            endpoint: "http://localhost".to_string(),
+            tenant_id: None,
+            static_labels: vec![],
+            label_columns: vec![],
+            headers: vec![],
+        });
+        let sink = LokiSink::new(
+            "test".to_string(),
+            config,
+            Arc::new(reqwest::Client::new()),
+            Arc::new(ComponentStats::new()),
+        );
+
+        // _timestamp column is Utf8 (scanner output from tailed log files and
+        // star_to_flat output).  The expected nanosecond value for
+        // "2024-01-15T10:30:00Z" is 1_705_314_600 * 1_000_000_000.
+        let expected_ns: u64 = 1_705_314_600_000_000_000;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(field_names::TIMESTAMP_UNDERSCORE, DataType::Utf8, true),
+            Field::new("message", DataType::Utf8, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["2024-01-15T10:30:00Z"])),
+                Arc::new(StringArray::from(vec!["hello"])),
+            ],
+        )
+        .unwrap();
+        let metadata = BatchMetadata {
+            resource_attrs: Arc::new(vec![]),
+            observed_time_ns: 99_999_999_999,
+        };
+
+        let stream_map = sink.build_stream_map(&batch, &metadata).unwrap();
+        let entries: Vec<LokiEntry> = stream_map.values().flatten().cloned().collect();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].0, expected_ns,
+            "Utf8 _timestamp '2024-01-15T10:30:00Z' must be parsed as {expected_ns} ns, \
+             not observed_time_ns ({})",
+            metadata.observed_time_ns
         );
     }
 
