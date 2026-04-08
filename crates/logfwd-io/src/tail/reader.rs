@@ -326,6 +326,11 @@ impl FileReader {
         source_id: SourceId,
         offset: u64,
     ) -> io::Result<()> {
+        // `SourceId(0)` is a sentinel for "unknown/invalid source"; never apply
+        // checkpoint offsets to it.
+        if source_id == SourceId(0) {
+            return Ok(());
+        }
         for tailed in self.files.values_mut() {
             if tailed.identity.source_id() == source_id {
                 let file_size = tailed.file.metadata()?.len();
@@ -395,5 +400,48 @@ impl FileReader {
             .map(|e| (e.source_id, e.path.clone()));
 
         active.chain(evicted).collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    use super::*;
+
+    #[test]
+    fn set_offset_by_source_ignores_zero_source_id_for_evicted_entries() {
+        let path = PathBuf::from("placeholder.log");
+        let mut reader = FileReader {
+            files: HashMap::new(),
+            read_buf: vec![0u8; 16],
+            evicted_offsets: HashMap::new(),
+            config: TailConfig::default(),
+        };
+        reader.evicted_offsets.insert(
+            path.clone(),
+            EvictedFile {
+                identity: FileIdentity {
+                    device: 1,
+                    inode: 2,
+                    fingerprint: 0,
+                },
+                offset: 7,
+                path: path.clone(),
+                source_id: SourceId(0),
+            },
+        );
+
+        reader
+            .set_offset_by_source(SourceId(0), 11)
+            .expect("zero source id should be ignored safely");
+
+        let updated = reader
+            .evicted_offsets
+            .get(&path)
+            .expect("evicted entry should remain present")
+            .offset;
+        assert_eq!(updated, 7, "sentinel SourceId(0) must be a no-op");
     }
 }
