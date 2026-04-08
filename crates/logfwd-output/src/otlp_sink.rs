@@ -1146,6 +1146,8 @@ mod tests {
     use arrow::array::{Int64Array, StringArray};
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
+    use proptest::prelude::*;
+    use proptest::string::string_regex;
 
     use super::*;
 
@@ -1334,6 +1336,87 @@ mod tests {
 
     fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
         haystack.windows(needle.len()).any(|w| w == needle)
+    }
+
+    proptest! {
+        #[test]
+        fn proptest_generated_fast_matches_handwritten_random_utf8_rows(
+            rows in proptest::collection::vec(
+                (
+                    prop::option::of(string_regex("[A-Za-z0-9_ :T.-]{0,30}").expect("valid regex")),
+                    prop::option::of(string_regex("[A-Za-z]{0,8}").expect("valid regex")),
+                    prop::option::of(string_regex("[A-Za-z0-9_ .:/-]{0,40}").expect("valid regex")),
+                    prop::option::of(prop_oneof![
+                        string_regex("[0-9a-f]{32}").expect("valid regex"),
+                        string_regex("[A-Za-z0-9]{0,40}").expect("valid regex"),
+                    ]),
+                    prop::option::of(prop_oneof![
+                        string_regex("[0-9a-f]{16}").expect("valid regex"),
+                        string_regex("[A-Za-z0-9]{0,24}").expect("valid regex"),
+                    ]),
+                    prop::option::of(any::<i64>()),
+                    prop::option::of(string_regex("[A-Za-z0-9_.-]{0,20}").expect("valid regex")),
+                    prop::option::of(any::<i64>()),
+                    prop::option::of((-1_000_000i64..1_000_000i64).prop_map(|n| n as f64 / 10.0)),
+                    prop::option::of(any::<bool>()),
+                ),
+                0..24
+            )
+        ) {
+            let timestamps: Vec<Option<String>> = rows.iter().map(|r| r.0.clone()).collect();
+            let levels: Vec<Option<String>> = rows.iter().map(|r| r.1.clone()).collect();
+            let messages: Vec<Option<String>> = rows.iter().map(|r| r.2.clone()).collect();
+            let trace_ids: Vec<Option<String>> = rows.iter().map(|r| r.3.clone()).collect();
+            let span_ids: Vec<Option<String>> = rows.iter().map(|r| r.4.clone()).collect();
+            let flags: Vec<Option<i64>> = rows.iter().map(|r| r.5).collect();
+            let hosts: Vec<Option<String>> = rows.iter().map(|r| r.6.clone()).collect();
+            let counts: Vec<Option<i64>> = rows.iter().map(|r| r.7).collect();
+            let latencies: Vec<Option<f64>> = rows.iter().map(|r| r.8).collect();
+            let actives: Vec<Option<bool>> = rows.iter().map(|r| r.9).collect();
+
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("timestamp", DataType::Utf8, true),
+                Field::new("level", DataType::Utf8, true),
+                Field::new("message", DataType::Utf8, true),
+                Field::new("trace_id", DataType::Utf8, true),
+                Field::new("span_id", DataType::Utf8, true),
+                Field::new("flags", DataType::Int64, true),
+                Field::new("host", DataType::Utf8, true),
+                Field::new("count", DataType::Int64, true),
+                Field::new("latency", DataType::Float64, true),
+                Field::new("active", DataType::Boolean, true),
+            ]));
+
+            let batch = RecordBatch::try_new(
+                schema,
+                vec![
+                    Arc::new(StringArray::from(timestamps.iter().map(|s| s.as_deref()).collect::<Vec<_>>())),
+                    Arc::new(StringArray::from(levels.iter().map(|s| s.as_deref()).collect::<Vec<_>>())),
+                    Arc::new(StringArray::from(messages.iter().map(|s| s.as_deref()).collect::<Vec<_>>())),
+                    Arc::new(StringArray::from(trace_ids.iter().map(|s| s.as_deref()).collect::<Vec<_>>())),
+                    Arc::new(StringArray::from(span_ids.iter().map(|s| s.as_deref()).collect::<Vec<_>>())),
+                    Arc::new(Int64Array::from(flags)),
+                    Arc::new(StringArray::from(hosts.iter().map(|s| s.as_deref()).collect::<Vec<_>>())),
+                    Arc::new(Int64Array::from(counts)),
+                    Arc::new(arrow::array::Float64Array::from(latencies)),
+                    Arc::new(arrow::array::BooleanArray::from(actives)),
+                ],
+            ).expect("valid random utf8 batch");
+
+            let metadata = make_metadata();
+
+            let mut handwritten = make_sink();
+            handwritten.encode_batch(&batch, &metadata);
+
+            let mut generated = make_sink();
+            generated.encode_batch_generated_fast(&batch, &metadata);
+
+            prop_assert_eq!(
+                generated.encoded_payload(),
+                handwritten.encoded_payload(),
+                "generated-fast OTLP payload drifted from handwritten encoder on random Utf8 rows"
+            );
+        }
     }
 
     #[test]

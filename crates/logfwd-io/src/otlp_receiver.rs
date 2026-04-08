@@ -1341,6 +1341,30 @@ fn write_hex_to_buf(out: &mut Vec<u8>, bytes: &[u8]) {
     }
 }
 
+#[cfg(test)]
+fn write_i64_to_buf_simple(out: &mut Vec<u8>, n: i64) {
+    out.extend_from_slice(n.to_string().as_bytes());
+}
+
+#[cfg(test)]
+fn write_u64_to_buf_simple(out: &mut Vec<u8>, n: u64) {
+    out.extend_from_slice(n.to_string().as_bytes());
+}
+
+#[cfg(test)]
+fn write_f64_to_buf_simple(out: &mut Vec<u8>, d: f64) {
+    if !d.is_finite() {
+        out.extend_from_slice(b"null");
+    } else {
+        out.extend_from_slice(d.to_string().as_bytes());
+    }
+}
+
+#[cfg(test)]
+fn write_hex_to_buf_simple(out: &mut Vec<u8>, bytes: &[u8]) {
+    out.extend_from_slice(hex::encode(bytes).as_bytes());
+}
+
 #[cfg(kani)]
 mod verification {
     use super::*;
@@ -1399,6 +1423,8 @@ mod tests {
         logs::v1::{LogRecord, ResourceLogs, ScopeLogs},
         resource::v1::Resource,
     };
+    use proptest::prelude::*;
+    use proptest::string::string_regex;
     use prost::Message;
 
     fn make_test_request() -> Vec<u8> {
@@ -1452,6 +1478,194 @@ mod tests {
         request.encode_to_vec()
     }
 
+    fn any_value_to_json_simple(value: &AnyValue) -> Option<serde_json::Value> {
+        match &value.value {
+            Some(Value::IntValue(v)) => Some(serde_json::Value::from(*v)),
+            Some(Value::DoubleValue(v)) => {
+                let mut buf = Vec::new();
+                write_f64_to_buf(&mut buf, *v);
+                serde_json::from_slice(&buf).ok()
+            }
+            Some(Value::BoolValue(v)) => Some(serde_json::Value::from(*v)),
+            Some(Value::StringValue(v)) => Some(serde_json::Value::String(v.clone())),
+            Some(Value::BytesValue(v)) => Some(serde_json::Value::String(hex::encode(v))),
+            _ => None,
+        }
+    }
+
+    fn convert_request_to_json_lines_simple(request: &ExportLogsServiceRequest) -> Vec<u8> {
+        let mut out = Vec::new();
+
+        for resource_logs in &request.resource_logs {
+            let mut resource_attrs: Vec<(String, String)> = Vec::new();
+            if let Some(resource) = &resource_logs.resource {
+                for attr in &resource.attributes {
+                    if let Some(value) = &attr.value
+                        && let Some(stringified) = any_value_to_string(value)
+                    {
+                        resource_attrs.push((attr.key.clone(), stringified));
+                    }
+                }
+            }
+
+            for scope_logs in &resource_logs.scope_logs {
+                for record in &scope_logs.log_records {
+                    let mut obj = serde_json::Map::new();
+
+                    if record.time_unix_nano > 0 {
+                        obj.insert(
+                            field_names::TIMESTAMP.to_string(),
+                            serde_json::Value::from(record.time_unix_nano),
+                        );
+                    }
+
+                    if !record.severity_text.is_empty() {
+                        obj.insert(
+                            field_names::SEVERITY.to_string(),
+                            serde_json::Value::String(record.severity_text.clone()),
+                        );
+                    }
+
+                    if let Some(body) = &record.body
+                        && let Some(body_str) = any_value_to_string(body)
+                    {
+                        obj.insert(
+                            field_names::BODY.to_string(),
+                            serde_json::Value::String(body_str),
+                        );
+                    }
+
+                    for attr in &record.attributes {
+                        if let Some(value) = &attr.value
+                            && let Some(json_value) = any_value_to_json_simple(value)
+                        {
+                            obj.insert(attr.key.clone(), json_value);
+                        }
+                    }
+
+                    for (key, value) in &resource_attrs {
+                        obj.insert(key.clone(), serde_json::Value::String(value.clone()));
+                    }
+
+                    if !record.trace_id.is_empty() {
+                        obj.insert(
+                            field_names::TRACE_ID.to_string(),
+                            serde_json::Value::String(hex::encode(&record.trace_id)),
+                        );
+                    }
+                    if !record.span_id.is_empty() {
+                        obj.insert(
+                            field_names::SPAN_ID.to_string(),
+                            serde_json::Value::String(hex::encode(&record.span_id)),
+                        );
+                    }
+
+                    serde_json::to_writer(&mut out, &serde_json::Value::Object(obj))
+                        .expect("json serialization should succeed");
+                    out.push(b'\n');
+                }
+            }
+        }
+
+        out
+    }
+
+    fn parse_json_lines_values(bytes: &[u8]) -> Vec<serde_json::Value> {
+        if bytes.is_empty() {
+            return Vec::new();
+        }
+        String::from_utf8_lossy(bytes)
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("valid json line"))
+            .collect()
+    }
+
+    fn any_value_strategy() -> impl Strategy<Value = AnyValue> {
+        prop_oneof![
+            string_regex("[A-Za-z0-9 _./:-]{0,20}")
+                .expect("regex")
+                .prop_map(|s| AnyValue {
+                    value: Some(Value::StringValue(s)),
+                }),
+            any::<i64>().prop_map(|v| AnyValue {
+                value: Some(Value::IntValue(v)),
+            }),
+            prop_oneof![
+                (-1_000_000i64..1_000_000i64).prop_map(|n| n as f64 / 100.0),
+                Just(f64::NAN),
+                Just(f64::INFINITY),
+                Just(f64::NEG_INFINITY),
+            ]
+            .prop_map(|v| AnyValue {
+                value: Some(Value::DoubleValue(v)),
+            }),
+            any::<bool>().prop_map(|b| AnyValue {
+                value: Some(Value::BoolValue(b)),
+            }),
+            proptest::collection::vec(any::<u8>(), 0..16).prop_map(|b| AnyValue {
+                value: Some(Value::BytesValue(b)),
+            }),
+            Just(AnyValue { value: None }),
+        ]
+    }
+
+    fn key_value_strategy() -> impl Strategy<Value = KeyValue> {
+        (
+            string_regex("[A-Za-z0-9_.-]{1,16}").expect("regex"),
+            prop::option::of(any_value_strategy()),
+        )
+            .prop_map(|(key, value)| KeyValue { key, value })
+    }
+
+    fn log_record_strategy() -> impl Strategy<Value = LogRecord> {
+        (
+            any::<u64>(),
+            string_regex("[A-Za-z]{0,8}").expect("regex"),
+            prop::option::of(any_value_strategy()),
+            proptest::collection::vec(key_value_strategy(), 0..6),
+            proptest::collection::vec(any::<u8>(), 0..20),
+            proptest::collection::vec(any::<u8>(), 0..12),
+        )
+            .prop_map(
+                |(time_unix_nano, severity_text, body, attributes, trace_id, span_id)| LogRecord {
+                    time_unix_nano,
+                    severity_text,
+                    body,
+                    attributes,
+                    trace_id,
+                    span_id,
+                    ..Default::default()
+                },
+            )
+    }
+
+    fn scope_logs_strategy() -> impl Strategy<Value = ScopeLogs> {
+        proptest::collection::vec(log_record_strategy(), 0..6).prop_map(|log_records| ScopeLogs {
+            log_records,
+            ..Default::default()
+        })
+    }
+
+    fn resource_logs_strategy() -> impl Strategy<Value = ResourceLogs> {
+        (
+            proptest::collection::vec(key_value_strategy(), 0..6),
+            proptest::collection::vec(scope_logs_strategy(), 0..3),
+        )
+            .prop_map(|(resource_attributes, scope_logs)| ResourceLogs {
+                resource: Some(Resource {
+                    attributes: resource_attributes,
+                    ..Default::default()
+                }),
+                scope_logs,
+                ..Default::default()
+            })
+    }
+
+    fn request_strategy() -> impl Strategy<Value = ExportLogsServiceRequest> {
+        proptest::collection::vec(resource_logs_strategy(), 0..4)
+            .prop_map(|resource_logs| ExportLogsServiceRequest { resource_logs })
+    }
+
     #[test]
     fn structured_batch_matches_legacy_scanned_batch() {
         let body = make_test_request();
@@ -1472,6 +1686,22 @@ mod tests {
             assert_eq!(
                 column_values(legacy.column(idx).as_ref()),
                 column_values(structured.column(idx).as_ref())
+            );
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn proptest_convert_request_to_json_lines_fast_matches_simple(
+            request in request_strategy()
+        ) {
+            let fast = convert_request_to_json_lines(&request);
+            let simple = convert_request_to_json_lines_simple(&request);
+
+            prop_assert_eq!(
+                parse_json_lines_values(&fast),
+                parse_json_lines_values(&simple),
+                "convert_request_to_json_lines fast path drifted from simple reference"
             );
         }
     }
@@ -2341,6 +2571,271 @@ mod tests {
         out.clear();
         write_i64_to_buf(&mut out, i64::MIN);
         assert_eq!(String::from_utf8(out).unwrap(), i64::MIN.to_string());
+    }
+
+    /// Local microbenchmark for OTLP request -> NDJSON conversion.
+    ///
+    /// Run with:
+    /// `cargo test -p logfwd-io otlp_receiver::tests::bench_convert_request_to_json_lines_fast_vs_simple --release -- --ignored --nocapture`
+    #[test]
+    #[ignore = "microbenchmark"]
+    fn bench_convert_request_to_json_lines_fast_vs_simple() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        let request = ExportLogsServiceRequest {
+            resource_logs: vec![ResourceLogs {
+                resource: Some(Resource {
+                    attributes: vec![
+                        KeyValue {
+                            key: "service.name".into(),
+                            value: Some(AnyValue {
+                                value: Some(Value::StringValue("bench".into())),
+                            }),
+                        },
+                        KeyValue {
+                            key: "service.instance".into(),
+                            value: Some(AnyValue {
+                                value: Some(Value::StringValue("instance-1".into())),
+                            }),
+                        },
+                    ],
+                    ..Default::default()
+                }),
+                scope_logs: vec![ScopeLogs {
+                    log_records: (0..2_000)
+                        .map(|i| LogRecord {
+                            time_unix_nano: 1_710_000_000_000_000_000 + i as u64,
+                            severity_text: match i % 4 {
+                                0 => "INFO".into(),
+                                1 => "WARN".into(),
+                                2 => "ERROR".into(),
+                                _ => "DEBUG".into(),
+                            },
+                            body: Some(AnyValue {
+                                value: Some(Value::StringValue(format!("message-{i}"))),
+                            }),
+                            attributes: vec![
+                                KeyValue {
+                                    key: "status".into(),
+                                    value: Some(AnyValue {
+                                        value: Some(Value::IntValue(200 + (i % 5) as i64)),
+                                    }),
+                                },
+                                KeyValue {
+                                    key: "latency".into(),
+                                    value: Some(AnyValue {
+                                        value: Some(Value::DoubleValue((i % 1000) as f64 / 10.0)),
+                                    }),
+                                },
+                                KeyValue {
+                                    key: "active".into(),
+                                    value: Some(AnyValue {
+                                        value: Some(Value::BoolValue(i % 2 == 0)),
+                                    }),
+                                },
+                            ],
+                            trace_id: if i % 3 == 0 {
+                                Vec::new()
+                            } else {
+                                vec![
+                                    0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a,
+                                    0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+                                ]
+                            },
+                            span_id: if i % 5 == 0 {
+                                Vec::new()
+                            } else {
+                                vec![0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]
+                            },
+                            ..Default::default()
+                        })
+                        .collect(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        };
+
+        let fast_once = convert_request_to_json_lines(&request);
+        let simple_once = convert_request_to_json_lines_simple(&request);
+        assert_eq!(
+            parse_json_lines_values(&fast_once),
+            parse_json_lines_values(&simple_once),
+            "fast and simple converters must remain semantically equivalent"
+        );
+
+        const ITERS: usize = 80;
+        let t0 = Instant::now();
+        for _ in 0..ITERS {
+            let out = convert_request_to_json_lines(&request);
+            black_box(out.len());
+        }
+        let fast = t0.elapsed();
+
+        let t0 = Instant::now();
+        for _ in 0..ITERS {
+            let out = convert_request_to_json_lines_simple(&request);
+            black_box(out.len());
+        }
+        let simple = t0.elapsed();
+
+        eprintln!(
+            "convert_request_to_json_lines bench records={} iters={ITERS}",
+            request.resource_logs[0].scope_logs[0].log_records.len()
+        );
+        eprintln!("  fast={:?}", fast);
+        eprintln!("  simple={:?}", simple);
+    }
+
+    proptest! {
+        #[test]
+        fn proptest_write_i64_fast_matches_simple(n in any::<i64>(), prefix in proptest::collection::vec(any::<u8>(), 0..32)) {
+            let mut fast = prefix.clone();
+            let mut simple = prefix;
+            write_i64_to_buf(&mut fast, n);
+            write_i64_to_buf_simple(&mut simple, n);
+            prop_assert_eq!(fast, simple);
+        }
+
+        #[test]
+        fn proptest_write_u64_fast_matches_simple(n in any::<u64>(), prefix in proptest::collection::vec(any::<u8>(), 0..32)) {
+            let mut fast = prefix.clone();
+            let mut simple = prefix;
+            write_u64_to_buf(&mut fast, n);
+            write_u64_to_buf_simple(&mut simple, n);
+            prop_assert_eq!(fast, simple);
+        }
+
+        #[test]
+        fn proptest_write_f64_fast_matches_simple(bits in any::<u64>(), prefix in proptest::collection::vec(any::<u8>(), 0..32)) {
+            let d = f64::from_bits(bits);
+            let mut fast = prefix.clone();
+            let mut simple = prefix;
+            write_f64_to_buf(&mut fast, d);
+            write_f64_to_buf_simple(&mut simple, d);
+            prop_assert_eq!(fast, simple);
+        }
+
+        #[test]
+        fn proptest_write_hex_fast_matches_simple(bytes in proptest::collection::vec(any::<u8>(), 0..256), prefix in proptest::collection::vec(any::<u8>(), 0..32)) {
+            let mut fast = prefix.clone();
+            let mut simple = prefix;
+            write_hex_to_buf(&mut fast, &bytes);
+            write_hex_to_buf_simple(&mut simple, &bytes);
+            prop_assert_eq!(fast, simple);
+        }
+    }
+
+    /// Local microbenchmark for writer helpers.
+    ///
+    /// Run with:
+    /// `cargo test -p logfwd-io otlp_receiver::tests::bench_writer_helpers_fast_vs_simple --release -- --ignored --nocapture`
+    #[test]
+    #[ignore = "microbenchmark"]
+    fn bench_writer_helpers_fast_vs_simple() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const N: usize = 200_000;
+        let i64_inputs: Vec<i64> = (0..N)
+            .map(|i| ((i as i64).wrapping_mul(1_048_573)).wrapping_sub(73_421))
+            .collect();
+        let u64_inputs: Vec<u64> = (0..N)
+            .map(|i| (i as u64).wrapping_mul(2_654_435_761))
+            .collect();
+        let f64_inputs: Vec<f64> = (0..N)
+            .map(|i| {
+                let r = (i as f64) * 0.125 - 17_333.75;
+                if i % 97 == 0 {
+                    f64::NAN
+                } else if i % 89 == 0 {
+                    f64::INFINITY
+                } else if i % 83 == 0 {
+                    f64::NEG_INFINITY
+                } else {
+                    r
+                }
+            })
+            .collect();
+        let hex_inputs: Vec<Vec<u8>> = (0..N)
+            .map(|i| {
+                let x = (i as u64).wrapping_mul(11_400_714_819_323_198_485);
+                x.to_le_bytes().to_vec()
+            })
+            .collect();
+
+        let mut buf = Vec::with_capacity(256 * 1024);
+
+        let t0 = Instant::now();
+        for &n in &i64_inputs {
+            buf.clear();
+            write_i64_to_buf(&mut buf, n);
+            black_box(buf.len());
+        }
+        let i64_fast = t0.elapsed();
+
+        let t0 = Instant::now();
+        for &n in &i64_inputs {
+            buf.clear();
+            write_i64_to_buf_simple(&mut buf, n);
+            black_box(buf.len());
+        }
+        let i64_simple = t0.elapsed();
+
+        let t0 = Instant::now();
+        for &n in &u64_inputs {
+            buf.clear();
+            write_u64_to_buf(&mut buf, n);
+            black_box(buf.len());
+        }
+        let u64_fast = t0.elapsed();
+
+        let t0 = Instant::now();
+        for &n in &u64_inputs {
+            buf.clear();
+            write_u64_to_buf_simple(&mut buf, n);
+            black_box(buf.len());
+        }
+        let u64_simple = t0.elapsed();
+
+        let t0 = Instant::now();
+        for &d in &f64_inputs {
+            buf.clear();
+            write_f64_to_buf(&mut buf, d);
+            black_box(buf.len());
+        }
+        let f64_fast = t0.elapsed();
+
+        let t0 = Instant::now();
+        for &d in &f64_inputs {
+            buf.clear();
+            write_f64_to_buf_simple(&mut buf, d);
+            black_box(buf.len());
+        }
+        let f64_simple = t0.elapsed();
+
+        let t0 = Instant::now();
+        for v in &hex_inputs {
+            buf.clear();
+            write_hex_to_buf(&mut buf, v);
+            black_box(buf.len());
+        }
+        let hex_fast = t0.elapsed();
+
+        let t0 = Instant::now();
+        for v in &hex_inputs {
+            buf.clear();
+            write_hex_to_buf_simple(&mut buf, v);
+            black_box(buf.len());
+        }
+        let hex_simple = t0.elapsed();
+
+        eprintln!("writer bench N={N}");
+        eprintln!("  i64  fast={:?} simple={:?}", i64_fast, i64_simple);
+        eprintln!("  u64  fast={:?} simple={:?}", u64_fast, u64_simple);
+        eprintln!("  f64  fast={:?} simple={:?}", f64_fast, f64_simple);
+        eprintln!("  hex  fast={:?} simple={:?}", hex_fast, hex_simple);
     }
 
     #[test]
