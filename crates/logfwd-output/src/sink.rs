@@ -347,13 +347,31 @@ mod verification {
         let tag: u8 = kani::any_where(|&v| v <= 3);
         let mut any_pending = false;
         let mut last_io_error = None;
-        let mut max_retry = None;
+        // Use a symbolic initial max_retry so the proof covers both the
+        // `max_retry.is_none()` path and the `d > prev` / `d <= prev` branches
+        // inside the RetryAfter arm of merge_child_send_result.
+        let initial_ms: Option<u64> = kani::any();
+        let mut max_retry = initial_ms.map(Duration::from_millis);
 
         let result = match tag {
             0 => SendResult::Ok,
             1 => SendResult::Rejected("no".to_string()),
-            2 => SendResult::RetryAfter(Duration::from_millis(250)),
+            2 => {
+                let retry_ms: u64 = kani::any();
+                SendResult::RetryAfter(Duration::from_millis(retry_ms))
+            }
             _ => SendResult::IoError(io::Error::other("boom")),
+        };
+
+        // Capture the duration we are about to pass (only meaningful for tag==2).
+        let retry_duration = if tag == 2 {
+            if let SendResult::RetryAfter(d) = &result {
+                Some(*d)
+            } else {
+                None
+            }
+        } else {
+            None
         };
 
         let state =
@@ -364,18 +382,22 @@ mod verification {
                 assert_eq!(state, Some(ChildState::Ok));
                 assert!(!any_pending);
                 assert!(last_io_error.is_none());
-                assert!(max_retry.is_none());
             }
             1 => {
                 assert!(matches!(state, Some(ChildState::Rejected(_))));
                 assert!(!any_pending);
                 assert!(last_io_error.is_none());
-                assert!(max_retry.is_none());
             }
             2 => {
                 assert!(state.is_none());
                 assert!(any_pending);
-                assert_eq!(max_retry, Some(Duration::from_millis(250)));
+                let d = retry_duration.unwrap();
+                let prev = initial_ms.map(Duration::from_millis);
+                if prev.is_none_or(|p| d > p) {
+                    assert_eq!(max_retry, Some(d));
+                } else {
+                    assert_eq!(max_retry, prev);
+                }
             }
             _ => {
                 assert!(state.is_none());
@@ -386,7 +408,14 @@ mod verification {
 
         kani::cover!(tag == 0, "ok becomes ChildState::Ok");
         kani::cover!(tag == 1, "rejected becomes ChildState::Rejected");
-        kani::cover!(tag == 2, "retry keeps child pending and records max delay");
+        kani::cover!(
+            tag == 2 && initial_ms.is_none(),
+            "retry with no prior max: sets max_retry"
+        );
+        kani::cover!(
+            tag == 2 && initial_ms.is_some(),
+            "retry with existing max: exercises d > prev branch"
+        );
         kani::cover!(tag == 3, "io error keeps child pending and stores error");
 
         // Exercise the `d > prev` branch: start with an existing max_retry and
