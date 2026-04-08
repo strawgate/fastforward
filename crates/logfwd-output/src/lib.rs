@@ -433,7 +433,7 @@ fn write_json_value(arr: &dyn Array, row: usize, out: &mut Vec<u8>) -> io::Resul
                 out.extend_from_slice(if v { b"true" } else { b"false" });
             }
         }
-        DataType::Struct(_) => {
+        DataType::Struct(schema_fields) => {
             if arr.is_null(row) {
                 out.extend_from_slice(b"null");
             } else {
@@ -442,10 +442,6 @@ fn write_json_value(arr: &dyn Array, row: usize, out: &mut Vec<u8>) -> io::Resul
                     .downcast_ref::<StructArray>()
                     .expect("DataType::Struct must downcast to StructArray");
                 out.push(b'{');
-                let schema_fields = match arr.data_type() {
-                    DataType::Struct(fields) => fields,
-                    _ => unreachable!(),
-                };
                 let num_fields = struct_arr.num_columns();
                 let mut first = true;
                 for field_idx in 0..num_fields {
@@ -1862,9 +1858,9 @@ mod write_row_json_tests {
     // Regression tests for issue #1592: grok()/geo_lookup() struct columns
     // -----------------------------------------------------------------------
 
-    /// Build a top-level grok-like struct column with three nullable Utf8
-    /// child fields (method, path, id).  Row `null_row` has the entire struct
-    /// set to null; `null_field_row` has the struct non-null but `id` null.
+    /// Build a single-row batch with a top-level grok-like struct column
+    /// containing three nullable Utf8 child fields (`method`, `path`, `id`).
+    /// When `struct_is_null` is true the entire struct cell is null.
     fn make_grok_struct_batch(
         method: Option<&str>,
         path: Option<&str>,
@@ -1956,8 +1952,8 @@ mod write_row_json_tests {
         assert_eq!(v["grok"]["method"], "POST");
         assert_eq!(v["grok"]["path"], "/upload");
         assert!(
-            v["grok"]["id"].is_null(),
-            "null child field should serialize as null, got: {}",
+            v["grok"].as_object().unwrap().contains_key("id") && v["grok"]["id"].is_null(),
+            "null child field must be present and serialize as null, got: {}",
             v["grok"]["id"]
         );
     }
