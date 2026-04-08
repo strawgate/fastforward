@@ -701,6 +701,7 @@ mod verification {
 
     /// Prove parse_cri_line rejects known invalid stream tokens.
     #[kani::proof]
+    #[kani::unwind(34)]
     fn verify_parse_cri_line_rejects_known_invalid_streams() {
         let out = b"2024-01-15T10:30:00Z out F ok";
         assert!(
@@ -719,6 +720,7 @@ mod verification {
 
     /// Prove parse_cri_line accepts both valid stream tokens.
     #[kani::proof]
+    #[kani::unwind(34)]
     fn verify_parse_cri_line_accepts_valid_streams() {
         let stdout = b"2024-01-15T10:30:00Z stdout F ok";
         assert!(
