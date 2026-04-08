@@ -12,7 +12,7 @@ doctest = false
 serde = { workspace = true }
 serde_yaml_ng = "0.10"
 thiserror = { workspace = true }
-url = "2"
+url = { workspace = true }
 
 [lints]
 workspace = true

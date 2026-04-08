@@ -698,8 +698,16 @@ impl Config {
 
     /// Validate the loaded configuration.
     fn validate(&self) -> Result<(), ConfigError> {
+        if let Some(ep) = &self.server.metrics_endpoint {
+            if let Err(msg) = validate_output_endpoint_url(ep) {
+                return Err(ConfigError::Validation(format!(
+                    "server.metrics_endpoint: {msg}"
+                )));
+            }
+        }
+
         if let Some(ep) = &self.server.traces_endpoint {
-            if let Err(msg) = validate_endpoint_url(ep) {
+            if let Err(msg) = validate_output_endpoint_url(ep) {
                 return Err(ConfigError::Validation(format!(
                     "server.traces_endpoint: {msg}"
                 )));
@@ -1449,7 +1457,9 @@ mod validate_host_port_tests {
 /// Validate that an endpoint URL has a recognised scheme and a non-empty host.
 ///
 /// Accepts `http://` or `https://` followed by at least one character.
-fn validate_endpoint_url(endpoint: &str) -> Result<(), String> {
+/// Returns the parsed [`url::Url`] on success so callers can inspect it
+/// without re-parsing.
+fn validate_endpoint_url(endpoint: &str) -> Result<url::Url, String> {
     let url = endpoint
         .parse::<url::Url>()
         .map_err(|e| format!("endpoint '{endpoint}' is not a valid URL: {e}"))?;
@@ -1470,18 +1480,15 @@ fn validate_endpoint_url(endpoint: &str) -> Result<(), String> {
     }
 
     if !url.username().is_empty() || url.password().is_some() {
-        return Err(format!(
-            "endpoint '{endpoint}' must not include credentials in the URL; use output.auth instead"
-        ));
+        return Err(
+            "endpoint must not include credentials in the URL; use output.auth instead".to_string(),
+        );
     }
 
-    Ok(())
+    Ok(url)
 }
 
-fn is_loopback_endpoint(endpoint: &str) -> bool {
-    let Ok(url) = endpoint.parse::<url::Url>() else {
-        return false;
-    };
+fn is_loopback_url(url: &url::Url) -> bool {
     let Some(host) = url.host() else {
         return false;
     };
@@ -1497,12 +1504,8 @@ fn is_loopback_endpoint(endpoint: &str) -> bool {
 /// - URL must not include embedded credentials.
 /// - Non-loopback endpoints must use HTTPS.
 pub fn validate_output_endpoint_url(endpoint: &str) -> Result<(), String> {
-    validate_endpoint_url(endpoint)?;
-    let is_https = endpoint
-        .parse::<url::Url>()
-        .map(|u| u.scheme() == "https")
-        .map_err(|e| format!("endpoint '{endpoint}' is not a valid URL: {e}"))?;
-    if !is_https && !is_loopback_endpoint(endpoint) {
+    let url = validate_endpoint_url(endpoint)?;
+    if url.scheme() != "https" && !is_loopback_url(&url) {
         return Err(format!(
             "endpoint '{endpoint}' uses insecure HTTP; use 'https://' for non-loopback output endpoints"
         ));
@@ -2295,9 +2298,15 @@ output:
   endpoint: https://user:pass@collector:4318/v1/logs
 ";
         let err = Config::load_str(yaml).expect_err("endpoint credentials must be rejected");
+        let msg = err.to_string();
         assert!(
-            err.to_string().contains("must not include credentials"),
-            "expected credentials rejection: {err}"
+            msg.contains("must not include credentials"),
+            "expected credentials rejection: {msg}"
+        );
+        // The error message must not leak the password.
+        assert!(
+            !msg.contains("pass@"),
+            "error message must not contain the password: {msg}"
         );
     }
 
