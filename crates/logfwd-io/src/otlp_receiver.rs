@@ -581,17 +581,25 @@ fn decode_otlp_logs_json(body: &[u8]) -> Result<Vec<u8>, InputError> {
             for record in records {
                 out.push(b'{');
 
+                // timestamp: prefer timeUnixNano, fall back to observedTimeUnixNano
+                // when event time is unknown (fixes #1690).
+                let mut ts_val = 0u64;
                 if let Some(ts) = record.get("timeUnixNano") {
-                    let parsed = parse_protojson_u64(ts).ok_or_else(|| {
+                    ts_val = parse_protojson_u64(ts).ok_or_else(|| {
                         InputError::Receiver(
                             "invalid OTLP JSON timeUnixNano: not a valid uint64".into(),
                         )
                     })?;
-                    if parsed > 0 {
-                        write_json_key(&mut out, field_names::TIMESTAMP);
-                        write_u64_to_buf(&mut out, parsed);
-                        out.push(b',');
+                }
+                if ts_val == 0 {
+                    if let Some(obs) = record.get("observedTimeUnixNano") {
+                        ts_val = parse_protojson_u64(obs).unwrap_or(0);
                     }
+                }
+                if ts_val > 0 {
+                    write_json_key(&mut out, field_names::TIMESTAMP);
+                    write_u64_to_buf(&mut out, ts_val);
+                    out.push(b',');
                 }
 
                 if let Some(sev) = record.get("severityText").and_then(|v| v.as_str()) {
@@ -920,10 +928,17 @@ fn convert_request_to_batch(request: &ExportLogsServiceRequest) -> Result<Record
             for record in &scope_logs.log_records {
                 builder.begin_row();
 
-                if record.time_unix_nano > 0
-                    && let Ok(ts) = i64::try_from(record.time_unix_nano)
-                {
-                    builder.append_i64_value_by_idx(timestamp_idx, ts);
+                // timestamp: prefer time_unix_nano, fall back to
+                // observed_time_unix_nano when event time is unknown (#1690).
+                let ts_raw = if record.time_unix_nano > 0 {
+                    record.time_unix_nano
+                } else {
+                    record.observed_time_unix_nano
+                };
+                if let Ok(ts) = i64::try_from(ts_raw) {
+                    if ts > 0 {
+                        builder.append_i64_value_by_idx(timestamp_idx, ts);
+                    }
                 }
 
                 if !record.severity_text.is_empty() {
@@ -2378,6 +2393,35 @@ mod tests {
         assert!(
             row.get(field_names::TIMESTAMP).is_none(),
             "unknown timestamp should be omitted, not emitted as 0"
+        );
+    }
+
+    /// JSON OTLP path: when timeUnixNano is 0 but observedTimeUnixNano is set,
+    /// the timestamp must use the observed time (issue #1690).
+    #[test]
+    fn json_path_uses_observed_time_when_event_time_is_zero() {
+        let json_lines = decode_otlp_logs_json(
+            br#"{
+                "resourceLogs": [{
+                    "scopeLogs": [{
+                        "logRecords": [{
+                            "timeUnixNano": "0",
+                            "observedTimeUnixNano": "1705314700000000000",
+                            "body": {"stringValue": "hello"}
+                        }]
+                    }]
+                }]
+            }"#,
+        )
+        .expect("valid OTLP JSON");
+
+        let line = String::from_utf8(json_lines).expect("utf8");
+        let row: serde_json::Value = serde_json::from_str(line.lines().next().unwrap()).unwrap();
+        assert_eq!(
+            row.get(field_names::TIMESTAMP)
+                .and_then(serde_json::Value::as_u64),
+            Some(1_705_314_700_000_000_000),
+            "JSON path must fall back to observedTimeUnixNano when timeUnixNano==0"
         );
     }
 
