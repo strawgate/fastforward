@@ -1295,16 +1295,8 @@ mod tests {
     fn permission_denied_reports_io_error_status() {
         use std::os::unix::fs::PermissionsExt;
 
-        let is_root = fs::read_to_string("/proc/self/status")
-            .ok()
-            .and_then(|status| {
-                status
-                    .lines()
-                    .find_map(|line| line.strip_prefix("Uid:"))
-                    .and_then(|rest| rest.split_whitespace().next())
-                    .and_then(|uid| uid.parse::<u32>().ok())
-            })
-            == Some(0);
+        // SAFETY: getuid() has no preconditions and is always safe to call.
+        let is_root = unsafe { libc::getuid() } == 0;
         if is_root {
             // Root can read regardless of mode bits; this assertion is not meaningful.
             return;

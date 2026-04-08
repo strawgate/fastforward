@@ -54,8 +54,8 @@ mod tests {
 
     fn apply_event(checkpoint: u64, event: Event) -> u64 {
         match event {
-            Event::Ack => checkpoint.saturating_add(1),
-            Event::Reject | Event::Hold => checkpoint,
+            Event::Ack | Event::Reject => checkpoint.saturating_add(1),
+            Event::Hold => checkpoint,
         }
     }
 
@@ -97,7 +97,7 @@ mod tests {
 
     proptest! {
         #[test]
-        fn checkpoint_policy_never_advances_on_reject_or_hold(events in proptest::collection::vec(0u8..=2, 0..256)) {
+        fn checkpoint_policy_advances_on_ack_or_reject_and_holds_on_hold(events in proptest::collection::vec(0u8..=2, 0..256)) {
             let mut checkpoint = 0u64;
             let mut previous = checkpoint;
 
@@ -111,11 +111,18 @@ mod tests {
 
                 prop_assert!(checkpoint >= previous, "checkpoint must be monotonic");
 
-                if matches!(event, Event::Reject | Event::Hold) {
+                if matches!(event, Event::Hold) {
                     prop_assert_eq!(
                         checkpoint,
                         previous,
-                        "checkpoint must not advance on reject/hold"
+                        "checkpoint must not advance on hold"
+                    );
+                }
+
+                if matches!(event, Event::Ack | Event::Reject) {
+                    prop_assert!(
+                        checkpoint > previous || previous == u64::MAX,
+                        "checkpoint must advance on ack or reject (unless saturated)"
                     );
                 }
 
