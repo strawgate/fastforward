@@ -1,0 +1,68 @@
+use std::fs::File;
+use std::io::{self, Read, Seek, SeekFrom};
+use std::os::unix::fs::MetadataExt;
+use std::path::Path;
+
+use logfwd_types::pipeline::SourceId;
+
+/// Byte offset within a file. Newtype prevents mixing with SourceId.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ByteOffset(pub u64);
+
+/// Identity of a file based on device + inode + content fingerprint.
+/// Survives renames. Detects inode reuse via fingerprint mismatch.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct FileIdentity {
+    pub device: u64,
+    pub inode: u64,
+    pub fingerprint: u64,
+}
+
+impl FileIdentity {
+    /// Derive a stable `SourceId` from the compound key (device, inode, fingerprint).
+    ///
+    /// Hashing all three fields prevents collisions between files that share
+    /// the same first N bytes (same fingerprint) but live on different inodes.
+    /// Two files on the same inode+device are the same file, so the fingerprint
+    /// differentiates after inode reuse (e.g., log rotation).
+    pub fn source_id(&self) -> SourceId {
+        // Empty file sentinel: fingerprint 0 means no data to checkpoint.
+        if self.fingerprint == 0 {
+            return SourceId(0);
+        }
+        let mut h = xxhash_rust::xxh64::Xxh64::new(0);
+        h.update(&self.device.to_le_bytes());
+        h.update(&self.inode.to_le_bytes());
+        h.update(&self.fingerprint.to_le_bytes());
+        SourceId(h.digest())
+    }
+}
+
+/// Compute the fingerprint of a file: xxhash64 of the first N bytes.
+pub(super) fn compute_fingerprint(file: &mut File, max_bytes: usize) -> io::Result<u64> {
+    let pos = file.stream_position()?;
+    file.seek(SeekFrom::Start(0))?;
+
+    let mut buf = vec![0u8; max_bytes];
+    let n = file.read(&mut buf)?;
+
+    file.seek(SeekFrom::Start(pos))?;
+
+    if n == 0 {
+        // Empty file gets a sentinel fingerprint.
+        return Ok(0);
+    }
+    Ok(xxhash_rust::xxh64::xxh64(&buf[..n], 0))
+}
+
+/// Build a FileIdentity for a path.
+pub(super) fn identify_file(path: &Path, fingerprint_bytes: usize) -> io::Result<FileIdentity> {
+    let mut file = File::open(path)?;
+    let meta = file.metadata()?;
+    let fingerprint = compute_fingerprint(&mut file, fingerprint_bytes)?;
+    Ok(FileIdentity {
+        device: meta.dev(),
+        inode: meta.ino(),
+        fingerprint,
+    })
+}

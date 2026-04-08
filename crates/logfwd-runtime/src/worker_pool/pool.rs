@@ -1,41 +1,3 @@
-//! Async output worker pool with MRU-first work consolidation.
-//!
-//! # Design
-//!
-//! Workers are long-lived tokio tasks, each owning one [`Sink`] instance
-//! (and therefore its own HTTP connection pool). Workers are kept in a
-//! [`VecDeque`] ordered Most-Recently-Used first. Dispatch always tries the
-//! front worker first; only when that channel is full does it try the next,
-//! and so on. This **consolidates work onto the fewest active workers**,
-//! keeping cold workers idle long enough to hit their `idle_timeout` and
-//! self-terminate — which closes their HTTP connections.
-//!
-//! # Scaling
-//!
-//! - Under low load: 1 active worker, rest idle → eventually close.
-//! - Under burst: pool spawns workers (up to `max_workers`) one at a time.
-//! - At `max_workers` with all channels full: `submit` async-waits on the
-//!   front worker, providing natural back-pressure to the pipeline.
-//!
-//! # Safety invariants
-//!
-//! - Every submitted [`WorkItem`] is either delivered to a worker's channel
-//!   or async-waited until a worker has capacity. Items are never dropped.
-//! - Every in-flight batch ticket is acked or rejected before shutdown
-//!   completes. The `drain` method joins all worker tasks.
-//! - Worker panic is surfaced when the pool joins worker tasks during
-//!   [`OutputWorkerPool::drain`]. Closed worker channels are pruned lazily on
-//!   the next submit, and worker-slot cleanup is drop-guarded so control-plane
-//!   health does not retain stale live-worker state after abrupt exits.
-//!
-//! # Kani proofs
-//!
-//! Pure dispatch logic is extracted into `dispatch_step` and proved with
-//! Kani.  See the `kani_proofs` module below.
-
-mod health;
-
-use backon::{BackoffBuilder, ExponentialBuilder};
 use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::sync::Arc;
@@ -44,157 +6,39 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
-use tracing::Instrument;
 
 use logfwd_io::diagnostics::{ComponentHealth, ComponentStats, PipelineMetrics};
-use logfwd_output::BatchMetadata;
-use logfwd_output::sink::{OutputHealthEvent, SendResult, Sink, SinkFactory};
-use logfwd_types::pipeline::{BatchTicket, Sending};
+use logfwd_output::sink::{OutputHealthEvent, SinkFactory};
 
-use arrow::record_batch::RecordBatch;
-
-use self::health::{
+use super::dispatch::{ChannelState, DispatchOutcome, dispatch_step};
+use super::health::{
     aggregate_output_health, idle_health_after_worker_insert, reduce_worker_slot_health,
 };
+use super::types::{
+    AckItem, DeliveryOutcome, MAX_REJECTION_REASON_BYTES, WorkItem, WorkerMsg,
+    bound_rejection_reason,
+};
+use super::worker::worker_task;
 
 #[cfg(not(test))]
 const DRAIN_CANCEL_GRACE: Duration = Duration::from_secs(5);
 #[cfg(test)]
 const DRAIN_CANCEL_GRACE: Duration = Duration::from_millis(50);
-const MAX_REJECTION_REASON_BYTES: usize = 256;
 
-// ---------------------------------------------------------------------------
-// Public message types
-// ---------------------------------------------------------------------------
-
-/// One batch of work to send to an output sink.
-///
-/// Ownership of `tickets` is transferred to the worker, which must ack or
-/// reject every ticket before it exits.
-pub struct WorkItem {
-    pub batch: RecordBatch,
-    pub metadata: BatchMetadata,
-    pub tickets: Vec<BatchTicket<Sending, u64>>,
-    /// Number of rows in the batch (for metrics recording at ack time).
-    pub num_rows: u64,
-    /// When this item was submitted to the pool (set by the caller, not submit()).
-    /// Uses tokio::time::Instant so elapsed() measures simulated time under Turmoil.
-    pub submitted_at: tokio::time::Instant,
-    /// Nanoseconds spent in the scan stage (passed through for metrics at ack time).
-    pub scan_ns: u64,
-    /// Nanoseconds spent in the transform stage (passed through for metrics at ack time).
-    pub transform_ns: u64,
-    /// Batch ID for active-batch tracking in PipelineMetrics.
-    pub batch_id: u64,
-    /// The batch span — kept alive through the worker so output_ns can be recorded on it.
-    pub span: tracing::Span,
-}
-
-/// Result from a worker after processing one [`WorkItem`].
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub enum DeliveryOutcome {
-    /// The batch was delivered successfully.
-    Delivered,
-    /// The sink rejected the batch permanently.
-    Rejected { reason: String },
-    /// Retries were exhausted before delivery could succeed.
-    RetryExhausted,
-    /// A hard per-batch timeout elapsed while sending.
-    TimedOut,
-    /// The pool was drained before this item could be delivered.
-    PoolClosed,
-    /// The selected worker channel closed before the item could be enqueued.
-    WorkerChannelClosed,
-    /// No worker could be created or selected for this item.
-    NoWorkersAvailable,
-    /// Catch-all for future sink result variants.
-    InternalFailure,
-}
-
-impl DeliveryOutcome {
-    /// Returns `true` when the batch reached the sink successfully.
-    ///
-    /// This is the compatibility gate used by the pipeline metrics path and
-    /// checkpoint policy while the typed delivery contract is rolled out.
-    pub const fn is_delivered(&self) -> bool {
-        matches!(self, Self::Delivered)
-    }
-
-    /// Returns `true` when the sink rejected the data permanently.
-    ///
-    /// This is the only worker outcome that should currently advance the
-    /// checkpoint without successful delivery.
-    pub const fn is_permanent_reject(&self) -> bool {
-        matches!(self, Self::Rejected { .. })
-    }
-}
-
-fn bound_rejection_reason(mut reason: String) -> String {
-    if reason.len() <= MAX_REJECTION_REASON_BYTES {
-        return reason;
-    }
-    let mut boundary = MAX_REJECTION_REASON_BYTES;
-    while boundary > 0 && !reason.is_char_boundary(boundary) {
-        boundary -= 1;
-    }
-    reason.truncate(boundary);
-    reason.push_str("...");
-    reason
-}
-
-pub struct AckItem {
-    /// The tickets from the corresponding `WorkItem`, plus delivery outcome.
-    pub tickets: Vec<BatchTicket<Sending, u64>>,
-    /// Delivery outcome from the worker/pool.
-    pub outcome: DeliveryOutcome,
-    /// Passed through from WorkItem for metrics recording.
-    pub num_rows: u64,
-    /// When the corresponding WorkItem was submitted.
-    /// Uses tokio::time::Instant so elapsed() measures simulated time under Turmoil.
-    pub submitted_at: tokio::time::Instant,
-    /// Nanoseconds spent in the scan stage (passed through from WorkItem).
-    pub scan_ns: u64,
-    /// Nanoseconds spent in the transform stage (passed through from WorkItem).
-    pub transform_ns: u64,
-    /// Nanoseconds spent in the output stage (actual send time, measured by worker).
-    pub output_ns: u64,
-    /// Nanoseconds spent waiting in the pool queue before a worker picked it up.
-    pub queue_wait_ns: u64,
-    /// Nanoseconds of pure `send_batch` wall time (tightest measurement around the call).
-    pub send_latency_ns: u64,
-    /// Batch ID for active-batch tracking in PipelineMetrics.
-    pub batch_id: u64,
-    /// Output sink name that produced this ack result.
-    pub output_name: String,
-}
-
-// ---------------------------------------------------------------------------
-// Internal worker messages
-// ---------------------------------------------------------------------------
-
-/// Message sent from pool to worker.
-enum WorkerMsg {
-    /// Process this batch.
-    Work(WorkItem),
-    /// Finish current item (if any) then exit cleanly.
-    Shutdown,
-}
-
-// ---------------------------------------------------------------------------
 // Worker config (shared across all workers in a pool)
 // ---------------------------------------------------------------------------
 
-struct WorkerConfig {
-    idle_timeout: Duration,
-    cancel: CancellationToken,
-    max_retry_delay: Duration,
-    metrics: Arc<PipelineMetrics>,
-    output_health: Arc<OutputHealthTracker>,
+pub(super) struct WorkerConfig {
+    pub(super) idle_timeout: Duration,
+    pub(super) cancel: CancellationToken,
+    pub(super) max_retry_delay: Duration,
+    pub(super) metrics: Arc<PipelineMetrics>,
+    pub(super) output_health: Arc<OutputHealthTracker>,
 }
 
-struct WorkerSlotCleanup {
-    output_health: Arc<OutputHealthTracker>,
-    worker_id: usize,
+pub(super) struct WorkerSlotCleanup {
+    pub(super) output_health: Arc<OutputHealthTracker>,
+    pub(super) worker_id: usize,
 }
 
 impl Drop for WorkerSlotCleanup {
@@ -211,7 +55,7 @@ struct WorkerHandle {
     tx: mpsc::Sender<WorkerMsg>,
 }
 
-struct OutputHealthTracker {
+pub(super) struct OutputHealthTracker {
     outputs: Vec<Arc<ComponentStats>>,
     state: std::sync::Mutex<OutputHealthState>,
 }
@@ -222,7 +66,7 @@ struct OutputHealthState {
 }
 
 impl OutputHealthTracker {
-    fn new(outputs: Vec<Arc<ComponentStats>>) -> Self {
+    pub(super) fn new(outputs: Vec<Arc<ComponentStats>>) -> Self {
         Self {
             outputs,
             state: std::sync::Mutex::new(OutputHealthState {
@@ -254,7 +98,11 @@ impl OutputHealthTracker {
         aggregate
     }
 
-    fn apply_worker_event(&self, worker_id: usize, event: OutputHealthEvent) -> ComponentHealth {
+    pub(super) fn apply_worker_event(
+        &self,
+        worker_id: usize,
+        event: OutputHealthEvent,
+    ) -> ComponentHealth {
         let mut state = self
             .state
             .lock()
@@ -275,7 +123,7 @@ impl OutputHealthTracker {
         aggregate
     }
 
-    fn remove_worker(&self, worker_id: usize) -> ComponentHealth {
+    pub(super) fn remove_worker(&self, worker_id: usize) -> ComponentHealth {
         let mut state = self
             .state
             .lock()
@@ -675,555 +523,6 @@ impl OutputWorkerPool {
         self.workers.len()
     }
 }
-
-// ---------------------------------------------------------------------------
-// Worker task
-// ---------------------------------------------------------------------------
-
-/// Long-lived tokio task that owns one `Sink` and processes `WorkItem`s.
-///
-/// Exits when:
-/// - The `rx` channel is closed (pool dropped the sender).
-/// - No item arrives within `idle_timeout` (self-terminate to free connection).
-/// - The `cancel` token is fired (hard shutdown).
-async fn worker_task(
-    id: usize,
-    mut sink: Box<dyn Sink>,
-    mut rx: mpsc::Receiver<WorkerMsg>,
-    ack_tx: mpsc::UnboundedSender<AckItem>,
-    cfg: WorkerConfig,
-) {
-    let WorkerConfig {
-        idle_timeout,
-        cancel,
-        max_retry_delay,
-        metrics,
-        output_health,
-    } = cfg;
-    let _slot_cleanup = WorkerSlotCleanup {
-        output_health: Arc::clone(&output_health),
-        worker_id: id,
-    };
-    loop {
-        tokio::select! {
-            biased; // check cancel first
-            () = cancel.cancelled() => break,
-            msg = recv_with_idle_timeout(&mut rx, idle_timeout) => {
-                match msg {
-                    None => break, // idle timeout or channel closed
-                    Some(WorkerMsg::Shutdown) => break,
-                    Some(WorkerMsg::Work(item)) => {
-                        let WorkItem {
-                            batch,
-                            metadata,
-                            tickets,
-                            num_rows,
-                            submitted_at,
-                            scan_ns,
-                            transform_ns,
-                            batch_id,
-                            span,
-                        } = item;
-                        let queue_wait_ns = submitted_at.elapsed().as_nanos() as u64;
-                        span.record("queue_wait_ns", queue_wait_ns);
-                        // Record which worker picked up this batch for the live dashboard.
-                        let now_ns = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_nanos() as u64;
-                        metrics.assign_worker_to_active_batch(batch_id, id, now_ns);
-                        let output_span = tracing::info_span!(
-                            parent: &span, "output",
-                            worker_id = id,
-                            send_ns   = tracing::field::Empty,
-                            recv_ns   = tracing::field::Empty,
-                            took_ms   = tracing::field::Empty,
-                            retries   = tracing::field::Empty,
-                            req_bytes = tracing::field::Empty,
-                            cmp_bytes = tracing::field::Empty,
-                            resp_bytes = tracing::field::Empty,
-                        );
-                        let (outcome, send_latency_ns, retries) =
-                            process_item(id, &mut *sink, &output_health, batch, &metadata, max_retry_delay)
-                        .instrument(output_span.clone())
-                        .await;
-                        output_span.record("retries", retries);
-                        output_span.record("send_ns", send_latency_ns);
-                        let output_ns = submitted_at.elapsed().as_nanos() as u64 - queue_wait_ns;
-                        // Remove from active_batches immediately — don't wait for the pipeline's
-                        // ack select loop, which can be starved by flush_batch.await blocking.
-                        metrics.finish_active_batch(batch_id);
-                        drop(span);
-                        let ack = AckItem {
-                            tickets,
-                            outcome,
-                            num_rows,
-                            submitted_at,
-                            scan_ns,
-                            transform_ns,
-                            output_ns,
-                            queue_wait_ns,
-                            send_latency_ns,
-                            batch_id,
-                            output_name: sink.name().to_string(),
-                        };
-                        if let Err(send_err) = ack_tx.send(ack) {
-                            let lost_ack = send_err.0;
-                            tracing::warn!(
-                                worker_id = id,
-                                num_rows = lost_ack.num_rows,
-                                "outcome" = ?lost_ack.outcome,
-                                "worker: ack channel closed, ack lost"
-                            );
-                        }
-                    }
-                }
-            }
-        }
-    }
-    // Always shut the sink down when the worker exits so resources are flushed
-    // and released. Health transitions for pipeline drain are driven by the
-    // pool-level drain path; idle worker expiry should not make outputs appear
-    // permanently unready because the pool can respawn workers on demand.
-    if let Err(e) = sink.shutdown().await {
-        tracing::error!(worker_id = id, error = %e, "worker_pool: sink shutdown failed");
-        metrics.output_error(sink.name());
-    }
-}
-
-/// Receive with idle timeout — returns `None` on timeout or channel close.
-async fn recv_with_idle_timeout(
-    rx: &mut mpsc::Receiver<WorkerMsg>,
-    idle_timeout: Duration,
-) -> Option<WorkerMsg> {
-    tokio::time::timeout(idle_timeout, rx.recv())
-        .await
-        .ok() // Err = timed out → None
-        .flatten() // None = channel closed → None
-}
-
-/// Process one batch with retry on `RetryAfter` and server errors.
-///
-/// Returns `(outcome, send_latency_ns, retries)` where `send_latency_ns` is
-/// cumulative wall time inside `sink.send_batch()` across all attempts
-/// (excludes backoff sleep).
-async fn process_item(
-    worker_id: usize,
-    sink: &mut dyn Sink,
-    output_health: &OutputHealthTracker,
-    batch: RecordBatch,
-    metadata: &BatchMetadata,
-    max_retry_delay: Duration,
-) -> (DeliveryOutcome, u64, usize) {
-    sink.begin_batch();
-
-    const MAX_RETRIES: usize = 3; // 1 initial + 3 retries = 4 total attempts
-    const BATCH_TIMEOUT_SECS: u64 = 60;
-
-    let mut backoff = ExponentialBuilder::default()
-        .with_min_delay(Duration::from_millis(100))
-        .with_max_delay(max_retry_delay)
-        .with_factor(2.0)
-        .with_max_times(MAX_RETRIES)
-        .with_jitter()
-        .build();
-
-    let mut send_latency_ns: u64 = 0;
-    let mut retries_count = 0;
-
-    loop {
-        // Hard per-batch timeout: prevents one slow/broken batch from
-        // tying up the worker indefinitely.
-        let send_start = std::time::Instant::now();
-        let result = tokio::time::timeout(
-            Duration::from_secs(BATCH_TIMEOUT_SECS),
-            sink.send_batch(&batch, metadata),
-        )
-        .await;
-        send_latency_ns += send_start.elapsed().as_nanos() as u64;
-
-        match result {
-            Err(_elapsed) => {
-                tracing::error!(
-                    worker_id,
-                    timeout_secs = BATCH_TIMEOUT_SECS,
-                    "worker_pool: batch send timed out"
-                );
-                output_health.apply_worker_event(worker_id, OutputHealthEvent::FatalFailure);
-                return (DeliveryOutcome::TimedOut, send_latency_ns, retries_count);
-            }
-            Ok(SendResult::Ok) => {
-                output_health.apply_worker_event(worker_id, OutputHealthEvent::DeliverySucceeded);
-                return (DeliveryOutcome::Delivered, send_latency_ns, retries_count);
-            }
-            Ok(SendResult::Rejected(reason)) => {
-                tracing::warn!(worker_id, %reason, "worker_pool: batch rejected");
-                output_health.apply_worker_event(worker_id, OutputHealthEvent::FatalFailure);
-                return (
-                    DeliveryOutcome::Rejected {
-                        reason: bound_rejection_reason(reason),
-                    },
-                    send_latency_ns,
-                    retries_count,
-                );
-            }
-            Ok(SendResult::RetryAfter(retry_dur)) => {
-                // Server specified delay — consume a backoff slot but use
-                // the server's delay (capped at max_retry_delay).
-                if backoff.next().is_none() {
-                    tracing::error!(
-                        worker_id,
-                        max_retries = MAX_RETRIES,
-                        "worker_pool: RetryAfter exceeded max retries"
-                    );
-                    output_health.apply_worker_event(worker_id, OutputHealthEvent::FatalFailure);
-                    return (
-                        DeliveryOutcome::RetryExhausted,
-                        send_latency_ns,
-                        retries_count,
-                    );
-                }
-                retries_count += 1;
-                let sleep_for = retry_dur.min(max_retry_delay);
-                output_health.apply_worker_event(worker_id, OutputHealthEvent::Retrying);
-                tracing::warn!(worker_id, ?sleep_for, "worker_pool: rate-limited, retrying");
-                tokio::time::sleep(sleep_for).await;
-            }
-            Ok(SendResult::IoError(e)) => match backoff.next() {
-                Some(delay) => {
-                    retries_count += 1;
-                    output_health.apply_worker_event(worker_id, OutputHealthEvent::Retrying);
-                    tracing::warn!(
-                        worker_id,
-                        sleep_ms = delay.as_millis() as u64,
-                        error = %e,
-                        "worker_pool: transient error, retrying with jitter"
-                    );
-                    tokio::time::sleep(delay).await;
-                }
-                None => {
-                    tracing::error!(
-                        worker_id,
-                        max_retries = MAX_RETRIES,
-                        error = %e,
-                        "worker_pool: gave up after retries"
-                    );
-                    output_health.apply_worker_event(worker_id, OutputHealthEvent::FatalFailure);
-                    return (
-                        DeliveryOutcome::RetryExhausted,
-                        send_latency_ns,
-                        retries_count,
-                    );
-                }
-            },
-            // Future SendResult variants (#[non_exhaustive]) — treat as failure.
-            Ok(_) => {
-                output_health.apply_worker_event(worker_id, OutputHealthEvent::FatalFailure);
-                return (
-                    DeliveryOutcome::InternalFailure,
-                    send_latency_ns,
-                    retries_count,
-                );
-            }
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Kani formal proofs — dispatch logic
-// ---------------------------------------------------------------------------
-//
-// The tokio runtime and channel operations cannot be modelled by Kani.
-// We extract the pure dispatch *decision* into a standalone function and
-// prove its invariants symbolically.  The actual pool code mirrors this
-// logic exactly so the proofs transfer.
-
-/// Abstract channel state used in Kani models.
-#[cfg_attr(kani, derive(kani::Arbitrary))]
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum ChannelState {
-    /// Channel has space — `try_send` would succeed.
-    HasSpace,
-    /// Channel is full — `try_send` would return `Full`.
-    Full,
-    /// Worker has exited — `try_send` would return `Closed`.
-    Closed,
-}
-
-/// Outcome of one dispatch step over an array of workers.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum DispatchOutcome {
-    /// Item sent to worker at this index.
-    SentToIndex(usize),
-    /// All workers full/closed but under limit — spawn a new worker.
-    SpawnNew,
-    /// All workers full, at limit — must async-wait on front worker.
-    WaitOnFront,
-}
-
-/// Pure dispatch algorithm (no I/O). Proved by Kani.
-///
-/// Scans `states` front-to-back:
-/// - Closed workers are skipped (counted as pruned).
-/// - The first worker with `HasSpace` receives the item.
-/// - If all non-closed workers are `Full`:
-///   - If `active_count < max_workers`, returns `SpawnNew`.
-///   - Otherwise returns `WaitOnFront`.
-///
-/// Preconditions: `max_workers >= 1`, `states.len() <= max_workers`.
-pub fn dispatch_step(states: &[ChannelState], max_workers: usize) -> DispatchOutcome {
-    for (i, &state) in states.iter().enumerate() {
-        match state {
-            ChannelState::Closed => {} // prune; try next
-            ChannelState::HasSpace => return DispatchOutcome::SentToIndex(i),
-            ChannelState::Full => {} // try next
-        }
-    }
-    // No worker had space. Count active (non-closed) workers.
-    let active = states
-        .iter()
-        .filter(|&&s| s != ChannelState::Closed)
-        .count();
-    if active < max_workers {
-        DispatchOutcome::SpawnNew
-    } else {
-        DispatchOutcome::WaitOnFront
-    }
-}
-
-#[cfg(kani)]
-mod kani_proofs {
-    use super::*;
-
-    // -----------------------------------------------------------------------
-    // Proof 1: Dispatch always sends to a valid index, spawns, or waits.
-    // The item is NEVER silently dropped.
-    // -----------------------------------------------------------------------
-    #[kani::proof]
-    #[kani::unwind(6)]
-    fn verify_dispatch_never_drops_item() {
-        const MAX_N: usize = 4;
-        let n: usize = kani::any();
-        kani::assume(n <= MAX_N);
-
-        let max_workers: usize = kani::any();
-        kani::assume(max_workers >= 1);
-        kani::assume(max_workers <= 8);
-        // Pool invariant: never more workers than max.
-        kani::assume(n <= max_workers);
-
-        let states: [ChannelState; MAX_N] = kani::any();
-
-        let outcome = dispatch_step(&states[..n], max_workers);
-
-        // Guard against vacuous proofs: confirm all three arms are reachable.
-        kani::cover!(
-            matches!(outcome, DispatchOutcome::SentToIndex(_)),
-            "SentToIndex path reachable"
-        );
-        kani::cover!(
-            matches!(outcome, DispatchOutcome::SpawnNew),
-            "SpawnNew path reachable"
-        );
-        kani::cover!(
-            matches!(outcome, DispatchOutcome::WaitOnFront),
-            "WaitOnFront path reachable"
-        );
-
-        match outcome {
-            DispatchOutcome::SentToIndex(i) => {
-                // Must be a valid index.
-                assert!(i < n);
-                // Must point to a non-closed, non-full slot.
-                assert_eq!(states[i], ChannelState::HasSpace);
-            }
-            DispatchOutcome::SpawnNew => {
-                // Must be under the limit.
-                let active = states[..n]
-                    .iter()
-                    .filter(|&&s| s != ChannelState::Closed)
-                    .count();
-                assert!(active < max_workers);
-                // No HasSpace worker exists (else we'd have sent to it).
-                assert!(!states[..n].iter().any(|&s| s == ChannelState::HasSpace));
-            }
-            DispatchOutcome::WaitOnFront => {
-                // Must be at the limit.
-                let active = states[..n]
-                    .iter()
-                    .filter(|&&s| s != ChannelState::Closed)
-                    .count();
-                assert_eq!(active, max_workers);
-                // No HasSpace worker exists.
-                assert!(!states[..n].iter().any(|&s| s == ChannelState::HasSpace));
-            }
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // Proof 2: SentToIndex always picks the FIRST HasSpace worker (MRU-first).
-    // -----------------------------------------------------------------------
-    #[kani::proof]
-    #[kani::unwind(6)]
-    fn verify_dispatch_picks_first_available() {
-        const MAX_N: usize = 4;
-        let n: usize = kani::any();
-        kani::assume(n > 0 && n <= MAX_N);
-
-        let max_workers: usize = kani::any();
-        kani::assume(max_workers >= n);
-
-        let states: [ChannelState; MAX_N] = kani::any();
-
-        let outcome = dispatch_step(&states[..n], max_workers);
-
-        // Guard: confirm MRU path (SentToIndex) is reachable under these inputs.
-        kani::cover!(
-            matches!(outcome, DispatchOutcome::SentToIndex(_)),
-            "SentToIndex reachable in picks_first proof"
-        );
-
-        if let DispatchOutcome::SentToIndex(i) = outcome {
-            // All workers before i must be Full or Closed.
-            for j in 0..i {
-                assert_ne!(states[j], ChannelState::HasSpace);
-            }
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // Proof 3: SpawnNew only fires when no HasSpace worker exists.
-    // -----------------------------------------------------------------------
-    #[kani::proof]
-    #[kani::unwind(6)]
-    fn verify_spawn_only_when_no_space() {
-        const MAX_N: usize = 4;
-        let n: usize = kani::any();
-        kani::assume(n <= MAX_N);
-
-        let max_workers: usize = kani::any();
-        kani::assume(max_workers >= 1 && max_workers <= 8);
-        kani::assume(n <= max_workers);
-
-        let states: [ChannelState; MAX_N] = kani::any();
-        let has_space = states[..n].iter().any(|&s| s == ChannelState::HasSpace);
-
-        let outcome = dispatch_step(&states[..n], max_workers);
-
-        // Guard: both branches (has_space / no_space) must be reachable.
-        kani::cover!(has_space, "has_space=true path exercised");
-        kani::cover!(!has_space, "has_space=false path exercised");
-
-        if has_space {
-            // Must send to an existing worker, not spawn.
-            assert!(!matches!(outcome, DispatchOutcome::SpawnNew));
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // Proof 4: WaitOnFront only fires when active == max_workers.
-    // -----------------------------------------------------------------------
-    #[kani::proof]
-    #[kani::unwind(6)]
-    fn verify_wait_only_at_capacity() {
-        const MAX_N: usize = 4;
-        let n: usize = kani::any();
-        kani::assume(n <= MAX_N);
-
-        let max_workers: usize = kani::any();
-        kani::assume(max_workers >= 1 && max_workers <= 4);
-        kani::assume(n <= max_workers);
-
-        let states: [ChannelState; MAX_N] = kani::any();
-        let active = states[..n]
-            .iter()
-            .filter(|&&s| s != ChannelState::Closed)
-            .count();
-
-        let outcome = dispatch_step(&states[..n], max_workers);
-
-        // Guard: WaitOnFront must be reachable (not vacuously avoided).
-        kani::cover!(
-            matches!(outcome, DispatchOutcome::WaitOnFront),
-            "WaitOnFront reachable in wait_only_at_capacity proof"
-        );
-
-        if matches!(outcome, DispatchOutcome::WaitOnFront) {
-            assert_eq!(active, max_workers);
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // Proof 5: With max_workers = 1 and a Full channel,
-    //          dispatch always returns WaitOnFront (backpressure).
-    // -----------------------------------------------------------------------
-    #[kani::proof]
-    fn verify_single_worker_full_causes_wait() {
-        let states = [ChannelState::Full];
-        let outcome = dispatch_step(&states, 1);
-        assert_eq!(outcome, DispatchOutcome::WaitOnFront);
-    }
-
-    // -----------------------------------------------------------------------
-    // Proof 6: Empty worker list with max >= 1 always triggers SpawnNew.
-    // -----------------------------------------------------------------------
-    #[kani::proof]
-    fn verify_empty_pool_triggers_spawn() {
-        let max_workers: usize = kani::any();
-        kani::assume(max_workers >= 1);
-        // Guard: ensure max_workers=1 AND max_workers>1 are both reachable.
-        kani::cover!(max_workers == 1, "single-worker capacity exercised");
-        kani::cover!(max_workers > 1, "multi-worker capacity exercised");
-        let outcome = dispatch_step(&[], max_workers);
-        assert_eq!(outcome, DispatchOutcome::SpawnNew);
-    }
-
-    // -----------------------------------------------------------------------
-    // Proof 7: is_delivered matches the enum variant exactly.
-    // -----------------------------------------------------------------------
-    #[kani::proof]
-    fn verify_delivery_outcome_is_delivered_contract() {
-        let rejected = DeliveryOutcome::Rejected {
-            reason: "bad request".to_owned(),
-        };
-        assert!(DeliveryOutcome::Delivered.is_delivered());
-        for outcome in [
-            rejected,
-            DeliveryOutcome::RetryExhausted,
-            DeliveryOutcome::TimedOut,
-            DeliveryOutcome::PoolClosed,
-            DeliveryOutcome::WorkerChannelClosed,
-            DeliveryOutcome::NoWorkersAvailable,
-            DeliveryOutcome::InternalFailure,
-        ] {
-            assert!(!outcome.is_delivered());
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // Proof 8: only explicit Rejected outcomes count as permanent rejects.
-    // -----------------------------------------------------------------------
-    #[kani::proof]
-    fn verify_delivery_outcome_is_permanent_reject_contract() {
-        let rejected = DeliveryOutcome::Rejected {
-            reason: "bad request".to_owned(),
-        };
-        assert!(rejected.is_permanent_reject());
-        for outcome in [
-            DeliveryOutcome::Delivered,
-            DeliveryOutcome::RetryExhausted,
-            DeliveryOutcome::TimedOut,
-            DeliveryOutcome::PoolClosed,
-            DeliveryOutcome::WorkerChannelClosed,
-            DeliveryOutcome::NoWorkersAvailable,
-            DeliveryOutcome::InternalFailure,
-        ] {
-            assert!(!outcome.is_permanent_reject());
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
 
@@ -1314,6 +613,7 @@ mod tests {
 
     use arrow::array::StringArray;
     use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
     use logfwd_io::diagnostics::ComponentHealth;
     use logfwd_output::BatchMetadata;
     use logfwd_output::sink::{SendResult, Sink, SinkFactory};

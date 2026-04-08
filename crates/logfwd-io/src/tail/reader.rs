@@ -1,0 +1,393 @@
+use std::collections::HashMap;
+use std::fs::File;
+use std::io::{self, Read, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
+use std::time::Instant;
+
+use logfwd_types::pipeline::SourceId;
+
+use super::identity::{ByteOffset, FileIdentity, compute_fingerprint, identify_file};
+use super::tailer::{TailConfig, TailEvent};
+
+/// State tracked per tailed file.
+pub(super) struct TailedFile {
+    pub(super) identity: FileIdentity,
+    pub(super) file: File,
+    pub(super) offset: u64,
+    pub(super) last_read: Instant,
+    pub(super) eof_emitted: bool,
+}
+
+/// Saved state for a file evicted from the open-file LRU cache.
+pub(super) struct EvictedFile {
+    pub(super) identity: FileIdentity,
+    pub(super) offset: u64,
+    pub(super) path: PathBuf,
+    pub(super) source_id: SourceId,
+}
+
+/// Internal result from read_new_data — distinguishes truncation from no-data.
+pub(super) enum ReadResult {
+    Data(Vec<u8>),
+    TruncatedThenData(Vec<u8>),
+    Truncated,
+    NoData,
+}
+
+/// Owns the open file descriptors, read buffer, and byte-level I/O.
+pub(super) struct FileReader {
+    pub(super) files: HashMap<PathBuf, TailedFile>,
+    pub(super) read_buf: Vec<u8>,
+    pub(super) evicted_offsets: HashMap<PathBuf, EvictedFile>,
+    pub(super) config: TailConfig,
+}
+
+impl FileReader {
+    pub(super) const MAX_READ_PER_POLL: usize = 4 * 1024 * 1024;
+
+    pub(super) fn open_file_at(&mut self, path: &Path, start_from_end: bool) -> io::Result<()> {
+        let identity = identify_file(path, self.config.fingerprint_bytes)?;
+        let mut file = File::open(path)?;
+        let file_size = file.metadata()?.len();
+
+        let offset = if let Some(evicted) = self.evicted_offsets.remove(path) {
+            if evicted.identity == identity {
+                let safe_offset = if evicted.offset > file_size {
+                    tracing::warn!(
+                        path = %path.display(),
+                        saved_offset = evicted.offset,
+                        file_size,
+                        "evicted offset exceeds file size — resetting to 0"
+                    );
+                    0
+                } else {
+                    evicted.offset
+                };
+                file.seek(SeekFrom::Start(safe_offset))?
+            } else {
+                tracing::warn!(
+                    path = %path.display(),
+                    evicted_identity = ?evicted.identity,
+                    current_identity = ?identity,
+                    "evicted offset identity mismatch — ignoring saved offset"
+                );
+                if start_from_end {
+                    file.seek(SeekFrom::End(0))?
+                } else {
+                    0
+                }
+            }
+        } else if start_from_end {
+            file.seek(SeekFrom::End(0))?
+        } else {
+            0
+        };
+
+        self.files.insert(
+            path.to_path_buf(),
+            TailedFile {
+                identity,
+                file,
+                offset,
+                last_read: Instant::now(),
+                eof_emitted: false,
+            },
+        );
+
+        Ok(())
+    }
+
+    pub(super) fn read_new_data(&mut self, path: &Path) -> io::Result<ReadResult> {
+        let tailed = match self.files.get_mut(path) {
+            Some(t) => t,
+            None => return Ok(ReadResult::NoData),
+        };
+
+        let meta = tailed.file.metadata()?;
+        let current_size = meta.len();
+
+        let was_truncated = current_size < tailed.offset;
+        if was_truncated {
+            tailed.offset = 0;
+            tailed.eof_emitted = false;
+            tailed.file.seek(SeekFrom::Start(0))?;
+            tailed.identity.fingerprint =
+                compute_fingerprint(&mut tailed.file, self.config.fingerprint_bytes)?;
+            tailed.file.seek(SeekFrom::Start(0))?;
+        }
+
+        if current_size <= tailed.offset {
+            return Ok(if was_truncated {
+                ReadResult::Truncated
+            } else {
+                ReadResult::NoData
+            });
+        }
+
+        let per_file_budget = self
+            .config
+            .per_file_read_budget_bytes
+            .clamp(1, Self::MAX_READ_PER_POLL);
+        let mut result = Vec::with_capacity(self.config.read_buf_size);
+        loop {
+            let remaining = per_file_budget.saturating_sub(result.len());
+            if remaining == 0 {
+                break;
+            }
+            let read_len = remaining.min(self.read_buf.len());
+            let n = tailed.file.read(&mut self.read_buf[..read_len])?;
+            if n == 0 {
+                break;
+            }
+            result.extend_from_slice(&self.read_buf[..n]);
+            tailed.offset += n as u64;
+        }
+
+        if result.is_empty() {
+            return Ok(if was_truncated {
+                ReadResult::Truncated
+            } else {
+                ReadResult::NoData
+            });
+        }
+
+        tailed.last_read = Instant::now();
+
+        if tailed.identity.fingerprint == 0 {
+            let current_pos = tailed.file.stream_position()?;
+            tailed.file.seek(SeekFrom::Start(0))?;
+            let new_fp = compute_fingerprint(&mut tailed.file, self.config.fingerprint_bytes)?;
+            tailed.file.seek(SeekFrom::Start(current_pos))?;
+            if new_fp != 0 {
+                tailed.identity.fingerprint = new_fp;
+            }
+        }
+
+        Ok(if was_truncated {
+            ReadResult::TruncatedThenData(result)
+        } else {
+            ReadResult::Data(result)
+        })
+    }
+
+    pub(super) fn drain_file(
+        &mut self,
+        path: &Path,
+        source_id: Option<SourceId>,
+        events: &mut Vec<TailEvent>,
+    ) -> bool {
+        match self.read_new_data(path) {
+            Ok(ReadResult::Data(data)) => {
+                events.push(TailEvent::Data {
+                    path: path.to_path_buf(),
+                    bytes: data,
+                    source_id,
+                });
+                false
+            }
+            Ok(ReadResult::TruncatedThenData(data)) => {
+                events.push(TailEvent::Truncated {
+                    path: path.to_path_buf(),
+                    source_id,
+                });
+                events.push(TailEvent::Data {
+                    path: path.to_path_buf(),
+                    bytes: data,
+                    source_id,
+                });
+                false
+            }
+            Ok(ReadResult::Truncated) => {
+                events.push(TailEvent::Truncated {
+                    path: path.to_path_buf(),
+                    source_id,
+                });
+                false
+            }
+            Ok(ReadResult::NoData) => false,
+            Err(e) => {
+                tracing::error!(path = %path.display(), error = %e, "tail.drain_file_error");
+                true
+            }
+        }
+    }
+
+    pub(super) fn read_all(&mut self, events: &mut Vec<TailEvent>) -> bool {
+        let mut had_error = false;
+        let paths: Vec<PathBuf> = self.files.keys().cloned().collect();
+        for path in paths {
+            let pre_read_source_id = self.source_id_for_path(&path);
+            match self.read_new_data(&path) {
+                Ok(ReadResult::Data(data)) => {
+                    if let Some(tailed) = self.files.get_mut(&path) {
+                        tailed.eof_emitted = false;
+                    }
+                    let source_id = self.source_id_for_path(&path);
+                    events.push(TailEvent::Data {
+                        path: path.clone(),
+                        bytes: data,
+                        source_id,
+                    });
+                }
+                Ok(ReadResult::TruncatedThenData(data)) => {
+                    events.push(TailEvent::Truncated {
+                        path: path.clone(),
+                        source_id: pre_read_source_id,
+                    });
+                    if let Some(tailed) = self.files.get_mut(&path) {
+                        tailed.eof_emitted = false;
+                    }
+                    let source_id = self.source_id_for_path(&path);
+                    events.push(TailEvent::Data {
+                        path: path.clone(),
+                        bytes: data,
+                        source_id,
+                    });
+                }
+                Ok(ReadResult::Truncated) => {
+                    events.push(TailEvent::Truncated {
+                        path: path.clone(),
+                        source_id: pre_read_source_id,
+                    });
+                }
+                Ok(ReadResult::NoData) => {
+                    if let Some(tailed) = self.files.get_mut(&path)
+                        && !tailed.eof_emitted
+                    {
+                        tailed.eof_emitted = true;
+                        let source_id = self.source_id_for_path(&path);
+                        events.push(TailEvent::EndOfFile {
+                            path: path.clone(),
+                            source_id,
+                        });
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(path = %path.display(), error = %e, "tail.read_error");
+                    had_error = true;
+                }
+            }
+        }
+        had_error
+    }
+
+    pub(super) fn evict_lru(&mut self, max_open: usize) {
+        if self.files.len() > max_open {
+            let mut by_age: Vec<(PathBuf, Instant)> = self
+                .files
+                .iter()
+                .map(|(path, tailed)| (path.clone(), tailed.last_read))
+                .collect();
+            by_age.sort_by_key(|(_, last_read)| *last_read);
+            let to_remove = self.files.len() - max_open;
+            for (path, _) in by_age.into_iter().take(to_remove) {
+                if let Some(tailed) = self.files.remove(&path) {
+                    let source_id = tailed.identity.source_id();
+                    self.evicted_offsets.insert(
+                        path.clone(),
+                        EvictedFile {
+                            identity: tailed.identity,
+                            offset: tailed.offset,
+                            path,
+                            source_id,
+                        },
+                    );
+                }
+            }
+        }
+    }
+
+    pub(super) fn get_offset(&self, path: &Path) -> Option<u64> {
+        self.files.get(path).map(|f| f.offset)
+    }
+
+    pub(super) fn set_offset(&mut self, path: &Path, offset: u64) -> io::Result<()> {
+        if let Some(tailed) = self.files.get_mut(path) {
+            let file_size = tailed.file.metadata()?.len();
+            let safe_offset = if offset > file_size {
+                tracing::warn!(
+                    path = %path.display(),
+                    saved_offset = offset,
+                    file_size,
+                    "checkpoint offset exceeds file size — resetting to 0"
+                );
+                0
+            } else {
+                offset
+            };
+            tailed.offset = safe_offset;
+            tailed.file.seek(SeekFrom::Start(safe_offset))?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn set_offset_by_source(
+        &mut self,
+        source_id: SourceId,
+        offset: u64,
+    ) -> io::Result<()> {
+        for tailed in self.files.values_mut() {
+            if tailed.identity.source_id() == source_id {
+                let file_size = tailed.file.metadata()?.len();
+                let safe_offset = if offset > file_size {
+                    tracing::warn!(
+                        source_id = source_id.0,
+                        saved_offset = offset,
+                        file_size,
+                        "checkpoint source offset exceeds file size — resetting to 0"
+                    );
+                    0
+                } else {
+                    offset
+                };
+                tailed.offset = safe_offset;
+                tailed.file.seek(SeekFrom::Start(safe_offset))?;
+                return Ok(());
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn num_files(&self) -> usize {
+        self.files.len()
+    }
+
+    pub(super) fn source_id_for_path(&self, path: &Path) -> Option<SourceId> {
+        self.files.get(path).and_then(|tailed| {
+            let sid = tailed.identity.source_id();
+            if sid == SourceId(0) { None } else { Some(sid) }
+        })
+    }
+
+    pub(super) fn file_offsets(&self) -> Vec<(SourceId, ByteOffset)> {
+        let active = self
+            .files
+            .iter()
+            .filter(|(_, tailed)| tailed.identity.fingerprint != 0)
+            .map(|(_, tailed)| (tailed.identity.source_id(), ByteOffset(tailed.offset)));
+
+        let evicted = self
+            .evicted_offsets
+            .values()
+            .filter(|e| e.identity.fingerprint != 0)
+            .map(|e| (e.source_id, ByteOffset(e.offset)));
+
+        active.chain(evicted).collect()
+    }
+
+    pub(super) fn file_paths(&self) -> Vec<(SourceId, PathBuf)> {
+        let active = self
+            .files
+            .iter()
+            .filter(|(_, tailed)| tailed.identity.fingerprint != 0)
+            .map(|(path, tailed)| (tailed.identity.source_id(), path.clone()));
+
+        let evicted = self
+            .evicted_offsets
+            .values()
+            .filter(|e| e.identity.fingerprint != 0)
+            .map(|e| (e.source_id, e.path.clone()));
+
+        active.chain(evicted).collect()
+    }
+}
