@@ -2260,4 +2260,38 @@ mod tests {
             a.referenced_columns
         );
     }
+
+    /// Regression for #1684: `SELECT _raw, level FROM logs WHERE level = 'ERROR'`
+    /// must produce `scan_config.keep_raw = true`.
+    ///
+    /// Before the fix, `keep_raw` was unconditionally `false` for non-SELECT-*
+    /// queries. The scanner therefore never called `append_raw`, `_raw` was absent
+    /// from the batch schema, and DataFusion raised "column _raw not found" on the
+    /// first batch, dropping all data.
+    #[test]
+    fn test_scan_config_keep_raw_true_when_raw_in_select_list() {
+        let a = QueryAnalyzer::new("SELECT _raw, level FROM logs WHERE level = 'ERROR'").unwrap();
+        let sc = a.scan_config();
+        assert!(
+            sc.keep_raw,
+            "scan_config.keep_raw must be true when _raw is in the SELECT list, got false"
+        );
+        assert!(
+            !sc.extract_all,
+            "scan_config.extract_all must be false for a selective query"
+        );
+    }
+
+    /// Selective query that does NOT mention `_raw` must leave keep_raw false
+    /// (no performance regression from the fix).
+    #[test]
+    fn test_scan_config_keep_raw_false_when_raw_not_referenced() {
+        let a =
+            QueryAnalyzer::new("SELECT level, message FROM logs WHERE level = 'ERROR'").unwrap();
+        let sc = a.scan_config();
+        assert!(
+            !sc.keep_raw,
+            "scan_config.keep_raw must be false when _raw is not referenced, got true"
+        );
+    }
 }
