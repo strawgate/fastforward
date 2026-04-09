@@ -348,7 +348,11 @@ impl GeneratorInput {
             3 => 429,
             _ => 200,
         };
-        let Some(event_ms) = (self.counter as i64)
+        let Ok(counter_i64) = i64::try_from(self.counter) else {
+            self.done = true;
+            return;
+        };
+        let Some(event_ms) = counter_i64
             .checked_mul(self.config.timestamp.step_ms)
             .and_then(|offset| self.config.timestamp.start_epoch_ms.checked_add(offset))
         else {
