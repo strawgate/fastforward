@@ -1,7 +1,5 @@
 # Fault Injection Framework — Design
 
-**Status:** Proposed  
-**Date:** 2026-04-09
 
 ## Problem
 
@@ -99,6 +97,10 @@ pub enum InputFault {
     SlowPoll { after_polls: usize, delay: Duration },
     /// Stop returning data for the given duration after N polls.
     Stall { after_polls: usize, duration: Duration },
+    /// Emit oversized chunks to pressure bounded channels.
+    BackpressureSpike { after_polls: usize, chunk_bytes: usize },
+    /// Return EACCES from poll() after N polls.
+    PermissionDenied { after_polls: usize },
     /// Panic at poll N.
     SourcePanic { at_poll: usize },
 }
@@ -135,6 +137,8 @@ pub enum OutputFault {
     CorrelatedFailure { duration: Duration },
     /// Cycle: succeed for N calls, then fail for M calls, repeat.
     ConnectionCycle { succeed_count: usize, fail_count: usize, kind: io::ErrorKind },
+    /// Accept only the first N rows in a batch; reject the rest.
+    PartialAccept { accept_rows: usize },
     /// flush() delays for the given duration.
     SlowFlush { delay: Duration },
     /// shutdown() never completes (tests drain timeout).
@@ -177,10 +181,16 @@ pub enum PipelineFault {
     LatencySpike { from: String, to: String, latency: Duration, duration: Duration, at: Duration },
     /// Crash and bounce a server host.
     ServerCrash { host: String, at: Duration, restart_after: Duration },
+    /// Inject scan delay in the scanner adapter.
+    SlowScan { delay: Duration, at_batch: usize },
+    /// Return an error from transform execution.
+    TransformError { at_batch: usize, message: String },
     /// Checkpoint flush failure at the Nth flush.
     CheckpointFlushFail { at_flush: usize },
     /// Corrupt loaded checkpoint data.
     CheckpointCorrupt,
+    /// Force-close an internal channel at a scheduled time.
+    ChannelClose { at: Duration },
 }
 ```
 
@@ -401,6 +411,7 @@ pub fn random_scenario(seed: u64) -> FaultScenario {
 
 /// Nightly CI: run N random seeds, report all failures.
 #[test]
+#[ignore = "nightly CI only; run with -- --ignored"]
 fn nightly_fault_campaign() {
     let base_seed: u64 = std::env::var("CAMPAIGN_SEED")
         .ok().and_then(|s| s.parse().ok())
@@ -431,9 +442,11 @@ fn nightly_fault_campaign() {
 
 ## Implementation Plan
 
-### Phase 1: Core Framework (this PR)
+### Phase 1: Core Framework (follow-up implementation PR)
 
-New files in `crates/logfwd/tests/turmoil_sim/`:
+This design PR is documentation-only; no runtime or test code is added here.
+
+Planned new files in `crates/logfwd/tests/turmoil_sim/`:
 
 | File | Contents |
 |------|----------|
@@ -450,6 +463,12 @@ Modifications:
 | `main.rs` | Add `mod fault_types; mod fault_input; ...` |
 | `instrumented_sink.rs` | Add `Intermittent`, `ConnectionCycle` to `FailureAction` |
 | `observable_checkpoint.rs` | Add `at_flush` crash trigger, `corrupt_on_load` flag |
+
+Documentation updates required in the same implementation PR:
+
+- `dev-docs/VERIFICATION.md` — describe where scenario-based fault injection fits relative to TLA+, Kani, and proptest
+- `dev-docs/CHANGE_MAP.md` — add cross-links for fault-injection changes that affect invariants and simulation coverage
+- `dev-docs/ARCHITECTURE.md` — document new simulation harness seams if pipeline orchestration hooks are introduced
 
 ### Phase 2: Named Scenarios (follow-up)
 
@@ -517,6 +536,23 @@ The framework **extends, not replaces** the existing turmoil_sim tests:
 | **RAC** | Reject advances checkpoint: permanent rejects DO advance | `durable_offset > 0` after reject |
 | **NR** | No regression: durable offset never goes backward across restarts | Cross-run checkpoint comparison |
 
+
+## Relationship to TLA+ and proptest
+
+The invariant checks in this framework are runtime test oracles, not replacements for formal models:
+
+- **TLA+ remains canonical** for temporal protocol properties (ordering, liveness, eventual drain) in `tla/PipelineMachine.tla`.
+- **Fault-injection invariants operationalize those properties** in executable scenarios to catch regressions in wiring, retries, and integration behavior.
+- **proptest remains required** for async/stateful permutations and heap-heavy paths where randomized input generation plus shrinking provides better counterexamples than scenario scripts.
+
+Planned split of responsibility:
+
+- Use **TLA+** to define protocol-level invariants and allowed transitions.
+- Use **proptest** for component-level stochastic exploration (e.g., scanner/SIMD equivalence, reducer transition sequences).
+- Use **fault scenarios** to validate end-to-end recovery under composed infrastructure failures.
+
+Each new fault scenario category should map to at least one existing verification artifact (TLA+ property name or proptest target) in the follow-up implementation PR.
+
 ## Future Consideration: `fail-rs` Failpoints
 
 The `fail` crate (tikv/fail-rs) provides compile-time failpoints for injecting
@@ -554,10 +590,17 @@ and `panic` failpoints. Never use `sleep`/`pause`/`delay` in async contexts.
    tests within individual faults.
 
 3. **How do we handle the known ack-starvation bug?**
-   Tests should document the current behavior (not the ideal). When the bug is
-   fixed, update the invariants to require intermediate checkpoint advances.
-   **Recommendation:** Use `InvariantSet::crash_recovery()` (relaxed) until
-   ack starvation is fixed, then tighten to `at_least_once()`.
+   In certain retry-heavy schedules, ACK processing can be delayed long enough
+   that checkpoints do not advance until much later in the run (starvation under
+   sustained retry pressure). This can produce false negatives if scenarios
+   require immediate intermediate checkpoint progress.
+
+   **Temporary test posture:** use `InvariantSet::crash_recovery()` for campaign
+   scenarios that intentionally induce prolonged retry pressure.
+
+   **Exit criterion:** once the starvation bug is fixed and covered by regression
+   tests, move those campaigns back to `InvariantSet::at_least_once()` and
+   require intermediate checkpoint advancement assertions.
 
 4. **Should pipeline faults (network partition, crash) be part of the scenario
    builder or applied via `sim.step()` sequences?**
