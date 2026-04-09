@@ -164,7 +164,6 @@ enum CompletionShell {
 enum BlastDestination {
     #[value(alias = "elasticsearch_otlp")]
     Otlp,
-    Http,
     #[value(alias = "elasticsearch_bulk")]
     Elasticsearch,
     Loki,
@@ -178,7 +177,6 @@ impl BlastDestination {
     fn as_output_type(self) -> logfwd_config::OutputType {
         match self {
             Self::Otlp => logfwd_config::OutputType::Otlp,
-            Self::Http => logfwd_config::OutputType::Http,
             Self::Elasticsearch => logfwd_config::OutputType::Elasticsearch,
             Self::Loki => logfwd_config::OutputType::Loki,
             Self::ArrowIpc => logfwd_config::OutputType::ArrowIpc,
@@ -191,7 +189,6 @@ impl BlastDestination {
     fn parse(input: &str) -> Option<Self> {
         match input.trim().to_ascii_lowercase().as_str() {
             "otlp" | "elasticsearch_otlp" => Some(Self::Otlp),
-            "http" => Some(Self::Http),
             "elasticsearch" | "elasticsearch_bulk" => Some(Self::Elasticsearch),
             "loki" => Some(Self::Loki),
             "arrow_ipc" | "arrow-ipc" | "arrow" => Some(Self::ArrowIpc),
@@ -209,10 +206,9 @@ impl BlastDestination {
     fn default_endpoint(self) -> &'static str {
         match self {
             Self::Otlp => "http://127.0.0.1:4318/v1/logs",
-            Self::Http => "http://127.0.0.1:8080",
             Self::Elasticsearch => "http://127.0.0.1:9200",
             Self::Loki => "http://127.0.0.1:3100/loki/api/v1/push",
-            Self::ArrowIpc => "127.0.0.1:18081",
+            Self::ArrowIpc => "http://127.0.0.1:18081",
             Self::Udp => "127.0.0.1:15514",
             Self::Tcp => "127.0.0.1:15140",
             Self::Null => "",
@@ -609,12 +605,12 @@ fn maybe_prompt_blast_setup(args: &mut BlastArgs) -> Result<(), CliError> {
     println!("Press Enter to accept defaults. Leave auth blank to skip.");
 
     let destination_raw = prompt_text(
-        "Destination [otlp/elasticsearch_otlp/http/elasticsearch/elasticsearch_bulk/loki/arrow_ipc/udp/tcp/null]",
+        "Destination [otlp/elasticsearch_otlp/elasticsearch/elasticsearch_bulk/loki/arrow_ipc/udp/tcp/null]",
         "otlp",
     )?;
     let destination = BlastDestination::parse(&destination_raw).ok_or_else(|| {
         CliError::Config(format!(
-            "unknown destination '{destination_raw}' (expected otlp/elasticsearch_otlp/http/elasticsearch/elasticsearch_bulk/loki/arrow_ipc/udp/tcp/null)"
+            "unknown destination '{destination_raw}' (expected otlp/elasticsearch_otlp/elasticsearch/elasticsearch_bulk/loki/arrow_ipc/udp/tcp/null)"
         ))
     })?;
     args.destination = Some(destination);
@@ -765,7 +761,26 @@ fn split_header(spec: &str) -> Result<(&str, &str), CliError> {
 }
 
 fn yaml_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "''"))
+    let mut escaped = String::with_capacity(value.len() + 2);
+    escaped.push('"');
+    for ch in value.chars() {
+        match ch {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            '\u{08}' => escaped.push_str("\\b"),
+            '\u{0c}' => escaped.push_str("\\f"),
+            ch if ch.is_control() => {
+                let _ =
+                    std::fmt::Write::write_fmt(&mut escaped, format_args!("\\u{:04x}", ch as u32));
+            }
+            ch => escaped.push(ch),
+        }
+    }
+    escaped.push('"');
+    escaped
 }
 
 fn schedule_self_interrupt_after(duration: Duration) {
@@ -1826,6 +1841,39 @@ mod cli_tests {
         assert!(!wizard_uses_interactive_terminals(true, false));
         assert!(!wizard_uses_interactive_terminals(false, true));
         assert!(wizard_uses_interactive_terminals(true, true));
+    }
+
+    #[test]
+    fn blast_destination_http_is_rejected_by_cli_parser() {
+        let err = Cli::try_parse_from([
+            "logfwd",
+            "blast",
+            "--destination",
+            "http",
+            "--endpoint",
+            "http://127.0.0.1:8080",
+        ])
+        .expect_err("http destination should be rejected");
+        assert_eq!(err.kind(), ErrorKind::InvalidValue);
+    }
+
+    #[test]
+    fn blast_arrow_ipc_default_endpoint_is_http_url() {
+        assert_eq!(
+            BlastDestination::ArrowIpc.default_endpoint(),
+            "http://127.0.0.1:18081"
+        );
+    }
+
+    #[test]
+    fn yaml_quote_escapes_newlines_and_control_chars() {
+        let quoted = yaml_quote("line1\nline2\r\n\0tab\tquote\"slash\\");
+        assert_eq!(
+            quoted,
+            "\"line1\\nline2\\r\\n\\u0000tab\\tquote\\\"slash\\\\\""
+        );
+        assert!(!quoted.contains('\n'));
+        assert!(!quoted.contains('\r'));
     }
 
     #[test]
