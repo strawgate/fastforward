@@ -19,6 +19,7 @@ fn eof_transition(eof_emitted: bool, had_data: bool) -> (bool, bool) {
 /// EndOfFile is emitted at most once per no-data streak: the event fires only
 /// when `eof_emitted` transitions from `false` to `true`, never while it is
 /// already `true`.
+#[cfg(kani)]
 #[kani::proof]
 fn verify_eof_emitted_at_most_once_per_no_data_streak() {
     let eof_emitted: bool = kani::any();
