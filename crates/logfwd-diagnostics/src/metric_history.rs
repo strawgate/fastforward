@@ -231,10 +231,12 @@ mod tests {
         for i in 0..100 {
             buf.push(i as f64 * 2.0, i as f64);
         }
+        let raw_points: usize = buf.tiers.iter().map(|tier| tier.points.len()).sum();
         let points = buf.points();
         // Should have points from all tiers, deduplicated
         assert!(!points.is_empty());
-        assert!(points.len() < 200); // some dedup happened
+        assert!(raw_points > points.len()); // duplicates across tiers were removed
+        assert_eq!(points.len(), 100); // highest-resolution tier preserves all unique timestamps
     }
 
     #[test]
