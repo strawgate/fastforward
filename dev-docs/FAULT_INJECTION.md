@@ -247,8 +247,11 @@ pub struct InvariantSet {
     /// Rejected batches DO advance checkpoints (accept data loss for
     /// permanent rejects to avoid infinite replay loops).
     pub reject_advances_checkpoint: bool,
-    /// Custom assertion function.
-    pub custom: Vec<Box<dyn Fn(&TestOutcome) -> Result<(), String>>>,
+}
+
+pub struct CustomAssertions {
+    /// Named runtime-only assertions supplied by the scenario/test.
+    pub checks: Vec<(&'static str, Box<dyn Fn(&TestOutcome) -> Result<(), String>>)>,
 }
 
 impl InvariantSet {
@@ -261,7 +264,6 @@ impl InvariantSet {
             shutdown_completeness: true,
             hold_on_transient_failure: true,
             reject_advances_checkpoint: true,
-            custom: vec![],
         }
     }
 
@@ -275,11 +277,14 @@ impl InvariantSet {
             shutdown_completeness: true,
             hold_on_transient_failure: true,
             reject_advances_checkpoint: true,
-            custom: vec![],
         }
     }
 }
 ```
+
+**Note:** See [Invariants Reference](#invariants-reference) for per-invariant
+TLA+/runtime mapping, and [Relationship to TLA+ and proptest](#relationship-to-tla-and-proptest)
+for how these runtime checks complement formal verification.
 
 ### `TestOutcome` — collected by observers during the test
 
@@ -312,7 +317,11 @@ pub struct TestOutcome {
 
 ```rust
 impl InvariantSet {
-    pub fn verify(&self, outcome: &TestOutcome) -> Result<(), Vec<String>> {
+    pub fn verify(
+        &self,
+        outcome: &TestOutcome,
+        customs: &CustomAssertions,
+    ) -> Result<(), Vec<String>> {
         let mut failures = vec![];
 
         if self.at_least_once_delivery {
@@ -325,18 +334,23 @@ impl InvariantSet {
         }
 
         if self.checkpoint_monotonicity {
-            // Check all sources for monotonicity via checkpoint_handle
-            // (uses existing assert_monotonic logic but collects errors
-            // instead of panicking)
+            for source_id in outcome.checkpoint_handle.source_ids() {
+                if let Err(err) = outcome
+                    .checkpoint_handle
+                    .assert_monotonic_result(source_id)
+                {
+                    failures.push(format!("checkpoint monotonicity violated for {source_id}: {err}"));
+                }
+            }
         }
 
-        if self.shutdown_completeness && !outcome.completed {
-            failures.push("shutdown did not complete".to_string());
+        if self.shutdown_completeness && (!outcome.completed || outcome.force_stopped) {
+            failures.push("shutdown did not complete cleanly (completed=false or force_stopped=true)".to_string());
         }
 
-        for custom in &self.custom {
+        for (name, custom) in &customs.checks {
             if let Err(msg) = custom(outcome) {
-                failures.push(msg);
+                failures.push(format!("custom assertion '{name}' failed: {msg}"));
             }
         }
 
@@ -407,7 +421,7 @@ pub fn random_scenario(seed: u64) -> FaultScenario {
     }
 
     builder
-        .invariants(InvariantSet::crash_recovery())
+        .invariants(InvariantSet::at_least_once())
         .sim_duration(Duration::from_secs(120))
         .shutdown_after(Duration::from_secs(60))
         .build()
@@ -552,9 +566,9 @@ The invariant checks in this framework are runtime test oracles, not replacement
 
 Planned split of responsibility:
 
-- Use **TLA+** to define protocol-level invariants and allowed transitions.
-- Use **proptest** for component-level stochastic exploration (e.g., scanner/SIMD equivalence, reducer transition sequences).
-- Use **fault scenarios** to validate end-to-end recovery under composed infrastructure failures.
+- **TLA+** defines protocol-level invariants and allowed transitions.
+- **proptest** explores component-level stochastic behavior (e.g., scanner/SIMD equivalence, reducer transition sequences).
+- **Fault scenarios** validate end-to-end recovery under composed infrastructure failures.
 
 Each new fault scenario category should map to at least one existing verification artifact (TLA+ property name or proptest target) in the follow-up implementation PR.
 
