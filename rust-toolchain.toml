@@ -1,6 +1,7 @@
 [toolchain]
-# Pin to the minimum Rust version that satisfies all workspace dependencies.
-# Note: Cargo.toml declares rust-version = "1.85" (MSRV), but transitive deps
-# (wide, safe_arch) currently require 1.89+. Bump this when deps change.
-channel = "1.89"
+# Track latest stable. The workspace uses recent language features and deps
+# that require current stable (1.94+ as of April 2026).
+# Cargo.toml declares rust-version = "1.85" as MSRV, but that is aspirational;
+# the actual minimum is dictated by transitive deps and language usage.
+channel = "stable"
 components = ["clippy", "rustfmt"]

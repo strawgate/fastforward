@@ -4,7 +4,7 @@
 
 | Tool | Version | Install |
 |------|---------|---------|
-| [Rust](https://rustup.rs) | 1.89+ (pinned in `rust-toolchain.toml`) | `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh` |
+| [Rust](https://rustup.rs) | Latest stable (managed by `rust-toolchain.toml`) | `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh` |
 | [just](https://just.systems) | 1.40+ | `cargo install just` or `brew install just` |
 | [cargo-nextest](https://nexte.st) | 0.9+ | `cargo install cargo-nextest` |
 
