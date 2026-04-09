@@ -73,11 +73,11 @@ status_of() {
 }
 
 yes_no() {
-    if [[ "$1" == "1" ]]; then
-        echo "yes"
-        return
-    fi
-    echo "no"
+    case "${1:-}" in
+        1) echo "yes" ;;
+        0) echo "no" ;;
+        *) echo "unknown" ;;
+    esac
 }
 
 record_check "cgroup_v2" test -f /sys/fs/cgroup/cgroup.controllers || true
