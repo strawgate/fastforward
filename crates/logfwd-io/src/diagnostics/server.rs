@@ -790,8 +790,26 @@ impl DiagnosticsServer {
                 .inputs
                 .iter()
                 .map(|(name, typ, stats)| {
+                    let transport_json = match typ.as_str() {
+                        "file" => format!(
+                            r#","transport":{{"file":{{"consecutive_error_polls":{}}}}}"#,
+                            stats.file_error_polls.load(Ordering::Relaxed)
+                        ),
+                        "tcp" => format!(
+                            r#","transport":{{"tcp":{{"accepted_connections":{},"active_connections":{}}}}}"#,
+                            stats.tcp_accepted.load(Ordering::Relaxed),
+                            stats.tcp_active.load(Ordering::Relaxed)
+                        ),
+                        "udp" => format!(
+                            r#","transport":{{"udp":{{"drops_detected":{},"recv_buffer_size":{}}}}}"#,
+                            stats.udp_drops.load(Ordering::Relaxed),
+                            stats.udp_recv_buf.load(Ordering::Relaxed)
+                        ),
+                        _ => String::new(),
+                    };
+
                     format!(
-                        r#"{{"name":"{}","type":"{}","health":"{}","lines_total":{},"bytes_total":{},"errors":{},"rotations":{},"parse_errors":{}}}"#,
+                        r#"{{"name":"{}","type":"{}","health":"{}","lines_total":{},"bytes_total":{},"errors":{},"rotations":{},"parse_errors":{}{}}}"#,
                         esc(name),
                         esc(typ),
                         stats.health().as_str(),
@@ -800,6 +818,7 @@ impl DiagnosticsServer {
                         stats.errors(),
                         stats.rotations(),
                         stats.parse_errors(),
+                        transport_json
                     )
                 })
                 .collect();
@@ -1820,6 +1839,47 @@ output:
             "not_ready",
             "components_failed",
             false,
+        );
+    }
+
+    #[test]
+    fn test_status_endpoint_includes_transport_parity_fields() {
+        let meter = opentelemetry::global::meter("test");
+        let mut pm = PipelineMetrics::new("default", "SELECT * FROM logs", &meter);
+
+        let file_in = pm.add_input("file_in", "file");
+        file_in.file_error_polls.store(5, Ordering::Relaxed);
+
+        let tcp_in = pm.add_input("tcp_in", "tcp");
+        tcp_in.tcp_accepted.store(42, Ordering::Relaxed);
+        tcp_in.tcp_active.store(3, Ordering::Relaxed);
+
+        let udp_in = pm.add_input("udp_in", "udp");
+        udp_in.udp_drops.store(100, Ordering::Relaxed);
+        udp_in.udp_recv_buf.store(8388608, Ordering::Relaxed);
+
+        let mut server = DiagnosticsServer::new("127.0.0.1:0");
+        server.add_pipeline(Arc::new(pm));
+        let (_handle, addr) = server.start().expect("server bind failed");
+        let port = addr.port();
+
+        let (status, body) = http_get(port, "/admin/v1/status");
+        assert_eq!(status, 200);
+
+        assert!(
+            body.contains(r#""transport":{"file":{"consecutive_error_polls":5}}"#),
+            "body missing file transport: {}",
+            body
+        );
+        assert!(
+            body.contains(r#""transport":{"tcp":{"accepted_connections":42,"active_connections":3}}"#),
+            "body missing tcp transport: {}",
+            body
+        );
+        assert!(
+            body.contains(r#""transport":{"udp":{"drops_detected":100,"recv_buffer_size":8388608}}"#),
+            "body missing udp transport: {}",
+            body
         );
     }
 
