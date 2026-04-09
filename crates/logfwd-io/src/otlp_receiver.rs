@@ -87,12 +87,28 @@ impl OtlpReceiverInput {
         addr: &str,
         stats: Arc<ComponentStats>,
     ) -> io::Result<Self> {
+        Self::new_with_stats_and_resource_prefix(
+            name,
+            addr,
+            stats,
+            field_names::DEFAULT_RESOURCE_PREFIX,
+        )
+    }
+
+    /// Like [`Self::new_with_stats`], but allows configuring the resource
+    /// attribute prefix used when flattening OTLP resource attributes.
+    pub fn new_with_stats_and_resource_prefix(
+        name: impl Into<String>,
+        addr: &str,
+        stats: Arc<ComponentStats>,
+        resource_prefix: impl Into<String>,
+    ) -> io::Result<Self> {
         Self::new_with_capacity_stats_and_prefix(
             name,
             addr,
             CHANNEL_BOUND,
             Some(stats),
-            field_names::DEFAULT_RESOURCE_PREFIX.to_string(),
+            resource_prefix.into(),
         )
     }
 

@@ -286,6 +286,12 @@ fn structured_values_are_serialized_deterministically() {
                                             value: Some(Value::IntValue(1)),
                                         }),
                                     },
+                                    KeyValue {
+                                        key: "a".into(),
+                                        value: Some(AnyValue {
+                                            value: Some(Value::IntValue(3)),
+                                        }),
+                                    },
                                 ],
                             })),
                         }),
@@ -315,7 +321,10 @@ fn structured_values_are_serialized_deterministically() {
         .as_any()
         .downcast_ref::<StringArray>()
         .expect("ctx must be Utf8");
-    assert_eq!(ctx.value(0), "{\"a\":1,\"b\":\"two\"}");
+    assert_eq!(
+        ctx.value(0),
+        "[{\"k\":\"b\",\"v\":\"two\"},{\"k\":\"a\",\"v\":1},{\"k\":\"a\",\"v\":3}]"
+    );
 
     let labels = batch
         .column_by_name("resource.attributes.resource.labels")
@@ -732,6 +741,70 @@ fn invalid_json_time_unix_nano_returns_error() {
     );
 
     assert!(result.is_err(), "invalid timeUnixNano must fail");
+}
+
+#[test]
+fn invalid_json_observed_time_unix_nano_returns_error() {
+    let result = decode_otlp_json(
+        br#"{
+            "resourceLogs": [{
+                "scopeLogs": [{
+                    "logRecords": [{
+                        "timeUnixNano": "0",
+                        "observedTimeUnixNano": "not-a-number"
+                    }]
+                }]
+            }]
+        }"#,
+        field_names::DEFAULT_RESOURCE_PREFIX,
+    );
+
+    assert!(
+        result.is_err(),
+        "invalid observedTimeUnixNano must fail instead of being treated as missing"
+    );
+}
+
+#[test]
+fn invalid_json_severity_number_returns_error() {
+    let result = decode_otlp_json(
+        br#"{
+            "resourceLogs": [{
+                "scopeLogs": [{
+                    "logRecords": [{
+                        "severityNumber": "bad-severity"
+                    }]
+                }]
+            }]
+        }"#,
+        field_names::DEFAULT_RESOURCE_PREFIX,
+    );
+
+    assert!(
+        result.is_err(),
+        "invalid severityNumber must fail instead of being treated as missing"
+    );
+}
+
+#[test]
+fn invalid_json_flags_returns_error() {
+    let result = decode_otlp_json(
+        br#"{
+            "resourceLogs": [{
+                "scopeLogs": [{
+                    "logRecords": [{
+                        "flags": "invalid-flags"
+                    }]
+                }]
+            }]
+        }"#,
+        field_names::DEFAULT_RESOURCE_PREFIX,
+    );
+
+    assert!(
+        result.is_err(),
+        "invalid flags must fail instead of being treated as missing"
+    );
 }
 
 #[test]

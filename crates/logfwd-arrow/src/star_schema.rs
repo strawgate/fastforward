@@ -580,6 +580,24 @@ pub fn star_to_flat(star: &StarSchema) -> Result<RecordBatch, ArrowError> {
         }
     }
 
+    // --- Unpivot SCOPE_ATTRS ---
+    // Populate default scope fields first (e.g., synthetic "logfwd" scope).
+    // LOG_ATTRS are unpivoted afterward and may carry row-level scope.*
+    // values from the original flat input; those should take precedence.
+    unpivot_attrs_to_flat(
+        &star.scope_attrs,
+        &mut flat_cols,
+        &mut col_index,
+        num_rows,
+        |parent_id| parent_id as usize,
+        |key| match key {
+            "scope_name" => "scope.name".to_string(),
+            "scope_version" => "scope.version".to_string(),
+            _ if key.starts_with("scope.") => key.to_string(),
+            _ => format!("scope.{key}"),
+        },
+    )?;
+
     // --- Unpivot LOG_ATTRS → flat columns ---
     unpivot_attrs_to_flat(
         &star.log_attrs,
@@ -605,21 +623,6 @@ pub fn star_to_flat(star: &StarSchema) -> Result<RecordBatch, ArrowError> {
             parent_id as usize
         },
         |key| format!("{RESOURCE_PREFIX}{key}"),
-    )?;
-
-    // --- Unpivot SCOPE_ATTRS ---
-    unpivot_attrs_to_flat(
-        &star.scope_attrs,
-        &mut flat_cols,
-        &mut col_index,
-        num_rows,
-        |parent_id| parent_id as usize,
-        |key| match key {
-            "scope_name" => "scope.name".to_string(),
-            "scope_version" => "scope.version".to_string(),
-            _ if key.starts_with("scope.") => key.to_string(),
-            _ => format!("scope.{key}"),
-        },
     )?;
 
     // The unpivot above set values at the resource_id index, but we need to
@@ -1764,6 +1767,9 @@ fn scatter_scope_attrs(
 
         if let TypedColumn::Str(ref mut v) = flat_cols[col_pos].1 {
             for (row, slot) in v.iter_mut().enumerate().take(num_rows) {
+                if slot.is_some() {
+                    continue;
+                }
                 let sid = scope_ids.value(row);
                 if let Some(val) = sid_to_val.get(&sid) {
                     *slot = val.clone();
@@ -2002,6 +2008,53 @@ mod tests {
         assert_eq!(st_arr.value(0), 200);
         assert_eq!(st_arr.value(1), 500);
         assert_eq!(st_arr.value(2), 429);
+    }
+
+    #[test]
+    fn roundtrip_preserves_existing_scope_columns() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("message", DataType::Utf8, true),
+            Field::new("scope.name", DataType::Utf8, true),
+            Field::new("scope.version", DataType::Utf8, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec![Some("one"), Some("two")])),
+                Arc::new(StringArray::from(vec![Some("otel"), Some("custom")])),
+                Arc::new(StringArray::from(vec![Some("1.0.0"), Some("2.0.0")])),
+            ],
+        )
+        .expect("valid batch");
+
+        let star = flat_to_star(&batch).expect("flat_to_star");
+        let roundtrip = star_to_flat(&star).expect("star_to_flat");
+
+        let scope_name = roundtrip
+            .column(
+                roundtrip
+                    .schema()
+                    .index_of("scope.name")
+                    .expect("scope.name idx"),
+            )
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("scope.name utf8");
+        assert_eq!(scope_name.value(0), "otel");
+        assert_eq!(scope_name.value(1), "custom");
+
+        let scope_version = roundtrip
+            .column(
+                roundtrip
+                    .schema()
+                    .index_of("scope.version")
+                    .expect("scope.version idx"),
+            )
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("scope.version utf8");
+        assert_eq!(scope_version.value(0), "1.0.0");
+        assert_eq!(scope_version.value(1), "2.0.0");
     }
 
     #[test]

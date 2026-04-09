@@ -6,6 +6,7 @@ use logfwd_types::field_names;
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::common::v1::AnyValue;
 use opentelemetry_proto::tonic::common::v1::any_value::Value;
+use std::fmt::Write as _;
 
 use crate::InputError;
 
@@ -27,6 +28,7 @@ pub(super) fn convert_request_to_batch(
     let scope_name_idx = builder.resolve_field(field_names::SCOPE_NAME.as_bytes());
     let scope_version_idx = builder.resolve_field(field_names::SCOPE_VERSION.as_bytes());
     let mut hex_buf = Vec::with_capacity(64);
+    let mut json_buf = String::with_capacity(256);
 
     for resource_logs in &request.resource_logs {
         // Resolve resource attribute fields once per ResourceLogs.
@@ -83,19 +85,37 @@ pub(super) fn convert_request_to_batch(
 
                 // body
                 if let Some(ref body_val) = record.body {
-                    append_any_value_as_string(&mut builder, body_idx, body_val, &mut hex_buf);
+                    append_any_value_as_string(
+                        &mut builder,
+                        body_idx,
+                        body_val,
+                        &mut hex_buf,
+                        &mut json_buf,
+                    );
                 }
 
                 // log record attributes
                 for attr in &record.attributes {
                     if let Some(ref value) = attr.value {
-                        append_attribute_value(&mut builder, &attr.key, value, &mut hex_buf);
+                        append_attribute_value(
+                            &mut builder,
+                            &attr.key,
+                            value,
+                            &mut hex_buf,
+                            &mut json_buf,
+                        );
                     }
                 }
 
                 // resource attributes (prefixed, pre-resolved per ResourceLogs)
                 for (field_idx, value) in &resource_attr_fields {
-                    append_attribute_value_by_idx(&mut builder, *field_idx, value, &mut hex_buf);
+                    append_attribute_value_by_idx(
+                        &mut builder,
+                        *field_idx,
+                        value,
+                        &mut hex_buf,
+                        &mut json_buf,
+                    );
                 }
 
                 // trace context
@@ -138,9 +158,10 @@ fn append_attribute_value(
     key: &str,
     value: &AnyValue,
     hex_buf: &mut Vec<u8>,
+    json_buf: &mut String,
 ) {
     let idx = builder.resolve_field(key.as_bytes());
-    append_attribute_value_by_idx(builder, idx, value, hex_buf);
+    append_attribute_value_by_idx(builder, idx, value, hex_buf, json_buf);
 }
 
 fn append_attribute_value_by_idx(
@@ -148,6 +169,7 @@ fn append_attribute_value_by_idx(
     idx: usize,
     value: &AnyValue,
     hex_buf: &mut Vec<u8>,
+    json_buf: &mut String,
 ) {
     match &value.value {
         Some(Value::IntValue(v)) => builder.append_i64_value_by_idx(idx, *v),
@@ -156,8 +178,8 @@ fn append_attribute_value_by_idx(
         Some(Value::StringValue(v)) => builder.append_decoded_str_by_idx(idx, v.as_bytes()),
         Some(Value::BytesValue(v)) => append_hex_field(builder, idx, v, hex_buf),
         Some(Value::ArrayValue(_)) | Some(Value::KvlistValue(_)) => {
-            if let Some(text) = any_value_to_deterministic_json_string(value) {
-                builder.append_decoded_str_by_idx(idx, text.as_bytes());
+            if write_any_value_to_json_buf(value, json_buf) {
+                builder.append_decoded_str_by_idx(idx, json_buf.as_bytes());
             }
         }
         _ => {}
@@ -169,6 +191,7 @@ fn append_any_value_as_string(
     idx: usize,
     value: &AnyValue,
     hex_buf: &mut Vec<u8>,
+    json_buf: &mut String,
 ) {
     match &value.value {
         Some(Value::StringValue(v)) => builder.append_decoded_str_by_idx(idx, v.as_bytes()),
@@ -185,64 +208,109 @@ fn append_any_value_as_string(
         }
         Some(Value::BytesValue(v)) => append_hex_field(builder, idx, v, hex_buf),
         Some(Value::ArrayValue(_)) | Some(Value::KvlistValue(_)) => {
-            if let Some(text) = any_value_to_deterministic_json_string(value) {
-                builder.append_decoded_str_by_idx(idx, text.as_bytes());
+            if write_any_value_to_json_buf(value, json_buf) {
+                builder.append_decoded_str_by_idx(idx, json_buf.as_bytes());
             }
         }
         _ => {}
     }
 }
 
-fn any_value_to_deterministic_json_string(value: &AnyValue) -> Option<String> {
-    let json_value = any_value_to_deterministic_json(value)?;
-    serde_json::to_string(&json_value).ok()
+fn write_any_value_to_json_buf(value: &AnyValue, out: &mut String) -> bool {
+    out.clear();
+    write_any_value_json(value, out)
 }
 
-fn any_value_to_deterministic_json(value: &AnyValue) -> Option<serde_json::Value> {
+fn write_any_value_json(value: &AnyValue, out: &mut String) -> bool {
     match &value.value {
-        Some(Value::StringValue(v)) => Some(serde_json::Value::String(v.clone())),
-        Some(Value::IntValue(v)) => Some(serde_json::Value::Number((*v).into())),
-        Some(Value::DoubleValue(v)) => serde_json::Number::from_f64(*v)
-            .map(serde_json::Value::Number)
-            .or_else(|| Some(serde_json::Value::String(v.to_string()))),
-        Some(Value::BoolValue(v)) => Some(serde_json::Value::Bool(*v)),
-        Some(Value::BytesValue(v)) => Some(serde_json::Value::String(bytes_to_hex(v))),
+        Some(Value::StringValue(v)) => {
+            write_json_escaped_string(out, v);
+            true
+        }
+        Some(Value::IntValue(v)) => write!(out, "{v}").is_ok(),
+        Some(Value::DoubleValue(v)) => {
+            if let Some(number) = serde_json::Number::from_f64(*v) {
+                write!(out, "{number}").is_ok()
+            } else {
+                // Preserve non-finite values as strings.
+                write_json_escaped_string(out, &v.to_string());
+                true
+            }
+        }
+        Some(Value::BoolValue(v)) => {
+            out.push_str(if *v { "true" } else { "false" });
+            true
+        }
+        Some(Value::BytesValue(v)) => {
+            out.push('"');
+            write_hex_to_string(out, v);
+            out.push('"');
+            true
+        }
         Some(Value::ArrayValue(arr)) => {
-            let mut out = Vec::with_capacity(arr.values.len());
-            for item in &arr.values {
-                if let Some(json) = any_value_to_deterministic_json(item) {
-                    out.push(json);
-                } else {
-                    out.push(serde_json::Value::Null);
+            out.push('[');
+            for (idx, item) in arr.values.iter().enumerate() {
+                if idx > 0 {
+                    out.push(',');
+                }
+                if !write_any_value_json(item, out) {
+                    out.push_str("null");
                 }
             }
-            Some(serde_json::Value::Array(out))
+            out.push(']');
+            true
         }
         Some(Value::KvlistValue(kvs)) => {
-            let mut pairs: Vec<_> = kvs.values.iter().collect();
-            pairs.sort_by(|a, b| a.key.cmp(&b.key));
-            let mut map = serde_json::Map::new();
-            for kv in pairs {
-                let json = kv
-                    .value
-                    .as_ref()
-                    .and_then(any_value_to_deterministic_json)
-                    .unwrap_or(serde_json::Value::Null);
-                map.insert(kv.key.clone(), json);
+            // Preserve duplicate keys and input order.
+            out.push('[');
+            for (idx, kv) in kvs.values.iter().enumerate() {
+                if idx > 0 {
+                    out.push(',');
+                }
+                out.push('{');
+                out.push_str("\"k\":");
+                write_json_escaped_string(out, &kv.key);
+                out.push_str(",\"v\":");
+                if let Some(value) = kv.value.as_ref() {
+                    if !write_any_value_json(value, out) {
+                        out.push_str("null");
+                    }
+                } else {
+                    out.push_str("null");
+                }
+                out.push('}');
             }
-            Some(serde_json::Value::Object(map))
+            out.push(']');
+            true
         }
-        None => None,
+        None => false,
     }
 }
 
-fn bytes_to_hex(input: &[u8]) -> String {
-    let mut out = String::with_capacity(input.len() * 2);
+fn write_hex_to_string(out: &mut String, input: &[u8]) {
     for byte in input {
-        use std::fmt::Write as _;
-        let _ = write!(&mut out, "{byte:02x}");
+        let _ = write!(out, "{byte:02x}");
     }
-    out
+}
+
+fn write_json_escaped_string(out: &mut String, value: &str) {
+    out.push('"');
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\u{08}' => out.push_str("\\b"),
+            '\u{0C}' => out.push_str("\\f"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c <= '\u{1F}' => {
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
 }
 
 fn append_hex_field(

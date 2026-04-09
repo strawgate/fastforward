@@ -166,7 +166,11 @@ fn decode_otlp_logs_json(body: &[u8], resource_prefix: &str) -> Result<Vec<u8>, 
                 }
                 if ts_val == 0 {
                     if let Some(obs) = record.get("observedTimeUnixNano") {
-                        ts_val = parse_protojson_u64(obs).unwrap_or(0);
+                        ts_val = parse_protojson_u64(obs).ok_or_else(|| {
+                            InputError::Receiver(
+                                "invalid OTLP JSON observedTimeUnixNano: not a valid uint64".into(),
+                            )
+                        })?;
                     }
                 }
                 if ts_val > 0 {
@@ -175,13 +179,17 @@ fn decode_otlp_logs_json(body: &[u8], resource_prefix: &str) -> Result<Vec<u8>, 
                     out.push(b',');
                 }
 
-                if let Some(obs) = record.get("observedTimeUnixNano")
-                    && let Some(obs_val) = parse_protojson_u64(obs)
-                    && obs_val > 0
-                {
-                    write_json_key(&mut out, field_names::OBSERVED_TIMESTAMP);
-                    write_u64_to_buf(&mut out, obs_val);
-                    out.push(b',');
+                if let Some(obs) = record.get("observedTimeUnixNano") {
+                    let obs_val = parse_protojson_u64(obs).ok_or_else(|| {
+                        InputError::Receiver(
+                            "invalid OTLP JSON observedTimeUnixNano: not a valid uint64".into(),
+                        )
+                    })?;
+                    if obs_val > 0 {
+                        write_json_key(&mut out, field_names::OBSERVED_TIMESTAMP);
+                        write_u64_to_buf(&mut out, obs_val);
+                        out.push(b',');
+                    }
                 }
 
                 if let Some(sev) = record.get("severityText").and_then(|v| v.as_str())
@@ -191,13 +199,17 @@ fn decode_otlp_logs_json(body: &[u8], resource_prefix: &str) -> Result<Vec<u8>, 
                     out.push(b',');
                 }
 
-                if let Some(sev_num) = record.get("severityNumber")
-                    && let Some(severity_number) = parse_protojson_i64(sev_num)
-                    && severity_number > 0
-                {
-                    write_json_key(&mut out, field_names::SEVERITY_NUMBER);
-                    write_i64_to_buf(&mut out, severity_number);
-                    out.push(b',');
+                if let Some(sev_num) = record.get("severityNumber") {
+                    let severity_number = parse_protojson_i64(sev_num).ok_or_else(|| {
+                        InputError::Receiver(
+                            "invalid OTLP JSON severityNumber: not a valid int64".into(),
+                        )
+                    })?;
+                    if severity_number > 0 {
+                        write_json_key(&mut out, field_names::SEVERITY_NUMBER);
+                        write_i64_to_buf(&mut out, severity_number);
+                        out.push(b',');
+                    }
                 }
 
                 if let Some(body_val) = record.get("body")
@@ -236,13 +248,15 @@ fn decode_otlp_logs_json(body: &[u8], resource_prefix: &str) -> Result<Vec<u8>, 
                     }
                 }
 
-                if let Some(flags) = record.get("flags")
-                    && let Some(parsed_flags) = parse_protojson_i64(flags)
-                    && parsed_flags > 0
-                {
-                    write_json_key(&mut out, field_names::FLAGS);
-                    write_i64_to_buf(&mut out, parsed_flags);
-                    out.push(b',');
+                if let Some(flags) = record.get("flags") {
+                    let parsed_flags = parse_protojson_i64(flags).ok_or_else(|| {
+                        InputError::Receiver("invalid OTLP JSON flags: not a valid int64".into())
+                    })?;
+                    if parsed_flags > 0 {
+                        write_json_key(&mut out, field_names::FLAGS);
+                        write_i64_to_buf(&mut out, parsed_flags);
+                        out.push(b',');
+                    }
                 }
 
                 if let Some(name) = scope_name
