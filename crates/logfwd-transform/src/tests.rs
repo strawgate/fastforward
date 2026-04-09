@@ -886,6 +886,19 @@ fn test_query_analyzer_union_column_refs() {
     );
 }
 
+#[test]
+fn test_query_analyzer_join_using_column_refs() {
+    let a = QueryAnalyzer::new("SELECT message FROM logs a JOIN logs b USING (level)").unwrap();
+    assert!(
+        a.referenced_columns.contains("message"),
+        "SELECT column must be in referenced_columns"
+    );
+    assert!(
+        a.referenced_columns.contains("level"),
+        "USING column must be in referenced_columns"
+    );
+}
+
 // -----------------------------------------------------------------------
 
 /// Verify that a stable schema does NOT trigger repeated context recreation

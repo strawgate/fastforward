@@ -206,8 +206,20 @@ fn walk_set_expr(
 
             for table_with_joins in &select.from {
                 for join in &table_with_joins.joins {
-                    if let sqlast::JoinConstraint::On(expr) = join_constraint(&join.join_operator) {
-                        collect_column_refs(expr, referenced_columns);
+                    match join_constraint(&join.join_operator) {
+                        sqlast::JoinConstraint::On(expr) => {
+                            collect_column_refs(expr, referenced_columns);
+                        }
+                        sqlast::JoinConstraint::Using(cols) => {
+                            for obj_name in cols {
+                                if let Some(part) = obj_name.0.last()
+                                    && let Some(ident) = part.as_ident()
+                                {
+                                    referenced_columns.insert(ident.value.clone());
+                                }
+                            }
+                        }
+                        sqlast::JoinConstraint::Natural | sqlast::JoinConstraint::None => {}
                     }
                 }
             }
