@@ -12,6 +12,7 @@ use super::discovery::FileDiscovery;
 use super::glob::expand_glob_patterns;
 use super::identity::ByteOffset;
 use super::reader::FileReader;
+use super::state::backoff_transition;
 
 /// Events emitted by the tailer.
 #[non_exhaustive]
@@ -211,16 +212,11 @@ impl FileTailer {
     }
 
     fn update_error_backoff(&mut self, had_error: bool) {
-        const INITIAL_BACKOFF_MS: u64 = 100;
-        const MAX_BACKOFF_MS: u64 = 5000;
+        let (next_error_polls, backoff_ms) =
+            backoff_transition(self.consecutive_error_polls, had_error);
+        self.consecutive_error_polls = next_error_polls;
 
-        if had_error {
-            self.consecutive_error_polls = self.consecutive_error_polls.saturating_add(1);
-            let exponent = self.consecutive_error_polls.saturating_sub(1).min(6);
-            let multiplier = 1u64 << exponent;
-            let backoff_ms = INITIAL_BACKOFF_MS
-                .saturating_mul(multiplier)
-                .min(MAX_BACKOFF_MS);
+        if let Some(backoff_ms) = backoff_ms {
             self.error_backoff_until = Some(Instant::now() + Duration::from_millis(backoff_ms));
             tracing::warn!(
                 consecutive_error_polls = self.consecutive_error_polls,
@@ -232,7 +228,6 @@ impl FileTailer {
                 PollingInputHealthEvent::ErrorBackoffObserved,
             );
         } else {
-            self.consecutive_error_polls = 0;
             self.error_backoff_until = None;
             self.health =
                 reduce_polling_input_health(self.health, PollingInputHealthEvent::PollHealthy);
