@@ -18,4 +18,5 @@ chck = "chck"
 extend-exclude = [
     # Built/minified dashboard — not human-authored, skip spell check.
     "crates/logfwd-diagnostics/src/dashboard.html",
+    "crates/logfwd-diagnostics/src/dashboard-dist/**",
 ]
