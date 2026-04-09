@@ -220,7 +220,8 @@ fn run_benchmark(args: RunArgs) -> Result<(), String> {
         raw_bytes: AtomicU64::new(0),
     });
 
-    let deadline = Instant::now() + Duration::from_secs(args.duration_secs);
+    let start = Instant::now();
+    let deadline = start + Duration::from_secs(args.duration_secs);
     let mut handles = Vec::with_capacity(args.workers);
 
     for worker_id in 0..args.workers {
@@ -243,15 +244,27 @@ fn run_benchmark(args: RunArgs) -> Result<(), String> {
         }));
     }
 
+    let mut first_err: Option<String> = None;
     for handle in handles {
         match handle.join() {
             Ok(Ok(())) => {}
-            Ok(Err(err)) => return Err(err),
-            Err(_) => return Err("worker thread panicked".to_string()),
+            Ok(Err(err)) => {
+                if first_err.is_none() {
+                    first_err = Some(err);
+                }
+            }
+            Err(_) => {
+                if first_err.is_none() {
+                    first_err = Some("worker thread panicked".to_string());
+                }
+            }
         }
     }
+    if let Some(err) = first_err {
+        return Err(err);
+    }
 
-    let elapsed = Duration::from_secs(args.duration_secs).as_secs_f64();
+    let elapsed = start.elapsed().as_secs_f64();
     let rows = counters.rows.load(Ordering::Relaxed);
     let batches = counters.batches.load(Ordering::Relaxed);
     let errors = counters.errors.load(Ordering::Relaxed);
@@ -300,8 +313,7 @@ fn run_worker(
             Ok(batch) => batch,
             Err(err) => {
                 counters.errors.fetch_add(1, Ordering::Relaxed);
-                eprintln!("worker {worker_id}: scan error: {err}");
-                continue;
+                return Err(format!("worker {worker_id}: scan error: {err}"));
             }
         };
 
@@ -309,8 +321,7 @@ fn run_worker(
             Ok(batch) => batch,
             Err(err) => {
                 counters.errors.fetch_add(1, Ordering::Relaxed);
-                eprintln!("worker {worker_id}: transform error: {err}");
-                continue;
+                return Err(format!("worker {worker_id}: transform error: {err}"));
             }
         };
 
@@ -330,6 +341,7 @@ fn run_worker(
             SendResult::RetryAfter(delay) => {
                 counters.errors.fetch_add(1, Ordering::Relaxed);
                 eprintln!("worker {worker_id}: retry-after: {delay:?}");
+                std::thread::sleep(delay);
             }
             SendResult::Rejected(reason) => {
                 counters.errors.fetch_add(1, Ordering::Relaxed);
