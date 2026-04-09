@@ -819,7 +819,10 @@ fn schedule_self_interrupt_after(duration: Duration) {
     #[cfg(unix)]
     {
         std::thread::spawn(move || {
-            std::thread::sleep(duration);
+            // Give runtime bootstrap a moment to install signal handlers before
+            // the auto-stop timer can fire.
+            let arm_delay = Duration::from_millis(250);
+            std::thread::sleep(arm_delay.saturating_add(duration));
             let pid = std::process::id() as libc::pid_t;
             // SAFETY: pid is the current process id; sending SIGINT mirrors Ctrl-C.
             let rc = unsafe { libc::kill(pid, libc::SIGINT) };
