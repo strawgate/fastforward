@@ -64,10 +64,11 @@ java -cp /path/to/tla2tools.jar tlc2.TLC MCPipelineMachine.tla -config PipelineM
 ```
 
 Three models:
-- **Model 1 — Safety** (comment out `ForceStop` in `Next`): `Sources={"s1","s2"}`,
+- **Model 1 — Safety** (normal + ForceStop paths): `Sources={"s1","s2"}`,
   `MaxBatchesPerSource=3`, ~50K states, < 30s
 - **Model 2 — Liveness**: `MaxBatchesPerSource=2`, ~5K states, < 5 min
-- **Model 3 — ForceStop**: enable `ForceStop`, remove `DrainCompleteness` from invariants
+- **Model 3 — Coverage**: reachability/vacuity witnesses via
+  `PipelineMachine.coverage.cfg` (expected invariant violations as witnesses)
 
 > Do NOT use `CONSTRAINT` to bound state space for liveness — it silently breaks liveness
 > by cutting off infinite behaviors before they converge. Use model constants instead.

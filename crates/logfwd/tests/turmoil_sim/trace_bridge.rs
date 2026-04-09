@@ -215,6 +215,14 @@ impl TransitionValidator {
         if events.is_empty() {
             return Err("trace is empty".to_string());
         }
+        if !matches!(
+            events.first(),
+            Some(TraceEvent::Phase {
+                phase: TracePhase::Running
+            })
+        ) {
+            return Err("trace must start with running phase marker".to_string());
+        }
 
         let mut phase = PhaseState::Running;
         let mut source_offsets = self.source_offsets.clone();

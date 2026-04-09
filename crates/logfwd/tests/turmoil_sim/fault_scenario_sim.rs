@@ -64,7 +64,26 @@ fn network_partition_repair_scenario_recovers_delivery() {
     InvariantSet::new()
         .no_sim_error()
         .server_connections_ge(1)
-        .server_received_ge(5)
+        .server_received_ge(40)
+        .verify(&outcome);
+}
+
+#[test]
+fn step_zero_network_fault_is_applied_and_recovery_is_possible() {
+    let outcome = FaultScenario::builder("network-step-zero-fault")
+        .with_seed(20260414)
+        .with_turmoil_tcp_sink()
+        .with_line_count(20)
+        .with_batch_timeout(Duration::from_millis(20))
+        .with_shutdown_after(Duration::from_secs(10))
+        .with_network_fault(NetworkFault::at_step(0, NetworkFaultAction::Partition))
+        .with_network_fault(NetworkFault::at_step(120, NetworkFaultAction::Repair))
+        .run();
+
+    InvariantSet::new()
+        .no_sim_error()
+        .server_connections_ge(1)
+        .server_received_ge(1)
         .verify(&outcome);
 }
 

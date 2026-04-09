@@ -305,6 +305,13 @@ impl FaultScenario {
             } else {
                 let mut faults = network_faults.iter().peekable();
                 let mut step = 0usize;
+                while let Some(fault) = faults.peek() {
+                    if fault.step != 0 {
+                        break;
+                    }
+                    apply_network_fault(&mut sim, fault);
+                    faults.next();
+                }
                 while faults.peek().is_some() {
                     sim.step()?;
                     step += 1;

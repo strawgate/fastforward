@@ -1826,7 +1826,9 @@ mod tests {
 
     #[cfg(feature = "loom-tests")]
     #[test]
-    fn loom_worker_removal_vs_late_event_never_resurrects_slot() {
+    fn loom_worker_removal_vs_late_event_model_never_resurrects_slot() {
+        // Reduced seam model: assert remove/event ordering cannot
+        // logically resurrect a removed slot.
         struct LoomState {
             worker_present: bool,
             worker_health: ComponentHealth,

@@ -147,3 +147,56 @@ fn trace_validator_rejects_checkpoint_regression() {
         "unexpected validator error: {err}"
     );
 }
+
+#[test]
+fn trace_validator_rejects_missing_running_marker() {
+    let events = vec![
+        TraceEvent::CheckpointUpdate {
+            source_id: 1,
+            offset: 1,
+        },
+        TraceEvent::Phase {
+            phase: TracePhase::Draining,
+        },
+        TraceEvent::Phase {
+            phase: TracePhase::Stopped,
+        },
+    ];
+
+    let validator = TransitionValidator::default();
+    let err = validator
+        .validate(&events)
+        .expect_err("trace without initial running marker must be rejected");
+    assert!(
+        err.contains("start with running phase marker"),
+        "unexpected validator error: {err}"
+    );
+}
+
+#[test]
+fn trace_validator_rejects_sink_activity_after_stopped() {
+    let events = vec![
+        TraceEvent::Phase {
+            phase: TracePhase::Running,
+        },
+        TraceEvent::Phase {
+            phase: TracePhase::Draining,
+        },
+        TraceEvent::Phase {
+            phase: TracePhase::Stopped,
+        },
+        TraceEvent::SinkResult {
+            outcome: super::trace_bridge::SinkOutcome::Ok,
+            rows: 1,
+        },
+    ];
+
+    let validator = TransitionValidator::default();
+    let err = validator
+        .validate(&events)
+        .expect_err("sink activity after stopped must be rejected");
+    assert!(
+        err.contains("after Stopped"),
+        "unexpected validator error: {err}"
+    );
+}

@@ -15,9 +15,9 @@ Models `PipelineMachine<S, C>` from
 |----------|------|-------------|
 | `DrainCompleteness` | Safety | `stop()` only reachable when all in_flight batches are resolved |
 | `QuiescenceHasNoSilentStrandedWork` | Safety | At `Stopped`, no in-flight batch is left without explicit terminal outcome |
-| `CheckpointOrderingInvariant` | Safety | committed[s]=n implies all batches 1..n are acked, none in_flight |
-| `CommittedNeverAheadOfAcked` | Safety | committed[s] never exceeds count of acked batches |
-| `NoDoubleComplete` | Safety | batch cannot be both in_flight and acked |
+| `CheckpointOrderingInvariant` | Safety | committed[s]=n implies all sent batches `<= n` are terminalized for commit (`acked` or `rejected`), none in_flight |
+| `CommittedNeverAheadOfCreated` | Safety | committed[s] never exceeds highest created batch ID |
+| `NoDoubleComplete` | Safety | batch cannot be both in_flight and any terminal set |
 | `InFlightImpliesCreated` | Safety | structural: in_flight ⊆ created |
 | `AckedImpliesCreated` | Safety | structural: acked ⊆ created |
 | `CommittedMonotonic` | Safety (temporal) | checkpoint never goes backwards |
@@ -229,11 +229,12 @@ entry in `in_flight[source]` is not removed until `apply_ack` is called.
 
 ### 2. Rejected batches advance the checkpoint
 
-`RejectBatch` is aliased to `AckBatch` — same state transition. Permanently-
-undeliverable data must not block checkpoint progress forever; that would
-stall drain indefinitely. At-least-once is weakened to at-most-once only for
-rejected batches. This matches Filebeat's behavior (advance past malformed
-records) and differs from Fluent Bit (drops the route, retries via backlog).
+`RejectBatch` is a distinct transition from `AckBatch`, but both are explicit
+terminal outcomes that can advance ordered commit. Permanently-undeliverable
+data must not block checkpoint progress forever; that would stall drain
+indefinitely. At-least-once is weakened to at-most-once only for rejected
+batches. This matches Filebeat's behavior (advance past malformed records) and
+differs from Fluent Bit (drops the route, retries via backlog).
 
 **Implication:** if a batch is rejected, the data in that batch is lost. This
 is the correct behavior for a log forwarder where corrupted or oversized data
@@ -265,9 +266,10 @@ blocking that a stateless forwarder should not need.
 
 `ForceStop` is modeled to reflect that every production system has a hard-kill
 escape hatch. Under normal operation (no ForceStop), the spec proves that drain
-always eventually completes (`EventualDrain`). With `ForceStop` enabled,
-`DrainCompleteness` no longer holds — this is intentional and correct: force-
-stopping is explicitly the policy decision to accept data loss for liveness.
+always eventually completes (`EventualDrain`). With `ForceStop`, in-flight work
+is explicitly terminalized into `abandoned`, so `DrainCompleteness` still holds
+(`Stopped => in_flight = {}`). The explicit `abandoned` set captures the policy
+decision to accept data loss for liveness.
 
 **Fairness assumption for `WF(Stop)`:** Stop's enabledness is stable once
 reached during Draining, because `NoCreateAfterDrain` (verified invariant)

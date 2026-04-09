@@ -57,6 +57,7 @@ BatchIds == 1..MaxBatchesPerSource
 VARIABLES
     phase,       \* Pipeline phase: "Running" | "Draining" | "Stopped"
     created,     \* [Sources -> SUBSET BatchIds] — assigned via create_batch
+    sent,        \* [Sources -> SUBSET BatchIds] — entered machine via begin_send
     in_flight,   \* [Sources -> SUBSET BatchIds] — after begin_send, before apply_ack
     acked,       \* [Sources -> SUBSET BatchIds] — terminal success outcome
     rejected,    \* [Sources -> SUBSET BatchIds] — terminal permanent-reject outcome
@@ -64,7 +65,7 @@ VARIABLES
     committed,   \* [Sources -> Nat]  — highest committed batch sequence (0 = none)
     forced       \* BOOLEAN — TRUE if ForceStop was used (data loss accepted)
 
-vars == <<phase, created, in_flight, acked, rejected, abandoned, committed, forced>>
+vars == <<phase, created, sent, in_flight, acked, rejected, abandoned, committed, forced>>
 
 (* ---------------------------------------------------------------------------
  * Helper operators
@@ -102,6 +103,11 @@ TypeOK ==
     /\ forced \in BOOLEAN
     /\ \A s \in Sources :
         /\ created[s]   \subseteq BatchIds
+        /\ sent[s]      \subseteq created[s]
+        /\ in_flight[s] \subseteq sent[s]
+        /\ acked[s]     \subseteq sent[s]
+        /\ rejected[s]  \subseteq sent[s]
+        /\ abandoned[s] \subseteq sent[s]
         /\ in_flight[s] \subseteq created[s]
         /\ acked[s]     \subseteq created[s]
         /\ rejected[s]  \subseteq created[s]
@@ -119,6 +125,7 @@ TypeOK ==
 Init ==
     /\ phase      = "Running"
     /\ created    = [s \in Sources |-> {}]
+    /\ sent       = [s \in Sources |-> {}]
     /\ in_flight  = [s \in Sources |-> {}]
     /\ acked      = [s \in Sources |-> {}]
     /\ rejected   = [s \in Sources |-> {}]
@@ -137,7 +144,7 @@ CreateBatch(s) ==
     /\ phase = "Running"
     /\ next_id \in BatchIds
     /\ created'   = [created   EXCEPT ![s] = created[s] \cup {next_id}]
-    /\ UNCHANGED <<phase, in_flight, acked, rejected, abandoned, committed, forced>>
+    /\ UNCHANGED <<phase, sent, in_flight, acked, rejected, abandoned, committed, forced>>
 
 \* begin_send: machine takes ownership of batch b for source s.
 \* A Queued ticket dropped before begin_send has no machine state — safe.
@@ -152,11 +159,13 @@ BeginSend(s, b) ==
     /\ b \notin acked[s]
     /\ b \notin rejected[s]
     /\ b \notin abandoned[s]
+    /\ b \notin sent[s]
     \* In Rust, Queued tickets are consumed by begin_send or dropped.
     \* Once dropped, the ticket is gone — you cannot send a batch whose
     \* ticket was dropped. This means sends are monotonic: you cannot send
     \* batch b if any batch with a higher ID was already sent or acked.
     /\ \A other \in (in_flight[s] \cup acked[s] \cup rejected[s] \cup abandoned[s]) : b >= other
+    /\ sent'      = [sent      EXCEPT ![s] = sent[s] \cup {b}]
     /\ in_flight' = [in_flight EXCEPT ![s] = in_flight[s] \cup {b}]
     /\ UNCHANGED <<phase, created, acked, rejected, abandoned, committed, forced>>
 
@@ -183,7 +192,7 @@ AckBatch(s, b) ==
        /\ in_flight' = [in_flight EXCEPT ![s] = new_in_flight_s]
        /\ acked'     = [acked     EXCEPT ![s] = new_acked_s]
        /\ committed' = [committed EXCEPT ![s] = NewCommitted(new_acked_s, new_rejected_s, new_in_flight_s)]
-    /\ UNCHANGED <<phase, created, rejected, abandoned, forced>>
+    /\ UNCHANGED <<phase, created, sent, rejected, abandoned, forced>>
 
 RejectBatch(s, b) ==
     /\ b \in in_flight[s]
@@ -194,13 +203,13 @@ RejectBatch(s, b) ==
        /\ in_flight' = [in_flight EXCEPT ![s] = new_in_flight_s]
        /\ rejected'  = [rejected  EXCEPT ![s] = new_rejected_s]
        /\ committed' = [committed EXCEPT ![s] = NewCommitted(new_acked_s, new_rejected_s, new_in_flight_s)]
-    /\ UNCHANGED <<phase, created, acked, abandoned, forced>>
+    /\ UNCHANGED <<phase, created, sent, acked, abandoned, forced>>
 
 \* begin_drain: closes pipeline to new batches.
 BeginDrain ==
     /\ phase = "Running"
     /\ phase' = "Draining"
-    /\ UNCHANGED <<created, in_flight, acked, rejected, abandoned, committed, forced>>
+    /\ UNCHANGED <<created, sent, in_flight, acked, rejected, abandoned, committed, forced>>
 
 \* stop: THE DRAIN GUARANTEE.
 \* Rust: PipelineMachine<Draining, C>::stop() returns Err(self) if not drained.
@@ -219,7 +228,7 @@ Stop ==
     /\ phase = "Draining"
     /\ \A s \in Sources : in_flight[s] = {}    \* THE DRAIN GUARD (≡ is_drained())
     /\ phase' = "Stopped"
-    /\ UNCHANGED <<created, in_flight, acked, rejected, abandoned, committed, forced>>
+    /\ UNCHANGED <<created, sent, in_flight, acked, rejected, abandoned, committed, forced>>
 
 \* force_stop: emergency shutdown when grace period expires.
 \* Discards in-flight state. Every production system has an equivalent:
@@ -241,7 +250,7 @@ ForceStop ==
     /\ forced' = TRUE
     /\ abandoned' = [s \in Sources |-> abandoned[s] \cup in_flight[s]]
     /\ in_flight' = [s \in Sources |-> {}]
-    /\ UNCHANGED <<created, acked, rejected, committed>>
+    /\ UNCHANGED <<created, sent, acked, rejected, committed>>
 
 (* ---------------------------------------------------------------------------
  * Next-state relation
@@ -317,8 +326,7 @@ QuiescenceHasNoSilentStrandedWork ==
     phase = "Stopped" =>
         \A s \in Sources :
             LET terminal_s == acked[s] \cup rejected[s] \cup abandoned[s]
-                sent_s == in_flight[s] \cup terminal_s
-            IN sent_s = terminal_s
+            IN sent[s] = terminal_s
 
 \* in_flight cannot grow once drain begins.
 \* This is what makes WF(Stop) sufficient — once in_flight[s] = {} is reached
@@ -359,7 +367,7 @@ CheckpointOrderingInvariant ==
     \A s \in Sources :
         LET n        == committed[s]
             committed_terminal_s == acked[s] \cup rejected[s]
-            ever_sent_s == in_flight[s] \cup committed_terminal_s
+            ever_sent_s == sent[s]
         IN n > 0 =>
             \A i \in ever_sent_s :
                 i <= n =>
@@ -376,14 +384,29 @@ CommittedNeverAheadOfCreated ==
 InFlightImpliesCreated ==
     \A s \in Sources : in_flight[s] \subseteq created[s]
 
+SentImpliesCreated ==
+    \A s \in Sources : sent[s] \subseteq created[s]
+
+InFlightImpliesSent ==
+    \A s \in Sources : in_flight[s] \subseteq sent[s]
+
 AckedImpliesCreated ==
     \A s \in Sources : acked[s] \subseteq created[s]
+
+AckedImpliesSent ==
+    \A s \in Sources : acked[s] \subseteq sent[s]
 
 RejectedImpliesCreated ==
     \A s \in Sources : rejected[s] \subseteq created[s]
 
+RejectedImpliesSent ==
+    \A s \in Sources : rejected[s] \subseteq sent[s]
+
 AbandonedImpliesCreated ==
     \A s \in Sources : abandoned[s] \subseteq created[s]
+
+AbandonedImpliesSent ==
+    \A s \in Sources : abandoned[s] \subseteq sent[s]
 
 (* ===========================================================================
  * LIVENESS PROPERTIES (hold under Fairness; ForceStop always in Next but
