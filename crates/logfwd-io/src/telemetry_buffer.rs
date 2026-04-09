@@ -234,9 +234,9 @@ pub fn metrics_to_otlp_json(points: &[MetricPoint]) -> String {
 
         metrics_json.push(format!(
             "{{\"name\":\"{}\",\"description\":\"{}\",\"unit\":\"{}\",\"gauge\":{{\"dataPoints\":[{}]}}}}",
-            name,
-            first.description,
-            first.unit,
+            json_escape(name),
+            json_escape(first.description),
+            json_escape(first.unit),
             data_points.join(",")
         ));
     }
