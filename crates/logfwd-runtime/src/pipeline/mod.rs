@@ -91,6 +91,7 @@ pub(crate) struct ChannelMsg {
     pub input_index: usize,
     pub scan_ns: u64,
     pub transform_ns: u64,
+    pub sender_addr: Option<std::net::SocketAddr>,
 }
 
 // ---------------------------------------------------------------------------
@@ -2406,6 +2407,7 @@ output:
             input_index: 0,
             scan_ns: 0,
             transform_ns: 0,
+            sender_addr: None,
         })
         .unwrap();
 

@@ -67,6 +67,7 @@ pub(crate) struct IoChunk {
     pub checkpoints: Vec<(SourceId, ByteOffset)>,
     pub queued_at: tokio::time::Instant,
     pub input_index: usize,
+    pub sender_addr: Option<std::net::SocketAddr>,
 }
 
 #[cfg(not(feature = "turmoil"))]
@@ -97,6 +98,7 @@ fn io_worker_loop(
     input_index: usize,
 ) {
     let mut buffered_since: Option<Instant> = None;
+    let mut buffered_sender: Option<std::net::SocketAddr> = None;
     let mut last_bp_warn: Option<Instant> = None;
 
     'io_loop: loop {
@@ -132,7 +134,16 @@ fn io_worker_loop(
         } else {
             for event in events {
                 match event {
-                    InputEvent::Data { bytes, .. } => {
+                    InputEvent::Data {
+                        bytes, sender_addr, ..
+                    } => {
+                        if input.buf.is_empty() {
+                            buffered_sender = sender_addr;
+                        } else if buffered_sender != sender_addr {
+                            // Mixed senders in one buffered chunk — clear sender
+                            // attribution for this batch to avoid lying in traces.
+                            buffered_sender = None;
+                        }
                         input.buf.extend_from_slice(&bytes);
                     }
                     InputEvent::Batch { batch, .. } => {
@@ -144,6 +155,7 @@ fn io_worker_loop(
                                 checkpoints,
                                 queued_at: tokio::time::Instant::now(),
                                 input_index,
+                                sender_addr: buffered_sender,
                             });
                             match tx.try_send(chunk) {
                                 Ok(()) => {}
@@ -165,6 +177,7 @@ fn io_worker_loop(
                                 Err(mpsc::error::TrySendError::Closed(_)) => break 'io_loop,
                             }
                             buffered_since = None;
+                            buffered_sender = None;
                         }
 
                         let item = IoWorkItem::Batch {
@@ -227,6 +240,7 @@ fn io_worker_loop(
                 checkpoints,
                 queued_at: tokio::time::Instant::now(),
                 input_index,
+                sender_addr: buffered_sender,
             });
 
             // Try non-blocking first; if full, log backpressure and block.
@@ -247,6 +261,7 @@ fn io_worker_loop(
                 Err(mpsc::error::TrySendError::Closed(_)) => break,
             }
             buffered_since = None;
+            buffered_sender = None;
         }
     }
 
@@ -261,6 +276,7 @@ fn io_worker_loop(
             checkpoints,
             queued_at: tokio::time::Instant::now(),
             input_index,
+            sender_addr: buffered_sender,
         });
         if tx.blocking_send(chunk).is_err() {
             tracing::warn!(
@@ -312,7 +328,7 @@ fn cpu_worker_loop(
     };
 
     while let Some(item) = rx.blocking_recv() {
-        let (batch, checkpoints, queued_at, input_index, scan_ns) = match item {
+        let (batch, checkpoints, queued_at, input_index, scan_ns, sender_addr) = match item {
             IoWorkItem::Bytes(chunk) => {
                 let t0 = Instant::now();
                 let batch = match transform.scanner.scan(chunk.bytes) {
@@ -335,6 +351,7 @@ fn cpu_worker_loop(
                     chunk.queued_at,
                     chunk.input_index,
                     t0.elapsed().as_nanos() as u64,
+                    chunk.sender_addr,
                 )
             }
             IoWorkItem::Batch {
@@ -342,7 +359,7 @@ fn cpu_worker_loop(
                 checkpoints,
                 queued_at,
                 input_index,
-            } => (batch, checkpoints, queued_at, input_index, 0),
+            } => (batch, checkpoints, queued_at, input_index, 0, None),
         };
 
         let num_rows = batch.num_rows();
@@ -375,6 +392,7 @@ fn cpu_worker_loop(
             input_index,
             scan_ns,
             transform_ns,
+            sender_addr,
         };
 
         // Use blocking_send (not shutdown-aware) so we deliver all

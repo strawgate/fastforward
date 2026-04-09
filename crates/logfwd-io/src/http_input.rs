@@ -285,6 +285,7 @@ impl InputSource for HttpInput {
             bytes: all,
             source_id: None,
             accounted_bytes,
+            sender_addr: None,
         }])
     }
 

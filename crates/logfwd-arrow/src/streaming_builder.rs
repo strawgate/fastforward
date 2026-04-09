@@ -2177,7 +2177,7 @@ mod tests {
         b.begin_batch(buf);
         let idx = b.resolve_field(b"lat");
         b.begin_row();
-        b.append_float_by_idx(idx, b"3.14");
+        b.append_float_by_idx(idx, b"3.141592653589793");
         b.end_row();
         b.begin_row();
         b.end_row(); // missing → null
@@ -2189,7 +2189,7 @@ mod tests {
             .as_any()
             .downcast_ref::<Float64Array>()
             .unwrap();
-        assert!((col.value(0) - 3.14).abs() < 1e-10);
+        assert!((col.value(0) - std::f64::consts::PI).abs() < 1e-10);
         assert!(col.is_null(1));
     }
 

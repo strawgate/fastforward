@@ -453,6 +453,7 @@ impl InputSource for GeneratorInput {
             bytes: out,
             source_id: None,
             accounted_bytes,
+            sender_addr: None,
         }])
     }
 

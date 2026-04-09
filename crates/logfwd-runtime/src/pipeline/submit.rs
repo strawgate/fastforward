@@ -37,6 +37,7 @@ impl Pipeline {
             queued_at,
             scan_ns,
             transform_ns,
+            sender_addr,
             ..
         } = msg;
         let batch_id = self.metrics.alloc_batch_id();
@@ -146,9 +147,11 @@ impl Pipeline {
         let input_rows = num_rows as u64;
         let out_rows = result.num_rows() as u64;
         let submitted_at = tokio::time::Instant::now();
+        let sender = sender_addr.map(|addr| addr.to_string()).unwrap_or_default();
 
         let batch_span = tracing::info_span!(
             "batch",
+            sender = %sender,
             scan_ns = scan_ns,
             transform_ns = transform_ns,
             input_rows = input_rows,
@@ -232,6 +235,7 @@ pub(super) async fn scan_and_transform_for_send(
         input_index,
         scan_ns,
         transform_ns,
+        sender_addr: None,
     })
 }
 
@@ -275,5 +279,6 @@ pub(super) async fn transform_direct_batch_for_send(
         input_index,
         scan_ns: 0,
         transform_ns,
+        sender_addr: None,
     })
 }

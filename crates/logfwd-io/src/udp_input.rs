@@ -1,6 +1,7 @@
 //! UDP input source. Listens on a UDP socket and produces one InputEvent
 //! per received datagram (or batch of datagrams).
 
+use std::collections::BTreeMap;
 use std::io;
 use std::net::UdpSocket;
 use std::sync::Arc;
@@ -99,24 +100,23 @@ impl InputSource for UdpInput {
     fn poll(&mut self) -> io::Result<Vec<InputEvent>> {
         let mut under_pressure = false;
 
-        // Accumulate into a single byte buffer; avoid per-datagram Vec alloc.
-        // We re-use `self.buf` for recv and build the output in a separate vec
-        // only when data actually arrives.
-        let mut total: Option<Vec<u8>> = None;
-        let mut source_bytes: u64 = 0;
+        // Accumulate by sender so each emitted Data event retains deterministic
+        // sender attribution without per-datagram allocations.
+        let mut by_sender: BTreeMap<std::net::SocketAddr, (Vec<u8>, u64)> = BTreeMap::new();
 
         // Drain all available datagrams in one poll cycle.
         loop {
-            // `recv` is cheaper than `recv_from` — we don't need the source addr.
-            match self.socket.recv(&mut self.buf) {
-                Ok(0) => {
+            match self.socket.recv_from(&mut self.buf) {
+                Ok((0, _)) => {
                     // Zero-length datagram — valid in UDP. Nothing to append,
                     // just continue draining.
                 }
-                Ok(n) => {
-                    source_bytes = source_bytes.saturating_add(n as u64);
+                Ok((n, sender_addr)) => {
                     let data = &self.buf[..n];
-                    let out = total.get_or_insert_with(|| Vec::with_capacity(4096));
+                    let (out, source_bytes) = by_sender
+                        .entry(sender_addr)
+                        .or_insert_with(|| (Vec::with_capacity(4096), 0));
+                    *source_bytes = source_bytes.saturating_add(n as u64);
                     out.extend_from_slice(data);
                     // Ensure newline termination so the scanner always sees
                     // complete lines, even if the sender omitted a trailing LF.
@@ -152,17 +152,19 @@ impl InputSource for UdpInput {
             },
         );
 
-        match total {
-            Some(bytes) => {
-                let accounted_bytes = source_bytes;
-                Ok(vec![InputEvent::Data {
-                    bytes,
-                    source_id: None,
-                    accounted_bytes,
-                }])
-            }
-            None => Ok(Vec::new()),
+        if by_sender.is_empty() {
+            return Ok(Vec::new());
         }
+
+        Ok(by_sender
+            .into_iter()
+            .map(|(sender_addr, (bytes, accounted_bytes))| InputEvent::Data {
+                bytes,
+                source_id: None,
+                accounted_bytes,
+                sender_addr: Some(sender_addr),
+            })
+            .collect())
     }
 
     fn name(&self) -> &str {
@@ -224,6 +226,7 @@ mod tests {
         let addr = input.local_addr().unwrap();
 
         let sender = StdSocket::bind("127.0.0.1:0").unwrap();
+        let sender_addr = sender.local_addr().unwrap();
         sender.send_to(b"no newline", addr).unwrap();
 
         std::thread::sleep(std::time::Duration::from_millis(50));
@@ -233,15 +236,49 @@ mod tests {
         if let InputEvent::Data {
             bytes,
             accounted_bytes,
+            sender_addr: Some(actual_sender),
             ..
         } = &events[0]
         {
             assert_eq!(*accounted_bytes, 10);
             assert_eq!(bytes.len(), 11);
             assert!(bytes.ends_with(b"\n"), "expected trailing newline");
+            assert_eq!(*actual_sender, sender_addr);
         } else {
             panic!("expected InputEvent::Data variant");
         }
+    }
+
+    #[test]
+    fn preserves_sender_addr_for_multiple_senders() {
+        let mut input = UdpInput::new("test", "127.0.0.1:0").unwrap();
+        let addr = input.local_addr().unwrap();
+
+        let sender1 = StdSocket::bind("127.0.0.1:0").unwrap();
+        let sender2 = StdSocket::bind("127.0.0.1:0").unwrap();
+        let sender1_addr = sender1.local_addr().unwrap();
+        let sender2_addr = sender2.local_addr().unwrap();
+
+        sender1.send_to(b"one\n", addr).unwrap();
+        sender2.send_to(b"two\n", addr).unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        let events = input.poll().unwrap();
+        assert_eq!(events.len(), 2);
+
+        let mut seen = std::collections::BTreeSet::new();
+        for event in events {
+            if let InputEvent::Data {
+                sender_addr: Some(sender),
+                ..
+            } = event
+            {
+                seen.insert(sender);
+            }
+        }
+        assert!(seen.contains(&sender1_addr));
+        assert!(seen.contains(&sender2_addr));
     }
 
     #[test]

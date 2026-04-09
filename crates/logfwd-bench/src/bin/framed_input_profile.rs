@@ -328,6 +328,7 @@ impl MockSource {
                     bytes: chunk.clone(),
                     source_id: None,
                     accounted_bytes: chunk.len() as u64,
+                    sender_addr: None,
                 }]
             })
             .collect();

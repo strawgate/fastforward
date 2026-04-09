@@ -30,6 +30,7 @@ impl MockSource {
                     bytes: chunk.to_vec(),
                     source_id: None,
                     accounted_bytes: chunk.len() as u64,
+                    sender_addr: None,
                 }]
             })
             .collect();

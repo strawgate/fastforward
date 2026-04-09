@@ -104,6 +104,7 @@ impl InputSource for FramedInput {
                     bytes,
                     source_id,
                     accounted_bytes,
+                    sender_addr,
                 } => {
                     self.stats.inc_bytes(accounted_bytes);
 
@@ -252,6 +253,17 @@ impl InputSource for FramedInput {
                             self.spare_buf = std::mem::replace(&mut self.out_buf, with_source);
                         }
                     }
+                    if inject_source_path && let Some(sender_addr) = sender_addr {
+                        let mut with_sender = std::mem::take(&mut self.spare_buf);
+                        with_sender.clear();
+                        inject_sender_metadata(
+                            &self.out_buf,
+                            sender_addr.to_string().as_bytes(),
+                            &mut with_sender,
+                        );
+                        self.out_buf.clear();
+                        self.spare_buf = std::mem::replace(&mut self.out_buf, with_sender);
+                    }
 
                     let line_count = memchr::memchr_iter(b'\n', &chunk[process_start..]).count();
                     self.stats.inc_lines(line_count as u64);
@@ -266,6 +278,7 @@ impl InputSource for FramedInput {
                             bytes: data,
                             source_id,
                             accounted_bytes: 0,
+                            sender_addr,
                         });
                     }
                 }
@@ -370,6 +383,7 @@ impl InputSource for FramedInput {
                                         bytes: data,
                                         source_id: key,
                                         accounted_bytes: 0,
+                                        sender_addr: None,
                                     });
                                 }
                             }
@@ -478,6 +492,38 @@ fn inject_source_path_metadata(chunk: &[u8], source_path: &std::path::Path, out:
     }
 }
 
+fn inject_sender_metadata(chunk: &[u8], sender: &[u8], out: &mut Vec<u8>) {
+    let mut pos = 0;
+    while pos < chunk.len() {
+        let eol = memchr::memchr(b'\n', &chunk[pos..]).map_or(chunk.len(), |o| pos + o);
+        let line = &chunk[pos..eol];
+        let first_nonws = line
+            .iter()
+            .position(|&b| !matches!(b, b' ' | b'\t' | b'\r'));
+        if let Some(obj_start) = first_nonws.filter(|&idx| line[idx] == b'{') {
+            let after_open = &line[obj_start + 1..];
+            let is_empty_obj = after_open
+                .iter()
+                .position(|&b| !matches!(b, b' ' | b'\t' | b'\r' | b'\n'))
+                .is_some_and(|i| after_open[i] == b'}');
+            out.extend_from_slice(&line[..obj_start]);
+            out.extend_from_slice(b"{\"_sender\":\"");
+            json_escape_bytes(sender, out);
+            out.push(b'"');
+            if !is_empty_obj {
+                out.push(b',');
+            }
+            out.extend_from_slice(after_open);
+        } else {
+            out.extend_from_slice(line);
+        }
+        if eol < chunk.len() {
+            out.push(b'\n');
+        }
+        pos = eol + 1;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -515,6 +561,7 @@ mod tests {
                             bytes: c.to_vec(),
                             source_id: None,
                             accounted_bytes: c.len() as u64,
+                            sender_addr: None,
                         }]
                     })
                     .collect(),
@@ -534,6 +581,7 @@ mod tests {
                             bytes: c.to_vec(),
                             source_id: Some(sid),
                             accounted_bytes: c.len() as u64,
+                            sender_addr: None,
                         }]
                     })
                     .collect(),
@@ -698,6 +746,7 @@ mod tests {
             bytes: b"line\n".to_vec(),
             source_id: None,
             accounted_bytes: 99,
+            sender_addr: None,
         }]]);
         let mut framed = FramedInput::new(
             Box::new(source),
@@ -709,6 +758,33 @@ mod tests {
         assert_eq!(collect_data(events), b"line\n");
         assert_eq!(stats.lines(), 1);
         assert_eq!(stats.bytes(), 99);
+    }
+
+    #[test]
+    fn data_events_preserve_sender_addr() {
+        let stats = make_stats();
+        let expected_sender: std::net::SocketAddr = "127.0.0.1:9001".parse().unwrap();
+        let source = MockSource::new(vec![vec![InputEvent::Data {
+            bytes: b"line\n".to_vec(),
+            source_id: None,
+            accounted_bytes: 5,
+            sender_addr: Some(expected_sender),
+        }]]);
+        let mut framed = FramedInput::new(
+            Box::new(source),
+            FormatDecoder::passthrough(Arc::clone(&stats)),
+            Arc::clone(&stats),
+        );
+
+        let events = framed.poll().unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            InputEvent::Data {
+                sender_addr: actual_sender,
+                ..
+            } => assert_eq!(*actual_sender, Some(expected_sender)),
+            _ => panic!("expected InputEvent::Data variant"),
+        }
     }
 
     #[test]
@@ -825,11 +901,13 @@ mod tests {
                 bytes: big,
                 source_id: Some(sid),
                 accounted_bytes: 0,
+                sender_addr: None,
             }],
             vec![InputEvent::Data {
                 bytes: second_bytes.to_vec(),
                 source_id: Some(sid),
                 accounted_bytes: 0,
+                sender_addr: None,
             }],
         ])
         .with_offsets(vec![(sid, ByteOffset(total))]);
@@ -951,12 +1029,14 @@ mod tests {
                 bytes: b"partial".to_vec(),
                 source_id: None,
                 accounted_bytes: 7,
+                sender_addr: None,
             }],
             vec![InputEvent::Rotated { source_id: None }],
             vec![InputEvent::Data {
                 bytes: b"fresh\n".to_vec(),
                 source_id: None,
                 accounted_bytes: 6,
+                sender_addr: None,
             }],
         ]);
         let mut framed = FramedInput::new(
@@ -1046,6 +1126,7 @@ mod tests {
                 bytes: b"no-newline".to_vec(),
                 source_id: None,
                 accounted_bytes: 10,
+                sender_addr: None,
             }],
             vec![InputEvent::EndOfFile { source_id: None }],
         ]);
@@ -1074,6 +1155,7 @@ mod tests {
                 bytes: b"complete\npartial".to_vec(),
                 source_id: None,
                 accounted_bytes: 16,
+                sender_addr: None,
             }],
             vec![InputEvent::EndOfFile { source_id: None }],
         ]);
@@ -1101,6 +1183,7 @@ mod tests {
                 bytes: b"line\n".to_vec(),
                 source_id: None,
                 accounted_bytes: 5,
+                sender_addr: None,
             }],
             vec![InputEvent::EndOfFile { source_id: None }],
         ]);
@@ -1135,11 +1218,13 @@ mod tests {
                     bytes: b"hello-from-A".to_vec(),
                     source_id: Some(sid_a),
                     accounted_bytes: 12,
+                    sender_addr: None,
                 },
                 InputEvent::Data {
                     bytes: b"hello-from-B".to_vec(),
                     source_id: Some(sid_b),
                     accounted_bytes: 12,
+                    sender_addr: None,
                 },
             ],
             // Poll 2: complete the lines from each source
@@ -1148,11 +1233,13 @@ mod tests {
                     bytes: b"-done\n".to_vec(),
                     source_id: Some(sid_a),
                     accounted_bytes: 6,
+                    sender_addr: None,
                 },
                 InputEvent::Data {
                     bytes: b"-done\n".to_vec(),
                     source_id: Some(sid_b),
                     accounted_bytes: 6,
+                    sender_addr: None,
                 },
             ],
         ]);
@@ -1201,11 +1288,13 @@ mod tests {
                     bytes: b"partial-A".to_vec(),
                     source_id: Some(sid_a),
                     accounted_bytes: 9,
+                    sender_addr: None,
                 },
                 InputEvent::Data {
                     bytes: b"partial-B".to_vec(),
                     source_id: Some(sid_b),
                     accounted_bytes: 9,
+                    sender_addr: None,
                 },
             ],
             // Truncation
@@ -1215,6 +1304,7 @@ mod tests {
                 bytes: b"fresh-A\n".to_vec(),
                 source_id: Some(sid_a),
                 accounted_bytes: 8,
+                sender_addr: None,
             }],
         ]);
 
@@ -1246,6 +1336,7 @@ mod tests {
             bytes: b"hello\nwor".to_vec(),
             source_id: Some(sid),
             accounted_bytes: 9,
+            sender_addr: None,
         }]])
         .with_offsets(vec![(sid, ByteOffset(1000))]);
 
@@ -1275,6 +1366,7 @@ mod tests {
             bytes: b"complete\n".to_vec(),
             source_id: Some(sid),
             accounted_bytes: 9,
+            sender_addr: None,
         }]])
         .with_offsets(vec![(sid, ByteOffset(500))]);
 
@@ -1312,18 +1404,21 @@ mod tests {
                 bytes: b"2024-01-15T10:30:00Z stdout P hello \n".to_vec(),
                 source_id: Some(sid_a),
                 accounted_bytes: 38,
+                sender_addr: None,
             }],
             // Source B: CRI full line (must NOT merge with A's partial)
             vec![InputEvent::Data {
                 bytes: b"2024-01-15T10:30:01Z stderr F {\"msg\":\"world\"}\n".to_vec(),
                 source_id: Some(sid_b),
                 accounted_bytes: 50,
+                sender_addr: None,
             }],
             // Source A: CRI full line (completes A's partial)
             vec![InputEvent::Data {
                 bytes: b"2024-01-15T10:30:02Z stdout F from-A\n".to_vec(),
                 source_id: Some(sid_a),
                 accounted_bytes: 39,
+                sender_addr: None,
             }],
         ]);
 
@@ -1370,12 +1465,14 @@ mod tests {
                 bytes: b"hello\nwor".to_vec(),
                 source_id: Some(sid),
                 accounted_bytes: 9,
+                sender_addr: None,
             }],
             // Second read: 3 bytes, newline at position 1 (the 'd\n')
             vec![InputEvent::Data {
                 bytes: b"ld\n".to_vec(),
                 source_id: Some(sid),
                 accounted_bytes: 3,
+                sender_addr: None,
             }],
         ])
         .with_offsets(vec![(sid, ByteOffset(12))]);
@@ -1409,6 +1506,7 @@ mod tests {
             bytes: b"{\"msg\":\"hello\"}\n".to_vec(),
             source_id: Some(sid),
             accounted_bytes: 0,
+            sender_addr: None,
         }]])
         .with_source_paths(vec![(sid, "/var/log/pods/ns_pod_uid/c/main.log".into())]);
 
@@ -1426,6 +1524,32 @@ mod tests {
     }
 
     #[test]
+    fn file_json_injects_sender_metadata_column() {
+        let stats = make_stats();
+        let sid = SourceId(12);
+        let sender_addr: std::net::SocketAddr = "127.0.0.1:9100".parse().unwrap();
+        let source = MockSource::new(vec![vec![InputEvent::Data {
+            bytes: b"{\"msg\":\"hello\"}\n".to_vec(),
+            source_id: Some(sid),
+            accounted_bytes: 0,
+            sender_addr: Some(sender_addr),
+        }]])
+        .with_source_paths(vec![(sid, "/var/log/pods/ns_pod_uid/c/sender.log".into())]);
+
+        let mut framed = FramedInput::new(
+            Box::new(source),
+            FormatDecoder::passthrough_json(Arc::clone(&stats)),
+            stats,
+        );
+
+        let out = collect_data(framed.poll().unwrap());
+        assert_eq!(
+            out,
+            b"{\"_sender\":\"127.0.0.1:9100\",\"_source_path\":\"/var/log/pods/ns_pod_uid/c/sender.log\",\"msg\":\"hello\"}\n"
+        );
+    }
+
+    #[test]
     fn file_cri_injects_source_path_alongside_cri_metadata() {
         let stats = make_stats();
         let sid = SourceId(8);
@@ -1433,6 +1557,7 @@ mod tests {
             bytes: b"2024-01-15T10:30:00Z stdout F {\"msg\":\"hello\"}\n".to_vec(),
             source_id: Some(sid),
             accounted_bytes: 0,
+            sender_addr: None,
         }]])
         .with_source_paths(vec![(sid, "/var/log/pods/ns_pod_uid/c/0.log".into())]);
 
@@ -1457,6 +1582,7 @@ mod tests {
             bytes: b"  \t{\"msg\":\"hello\"}\n".to_vec(),
             source_id: Some(sid),
             accounted_bytes: 0,
+            sender_addr: None,
         }]])
         .with_source_paths(vec![(sid, "/var/log/pods/ns_pod_uid/c/1.log".into())]);
 
@@ -1483,6 +1609,7 @@ mod tests {
             bytes: b"{}\n".to_vec(),
             source_id: Some(sid),
             accounted_bytes: 0,
+            sender_addr: None,
         }]])
         .with_source_paths(vec![(sid, "/var/log/pods/ns_pod_uid/c/2.log".into())]);
 
@@ -1508,6 +1635,7 @@ mod tests {
             bytes: b"{\"msg\":\"hello\"}\n".to_vec(),
             source_id: Some(sid),
             accounted_bytes: 0,
+            sender_addr: None,
         }]])
         .with_source_paths(vec![(sid, "/var/log/pods/ns_pod_uid/c/raw.log".into())]);
 

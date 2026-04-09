@@ -18,10 +18,14 @@ pub enum InputEvent {
     /// to input diagnostics for this event. For raw byte inputs this is
     /// usually `bytes.len()`. Wrappers like `FramedInput` may consume this for
     /// accounting and forward downstream data with `accounted_bytes = 0`.
+    /// `sender_addr` is the transport peer address (`ip:port`) when available
+    /// (for example, from UDP `recv_from`). Sources without peer identity set
+    /// this to `None`.
     Data {
         bytes: Vec<u8>,
         source_id: Option<SourceId>,
         accounted_bytes: u64,
+        sender_addr: Option<std::net::SocketAddr>,
     },
     /// New structured rows produced directly by the source.
     ///
@@ -133,6 +137,7 @@ impl InputSource for FileInput {
                         bytes,
                         source_id,
                         accounted_bytes,
+                        sender_addr: None,
                     });
                 }
                 TailEvent::Rotated { source_id, .. } => {

@@ -129,6 +129,7 @@ impl InputSource for PlatformSensorBetaInput {
             bytes,
             source_id: None,
             accounted_bytes,
+            sender_addr: None,
         }])
     }
 

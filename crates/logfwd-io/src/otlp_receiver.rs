@@ -280,6 +280,7 @@ impl InputSource for OtlpReceiverInput {
                 bytes: all,
                 source_id: None,
                 accounted_bytes: all_accounted_bytes,
+                sender_addr: None,
             });
         }
         events.extend(
