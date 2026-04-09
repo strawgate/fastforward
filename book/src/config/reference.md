@@ -162,11 +162,13 @@ input:
 ### `linux_sensor_beta` input
 
 Linux beta sensor lane for early platform-native ingestion development. This
-input only supports `format: json`.
+input emits Arrow batches directly. `format` is optional and only used for
+compatibility with shared input plumbing (`raw`/`json` accepted; `cri`/`auto`
+rejected).
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `sensor_beta.poll_interval_ms` | integer | No | Heartbeat cadence in milliseconds. Must be `>= 1`. Defaults to `10000`. |
+| `sensor_beta.poll_interval_ms` | integer | No | Snapshot poll cadence in milliseconds. Must be `>= 1`. Defaults to `10000`. |
 | `sensor_beta.emit_heartbeat` | boolean | No | Emit periodic heartbeat rows while idle. Defaults to `true`. |
 | `sensor_beta.families` | list | No | Core families to collect each poll. Allowed values: `process`, `network`, `disk_io`. Defaults to all three. |
 | `sensor_beta.max_rows_per_poll` | integer | No | Max data rows emitted per poll across selected families. Defaults to `256`. |
@@ -174,7 +176,7 @@ input only supports `format: json`.
 ```yaml
 input:
   type: linux_sensor_beta
-  format: json
+  format: raw
   sensor_beta:
     poll_interval_ms: 2000
     families: [process, network, disk_io]
@@ -184,11 +186,13 @@ input:
 ### `macos_sensor_beta` input
 
 macOS beta sensor lane for EndpointSecurity-oriented adapter bring-up. This
-input only supports `format: json`.
+input emits Arrow batches directly. `format` is optional and only used for
+compatibility with shared input plumbing (`raw`/`json` accepted; `cri`/`auto`
+rejected).
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `sensor_beta.poll_interval_ms` | integer | No | Heartbeat cadence in milliseconds. Must be `>= 1`. Defaults to `10000`. |
+| `sensor_beta.poll_interval_ms` | integer | No | Snapshot poll cadence in milliseconds. Must be `>= 1`. Defaults to `10000`. |
 | `sensor_beta.emit_heartbeat` | boolean | No | Emit periodic heartbeat rows while idle. Defaults to `true`. |
 | `sensor_beta.families` | list | No | Core families to collect each poll. Allowed values: `process`, `network`, `disk_io`. Defaults to all three. |
 | `sensor_beta.max_rows_per_poll` | integer | No | Max data rows emitted per poll across selected families. Defaults to `256`. |
@@ -196,17 +200,19 @@ input only supports `format: json`.
 ```yaml
 input:
   type: macos_sensor_beta
-  format: json
+  format: raw
 ```
 
 ### `windows_sensor_beta` input
 
 Windows beta sensor lane for eBPF/ETW hybrid adapter bring-up. This input only
-supports `format: json`.
+emits Arrow batches directly. `format` is optional and only used for
+compatibility with shared input plumbing (`raw`/`json` accepted; `cri`/`auto`
+rejected).
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `sensor_beta.poll_interval_ms` | integer | No | Heartbeat cadence in milliseconds. Must be `>= 1`. Defaults to `10000`. |
+| `sensor_beta.poll_interval_ms` | integer | No | Snapshot poll cadence in milliseconds. Must be `>= 1`. Defaults to `10000`. |
 | `sensor_beta.emit_heartbeat` | boolean | No | Emit periodic heartbeat rows while idle. Defaults to `true`. |
 | `sensor_beta.families` | list | No | Core families to collect each poll. Allowed values: `process`, `network`, `disk_io`. Defaults to all three. |
 | `sensor_beta.max_rows_per_poll` | integer | No | Max data rows emitted per poll across selected families. Defaults to `256`. |
@@ -214,7 +220,7 @@ supports `format: json`.
 ```yaml
 input:
   type: windows_sensor_beta
-  format: json
+  format: raw
 ```
 
 ### `arrow_ipc` input *(not yet supported)*

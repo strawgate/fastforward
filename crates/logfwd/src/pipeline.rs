@@ -1443,14 +1443,18 @@ fn make_format(
 
 fn validate_input_format(name: &str, input_type: InputType, format: &Format) -> Result<(), String> {
     match input_type {
-        InputType::Generator
-        | InputType::Otlp
-        | InputType::LinuxSensorBeta
-        | InputType::MacosSensorBeta
-        | InputType::WindowsSensorBeta => {
+        InputType::Generator | InputType::Otlp => {
             if !matches!(format, Format::Json) {
                 return Err(format!(
                     "input '{name}': format {:?} is not supported for {:?} inputs (expected json)",
+                    format, input_type
+                ));
+            }
+        }
+        InputType::LinuxSensorBeta | InputType::MacosSensorBeta | InputType::WindowsSensorBeta => {
+            if matches!(format, Format::Cri | Format::Auto) {
+                return Err(format!(
+                    "input '{name}': format {:?} is not supported for {:?} inputs (expected raw or json)",
                     format, input_type
                 ));
             }
@@ -1621,7 +1625,7 @@ fn build_input_state(
                 _ => unreachable!("handled by outer match"),
             };
 
-            let format = cfg.format.clone().unwrap_or(Format::Json);
+            let format = cfg.format.clone().unwrap_or(Format::Raw);
             validate_input_format(name, cfg.input_type.clone(), &format)?;
 
             let beta_cfg = build_platform_sensor_beta_config(cfg.sensor_beta.as_ref());

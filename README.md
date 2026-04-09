@@ -181,7 +181,8 @@ See the [Configuration Reference](book/src/config/reference.md) for all YAML fie
 - `windows_sensor_beta`
 
 These inputs are platform-gated and emit beta snapshot coverage for core families
-(`process`, `network`, `disk_io`) plus sensor-control lifecycle events.
+(`process`, `network`, `disk_io`) plus sensor-control lifecycle events as
+direct Arrow rows.
 
 ```yaml
 input:
