@@ -6,6 +6,7 @@
 //! - `resourceLogs`   — new stderr lines since last push
 
 use std::fmt::Write;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -287,6 +288,12 @@ pub(super) fn collect_spans(
     // In-progress active batches.
     let now = now_nanos();
     for pm in pipelines {
+        // Mix pipeline name into synthetic trace/span IDs so different
+        // pipelines with the same batch IDs don't collide.
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        pm.name.hash(&mut hasher);
+        let pipeline_hash = hasher.finish();
+
         if let Ok(active) = pm.active_batches.lock() {
             for (id, b) in active.iter() {
                 let elapsed = now.saturating_sub(b.start_unix_ns);
@@ -304,8 +311,8 @@ pub(super) fn collect_spans(
                     attrs.push(("output_start_unix_ns", b.output_start_unix_ns.to_string()));
                 }
                 spans.push(SpanRecord {
-                    trace_id: format!("{:032x}", id),
-                    span_id: format!("{:016x}", id),
+                    trace_id: format!("{:016x}{:016x}", pipeline_hash, id),
+                    span_id: format!("{:016x}", id ^ pipeline_hash),
                     parent_id: "0000000000000000".to_string(),
                     name: "batch".to_string(),
                     start_unix_ns: b.start_unix_ns,
@@ -370,9 +377,10 @@ pub(super) fn metrics_to_otlp_json(points: &[MetricPoint]) -> String {
                 let _ = write!(out, "{}", now);
                 out.push_str(r#"","asDouble":"#);
                 // Write f64 — JSON number. Emit null for non-finite values.
+                // Guard against i64 saturation for values outside i64 range.
                 if !v.is_finite() {
                     let _ = write!(out, "null");
-                } else if v.fract() == 0.0 {
+                } else if v.fract() == 0.0 && *v >= i64::MIN as f64 && *v <= i64::MAX as f64 {
                     let _ = write!(out, "{}", *v as i64);
                 } else {
                     let _ = write!(out, "{}", v);

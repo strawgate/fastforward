@@ -208,6 +208,7 @@ impl DiagnosticsServer {
             .with_state(Arc::clone(&state));
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        let (startup_tx, startup_rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(1);
 
         let handle = std::thread::Builder::new()
             .name("diagnostics-http".into())
@@ -219,6 +220,9 @@ impl DiagnosticsServer {
                     Ok(rt) => rt,
                     Err(e) => {
                         tracing::error!(error = %e, "diagnostics runtime creation failed");
+                        startup_tx
+                            .send(Err(format!("diagnostics runtime creation failed: {e}")))
+                            .ok();
                         return;
                     }
                 };
@@ -228,12 +232,20 @@ impl DiagnosticsServer {
                         Ok(l) => l,
                         Err(e) => {
                             tracing::error!(error = %e, "diagnostics TcpListener conversion failed");
+                            startup_tx
+                                .send(Err(format!(
+                                    "diagnostics TcpListener conversion failed: {e}"
+                                )))
+                                .ok();
                             return;
                         }
                     };
 
                     // Spawn sampler task.
                     tokio::spawn(sampler_loop(Arc::clone(&state)));
+
+                    // Signal that the server is alive and ready to accept connections.
+                    startup_tx.send(Ok(())).ok();
 
                     let server =
                         axum::serve(listener, app).with_graceful_shutdown(async move {
@@ -244,6 +256,19 @@ impl DiagnosticsServer {
                 });
             })
             .map_err(|e| io::Error::other(format!("failed to spawn diagnostics-http: {e}")))?;
+
+        // Wait for the background thread to confirm startup before returning.
+        match startup_rx.recv() {
+            Ok(Ok(())) => {}
+            Ok(Err(msg)) => {
+                return Err(io::Error::other(msg));
+            }
+            Err(_) => {
+                return Err(io::Error::other(
+                    "diagnostics thread exited without signaling startup",
+                ));
+            }
+        }
 
         Ok((
             ServerHandle {
