@@ -22,6 +22,7 @@ const MAX_SPANS: usize = 16_000; // ~8000 batches × 2 spans each
 // Serializable span snapshot
 // ---------------------------------------------------------------------------
 
+/// Compact, serializable span snapshot served by diagnostics endpoints.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct TraceSpan {
     /// 32-char lowercase hex trace ID.
@@ -30,6 +31,7 @@ pub struct TraceSpan {
     pub span_id: String,
     /// 16-char lowercase hex parent span ID.  All-zeros = root span.
     pub parent_id: String,
+    /// Span name.
     pub name: String,
     /// Unix nanoseconds at span start.
     pub start_unix_ns: u64,
@@ -59,6 +61,7 @@ impl fmt::Debug for SpanBuffer {
 }
 
 impl SpanBuffer {
+    /// Create a new shared ring buffer for completed spans.
     pub fn new() -> Self {
         Self {
             inner: Arc::new(Mutex::new(VecDeque::with_capacity(MAX_SPANS))),
@@ -104,6 +107,7 @@ pub struct RingBufferExporter {
 }
 
 impl RingBufferExporter {
+    /// Create an exporter that pushes completed spans into `buf`.
     pub fn new(buf: SpanBuffer) -> Self {
         Self { buf }
     }
@@ -111,9 +115,9 @@ impl RingBufferExporter {
 
 impl SpanExporter for RingBufferExporter {
     fn export(&self, batch: Vec<SpanData>) -> impl Future<Output = OTelSdkResult> + Send {
-        let spans: Vec<TraceSpan> = batch.into_iter().map(convert).collect();
         if let Ok(mut buf) = self.buf.inner.lock() {
-            for span in spans {
+            for span_data in batch {
+                let span = convert(span_data);
                 if buf.len() >= MAX_SPANS {
                     buf.pop_front();
                 }

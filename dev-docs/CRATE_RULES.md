@@ -48,7 +48,8 @@ Rules and constraints for each crate. Enforced by CI, not just convention.
 | Rule | Enforcement |
 |------|-------------|
 | Owns diagnostics server, telemetry shaping, and stderr/span buffering | Architecture |
-| Allowed deps: `logfwd-types`, `axum`, `tiny_http`, `tokio`, `tracing`, `serde(_yaml_ng/_json)`, `opentelemetry(_sdk)`, `url`, `libc` | Cargo.toml + review |
+| Allowed deps: `logfwd-types`, `tiny_http`, `tracing`, `serde(_yaml_ng/_json)`, `opentelemetry(_sdk)`, `url`, `libc` | Cargo.toml + review |
+| Owns diagnostics dashboard asset `crates/logfwd-diagnostics/src/dashboard.html` (generated from `dashboard/`) | Dashboard build + code review |
 | Must not depend on runtime orchestration crates (`logfwd-runtime`, `logfwd-output`) | Cargo dependency graph + review |
 | Kani seams for readiness policy and stderr escaping stay tracked in `dev-docs/verification/kani-boundary-contract.toml` | CI script: `python3 scripts/verify_kani_boundary_contract.py` |
 

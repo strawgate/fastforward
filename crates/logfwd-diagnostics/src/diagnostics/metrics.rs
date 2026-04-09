@@ -8,8 +8,10 @@ use opentelemetry::metrics::{Counter, Meter};
 use super::{ActiveBatch, ComponentHealth, ComponentStats};
 use crate::diagnostics::render::now_nanos;
 
-/// Stats for a full pipeline. Dual-write: atomics for local endpoints,
-/// OTel counters for OTLP push.
+/// Pipeline-wide diagnostics counters and timing state.
+///
+/// This type dual-writes metrics into local atomics for status/readiness
+/// snapshots and OpenTelemetry counters for OTLP export.
 pub struct PipelineMetrics {
     pub name: String,
     /// (name, type, stats)

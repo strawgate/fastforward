@@ -92,6 +92,7 @@ impl Default for StderrCapture {
 }
 
 impl StderrCapture {
+    /// Create a fresh stderr capture handle with an empty shared buffer.
     pub fn new() -> Self {
         Self {
             state: Arc::new(CaptureState::new()),
@@ -183,6 +184,7 @@ impl StderrCapture {
 #[cfg(unix)]
 fn reader_loop(read_fd: i32, orig_fd: i32, state: &CaptureState) {
     let mut buf = vec![0u8; 4096];
+    const MAX_PARTIAL_BYTES: usize = 1024 * 1024;
     // Accumulate raw bytes so multi-byte UTF-8 sequences split across reads
     // are decoded correctly per complete line, not per chunk.
     let mut partial: Vec<u8> = Vec::new();
@@ -203,6 +205,13 @@ fn reader_loop(read_fd: i32, orig_fd: i32, state: &CaptureState) {
         }
         if n == 0 {
             // EOF — write end of pipe was closed (process exiting).
+            if !partial.is_empty() {
+                let line = String::from_utf8_lossy(&partial);
+                let clean = strip_ansi(&line);
+                if !clean.is_empty() {
+                    state.push_line(clean);
+                }
+            }
             break;
         }
 
@@ -217,6 +226,11 @@ fn reader_loop(read_fd: i32, orig_fd: i32, state: &CaptureState) {
 
         // Accumulate and split on newline bytes; decode each complete line once.
         partial.extend_from_slice(bytes);
+        if partial.len() > MAX_PARTIAL_BYTES {
+            let keep = MAX_PARTIAL_BYTES;
+            let drop = partial.len() - keep;
+            partial.drain(..drop);
+        }
         while let Some(pos) = partial.iter().position(|&b| b == b'\n') {
             let line_bytes = &partial[..pos];
             let line = String::from_utf8_lossy(line_bytes);
