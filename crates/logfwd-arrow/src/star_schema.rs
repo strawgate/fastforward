@@ -1749,14 +1749,7 @@ fn scatter_scope_attrs(
                 TypedColumn::Str(v) => v,
                 _ => continue,
             };
-            let mut map: HashMap<u32, Option<String>> = HashMap::new();
-            for row in 0..num_rows {
-                let sid = scope_ids.value(row);
-                if let std::collections::hash_map::Entry::Vacant(e) = map.entry(sid) {
-                    e.insert(values[row].clone());
-                }
-            }
-            map
+            collect_template_values_by_id(values, scope_ids, num_rows)
         };
 
         if let TypedColumn::Str(ref mut v) = flat_cols[col_pos].1 {
@@ -1771,6 +1764,24 @@ fn scatter_scope_attrs(
             }
         }
     }
+}
+
+fn collect_template_values_by_id<T: Clone>(
+    values: &[Option<T>],
+    ids: &UInt32Array,
+    num_rows: usize,
+) -> HashMap<u32, Option<T>> {
+    let mut map: HashMap<u32, Option<T>> = HashMap::new();
+    for row in 0..num_rows {
+        let id = ids.value(row);
+        if let std::collections::hash_map::Entry::Vacant(e) = map.entry(id) {
+            let template_row = id as usize;
+            if template_row < num_rows {
+                e.insert(values[template_row].clone());
+            }
+        }
+    }
+    map
 }
 
 // ---------------------------------------------------------------------------
@@ -2068,6 +2079,16 @@ mod tests {
 
         let roundtrip = star_to_flat(&star).expect("star_to_flat empty");
         assert_eq!(roundtrip.num_rows(), 0);
+    }
+
+    #[test]
+    fn collect_template_values_prefers_template_row_index() {
+        let values = vec![None, None, Some("otel".to_string())];
+        let ids = UInt32Array::from(vec![2u32, 2, 2]);
+
+        let collected = collect_template_values_by_id(&values, &ids, 3);
+
+        assert_eq!(collected.get(&2), Some(&Some("otel".to_string())));
     }
 
     #[test]

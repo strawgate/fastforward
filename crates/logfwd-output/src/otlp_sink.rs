@@ -904,43 +904,38 @@ fn resolve_batch_columns<'a>(batch: &'a RecordBatch, resource_prefix: &str) -> B
         let field_name = field.name().as_str();
 
         // Severity number — use directly instead of deriving from text.
-        if field_name == field_names::SEVERITY_NUMBER {
-            if severity_num_col.is_none() && matches!(field.data_type(), DataType::Int64) {
-                severity_num_col = Some((idx, batch.column(idx).as_primitive::<Int64Type>()));
-                continue;
-            }
+        if field_name == field_names::SEVERITY_NUMBER
+            && severity_num_col.is_none()
+            && matches!(field.data_type(), DataType::Int64)
+        {
+            severity_num_col = Some((idx, batch.column(idx).as_primitive::<Int64Type>()));
+            continue;
         }
 
         // Observed timestamp.
-        if field_name == field_names::OBSERVED_TIMESTAMP {
-            if observed_ts_col.is_none()
-                && matches!(
-                    field.data_type(),
-                    DataType::Int64 | DataType::UInt64 | DataType::Timestamp(_, _)
-                )
-            {
-                observed_ts_col = Some((idx, batch.column(idx).as_ref()));
-                continue;
-            }
+        if field_name == field_names::OBSERVED_TIMESTAMP
+            && observed_ts_col.is_none()
+            && matches!(
+                field.data_type(),
+                DataType::Int64 | DataType::UInt64 | DataType::Timestamp(_, _)
+            )
+        {
+            observed_ts_col = Some((idx, batch.column(idx).as_ref()));
+            continue;
         }
 
         // Scope metadata.
-        if field_name == field_names::SCOPE_NAME {
-            if scope_name_col.is_none() {
-                scope_name_col =
-                    resolve_otlp_str_col(batch.column(idx).as_ref()).map(|arr| (idx, arr));
-                if scope_name_col.is_some() {
-                    continue;
-                }
+        if field_name == field_names::SCOPE_NAME && scope_name_col.is_none() {
+            scope_name_col = resolve_otlp_str_col(batch.column(idx).as_ref()).map(|arr| (idx, arr));
+            if scope_name_col.is_some() {
+                continue;
             }
         }
-        if field_name == field_names::SCOPE_VERSION {
-            if scope_version_col.is_none() {
-                scope_version_col =
-                    resolve_otlp_str_col(batch.column(idx).as_ref()).map(|arr| (idx, arr));
-                if scope_version_col.is_some() {
-                    continue;
-                }
+        if field_name == field_names::SCOPE_VERSION && scope_version_col.is_none() {
+            scope_version_col =
+                resolve_otlp_str_col(batch.column(idx).as_ref()).map(|arr| (idx, arr));
+            if scope_version_col.is_some() {
+                continue;
             }
         }
 
