@@ -90,19 +90,36 @@ impl Config {
                     )));
                 }
                 match input.input_type {
-                    InputType::File => match &input.path {
-                        None => {
+                    InputType::File => {
+                        match &input.path {
+                            None => {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': file input requires 'path'"
+                                )));
+                            }
+                            Some(p) if p.trim().is_empty() => {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': file input 'path' must not be empty"
+                                )));
+                            }
+                            _ => {}
+                        }
+                        if input.poll_interval_ms == Some(0) {
                             return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': file input requires 'path'"
+                                "pipeline '{name}' input '{label}': 'poll_interval_ms' must be at least 1"
                             )));
                         }
-                        Some(p) if p.trim().is_empty() => {
+                        if input.read_buf_size == Some(0) {
                             return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': file input 'path' must not be empty"
+                                "pipeline '{name}' input '{label}': 'read_buf_size' must be at least 1"
                             )));
                         }
-                        _ => {}
-                    },
+                        if input.per_file_read_budget_bytes == Some(0) {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'per_file_read_budget_bytes' must be at least 1"
+                            )));
+                        }
+                    }
                     InputType::Udp | InputType::Tcp => {
                         if input.listen.is_none() {
                             return Err(ConfigError::Validation(format!(
@@ -230,6 +247,21 @@ impl Config {
                                 "pipeline '{name}' input '{label}': 'glob_rescan_interval_ms' is not supported for tcp/udp inputs"
                             )));
                         }
+                        if input.poll_interval_ms.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'poll_interval_ms' is not supported for tcp/udp inputs"
+                            )));
+                        }
+                        if input.read_buf_size.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'read_buf_size' is not supported for tcp/udp inputs"
+                            )));
+                        }
+                        if input.per_file_read_budget_bytes.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'per_file_read_budget_bytes' is not supported for tcp/udp inputs"
+                            )));
+                        }
                         if input.sensor_beta.is_some() {
                             return Err(ConfigError::Validation(format!(
                                 "pipeline '{name}' input '{label}': 'sensor_beta' settings are only supported for *_sensor_beta inputs"
@@ -267,6 +299,21 @@ impl Config {
                                 "pipeline '{name}' input '{label}': 'glob_rescan_interval_ms' is not supported for otlp inputs"
                             )));
                         }
+                        if input.poll_interval_ms.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'poll_interval_ms' is not supported for otlp inputs"
+                            )));
+                        }
+                        if input.read_buf_size.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'read_buf_size' is not supported for otlp inputs"
+                            )));
+                        }
+                        if input.per_file_read_budget_bytes.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'per_file_read_budget_bytes' is not supported for otlp inputs"
+                            )));
+                        }
                         if input.sensor_beta.is_some() {
                             return Err(ConfigError::Validation(format!(
                                 "pipeline '{name}' input '{label}': 'sensor_beta' settings are only supported for *_sensor_beta inputs"
@@ -297,6 +344,21 @@ impl Config {
                         if input.glob_rescan_interval_ms.is_some() {
                             return Err(ConfigError::Validation(format!(
                                 "pipeline '{name}' input '{label}': 'glob_rescan_interval_ms' is not supported for http inputs"
+                            )));
+                        }
+                        if input.poll_interval_ms.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'poll_interval_ms' is not supported for http inputs"
+                            )));
+                        }
+                        if input.read_buf_size.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'read_buf_size' is not supported for http inputs"
+                            )));
+                        }
+                        if input.per_file_read_budget_bytes.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'per_file_read_budget_bytes' is not supported for http inputs"
                             )));
                         }
                         if input.sensor_beta.is_some() {
@@ -355,6 +417,21 @@ impl Config {
                         if input.glob_rescan_interval_ms.is_some() {
                             return Err(ConfigError::Validation(format!(
                                 "pipeline '{name}' input '{label}': 'glob_rescan_interval_ms' is not supported for generator inputs"
+                            )));
+                        }
+                        if input.poll_interval_ms.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'poll_interval_ms' is not supported for generator inputs"
+                            )));
+                        }
+                        if input.read_buf_size.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'read_buf_size' is not supported for generator inputs"
+                            )));
+                        }
+                        if input.per_file_read_budget_bytes.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'per_file_read_budget_bytes' is not supported for generator inputs"
                             )));
                         }
                         if input.sensor_beta.is_some() {
@@ -464,6 +541,24 @@ impl Config {
                         if input.listen.is_some() {
                             return Err(ConfigError::Validation(format!(
                                 "pipeline '{name}' input '{label}': 'listen' is not supported for {} inputs",
+                                input.input_type
+                            )));
+                        }
+                        if input.poll_interval_ms.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'poll_interval_ms' is not supported for {} inputs",
+                                input.input_type
+                            )));
+                        }
+                        if input.read_buf_size.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'read_buf_size' is not supported for {} inputs",
+                                input.input_type
+                            )));
+                        }
+                        if input.per_file_read_budget_bytes.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'per_file_read_budget_bytes' is not supported for {} inputs",
                                 input.input_type
                             )));
                         }

@@ -271,6 +271,9 @@ pub struct InputConfig {
     pub path: Option<String>,
     pub listen: Option<String>,
     pub format: Option<Format>,
+    pub poll_interval_ms: Option<u64>,
+    pub read_buf_size: Option<usize>,
+    pub per_file_read_budget_bytes: Option<usize>,
     pub max_open_files: Option<usize>,
     pub glob_rescan_interval_ms: Option<u64>,
     #[serde(default)]
