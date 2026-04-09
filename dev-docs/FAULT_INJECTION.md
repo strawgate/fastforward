@@ -247,6 +247,8 @@ pub struct InvariantSet {
     /// Rejected batches DO advance checkpoints (accept data loss for
     /// permanent rejects to avoid infinite replay loops).
     pub reject_advances_checkpoint: bool,
+    /// Durable checkpoints never regress across restart boundaries.
+    pub no_regression: bool,
 }
 
 pub struct CustomAssertions {
@@ -264,6 +266,7 @@ impl InvariantSet {
             shutdown_completeness: true,
             hold_on_transient_failure: true,
             reject_advances_checkpoint: true,
+            no_regression: true,
         }
     }
 
@@ -277,6 +280,7 @@ impl InvariantSet {
             shutdown_completeness: true,
             hold_on_transient_failure: true,
             reject_advances_checkpoint: true,
+            no_regression: true,
         }
     }
 }
@@ -365,6 +369,12 @@ impl InvariantSet {
             }
         }
 
+        if self.no_regression {
+            if let Err(err) = outcome.checkpoint_handle.assert_no_regression_result() {
+                failures.push(format!("no-regression violated: {err}"));
+            }
+        }
+
         if self.shutdown_completeness && (!outcome.completed || outcome.force_stopped) {
             failures.push("shutdown did not complete cleanly (completed=false or force_stopped=true)".to_string());
         }
@@ -417,6 +427,7 @@ For nightly CI, generate random fault scenarios using proptest or seeded RNG:
 /// Generate a random fault scenario from a seed.
 pub fn random_scenario(seed: u64) -> FaultScenario {
     let mut rng = StdRng::seed_from_u64(seed);
+    let mut retry_heavy_profile = false;
 
     let mut builder = FaultScenario::builder()
         .input_lines(rng.gen_range(10..500))
@@ -432,17 +443,39 @@ pub fn random_scenario(seed: u64) -> FaultScenario {
     // Random output faults (0-3)
     let n_output = rng.gen_range(0..4);
     for _ in 0..n_output {
-        builder = builder.output_fault(random_output_fault(&mut rng));
+        let fault = random_output_fault(&mut rng);
+        if matches!(
+            fault,
+            OutputFault::Intermittent { .. }
+                | OutputFault::ConnectionCycle { .. }
+                | OutputFault::CorrelatedFailure { .. }
+        ) {
+            retry_heavy_profile = true;
+        }
+        builder = builder.output_fault(fault);
     }
 
     // Random pipeline faults (0-2)
     let n_pipeline = rng.gen_range(0..3);
     for _ in 0..n_pipeline {
-        builder = builder.pipeline_fault(random_pipeline_fault(&mut rng));
+        let fault = random_pipeline_fault(&mut rng);
+        if matches!(
+            fault,
+            PipelineFault::NetworkPartition { .. } | PipelineFault::CheckpointFlushFail { .. }
+        ) {
+            retry_heavy_profile = true;
+        }
+        builder = builder.pipeline_fault(fault);
     }
 
+    let invariants = if retry_heavy_profile {
+        InvariantSet::crash_recovery()
+    } else {
+        InvariantSet::at_least_once()
+    };
+
     builder
-        .invariants(InvariantSet::at_least_once())
+        .invariants(invariants)
         .sim_duration(Duration::from_secs(120))
         .shutdown_after(Duration::from_secs(60))
         .build()
@@ -509,6 +542,7 @@ Documentation updates required in the same implementation PR:
 - `dev-docs/VERIFICATION.md` — describe where scenario-based fault injection fits relative to TLA+, Kani, and proptest
 - `dev-docs/CHANGE_MAP.md` — add cross-links for fault-injection changes that affect invariants and simulation coverage
 - `dev-docs/ARCHITECTURE.md` — document new simulation harness seams if pipeline orchestration hooks are introduced
+- `dev-docs/PHASES.md` — mark the "Fault injection framework core" task done with the implementation PR number
 
 ### Phase 2: Named Scenarios (follow-up)
 
@@ -574,7 +608,7 @@ The framework **extends, not replaces** the existing turmoil_sim tests:
 | **SC** | Shutdown completeness: pipeline reaches Stopped | Yes (liveness config) | `sim.run()` returns `Ok` and no forced stop |
 | **HTF** | Hold on transient failure: retry-exhausted/timed-out batches do not advance checkpoint | Partial (retry policy details are implementation-level) | `durable_offset == pre_batch_offset` after all transient retries fail |
 | **RAC** | Reject advances checkpoint: permanent rejects may advance | No (policy choice, implementation-level) | checkpoint advances only for explicit permanent reject paths |
-| **NR** | No regression: durable offset never goes backward across restarts | Partial (restart persistence modeled abstractly) | Cross-run checkpoint comparison |
+| **NR** | No regression: durable offset never goes backward across restarts | Partial (restart persistence modeled abstractly) | `assert_no_regression_result()` |
 
 
 ## Relationship to TLA+ and proptest
