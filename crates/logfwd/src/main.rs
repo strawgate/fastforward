@@ -9,8 +9,9 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 use std::env;
 use std::io::{self, IsTerminal, Write};
 use std::sync::Arc;
+use std::time::Duration;
 
-use clap::{CommandFactory, Parser, Subcommand, ValueEnum, error::ErrorKind};
+use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum, error::ErrorKind};
 use opentelemetry::metrics::MeterProvider;
 
 mod config_templates;
@@ -35,6 +36,8 @@ const CLI_AFTER_HELP: &str = r"Examples:
   logfwd dry-run --config config.yaml
   logfwd effective-config --config config.yaml
   logfwd blackhole
+  logfwd blast --destination otlp --endpoint http://127.0.0.1:4318/v1/logs
+  logfwd devour --mode otlp --listen 127.0.0.1:4318
   logfwd generate-json 10000 test.json
   logfwd wizard
   logfwd completions bash
@@ -157,6 +160,152 @@ enum CompletionShell {
     Nushell,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum BlastDestination {
+    #[value(alias = "elasticsearch_otlp")]
+    Otlp,
+    Http,
+    #[value(alias = "elasticsearch_bulk")]
+    Elasticsearch,
+    Loki,
+    ArrowIpc,
+    Udp,
+    Tcp,
+    Null,
+}
+
+impl BlastDestination {
+    fn as_output_type(self) -> logfwd_config::OutputType {
+        match self {
+            Self::Otlp => logfwd_config::OutputType::Otlp,
+            Self::Http => logfwd_config::OutputType::Http,
+            Self::Elasticsearch => logfwd_config::OutputType::Elasticsearch,
+            Self::Loki => logfwd_config::OutputType::Loki,
+            Self::ArrowIpc => logfwd_config::OutputType::ArrowIpc,
+            Self::Udp => logfwd_config::OutputType::Udp,
+            Self::Tcp => logfwd_config::OutputType::Tcp,
+            Self::Null => logfwd_config::OutputType::Null,
+        }
+    }
+
+    fn parse(input: &str) -> Option<Self> {
+        match input.trim().to_ascii_lowercase().as_str() {
+            "otlp" | "elasticsearch_otlp" => Some(Self::Otlp),
+            "http" => Some(Self::Http),
+            "elasticsearch" | "elasticsearch_bulk" => Some(Self::Elasticsearch),
+            "loki" => Some(Self::Loki),
+            "arrow_ipc" | "arrow-ipc" | "arrow" => Some(Self::ArrowIpc),
+            "udp" => Some(Self::Udp),
+            "tcp" => Some(Self::Tcp),
+            "null" => Some(Self::Null),
+            _ => None,
+        }
+    }
+
+    fn requires_endpoint(self) -> bool {
+        !matches!(self, Self::Null)
+    }
+
+    fn default_endpoint(self) -> &'static str {
+        match self {
+            Self::Otlp => "http://127.0.0.1:4318/v1/logs",
+            Self::Http => "http://127.0.0.1:8080",
+            Self::Elasticsearch => "http://127.0.0.1:9200",
+            Self::Loki => "http://127.0.0.1:3100/loki/api/v1/push",
+            Self::ArrowIpc => "127.0.0.1:18081",
+            Self::Udp => "127.0.0.1:15514",
+            Self::Tcp => "127.0.0.1:15140",
+            Self::Null => "",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum DevourMode {
+    #[value(alias = "elasticsearch_otlp")]
+    Otlp,
+    Http,
+    #[value(name = "elasticsearch_bulk", alias = "elasticsearch")]
+    ElasticsearchBulk,
+    Tcp,
+    Udp,
+}
+
+impl DevourMode {
+    fn default_listen(self) -> &'static str {
+        match self {
+            Self::Otlp => "127.0.0.1:4318",
+            Self::Http => "127.0.0.1:8080",
+            Self::ElasticsearchBulk => "127.0.0.1:9200",
+            Self::Tcp => "127.0.0.1:15140",
+            Self::Udp => "127.0.0.1:15514",
+        }
+    }
+
+    fn target_hint(self, listen: &str) -> String {
+        match self {
+            Self::Otlp => format!("http://{listen}/v1/logs"),
+            Self::Http => format!("http://{listen}/"),
+            Self::ElasticsearchBulk => format!("http://{listen}/_bulk"),
+            Self::Tcp | Self::Udp => listen.to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Args)]
+struct BlastArgs {
+    /// Destination type to blast.
+    #[arg(long, value_enum)]
+    destination: Option<BlastDestination>,
+
+    /// Destination endpoint URL/address (required for all destinations except `null`).
+    #[arg(long)]
+    endpoint: Option<String>,
+
+    /// Bearer token auth.
+    #[arg(long)]
+    auth_bearer_token: Option<String>,
+
+    /// Extra header, repeatable: --auth-header 'Authorization=ApiKey xyz'.
+    #[arg(long, value_name = "KEY=VALUE")]
+    auth_header: Vec<String>,
+
+    /// Worker count.
+    #[arg(long, default_value_t = 2)]
+    workers: usize,
+
+    /// Lines per generated batch.
+    #[arg(long, default_value_t = 5_000)]
+    batch_lines: usize,
+
+    /// Benchmark active-send duration in seconds.
+    #[arg(long, default_value_t = 30)]
+    duration_secs: u64,
+
+    /// Diagnostics server bind address for generated config.
+    #[arg(long, default_value = "127.0.0.1:0")]
+    diagnostics_addr: String,
+}
+
+#[derive(Debug, Clone, Args)]
+struct DevourArgs {
+    /// Receiver mode to emulate.
+    #[arg(long, value_enum, default_value_t = DevourMode::Otlp)]
+    mode: DevourMode,
+
+    /// Bind address (defaults depend on mode).
+    #[arg(long)]
+    listen: Option<String>,
+
+    /// Optional run duration in seconds (default: run until stopped).
+    #[arg(long)]
+    duration_secs: Option<u64>,
+
+    /// Diagnostics server bind address for generated config.
+    #[arg(long, default_value = "127.0.0.1:0")]
+    diagnostics_addr: String,
+}
+
 #[derive(Debug, Parser)]
 #[command(
     name = "logfwd",
@@ -204,6 +353,10 @@ enum Commands {
         )]
         config: Option<String>,
     },
+    /// Blast generated data into a destination sink via the normal runtime pipeline.
+    Blast(BlastArgs),
+    /// Run a blackhole receiver via the normal runtime pipeline.
+    Devour(DevourArgs),
     /// Start OTLP blackhole receiver for testing.
     Blackhole {
         #[arg(
@@ -318,6 +471,8 @@ async fn run_command(command: Commands) -> Result<(), CliError> {
             let config_path = resolve_config_path(config.as_deref())?;
             cmd_run(&config_path, false, true).await
         }
+        Commands::Blast(args) => cmd_blast(args).await,
+        Commands::Devour(args) => cmd_devour(args).await,
         Commands::Blackhole { bind_addr } => cmd_blackhole(bind_addr.as_deref()).await,
         Commands::GenerateJson {
             num_lines,
@@ -357,34 +512,280 @@ async fn cmd_run(config_path: &str, validate_only: bool, dry_run: bool) -> Resul
     run_pipelines(config, base_path, config_path, &config_yaml).await
 }
 
+async fn cmd_blast(mut args: BlastArgs) -> Result<(), CliError> {
+    maybe_prompt_blast_setup(&mut args)?;
+
+    if args.duration_secs == 0 {
+        return Err(CliError::Config(
+            "--duration-secs must be at least 1".to_owned(),
+        ));
+    }
+    if args.workers == 0 {
+        return Err(CliError::Config("--workers must be at least 1".to_owned()));
+    }
+    if args.batch_lines == 0 {
+        return Err(CliError::Config(
+            "--batch-lines must be at least 1".to_owned(),
+        ));
+    }
+
+    let output_cfg = resolve_blast_output_config(&args)?;
+    let config_yaml = render_blast_yaml(&args, &output_cfg);
+    let config = logfwd_config::Config::load_str(&config_yaml)
+        .map_err(|e| CliError::Config(format!("build generated config: {e}")))?;
+
+    println!("Starting blast (runtime pipeline shortcut)...");
+    println!(
+        "destination={} workers={} batch_lines={} duration={}s",
+        output_cfg.output_type, args.workers, args.batch_lines, args.duration_secs
+    );
+    if let Some(endpoint) = &output_cfg.endpoint {
+        println!("endpoint={endpoint}");
+    }
+    println!("diagnostics={}", args.diagnostics_addr);
+
+    schedule_self_interrupt_after(Duration::from_secs(args.duration_secs));
+    run_pipelines(config, None, "<blast-generated>", &config_yaml).await
+}
+
+async fn cmd_devour(args: DevourArgs) -> Result<(), CliError> {
+    let listen = args
+        .listen
+        .clone()
+        .unwrap_or_else(|| args.mode.default_listen().to_string());
+
+    logfwd_config::validate_host_port(&listen)
+        .map_err(|e| CliError::Config(format!("invalid listen address: {e}")))?;
+
+    if args.duration_secs == Some(0) {
+        return Err(CliError::Config(
+            "--duration-secs must be at least 1 when provided".to_owned(),
+        ));
+    }
+
+    println!(
+        "devour mode={:?} listening={} target={}",
+        args.mode,
+        listen,
+        args.mode.target_hint(&listen)
+    );
+    println!("dropping all received data (blackhole mode)");
+    println!("diagnostics={}", args.diagnostics_addr);
+    if let Some(duration) = args.duration_secs {
+        println!("duration={}s", duration);
+        schedule_self_interrupt_after(Duration::from_secs(duration));
+    }
+
+    let config_yaml = render_devour_yaml(&args, &listen);
+    let config = logfwd_config::Config::load_str(&config_yaml)
+        .map_err(|e| CliError::Config(format!("build generated config: {e}")))?;
+
+    run_pipelines(config, None, "<devour-generated>", &config_yaml).await
+}
+
 async fn cmd_blackhole(bind_addr: Option<&str>) -> Result<(), CliError> {
-    let addr = bind_addr.unwrap_or("127.0.0.1:4318");
+    let args = DevourArgs {
+        mode: DevourMode::Otlp,
+        listen: bind_addr.map(ToOwned::to_owned),
+        duration_secs: None,
+        diagnostics_addr: "127.0.0.1:0".to_string(),
+    };
+    cmd_devour(args).await
+}
 
-    // Validate addr using the same hostname-accepting logic as the config
-    // validator (validate_host_port) so that a hostname like `localhost:4318`
-    // is accepted here and not only rejected later by the config layer.
-    logfwd_config::validate_host_port(addr)
-        .map_err(|e| CliError::Config(format!("invalid bind address: {e}")))?;
+fn maybe_prompt_blast_setup(args: &mut BlastArgs) -> Result<(), CliError> {
+    if args.destination.is_some() {
+        return Ok(());
+    }
 
-    // Use port 0 for diagnostics so it never collides with an in-use port.
-    // Quote addr as a YAML string so bracketed IPv6 (e.g. [::1]:4318) does not
-    // break YAML parsing. Single-quote with '' escaping for any embedded quotes.
-    let yaml_addr = addr.replace('\'', "''");
-    let yaml = format!(
-        "input:\n  type: otlp\n  listen: '{yaml_addr}'\noutput:\n  type: null\nserver:\n  diagnostics: 127.0.0.1:0\n"
-    );
-    let config = logfwd_config::Config::load_str(&yaml)
-        .map_err(|e| CliError::Config(format!("internal config error: {e}")))?;
+    if !wizard_uses_interactive_terminals(io::stdin().is_terminal(), io::stdout().is_terminal()) {
+        return Err(CliError::Config(
+            "no destination provided. Pass --destination (wizard requires interactive stdin/stdout)"
+                .to_owned(),
+        ));
+    }
 
-    eprintln!(
-        "{}logfwd blackhole{} starting on {}{addr}{}",
-        bold(),
-        reset(),
-        bold(),
-        reset(),
-    );
+    println!("blast quick setup");
+    println!("Press Enter to accept defaults. Leave auth blank to skip.");
 
-    run_pipelines(config, None, "<blackhole>", &yaml).await
+    let destination_raw = prompt_text(
+        "Destination [otlp/elasticsearch_otlp/http/elasticsearch/elasticsearch_bulk/loki/arrow_ipc/udp/tcp/null]",
+        "otlp",
+    )?;
+    let destination = BlastDestination::parse(&destination_raw).ok_or_else(|| {
+        CliError::Config(format!(
+            "unknown destination '{destination_raw}' (expected otlp/elasticsearch_otlp/http/elasticsearch/elasticsearch_bulk/loki/arrow_ipc/udp/tcp/null)"
+        ))
+    })?;
+    args.destination = Some(destination);
+
+    if destination.requires_endpoint() {
+        let endpoint = prompt_text("Endpoint", destination.default_endpoint())?;
+        args.endpoint = Some(endpoint);
+    }
+
+    let token = prompt_text("Bearer token (optional)", "")?;
+    if !token.is_empty() {
+        args.auth_bearer_token = Some(token);
+    }
+
+    args.workers = prompt_text("Workers", &args.workers.to_string())?
+        .parse::<usize>()
+        .map_err(|_| CliError::Config("Workers must be a positive integer".to_owned()))?;
+    args.batch_lines = prompt_text("Batch lines", &args.batch_lines.to_string())?
+        .parse::<usize>()
+        .map_err(|_| CliError::Config("Batch lines must be a positive integer".to_owned()))?;
+    args.duration_secs = prompt_text("Duration seconds", &args.duration_secs.to_string())?
+        .parse::<u64>()
+        .map_err(|_| CliError::Config("Duration seconds must be a positive integer".to_owned()))?;
+
+    Ok(())
+}
+
+fn resolve_blast_output_config(args: &BlastArgs) -> Result<logfwd_config::OutputConfig, CliError> {
+    let destination = args
+        .destination
+        .ok_or_else(|| CliError::Config("blast requires --destination".to_owned()))?;
+
+    let mut output_cfg = logfwd_config::OutputConfig {
+        output_type: destination.as_output_type(),
+        ..logfwd_config::OutputConfig::default()
+    };
+
+    if destination.requires_endpoint() {
+        let endpoint = args.endpoint.clone().ok_or_else(|| {
+            CliError::Config("blast requires --endpoint for this destination".to_owned())
+        })?;
+        output_cfg.endpoint = Some(endpoint);
+    }
+
+    if args.auth_bearer_token.is_some() || !args.auth_header.is_empty() {
+        let mut auth = output_cfg.auth.clone().unwrap_or_default();
+        if let Some(token) = &args.auth_bearer_token {
+            auth.bearer_token = Some(token.clone());
+        }
+        for spec in &args.auth_header {
+            let (key, value) = split_header(spec)?;
+            auth.headers.insert(key.to_string(), value.to_string());
+        }
+        output_cfg.auth = Some(auth);
+    }
+
+    Ok(output_cfg)
+}
+
+fn render_blast_yaml(args: &BlastArgs, output_cfg: &logfwd_config::OutputConfig) -> String {
+    let mut yaml = String::new();
+    yaml.push_str("pipelines:\n");
+    yaml.push_str("  blast:\n");
+    yaml.push_str(&format!("    workers: {}\n", args.workers));
+    yaml.push_str("    inputs:\n");
+    yaml.push_str("      - type: generator\n");
+    yaml.push_str("        format: json\n");
+    yaml.push_str("        generator:\n");
+    yaml.push_str(&format!("          batch_size: {}\n", args.batch_lines));
+    yaml.push_str("          events_per_sec: 0\n");
+    yaml.push_str("    outputs:\n");
+    yaml.push_str(&format!("      - type: {}\n", output_cfg.output_type));
+
+    if let Some(endpoint) = &output_cfg.endpoint {
+        yaml.push_str(&format!("        endpoint: {}\n", yaml_quote(endpoint)));
+    }
+    if let Some(auth) = &output_cfg.auth {
+        yaml.push_str("        auth:\n");
+        if let Some(token) = &auth.bearer_token {
+            yaml.push_str(&format!("          bearer_token: {}\n", yaml_quote(token)));
+        }
+        if !auth.headers.is_empty() {
+            yaml.push_str("          headers:\n");
+            let mut keys: Vec<_> = auth.headers.keys().collect();
+            keys.sort();
+            for key in keys {
+                if let Some(value) = auth.headers.get(key) {
+                    yaml.push_str(&format!(
+                        "            {}: {}\n",
+                        yaml_quote(key),
+                        yaml_quote(value)
+                    ));
+                }
+            }
+        }
+    }
+
+    yaml.push_str("server:\n");
+    yaml.push_str(&format!(
+        "  diagnostics: {}\n",
+        yaml_quote(&args.diagnostics_addr)
+    ));
+    yaml
+}
+
+fn render_devour_yaml(args: &DevourArgs, listen: &str) -> String {
+    let input = match args.mode {
+        DevourMode::Otlp => format!(
+            "input:\n  type: otlp\n  listen: {}\n  format: json\n",
+            yaml_quote(listen)
+        ),
+        DevourMode::Http => format!(
+            "input:\n  type: http\n  listen: {}\n  format: json\n  http:\n    path: '/'\n    strict_path: false\n    method: POST\n    response_code: 204\n",
+            yaml_quote(listen)
+        ),
+        DevourMode::ElasticsearchBulk => format!(
+            "input:\n  type: http\n  listen: {}\n  format: json\n  http:\n    path: '/'\n    strict_path: false\n    method: POST\n    response_code: 200\n",
+            yaml_quote(listen)
+        ),
+        DevourMode::Tcp => format!(
+            "input:\n  type: tcp\n  listen: {}\n  format: json\n",
+            yaml_quote(listen)
+        ),
+        DevourMode::Udp => format!(
+            "input:\n  type: udp\n  listen: {}\n  format: json\n",
+            yaml_quote(listen)
+        ),
+    };
+
+    format!(
+        "{input}output:\n  type: null\nserver:\n  diagnostics: {}\n",
+        yaml_quote(&args.diagnostics_addr),
+    )
+}
+
+fn split_header(spec: &str) -> Result<(&str, &str), CliError> {
+    let Some((key, value)) = spec.split_once('=') else {
+        return Err(CliError::Config(format!(
+            "invalid --auth-header '{spec}'; expected KEY=VALUE"
+        )));
+    };
+    if key.is_empty() {
+        return Err(CliError::Config(format!(
+            "invalid --auth-header '{spec}'; key must not be empty"
+        )));
+    }
+    Ok((key, value))
+}
+
+fn yaml_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn schedule_self_interrupt_after(duration: Duration) {
+    #[cfg(unix)]
+    {
+        let pid = std::process::id().to_string();
+        std::thread::spawn(move || {
+            std::thread::sleep(duration);
+            let _ = std::process::Command::new("kill")
+                .args(["-s", "INT", &pid])
+                .status();
+        });
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = duration;
+        eprintln!(
+            "warning: --duration-secs auto-stop is only supported on unix; press Ctrl-C to stop"
+        );
+    }
 }
 
 fn cmd_generate_json(num_lines: usize, output_file: &str) -> Result<(), CliError> {
