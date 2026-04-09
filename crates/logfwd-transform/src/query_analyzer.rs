@@ -46,22 +46,13 @@ impl QueryAnalyzer {
         let mut where_clause = None;
 
         if let Statement::Query(query) = stmt {
-            walk_set_expr(
-                query.body.as_ref(),
+            walk_query(
+                query,
                 &mut referenced_columns,
                 &mut uses_select_star,
                 &mut except_fields,
                 &mut where_clause,
             );
-
-            // Walk ORDER BY — columns may appear only here (not in SELECT or WHERE).
-            if let Some(ref order_by) = query.order_by {
-                if let sqlast::OrderByKind::Expressions(exprs) = &order_by.kind {
-                    for ob in exprs {
-                        collect_column_refs(&ob.expr, &mut referenced_columns);
-                    }
-                }
-            }
         } else {
             return Err(TransformError::Sql(
                 "Only SELECT statements are supported".to_string(),
@@ -156,6 +147,32 @@ impl QueryAnalyzer {
 
         hints
     }
+}
+
+/// Recursively walk a Query wrapper (ORDER BY + body).
+fn walk_query(
+    query: &sqlast::Query,
+    referenced_columns: &mut HashSet<String>,
+    uses_select_star: &mut bool,
+    except_fields: &mut Vec<String>,
+    where_clause: &mut Option<SqlExpr>,
+) {
+    // Walk ORDER BY — columns may appear only here.
+    if let Some(ref order_by) = query.order_by
+        && let sqlast::OrderByKind::Expressions(exprs) = &order_by.kind
+    {
+        for ob in exprs {
+            collect_column_refs(&ob.expr, referenced_columns);
+        }
+    }
+
+    walk_set_expr(
+        query.body.as_ref(),
+        referenced_columns,
+        uses_select_star,
+        except_fields,
+        where_clause,
+    );
 }
 
 /// Recursively walk a `SetExpr`, collecting column refs from SELECT, WHERE,
@@ -407,8 +424,8 @@ fn walk_table_factor(
     match factor {
         sqlast::TableFactor::Derived { subquery, .. } => {
             let mut nested_where = None;
-            walk_set_expr(
-                subquery.body.as_ref(),
+            walk_query(
+                subquery,
                 referenced_columns,
                 uses_select_star,
                 except_fields,
@@ -472,16 +489,14 @@ fn extract_join_constraint(op: &sqlast::JoinOperator) -> Option<&sqlast::JoinCon
         | J::Right(c)
         | J::RightOuter(c)
         | J::FullOuter(c)
-        | J::CrossJoin(c)
         | J::Semi(c)
         | J::LeftSemi(c)
         | J::RightSemi(c)
         | J::Anti(c)
         | J::LeftAnti(c)
         | J::RightAnti(c)
-        | J::StraightJoin(c)
         | J::AsOf { constraint: c, .. } => Some(c),
-        J::CrossApply | J::OuterApply => None,
+        J::CrossJoin | J::CrossApply | J::OuterApply => None,
     }
 }
 

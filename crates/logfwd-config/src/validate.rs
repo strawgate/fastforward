@@ -939,7 +939,7 @@ impl Config {
                 .filter(|i| i.input_type == InputType::File)
             {
                 if let Some(p) = input.path.as_deref() {
-                    if p.contains('*') || p.contains('?') {
+                    if p.contains('*') || p.contains('?') || p.contains('[') {
                         glob_input_patterns.push(p.to_string());
                     } else {
                         let pb = std::path::PathBuf::from(p);
@@ -1339,10 +1339,30 @@ fn glob_could_match(glob_pattern: &str, file_path: &str) -> bool {
     let glob_dir = glob_path.parent().map(normalize_path_for_compare);
     let file_dir = file.parent().map(normalize_path_for_compare);
 
-    // If the file is in the same directory as the glob, it could match.
-    if let (Some(g), Some(f)) = (&glob_dir, &file_dir)
-        && g == f
-    {
+    let same_directory = matches!((&glob_dir, &file_dir), (Some(g), Some(f)) if g == f);
+    let recursive_double_star = glob_pattern.contains("**");
+    let recursive_prefix_match = if recursive_double_star {
+        if let (Some(g), Some(f)) = (&glob_dir, &file_dir) {
+            let mut prefix = std::path::PathBuf::new();
+            let mut saw_recursive = false;
+            for component in g.components() {
+                if component.as_os_str() == "**" {
+                    saw_recursive = true;
+                    break;
+                }
+                prefix.push(component.as_os_str());
+            }
+            saw_recursive && f.starts_with(prefix)
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    // If the file is in the same directory as the glob (or the glob uses a
+    // recursive `**` prefix that includes the file directory), it could match.
+    if same_directory || recursive_prefix_match {
         // Also check filename pattern if the glob has a simple `*.ext` form.
         if let Some(glob_name) = glob_path.file_name().and_then(|n| n.to_str())
             && let Some(file_name) = file.file_name().and_then(|n| n.to_str())
@@ -1504,10 +1524,14 @@ pipelines:
     }
 
     #[test]
-    fn glob_could_match_nested_glob_paths_do_not_cross_directory_check() {
-        assert!(!glob_could_match(
+    fn glob_could_match_recursive_double_star_matches_nested_directories() {
+        assert!(glob_could_match(
             "/var/log/**/access.log",
             "/var/log/subdir/access.log"
+        ));
+        assert!(!glob_could_match(
+            "/var/log/**/access.log",
+            "/var/log/subdir/error.log"
         ));
     }
 }
