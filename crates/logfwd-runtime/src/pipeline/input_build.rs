@@ -167,7 +167,9 @@ pub(super) fn build_input_state(
                             Some(s) if s.eq_ignore_ascii_case("now") => {
                                 std::time::SystemTime::now()
                                     .duration_since(std::time::UNIX_EPOCH)
-                                    .unwrap_or_default()
+                                    .map_err(|_| {
+                                        format!("input '{name}': system clock is before Unix epoch, cannot resolve timestamp.start=\"now\"")
+                                    })?
                                     .as_millis() as i64
                             }
                             Some(s) => parse_iso8601_to_epoch_ms(s).map_err(|e| {

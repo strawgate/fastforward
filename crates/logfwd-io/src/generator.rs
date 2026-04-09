@@ -348,10 +348,13 @@ impl GeneratorInput {
             3 => 429,
             _ => 200,
         };
-        let event_ms =
-            self.config.timestamp.start_epoch_ms.saturating_add(
-                (self.counter as i64).saturating_mul(self.config.timestamp.step_ms),
-            );
+        let Some(event_ms) = (self.counter as i64)
+            .checked_mul(self.config.timestamp.step_ms)
+            .and_then(|offset| self.config.timestamp.start_epoch_ms.checked_add(offset))
+        else {
+            self.done = true;
+            return;
+        };
         let (year, month, day, hour, min, sec, msec) = epoch_ms_to_parts(event_ms);
 
         match self.config.complexity {

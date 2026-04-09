@@ -902,6 +902,10 @@ fn validate_log_level(level: &str) -> Result<(), String> {
 ///
 /// Checks both format and semantic validity (month/day/hour/min/sec ranges,
 /// including correct days-per-month with leap year handling).
+///
+/// Note: `logfwd-io::generator::parse_iso8601_to_epoch_ms` performs the same
+/// validation plus epoch conversion.  We duplicate the range checks here because
+/// `logfwd-config` cannot depend on `logfwd-io` (wrong crate-dependency direction).
 fn validate_iso8601_timestamp(s: &str) -> Result<(), String> {
     let b = s.as_bytes();
     if b.len() != 20

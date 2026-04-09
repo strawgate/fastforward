@@ -229,6 +229,7 @@ pub struct GeneratorInputConfig {
     pub attributes: HashMap<String, GeneratorAttributeValueConfig>,
     pub sequence: Option<GeneratorSequenceConfig>,
     pub event_created_unix_nano_field: Option<String>,
+    /// Timestamp configuration for the `logs` profile. See [`GeneratorTimestampConfig`].
     pub timestamp: Option<GeneratorTimestampConfig>,
 }
 
