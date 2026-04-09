@@ -115,6 +115,23 @@ same emitted JSON-line semantics for the supported field set.
 This is stronger than “both requests return 200”. It means the receiver must
 not silently diverge by format path.
 
+## Arrow IPC Receiver Contract
+
+The Arrow IPC receiver accepts `POST /v1/arrow` and forwards decoded
+`RecordBatch`es directly into the pipeline channel.
+
+### Delivery rules
+
+- If every non-empty batch in the request is accepted, return `200`.
+- If the channel becomes full after some prefix of batches has already been
+  accepted, return `429` for the whole request (never `200`).
+- A `429` on this path means **partial acceptance is possible**: a prefix may
+  already be delivered, so client retries are required to avoid loss of the
+  unsent suffix and may duplicate already-accepted prefix batches.
+- Downstream processing for Arrow IPC ingress is therefore at-least-once under
+  backpressure unless request-level deduplication is introduced externally.
+- A disconnected pipeline channel returns `503`.
+
 ## OTLP Sink Contract
 
 The OTLP sink accepts a `RecordBatch` and emits a valid
@@ -168,6 +185,24 @@ The file path is:
 - When EOF flushes a remainder, or a remainder is explicitly discarded after a
   documented lifecycle event, the checkpoint may then advance.
 
+### Source metadata rules
+
+- Source metadata (`_source_path`, `_source_id`, future fields) must be
+  attached as Arrow columns **post-scan**, not injected into raw bytes pre-scan.
+- The existing `inject_source_path_metadata` in `framed.rs` is **deprecated**
+  (#1615). It must not be extended or used as a pattern for new metadata.
+- Legacy exception: `_source_path` raw-byte insertion still exists in
+  `inject_source_path_metadata` for compatibility with current file JSON/CRI
+  paths. Treat this as transitional technical debt until #1615 lands; do not
+  add new `_source_*` raw injection helpers.
+- Canonical pattern for new metadata: scanner-attached `_resource_*` columns
+  (the same resource-column model used by OTLP/OTAP paths), attached at
+  scan/build time in the RecordBatch schema and accessible via SQL without raw
+  payload mutation.
+- Rationale: raw injection mutates user data, causes format-specific edge
+  cases (invalid JSON for empty objects), and is 30x slower than post-scan
+  column attachment (PR #1370 prototype measurements).
+
 ### Lifecycle rules
 
 - Rotate, truncate, delete/recreate, and EOF/stall notifications are explicit events.
@@ -176,11 +211,13 @@ The file path is:
 - Every `InputSource` implementation must define its control-plane `health()`
   semantics explicitly; input lifecycle truth must not rely on a trait-level
   default.
-- The current tailer emits `EndOfFile` once per no-data streak so downstream
-  framing can flush a trailing partial line for that source without waiting for
-  permanent file closure.
-- Fresh data resets that no-data streak, allowing a later `EndOfFile` signal to
-  flush a new trailing remainder if reads stall again.
+- The current file tailer emits `EndOfFile` only after both:
+  two consecutive no-data polls for a source, and
+  an idle-duration gate (derived from `poll_interval_ms`) has elapsed.
+  This avoids flushing mid-line fragments too aggressively on transient stalls
+  while still providing a bounded flush path for trailing partial lines.
+- Fresh data resets both the poll streak and idle timer, allowing a later
+  `EndOfFile` signal after a new sustained no-data period.
 - Tailer watcher/file I/O error bursts that trigger poll backoff should surface
   as `degraded` control-plane health, and a later clean poll should recover the
   file input to `healthy`.

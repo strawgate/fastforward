@@ -2,7 +2,8 @@
 # Install: cargo install just
 # Usage:  just --list
 
-# Default recipe: run all checks (same as CI)
+# Default recipe: run quick CI checks (default-members path).
+# Use `just ci-all` for full workspace CI checks (includes datafusion).
 
 # Limit all parallelism to 2 vCPU to avoid starving other processes.
 # This caps cargo compilation, test execution, rayon workers, and any Tokio
@@ -14,6 +15,99 @@ export NEXTEST_TEST_THREADS := env("JOBS", "2")
 export TOKIO_WORKER_THREADS := env("JOBS", "2")
 export RAYON_NUM_THREADS := env("JOBS", "2")
 default: ci
+
+# ---------------------------------------------------------------------------
+# Bootstrap
+# ---------------------------------------------------------------------------
+
+# One-command bootstrap: install toolchain, dev tools, git hooks, and fetch deps.
+# Run this after cloning the repo. Safe to re-run — idempotent.
+setup:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "==> Checking Rust toolchain (rust-toolchain.toml)"
+    if command -v rustup &>/dev/null; then
+        rustup show active-toolchain
+    else
+        echo "ERROR: rustup not found — install from https://rustup.rs" >&2
+        exit 1
+    fi
+    echo ""
+    echo "==> Installing dev tools"
+    if command -v mise &>/dev/null; then
+        echo "    mise detected — running mise install"
+        mise install
+    else
+        echo "    mise not found — falling back to cargo install"
+        just install-tools
+    fi
+    echo ""
+    echo "==> Fetching Cargo dependencies"
+    cargo fetch
+    echo ""
+    echo "==> Installing git hooks"
+    just install-hooks
+    echo ""
+    echo "==> Building diagnostics dashboard (Node.js)"
+    if command -v node &>/dev/null; then
+        just dashboard
+    else
+        echo "    SKIP: node not found — dashboard build requires Node.js 22+"
+        echo "    The dashboard is optional for most Rust development."
+    fi
+    echo ""
+    echo "==> Setup complete. Run 'just doctor' to verify, or 'just ci' to test."
+
+# Verify that all required dev tools are installed and report versions.
+doctor:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    MISSING_REQUIRED=0; MISSING_OPTIONAL=0
+    check() {
+        local name="$1" cmd="$2" required="${3:-true}"
+        if command -v "$cmd" &>/dev/null; then
+            ver=$("$cmd" --version 2>/dev/null | head -1)
+            printf "  %-18s %s\n" "✓ $name" "$ver"
+        elif [ "$required" = "true" ]; then
+            printf "  %-18s %s\n" "✗ $name" "MISSING (required)"
+            MISSING_REQUIRED=1
+        else
+            printf "  %-18s %s\n" "- $name" "not found (optional)"
+            MISSING_OPTIONAL=1
+        fi
+    }
+    echo "logfwd development environment"
+    echo "==============================="
+    echo ""
+    echo "Required:"
+    check "rustc"     rustc
+    check "cargo"     cargo
+    check "rustfmt"   rustfmt
+    check "clippy"    cargo-clippy
+    check "just"      just
+    check "nextest"   cargo-nextest
+    echo ""
+    echo "Recommended:"
+    check "taplo"     taplo     false
+    check "cargo-deny" cargo-deny false
+    check "cargo-machete" cargo-machete false
+    echo ""
+    echo "Optional:"
+    check "node"      node      false
+    check "npm"       npm       false
+    check "docker"    docker    false
+    check "mise"      mise      false
+    check "sccache"   sccache   false
+    check "kani"      cargo-kani false
+    echo ""
+    if [ "$MISSING_REQUIRED" -ne 0 ]; then
+        echo "Some required tools are missing. Run: just setup"
+        exit 1
+    elif [ "$MISSING_OPTIONAL" -ne 0 ]; then
+        echo "All required tools present. Some optional tools missing — see mise.toml."
+    else
+        echo "All tools present."
+    fi
 
 # Format all Rust code
 fmt:
@@ -39,10 +133,31 @@ test:
 test-all:
     cargo nextest run --workspace --profile ci
 
-# Run Kani formal verification proofs (logfwd-core only)
+# Tests — eBPF prototype crate only
+test-ebpf:
+    cargo test -p logfwd-ebpf-proto --all-targets
+
+# Build check — eBPF pipe-capture userspace loader
+check-ebpf-pipe-capture:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ "$(uname -s)" != "Linux" ]]; then
+        echo "Skipping: check-ebpf-pipe-capture is Linux-only (aya userspace bindings)."
+        exit 0
+    fi
+    cargo check --manifest-path crates/logfwd-ebpf-proto/pipe-capture/Cargo.toml
+
+# Run required Kani formal verification proofs for production crates
 # Requires: cargo install --locked kani-verifier && cargo kani setup
 kani:
+    just kani-required
+
+# Run the required Kani crate set enforced by CI guardrails.
+kani-required:
     RUSTC_WRAPPER="" cargo kani -p logfwd-core -Z function-contracts -Z mem-predicates -Z stubbing -j $CARGO_BUILD_JOBS
+    RUSTC_WRAPPER="" cargo kani -p logfwd-arrow -Z function-contracts -Z mem-predicates -Z stubbing -j $CARGO_BUILD_JOBS
+    RUSTC_WRAPPER="" cargo kani -p logfwd-io -Z function-contracts -Z mem-predicates -Z stubbing -j $CARGO_BUILD_JOBS
+    RUSTC_WRAPPER="" cargo kani -p logfwd-output -Z function-contracts -Z mem-predicates -Z stubbing -j $CARGO_BUILD_JOBS
 
 # Validate the non-core Kani boundary contract.
 kani-boundary:
@@ -392,11 +507,19 @@ bench-rate *ARGS:
 bench-memory *ARGS:
     cargo run -p logfwd-bench --release --bin memory-profile -- {{ARGS}}
 
-# Install development tools
+# Install development tools (fallback when mise is not available)
 install-tools:
-    cargo install taplo-cli cargo-deny cargo-audit cargo-nextest
+    cargo install taplo-cli cargo-deny cargo-nextest cargo-machete
+    @echo "Optional: cargo install sccache --locked"
     @echo "Optional: cargo install inferno"
-    @echo "Install just: https://just.systems/man/en/installation.html"
+
+# Start local dev services (Elasticsearch, OTLP blackhole). Requires Docker.
+services:
+    docker compose -f docker-compose.dev.yml up -d
+
+# Stop local dev services
+services-down:
+    docker compose -f docker-compose.dev.yml down
 
 # Set up git pre-commit hook (works from any worktree)
 install-hooks:

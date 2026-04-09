@@ -36,6 +36,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       core: ${{ steps.filter.outputs.core }}
+      kani_required: ${{ steps.filter.outputs.kani_required }}
       tla: ${{ steps.filter.outputs.tla }}
     steps:
       - uses: actions/checkout@v6
@@ -45,10 +46,20 @@ jobs:
           filters: |
             core:
               - 'crates/logfwd-core/**'
+            kani_required:
+              - 'crates/logfwd-core/**'
+              - 'crates/logfwd-arrow/**'
+              - 'crates/logfwd-io/**'
+              - 'crates/logfwd-output/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'dev-docs/verification/kani-boundary-contract.toml'
+              - 'scripts/verify_kani_boundary_contract.py'
+              - '.github/workflows/ci.yml'
             tla:
               - 'tla/**'
               - 'crates/logfwd-core/src/pipeline/**'
-              - 'crates/logfwd/src/pipeline.rs'
+              - 'crates/logfwd-runtime/src/pipeline.rs'
 
   # -------------------------------------------------------------------------
   # Frontend checks — format, lint, typecheck in one job (single npm install)
@@ -148,6 +159,12 @@ jobs:
       - name: Actionlint
         run: ./actionlint
 
+      - name: Source file length guardrail
+        run: python3 scripts/check_max_source_lines.py
+
+      - name: No raw payload injection guardrail
+        run: python3 scripts/check_no_raw_payload_injection.py
+
       # --- Expensive steps below — only reached if fast checks pass ---
 
       - uses: Swatinem/rust-cache@v2
@@ -161,6 +178,11 @@ jobs:
 
       - name: Clippy
         run: cargo clippy -- -D warnings
+
+      - name: Rustdoc warnings check
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --no-deps --document-private-items
 
       - name: Dependency audit (licenses / bans / advisories)
         run: cargo deny check
@@ -277,7 +299,7 @@ jobs:
     if: |
       github.event_name == 'push' ||
       contains(github.event.pull_request.labels.*.name, 'ci:full') ||
-      (github.event.pull_request.draft == false && needs.changes.outputs.core == 'true')
+      (github.event.pull_request.draft == false && needs.changes.outputs.kani_required == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -293,6 +315,9 @@ jobs:
         with:
           args: >-
             -p logfwd-core
+            -p logfwd-arrow
+            -p logfwd-io
+            -p logfwd-output
             -Z function-contracts -Z mem-predicates -Z stubbing
         env:
           RUSTC_WRAPPER: ""

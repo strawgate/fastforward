@@ -7,1619 +7,25 @@
 //!
 //! Environment variables in values are expanded using `${VAR}` syntax.
 
-use serde::Deserialize;
-use std::collections::HashMap;
-use std::fmt;
-use std::path::Path;
-
-// ---------------------------------------------------------------------------
-// Authentication configuration
-// ---------------------------------------------------------------------------
-
-/// Authentication configuration for output HTTP sinks.
-///
-/// Supports bearer tokens and arbitrary key/value header pairs.
-/// All values support `${ENV_VAR}` expansion at config-load time.
-#[derive(Debug, Clone, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-pub struct AuthConfig {
-    /// Sets the `Authorization: Bearer <token>` header on every request.
-    pub bearer_token: Option<String>,
-    /// Additional HTTP headers to add to every request (e.g. `X-API-Key`).
-    #[serde(default)]
-    pub headers: HashMap<String, String>,
-}
-
-// ---------------------------------------------------------------------------
-// Public error type
-// ---------------------------------------------------------------------------
-
-/// Errors that can occur while loading or validating configuration.
-#[derive(Debug, thiserror::Error)]
-#[must_use]
-#[non_exhaustive]
-pub enum ConfigError {
-    /// I/O error reading the configuration file.
-    #[error("config I/O error: {0}")]
-    Io(#[from] std::io::Error),
-    /// YAML parsing error.
-    #[error("config YAML error: {0}")]
-    Yaml(#[from] serde_yaml_ng::Error),
-    /// Semantic validation error in configuration values.
-    #[error("config validation error: {0}")]
-    Validation(String),
-}
-
-// ---------------------------------------------------------------------------
-// Enums for known types / formats
-// ---------------------------------------------------------------------------
-
-/// Recognised input types.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-#[non_exhaustive]
-pub enum InputType {
-    File,
-    Udp,
-    Tcp,
-    Otlp,
-    /// Synthetic data generator for benchmarking.
-    Generator,
-    /// Linux beta sensor input (eBPF-oriented runtime path).
-    LinuxSensorBeta,
-    /// macOS beta sensor input (EndpointSecurity-oriented runtime path).
-    MacosSensorBeta,
-    /// Windows beta sensor input (eBPF/ETW hybrid-oriented runtime path).
-    WindowsSensorBeta,
-    /// Arrow IPC stream receiver (native Arrow transport).
-    ArrowIpc,
-}
-
-impl fmt::Display for InputType {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            InputType::File => f.write_str("file"),
-            InputType::Udp => f.write_str("udp"),
-            InputType::Tcp => f.write_str("tcp"),
-            InputType::Otlp => f.write_str("otlp"),
-            InputType::Generator => f.write_str("generator"),
-            InputType::LinuxSensorBeta => f.write_str("linux_sensor_beta"),
-            InputType::MacosSensorBeta => f.write_str("macos_sensor_beta"),
-            InputType::WindowsSensorBeta => f.write_str("windows_sensor_beta"),
-            InputType::ArrowIpc => f.write_str("arrow_ipc"),
-        }
-    }
-}
-
-/// Recognised output types.
-///
-/// Uses a custom `Deserialize` impl so that `type: null` in YAML (which
-/// the YAML spec parses as the scalar null, not the string `"null"`) is
-/// accepted as the `Null` variant in both simple and list contexts.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-#[non_exhaustive]
-pub enum OutputType {
-    #[default]
-    Otlp,
-    Http,
-    Elasticsearch,
-    Loki,
-    Stdout,
-    File,
-    Parquet,
-    /// Discard all data. Used for benchmarking and blackhole receivers.
-    Null,
-    /// Send newline-delimited data over TCP.
-    Tcp,
-    /// Send datagrams over UDP.
-    Udp,
-    /// Arrow IPC stream over HTTP (native Arrow transport).
-    ArrowIpc,
-}
-
-impl fmt::Display for OutputType {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            OutputType::Otlp => f.write_str("otlp"),
-            OutputType::Http => f.write_str("http"),
-            OutputType::Elasticsearch => f.write_str("elasticsearch"),
-            OutputType::Loki => f.write_str("loki"),
-            OutputType::Stdout => f.write_str("stdout"),
-            OutputType::File => f.write_str("file"),
-            OutputType::Parquet => f.write_str("parquet"),
-            OutputType::Null => f.write_str("null"),
-            OutputType::Tcp => f.write_str("tcp"),
-            OutputType::Udp => f.write_str("udp"),
-            OutputType::ArrowIpc => f.write_str("arrow_ipc"),
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for OutputType {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        struct V;
-        impl serde::de::Visitor<'_> for V {
-            type Value = OutputType;
-            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-                write!(f, r#"an output type name (e.g. "stdout", "null", "otlp")"#)
-            }
-            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<OutputType, E> {
-                match v {
-                    "otlp" => Ok(OutputType::Otlp),
-                    "http" => Ok(OutputType::Http),
-                    "elasticsearch" => Ok(OutputType::Elasticsearch),
-                    "loki" => Ok(OutputType::Loki),
-                    "stdout" => Ok(OutputType::Stdout),
-                    "file" => Ok(OutputType::File),
-                    "parquet" => Ok(OutputType::Parquet),
-                    "null" => Ok(OutputType::Null),
-                    "tcp" => Ok(OutputType::Tcp),
-                    "udp" => Ok(OutputType::Udp),
-                    "arrow_ipc" => Ok(OutputType::ArrowIpc),
-                    other => Err(E::unknown_variant(
-                        other,
-                        &[
-                            "otlp",
-                            "http",
-                            "elasticsearch",
-                            "loki",
-                            "stdout",
-                            "file",
-                            "parquet",
-                            "null",
-                            "tcp",
-                            "udp",
-                            "arrow_ipc",
-                        ],
-                    )),
-                }
-            }
-            /// YAML scalar `null` deserialises as a unit — map it to `Null`.
-            fn visit_unit<E: serde::de::Error>(self) -> Result<OutputType, E> {
-                Ok(OutputType::Null)
-            }
-            /// Some YAML parsers may emit `None` for a null scalar.
-            fn visit_none<E: serde::de::Error>(self) -> Result<OutputType, E> {
-                Ok(OutputType::Null)
-            }
-        }
-        d.deserialize_any(V)
-    }
-}
-
-/// Recognised log formats.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-#[non_exhaustive]
-pub enum Format {
-    Cri,
-    Json,
-    Logfmt,
-    Syslog,
-    Raw,
-    Auto,
-    /// Human-readable colored console output for debugging/testing.
-    Console,
-    /// Plain text output.
-    Text,
-}
-
-impl fmt::Display for Format {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Format::Cri => f.write_str("cri"),
-            Format::Json => f.write_str("json"),
-            Format::Logfmt => f.write_str("logfmt"),
-            Format::Syslog => f.write_str("syslog"),
-            Format::Raw => f.write_str("raw"),
-            Format::Auto => f.write_str("auto"),
-            Format::Console => f.write_str("console"),
-            Format::Text => f.write_str("text"),
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Input / Output descriptors
-// ---------------------------------------------------------------------------
-
-/// Named generator output profiles.
-#[non_exhaustive]
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum GeneratorProfileConfig {
-    /// Synthetic request-like JSON logs.
-    #[default]
-    Logs,
-    /// Flat JSON records built from static attributes and generated fields.
-    Record,
-}
-
-/// Controls the size and shape of synthetic generator rows.
-#[non_exhaustive]
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum GeneratorComplexityConfig {
-    /// Flat request-style logs around a couple hundred bytes.
-    #[default]
-    Simple,
-    /// Request-style logs with occasional nested objects and arrays.
-    Complex,
-}
-
-/// Static scalar attribute value for generated `record` rows.
-#[non_exhaustive]
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(untagged)]
-pub enum GeneratorAttributeValueConfig {
-    /// JSON null scalar.
-    Null,
-    /// UTF-8 text scalar.
-    String(String),
-    /// Signed 64-bit integer scalar.
-    Integer(i64),
-    /// 64-bit floating point scalar.
-    Float(f64),
-    /// Boolean scalar.
-    Bool(bool),
-}
-
-/// Monotonic sequence field generation.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct GeneratorSequenceConfig {
-    /// Output field name for the generated sequence.
-    pub field: String,
-    /// Initial sequence value. Defaults to 1.
-    pub start: Option<u64>,
-}
-
-/// Generator-specific configuration.
-#[derive(Debug, Clone, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-pub struct GeneratorInputConfig {
-    /// Target events per second. 0 or omitted means unlimited.
-    pub events_per_sec: Option<u64>,
-    /// Number of events emitted on each input poll.
-    pub batch_size: Option<usize>,
-    /// Total events to emit before the generator finishes. 0 or omitted means infinite.
-    pub total_events: Option<u64>,
-    /// Controls size/shape for the `logs` profile.
-    pub complexity: Option<GeneratorComplexityConfig>,
-    /// Which event shape to emit.
-    pub profile: Option<GeneratorProfileConfig>,
-    /// Static scalar attributes written into generated rows.
-    #[serde(default)]
-    pub attributes: HashMap<String, GeneratorAttributeValueConfig>,
-    /// Monotonic sequence field for `record` rows.
-    pub sequence: Option<GeneratorSequenceConfig>,
-    /// Source-created timestamp field for `record` rows.
-    pub event_created_unix_nano_field: Option<String>,
-}
-
-/// Platform beta sensor configuration.
-#[derive(Debug, Clone, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-pub struct PlatformSensorBetaInputConfig {
-    /// Sensor heartbeat cadence. Defaults to 10_000 when omitted.
-    pub poll_interval_ms: Option<u64>,
-    /// Emit periodic heartbeat rows while the sensor is idle. Defaults to true.
-    pub emit_heartbeat: Option<bool>,
-    /// Optional JSON control-plane file path for runtime reloads.
-    pub control_path: Option<String>,
-    /// How often to check `control_path` for updates. Defaults to 1_000 when omitted.
-    pub control_reload_interval_ms: Option<u64>,
-    /// Optional explicit sensor signal families to enable.
-    ///
-    /// When omitted, each platform uses its default family set.
-    pub enabled_families: Option<Vec<String>>,
-    /// Emit periodic per-family sample rows. Defaults to true.
-    pub emit_signal_rows: Option<bool>,
-}
-
-/// A single input source.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct InputConfig {
-    /// Optional friendly name (used in multi-input pipelines).
-    pub name: Option<String>,
-    #[serde(rename = "type")]
-    pub input_type: InputType,
-    /// File glob or listen address, depending on `input_type`.
-    pub path: Option<String>,
-    pub listen: Option<String>,
-    pub format: Option<Format>,
-    /// Maximum number of file descriptors to keep open simultaneously.
-    /// Applies only to `file` inputs. Defaults to 1024 when not set.
-    pub max_open_files: Option<usize>,
-    /// How often (ms) to re-evaluate glob patterns to discover new files.
-    /// Applies only to glob `file` inputs. Defaults to 5000ms when not set.
-    /// Set to a small value (e.g. 50) in tests to avoid long waits.
-    pub glob_rescan_interval_ms: Option<u64>,
-    /// Generator-specific configuration.
-    #[serde(default)]
-    pub generator: Option<GeneratorInputConfig>,
-    /// Platform beta sensor-specific configuration.
-    #[serde(default)]
-    pub sensor_beta: Option<PlatformSensorBetaInputConfig>,
-    /// Per-input SQL transform. When set, this input gets its own Scanner +
-    /// `SqlTransform` pair. Overrides the pipeline-level `transform` field
-    /// for this input only.
-    pub sql: Option<String>,
-}
-
-/// A single output destination.
-#[derive(Debug, Clone, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-pub struct OutputConfig {
-    pub name: Option<String>,
-    #[serde(rename = "type")]
-    pub output_type: OutputType,
-    pub endpoint: Option<String>,
-    pub protocol: Option<String>,
-    pub compression: Option<String>,
-    /// Elasticsearch bulk request mode. Defaults to buffered.
-    pub request_mode: Option<String>,
-    pub format: Option<Format>,
-    pub path: Option<String>,
-    /// Elasticsearch index name. Defaults to "logs" if not specified.
-    pub index: Option<String>,
-    /// Optional authentication for HTTP-based outputs.
-    #[serde(default)]
-    pub auth: Option<AuthConfig>,
-
-    // Loki-specific configuration
-    /// Optional X-Scope-OrgID header value for multi-tenant Loki.
-    pub tenant_id: Option<String>,
-    /// Static labels added to every Loki stream.
-    pub static_labels: Option<HashMap<String, String>>,
-    /// Record columns to use as Loki stream labels.
-    pub label_columns: Option<Vec<String>>,
-}
-
-// ---------------------------------------------------------------------------
-// Pipeline
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// Enrichment
-// ---------------------------------------------------------------------------
-
-/// Supported geo-IP database formats.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-#[non_exhaustive]
-pub enum GeoDatabaseFormat {
-    /// MaxMind MMDB format (GeoLite2-City, GeoIP2-City, DB-IP MMDB).
-    Mmdb,
-}
-
-/// Configuration for a geo-IP database used by the `geo_lookup()` UDF.
-///
-/// ```yaml
-/// enrichment:
-///   - type: geo_database
-///     format: mmdb
-///     path: /etc/logfwd/GeoLite2-City.mmdb
-///     refresh_interval: 86400
-/// ```
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct GeoDatabaseConfig {
-    /// Database format.
-    pub format: GeoDatabaseFormat,
-    /// Path to the database file.
-    pub path: String,
-    /// How often to reload the database file, in seconds. Optional.
-    // TODO: not yet implemented — currently ignored at runtime
-    pub refresh_interval: Option<u64>,
-}
-
-/// Configuration for a static key-value enrichment table.
-///
-/// ```yaml
-/// enrichment:
-///   - type: static
-///     table_name: env
-///     labels:
-///       dc: us-east-1
-///       team: platform
-/// ```
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct StaticEnrichmentConfig {
-    /// SQL table name for the enrichment source.
-    pub table_name: String,
-    /// Key-value pairs that form a single-row table.
-    pub labels: HashMap<String, String>,
-}
-
-/// Configuration for the host-info enrichment table.
-///
-/// Resolves hostname, OS type, and architecture at startup.
-///
-/// ```yaml
-/// enrichment:
-///   - type: host_info
-/// ```
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct HostInfoConfig {}
-
-/// Configuration for the Kubernetes CRI log-path enrichment table.
-///
-/// Extracts namespace, pod name, pod UID, and container name from CRI log
-/// file paths. Updated automatically as the tailer discovers new log files.
-///
-/// ```yaml
-/// enrichment:
-///   - type: k8s_path
-///     table_name: k8s_pods
-/// ```
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct K8sPathConfig {
-    /// SQL table name. Defaults to `"k8s_pods"`.
-    #[serde(default = "default_k8s_table_name")]
-    pub table_name: String,
-}
-
-fn default_k8s_table_name() -> String {
-    "k8s_pods".to_string()
-}
-
-/// Configuration for a CSV file enrichment table.
-///
-/// ```yaml
-/// enrichment:
-///   - type: csv
-///     table_name: assets
-///     path: /etc/logfwd/assets.csv
-/// ```
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CsvEnrichmentConfig {
-    /// SQL table name for the enrichment source.
-    pub table_name: String,
-    /// Path to the CSV file.
-    pub path: String,
-}
-
-/// Configuration for a JSON Lines file enrichment table.
-///
-/// ```yaml
-/// enrichment:
-///   - type: jsonl
-///     table_name: ip_owners
-///     path: /etc/logfwd/ip-owners.jsonl
-/// ```
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct JsonlEnrichmentConfig {
-    /// SQL table name for the enrichment source.
-    pub table_name: String,
-    /// Path to the JSON Lines file.
-    pub path: String,
-}
-
-/// Enrichment configuration entry.
-///
-/// Each entry in the `enrichment` list specifies one enrichment source.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum EnrichmentConfig {
-    /// Geo-IP lookup database for the `geo_lookup()` UDF.
-    GeoDatabase(GeoDatabaseConfig),
-    /// Static key-value pairs exposed as a single-row SQL table.
-    Static(StaticEnrichmentConfig),
-    /// System host metadata (hostname, OS, arch).
-    HostInfo(HostInfoConfig),
-    /// Kubernetes pod metadata parsed from CRI log file paths.
-    K8sPath(K8sPathConfig),
-    /// Lookup table loaded from a CSV file.
-    Csv(CsvEnrichmentConfig),
-    /// Lookup table loaded from a JSON Lines file.
-    Jsonl(JsonlEnrichmentConfig),
-}
-
-// ---------------------------------------------------------------------------
-// Pipeline
-// ---------------------------------------------------------------------------
-
-/// One logical pipeline (inputs -> SQL transform -> outputs).
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PipelineConfig {
-    #[serde(default, deserialize_with = "deserialize_one_or_many")]
-    pub inputs: Vec<InputConfig>,
-    pub transform: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_one_or_many")]
-    pub outputs: Vec<OutputConfig>,
-    /// Enrichment sources (e.g. geo-IP databases).
-    #[serde(default)]
-    pub enrichment: Vec<EnrichmentConfig>,
-    /// Static OTLP resource attributes emitted with every batch.
-    ///
-    /// These are added to the OTLP `Resource.attributes` field and are
-    /// recommended by the OTLP spec for every exported signal.
-    ///
-    /// ```yaml
-    /// resource_attrs:
-    ///   service.name: my-service
-    ///   service.version: "1.0"
-    ///   deployment.environment: production
-    /// ```
-    #[serde(default)]
-    pub resource_attrs: HashMap<String, String>,
-    /// Maximum number of concurrent output workers. Default: 4.
-    pub workers: Option<usize>,
-    /// Batch target size in bytes before flushing. Default: 4 MiB.
-    pub batch_target_bytes: Option<usize>,
-    /// Batch flush timeout in milliseconds. Default: 100.
-    pub batch_timeout_ms: Option<u64>,
-    /// Input polling interval in milliseconds. Default: 10.
-    pub poll_interval_ms: Option<u64>,
-}
-
-// ---------------------------------------------------------------------------
-// Server / Storage
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-pub struct ServerConfig {
-    pub diagnostics: Option<String>,
-    pub log_level: Option<String>,
-    /// OTLP endpoint for metrics push (e.g. "http://localhost:4318").
-    /// If not set, OTLP push is disabled.
-    pub metrics_endpoint: Option<String>,
-    /// OTLP push interval in seconds. Default: 60.
-    pub metrics_interval_secs: Option<u64>,
-    /// OTLP endpoint for trace push (e.g. "http://localhost:4318").
-    /// If not set, traces are only buffered in-process for the dashboard.
-    pub traces_endpoint: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-pub struct StorageConfig {
-    pub data_dir: Option<String>,
-}
-
-// ---------------------------------------------------------------------------
-// Top-level config (supports simple + advanced)
-// ---------------------------------------------------------------------------
-
-/// Raw top-level YAML — we use a flat struct with Options so serde can
-/// deserialise either layout, then we normalise into [`Config`].
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawConfig {
-    // Simple form
-    input: Option<InputConfig>,
-    transform: Option<String>,
-    output: Option<OutputConfig>,
-    /// Enrichment sources for the simple-form default pipeline.
-    #[serde(default)]
-    enrichment: Vec<EnrichmentConfig>,
-    /// Static OTLP resource attributes for the simple-form default pipeline.
-    #[serde(default)]
-    resource_attrs: HashMap<String, String>,
-
-    // Advanced form
-    pipelines: Option<HashMap<String, PipelineConfig>>,
-
-    // Shared
-    #[serde(default)]
-    server: ServerConfig,
-    #[serde(default)]
-    storage: StorageConfig,
-}
-
-/// Fully resolved configuration.
-#[derive(Debug, Clone)]
-pub struct Config {
-    pub pipelines: HashMap<String, PipelineConfig>,
-    pub server: ServerConfig,
-    pub storage: StorageConfig,
-}
-
-impl Config {
-    /// Load configuration from a file path.
-    pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, ConfigError> {
-        let raw = std::fs::read_to_string(path)?;
-        Self::load_str(&raw)
-    }
-
-    /// Load configuration from a YAML string (handy for tests).
-    pub fn load_str(yaml: &str) -> Result<Self, ConfigError> {
-        let expanded = expand_env_vars(yaml)?;
-        let raw: RawConfig = serde_yaml_ng::from_str(&expanded)?;
-        Self::from_raw(raw)
-    }
-
-    /// Expand `${VAR}` references in YAML values using process environment vars.
-    pub fn expand_env_str(yaml: &str) -> Result<String, ConfigError> {
-        expand_env_vars(yaml)
-    }
-
-    // Normalise the two layout variants into a single representation.
-    fn from_raw(raw: RawConfig) -> Result<Self, ConfigError> {
-        let pipelines = match (raw.pipelines, raw.input, raw.output) {
-            (Some(p), None, None) => {
-                if !raw.enrichment.is_empty() {
-                    return Err(ConfigError::Validation(
-                        "top-level `enrichment` is not supported when using `pipelines:` form \
-                         — move enrichment configuration inside each pipeline"
-                            .into(),
-                    ));
-                }
-                if !raw.resource_attrs.is_empty() {
-                    return Err(ConfigError::Validation(
-                        "top-level `resource_attrs` cannot be used with `pipelines:`; \
-                         move resource_attrs into each pipeline"
-                            .into(),
-                    ));
-                }
-                p
-            }
-            (None, Some(input), Some(output)) => {
-                let pipeline = PipelineConfig {
-                    inputs: vec![input],
-                    transform: raw.transform,
-                    outputs: vec![output],
-                    enrichment: raw.enrichment,
-                    resource_attrs: raw.resource_attrs,
-                    workers: None,
-                    batch_target_bytes: None,
-                    batch_timeout_ms: None,
-                    poll_interval_ms: None,
-                };
-                let mut map = HashMap::new();
-                map.insert("default".to_string(), pipeline);
-                map
-            }
-            (Some(_), Some(_), _) | (Some(_), _, Some(_)) => {
-                return Err(ConfigError::Validation(
-                    "cannot mix top-level input/output with pipelines".into(),
-                ));
-            }
-            (None, None, None) => {
-                return Err(ConfigError::Validation(
-                    "config must define either input/output or pipelines".into(),
-                ));
-            }
-            (None, Some(_), None) => {
-                return Err(ConfigError::Validation(
-                    "output is required when input is specified".into(),
-                ));
-            }
-            (None, None, Some(_)) => {
-                return Err(ConfigError::Validation(
-                    "input is required when output is specified".into(),
-                ));
-            }
-        };
-
-        let cfg = Config {
-            pipelines,
-            server: raw.server,
-            storage: raw.storage,
-        };
-        cfg.validate()?;
-        Ok(cfg)
-    }
-
-    /// Validate the loaded configuration.
-    fn validate(&self) -> Result<(), ConfigError> {
-        if let Some(ep) = &self.server.traces_endpoint {
-            if let Err(msg) = validate_endpoint_url(ep) {
-                return Err(ConfigError::Validation(format!(
-                    "server.traces_endpoint: {msg}"
-                )));
-            }
-        }
-
-        // Validate server.diagnostics bind address at config time so that
-        // `validate` catches typos before the server tries to bind at runtime.
-        if let Some(addr) = &self.server.diagnostics {
-            if let Err(msg) = validate_bind_addr(addr) {
-                return Err(ConfigError::Validation(format!(
-                    "server.diagnostics: {msg}"
-                )));
-            }
-        }
-
-        // Validate server.log_level is a recognised level (#481).
-        if let Some(level) = &self.server.log_level {
-            if let Err(msg) = validate_log_level(level) {
-                return Err(ConfigError::Validation(format!("server.log_level: {msg}")));
-            }
-        }
-
-        if self.pipelines.is_empty() {
-            return Err(ConfigError::Validation(
-                "at least one pipeline must be defined".into(),
-            ));
-        }
-
-        for (name, pipe) in &self.pipelines {
-            if pipe.batch_timeout_ms == Some(0) {
-                return Err(ConfigError::Validation(format!(
-                    "pipeline '{name}': batch_timeout_ms must be greater than 0"
-                )));
-            }
-            if pipe.poll_interval_ms == Some(0) {
-                return Err(ConfigError::Validation(format!(
-                    "pipeline '{name}': poll_interval_ms must be greater than 0"
-                )));
-            }
-            if pipe.workers == Some(0) {
-                return Err(ConfigError::Validation(format!(
-                    "pipeline '{name}': workers must be greater than 0"
-                )));
-            }
-            if pipe.batch_target_bytes == Some(0) {
-                return Err(ConfigError::Validation(format!(
-                    "pipeline '{name}': batch_target_bytes must be greater than 0"
-                )));
-            }
-            if let Some(sql) = &pipe.transform {
-                if sql.trim().is_empty() {
-                    return Err(ConfigError::Validation(format!(
-                        "pipeline '{name}': transform SQL cannot be empty"
-                    )));
-                }
-            }
-            if pipe.inputs.is_empty() {
-                return Err(ConfigError::Validation(format!(
-                    "pipeline '{name}' has no inputs"
-                )));
-            }
-            if pipe.outputs.is_empty() {
-                return Err(ConfigError::Validation(format!(
-                    "pipeline '{name}' has no outputs"
-                )));
-            }
-
-            for (i, input) in pipe.inputs.iter().enumerate() {
-                let label = input
-                    .name
-                    .as_deref()
-                    .map_or_else(|| format!("#{i}"), String::from);
-
-                if input.input_type == InputType::ArrowIpc {
-                    return Err(ConfigError::Validation(format!(
-                        "pipeline '{name}' input '{label}': arrow_ipc input type is not yet supported"
-                    )));
-                }
-                match input.input_type {
-                    InputType::File => {
-                        if input.path.is_none() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': file input requires 'path'"
-                            )));
-                        }
-                    }
-                    InputType::Udp | InputType::Tcp => {
-                        if input.listen.is_none() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': udp/tcp input requires 'listen'"
-                            )));
-                        }
-                        if let Some(addr) = &input.listen {
-                            if let Err(msg) = validate_bind_addr(addr) {
-                                return Err(ConfigError::Validation(format!(
-                                    "pipeline '{name}' input '{label}': {msg}"
-                                )));
-                            }
-                        }
-                    }
-                    InputType::Otlp => {
-                        if input.listen.is_none() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'listen' is required for {} inputs",
-                                input.input_type
-                            )));
-                        }
-                        if let Some(addr) = &input.listen {
-                            if let Err(msg) = validate_bind_addr(addr) {
-                                return Err(ConfigError::Validation(format!(
-                                    "pipeline '{name}' input '{label}': {msg}"
-                                )));
-                            }
-                        }
-                    }
-                    InputType::Generator
-                    | InputType::LinuxSensorBeta
-                    | InputType::MacosSensorBeta
-                    | InputType::WindowsSensorBeta
-                    | InputType::ArrowIpc => {}
-                }
-
-                // Reject fields that don't apply to this input type.
-                match input.input_type {
-                    InputType::File => {
-                        if input.generator.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'generator' settings are only supported for generator inputs"
-                            )));
-                        }
-                        if input.listen.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'listen' is not supported for file inputs"
-                            )));
-                        }
-                        validate_no_sensor_beta_for_input(input, name, &label)?;
-                    }
-                    InputType::Tcp | InputType::Udp => {
-                        if input.generator.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'generator' settings are only supported for generator inputs"
-                            )));
-                        }
-                        if input.path.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'path' is not supported for tcp/udp inputs"
-                            )));
-                        }
-                        if input.max_open_files.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'max_open_files' is not supported for tcp/udp inputs"
-                            )));
-                        }
-                        if input.glob_rescan_interval_ms.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'glob_rescan_interval_ms' is not supported for tcp/udp inputs"
-                            )));
-                        }
-                        validate_no_sensor_beta_for_input(input, name, &label)?;
-                    }
-                    InputType::Otlp => {
-                        if input.generator.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'generator' settings are only supported for generator inputs"
-                            )));
-                        }
-                        if input.path.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'path' is not supported for otlp inputs"
-                            )));
-                        }
-                        if input.max_open_files.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'max_open_files' is not supported for otlp inputs"
-                            )));
-                        }
-                        if input.glob_rescan_interval_ms.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'glob_rescan_interval_ms' is not supported for otlp inputs"
-                            )));
-                        }
-                        validate_no_sensor_beta_for_input(input, name, &label)?;
-                    }
-                    InputType::Generator => {
-                        if input.listen.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'listen' is not supported for generator inputs; use generator.events_per_sec"
-                            )));
-                        }
-                        if input.path.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'path' is not supported for generator inputs"
-                            )));
-                        }
-                        if input.max_open_files.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'max_open_files' is not supported for generator inputs"
-                            )));
-                        }
-                        if input.glob_rescan_interval_ms.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'glob_rescan_interval_ms' is not supported for generator inputs"
-                            )));
-                        }
-                        validate_no_sensor_beta_for_input(input, name, &label)?;
-                        if input.generator.as_ref().and_then(|cfg| cfg.batch_size) == Some(0) {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': generator.batch_size must be at least 1"
-                            )));
-                        }
-                        if let Some(generator) = &input.generator {
-                            let is_record_profile =
-                                matches!(generator.profile, Some(GeneratorProfileConfig::Record));
-                            if generator.attributes.keys().any(|key| key.trim().is_empty()) {
-                                return Err(ConfigError::Validation(format!(
-                                    "pipeline '{name}' input '{label}': generator.attributes keys must not be empty"
-                                )));
-                            }
-                            if generator
-                                .attributes
-                                .values()
-                                .any(|value| matches!(value, GeneratorAttributeValueConfig::Float(v) if !v.is_finite()))
-                            {
-                                return Err(ConfigError::Validation(format!(
-                                    "pipeline '{name}' input '{label}': generator.attributes float values must be finite"
-                                )));
-                            }
-                            if !is_record_profile
-                                && (!generator.attributes.is_empty()
-                                    || generator.sequence.is_some()
-                                    || generator.event_created_unix_nano_field.is_some())
-                            {
-                                return Err(ConfigError::Validation(format!(
-                                    "pipeline '{name}' input '{label}': generator.attributes, generator.sequence, and generator.event_created_unix_nano_field require generator.profile=record"
-                                )));
-                            }
-                            if let Some(sequence) = &generator.sequence {
-                                if sequence.field.trim().is_empty() {
-                                    return Err(ConfigError::Validation(format!(
-                                        "pipeline '{name}' input '{label}': generator.sequence.field must not be empty"
-                                    )));
-                                }
-                                if generator.attributes.contains_key(&sequence.field) {
-                                    return Err(ConfigError::Validation(format!(
-                                        "pipeline '{name}' input '{label}': generator.sequence.field must not duplicate a generator.attributes key"
-                                    )));
-                                }
-                            }
-                            if generator
-                                .event_created_unix_nano_field
-                                .as_deref()
-                                .is_some_and(|field| field.trim().is_empty())
-                            {
-                                return Err(ConfigError::Validation(format!(
-                                    "pipeline '{name}' input '{label}': generator.event_created_unix_nano_field must not be empty"
-                                )));
-                            }
-                            if let Some(field) = generator.event_created_unix_nano_field.as_deref()
-                            {
-                                if generator.attributes.contains_key(field) {
-                                    return Err(ConfigError::Validation(format!(
-                                        "pipeline '{name}' input '{label}': generator.event_created_unix_nano_field must not duplicate a generator.attributes key"
-                                    )));
-                                }
-                                if generator
-                                    .sequence
-                                    .as_ref()
-                                    .is_some_and(|sequence| sequence.field == field)
-                                {
-                                    return Err(ConfigError::Validation(format!(
-                                        "pipeline '{name}' input '{label}': generator.event_created_unix_nano_field must not duplicate generator.sequence.field"
-                                    )));
-                                }
-                            }
-                        }
-                    }
-                    InputType::LinuxSensorBeta
-                    | InputType::MacosSensorBeta
-                    | InputType::WindowsSensorBeta => {
-                        if input.generator.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'generator' settings are only supported for generator inputs"
-                            )));
-                        }
-                        if input.listen.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'listen' is not supported for {} inputs",
-                                input.input_type
-                            )));
-                        }
-                        if input.path.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'path' is not supported for {} inputs",
-                                input.input_type
-                            )));
-                        }
-                        if input.max_open_files.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'max_open_files' is not supported for {} inputs",
-                                input.input_type
-                            )));
-                        }
-                        if input.glob_rescan_interval_ms.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'glob_rescan_interval_ms' is not supported for {} inputs",
-                                input.input_type
-                            )));
-                        }
-                        if input
-                            .sensor_beta
-                            .as_ref()
-                            .and_then(|cfg| cfg.poll_interval_ms)
-                            == Some(0)
-                        {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': sensor_beta.poll_interval_ms must be at least 1"
-                            )));
-                        }
-                        if input
-                            .sensor_beta
-                            .as_ref()
-                            .and_then(|cfg| cfg.control_reload_interval_ms)
-                            == Some(0)
-                        {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': sensor_beta.control_reload_interval_ms must be at least 1"
-                            )));
-                        }
-                        if input
-                            .sensor_beta
-                            .as_ref()
-                            .and_then(|cfg| cfg.control_path.as_deref())
-                            .is_some_and(|path| path.trim().is_empty())
-                        {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': sensor_beta.control_path must not be empty"
-                            )));
-                        }
-                        if let Some(families) = input
-                            .sensor_beta
-                            .as_ref()
-                            .and_then(|cfg| cfg.enabled_families.as_ref())
-                        {
-                            for family in families {
-                                let normalized = family.trim();
-                                if normalized.is_empty() {
-                                    return Err(ConfigError::Validation(format!(
-                                        "pipeline '{name}' input '{label}': sensor_beta.enabled_families entries must not be empty"
-                                    )));
-                                }
-                                if !is_sensor_beta_family_supported(&input.input_type, normalized) {
-                                    return Err(ConfigError::Validation(format!(
-                                        "pipeline '{name}' input '{label}': unknown sensor_beta family '{normalized}' for {} input (supported: {})",
-                                        input.input_type,
-                                        sensor_beta_supported_families_csv(&input.input_type)
-                                    )));
-                                }
-                            }
-                        }
-                    }
-                    InputType::ArrowIpc => {
-                        if input.generator.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'generator' settings are only supported for generator inputs"
-                            )));
-                        }
-                        validate_no_sensor_beta_for_input(input, name, &label)?;
-                    }
-                }
-
-                // Reject input formats that are not yet implemented.
-                if let Some(fmt @ (Format::Logfmt | Format::Syslog)) = &input.format {
-                    return Err(ConfigError::Validation(format!(
-                        "pipeline '{name}' input '{label}': format {fmt:?} is not yet implemented",
-                    )));
-                }
-
-                // max_open_files: 0 silently disables all file reading (#696).
-                if input.max_open_files == Some(0) {
-                    return Err(ConfigError::Validation(format!(
-                        "pipeline '{name}' input '{label}': max_open_files must be at least 1"
-                    )));
-                }
-
-                // Reject whitespace-only per-input SQL (mirrors pipeline-level check).
-                if let Some(sql) = &input.sql {
-                    if sql.trim().is_empty() {
-                        return Err(ConfigError::Validation(format!(
-                            "pipeline '{name}' input '{label}': per-input sql cannot be empty"
-                        )));
-                    }
-                }
-            }
-
-            for (i, output) in pipe.outputs.iter().enumerate() {
-                let label = output
-                    .name
-                    .as_deref()
-                    .map_or_else(|| format!("#{i}"), String::from);
-
-                // Reject placeholder output types that are not yet implemented.
-                if matches!(output.output_type, OutputType::Parquet | OutputType::Http) {
-                    return Err(ConfigError::Validation(format!(
-                        "pipeline '{name}' output '{label}': {} output type is not yet implemented",
-                        output.output_type,
-                    )));
-                }
-
-                match output.output_type {
-                    OutputType::Otlp
-                    | OutputType::Elasticsearch
-                    | OutputType::Loki
-                    | OutputType::ArrowIpc => {
-                        if output.endpoint.is_none() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' output '{label}': {} output requires 'endpoint'",
-                                output.output_type,
-                            )));
-                        }
-                        if let Some(ep) = &output.endpoint
-                            && let Err(msg) = validate_endpoint_url(ep)
-                        {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' output '{label}': {msg}",
-                            )));
-                        }
-                        if output.output_type == OutputType::Elasticsearch {
-                            if let Some(mode) = output.request_mode.as_deref()
-                                && !matches!(mode, "buffered" | "streaming")
-                            {
-                                return Err(ConfigError::Validation(format!(
-                                    "pipeline '{name}' output '{label}': elasticsearch request_mode must be 'buffered' or 'streaming'"
-                                )));
-                            }
-                            if output.request_mode.as_deref() == Some("streaming")
-                                && output.compression.as_deref() == Some("gzip")
-                            {
-                                return Err(ConfigError::Validation(format!(
-                                    "pipeline '{name}' output '{label}': elasticsearch request_mode 'streaming' does not support gzip compression yet"
-                                )));
-                            }
-                        } else if output.request_mode.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' output '{label}': request_mode is only supported for elasticsearch outputs"
-                            )));
-                        }
-                    }
-                    OutputType::File => {
-                        if output.path.is_none() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' output '{label}': {} output requires 'path'",
-                                output.output_type,
-                            )));
-                        }
-                        if let Some(fmt) = &output.format
-                            && !matches!(fmt, Format::Json | Format::Text)
-                        {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' output '{label}': file output only supports format json or text"
-                            )));
-                        }
-                    }
-                    OutputType::Stdout => {
-                        if let Some(fmt) = &output.format
-                            && !matches!(fmt, Format::Json | Format::Text | Format::Console)
-                        {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' output '{label}': stdout output only supports format json, text, or console"
-                            )));
-                        }
-                    }
-                    OutputType::Null => {}
-                    OutputType::Tcp | OutputType::Udp => {
-                        if output.endpoint.is_none() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' output '{label}': {} output requires 'endpoint'",
-                                output.output_type,
-                            )));
-                        }
-                        if let Some(ep) = &output.endpoint {
-                            if let Err(msg) = validate_host_port(ep) {
-                                return Err(ConfigError::Validation(format!(
-                                    "pipeline '{name}' output '{label}': {msg}",
-                                )));
-                            }
-                        }
-                    }
-                    OutputType::Parquet => {
-                        // Parquet output not yet implemented
-                    }
-                    OutputType::Http => {
-                        // Defensive: Http is rejected above, but guard here so
-                        // any future refactor that reorders validation never
-                        // reaches sink construction via a silent fall-through.
-                        return Err(ConfigError::Validation(format!(
-                            "pipeline '{name}' output '{label}': http output type is not yet implemented",
-                        )));
-                    }
-                }
-
-                // Reject fields that don't apply to this output type.
-                if output.output_type != OutputType::Elasticsearch && output.index.is_some() {
-                    return Err(ConfigError::Validation(format!(
-                        "pipeline '{name}' output '{label}': 'index' is only supported for elasticsearch outputs"
-                    )));
-                }
-                if output.output_type == OutputType::Loki && output.compression.is_some() {
-                    return Err(ConfigError::Validation(format!(
-                        "pipeline '{name}' output '{label}': 'compression' is not supported for loki outputs"
-                    )));
-                }
-                if output.output_type != OutputType::Otlp && output.protocol.is_some() {
-                    return Err(ConfigError::Validation(format!(
-                        "pipeline '{name}' output '{label}': 'protocol' is only supported for otlp outputs"
-                    )));
-                }
-                if output.output_type != OutputType::Loki {
-                    if output.tenant_id.is_some() {
-                        return Err(ConfigError::Validation(format!(
-                            "pipeline '{name}' output '{label}': 'tenant_id' is only supported for loki outputs"
-                        )));
-                    }
-                    if output.static_labels.is_some() {
-                        return Err(ConfigError::Validation(format!(
-                            "pipeline '{name}' output '{label}': 'static_labels' is only supported for loki outputs"
-                        )));
-                    }
-                    if output.label_columns.is_some() {
-                        return Err(ConfigError::Validation(format!(
-                            "pipeline '{name}' output '{label}': 'label_columns' is only supported for loki outputs"
-                        )));
-                    }
-                }
-                if !matches!(output.output_type, OutputType::File | OutputType::Parquet)
-                    && output.path.is_some()
-                {
-                    return Err(ConfigError::Validation(format!(
-                        "pipeline '{name}' output '{label}': 'path' is only supported for file/parquet outputs"
-                    )));
-                }
-                // auth is only valid for HTTP-based outputs
-                if !matches!(
-                    output.output_type,
-                    OutputType::Otlp
-                        | OutputType::Http
-                        | OutputType::Elasticsearch
-                        | OutputType::Loki
-                        | OutputType::ArrowIpc
-                ) && output.auth.is_some()
-                {
-                    return Err(ConfigError::Validation(format!(
-                        "pipeline '{name}' output '{label}': 'auth' is only supported for HTTP-based outputs"
-                    )));
-                }
-                // compression: only valid for outputs that support it
-                if matches!(
-                    output.output_type,
-                    OutputType::Stdout
-                        | OutputType::Null
-                        | OutputType::Tcp
-                        | OutputType::Udp
-                        | OutputType::File
-                ) && output.compression.is_some()
-                {
-                    return Err(ConfigError::Validation(format!(
-                        "pipeline '{name}' output '{label}': 'compression' is not supported for this output type"
-                    )));
-                }
-            }
-
-            // Validate enrichment entries (#550).
-            for (j, enrichment) in pipe.enrichment.iter().enumerate() {
-                match enrichment {
-                    EnrichmentConfig::GeoDatabase(geo_cfg) => {
-                        // Only check existence for absolute paths; relative paths
-                        // are resolved against base_path in Pipeline::from_config.
-                        let p = Path::new(&geo_cfg.path);
-                        if p.is_absolute() && !p.exists() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' enrichment #{j}: geo database file not found: {}",
-                                geo_cfg.path,
-                            )));
-                        }
-                    }
-                    EnrichmentConfig::Static(cfg) => {
-                        if cfg.labels.is_empty() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' enrichment #{j}: static enrichment requires at least one label"
-                            )));
-                        }
-                    }
-                    EnrichmentConfig::Csv(cfg) => {
-                        let p = Path::new(&cfg.path);
-                        if p.is_absolute() && !p.exists() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' enrichment #{j}: csv file not found: {}",
-                                cfg.path,
-                            )));
-                        }
-                    }
-                    EnrichmentConfig::Jsonl(cfg) => {
-                        let p = Path::new(&cfg.path);
-                        if p.is_absolute() && !p.exists() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' enrichment #{j}: jsonl file not found: {}",
-                                cfg.path,
-                            )));
-                        }
-                    }
-                    EnrichmentConfig::HostInfo(_) | EnrichmentConfig::K8sPath(_) => {}
-                }
-            }
-        }
-
-        Ok(())
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Validate that a bind address is a parseable `host:port` socket address.
-fn validate_bind_addr(addr: &str) -> Result<(), String> {
-    validate_host_port(addr)
-}
-
-fn validate_no_sensor_beta_for_input(
-    input: &InputConfig,
-    pipeline_name: &str,
-    input_label: &str,
-) -> Result<(), ConfigError> {
-    if input.sensor_beta.is_some() {
-        return Err(ConfigError::Validation(format!(
-            "pipeline '{pipeline_name}' input '{input_label}': 'sensor_beta' settings are only supported for *_sensor_beta inputs"
-        )));
-    }
-    Ok(())
-}
-
-fn sensor_beta_supported_families(input_type: &InputType) -> &'static [&'static str] {
-    match input_type {
-        InputType::LinuxSensorBeta => &["process", "file", "network", "dns", "authz"],
-        InputType::MacosSensorBeta => &["process", "file", "network", "dns", "module", "authz"],
-        InputType::WindowsSensorBeta => &[
-            "process", "file", "network", "dns", "module", "registry", "authz",
-        ],
-        _ => &[],
-    }
-}
-
-fn sensor_beta_supported_families_csv(input_type: &InputType) -> &'static str {
-    match input_type {
-        InputType::LinuxSensorBeta => "process,file,network,dns,authz",
-        InputType::MacosSensorBeta => "process,file,network,dns,module,authz",
-        InputType::WindowsSensorBeta => "process,file,network,dns,module,registry,authz",
-        _ => "",
-    }
-}
-
-fn is_sensor_beta_family_supported(input_type: &InputType, name: &str) -> bool {
-    sensor_beta_supported_families(input_type).contains(&name)
-}
-
-/// Validate that a string has a valid `host:port` format where port is a u16.
-///
-/// Accepts IP addresses (v4 and v6) as well as hostnames, consistent with the
-/// runtime `TcpListener::bind` behaviour.  Use this function anywhere an
-/// address is validated so that CLI and config validation remain in sync.
-pub fn validate_host_port(addr: &str) -> Result<(), String> {
-    if addr.starts_with("http://") || addr.starts_with("https://") {
-        return Err(format!("'{addr}' is a URL, expected host:port"));
-    }
-
-    let (host, port_str) = if addr.starts_with('[') {
-        // Use find (first ']') not rfind (last ']') so that inputs like
-        // "[::1]]:4317" are rejected rather than treating "[::1]]" as the host.
-        let close_bracket = addr
-            .find(']')
-            .ok_or_else(|| format!("'{addr}' has mismatched brackets"))?;
-        let inner = &addr[1..close_bracket];
-        if inner.is_empty() {
-            return Err(format!(
-                "'{addr}' has an empty IPv6 address inside brackets"
-            ));
-        }
-        inner
-            .parse::<std::net::Ipv6Addr>()
-            .map_err(|_| format!("'{addr}' contains a non-IPv6 value inside brackets"))?;
-        if !addr[close_bracket..].starts_with("]:") {
-            return Err(format!("'{addr}' is missing a port after IPv6 brackets"));
-        }
-        let port_str = &addr[close_bracket + 2..];
-        (&addr[..=close_bracket], port_str)
-    } else {
-        addr.rsplit_once(':')
-            .ok_or_else(|| format!("'{addr}' is missing a port (expected format host:port)"))?
-    };
-
-    if host.is_empty() {
-        return Err(format!("'{addr}' has an empty host"));
-    }
-
-    // Reject path-like hosts (e.g. "host/path:80") — these are likely
-    // malformed URLs rather than intentional host:port values. (#1461)
-    if host.contains('/') {
-        return Err(format!(
-            "'{addr}' host contains a '/' (expected host:port, not a URL path)"
-        ));
-    }
-
-    // Reject unmatched closing bracket outside of IPv6 brackets (e.g. "host]:80").
-    if !addr.starts_with('[') && host.contains(']') {
-        return Err(format!("'{addr}' has an unmatched ']' in the host"));
-    }
-
-    if !addr.starts_with('[') && host.contains(':') {
-        return Err(format!(
-            "'{addr}' has multiple colons without IPv6 brackets"
-        ));
-    }
-
-    port_str
-        .parse::<u16>()
-        .map_err(|_| format!("'{addr}' has an invalid port '{port_str}'"))?;
-    Ok(())
-}
-
-/// Validate that a log level string is a recognised tracing level.
-///
-/// Accepted values (case-insensitive): `trace`, `debug`, `info`, `warn`, `error`.
-fn validate_log_level(level: &str) -> Result<(), String> {
-    match level.to_ascii_lowercase().as_str() {
-        "trace" | "debug" | "info" | "warn" | "error" => Ok(()),
-        _ => Err(format!(
-            "'{level}' is not a recognised log level; expected one of: trace, debug, info, warn, error"
-        )),
-    }
-}
+mod compat;
+mod env;
+mod load;
+mod serde_helpers;
+mod types;
+mod validate;
 
 #[cfg(test)]
-mod validate_host_port_tests {
-    use super::*;
-
-    #[test]
-    fn validate_host_port_works() {
-        assert!(validate_host_port("127.0.0.1:4317").is_ok());
-        assert!(validate_host_port("localhost:4317").is_ok());
-        assert!(validate_host_port("my-host.internal:8080").is_ok());
-        assert!(validate_host_port("[::1]:4317").is_ok());
-        assert!(validate_host_port("[2001:db8::1]:80").is_ok());
-
-        assert!(
-            validate_host_port(":4317")
-                .unwrap_err()
-                .contains("empty host")
-        );
-        assert!(
-            validate_host_port("http://localhost:4317")
-                .unwrap_err()
-                .contains("URL")
-        );
-        assert!(
-            validate_host_port("https://localhost:4317")
-                .unwrap_err()
-                .contains("URL")
-        );
-        assert!(
-            validate_host_port("foo:bar:4317")
-                .unwrap_err()
-                .contains("multiple colons")
-        );
-        assert!(
-            validate_host_port("localhost")
-                .unwrap_err()
-                .contains("missing a port")
-        );
-        assert!(
-            validate_host_port("localhost:")
-                .unwrap_err()
-                .contains("invalid port")
-        );
-        assert!(
-            validate_host_port("localhost:999999")
-                .unwrap_err()
-                .contains("invalid port")
-        );
-        assert!(
-            validate_host_port("[::1]")
-                .unwrap_err()
-                .contains("missing a port")
-        );
-        assert!(
-            validate_host_port("[::1]:")
-                .unwrap_err()
-                .contains("invalid port")
-        );
-        // Empty IPv6 brackets — []:8080 has no host
-        assert!(validate_host_port("[]:8080").unwrap_err().contains("empty"));
-        // Double closing bracket — [::1]]:4317 is malformed
-        assert!(
-            validate_host_port("[::1]]:4317")
-                .unwrap_err()
-                .contains("missing a port")
-        );
-        // Path-like host rejected (#1461)
-        assert!(
-            validate_host_port("foo/bar:4317")
-                .unwrap_err()
-                .contains("/")
-        );
-        // Unmatched closing bracket rejected (#1461)
-        assert!(validate_host_port("foo]:4317").unwrap_err().contains("]"));
-    }
-
-    #[test]
-    fn validate_bind_addr_works() {
-        assert!(validate_bind_addr("127.0.0.1:4317").is_ok());
-        assert!(validate_bind_addr("localhost:4317").is_ok());
-        assert!(validate_bind_addr("[::1]:4317").is_ok());
-        assert!(validate_bind_addr("http://localhost:4317").is_err());
-    }
-}
-
-/// Validate that an endpoint URL has a recognised scheme and a non-empty host.
-///
-/// Accepts `http://` or `https://` followed by at least one character.
-fn validate_endpoint_url(endpoint: &str) -> Result<(), String> {
-    let rest = if let Some(r) = endpoint.strip_prefix("https://") {
-        r
-    } else if let Some(r) = endpoint.strip_prefix("http://") {
-        r
-    } else {
-        return Err(format!(
-            "endpoint '{endpoint}' has no recognised scheme; expected 'http://' or 'https://'"
-        ));
-    };
-    if rest.is_empty() {
-        return Err(format!(
-            "endpoint '{endpoint}' has no host after the scheme"
-        ));
-    }
-    Ok(())
-}
-
-/// Expand `${VAR}` references in `text` using the process environment.
-///
-/// Returns an error if a referenced variable is not set in the environment.
-/// This catches misspelled env var names at config-load time
-/// instead of producing cryptic runtime failures.
-fn expand_env_vars(text: &str) -> Result<String, ConfigError> {
-    let mut result = String::with_capacity(text.len());
-    let mut chars = text.chars().peekable();
-
-    while let Some(ch) = chars.next() {
-        if ch == '$' && chars.peek() == Some(&'{') {
-            chars.next(); // consume '{'
-            let mut var_name = String::new();
-            let mut found_close = false;
-            for c in chars.by_ref() {
-                if c == '}' {
-                    found_close = true;
-                    break;
-                }
-                var_name.push(c);
-            }
-            if !found_close {
-                result.push_str("${");
-                result.push_str(&var_name);
-                continue;
-            }
-            match std::env::var(&var_name) {
-                Ok(val) => result.push_str(&val),
-                Err(_) => {
-                    return Err(ConfigError::Validation(format!(
-                        "environment variable '{var_name}' is not set"
-                    )));
-                }
-            }
-        } else {
-            result.push(ch);
-        }
-    }
-
-    Ok(result)
-}
-
-/// Serde helper: accept either a single `T` or a `Vec<T>`.
-fn deserialize_one_or_many<'de, T, D>(deserializer: D) -> Result<Vec<T>, D::Error>
-where
-    T: Deserialize<'de>,
-    D: serde::Deserializer<'de>,
-{
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum OneOrMany<T> {
-        Many(Vec<T>),
-        One(T),
-    }
-
-    match OneOrMany::deserialize(deserializer)? {
-        OneOrMany::Many(v) => Ok(v),
-        OneOrMany::One(v) => Ok(vec![v]),
-    }
-}
+pub(crate) use env::expand_env_vars;
+pub use types::{
+    AuthConfig, Config, ConfigError, CsvEnrichmentConfig, EnrichmentConfig, Format,
+    GeneratorAttributeValueConfig, GeneratorComplexityConfig, GeneratorInputConfig,
+    GeneratorProfileConfig, GeneratorSequenceConfig, GeoDatabaseConfig, GeoDatabaseFormat,
+    HostInfoConfig, HttpInputConfig, HttpMethodConfig, InputConfig, InputType,
+    JsonlEnrichmentConfig, K8sPathConfig, OutputConfig, OutputType, PipelineConfig,
+    PlatformSensorBetaInputConfig, ServerConfig, StaticEnrichmentConfig, StorageConfig,
+    TlsInputConfig,
+};
+pub use validate::validate_host_port;
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -1628,6 +34,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn simple_config() {
@@ -1736,6 +143,33 @@ output:
         // SAFETY: this test is not run concurrently with other tests that
         // depend on the same environment variable.
         unsafe { std::env::remove_var("LOGFWD_TEST_ENDPOINT") };
+    }
+
+    #[test]
+    fn load_reads_config_from_file() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time must be after unix epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "logfwd-config-load-{}-{unique}.yaml",
+            std::process::id()
+        ));
+        let yaml = r"
+input:
+  type: file
+  path: /var/log/test.log
+output:
+  type: stdout
+";
+        fs::write(&path, yaml).expect("write config");
+
+        let cfg = Config::load(&path).expect("Config::load should parse file");
+        assert_eq!(cfg.pipelines.len(), 1);
+        let pipe = &cfg.pipelines["default"];
+        assert_eq!(pipe.inputs[0].input_type, InputType::File);
+        assert_eq!(pipe.outputs[0].output_type, OutputType::Stdout);
+        let _ = fs::remove_file(&path);
     }
 
     #[test]
@@ -1913,7 +347,7 @@ output:
     fn validation_unimplemented_output_type() {
         // Each placeholder type should be caught by Config::validate() before
         // pipeline construction, not silently accepted.
-        for otype in ["parquet"] {
+        for otype in ["parquet", "http"] {
             let yaml = format!(
                 "input:\n  type: file\n  path: /tmp/x.log\noutput:\n  type: {otype}\n  endpoint: http://x\n  path: /tmp/x\n"
             );
@@ -1987,7 +421,7 @@ output:
         }
 
         // Placeholder output types must be rejected at validation time.
-        for otype in ["http", "parquet"] {
+        for otype in ["parquet", "http"] {
             let yaml = format!(
                 "input:\n  type: file\n  path: /tmp/x.log\noutput:\n  type: {otype}\n  endpoint: http://x\n  path: /tmp/x\n"
             );
@@ -2024,7 +458,7 @@ output:
     }
 
     #[test]
-    fn http_output_rejected_at_validation_boundary() {
+    fn http_output_is_rejected() {
         let yaml = r"
 input:
   type: file
@@ -2033,11 +467,31 @@ output:
   type: http
   endpoint: http://localhost:9200
 ";
-        let err = Config::load_str(yaml).expect_err("http output should fail validation");
+        let err = Config::load_str(yaml).expect_err("http output should be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not yet implemented"),
+            "error should mention 'not yet implemented': {msg}"
+        );
+    }
+
+    #[test]
+    fn pipelines_form_rejects_top_level_transform() {
+        let yaml = r"
+transform: SELECT * FROM logs
+pipelines:
+  default:
+    inputs:
+      - type: file
+        path: /tmp/x.log
+    outputs:
+      - type: stdout
+";
+        let err = Config::load_str(yaml).expect_err("top-level transform must be rejected");
         assert!(
             err.to_string()
-                .contains("http output type is not yet implemented"),
-            "expected explicit unsupported message: {err}"
+                .contains("top-level `transform` cannot be used with `pipelines:`"),
+            "unexpected validation error: {err}"
         );
     }
 
@@ -2048,6 +502,19 @@ output:
         assert_eq!(
             cfg.pipelines["default"].outputs[0].output_type,
             OutputType::File
+        );
+    }
+
+    #[test]
+    fn file_output_empty_path_rejected() {
+        // Regression test for #1663: path: "" passed --validate but failed at startup.
+        let yaml =
+            "input:\n  type: file\n  path: /tmp/x.log\noutput:\n  type: file\n  path: \"\"\n";
+        let err = Config::load_str(yaml).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("path' must not be empty") || msg.contains("path must not be empty"),
+            "expected 'path must not be empty' in error, got: {msg}"
         );
     }
 
@@ -2118,6 +585,7 @@ output:
             ("udp", "listen: 0.0.0.0:514"),
             ("tcp", "listen: 0.0.0.0:514"),
             ("otlp", "listen: 0.0.0.0:4317"),
+            ("http", "listen: 0.0.0.0:8080"),
             ("generator", ""),
             ("linux_sensor_beta", ""),
             ("macos_sensor_beta", ""),
@@ -2181,7 +649,24 @@ output:
     }
 
     #[test]
-    fn sensor_beta_rejects_unknown_family() {
+    fn sensor_beta_rejects_empty_control_path() {
+        let yaml = r#"
+input:
+  type: linux_sensor_beta
+  sensor_beta:
+    control_path: "   "
+output:
+  type: stdout
+"#;
+        let err = Config::load_str(yaml).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("sensor_beta.control_path must not be empty")
+        );
+    }
+
+    #[test]
+    fn sensor_beta_rejects_unknown_enabled_family() {
         let yaml = r"
 input:
   type: linux_sensor_beta
@@ -2195,66 +680,6 @@ output:
             err.to_string()
                 .contains("unknown sensor_beta family 'made_up_family'")
         );
-    }
-
-    #[test]
-    fn sensor_beta_rejects_family_not_supported_by_target_os() {
-        let yaml = r"
-input:
-  type: linux_sensor_beta
-  sensor_beta:
-    enabled_families: [process, module]
-output:
-  type: stdout
-";
-        let err = Config::load_str(yaml).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("unknown sensor_beta family 'module'"));
-        assert!(msg.contains("supported: process,file,network,dns,authz"));
-    }
-
-    #[test]
-    fn sensor_beta_macos_accepts_module_family() {
-        let yaml = r"
-input:
-  type: macos_sensor_beta
-  sensor_beta:
-    enabled_families: [process, module]
-output:
-  type: stdout
-";
-        Config::load_str(yaml).expect("macOS sensor should accept module family");
-    }
-
-    #[test]
-    fn sensor_beta_windows_accepts_registry_family() {
-        let yaml = r"
-input:
-  type: windows_sensor_beta
-  sensor_beta:
-    enabled_families: [process, registry]
-output:
-  type: stdout
-";
-        Config::load_str(yaml).expect("windows sensor should accept registry family");
-    }
-
-    #[test]
-    fn sensor_beta_accepts_control_plane_fields() {
-        let yaml = r"
-input:
-  type: linux_sensor_beta
-  sensor_beta:
-    poll_interval_ms: 250
-    emit_heartbeat: true
-    control_path: ./control/sensor.json
-    control_reload_interval_ms: 500
-    enabled_families: [process, network, dns]
-    emit_signal_rows: false
-output:
-  type: stdout
-";
-        Config::load_str(yaml).expect("sensor_beta control fields should validate");
     }
 
     #[test]
@@ -2961,7 +1386,7 @@ pipelines:
     fn enrichment_csv_config_accepted() {
         // Use a path that exists to pass validation.
         let tmp = std::env::temp_dir().join("logfwd_test_enrichment.csv");
-        std::fs::write(&tmp, "host,owner\nweb1,alice\n").expect("create temp csv");
+        fs::write(&tmp, "host,owner\nweb1,alice\n").expect("create temp csv");
         let yaml = format!(
             "pipelines:\n  app:\n    inputs:\n      - type: file\n        path: /tmp/x.log\n    outputs:\n      - type: stdout\n    enrichment:\n      - type: csv\n        table_name: assets\n        path: {}\n",
             tmp.display()
@@ -2976,15 +1401,14 @@ pipelines:
             }
             other => panic!("expected Csv, got {other:?}"),
         }
-        let _ = std::fs::remove_file(&tmp);
+        let _ = fs::remove_file(&tmp);
     }
 
     #[test]
     fn enrichment_jsonl_config_accepted() {
         // Use a path that exists to pass validation.
         let tmp = std::env::temp_dir().join("logfwd_test_enrichment.jsonl");
-        std::fs::write(&tmp, "{\"ip\":\"1.2.3.4\",\"owner\":\"alice\"}\n")
-            .expect("create temp jsonl");
+        fs::write(&tmp, "{\"ip\":\"1.2.3.4\",\"owner\":\"alice\"}\n").expect("create temp jsonl");
         let yaml = format!(
             "pipelines:\n  app:\n    inputs:\n      - type: file\n        path: /tmp/x.log\n    outputs:\n      - type: stdout\n    enrichment:\n      - type: jsonl\n        table_name: ip_owners\n        path: {}\n",
             tmp.display()
@@ -2999,7 +1423,7 @@ pipelines:
             }
             other => panic!("expected Jsonl, got {other:?}"),
         }
-        let _ = std::fs::remove_file(&tmp);
+        let _ = fs::remove_file(&tmp);
     }
 
     #[test]
@@ -3179,6 +1603,98 @@ pipelines:
         assert!(
             err.to_string().contains("max_open_files"),
             "expected max_open_files rejection: {err}"
+        );
+    }
+
+    #[test]
+    fn tcp_rejects_tls_block() {
+        // TCP inputs do not have runtime TLS termination wired up; any tls:
+        // block must be rejected to avoid a false sense of security.
+        let yaml = r#"
+pipelines:
+  test:
+    inputs:
+      - type: tcp
+        listen: 0.0.0.0:514
+        tls:
+          cert_file: /tmp/server.pem
+          key_file: /tmp/server.key
+    outputs:
+      - type: null
+"#;
+        let err = Config::load_str(yaml).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("TLS is not yet supported for TCP inputs"),
+            "expected TCP TLS rejection: {err}"
+        );
+    }
+
+    #[test]
+    fn tcp_tls_requires_cert_and_key_together() {
+        // This test validates cert/key pairing logic; update expected message
+        // because TCP now rejects TLS entirely before reaching that check.
+        let yaml = r#"
+pipelines:
+  test:
+    inputs:
+      - type: tcp
+        listen: 0.0.0.0:514
+        tls:
+          cert_file: /tmp/server.pem
+    outputs:
+      - type: null
+"#;
+        let err = Config::load_str(yaml).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("TLS is not yet supported for TCP inputs"),
+            "expected TCP TLS rejection (cert/key pairing check superseded): {err}"
+        );
+    }
+
+    #[test]
+    fn tcp_mtls_requires_client_ca() {
+        // mTLS config is now rejected at the TCP-not-supported boundary.
+        let yaml = r#"
+pipelines:
+  test:
+    inputs:
+      - type: tcp
+        listen: 0.0.0.0:514
+        tls:
+          cert_file: /tmp/server.pem
+          key_file: /tmp/server.key
+          require_client_auth: true
+    outputs:
+      - type: null
+"#;
+        let err = Config::load_str(yaml).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("TLS is not yet supported for TCP inputs"),
+            "expected TCP TLS rejection (mTLS check superseded): {err}"
+        );
+    }
+
+    #[test]
+    fn udp_rejects_tls_block() {
+        let yaml = r#"
+pipelines:
+  test:
+    inputs:
+      - type: udp
+        listen: 0.0.0.0:514
+        tls:
+          cert_file: /tmp/server.pem
+          key_file: /tmp/server.key
+    outputs:
+      - type: null
+"#;
+        let err = Config::load_str(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("TLS is not supported for UDP"),
+            "expected UDP TLS rejection: {err}"
         );
     }
 
@@ -3524,6 +2040,151 @@ pipelines:
     }
 
     #[test]
+    fn generator_timestamp_config_accepted() {
+        let yaml = r#"
+pipelines:
+  test:
+    inputs:
+      - type: generator
+        generator:
+          timestamp:
+            start: "2023-06-01T12:00:00Z"
+            step_ms: 5000
+    outputs:
+      - type: null
+"#;
+        let cfg = Config::load_str(yaml).expect("timestamp config should be valid");
+        let ts = cfg.pipelines["test"].inputs[0]
+            .generator
+            .as_ref()
+            .unwrap()
+            .timestamp
+            .as_ref()
+            .expect("timestamp config");
+        assert_eq!(ts.start.as_deref(), Some("2023-06-01T12:00:00Z"));
+        assert_eq!(ts.step_ms, Some(5000));
+    }
+
+    #[test]
+    fn generator_timestamp_now_accepted() {
+        let yaml = r#"
+pipelines:
+  test:
+    inputs:
+      - type: generator
+        generator:
+          timestamp:
+            start: "now"
+            step_ms: -100
+    outputs:
+      - type: null
+"#;
+        Config::load_str(yaml).expect("timestamp start=now should be valid");
+    }
+
+    #[test]
+    fn generator_timestamp_rejects_zero_step() {
+        let yaml = r#"
+pipelines:
+  test:
+    inputs:
+      - type: generator
+        generator:
+          timestamp:
+            step_ms: 0
+    outputs:
+      - type: null
+"#;
+        let err = Config::load_str(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("step_ms must not be zero"),
+            "expected zero step rejection: {err}"
+        );
+    }
+
+    #[test]
+    fn generator_timestamp_rejects_invalid_start() {
+        let yaml = r#"
+pipelines:
+  test:
+    inputs:
+      - type: generator
+        generator:
+          timestamp:
+            start: "not-a-date"
+    outputs:
+      - type: null
+"#;
+        let err = Config::load_str(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("YYYY-MM-DDTHH:MM:SSZ"),
+            "expected format rejection: {err}"
+        );
+    }
+
+    #[test]
+    fn generator_timestamp_rejects_record_profile() {
+        let yaml = r#"
+pipelines:
+  test:
+    inputs:
+      - type: generator
+        generator:
+          profile: record
+          timestamp:
+            start: "now"
+    outputs:
+      - type: null
+"#;
+        let err = Config::load_str(yaml).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("only supported for the logs profile"),
+            "expected logs-only rejection: {err}"
+        );
+    }
+
+    #[test]
+    fn generator_timestamp_rejects_invalid_calendar_date() {
+        let yaml = r#"
+pipelines:
+  test:
+    inputs:
+      - type: generator
+        generator:
+          timestamp:
+            start: "2024-02-31T00:00:00Z"
+    outputs:
+      - type: null
+"#;
+        let err = Config::load_str(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("day 31 out of range"),
+            "expected invalid date rejection: {err}"
+        );
+    }
+
+    #[test]
+    fn generator_timestamp_rejects_month_13() {
+        let yaml = r#"
+pipelines:
+  test:
+    inputs:
+      - type: generator
+        generator:
+          timestamp:
+            start: "2024-13-01T00:00:00Z"
+    outputs:
+      - type: null
+"#;
+        let err = Config::load_str(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("month 13 out of range"),
+            "expected invalid month rejection: {err}"
+        );
+    }
+
+    #[test]
     fn arrow_ipc_input_rejected() {
         let yaml = r#"
 pipelines:
@@ -3778,6 +2439,95 @@ pipelines:
         assert!(
             err.to_string().contains("only supported for loki"),
             "expected loki-only message: {err}"
+        );
+    }
+
+    // Regression tests for issue #1667: empty paths for geo_database/csv/jsonl enrichment
+    // must be rejected at --validate time, not silently passed through to runtime.
+
+    #[test]
+    fn geo_database_empty_path_rejected() {
+        let yaml = r#"
+pipelines:
+  test:
+    inputs:
+      - type: file
+        path: /tmp/test.log
+    outputs:
+      - type: stdout
+    enrichment:
+      - type: geo_database
+        format: mmdb
+        path: ""
+"#;
+        let err = Config::load_str(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("path") && err.to_string().contains("empty"),
+            "expected empty-path rejection for geo_database: {err}"
+        );
+    }
+
+    #[test]
+    fn csv_enrichment_empty_path_rejected() {
+        let yaml = r#"
+pipelines:
+  test:
+    inputs:
+      - type: file
+        path: /tmp/test.log
+    outputs:
+      - type: stdout
+    enrichment:
+      - type: csv
+        table_name: assets
+        path: ""
+"#;
+        let err = Config::load_str(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("path") && err.to_string().contains("empty"),
+            "expected empty-path rejection for csv enrichment: {err}"
+        );
+    }
+
+    #[test]
+    fn jsonl_enrichment_empty_path_rejected() {
+        let yaml = r#"
+pipelines:
+  test:
+    inputs:
+      - type: file
+        path: /tmp/test.log
+    outputs:
+      - type: stdout
+    enrichment:
+      - type: jsonl
+        table_name: owners
+        path: "   "
+"#;
+        let err = Config::load_str(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("path") && err.to_string().contains("empty"),
+            "expected empty-path rejection for jsonl enrichment: {err}"
+        );
+    }
+
+    #[test]
+    fn geo_database_whitespace_path_rejected() {
+        let yaml = "pipelines:\n  test:\n    inputs:\n      - type: file\n        path: /tmp/test.log\n    outputs:\n      - type: stdout\n    enrichment:\n      - type: geo_database\n        format: mmdb\n        path: \"   \"\n";
+        let err = Config::load_str(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("path") && err.to_string().contains("empty"),
+            "whitespace-only path must be rejected for geo_database: {err}"
+        );
+    }
+
+    #[test]
+    fn csv_enrichment_whitespace_path_rejected() {
+        let yaml = "pipelines:\n  test:\n    inputs:\n      - type: file\n        path: /tmp/test.log\n    outputs:\n      - type: stdout\n    enrichment:\n      - type: csv\n        table_name: assets\n        path: \"   \"\n";
+        let err = Config::load_str(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("path") && err.to_string().contains("empty"),
+            "whitespace-only path must be rejected for csv enrichment: {err}"
         );
     }
 }

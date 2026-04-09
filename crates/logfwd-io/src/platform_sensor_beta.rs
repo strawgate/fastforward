@@ -239,6 +239,7 @@ struct ControlFileConfig {
 
 impl PlatformSensorState<InitState> {
     fn start(self) -> Result<InitStartOk, InitStartErr> {
+        let now = Instant::now();
         let mut rows = vec![self.common.control_row(
             &self.state.control,
             "startup",
@@ -256,11 +257,14 @@ impl PlatformSensorState<InitState> {
             Ok(event) => event,
             Err(err) => return Err(Box::new((self, err))),
         };
+        let last_control_check = now
+            .checked_sub(self.common.cfg.control_reload_interval)
+            .unwrap_or(now);
         let running = PlatformSensorState {
             common: self.common,
             state: RunningState {
-                last_emit: Instant::now(),
-                last_control_check: Instant::now(),
+                last_emit: now,
+                last_control_check,
                 control: self.state.control,
             },
         };
@@ -276,21 +280,28 @@ impl PlatformSensorState<RunningState> {
             rows.extend(reload_rows);
         }
 
-        if self.state.control.emit_heartbeat
-            && self.state.last_emit.elapsed() >= self.common.cfg.poll_interval
-        {
-            rows.push(self.common.control_row(
-                &self.state.control,
-                "heartbeat",
-                "beta sensor heartbeat",
-                "ok",
-            ));
-            rows.extend(self.common.signal_sample_rows(
-                &self.state.control,
-                "heartbeat_sample",
-                "periodic signal snapshot",
-            ));
-            self.state.last_emit = Instant::now();
+        if self.state.last_emit.elapsed() >= self.common.cfg.poll_interval {
+            let mut emitted = false;
+            if self.state.control.emit_heartbeat {
+                rows.push(self.common.control_row(
+                    &self.state.control,
+                    "heartbeat",
+                    "beta sensor heartbeat",
+                    "ok",
+                ));
+                emitted = true;
+            }
+            if self.state.control.emit_signal_rows {
+                rows.extend(self.common.signal_sample_rows(
+                    &self.state.control,
+                    "heartbeat_sample",
+                    "periodic signal snapshot",
+                ));
+                emitted = true;
+            }
+            if emitted {
+                self.state.last_emit = Instant::now();
+            }
         }
 
         rows
@@ -571,19 +582,13 @@ impl PlatformSensorBetaInput {
             ));
         }
 
-        let mut control = ControlState {
+        let control = ControlState {
             generation: 1,
             enabled_families: parse_enabled_families(cfg.enabled_families.as_deref(), target)?,
             source: ControlSource::StaticConfig,
             emit_heartbeat: cfg.emit_heartbeat,
             emit_signal_rows: cfg.emit_signal_rows,
         };
-
-        if let Some(path) = cfg.control_path.as_ref()
-            && let Some(file_cfg) = read_control_file(path)?
-        {
-            control = apply_control_file(control, file_cfg, target)?;
-        }
 
         Ok(Self {
             name: name.clone(),
@@ -700,27 +705,6 @@ fn read_control_file(path: &Path) -> io::Result<Option<ControlFileConfig>> {
     }
 }
 
-fn apply_control_file(
-    mut state: ControlState,
-    file_cfg: ControlFileConfig,
-    target: PlatformSensorTarget,
-) -> io::Result<ControlState> {
-    if let Some(enabled) = file_cfg.enabled_families {
-        state.enabled_families = parse_enabled_families(Some(&enabled), target)?;
-    }
-    if let Some(v) = file_cfg.emit_heartbeat {
-        state.emit_heartbeat = v;
-    }
-    if let Some(v) = file_cfg.emit_signal_rows {
-        state.emit_signal_rows = v;
-    }
-    if let Some(generation) = file_cfg.generation {
-        state.generation = generation;
-    }
-    state.source = ControlSource::ControlFile;
-    Ok(state)
-}
-
 fn enabled_families_csv(control: &ControlState) -> String {
     control
         .enabled_families
@@ -792,6 +776,7 @@ fn current_host_platform() -> HostPlatform {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::atomic_write::atomic_write_file;
     use arrow::array::Array;
     use std::sync::Arc;
 
@@ -858,6 +843,16 @@ mod tests {
             .downcast_ref::<UInt64Array>()
             .expect("u64 array");
         (0..arr.len()).map(|i| arr.value(i)).collect()
+    }
+
+    fn new_control_file_path() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("sensor-control.json");
+        (dir, path)
+    }
+
+    fn write_control_file(path: &Path, json: &str) {
+        atomic_write_file(path, json.as_bytes()).expect("write control file");
     }
 
     #[test]
@@ -928,6 +923,39 @@ mod tests {
     }
 
     #[test]
+    fn signal_rows_emit_when_heartbeat_disabled() {
+        let mut input = PlatformSensorBetaInput::new(
+            "beta",
+            host_target(),
+            PlatformSensorBetaConfig {
+                emit_heartbeat: false,
+                emit_signal_rows: true,
+                poll_interval: Duration::from_millis(1),
+                ..PlatformSensorBetaConfig::default()
+            },
+        )
+        .expect("host target should be valid");
+
+        let _ = input.poll().expect("startup poll");
+        std::thread::sleep(Duration::from_millis(2));
+
+        let events = input.poll().expect("second poll");
+        assert_eq!(events.len(), 1, "second poll should emit sample rows");
+        let batch = first_batch(&events);
+        let kinds = string_col(batch, "event_kind");
+        assert!(
+            kinds
+                .iter()
+                .any(|v| v.as_deref() == Some("heartbeat_sample")),
+            "periodic sample rows should be emitted even when heartbeats are disabled"
+        );
+        assert!(
+            !kinds.iter().any(|v| v.as_deref() == Some("heartbeat")),
+            "heartbeat rows should remain disabled"
+        );
+    }
+
+    #[test]
     fn enabled_families_filter_signal_samples() {
         let mut input = PlatformSensorBetaInput::new(
             "beta",
@@ -986,8 +1014,7 @@ mod tests {
 
     #[test]
     fn control_file_reload_updates_generation_and_families() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let control_path = dir.path().join("sensor-control.json");
+        let (_dir, control_path) = new_control_file_path();
 
         let mut input = PlatformSensorBetaInput::new(
             "beta",
@@ -1006,11 +1033,10 @@ mod tests {
         // startup
         assert_eq!(input.poll().expect("startup poll").len(), 1);
 
-        std::fs::write(
+        write_control_file(
             &control_path,
             r#"{"generation":42,"enabled_families":["dns"],"emit_signal_rows":true}"#,
-        )
-        .expect("write control file");
+        );
         std::thread::sleep(Duration::from_millis(2));
 
         let events = input.poll().expect("reload poll succeeds");
@@ -1045,8 +1071,7 @@ mod tests {
 
     #[test]
     fn control_reload_same_generation_and_values_is_noop() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let control_path = dir.path().join("sensor-control.json");
+        let (_dir, control_path) = new_control_file_path();
 
         let mut input = PlatformSensorBetaInput::new(
             "beta",
@@ -1065,17 +1090,49 @@ mod tests {
         // startup
         assert_eq!(input.poll().expect("startup poll").len(), 1);
 
-        std::fs::write(
+        write_control_file(
             &control_path,
             r#"{"generation":1,"enabled_families":["process"],"emit_heartbeat":false,"emit_signal_rows":true}"#,
-        )
-        .expect("write control file");
+        );
         std::thread::sleep(Duration::from_millis(2));
 
         let events = input.poll().expect("reload poll succeeds");
         assert!(
             events.is_empty(),
             "unchanged control file should not emit reload-applied rows"
+        );
+    }
+
+    #[test]
+    fn malformed_control_file_does_not_fail_startup() {
+        let (_dir, control_path) = new_control_file_path();
+        write_control_file(&control_path, r#"{"generation":"invalid"}"#);
+
+        let mut input = PlatformSensorBetaInput::new(
+            "beta",
+            host_target(),
+            PlatformSensorBetaConfig {
+                control_path: Some(control_path),
+                control_reload_interval: Duration::from_millis(1),
+                emit_heartbeat: false,
+                emit_signal_rows: false,
+                ..PlatformSensorBetaConfig::default()
+            },
+        )
+        .expect("startup should not fail on malformed optional control file");
+
+        assert_eq!(input.poll().expect("startup poll").len(), 1);
+        std::thread::sleep(Duration::from_millis(2));
+
+        let events = input.poll().expect("reload poll should succeed");
+        assert_eq!(events.len(), 1);
+        let batch = first_batch(&events);
+        let kinds = string_col(batch, "event_kind");
+        assert!(
+            kinds
+                .iter()
+                .any(|v| v.as_deref() == Some("control_reload_failed")),
+            "malformed control file should surface through reload failure rows"
         );
     }
 

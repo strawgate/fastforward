@@ -139,9 +139,25 @@ just kani-boundary
 ```
 
 CI runs this check in the dedicated `Verification guardrail` job, and the
-required `CI conclusion` status depends on that guardrail passing. This keeps
-required seam drift visible as its own blocking check instead of burying it
-inside the broader lint job.
+required `CI conclusion` status depends on that guardrail passing. CI also runs
+`cargo kani` for the required production crates (`logfwd-core`, `logfwd-arrow`,
+`logfwd-io`, `logfwd-output`) under the following conditions (from the `kani`
+job in `.github/workflows/ci.yml`):
+
+- **any push** to the repository, OR
+- a pull request carrying the **`ci:full` label**, OR
+- a **non-draft pull request** where the path-filter outputs
+  `kani_required == 'true'` — i.e. at least one changed file matches one of:
+  - `crates/logfwd-core/**`
+  - `crates/logfwd-arrow/**`
+  - `crates/logfwd-io/**`
+  - `crates/logfwd-output/**`
+  - `dev-docs/verification/kani-boundary-contract.toml`
+  - `scripts/verify_kani_boundary_contract.py`
+  - `.github/workflows/ci.yml`
+
+A matching path change in a **draft** PR does not trigger the job; the PR must
+be marked ready for review first.
 
 ### Proof quality requirements
 
@@ -260,15 +276,18 @@ logfwd-core is the proven kernel. All rules are CI-enforced.
 | `pipeline/batch.rs` | BatchTicket typestate (ack/nack/fail/reject) | Kani exhaustive (5 proofs) + compile-time |
 | `logfwd-types/diagnostics/health.rs` | `ComponentHealth` lattice (`combine`, readiness, storage repr) | Kani exhaustive (4 proofs) + unit tests |
 | `logfwd-output/lib.rs` | Conflict struct detection, ColVariant priority ordering | Kani (8 proofs: ColVariant field preservation, variant_dt, is_conflict_struct, json/str priority contracts) |
-| `logfwd-output/sink.rs` | SendResult outcome variants for the async Sink trait | Kani (4 proofs: Ok/RetryAfter/Rejected variant invariants, mutual exclusion) |
+| `logfwd-output/sink.rs` | Fanout helper correctness: `merge_child_send_result` pending-signal tracking and `finalize_fanout_outcome` outcome precedence | Kani (2 proofs: `verify_merge_child_send_result_tracks_pending_signals`, `verify_finalize_fanout_outcome_precedence`) |
 | `logfwd-output/sink/health.rs` | Output health reducer + fanout roll-up semantics | Kani (7 proofs: retrying terminal preservation, shutdown completion, startup recovery, delivery recovery, shutdown request semantics, fanout commutativity, fatal-failure drain preservation) + unit tests + proptest sequence/aggregation checks |
 | `logfwd-io/diagnostics/policy.rs` | Control-plane readiness/status policy mapping (`health_reason`, `readiness_impact`, readiness snapshot consistency) | Kani exhaustive (4 proofs) + unit tests + proptest mapping checks |
-| `logfwd-io/otlp_receiver.rs` | OTLP proto→JSON transcoding helpers inside a mixed runtime receiver shell | Kani recommended (1 proof: hex encoding) + unit tests; future Kani targets include protojson numeric parsing, integer/float writers, and JSON escaping helpers |
+| `logfwd-io/otlp_receiver/convert.rs` | OTLP proto→JSON/Arrow conversion helpers extracted from the runtime shell | Kani recommended (1 proof: hex encoding) + unit tests + proptest oracle checks (writer helpers and request→NDJSON fast-vs-simple equivalence) + ignored release microbench guardrails |
+| `logfwd-output/elasticsearch.rs` | Elasticsearch bulk NDJSON serialization + timestamp suffix writer | Unit tests + proptest oracle checks (serialize_batch and timestamp suffix fast-vs-simple equivalence) + ignored release microbench guardrails |
+| `logfwd-output/otlp_sink.rs` | OTLP sink row encoder and generated-fast encoder parity | Unit tests + proptest oracle check (generated-fast vs handwritten encoder equivalence on random UTF-8 rows) |
 | `logfwd-io/polling_input_health.rs` | Polling-input source health reducer for tail/TCP/UDP (`healthy`, backpressure, error-backoff) | Kani exhaustive (3 proofs) + unit tests + proptest sequence checks |
 | `logfwd-io/receiver_health.rs` | Standalone receiver health reducer (`noop`, backpressure, fatal, shutdown) | Kani exhaustive (6 proofs) + unit tests + proptest sequence checks |
 | `logfwd-io/format.rs` | CRI metadata injection, Auto-mode fallthrough to passthrough | Kani (4 proofs: inject_cri_metadata output structure, JSON vs plain-text path dispatch) |
-| `logfwd-io/tail.rs` | File tailer EOF emission state machine (eof_emitted flag) | Kani (4 proofs: at-most-once emission per streak, data-reset invariant, two-poll sequence, reset-cycle) |
-| `logfwd/pipeline/checkpoint_policy.rs` | Typed delivery outcome -> checkpoint disposition mapping (`Ack`, `Reject`, `Hold`) | Kani exhaustive (3 proofs) + unit tests |
+| `logfwd-io/tail/verification.rs` | File tailer EOF emission state machine (`eof_emitted` + idle-poll threshold + idle-time gate) | Kani (4 proofs: at-most-once thresholded emission with idle-time gate, data-reset invariant, two-no-data threshold sequence, reset-cycle) |
+| `logfwd-io/segment.rs` | Checkpoint segment envelope read/write/recovery (`LCHK` header/footer, checksum, replay plan) | Unit tests for panic/OOM/silent-mask hardening (unsupported-version, permission-denied I/O surfacing, write/read size-bound parity, recovery error semantics) |
+| `logfwd/pipeline/checkpoint_policy.rs` | Typed delivery outcome -> checkpoint disposition mapping (`Ack`, `Reject`, `Hold`) | Kani exhaustive (3 proofs) + unit tests + proptest sequence invariants (monotonicity + no-advance-on-reject/hold) |
 | `logfwd/worker_pool/health.rs` | Pool idle-phase insertion + worker-slot aggregation policy | Kani exhaustive (3 proofs) + unit tests + proptest aggregation checks |
 | `logfwd/worker_pool.rs` | MRU dispatch decision + typed delivery outcome helpers | Kani (8 dispatch/outcome proofs) + unit tests for worker-slot aggregation, drain-phase stickiness, and create-failure behavior |
 | `logfwd-arrow/storage_builder.rs` | StructArray conflict column assembly | Kani (2 proofs: duplicate name guard, row count invariant) + unit tests |

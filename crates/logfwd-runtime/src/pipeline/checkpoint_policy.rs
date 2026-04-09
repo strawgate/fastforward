@@ -43,6 +43,21 @@ pub(super) const fn default_ticket_disposition(outcome: &DeliveryOutcome) -> Tic
 mod tests {
     use super::{TicketDisposition, default_ticket_disposition};
     use crate::worker_pool::DeliveryOutcome;
+    use proptest::prelude::*;
+
+    #[derive(Clone, Copy, Debug)]
+    enum Event {
+        Ack,
+        Reject,
+        Hold,
+    }
+
+    fn apply_event(checkpoint: u64, event: Event) -> u64 {
+        match event {
+            Event::Ack | Event::Reject => checkpoint.saturating_add(1),
+            Event::Hold => checkpoint,
+        }
+    }
 
     #[test]
     fn delivered_acks_tickets() {
@@ -77,6 +92,42 @@ mod tests {
                 default_ticket_disposition(&outcome),
                 TicketDisposition::Hold
             );
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn checkpoint_policy_advances_on_ack_or_reject_and_holds_on_hold(events in proptest::collection::vec(0u8..=2, 0..256)) {
+            let mut checkpoint = 0u64;
+            let mut previous = checkpoint;
+
+            for raw in events {
+                let event = match raw {
+                    0 => Event::Ack,
+                    1 => Event::Reject,
+                    _ => Event::Hold,
+                };
+                checkpoint = apply_event(checkpoint, event);
+
+                prop_assert!(checkpoint >= previous, "checkpoint must be monotonic");
+
+                if matches!(event, Event::Hold) {
+                    prop_assert_eq!(
+                        checkpoint,
+                        previous,
+                        "checkpoint must not advance on hold"
+                    );
+                }
+
+                if matches!(event, Event::Ack | Event::Reject) {
+                    prop_assert!(
+                        checkpoint > previous || previous == u64::MAX,
+                        "checkpoint must advance on ack or reject (unless saturated)"
+                    );
+                }
+
+                previous = checkpoint;
+            }
         }
     }
 }

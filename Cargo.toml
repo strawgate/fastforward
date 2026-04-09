@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/logfwd-config",
+    "crates/logfwd-runtime",
     "crates/logfwd-types",
     "crates/logfwd-core",
     "crates/logfwd-arrow",
@@ -32,17 +33,19 @@ default-members = [
 
 [workspace.package]
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.89"
 
 [workspace.dependencies]
-arrow = { version = "55", default-features = false, features = ["ipc_compression"] }
+arrow = { version = "58", default-features = false, features = ["ipc_compression"] }
 backon = { version = "1", default-features = false, features = ["tokio-sleep"] }
 bytes = "1"
+chrono = { version = "0.4.44", default-features = false }
 clap = "4.5"
 clap_complete = "4.5"
 clap_complete_nushell = "4.6"
-arrow-json = "55"
-datafusion = { version = "48", default-features = false, features = [
+arrow-json = "58"
+datafusion = { version = "53", default-features = false, features = [
+    "sql",
     "string_expressions",
     "unicode_expressions",
     "regex_expressions",
@@ -63,6 +66,7 @@ turmoil = "0.7"
 walkdir = "2"
 smallvec = { version = "1", features = ["union"] }
 thiserror = { version = "2", default-features = false }
+url = "2"
 anyhow = "1"
 
 [workspace.lints.clippy]

@@ -5,7 +5,7 @@
 use arrow::array::Array;
 use super::{AttrArray, BatchColumns, BatchMetadata, encode_fixed32, encode_key_value_bool,
     encode_key_value_double, encode_key_value_int, encode_key_value_string, encode_tag,
-    encode_varint, str_value};
+    encode_varint, numeric_timestamp_ns, str_value};
 use logfwd_core::otlp::{self, Severity, bytes_field_size, encode_bytes_field, encode_fixed64,
     encode_varint_field, hex_decode, parse_severity, parse_timestamp_nanos};
 
@@ -16,7 +16,9 @@ pub(super) fn encode_row_as_log_record_fast_v1(
     metadata: &BatchMetadata,
     buf: &mut Vec<u8>,
 ) {
-    let timestamp_ns: u64 = if let Some((_, arr)) = columns.timestamp_col.as_ref() {
+    let timestamp_ns: u64 = if let Some((_, arr)) = columns.timestamp_num_col.as_ref() {
+        numeric_timestamp_ns(*arr, row)
+    } else if let Some((_, arr)) = columns.timestamp_col.as_ref() {
         if arr.is_null(row) {
             0
         } else {
@@ -118,34 +120,31 @@ pub(super) fn encode_row_as_log_record_fast_v1(
         }
     }
 
-    if let Some((_, arr)) = columns.flags_col {
-        if !arr.is_null(row) {
+    if let Some((_, arr)) = columns.flags_col
+        && !arr.is_null(row) {
             let raw = arr.value(row);
             if let Ok(flags) = u32::try_from(raw) {
                 encode_fixed32(buf, otlp::LOG_RECORD_FLAGS, flags);
             }
         }
-    }
 
-    if let Some((_, arr)) = columns.trace_id_col.as_ref() {
-        if !arr.is_null(row) {
+    if let Some((_, arr)) = columns.trace_id_col.as_ref()
+        && !arr.is_null(row) {
             let hex = arr.value(row);
             let mut decoded = [0u8; 16];
             if hex_decode(hex.as_bytes(), &mut decoded) {
                 encode_bytes_field(buf, otlp::LOG_RECORD_TRACE_ID, &decoded);
             }
         }
-    }
 
-    if let Some((_, arr)) = columns.span_id_col.as_ref() {
-        if !arr.is_null(row) {
+    if let Some((_, arr)) = columns.span_id_col.as_ref()
+        && !arr.is_null(row) {
             let hex = arr.value(row);
             let mut decoded = [0u8; 8];
             if hex_decode(hex.as_bytes(), &mut decoded) {
                 encode_bytes_field(buf, otlp::LOG_RECORD_SPAN_ID, &decoded);
             }
         }
-    }
 
     encode_fixed64(
         buf,

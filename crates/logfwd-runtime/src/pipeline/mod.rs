@@ -4,54 +4,52 @@
 //! accumulates bytes) and a CPU worker (scans to RecordBatch, runs SQL).
 //! See `input_pipeline` for the I/O/compute separation architecture.
 
+mod build;
+mod checkpoint_io;
 mod checkpoint_policy;
 mod health;
+mod input_build;
 pub(crate) mod input_pipeline;
+mod input_poll;
+mod submit;
 
+use self::checkpoint_io::flush_checkpoint_with_retry;
 use self::checkpoint_policy::{TicketDisposition, default_ticket_disposition};
+#[cfg(feature = "turmoil")]
+use self::input_poll::async_input_poll_loop;
 
 use std::collections::HashMap;
 use std::io;
-use std::path::PathBuf;
 use std::sync::Arc;
-
-use arrow::record_batch::RecordBatch;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[cfg(any(test, feature = "turmoil"))]
 use bytes::Bytes;
 use bytes::BytesMut;
 
-use opentelemetry::metrics::Meter;
+use arrow::record_batch::RecordBatch;
+use logfwd_arrow::Scanner;
 
 use crate::processor::Processor;
 use crate::transform::SqlTransform;
-use crate::worker_pool::{AckItem, OutputWorkerPool, WorkItem};
-use logfwd_arrow::scanner::Scanner;
-#[cfg(feature = "datafusion")]
-use logfwd_config::{EnrichmentConfig, GeoDatabaseFormat};
-use logfwd_config::{
-    Format, GeneratorAttributeValueConfig, GeneratorComplexityConfig, GeneratorProfileConfig,
-    InputConfig, InputType, PipelineConfig, PlatformSensorBetaInputConfig,
-};
-use logfwd_io::checkpoint::{
-    CheckpointStore, FileCheckpointStore, SourceCheckpoint, default_data_dir,
-};
+use crate::worker_pool::{AckItem, OutputWorkerPool};
+#[cfg(test)]
+use logfwd_io::checkpoint::FileCheckpointStore;
+use logfwd_io::checkpoint::{CheckpointStore, SourceCheckpoint};
 use logfwd_io::diagnostics::{ComponentHealth, ComponentStats, PipelineMetrics};
+#[cfg(test)]
 use logfwd_io::format::FormatDecoder;
-use logfwd_io::framed::FramedInput;
 #[cfg(any(test, feature = "turmoil"))]
 use logfwd_io::input::InputEvent;
-use logfwd_io::input::{FileInput, InputSource};
-use logfwd_io::tail::{ByteOffset, TailConfig};
-use logfwd_output::{
-    AsyncFanoutFactory, BatchMetadata, OnceAsyncFactory, SinkFactory, build_sink_factory,
-};
+use logfwd_io::input::InputSource;
+use logfwd_io::tail::ByteOffset;
+#[cfg(feature = "turmoil")]
+use logfwd_output::SinkFactory;
+#[cfg(test)]
+use logfwd_output::build_sink_factory;
+use logfwd_output::{BatchMetadata, OnceAsyncFactory};
 use logfwd_types::pipeline::{PipelineMachine, Running, SourceId};
 use tokio_util::sync::CancellationToken;
-
-#[cfg(feature = "turmoil")]
-use self::health::{HealthTransitionEvent, reduce_component_health};
 
 // ---------------------------------------------------------------------------
 // block_in_place shim for simulation
@@ -157,332 +155,7 @@ pub struct Pipeline {
 }
 
 impl Pipeline {
-    /// Construct a pipeline from parsed YAML config.
-    pub fn from_config(
-        name: &str,
-        config: &PipelineConfig,
-        meter: &Meter,
-        base_path: Option<&std::path::Path>,
-    ) -> Result<Self, String> {
-        if config.workers == Some(0) {
-            return Err("workers must be >= 1".to_string());
-        }
-        if config.batch_target_bytes == Some(0) {
-            return Err("batch_target_bytes must be > 0".to_string());
-        }
-
-        // Collect enrichment sources once — they are shared across all
-        // per-input transforms.
-        #[cfg(feature = "datafusion")]
-        let (enrichment_tables, geo_database) = {
-            let mut enrichment_tables: Vec<Arc<dyn crate::transform::enrichment::EnrichmentTable>> =
-                Vec::new();
-            let mut geo_database: Option<Arc<dyn crate::transform::enrichment::GeoDatabase>> = None;
-
-            for enrichment in &config.enrichment {
-                match enrichment {
-                    EnrichmentConfig::GeoDatabase(geo_cfg) => {
-                        let mut path = PathBuf::from(&geo_cfg.path);
-                        if path.is_relative()
-                            && let Some(base) = base_path
-                        {
-                            path = base.join(path);
-                        }
-
-                        let db: Arc<dyn crate::transform::enrichment::GeoDatabase> = match geo_cfg
-                            .format
-                        {
-                            GeoDatabaseFormat::Mmdb => {
-                                let mmdb =
-                                    crate::transform::udf::geo_lookup::MmdbDatabase::open(&path)
-                                        .map_err(|e| {
-                                            format!(
-                                                "failed to open geo database '{}': {e}",
-                                                path.display()
-                                            )
-                                        })?;
-                                Arc::new(mmdb)
-                            }
-                            _ => {
-                                return Err(format!(
-                                    "unsupported geo database format: {:?}",
-                                    geo_cfg.format
-                                ));
-                            }
-                        };
-                        if geo_cfg.refresh_interval.is_some() {
-                            tracing::warn!(
-                                "geo_database refresh_interval is not yet implemented, database will not auto-reload"
-                            );
-                        }
-                        geo_database = Some(db);
-                    }
-                    EnrichmentConfig::Static(cfg) => {
-                        let labels: Vec<(String, String)> = cfg
-                            .labels
-                            .iter()
-                            .map(|(k, v)| (k.clone(), v.clone()))
-                            .collect();
-                        let table = Arc::new(
-                            crate::transform::enrichment::StaticTable::new(
-                                &cfg.table_name,
-                                &labels,
-                            )
-                            .map_err(|e| format!("enrichment '{}': {e}", cfg.table_name))?,
-                        );
-                        enrichment_tables.push(table);
-                    }
-                    EnrichmentConfig::HostInfo(_) => {
-                        let table = Arc::new(crate::transform::enrichment::HostInfoTable::new());
-                        enrichment_tables.push(table);
-                    }
-                    EnrichmentConfig::K8sPath(cfg) => {
-                        let table = Arc::new(crate::transform::enrichment::K8sPathTable::new(
-                            &cfg.table_name,
-                        ));
-                        enrichment_tables.push(table);
-                    }
-                    EnrichmentConfig::Csv(cfg) => {
-                        let mut path = PathBuf::from(&cfg.path);
-                        if path.is_relative()
-                            && let Some(base) = base_path
-                        {
-                            path = base.join(path);
-                        }
-                        let table = Arc::new(crate::transform::enrichment::CsvFileTable::new(
-                            &cfg.table_name,
-                            &path,
-                        ));
-                        table
-                            .reload()
-                            .map_err(|e| format!("enrichment '{}': {e}", cfg.table_name))?;
-                        enrichment_tables.push(table);
-                    }
-                    EnrichmentConfig::Jsonl(cfg) => {
-                        let mut path = PathBuf::from(&cfg.path);
-                        if path.is_relative()
-                            && let Some(base) = base_path
-                        {
-                            path = base.join(path);
-                        }
-                        let table =
-                            Arc::new(crate::transform::enrichment::JsonLinesFileTable::new(
-                                &cfg.table_name,
-                                &path,
-                            ));
-                        table
-                            .reload()
-                            .map_err(|e| format!("enrichment '{}': {e}", cfg.table_name))?;
-                        enrichment_tables.push(table);
-                    }
-                }
-            }
-
-            (enrichment_tables, geo_database)
-        };
-
-        #[cfg(not(feature = "datafusion"))]
-        if !config.enrichment.is_empty() {
-            return Err(
-                "pipeline enrichment requires DataFusion. Build default/full logfwd \
-                 (or add `--features datafusion`)"
-                    .to_string(),
-            );
-        }
-
-        // The pipeline-level SQL is the fallback for inputs without their own.
-        let pipeline_sql = config.transform.as_deref().unwrap_or("SELECT * FROM logs");
-
-        // For PipelineMetrics, use the pipeline-level SQL as the label.
-        let mut metrics = PipelineMetrics::new(name, pipeline_sql, meter);
-
-        // Open checkpoint store scoped to this pipeline name.
-        // Only create the directory if LOGFWD_DATA_DIR is explicitly set
-        // (prevents tests from polluting the default data dir).
-        let checkpoint_dir = default_data_dir().join(name);
-        let checkpoint_store = if checkpoint_dir.exists()
-            || std::env::var_os("LOGFWD_DATA_DIR").is_some()
-        {
-            match FileCheckpointStore::open(&checkpoint_dir) {
-                Ok(s) => Some(Box::new(s) as Box<dyn CheckpointStore>),
-                Err(e) => {
-                    tracing::warn!(error = %e, "could not open checkpoint store — starting from beginning");
-                    None
-                }
-            }
-        } else {
-            None
-        };
-        let saved_checkpoints: Vec<SourceCheckpoint> = checkpoint_store
-            .as_ref()
-            .map(|s| s.load_all())
-            .unwrap_or_default();
-
-        // Build per-input InputTransform and InputState.
-        let mut inputs = Vec::new();
-        let mut input_transforms = Vec::new();
-
-        for (i, input_cfg) in config.inputs.iter().enumerate() {
-            let mut resolved_cfg = input_cfg.clone();
-            if let Some(path_str) = &input_cfg.path {
-                let mut path = PathBuf::from(path_str);
-                if path.is_relative()
-                    && let Some(base) = base_path
-                {
-                    path = base.join(path);
-                }
-                if let Ok(abs_path) = std::fs::canonicalize(&path) {
-                    resolved_cfg.path = Some(abs_path.to_string_lossy().into_owned());
-                } else {
-                    resolved_cfg.path = Some(path.to_string_lossy().into_owned());
-                }
-            }
-            if let Some(sensor_cfg) = resolved_cfg.sensor_beta.as_mut()
-                && let Some(control_path) = sensor_cfg.control_path.as_ref()
-            {
-                let mut path = PathBuf::from(control_path);
-                if path.is_relative()
-                    && let Some(base) = base_path
-                {
-                    path = base.join(path);
-                }
-                // Keep the configured control path (plus optional base join) instead of
-                // canonicalizing so symlink swaps remain observable at runtime.
-                sensor_cfg.control_path = Some(path.to_string_lossy().into_owned());
-            }
-
-            let input_name = input_cfg
-                .name
-                .clone()
-                .unwrap_or_else(|| format!("input_{i}"));
-            let input_type_str = format!("{:?}", input_cfg.input_type).to_lowercase();
-            let input_stats = metrics.add_input(&input_name, &input_type_str);
-
-            // Determine the SQL for this input: per-input > pipeline-level > passthrough.
-            let input_sql = input_cfg.sql.as_deref().unwrap_or(pipeline_sql);
-
-            let transform = SqlTransform::new(input_sql).map_err(|e| e.to_string())?;
-            #[cfg(feature = "datafusion")]
-            let mut transform = transform;
-
-            // Wire up shared enrichment sources to this transform.
-            #[cfg(feature = "datafusion")]
-            {
-                if let Some(ref db) = geo_database {
-                    transform.set_geo_database(Arc::clone(db));
-                }
-                for table in &enrichment_tables {
-                    transform
-                        .add_enrichment_table(Arc::clone(table))
-                        .map_err(|e| format!("input '{}': enrichment error: {e}", input_name))?;
-                }
-            }
-
-            let mut scan_config = transform.scan_config();
-            // Raw format sends non-JSON lines to the scanner. Without keep_raw,
-            // these produce empty rows. Force keep_raw so every line is captured.
-            if matches!(input_cfg.format, Some(Format::Raw)) {
-                scan_config.keep_raw = true;
-            }
-            let otlp_structured_ingress = otlp_uses_structured_ingress(&scan_config);
-            let scanner = Scanner::new(scan_config);
-
-            input_transforms.push(InputTransform {
-                scanner,
-                transform,
-                input_name: input_name.clone(),
-            });
-
-            inputs.push(build_input_state(
-                &input_name,
-                &resolved_cfg,
-                input_stats,
-                otlp_structured_ingress,
-            )?);
-        }
-
-        // Restore previously saved file offsets by fingerprint (SourceId).
-        for cp in &saved_checkpoints {
-            let source_id = SourceId(cp.source_id);
-            for input in &mut inputs {
-                input.source.set_offset_by_source(source_id, cp.offset);
-            }
-        }
-
-        // Build output sink factory → pool.
-        let factory: Arc<dyn SinkFactory> = if config.outputs.len() == 1 {
-            let output_cfg = &config.outputs[0];
-            let output_name = output_cfg
-                .name
-                .clone()
-                .unwrap_or_else(|| "output_0".to_string());
-            let output_type_str = format!("{:?}", output_cfg.output_type).to_lowercase();
-            let output_stats = metrics.add_output(&output_name, &output_type_str);
-            build_sink_factory(&output_name, output_cfg, base_path, output_stats)
-                .map_err(|e| e.to_string())?
-        } else {
-            let mut factories: Vec<Arc<dyn SinkFactory>> = Vec::new();
-            for (i, output_cfg) in config.outputs.iter().enumerate() {
-                let output_name = output_cfg
-                    .name
-                    .clone()
-                    .unwrap_or_else(|| format!("output_{i}"));
-                let output_type_str = format!("{:?}", output_cfg.output_type).to_lowercase();
-                let output_stats = metrics.add_output(&output_name, &output_type_str);
-                factories.push(
-                    build_sink_factory(&output_name, output_cfg, base_path, output_stats)
-                        .map_err(|e| e.to_string())?,
-                );
-            }
-            let fanout_name = name.to_string();
-            Arc::new(AsyncFanoutFactory::new(fanout_name, factories))
-        };
-
-        // Single-use factories (e.g. OnceAsyncFactory wrapping a pre-built
-        // sink) can only create one worker and that worker must never
-        // idle-expire — if it exits, create() returns an error and the
-        // output stops permanently.
-        let (max_workers, idle_timeout) = if factory.is_single_use() {
-            (1, Duration::MAX) // never idle-expire the sole worker
-        } else {
-            (config.workers.unwrap_or(4), Duration::from_secs(30))
-        };
-        let metrics = Arc::new(metrics);
-        let pool = OutputWorkerPool::new(factory, max_workers, idle_timeout, Arc::clone(&metrics));
-
-        // Convert resource_attrs HashMap to a sorted Vec for deterministic output.
-        let mut resource_attrs: Vec<(String, String)> = config
-            .resource_attrs
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        resource_attrs.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-
-        debug_assert_eq!(
-            inputs.len(),
-            input_transforms.len(),
-            "inputs and input_transforms must have the same length"
-        );
-
-        Ok(Pipeline {
-            name: name.to_string(),
-            inputs,
-            input_transforms,
-            processors: vec![],
-            pool,
-            metrics,
-            batch_target_bytes: config.batch_target_bytes.unwrap_or(4 * 1024 * 1024),
-            batch_timeout: Duration::from_millis(config.batch_timeout_ms.unwrap_or(100)),
-            poll_interval: Duration::from_millis(config.poll_interval_ms.unwrap_or(10)),
-            resource_attrs: Arc::new(resource_attrs),
-            machine: Some(PipelineMachine::new().start()),
-            checkpoint_store,
-            last_checkpoint_flush: tokio::time::Instant::now(),
-            checkpoint_flush_interval: Duration::from_secs(5),
-        })
-    }
-
-    /// Replace the output sink with an async [`Sink`].
+    /// Replace the output sink with an async sink implementation.
     ///
     /// Wraps the sink in a single-worker pool via [`OnceAsyncFactory`].
     pub fn with_sink(mut self, sink: Box<dyn logfwd_output::Sink>) -> Self {
@@ -923,156 +596,25 @@ impl Pipeline {
         Ok(())
     }
 
-    /// Submit a scanned and SQL-transformed batch to the processor chain and output pool.
-    ///
-    /// This is the single path for all inputs (both production CPU workers
-    /// and turmoil simulation tasks). The batch has already been scanned
-    /// and SQL-transformed by the sender.
-    ///
-    /// Ticket lifecycle:
-    /// 1. Create Queued tickets from checkpoints
-    /// 2. Transition to Sending (must ack or reject after this point)
-    /// 3. Run processor chain (reject on error)
-    /// 4. Concatenate outputs, submit to pool
-    async fn submit_batch(&mut self, msg: ChannelMsg) {
-        let ChannelMsg {
-            batch,
-            checkpoints,
-            queued_at,
-            scan_ns,
-            transform_ns,
-            ..
-        } = msg;
-        let batch_id = self.metrics.alloc_batch_id();
-        self.metrics.begin_active_batch(batch_id, now_nanos());
-
-        // Record queue wait time.
-        if let Some(qt) = queued_at {
-            let wait_ns = qt.elapsed().as_nanos() as u64;
-            self.metrics.record_queue_wait(wait_ns);
-        }
-
-        // Create Queued tickets, then transition to Sending.
-        // After begin_send, tickets MUST be acked or rejected.
-        let sending: Vec<_> = if let Some(ref mut machine) = self.machine {
-            checkpoints
-                .iter()
-                .map(|(&sid, &offset)| {
-                    let queued = machine.create_batch(sid, offset.0);
-                    machine.begin_send(queued)
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
-
-        let num_rows = batch.num_rows();
-
-        // Handle zero-row results (SQL WHERE filtered all rows).
-        // Ack tickets so the input doesn't re-read the same data.
-        if num_rows == 0 {
-            self.ack_all_tickets(sending, TicketDisposition::Ack);
-            self.metrics.record_batch(0, scan_ns, transform_ns, 0);
-            self.metrics.finish_active_batch(batch_id);
-            return;
-        }
-        // Run through processor chain.
-        let metadata = BatchMetadata {
-            resource_attrs: Arc::clone(&self.resource_attrs),
-            observed_time_ns: now_nanos(),
-        };
-        let results = if self.processors.is_empty() {
-            smallvec::smallvec![batch]
-        } else {
-            match crate::processor::run_chain(&mut self.processors, batch, &metadata) {
-                Ok(batches) => batches,
-                Err(crate::processor::ProcessorError::Transient(e)) => {
-                    tracing::warn!(error = %e, "transient processor error, rejecting batch");
-                    self.ack_all_tickets(sending, TicketDisposition::Reject);
-                    self.metrics.finish_active_batch(batch_id);
-                    return;
-                }
-                Err(crate::processor::ProcessorError::Permanent(e)) => {
-                    tracing::error!(error = %e, "permanent processor error, dropping batch");
-                    self.ack_all_tickets(sending, TicketDisposition::Ack); // ack but don't forward
-                    self.metrics.finish_active_batch(batch_id);
-                    return;
-                }
-                Err(crate::processor::ProcessorError::Fatal(e)) => {
-                    tracing::error!(error = %e, "fatal processor error");
-                    self.ack_all_tickets(sending, TicketDisposition::Reject);
-                    self.metrics.finish_active_batch(batch_id);
-                    return;
-                }
-            }
-        };
-
-        let total_rows: u64 = results.iter().map(|b| b.num_rows() as u64).sum();
-        self.metrics.transform_out.inc_lines(total_rows);
-
-        // Handle post-processor zero-row results.
-        if total_rows == 0 {
-            self.ack_all_tickets(sending, TicketDisposition::Ack);
-            self.metrics.record_batch(0, scan_ns, transform_ns, 0);
-            self.metrics.finish_active_batch(batch_id);
-            return;
-        }
-
-        // Concatenate multiple processor outputs into a single batch
-        // (matches flush_batch_from behavior — one ticket set per submission).
-        let result = if results.len() == 1 {
-            results.into_iter().next().expect("checked len == 1")
-        } else {
-            match arrow::compute::concat_batches(&results[0].schema(), results.iter()) {
-                Ok(batch) => batch,
-                Err(e) => {
-                    tracing::error!(
-                        error = %e,
-                        "processor chain returned incompatible schemas; rejecting batch"
-                    );
-                    self.ack_all_tickets(sending, TicketDisposition::Reject);
-                    self.metrics.finish_active_batch(batch_id);
-                    return;
-                }
-            }
-        };
-
-        let out_rows = result.num_rows() as u64;
-        let submitted_at = tokio::time::Instant::now();
-
-        let batch_span = tracing::info_span!(
-            "batch",
-            scan_ns = scan_ns,
-            transform_ns = transform_ns,
-            input_rows = out_rows,
-            queue_wait_ns = tracing::field::Empty,
-        );
-
-        self.pool
-            .submit(WorkItem {
-                num_rows: out_rows,
-                batch: result,
-                metadata,
-                tickets: sending,
-                submitted_at,
-                scan_ns,
-                transform_ns,
-                batch_id,
-                span: batch_span,
-            })
-            .await;
-        self.metrics
-            .inflight_batches
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    }
-
     /// Apply a pool `AckItem` at the worker/checkpoint seam.
     ///
     /// Called from the `select!` loop when a pool worker finishes a batch.
     fn apply_pool_ack(&mut self, ack: AckItem) {
-        self.metrics
+        if self
+            .metrics
             .inflight_batches
-            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            .fetch_update(
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+                |value| value.checked_sub(1),
+            )
+            .is_err()
+        {
+            tracing::warn!(
+                batch_id = ack.batch_id,
+                "pipeline: received ack with zero inflight_batches counter"
+            );
+        }
         self.metrics.finish_active_batch(ack.batch_id);
         if ack.outcome.is_delivered() {
             self.metrics
@@ -1108,23 +650,27 @@ impl Pipeline {
                 TicketDisposition::Ack => Some(ticket.ack()),
                 TicketDisposition::Reject => Some(ticket.reject()),
                 TicketDisposition::Hold => {
+                    // Convert Sending -> Queued to satisfy the typestate
+                    // contract without acknowledging the batch. We
+                    // intentionally do not re-dispatch yet; the machine keeps
+                    // this batch in-flight so checkpoints do not advance.
+                    let _ = ticket.fail();
                     held += 1;
                     None
                 }
             };
             if let Some(receipt) = receipt {
                 let advance = machine.apply_ack(receipt);
-                if advance.advanced {
-                    if let (Some(ref mut store), Some(offset)) =
+                if advance.advanced
+                    && let (Some(ref mut store), Some(offset)) =
                         (self.checkpoint_store.as_mut(), advance.checkpoint)
-                    {
-                        store.update(SourceCheckpoint {
-                            source_id: advance.source.0,
-                            path: None, // path is metadata, not required for restore
-                            offset,
-                        });
-                        any_advanced = true;
-                    }
+                {
+                    store.update(SourceCheckpoint {
+                        source_id: advance.source.0,
+                        path: None, // path is metadata, not required for restore
+                        offset,
+                    });
+                    any_advanced = true;
                 }
             }
         }
@@ -1138,596 +684,18 @@ impl Pipeline {
         // Advance the timer even on failure to prevent retry flooding.
         if any_advanced && self.last_checkpoint_flush.elapsed() >= self.checkpoint_flush_interval {
             self.last_checkpoint_flush = tokio::time::Instant::now();
-            if let Some(ref mut store) = self.checkpoint_store {
-                if let Err(e) = store.flush() {
-                    tracing::warn!(error = %e, "pipeline: checkpoint flush error");
-                }
-            }
-        }
-    }
-}
-
-/// Flush checkpoint store with bounded retry (3 attempts, 100ms between).
-///
-/// The final shutdown flush is the last chance to persist checkpoint progress.
-/// A single failure here loses all checkpoint advancement from the run.
-/// Retry with brief sleeps to handle transient I/O errors (disk busy, NFS glitch).
-///
-/// Uses `tokio::time::sleep` for the retry delay so the async task yields
-/// between attempts (Turmoil-compatible). Note: `store.flush()` itself is
-/// synchronous I/O; only the inter-retry sleep is non-blocking.
-async fn flush_checkpoint_with_retry(store: &mut dyn CheckpointStore) {
-    const MAX_ATTEMPTS: u32 = 3;
-    const RETRY_DELAY: Duration = Duration::from_millis(100);
-
-    for attempt in 0..MAX_ATTEMPTS {
-        match store.flush() {
-            Ok(()) => {
-                if attempt > 0 {
-                    tracing::info!(attempt, "pipeline: checkpoint flush succeeded after retry");
-                }
-                return;
-            }
-            Err(e) => {
-                if attempt + 1 < MAX_ATTEMPTS {
-                    tracing::warn!(
-                        attempt,
-                        error = %e,
-                        "pipeline: checkpoint flush failed, retrying"
-                    );
-                    tokio::time::sleep(RETRY_DELAY).await;
-                } else {
-                    tracing::error!(
-                        attempts = MAX_ATTEMPTS,
-                        error = %e,
-                        "pipeline: checkpoint flush failed after all retries — \
-                         checkpoint progress from this run may be lost"
-                    );
-                }
-            }
-        }
-    }
-}
-
-/// Async input loop for simulation testing.
-///
-/// Polls source, accumulates bytes, scans + SQL transforms, and sends
-/// `ChannelMsg` — same output type as production CPU workers. Uses
-/// `tokio::time::sleep` so Turmoil's simulated time advances deterministically.
-#[cfg(feature = "turmoil")]
-#[allow(clippy::too_many_arguments)]
-async fn async_input_poll_loop(
-    mut input: InputState,
-    mut transform: InputTransform,
-    tx: tokio::sync::mpsc::Sender<ChannelMsg>,
-    metrics: Arc<PipelineMetrics>,
-    shutdown: CancellationToken,
-    batch_target_bytes: usize,
-    batch_timeout: Duration,
-    poll_interval: Duration,
-    input_index: usize,
-) {
-    let mut buffered_since: Option<tokio::time::Instant> = None;
-    'poll_loop: loop {
-        if shutdown.is_cancelled() {
-            input.stats.set_health(reduce_component_health(
-                input.stats.health(),
-                HealthTransitionEvent::ShutdownRequested,
-            ));
-            break;
-        }
-
-        let events = match input.source.poll() {
-            Ok(e) => e,
-            Err(e) => {
-                input.stats.inc_errors();
-                input.stats.set_health(reduce_component_health(
-                    input.stats.health(),
-                    HealthTransitionEvent::PollFailed,
-                ));
-                tracing::warn!(input = input.source.name(), error = %e, "input.poll_error");
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                continue;
-            }
-        };
-
-        input.stats.set_health(reduce_component_health(
-            input.stats.health(),
-            HealthTransitionEvent::Observed(input.source.health()),
-        ));
-
-        if events.is_empty() {
-            tokio::time::sleep(poll_interval).await;
-        } else {
-            for event in events {
-                match event {
-                    InputEvent::Data { bytes, .. } => {
-                        input.buf.extend_from_slice(&bytes);
-                    }
-                    InputEvent::Batch { batch, .. } => {
-                        if !input.buf.is_empty() {
-                            if let Some(msg) = scan_and_transform_for_send(
-                                &mut input,
-                                &mut transform,
-                                &metrics,
-                                input_index,
-                            )
-                            .await
-                            {
-                                if tx.send(msg).await.is_err() {
-                                    break 'poll_loop;
-                                }
-                            }
-                            buffered_since = None;
-                        }
-
-                        if let Some(msg) = transform_direct_batch_for_send(
-                            &mut input,
-                            &mut transform,
-                            &metrics,
-                            input_index,
-                            batch,
-                        )
-                        .await
-                        {
-                            if tx.send(msg).await.is_err() {
-                                break 'poll_loop;
-                            }
-                        }
-                    }
-                    InputEvent::Rotated { .. } => {
-                        input.stats.inc_rotations();
-                    }
-                    InputEvent::Truncated { .. } => {
-                        input.stats.inc_rotations();
-                    }
-                    InputEvent::EndOfFile { .. } => {}
-                }
-            }
-            if buffered_since.is_none() && !input.buf.is_empty() {
-                buffered_since = Some(tokio::time::Instant::now());
-            }
-        }
-
-        let timeout_elapsed = buffered_since.is_some_and(|t| t.elapsed() >= batch_timeout);
-        let should_send =
-            input.buf.len() >= batch_target_bytes || (!input.buf.is_empty() && timeout_elapsed);
-        if should_send {
-            if let Some(msg) =
-                scan_and_transform_for_send(&mut input, &mut transform, &metrics, input_index).await
+            if let Some(ref mut store) = self.checkpoint_store
+                && let Err(e) = store.flush()
             {
-                if tx.send(msg).await.is_err() {
-                    break;
-                }
-            }
-            buffered_since = None;
-        }
-    }
-
-    // Drain remaining buffered data.
-    if !input.buf.is_empty() {
-        if let Some(msg) =
-            scan_and_transform_for_send(&mut input, &mut transform, &metrics, input_index).await
-        {
-            if let Err(e) = tx.send(msg).await {
-                tracing::warn!(
-                    input = input.source.name(),
-                    error = %e,
-                    "input.channel_closed_on_shutdown_drain"
-                );
+                tracing::warn!(error = %e, "pipeline: checkpoint flush error");
             }
         }
     }
-    input.stats.set_health(reduce_component_health(
-        input.stats.health(),
-        HealthTransitionEvent::ShutdownCompleted,
-    ));
-}
-
-/// Scan + SQL transform accumulated bytes into a `ChannelMsg`.
-///
-/// Used by the turmoil async input loop. On scan/transform error,
-/// returns a sentinel empty-batch message carrying the checkpoints
-/// so the pipeline can reject those offsets.
-#[cfg(feature = "turmoil")]
-async fn scan_and_transform_for_send(
-    input: &mut InputState,
-    transform: &mut InputTransform,
-    metrics: &PipelineMetrics,
-    input_index: usize,
-) -> Option<ChannelMsg> {
-    let data = input.buf.split().freeze();
-    let checkpoints: HashMap<SourceId, ByteOffset> =
-        input.source.checkpoint_data().into_iter().collect();
-    let queued_at = tokio::time::Instant::now();
-
-    let t0 = tokio::time::Instant::now();
-    let batch = match scan_maybe_blocking(&mut transform.scanner, data) {
-        Ok(b) => b,
-        Err(e) => {
-            metrics.inc_scan_error();
-            metrics.inc_parse_error();
-            metrics.inc_dropped_batch();
-            tracing::warn!(input = transform.input_name.as_str(), error = %e, "scan error");
-            // Checkpoints dropped — at-least-once: data re-read on restart.
-            return None;
-        }
-    };
-    let scan_ns = t0.elapsed().as_nanos() as u64;
-
-    let num_rows = batch.num_rows();
-    if num_rows > 0 {
-        metrics.transform_in.inc_lines(num_rows as u64);
-    }
-
-    let t1 = tokio::time::Instant::now();
-    let result = match transform.transform.execute(batch).await {
-        Ok(r) => r,
-        Err(e) => {
-            metrics.inc_transform_error();
-            metrics.inc_dropped_batch();
-            tracing::warn!(input = transform.input_name.as_str(), error = %e, "transform error");
-            // Checkpoints dropped — at-least-once: data re-read on restart.
-            return None;
-        }
-    };
-    let transform_ns = t1.elapsed().as_nanos() as u64;
-
-    Some(ChannelMsg {
-        batch: result,
-        checkpoints,
-        queued_at: Some(queued_at),
-        input_index,
-        scan_ns,
-        transform_ns,
-    })
-}
-
-#[cfg(feature = "turmoil")]
-async fn transform_direct_batch_for_send(
-    input: &mut InputState,
-    transform: &mut InputTransform,
-    metrics: &PipelineMetrics,
-    input_index: usize,
-    batch: RecordBatch,
-) -> Option<ChannelMsg> {
-    let checkpoints: HashMap<SourceId, ByteOffset> =
-        input.source.checkpoint_data().into_iter().collect();
-    let queued_at = tokio::time::Instant::now();
-
-    let num_rows = batch.num_rows();
-    if num_rows > 0 {
-        metrics.transform_in.inc_lines(num_rows as u64);
-    }
-
-    let t0 = tokio::time::Instant::now();
-    let result = match transform.transform.execute(batch).await {
-        Ok(r) => r,
-        Err(e) => {
-            metrics.inc_transform_error();
-            metrics.inc_dropped_batch();
-            tracing::warn!(
-                input = transform.input_name.as_str(),
-                error = %e,
-                "transform error"
-            );
-            return None;
-        }
-    };
-    let transform_ns = t0.elapsed().as_nanos() as u64;
-
-    Some(ChannelMsg {
-        batch: result,
-        checkpoints,
-        queued_at: Some(queued_at),
-        input_index,
-        scan_ns: 0,
-        transform_ns,
-    })
 }
 
 // ---------------------------------------------------------------------------
 // Input construction
 // ---------------------------------------------------------------------------
-
-/// Build a format processor from the config format.
-fn make_format(
-    name: &str,
-    input_type: InputType,
-    format: &Format,
-    stats: &Arc<ComponentStats>,
-) -> Result<FormatDecoder, String> {
-    const CRI_MAX_MESSAGE: usize = 2 * 1024 * 1024;
-    let proc = match format {
-        Format::Cri => FormatDecoder::cri(CRI_MAX_MESSAGE, Arc::clone(stats)),
-        Format::Auto => FormatDecoder::auto(CRI_MAX_MESSAGE, Arc::clone(stats)),
-        Format::Json => FormatDecoder::passthrough_json(Arc::clone(stats)),
-        Format::Raw => FormatDecoder::passthrough(Arc::clone(stats)),
-        unsupported => {
-            return Err(format!(
-                "input '{name}': format {:?} is not supported for {:?} inputs",
-                unsupported, input_type
-            ));
-        }
-    };
-    Ok(proc)
-}
-
-fn validate_input_format(name: &str, input_type: InputType, format: &Format) -> Result<(), String> {
-    match input_type {
-        InputType::Generator | InputType::Otlp => {
-            if !matches!(format, Format::Json) {
-                return Err(format!(
-                    "input '{name}': format {:?} is not supported for {:?} inputs (expected json)",
-                    format, input_type
-                ));
-            }
-        }
-        InputType::LinuxSensorBeta | InputType::MacosSensorBeta | InputType::WindowsSensorBeta => {
-            if !matches!(format, Format::Raw | Format::Json) {
-                return Err(format!(
-                    "input '{name}': format {:?} is not supported for {:?} inputs (expected raw or json)",
-                    format, input_type
-                ));
-            }
-        }
-        _ => {}
-    }
-    Ok(())
-}
-
-fn build_input_state(
-    name: &str,
-    cfg: &InputConfig,
-    stats: Arc<ComponentStats>,
-    otlp_structured_ingress: bool,
-) -> Result<InputState, String> {
-    let (raw_source, format, buf_cap): (Box<dyn InputSource>, Format, usize) = match cfg.input_type
-    {
-        InputType::File => {
-            let path = cfg
-                .path
-                .as_ref()
-                .ok_or_else(|| format!("input '{name}': file input requires 'path'"))?;
-            let format = cfg.format.clone().unwrap_or(Format::Auto);
-            let mut tail_config = TailConfig {
-                start_from_end: false,
-                poll_interval_ms: 50,
-                read_buf_size: 256 * 1024,
-                max_open_files: cfg.max_open_files.unwrap_or(1024),
-                ..Default::default()
-            };
-            if let Some(interval) = cfg.glob_rescan_interval_ms {
-                tail_config.glob_rescan_interval_ms = interval;
-            }
-            let is_glob = path.contains('*') || path.contains('?') || path.contains('[');
-            let source = if is_glob {
-                FileInput::new_with_globs(name.to_string(), &[path.as_str()], tail_config)
-            } else {
-                FileInput::new(name.to_string(), &[PathBuf::from(path)], tail_config)
-            }
-            .map_err(|e| format!("input '{name}': failed to create tailer: {e}"))?;
-            validate_input_format(name, InputType::File, &format)?;
-            (Box::new(source), format, 4 * 1024 * 1024)
-        }
-        InputType::Generator => {
-            use logfwd_io::generator::{
-                GeneratorAttributeValue, GeneratorComplexity, GeneratorConfig,
-                GeneratorGeneratedField, GeneratorInput, GeneratorProfile,
-            };
-            let generator_cfg = cfg.generator.as_ref();
-            let config = GeneratorConfig {
-                events_per_sec: generator_cfg.and_then(|c| c.events_per_sec).unwrap_or(0),
-                batch_size: generator_cfg.and_then(|c| c.batch_size).unwrap_or(1000),
-                total_events: generator_cfg.and_then(|c| c.total_events).unwrap_or(0),
-                complexity: match generator_cfg.and_then(|c| c.complexity.clone()) {
-                    Some(GeneratorComplexityConfig::Complex) => GeneratorComplexity::Complex,
-                    Some(GeneratorComplexityConfig::Simple) | None => GeneratorComplexity::Simple,
-                    Some(_) => GeneratorComplexity::Simple,
-                },
-                profile: match generator_cfg.and_then(|c| c.profile.clone()) {
-                    Some(GeneratorProfileConfig::Record) => GeneratorProfile::Record,
-                    Some(GeneratorProfileConfig::Logs) | None => GeneratorProfile::Logs,
-                    Some(_) => GeneratorProfile::Logs,
-                },
-                attributes: generator_cfg
-                    .map(|c| {
-                        c.attributes
-                            .iter()
-                            .map(|(k, v)| {
-                                let value = match v {
-                                    GeneratorAttributeValueConfig::String(v) => {
-                                        GeneratorAttributeValue::String(v.clone())
-                                    }
-                                    GeneratorAttributeValueConfig::Null => {
-                                        GeneratorAttributeValue::Null
-                                    }
-                                    GeneratorAttributeValueConfig::Integer(v) => {
-                                        GeneratorAttributeValue::Integer(*v)
-                                    }
-                                    GeneratorAttributeValueConfig::Float(v) => {
-                                        GeneratorAttributeValue::Float(*v)
-                                    }
-                                    GeneratorAttributeValueConfig::Bool(v) => {
-                                        GeneratorAttributeValue::Bool(*v)
-                                    }
-                                    _ => GeneratorAttributeValue::Null,
-                                };
-                                (k.clone(), value)
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-                sequence: generator_cfg.and_then(|c| {
-                    c.sequence.as_ref().map(|seq| GeneratorGeneratedField {
-                        field: seq.field.clone(),
-                        start: seq.start.unwrap_or(1),
-                    })
-                }),
-                event_created_unix_nano_field: generator_cfg
-                    .and_then(|c| c.event_created_unix_nano_field.clone()),
-            };
-            let format = cfg.format.clone().unwrap_or(Format::Json);
-            validate_input_format(name, InputType::Generator, &format)?;
-            let source = GeneratorInput::new(name, config);
-            (Box::new(source), format, 4 * 1024 * 1024)
-        }
-        InputType::Otlp => {
-            let addr = cfg
-                .listen
-                .as_ref()
-                .ok_or_else(|| format!("input '{name}': otlp input requires 'listen'"))?;
-            let format = cfg.format.clone().unwrap_or(Format::Json);
-            validate_input_format(name, InputType::Otlp, &format)?;
-            let source = if otlp_structured_ingress {
-                logfwd_io::otlp_receiver::OtlpReceiverInput::new_structured_with_stats(
-                    name,
-                    addr,
-                    Arc::clone(&stats),
-                )
-            } else {
-                logfwd_io::otlp_receiver::OtlpReceiverInput::new_with_stats(
-                    name,
-                    addr,
-                    Arc::clone(&stats),
-                )
-            }
-            .map_err(|e| format!("input '{name}': failed to start OTLP receiver: {e}"))?;
-            (Box::new(source), format, 4 * 1024 * 1024)
-        }
-        InputType::Udp => {
-            let addr = cfg
-                .listen
-                .as_ref()
-                .ok_or_else(|| format!("input '{name}': udp input requires 'listen'"))?;
-            if matches!(cfg.format, Some(Format::Cri | Format::Auto)) {
-                return Err(format!(
-                    "input '{name}': CRI/auto format is not supported for UDP inputs (CRI is a file-based container log format)"
-                ));
-            }
-            let source = logfwd_io::udp_input::UdpInput::new(name, addr)
-                .map_err(|e| format!("input '{name}': failed to bind UDP {addr}: {e}"))?;
-            let format = cfg.format.clone().unwrap_or(Format::Json);
-            validate_input_format(name, InputType::Udp, &format)?;
-            (Box::new(source), format, 1024 * 1024)
-        }
-        InputType::Tcp => {
-            let addr = cfg
-                .listen
-                .as_ref()
-                .ok_or_else(|| format!("input '{name}': tcp input requires 'listen'"))?;
-            if matches!(cfg.format, Some(Format::Cri | Format::Auto)) {
-                return Err(format!(
-                    "input '{name}': CRI/auto format is not supported for TCP inputs (CRI is a file-based container log format)"
-                ));
-            }
-            let source = logfwd_io::tcp_input::TcpInput::new(name, addr)
-                .map_err(|e| format!("input '{name}': failed to bind TCP {addr}: {e}"))?;
-            let format = cfg.format.clone().unwrap_or(Format::Json);
-            validate_input_format(name, InputType::Tcp, &format)?;
-            (Box::new(source), format, 4 * 1024 * 1024)
-        }
-        InputType::LinuxSensorBeta | InputType::MacosSensorBeta | InputType::WindowsSensorBeta => {
-            use logfwd_io::platform_sensor_beta::{PlatformSensorBetaInput, PlatformSensorTarget};
-
-            let target = match cfg.input_type {
-                InputType::LinuxSensorBeta => PlatformSensorTarget::Linux,
-                InputType::MacosSensorBeta => PlatformSensorTarget::Macos,
-                InputType::WindowsSensorBeta => PlatformSensorTarget::Windows,
-                _ => unreachable!("handled by outer match"),
-            };
-
-            let format = cfg.format.clone().unwrap_or(Format::Raw);
-            validate_input_format(name, cfg.input_type.clone(), &format)?;
-
-            let beta_cfg = build_platform_sensor_beta_config(cfg.sensor_beta.as_ref());
-            let source = PlatformSensorBetaInput::new(name, target, beta_cfg).map_err(|e| {
-                format!(
-                    "input '{name}': failed to initialize {} input: {e}",
-                    cfg.input_type
-                )
-            })?;
-            (Box::new(source), format, 64 * 1024)
-        }
-        _ => {
-            return Err(format!(
-                "input '{name}': type {:?} not yet supported",
-                cfg.input_type
-            ));
-        }
-    };
-
-    if is_sensor_beta_input_type(&cfg.input_type) {
-        return Ok(InputState {
-            source: raw_source,
-            buf: BytesMut::with_capacity(buf_cap),
-            stats,
-        });
-    }
-
-    // Wrap the raw transport with framing + format processing.
-    let format_proc = make_format(name, cfg.input_type.clone(), &format, &stats)?;
-    let framed = FramedInput::new(raw_source, format_proc, Arc::clone(&stats));
-
-    Ok(InputState {
-        source: Box::new(framed),
-        buf: BytesMut::with_capacity(buf_cap),
-        stats,
-    })
-}
-
-fn is_sensor_beta_input_type(input_type: &InputType) -> bool {
-    matches!(
-        input_type,
-        InputType::LinuxSensorBeta | InputType::MacosSensorBeta | InputType::WindowsSensorBeta
-    )
-}
-
-fn build_platform_sensor_beta_config(
-    cfg: Option<&PlatformSensorBetaInputConfig>,
-) -> logfwd_io::platform_sensor_beta::PlatformSensorBetaConfig {
-    let original_poll_interval_ms = cfg.and_then(|c| c.poll_interval_ms);
-    let poll_interval_ms = original_poll_interval_ms.unwrap_or(10_000);
-    let clamped_poll_interval_ms = poll_interval_ms.max(1);
-    if original_poll_interval_ms == Some(0) {
-        tracing::warn!(
-            original = 0u64,
-            clamped = clamped_poll_interval_ms,
-            "sensor beta poll_interval_ms was below minimum and clamped to 1ms"
-        );
-    }
-    let emit_heartbeat = cfg.and_then(|c| c.emit_heartbeat).unwrap_or(true);
-    let original_control_reload_interval_ms = cfg
-        .and_then(|c| c.control_reload_interval_ms)
-        .unwrap_or(1_000);
-    let clamped_control_reload_interval_ms = original_control_reload_interval_ms.max(1);
-    if original_control_reload_interval_ms == 0 {
-        tracing::warn!(
-            original = 0u64,
-            clamped = clamped_control_reload_interval_ms,
-            "sensor beta control_reload_interval_ms was below minimum and clamped to 1ms"
-        );
-    }
-    let emit_signal_rows = cfg.and_then(|c| c.emit_signal_rows).unwrap_or(true);
-    let control_path = cfg.and_then(|c| c.control_path.as_ref()).map(PathBuf::from);
-    let enabled_families = cfg.and_then(|c| c.enabled_families.clone());
-
-    logfwd_io::platform_sensor_beta::PlatformSensorBetaConfig {
-        emit_heartbeat,
-        poll_interval: Duration::from_millis(clamped_poll_interval_ms),
-        control_path,
-        control_reload_interval: Duration::from_millis(clamped_control_reload_interval_ms),
-        enabled_families,
-        emit_signal_rows,
-    }
-}
-
-fn otlp_uses_structured_ingress(scan_config: &logfwd_core::scan_config::ScanConfig) -> bool {
-    // Structured OTLP ingress preserves typed log fields, but it does not yet
-    // synthesize scanner-owned `_raw`. Keep legacy JSON-lines -> scanner mode
-    // whenever the SQL plan requires `_raw` semantics.
-    !scan_config.keep_raw
-}
 
 fn now_nanos() -> u64 {
     SystemTime::now()
@@ -1749,7 +717,6 @@ mod tests {
     use serial_test::serial;
     use std::time::Instant;
 
-    use logfwd_arrow::scanner::Scanner;
     use logfwd_config::{Format, OutputConfig, OutputType};
     use logfwd_core::scan_config::ScanConfig;
     use logfwd_io::diagnostics::ComponentStats;
@@ -1769,21 +736,6 @@ mod tests {
         assert_eq!(factory.name(), "test");
         let sink = factory.create().expect("create should succeed");
         assert_eq!(sink.name(), "test");
-    }
-
-    #[test]
-    fn sensor_beta_formats_allow_raw_and_json_only() {
-        assert!(validate_input_format("sensor", InputType::LinuxSensorBeta, &Format::Raw).is_ok());
-        assert!(
-            validate_input_format("sensor", InputType::WindowsSensorBeta, &Format::Json).is_ok()
-        );
-
-        let err = validate_input_format("sensor", InputType::MacosSensorBeta, &Format::Cri)
-            .expect_err("sensor beta should reject CRI framing");
-        assert!(
-            err.contains("expected raw or json"),
-            "unexpected error: {err}"
-        );
     }
 
     #[test]
@@ -2064,7 +1016,7 @@ output:
             keep_raw: true,
             ..ScanConfig::default()
         };
-        assert!(!otlp_uses_structured_ingress(&scan_config));
+        assert!(!input_build::otlp_uses_structured_ingress(&scan_config));
     }
 
     #[test]
@@ -2073,7 +1025,7 @@ output:
             keep_raw: false,
             ..ScanConfig::default()
         };
-        assert!(otlp_uses_structured_ingress(&scan_config));
+        assert!(input_build::otlp_uses_structured_ingress(&scan_config));
     }
 
     #[test]
@@ -2155,9 +1107,18 @@ output:
 
         let shutdown = CancellationToken::new();
         let sd_clone = shutdown.clone();
+        let metrics = Arc::clone(&pipeline.metrics);
 
         std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(500));
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let errors = metrics.transform_errors.load(Ordering::Relaxed);
+                let dropped = metrics.dropped_batches_total.load(Ordering::Relaxed);
+                if errors > 0 || dropped > 0 || Instant::now() >= deadline {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
             sd_clone.cancel();
         });
 
@@ -2229,9 +1190,18 @@ output:
 
         let shutdown = CancellationToken::new();
         let sd_clone = shutdown.clone();
+        let metrics = Arc::clone(&pipeline.metrics);
 
         std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(500));
+            let deadline = Instant::now() + Duration::from_secs(30);
+            loop {
+                let errors = metrics.transform_errors.load(Ordering::Relaxed);
+                let dropped = metrics.dropped_batches_total.load(Ordering::Relaxed);
+                if errors > 0 || dropped > 0 || Instant::now() >= deadline {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
             sd_clone.cancel();
         });
 
@@ -2314,32 +1284,24 @@ output:
     fn test_pipeline_transform_error_skips_batch_continues() {
         use std::sync::atomic::Ordering;
 
-        let dir = tempfile::tempdir().unwrap();
-        let log_path = dir.path().join("test.log");
-
-        // Write JSON lines that do NOT contain `nonexistent_col`.
-        let mut data = String::new();
-        for i in 0..5 {
-            data.push_str(&format!(r#"{{"level":"INFO","msg":"hello {}"}}"#, i));
-            data.push('\n');
-        }
-        std::fs::write(&log_path, data.as_bytes()).unwrap();
-
-        // SQL references a column that will never be present → DataFusion
-        // returns an error at execution time, not at parse / new() time.
-        let yaml = format!(
-            r#"
+        // SQL references a column that will never be present. Use generator
+        // input so this test only exercises pipeline transform behavior and is
+        // not sensitive to file-tail timing under heavy coverage.
+        let yaml = r#"
 input:
-  type: file
-  path: {}
-  format: json
+  type: generator
+  generator:
+    events_per_sec: 10000
+    batch_size: 64
+    profile: record
+    attributes:
+      benchmark_id: run-123
+      pod_name: emitter-0
+      stream_id: emitter-0
 transform: "SELECT nonexistent_col FROM logs"
 output:
-  type: stdout
-  format: json
-"#,
-            log_path.display()
-        );
+  type: null
+"#;
         let config = logfwd_config::Config::load_str(&yaml).unwrap();
         let pipe_cfg = &config.pipelines["default"];
         let mut pipeline = Pipeline::from_config("default", pipe_cfg, &test_meter(), None).unwrap();
@@ -3452,6 +2414,38 @@ output:
     }
 
     #[test]
+    fn test_apply_pool_ack_does_not_underflow_inflight_counter() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("underflow.log");
+        std::fs::write(&log_path, "").unwrap();
+        let mut pipeline = pipeline_with_sink(&log_path, Box::new(DevNullSink));
+
+        pipeline
+            .metrics
+            .inflight_batches
+            .store(0, Ordering::Relaxed);
+        pipeline.apply_pool_ack(AckItem {
+            tickets: vec![],
+            outcome: crate::worker_pool::DeliveryOutcome::InternalFailure,
+            num_rows: 0,
+            submitted_at: tokio::time::Instant::now(),
+            scan_ns: 0,
+            transform_ns: 0,
+            output_ns: 0,
+            queue_wait_ns: 0,
+            send_latency_ns: 0,
+            batch_id: 0,
+            output_name: "test".to_string(),
+        });
+
+        assert_eq!(
+            pipeline.metrics.inflight_batches.load(Ordering::Relaxed),
+            0,
+            "inflight counter must not underflow on stray ack"
+        );
+    }
+
+    #[test]
     fn test_transform_filter_all_rows_does_not_crash() {
         let dir = tempfile::tempdir().unwrap();
         let log_path = dir.path().join("test.log");
@@ -3677,7 +2671,6 @@ output:
 #[cfg(test)]
 mod format_integration_tests {
     use super::*;
-    use logfwd_arrow::scanner::Scanner;
     use logfwd_core::scan_config::ScanConfig;
 
     /// JSON format: raw bytes pass directly through to scanner.
@@ -3761,7 +2754,6 @@ mod format_integration_tests {
 #[cfg(test)]
 mod proptest_pipeline {
     use super::*;
-    use logfwd_arrow::scanner::Scanner;
     use logfwd_core::scan_config::ScanConfig;
     use proptest::prelude::*;
 

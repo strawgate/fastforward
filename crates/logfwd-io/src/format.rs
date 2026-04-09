@@ -26,13 +26,39 @@ pub enum FormatDecoder {
         stats: Arc<ComponentStats>,
     },
     Cri {
-        aggregator: CriReassembler,
+        aggregators: [CriReassembler; 2],
         stats: Arc<ComponentStats>,
     },
     Auto {
-        aggregator: CriReassembler,
+        aggregators: [CriReassembler; 2],
         stats: Arc<ComponentStats>,
     },
+}
+
+fn new_stream_aggregators(max_message_size: usize) -> [CriReassembler; 2] {
+    [
+        CriReassembler::new(max_message_size),
+        CriReassembler::new(max_message_size),
+    ]
+}
+
+const STDOUT_IDX: usize = 0;
+const STDERR_IDX: usize = 1;
+
+fn stream_aggregator<'a>(
+    aggregators: &'a mut [CriReassembler; 2],
+    stream: &[u8],
+) -> &'a mut CriReassembler {
+    if stream == b"stderr" {
+        &mut aggregators[STDERR_IDX]
+    } else {
+        &mut aggregators[STDOUT_IDX]
+    }
+}
+
+fn reset_stream_aggregators(aggregators: &mut [CriReassembler; 2]) {
+    aggregators[STDOUT_IDX].reset();
+    aggregators[STDERR_IDX].reset();
 }
 
 impl FormatDecoder {
@@ -56,7 +82,7 @@ impl FormatDecoder {
     /// Create a CRI format processor with the given max message size.
     pub fn cri(max_message_size: usize, stats: Arc<ComponentStats>) -> Self {
         Self::Cri {
-            aggregator: CriReassembler::new(max_message_size),
+            aggregators: new_stream_aggregators(max_message_size),
             stats,
         }
     }
@@ -64,7 +90,7 @@ impl FormatDecoder {
     /// Create an Auto format processor (tries CRI, falls through to passthrough).
     pub fn auto(max_message_size: usize, stats: Arc<ComponentStats>) -> Self {
         Self::Auto {
-            aggregator: CriReassembler::new(max_message_size),
+            aggregators: new_stream_aggregators(max_message_size),
             stats,
         }
     }
@@ -81,12 +107,12 @@ impl FormatDecoder {
             Self::PassthroughJson { stats } => Self::PassthroughJson {
                 stats: Arc::clone(stats),
             },
-            Self::Cri { aggregator, stats } => Self::Cri {
-                aggregator: CriReassembler::new(aggregator.max_message_size()),
+            Self::Cri { aggregators, stats } => Self::Cri {
+                aggregators: new_stream_aggregators(aggregators[0].max_message_size()),
                 stats: Arc::clone(stats),
             },
-            Self::Auto { aggregator, stats } => Self::Auto {
-                aggregator: CriReassembler::new(aggregator.max_message_size()),
+            Self::Auto { aggregators, stats } => Self::Auto {
+                aggregators: new_stream_aggregators(aggregators[0].max_message_size()),
                 stats: Arc::clone(stats),
             },
         }
@@ -105,11 +131,11 @@ impl FormatDecoder {
                 count_json_parse_errors(chunk, stats);
                 out.extend_from_slice(chunk);
             }
-            Self::Cri { aggregator, stats } => {
-                extract_cri_messages(chunk, out, aggregator, stats, false);
+            Self::Cri { aggregators, stats } => {
+                extract_cri_messages(chunk, out, aggregators, stats, false);
             }
-            Self::Auto { aggregator, stats } => {
-                extract_cri_messages(chunk, out, aggregator, stats, true);
+            Self::Auto { aggregators, stats } => {
+                extract_cri_messages(chunk, out, aggregators, stats, true);
             }
         }
     }
@@ -118,10 +144,19 @@ impl FormatDecoder {
     pub fn reset(&mut self) {
         match self {
             Self::Passthrough { .. } | Self::PassthroughJson { .. } => {}
-            Self::Cri { aggregator, .. } | Self::Auto { aggregator, .. } => {
-                aggregator.reset();
+            Self::Cri { aggregators, .. } | Self::Auto { aggregators, .. } => {
+                reset_stream_aggregators(aggregators);
             }
         }
+    }
+
+    /// Whether this decoder can produce JSON-object rows that should receive
+    /// `_source_path` metadata injection for file-backed input.
+    pub fn supports_source_path_injection(&self) -> bool {
+        matches!(
+            self,
+            Self::PassthroughJson { .. } | Self::Cri { .. } | Self::Auto { .. }
+        )
     }
 }
 
@@ -159,7 +194,7 @@ fn count_json_parse_errors(chunk: &[u8], stats: &ComponentStats) {
 fn extract_cri_messages(
     input: &[u8],
     out: &mut Vec<u8>,
-    aggregator: &mut CriReassembler,
+    aggregators: &mut [CriReassembler; 2],
     stats: &ComponentStats,
     passthrough_on_fail: bool,
 ) {
@@ -168,6 +203,7 @@ fn extract_cri_messages(
         let eol = memchr::memchr(b'\n', &input[pos..]).map_or(input.len(), |o| pos + o);
         let line = &input[pos..eol];
         if let Some(cri) = parse_cri_line(line) {
+            let aggregator = stream_aggregator(aggregators, cri.stream);
             let max_message_size = aggregator.max_message_size();
             match aggregator.feed(cri.message, cri.is_full) {
                 AggregateResult::Complete(msg) => {
@@ -192,7 +228,7 @@ fn extract_cri_messages(
             }
         } else {
             // Break any pending CRI aggregation at parse/fallback boundaries.
-            aggregator.reset();
+            reset_stream_aggregators(aggregators);
             if !line.is_empty() && passthrough_on_fail {
                 out.extend_from_slice(line);
                 out.push(b'\n');
@@ -235,8 +271,22 @@ fn inject_cri_metadata(msg: &[u8], timestamp: &[u8], stream: &[u8], out: &mut Ve
         out.extend_from_slice(timestamp);
         out.extend_from_slice(b"\",\"_stream\":\"");
         out.extend_from_slice(stream);
-        out.extend_from_slice(b"\",");
-        out.extend_from_slice(&msg[1..]);
+        // Fixes #1658: if the message body after '{' is empty (just '}' possibly
+        // with leading whitespace), do NOT emit a trailing comma — the result
+        // would be invalid JSON.
+        let after_brace = &msg[1..];
+        let rest = after_brace
+            .iter()
+            .position(|b| !b.is_ascii_whitespace())
+            .map_or(after_brace, |i| &after_brace[i..]);
+        if rest.starts_with(b"}") {
+            // Empty JSON object — close without a comma.
+            out.extend_from_slice(b"\"");
+            out.extend_from_slice(rest);
+        } else {
+            out.extend_from_slice(b"\",");
+            out.extend_from_slice(after_brace);
+        }
     } else {
         // Plain text: wrap as {"_timestamp":"...","_stream":"...","_raw":"<escaped>"}
         // so that message content is preserved and the scanner can ingest the record.
@@ -297,6 +347,32 @@ mod tests {
         assert_eq!(
             out,
             b"{\"_timestamp\":\"2024-01-15T10:30:00Z\",\"_stream\":\"stdout\",\"_raw\":\"hello world\"}\n"
+        );
+    }
+
+    #[test]
+    fn cri_interleaved_streams_do_not_cross_contaminate() {
+        let stats = make_stats();
+        let mut proc = FormatDecoder::cri(2 * 1024 * 1024, Arc::clone(&stats));
+        let mut out = Vec::new();
+
+        proc.process_lines(b"2024-01-15T10:30:00Z stdout P out-\n", &mut out);
+        proc.process_lines(b"2024-01-15T10:30:01Z stderr F err\n", &mut out);
+        proc.process_lines(b"2024-01-15T10:30:02Z stdout F done\n", &mut out);
+
+        let mut expected = Vec::new();
+        expected.extend_from_slice(
+            b"{\"_timestamp\":\"2024-01-15T10:30:01Z\",\"_stream\":\"stderr\",\"_raw\":\"err\"}\n",
+        );
+        expected.extend_from_slice(
+            b"{\"_timestamp\":\"2024-01-15T10:30:02Z\",\"_stream\":\"stdout\",\"_raw\":\"out-done\"}\n",
+        );
+        assert_eq!(out, expected);
+        assert_eq!(
+            stats
+                .parse_errors_total
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
         );
     }
 
@@ -450,6 +526,51 @@ mod tests {
         assert_eq!(
             out,
             b"{\"_timestamp\":\"2024-01-15T10:30:00Z\",\"_stream\":\"stdout\",\"_raw\":\"say \\\"hello\\\"\"}\n"
+        );
+    }
+
+    /// Regression for #1658: a CRI log line whose message is an empty JSON
+    /// object `{}` must NOT produce a trailing comma in the output.
+    ///
+    /// Before the fix, inject_cri_metadata emitted:
+    ///   `{"_timestamp":"T","_stream":"S",}` — invalid JSON (trailing comma).
+    #[test]
+    fn cri_empty_json_object_message_produces_valid_json() {
+        let stats = make_stats();
+        let mut proc = FormatDecoder::cri(2 * 1024 * 1024, stats);
+        let input = b"2024-01-15T10:30:00Z stdout F {}\n";
+        let mut out = Vec::new();
+        proc.process_lines(input, &mut out);
+        let output_str = std::str::from_utf8(&out).expect("output must be valid UTF-8");
+        let trimmed = output_str.trim_end_matches('\n');
+        assert!(
+            serde_json::from_str::<serde_json::Value>(trimmed).is_ok(),
+            "empty JSON object message must produce valid JSON, got: {trimmed:?}"
+        );
+        // Must contain the injected metadata.
+        assert!(
+            trimmed.contains("\"_timestamp\":\"2024-01-15T10:30:00Z\""),
+            "output must contain _timestamp, got: {trimmed:?}"
+        );
+        assert!(
+            trimmed.contains("\"_stream\":\"stdout\""),
+            "output must contain _stream, got: {trimmed:?}"
+        );
+    }
+
+    /// Whitespace-only body `{ }` should also produce valid JSON (no trailing comma).
+    #[test]
+    fn cri_whitespace_json_object_message_produces_valid_json() {
+        let stats = make_stats();
+        let mut proc = FormatDecoder::cri(2 * 1024 * 1024, stats);
+        let input = b"2024-01-15T10:30:00Z stdout F { }\n";
+        let mut out = Vec::new();
+        proc.process_lines(input, &mut out);
+        let output_str = std::str::from_utf8(&out).expect("output must be valid UTF-8");
+        let trimmed = output_str.trim_end_matches('\n');
+        assert!(
+            serde_json::from_str::<serde_json::Value>(trimmed).is_ok(),
+            "whitespace JSON object must produce valid JSON, got: {trimmed:?}"
         );
     }
 
@@ -625,8 +746,16 @@ mod verification {
         let stream = b"S";
         let mut out = Vec::new();
         inject_cri_metadata(&msg, ts, stream, &mut out);
-        // Output must start with the timestamp+stream injection prefix.
-        assert!(out.starts_with(b"{\"_timestamp\":\"TS\",\"_stream\":\"S\","));
+        // Output must start with timestamp+stream. The next byte is:
+        // - ',' for non-empty JSON objects
+        // - '}' for empty object path (`{}` / `{ }`) from issue #1658 fix
+        let prefix = b"{\"_timestamp\":\"TS\",\"_stream\":\"S\"";
+        assert!(out.starts_with(prefix));
+        let next = out.get(prefix.len()).copied();
+        assert!(
+            matches!(next, Some(b',') | Some(b'}')),
+            "expected ',' or '}}' after injected _stream"
+        );
         kani::cover!(true, "JSON path metadata prefix verified");
     }
 

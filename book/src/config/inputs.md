@@ -34,8 +34,11 @@ data source is required.
 | `generator.sequence.field` | string | No | unset | Output field name for a monotonic generated sequence in `record` rows. |
 | `generator.sequence.start` | integer | No | `1` | Initial value for the generated sequence. |
 | `generator.event_created_unix_nano_field` | string | No | unset | Adds a source-created nanosecond timestamp field to each `record` row. |
+| `generator.timestamp.start` | string | No | `2024-01-15T00:00:00Z` | Start timestamp for the `logs` profile. ISO8601 (`YYYY-MM-DDTHH:MM:SSZ`) or `"now"` for wall-clock time at startup. |
+| `generator.timestamp.step_ms` | integer | No | `1` | Milliseconds between events. Positive = forward, negative = backward. |
 
 ```yaml
+# Record profile (benchmarking)
 input:
   type: generator
   generator:
@@ -55,6 +58,33 @@ input:
     event_created_unix_nano_field: event_created_unix_nano
 ```
 
+### Timestamp examples (`logs` profile)
+
+```yaml
+# Real-time simulation (timestamps start at now, +1ms per event)
+input:
+  type: generator
+  generator:
+    timestamp:
+      start: "now"
+
+# Backfill from now (timestamps go backward, 100ms apart)
+input:
+  type: generator
+  generator:
+    timestamp:
+      start: "now"
+      step_ms: -100
+
+# Fixed historical window (5-second intervals)
+input:
+  type: generator
+  generator:
+    timestamp:
+      start: "2023-06-01T12:00:00Z"
+      step_ms: 5000
+```
+
 Use `generate-json <num_lines> <output_file>` on the CLI to write a fixed number of lines to a file instead.
 
 ## UDP
@@ -68,6 +98,8 @@ input:
   format: json
 ```
 
+TLS is not supported for UDP inputs.
+
 ## TCP
 
 Accept log lines on a TCP socket.
@@ -79,6 +111,14 @@ input:
   format: json
 ```
 
+Framing behavior:
+
+- Prefer RFC 6587 octet counting (`<len><space><payload>`).
+- Fall back to newline-delimited records for legacy senders.
+- Records larger than 1 MiB are discarded.
+
+TLS is not supported for TCP inputs.
+
 ## OTLP
 
 Receive OTLP log records from another agent or SDK.
@@ -87,4 +127,21 @@ Receive OTLP log records from another agent or SDK.
 input:
   type: otlp
   listen: 0.0.0.0:4318
+```
+
+## HTTP
+
+Receive newline-delimited payloads over HTTP `POST` (NDJSON or raw lines).
+
+```yaml
+input:
+  type: http
+  listen: 0.0.0.0:8081
+  format: json     # json | raw
+  http:
+    path: /ingest  # optional, defaults to /
+    strict_path: true
+    method: POST
+    max_request_body_size: 20971520
+    response_code: 200
 ```

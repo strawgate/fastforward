@@ -170,7 +170,7 @@ input supports `format: raw` (default) or `format: json`.
 | `sensor_beta.emit_heartbeat` | boolean | No | Emit periodic heartbeat rows while idle. Defaults to `true`. |
 | `sensor_beta.control_path` | string | No | Optional JSON control-plane file path for runtime reload. |
 | `sensor_beta.control_reload_interval_ms` | integer | No | Reload check interval in milliseconds. Must be `>= 1`. Defaults to `1000`. |
-| `sensor_beta.enabled_families` | array[string] | No | Optional enabled signal families for this target (`process,file,network,dns,authz` on Linux). |
+| `sensor_beta.enabled_families` | array[string] | No | Optional enabled signal families for this target (`process,file,network,dns,authz` on Linux). Omit to use defaults; set `[]` to disable all families. |
 | `sensor_beta.emit_signal_rows` | boolean | No | Emit periodic per-family sample rows. Defaults to `true`. |
 
 ```yaml
@@ -192,7 +192,7 @@ input supports `format: raw` (default) or `format: json`.
 | `sensor_beta.emit_heartbeat` | boolean | No | Emit periodic heartbeat rows while idle. Defaults to `true`. |
 | `sensor_beta.control_path` | string | No | Optional JSON control-plane file path for runtime reload. |
 | `sensor_beta.control_reload_interval_ms` | integer | No | Reload check interval in milliseconds. Must be `>= 1`. Defaults to `1000`. |
-| `sensor_beta.enabled_families` | array[string] | No | Optional enabled signal families (`process,file,network,dns,module,authz` on macOS). |
+| `sensor_beta.enabled_families` | array[string] | No | Optional enabled signal families (`process,file,network,dns,module,authz` on macOS). Omit to use defaults; set `[]` to disable all families. |
 | `sensor_beta.emit_signal_rows` | boolean | No | Emit periodic per-family sample rows. Defaults to `true`. |
 
 ```yaml
@@ -212,7 +212,7 @@ supports `format: raw` (default) or `format: json`.
 | `sensor_beta.emit_heartbeat` | boolean | No | Emit periodic heartbeat rows while idle. Defaults to `true`. |
 | `sensor_beta.control_path` | string | No | Optional JSON control-plane file path for runtime reload. |
 | `sensor_beta.control_reload_interval_ms` | integer | No | Reload check interval in milliseconds. Must be `>= 1`. Defaults to `1000`. |
-| `sensor_beta.enabled_families` | array[string] | No | Optional enabled signal families (`process,file,network,dns,module,registry,authz` on Windows). |
+| `sensor_beta.enabled_families` | array[string] | No | Optional enabled signal families (`process,file,network,dns,module,registry,authz` on Windows). Omit to use defaults; set `[]` to disable all families. |
 | `sensor_beta.emit_signal_rows` | boolean | No | Emit periodic per-family sample rows. Defaults to `true`. |
 
 ```yaml

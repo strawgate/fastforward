@@ -69,13 +69,25 @@ issue = 1306
 [[seams]]
 path = "crates/logfwd-io/src/otlp_receiver.rs"
 status = "recommended"
-reason = "The file still mixes HTTP/runtime shell code with pure protojson parsing and escaping helpers; one local hex-encoding proof now exists, but broader in-file Kani should wait for further helper isolation."
+reason = "Post-split module shell still hosts HTTP/runtime orchestration; pure protojson parsing and hex-encoding proof seams now live in otlp_receiver/convert.rs."
 issue = 1484
 
 [[seams]]
-path = "crates/logfwd-io/src/tail.rs"
+path = "crates/logfwd-io/src/otlp_receiver/convert.rs"
+status = "recommended"
+reason = "Structured conversion and protojson numeric normalization helpers are isolated pure seams inside OTLP receiver internals."
+issue = 1484
+
+[[seams]]
+path = "crates/logfwd-io/src/tail/verification.rs"
 status = "required"
 reason = "The EOF emission state machine is a local proof seam despite living in an IO crate."
+issue = 1314
+
+[[seams]]
+path = "crates/logfwd-io/src/tail/mod.rs"
+status = "recommended"
+reason = "Module shell gates tail-specific verification under #[cfg(kani)] and should stay aligned with the verification seam."
 issue = 1314
 
 [[seams]]
@@ -103,19 +115,19 @@ reason = "Output lifecycle reduction and fanout health aggregation are isolated 
 issue = 1439
 
 [[seams]]
-path = "crates/logfwd/src/worker_pool.rs"
+path = "crates/logfwd-runtime/src/worker_pool/dispatch.rs"
 status = "required"
-reason = "Worker dispatch helpers already expose bounded local proof seams."
+reason = "Worker dispatch helpers are isolated in this module and remain bounded local proof seams."
 issue = 1314
 
 [[seams]]
-path = "crates/logfwd/src/pipeline/checkpoint_policy.rs"
+path = "crates/logfwd-runtime/src/pipeline/checkpoint_policy.rs"
 status = "required"
 reason = "The typed delivery outcome -> checkpoint disposition compatibility mapping is a local pure seam."
 issue = 1314
 
 [[seams]]
-path = "crates/logfwd/src/worker_pool/health.rs"
+path = "crates/logfwd-runtime/src/worker_pool/health.rs"
 status = "required"
 reason = "Pool-level health insertion and aggregation policy is isolated here and should remain Kani-covered."
 issue = 1314
@@ -133,13 +145,13 @@ reason = "IO-heavy sink implementation; proof-worthy helpers should be extracted
 issue = 1313
 
 [[seams]]
-path = "crates/logfwd/src/pipeline.rs"
+path = "crates/logfwd-runtime/src/pipeline/mod.rs"
 status = "exempt"
 reason = "Async orchestration shell remains mixed; local proof seams are being extracted incrementally."
 issue = 1449
 
 [[seams]]
-path = "crates/logfwd/src/pipeline/health.rs"
+path = "crates/logfwd-runtime/src/pipeline/health.rs"
 status = "required"
 reason = "Pipeline input-loop health transitions are an isolated local reducer with bounded Kani invariants."
 issue = 1440

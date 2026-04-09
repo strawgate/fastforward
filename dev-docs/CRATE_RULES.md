@@ -41,6 +41,7 @@ Rules and constraints for each crate. Enforced by CI, not just convention.
 | `InputSource` implementations must define `health()` explicitly; no optimistic trait default | Compilation + code review |
 | `InputSource` trait-shape changes must pass cross-workspace compile checks for turmoil tests and bench binaries (`cargo test -p logfwd --features turmoil --test turmoil_sim --no-run`, `cargo build -p logfwd-bench --bin framed_input_profile`) | CI/local verification checklist |
 | Pure seam Kani boundary status tracked in `dev-docs/verification/kani-boundary-contract.toml` | CI script: `python3 scripts/verify_kani_boundary_contract.py` |
+| **No raw payload injection.** Legacy `_source_path` raw-byte insertion exists only in `framed.rs::inject_source_path_metadata` as a deprecated compatibility seam (#1615) and must not be expanded. New source metadata fields must be attached post-scan as Arrow columns using canonical `_resource_*` naming (scanner-attached resource columns shared across OTLP/OTAP paths). | CI guard script (`python3 scripts/check_no_raw_payload_injection.py`) + code review |
 
 ## logfwd-transform
 
@@ -59,14 +60,22 @@ Rules and constraints for each crate. Enforced by CI, not just convention.
 | Deps: core + arrow + ureq/reqwest | Cargo.toml |
 | Pure seam Kani boundary status tracked in `dev-docs/verification/kani-boundary-contract.toml` | CI script: `python3 scripts/verify_kani_boundary_contract.py` |
 
-## logfwd (binary)
+## logfwd-runtime
 
 | Rule | Enforcement |
 |------|-------------|
-| Async orchestration only — no business logic | Code review |
-| Pipeline decisions go through core state machine | Architecture |
-| Deps: everything + tokio + bytes | Cargo.toml |
-| BytesMut/Bytes used for pipeline buffer accumulation | Architecture |
+| Owns async pipeline orchestration, worker pool, and processor chain | Architecture |
+| Domain logic stays in lower crates when a pure seam exists | Code review |
+| Feature forwarding must preserve `datafusion` and `turmoil` behavior for downstream `logfwd` users | Compilation |
+| Pure seam Kani boundary status tracked in `dev-docs/verification/kani-boundary-contract.toml` | CI script: `python3 scripts/verify_kani_boundary_contract.py` |
+
+## logfwd (binary / facade)
+
+| Rule | Enforcement |
+|------|-------------|
+| CLI/bootstrap only — no long-lived runtime orchestration | Code review |
+| Public re-exports must stay compatibility-only and not fork runtime behavior | Code review |
+| Pipeline decisions still go through core state machine via `logfwd-runtime` | Architecture |
 | Pure seam Kani boundary status tracked in `dev-docs/verification/kani-boundary-contract.toml` | CI script: `python3 scripts/verify_kani_boundary_contract.py` |
 
 ## Adding a new crate
