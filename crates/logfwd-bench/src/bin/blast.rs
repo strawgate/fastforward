@@ -15,8 +15,8 @@
 //!     --config ./logfwd.yaml --pipeline default --dry-run
 
 use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Barrier};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -204,10 +204,11 @@ fn run_benchmark(args: RunArgs) -> Result<(), String> {
     println!("transform_sql={}", args.transform_sql);
     println!("\nResolved output config:\n{resolved_yaml}");
 
+    let base_path = args.config.as_deref().and_then(Path::parent);
     let sink_factory = build_sink_factory(
         "blast",
         &output_cfg,
-        None,
+        base_path,
         Arc::new(ComponentStats::default()),
     )
     .map_err(|e| format!("build sink factory: {e}"))?;
@@ -219,13 +220,14 @@ fn run_benchmark(args: RunArgs) -> Result<(), String> {
         raw_bytes: AtomicU64::new(0),
     });
 
-    let start = Instant::now();
-    let deadline = start + Duration::from_secs(args.duration_secs);
+    let duration = Duration::from_secs(args.duration_secs);
+    let start_barrier = Arc::new(Barrier::new(args.workers + 1));
     let mut handles = Vec::with_capacity(args.workers);
 
     for worker_id in 0..args.workers {
         let counters = Arc::clone(&counters);
         let sink_factory = Arc::clone(&sink_factory);
+        let start_barrier = Arc::clone(&start_barrier);
         let sql = args.transform_sql.clone();
         let kind = args.generator;
         let payload = generate_payload(kind, args.batch_lines, args.seed + worker_id as u64);
@@ -238,10 +240,15 @@ fn run_benchmark(args: RunArgs) -> Result<(), String> {
                 payload,
                 payload_len,
                 sql,
-                deadline,
+                duration,
+                start_barrier,
             )
         }));
     }
+
+    // Begin timing only after all workers finish setup and are ready to send.
+    start_barrier.wait();
+    let start = Instant::now();
 
     let mut first_err: Option<String> = None;
     for handle in handles {
@@ -289,7 +296,8 @@ fn run_worker(
     payload: Vec<u8>,
     payload_len: u64,
     transform_sql: String,
-    deadline: Instant,
+    duration: Duration,
+    start_barrier: Arc<Barrier>,
 ) -> Result<(), String> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -306,6 +314,8 @@ fn run_worker(
 
     let metadata = logfwd_bench::generators::make_metadata();
     let payload = bytes::Bytes::from(payload);
+    start_barrier.wait();
+    let deadline = Instant::now() + duration;
 
     while Instant::now() < deadline {
         let batch = match scanner.scan_detached(payload.clone()) {
@@ -484,7 +494,7 @@ fn render_output_yaml(output: &OutputConfig) -> String {
     let mut lines = vec![format!("type: {}", output.output_type)];
 
     if let Some(endpoint) = &output.endpoint {
-        lines.push(format!("endpoint: {endpoint}"));
+        lines.push(format!("endpoint: {}", redact_endpoint_userinfo(endpoint)));
     }
     if let Some(protocol) = &output.protocol {
         lines.push(format!("protocol: {protocol}"));
@@ -495,11 +505,31 @@ fn render_output_yaml(output: &OutputConfig) -> String {
     if let Some(request_mode) = &output.request_mode {
         lines.push(format!("request_mode: {request_mode}"));
     }
+    if let Some(format) = &output.format {
+        lines.push(format!("format: {format}"));
+    }
+    if let Some(path) = &output.path {
+        lines.push(format!("path: {path}"));
+    }
     if let Some(index) = &output.index {
         lines.push(format!("index: {index}"));
     }
     if let Some(tenant_id) = &output.tenant_id {
         lines.push(format!("tenant_id: {tenant_id}"));
+    }
+    if let Some(static_labels) = &output.static_labels {
+        lines.push("static_labels:".to_string());
+        let mut labels: Vec<_> = static_labels.iter().collect();
+        labels.sort_by(|(k1, _), (k2, _)| k1.cmp(k2));
+        for (k, v) in labels {
+            lines.push(format!("  {k}: {v}"));
+        }
+    }
+    if let Some(label_columns) = &output.label_columns {
+        lines.push("label_columns:".to_string());
+        for col in label_columns {
+            lines.push(format!("  - {col}"));
+        }
     }
     if let Some(auth) = &output.auth {
         if auth.bearer_token.is_some() || !auth.headers.is_empty() {
@@ -508,8 +538,13 @@ fn render_output_yaml(output: &OutputConfig) -> String {
         if auth.bearer_token.is_some() {
             lines.push("  bearer_token: <redacted>".to_string());
         }
-        for (key, _value) in &auth.headers {
-            lines.push(format!("  headers.{key}: <redacted>"));
+        if !auth.headers.is_empty() {
+            lines.push("  headers:".to_string());
+            let mut headers: Vec<_> = auth.headers.iter().collect();
+            headers.sort_by(|(k1, _), (k2, _)| k1.cmp(k2));
+            for (key, _value) in headers {
+                lines.push(format!("    {key}: <redacted>"));
+            }
         }
     }
 
@@ -518,6 +553,19 @@ fn render_output_yaml(output: &OutputConfig) -> String {
         .map(|line| format!("  {line}"))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn redact_endpoint_userinfo(endpoint: &str) -> String {
+    match reqwest::Url::parse(endpoint) {
+        Ok(mut parsed) => {
+            if !parsed.username().is_empty() || parsed.password().is_some() {
+                let _ = parsed.set_username("");
+                let _ = parsed.set_password(None);
+            }
+            parsed.to_string()
+        }
+        Err(_) => endpoint.to_string(),
+    }
 }
 
 fn print_flag_mapping() {
@@ -542,4 +590,60 @@ fn print_flag_mapping() {
     );
     println!("  3) Safety preview before sending traffic:");
     println!("     blast run ... --dry-run");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn redact_endpoint_userinfo_removes_credentials() {
+        let input = "http://alice:secret@example.com:4318/v1/logs?foo=bar";
+        let redacted = redact_endpoint_userinfo(input);
+        assert_eq!(redacted, "http://example.com:4318/v1/logs?foo=bar");
+    }
+
+    #[test]
+    fn render_output_yaml_redacts_secrets_and_keeps_all_supported_fields() {
+        let mut auth_headers = HashMap::new();
+        auth_headers.insert("Authorization".to_string(), "ApiKey secret-value".to_string());
+        auth_headers.insert("X-Custom".to_string(), "custom-secret".to_string());
+
+        let mut static_labels = HashMap::new();
+        static_labels.insert("env".to_string(), "prod".to_string());
+        static_labels.insert("region".to_string(), "us-central1".to_string());
+
+        let cfg = OutputConfig {
+            name: Some("bench".to_string()),
+            output_type: OutputType::Loki,
+            endpoint: Some("https://alice:secret@example.com/loki/api/v1/push".to_string()),
+            protocol: Some("http".to_string()),
+            compression: Some("gzip".to_string()),
+            request_mode: Some("streaming".to_string()),
+            format: Some(logfwd_config::Format::Json),
+            path: Some("/tmp/out.log".to_string()),
+            index: Some("bench-index".to_string()),
+            auth: Some(logfwd_config::AuthConfig {
+                bearer_token: Some("bearer-secret".to_string()),
+                headers: auth_headers,
+            }),
+            tenant_id: Some("tenant-a".to_string()),
+            static_labels: Some(static_labels),
+            label_columns: Some(vec!["service".to_string(), "host".to_string()]),
+        };
+
+        let rendered = render_output_yaml(&cfg);
+
+        assert!(rendered.contains("endpoint: https://example.com/loki/api/v1/push"));
+        assert!(rendered.contains("format: json"));
+        assert!(rendered.contains("path: /tmp/out.log"));
+        assert!(rendered.contains("static_labels:"));
+        assert!(rendered.contains("label_columns:"));
+        assert!(rendered.contains("headers:"));
+        assert!(rendered.contains("Authorization: <redacted>"));
+        assert!(rendered.contains("X-Custom: <redacted>"));
+        assert!(!rendered.contains("alice"));
+        assert!(!rendered.contains("secret"));
+        assert!(!rendered.contains("bearer-secret"));
+    }
 }
