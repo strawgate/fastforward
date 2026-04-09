@@ -1375,6 +1375,60 @@ mod tests {
             "Null timestamp should fall back to observed_time_ns"
         );
     }
+    /// Regression: Loki sink must read Arrow Timestamp(Nanosecond) columns
+    /// and use the actual timestamp value, not fall back to observed_time_ns.
+    /// Before the fix, the `DataType::Timestamp` arm was missing entirely and
+    /// hit the `_ => metadata.observed_time_ns` default.
+    #[test]
+    fn test_arrow_timestamp_nanosecond_column_used_as_loki_ts() {
+        use arrow::array::TimestampNanosecondArray;
+        use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+
+        let config = Arc::new(LokiConfig {
+            endpoint: "http://localhost".to_string(),
+            tenant_id: None,
+            static_labels: vec![],
+            label_columns: vec![],
+            headers: vec![],
+        });
+        let sink = LokiSink::new(
+            "test".to_string(),
+            config,
+            Arc::new(reqwest::Client::new()),
+            Arc::new(ComponentStats::new()),
+        );
+
+        let expected_ns: i64 = 1_705_314_600_000_000_000;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                field_names::TIMESTAMP_UNDERSCORE,
+                DataType::Timestamp(TimeUnit::Nanosecond, None),
+                true,
+            ),
+            Field::new("message", DataType::Utf8, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(TimestampNanosecondArray::from(vec![expected_ns])),
+                Arc::new(arrow::array::StringArray::from(vec!["hello"])),
+            ],
+        )
+        .unwrap();
+        let metadata = BatchMetadata {
+            resource_attrs: Arc::new(vec![]),
+            observed_time_ns: 99_999,
+        };
+
+        let stream_map = sink.build_stream_map(&batch, &metadata).unwrap();
+        let entries: Vec<LokiEntry> = stream_map.values().flatten().cloned().collect();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].0, expected_ns as u64,
+            "Timestamp(Nanosecond) value ({expected_ns}) must be used, not observed_time_ns ({})",
+            metadata.observed_time_ns
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

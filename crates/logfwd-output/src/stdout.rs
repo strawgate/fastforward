@@ -532,4 +532,87 @@ mod tests {
             "text fallback should be identical to json format"
         );
     }
+
+    /// Regression: console format with a Boolean column must not panic.
+    /// Before the fix, the extra-fields rendering hit `unreachable!()` for
+    /// non-string, non-numeric types.
+    #[test]
+    fn console_format_boolean_column_does_not_panic() {
+        use arrow::array::BooleanArray;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("message", DataType::Utf8, true),
+            Field::new("is_error", DataType::Boolean, true),
+        ]));
+        let msg = StringArray::from(vec![Some("hello")]);
+        let flag = BooleanArray::from(vec![Some(true)]);
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(msg), Arc::new(flag)]).unwrap();
+
+        let mut sink = StdoutSink::new(
+            "test-bool".to_string(),
+            StdoutFormat::Console,
+            Arc::new(ComponentStats::new()),
+        );
+        let mut out: Vec<u8> = Vec::new();
+        // Must not panic.
+        sink.write_batch_to(&batch, &make_metadata(), &mut out)
+            .unwrap();
+        let output = String::from_utf8(out).unwrap();
+        assert!(
+            output.contains("is_error=true"),
+            "boolean value should appear in output: {output:?}"
+        );
+    }
+
+    /// Regression: console format must recognise `_timestamp` as a timestamp
+    /// column. Before the fix, `_timestamp` was missing from the `find_col`
+    /// name list, so the timestamp was omitted from console output.
+    #[test]
+    fn console_format_underscore_timestamp_shown() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("_timestamp", DataType::Utf8, true),
+            Field::new("message", DataType::Utf8, true),
+        ]));
+        let ts = StringArray::from(vec![Some("2024-01-15T10:30:00Z")]);
+        let msg = StringArray::from(vec![Some("hello")]);
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(ts), Arc::new(msg)]).unwrap();
+
+        let mut sink = StdoutSink::new(
+            "test-ts".to_string(),
+            StdoutFormat::Console,
+            Arc::new(ComponentStats::new()),
+        );
+        let mut out: Vec<u8> = Vec::new();
+        sink.write_batch_to(&batch, &make_metadata(), &mut out)
+            .unwrap();
+        let output = String::from_utf8(out).unwrap();
+        assert!(
+            output.contains("10:30:00Z"),
+            "_timestamp value should appear in console output: {output:?}"
+        );
+    }
+
+    /// Regression: console format with `_raw` as the only content column must
+    /// show the content. Before the fix, `_raw` was not in the `find_col`
+    /// message variant list, producing empty console lines.
+    #[test]
+    fn console_format_raw_as_message_column() {
+        let schema = Arc::new(Schema::new(vec![Field::new("_raw", DataType::Utf8, true)]));
+        let raw = StringArray::from(vec![Some("raw log line here")]);
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(raw)]).unwrap();
+
+        let mut sink = StdoutSink::new(
+            "test-raw-console".to_string(),
+            StdoutFormat::Console,
+            Arc::new(ComponentStats::new()),
+        );
+        let mut out: Vec<u8> = Vec::new();
+        sink.write_batch_to(&batch, &make_metadata(), &mut out)
+            .unwrap();
+        let output = String::from_utf8(out).unwrap();
+        assert!(
+            output.contains("raw log line here"),
+            "_raw content should appear in console output: {output:?}"
+        );
+    }
 }

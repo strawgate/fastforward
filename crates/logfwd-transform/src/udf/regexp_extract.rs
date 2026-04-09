@@ -459,6 +459,45 @@ mod tests {
         );
     }
 
+    /// Regression: regexp_extract() must accept Utf8View input columns.
+    /// Before the fix, Utf8View was not in the signature and would cause a
+    /// type-mismatch error at planning time.
+    #[test]
+    fn test_regexp_extract_utf8view_input() {
+        use arrow::array::StringViewArray;
+
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "msg",
+            DataType::Utf8View,
+            true,
+        )]));
+        let msgs: Arc<dyn Array> = Arc::new(StringViewArray::from(vec![
+            Some("status=200 user=alice"),
+            Some("status=500 user=bob"),
+            None,
+        ]));
+        let batch = RecordBatch::try_new(schema, vec![msgs]).unwrap();
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let result = rt.block_on(run_sql(
+            batch,
+            "SELECT regexp_extract(msg, 'status=(\\d+)', 1) AS status FROM logs",
+        ));
+
+        let status = result
+            .column_by_name("status")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(status.value(0), "200");
+        assert_eq!(status.value(1), "500");
+        assert!(status.is_null(2));
+    }
+
     #[test]
     fn test_regexp_extract_rejects_array_pattern_argument() {
         let schema = Arc::new(Schema::new(vec![

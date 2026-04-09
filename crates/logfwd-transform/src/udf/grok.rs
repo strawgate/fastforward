@@ -523,6 +523,45 @@ mod tests {
         }
     }
 
+    /// Regression: grok() must accept Utf8View input columns.
+    /// Before the fix, Utf8View was not in the signature's OneOf list and the
+    /// UDF would fail with a type-mismatch error.
+    #[test]
+    fn test_grok_utf8view_input() {
+        use arrow::array::StringViewArray;
+
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "message",
+            DataType::Utf8View,
+            true,
+        )]));
+        let msgs: ArrayRef = Arc::new(StringViewArray::from(vec![
+            Some("GET /api/users 200"),
+            Some("POST /api/orders 500"),
+            None,
+        ]));
+        let batch = RecordBatch::try_new(schema, vec![msgs]).unwrap();
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let result = rt.block_on(run_sql(
+            batch,
+            "SELECT get_field(grok(message, '%{WORD:method} %{URIPATH:path} %{NUMBER:status}'), 'method') AS http_method FROM logs",
+        ));
+
+        let method = result
+            .column_by_name("http_method")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(method.value(0), "GET");
+        assert_eq!(method.value(1), "POST");
+        assert!(method.is_null(2));
+    }
+
     #[test]
     fn test_grok_rejects_array_pattern_argument() {
         let schema = Arc::new(Schema::new(vec![

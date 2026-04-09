@@ -694,6 +694,47 @@ mod tests {
         assert!(cc.is_null(1));
     }
 
+    /// Regression: geo_lookup() must accept Utf8View input columns.
+    /// Before the fix, the signature only included Utf8 and the UDF would
+    /// reject Utf8View arrays (e.g. from Parquet readers or certain transforms).
+    #[test]
+    fn geo_lookup_utf8view_input() {
+        use arrow::array::StringViewArray;
+
+        let db = make_db();
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "ip",
+            DataType::Utf8View,
+            true,
+        )]));
+        let arr: ArrayRef = Arc::new(StringViewArray::from(vec![
+            Some("1.2.3.4"),
+            Some("5.6.7.8"),
+            None,
+        ]));
+        let batch = RecordBatch::try_new(schema, vec![arr]).unwrap();
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let result = rt.block_on(run_sql(
+            batch,
+            db,
+            "SELECT get_field(geo_lookup(ip), 'country_code') AS cc FROM logs",
+        ));
+
+        let cc = result
+            .column_by_name("cc")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(cc.value(0), "US");
+        assert_eq!(cc.value(1), "DE");
+        assert!(cc.is_null(2));
+    }
+
     #[test]
     fn geo_lookup_mixed_rows() {
         let db = make_db();
