@@ -85,3 +85,47 @@ jobs:
         with:
           name: ebpf-capabilities-linux
           path: artifacts/ebpf-capabilities/
+
+  macos-ebpf:
+    name: macOS eBPF proto tests
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Host snapshot
+        run: |
+          uname -a
+          sysctl kern.osproductversion || true
+          rustc --version
+
+      - name: Test eBPF proto crate
+        run: cargo test -p logfwd-ebpf-proto --all-targets
+
+  windows-ebpf:
+    name: Windows eBPF proto tests
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Host snapshot
+        shell: pwsh
+        run: |
+          systeminfo | Select-Object -First 15
+          rustc --version
+
+      - name: Test eBPF proto crate
+        run: cargo test -p logfwd-ebpf-proto --all-targets
