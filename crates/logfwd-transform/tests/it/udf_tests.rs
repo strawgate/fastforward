@@ -29,6 +29,7 @@ fn test_hash_udf_string_view() {
         number_rows: 2,
         return_field: Arc::clone(&return_field),
         arg_fields: vec![],
+        config_options: Default::default(),
     };
 
     let result_view = udf.invoke_with_args(args_view).unwrap();
@@ -40,6 +41,7 @@ fn test_hash_udf_string_view() {
         number_rows: 2,
         return_field: Arc::clone(&return_field),
         arg_fields: vec![],
+        config_options: Default::default(),
     };
 
     let result_string = udf.invoke_with_args(args_string).unwrap();
@@ -81,6 +83,7 @@ fn test_hash_udf_large_utf8_with_null() {
         number_rows: 2,
         return_field: Arc::clone(&return_field),
         arg_fields: vec![],
+        config_options: Default::default(),
     };
 
     let result_large = udf.invoke_with_args(args_large).unwrap();
@@ -106,6 +109,7 @@ fn test_hash_udf_large_utf8_with_null() {
         number_rows: 2,
         return_field: Arc::clone(&return_field),
         arg_fields: vec![],
+        config_options: Default::default(),
     };
     let result_str = udf.invoke_with_args(args_str).unwrap();
     let str_arr = match result_str {
@@ -128,6 +132,7 @@ fn test_hash_udf_missing_args() {
         number_rows: 0,
         return_field: Arc::clone(&return_field),
         arg_fields: vec![],
+        config_options: Default::default(),
     };
     let result = udf.invoke_with_args(args);
     assert!(result.is_err());
@@ -151,6 +156,7 @@ fn test_hash_udf_extra_args() {
         number_rows: 1,
         return_field: Arc::clone(&return_field),
         arg_fields: vec![],
+        config_options: Default::default(),
     };
     let result = udf.invoke_with_args(args);
     assert!(result.is_err());
@@ -173,6 +179,7 @@ fn test_json_extract_udf_missing_args() {
         number_rows: 1,
         return_field: Arc::clone(&return_field),
         arg_fields: vec![],
+        config_options: Default::default(),
     };
     let result = udf.invoke_with_args(args);
     assert!(result.is_err());
@@ -196,6 +203,7 @@ fn test_json_extract_udf_extra_args() {
         number_rows: 1,
         return_field: Arc::clone(&return_field),
         arg_fields: vec![],
+        config_options: Default::default(),
     };
     let result = udf.invoke_with_args(args);
     assert!(result.is_err());
@@ -220,6 +228,7 @@ fn test_geo_lookup_udf_missing_args() {
         number_rows: 0,
         return_field: Arc::clone(&return_field),
         arg_fields: vec![],
+        config_options: Default::default(),
     };
     let result = udf.invoke_with_args(args);
     assert!(result.is_err());
@@ -247,6 +256,7 @@ fn test_geo_lookup_udf_extra_args() {
         number_rows: 1,
         return_field: Arc::clone(&return_field),
         arg_fields: vec![],
+        config_options: Default::default(),
     };
     let result = udf.invoke_with_args(args);
     assert!(result.is_err());
@@ -269,6 +279,7 @@ fn test_grok_udf_missing_args() {
         number_rows: 1,
         return_field: Arc::clone(&return_field),
         arg_fields: vec![],
+        config_options: Default::default(),
     };
     let result = udf.invoke_with_args(args);
     assert!(result.is_err());
@@ -292,6 +303,7 @@ fn test_grok_udf_extra_args() {
         number_rows: 1,
         return_field: Arc::clone(&return_field),
         arg_fields: vec![],
+        config_options: Default::default(),
     };
     let result = udf.invoke_with_args(args);
     assert!(result.is_err());
@@ -319,6 +331,7 @@ fn test_regexp_extract_udf_missing_args() {
         number_rows: 1,
         return_field: Arc::clone(&return_field),
         arg_fields: vec![],
+        config_options: Default::default(),
     };
     let result = udf.invoke_with_args(args);
     assert!(result.is_err());
@@ -342,6 +355,7 @@ fn test_regexp_extract_udf_extra_args() {
         number_rows: 1,
         return_field: Arc::clone(&return_field),
         arg_fields: vec![],
+        config_options: Default::default(),
     };
     let result = udf.invoke_with_args(args);
     assert!(result.is_err());
