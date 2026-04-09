@@ -423,7 +423,8 @@ fn structured_batch_preserves_boolean_type_and_dotted_attributes() {
         }],
     };
 
-    let batch = convert_request_to_batch(&request).expect("structured decode succeeds");
+    let batch = convert_request_to_batch(&request, field_names::DEFAULT_RESOURCE_PREFIX)
+        .expect("structured decode succeeds");
 
     let sampled = batch
         .column_by_name("sampled")
@@ -436,16 +437,16 @@ fn structured_batch_preserves_boolean_type_and_dotted_attributes() {
     assert!(sampled.value(0), "sampled=true must be preserved as bool");
 
     let service_name = batch
-        .column_by_name("service.name")
-        .expect("dotted attribute must keep original column name");
+        .column_by_name("resource.attributes.service.name")
+        .expect("resource attribute must be prefixed with resource.attributes.");
     let service_name = service_name
         .as_any()
         .downcast_ref::<StringArray>()
-        .expect("service.name should remain a flat string column");
+        .expect("resource.attributes.service.name should remain a flat string column");
     assert_eq!(service_name.value(0), "checkout-api");
     assert!(
-        batch.column_by_name("service_name").is_none(),
-        "dotted attributes must not require sanitized internal-name coupling"
+        batch.column_by_name("service.name").is_none(),
+        "resource attributes must not appear as bare keys"
     );
 }
 
@@ -470,10 +471,11 @@ fn structured_batch_preserves_resource_boolean_type() {
         }],
     };
 
-    let batch = convert_request_to_batch(&request).expect("structured decode succeeds");
+    let batch = convert_request_to_batch(&request, field_names::DEFAULT_RESOURCE_PREFIX)
+        .expect("structured decode succeeds");
     let sampled = batch
-        .column_by_name("resource.sampled")
-        .expect("resource.sampled must exist");
+        .column_by_name("resource.attributes.resource.sampled")
+        .expect("resource.attributes.resource.sampled must exist");
     assert_eq!(sampled.data_type(), &DataType::Boolean);
     let sampled = sampled
         .as_any()
@@ -610,7 +612,8 @@ fn record_attributes_override_resource_attributes_in_protobuf_paths() {
         "record attribute must override same-key resource attribute in JSON lines"
     );
 
-    let batch = convert_request_to_batch(&request).expect("structured batch decode");
+    let batch = convert_request_to_batch(&request, field_names::DEFAULT_RESOURCE_PREFIX)
+        .expect("structured batch decode");
     let service_name = batch
         .column_by_name("service.name")
         .expect("service.name column should exist");
@@ -2212,7 +2215,8 @@ fn batch_path_uses_observed_time_when_event_time_is_zero() {
         }],
     };
 
-    let batch = convert_request_to_batch(&request).expect("batch build must succeed");
+    let batch = convert_request_to_batch(&request, field_names::DEFAULT_RESOURCE_PREFIX)
+        .expect("batch build must succeed");
     let ts_col = batch
         .column_by_name(field_names::TIMESTAMP)
         .expect("_timestamp column must exist");

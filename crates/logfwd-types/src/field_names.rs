@@ -76,6 +76,63 @@ pub const TRACE_FLAGS: &str = "trace_flags";
 pub const TRACE_FLAGS_VARIANTS: &[&str] = &["flags"];
 
 // ---------------------------------------------------------------------------
+// Observed timestamp
+// ---------------------------------------------------------------------------
+
+/// Observed timestamp column — collector-set receive time in nanoseconds.
+///
+/// Written by the OTLP receiver for `observedTimeUnixNano`.
+pub const OBSERVED_TIMESTAMP: &str = "observed_timestamp";
+
+// ---------------------------------------------------------------------------
+// Severity number
+// ---------------------------------------------------------------------------
+
+/// Numeric severity column — OTLP severity number (1-24).
+///
+/// Written by the OTLP receiver for `severityNumber`.
+pub const SEVERITY_NUMBER: &str = "severity_number";
+
+// ---------------------------------------------------------------------------
+// Flags
+// ---------------------------------------------------------------------------
+
+/// Log record flags column — W3C trace flags (Int64).
+///
+/// Written by the OTLP receiver for `flags`.
+pub const FLAGS: &str = "flags";
+
+// ---------------------------------------------------------------------------
+// Instrumentation Scope
+// ---------------------------------------------------------------------------
+
+/// Instrumentation scope name column.
+///
+/// Written by the OTLP receiver for `InstrumentationScope.name`.
+pub const SCOPE_NAME: &str = "scope.name";
+
+/// Instrumentation scope version column.
+///
+/// Written by the OTLP receiver for `InstrumentationScope.version`.
+pub const SCOPE_VERSION: &str = "scope.version";
+
+// ---------------------------------------------------------------------------
+// Resource attribute prefix
+// ---------------------------------------------------------------------------
+
+/// Default prefix for resource attribute columns.
+///
+/// The OTLP receiver prefixes resource attribute keys with this string so
+/// output sinks can distinguish resource-level from log-level attributes.
+/// Example: OTLP `service.name` → column `resource.attributes.service.name`.
+pub const DEFAULT_RESOURCE_PREFIX: &str = "resource.attributes.";
+
+/// Legacy resource attribute prefix used before the `resource.attributes.`
+/// convention. Sinks check this as a fallback for backwards compatibility
+/// with older batches and config-level `resource_attrs`.
+pub const LEGACY_RESOURCE_PREFIX: &str = "_resource_";
+
+// ---------------------------------------------------------------------------
 // Type-conflict struct children (Arrow schema)
 // ---------------------------------------------------------------------------
 

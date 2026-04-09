@@ -338,5 +338,5 @@ pub(super) fn decode_otlp_logs_to_batch(body: &[u8]) -> Result<RecordBatch, Inpu
     let request = ExportLogsServiceRequest::decode(body)
         .map_err(|e| InputError::Receiver(format!("invalid protobuf: {e}")))?;
 
-    convert_request_to_batch(&request)
+    convert_request_to_batch(&request, field_names::DEFAULT_RESOURCE_PREFIX)
 }

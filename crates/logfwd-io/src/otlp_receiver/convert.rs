@@ -105,28 +105,41 @@ pub(super) fn convert_request_to_json_lines(request: &ExportLogsServiceRequest) 
 
 pub(super) fn convert_request_to_batch(
     request: &ExportLogsServiceRequest,
+    resource_prefix: &str,
 ) -> Result<RecordBatch, InputError> {
     let mut builder = StreamingBuilder::new(false);
     builder.begin_batch(Bytes::new());
 
     let timestamp_idx = builder.resolve_field(field_names::TIMESTAMP.as_bytes());
+    let observed_ts_idx = builder.resolve_field(field_names::OBSERVED_TIMESTAMP.as_bytes());
     let severity_idx = builder.resolve_field(field_names::SEVERITY.as_bytes());
+    let severity_num_idx = builder.resolve_field(field_names::SEVERITY_NUMBER.as_bytes());
     let body_idx = builder.resolve_field(field_names::BODY.as_bytes());
     let trace_id_idx = builder.resolve_field(field_names::TRACE_ID.as_bytes());
     let span_id_idx = builder.resolve_field(field_names::SPAN_ID.as_bytes());
+    let flags_idx = builder.resolve_field(field_names::FLAGS.as_bytes());
+    let scope_name_idx = builder.resolve_field(field_names::SCOPE_NAME.as_bytes());
+    let scope_version_idx = builder.resolve_field(field_names::SCOPE_VERSION.as_bytes());
     let mut hex_buf = Vec::with_capacity(64);
 
     for resource_logs in &request.resource_logs {
-        let mut resource_attrs = Vec::new();
+        // Collect resource attributes with the configured prefix.
+        let mut resource_attr_keys: Vec<String> = Vec::new();
+        let mut resource_attr_values: Vec<&AnyValue> = Vec::new();
         if let Some(ref resource) = resource_logs.resource {
             for attr in &resource.attributes {
                 if let Some(ref value) = attr.value {
-                    resource_attrs.push((&attr.key, value));
+                    resource_attr_keys.push(format!("{resource_prefix}{}", attr.key));
+                    resource_attr_values.push(value);
                 }
             }
         }
 
         for scope_logs in &resource_logs.scope_logs {
+            // Extract scope metadata once per ScopeLogs.
+            let scope_name = scope_logs.scope.as_ref().map(|s| s.name.as_str());
+            let scope_version = scope_logs.scope.as_ref().map(|s| s.version.as_str());
+
             for record in &scope_logs.log_records {
                 builder.begin_row();
 
@@ -143,30 +156,65 @@ pub(super) fn convert_request_to_batch(
                     }
                 }
 
+                // observed_time_unix_nano — always written separately.
+                if let Ok(obs_ts) = i64::try_from(record.observed_time_unix_nano)
+                    && obs_ts > 0
+                {
+                    builder.append_i64_value_by_idx(observed_ts_idx, obs_ts);
+                }
+
+                // severity_text
                 if !record.severity_text.is_empty() {
                     builder
                         .append_decoded_str_by_idx(severity_idx, record.severity_text.as_bytes());
                 }
 
+                // severity_number
+                if record.severity_number > 0 {
+                    builder
+                        .append_i64_value_by_idx(severity_num_idx, record.severity_number as i64);
+                }
+
+                // body
                 if let Some(ref body_val) = record.body {
                     append_any_value_as_string(&mut builder, body_idx, body_val, &mut hex_buf);
                 }
 
+                // log record attributes
                 for attr in &record.attributes {
                     if let Some(ref value) = attr.value {
                         append_attribute_value(&mut builder, &attr.key, value, &mut hex_buf);
                     }
                 }
 
-                for (key, value) in &resource_attrs {
+                // resource attributes (prefixed)
+                for (key, value) in resource_attr_keys.iter().zip(resource_attr_values.iter()) {
                     append_attribute_value(&mut builder, key, value, &mut hex_buf);
                 }
 
+                // trace context
                 if !record.trace_id.is_empty() {
                     append_hex_field(&mut builder, trace_id_idx, &record.trace_id, &mut hex_buf);
                 }
                 if !record.span_id.is_empty() {
                     append_hex_field(&mut builder, span_id_idx, &record.span_id, &mut hex_buf);
+                }
+
+                // flags
+                if record.flags > 0 {
+                    builder.append_i64_value_by_idx(flags_idx, record.flags as i64);
+                }
+
+                // scope metadata
+                if let Some(name) = scope_name
+                    && !name.is_empty()
+                {
+                    builder.append_decoded_str_by_idx(scope_name_idx, name.as_bytes());
+                }
+                if let Some(version) = scope_version
+                    && !version.is_empty()
+                {
+                    builder.append_decoded_str_by_idx(scope_version_idx, version.as_bytes());
                 }
 
                 builder.end_row();
