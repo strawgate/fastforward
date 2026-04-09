@@ -459,40 +459,14 @@ fn source_path_for<'a>(
 
 fn inject_source_path_metadata(chunk: &[u8], source_path: &std::path::Path, out: &mut Vec<u8>) {
     let source_path_bytes = source_path.to_string_lossy();
-    let source_path_bytes = source_path_bytes.as_bytes();
-    let mut pos = 0;
-    while pos < chunk.len() {
-        let eol = memchr::memchr(b'\n', &chunk[pos..]).map_or(chunk.len(), |o| pos + o);
-        let line = &chunk[pos..eol];
-        let first_nonws = line
-            .iter()
-            .position(|&b| !matches!(b, b' ' | b'\t' | b'\r'));
-        if let Some(obj_start) = first_nonws.filter(|&idx| line[idx] == b'{') {
-            let after_open = &line[obj_start + 1..];
-            // Detect empty object: only whitespace between `{` and `}`.
-            let is_empty_obj = after_open
-                .iter()
-                .position(|&b| !matches!(b, b' ' | b'\t' | b'\r' | b'\n'))
-                .is_some_and(|i| after_open[i] == b'}');
-            out.extend_from_slice(&line[..obj_start]);
-            out.extend_from_slice(b"{\"_source_path\":\"");
-            json_escape_bytes(source_path_bytes, out);
-            out.push(b'"');
-            if !is_empty_obj {
-                out.push(b',');
-            }
-            out.extend_from_slice(after_open);
-        } else {
-            out.extend_from_slice(line);
-        }
-        if eol < chunk.len() {
-            out.push(b'\n');
-        }
-        pos = eol + 1;
-    }
+    inject_json_metadata(chunk, b"_source_path", source_path_bytes.as_bytes(), out);
 }
 
 fn inject_sender_metadata(chunk: &[u8], sender: &[u8], out: &mut Vec<u8>) {
+    inject_json_metadata(chunk, b"_sender", sender, out);
+}
+
+fn inject_json_metadata(chunk: &[u8], key: &[u8], value: &[u8], out: &mut Vec<u8>) {
     let mut pos = 0;
     while pos < chunk.len() {
         let eol = memchr::memchr(b'\n', &chunk[pos..]).map_or(chunk.len(), |o| pos + o);
@@ -507,8 +481,10 @@ fn inject_sender_metadata(chunk: &[u8], sender: &[u8], out: &mut Vec<u8>) {
                 .position(|&b| !matches!(b, b' ' | b'\t' | b'\r' | b'\n'))
                 .is_some_and(|i| after_open[i] == b'}');
             out.extend_from_slice(&line[..obj_start]);
-            out.extend_from_slice(b"{\"_sender\":\"");
-            json_escape_bytes(sender, out);
+            out.extend_from_slice(b"{\"");
+            out.extend_from_slice(key);
+            out.extend_from_slice(b"\":\"");
+            json_escape_bytes(value, out);
             out.push(b'"');
             if !is_empty_obj {
                 out.push(b',');
