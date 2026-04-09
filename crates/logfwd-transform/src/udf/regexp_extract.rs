@@ -2,6 +2,8 @@
 //!
 //! Spark-compatible regex extraction. Returns the capture group at the given
 //! index (1-based), or the full match if index is 0. Returns NULL on no match.
+//! `string` and `pattern` accept Utf8, Utf8View, or LargeUtf8 expressions;
+//! `pattern` must still be a scalar literal at runtime.
 //!
 //! ```sql
 //! SELECT regexp_extract(message_str, 'status=(\d+)', 1) AS status FROM logs
@@ -24,11 +26,10 @@ use regex::Regex;
 
 /// UDF: regexp_extract(string, pattern, group_index) -> Utf8
 ///
-/// - `string`: the input column (Utf8)
-/// - `pattern`: regex pattern with capture groups (Utf8 literal)
-/// - `group_index`: 0 for full match, 1+ for capture groups (Int64)
-///
-/// Returns NULL when the pattern doesn't match or the group index is out of range.
+/// SQL shape: `regexp_extract(<text>, <regex-literal>, <group-index>)`.
+/// `<text>` and `<regex-literal>` may be Utf8, Utf8View, or LargeUtf8
+/// expressions; `<group-index>` is Int64 (`0` = full match, `1+` = capture).
+/// Returns NULL when the pattern does not match or the group index is out of range.
 #[derive(Debug)]
 pub struct RegexpExtractUdf {
     signature: Signature,

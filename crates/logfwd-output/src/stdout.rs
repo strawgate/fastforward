@@ -148,28 +148,25 @@ impl StdoutSink {
         let schema = batch.schema();
         let fields = schema.fields();
 
-        // Find well-known columns by name — canonical names first, then shared
-        // variant lists from `field_names` to avoid sink drift.
-        let ts_idx = fields.iter().position(|f| {
-            field_names::matches_any(
-                f.name(),
-                field_names::TIMESTAMP,
-                field_names::TIMESTAMP_VARIANTS,
-            ) || f.name() == "timestamp_str"
-        });
-        let level_idx = fields.iter().position(|f| {
-            field_names::matches_any(
-                f.name(),
-                field_names::SEVERITY,
-                field_names::SEVERITY_VARIANTS,
-            ) || f.name() == "level_str"
-        });
-        let msg_idx = fields.iter().position(|f| {
-            field_names::matches_any(f.name(), field_names::BODY, field_names::BODY_VARIANTS)
-                || f.name() == "message_str"
-                || f.name() == "msg_str"
-                || f.name() == field_names::RAW
-        });
+        // Resolve canonical names first, then variants, then conflict suffixes.
+        let ts_idx = find_preferred_column(
+            fields,
+            field_names::TIMESTAMP,
+            field_names::TIMESTAMP_VARIANTS,
+            &[],
+        );
+        let level_idx = find_preferred_column(
+            fields,
+            field_names::SEVERITY,
+            field_names::SEVERITY_VARIANTS,
+            &[],
+        );
+        let msg_idx = find_preferred_column(
+            fields,
+            field_names::BODY,
+            field_names::BODY_VARIANTS,
+            &[field_names::RAW],
+        );
 
         let cols = build_col_infos(batch);
 
@@ -317,6 +314,43 @@ fn safe_col_to_string<'a>(col: &'a dyn Array, row: usize) -> Cow<'a, str> {
         DataType::LargeUtf8 => Cow::Borrowed(col.as_string::<i64>().value(row)),
         _ => Cow::Owned(safe_array_value_to_string(col, row)),
     }
+}
+
+fn find_preferred_column(
+    fields: &arrow::datatypes::Fields,
+    canonical: &str,
+    variants: &[&str],
+    extra_fallback: &[&str],
+) -> Option<usize> {
+    if let Some(idx) = find_exact_column(fields, canonical) {
+        return Some(idx);
+    }
+    for &name in variants {
+        if let Some(idx) = find_exact_column(fields, name) {
+            return Some(idx);
+        }
+    }
+    for &name in extra_fallback {
+        if let Some(idx) = find_exact_column(fields, name) {
+            return Some(idx);
+        }
+    }
+
+    for base in std::iter::once(canonical)
+        .chain(variants.iter().copied())
+        .chain(extra_fallback.iter().copied())
+    {
+        let conflict_str = format!("{base}__str");
+        if let Some(idx) = find_exact_column(fields, conflict_str.as_str()) {
+            return Some(idx);
+        }
+    }
+
+    None
+}
+
+fn find_exact_column(fields: &arrow::datatypes::Fields, name: &str) -> Option<usize> {
+    fields.iter().position(|f| f.name() == name)
 }
 
 /// Convert an Arrow value to string without panicking or silently erasing errors.
@@ -656,6 +690,76 @@ mod tests {
         assert!(
             output.contains("large log line"),
             "LargeUtf8 message should appear in console output: {output:?}"
+        );
+    }
+
+    #[test]
+    fn console_format_prefers_canonical_message_over_raw() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(field_names::RAW, DataType::Utf8, true),
+            Field::new(field_names::BODY, DataType::Utf8, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec![Some("raw line")])),
+                Arc::new(StringArray::from(vec![Some("parsed message")])),
+            ],
+        )
+        .expect("valid batch");
+
+        let mut sink = StdoutSink::new(
+            "test-canonical-message".to_string(),
+            StdoutFormat::Console,
+            Arc::new(ComponentStats::new()),
+        );
+        let mut out: Vec<u8> = Vec::new();
+        sink.write_batch_to(&batch, &make_metadata(), &mut out)
+            .expect("console write");
+        let output = String::from_utf8(out).expect("utf8");
+        assert!(
+            output.contains("parsed message"),
+            "canonical message must win when message and _raw are both present: {output:?}"
+        );
+        assert!(
+            !output.contains("raw line"),
+            "_raw must not shadow canonical message: {output:?}"
+        );
+    }
+
+    #[test]
+    fn console_format_prefers_canonical_timestamp_over_variant() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(field_names::TIMESTAMP_UNDERSCORE, DataType::Utf8, true),
+            Field::new(field_names::TIMESTAMP, DataType::Utf8, true),
+            Field::new(field_names::BODY, DataType::Utf8, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec![Some("2024-01-01T00:00:00Z")])),
+                Arc::new(StringArray::from(vec![Some("2025-01-01T01:02:03Z")])),
+                Arc::new(StringArray::from(vec![Some("hello")])),
+            ],
+        )
+        .expect("valid batch");
+
+        let mut sink = StdoutSink::new(
+            "test-canonical-timestamp".to_string(),
+            StdoutFormat::Console,
+            Arc::new(ComponentStats::new()),
+        );
+        let mut out: Vec<u8> = Vec::new();
+        sink.write_batch_to(&batch, &make_metadata(), &mut out)
+            .expect("console write");
+        let output = String::from_utf8(out).expect("utf8");
+        assert!(
+            output.starts_with("01:02:03Z  hello"),
+            "canonical timestamp must be selected before _timestamp: {output:?}"
+        );
+        assert!(
+            !output.starts_with("00:00:00Z"),
+            "_timestamp variant must not shadow canonical timestamp in leading slot: {output:?}"
         );
     }
 }
