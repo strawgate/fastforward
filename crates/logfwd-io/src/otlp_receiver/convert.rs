@@ -512,7 +512,6 @@ mod verification {
 }
 
 /// Minimal hex encoding (avoid adding the `hex` crate).
-/// Only used in any_value_to_string for BytesValue (rare case).
 pub(super) mod hex {
     pub fn encode(bytes: &[u8]) -> String {
         const HEX_TABLE: &[u8; 16] = b"0123456789abcdef";
