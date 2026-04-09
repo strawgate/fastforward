@@ -1,5 +1,6 @@
 [toolchain]
-# Pin to the MSRV declared in Cargo.toml [workspace.package].
-# Bump this when the workspace rust-version changes.
-channel = "1.85"
+# Pin to the minimum Rust version that satisfies all workspace dependencies.
+# Note: Cargo.toml declares rust-version = "1.85" (MSRV), but transitive deps
+# (wide, safe_arch) currently require 1.89+. Bump this when deps change.
+channel = "1.89"
 components = ["clippy", "rustfmt"]
