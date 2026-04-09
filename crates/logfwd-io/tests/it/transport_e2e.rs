@@ -547,8 +547,8 @@ fn otlp_protobuf_roundtrip() {
         "expected level field, got: {text}"
     );
     assert!(
-        text.contains("\"message\":\"test message\""),
-        "expected message field, got: {text}"
+        text.contains("\"body\":\"test message\""),
+        "expected body field, got: {text}"
     );
     assert!(
         text.contains("\"env\":\"prod\""),
@@ -613,8 +613,8 @@ fn otlp_gzip_protobuf_roundtrip() {
         "expected level field, got: {text}"
     );
     assert!(
-        text.contains("\"message\":\"test gzip\""),
-        "expected message field, got: {text}"
+        text.contains("\"body\":\"test gzip\""),
+        "expected body field, got: {text}"
     );
     assert!(
         text.contains("\"env\":\"prod\""),

@@ -145,8 +145,8 @@ fn scan_line<B: ScanBuilder>(
     scratch: &mut alloc::vec::Vec<u8>,
 ) {
     builder.begin_row();
-    if config.keep_raw {
-        builder.append_raw(&buf[start..end]);
+    if config.captures_line() {
+        builder.append_line(&buf[start..end]);
     }
 
     // Find the opening '{' using bitmasks
@@ -595,20 +595,20 @@ mod tests {
     /// Minimal ScanBuilder for testing — captures fields as strings.
     struct TestBuilder {
         rows: Vec<Vec<(String, String)>>,
-        raws: Vec<Option<String>>,
+        lines: Vec<Option<String>>,
         current_row: Vec<(String, String)>,
         field_names: Vec<String>,
-        current_raw: Option<String>,
+        current_line: Option<String>,
     }
 
     impl TestBuilder {
         fn new() -> Self {
             Self {
                 rows: Vec::new(),
-                raws: Vec::new(),
+                lines: Vec::new(),
                 current_row: Vec::new(),
                 field_names: Vec::new(),
-                current_raw: None,
+                current_line: None,
             }
         }
     }
@@ -616,11 +616,11 @@ mod tests {
     impl ScanBuilder for TestBuilder {
         fn begin_row(&mut self) {
             self.current_row.clear();
-            self.current_raw = None;
+            self.current_line = None;
         }
         fn end_row(&mut self) {
             self.rows.push(self.current_row.clone());
-            self.raws.push(self.current_raw.take());
+            self.lines.push(self.current_line.take());
         }
         fn resolve_field(&mut self, name: &[u8]) -> usize {
             let name_str = core::str::from_utf8(name).unwrap().to_string();
@@ -656,8 +656,8 @@ mod tests {
             let name = self.field_names[idx].clone();
             self.current_row.push((name, "null".to_string()));
         }
-        fn append_raw(&mut self, val: &[u8]) {
-            self.current_raw = Some(String::from_utf8_lossy(val).to_string());
+        fn append_line(&mut self, val: &[u8]) {
+            self.current_line = Some(String::from_utf8_lossy(val).to_string());
         }
     }
 
@@ -944,7 +944,7 @@ mod tests {
     fn raw_non_json_lines() {
         let buf = b"plain text line 1\nplain text line 2\n";
         let config = ScanConfig {
-            keep_raw: true,
+            line_field_name: Some("message".to_string()),
             ..ScanConfig::default()
         };
         let mut builder = TestBuilder::new();
@@ -954,10 +954,10 @@ mod tests {
     }
 
     #[test]
-    fn keep_raw_with_json() {
+    fn captures_line_with_json() {
         let buf = br#"{"a":"b"}"#;
         let config = ScanConfig {
-            keep_raw: true,
+            line_field_name: Some("message".to_string()),
             ..ScanConfig::default()
         };
         let mut builder = TestBuilder::new();
@@ -965,21 +965,21 @@ mod tests {
 
         assert_eq!(builder.rows.len(), 1);
         assert!(builder.rows[0].iter().any(|(k, v)| k == "a" && v == "b"));
-        assert_eq!(builder.raws[0].as_deref(), Some(r#"{"a":"b"}"#));
+        assert_eq!(builder.lines[0].as_deref(), Some(r#"{"a":"b"}"#));
     }
 
     #[test]
-    fn keep_raw_non_json_captures_content() {
+    fn captures_line_non_json_content() {
         let buf = b"hello world\n";
         let config = ScanConfig {
-            keep_raw: true,
+            line_field_name: Some("message".to_string()),
             ..ScanConfig::default()
         };
         let mut builder = TestBuilder::new();
         scan_streaming(buf, &config, &mut builder);
 
         assert_eq!(builder.rows.len(), 1);
-        assert_eq!(builder.raws[0].as_deref(), Some("hello world"));
+        assert_eq!(builder.lines[0].as_deref(), Some("hello world"));
     }
 
     #[test]

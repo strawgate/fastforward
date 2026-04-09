@@ -58,6 +58,7 @@ pub struct OtlpSink {
     protocol: OtlpProtocol,
     compression: Compression,
     headers: Vec<(String, String)>,
+    message_field: String,
     pub(crate) encoder_buf: Vec<u8>,
     compress_buf: Vec<u8>,
     grpc_buf: Vec<u8>,
@@ -113,6 +114,7 @@ impl OtlpSink {
             protocol,
             compression,
             headers,
+            message_field: field_names::BODY.to_string(),
             encoder_buf: Vec::with_capacity(64 * 1024),
             compress_buf: Vec::with_capacity(64 * 1024),
             grpc_buf: Vec::with_capacity(64 * 1024),
@@ -120,6 +122,12 @@ impl OtlpSink {
             client,
             stats,
         })
+    }
+
+    #[inline]
+    pub fn with_message_field(mut self, message_field: String) -> Self {
+        self.message_field = message_field;
+        self
     }
 
     /// Encode a full ExportLogsServiceRequest from a RecordBatch.
@@ -186,7 +194,7 @@ impl OtlpSink {
         };
 
         // Resolve column roles and downcast arrays once for the whole batch.
-        let columns = resolve_batch_columns(batch);
+        let columns = resolve_batch_columns(batch, self.message_field.as_str());
 
         // Phase 1: encode all LogRecords and assign each row to a resource group.
         let mut records_buf: Vec<u8> = Vec::with_capacity(num_rows * 128);
@@ -372,7 +380,7 @@ impl OtlpSink {
             batch
         };
 
-        let columns = resolve_batch_columns(batch);
+        let columns = resolve_batch_columns(batch, self.message_field.as_str());
         self.encoder_buf.reserve(num_rows * 128);
 
         for row in 0..num_rows {
@@ -598,6 +606,7 @@ pub struct OtlpSinkFactory {
     protocol: OtlpProtocol,
     compression: Compression,
     headers: Vec<(String, String)>,
+    message_field: String,
     client: reqwest::Client,
     stats: Arc<ComponentStats>,
 }
@@ -610,6 +619,7 @@ impl OtlpSinkFactory {
         protocol: OtlpProtocol,
         compression: Compression,
         headers: Vec<(String, String)>,
+        message_field: String,
         stats: Arc<ComponentStats>,
     ) -> io::Result<Self> {
         let client = reqwest::Client::builder()
@@ -623,6 +633,7 @@ impl OtlpSinkFactory {
             protocol,
             compression,
             headers,
+            message_field,
             client,
             stats,
         })
@@ -631,7 +642,7 @@ impl OtlpSinkFactory {
 
 impl super::sink::SinkFactory for OtlpSinkFactory {
     fn create(&self) -> io::Result<Box<dyn super::sink::Sink>> {
-        Ok(Box::new(OtlpSink::new(
+        let sink = OtlpSink::new(
             self.name.clone(),
             self.endpoint.clone(),
             self.protocol,
@@ -639,7 +650,9 @@ impl super::sink::SinkFactory for OtlpSinkFactory {
             self.headers.clone(),
             self.client.clone(),
             Arc::clone(&self.stats),
-        )?))
+        )?
+        .with_message_field(self.message_field.clone());
+        Ok(Box::new(sink))
     }
 
     fn name(&self) -> &str {
@@ -714,9 +727,6 @@ struct BatchColumns<'a> {
     level_col: Option<(usize, OtlpStrCol<'a>)>,
     /// Downcast array for the primary message/body column.
     body_col: Option<(usize, OtlpStrCol<'a>)>,
-    /// Downcast array for the `_raw` column, used as a per-row body
-    /// fallback when `body_col` is null for that row.
-    raw_col: Option<(usize, OtlpStrCol<'a>)>,
     /// Downcast array for the `trace_id` column (32 hex chars → 16-byte OTLP field 9).
     trace_id_col: Option<(usize, OtlpStrCol<'a>)>,
     /// Downcast array for the `span_id` column (16 hex chars → 8-byte OTLP field 10).
@@ -739,13 +749,12 @@ fn resolve_otlp_str_col(col: &dyn Array) -> Option<OtlpStrCol<'_>> {
 }
 
 /// Scan the batch schema once and resolve column roles and downcast arrays.
-fn resolve_batch_columns(batch: &RecordBatch) -> BatchColumns<'_> {
+fn resolve_batch_columns<'a>(batch: &'a RecordBatch, message_field: &str) -> BatchColumns<'a> {
     let schema = batch.schema();
     let mut timestamp_col: Option<(usize, OtlpStrCol<'_>)> = None;
     let mut timestamp_num_col: Option<(usize, &dyn Array)> = None;
     let mut level_col: Option<(usize, OtlpStrCol<'_>)> = None;
     let mut body_col: Option<(usize, OtlpStrCol<'_>)> = None;
-    let mut raw_col: Option<(usize, OtlpStrCol<'_>)> = None;
     let mut trace_id_col: Option<(usize, OtlpStrCol<'_>)> = None;
     let mut span_id_col: Option<(usize, OtlpStrCol<'_>)> = None;
     let mut flags_col: Option<(usize, &PrimitiveArray<Int64Type>)> = None;
@@ -788,6 +797,14 @@ fn resolve_batch_columns(batch: &RecordBatch) -> BatchColumns<'_> {
                     excluded.push(idx);
                 }
             }
+            name if name == message_field => {
+                if body_col.is_none()
+                    && let Some(arr) = resolve_otlp_str_col(batch.column(idx).as_ref())
+                {
+                    body_col = Some((idx, arr));
+                    excluded.push(idx);
+                }
+            }
             name if field_names::matches_any(
                 name,
                 field_names::BODY,
@@ -799,14 +816,6 @@ fn resolve_batch_columns(batch: &RecordBatch) -> BatchColumns<'_> {
                 {
                     body_col = Some((idx, arr));
                     excluded.push(idx);
-                }
-            }
-            field_names::RAW => {
-                // Always excluded from attributes; used as per-row body fallback.
-                excluded.push(idx);
-                if raw_col.is_none() {
-                    raw_col =
-                        resolve_otlp_str_col(batch.column(idx).as_ref()).map(|arr| (idx, arr));
                 }
             }
             field_names::TRACE_ID => {
@@ -904,7 +913,6 @@ fn resolve_batch_columns(batch: &RecordBatch) -> BatchColumns<'_> {
         timestamp_num_col,
         level_col,
         body_col,
-        raw_col,
         trace_id_col,
         span_id_col,
         flags_col,
@@ -981,9 +989,8 @@ fn encode_row_as_log_record(
             (Severity::Unspecified, b"")
         };
 
-    let body: &str = match (columns.body_col.as_ref(), columns.raw_col.as_ref()) {
-        (Some((_, body)), _) if !body.is_null(row) => body.value(row),
-        (_, Some((_, raw))) if !raw.is_null(row) => raw.value(row),
+    let body: &str = match columns.body_col.as_ref() {
+        Some((_, body)) if !body.is_null(row) => body.value(row),
         _ => "",
     };
     let body_bytes = body.as_bytes();
@@ -2017,7 +2024,7 @@ mod tests {
     }
 
     #[test]
-    fn raw_column_falls_back_when_message_is_null_for_row() {
+    fn configured_message_field_controls_otlp_body_source() {
         use opentelemetry_proto::tonic::{
             collector::logs::v1::ExportLogsServiceRequest, common::v1::any_value::Value,
         };
@@ -2025,7 +2032,7 @@ mod tests {
 
         let schema = Arc::new(Schema::new(vec![
             Field::new("message", DataType::Utf8, true),
-            Field::new("_raw", DataType::Utf8, true),
+            Field::new("body", DataType::Utf8, true),
         ]));
         let batch = RecordBatch::try_new(
             schema,
@@ -2041,13 +2048,33 @@ mod tests {
 
         let metadata = make_metadata();
 
-        let mut handwritten = make_sink();
+        let mut handwritten = OtlpSink::new(
+            "test".to_string(),
+            "http://localhost:4318".to_string(),
+            OtlpProtocol::Http,
+            Compression::None,
+            vec![],
+            reqwest::Client::new(),
+            Arc::new(ComponentStats::new()),
+        )
+        .expect("handwritten sink")
+        .with_message_field("message".to_string());
         handwritten.encode_batch(&batch, &metadata);
         let handwritten_request =
             ExportLogsServiceRequest::decode(handwritten.encoder_buf.as_slice())
                 .expect("prost must decode handwritten output");
 
-        let mut generated = make_sink();
+        let mut generated = OtlpSink::new(
+            "test".to_string(),
+            "http://localhost:4318".to_string(),
+            OtlpProtocol::Http,
+            Compression::None,
+            vec![],
+            reqwest::Client::new(),
+            Arc::new(ComponentStats::new()),
+        )
+        .expect("generated sink")
+        .with_message_field("message".to_string());
         generated.encode_batch_generated_fast(&batch, &metadata);
         let generated_request = ExportLogsServiceRequest::decode(generated.encoder_buf.as_slice())
             .expect("prost must decode generated-fast output");
@@ -2079,8 +2106,8 @@ mod tests {
             })
             .collect();
 
-        assert_eq!(handwritten_bodies, vec!["message-body", "raw-fallback"]);
-        assert_eq!(generated_bodies, vec!["message-body", "raw-fallback"]);
+        assert_eq!(handwritten_bodies, vec!["message-body", ""]);
+        assert_eq!(generated_bodies, vec!["message-body", ""]);
     }
 
     /// Roundtrip with multiple rows to verify repeated LogRecord encoding.

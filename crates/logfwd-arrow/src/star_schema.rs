@@ -189,8 +189,8 @@ pub fn flat_to_star(batch: &RecordBatch) -> Result<StarSchema, ArrowError> {
             continue;
         }
 
-        // Skip _raw — internal only, not part of OTAP.
-        if name == "_raw" {
+        // Skip body — internal only, not part of OTAP.
+        if name == "body" {
             continue;
         }
 

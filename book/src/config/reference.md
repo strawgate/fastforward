@@ -275,7 +275,7 @@ The `format` field controls how raw bytes from the input are parsed into log rec
 | `auto` | Auto-detect (default). Tries CRI first, then JSON, then raw. |
 | `cri` | CRI container log format (`<timestamp> <stream> <flags> <message>`). Multi-line log reassembly via the `P` partial flag is supported. |
 | `json` | Newline-delimited JSON. Each line must be a single JSON object. |
-| `raw` | Treat each line as an opaque string stored in `_raw_str`. |
+| `raw` | Treat each line as an opaque string stored in `body`. |
 | `logfmt` | Key=value pairs (e.g. `level=info msg="hello"`). *Not yet implemented.* |
 | `console` | Human-readable coloured output for interactive debugging. Output mode only. |
 
@@ -454,7 +454,7 @@ Special columns added by the scanner / input format layer:
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `_raw` | string | Original input line (only when `keep_raw: true`, or when a non-JSON CRI line is wrapped for scanner safety). |
+| `body` | string | Original input line (when input line capture is enabled, e.g. `line_field: body`, or when a non-JSON CRI line is wrapped for scanner safety). |
 | `_timestamp` | string | Timestamp from the CRI header as an RFC 3339 string (CRI inputs only). |
 | `_stream` | string | CRI stream name (`stdout` / `stderr`). |
 | `_source_path` | string | Canonical file path for file-backed rows (JSON and CRI file inputs). |

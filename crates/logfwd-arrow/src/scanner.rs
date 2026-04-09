@@ -54,10 +54,10 @@ impl ScanBuilder for StreamingBuilder {
         self.append_null_by_idx(idx);
     }
     #[inline(always)]
-    fn append_raw(&mut self, line: &[u8]) {
+    fn append_line(&mut self, line: &[u8]) {
         // Explicitly call the inherent method to avoid any ambiguity
         // with this trait method of the same name.
-        StreamingBuilder::append_raw(self, line);
+        StreamingBuilder::append_line(self, line);
     }
 }
 
@@ -80,7 +80,7 @@ impl Scanner {
     /// Create a new streaming scanner with the given configuration.
     pub fn new(config: ScanConfig) -> Self {
         Scanner {
-            builder: StreamingBuilder::new(config.keep_raw),
+            builder: StreamingBuilder::new(config.line_field_name.clone()),
             config,
             resource_attrs: Vec::new(),
         }
@@ -256,7 +256,7 @@ mod tests {
                 aliases: vec![],
             }],
             extract_all: false,
-            keep_raw: false,
+            line_field_name: None,
             validate_utf8: false,
         };
         let batch = Scanner::new(config)
@@ -271,17 +271,17 @@ mod tests {
         assert!(batch.column_by_name("b").is_none());
     }
     #[test]
-    fn test_keep_raw() {
+    fn test_line_capture() {
         let config = ScanConfig {
             wanted_fields: vec![],
             extract_all: true,
-            keep_raw: true,
+            line_field_name: Some("body".to_string()),
             validate_utf8: false,
         };
         let batch = Scanner::new(config)
             .scan_detached(Bytes::from(b"{\"msg\":\"hi\"}\n".to_vec()))
             .unwrap();
-        assert!(batch.column_by_name("_raw").is_some());
+        assert!(batch.column_by_name("body").is_some());
     }
 
     #[test]
@@ -555,25 +555,25 @@ mod tests {
     }
 
     #[test]
-    fn test_streaming_keep_raw() {
+    fn test_streaming_line_capture() {
         let config = ScanConfig {
             wanted_fields: vec![],
             extract_all: true,
-            keep_raw: true,
+            line_field_name: Some("body".to_string()),
             validate_utf8: false,
         };
         let batch = Scanner::new(config)
             .scan(Bytes::from_static(b"{\"msg\":\"hi\"}\n"))
             .unwrap();
         assert!(
-            batch.column_by_name("_raw").is_some(),
-            "_raw column must be present when keep_raw=true"
+            batch.column_by_name("body").is_some(),
+            "body column must be present when line_capture=true"
         );
-        let raw_col = batch.column_by_name("_raw").unwrap();
+        let raw_col = batch.column_by_name("body").unwrap();
         let raw_arr = raw_col
             .as_any()
             .downcast_ref::<arrow::array::StringViewArray>()
-            .expect("_raw must be StringViewArray in Scanner");
+            .expect("body must be StringViewArray in Scanner");
         assert_eq!(raw_arr.value(0), "{\"msg\":\"hi\"}");
     }
 

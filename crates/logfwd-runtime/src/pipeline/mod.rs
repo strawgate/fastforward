@@ -948,7 +948,7 @@ output:
         let mut scanner = Scanner::new(ScanConfig {
             wanted_fields: vec![],
             extract_all: true,
-            keep_raw: false,
+            line_field_name: None,
             validate_utf8: false,
         });
         let batch = scanner.scan_detached(Bytes::from(bytes.clone())).unwrap();
@@ -2682,7 +2682,7 @@ mod format_integration_tests {
         let config = ScanConfig {
             wanted_fields: vec![],
             extract_all: true,
-            keep_raw: false,
+            line_field_name: None,
             validate_utf8: false,
         };
         let mut scanner = Scanner::new(config);
@@ -2693,20 +2693,20 @@ mod format_integration_tests {
         assert!(batch.schema().field_with_name("msg").is_ok());
     }
 
-    /// Raw format: lines captured as _raw when keep_raw is true.
+    /// Raw format: lines captured as body when line_capture is true.
     #[test]
     fn raw_format_captures_lines() {
         let input = b"plain text line 1\nplain text line 2\n";
         let config = ScanConfig {
             wanted_fields: vec![],
             extract_all: true,
-            keep_raw: true,
+            line_field_name: Some("body".to_string()),
             validate_utf8: false,
         };
         let mut scanner = Scanner::new(config);
         let batch = scanner.scan_detached(Bytes::from(input.to_vec())).unwrap();
         assert_eq!(batch.num_rows(), 2);
-        assert!(batch.schema().field_with_name("_raw").is_ok());
+        assert!(batch.schema().field_with_name("body").is_ok());
     }
 
     /// CRI format: message extracted, timestamp/stream/flag stripped.
@@ -2721,7 +2721,7 @@ mod format_integration_tests {
         let config = ScanConfig {
             wanted_fields: vec![],
             extract_all: true,
-            keep_raw: false,
+            line_field_name: None,
             validate_utf8: false,
         };
         let mut scanner = Scanner::new(config);
@@ -2743,7 +2743,7 @@ mod format_integration_tests {
         let config = ScanConfig {
             wanted_fields: vec![],
             extract_all: true,
-            keep_raw: false,
+            line_field_name: None,
             validate_utf8: false,
         };
         let mut scanner = Scanner::new(config);
@@ -2792,10 +2792,10 @@ mod proptest_pipeline {
             let config = ScanConfig {
                 wanted_fields: vec![],
                 extract_all: true,
-                keep_raw: false,
+                line_field_name: None,
                 validate_utf8: false,
             };
-            let mut scanner_whole = Scanner::new(ScanConfig { wanted_fields: vec![], extract_all: true, keep_raw: false, validate_utf8: false });
+            let mut scanner_whole = Scanner::new(ScanConfig { wanted_fields: vec![], extract_all: true, line_field_name: None, validate_utf8: false });
             let batch_whole = scanner_whole.scan_detached(Bytes::from(ndjson.clone())).unwrap();
 
             // Split into two chunks with remainder handling
@@ -2830,7 +2830,7 @@ mod proptest_pipeline {
                 buf.extend_from_slice(&combined);
             }
 
-            let config2 = ScanConfig { wanted_fields: vec![], extract_all: true, keep_raw: false, validate_utf8: false }; let mut scanner_split = Scanner::new(config2);
+            let config2 = ScanConfig { wanted_fields: vec![], extract_all: true, line_field_name: None, validate_utf8: false }; let mut scanner_split = Scanner::new(config2);
             let batch_split = scanner_split.scan_detached(Bytes::from(buf.clone())).unwrap();
 
             prop_assert_eq!(

@@ -32,7 +32,7 @@ fuzz_target!(|data: &[u8]| {
     let config = ScanConfig {
         wanted_fields: vec![],
         extract_all: true,
-        keep_raw: false,
+        line_field_name: None,
         validate_utf8: false,
     };
     let mut scanner = Scanner::new(config);
@@ -52,7 +52,7 @@ fuzz_target!(|data: &[u8]| {
             },
         ],
         extract_all: false,
-        keep_raw: false,
+        line_field_name: None,
         validate_utf8: false,
     };
     let mut scanner2 = Scanner::new(config2);
@@ -65,7 +65,7 @@ fuzz_target!(|data: &[u8]| {
     let config_v = ScanConfig {
         wanted_fields: vec![],
         extract_all: true,
-        keep_raw: false,
+        line_field_name: None,
         validate_utf8: true,
     };
     let mut scanner_v = Scanner::new(config_v);
@@ -86,7 +86,7 @@ fuzz_target!(|data: &[u8]| {
             },
         ],
         extract_all: false,
-        keep_raw: false,
+        line_field_name: None,
         validate_utf8: true,
     };
     let mut scanner2_v = Scanner::new(config2_v);

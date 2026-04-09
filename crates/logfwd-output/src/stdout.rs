@@ -39,6 +39,7 @@ pub enum StdoutFormat {
 pub struct StdoutSink {
     name: String,
     format: StdoutFormat,
+    message_field: String,
     buf: Vec<u8>,
     /// Reusable buffer for collecting the full batch output before writing to
     /// async stdout.  Separate from `buf` which is used as row-level scratch
@@ -50,6 +51,15 @@ pub struct StdoutSink {
 
 impl StdoutSink {
     pub fn new(name: String, format: StdoutFormat, stats: Arc<ComponentStats>) -> Self {
+        Self::with_message_field(name, format, field_names::BODY.to_string(), stats)
+    }
+
+    pub fn with_message_field(
+        name: String,
+        format: StdoutFormat,
+        message_field: String,
+        stats: Arc<ComponentStats>,
+    ) -> Self {
         let color = format == StdoutFormat::Console
             && std::env::var_os("NO_COLOR").is_none()
             // SAFETY: isatty is a simple query on a well-known fd; no invariants to uphold.
@@ -57,6 +67,7 @@ impl StdoutSink {
         StdoutSink {
             name,
             format,
+            message_field,
             buf: Vec::with_capacity(8192),
             output_buf: Vec::with_capacity(8192),
             color,
@@ -78,13 +89,13 @@ impl StdoutSink {
 
         match self.format {
             StdoutFormat::Text => {
-                // Try to find _raw column.
-                let raw_idx = batch
+                // Try to find configured message column.
+                let msg_idx = batch
                     .schema()
                     .fields()
                     .iter()
-                    .position(|f| f.name() == "_raw");
-                if let Some(idx) = raw_idx {
+                    .position(|f| f.name() == self.message_field.as_str());
+                if let Some(idx) = msg_idx {
                     let col = batch.column(idx);
                     for row in 0..num_rows {
                         if !col.is_null(row) {
@@ -227,7 +238,8 @@ impl StdoutSink {
             // Remaining fields as key=value pairs (dim).
             let mut has_extra = false;
             for col in &cols {
-                // Skip the well-known columns and _raw. Check ALL variant
+                // Skip the well-known columns and configured message column.
+                // Check ALL variant
                 // indices — find_col may have matched a different variant
                 // (e.g. message_str vs message_int).
                 let col_matches_well_known = col.json_variants.iter().any(|v| match v {
@@ -238,7 +250,7 @@ impl StdoutSink {
                     }
                     ColVariant::StructField { .. } => false,
                 });
-                if col.field_name == "_raw" || col_matches_well_known {
+                if col.field_name == self.message_field || col_matches_well_known {
                     continue;
                 }
 
@@ -428,15 +440,26 @@ impl Sink for StdoutSink {
 pub struct StdoutSinkFactory {
     name: String,
     format: StdoutFormat,
+    message_field: String,
     stats: Arc<ComponentStats>,
 }
 
 impl StdoutSinkFactory {
     /// Create a new factory for stdout sinks.
     pub fn new(name: String, format: StdoutFormat, stats: Arc<ComponentStats>) -> Self {
+        Self::with_message_field(name, format, field_names::BODY.to_string(), stats)
+    }
+
+    pub fn with_message_field(
+        name: String,
+        format: StdoutFormat,
+        message_field: String,
+        stats: Arc<ComponentStats>,
+    ) -> Self {
         StdoutSinkFactory {
             name,
             format,
+            message_field,
             stats,
         }
     }
@@ -444,11 +467,17 @@ impl StdoutSinkFactory {
 
 impl SinkFactory for StdoutSinkFactory {
     fn create(&self) -> io::Result<Box<dyn Sink>> {
-        Ok(Box::new(StdoutSink::new(
-            self.name.clone(),
-            self.format,
-            Arc::clone(&self.stats),
-        )))
+        let sink = if self.message_field == field_names::BODY {
+            StdoutSink::new(self.name.clone(), self.format, Arc::clone(&self.stats))
+        } else {
+            StdoutSink::with_message_field(
+                self.name.clone(),
+                self.format,
+                self.message_field.clone(),
+                Arc::clone(&self.stats),
+            )
+        };
+        Ok(Box::new(sink))
     }
 
     fn name(&self) -> &str {

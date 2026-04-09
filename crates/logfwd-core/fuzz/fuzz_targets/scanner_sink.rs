@@ -21,7 +21,7 @@ fn run_sinks(data: &[u8], validate_utf8: bool) {
     let mut scanner = Scanner::new(ScanConfig {
         wanted_fields: vec![],
         extract_all: true,
-        keep_raw: false,
+        line_field_name: None,
         validate_utf8,
     });
     let Ok(batch) = scanner.scan_detached(bytes::Bytes::copy_from_slice(data)) else { return; };
