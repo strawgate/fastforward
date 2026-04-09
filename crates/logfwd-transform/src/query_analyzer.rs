@@ -99,11 +99,11 @@ impl QueryAnalyzer {
             }
 
             // Walk ORDER BY — columns may appear only here (not in SELECT or WHERE).
-            if let Some(ref order_by) = query.order_by {
-                if let sqlast::OrderByKind::Expressions(exprs) = &order_by.kind {
-                    for ob in exprs {
-                        collect_column_refs(&ob.expr, &mut referenced_columns);
-                    }
+            if let Some(ref order_by) = query.order_by
+                && let sqlast::OrderByKind::Expressions(exprs) = &order_by.kind
+            {
+                for ob in exprs {
+                    collect_column_refs(&ob.expr, &mut referenced_columns);
                 }
             }
         } else {
