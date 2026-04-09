@@ -438,7 +438,7 @@ fn resolve_output_config(args: &RunArgs) -> Result<OutputConfig, String> {
 }
 
 fn load_output_from_config(
-    config_path: &PathBuf,
+    config_path: &Path,
     pipeline: Option<&str>,
     output_index: usize,
 ) -> Result<OutputConfig, String> {
