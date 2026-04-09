@@ -1524,7 +1524,7 @@ fn scatter_resource_attrs(
                     for (row, slot) in v.iter_mut().enumerate().take(num_rows) {
                         let rid = resource_ids.value(row);
                         if let Some(val) = rid_to_val.get(&rid) {
-                            *slot = val.clone();
+                            *slot = *val;
                         }
                     }
                 }
@@ -1535,7 +1535,7 @@ fn scatter_resource_attrs(
                     for (row, slot) in v.iter_mut().enumerate().take(num_rows) {
                         let rid = resource_ids.value(row);
                         if let Some(val) = rid_to_val.get(&rid) {
-                            *slot = val.clone();
+                            *slot = *val;
                         }
                     }
                 }
@@ -1546,7 +1546,7 @@ fn scatter_resource_attrs(
                     for (row, slot) in v.iter_mut().enumerate().take(num_rows) {
                         let rid = resource_ids.value(row);
                         if let Some(val) = rid_to_val.get(&rid) {
-                            *slot = val.clone();
+                            *slot = *val;
                         }
                     }
                 }

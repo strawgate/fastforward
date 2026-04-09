@@ -968,6 +968,30 @@ fn test_query_analyzer_joined_derived_relation_column_refs() {
     );
 }
 
+#[test]
+fn test_query_analyzer_table_function_args_column_refs() {
+    let with_table_args = QueryAnalyzer::new("SELECT message FROM logs(level, host)").unwrap();
+    assert!(
+        with_table_args.referenced_columns.contains("level"),
+        "table-args column must be in referenced_columns"
+    );
+    assert!(
+        with_table_args.referenced_columns.contains("host"),
+        "table-args column must be in referenced_columns"
+    );
+
+    let with_table_function =
+        QueryAnalyzer::new("SELECT message FROM TABLE(my_tvf(level, host))").unwrap();
+    assert!(
+        with_table_function.referenced_columns.contains("level"),
+        "table-function arg column must be in referenced_columns"
+    );
+    assert!(
+        with_table_function.referenced_columns.contains("host"),
+        "table-function arg column must be in referenced_columns"
+    );
+}
+
 // -----------------------------------------------------------------------
 
 /// Verify that a stable schema does NOT trigger repeated context recreation

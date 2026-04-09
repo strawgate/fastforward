@@ -1304,7 +1304,7 @@ fn redact_url(endpoint: &str) -> String {
         }
     } else if let Some(at) = endpoint.rfind('@') {
         // Last-resort redaction for malformed URLs: hide authority userinfo.
-        let authority_start = endpoint.find("://").map(|idx| idx + 3).unwrap_or(0);
+        let authority_start = endpoint.find("://").map_or(0, |idx| idx + 3);
         let prefix = &endpoint[..authority_start];
         let suffix = &endpoint[at + 1..];
         format!("{prefix}{REDACTED_URL_USERINFO}@{suffix}")

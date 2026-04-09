@@ -415,6 +415,11 @@ fn walk_table_factor(
     except_fields: &mut Vec<String>,
 ) {
     match factor {
+        sqlast::TableFactor::Table { args, .. } => {
+            if let Some(args) = args {
+                collect_function_args(&args.args, referenced_columns);
+            }
+        }
         sqlast::TableFactor::Derived { subquery, .. } => {
             let mut nested_where = None;
             walk_query(
@@ -434,6 +439,68 @@ fn walk_table_factor(
                 uses_select_star,
                 except_fields,
             );
+        }
+        sqlast::TableFactor::TableFunction { expr, .. } => {
+            collect_column_refs(expr, referenced_columns);
+        }
+        sqlast::TableFactor::Function { args, .. } => {
+            collect_function_args(args, referenced_columns);
+        }
+        sqlast::TableFactor::UNNEST { array_exprs, .. } => {
+            for expr in array_exprs {
+                collect_column_refs(expr, referenced_columns);
+            }
+        }
+        sqlast::TableFactor::Pivot {
+            table,
+            aggregate_functions,
+            value_column,
+            value_source,
+            default_on_null,
+            ..
+        } => {
+            walk_table_factor(table, referenced_columns, uses_select_star, except_fields);
+            for agg in aggregate_functions {
+                collect_column_refs(&agg.expr, referenced_columns);
+            }
+            for col in value_column {
+                referenced_columns.insert(col.value.clone());
+            }
+            match value_source {
+                sqlast::PivotValueSource::List(values) => {
+                    for value in values {
+                        collect_column_refs(&value.expr, referenced_columns);
+                    }
+                }
+                sqlast::PivotValueSource::Any(order_by) => {
+                    for ob in order_by {
+                        collect_column_refs(&ob.expr, referenced_columns);
+                    }
+                }
+                sqlast::PivotValueSource::Subquery(query) => {
+                    let mut nested_where = None;
+                    walk_query(
+                        query,
+                        referenced_columns,
+                        uses_select_star,
+                        except_fields,
+                        &mut nested_where,
+                    );
+                }
+            }
+            if let Some(expr) = default_on_null {
+                collect_column_refs(expr, referenced_columns);
+            }
+        }
+        sqlast::TableFactor::Unpivot { table, columns, .. } => {
+            walk_table_factor(table, referenced_columns, uses_select_star, except_fields);
+            for col in columns {
+                referenced_columns.insert(col.value.clone());
+            }
+        }
+        sqlast::TableFactor::JsonTable { json_expr, .. }
+        | sqlast::TableFactor::OpenJsonTable { json_expr, .. } => {
+            collect_column_refs(json_expr, referenced_columns);
         }
         _ => {}
     }
@@ -515,6 +582,31 @@ fn collect_join_constraint_columns(
     }
 }
 
+fn collect_function_arg_refs(arg: &sqlast::FunctionArg, cols: &mut HashSet<String>) {
+    match arg {
+        sqlast::FunctionArg::Unnamed(sqlast::FunctionArgExpr::Expr(e))
+        | sqlast::FunctionArg::Named {
+            arg: sqlast::FunctionArgExpr::Expr(e),
+            ..
+        } => {
+            collect_column_refs(e, cols);
+        }
+        sqlast::FunctionArg::ExprNamed { name, arg, .. } => {
+            collect_column_refs(name, cols);
+            if let sqlast::FunctionArgExpr::Expr(e) = arg {
+                collect_column_refs(e, cols);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_function_args(args: &[sqlast::FunctionArg], cols: &mut HashSet<String>) {
+    for arg in args {
+        collect_function_arg_refs(arg, cols);
+    }
+}
+
 /// Recursively collect column name references from a SQL expression.
 fn collect_column_refs(expr: &SqlExpr, cols: &mut HashSet<String>) {
     match expr {
@@ -538,18 +630,7 @@ fn collect_column_refs(expr: &SqlExpr, cols: &mut HashSet<String>) {
             match &func.args {
                 sqlast::FunctionArguments::List(arg_list) => {
                     for arg in &arg_list.args {
-                        match arg {
-                            sqlast::FunctionArg::Unnamed(sqlast::FunctionArgExpr::Expr(e)) => {
-                                collect_column_refs(e, cols);
-                            }
-                            sqlast::FunctionArg::Named {
-                                arg: sqlast::FunctionArgExpr::Expr(e),
-                                ..
-                            } => {
-                                collect_column_refs(e, cols);
-                            }
-                            _ => {}
-                        }
+                        collect_function_arg_refs(arg, cols);
                     }
                 }
                 sqlast::FunctionArguments::None => {}
