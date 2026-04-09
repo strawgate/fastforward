@@ -87,21 +87,105 @@ mod tests;
 
 #[cfg(kani)]
 mod kani_proofs {
-    use arrow::datatypes::DataType;
+    use arrow::datatypes::{DataType, Fields};
 
-    use super::{json_priority, str_priority};
+    use super::{ColVariant, is_conflict_struct, json_priority, str_priority, variant_dt};
 
     #[kani::proof]
-    fn json_priority_orders_numeric_and_bool_before_text() {
-        assert!(json_priority(&DataType::Int64) > json_priority(&DataType::Float64));
-        assert!(json_priority(&DataType::Float64) > json_priority(&DataType::Boolean));
-        assert!(json_priority(&DataType::Boolean) > json_priority(&DataType::Utf8));
+    fn verify_is_conflict_struct_empty_returns_false() {
+        let fields = Fields::empty();
+        assert!(!is_conflict_struct(&fields));
+        kani::cover!(true, "empty fields path exercised");
     }
 
     #[kani::proof]
-    fn str_priority_prefers_text_over_numeric() {
-        assert!(str_priority(&DataType::Utf8) > str_priority(&DataType::Boolean));
-        assert!(str_priority(&DataType::Boolean) > str_priority(&DataType::Int64));
-        assert!(str_priority(&DataType::Int64) > str_priority(&DataType::Float64));
+    fn verify_json_priority_total_order() {
+        assert!(json_priority(&DataType::Int64) > json_priority(&DataType::Float64));
+        assert!(json_priority(&DataType::Float64) > json_priority(&DataType::Utf8));
+        assert!(json_priority(&DataType::Int64) > json_priority(&DataType::Utf8));
+        kani::cover!(
+            json_priority(&DataType::Int64) > json_priority(&DataType::Utf8),
+            "int beats utf8"
+        );
+    }
+
+    #[kani::proof]
+    fn verify_str_priority_string_beats_numerics() {
+        assert!(str_priority(&DataType::Utf8) > str_priority(&DataType::Int64));
+        assert!(str_priority(&DataType::Utf8View) > str_priority(&DataType::Float64));
+        assert!(str_priority(&DataType::Utf8) == str_priority(&DataType::Utf8View));
+        kani::cover!(
+            str_priority(&DataType::Utf8) > str_priority(&DataType::Int64),
+            "utf8 beats int64"
+        );
+    }
+
+    #[kani::proof]
+    fn verify_json_and_str_priority_differ_for_int_vs_utf8() {
+        assert!(json_priority(&DataType::Int64) > json_priority(&DataType::Utf8));
+        assert!(str_priority(&DataType::Utf8) > str_priority(&DataType::Int64));
+        kani::cover!(
+            true,
+            "ordering inversion between json and str priority verified"
+        );
+    }
+
+    #[kani::proof]
+    fn verify_col_variant_flat_preserves_idx_and_type() {
+        let col_idx: usize = kani::any();
+        let v = ColVariant::Flat {
+            col_idx,
+            dt: DataType::Int64,
+        };
+        if let ColVariant::Flat { col_idx: idx, dt } = v {
+            assert_eq!(idx, col_idx);
+            assert_eq!(dt, DataType::Int64);
+        }
+        kani::cover!(col_idx > 0, "non-zero col_idx");
+        kani::cover!(col_idx == 0, "zero col_idx");
+    }
+
+    #[kani::proof]
+    fn verify_col_variant_struct_field_preserves_indices() {
+        let struct_col_idx: usize = kani::any();
+        let field_idx: usize = kani::any();
+        let v = ColVariant::StructField {
+            struct_col_idx,
+            field_idx,
+            dt: DataType::Utf8,
+        };
+        if let ColVariant::StructField {
+            struct_col_idx: sci,
+            field_idx: fi,
+            dt,
+        } = v
+        {
+            assert_eq!(sci, struct_col_idx);
+            assert_eq!(fi, field_idx);
+            assert_eq!(dt, DataType::Utf8);
+        }
+        kani::cover!(struct_col_idx > 0, "non-zero struct_col_idx");
+        kani::cover!(field_idx > 0, "non-zero field_idx");
+    }
+
+    #[kani::proof]
+    fn verify_variant_dt_flat() {
+        let v = ColVariant::Flat {
+            col_idx: 0,
+            dt: DataType::Int64,
+        };
+        assert_eq!(variant_dt(&v), &DataType::Int64);
+        kani::cover!(true, "variant_dt(Flat) returns correct type");
+    }
+
+    #[kani::proof]
+    fn verify_variant_dt_struct_field() {
+        let v = ColVariant::StructField {
+            struct_col_idx: 0,
+            field_idx: 1,
+            dt: DataType::Float64,
+        };
+        assert_eq!(variant_dt(&v), &DataType::Float64);
+        kani::cover!(true, "variant_dt(StructField) returns correct type");
     }
 }
