@@ -61,7 +61,23 @@ impl OtlpReceiverInput {
     /// Bind an HTTP server on `addr` (e.g. "0.0.0.0:4318").
     /// Spawns a background thread to handle requests.
     pub fn new(name: impl Into<String>, addr: &str) -> io::Result<Self> {
-        Self::new_with_capacity_and_stats(name, addr, CHANNEL_BOUND, None)
+        Self::new_with_resource_prefix(name, addr, field_names::DEFAULT_RESOURCE_PREFIX)
+    }
+
+    /// Like [`Self::new`], but with a custom resource attribute prefix used
+    /// when materializing OTLP resource attributes into flat columns.
+    pub fn new_with_resource_prefix(
+        name: impl Into<String>,
+        addr: &str,
+        resource_prefix: impl Into<String>,
+    ) -> io::Result<Self> {
+        Self::new_with_capacity_stats_and_prefix(
+            name,
+            addr,
+            CHANNEL_BOUND,
+            None,
+            resource_prefix.into(),
+        )
     }
 
     /// Like [`Self::new`], but wires input diagnostics into receiver-side
@@ -71,20 +87,49 @@ impl OtlpReceiverInput {
         addr: &str,
         stats: Arc<ComponentStats>,
     ) -> io::Result<Self> {
-        Self::new_with_capacity_and_stats(name, addr, CHANNEL_BOUND, Some(stats))
+        Self::new_with_capacity_stats_and_prefix(
+            name,
+            addr,
+            CHANNEL_BOUND,
+            Some(stats),
+            field_names::DEFAULT_RESOURCE_PREFIX.to_string(),
+        )
     }
 
     /// Like [`Self::new`] but with an explicit channel capacity. Useful for tests.
     #[cfg(test)]
     fn new_with_capacity(name: impl Into<String>, addr: &str, capacity: usize) -> io::Result<Self> {
-        Self::new_with_capacity_and_stats(name, addr, capacity, None)
+        Self::new_with_capacity_stats_and_prefix(
+            name,
+            addr,
+            capacity,
+            None,
+            field_names::DEFAULT_RESOURCE_PREFIX.to_string(),
+        )
     }
 
+    #[cfg(test)]
     fn new_with_capacity_and_stats(
         name: impl Into<String>,
         addr: &str,
         capacity: usize,
         stats: Option<Arc<ComponentStats>>,
+    ) -> io::Result<Self> {
+        Self::new_with_capacity_stats_and_prefix(
+            name,
+            addr,
+            capacity,
+            stats,
+            field_names::DEFAULT_RESOURCE_PREFIX.to_string(),
+        )
+    }
+
+    fn new_with_capacity_stats_and_prefix(
+        name: impl Into<String>,
+        addr: &str,
+        capacity: usize,
+        stats: Option<Arc<ComponentStats>>,
+        resource_prefix: String,
     ) -> io::Result<Self> {
         let std_listener = std::net::TcpListener::bind(addr)
             .map_err(|e| io::Error::other(format!("OTLP receiver bind {addr}: {e}")))?;
@@ -100,7 +145,7 @@ impl OtlpReceiverInput {
             tx,
             is_running: Arc::clone(&is_running),
             health: Arc::clone(&health),
-            resource_prefix: field_names::DEFAULT_RESOURCE_PREFIX.to_string(),
+            resource_prefix,
             stats,
         });
         let (shutdown_tx, shutdown_rx) = oneshot::channel();

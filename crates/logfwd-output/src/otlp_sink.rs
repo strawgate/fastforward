@@ -77,8 +77,11 @@ enum ResourceValueRef<'a> {
 /// Per-row resource key: one optional borrowed/scalar value per `_resource_*` column.
 type ResourceKey<'a> = Vec<Option<ResourceValueRef<'a>>>;
 
-/// Per-group state: the resource key and byte-range spans of encoded log records.
-type ResourceGroup<'a> = (ResourceKey<'a>, Vec<(usize, usize)>);
+/// Per-group scope key (name, version).
+type ScopeKey<'a> = (Option<&'a str>, Option<&'a str>);
+
+/// Per-group state: resource key + scope key + byte-range spans of encoded log records.
+type ResourceGroup<'a> = (ResourceKey<'a>, ScopeKey<'a>, Vec<(usize, usize)>);
 
 impl OtlpSink {
     pub fn new(
@@ -191,39 +194,71 @@ impl OtlpSink {
         // Phase 1: encode all LogRecords and assign each row to a resource group.
         let mut records_buf: Vec<u8> = Vec::with_capacity(num_rows * 128);
         let mut grouped_ranges: Vec<ResourceGroup<'_>> = Vec::new();
-        let mut group_index_by_key: std::collections::HashMap<ResourceKey<'_>, usize> =
-            std::collections::HashMap::new();
+        let mut group_index_by_key: std::collections::HashMap<
+            (ResourceKey<'_>, ScopeKey<'_>),
+            usize,
+        > = std::collections::HashMap::new();
 
         for row in 0..num_rows {
             let mut key: ResourceKey<'_> = Vec::with_capacity(columns.resource_cols.len());
             for (_, attr) in &columns.resource_cols {
                 key.push(attr.value_ref(row));
             }
-            let group_idx = if let Some(existing) = group_index_by_key.get(&key).copied() {
+            let scope_name = columns.scope_name_col.as_ref().and_then(|(_, arr)| {
+                if arr.is_null(row) {
+                    None
+                } else {
+                    Some(arr.value(row))
+                }
+            });
+            let scope_version = columns.scope_version_col.as_ref().and_then(|(_, arr)| {
+                if arr.is_null(row) {
+                    None
+                } else {
+                    Some(arr.value(row))
+                }
+            });
+            let scope_key = (scope_name, scope_version);
+
+            let group_idx = if let Some(existing) =
+                group_index_by_key.get(&(key.clone(), scope_key)).copied()
+            {
                 existing
             } else {
                 let idx = grouped_ranges.len();
-                group_index_by_key.insert(key.clone(), idx);
-                grouped_ranges.push((key, Vec::new()));
+                group_index_by_key.insert((key.clone(), scope_key), idx);
+                grouped_ranges.push((key, scope_key, Vec::new()));
                 idx
             };
 
             let start = records_buf.len();
             encode_row(&columns, row, metadata, &mut records_buf);
-            grouped_ranges[group_idx].1.push((start, records_buf.len()));
+            grouped_ranges[group_idx].2.push((start, records_buf.len()));
         }
 
         // Phase 2: compute sizes bottom-up per resource group.
-        let instrumentation_scope_inner_size =
-            bytes_field_size(otlp::INSTRUMENTATION_SCOPE_NAME, SCOPE_NAME.len())
-                + bytes_field_size(otlp::INSTRUMENTATION_SCOPE_VERSION, SCOPE_VERSION.len());
-
         let mut grouped_resource_msgs: Vec<Vec<u8>> = Vec::with_capacity(grouped_ranges.len());
         let mut grouped_resource_inner_sizes: Vec<usize> = Vec::with_capacity(grouped_ranges.len());
         let mut grouped_scope_inner_sizes: Vec<usize> = Vec::with_capacity(grouped_ranges.len());
+        let mut grouped_scope_values: Vec<(Vec<u8>, Vec<u8>)> =
+            Vec::with_capacity(grouped_ranges.len());
         let mut request_size = 0usize;
 
-        for (key, record_ranges) in &grouped_ranges {
+        for (key, scope_key, record_ranges) in &grouped_ranges {
+            let scope_name = scope_key
+                .0
+                .unwrap_or_else(|| std::str::from_utf8(SCOPE_NAME).unwrap_or("logfwd"));
+            let scope_version = scope_key
+                .1
+                .unwrap_or_else(|| std::str::from_utf8(SCOPE_VERSION).unwrap_or(""));
+            let scope_name_bytes = scope_name.as_bytes().to_vec();
+            let scope_version_bytes = scope_version.as_bytes().to_vec();
+            let instrumentation_scope_inner_size =
+                bytes_field_size(otlp::INSTRUMENTATION_SCOPE_NAME, scope_name_bytes.len())
+                    + bytes_field_size(
+                        otlp::INSTRUMENTATION_SCOPE_VERSION,
+                        scope_version_bytes.len(),
+                    );
             let mut scope_logs_inner_size =
                 bytes_field_size(otlp::SCOPE_LOGS_SCOPE, instrumentation_scope_inner_size);
             for &(start, end) in record_ranges {
@@ -283,11 +318,16 @@ impl OtlpSink {
             grouped_resource_msgs.push(resource_msg);
             grouped_resource_inner_sizes.push(resource_inner_size);
             grouped_scope_inner_sizes.push(scope_logs_inner_size);
+            grouped_scope_values.push((scope_name_bytes, scope_version_bytes));
         }
 
         // Phase 3: write final protobuf with one ResourceLogs per group.
         self.encoder_buf.reserve(request_size + 16);
-        for (group_idx, (_key, record_ranges)) in grouped_ranges.iter().enumerate() {
+        for (group_idx, (_key, _scope_key, record_ranges)) in grouped_ranges.iter().enumerate() {
+            let (scope_name, scope_version) = &grouped_scope_values[group_idx];
+            let instrumentation_scope_inner_size =
+                bytes_field_size(otlp::INSTRUMENTATION_SCOPE_NAME, scope_name.len())
+                    + bytes_field_size(otlp::INSTRUMENTATION_SCOPE_VERSION, scope_version.len());
             encode_tag(
                 &mut self.encoder_buf,
                 otlp::EXPORT_LOGS_REQUEST_RESOURCE_LOGS,
@@ -329,12 +369,12 @@ impl OtlpSink {
             encode_bytes_field(
                 &mut self.encoder_buf,
                 otlp::INSTRUMENTATION_SCOPE_NAME,
-                SCOPE_NAME,
+                scope_name,
             );
             encode_bytes_field(
                 &mut self.encoder_buf,
                 otlp::INSTRUMENTATION_SCOPE_VERSION,
-                SCOPE_VERSION,
+                scope_version,
             );
 
             for &(start, end) in record_ranges {
@@ -724,16 +764,12 @@ struct BatchColumns<'a> {
     /// Downcast array for the `flags` / `trace_flags` column (uint32, OTLP field 8).
     flags_col: Option<(usize, &'a PrimitiveArray<Int64Type>)>,
     /// Severity number column (Int64, OTLP severity_number).
-    #[allow(dead_code)]
     severity_num_col: Option<(usize, &'a PrimitiveArray<Int64Type>)>,
     /// Observed timestamp column (Int64, nanoseconds).
-    #[allow(dead_code)]
     observed_ts_col: Option<(usize, &'a dyn Array)>,
     /// Scope name column.
-    #[allow(dead_code)]
     scope_name_col: Option<(usize, OtlpStrCol<'a>)>,
     /// Scope version column.
-    #[allow(dead_code)]
     scope_version_col: Option<(usize, OtlpStrCol<'a>)>,
     /// Non-special attribute columns: (field_name, pre-downcast array).
     attribute_cols: Vec<(String, AttrArray<'a>)>,
@@ -1046,6 +1082,15 @@ fn encode_row_as_log_record(
         } else {
             (Severity::Unspecified, b"")
         };
+    let severity_number = if let Some((_, arr)) = columns.severity_num_col.as_ref() {
+        if arr.is_null(row) {
+            0
+        } else {
+            u64::try_from(arr.value(row)).unwrap_or(0)
+        }
+    } else {
+        severity_num as u64
+    };
 
     let body: &str = match (columns.body_col.as_ref(), columns.raw_col.as_ref()) {
         (Some((_, body)), _) if !body.is_null(row) => body.value(row),
@@ -1062,8 +1107,8 @@ fn encode_row_as_log_record(
     }
 
     // LogRecord.severity_number (varint)
-    if severity_num as u8 > 0 {
-        encode_varint_field(buf, otlp::LOG_RECORD_SEVERITY_NUMBER, severity_num as u64);
+    if severity_number > 0 {
+        encode_varint_field(buf, otlp::LOG_RECORD_SEVERITY_NUMBER, severity_number);
     }
 
     // LogRecord.severity_text (string)
@@ -1170,11 +1215,12 @@ fn encode_row_as_log_record(
     }
 
     // LogRecord.observed_time_unix_nano (fixed64)
-    encode_fixed64(
-        buf,
-        otlp::LOG_RECORD_OBSERVED_TIME_UNIX_NANO,
-        metadata.observed_time_ns,
-    );
+    let observed_ns = if let Some((_, arr)) = columns.observed_ts_col.as_ref() {
+        numeric_timestamp_ns(*arr, row)
+    } else {
+        metadata.observed_time_ns
+    };
+    encode_fixed64(buf, otlp::LOG_RECORD_OBSERVED_TIME_UNIX_NANO, observed_ns);
 }
 
 /// Encode a KeyValue with string AnyValue as an attribute.

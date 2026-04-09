@@ -77,13 +77,12 @@ pub(super) fn decode_otlp_json(
     body: &[u8],
     resource_prefix: &str,
 ) -> Result<RecordBatch, InputError> {
-    let json_lines = decode_otlp_logs_json(body)?;
+    let json_lines = decode_otlp_logs_json(body, resource_prefix)?;
     if json_lines.is_empty() {
         return Ok(RecordBatch::new_empty(Arc::new(
             arrow::datatypes::Schema::empty(),
         )));
     }
-    let _ = resource_prefix; // TODO: thread resource_prefix through JSON decode
     let mut scanner = Scanner::new(ScanConfig::default());
     scanner
         .scan(Bytes::from(json_lines))
@@ -92,7 +91,7 @@ pub(super) fn decode_otlp_json(
 
 /// Parse an OTLP JSON ExportLogsServiceRequest and produce newline-delimited
 /// JSON lines. Used internally by [`decode_otlp_json`] to feed the scanner.
-fn decode_otlp_logs_json(body: &[u8]) -> Result<Vec<u8>, InputError> {
+fn decode_otlp_logs_json(body: &[u8], resource_prefix: &str) -> Result<Vec<u8>, InputError> {
     if body.is_empty() {
         return Ok(Vec::new());
     }
@@ -113,7 +112,7 @@ fn decode_otlp_logs_json(body: &[u8]) -> Result<Vec<u8>, InputError> {
 
     for rl in resource_logs {
         // Collect resource attributes.
-        let mut resource_attrs: Vec<(&str, String)> = Vec::new();
+        let mut resource_attrs: Vec<(String, String)> = Vec::new();
         if let Some(attrs) = rl
             .get("resource")
             .and_then(|r| r.get("attributes"))
@@ -127,7 +126,7 @@ fn decode_otlp_logs_json(body: &[u8]) -> Result<Vec<u8>, InputError> {
                     continue;
                 };
                 if let Some(value) = json_any_value_to_string(value)? {
-                    resource_attrs.push((key, value));
+                    resource_attrs.push((format!("{resource_prefix}{key}"), value));
                 }
             }
         }
@@ -138,6 +137,15 @@ fn decode_otlp_logs_json(body: &[u8]) -> Result<Vec<u8>, InputError> {
         };
 
         for sl in scope_logs {
+            let scope_name = sl
+                .get("scope")
+                .and_then(|scope| scope.get("name"))
+                .and_then(|name| name.as_str());
+            let scope_version = sl
+                .get("scope")
+                .and_then(|scope| scope.get("version"))
+                .and_then(|version| version.as_str());
+
             let records = match sl.get("logRecords").and_then(|v| v.as_array()) {
                 Some(arr) => arr,
                 None => continue,
@@ -167,11 +175,29 @@ fn decode_otlp_logs_json(body: &[u8]) -> Result<Vec<u8>, InputError> {
                     out.push(b',');
                 }
 
-                if let Some(sev) = record.get("severityText").and_then(|v| v.as_str()) {
-                    if !sev.is_empty() {
-                        write_json_string_field(&mut out, field_names::SEVERITY, sev);
-                        out.push(b',');
-                    }
+                if let Some(obs) = record.get("observedTimeUnixNano")
+                    && let Some(obs_val) = parse_protojson_u64(obs)
+                    && obs_val > 0
+                {
+                    write_json_key(&mut out, field_names::OBSERVED_TIMESTAMP);
+                    write_u64_to_buf(&mut out, obs_val);
+                    out.push(b',');
+                }
+
+                if let Some(sev) = record.get("severityText").and_then(|v| v.as_str())
+                    && !sev.is_empty()
+                {
+                    write_json_string_field(&mut out, field_names::SEVERITY, sev);
+                    out.push(b',');
+                }
+
+                if let Some(sev_num) = record.get("severityNumber")
+                    && let Some(severity_number) = parse_protojson_i64(sev_num)
+                    && severity_number > 0
+                {
+                    write_json_key(&mut out, field_names::SEVERITY_NUMBER);
+                    write_i64_to_buf(&mut out, severity_number);
+                    out.push(b',');
                 }
 
                 if let Some(body_val) = record.get("body")
@@ -208,6 +234,28 @@ fn decode_otlp_logs_json(body: &[u8]) -> Result<Vec<u8>, InputError> {
                         write_json_string_field(&mut out, field_names::SPAN_ID, sid);
                         out.push(b',');
                     }
+                }
+
+                if let Some(flags) = record.get("flags")
+                    && let Some(parsed_flags) = parse_protojson_i64(flags)
+                    && parsed_flags > 0
+                {
+                    write_json_key(&mut out, field_names::FLAGS);
+                    write_i64_to_buf(&mut out, parsed_flags);
+                    out.push(b',');
+                }
+
+                if let Some(name) = scope_name
+                    && !name.is_empty()
+                {
+                    write_json_string_field(&mut out, field_names::SCOPE_NAME, name);
+                    out.push(b',');
+                }
+                if let Some(version) = scope_version
+                    && !version.is_empty()
+                {
+                    write_json_string_field(&mut out, field_names::SCOPE_VERSION, version);
+                    out.push(b',');
                 }
 
                 if out.last() == Some(&b',') {

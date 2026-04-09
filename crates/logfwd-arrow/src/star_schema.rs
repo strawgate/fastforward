@@ -1,7 +1,7 @@
 //! Flat ↔ OTAP star schema conversion for Arrow RecordBatches.
 //!
 //! logfwd uses a **flat schema**: one `RecordBatch` with all fields as columns.
-//! Resource attributes are prefixed with `resource.attributes.*``. This is directly
+//! Resource attributes are prefixed with `resource.attributes.*`. This is directly
 //! queryable by DuckDB, Polars, DataFusion with zero schema knowledge.
 //!
 //! OTAP uses a **star schema**: 4 tables with foreign keys (LOGS fact table +
