@@ -45,8 +45,33 @@ jobs:
 
       - name: Install eBPF userspace tooling
         run: |
+          set -euo pipefail
+          if command -v bpftool >/dev/null 2>&1; then
+            echo "bpftool already present"
+            bpftool version || true
+            exit 0
+          fi
+
           sudo apt-get update
-          sudo apt-get install -y bpftool
+          if apt-cache show bpftool >/dev/null 2>&1; then
+            sudo apt-get install -y bpftool
+          else
+            echo "apt package 'bpftool' not directly available; trying linux-tools-common"
+            sudo apt-get install -y linux-tools-common || true
+          fi
+
+          if ! command -v bpftool >/dev/null 2>&1; then
+            candidate="$(find /usr/lib/linux-tools -type f -name bpftool 2>/dev/null | head -n1 || true)"
+            if [[ -n "${candidate}" ]]; then
+              sudo ln -sf "${candidate}" /usr/local/bin/bpftool
+            fi
+          fi
+
+          if command -v bpftool >/dev/null 2>&1; then
+            bpftool version || true
+          else
+            echo "bpftool still unavailable; capability probe will record this."
+          fi
 
       - name: Test eBPF proto crate
         run: cargo test -p logfwd-ebpf-proto --all-targets
@@ -64,7 +89,16 @@ jobs:
 
       - name: Add probe summary
         if: always()
-        run: cat artifacts/ebpf-capabilities/summary.md >> "$GITHUB_STEP_SUMMARY"
+        run: |
+          if [[ -f artifacts/ebpf-capabilities/summary.md ]]; then
+            cat artifacts/ebpf-capabilities/summary.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "## eBPF capability snapshot"
+              echo ""
+              echo "Probe summary not generated (earlier Linux steps failed)."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Upload eBPF capability artifacts
         if: always()
@@ -190,6 +224,8 @@ jobs:
       - name: Probe eBPF for Windows capabilities
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Continue"
+          $PSNativeCommandUseErrorActionPreference = $false
           $outDir = "artifacts/windows-ebpf"
           New-Item -Path $outDir -ItemType Directory -Force | Out-Null
           $statusFile = Join-Path $outDir "status.tsv"
@@ -243,6 +279,7 @@ jobs:
             "- `status.tsv`: machine-readable pass/fail checks.",
             "- `netsh-ebpf-show-*.txt`: raw eBPF for Windows command output."
           ) | Out-File -FilePath $summaryFile -Encoding utf8
+          exit 0
 
       - name: Add Windows probe summary
         if: always()
