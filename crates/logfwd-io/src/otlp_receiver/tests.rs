@@ -492,7 +492,7 @@ fn decodes_otlp_to_json_lines() {
     assert_eq!(lines.len(), 2);
     assert!(lines[0].contains("\"level\":\"INFO\""), "got: {}", lines[0]);
     assert!(
-        lines[0].contains("\"message\":\"hello world\""),
+        lines[0].contains("\"body\":\"hello world\""),
         "got: {}",
         lines[0]
     );
@@ -563,7 +563,7 @@ fn protobuf_and_json_inputs_match_semantics() {
 
     for (lhs, rhs) in left.iter().zip(right.iter()) {
         assert_eq!(lhs.get("level"), rhs.get("level"));
-        assert_eq!(lhs.get("message"), rhs.get("message"));
+        assert_eq!(lhs.get("body"), rhs.get("body"));
         assert_eq!(lhs.get("service"), rhs.get("service"));
         assert_eq!(lhs.get("status"), rhs.get("status"));
         assert_eq!(lhs.get("payload"), rhs.get("payload"));
@@ -713,10 +713,10 @@ fn json_bytes_value_matches_protobuf_semantics() {
     let right = parse_first(&json_lines);
 
     assert_eq!(
-        left.get("message").and_then(serde_json::Value::as_str),
+        left.get("body").and_then(serde_json::Value::as_str),
         Some("01020304")
     );
-    assert_eq!(left.get("message"), right.get("message"));
+    assert_eq!(left.get("body"), right.get("body"));
     assert_eq!(left.get("payload"), right.get("payload"));
 }
 
@@ -1113,7 +1113,7 @@ fn special_float_strings_match_protobuf_semantics() {
     let json_row = parse_first(&json_lines);
     assert_eq!(protobuf_row, json_row);
     assert_eq!(
-        json_row.get("message").and_then(serde_json::Value::as_str),
+        json_row.get("body").and_then(serde_json::Value::as_str),
         Some("NaN")
     );
     assert!(
@@ -1208,9 +1208,7 @@ fn empty_string_body_and_unsupported_values_preserve_wire_equivalence() {
     );
     assert!(protobuf_row.get("unsupported_resource").is_none());
     assert_eq!(
-        protobuf_row
-            .get("message")
-            .and_then(serde_json::Value::as_str),
+        protobuf_row.get("body").and_then(serde_json::Value::as_str),
         Some("")
     );
 }

@@ -89,7 +89,7 @@ impl Scanner {
     /// Create a scanner that injects constant `_resource_*` columns per row.
     pub fn with_resource_attrs(config: ScanConfig, resource_attrs: Vec<(String, String)>) -> Self {
         Scanner {
-            builder: StreamingBuilder::new(config.keep_raw),
+            builder: StreamingBuilder::new(config.line_field_name.clone()),
             config,
             resource_attrs,
         }

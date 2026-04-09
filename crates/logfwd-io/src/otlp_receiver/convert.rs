@@ -106,7 +106,7 @@ pub(super) fn convert_request_to_json_lines(request: &ExportLogsServiceRequest) 
 pub(super) fn convert_request_to_batch(
     request: &ExportLogsServiceRequest,
 ) -> Result<RecordBatch, InputError> {
-    let mut builder = StreamingBuilder::new(false);
+    let mut builder = StreamingBuilder::new(None);
     builder.begin_batch(Bytes::new());
 
     let timestamp_idx = builder.resolve_field(field_names::TIMESTAMP.as_bytes());

@@ -104,15 +104,17 @@ impl StdoutSink {
                         }
                     }
                 } else {
-                    // No _raw column — fall back to JSON and warn once.
+                    // Configured message field is absent — fall back to JSON and warn once.
                     static WARNED: std::sync::atomic::AtomicBool =
                         std::sync::atomic::AtomicBool::new(false);
                     if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
                         tracing::warn!(
                             sink = %self.name,
-                            "stdout/file 'text' format requires a '_raw' column in the output \
-                             batch; falling back to JSON. Add _raw to your SQL SELECT or use \
+                            "stdout/file 'text' format requires message field '{}' in the output \
+                             batch; falling back to JSON. Add that field to your SQL SELECT or use \
                              format: json."
+                            ,
+                            self.message_field
                         );
                     }
                     let cols = build_col_infos(batch);
@@ -507,10 +509,10 @@ mod tests {
         }
     }
 
-    /// A batch with a `_raw` column should be written as plain text lines.
+    /// A batch with a `body` column should be written as plain text lines.
     #[test]
     fn text_format_with_raw_column_writes_raw_lines() {
-        let schema = Arc::new(Schema::new(vec![Field::new("_raw", DataType::Utf8, true)]));
+        let schema = Arc::new(Schema::new(vec![Field::new("body", DataType::Utf8, true)]));
         let raw = StringArray::from(vec![Some("line one"), Some("line two")]);
         let batch = RecordBatch::try_new(schema, vec![Arc::new(raw)]).unwrap();
 
@@ -527,7 +529,7 @@ mod tests {
         assert_eq!(output, "line one\nline two\n");
     }
 
-    /// A batch *without* a `_raw` column should fall back to JSON output so
+    /// A batch *without* a `body` column should fall back to JSON output so
     /// existing behaviour is preserved.
     #[test]
     fn text_format_without_raw_column_falls_back_to_json() {

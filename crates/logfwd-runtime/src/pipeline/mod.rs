@@ -1012,18 +1012,18 @@ output:
     }
 
     #[test]
-    fn otlp_structured_ingress_is_disabled_when_keep_raw_is_required() {
+    fn otlp_structured_ingress_is_disabled_when_line_capture_is_required() {
         let scan_config = ScanConfig {
-            keep_raw: true,
+            line_field_name: Some(logfwd_types::field_names::BODY.to_string()),
             ..ScanConfig::default()
         };
         assert!(!input_build::otlp_uses_structured_ingress(&scan_config));
     }
 
     #[test]
-    fn otlp_structured_ingress_is_enabled_when_keep_raw_is_not_required() {
+    fn otlp_structured_ingress_is_enabled_when_line_capture_is_not_required() {
         let scan_config = ScanConfig {
-            keep_raw: false,
+            line_field_name: None,
             ..ScanConfig::default()
         };
         assert!(input_build::otlp_uses_structured_ingress(&scan_config));

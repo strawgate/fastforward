@@ -567,7 +567,7 @@ mod tests {
             r#"{"active": false}"#,
             r#"{"active": "fallback"}"#,
         ]);
-        let result = query("SELECT json(_raw, 'active') as active FROM logs", batch).await;
+        let result = query("SELECT json(body, 'active') as active FROM logs", batch).await;
         let col = result
             .column(0)
             .as_any()
@@ -643,18 +643,18 @@ mod tests {
         assert!((duration.value(2) - 2.25).abs() < 0.001);
     }
 
-    /// `json(_raw, 'key')` must return NULL for rows where `_raw` itself is NULL,
+    /// `json(body, 'key')` must return NULL for rows where `body` itself is NULL,
     /// without erroring the whole batch.
     ///
-    /// Regression test: previously, NULL rows in `_raw` were emitted as bare `\n`
+    /// Regression test: previously, NULL rows in `body` were emitted as bare `\n`
     /// (empty lines).  The scanner skips empty lines, so the output had fewer rows
     /// than the input, triggering a "scanner row count mismatch" error for the
     /// entire batch.
     #[tokio::test]
-    async fn test_json_null_raw_returns_null_not_error() {
-        // Build a nullable _raw column: row 0 has data, row 1 is NULL, row 2 has data.
+    async fn test_json_null_body_returns_null_not_error() {
+        // Build a nullable body column: row 0 has data, row 1 is NULL, row 2 has data.
         let schema = Arc::new(arrow::datatypes::Schema::new(vec![
-            arrow::datatypes::Field::new("_raw", DataType::Utf8, true),
+            arrow::datatypes::Field::new("body", DataType::Utf8, true),
         ]));
         let raw: arrow::array::ArrayRef = Arc::new(StringArray::from(vec![
             Some(r#"{"status": 200}"#),
@@ -671,7 +671,7 @@ mod tests {
 
         // json() — must not error; null row must return null
         let result = ctx
-            .sql("SELECT json(_raw, 'status') AS s FROM logs")
+            .sql("SELECT json(body, 'status') AS s FROM logs")
             .await
             .unwrap()
             .collect()
@@ -685,7 +685,7 @@ mod tests {
             .downcast_ref::<StringArray>()
             .unwrap();
         assert_eq!(col.value(0), "200", "row 0 must extract status");
-        assert!(col.is_null(1), "row 1 (null _raw) must produce null");
+        assert!(col.is_null(1), "row 1 (null body) must produce null");
         assert_eq!(col.value(2), "404", "row 2 must extract status");
 
         // json_int() — same null row must not crash
@@ -697,13 +697,13 @@ mod tests {
             Some(r#"{"status": 404}"#),
         ]));
         let schema2 = Arc::new(arrow::datatypes::Schema::new(vec![
-            arrow::datatypes::Field::new("_raw", DataType::Utf8, true),
+            arrow::datatypes::Field::new("body", DataType::Utf8, true),
         ]));
         let batch2 = RecordBatch::try_new(schema2, vec![raw2]).unwrap();
         let table2 = MemTable::try_new(batch2.schema(), vec![vec![batch2]]).unwrap();
         ctx2.register_table("logs", Arc::new(table2)).unwrap();
         let result2 = ctx2
-            .sql("SELECT json_int(_raw, 'status') AS s FROM logs")
+            .sql("SELECT json_int(body, 'status') AS s FROM logs")
             .await
             .unwrap()
             .collect()
@@ -718,7 +718,7 @@ mod tests {
         assert_eq!(col2.value(0), 200, "json_int row 0");
         assert!(
             col2.is_null(1),
-            "json_int row 1 (null _raw) must produce null"
+            "json_int row 1 (null body) must produce null"
         );
         assert_eq!(col2.value(2), 404, "json_int row 2");
     }

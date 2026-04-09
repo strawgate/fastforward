@@ -341,16 +341,12 @@ fn build_platform_sensor_beta_config(
 
 /// Returns whether OTLP input should use structured ingress mode.
 ///
-/// Structured ingress preserves typed OTLP fields but does not synthesize the
-/// scanner-owned `_raw` column. We therefore keep legacy JSON-lines scanner mode
-/// whenever `ScanConfig.keep_raw` is enabled.
+/// Structured ingress preserves typed OTLP fields but bypasses the scanner.
+/// If scanner line capture is required, use legacy scanner ingress.
 pub(super) fn otlp_uses_structured_ingress(
     scan_config: &logfwd_core::scan_config::ScanConfig,
 ) -> bool {
-    // Structured OTLP ingress preserves typed log fields, but it does not yet
-    // synthesize scanner-owned `_raw`. Keep legacy JSON-lines -> scanner mode
-    // whenever the SQL plan requires `_raw` semantics.
-    !scan_config.keep_raw
+    !scan_config.captures_line()
 }
 
 #[cfg(test)]
@@ -487,17 +483,17 @@ mod tests {
     }
 
     #[test]
-    fn otlp_structured_ingress_tracks_keep_raw_flag() {
+    fn otlp_structured_ingress_tracks_line_capture_flag() {
         let mut scan = logfwd_core::scan_config::ScanConfig::default();
-        scan.keep_raw = false;
+        scan.line_field_name = None;
         assert!(
             otlp_uses_structured_ingress(&scan),
-            "keep_raw=false should prefer structured OTLP ingress"
+            "line capture disabled should prefer structured OTLP ingress"
         );
-        scan.keep_raw = true;
+        scan.line_field_name = Some(logfwd_types::field_names::BODY.to_string());
         assert!(
             !otlp_uses_structured_ingress(&scan),
-            "keep_raw=true should force legacy scanner ingress"
+            "line capture enabled should force legacy scanner ingress"
         );
     }
 }

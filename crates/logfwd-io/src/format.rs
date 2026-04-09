@@ -27,10 +27,12 @@ pub enum FormatDecoder {
     },
     Cri {
         aggregators: [CriReassembler; 2],
+        plain_text_field_name: String,
         stats: Arc<ComponentStats>,
     },
     Auto {
         aggregators: [CriReassembler; 2],
+        plain_text_field_name: String,
         stats: Arc<ComponentStats>,
     },
 }
@@ -94,6 +96,7 @@ impl FormatDecoder {
     ) -> Self {
         Self::Cri {
             aggregators: new_stream_aggregators(max_message_size),
+            plain_text_field_name,
             stats,
         }
     }
@@ -114,6 +117,7 @@ impl FormatDecoder {
     ) -> Self {
         Self::Auto {
             aggregators: new_stream_aggregators(max_message_size),
+            plain_text_field_name,
             stats,
         }
     }
@@ -130,12 +134,22 @@ impl FormatDecoder {
             Self::PassthroughJson { stats } => Self::PassthroughJson {
                 stats: Arc::clone(stats),
             },
-            Self::Cri { aggregators, stats } => Self::Cri {
+            Self::Cri {
+                aggregators,
+                plain_text_field_name,
+                stats,
+            } => Self::Cri {
                 aggregators: new_stream_aggregators(aggregators[0].max_message_size()),
+                plain_text_field_name: plain_text_field_name.clone(),
                 stats: Arc::clone(stats),
             },
-            Self::Auto { aggregators, stats } => Self::Auto {
+            Self::Auto {
+                aggregators,
+                plain_text_field_name,
+                stats,
+            } => Self::Auto {
                 aggregators: new_stream_aggregators(aggregators[0].max_message_size()),
+                plain_text_field_name: plain_text_field_name.clone(),
                 stats: Arc::clone(stats),
             },
         }
@@ -154,11 +168,19 @@ impl FormatDecoder {
                 count_json_parse_errors(chunk, stats);
                 out.extend_from_slice(chunk);
             }
-            Self::Cri { aggregators, stats } => {
-                extract_cri_messages(chunk, out, aggregators, stats, false);
+            Self::Cri {
+                aggregators,
+                plain_text_field_name,
+                stats,
+            } => {
+                extract_cri_messages(chunk, out, aggregators, plain_text_field_name, stats, false);
             }
-            Self::Auto { aggregators, stats } => {
-                extract_cri_messages(chunk, out, aggregators, stats, true);
+            Self::Auto {
+                aggregators,
+                plain_text_field_name,
+                stats,
+            } => {
+                extract_cri_messages(chunk, out, aggregators, plain_text_field_name, stats, true);
             }
         }
     }
@@ -218,6 +240,7 @@ fn extract_cri_messages(
     input: &[u8],
     out: &mut Vec<u8>,
     aggregators: &mut [CriReassembler; 2],
+    plain_text_field_name: &str,
     stats: &ComponentStats,
     passthrough_on_fail: bool,
 ) {
@@ -393,10 +416,10 @@ mod tests {
 
         let mut expected = Vec::new();
         expected.extend_from_slice(
-            b"{\"_timestamp\":\"2024-01-15T10:30:01Z\",\"_stream\":\"stderr\",\"_raw\":\"err\"}\n",
+            b"{\"_timestamp\":\"2024-01-15T10:30:01Z\",\"_stream\":\"stderr\",\"body\":\"err\"}\n",
         );
         expected.extend_from_slice(
-            b"{\"_timestamp\":\"2024-01-15T10:30:02Z\",\"_stream\":\"stdout\",\"_raw\":\"out-done\"}\n",
+            b"{\"_timestamp\":\"2024-01-15T10:30:02Z\",\"_stream\":\"stdout\",\"body\":\"out-done\"}\n",
         );
         assert_eq!(out, expected);
         assert_eq!(

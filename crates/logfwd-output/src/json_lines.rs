@@ -12,7 +12,7 @@ use logfwd_types::diagnostics::ComponentStats;
 use crate::http_classify;
 use crate::sink::{SendResult, Sink, SinkFactory};
 
-use super::{Compression, build_col_infos, str_value, write_row_json};
+use super::{Compression, build_col_infos, write_row_json};
 
 // ---------------------------------------------------------------------------
 // JsonLinesSink
@@ -81,13 +81,6 @@ impl JsonLinesSink {
     }
 
     /// Serialize the batch into `self.batch_buf` as newline-delimited JSON.
-    ///
-    /// Returns the number of rows actually written on success, or `Err` if the
-    /// schema claims `_raw` passthrough but the column is unexpectedly absent —
-    /// this indicates a logic error and should not be silently swallowed (issue #317).
-    ///
-    /// Note: in raw-passthrough mode, null `_raw` values are skipped, so the
-    /// returned count may be less than `batch.num_rows()`.
     pub fn serialize_batch(&mut self, batch: &RecordBatch) -> io::Result<u64> {
         self.batch_buf.clear();
         let num_rows = batch.num_rows();
@@ -95,40 +88,12 @@ impl JsonLinesSink {
             return Ok(0);
         }
 
-        if Self::is_raw_passthrough(batch) {
-            // Fast path: memcpy _raw values directly.
-            // Use `position` instead of `index_of().expect(...)` to avoid panicking
-            // if the schema is unexpectedly inconsistent (issue #317).
-            let raw_idx = batch
-                .schema()
-                .fields()
-                .iter()
-                .position(|f| f.name() == "_raw")
-                .ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "_raw column absent despite passthrough eligibility check",
-                    )
-                })?;
-            let col = batch.column(raw_idx);
-            let mut rows_written: u64 = 0;
-            for row in 0..num_rows {
-                if !col.is_null(row) {
-                    self.batch_buf
-                        .extend_from_slice(str_value(col, row).as_bytes());
-                    self.batch_buf.push(b'\n');
-                    rows_written += 1;
-                }
-            }
-            Ok(rows_written)
-        } else {
-            let cols = build_col_infos(batch);
-            for row in 0..num_rows {
-                write_row_json(batch, row, &cols, &mut self.batch_buf)?;
-                self.batch_buf.push(b'\n');
-            }
-            Ok(num_rows as u64)
+        let cols = build_col_infos(batch);
+        for row in 0..num_rows {
+            write_row_json(batch, row, &cols, &mut self.batch_buf)?;
+            self.batch_buf.push(b'\n');
         }
+        Ok(num_rows as u64)
     }
 
     async fn post_payload(&self, payload: Vec<u8>) -> io::Result<SendResult> {

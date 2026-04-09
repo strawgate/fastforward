@@ -854,6 +854,12 @@ impl StreamingBuilder {
 
         for fc in &self.fields[..self.num_active] {
             let name = String::from_utf8_lossy(&fc.name);
+            if !self.line_views.is_empty() && self.line_field_name.as_deref() == Some(name.as_ref())
+            {
+                // Line capture owns this output column name for this batch.
+                // Keep scanner semantics as "line wins" when names collide.
+                continue;
+            }
             let conflict = (fc.has_int as u8)
                 + (fc.has_float as u8)
                 + (fc.has_str as u8)
@@ -2307,7 +2313,7 @@ mod tests {
     #[test]
     fn test_resource_columns_injected_with_metadata_in_finish_batch() {
         let buf = bytes::Bytes::from_static(b"unused");
-        let mut b = StreamingBuilder::new(false);
+        let mut b = StreamingBuilder::new(None);
         b.set_resource_attributes(&[
             ("service.name".to_string(), "checkout".to_string()),
             ("k8s.namespace".to_string(), "prod".to_string()),
@@ -2366,7 +2372,7 @@ mod tests {
     fn test_resource_columns_exist_on_empty_batch_in_both_finish_paths() {
         let attrs = vec![("service.name".to_string(), "checkout".to_string())];
 
-        let mut view_builder = StreamingBuilder::new(false);
+        let mut view_builder = StreamingBuilder::new(None);
         view_builder.set_resource_attributes(attrs.as_slice());
         view_builder.begin_batch(bytes::Bytes::from_static(b""));
         let view_batch = view_builder.finish_batch().expect("finish view batch");
@@ -2378,7 +2384,7 @@ mod tests {
             "empty view batch should preserve _resource_* schema"
         );
 
-        let mut detached_builder = StreamingBuilder::new(false);
+        let mut detached_builder = StreamingBuilder::new(None);
         detached_builder.set_resource_attributes(attrs.as_slice());
         detached_builder.begin_batch(bytes::Bytes::from_static(b""));
         let detached_batch = detached_builder
