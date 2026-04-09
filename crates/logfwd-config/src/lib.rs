@@ -65,6 +65,12 @@ pub enum InputType {
     Otlp,
     /// Synthetic data generator for benchmarking.
     Generator,
+    /// Linux beta sensor input (eBPF-oriented runtime path).
+    LinuxSensorBeta,
+    /// macOS beta sensor input (EndpointSecurity-oriented runtime path).
+    MacosSensorBeta,
+    /// Windows beta sensor input (eBPF/ETW hybrid-oriented runtime path).
+    WindowsSensorBeta,
     /// Arrow IPC stream receiver (native Arrow transport).
     ArrowIpc,
 }
@@ -77,6 +83,9 @@ impl fmt::Display for InputType {
             InputType::Tcp => f.write_str("tcp"),
             InputType::Otlp => f.write_str("otlp"),
             InputType::Generator => f.write_str("generator"),
+            InputType::LinuxSensorBeta => f.write_str("linux_sensor_beta"),
+            InputType::MacosSensorBeta => f.write_str("macos_sensor_beta"),
+            InputType::WindowsSensorBeta => f.write_str("windows_sensor_beta"),
             InputType::ArrowIpc => f.write_str("arrow_ipc"),
         }
     }
@@ -288,6 +297,16 @@ pub struct GeneratorInputConfig {
     pub event_created_unix_nano_field: Option<String>,
 }
 
+/// Platform beta sensor configuration.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct PlatformSensorBetaInputConfig {
+    /// Sensor heartbeat cadence. Defaults to 10_000 when omitted.
+    pub poll_interval_ms: Option<u64>,
+    /// Emit periodic heartbeat rows while the sensor is idle. Defaults to true.
+    pub emit_heartbeat: Option<bool>,
+}
+
 /// A single input source.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -310,6 +329,9 @@ pub struct InputConfig {
     /// Generator-specific configuration.
     #[serde(default)]
     pub generator: Option<GeneratorInputConfig>,
+    /// Platform beta sensor-specific configuration.
+    #[serde(default)]
+    pub sensor_beta: Option<PlatformSensorBetaInputConfig>,
     /// Per-input SQL transform. When set, this input gets its own Scanner +
     /// `SqlTransform` pair. Overrides the pipeline-level `transform` field
     /// for this input only.
@@ -798,7 +820,11 @@ impl Config {
                             }
                         }
                     }
-                    InputType::Generator | InputType::ArrowIpc => {}
+                    InputType::Generator
+                    | InputType::LinuxSensorBeta
+                    | InputType::MacosSensorBeta
+                    | InputType::WindowsSensorBeta
+                    | InputType::ArrowIpc => {}
                 }
 
                 // Reject fields that don't apply to this input type.
@@ -812,6 +838,11 @@ impl Config {
                         if input.listen.is_some() {
                             return Err(ConfigError::Validation(format!(
                                 "pipeline '{name}' input '{label}': 'listen' is not supported for file inputs"
+                            )));
+                        }
+                        if input.sensor_beta.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'sensor_beta' settings are only supported for *_sensor_beta inputs"
                             )));
                         }
                     }
@@ -836,6 +867,11 @@ impl Config {
                                 "pipeline '{name}' input '{label}': 'glob_rescan_interval_ms' is not supported for tcp/udp inputs"
                             )));
                         }
+                        if input.sensor_beta.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'sensor_beta' settings are only supported for *_sensor_beta inputs"
+                            )));
+                        }
                     }
                     InputType::Otlp => {
                         if input.generator.is_some() {
@@ -858,6 +894,11 @@ impl Config {
                                 "pipeline '{name}' input '{label}': 'glob_rescan_interval_ms' is not supported for otlp inputs"
                             )));
                         }
+                        if input.sensor_beta.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'sensor_beta' settings are only supported for *_sensor_beta inputs"
+                            )));
+                        }
                     }
                     InputType::Generator => {
                         if input.listen.is_some() {
@@ -878,6 +919,11 @@ impl Config {
                         if input.glob_rescan_interval_ms.is_some() {
                             return Err(ConfigError::Validation(format!(
                                 "pipeline '{name}' input '{label}': 'glob_rescan_interval_ms' is not supported for generator inputs"
+                            )));
+                        }
+                        if input.sensor_beta.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'sensor_beta' settings are only supported for *_sensor_beta inputs"
                             )));
                         }
                         if input.generator.as_ref().and_then(|cfg| cfg.batch_size) == Some(0) {
@@ -951,10 +997,58 @@ impl Config {
                             }
                         }
                     }
+                    InputType::LinuxSensorBeta
+                    | InputType::MacosSensorBeta
+                    | InputType::WindowsSensorBeta => {
+                        if input.generator.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'generator' settings are only supported for generator inputs"
+                            )));
+                        }
+                        if input.listen.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'listen' is not supported for {} inputs",
+                                input.input_type
+                            )));
+                        }
+                        if input.path.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'path' is not supported for {} inputs",
+                                input.input_type
+                            )));
+                        }
+                        if input.max_open_files.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'max_open_files' is not supported for {} inputs",
+                                input.input_type
+                            )));
+                        }
+                        if input.glob_rescan_interval_ms.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'glob_rescan_interval_ms' is not supported for {} inputs",
+                                input.input_type
+                            )));
+                        }
+                        if input
+                            .sensor_beta
+                            .as_ref()
+                            .and_then(|cfg| cfg.poll_interval_ms)
+                            == Some(0)
+                        {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': sensor_beta.poll_interval_ms must be at least 1"
+                            )));
+                        }
+                    }
                     InputType::ArrowIpc => {
                         if input.generator.is_some() {
                             return Err(ConfigError::Validation(format!(
                                 "pipeline '{name}' input '{label}': 'generator' settings are only supported for generator inputs"
+                            )));
+                        }
+                        if input.sensor_beta.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'sensor_beta' settings are only supported for *_sensor_beta inputs"
                             )));
                         }
                     }
@@ -1957,10 +2051,48 @@ output:
             ("tcp", "listen: 0.0.0.0:514"),
             ("otlp", "listen: 0.0.0.0:4317"),
             ("generator", ""),
+            ("linux_sensor_beta", ""),
+            ("macos_sensor_beta", ""),
+            ("windows_sensor_beta", ""),
         ] {
             let yaml = format!("input:\n  type: {itype}\n  {extra}\noutput:\n  type: stdout\n");
             Config::load_str(&yaml).unwrap_or_else(|e| panic!("failed for {itype}: {e}"));
         }
+    }
+
+    #[test]
+    fn file_input_rejects_sensor_beta_block() {
+        let yaml = r"
+input:
+  type: file
+  path: /tmp/x.log
+  sensor_beta:
+    poll_interval_ms: 1000
+output:
+  type: stdout
+";
+        let err = Config::load_str(yaml).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("'sensor_beta' settings are only supported for *_sensor_beta inputs")
+        );
+    }
+
+    #[test]
+    fn sensor_beta_rejects_zero_poll_interval() {
+        let yaml = r"
+input:
+  type: linux_sensor_beta
+  sensor_beta:
+    poll_interval_ms: 0
+output:
+  type: stdout
+";
+        let err = Config::load_str(yaml).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("sensor_beta.poll_interval_ms must be at least 1")
+        );
     }
 
     #[test]

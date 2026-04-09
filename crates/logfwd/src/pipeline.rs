@@ -32,7 +32,7 @@ use logfwd_arrow::scanner::Scanner;
 use logfwd_config::{EnrichmentConfig, GeoDatabaseFormat};
 use logfwd_config::{
     Format, GeneratorAttributeValueConfig, GeneratorComplexityConfig, GeneratorProfileConfig,
-    InputConfig, InputType, PipelineConfig,
+    InputConfig, InputType, PipelineConfig, PlatformSensorBetaInputConfig,
 };
 use logfwd_io::checkpoint::{
     CheckpointStore, FileCheckpointStore, SourceCheckpoint, default_data_dir,
@@ -1442,7 +1442,11 @@ fn make_format(
 
 fn validate_input_format(name: &str, input_type: InputType, format: &Format) -> Result<(), String> {
     match input_type {
-        InputType::Generator | InputType::Otlp => {
+        InputType::Generator
+        | InputType::Otlp
+        | InputType::LinuxSensorBeta
+        | InputType::MacosSensorBeta
+        | InputType::WindowsSensorBeta => {
             if !matches!(format, Format::Json) {
                 return Err(format!(
                     "input '{name}': format {:?} is not supported for {:?} inputs (expected json)",
@@ -1606,6 +1610,28 @@ fn build_input_state(
             validate_input_format(name, InputType::Tcp, &format)?;
             (Box::new(source), format, 4 * 1024 * 1024)
         }
+        InputType::LinuxSensorBeta | InputType::MacosSensorBeta | InputType::WindowsSensorBeta => {
+            use logfwd_io::platform_sensor_beta::{PlatformSensorBetaInput, PlatformSensorTarget};
+
+            let target = match cfg.input_type {
+                InputType::LinuxSensorBeta => PlatformSensorTarget::Linux,
+                InputType::MacosSensorBeta => PlatformSensorTarget::Macos,
+                InputType::WindowsSensorBeta => PlatformSensorTarget::Windows,
+                _ => unreachable!("handled by outer match"),
+            };
+
+            let format = cfg.format.clone().unwrap_or(Format::Json);
+            validate_input_format(name, cfg.input_type.clone(), &format)?;
+
+            let beta_cfg = build_platform_sensor_beta_config(cfg.sensor_beta.as_ref());
+            let source = PlatformSensorBetaInput::new(name, target, beta_cfg).map_err(|e| {
+                format!(
+                    "input '{name}': failed to initialize {} input: {e}",
+                    cfg.input_type
+                )
+            })?;
+            (Box::new(source), format, 64 * 1024)
+        }
         _ => {
             return Err(format!(
                 "input '{name}': type {:?} not yet supported",
@@ -1623,6 +1649,17 @@ fn build_input_state(
         buf: BytesMut::with_capacity(buf_cap),
         stats,
     })
+}
+
+fn build_platform_sensor_beta_config(
+    cfg: Option<&PlatformSensorBetaInputConfig>,
+) -> logfwd_io::platform_sensor_beta::PlatformSensorBetaConfig {
+    let poll_interval_ms = cfg.and_then(|c| c.poll_interval_ms).unwrap_or(10_000);
+    let emit_heartbeat = cfg.and_then(|c| c.emit_heartbeat).unwrap_or(true);
+    logfwd_io::platform_sensor_beta::PlatformSensorBetaConfig {
+        emit_heartbeat,
+        poll_interval: Duration::from_millis(poll_interval_ms.max(1)),
+    }
 }
 
 fn otlp_uses_structured_ingress(scan_config: &logfwd_core::scan_config::ScanConfig) -> bool {

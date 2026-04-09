@@ -1003,7 +1003,11 @@ fn validate_input_format_read_only(
             format,
             Format::Cri | Format::Auto | Format::Json | Format::Raw
         ),
-        InputType::Generator | InputType::Otlp => matches!(format, Format::Json),
+        InputType::Generator
+        | InputType::Otlp
+        | InputType::LinuxSensorBeta
+        | InputType::MacosSensorBeta
+        | InputType::WindowsSensorBeta => matches!(format, Format::Json),
         InputType::Udp | InputType::Tcp => matches!(format, Format::Json | Format::Raw),
         InputType::ArrowIpc => false,
         other => {
@@ -1111,6 +1115,9 @@ fn input_label(i: &logfwd_config::InputConfig) -> String {
         InputType::Udp => format!("udp   {}", i.listen.as_deref().unwrap_or(":514")),
         InputType::Otlp => format!("otlp  {}", i.listen.as_deref().unwrap_or(":4318")),
         InputType::Generator => "generator".to_string(),
+        InputType::LinuxSensorBeta => "linux_sensor_beta".to_string(),
+        InputType::MacosSensorBeta => "macos_sensor_beta".to_string(),
+        InputType::WindowsSensorBeta => "windows_sensor_beta".to_string(),
         _ => "unknown".to_string(),
     }
 }
