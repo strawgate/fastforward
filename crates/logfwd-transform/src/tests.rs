@@ -857,6 +857,21 @@ fn test_query_analyzer_in_list_column_refs() {
     );
 }
 
+#[test]
+fn test_query_analyzer_join_on_column_refs() {
+    let a =
+        QueryAnalyzer::new("SELECT a.message FROM logs a JOIN logs b ON a.level = b.level LIMIT 5")
+            .unwrap();
+    assert!(
+        a.referenced_columns.contains("message"),
+        "SELECT column must be in referenced_columns"
+    );
+    assert!(
+        a.referenced_columns.contains("level"),
+        "JOIN ON column must be in referenced_columns"
+    );
+}
+
 // -----------------------------------------------------------------------
 
 /// Verify that a stable schema does NOT trigger repeated context recreation

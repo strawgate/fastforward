@@ -1275,6 +1275,16 @@ fn unpivot_attrs_to_flat(
         .downcast_ref::<BooleanArray>()
         .ok_or_else(|| ArrowError::SchemaError("bool not Boolean".to_string()))?;
 
+    let bytes_arr = attrs_batch
+        .column(
+            a_schema
+                .index_of("bytes")
+                .map_err(|e| ArrowError::SchemaError(format!("missing bytes: {e}")))?,
+        )
+        .as_any()
+        .downcast_ref::<BinaryArray>()
+        .ok_or_else(|| ArrowError::SchemaError("bytes not Binary".to_string()))?;
+
     for row in 0..attrs_batch.num_rows() {
         let parent_id = parent_id_arr.value(row);
         let target_row = row_for(parent_id);
@@ -1325,12 +1335,26 @@ fn unpivot_attrs_to_flat(
                     }
                 }
             }
+            ATTR_TYPE_BYTES => {
+                // Bytes are stored in the binary column; hex-encode for flat schema.
+                if !bytes_arr.is_null(row)
+                    && let TypedColumn::Str(ref mut v) = flat_cols[col_pos].1
+                {
+                    let hex: String =
+                        bytes_arr.value(row).iter().fold(String::new(), |mut s, b| {
+                            use std::fmt::Write;
+                            let _ = write!(s, "{b:02x}");
+                            s
+                        });
+                    v[target_row] = Some(hex);
+                }
+            }
             _ => {
-                // ATTR_TYPE_STR or ATTR_TYPE_BYTES — read from str column.
-                if !str_arr.is_null(row) {
-                    if let TypedColumn::Str(ref mut v) = flat_cols[col_pos].1 {
-                        v[target_row] = Some(str_arr.value(row).to_string());
-                    }
+                // ATTR_TYPE_STR — read from str column.
+                if !str_arr.is_null(row)
+                    && let TypedColumn::Str(ref mut v) = flat_cols[col_pos].1
+                {
+                    v[target_row] = Some(str_arr.value(row).to_string());
                 }
             }
         }

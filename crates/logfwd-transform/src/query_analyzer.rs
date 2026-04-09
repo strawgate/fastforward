@@ -83,6 +83,30 @@ impl QueryAnalyzer {
                 if let Some(ref having) = select.having {
                     collect_column_refs(having, &mut referenced_columns);
                 }
+                // Walk FROM clause — JOIN ON conditions contain column refs
+                // that the scanner must extract.
+                for table_with_joins in &select.from {
+                    for join in &table_with_joins.joins {
+                        if let sqlast::JoinConstraint::On(expr) =
+                            join_constraint(&join.join_operator)
+                        {
+                            collect_column_refs(expr, &mut referenced_columns);
+                        }
+                    }
+                }
+
+                // Walk WINDOW named definitions — PARTITION BY / ORDER BY
+                // columns may only appear in named window specs.
+                for sqlast::NamedWindowDefinition(_, named_expr) in &select.named_window {
+                    if let sqlast::NamedWindowExpr::WindowSpec(spec) = named_expr {
+                        for e in &spec.partition_by {
+                            collect_column_refs(e, &mut referenced_columns);
+                        }
+                        for ob in &spec.order_by {
+                            collect_column_refs(&ob.expr, &mut referenced_columns);
+                        }
+                    }
+                }
             }
 
             // Walk ORDER BY — columns may appear only here (not in SELECT or WHERE).
@@ -316,6 +340,30 @@ fn extract_except_fields(opts: &WildcardAdditionalOptions, out: &mut Vec<String>
         out.push(except.first_element.value.clone());
         for ident in &except.additional_elements {
             out.push(ident.value.clone());
+        }
+    }
+}
+
+/// Extract the `JoinConstraint` from any `JoinOperator` variant.
+fn join_constraint(op: &sqlast::JoinOperator) -> &sqlast::JoinConstraint {
+    use sqlast::JoinOperator as J;
+    match op {
+        J::Join(c)
+        | J::Inner(c)
+        | J::Left(c)
+        | J::LeftOuter(c)
+        | J::Right(c)
+        | J::RightOuter(c)
+        | J::FullOuter(c)
+        | J::CrossJoin(c)
+        | J::Semi(c)
+        | J::LeftSemi(c)
+        | J::RightSemi(c)
+        | J::Anti(c)
+        | J::LeftAnti(c)
+        | J::RightAnti(c) => c,
+        J::CrossApply | J::OuterApply | J::AsOf { .. } | J::StraightJoin(_) => {
+            &sqlast::JoinConstraint::None
         }
     }
 }
