@@ -105,8 +105,7 @@ impl From<logfwd_runtime::bootstrap::RuntimeError> for CliError {
 // ---------------------------------------------------------------------------
 
 fn use_color() -> bool {
-    // SAFETY: isatty is a simple query on a well-known fd; no invariants to uphold.
-    env::var_os("NO_COLOR").is_none() && unsafe { libc::isatty(libc::STDERR_FILENO) != 0 }
+    env::var_os("NO_COLOR").is_none() && io::stderr().is_terminal()
 }
 
 fn use_json_logs_for_stderr(is_terminal: bool) -> bool {
