@@ -1,4 +1,4 @@
-//! UDF: geo_lookup(ip: Utf8) -> Struct{country_code, country_name, city, region, latitude, longitude, asn, org}
+//! UDF: geo_lookup(ip: Utf8|Utf8View|LargeUtf8) -> Struct{country_code, country_name, city, region, latitude, longitude, asn, org}
 //!
 //! Enriches log records with geographic location data based on IP addresses.
 //! Wraps a pluggable [`GeoDatabase`] backend — use [`MmdbDatabase`] for
@@ -55,7 +55,7 @@ fn geo_result_type() -> DataType {
 // GeoLookupUdf
 // ---------------------------------------------------------------------------
 
-/// UDF: geo_lookup(ip: Utf8) -> Struct{country_code, country_name, city, region, latitude, longitude, asn, org}
+/// UDF: geo_lookup(ip: Utf8|Utf8View|LargeUtf8) -> Struct{country_code, country_name, city, region, latitude, longitude, asn, org}
 ///
 /// Calls the underlying [`GeoDatabase`] for each row. Returns a struct with all
 /// NULL fields for IPs that cannot be resolved (private ranges, malformed, absent

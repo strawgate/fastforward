@@ -83,6 +83,21 @@ impl RegexpExtractUdf {
                         DataType::Utf8View,
                         DataType::Int64,
                     ]),
+                    TypeSignature::Exact(vec![
+                        DataType::Utf8,
+                        DataType::LargeUtf8,
+                        DataType::Int64,
+                    ]),
+                    TypeSignature::Exact(vec![
+                        DataType::Utf8View,
+                        DataType::LargeUtf8,
+                        DataType::Int64,
+                    ]),
+                    TypeSignature::Exact(vec![
+                        DataType::LargeUtf8,
+                        DataType::LargeUtf8,
+                        DataType::Int64,
+                    ]),
                 ]),
                 Volatility::Immutable,
             ),

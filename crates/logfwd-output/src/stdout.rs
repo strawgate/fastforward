@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::future::Future;
 use std::io::{self, Write};
 use std::pin::Pin;
@@ -147,42 +148,28 @@ impl StdoutSink {
         let schema = batch.schema();
         let fields = schema.fields();
 
-        // Find well-known columns by name — check all canonical variants so
-        // CRI (_timestamp), OTLP (timestamp), and ES (@timestamp) sources work.
-        let ts_idx = find_col(
-            fields,
-            &[
+        // Find well-known columns by name — canonical names first, then shared
+        // variant lists from `field_names` to avoid sink drift.
+        let ts_idx = fields.iter().position(|f| {
+            field_names::matches_any(
+                f.name(),
                 field_names::TIMESTAMP,
-                field_names::TIMESTAMP_UNDERSCORE,
-                field_names::TIMESTAMP_AT,
-                field_names::TIMESTAMP_VARIANTS[0],
-                field_names::TIMESTAMP_VARIANTS[1],
-                "timestamp_str",
-            ],
-        );
-        let level_idx = find_col(
-            fields,
-            &[
+                field_names::TIMESTAMP_VARIANTS,
+            ) || f.name() == "timestamp_str"
+        });
+        let level_idx = fields.iter().position(|f| {
+            field_names::matches_any(
+                f.name(),
                 field_names::SEVERITY,
-                "level_str",
-                field_names::SEVERITY_VARIANTS[0],
-                field_names::SEVERITY_VARIANTS[1],
-                field_names::SEVERITY_VARIANTS[2],
-                field_names::SEVERITY_VARIANTS[3],
-            ],
-        );
-        let msg_idx = find_col(
-            fields,
-            &[
-                field_names::BODY,
-                "message_str",
-                field_names::BODY_VARIANTS[0],
-                "msg_str",
-                field_names::BODY_VARIANTS[1],
-                field_names::BODY_VARIANTS[2],
-                field_names::RAW,
-            ],
-        );
+                field_names::SEVERITY_VARIANTS,
+            ) || f.name() == "level_str"
+        });
+        let msg_idx = fields.iter().position(|f| {
+            field_names::matches_any(f.name(), field_names::BODY, field_names::BODY_VARIANTS)
+                || f.name() == "message_str"
+                || f.name() == "msg_str"
+                || f.name() == field_names::RAW
+        });
 
         let cols = build_col_infos(batch);
 
@@ -195,7 +182,7 @@ impl StdoutSink {
                 if !col.is_null(row) {
                     let ts = safe_col_to_string(col, row);
                     // Show just the time portion if it's a full ISO timestamp.
-                    let short = ts.find('T').map_or(ts.as_str(), |i| &ts[i + 1..]);
+                    let short = ts.find('T').map_or(ts.as_ref(), |i| &ts[i + 1..]);
                     if self.color {
                         self.buf.extend_from_slice(b"\x1b[2m");
                     }
@@ -213,7 +200,7 @@ impl StdoutSink {
                 if !col.is_null(row) {
                     let level = safe_col_to_string(col, row);
                     if self.color {
-                        let color = match level.as_str() {
+                        let color = match level.as_ref() {
                             "ERROR" => "\x1b[1;31m", // bold red
                             "WARN" => "\x1b[33m",    // yellow
                             "INFO" => "\x1b[32m",    // green
@@ -323,12 +310,12 @@ impl StdoutSink {
 ///
 /// Unlike `str_value` (which panics on non-string types), this handles all
 /// Arrow data types via `array_value_to_string` for non-Utf8 columns.
-fn safe_col_to_string(col: &dyn Array, row: usize) -> String {
+fn safe_col_to_string<'a>(col: &'a dyn Array, row: usize) -> Cow<'a, str> {
     match col.data_type() {
-        DataType::Utf8 => col.as_string::<i32>().value(row).to_string(),
-        DataType::Utf8View => col.as_string_view().value(row).to_string(),
-        DataType::LargeUtf8 => col.as_string::<i64>().value(row).to_string(),
-        _ => safe_array_value_to_string(col, row),
+        DataType::Utf8 => Cow::Borrowed(col.as_string::<i32>().value(row)),
+        DataType::Utf8View => Cow::Borrowed(col.as_string_view().value(row)),
+        DataType::LargeUtf8 => Cow::Borrowed(col.as_string::<i64>().value(row)),
+        _ => Cow::Owned(safe_array_value_to_string(col, row)),
     }
 }
 
@@ -341,16 +328,6 @@ fn safe_array_value_to_string(col: &dyn Array, row: usize) -> String {
             "<format_error>".to_string()
         }
     }
-}
-
-/// Find a column index by trying multiple name variants.
-fn find_col(fields: &arrow::datatypes::Fields, names: &[&str]) -> Option<usize> {
-    for name in names {
-        if let Some(idx) = fields.iter().position(|f| f.name() == *name) {
-            return Some(idx);
-        }
-    }
-    None
 }
 
 // ---------------------------------------------------------------------------
@@ -625,6 +602,60 @@ mod tests {
         assert!(
             output.contains("raw log line here"),
             "_raw content should appear in console output: {output:?}"
+        );
+    }
+
+    #[test]
+    fn console_format_utf8view_message_column() {
+        use arrow::array::StringViewArray;
+
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "message",
+            DataType::Utf8View,
+            true,
+        )]));
+        let msg = StringViewArray::from(vec![Some("view log line")]);
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(msg)]).unwrap();
+
+        let mut sink = StdoutSink::new(
+            "test-utf8view-console".to_string(),
+            StdoutFormat::Console,
+            Arc::new(ComponentStats::new()),
+        );
+        let mut out: Vec<u8> = Vec::new();
+        sink.write_batch_to(&batch, &make_metadata(), &mut out)
+            .unwrap();
+        let output = String::from_utf8(out).unwrap();
+        assert!(
+            output.contains("view log line"),
+            "Utf8View message should appear in console output: {output:?}"
+        );
+    }
+
+    #[test]
+    fn console_format_largeutf8_message_column() {
+        use arrow::array::LargeStringArray;
+
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "message",
+            DataType::LargeUtf8,
+            true,
+        )]));
+        let msg = LargeStringArray::from(vec![Some("large log line")]);
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(msg)]).unwrap();
+
+        let mut sink = StdoutSink::new(
+            "test-largeutf8-console".to_string(),
+            StdoutFormat::Console,
+            Arc::new(ComponentStats::new()),
+        );
+        let mut out: Vec<u8> = Vec::new();
+        sink.write_batch_to(&batch, &make_metadata(), &mut out)
+            .unwrap();
+        let output = String::from_utf8(out).unwrap();
+        assert!(
+            output.contains("large log line"),
+            "LargeUtf8 message should appear in console output: {output:?}"
         );
     }
 }

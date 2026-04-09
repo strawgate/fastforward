@@ -2489,8 +2489,8 @@ pipelines:
         let err = Config::load_str(yaml).unwrap_err();
         let msg = err.to_string();
         assert!(
-            msg.contains("gzip") || msg.contains("zstd"),
-            "expected arrow_ipc gzip rejection error mentioning gzip or zstd: {msg}"
+            msg.contains("arrow_ipc output only supports 'zstd'") && msg.contains("'gzip'"),
+            "expected arrow_ipc-specific gzip rejection, got: {msg}"
         );
     }
 
