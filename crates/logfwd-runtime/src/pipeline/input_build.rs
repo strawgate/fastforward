@@ -4,7 +4,7 @@ use std::sync::Arc;
 use bytes::BytesMut;
 use logfwd_config::{
     Format, GeneratorAttributeValueConfig, GeneratorComplexityConfig, GeneratorProfileConfig,
-    HttpMethodConfig, InputConfig, InputType, PlatformSensorBetaInputConfig,
+    HttpMethodConfig, InputConfig, InputType, PlatformSensorInputConfig,
 };
 use logfwd_io::diagnostics::ComponentStats;
 use logfwd_io::format::FormatDecoder;
@@ -43,14 +43,6 @@ fn validate_input_format(name: &str, input_type: InputType, format: &Format) -> 
             if !matches!(format, Format::Json) {
                 return Err(format!(
                     "input '{name}': format {:?} is not supported for {:?} inputs (expected json)",
-                    format, input_type
-                ));
-            }
-        }
-        InputType::LinuxSensorBeta | InputType::MacosSensorBeta | InputType::WindowsSensorBeta => {
-            if !matches!(format, Format::Raw | Format::Json) {
-                return Err(format!(
-                    "input '{name}': format {:?} is not supported for {:?} inputs (expected raw or json)",
                     format, input_type
                 ));
             }
@@ -290,27 +282,34 @@ pub(super) fn build_input_state(
             validate_input_format(name, InputType::Tcp, &format)?;
             (Box::new(source), format, 4 * 1024 * 1024)
         }
-        InputType::LinuxSensorBeta | InputType::MacosSensorBeta | InputType::WindowsSensorBeta => {
-            use logfwd_io::platform_sensor_beta::{PlatformSensorBetaInput, PlatformSensorTarget};
+        InputType::LinuxEbpfSensor | InputType::MacosEsSensor | InputType::WindowsEbpfSensor => {
+            use logfwd_io::platform_sensor::{PlatformSensorInput, PlatformSensorTarget};
 
             let target = match cfg.input_type {
-                InputType::LinuxSensorBeta => PlatformSensorTarget::Linux,
-                InputType::MacosSensorBeta => PlatformSensorTarget::Macos,
-                InputType::WindowsSensorBeta => PlatformSensorTarget::Windows,
+                InputType::LinuxEbpfSensor => PlatformSensorTarget::Linux,
+                InputType::MacosEsSensor => PlatformSensorTarget::Macos,
+                InputType::WindowsEbpfSensor => PlatformSensorTarget::Windows,
                 _ => unreachable!("handled by outer match"),
             };
 
-            let format = cfg.format.clone().unwrap_or(Format::Raw);
-            validate_input_format(name, cfg.input_type.clone(), &format)?;
+            if cfg.format.is_some() {
+                return Err(format!(
+                    "input '{name}': sensor inputs do not support 'format' (Arrow-native input)"
+                ));
+            }
 
-            let beta_cfg = build_platform_sensor_beta_config(cfg.sensor_beta.as_ref());
-            let source = PlatformSensorBetaInput::new(name, target, beta_cfg).map_err(|e| {
+            let sensor_cfg = build_platform_sensor_config(cfg.sensor.as_ref());
+            let source = PlatformSensorInput::new(name, target, sensor_cfg).map_err(|e| {
                 format!(
                     "input '{name}': failed to initialize {} input: {e}",
                     cfg.input_type
                 )
             })?;
-            (Box::new(source), format, 64 * 1024)
+            return Ok(InputState {
+                source: Box::new(source),
+                buf: BytesMut::with_capacity(64 * 1024),
+                stats,
+            });
         }
         _ => {
             return Err(format!(
@@ -331,16 +330,14 @@ pub(super) fn build_input_state(
     })
 }
 
-fn build_platform_sensor_beta_config(
-    cfg: Option<&PlatformSensorBetaInputConfig>,
-) -> logfwd_io::platform_sensor_beta::PlatformSensorBetaConfig {
+fn build_platform_sensor_config(
+    cfg: Option<&PlatformSensorInputConfig>,
+) -> logfwd_io::platform_sensor::PlatformSensorConfig {
     let poll_interval_ms = cfg.and_then(|c| c.poll_interval_ms).unwrap_or(10_000);
-    let emit_heartbeat = cfg.and_then(|c| c.emit_heartbeat).unwrap_or(true);
     let control_reload_interval_ms = cfg
         .and_then(|c| c.control_reload_interval_ms)
         .unwrap_or(1_000);
-    logfwd_io::platform_sensor_beta::PlatformSensorBetaConfig {
-        emit_heartbeat,
+    logfwd_io::platform_sensor::PlatformSensorConfig {
         poll_interval: std::time::Duration::from_millis(poll_interval_ms.max(1)),
         control_path: cfg.and_then(|c| c.control_path.clone()).map(PathBuf::from),
         control_reload_interval: std::time::Duration::from_millis(
@@ -396,23 +393,40 @@ mod tests {
     }
 
     #[test]
-    fn sensor_beta_formats_accept_raw_and_json() {
-        for input_type in [
-            InputType::LinuxSensorBeta,
-            InputType::MacosSensorBeta,
-            InputType::WindowsSensorBeta,
-        ] {
-            assert!(validate_input_format("in", input_type.clone(), &Format::Raw).is_ok());
-            assert!(validate_input_format("in", input_type, &Format::Json).is_ok());
-        }
-    }
-
-    #[test]
-    fn sensor_beta_formats_reject_non_raw_json() {
-        let err = validate_input_format("in", InputType::LinuxSensorBeta, &Format::Cri)
-            .expect_err("sensor beta should reject cri format");
+    fn sensor_inputs_reject_format_configuration() {
+        let mut pm = logfwd_io::diagnostics::PipelineMetrics::new(
+            "p",
+            "SELECT 1",
+            &logfwd_test_utils::test_meter(),
+        );
+        let stats = pm.add_input("sensor", "test");
+        let input_type = if cfg!(target_os = "linux") {
+            InputType::LinuxEbpfSensor
+        } else if cfg!(target_os = "macos") {
+            InputType::MacosEsSensor
+        } else {
+            InputType::WindowsEbpfSensor
+        };
+        let cfg = InputConfig {
+            name: Some("sensor".to_string()),
+            input_type,
+            path: None,
+            listen: None,
+            format: Some(Format::Raw),
+            max_open_files: None,
+            glob_rescan_interval_ms: None,
+            generator: None,
+            http: None,
+            sensor: Some(Default::default()),
+            sql: None,
+            tls: None,
+        };
+        let err = match build_input_state("sensor", &cfg, stats, true) {
+            Ok(_) => panic!("sensor format must be rejected"),
+            Err(err) => err,
+        };
         assert!(
-            err.contains("expected raw or json"),
+            err.contains("do not support 'format'"),
             "unexpected error: {err}"
         );
     }
@@ -436,7 +450,7 @@ mod tests {
                     glob_rescan_interval_ms: None,
                     generator: None,
                     http: None,
-                    sensor_beta: None,
+                    sensor: None,
                     sql: None,
                     tls: None,
                 };

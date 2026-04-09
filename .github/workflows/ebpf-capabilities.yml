@@ -4,20 +4,20 @@ on:
   push:
     branches: [main]
     paths:
-      # Run this workflow only for eBPF/sensor-beta surfaces.
+      # Run this workflow only for eBPF/sensor surfaces.
       - ".github/workflows/ebpf-capabilities.yml"
       - "scripts/ci-ebpf-capabilities.sh"
       - "crates/logfwd-ebpf-proto/**"
-      - "crates/logfwd-io/src/platform_sensor_beta.rs"
+      - "crates/logfwd-io/src/platform_sensor.rs"
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened, ready_for_review]
     paths:
-      # Trigger on PR updates only when eBPF/sensor-beta code changed.
+      # Trigger on PR updates only when eBPF/sensor code changed.
       - ".github/workflows/ebpf-capabilities.yml"
       - "scripts/ci-ebpf-capabilities.sh"
       - "crates/logfwd-ebpf-proto/**"
-      - "crates/logfwd-io/src/platform_sensor_beta.rs"
+      - "crates/logfwd-io/src/platform_sensor.rs"
   workflow_dispatch:
   schedule:
     - cron: "17 9 * * 1"
@@ -76,11 +76,11 @@ jobs:
       - name: Test eBPF proto crate
         run: cargo test -p logfwd-ebpf-proto --all-targets
 
-      - name: Test Linux beta sensor/config paths
+      - name: Test Linux sensor/config paths
         run: |
-          cargo test -p logfwd-io platform_sensor_beta::tests -- --nocapture
-          cargo test -p logfwd-config sensor_beta -- --nocapture
-          cargo test -p logfwd sensor_beta_formats_allow_raw_and_json_only -- --nocapture
+          cargo test -p logfwd-io platform_sensor::tests -- --nocapture
+          cargo test -p logfwd-config sensor_ -- --nocapture
+          cargo test -p logfwd validate_pipelines_read_only_rejects_sensor_format -- --nocapture
 
       - name: Check pipe-capture userspace loader builds
         run: cargo check --manifest-path crates/logfwd-ebpf-proto/pipe-capture/Cargo.toml
@@ -129,9 +129,9 @@ jobs:
 
       - name: Test macOS sensor/config paths
         run: |
-          cargo test -p logfwd-io platform_sensor_beta::tests -- --nocapture
-          cargo test -p logfwd-config sensor_beta -- --nocapture
-          cargo test -p logfwd sensor_beta_formats_allow_raw_and_json_only -- --nocapture
+          cargo test -p logfwd-io platform_sensor::tests -- --nocapture
+          cargo test -p logfwd-config sensor_ -- --nocapture
+          cargo test -p logfwd validate_pipelines_read_only_rejects_sensor_format -- --nocapture
 
       - name: Probe macOS sensor capabilities
         run: |
@@ -229,9 +229,9 @@ jobs:
       - name: Test Windows sensor/config paths
         shell: pwsh
         run: |
-          cargo test -p logfwd-io platform_sensor_beta::tests -- --nocapture
-          cargo test -p logfwd-config sensor_beta -- --nocapture
-          cargo test -p logfwd sensor_beta_formats_allow_raw_and_json_only -- --nocapture
+          cargo test -p logfwd-io platform_sensor::tests -- --nocapture
+          cargo test -p logfwd-config sensor_ -- --nocapture
+          cargo test -p logfwd validate_pipelines_read_only_rejects_sensor_format -- --nocapture
 
       - name: Probe eBPF for Windows capabilities
         shell: pwsh

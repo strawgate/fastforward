@@ -1,4 +1,4 @@
-//! Cross-platform beta sensor input.
+//! Cross-platform sensor input.
 //!
 //! This source now emits Arrow `RecordBatch` rows directly. It includes a
 //! lightweight runtime control plane (optional JSON file reload) and explicit
@@ -18,7 +18,7 @@ use serde::Deserialize;
 
 use crate::input::{InputEvent, InputSource};
 
-/// Platform target for a beta sensor input.
+/// Platform target for a platform sensor input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlatformSensorTarget {
     Linux,
@@ -113,12 +113,10 @@ fn target_signal_families(target: PlatformSensorTarget) -> &'static [SignalFamil
     }
 }
 
-/// Runtime options for platform beta inputs.
+/// Runtime options for platform sensor inputs.
 #[derive(Debug, Clone)]
-pub struct PlatformSensorBetaConfig {
-    /// Emit periodic heartbeat rows when the source is idle.
-    pub emit_heartbeat: bool,
-    /// Heartbeat cadence.
+pub struct PlatformSensorConfig {
+    /// Periodic sample cadence.
     pub poll_interval: Duration,
     /// Optional JSON control-plane file for runtime sensor tuning.
     pub control_path: Option<PathBuf>,
@@ -132,10 +130,9 @@ pub struct PlatformSensorBetaConfig {
     pub emit_signal_rows: bool,
 }
 
-impl Default for PlatformSensorBetaConfig {
+impl Default for PlatformSensorConfig {
     fn default() -> Self {
         Self {
-            emit_heartbeat: true,
             poll_interval: Duration::from_millis(10_000),
             control_path: None,
             control_reload_interval: Duration::from_millis(1_000),
@@ -145,9 +142,9 @@ impl Default for PlatformSensorBetaConfig {
     }
 }
 
-/// Beta input source for per-platform sensor bring-up.
+/// Input source for per-platform sensor bring-up.
 #[derive(Debug)]
-pub struct PlatformSensorBetaInput {
+pub struct PlatformSensorInput {
     name: String,
     machine: Option<PlatformSensorMachine>,
 }
@@ -163,7 +160,7 @@ struct PlatformSensorCommon {
     name: String,
     target: PlatformSensorTarget,
     host_platform: &'static str,
-    cfg: PlatformSensorBetaConfig,
+    cfg: PlatformSensorConfig,
     schema: Arc<Schema>,
 }
 
@@ -190,7 +187,6 @@ struct ControlState {
     generation: u64,
     enabled_families: Vec<SignalFamily>,
     source: ControlSource,
-    emit_heartbeat: bool,
     emit_signal_rows: bool,
 }
 
@@ -223,7 +219,6 @@ struct SensorRow {
     control_source: String,
     control_path: Option<String>,
     enabled_families: Option<String>,
-    effective_emit_heartbeat: Option<bool>,
     effective_emit_signal_rows: Option<bool>,
     message: String,
 }
@@ -233,6 +228,8 @@ struct SensorRow {
 struct ControlFileConfig {
     generation: Option<u64>,
     enabled_families: Option<Vec<String>>,
+    // Deprecated no-op retained for backward-compatible control files.
+    #[allow(dead_code)]
     emit_heartbeat: Option<bool>,
     emit_signal_rows: Option<bool>,
 }
@@ -243,7 +240,7 @@ impl PlatformSensorState<InitState> {
         let mut rows = vec![self.common.control_row(
             &self.state.control,
             "startup",
-            "beta sensor startup complete",
+            "sensor startup complete",
             "ok",
         )];
         rows.extend(self.common.capability_rows(&self.state.control));
@@ -281,25 +278,12 @@ impl PlatformSensorState<RunningState> {
         }
 
         if self.state.last_emit.elapsed() >= self.common.cfg.poll_interval {
-            let mut emitted = false;
-            if self.state.control.emit_heartbeat {
-                rows.push(self.common.control_row(
-                    &self.state.control,
-                    "heartbeat",
-                    "beta sensor heartbeat",
-                    "ok",
-                ));
-                emitted = true;
-            }
             if self.state.control.emit_signal_rows {
                 rows.extend(self.common.signal_sample_rows(
                     &self.state.control,
-                    "heartbeat_sample",
+                    "sample",
                     "periodic signal snapshot",
                 ));
-                emitted = true;
-            }
-            if emitted {
                 self.state.last_emit = Instant::now();
             }
         }
@@ -332,9 +316,6 @@ impl PlatformSensorState<RunningState> {
                     };
                     next.enabled_families = parsed;
                 }
-                if let Some(v) = file_cfg.emit_heartbeat {
-                    next.emit_heartbeat = v;
-                }
                 if let Some(v) = file_cfg.emit_signal_rows {
                     next.emit_signal_rows = v;
                 }
@@ -344,7 +325,6 @@ impl PlatformSensorState<RunningState> {
                     .is_some_and(|generation| generation != self.state.control.generation);
 
                 let changed = next.enabled_families != self.state.control.enabled_families
-                    || next.emit_heartbeat != self.state.control.emit_heartbeat
                     || next.emit_signal_rows != self.state.control.emit_signal_rows
                     || generation_changed;
 
@@ -403,7 +383,6 @@ impl PlatformSensorCommon {
                 .as_ref()
                 .map(|path| path.display().to_string()),
             enabled_families: Some(enabled_families_csv(control)),
-            effective_emit_heartbeat: Some(control.emit_heartbeat),
             effective_emit_signal_rows: Some(control.emit_signal_rows),
             message: message.to_string(),
         }
@@ -434,7 +413,6 @@ impl PlatformSensorCommon {
                         .as_ref()
                         .map(|path| path.display().to_string()),
                     enabled_families: Some(enabled_families_csv(control)),
-                    effective_emit_heartbeat: Some(control.emit_heartbeat),
                     effective_emit_signal_rows: Some(control.emit_signal_rows),
                     message: if is_enabled {
                         format!("{} family enabled", family.as_str())
@@ -473,7 +451,6 @@ impl PlatformSensorCommon {
                     .as_ref()
                     .map(|path| path.display().to_string()),
                 enabled_families: Some(enabled_families_csv(control)),
-                effective_emit_heartbeat: Some(control.emit_heartbeat),
                 effective_emit_signal_rows: Some(control.emit_signal_rows),
                 message: format!("{} ({})", message, family.as_str()),
             })
@@ -497,10 +474,8 @@ impl PlatformSensorCommon {
         let mut control_source = Vec::with_capacity(rows.len());
         let mut control_path = Vec::with_capacity(rows.len());
         let mut enabled_families = Vec::with_capacity(rows.len());
-        let mut effective_emit_heartbeat = Vec::with_capacity(rows.len());
         let mut effective_emit_signal_rows = Vec::with_capacity(rows.len());
         let mut message = Vec::with_capacity(rows.len());
-        let mut sensor_beta = Vec::with_capacity(rows.len());
         let mut accounted_bytes = 0_u64;
 
         for row in rows {
@@ -516,11 +491,9 @@ impl PlatformSensorCommon {
             control_source.push(row.control_source);
             control_path.push(row.control_path);
             enabled_families.push(row.enabled_families);
-            effective_emit_heartbeat.push(row.effective_emit_heartbeat);
             effective_emit_signal_rows.push(row.effective_emit_signal_rows);
             accounted_bytes = accounted_bytes.saturating_add(row.message.len() as u64);
             message.push(row.message);
-            sensor_beta.push(true);
         }
 
         let columns: Vec<ArrayRef> = vec![
@@ -536,10 +509,8 @@ impl PlatformSensorCommon {
             Arc::new(StringArray::from(control_source)),
             Arc::new(StringArray::from(control_path)),
             Arc::new(StringArray::from(enabled_families)),
-            Arc::new(BooleanArray::from(effective_emit_heartbeat)),
             Arc::new(BooleanArray::from(effective_emit_signal_rows)),
             Arc::new(StringArray::from(message)),
-            Arc::new(BooleanArray::from(sensor_beta)),
         ];
 
         let batch = RecordBatch::try_new(Arc::clone(&self.schema), columns)
@@ -553,20 +524,20 @@ impl PlatformSensorCommon {
     }
 }
 
-impl PlatformSensorBetaInput {
-    /// Create a beta platform sensor source.
+impl PlatformSensorInput {
+    /// Create a platform sensor source.
     ///
     /// Returns an error when `target` does not match the current host platform.
     pub fn new(
         name: impl Into<String>,
         target: PlatformSensorTarget,
-        cfg: PlatformSensorBetaConfig,
+        cfg: PlatformSensorConfig,
     ) -> io::Result<Self> {
         let name = name.into();
         let host_platform = current_host_platform().as_str().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::Unsupported,
-                "platform sensor beta inputs are unsupported on this host",
+                "platform sensor inputs are unsupported on this host",
             )
         })?;
 
@@ -574,7 +545,7 @@ impl PlatformSensorBetaInput {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!(
-                    "{} sensor beta input can only run on {} hosts (current host: {})",
+                    "{} sensor input can only run on {} hosts (current host: {})",
                     target.as_str(),
                     target.as_str(),
                     host_platform
@@ -586,7 +557,6 @@ impl PlatformSensorBetaInput {
             generation: 1,
             enabled_families: parse_enabled_families(cfg.enabled_families.as_deref(), target)?,
             source: ControlSource::StaticConfig,
-            emit_heartbeat: cfg.emit_heartbeat,
             emit_signal_rows: cfg.emit_signal_rows,
         };
 
@@ -606,12 +576,12 @@ impl PlatformSensorBetaInput {
     }
 }
 
-impl InputSource for PlatformSensorBetaInput {
+impl InputSource for PlatformSensorInput {
     fn poll(&mut self) -> io::Result<Vec<InputEvent>> {
         let machine = self
             .machine
             .take()
-            .ok_or_else(|| io::Error::other("platform sensor beta state missing"))?;
+            .ok_or_else(|| io::Error::other("platform sensor state missing"))?;
 
         let (next_machine, result) = match machine {
             PlatformSensorMachine::Init(init) => match init.start() {
@@ -728,10 +698,8 @@ fn sensor_schema() -> Arc<Schema> {
         Field::new("control_source", DataType::Utf8, false),
         Field::new("control_path", DataType::Utf8, true),
         Field::new("enabled_families", DataType::Utf8, true),
-        Field::new("effective_emit_heartbeat", DataType::Boolean, true),
         Field::new("effective_emit_signal_rows", DataType::Boolean, true),
         Field::new("message", DataType::Utf8, false),
-        Field::new("sensor_beta", DataType::Boolean, false),
     ]))
 }
 
@@ -857,23 +825,20 @@ mod tests {
 
     #[test]
     fn rejects_non_matching_platform_target() {
-        let err = PlatformSensorBetaInput::new(
-            "beta",
-            non_host_target(),
-            PlatformSensorBetaConfig::default(),
-        )
-        .expect_err("non-matching target must fail");
+        let err =
+            PlatformSensorInput::new("sensor", non_host_target(), PlatformSensorConfig::default())
+                .expect_err("non-matching target must fail");
         assert!(err.to_string().contains("can only run on"));
     }
 
     #[test]
     fn rejects_unknown_enabled_family() {
-        let err = PlatformSensorBetaInput::new(
-            "beta",
+        let err = PlatformSensorInput::new(
+            "sensor",
             host_target(),
-            PlatformSensorBetaConfig {
+            PlatformSensorConfig {
                 enabled_families: Some(vec!["not_a_family".to_string()]),
-                ..PlatformSensorBetaConfig::default()
+                ..PlatformSensorConfig::default()
             },
         )
         .expect_err("unknown family must fail");
@@ -882,12 +847,9 @@ mod tests {
 
     #[test]
     fn emits_startup_batch_on_first_poll() {
-        let mut input = PlatformSensorBetaInput::new(
-            "beta",
-            host_target(),
-            PlatformSensorBetaConfig::default(),
-        )
-        .expect("host target should be valid");
+        let mut input =
+            PlatformSensorInput::new("sensor", host_target(), PlatformSensorConfig::default())
+                .expect("host target should be valid");
 
         let events = input.poll().expect("poll should succeed");
         assert_eq!(events.len(), 1);
@@ -904,15 +866,14 @@ mod tests {
     }
 
     #[test]
-    fn heartbeat_disabled_emits_only_startup_batch() {
-        let mut input = PlatformSensorBetaInput::new(
-            "beta",
+    fn signal_rows_disabled_emits_only_startup_batch() {
+        let mut input = PlatformSensorInput::new(
+            "sensor",
             host_target(),
-            PlatformSensorBetaConfig {
-                emit_heartbeat: false,
+            PlatformSensorConfig {
                 emit_signal_rows: false,
                 poll_interval: Duration::from_millis(1),
-                ..PlatformSensorBetaConfig::default()
+                ..PlatformSensorConfig::default()
             },
         )
         .expect("host target should be valid");
@@ -923,15 +884,14 @@ mod tests {
     }
 
     #[test]
-    fn signal_rows_emit_when_heartbeat_disabled() {
-        let mut input = PlatformSensorBetaInput::new(
-            "beta",
+    fn periodic_signal_rows_emit_when_enabled() {
+        let mut input = PlatformSensorInput::new(
+            "sensor",
             host_target(),
-            PlatformSensorBetaConfig {
-                emit_heartbeat: false,
+            PlatformSensorConfig {
                 emit_signal_rows: true,
                 poll_interval: Duration::from_millis(1),
-                ..PlatformSensorBetaConfig::default()
+                ..PlatformSensorConfig::default()
             },
         )
         .expect("host target should be valid");
@@ -944,25 +904,19 @@ mod tests {
         let batch = first_batch(&events);
         let kinds = string_col(batch, "event_kind");
         assert!(
-            kinds
-                .iter()
-                .any(|v| v.as_deref() == Some("heartbeat_sample")),
-            "periodic sample rows should be emitted even when heartbeats are disabled"
-        );
-        assert!(
-            !kinds.iter().any(|v| v.as_deref() == Some("heartbeat")),
-            "heartbeat rows should remain disabled"
+            kinds.iter().any(|v| v.as_deref() == Some("sample")),
+            "periodic sample rows should be emitted when signal rows are enabled"
         );
     }
 
     #[test]
     fn enabled_families_filter_signal_samples() {
-        let mut input = PlatformSensorBetaInput::new(
-            "beta",
+        let mut input = PlatformSensorInput::new(
+            "sensor",
             host_target(),
-            PlatformSensorBetaConfig {
+            PlatformSensorConfig {
                 enabled_families: Some(vec!["process".to_string(), "dns".to_string()]),
-                ..PlatformSensorBetaConfig::default()
+                ..PlatformSensorConfig::default()
             },
         )
         .expect("host target should be valid");
@@ -991,12 +945,12 @@ mod tests {
 
     #[test]
     fn explicit_empty_enabled_families_disables_signal_samples() {
-        let mut input = PlatformSensorBetaInput::new(
-            "beta",
+        let mut input = PlatformSensorInput::new(
+            "sensor",
             host_target(),
-            PlatformSensorBetaConfig {
+            PlatformSensorConfig {
                 enabled_families: Some(Vec::new()),
-                ..PlatformSensorBetaConfig::default()
+                ..PlatformSensorConfig::default()
             },
         )
         .expect("host target should be valid");
@@ -1016,16 +970,15 @@ mod tests {
     fn control_file_reload_updates_generation_and_families() {
         let (_dir, control_path) = new_control_file_path();
 
-        let mut input = PlatformSensorBetaInput::new(
-            "beta",
+        let mut input = PlatformSensorInput::new(
+            "sensor",
             host_target(),
-            PlatformSensorBetaConfig {
+            PlatformSensorConfig {
                 control_path: Some(control_path.clone()),
                 control_reload_interval: Duration::from_millis(1),
                 poll_interval: Duration::from_secs(60),
-                emit_heartbeat: false,
                 enabled_families: Some(vec!["process".to_string()]),
-                ..PlatformSensorBetaConfig::default()
+                ..PlatformSensorConfig::default()
             },
         )
         .expect("host target should be valid");
@@ -1073,16 +1026,15 @@ mod tests {
     fn control_reload_same_generation_and_values_is_noop() {
         let (_dir, control_path) = new_control_file_path();
 
-        let mut input = PlatformSensorBetaInput::new(
-            "beta",
+        let mut input = PlatformSensorInput::new(
+            "sensor",
             host_target(),
-            PlatformSensorBetaConfig {
+            PlatformSensorConfig {
                 control_path: Some(control_path.clone()),
                 control_reload_interval: Duration::from_millis(1),
                 poll_interval: Duration::from_secs(60),
-                emit_heartbeat: false,
                 enabled_families: Some(vec!["process".to_string()]),
-                ..PlatformSensorBetaConfig::default()
+                ..PlatformSensorConfig::default()
             },
         )
         .expect("host target should be valid");
@@ -1092,7 +1044,7 @@ mod tests {
 
         write_control_file(
             &control_path,
-            r#"{"generation":1,"enabled_families":["process"],"emit_heartbeat":false,"emit_signal_rows":true}"#,
+            r#"{"generation":1,"enabled_families":["process"],"emit_signal_rows":true}"#,
         );
         std::thread::sleep(Duration::from_millis(2));
 
@@ -1108,15 +1060,14 @@ mod tests {
         let (_dir, control_path) = new_control_file_path();
         write_control_file(&control_path, r#"{"generation":"invalid"}"#);
 
-        let mut input = PlatformSensorBetaInput::new(
-            "beta",
+        let mut input = PlatformSensorInput::new(
+            "sensor",
             host_target(),
-            PlatformSensorBetaConfig {
+            PlatformSensorConfig {
                 control_path: Some(control_path),
                 control_reload_interval: Duration::from_millis(1),
-                emit_heartbeat: false,
                 emit_signal_rows: false,
-                ..PlatformSensorBetaConfig::default()
+                ..PlatformSensorConfig::default()
             },
         )
         .expect("startup should not fail on malformed optional control file");
@@ -1138,12 +1089,9 @@ mod tests {
 
     #[test]
     fn poll_error_preserves_machine_and_name_invariants() {
-        let mut input = PlatformSensorBetaInput::new(
-            "beta",
-            host_target(),
-            PlatformSensorBetaConfig::default(),
-        )
-        .expect("host target should be valid");
+        let mut input =
+            PlatformSensorInput::new("sensor", host_target(), PlatformSensorConfig::default())
+                .expect("host target should be valid");
 
         let init = match input.machine.as_mut() {
             Some(PlatformSensorMachine::Init(init)) => init,
@@ -1161,7 +1109,7 @@ mod tests {
         );
 
         // Even after a poll error, public API should remain non-panicking.
-        assert_eq!(input.name(), "beta");
+        assert_eq!(input.name(), "sensor");
 
         let second_err = match input.poll() {
             Ok(_) => panic!("machine should still be present"),
@@ -1175,12 +1123,9 @@ mod tests {
 
     #[test]
     fn health_transitions_from_starting_to_healthy_after_first_poll() {
-        let mut input = PlatformSensorBetaInput::new(
-            "beta",
-            host_target(),
-            PlatformSensorBetaConfig::default(),
-        )
-        .expect("host target should be valid");
+        let mut input =
+            PlatformSensorInput::new("sensor", host_target(), PlatformSensorConfig::default())
+                .expect("host target should be valid");
 
         assert_eq!(input.health(), ComponentHealth::Starting);
         let _ = input.poll().expect("startup poll succeeds");

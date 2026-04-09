@@ -159,67 +159,65 @@ input:
   listen: 0.0.0.0:4318
 ```
 
-### `linux_sensor_beta` input
+### `linux_ebpf_sensor` input
 
-Linux beta sensor lane for early platform-native ingestion development. This
-input supports `format: raw` (default) or `format: json`.
+Linux eBPF sensor input for platform-native ingestion. This input is
+Arrow-native and does not support `format`.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `sensor_beta.poll_interval_ms` | integer | No | Heartbeat cadence in milliseconds. Must be `>= 1`. Defaults to `10000`. |
-| `sensor_beta.emit_heartbeat` | boolean | No | Emit periodic heartbeat rows while idle. Defaults to `true`. |
-| `sensor_beta.control_path` | string | No | Optional JSON control-plane file path for runtime reload. |
-| `sensor_beta.control_reload_interval_ms` | integer | No | Reload check interval in milliseconds. Must be `>= 1`. Defaults to `1000`. |
-| `sensor_beta.enabled_families` | array[string] | No | Optional enabled signal families for this target (`process,file,network,dns,authz` on Linux). Omit to use defaults; set `[]` to disable all families. |
-| `sensor_beta.emit_signal_rows` | boolean | No | Emit periodic per-family sample rows. Defaults to `true`. |
+| `sensor.poll_interval_ms` | integer | No | Periodic sample cadence in milliseconds. Must be `>= 1`. Defaults to `10000`. |
+| `sensor.control_path` | string | No | Optional JSON control-plane file path for runtime reload. |
+| `sensor.control_reload_interval_ms` | integer | No | Reload check interval in milliseconds. Must be `>= 1`. Defaults to `1000`. |
+| `sensor.enabled_families` | array[string] | No | Optional enabled signal families for this target (`process,file,network,dns,authz` on Linux). Omit to use defaults; set `[]` to disable all families. |
+| `sensor.emit_signal_rows` | boolean | No | Emit periodic per-family sample rows. Defaults to `true`. |
 
 ```yaml
 input:
-  type: linux_sensor_beta
-  format: raw
-  sensor_beta:
+  type: linux_ebpf_sensor
+  sensor:
     poll_interval_ms: 2000
 ```
 
-### `macos_sensor_beta` input
+### `macos_es_sensor` input
 
-macOS beta sensor lane for EndpointSecurity-oriented adapter bring-up. This
-input supports `format: raw` (default) or `format: json`.
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `sensor_beta.poll_interval_ms` | integer | No | Heartbeat cadence in milliseconds. Must be `>= 1`. Defaults to `10000`. |
-| `sensor_beta.emit_heartbeat` | boolean | No | Emit periodic heartbeat rows while idle. Defaults to `true`. |
-| `sensor_beta.control_path` | string | No | Optional JSON control-plane file path for runtime reload. |
-| `sensor_beta.control_reload_interval_ms` | integer | No | Reload check interval in milliseconds. Must be `>= 1`. Defaults to `1000`. |
-| `sensor_beta.enabled_families` | array[string] | No | Optional enabled signal families (`process,file,network,dns,module,authz` on macOS). Omit to use defaults; set `[]` to disable all families. |
-| `sensor_beta.emit_signal_rows` | boolean | No | Emit periodic per-family sample rows. Defaults to `true`. |
-
-```yaml
-input:
-  type: macos_sensor_beta
-  format: raw
-```
-
-### `windows_sensor_beta` input
-
-Windows beta sensor lane for eBPF/ETW hybrid adapter bring-up. This input
-supports `format: raw` (default) or `format: json`.
+macOS EndpointSecurity sensor input. This input is Arrow-native and does not
+support `format`.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `sensor_beta.poll_interval_ms` | integer | No | Heartbeat cadence in milliseconds. Must be `>= 1`. Defaults to `10000`. |
-| `sensor_beta.emit_heartbeat` | boolean | No | Emit periodic heartbeat rows while idle. Defaults to `true`. |
-| `sensor_beta.control_path` | string | No | Optional JSON control-plane file path for runtime reload. |
-| `sensor_beta.control_reload_interval_ms` | integer | No | Reload check interval in milliseconds. Must be `>= 1`. Defaults to `1000`. |
-| `sensor_beta.enabled_families` | array[string] | No | Optional enabled signal families (`process,file,network,dns,module,registry,authz` on Windows). Omit to use defaults; set `[]` to disable all families. |
-| `sensor_beta.emit_signal_rows` | boolean | No | Emit periodic per-family sample rows. Defaults to `true`. |
+| `sensor.poll_interval_ms` | integer | No | Periodic sample cadence in milliseconds. Must be `>= 1`. Defaults to `10000`. |
+| `sensor.control_path` | string | No | Optional JSON control-plane file path for runtime reload. |
+| `sensor.control_reload_interval_ms` | integer | No | Reload check interval in milliseconds. Must be `>= 1`. Defaults to `1000`. |
+| `sensor.enabled_families` | array[string] | No | Optional enabled signal families (`process,file,network,dns,module,authz` on macOS). Omit to use defaults; set `[]` to disable all families. |
+| `sensor.emit_signal_rows` | boolean | No | Emit periodic per-family sample rows. Defaults to `true`. |
 
 ```yaml
 input:
-  type: windows_sensor_beta
-  format: raw
+  type: macos_es_sensor
 ```
+
+### `windows_ebpf_sensor` input
+
+Windows eBPF sensor input. This input is Arrow-native and does not support
+`format`.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `sensor.poll_interval_ms` | integer | No | Periodic sample cadence in milliseconds. Must be `>= 1`. Defaults to `10000`. |
+| `sensor.control_path` | string | No | Optional JSON control-plane file path for runtime reload. |
+| `sensor.control_reload_interval_ms` | integer | No | Reload check interval in milliseconds. Must be `>= 1`. Defaults to `1000`. |
+| `sensor.enabled_families` | array[string] | No | Optional enabled signal families (`process,file,network,dns,module,registry,authz` on Windows). Omit to use defaults; set `[]` to disable all families. |
+| `sensor.emit_signal_rows` | boolean | No | Emit periodic per-family sample rows. Defaults to `true`. |
+
+```yaml
+input:
+  type: windows_ebpf_sensor
+```
+
+Compatibility note: legacy names `linux_sensor_beta`, `macos_sensor_beta`,
+`windows_sensor_beta`, plus the legacy `sensor_beta:` block, are still
+accepted as aliases for backward compatibility.
 
 ### `arrow_ipc` input *(not yet supported)*
 
@@ -237,9 +235,9 @@ config validation currently rejects it.
 | `udp` | Implemented | Receive log lines over UDP. |
 | `tcp` | Implemented | Accept log lines over TCP. |
 | `otlp` | Implemented | Receive OTLP logs over a bound listen address. |
-| `linux_sensor_beta` | Beta | Linux platform sensor beta lane (heartbeat/control events while integration is in progress). |
-| `macos_sensor_beta` | Beta | macOS platform sensor beta lane (heartbeat/control events while integration is in progress). |
-| `windows_sensor_beta` | Beta | Windows platform sensor beta lane (heartbeat/control events while integration is in progress). |
+| `linux_ebpf_sensor` | Implemented | Linux eBPF sensor input (Arrow-native control + signal rows). |
+| `macos_es_sensor` | Implemented | macOS EndpointSecurity sensor input (Arrow-native control + signal rows). |
+| `windows_ebpf_sensor` | Implemented | Windows eBPF sensor input (Arrow-native control + signal rows). |
 | `arrow_ipc` | Not yet supported | Reserved for future Arrow IPC ingest. |
 
 ---
@@ -247,6 +245,8 @@ config validation currently rejects it.
 ## Formats
 
 The `format` field controls how raw bytes from the input are parsed into log records.
+`linux_ebpf_sensor`, `macos_es_sensor`, and `windows_ebpf_sensor` are
+Arrow-native and reject `format`.
 
 | Value | Description |
 |-------|-------------|
