@@ -18,65 +18,56 @@ Audit focus:
 
 ## Findings (Prioritized)
 
-### 1. P2: Yanked crate in lockfile (`fastrand 2.4.0`)
+### 1. P2: Yanked crate in lockfile (`fastrand 2.4.0`) — resolved
 
-- Evidence: `cargo deny check` reports a yanked crate.
-- Lockfile location: `Cargo.lock` shows `fastrand 2.4.0` at line 1566.
-- Validation: `cargo update -p fastrand --dry-run` resolves cleanly to `2.4.1`.
+- Historical evidence (at audit time): `cargo deny check` reported `fastrand 2.4.0` as yanked.
+- Current state: `Cargo.lock` now contains `fastrand 2.4.1`.
+- Validation command: `cargo update -p fastrand --dry-run`.
 
 References:
 
-- `Cargo.lock:1566`
-- `Cargo.lock:1567`
+- `Cargo.lock` package stanza for `name = "fastrand"` (current `version = "2.4.1"`).
+- `cargo deny check` output from this audit run.
 
 Recommendation:
 
-- Update lockfile with `cargo update -p fastrand`.
-- Re-run `cargo deny check` in CI to verify warning is gone.
+- Keep this item as a historical audit note.
+- Continue enforcing with `cargo deny check` in CI.
 
 ---
 
-### 2. P2: Build docs claim `just ci` is full CI, but it is fast-tier only
+### 2. P2: Build docs claim `just ci` is full CI, but it is fast-tier only — resolved
 
-- `book/src/development/building.md` says `just ci` runs the full CI suite.
-- `justfile` defines `ci` as quick/default-members path (no DataFusion), and `ci-all` as full workspace.
-- This can give false confidence that DataFusion/full-workspace checks ran locally.
+- Historical observation (audit snapshot): docs text and `justfile` semantics diverged.
+- Current state: `book/src/development/building.md` now matches `justfile` (`ci` fast-tier, `ci-all` full-tier).
 
 References:
 
-- `book/src/development/building.md:19`
-- `justfile:58`
-- `justfile:61`
+- `book/src/development/building.md` command table (`just ci` / `just ci-all`)
+- `justfile` target `ci`
+- `justfile` target `ci-all`
 
 Recommendation:
 
-- Update docs to describe:
-  - `just ci` = fast dev CI tier
-  - `just ci-all` = full CI-equivalent tier
+- Keep docs and `justfile` semantics aligned as part of normal CI/docs review.
 
 ---
 
-### 3. P2: Crate-boundary guidance doc has stale dependency graph entries
+### 3. P2: Crate-boundary guidance doc had stale dependency graph entries — resolved
 
-- `docs/ci/crate-boundary-and-dependency-integrity.md` says:
-  - `logfwd-transform` depends on `logfwd-io`
-  - `logfwd-output` depends on `logfwd-io`
-- Current manifests do not match:
-  - `crates/logfwd-transform/Cargo.toml` has no `logfwd-io` dependency.
-  - `crates/logfwd-output/Cargo.toml` has no `logfwd-io` dependency.
-- This creates reviewer confusion because the policy doc claims “actual dependency graph.”
+- Historical observation (audit snapshot): dependency graph text was stale.
+- Current state: crate-boundary docs were corrected to match manifests.
 
 References:
 
-- `docs/ci/crate-boundary-and-dependency-integrity.md:94`
-- `docs/ci/crate-boundary-and-dependency-integrity.md:95`
-- `crates/logfwd-transform/Cargo.toml:11`
-- `crates/logfwd-output/Cargo.toml:11`
+- `docs/ci/crate-boundary-and-dependency-integrity.md` section: actual dependency graph
+- `crates/logfwd-transform/Cargo.toml` dependencies section
+- `crates/logfwd-output/Cargo.toml` dependencies section
 
 Recommendation:
 
-- Update the policy document to reflect current manifests.
-- Optionally add a lightweight graph-check script in CI to prevent doc drift.
+- Keep policy docs synchronized with manifest changes.
+- Optionally add a lightweight graph-check script in CI to prevent future drift.
 
 ---
 
@@ -125,7 +116,7 @@ Recommendation:
 
 ## Suggested Follow-up Order
 
-1. Fix yanked crate (`fastrand`) in lockfile.
-2. Fix doc mismatches (`building.md`, crate-boundary CI guidance).
+1. Keep `cargo deny check` in CI and monitor for new yanked advisories.
+2. Add light anti-drift checks for docs that mirror tool/manifest semantics.
 3. Decide and document policy on workspace dependency normalization.
 4. Prune or annotate stale `deny.toml` license allowances.
