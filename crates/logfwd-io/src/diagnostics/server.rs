@@ -74,7 +74,10 @@ fn redact_yaml_value(value: &mut serde_yaml_ng::Value, in_auth_block: bool) {
     }
 }
 
-fn redact_config_yaml(raw_yaml: &str) -> String {
+/// Redact credentials (auth tokens, bearer tokens, endpoint userinfo) from a
+/// config YAML string. Returns the redacted YAML, or a placeholder if parsing
+/// fails.
+pub fn redact_config_yaml(raw_yaml: &str) -> String {
     let Ok(mut parsed) = serde_yaml_ng::from_str::<serde_yaml_ng::Value>(raw_yaml) else {
         return REDACTED_CONFIG_UNAVAILABLE.to_string();
     };

@@ -872,6 +872,20 @@ fn test_query_analyzer_join_on_column_refs() {
     );
 }
 
+#[test]
+fn test_query_analyzer_union_column_refs() {
+    let a =
+        QueryAnalyzer::new("SELECT level FROM logs UNION ALL SELECT severity FROM logs").unwrap();
+    assert!(
+        a.referenced_columns.contains("level"),
+        "left branch column must be in referenced_columns"
+    );
+    assert!(
+        a.referenced_columns.contains("severity"),
+        "right branch column must be in referenced_columns"
+    );
+}
+
 // -----------------------------------------------------------------------
 
 /// Verify that a stable schema does NOT trigger repeated context recreation

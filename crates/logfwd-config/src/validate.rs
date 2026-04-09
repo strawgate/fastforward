@@ -1231,10 +1231,38 @@ mod validate_host_port_tests {
     }
 }
 
+/// Redact userinfo (username:password) from a URL for safe inclusion in error
+/// messages.  Replaces `scheme://user:pass@host` with `scheme://***@host`.
+fn redact_url(endpoint: &str) -> String {
+    // Try to parse; if that fails, just redact anything between :// and @.
+    if let Ok(mut parsed) = Url::parse(endpoint) {
+        if !parsed.username().is_empty() || parsed.password().is_some() {
+            let _ = parsed.set_username("***");
+            let _ = parsed.set_password(None);
+        }
+        parsed.to_string()
+    } else if let Some(scheme_end) = endpoint.find("://") {
+        let after_scheme = &endpoint[scheme_end + 3..];
+        if let Some(at) = after_scheme.find('@') {
+            format!(
+                "{}://***@{}",
+                &endpoint[..scheme_end],
+                &after_scheme[at + 1..]
+            )
+        } else {
+            endpoint.to_string()
+        }
+    } else {
+        endpoint.to_string()
+    }
+}
+
 /// Validate that an endpoint URL has a recognised scheme and a non-empty host.
 fn validate_endpoint_url(endpoint: &str) -> Result<(), String> {
+    let safe = redact_url(endpoint);
+
     let parsed =
-        Url::parse(endpoint).map_err(|_| format!("endpoint '{endpoint}' is not a valid URL"))?;
+        Url::parse(endpoint).map_err(|_| format!("endpoint '{safe}' is not a valid URL"))?;
 
     let rest = if endpoint
         .get(..8)
@@ -1248,21 +1276,17 @@ fn validate_endpoint_url(endpoint: &str) -> Result<(), String> {
         &endpoint[7..]
     } else {
         return Err(format!(
-            "endpoint '{endpoint}' has no recognised scheme; expected 'http://' or 'https://'"
+            "endpoint '{safe}' has no recognised scheme; expected 'http://' or 'https://'"
         ));
     };
 
     // Reject malformed authority forms like `http:///bulk` or `https://?x=1`.
     if rest.is_empty() || rest.starts_with('/') || rest.starts_with('?') || rest.starts_with('#') {
-        return Err(format!(
-            "endpoint '{endpoint}' has no host after the scheme"
-        ));
+        return Err(format!("endpoint '{safe}' has no host after the scheme"));
     }
 
     if parsed.host_str().is_none_or(str::is_empty) {
-        return Err(format!(
-            "endpoint '{endpoint}' has no host after the scheme"
-        ));
+        return Err(format!("endpoint '{safe}' has no host after the scheme"));
     }
 
     Ok(())

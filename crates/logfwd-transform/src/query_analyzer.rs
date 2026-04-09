@@ -46,68 +46,13 @@ impl QueryAnalyzer {
         let mut where_clause = None;
 
         if let Statement::Query(query) = stmt {
-            if let SetExpr::Select(select) = query.body.as_ref() {
-                for item in &select.projection {
-                    match item {
-                        SelectItem::Wildcard(opts) => {
-                            uses_select_star = true;
-                            extract_except_fields(opts, &mut except_fields);
-                        }
-                        SelectItem::QualifiedWildcard(_, opts) => {
-                            uses_select_star = true;
-                            extract_except_fields(opts, &mut except_fields);
-                        }
-                        SelectItem::UnnamedExpr(expr) => {
-                            collect_column_refs(expr, &mut referenced_columns);
-                        }
-                        SelectItem::ExprWithAlias { expr, .. } => {
-                            collect_column_refs(expr, &mut referenced_columns);
-                        }
-                    }
-                }
-
-                // Walk WHERE clause for column references.
-                if let Some(ref selection) = select.selection {
-                    collect_column_refs(selection, &mut referenced_columns);
-                    where_clause = Some(selection.clone());
-                }
-
-                // Walk GROUP BY — columns may appear only here (not in SELECT or WHERE).
-                if let sqlast::GroupByExpr::Expressions(exprs, _) = &select.group_by {
-                    for e in exprs {
-                        collect_column_refs(e, &mut referenced_columns);
-                    }
-                }
-
-                // Walk HAVING — HAVING MAX(col) > N where col is not in SELECT.
-                if let Some(ref having) = select.having {
-                    collect_column_refs(having, &mut referenced_columns);
-                }
-                // Walk FROM clause — JOIN ON conditions contain column refs
-                // that the scanner must extract.
-                for table_with_joins in &select.from {
-                    for join in &table_with_joins.joins {
-                        if let sqlast::JoinConstraint::On(expr) =
-                            join_constraint(&join.join_operator)
-                        {
-                            collect_column_refs(expr, &mut referenced_columns);
-                        }
-                    }
-                }
-
-                // Walk WINDOW named definitions — PARTITION BY / ORDER BY
-                // columns may only appear in named window specs.
-                for sqlast::NamedWindowDefinition(_, named_expr) in &select.named_window {
-                    if let sqlast::NamedWindowExpr::WindowSpec(spec) = named_expr {
-                        for e in &spec.partition_by {
-                            collect_column_refs(e, &mut referenced_columns);
-                        }
-                        for ob in &spec.order_by {
-                            collect_column_refs(&ob.expr, &mut referenced_columns);
-                        }
-                    }
-                }
-            }
+            walk_set_expr(
+                query.body.as_ref(),
+                &mut referenced_columns,
+                &mut uses_select_star,
+                &mut except_fields,
+                &mut where_clause,
+            );
 
             // Walk ORDER BY — columns may appear only here (not in SELECT or WHERE).
             if let Some(ref order_by) = query.order_by {
@@ -210,6 +155,101 @@ impl QueryAnalyzer {
         };
 
         hints
+    }
+}
+
+/// Recursively walk a `SetExpr`, collecting column refs from SELECT, WHERE,
+/// GROUP BY, HAVING, FROM/JOIN, and WINDOW clauses. For `SetOperation`
+/// (UNION/INTERSECT/EXCEPT) both branches are walked.
+fn walk_set_expr(
+    set_expr: &SetExpr,
+    referenced_columns: &mut HashSet<String>,
+    uses_select_star: &mut bool,
+    except_fields: &mut Vec<String>,
+    where_clause: &mut Option<SqlExpr>,
+) {
+    match set_expr {
+        SetExpr::Select(select) => {
+            for item in &select.projection {
+                match item {
+                    SelectItem::Wildcard(opts) => {
+                        *uses_select_star = true;
+                        extract_except_fields(opts, except_fields);
+                    }
+                    SelectItem::QualifiedWildcard(_, opts) => {
+                        *uses_select_star = true;
+                        extract_except_fields(opts, except_fields);
+                    }
+                    SelectItem::UnnamedExpr(expr) => {
+                        collect_column_refs(expr, referenced_columns);
+                    }
+                    SelectItem::ExprWithAlias { expr, .. } => {
+                        collect_column_refs(expr, referenced_columns);
+                    }
+                }
+            }
+
+            if let Some(ref selection) = select.selection {
+                collect_column_refs(selection, referenced_columns);
+                *where_clause = Some(selection.clone());
+            }
+
+            if let sqlast::GroupByExpr::Expressions(exprs, _) = &select.group_by {
+                for e in exprs {
+                    collect_column_refs(e, referenced_columns);
+                }
+            }
+
+            if let Some(ref having) = select.having {
+                collect_column_refs(having, referenced_columns);
+            }
+
+            for table_with_joins in &select.from {
+                for join in &table_with_joins.joins {
+                    if let sqlast::JoinConstraint::On(expr) = join_constraint(&join.join_operator) {
+                        collect_column_refs(expr, referenced_columns);
+                    }
+                }
+            }
+
+            for sqlast::NamedWindowDefinition(_, named_expr) in &select.named_window {
+                if let sqlast::NamedWindowExpr::WindowSpec(spec) = named_expr {
+                    for e in &spec.partition_by {
+                        collect_column_refs(e, referenced_columns);
+                    }
+                    for ob in &spec.order_by {
+                        collect_column_refs(&ob.expr, referenced_columns);
+                    }
+                }
+            }
+        }
+        SetExpr::SetOperation { left, right, .. } => {
+            walk_set_expr(
+                left,
+                referenced_columns,
+                uses_select_star,
+                except_fields,
+                where_clause,
+            );
+            walk_set_expr(
+                right,
+                referenced_columns,
+                uses_select_star,
+                except_fields,
+                where_clause,
+            );
+        }
+        SetExpr::Query(query) => {
+            walk_set_expr(
+                query.body.as_ref(),
+                referenced_columns,
+                uses_select_star,
+                except_fields,
+                where_clause,
+            );
+        }
+        // Values, Table, etc. — no column refs to extract.
+        _ => {}
     }
 }
 
