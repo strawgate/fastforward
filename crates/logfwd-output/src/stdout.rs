@@ -311,7 +311,7 @@ impl StdoutSink {
 ///
 /// Unlike `str_value` (which panics on non-string types), this handles all
 /// Arrow data types via `array_value_to_string` for non-Utf8 columns.
-fn safe_col_to_string<'a>(col: &'a dyn Array, row: usize) -> Cow<'a, str> {
+fn safe_col_to_string(col: &dyn Array, row: usize) -> Cow<'_, str> {
     match col.data_type() {
         DataType::Utf8 => Cow::Borrowed(col.as_string::<i32>().value(row)),
         DataType::Utf8View => Cow::Borrowed(col.as_string_view().value(row)),
