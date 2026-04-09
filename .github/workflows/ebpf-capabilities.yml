@@ -4,26 +4,20 @@ on:
   push:
     branches: [main]
     paths:
+      # Run this workflow only for eBPF/sensor-beta surfaces.
       - ".github/workflows/ebpf-capabilities.yml"
       - "scripts/ci-ebpf-capabilities.sh"
       - "crates/logfwd-ebpf-proto/**"
-      - "crates/logfwd-io/src/lib.rs"
       - "crates/logfwd-io/src/platform_sensor_beta.rs"
-      - "crates/logfwd-config/src/lib.rs"
-      - "crates/logfwd/src/main.rs"
-      - "crates/logfwd/src/pipeline.rs"
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened, ready_for_review]
     paths:
+      # Trigger on PR updates only when eBPF/sensor-beta code changed.
       - ".github/workflows/ebpf-capabilities.yml"
       - "scripts/ci-ebpf-capabilities.sh"
       - "crates/logfwd-ebpf-proto/**"
-      - "crates/logfwd-io/src/lib.rs"
       - "crates/logfwd-io/src/platform_sensor_beta.rs"
-      - "crates/logfwd-config/src/lib.rs"
-      - "crates/logfwd/src/main.rs"
-      - "crates/logfwd/src/pipeline.rs"
   workflow_dispatch:
   schedule:
     - cron: "17 9 * * 1"
