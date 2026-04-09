@@ -346,11 +346,9 @@ impl Pipeline {
                 {
                     path = base.join(path);
                 }
-                if let Ok(abs_path) = std::fs::canonicalize(&path) {
-                    sensor_cfg.control_path = Some(abs_path.to_string_lossy().into_owned());
-                } else {
-                    sensor_cfg.control_path = Some(path.to_string_lossy().into_owned());
-                }
+                // Keep the configured control path (plus optional base join) instead of
+                // canonicalizing so symlink swaps remain observable at runtime.
+                sensor_cfg.control_path = Some(path.to_string_lossy().into_owned());
             }
 
             let input_name = input_cfg
@@ -1699,9 +1697,17 @@ fn build_platform_sensor_beta_config(
         );
     }
     let emit_heartbeat = cfg.and_then(|c| c.emit_heartbeat).unwrap_or(true);
-    let control_reload_interval_ms = cfg
+    let original_control_reload_interval_ms = cfg
         .and_then(|c| c.control_reload_interval_ms)
         .unwrap_or(1_000);
+    let clamped_control_reload_interval_ms = original_control_reload_interval_ms.max(1);
+    if original_control_reload_interval_ms == 0 {
+        tracing::warn!(
+            original = 0u64,
+            clamped = clamped_control_reload_interval_ms,
+            "sensor beta control_reload_interval_ms was below minimum and clamped to 1ms"
+        );
+    }
     let emit_signal_rows = cfg.and_then(|c| c.emit_signal_rows).unwrap_or(true);
     let control_path = cfg.and_then(|c| c.control_path.as_ref()).map(PathBuf::from);
     let enabled_families = cfg.and_then(|c| c.enabled_families.clone());
@@ -1710,7 +1716,7 @@ fn build_platform_sensor_beta_config(
         emit_heartbeat,
         poll_interval: Duration::from_millis(clamped_poll_interval_ms),
         control_path,
-        control_reload_interval: Duration::from_millis(control_reload_interval_ms.max(1)),
+        control_reload_interval: Duration::from_millis(clamped_control_reload_interval_ms),
         enabled_families,
         emit_signal_rows,
     }

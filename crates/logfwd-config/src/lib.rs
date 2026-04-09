@@ -1065,8 +1065,7 @@ impl Config {
                                         "pipeline '{name}' input '{label}': sensor_beta.enabled_families entries must not be empty"
                                     )));
                                 }
-                                if !validate_sensor_beta_family_name(&input.input_type, normalized)
-                                {
+                                if !is_sensor_beta_family_supported(&input.input_type, normalized) {
                                     return Err(ConfigError::Validation(format!(
                                         "pipeline '{name}' input '{label}': unknown sensor_beta family '{normalized}' for {} input (supported: {})",
                                         input.input_type,
@@ -1376,7 +1375,7 @@ fn sensor_beta_supported_families_csv(input_type: &InputType) -> &'static str {
     }
 }
 
-fn validate_sensor_beta_family_name(input_type: &InputType, name: &str) -> bool {
+fn is_sensor_beta_family_supported(input_type: &InputType, name: &str) -> bool {
     sensor_beta_supported_families(input_type).contains(&name)
 }
 

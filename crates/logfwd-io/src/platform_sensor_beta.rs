@@ -27,6 +27,7 @@ pub enum PlatformSensorTarget {
 }
 
 impl PlatformSensorTarget {
+    /// Returns the stable lowercase platform key used in config and telemetry rows.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -193,6 +194,9 @@ struct ControlState {
     emit_signal_rows: bool,
 }
 
+type InitStartOk = (PlatformSensorState<RunningState>, Vec<InputEvent>);
+type InitStartErr = Box<(PlatformSensorState<InitState>, io::Error)>;
+
 #[derive(Debug, Clone, Copy)]
 enum ControlSource {
     StaticConfig,
@@ -234,12 +238,7 @@ struct ControlFileConfig {
 }
 
 impl PlatformSensorState<InitState> {
-    fn start(
-        self,
-    ) -> Result<
-        (PlatformSensorState<RunningState>, Vec<InputEvent>),
-        (PlatformSensorState<InitState>, io::Error),
-    > {
+    fn start(self) -> Result<InitStartOk, InitStartErr> {
         let mut rows = vec![self.common.control_row(
             &self.state.control,
             "startup",
@@ -255,7 +254,7 @@ impl PlatformSensorState<InitState> {
 
         let event = match self.common.build_batch_event(rows) {
             Ok(event) => event,
-            Err(err) => return Err((self, err)),
+            Err(err) => return Err(Box::new((self, err))),
         };
         let running = PlatformSensorState {
             common: self.common,
@@ -612,7 +611,10 @@ impl InputSource for PlatformSensorBetaInput {
         let (next_machine, result) = match machine {
             PlatformSensorMachine::Init(init) => match init.start() {
                 Ok((running, events)) => (PlatformSensorMachine::Running(running), Ok(events)),
-                Err((init, err)) => (PlatformSensorMachine::Init(init), Err(err)),
+                Err(err) => {
+                    let (init, err) = *err;
+                    (PlatformSensorMachine::Init(init), Err(err))
+                }
             },
             PlatformSensorMachine::Running(mut running) => {
                 let rows = running.poll_rows();
