@@ -23,7 +23,6 @@ use std::time::{Duration, Instant};
 use clap::{Parser, Subcommand, ValueEnum};
 use logfwd_arrow::scanner::Scanner;
 use logfwd_config::{Config, OutputConfig, OutputType};
-use logfwd_core::scan_config::ScanConfig;
 use logfwd_output::build_sink_factory;
 use logfwd_output::sink::SendResult;
 use logfwd_transform::SqlTransform;
@@ -297,9 +296,9 @@ fn run_worker(
         .build()
         .map_err(|e| format!("worker {worker_id}: tokio runtime: {e}"))?;
 
-    let mut scanner = Scanner::new(ScanConfig::default());
     let mut transform = SqlTransform::new(&transform_sql)
         .map_err(|e| format!("worker {worker_id}: transform compile: {e}"))?;
+    let mut scanner = Scanner::new(transform.scan_config());
 
     let mut sink = sink_factory
         .create()
