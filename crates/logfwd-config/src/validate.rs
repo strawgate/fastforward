@@ -929,23 +929,25 @@ impl Config {
 
             // Guard against feedback loops: reject configs where a file output
             // path matches a file input path in the same pipeline (#1596).
-            let file_input_paths: Vec<std::path::PathBuf> = pipe
+            // Collect file input paths (exact) and glob patterns separately.
+            let mut exact_input_paths: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::new();
+            let mut glob_input_patterns: Vec<String> = Vec::new();
+
+            for input in pipe
                 .inputs
                 .iter()
                 .filter(|i| i.input_type == InputType::File)
-                .filter_map(|i| i.path.as_deref())
-                .filter(|p| !p.contains('*') && !p.contains('?'))
-                .map(std::path::PathBuf::from)
-                .collect();
-
-            let normalized_file_inputs: Vec<(std::path::PathBuf, std::path::PathBuf)> =
-                file_input_paths
-                    .into_iter()
-                    .map(|p| {
-                        let norm = normalize_path_for_compare(&p);
-                        (p, norm)
-                    })
-                    .collect();
+            {
+                if let Some(p) = input.path.as_deref() {
+                    if p.contains('*') || p.contains('?') {
+                        glob_input_patterns.push(p.to_string());
+                    } else {
+                        let pb = std::path::PathBuf::from(p);
+                        let norm = normalize_path_for_compare(&pb);
+                        exact_input_paths.push((pb, norm));
+                    }
+                }
+            }
 
             for (j, output) in pipe.outputs.iter().enumerate() {
                 let out_label = output
@@ -961,13 +963,26 @@ impl Config {
                 };
                 let out_pb = std::path::PathBuf::from(out_path);
                 let out_norm = normalize_path_for_compare(&out_pb);
-                for (in_pb, in_norm) in &normalized_file_inputs {
+
+                // Check exact input path match.
+                for (in_pb, in_norm) in &exact_input_paths {
                     if out_norm == *in_norm {
                         return Err(ConfigError::Validation(format!(
                             "pipeline '{name}' output '{out_label}': output path '{}' is the same \
                              as file input path '{}' — this creates an unbounded feedback loop",
                             out_path,
                             in_pb.display(),
+                        )));
+                    }
+                }
+
+                // Check if the output path could match any glob input pattern.
+                for glob_pattern in &glob_input_patterns {
+                    if glob_could_match(glob_pattern, out_path) {
+                        return Err(ConfigError::Validation(format!(
+                            "pipeline '{name}' output '{out_label}': output path '{out_path}' \
+                             could match file input glob '{glob_pattern}' — this creates an \
+                             unbounded feedback loop",
                         )));
                     }
                 }
@@ -1307,6 +1322,35 @@ fn validate_endpoint_url(endpoint: &str) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+/// Check if a file path could match a glob pattern by comparing the directory
+/// prefix. A glob like `/var/log/*.log` has prefix `/var/log/` and would match
+/// any output file in that directory with a `.log` extension.
+fn glob_could_match(glob_pattern: &str, file_path: &str) -> bool {
+    let glob_path = Path::new(glob_pattern);
+    let file = Path::new(file_path);
+
+    let glob_dir = glob_path.parent().map(normalize_path_for_compare);
+    let file_dir = file.parent().map(normalize_path_for_compare);
+
+    // If the file is in the same directory as the glob, it could match.
+    if let (Some(g), Some(f)) = (&glob_dir, &file_dir)
+        && g == f
+    {
+        // Also check filename pattern if the glob has a simple `*.ext` form.
+        if let Some(glob_name) = glob_path.file_name().and_then(|n| n.to_str())
+            && let Some(file_name) = file.file_name().and_then(|n| n.to_str())
+        {
+            if let Some(ext) = glob_name.strip_prefix('*') {
+                return file_name.ends_with(ext);
+            }
+            // Pattern contains `?` or other wildcards — conservatively match.
+            return true;
+        }
+        return true;
+    }
+    false
 }
 
 /// Return the first illegal character in an Elasticsearch index name, or None.
