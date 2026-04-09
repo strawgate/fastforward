@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use logfwd_types::pipeline::SourceId;
 
@@ -16,6 +16,8 @@ pub(super) struct TailedFile {
     pub(super) offset: u64,
     pub(super) last_read: Instant,
     pub(super) eof_emitted: bool,
+    pub(super) idle_polls: u8,
+    pub(super) idle_since: Option<Instant>,
 }
 
 /// Saved state for a file evicted from the open-file LRU cache.
@@ -45,6 +47,15 @@ pub(super) struct FileReader {
 
 impl FileReader {
     pub(super) const MAX_READ_PER_POLL: usize = 4 * 1024 * 1024;
+    const EOF_IDLE_POLLS_BEFORE_EMIT: u8 = 2;
+
+    fn eof_min_idle_duration(&self) -> Duration {
+        Duration::from_millis(
+            self.config
+                .poll_interval_ms
+                .saturating_mul(Self::EOF_IDLE_POLLS_BEFORE_EMIT as u64),
+        )
+    }
 
     pub(super) fn open_file_at(&mut self, path: &Path, start_from_end: bool) -> io::Result<()> {
         let mut file = File::open(path)?;
@@ -115,6 +126,8 @@ impl FileReader {
                 offset,
                 last_read: Instant::now(),
                 eof_emitted: false,
+                idle_polls: 0,
+                idle_since: None,
             },
         );
 
@@ -134,6 +147,8 @@ impl FileReader {
         if was_truncated {
             tailed.offset = 0;
             tailed.eof_emitted = false;
+            tailed.idle_polls = 0;
+            tailed.idle_since = None;
             tailed.file.seek(SeekFrom::Start(0))?;
             tailed.identity.fingerprint =
                 compute_fingerprint(&mut tailed.file, self.config.fingerprint_bytes)?;
@@ -204,6 +219,8 @@ impl FileReader {
             Ok(ReadResult::Data(data)) => {
                 if let Some(tailed) = self.files.get_mut(path) {
                     tailed.eof_emitted = false;
+                    tailed.idle_polls = 0;
+                    tailed.idle_since = None;
                 }
                 let source_id = self.source_id_for_path(path);
                 events.push(TailEvent::Data {
@@ -220,6 +237,8 @@ impl FileReader {
                 });
                 if let Some(tailed) = self.files.get_mut(path) {
                     tailed.eof_emitted = false;
+                    tailed.idle_polls = 0;
+                    tailed.idle_since = None;
                 }
                 let source_id = self.source_id_for_path(path);
                 events.push(TailEvent::Data {
@@ -232,6 +251,8 @@ impl FileReader {
             Ok(ReadResult::Truncated) => {
                 if let Some(tailed) = self.files.get_mut(path) {
                     tailed.eof_emitted = false;
+                    tailed.idle_polls = 0;
+                    tailed.idle_since = None;
                 }
                 events.push(TailEvent::Truncated {
                     path: path.to_path_buf(),
@@ -252,6 +273,7 @@ impl FileReader {
         let mut paths = std::mem::take(&mut self.scratch_paths);
         paths.clear();
         paths.extend(self.files.keys().cloned());
+        let eof_min_idle = self.eof_min_idle_duration();
 
         for path in &paths {
             let pre_read_source_id = self.source_id_for_path(path);
@@ -259,6 +281,7 @@ impl FileReader {
                 Ok(ReadResult::Data(data)) => {
                     if let Some(tailed) = self.files.get_mut(path) {
                         tailed.eof_emitted = false;
+                        tailed.idle_polls = 0;
                     }
                     let source_id = self.source_id_for_path(path);
                     events.push(TailEvent::Data {
@@ -274,6 +297,7 @@ impl FileReader {
                     });
                     if let Some(tailed) = self.files.get_mut(path) {
                         tailed.eof_emitted = false;
+                        tailed.idle_polls = 0;
                     }
                     let source_id = self.source_id_for_path(path);
                     events.push(TailEvent::Data {
@@ -285,6 +309,7 @@ impl FileReader {
                 Ok(ReadResult::Truncated) => {
                     if let Some(tailed) = self.files.get_mut(path) {
                         tailed.eof_emitted = false;
+                        tailed.idle_polls = 0;
                     }
                     events.push(TailEvent::Truncated {
                         path: path.clone(),
@@ -292,10 +317,21 @@ impl FileReader {
                     });
                 }
                 Ok(ReadResult::NoData) => {
-                    if let Some(tailed) = self.files.get_mut(path)
-                        && !tailed.eof_emitted
-                    {
-                        tailed.eof_emitted = true;
+                    let mut emit_eof = false;
+                    if let Some(tailed) = self.files.get_mut(path) {
+                        let now = Instant::now();
+                        tailed.idle_polls = tailed.idle_polls.saturating_add(1);
+                        let idle_since = tailed.idle_since.get_or_insert(now);
+                        let idle_elapsed = now.duration_since(*idle_since) >= eof_min_idle;
+                        if !tailed.eof_emitted
+                            && tailed.idle_polls >= Self::EOF_IDLE_POLLS_BEFORE_EMIT
+                            && idle_elapsed
+                        {
+                            tailed.eof_emitted = true;
+                            emit_eof = true;
+                        }
+                    }
+                    if emit_eof {
                         let source_id = self.source_id_for_path(path);
                         events.push(TailEvent::EndOfFile {
                             path: path.clone(),
@@ -455,6 +491,8 @@ mod tests {
     use std::fs::{self, File, OpenOptions};
     use std::io::Write;
     use std::path::PathBuf;
+    use std::thread::sleep;
+    use std::time::Duration;
 
     use super::*;
 
@@ -464,7 +502,10 @@ mod tests {
             read_buf: vec![0u8; 64],
             evicted_offsets: HashMap::new(),
             scratch_paths: Vec::new(),
-            config: TailConfig::default(),
+            config: TailConfig {
+                poll_interval_ms: 0,
+                ..TailConfig::default()
+            },
         }
     }
 
@@ -633,6 +674,13 @@ mod tests {
 
         events.clear();
         assert!(!reader.read_all(&mut events));
+        assert!(
+            events.is_empty(),
+            "first idle poll should not emit EOF; wait for a second idle poll"
+        );
+
+        events.clear();
+        assert!(!reader.read_all(&mut events));
         assert!(matches!(events.first(), Some(TailEvent::EndOfFile { .. })));
 
         OpenOptions::new()
@@ -648,8 +696,57 @@ mod tests {
         events.clear();
         assert!(!reader.read_all(&mut events));
         assert!(
+            events.is_empty(),
+            "first idle poll after truncation should not emit EOF"
+        );
+
+        events.clear();
+        assert!(!reader.read_all(&mut events));
+        assert!(
             matches!(events.first(), Some(TailEvent::EndOfFile { .. })),
             "expected EOF event after truncation reset"
+        );
+    }
+
+    #[test]
+    fn read_all_eof_waits_for_min_idle_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("eof-idle-window.log");
+        fs::write(&path, b"abc").unwrap();
+
+        let mut reader = FileReader {
+            config: TailConfig {
+                poll_interval_ms: 10,
+                ..TailConfig::default()
+            },
+            ..test_reader()
+        };
+        reader.open_file_at(&path, false).unwrap();
+
+        let mut events = Vec::new();
+        assert!(!reader.read_all(&mut events));
+        assert!(matches!(events.first(), Some(TailEvent::Data { .. })));
+
+        events.clear();
+        assert!(!reader.read_all(&mut events));
+        assert!(
+            events.is_empty(),
+            "first idle poll should not emit EOF before minimum idle window"
+        );
+
+        events.clear();
+        assert!(!reader.read_all(&mut events));
+        assert!(
+            events.is_empty(),
+            "second idle poll still should not emit EOF if minimum idle time has not elapsed"
+        );
+
+        sleep(Duration::from_millis(25));
+        events.clear();
+        assert!(!reader.read_all(&mut events));
+        assert!(
+            matches!(events.first(), Some(TailEvent::EndOfFile { .. })),
+            "EOF should emit once the idle window has elapsed"
         );
     }
 }

@@ -211,11 +211,13 @@ The file path is:
 - Every `InputSource` implementation must define its control-plane `health()`
   semantics explicitly; input lifecycle truth must not rely on a trait-level
   default.
-- The current tailer emits `EndOfFile` once per no-data streak so downstream
-  framing can flush a trailing partial line for that source without waiting for
-  permanent file closure.
-- Fresh data resets that no-data streak, allowing a later `EndOfFile` signal to
-  flush a new trailing remainder if reads stall again.
+- The current file tailer emits `EndOfFile` only after both:
+  two consecutive no-data polls for a source, and
+  an idle-duration gate (derived from `poll_interval_ms`) has elapsed.
+  This avoids flushing mid-line fragments too aggressively on transient stalls
+  while still providing a bounded flush path for trailing partial lines.
+- Fresh data resets both the poll streak and idle timer, allowing a later
+  `EndOfFile` signal after a new sustained no-data period.
 - Tailer watcher/file I/O error bursts that trigger poll backoff should surface
   as `degraded` control-plane health, and a later clean poll should recover the
   file input to `healthy`.
