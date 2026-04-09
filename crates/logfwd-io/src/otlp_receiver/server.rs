@@ -114,12 +114,23 @@ pub(super) async fn handle_otlp_request(
             return (status, "invalid content-type header").into_response();
         }
     };
-    let is_json = matches!(content_type.as_deref(), Some("application/json"));
-
-    let payload = if is_json {
-        decode_otlp_logs_with_mode_json(&body, state.mode, accounted_bytes)
-    } else {
-        decode_otlp_logs_with_mode(&body, state.mode, accounted_bytes)
+    let payload = match content_type.as_deref() {
+        Some("application/json") => {
+            decode_otlp_logs_with_mode_json(&body, state.mode, accounted_bytes)
+        }
+        Some("application/x-protobuf")
+        | Some("application/protobuf")
+        | Some("application/vnd.google.protobuf") => {
+            decode_otlp_logs_with_mode(&body, state.mode, accounted_bytes)
+        }
+        Some(_) | None => {
+            record_error(state.stats.as_ref());
+            return (
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "unsupported content-type",
+            )
+                .into_response();
+        }
     };
     let payload = match payload {
         Ok(payload) => payload,

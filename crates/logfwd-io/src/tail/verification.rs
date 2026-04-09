@@ -3,16 +3,22 @@
 /// Pure model of the `eof_emitted` state transition in `FileTailer::poll()`.
 ///
 /// Mirrors the logic from the `ReadResult::Data`, `ReadResult::TruncatedThenData`,
-/// and `ReadResult::NoData` arms exactly, making the invariant explicitly testable.
+/// `ReadResult::Truncated`, and `ReadResult::NoData` arms exactly, making the
+/// invariant explicitly testable.
 ///
 /// Returns `(new_eof_emitted, should_emit_eof_event)`.
-fn eof_transition(eof_emitted: bool, had_data: bool) -> (bool, bool) {
-    if had_data {
-        (false, false)
-    } else if !eof_emitted {
-        (true, true)
-    } else {
-        (true, false)
+#[derive(Clone, Copy)]
+enum PollOutcome {
+    DataLike,
+    Truncated,
+    NoData,
+}
+
+fn eof_transition(eof_emitted: bool, outcome: PollOutcome) -> (bool, bool) {
+    match outcome {
+        PollOutcome::DataLike | PollOutcome::Truncated => (false, false),
+        PollOutcome::NoData if !eof_emitted => (true, true),
+        PollOutcome::NoData => (true, false),
     }
 }
 
@@ -23,7 +29,7 @@ fn eof_transition(eof_emitted: bool, had_data: bool) -> (bool, bool) {
 #[kani::proof]
 fn verify_eof_emitted_at_most_once_per_no_data_streak() {
     let eof_emitted: bool = kani::any();
-    let (_, fires) = eof_transition(eof_emitted, false); // NoData
+    let (_, fires) = eof_transition(eof_emitted, PollOutcome::NoData);
     if fires {
         assert!(!eof_emitted, "EndOfFile may only fire when flag was false");
     }
@@ -41,7 +47,7 @@ fn verify_eof_emitted_at_most_once_per_no_data_streak() {
 #[kani::proof]
 fn verify_data_resets_eof_flag() {
     let eof_emitted: bool = kani::any();
-    let (new_flag, fires) = eof_transition(eof_emitted, true); // Data
+    let (new_flag, fires) = eof_transition(eof_emitted, PollOutcome::DataLike);
     assert!(!new_flag, "Data must reset eof_emitted to false");
     assert!(!fires, "Data must not emit EndOfFile");
     kani::cover!(eof_emitted, "eof_emitted was true before data arrived");
@@ -51,8 +57,8 @@ fn verify_data_resets_eof_flag() {
 /// Two consecutive NoData polls emit EndOfFile exactly once (on the first).
 #[kani::proof]
 fn verify_two_no_data_polls_emit_exactly_once() {
-    let (state1, fires1) = eof_transition(false, false); // first NoData
-    let (state2, fires2) = eof_transition(state1, false); // second NoData
+    let (state1, fires1) = eof_transition(false, PollOutcome::NoData);
+    let (state2, fires2) = eof_transition(state1, PollOutcome::NoData);
     assert!(fires1, "first NoData poll must emit EndOfFile");
     assert!(!fires2, "second NoData poll must not emit again");
     assert!(state1 && state2, "flag stays true after both polls");
@@ -65,11 +71,22 @@ fn verify_two_no_data_polls_emit_exactly_once() {
 /// Sequence: NoData → Data → NoData.  Both stalls must emit exactly one event.
 #[kani::proof]
 fn verify_eof_fires_again_after_data_resets_flag() {
-    let (after_nodata, fires1) = eof_transition(false, false); // first stall
-    let (after_data, _) = eof_transition(after_nodata, true); // data arrives
-    let (_, fires2) = eof_transition(after_data, false); // second stall
+    let (after_nodata, fires1) = eof_transition(false, PollOutcome::NoData);
+    let (after_data, _) = eof_transition(after_nodata, PollOutcome::DataLike);
+    let (_, fires2) = eof_transition(after_data, PollOutcome::NoData);
     assert!(fires1, "first stall must emit EndOfFile");
     assert!(fires2, "second stall must emit EndOfFile after data reset");
     kani::cover!(fires1, "first no-data streak emitted EOF");
     kani::cover!(fires2, "second no-data streak emitted EOF after reset");
+}
+
+/// Truncation resets eof_emitted without emitting EndOfFile.
+#[kani::proof]
+fn verify_truncation_resets_eof_without_event() {
+    let eof_emitted: bool = kani::any();
+    let (new_flag, fires) = eof_transition(eof_emitted, PollOutcome::Truncated);
+    assert!(!new_flag, "Truncated must clear eof_emitted");
+    assert!(!fires, "Truncated must not emit EndOfFile");
+    kani::cover!(eof_emitted, "truncated while eof flag set");
+    kani::cover!(!eof_emitted, "truncated while eof flag clear");
 }

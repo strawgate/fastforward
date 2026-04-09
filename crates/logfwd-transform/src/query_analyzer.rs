@@ -46,43 +46,50 @@ impl QueryAnalyzer {
         let mut where_clause = None;
 
         if let Statement::Query(query) = stmt {
-            if let SetExpr::Select(select) = query.body.as_ref() {
-                for item in &select.projection {
-                    match item {
-                        SelectItem::Wildcard(opts) => {
-                            uses_select_star = true;
-                            extract_except_fields(opts, &mut except_fields);
-                        }
-                        SelectItem::QualifiedWildcard(_, opts) => {
-                            uses_select_star = true;
-                            extract_except_fields(opts, &mut except_fields);
-                        }
-                        SelectItem::UnnamedExpr(expr) => {
-                            collect_column_refs(expr, &mut referenced_columns);
-                        }
-                        SelectItem::ExprWithAlias { expr, .. } => {
-                            collect_column_refs(expr, &mut referenced_columns);
-                        }
+            let select = match query.body.as_ref() {
+                SetExpr::Select(select) => select,
+                _ => {
+                    return Err(TransformError::Sql(
+                        "Only plain SELECT queries are supported".to_string(),
+                    ));
+                }
+            };
+
+            for item in &select.projection {
+                match item {
+                    SelectItem::Wildcard(opts) => {
+                        uses_select_star = true;
+                        extract_except_fields(opts, &mut except_fields);
+                    }
+                    SelectItem::QualifiedWildcard(_, opts) => {
+                        uses_select_star = true;
+                        extract_except_fields(opts, &mut except_fields);
+                    }
+                    SelectItem::UnnamedExpr(expr) => {
+                        collect_column_refs(expr, &mut referenced_columns);
+                    }
+                    SelectItem::ExprWithAlias { expr, .. } => {
+                        collect_column_refs(expr, &mut referenced_columns);
                     }
                 }
+            }
 
-                // Walk WHERE clause for column references.
-                if let Some(ref selection) = select.selection {
-                    collect_column_refs(selection, &mut referenced_columns);
-                    where_clause = Some(selection.clone());
-                }
+            // Walk WHERE clause for column references.
+            if let Some(ref selection) = select.selection {
+                collect_column_refs(selection, &mut referenced_columns);
+                where_clause = Some(selection.clone());
+            }
 
-                // Walk GROUP BY — columns may appear only here (not in SELECT or WHERE).
-                if let sqlast::GroupByExpr::Expressions(exprs, _) = &select.group_by {
-                    for e in exprs {
-                        collect_column_refs(e, &mut referenced_columns);
-                    }
+            // Walk GROUP BY — columns may appear only here (not in SELECT or WHERE).
+            if let sqlast::GroupByExpr::Expressions(exprs, _) = &select.group_by {
+                for e in exprs {
+                    collect_column_refs(e, &mut referenced_columns);
                 }
+            }
 
-                // Walk HAVING — HAVING MAX(col) > N where col is not in SELECT.
-                if let Some(ref having) = select.having {
-                    collect_column_refs(having, &mut referenced_columns);
-                }
+            // Walk HAVING — HAVING MAX(col) > N where col is not in SELECT.
+            if let Some(ref having) = select.having {
+                collect_column_refs(having, &mut referenced_columns);
             }
 
             // Walk ORDER BY — columns may appear only here (not in SELECT or WHERE).

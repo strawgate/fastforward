@@ -87,7 +87,7 @@ mod tests;
 
 #[cfg(kani)]
 mod kani_proofs {
-    use arrow::datatypes::{DataType, Fields};
+    use arrow::datatypes::{DataType, Field, Fields};
 
     use super::{ColVariant, is_conflict_struct, json_priority, str_priority, variant_dt};
 
@@ -96,6 +96,16 @@ mod kani_proofs {
         let fields = Fields::empty();
         assert!(!is_conflict_struct(&fields));
         kani::cover!(true, "empty fields path exercised");
+    }
+
+    #[kani::proof]
+    fn verify_is_conflict_struct_valid_returns_true() {
+        let fields = Fields::from(vec![
+            Field::new("value__int", DataType::Int64, true),
+            Field::new("value__str", DataType::Utf8, true),
+        ]);
+        assert!(is_conflict_struct(&fields));
+        kani::cover!(true, "valid conflict struct path exercised");
     }
 
     #[kani::proof]

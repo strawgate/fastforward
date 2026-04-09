@@ -242,6 +242,19 @@ fn test_query_analyzer_select_star() {
 }
 
 #[test]
+fn test_query_analyzer_rejects_non_plain_select_body() {
+    let result = QueryAnalyzer::new("SELECT level FROM logs UNION SELECT msg FROM logs");
+    match result {
+        Ok(_) => panic!("set-operation query body must be rejected"),
+        Err(err) => assert!(
+            err.to_string()
+                .contains("Only plain SELECT queries are supported"),
+            "unexpected error: {err}"
+        ),
+    }
+}
+
+#[test]
 fn test_query_analyzer_except() {
     let analyzer = QueryAnalyzer::new("SELECT * EXCEPT (stack_trace) FROM logs").unwrap();
     assert!(analyzer.uses_select_star);
@@ -943,6 +956,26 @@ fn validate_plan_uses_null_probe_values_for_cast_paths() {
     transform
         .validate_plan()
         .expect("cast-heavy query should validate with null probe values");
+}
+
+#[test]
+fn execute_blocking_returns_error_in_current_thread_runtime() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("current-thread runtime should build");
+
+    rt.block_on(async {
+        let mut transform = SqlTransform::new("SELECT * FROM logs").unwrap();
+        let err = transform
+            .execute_blocking(make_test_batch())
+            .expect_err("execute_blocking must not run inside current-thread runtime");
+        assert!(
+            err.to_string()
+                .contains("cannot be called from a current-thread Tokio runtime"),
+            "unexpected error: {err}"
+        );
+    });
 }
 
 /// When a WHERE clause filters out every row, execute should return an

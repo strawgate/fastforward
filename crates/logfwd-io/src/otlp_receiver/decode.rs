@@ -79,8 +79,9 @@ pub(super) fn decode_otlp_logs_json(body: &[u8]) -> Result<Vec<u8>, InputError> 
     let mut out = Vec::new();
 
     for rl in resource_logs {
-        // Collect resource attributes.
-        let mut resource_attrs: Vec<(&str, String)> = Vec::new();
+        // Collect resource attributes without flattening to string so JsonLines
+        // and structured modes keep matching scalar semantics.
+        let mut resource_attrs: Vec<(&str, &serde_json::Value)> = Vec::new();
         if let Some(attrs) = rl
             .get("resource")
             .and_then(|r| r.get("attributes"))
@@ -93,9 +94,7 @@ pub(super) fn decode_otlp_logs_json(body: &[u8]) -> Result<Vec<u8>, InputError> 
                 let Some(value) = kv.get("value") else {
                     continue;
                 };
-                if let Some(value) = json_any_value_to_string(value)? {
-                    resource_attrs.push((key, value));
-                }
+                resource_attrs.push((key, value));
             }
         }
 
@@ -125,7 +124,11 @@ pub(super) fn decode_otlp_logs_json(body: &[u8]) -> Result<Vec<u8>, InputError> 
                 }
                 if ts_val == 0 {
                     if let Some(obs) = record.get("observedTimeUnixNano") {
-                        ts_val = parse_protojson_u64(obs).unwrap_or(0);
+                        ts_val = parse_protojson_u64(obs).ok_or_else(|| {
+                            InputError::Receiver(
+                                "invalid OTLP JSON observedTimeUnixNano: not a valid uint64".into(),
+                            )
+                        })?;
                     }
                 }
                 if ts_val > 0 {
@@ -149,8 +152,9 @@ pub(super) fn decode_otlp_logs_json(body: &[u8]) -> Result<Vec<u8>, InputError> 
                 }
 
                 for (key, value) in &resource_attrs {
-                    write_json_string_field(&mut out, key, value);
-                    out.push(b',');
+                    if write_json_any_value_field_from_json(&mut out, key, value)? {
+                        out.push(b',');
+                    }
                 }
 
                 if let Some(attrs) = record.get("attributes").and_then(|v| v.as_array()) {

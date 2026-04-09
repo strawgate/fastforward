@@ -138,13 +138,13 @@ fn convert_request_to_json_lines_simple(request: &ExportLogsServiceRequest) -> V
     let mut out = Vec::new();
 
     for resource_logs in &request.resource_logs {
-        let mut resource_attrs: Vec<(String, String)> = Vec::new();
+        let mut resource_attrs: Vec<(String, serde_json::Value)> = Vec::new();
         if let Some(resource) = &resource_logs.resource {
             for attr in &resource.attributes {
                 if let Some(value) = &attr.value
-                    && let Some(stringified) = any_value_to_string_simple(value)
+                    && let Some(json_value) = any_value_to_json_simple(value)
                 {
-                    resource_attrs.push((attr.key.clone(), stringified));
+                    resource_attrs.push((attr.key.clone(), json_value));
                 }
             }
         }
@@ -177,7 +177,7 @@ fn convert_request_to_json_lines_simple(request: &ExportLogsServiceRequest) -> V
                 }
 
                 for (key, value) in &resource_attrs {
-                    obj.insert(key.clone(), serde_json::Value::String(value.clone()));
+                    obj.insert(key.clone(), value.clone());
                 }
 
                 for attr in &record.attributes {
@@ -983,6 +983,24 @@ fn invalid_json_time_unix_nano_returns_error() {
     );
 
     assert!(result.is_err(), "invalid timeUnixNano must fail");
+}
+
+#[test]
+fn invalid_json_observed_time_unix_nano_returns_error() {
+    let result = decode_otlp_logs_json(
+        br#"{
+            "resourceLogs": [{
+                "scopeLogs": [{
+                    "logRecords": [{
+                        "timeUnixNano": "0",
+                        "observedTimeUnixNano": "not-a-number"
+                    }]
+                }]
+            }]
+        }"#,
+    );
+
+    assert!(result.is_err(), "invalid observedTimeUnixNano must fail");
 }
 
 #[test]
@@ -1795,9 +1813,42 @@ fn content_type_substring_match_does_not_route_json() {
         Err(e) => panic!("unexpected error: {e}"),
     };
     assert_eq!(
-        status, 400,
-        "application/jsonl must not route to JSON decoder"
+        status, 415,
+        "application/jsonl must be rejected as unsupported content-type"
     );
+}
+
+#[test]
+fn missing_content_type_returns_415() {
+    let receiver = OtlpReceiverInput::new_with_capacity("test", "127.0.0.1:0", 16).unwrap();
+    let port = receiver.local_addr().port();
+    let url = format!("http://127.0.0.1:{port}/v1/logs");
+    let body = make_test_request();
+
+    let status = match ureq::post(&url).send(body.as_slice()) {
+        Ok(resp) => resp.status().as_u16(),
+        Err(ureq::Error::StatusCode(code)) => code,
+        Err(e) => panic!("unexpected error: {e}"),
+    };
+    assert_eq!(status, 415, "missing content-type must return 415");
+}
+
+#[test]
+fn unsupported_content_type_returns_415() {
+    let receiver = OtlpReceiverInput::new_with_capacity("test", "127.0.0.1:0", 16).unwrap();
+    let port = receiver.local_addr().port();
+    let url = format!("http://127.0.0.1:{port}/v1/logs");
+    let body = make_test_request();
+
+    let status = match ureq::post(&url)
+        .header("content-type", "text/plain")
+        .send(body.as_slice())
+    {
+        Ok(resp) => resp.status().as_u16(),
+        Err(ureq::Error::StatusCode(code)) => code,
+        Err(e) => panic!("unexpected error: {e}"),
+    };
+    assert_eq!(status, 415, "unsupported content-type must return 415");
 }
 
 // Bug #723: wrong HTTP method should return 405, not 404.

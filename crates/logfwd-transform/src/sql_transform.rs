@@ -234,7 +234,10 @@ impl SqlTransform {
             Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
                 tokio::task::block_in_place(|| handle.block_on(self.execute(batch)))
             }
-            Ok(_) | Err(_) => {
+            Ok(_) => Err(TransformError::Sql(
+                "execute_blocking() cannot be called from a current-thread Tokio runtime; use execute().await instead".to_string(),
+            )),
+            Err(_) => {
                 let rt = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()

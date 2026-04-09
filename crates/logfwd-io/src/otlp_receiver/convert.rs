@@ -14,14 +14,13 @@ pub(super) fn convert_request_to_json_lines(request: &ExportLogsServiceRequest) 
     let mut out = Vec::new();
 
     for resource_logs in &request.resource_logs {
-        // Extract resource attributes (e.g., service.name).
-        let mut resource_attrs: Vec<(&str, String)> = Vec::new();
+        // Extract resource attributes (e.g., service.name) without
+        // pre-stringifying so scalar types remain aligned with structured mode.
+        let mut resource_attrs: Vec<(&str, &AnyValue)> = Vec::new();
         if let Some(ref resource) = resource_logs.resource {
             for attr in &resource.attributes {
                 if let Some(ref value) = attr.value {
-                    if let Some(value) = any_value_to_string(value) {
-                        resource_attrs.push((&attr.key, value));
-                    }
+                    resource_attrs.push((&attr.key, value));
                 }
             }
         }
@@ -61,8 +60,9 @@ pub(super) fn convert_request_to_json_lines(request: &ExportLogsServiceRequest) 
 
                 // resource attributes
                 for (key, value) in &resource_attrs {
-                    write_json_string_field(&mut out, key, value);
-                    out.push(b',');
+                    if write_json_any_value(&mut out, key, value) {
+                        out.push(b',');
+                    }
                 }
 
                 // log record attributes
@@ -115,6 +115,7 @@ pub(super) fn convert_request_to_batch(
     let trace_id_idx = builder.resolve_field(field_names::TRACE_ID.as_bytes());
     let span_id_idx = builder.resolve_field(field_names::SPAN_ID.as_bytes());
     let mut hex_buf = Vec::with_capacity(64);
+    let mut num_buf = Vec::with_capacity(32);
 
     for resource_logs in &request.resource_logs {
         let mut resource_attrs = Vec::new();
@@ -149,7 +150,13 @@ pub(super) fn convert_request_to_batch(
                 }
 
                 if let Some(ref body_val) = record.body {
-                    append_any_value_as_string(&mut builder, body_idx, body_val, &mut hex_buf);
+                    append_any_value_as_string(
+                        &mut builder,
+                        body_idx,
+                        body_val,
+                        &mut hex_buf,
+                        &mut num_buf,
+                    );
                 }
 
                 for attr in &record.attributes {
@@ -201,16 +208,20 @@ fn append_any_value_as_string(
     idx: usize,
     value: &AnyValue,
     hex_buf: &mut Vec<u8>,
+    num_buf: &mut Vec<u8>,
 ) {
     match &value.value {
         Some(Value::StringValue(v)) => builder.append_decoded_str_by_idx(idx, v.as_bytes()),
         Some(Value::IntValue(v)) => {
-            let value = v.to_string();
-            builder.append_decoded_str_by_idx(idx, value.as_bytes());
+            num_buf.clear();
+            write_i64_to_buf(num_buf, *v);
+            builder.append_decoded_str_by_idx(idx, num_buf);
         }
         Some(Value::DoubleValue(v)) => {
-            let value = v.to_string();
-            builder.append_decoded_str_by_idx(idx, value.as_bytes());
+            num_buf.clear();
+            use std::io::Write as _;
+            let _ = write!(num_buf, "{}", v);
+            builder.append_decoded_str_by_idx(idx, num_buf);
         }
         Some(Value::BoolValue(v)) => {
             builder.append_decoded_str_by_idx(idx, if *v { b"true" } else { b"false" });
