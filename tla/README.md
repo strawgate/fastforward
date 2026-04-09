@@ -14,6 +14,7 @@ Models `PipelineMachine<S, C>` from
 | Property | Type | Description |
 |----------|------|-------------|
 | `DrainCompleteness` | Safety | `stop()` only reachable when all in_flight batches are resolved |
+| `QuiescenceHasNoSilentStrandedWork` | Safety | At `Stopped`, no in-flight batch is left without explicit terminal outcome |
 | `CheckpointOrderingInvariant` | Safety | committed[s]=n implies all batches 1..n are acked, none in_flight |
 | `CommittedNeverAheadOfAcked` | Safety | committed[s] never exceeds count of acked batches |
 | `NoDoubleComplete` | Safety | batch cannot be both in_flight and acked |
@@ -23,7 +24,7 @@ Models `PipelineMachine<S, C>` from
 | `NoCreateAfterDrain` | Safety (temporal) | no new batches after begin_drain |
 | `DrainMeansNoNewSending` | Safety (temporal) | in_flight cannot grow once phase ≠ Running |
 | `EventualDrain` | Liveness | every started drain eventually reaches Stopped |
-| `NoBatchLeftBehind` | Liveness | every in_flight batch eventually leaves in_flight |
+| `NoBatchLeftBehind` | Liveness | every in_flight batch eventually terminalizes (ack/reject/abandon) |
 | `StoppedIsStable` | Liveness | once Stopped, stays Stopped |
 | `AllCreatedBatchesEventuallyAccountedFor` | Liveness | every created batch is committed or machine is Stopped |
 | `BeginDrainReachable` | Reachability (invariant ~P) | Draining phase is reachable (vacuity guard) |
@@ -31,6 +32,8 @@ Models `PipelineMachine<S, C>` from
 | `AckOccurs` | Reachability (invariant ~P) | at least one batch is acked (AckBatch fires) |
 | `CheckpointAdvances` | Reachability (invariant ~P) | committed checkpoint advances at least once |
 | `ForcedReachable` | Reachability (invariant ~P) | ForceStop path is reachable (vacuity guard) |
+| `RejectOccurs` | Reachability (invariant ~P) | Reject path is reachable |
+| `AbandonOccurs` | Reachability (invariant ~P) | ForceStop abandonment path is reachable |
 
 ### File structure (two-file pattern)
 
@@ -66,7 +69,7 @@ tla/
 
 ### Four models to run
 
-**Model 1 — Safety (normal path, EnableForceStop=FALSE):**
+**Model 1 — Safety (normal + ForceStop paths):**
 
 ```bash
 java -cp /path/to/tla2tools.jar tlc2.TLC MCPipelineMachine.tla -config PipelineMachine.cfg
@@ -90,19 +93,13 @@ java -cp /path/to/tla2tools.jar tlc2.TLC MCPipelineMachine.tla -config PipelineM
 > that must be distinct for temporal reasoning, silently producing unsound results.
 > SYMMETRY is safe only for safety (INVARIANT) checks.
 
-**Model 3 — Safety with ForceStop:**
-
-ForceStop is always in `Next` — no separate config needed. The `forced` flag
-records when it fired, and `DrainCompleteness` is conditioned on `~forced`, so
-all configs check it unconditionally. To verify ForceStop-specific behavior, run
-the safety config and inspect the `forced=TRUE` traces in TLC's error output.
-
-**Model 4 — Coverage / reachability (vacuity guards):**
+**Model 3 — Coverage / reachability (vacuity guards):**
 
 ```bash
 java -cp /path/to/tla2tools.jar tlc2.TLC MCPipelineMachine.tla -config PipelineMachine.coverage.cfg
 # TLC will report INVARIANT VIOLATIONS for BeginDrainReachable, StopReachable,
-# AckOccurs, CheckpointAdvances, ForcedReachable — each violation is a witness
+# AckOccurs, RejectOccurs, CheckpointAdvances, ForcedReachable, AbandonOccurs —
+# each violation is a witness
 # trace proving the state IS reachable. No violation = state unreachable = bug.
 ```
 

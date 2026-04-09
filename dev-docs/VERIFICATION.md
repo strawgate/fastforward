@@ -42,12 +42,13 @@ Write a TLA+ spec when:
 | Property | Type | Description |
 |----------|------|-------------|
 | `DrainCompleteness` | Safety | `stop()` only reachable when all in-flight batches are resolved |
+| `QuiescenceHasNoSilentStrandedWork` | Safety | `Stopped` never leaves sent batches without terminal outcome |
 | `CheckpointOrderingInvariant` | Safety | `committed[s]=n` implies all batches `1..n` are acked, none in-flight |
 | `CommittedMonotonic` | Safety | Checkpoint never goes backwards |
 | `NoCreateAfterDrain` | Safety | No new batches after `begin_drain` |
 | `NoDoubleComplete` | Safety | Batch cannot be both in-flight and acked |
 | `EventualDrain` | Liveness | Every started drain eventually reaches Stopped |
-| `NoBatchLeftBehind` | Liveness | Every in-flight batch eventually leaves in-flight |
+| `NoBatchLeftBehind` | Liveness | Every in-flight batch eventually terminalizes (`ack`/`reject`/`abandon`) |
 | `StoppedIsStable` | Liveness | Once Stopped, stays Stopped |
 
 `tla/MCPipelineMachine.tla` is the TLC model checker configuration (symmetry sets, model

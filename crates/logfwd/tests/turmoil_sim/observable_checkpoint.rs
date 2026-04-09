@@ -11,6 +11,8 @@ use std::sync::{Arc, Mutex};
 
 use logfwd_io::checkpoint::{CheckpointStore, SourceCheckpoint};
 
+use super::trace_bridge::{TraceEvent, TraceRecorder};
+
 /// Entry in the checkpoint update history.
 #[derive(Debug, Clone)]
 pub struct CheckpointEvent {
@@ -105,6 +107,7 @@ pub struct ObservableCheckpointStore {
     state: Arc<Mutex<CheckpointState>>,
     pending: BTreeMap<u64, SourceCheckpoint>,
     crash_armed: Arc<AtomicBool>,
+    trace: Option<TraceRecorder>,
 }
 
 impl ObservableCheckpointStore {
@@ -119,8 +122,14 @@ impl ObservableCheckpointStore {
             state,
             pending: BTreeMap::new(),
             crash_armed,
+            trace: None,
         };
         (store, handle)
+    }
+
+    pub fn with_trace_recorder(mut self, trace: TraceRecorder) -> Self {
+        self.trace = Some(trace);
+        self
     }
 }
 
@@ -132,6 +141,12 @@ impl CheckpointStore for ObservableCheckpointStore {
             offset: checkpoint.offset,
         });
         drop(s);
+        if let Some(trace) = &self.trace {
+            trace.record(TraceEvent::CheckpointUpdate {
+                source_id: checkpoint.source_id,
+                offset: checkpoint.offset,
+            });
+        }
         self.pending.insert(checkpoint.source_id, checkpoint);
     }
 
@@ -140,6 +155,9 @@ impl CheckpointStore for ObservableCheckpointStore {
             self.pending.clear();
             let mut s = self.state.lock().unwrap();
             s.crash_count += 1;
+            if let Some(trace) = &self.trace {
+                trace.record(TraceEvent::CheckpointFlush { success: false });
+            }
             return Err(io::Error::new(
                 io::ErrorKind::Other,
                 "simulated crash during checkpoint flush",
@@ -151,6 +169,9 @@ impl CheckpointStore for ObservableCheckpointStore {
             s.durable.insert(k, v);
         }
         s.flush_count += 1;
+        if let Some(trace) = &self.trace {
+            trace.record(TraceEvent::CheckpointFlush { success: true });
+        }
         Ok(())
     }
 
