@@ -748,6 +748,20 @@ mod tests {
     use arrow::array::Array;
     use std::sync::Arc;
 
+    mod tempfiles {
+        use super::*;
+
+        pub(super) fn control_file_path() -> (tempfile::TempDir, PathBuf) {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join("sensor-control.json");
+            (dir, path)
+        }
+
+        pub(super) fn write_control_file(path: &Path, json: &str) {
+            atomic_write_file(path, json.as_bytes()).expect("write control file");
+        }
+    }
+
     fn host_target() -> PlatformSensorTarget {
         #[cfg(target_os = "linux")]
         {
@@ -811,16 +825,6 @@ mod tests {
             .downcast_ref::<UInt64Array>()
             .expect("u64 array");
         (0..arr.len()).map(|i| arr.value(i)).collect()
-    }
-
-    fn new_control_file_path() -> (tempfile::TempDir, PathBuf) {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("sensor-control.json");
-        (dir, path)
-    }
-
-    fn write_control_file(path: &Path, json: &str) {
-        atomic_write_file(path, json.as_bytes()).expect("write control file");
     }
 
     #[test]
@@ -968,7 +972,7 @@ mod tests {
 
     #[test]
     fn control_file_reload_updates_generation_and_families() {
-        let (_dir, control_path) = new_control_file_path();
+        let (_dir, control_path) = tempfiles::control_file_path();
 
         let mut input = PlatformSensorInput::new(
             "sensor",
@@ -986,7 +990,7 @@ mod tests {
         // startup
         assert_eq!(input.poll().expect("startup poll").len(), 1);
 
-        write_control_file(
+        tempfiles::write_control_file(
             &control_path,
             r#"{"generation":42,"enabled_families":["dns"],"emit_signal_rows":true}"#,
         );
@@ -1024,7 +1028,7 @@ mod tests {
 
     #[test]
     fn control_reload_same_generation_and_values_is_noop() {
-        let (_dir, control_path) = new_control_file_path();
+        let (_dir, control_path) = tempfiles::control_file_path();
 
         let mut input = PlatformSensorInput::new(
             "sensor",
@@ -1042,7 +1046,7 @@ mod tests {
         // startup
         assert_eq!(input.poll().expect("startup poll").len(), 1);
 
-        write_control_file(
+        tempfiles::write_control_file(
             &control_path,
             r#"{"generation":1,"enabled_families":["process"],"emit_signal_rows":true}"#,
         );
@@ -1057,8 +1061,8 @@ mod tests {
 
     #[test]
     fn malformed_control_file_does_not_fail_startup() {
-        let (_dir, control_path) = new_control_file_path();
-        write_control_file(&control_path, r#"{"generation":"invalid"}"#);
+        let (_dir, control_path) = tempfiles::control_file_path();
+        tempfiles::write_control_file(&control_path, r#"{"generation":"invalid"}"#);
 
         let mut input = PlatformSensorInput::new(
             "sensor",
