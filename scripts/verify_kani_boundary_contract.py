@@ -81,7 +81,7 @@ def validate() -> list[str]:
             continue
 
         text = file_path.read_text(encoding="utf-8")
-        has_kani_cfg = "#[cfg(kani)]" in text
+        has_kani_cfg = "#![cfg(kani)]" in text or "#[cfg(kani)]" in text
         has_kani_proof = "#[kani::proof]" in text
 
         if status == "required":
