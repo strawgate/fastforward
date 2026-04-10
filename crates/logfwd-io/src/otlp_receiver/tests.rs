@@ -1,5 +1,5 @@
 use super::*;
-use arrow::array::{Array, BooleanArray, Int64Array, StringArray, StringViewArray};
+use arrow::array::{Array, BooleanArray, Int64Array, StringArray};
 use arrow::datatypes::DataType;
 use logfwd_types::field_names;
 use opentelemetry_proto::tonic::{
@@ -93,54 +93,6 @@ where
         assert!(Instant::now() < deadline, "{failure_message}");
         std::thread::sleep(Duration::from_millis(10));
     }
-}
-
-fn column_values(array: &dyn Array) -> Vec<String> {
-    if let Some(array) = array.as_any().downcast_ref::<Int64Array>() {
-        return (0..array.len())
-            .map(|idx| {
-                if array.is_null(idx) {
-                    "NULL".to_string()
-                } else {
-                    array.value(idx).to_string()
-                }
-            })
-            .collect();
-    }
-    if let Some(array) = array.as_any().downcast_ref::<StringArray>() {
-        return (0..array.len())
-            .map(|idx| {
-                if array.is_null(idx) {
-                    "NULL".to_string()
-                } else {
-                    array.value(idx).to_string()
-                }
-            })
-            .collect();
-    }
-    if let Some(array) = array.as_any().downcast_ref::<StringViewArray>() {
-        return (0..array.len())
-            .map(|idx| {
-                if array.is_null(idx) {
-                    "NULL".to_string()
-                } else {
-                    array.value(idx).to_string()
-                }
-            })
-            .collect();
-    }
-    if let Some(array) = array.as_any().downcast_ref::<BooleanArray>() {
-        return (0..array.len())
-            .map(|idx| {
-                if array.is_null(idx) {
-                    "NULL".to_string()
-                } else {
-                    array.value(idx).to_string()
-                }
-            })
-            .collect();
-    }
-    panic!("unsupported test array type: {:?}", array.data_type());
 }
 
 #[test]

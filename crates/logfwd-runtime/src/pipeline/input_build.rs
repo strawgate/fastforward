@@ -346,6 +346,15 @@ fn build_platform_sensor_beta_config(
     }
 }
 
+/// Returns whether OTLP input should use structured ingress mode.
+///
+/// Structured ingress preserves typed OTLP fields but bypasses the scanner.
+/// If scanner line capture is required, use legacy scanner ingress.
+pub(super) fn otlp_uses_structured_ingress(
+    scan_config: &logfwd_core::scan_config::ScanConfig,
+) -> bool {
+    !scan_config.captures_line()
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -480,5 +489,19 @@ mod tests {
                 );
             }
         }
+    }
+    #[test]
+    fn otlp_structured_ingress_tracks_line_capture_flag() {
+        let mut scan = logfwd_core::scan_config::ScanConfig::default();
+        scan.line_field_name = None;
+        assert!(
+            otlp_uses_structured_ingress(&scan),
+            "line capture disabled should prefer structured OTLP ingress"
+        );
+        scan.line_field_name = Some(logfwd_types::field_names::BODY.to_string());
+        assert!(
+            !otlp_uses_structured_ingress(&scan),
+            "line capture enabled should force legacy scanner ingress"
+        );
     }
 }

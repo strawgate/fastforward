@@ -813,7 +813,7 @@ fn validate_transform_probe_read_only(
 
     let fields: Vec<Field> = if transform.analyzer().referenced_columns.is_empty() {
         vec![
-            Field::new("_raw", DataType::Utf8, true),
+            Field::new("body", DataType::Utf8, true),
             Field::new("level", DataType::Utf8, true),
             Field::new("msg", DataType::Utf8, true),
         ]
