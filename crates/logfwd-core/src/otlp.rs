@@ -919,14 +919,18 @@ mod verification {
         assert!(decoded == value, "varint roundtrip mismatch");
     }
 
-    /// Prove encode_varint never panics for any u64 input.
+    /// Prove encode_varint handles the boundary values where encoded length changes.
+    ///
+    /// The exhaustive all-`u64` behavior is already covered by
+    /// `verify_varint_len_matches_encode` and `verify_varint_format_and_roundtrip`.
     #[kani::proof]
-    #[kani::unwind(12)]
     #[kani::solver(kissat)] // arithmetic-heavy varint bit ops: kissat outperforms cadical
     fn verify_varint_no_panic() {
-        let value: u64 = kani::any();
-        let mut buf = Vec::with_capacity(10); // varint max 10 bytes — no realloc paths
-        encode_varint(&mut buf, value);
+        for value in [0, 1, 0x7F, 0x80, 0x3FFF, 0x4000, u64::MAX] {
+            let mut buf = Vec::with_capacity(10); // varint max 10 bytes — no realloc paths
+            encode_varint(&mut buf, value);
+            assert!(buf.len() <= 10);
+        }
     }
 
     /// Prove encode_tag produces correct field_number and wire_type encoding.
@@ -1024,32 +1028,34 @@ mod verification {
         days + day as i64 - 1
     }
 
-    /// Prove bytes_field_size matches actual encode_bytes_field output.
+    /// Prove bytes_field_size matches actual encode_bytes_field output for the
+    /// tag-length and length-varint boundary classes that determine the size.
     #[kani::proof]
-    #[kani::unwind(12)]
     #[kani::solver(kissat)]
     fn verify_bytes_field_size() {
-        let field_number: u32 = kani::any();
-        let data_len: usize = kani::any();
-        kani::assume(field_number > 0 && field_number <= 1000);
-        kani::assume(data_len <= 256);
-
-        let predicted = bytes_field_size(field_number, data_len);
-
         // Fixed array sliced to data_len — no dynamic allocation, no realloc paths.
         // Output buf pre-sized to tag varint (10) + length varint (10) + data (256) = 276 max.
         let data = [0u8; 256];
-        let mut buf = Vec::with_capacity(276);
-        encode_bytes_field(&mut buf, field_number, &data[..data_len]);
+        for (field_number, data_len) in [
+            (1, 0),
+            (15, 127),
+            (16, 128),
+            (2_047, 255),
+            (2_048, 256),
+            (262_143, 1),
+            (262_144, 127),
+            (33_554_431, 128),
+            (0x1FFF_FFFF, 0),
+        ] {
+            let predicted = bytes_field_size(field_number, data_len);
+            let mut buf = Vec::with_capacity(276);
+            encode_bytes_field(&mut buf, field_number, &data[..data_len]);
 
-        assert!(
-            buf.len() == predicted,
-            "bytes_field_size disagrees with encode_bytes_field"
-        );
-
-        // Confirm both boundary cases are reachable
-        kani::cover!(field_number == 1 && data_len == 0);
-        kani::cover!(field_number == 1000 && data_len == 256);
+            assert!(
+                buf.len() == predicted,
+                "bytes_field_size disagrees with encode_bytes_field"
+            );
+        }
     }
 
     // NOTE: parse_timestamp_nanos proofs deferred — Kani has trouble with

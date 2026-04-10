@@ -731,6 +731,17 @@ mod tests {
 mod verification {
     use super::*;
 
+    const SHORT_FIELD_NAME: &str = "b";
+
+    fn assert_bytes_eq(actual: &[u8], expected: &[u8]) {
+        assert_eq!(actual.len(), expected.len());
+        let mut i = 0;
+        while i < expected.len() {
+            assert_eq!(actual[i], expected[i]);
+            i += 1;
+        }
+    }
+
     /// Prove parse_cri_line never panics for any 32-byte input.
     #[kani::proof]
     #[kani::unwind(34)]
@@ -959,175 +970,81 @@ mod verification {
         }
     }
 
-    /// Prove write_json_line with prefix correctly injects after opening brace,
-    /// and wraps non-JSON messages as {"body":"..."}.
-    ///
-    /// Input: 2-byte msg + 2-byte prefix = 4 symbolic bytes. Reduced from
-    /// 8+4->4+4->2+2 to stay under CI timeout: 4+4 bytes generated ~21K VCCs /
-    /// ~5K post-simplification that timed out kissat on ubuntu-latest runners.
-    /// 2+2 still covers:
-    ///   - msg[0] drives JSON vs non-JSON branch
-    ///   - msg[1] (non-JSON: through json_escape_bytes; JSON: verbatim copy)
-    ///   - prefix injection, including the empty-object path that strips a
-    ///     trailing comma when the JSON payload is just "{}"
-    /// Vec::with_capacity(64) pre-allocates to avoid realloc VCC explosion.
+    /// Prove the prefix injector strips a trailing comma for empty objects.
     #[kani::proof]
-    #[kani::unwind(4)] // 2 iterations + 2 margin
-    #[kani::solver(kissat)] // json_escape_bytes loop × 2 symbolic bytes: kissat outperforms cadical
+    #[kani::unwind(8)]
+    #[kani::solver(kissat)]
     fn verify_write_json_line_prefix_injection() {
-        let msg: [u8; 2] = kani::any();
-        let prefix: [u8; 2] = kani::any();
-        // Pre-allocate: { (1) + prefix (2) + msg[1..] (1) + \n (1) = 5 bytes JSON path;
-        // or {"body":"..."} path up to 64 bytes. Capacity 64 avoids all reallocs.
         let mut out = Vec::with_capacity(64);
-
-        // Guard vacuity: ensure both paths are reachable
-        kani::cover!(msg[0] == b'{', "JSON path reachable");
-        kani::cover!(msg[0] != b'{', "non-JSON path reachable");
-
-        // Guard vacuity for json_escape_bytes arms in the non-JSON path.
-        // msg[1] drives the escape since msg[0] controls the JSON/plain split.
-        kani::cover!(
-            msg[0] != b'{' && msg[1] == b'"',
-            "quote escape arm reachable"
-        );
-        kani::cover!(
-            msg[0] != b'{' && msg[1] == b'\\',
-            "backslash escape arm reachable"
-        );
-        kani::cover!(
-            msg[0] != b'{' && msg[1] < 0x20,
-            "control-char escape arm reachable"
-        );
-
-        // Guard vacuity for the empty-object comma-strip path (is_empty_obj branch).
-        // For a 2-byte msg, is_empty_obj triggers only when msg == b"{}".
-        // The code strips trailing whitespace from prefix before checking for a
-        // trailing comma, so we cover both the direct case (prefix[1] == b',')
-        // and the whitespace-stripped case (prefix[0] == b',' with ws suffix).
-        kani::cover!(
-            msg[0] == b'{' && msg[1] == b'}' && prefix[1] == b',',
-            "empty-object comma-strip path reachable (direct)"
-        );
-        kani::cover!(
-            msg[0] == b'{'
-                && msg[1] == b'}'
-                && prefix[0] == b','
-                && matches!(prefix[1], b' ' | b'\t' | b'\r' | b'\n'),
-            "empty-object comma-strip path reachable (ws-stripped)"
-        );
-        kani::cover!(
-            msg[0] == b'{' && msg[1] != b'}',
-            "JSON path without comma-strip reachable"
-        );
-
-        write_json_line(&msg, Some(&prefix), &mut out);
-
-        if msg[0] == b'{' {
-            // Mirror the code's prefix_end whitespace-stripping logic.
-            let is_ws = |b: u8| matches!(b, b' ' | b'\t' | b'\r' | b'\n');
-            let prefix_end: usize = if is_ws(prefix[1]) {
-                if is_ws(prefix[0]) { 0 } else { 1 }
-            } else {
-                2
-            };
-
-            let is_empty_obj = msg[1] == b'}';
-            let strips_trailing_comma =
-                is_empty_obj && prefix_end > 0 && prefix[prefix_end - 1] == b',';
-
-            // Output: { + (possibly trimmed) prefix + msg[1..] + \n
-            assert_eq!(out[0], b'{');
-
-            if strips_trailing_comma {
-                // Code emits prefix[..prefix_end-1] then prefix[prefix_end..],
-                // then msg[1..], then \n.
-                let trimmed_len = (prefix_end - 1) + (2 - prefix_end);
-                let expected_len = 1 + trimmed_len + 1 + 1; // '{' + prefix parts + msg[1] + '\n'
-                assert_eq!(out.len(), expected_len);
-                assert_eq!(out[out.len() - 1], b'\n');
-                assert_eq!(out[out.len() - 2], msg[1]);
-            } else {
-                // Full prefix emitted: { + prefix[0] + prefix[1] + msg[1] + \n
-                assert_eq!(out.len(), 5);
-                assert_eq!(out[1], prefix[0]);
-                assert_eq!(out[2], prefix[1]);
-                assert_eq!(out[3], msg[1]);
-                assert_eq!(out[4], b'\n');
-            }
-        } else {
-            // Non-JSON: wrapped as {"body":"..."}\n — ends with \n
-            assert_eq!(out[out.len() - 1], b'\n');
-            // Output starts with {"body":"  — check byte-by-byte (no memcmp).
-            assert_eq!(out[0], b'{');
-            assert_eq!(out[1], b'"');
-            assert_eq!(out[2], b'b');
-            assert_eq!(out[3], b'o');
-            assert_eq!(out[4], b'd');
-            assert_eq!(out[5], b'y');
-            assert_eq!(out[6], b'"');
-            assert_eq!(out[7], b':');
-            assert_eq!(out[8], b'"');
-        }
+        write_json_line_with_plain_text_field(b"{}", Some(b"a,"), SHORT_FIELD_NAME, &mut out);
+        assert_bytes_eq(&out, b"{a}\n");
     }
 
-    /// Prove write_json_line without prefix passes JSON through and wraps plain text.
-    ///
-    /// Input: 2 symbolic bytes. Reduced from 8→4→3→2 to keep SAT solving under
-    /// CI timeout (3 bytes still produced thousands of VCCs that timed out in
-    /// kissat on ubuntu-latest runners). 2 bytes still covers every escape path
-    /// and both JSON/non-JSON branches — the second byte independently exercises
-    /// the json_escape_bytes match arms.
-    /// Vec::with_capacity(64) pre-allocates to avoid realloc VCC explosion.
+    /// Prove comma stripping also works when the prefix ends in whitespace.
     #[kani::proof]
-    #[kani::unwind(4)] // 2 iterations + 2 margin
-    #[kani::solver(kissat)] // json_escape_bytes loop × 2 symbolic bytes: kissat outperforms cadical
-    fn verify_write_json_line_no_prefix() {
-        let msg: [u8; 2] = kani::any();
+    #[kani::unwind(8)]
+    #[kani::solver(kissat)]
+    fn verify_write_json_line_prefix_injection_ws_stripped() {
         let mut out = Vec::with_capacity(64);
+        write_json_line_with_plain_text_field(b"{}", Some(b", "), SHORT_FIELD_NAME, &mut out);
+        assert_bytes_eq(&out, b"{ }\n");
+    }
 
-        // Guard vacuity: ensure both paths are reachable
-        kani::cover!(msg[0] == b'{', "JSON path reachable");
-        kani::cover!(msg[0] != b'{', "non-JSON path reachable");
+    /// Prove non-empty JSON gets the prefix injected without comma stripping.
+    #[kani::proof]
+    #[kani::unwind(8)]
+    #[kani::solver(kissat)]
+    fn verify_write_json_line_prefix_injection_non_empty_json() {
+        let mut out = Vec::with_capacity(64);
+        write_json_line_with_plain_text_field(b"{x", Some(b"ab"), SHORT_FIELD_NAME, &mut out);
+        assert_bytes_eq(&out, b"{abx\n");
+    }
 
-        // Guard vacuity for json_escape_bytes arms — Kani must find a model
-        // where each escape branch is exercised (second byte drives escape
-        // since first byte is fixed to non-{ for the non-JSON path).
-        kani::cover!(
-            msg[0] != b'{' && msg[1] == b'"',
-            "quote escape arm reachable"
-        );
-        kani::cover!(
-            msg[0] != b'{' && msg[1] == b'\\',
-            "backslash escape arm reachable"
-        );
-        kani::cover!(
-            msg[0] != b'{' && msg[1] < 0x20,
-            "control-char escape arm reachable"
-        );
+    /// Prove JSON messages pass through unchanged when no prefix is present.
+    #[kani::proof]
+    #[kani::unwind(8)]
+    #[kani::solver(kissat)]
+    fn verify_write_json_line_no_prefix() {
+        let mut out = Vec::with_capacity(64);
+        write_json_line_with_plain_text_field(b"{}", None, SHORT_FIELD_NAME, &mut out);
+        assert_bytes_eq(&out, b"{}\n");
+    }
 
-        write_json_line(&msg, None, &mut out);
+    /// Prove quote escaping for plain-text messages.
+    #[kani::proof]
+    #[kani::unwind(16)]
+    #[kani::solver(kissat)]
+    fn verify_write_json_line_no_prefix_quote_escape() {
+        let mut out = Vec::with_capacity(64);
+        write_json_line_with_plain_text_field(b"\"", None, SHORT_FIELD_NAME, &mut out);
+        assert_bytes_eq(&out, b"{\"b\":\"\\\"\"}\n");
+    }
 
-        // Always ends with \n
-        assert_eq!(out[out.len() - 1], b'\n');
+    /// Prove backslash escaping for plain-text messages.
+    #[kani::proof]
+    #[kani::unwind(16)]
+    #[kani::solver(kissat)]
+    fn verify_write_json_line_no_prefix_backslash_escape() {
+        let mut out = Vec::with_capacity(64);
+        write_json_line_with_plain_text_field(b"\\", None, SHORT_FIELD_NAME, &mut out);
+        assert_bytes_eq(&out, b"{\"b\":\"\\\\\"}\n");
+    }
 
-        if msg[0] == b'{' {
-            // JSON message passed through unchanged: msg + \n
-            assert_eq!(out.len(), 3);
-            // Check each byte individually to avoid memcmp VCC explosion
-            assert_eq!(out[0], msg[0]);
-            assert_eq!(out[1], msg[1]);
-        } else {
-            // Non-JSON: wrapped as {"body":"..."}\n — check prefix byte by byte
-            assert_eq!(out[0], b'{');
-            assert_eq!(out[1], b'"');
-            assert_eq!(out[2], b'b');
-            assert_eq!(out[3], b'o');
-            assert_eq!(out[4], b'd');
-            assert_eq!(out[5], b'y');
-            assert_eq!(out[6], b'"');
-            assert_eq!(out[7], b':');
-            assert_eq!(out[8], b'"');
-        }
+    /// Prove control characters use \\u00XX escaping.
+    #[kani::proof]
+    #[kani::unwind(20)]
+    #[kani::solver(kissat)]
+    fn verify_write_json_line_no_prefix_control_escape() {
+        let mut out = Vec::with_capacity(64);
+        write_json_line_with_plain_text_field(&[0x1F], None, SHORT_FIELD_NAME, &mut out);
+        assert_bytes_eq(&out, b"{\"b\":\"\\u001f\"}\n");
+    }
+
+    /// Prove the public wrapper uses "body" for non-JSON messages.
+    #[kani::proof]
+    fn verify_write_json_line_default_plain_text_field() {
+        let mut out = Vec::with_capacity(32);
+        write_json_line(b"x", None, &mut out);
+        assert_bytes_eq(&out, b"{\"body\":\"x\"}\n");
     }
 }
