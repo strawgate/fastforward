@@ -412,8 +412,9 @@ fn cmd_effective_config(config_path: Option<&str>) -> Result<(), CliError> {
         |err| eprintln!("  {}error{}: {err}", red(), reset()),
     )?;
 
+    let redacted_yaml = logfwd_io::diagnostics::redact_config_yaml(&effective_yaml);
     eprintln!("{}# validated from {config_path}{}", dim(), reset());
-    print!("{effective_yaml}");
+    print!("{redacted_yaml}");
     Ok(())
 }
 
