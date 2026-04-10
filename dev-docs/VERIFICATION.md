@@ -152,6 +152,7 @@ job in `.github/workflows/ci.yml`):
   - `crates/logfwd-arrow/**`
   - `crates/logfwd-io/**`
   - `crates/logfwd-output/**`
+  - `crates/logfwd-diagnostics/**`
   - `dev-docs/verification/kani-boundary-contract.toml`
   - `scripts/verify_kani_boundary_contract.py`
   - `.github/workflows/ci.yml`

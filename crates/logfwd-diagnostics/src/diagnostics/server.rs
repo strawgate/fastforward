@@ -109,10 +109,12 @@ impl Drop for ServerHandle {
     fn drop(&mut self) {
         // Signal the sampler loop to exit.
         self.running.store(false, Ordering::Relaxed);
-        if let Some(h) = self.sampler_handle.take() {
-            let _ = h.join();
-        }
         self.http_task.shutdown_and_join();
+        if let Some(h) = self.sampler_handle.take()
+            && h.join().is_err()
+        {
+            tracing::error!("diagnostics metric sampler panicked during shutdown");
+        }
     }
 }
 

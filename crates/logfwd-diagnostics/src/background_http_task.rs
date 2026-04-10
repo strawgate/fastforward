@@ -37,7 +37,9 @@ impl BackgroundHttpTask {
     pub(crate) fn shutdown_and_join(&mut self) {
         self.signal_shutdown();
         if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
+            if let Err(_panic) = handle.join() {
+                tracing::error!("diagnostics HTTP worker panicked during shutdown");
+            }
         }
     }
 }

@@ -133,7 +133,7 @@ reason = "Pool-level health insertion and aggregation policy is isolated here an
 issue = 1314
 
 [[seams]]
-path = "crates/logfwd-diagnostics/src/diagnostics.rs"
+path = "crates/logfwd-diagnostics/src/diagnostics/server.rs"
 status = "exempt"
 reason = "Still mixes HTTP shell code, JSON formatting, and runtime snapshot assembly; pure policy extraction is tracked separately."
 issue = 1438
