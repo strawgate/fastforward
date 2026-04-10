@@ -12,6 +12,7 @@
 use crate::filter_hints::FilterHints;
 use crate::format::FormatDecoder;
 use crate::input::{InputEvent, InputSource};
+use crate::poll_cadence::PollCadenceSignal;
 use crate::tail::ByteOffset;
 use logfwd_core::checkpoint_tracker::CheckpointTracker;
 use logfwd_core::cri::json_escape_bytes;
@@ -391,6 +392,14 @@ impl InputSource for FramedInput {
 
     fn apply_hints(&mut self, hints: &FilterHints) {
         self.inner.apply_hints(hints);
+    }
+
+    fn poll_cadence_signal(&self) -> PollCadenceSignal {
+        self.inner.poll_cadence_signal()
+    }
+
+    fn adaptive_fast_polls_max(&self) -> u8 {
+        self.inner.adaptive_fast_polls_max()
     }
 
     /// Return checkpoint offsets from the Kani-proven CheckpointTracker.
