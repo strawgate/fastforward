@@ -1,5 +1,5 @@
 use super::*;
-use arrow::array::{BooleanArray, Int64Array, StringArray, StringViewArray};
+use arrow::array::{Array, BooleanArray, Int64Array, StringArray};
 use arrow::datatypes::DataType;
 use logfwd_types::field_names;
 use opentelemetry_proto::tonic::{
