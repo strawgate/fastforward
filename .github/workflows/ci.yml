@@ -73,7 +73,6 @@ jobs:
             frontend:
               - 'dashboard/**'
               - '.github/actions/build-dashboard/**'
-              - '.github/workflows/ci.yml'
             miri:
               - 'crates/logfwd-core/**'
               - 'crates/logfwd-types/**'
@@ -404,7 +403,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@nightly
         with:
-          components: miri
+          components: miri, rust-src
 
       - uses: Swatinem/rust-cache@v2
         with:
