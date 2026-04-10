@@ -177,7 +177,7 @@ fn run_case(case: &Case, iterations: usize, timeout: Duration, concurrency: usiz
         totals.encode_generated += t3.elapsed();
     }
 
-    totals.receiver_direct = run_receiver_direct(&request_body, case.rows, iterations);
+    totals.receiver_direct = run_receiver_direct(&request_body, case.rows, iterations, concurrency);
 
     let sink_only = run_sink_only(&warmup_batch, &metadata, iterations);
     let sink_total_rows = warmup_batch.num_rows().saturating_mul(iterations);
@@ -188,7 +188,7 @@ fn run_case(case: &Case, iterations: usize, timeout: Duration, concurrency: usiz
     );
     print_stage_block(
         "receiver-direct",
-        case.rows * iterations,
+        case.rows * concurrency * iterations,
         totals.receiver_direct,
         None,
     );
@@ -220,9 +220,14 @@ fn run_case(case: &Case, iterations: usize, timeout: Duration, concurrency: usiz
     println!();
 }
 
-fn run_receiver_direct(request_body: &[u8], expected_rows: usize, iterations: usize) -> Duration {
+fn run_receiver_direct(
+    request_body: &[u8],
+    expected_rows: usize,
+    iterations: usize,
+    concurrency: usize,
+) -> Duration {
     let t0 = Instant::now();
-    for _ in 0..iterations {
+    for _ in 0..iterations.saturating_mul(concurrency) {
         let direct_batch =
             decode_protobuf_to_batch(request_body).expect("receiver direct decode must succeed");
         assert_eq!(direct_batch.num_rows(), expected_rows);
