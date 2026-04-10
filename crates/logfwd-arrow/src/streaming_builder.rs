@@ -511,6 +511,9 @@ impl StreamingBuilder {
                 Some((self.offset_of(line), line.len() as u32))
             } else {
                 let lossy = String::from_utf8_lossy(line);
+                let Ok(lossy_len) = u32::try_from(lossy.len()) else {
+                    return;
+                };
                 let Ok(decoded_offset) = u32::try_from(self.decoded_buf.len()) else {
                     return;
                 };
@@ -521,7 +524,7 @@ impl StreamingBuilder {
                     return;
                 };
                 self.decoded_buf.extend_from_slice(lossy.as_bytes());
-                Some((combined_offset, lossy.len() as u32))
+                Some((combined_offset, lossy_len))
             };
             if let Some(line_view) = line_view {
                 self.line_views.push(line_view);

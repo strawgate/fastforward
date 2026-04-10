@@ -2726,6 +2726,40 @@ mod format_integration_tests {
         }
     }
 
+    /// Raw format treats each line as an opaque input record captured in `body`,
+    /// even when the payload itself looks like JSON.
+    #[test]
+    fn raw_format_json_line_prefers_full_line_body() {
+        let input = br#"{"body":"app message","level":"INFO"}"#;
+        let mut with_newline = input.to_vec();
+        with_newline.push(b'\n');
+        let config = ScanConfig {
+            wanted_fields: vec![],
+            extract_all: true,
+            line_field_name: Some("body".to_string()),
+            validate_utf8: false,
+        };
+        let mut scanner = Scanner::new(config);
+        let batch = scanner.scan_detached(Bytes::from(with_newline)).unwrap();
+        assert_eq!(batch.num_rows(), 1);
+        let body_col = batch
+            .column_by_name("body")
+            .expect("raw format should emit body column");
+        if let Some(arr) = body_col
+            .as_any()
+            .downcast_ref::<arrow::array::StringArray>()
+        {
+            assert_eq!(arr.value(0), std::str::from_utf8(input).unwrap());
+        } else if let Some(arr) = body_col
+            .as_any()
+            .downcast_ref::<arrow::array::StringViewArray>()
+        {
+            assert_eq!(arr.value(0), std::str::from_utf8(input).unwrap());
+        } else {
+            panic!("body column must be StringArray or StringViewArray");
+        }
+    }
+
     /// CRI format: message extracted, timestamp/stream/flag stripped.
     #[test]
     fn cri_extraction_produces_json() {

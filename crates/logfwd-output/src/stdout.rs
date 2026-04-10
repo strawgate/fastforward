@@ -95,20 +95,7 @@ impl StdoutSink {
             StdoutFormat::Text => {
                 let msg_indices =
                     resolve_message_indices(batch.schema().fields(), &self.message_field);
-                if !msg_indices.is_empty() {
-                    for row in 0..num_rows {
-                        if let Some(col) = msg_indices
-                            .iter()
-                            .map(|&idx| batch.column(idx))
-                            .find(|col| !col.is_null(row))
-                        {
-                            dest.write_all(
-                                safe_array_value_to_string(col.as_ref(), row).as_bytes(),
-                            )?;
-                            dest.write_all(b"\n")?;
-                        }
-                    }
-                } else {
+                if msg_indices.is_empty() {
                     // Configured message field is absent — fall back to JSON and warn once.
                     static WARNED: std::sync::atomic::AtomicBool =
                         std::sync::atomic::AtomicBool::new(false);
@@ -128,6 +115,19 @@ impl StdoutSink {
                         write_row_json(batch, row, &cols, &mut self.buf)?;
                         self.buf.push(b'\n');
                         dest.write_all(&self.buf)?;
+                    }
+                } else {
+                    for row in 0..num_rows {
+                        if let Some(col) = msg_indices
+                            .iter()
+                            .map(|&idx| batch.column(idx))
+                            .find(|col| !col.is_null(row))
+                        {
+                            dest.write_all(
+                                safe_array_value_to_string(col.as_ref(), row).as_bytes(),
+                            )?;
+                            dest.write_all(b"\n")?;
+                        }
                     }
                 }
             }
