@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use logfwd_bench::{generators, make_otlp_sink};
 use logfwd_io::input::{InputEvent, InputSource};
-use logfwd_io::otlp_receiver::{decode_protobuf_to_batch, OtlpReceiverInput};
+use logfwd_io::otlp_receiver::{OtlpReceiverInput, decode_protobuf_to_batch};
 use logfwd_output::Compression;
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::common::v1::any_value::Value;
