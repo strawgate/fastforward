@@ -1827,18 +1827,19 @@ mod tests {
     #[cfg(feature = "loom-tests")]
     #[test]
     fn loom_worker_removal_vs_late_event_model_never_resurrects_slot() {
-        // Reduced seam model: assert remove/event ordering cannot
-        // logically resurrect a removed slot.
+        use std::collections::BTreeMap;
+
         struct LoomState {
-            worker_present: bool,
-            worker_health: ComponentHealth,
+            worker_slots: BTreeMap<usize, ComponentHealth>,
             idle_health: ComponentHealth,
         }
 
         loom::model(|| {
+            let worker_id = 1usize;
+            let mut worker_slots = BTreeMap::new();
+            worker_slots.insert(worker_id, ComponentHealth::Starting);
             let state = loom::sync::Arc::new(loom::sync::Mutex::new(LoomState {
-                worker_present: true,
-                worker_health: ComponentHealth::Starting,
+                worker_slots,
                 idle_health: ComponentHealth::Healthy,
             }));
 
@@ -1847,7 +1848,7 @@ mod tests {
                 let mut state = remove_state
                     .lock()
                     .expect("loom mutex poisoned while removing worker");
-                state.worker_present = false;
+                state.worker_slots.remove(&worker_id);
             });
 
             let event_state = loom::sync::Arc::clone(&state);
@@ -1855,10 +1856,10 @@ mod tests {
                 let mut state = event_state
                     .lock()
                     .expect("loom mutex poisoned while applying event");
-                if state.worker_present {
-                    state.worker_health = reduce_worker_slot_health(
-                        state.worker_health,
-                        OutputHealthEvent::FatalFailure,
+                if let Some(current) = state.worker_slots.get(&worker_id).copied() {
+                    state.worker_slots.insert(
+                        worker_id,
+                        reduce_worker_slot_health(current, OutputHealthEvent::FatalFailure),
                     );
                 }
             });
@@ -1870,7 +1871,7 @@ mod tests {
                 .lock()
                 .expect("loom mutex poisoned while validating state");
             assert!(
-                !state.worker_present,
+                state.worker_slots.get(&worker_id).is_none(),
                 "late events must not resurrect removed worker state"
             );
             assert_eq!(

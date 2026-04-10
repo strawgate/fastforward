@@ -23,8 +23,10 @@ fn generate_json_lines(n: usize) -> Vec<Vec<u8>> {
 fn trace_bridge_end_to_end_validates_runtime_transitions() {
     let mut sim = super::build_sim(40, 1);
 
-    let trace_file = NamedTempFile::new().expect("create temp trace file");
-    let trace = TraceRecorder::new(trace_file.path()).expect("create trace recorder");
+    let trace_path = NamedTempFile::new()
+        .expect("create temp trace file")
+        .into_temp_path();
+    let trace = TraceRecorder::new(&trace_path).expect("create trace recorder");
 
     let sink = InstrumentedSink::always_succeed().with_trace_recorder(trace.clone());
     let delivered_counter = sink.delivered_counter();
@@ -79,7 +81,7 @@ fn trace_bridge_end_to_end_validates_runtime_transitions() {
         "expected durable checkpoint for source 1"
     );
 
-    let events = load_trace(trace_file.path()).expect("load trace file");
+    let events = load_trace(&trace_path).expect("load trace file");
     assert!(!events.is_empty(), "trace must contain events");
 
     let validator = TransitionValidator::default();

@@ -111,6 +111,7 @@ pub struct ObservableCheckpointStore {
 }
 
 impl ObservableCheckpointStore {
+    /// Create a checkpoint store and its shared inspection handle.
     pub fn new() -> (Self, CheckpointHandle) {
         let state = Arc::new(Mutex::new(CheckpointState::default()));
         let crash_armed = Arc::new(AtomicBool::new(false));
@@ -127,6 +128,7 @@ impl ObservableCheckpointStore {
         (store, handle)
     }
 
+    /// Attach a trace recorder that receives checkpoint events.
     pub fn with_trace_recorder(mut self, trace: TraceRecorder) -> Self {
         self.trace = Some(trace);
         self

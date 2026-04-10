@@ -25,12 +25,16 @@ const DEFAULT_TICK_MS: u64 = 1;
 const DEFAULT_BATCH_TIMEOUT_MS: u64 = 20;
 const DEFAULT_TCP_PORT: u16 = 9137;
 
+/// Network fault operations the scenario can inject into the simulation.
 #[derive(Clone, Debug)]
 pub enum NetworkFaultAction {
+    /// Partition the pipeline and server hosts.
     Partition,
+    /// Repair the pipeline and server hosts.
     Repair,
 }
 
+/// A network fault scheduled for a particular turmoil simulation step.
 #[derive(Clone, Debug)]
 pub struct NetworkFault {
     step: usize,
@@ -38,18 +42,24 @@ pub struct NetworkFault {
 }
 
 impl NetworkFault {
+    /// Create a fault that should fire at the given simulation step.
     pub fn at_step(step: usize, action: NetworkFaultAction) -> Self {
         Self { step, action }
     }
 }
 
+/// Sink selection for the fault scenario.
 #[derive(Clone, Debug)]
 pub enum SinkMode {
+    /// Use the scripted, traceable sink implementation.
     Instrumented { script: Vec<FailureAction> },
+    /// Exercise the real TCP sink against a turmoil TCP server.
     TurmoilTcp,
+    /// Count delivered rows without any scripted failure behavior.
     Counting,
 }
 
+/// Configurable turmoil scenario used by the verification harness.
 #[derive(Clone, Debug)]
 pub struct FaultScenario {
     name: String,
@@ -68,6 +78,7 @@ pub struct FaultScenario {
 }
 
 impl FaultScenario {
+    /// Build a scenario with the default harness settings.
     pub fn builder(name: &str) -> Self {
         Self {
             name: name.to_string(),
@@ -86,61 +97,73 @@ impl FaultScenario {
         }
     }
 
+    /// Override the turmoil RNG seed.
     pub fn with_seed(mut self, seed: u64) -> Self {
         self.seed = seed;
         self
     }
 
+    /// Set how many JSON lines the scenario should feed to the pipeline.
     pub fn with_line_count(mut self, lines: usize) -> Self {
         self.lines = lines;
         self
     }
 
+    /// Select the scripted sink mode for the scenario.
     pub fn with_sink_script(mut self, script: Vec<FailureAction>) -> Self {
         self.sink_mode = SinkMode::Instrumented { script };
         self
     }
 
+    /// Route output through the turmoil TCP sink/server pair.
     pub fn with_turmoil_tcp_sink(mut self) -> Self {
         self.sink_mode = SinkMode::TurmoilTcp;
         self
     }
 
+    /// Use the counter-only sink mode.
     pub fn with_counting_sink(mut self) -> Self {
         self.sink_mode = SinkMode::Counting;
         self
     }
 
+    /// Override the simulation shutdown deadline.
     pub fn with_shutdown_after(mut self, shutdown_after: Duration) -> Self {
         self.shutdown_after = shutdown_after;
         self
     }
 
+    /// Override the pipeline batch timeout.
     pub fn with_batch_timeout(mut self, timeout: Duration) -> Self {
         self.batch_timeout_ms = timeout.as_millis() as u64;
         self
     }
 
+    /// Enable checkpoint flushing at a fixed interval.
     pub fn with_checkpoint_flush_interval(mut self, interval: Duration) -> Self {
         self.checkpoint_flush_interval = Some(interval);
         self
     }
 
+    /// Arm a simulated checkpoint crash after the given delay.
     pub fn with_checkpoint_crash_after(mut self, crash_after: Duration) -> Self {
         self.arm_checkpoint_crash_after = Some(crash_after);
         self
     }
 
+    /// Schedule an additional network fault for the simulation.
     pub fn with_network_fault(mut self, fault: NetworkFault) -> Self {
         self.network_faults.push(fault);
         self
     }
 
+    /// Set the turmoil fail rate.
     pub fn with_fail_rate(mut self, fail_rate: f64) -> Self {
         self.fail_rate = Some(fail_rate);
         self
     }
 
+    /// Execute the scenario and return the captured outcome.
     pub fn run(self) -> TestOutcome {
         let scenario_name = self.name.clone();
         let seed = self.seed;
@@ -175,6 +198,16 @@ impl FaultScenario {
                 tcp_server_handle = Some(server);
 
                 let scenario = self.clone();
+                let maybe_checkpoint = if scenario.checkpoint_flush_interval.is_some()
+                    || scenario.arm_checkpoint_crash_after.is_some()
+                {
+                    let (store, handle) = ObservableCheckpointStore::new();
+                    checkpoint_handle = Some(handle.clone());
+                    Some((store, handle))
+                } else {
+                    None
+                };
+
                 sim.client("pipeline", async move {
                     let lines = generate_json_lines(scenario.lines);
                     let input = ChannelInputSource::new("scenario", scenario.source_id, lines);
@@ -182,10 +215,21 @@ impl FaultScenario {
                     let sink = TurmoilTcpSink::new("server", DEFAULT_TCP_PORT);
                     let mut pipeline = Pipeline::for_simulation("sim", Box::new(sink));
                     pipeline.set_batch_timeout(Duration::from_millis(scenario.batch_timeout_ms));
+                    let mut pipeline = pipeline.with_input("scenario", Box::new(input));
+
                     if let Some(interval) = scenario.checkpoint_flush_interval {
                         pipeline.set_checkpoint_flush_interval(interval);
                     }
-                    let mut pipeline = pipeline.with_input("scenario", Box::new(input));
+
+                    if let Some((store, handle)) = maybe_checkpoint {
+                        pipeline = pipeline.with_checkpoint_store(Box::new(store));
+                        if let Some(crash_after) = scenario.arm_checkpoint_crash_after {
+                            tokio::spawn(async move {
+                                tokio::time::sleep(crash_after).await;
+                                handle.arm_crash();
+                            });
+                        }
+                    }
 
                     let shutdown = CancellationToken::new();
                     let sd = shutdown.clone();
@@ -359,6 +403,7 @@ fn generate_json_lines(n: usize) -> Vec<Vec<u8>> {
         .collect()
 }
 
+/// Captured results from a single fault-scenario run.
 pub struct TestOutcome {
     scenario_name: String,
     seed: u64,
@@ -371,38 +416,46 @@ pub struct TestOutcome {
 }
 
 impl TestOutcome {
+    /// Return the number of rows the sink ultimately delivered.
     pub fn delivered_rows(&self) -> u64 {
         self.delivered_rows
     }
 
+    /// Return the number of sink send attempts made by the scenario.
     pub fn send_calls(&self) -> u64 {
         self.send_calls
     }
 
+    /// Return whether the turmoil simulation panicked.
     pub fn panicked(&self) -> bool {
         self.panicked
     }
 
+    /// Return the simulation error, if any.
     pub fn sim_error(&self) -> Option<&str> {
         self.sim_error.as_deref()
     }
 
+    /// Return the checkpoint handle for post-run assertions, if one exists.
     pub fn checkpoint(&self) -> Option<&CheckpointHandle> {
         self.checkpoint.as_ref()
     }
 
+    /// Return the TCP server row count captured by the scenario, if any.
     pub fn server_received(&self) -> Option<u64> {
         self.tcp_server
             .as_ref()
             .map(|h| h.received_lines.load(Ordering::Relaxed))
     }
 
+    /// Return the TCP server connection count captured by the scenario, if any.
     pub fn server_connections(&self) -> Option<u64> {
         self.tcp_server
             .as_ref()
             .map(|h| h.connection_count.load(Ordering::Relaxed))
     }
 
+    /// Return a replay hint for reproducing the same turmoil seed.
     pub fn replay_hint(&self) -> String {
         format!(
             "replay with TURMOIL_SEED={} cargo test -p logfwd --features turmoil --test turmoil_sim",
@@ -423,59 +476,70 @@ enum Invariant {
     ServerConnectionsGe(u64),
 }
 
+/// Builder-style collection of invariants to assert against a `TestOutcome`.
 #[derive(Clone, Debug, Default)]
 pub struct InvariantSet {
     invariants: Vec<Invariant>,
 }
 
 impl InvariantSet {
+    /// Create an empty invariant set.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Require that the scenario completes without a simulation error.
     pub fn no_sim_error(mut self) -> Self {
         self.invariants.push(Invariant::NoSimError);
         self
     }
 
+    /// Require an exact delivered-row count.
     pub fn delivered_eq(mut self, expected: u64) -> Self {
         self.invariants.push(Invariant::DeliveredEq(expected));
         self
     }
 
+    /// Require at least the given number of send attempts.
     pub fn calls_ge(mut self, minimum: u64) -> Self {
         self.invariants.push(Invariant::CallsGe(minimum));
         self
     }
 
+    /// Require monotonic checkpoint progress for a source.
     pub fn checkpoint_monotonic(mut self, source_id: u64) -> Self {
         self.invariants
             .push(Invariant::CheckpointMonotonic { source_id });
         self
     }
 
+    /// Require that at least one checkpoint flush crash occurred.
     pub fn checkpoint_crash_count_ge(mut self, min: u64) -> Self {
         self.invariants.push(Invariant::CheckpointCrashCountGe(min));
         self
     }
 
+    /// Require a minimum number of checkpoint updates for a source.
     pub fn checkpoint_updates_ge(mut self, source_id: u64, min: usize) -> Self {
         self.invariants
             .push(Invariant::CheckpointUpdatesGe { source_id, min });
         self
     }
 
+    /// Require at least the given number of TCP rows received by the server.
     pub fn server_received_ge(mut self, minimum: u64) -> Self {
         self.invariants.push(Invariant::ServerReceivedGe(minimum));
         self
     }
 
+    /// Require at least the given number of TCP connections.
     pub fn server_connections_ge(mut self, minimum: u64) -> Self {
         self.invariants
             .push(Invariant::ServerConnectionsGe(minimum));
         self
     }
 
+    /// Verify every configured invariant against the captured outcome.
     pub fn verify(&self, outcome: &TestOutcome) {
         for invariant in &self.invariants {
             match invariant {

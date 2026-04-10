@@ -12,8 +12,16 @@
  * THREE MODELS:
  *
  * 1. SAFETY (normal + ForceStop):
- *    Check: TypeOK, NoDoubleComplete, DrainCompleteness,
- *           CheckpointOrderingInvariant, CommittedNeverAheadOfCreated
+ *    Check the invariants named in PipelineMachine.cfg:
+ *      TypeOK, NoDoubleComplete, DrainCompleteness,
+ *      QuiescenceHasNoSilentStrandedWork, CheckpointOrderingInvariant,
+ *      CommittedNeverAheadOfCreated, SentImpliesCreated,
+ *      InFlightImpliesCreated, InFlightImpliesSent,
+ *      AckedImpliesCreated, AckedImpliesSent,
+ *      RejectedImpliesCreated, RejectedImpliesSent,
+ *      AbandonedImpliesCreated, AbandonedImpliesSent
+ *    Temporal properties in the safety model:
+ *      NoCreateAfterDrain, CommittedMonotonic, DrainMeansNoNewSending
  *    Use: MCFast constants (2 sources, 3 batches) — < 30s
  *
  * 2. LIVENESS (normal path must converge without ForceStop fairness):

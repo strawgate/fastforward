@@ -69,6 +69,28 @@ fn network_partition_repair_scenario_recovers_delivery() {
 }
 
 #[test]
+fn turmoil_tcp_checkpoint_crash_scenario_captures_checkpoint_activity() {
+    let outcome = FaultScenario::builder("turmoil-tcp-checkpoint-crash")
+        .with_seed(20260415)
+        .with_turmoil_tcp_sink()
+        .with_line_count(40)
+        .with_batch_timeout(Duration::from_millis(20))
+        .with_checkpoint_flush_interval(Duration::from_millis(50))
+        .with_checkpoint_crash_after(Duration::from_millis(200))
+        .with_shutdown_after(Duration::from_secs(10))
+        .run();
+
+    InvariantSet::new()
+        .no_sim_error()
+        .server_connections_ge(1)
+        .server_received_ge(1)
+        .checkpoint_crash_count_ge(1)
+        .checkpoint_updates_ge(1, 1)
+        .checkpoint_monotonic(1)
+        .verify(&outcome);
+}
+
+#[test]
 fn step_zero_network_fault_is_applied_and_recovery_is_possible() {
     let outcome = FaultScenario::builder("network-step-zero-fault")
         .with_seed(20260414)

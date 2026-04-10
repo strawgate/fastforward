@@ -46,6 +46,7 @@ pub struct InstrumentedSink {
 
 #[allow(dead_code)]
 impl InstrumentedSink {
+    /// Create a sink with the supplied failure script.
     pub fn new(script: Vec<FailureAction>) -> Self {
         Self {
             script,
@@ -61,16 +62,17 @@ impl InstrumentedSink {
         Self::new(vec![])
     }
 
-    /// Get shared counter for delivered rows.
+    /// Get the shared counter for delivered rows.
     pub fn delivered_counter(&self) -> Arc<AtomicU64> {
         self.delivered_rows.clone()
     }
 
-    /// Get shared counter for total calls.
+    /// Get the shared counter for total calls.
     pub fn call_counter(&self) -> Arc<AtomicU64> {
         self.call_count.clone()
     }
 
+    /// Attach a trace recorder that receives sink result events.
     pub fn with_trace_recorder(mut self, trace: TraceRecorder) -> Self {
         self.trace = Some(trace);
         self
@@ -101,6 +103,7 @@ pub struct InstrumentedSinkFactory {
 
 #[allow(dead_code)]
 impl InstrumentedSinkFactory {
+    /// Create a sink factory with one script queue per worker.
     pub fn new(per_worker_scripts: Vec<Vec<FailureAction>>) -> Self {
         let delivered_rows = Arc::new(AtomicU64::new(0));
         let call_count = Arc::new(AtomicU64::new(0));
@@ -112,14 +115,17 @@ impl InstrumentedSinkFactory {
         }
     }
 
+    /// Get the shared counter for delivered rows.
     pub fn delivered_counter(&self) -> Arc<AtomicU64> {
         self.delivered_rows.clone()
     }
 
+    /// Get the shared counter for total calls.
     pub fn call_counter(&self) -> Arc<AtomicU64> {
         self.call_count.clone()
     }
 
+    /// Attach a trace recorder that receives sink result events.
     pub fn with_trace_recorder(mut self, trace: TraceRecorder) -> Self {
         self.trace = Some(trace);
         self
