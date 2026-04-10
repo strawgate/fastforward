@@ -371,42 +371,36 @@ impl InputSource for FramedInput {
                             if !state.remainder.is_empty() {
                                 let mut remainder = std::mem::take(&mut state.remainder);
                                 remainder.push(b'\n');
-                                let mut process_start = 0usize;
-                                if state.overflow_tainted {
-                                    process_start =
-                                        memchr::memchr(b'\n', &remainder).map_or(0, |i| i + 1);
-                                    state.overflow_tainted = false;
-                                }
+                                let tainted = state.overflow_tainted;
+                                state.overflow_tainted = false;
 
-                                self.out_buf.clear();
-                                let state =
-                                    self.sources.get_mut(&key).expect("just checked existence");
-                                if process_start < remainder.len() {
-                                    state.format.process_lines(
-                                        &remainder[process_start..],
-                                        &mut self.out_buf,
-                                    );
-                                }
-                                if inject_source_path {
-                                    if let Some(source_path) = source_path_for(
-                                        key,
-                                        &mut source_path_by_id,
-                                        self.inner.as_ref(),
-                                    ) {
-                                        let mut with_source = std::mem::take(&mut self.spare_buf);
-                                        with_source.clear();
-                                        inject_source_path_metadata(
-                                            &self.out_buf,
-                                            source_path,
-                                            &mut with_source,
-                                        );
-                                        self.out_buf.clear();
-                                        self.spare_buf =
-                                            std::mem::replace(&mut self.out_buf, with_source);
+                                if !tainted {
+                                    self.out_buf.clear();
+                                    let state =
+                                        self.sources.get_mut(&key).expect("just checked existence");
+                                    state.format.process_lines(&remainder, &mut self.out_buf);
+                                    if inject_source_path {
+                                        if let Some(source_path) = source_path_for(
+                                            key,
+                                            &mut source_path_by_id,
+                                            self.inner.as_ref(),
+                                        ) {
+                                            let mut with_source =
+                                                std::mem::take(&mut self.spare_buf);
+                                            with_source.clear();
+                                            inject_source_path_metadata(
+                                                &self.out_buf,
+                                                source_path,
+                                                &mut with_source,
+                                            );
+                                            self.out_buf.clear();
+                                            self.spare_buf =
+                                                std::mem::replace(&mut self.out_buf, with_source);
+                                        }
                                     }
-                                }
 
-                                self.stats.inc_lines(1);
+                                    self.stats.inc_lines(1);
+                                }
 
                                 // Remainder was flushed — update tracker so
                                 // checkpointable_offset advances past the
@@ -1246,6 +1240,47 @@ mod tests {
 
         let events2 = framed.poll().unwrap();
         assert!(collect_data(events2).is_empty());
+    }
+
+    /// A tainted overflow remainder discarded at EOF must not be counted as a
+    /// processed line.
+    #[test]
+    fn eof_discards_tainted_overflow_remainder_without_counting_a_line() {
+        let stats = make_stats();
+        let big = vec![b'x'; MAX_REMAINDER_BYTES + 1];
+        let source = MockSource::new(vec![
+            vec![InputEvent::Data {
+                bytes: big,
+                source_id: None,
+                accounted_bytes: (MAX_REMAINDER_BYTES + 1) as u64,
+                sender_addr: None,
+            }],
+            vec![InputEvent::EndOfFile { source_id: None }],
+        ]);
+        let mut framed = FramedInput::new(
+            Box::new(source),
+            FormatDecoder::passthrough(Arc::clone(&stats)),
+            stats,
+        );
+
+        let events1 = framed.poll().unwrap();
+        assert!(collect_data(events1).is_empty());
+        assert_eq!(
+            framed.stats.lines(),
+            0,
+            "overflow without a newline must not increment the line counter"
+        );
+
+        let events2 = framed.poll().unwrap();
+        assert!(
+            collect_data(events2).is_empty(),
+            "tainted overflow remainder must be dropped at EOF"
+        );
+        assert_eq!(
+            framed.stats.lines(),
+            0,
+            "discarded EOF overflow fragment must not count as a processed line"
+        );
     }
 
     // -----------------------------------------------------------------------
