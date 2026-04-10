@@ -155,13 +155,18 @@ fn compliance_file_rotate_create() {
     let pipeline = build_pipeline(&yaml);
     let (shutdown, metrics, handle) = run_pipeline_background(pipeline);
 
-    // Wait for initial 5000 lines to be ingested before rotating.
+    // Wait for most of the initial file to be ingested before rotating.
+    //
+    // We intentionally avoid waiting on an exact 5000-line threshold here:
+    // busy CI hosts can lag near the boundary, and rotating slightly earlier
+    // still exercises the same behavior. The final assertion still requires
+    // all 10000 lines, so correctness remains strict.
     if !wait_for(
-        || metrics.transform_in.lines_total.load(Ordering::Relaxed) >= 5000,
+        || metrics.transform_in.lines_total.load(Ordering::Relaxed) >= 4500,
         wait_timeout(),
     ) {
         shutdown.cancel();
-        panic!("timed out waiting for initial 5000 lines before create-style rotation");
+        panic!("timed out waiting for initial ingestion before create-style rotation");
     }
 
     // Simulate logrotate "create" style.
