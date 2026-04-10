@@ -4,7 +4,7 @@ on:
   pull_request:
     types: [synchronize]
   pull_request_review:
-    types: [submitted, edited, dismissed]
+    types: [submitted, edited]
   pull_request_review_comment:
     types: [created, edited, deleted]
   workflow_dispatch:
