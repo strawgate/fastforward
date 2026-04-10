@@ -186,6 +186,7 @@ Receive newline-delimited payloads over HTTP `POST`.
 | `http.method` | string | No | Accepted method. Defaults to `POST`. |
 | `http.max_request_body_size` | integer | No | Maximum request body size in bytes. Defaults to 20 MiB. |
 | `http.response_code` | integer | No | Success code. One of `200`, `201`, `202`, `204` (default `200`). |
+| `http.response_body` | string | No | Optional static success response body. Not allowed when `http.response_code: 204`. |
 
 ```yaml
 input:
@@ -198,6 +199,7 @@ input:
     method: POST
     max_request_body_size: 20971520
     response_code: 200
+    response_body: '{"ok":true}'
 ```
 
 ### `linux_sensor_beta` input

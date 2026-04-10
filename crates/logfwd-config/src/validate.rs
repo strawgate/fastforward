@@ -420,6 +420,11 @@ impl Config {
                                     "pipeline '{name}' input '{label}': http.response_code must be one of 200, 201, 202, 204"
                                 )));
                             }
+                            if http.response_code == Some(204) && http.response_body.is_some() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': http.response_body is not allowed when http.response_code is 204"
+                                )));
+                            }
                         }
                     }
                     InputType::Generator => {
@@ -1746,6 +1751,35 @@ pipelines:
         assert!(
             err.to_string().contains("has illegal prefix '_'"),
             "expected prefix rejection: {err}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod validate_http_response_tests {
+    use crate::types::Config;
+
+    #[test]
+    fn http_response_body_with_204_is_rejected() {
+        let yaml = r#"
+pipelines:
+  test:
+    inputs:
+      - type: http
+        listen: 127.0.0.1:8081
+        format: json
+        http:
+          path: /ingest
+          response_code: 204
+          response_body: '{"ok":true}'
+    outputs:
+      - type: null
+"#;
+        let err = Config::load_str(yaml).expect_err("204 + response_body must fail validation");
+        assert!(
+            err.to_string()
+                .contains("http.response_body is not allowed when http.response_code is 204"),
+            "unexpected error: {err}"
         );
     }
 }
