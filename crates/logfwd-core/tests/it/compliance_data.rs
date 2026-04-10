@@ -33,8 +33,8 @@ fn scan_streaming(input: &[u8]) -> RecordBatch {
         .expect("scan failed")
 }
 
-/// Scan with Scanner (detached mode) using line_capture=true.
-fn scan_storage_raw(input: &[u8]) -> RecordBatch {
+/// Scan with Scanner (detached mode) with line capture enabled.
+fn scan_storage_with_line_capture(input: &[u8]) -> RecordBatch {
     let config = ScanConfig {
         line_field_name: Some("body".to_string()),
         ..ScanConfig::default()
@@ -652,7 +652,7 @@ fn compliance_only_newlines() {
 #[test]
 fn compliance_line_capture_preserves_line() {
     let input = b"{\"a\":1,\"b\":\"hello\"}\n";
-    let batch = scan_storage_raw(input);
+    let batch = scan_storage_with_line_capture(input);
     assert_eq!(batch.num_rows(), 1);
     let raw = batch
         .column_by_name("body")

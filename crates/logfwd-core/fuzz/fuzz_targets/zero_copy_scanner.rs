@@ -28,6 +28,18 @@ fn validate_batch(batch: &arrow::record_batch::RecordBatch, label: &str) {
 }
 
 fuzz_target!(|data: &[u8]| {
+    // Extract-all mode with line capture enabled.
+    let config_line = ScanConfig {
+        wanted_fields: vec![],
+        extract_all: true,
+        line_field_name: Some("body".to_string()),
+        validate_utf8: false,
+    };
+    let mut scanner_line = Scanner::new(config_line);
+    if let Ok(batch_line) = scanner_line.scan(bytes::Bytes::copy_from_slice(data)) {
+        validate_batch(&batch_line, "streaming_extract_all_line_capture");
+    }
+
     // Extract-all mode.
     let config = ScanConfig {
         wanted_fields: vec![],
