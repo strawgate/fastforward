@@ -1,6 +1,10 @@
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
+/// Owns the diagnostics HTTP background thread and its shutdown trigger.
+///
+/// Dropping the handle only signals shutdown. Call `shutdown_and_join()` when
+/// teardown needs to wait for the worker thread to exit before proceeding.
 pub(crate) struct BackgroundHttpTask {
     shutdown: Option<ShutdownHandle>,
     handle: Option<JoinHandle<()>>,
@@ -11,6 +15,7 @@ enum ShutdownHandle {
 }
 
 impl BackgroundHttpTask {
+    /// Wrap a spawned diagnostics HTTP worker and its server handle.
     pub(crate) fn new(server: Arc<tiny_http::Server>, handle: JoinHandle<()>) -> Self {
         Self {
             shutdown: Some(ShutdownHandle::TinyHttp(server)),
@@ -26,6 +31,9 @@ impl BackgroundHttpTask {
         }
     }
 
+    /// Signal shutdown and block until the HTTP worker exits.
+    ///
+    /// This is idempotent: repeated calls after the first are no-ops.
     pub(crate) fn shutdown_and_join(&mut self) {
         self.signal_shutdown();
         if let Some(handle) = self.handle.take() {

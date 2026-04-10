@@ -184,7 +184,6 @@ impl StderrCapture {
 #[cfg(unix)]
 fn reader_loop(read_fd: i32, orig_fd: i32, state: &CaptureState) {
     let mut buf = vec![0u8; 4096];
-    const MAX_PARTIAL_BYTES: usize = 1024 * 1024;
     // Accumulate raw bytes so multi-byte UTF-8 sequences split across reads
     // are decoded correctly per complete line, not per chunk.
     let mut partial: Vec<u8> = Vec::new();
@@ -226,8 +225,8 @@ fn reader_loop(read_fd: i32, orig_fd: i32, state: &CaptureState) {
 
         // Accumulate and split on newline bytes; decode each complete line once.
         partial.extend_from_slice(bytes);
-        if partial.len() > MAX_PARTIAL_BYTES {
-            let keep = MAX_PARTIAL_BYTES;
+        if partial.len() > MAX_BYTES {
+            let keep = MAX_BYTES;
             let drop = partial.len() - keep;
             partial.drain(..drop);
         }

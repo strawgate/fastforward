@@ -20,6 +20,7 @@ SOURCE_SUFFIXES = {
     ".jsx",
     ".mjs",
     ".cjs",
+    ".html",
 }
 EXCLUDED_PARTS = {
     ".git",

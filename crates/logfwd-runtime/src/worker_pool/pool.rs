@@ -622,8 +622,8 @@ mod tests {
     use std::fmt;
     use std::future::pending;
     use std::pin::Pin;
-    use std::sync::{Arc, Mutex};
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    use std::sync::{Arc, Mutex};
     use tiny_http::{Header, Response, Server, StatusCode};
     use tracing::{Event, Id, Subscriber};
     use tracing_subscriber::layer::{Context, Layer};
