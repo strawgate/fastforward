@@ -84,6 +84,15 @@ fn watch_parent_for(path: &Path) -> Option<PathBuf> {
 }
 
 impl FileTailer {
+    /// Create a tailer for explicit file paths.
+    ///
+    /// The provided `paths` are watched immediately. `TailConfig` controls the
+    /// polling cadence, read buffer sizing, glob rescans, and related tailing
+    /// behavior. The shared `ComponentStats` handle is updated with file
+    /// transport diagnostics for this tailer.
+    ///
+    /// Returns an error when the underlying file watcher or initial file setup
+    /// cannot be created.
     pub fn new(
         paths: &[PathBuf],
         config: TailConfig,
@@ -148,6 +157,16 @@ impl FileTailer {
         Ok(tailer)
     }
 
+    /// Create a tailer for glob patterns.
+    ///
+    /// The provided `patterns` are expanded immediately and then watched for
+    /// future matches. `TailConfig` controls the polling cadence, read buffer
+    /// sizing, glob rescans, and related tailing behavior. The shared
+    /// `ComponentStats` handle is updated with file transport diagnostics for
+    /// this tailer.
+    ///
+    /// Returns an error when the underlying file watcher or initial file setup
+    /// cannot be created.
     pub fn new_with_globs(
         patterns: &[&str],
         config: TailConfig,

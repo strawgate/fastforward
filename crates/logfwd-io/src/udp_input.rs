@@ -197,7 +197,7 @@ mod tests {
         let mut input = UdpInput::new(
             "test",
             "127.0.0.1:0",
-            std::sync::Arc::new(logfwd_types::diagnostics::ComponentStats::new()),
+            Arc::new(logfwd_types::diagnostics::ComponentStats::new()),
         )
         .unwrap();
         let addr = input.local_addr().unwrap();
@@ -223,7 +223,7 @@ mod tests {
         let mut input = UdpInput::new(
             "test",
             "127.0.0.1:0",
-            std::sync::Arc::new(logfwd_types::diagnostics::ComponentStats::new()),
+            Arc::new(logfwd_types::diagnostics::ComponentStats::new()),
         )
         .unwrap();
         let addr = input.local_addr().unwrap();
@@ -246,7 +246,7 @@ mod tests {
         let mut input = UdpInput::new(
             "test",
             "127.0.0.1:0",
-            std::sync::Arc::new(logfwd_types::diagnostics::ComponentStats::new()),
+            Arc::new(logfwd_types::diagnostics::ComponentStats::new()),
         )
         .unwrap();
         let addr = input.local_addr().unwrap();
@@ -277,7 +277,7 @@ mod tests {
         let mut input = UdpInput::new(
             "test",
             "127.0.0.1:0",
-            std::sync::Arc::new(logfwd_types::diagnostics::ComponentStats::new()),
+            Arc::new(logfwd_types::diagnostics::ComponentStats::new()),
         )
         .unwrap();
         let addr = input.local_addr().unwrap();
@@ -300,7 +300,7 @@ mod tests {
         let mut input = UdpInput::new(
             "test",
             "127.0.0.1:0",
-            std::sync::Arc::new(logfwd_types::diagnostics::ComponentStats::new()),
+            Arc::new(logfwd_types::diagnostics::ComponentStats::new()),
         )
         .unwrap();
         let events = input.poll().unwrap();
@@ -312,7 +312,7 @@ mod tests {
         let input = UdpInput::new(
             "test",
             "127.0.0.1:0",
-            std::sync::Arc::new(logfwd_types::diagnostics::ComponentStats::new()),
+            Arc::new(logfwd_types::diagnostics::ComponentStats::new()),
         )
         .unwrap();
         assert_eq!(input.buf.len(), 65507);
@@ -324,7 +324,7 @@ mod tests {
         let input = UdpInput::new(
             "test",
             "127.0.0.1:0",
-            std::sync::Arc::new(logfwd_types::diagnostics::ComponentStats::new()),
+            Arc::new(logfwd_types::diagnostics::ComponentStats::new()),
         )
         .unwrap();
         let actual = input.recv_buffer_size();
@@ -343,7 +343,7 @@ mod tests {
         let mut input = UdpInput::new(
             "test",
             "127.0.0.1:0",
-            std::sync::Arc::new(logfwd_types::diagnostics::ComponentStats::new()),
+            Arc::new(logfwd_types::diagnostics::ComponentStats::new()),
         )
         .unwrap();
         let addr = input.local_addr().unwrap();
@@ -396,7 +396,7 @@ mod tests {
         let mut input = UdpInput::new(
             "test",
             "127.0.0.1:0",
-            std::sync::Arc::new(logfwd_types::diagnostics::ComponentStats::new()),
+            Arc::new(logfwd_types::diagnostics::ComponentStats::new()),
         )
         .unwrap();
         let addr = input.local_addr().unwrap();
@@ -429,7 +429,7 @@ mod tests {
         let input = UdpInput::new(
             "test",
             "127.0.0.1:0",
-            std::sync::Arc::new(logfwd_types::diagnostics::ComponentStats::new()),
+            Arc::new(logfwd_types::diagnostics::ComponentStats::new()),
         )
         .unwrap();
         // Verify by attempting a recv on an empty socket — it should return
@@ -451,7 +451,7 @@ mod tests {
         let input = UdpInput::new(
             "test",
             "127.0.0.1:0",
-            std::sync::Arc::new(logfwd_types::diagnostics::ComponentStats::new()),
+            Arc::new(logfwd_types::diagnostics::ComponentStats::new()),
         )
         .unwrap();
         assert_eq!(input.drops_detected(), 0);
@@ -462,7 +462,7 @@ mod tests {
         let mut input = UdpInput::new(
             "test",
             "127.0.0.1:0",
-            std::sync::Arc::new(logfwd_types::diagnostics::ComponentStats::new()),
+            Arc::new(logfwd_types::diagnostics::ComponentStats::new()),
         )
         .unwrap();
         input.health = ComponentHealth::Degraded;

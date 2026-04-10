@@ -32,7 +32,7 @@ fn make_framed_file_input(paths: &[PathBuf]) -> FramedInput {
             glob_rescan_interval_ms: 0,
             ..Default::default()
         },
-        std::sync::Arc::new(logfwd_types::diagnostics::ComponentStats::new()),
+        Arc::clone(&stats),
     )
     .expect("create file input");
 
@@ -54,7 +54,7 @@ fn make_framed_glob_input(pattern: &str) -> FramedInput {
             glob_rescan_interval_ms: 0,
             ..Default::default()
         },
-        std::sync::Arc::new(logfwd_types::diagnostics::ComponentStats::new()),
+        Arc::clone(&stats),
     )
     .expect("create glob file input");
 

@@ -248,6 +248,11 @@ impl InputSource for TcpInput {
                 // the kernel accept queue does not fill up and stall.
                 match self.listener.accept() {
                     Ok((_stream, _addr)) => {
+                        self.connections_accepted += 1;
+                        self.stats.tcp_accepted.store(
+                            self.connections_accepted,
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
                         under_pressure = true;
                         continue; // dropped immediately
                     }

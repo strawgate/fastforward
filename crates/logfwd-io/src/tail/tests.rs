@@ -28,6 +28,24 @@ where
     }
 }
 
+fn make_file_tailer(paths: &[PathBuf], config: TailConfig) -> FileTailer {
+    FileTailer::new(
+        paths,
+        config,
+        std::sync::Arc::new(logfwd_types::diagnostics::ComponentStats::new()),
+    )
+    .unwrap()
+}
+
+fn make_file_tailer_with_globs(patterns: &[&str], config: TailConfig) -> FileTailer {
+    FileTailer::new_with_globs(
+        patterns,
+        config,
+        std::sync::Arc::new(logfwd_types::diagnostics::ComponentStats::new()),
+    )
+    .unwrap()
+}
+
 // ---- glob_root / glob_max_depth unit tests ----
 
 #[test]
@@ -122,12 +140,7 @@ fn test_tail_new_data() {
         ..Default::default()
     };
 
-    let mut tailer = FileTailer::new(
-        std::slice::from_ref(&log_path),
-        config,
-        std::sync::Arc::new(logfwd_types::diagnostics::ComponentStats::new()),
-    )
-    .unwrap();
+    let mut tailer = make_file_tailer(std::slice::from_ref(&log_path), config);
 
     // First poll should read existing content.
     let events = poll_until(
@@ -206,12 +219,7 @@ fn test_tail_truncation() {
         poll_interval_ms: 10,
         ..Default::default()
     };
-    let mut tailer = FileTailer::new(
-        std::slice::from_ref(&log_path),
-        config,
-        std::sync::Arc::new(logfwd_types::diagnostics::ComponentStats::new()),
-    )
-    .unwrap();
+    let mut tailer = make_file_tailer(std::slice::from_ref(&log_path), config);
 
     // Read initial data.
     std::thread::sleep(Duration::from_millis(50));
@@ -264,12 +272,7 @@ fn test_tail_rotation() {
         poll_interval_ms: 10,
         ..Default::default()
     };
-    let mut tailer = FileTailer::new(
-        std::slice::from_ref(&log_path),
-        config,
-        std::sync::Arc::new(logfwd_types::diagnostics::ComponentStats::new()),
-    )
-    .unwrap();
+    let mut tailer = make_file_tailer(std::slice::from_ref(&log_path), config);
 
     // Read initial data.
     std::thread::sleep(Duration::from_millis(50));
@@ -566,12 +569,7 @@ fn test_glob_initial_discovery() {
         glob_rescan_interval_ms: 60_000, // long interval — not relevant for this test
         ..Default::default()
     };
-    let mut tailer = FileTailer::new_with_globs(
-        &[&pattern],
-        config,
-        std::sync::Arc::new(logfwd_types::diagnostics::ComponentStats::new()),
-    )
-    .unwrap();
+    let mut tailer = make_file_tailer_with_globs(&[&pattern], config);
 
     // Both files should have been discovered immediately.
     assert_eq!(tailer.num_files(), 2, "should tail both initial log files");
@@ -606,12 +604,7 @@ fn test_glob_rescan_discovers_new_file() {
         glob_rescan_interval_ms: 50,
         ..Default::default()
     };
-    let mut tailer = FileTailer::new_with_globs(
-        &[&pattern],
-        config,
-        std::sync::Arc::new(logfwd_types::diagnostics::ComponentStats::new()),
-    )
-    .unwrap();
+    let mut tailer = make_file_tailer_with_globs(&[&pattern], config);
 
     // No files exist yet — tailer starts with nothing.
     assert_eq!(tailer.num_files(), 0, "no files should be tailed initially");

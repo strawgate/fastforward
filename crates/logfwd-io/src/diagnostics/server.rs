@@ -1865,26 +1865,31 @@ output:
 
         let (status, body) = http_get(port, "/admin/v1/status");
         assert_eq!(status, 200);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&body).expect("invalid JSON output from /admin/v1/status");
+        let inputs = parsed["pipelines"][0]["inputs"]
+            .as_array()
+            .expect("status endpoint should include pipeline inputs");
 
-        assert!(
-            body.contains(r#""transport":{"file":{"consecutive_error_polls":5}}"#),
-            "body missing file transport: {}",
-            body
-        );
-        assert!(
-            body.contains(
-                r#""transport":{"tcp":{"accepted_connections":42,"active_connections":3}}"#
-            ),
-            "body missing tcp transport: {}",
-            body
-        );
-        assert!(
-            body.contains(
-                r#""transport":{"udp":{"drops_detected":100,"recv_buffer_size":8388608}}"#
-            ),
-            "body missing udp transport: {}",
-            body
-        );
+        let file = inputs
+            .iter()
+            .find(|input| input["name"] == "file_in")
+            .expect("missing file_in input");
+        assert_eq!(file["transport"]["file"]["consecutive_error_polls"], 5);
+
+        let tcp = inputs
+            .iter()
+            .find(|input| input["name"] == "tcp_in")
+            .expect("missing tcp_in input");
+        assert_eq!(tcp["transport"]["tcp"]["accepted_connections"], 42);
+        assert_eq!(tcp["transport"]["tcp"]["active_connections"], 3);
+
+        let udp = inputs
+            .iter()
+            .find(|input| input["name"] == "udp_in")
+            .expect("missing udp_in input");
+        assert_eq!(udp["transport"]["udp"]["drops_detected"], 100);
+        assert_eq!(udp["transport"]["udp"]["recv_buffer_size"], 8_388_608);
     }
 
     #[test]
