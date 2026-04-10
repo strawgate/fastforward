@@ -16,7 +16,7 @@ use super::sink::{SendResult, Sink, SinkFactory};
 use arrow::util::display::array_value_to_string;
 
 use super::{
-    BatchMetadata, ColVariant, build_col_infos, get_array, is_null, str_value, write_json_value,
+    BatchMetadata, ColVariant, build_col_infos, get_array, is_null, write_json_value,
     write_row_json,
 };
 
@@ -93,17 +93,14 @@ impl StdoutSink {
 
         match self.format {
             StdoutFormat::Text => {
-                // Try to find configured message column.
-                let msg_idx = batch
-                    .schema()
-                    .fields()
-                    .iter()
-                    .position(|f| f.name() == self.message_field.as_str());
+                let msg_idx = resolve_message_idx(batch.schema().fields(), &self.message_field);
                 if let Some(idx) = msg_idx {
                     let col = batch.column(idx);
                     for row in 0..num_rows {
                         if !col.is_null(row) {
-                            dest.write_all(str_value(col, row).as_bytes())?;
+                            dest.write_all(
+                                safe_array_value_to_string(col.as_ref(), row).as_bytes(),
+                            )?;
                             dest.write_all(b"\n")?;
                         }
                     }
@@ -178,7 +175,7 @@ impl StdoutSink {
             field_names::SEVERITY_VARIANTS,
             &[],
         );
-        let msg_idx = resolve_console_message_idx(fields, self.message_field.as_str());
+        let msg_idx = resolve_message_idx(fields, self.message_field.as_str());
 
         let cols = build_col_infos(batch);
 
@@ -370,13 +367,10 @@ fn find_exact_column(fields: &arrow::datatypes::Fields, name: &str) -> Option<us
     fields.iter().position(|f| f.name() == name)
 }
 
-/// Resolve the best message column for console output.
+/// Resolve the best message column for text or console output.
 ///
 /// Priority: canonical `body` → configured `message_field` → legacy aliases.
-fn resolve_console_message_idx(
-    fields: &arrow::datatypes::Fields,
-    message_field: &str,
-) -> Option<usize> {
+fn resolve_message_idx(fields: &arrow::datatypes::Fields, message_field: &str) -> Option<usize> {
     // Canonical body always wins when present.
     if let Some(idx) = find_preferred_column(fields, field_names::BODY, &[], &[]) {
         return Some(idx);
@@ -579,6 +573,50 @@ mod tests {
         let row1: serde_json::Value = serde_json::from_str(lines[1]).expect("row 1 is valid JSON");
         assert_eq!(row0["msg"], "hello");
         assert_eq!(row1["msg"], "world");
+    }
+
+    #[test]
+    fn text_format_honors_message_alias_fallback() {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "message",
+            DataType::Utf8,
+            true,
+        )]));
+        let msg = StringArray::from(vec![Some("hello"), Some("world")]);
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(msg)]).unwrap();
+
+        let mut sink = StdoutSink::new(
+            "test-message-alias".to_string(),
+            StdoutFormat::Text,
+            Arc::new(ComponentStats::new()),
+        );
+        let mut out: Vec<u8> = Vec::new();
+        sink.write_batch_to(&batch, &make_metadata(), &mut out)
+            .unwrap();
+
+        let output = String::from_utf8(out).unwrap();
+        assert_eq!(output, "hello\nworld\n");
+    }
+
+    #[test]
+    fn text_format_non_string_body_does_not_panic() {
+        use arrow::array::Int64Array;
+
+        let schema = Arc::new(Schema::new(vec![Field::new("body", DataType::Int64, true)]));
+        let body = Int64Array::from(vec![Some(42), Some(7)]);
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(body)]).unwrap();
+
+        let mut sink = StdoutSink::new(
+            "test-non-string-body".to_string(),
+            StdoutFormat::Text,
+            Arc::new(ComponentStats::new()),
+        );
+        let mut out: Vec<u8> = Vec::new();
+        sink.write_batch_to(&batch, &make_metadata(), &mut out)
+            .unwrap();
+
+        let output = String::from_utf8(out).unwrap();
+        assert_eq!(output, "42\n7\n");
     }
 
     /// The JSON fallback output for text format must match what the explicit
