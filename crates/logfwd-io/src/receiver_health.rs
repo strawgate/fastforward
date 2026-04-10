@@ -4,7 +4,7 @@
 
 use logfwd_types::diagnostics::ComponentHealth;
 
-/// Lifecycle events that can update standalone receiver health.
+/// Lifecycle events that can update standalone receiver health snapshots.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ReceiverHealthEvent {
     /// A request delivered non-empty data into the pipeline successfully.
@@ -61,7 +61,7 @@ pub(crate) const fn reduce_receiver_health(
 
 #[cfg(test)]
 mod tests {
-    use super::{ReceiverHealthEvent, reduce_receiver_health};
+    use super::{reduce_receiver_health, ReceiverHealthEvent};
     use logfwd_types::diagnostics::ComponentHealth;
     use proptest::prelude::*;
 
@@ -145,7 +145,7 @@ mod tests {
         ) {
             let out = apply_events(ComponentHealth::Stopping, &events);
             if events.contains(&ReceiverHealthEvent::ShutdownCompleted) {
-                prop_assert!(matches!(out, ComponentHealth::Stopping | ComponentHealth::Stopped));
+                prop_assert_eq!(out, ComponentHealth::Stopped);
             } else {
                 prop_assert_eq!(out, ComponentHealth::Stopping);
             }
@@ -155,10 +155,11 @@ mod tests {
 
 #[cfg(kani)]
 mod verification {
-    use super::{ReceiverHealthEvent, reduce_receiver_health};
+    use super::{reduce_receiver_health, ReceiverHealthEvent};
     use logfwd_types::diagnostics::ComponentHealth;
 
     #[kani::proof]
+    #[kani::unwind(3)]
     fn verify_delivery_noop_preserves_current_health() {
         let current = ComponentHealth::from_repr(kani::any());
         let out = reduce_receiver_health(current, ReceiverHealthEvent::DeliveryNoop);
@@ -175,6 +176,7 @@ mod verification {
     }
 
     #[kani::proof]
+    #[kani::unwind(3)]
     fn verify_delivery_accepted_recovers_only_non_terminal_receivers() {
         let current = ComponentHealth::from_repr(kani::any());
         let out = reduce_receiver_health(current, ReceiverHealthEvent::DeliveryAccepted);
@@ -197,6 +199,7 @@ mod verification {
     }
 
     #[kani::proof]
+    #[kani::unwind(3)]
     fn verify_backpressure_degrades_only_non_terminal_receivers() {
         let current = ComponentHealth::from_repr(kani::any());
         let out = reduce_receiver_health(current, ReceiverHealthEvent::Backpressure);
@@ -219,6 +222,7 @@ mod verification {
     }
 
     #[kani::proof]
+    #[kani::unwind(3)]
     fn verify_fatal_failure_preserves_drain_phase() {
         let current = ComponentHealth::from_repr(kani::any());
         let out = reduce_receiver_health(current, ReceiverHealthEvent::FatalFailure);
@@ -239,6 +243,7 @@ mod verification {
     }
 
     #[kani::proof]
+    #[kani::unwind(3)]
     fn verify_shutdown_requested_only_moves_non_terminal_receivers_to_stopping() {
         let current = ComponentHealth::from_repr(kani::any());
         let out = reduce_receiver_health(current, ReceiverHealthEvent::ShutdownRequested);
@@ -259,6 +264,7 @@ mod verification {
     }
 
     #[kani::proof]
+    #[kani::unwind(3)]
     fn verify_shutdown_completed_stops_only_non_failed_receivers() {
         let current = ComponentHealth::from_repr(kani::any());
         let out = reduce_receiver_health(current, ReceiverHealthEvent::ShutdownCompleted);

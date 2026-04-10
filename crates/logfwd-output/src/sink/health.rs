@@ -93,7 +93,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{OutputHealthEvent, aggregate_fanout_health, reduce_output_health};
+    use super::{aggregate_fanout_health, reduce_output_health, OutputHealthEvent};
     use logfwd_types::diagnostics::ComponentHealth;
     use proptest::prelude::*;
 
@@ -276,7 +276,7 @@ mod tests {
 
 #[cfg(kani)]
 mod verification {
-    use super::{OutputHealthEvent, aggregate_fanout_health, reduce_output_health};
+    use super::{aggregate_fanout_health, reduce_output_health, OutputHealthEvent};
     use logfwd_types::diagnostics::ComponentHealth;
 
     #[kani::proof]
