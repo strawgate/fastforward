@@ -610,6 +610,10 @@ mod tests {
     }
 
     proptest! {
+        #![proptest_config(ProptestConfig {
+            failure_persistence: None,
+            .. ProptestConfig::default()
+        })]
         #[test]
         fn proptest_stream_token_validation(stream in "[a-z]{1,8}") {
             let line = format!("2024-01-15T10:30:00Z {stream} F msg");

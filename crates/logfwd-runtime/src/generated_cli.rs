@@ -146,7 +146,12 @@ pub fn render_blast_yaml(
             keys.sort();
             for key in keys {
                 if let Some(value) = auth.headers.get(key) {
-                    let _ = writeln!(yaml, "            {}: {}", yaml_quote(key), yaml_quote(value));
+                    let _ = writeln!(
+                        yaml,
+                        "            {}: {}",
+                        yaml_quote(key),
+                        yaml_quote(value)
+                    );
                 }
             }
         }
