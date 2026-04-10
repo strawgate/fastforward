@@ -31,7 +31,7 @@ fn checkpoint_crash_scenario_keeps_delivery_and_monotonic_updates() {
 }
 
 #[test]
-fn pre_durability_flush_failure_never_persists_checkpoint_and_still_terminalizes() {
+fn pre_durability_flush_failure_never_persists_checkpoint_and_keeps_delivery_contract() {
     let outcome = FaultScenario::builder("pre-durability-flush-failure")
         .with_seed(20260417)
         .with_line_count(20)
@@ -53,7 +53,7 @@ fn pre_durability_flush_failure_never_persists_checkpoint_and_still_terminalizes
 }
 
 #[test]
-fn post_durability_flush_failure_preserves_valid_checkpoint_progress_and_terminalization() {
+fn post_durability_flush_failure_preserves_valid_checkpoint_progress_and_delivery_contract() {
     let outcome = FaultScenario::builder("post-durability-flush-failure")
         .with_seed(20260418)
         .with_line_count(40)

@@ -1,5 +1,6 @@
 use serde::Serialize;
 
+/// Stable diagnostics payload contract version for JSON endpoints.
 pub const STABLE_DIAGNOSTICS_CONTRACT_VERSION: &str = "v1";
 
 /// In-flight batch being processed right now.
@@ -64,6 +65,7 @@ pub struct MemoryStats {
 }
 
 #[derive(Debug, Serialize)]
+/// Typed response payload for `/live`.
 pub struct LiveResponse {
     pub contract_version: &'static str,
     pub status: &'static str,
@@ -72,6 +74,7 @@ pub struct LiveResponse {
 }
 
 #[derive(Debug, Serialize)]
+/// Typed response payload for `/ready`.
 pub struct ReadyResponse {
     pub contract_version: &'static str,
     pub status: &'static str,
@@ -80,6 +83,7 @@ pub struct ReadyResponse {
 }
 
 #[derive(Debug, Serialize)]
+/// Typed response payload for `/admin/v1/status`.
 pub struct StatusSnapshotResponse {
     pub contract_version: &'static str,
     pub live: StatusSnapshot,
@@ -90,6 +94,7 @@ pub struct StatusSnapshotResponse {
 }
 
 #[derive(Debug, Serialize)]
+/// Shared status snapshot used by liveness and readiness sections.
 pub struct StatusSnapshot {
     pub status: String,
     pub reason: String,
@@ -97,6 +102,7 @@ pub struct StatusSnapshot {
 }
 
 #[derive(Debug, Serialize)]
+/// Aggregated component health summary for status output.
 pub struct ComponentHealthSnapshot {
     pub status: String,
     pub reason: String,
@@ -105,6 +111,7 @@ pub struct ComponentHealthSnapshot {
 }
 
 #[derive(Debug, Serialize)]
+/// Per-pipeline health and throughput snapshot.
 pub struct PipelineStatus {
     pub name: String,
     pub inputs: Vec<ComponentStatus>,
@@ -117,6 +124,7 @@ pub struct PipelineStatus {
 }
 
 #[derive(Debug, Serialize)]
+/// Generic component status shape for inputs and outputs.
 pub struct ComponentStatus {
     pub name: String,
     #[serde(rename = "type")]
@@ -134,6 +142,7 @@ pub struct ComponentStatus {
 }
 
 #[derive(Debug, Serialize)]
+/// Transport-specific status details for a component.
 pub struct TransportStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file: Option<FileTransportStatus>,
@@ -144,23 +153,27 @@ pub struct TransportStatus {
 }
 
 #[derive(Debug, Serialize)]
+/// File input transport counters.
 pub struct FileTransportStatus {
     pub consecutive_error_polls: u64,
 }
 
 #[derive(Debug, Serialize)]
+/// TCP input/output transport counters.
 pub struct TcpTransportStatus {
     pub accepted_connections: u64,
     pub active_connections: u64,
 }
 
 #[derive(Debug, Serialize)]
+/// UDP transport counters and socket buffer sizing.
 pub struct UdpTransportStatus {
     pub drops_detected: u64,
     pub recv_buffer_size: u64,
 }
 
 #[derive(Debug, Serialize)]
+/// Transform-stage status and filtering statistics.
 pub struct TransformStatus {
     pub sql: String,
     pub health: String,
@@ -171,6 +184,7 @@ pub struct TransformStatus {
 }
 
 #[derive(Debug, Serialize)]
+/// Batch processing and checkpoint-related counters.
 pub struct BatchStatus {
     pub total: u64,
     pub avg_rows: f64,
@@ -188,6 +202,7 @@ pub struct BatchStatus {
 }
 
 #[derive(Debug, Serialize)]
+/// Stage latency totals in seconds.
 pub struct StageSeconds {
     pub scan: f64,
     pub transform: f64,
@@ -197,12 +212,14 @@ pub struct StageSeconds {
 }
 
 #[derive(Debug, Serialize)]
+/// Dominant bottleneck stage and explanatory reason.
 pub struct BottleneckStatus {
     pub stage: String,
     pub reason: String,
 }
 
 #[derive(Debug, Serialize)]
+/// Process-level status included in `/admin/v1/status`.
 pub struct SystemStatus {
     pub uptime_seconds: u64,
     pub version: &'static str,
@@ -211,6 +228,7 @@ pub struct SystemStatus {
 }
 
 #[derive(Debug, Serialize)]
+/// Serializable memory counters for diagnostics responses.
 pub struct MemoryStatsResponse {
     pub resident: usize,
     pub allocated: usize,

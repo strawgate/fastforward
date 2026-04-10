@@ -80,6 +80,11 @@ describe("metric registry", () => {
     expect(() => createMetricRegistry(incomplete)).toThrow("missing metric id: stalls");
   });
 
+  it("throws if any metric id is duplicated", () => {
+    const duplicated = [...ALL_IDS.map(makeSeries), makeSeries("mem")];
+    expect(() => createMetricRegistry(duplicated)).toThrow("duplicate metric id: mem");
+  });
+
   it("clears limit when a later update omits it", () => {
     const registry = createMetricRegistry(ALL_IDS.map(makeSeries));
 
