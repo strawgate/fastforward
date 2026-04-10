@@ -8,6 +8,7 @@
 
 /// Abstract channel state used in Kani models.
 #[cfg_attr(kani, derive(kani::Arbitrary))]
+#[cfg(any(test, kani))]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum ChannelState {
     /// Channel has space — `try_send` would succeed.
@@ -19,6 +20,7 @@ pub(crate) enum ChannelState {
 }
 
 /// Outcome of one dispatch step over an array of workers.
+#[cfg(any(test, kani))]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum DispatchOutcome {
     /// Item sent to worker at this index in the original `states` snapshot.
@@ -39,6 +41,7 @@ pub(crate) enum DispatchOutcome {
 ///   - Otherwise returns `WaitOnFront`.
 ///
 /// Preconditions: `max_workers >= 1`, `states.len() <= max_workers`.
+#[cfg(any(test, kani))]
 pub(crate) fn dispatch_step(states: &[ChannelState], max_workers: usize) -> DispatchOutcome {
     for (i, &state) in states.iter().enumerate() {
         match state {

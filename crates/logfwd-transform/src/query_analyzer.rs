@@ -502,7 +502,7 @@ fn walk_table_factor(
         | sqlast::TableFactor::OpenJsonTable { json_expr, .. } => {
             collect_column_refs(json_expr, referenced_columns);
         }
-        _ => {}
+        sqlast::TableFactor::MatchRecognize { .. } => {}
     }
 }
 
