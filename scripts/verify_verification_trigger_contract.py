@@ -62,25 +62,90 @@ def _strip_yaml_value(value: str) -> str:
     return value
 
 
+def _is_required_just_command(line: str, command: str) -> bool:
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#"):
+        return False
+    return bool(re.match(rf"^(?:@|-)?\s*{re.escape(command)}(?:\s*(?:#.*)?)$", stripped))
+
+
+def _collect_step_lines(job_block: list[str], idx: int) -> list[str]:
+    step_start = idx
+    step_item_indent = None
+    for back_idx in range(idx, -1, -1):
+        candidate = job_block[back_idx]
+        candidate_stripped = candidate.strip()
+        candidate_indent = len(candidate) - len(candidate.lstrip(" "))
+        if candidate_stripped.startswith("- "):
+            step_start = back_idx
+            step_item_indent = candidate_indent
+            break
+
+    if step_item_indent is None:
+        step_item_indent = len(job_block[idx]) - len(job_block[idx].lstrip(" "))
+
+    step_lines = [job_block[step_start]]
+    for next_line in job_block[step_start + 1 :]:
+        next_stripped = next_line.strip()
+        next_indent = len(next_line) - len(next_line.lstrip(" "))
+        if next_stripped.startswith("- ") and next_indent == step_item_indent:
+            break
+        step_lines.append(next_line)
+    return step_lines
+
+
+def extract_job_block(ci_text: str, job_name: str) -> list[str]:
+    lines = ci_text.splitlines()
+    jobs_start = None
+    jobs_indent = None
+
+    for idx, line in enumerate(lines):
+        if line.strip() == "jobs:":
+            jobs_start = idx
+            jobs_indent = len(line) - len(line.lstrip(" "))
+            break
+
+    if jobs_start is None or jobs_indent is None:
+        raise ValueError("ci.yml missing top-level 'jobs' section")
+
+    start = None
+    job_indent = None
+    for idx, line in enumerate(lines[jobs_start + 1 :], start=jobs_start + 1):
+        stripped = line.strip()
+        indent = len(line) - len(line.lstrip(" "))
+        if stripped and indent <= jobs_indent:
+            break
+        if indent == jobs_indent + 2 and stripped == f"{job_name}:":
+            start = idx
+            job_indent = indent
+            break
+
+    if start is None or job_indent is None:
+        raise ValueError(f"ci.yml missing job '{job_name}'")
+
+    block = [lines[start]]
+    for line in lines[start + 1 :]:
+        stripped = line.strip()
+        indent = len(line) - len(line.lstrip(" "))
+        if stripped and indent <= job_indent:
+            break
+        block.append(line)
+    return block
+
+
 def extract_paths_filter_entries(ci_text: str, filter_name: str) -> set[str]:
     changes_block = extract_job_block(ci_text, "changes")
     filters_block: list[str] | None = None
 
     for idx, line in enumerate(changes_block):
         stripped = line.strip()
-        if not (
-            "uses:" in stripped and "dorny/paths-filter@" in stripped
-        ):
+        if not ("uses:" in stripped and "dorny/paths-filter@" in stripped):
             continue
 
-        step_indent = len(line) - len(line.lstrip(" "))
-        step_lines = [line]
-        for next_line in changes_block[idx + 1 :]:
-            next_stripped = next_line.strip()
-            next_indent = len(next_line) - len(next_line.lstrip(" "))
-            if next_stripped and next_indent <= step_indent:
-                break
-            step_lines.append(next_line)
+        step_lines = _collect_step_lines(changes_block, idx)
+
+        if not any(step_line.strip() == "id: filter" for step_line in step_lines):
+            continue
 
         filters_start = None
         filters_indent = None
@@ -104,9 +169,7 @@ def extract_paths_filter_entries(ci_text: str, filter_name: str) -> set[str]:
         break
 
     if filters_block is None:
-        raise ValueError(
-            "ci.yml missing dorny/paths-filter filters block under the changes job"
-        )
+        raise ValueError("ci.yml missing changes.filter dorny/paths-filter filters block")
 
     entries: set[str] = set()
     in_filter = False
@@ -131,80 +194,49 @@ def extract_paths_filter_entries(ci_text: str, filter_name: str) -> set[str]:
 
     if not entries:
         raise ValueError(f"ci.yml filter '{filter_name}' missing or empty")
-
     return entries
-
-
-def extract_job_block(ci_text: str, job_name: str) -> list[str]:
-    lines = ci_text.splitlines()
-    jobs_start = None
-    jobs_indent = None
-
-    for idx, line in enumerate(lines):
-        if line.strip() == "jobs:":
-            jobs_start = idx
-            jobs_indent = len(line) - len(line.lstrip(" "))
-            break
-
-    if jobs_start is None or jobs_indent is None:
-        raise ValueError("ci.yml missing top-level 'jobs' section")
-
-    start = None
-    job_indent = None
-
-    for idx, line in enumerate(lines[jobs_start + 1 :], start=jobs_start + 1):
-        stripped = line.strip()
-        indent = len(line) - len(line.lstrip(" "))
-        if stripped and indent <= jobs_indent:
-            break
-        if indent == jobs_indent + 2 and stripped == f"{job_name}:":
-            start = idx
-            job_indent = indent
-            break
-
-    if start is None or job_indent is None:
-        raise ValueError(f"ci.yml missing job '{job_name}'")
-
-    block = [lines[start]]
-    for line in lines[start + 1 :]:
-        stripped = line.strip()
-        indent = len(line) - len(line.lstrip(" "))
-        if stripped and indent <= job_indent:
-            break
-        block.append(line)
-    return block
 
 
 def extract_kani_args_crates(ci_text: str) -> set[str]:
     kani_block = extract_job_block(ci_text, "kani")
-    args_lines: list[str] = []
-    collecting = False
-    args_indent = None
 
-    for line in kani_block:
+    for idx, line in enumerate(kani_block):
         stripped = line.strip()
-        indent = len(line) - len(line.lstrip(" "))
-        if not collecting and stripped.startswith("args:"):
-            collecting = True
-            args_indent = indent
-            after_colon = stripped.split(":", 1)[1].strip()
-            if after_colon and after_colon not in {"|", "|-", ">", ">-"}:
-                args_lines.append(after_colon)
+        if not ("uses:" in stripped and "model-checking/kani-github-action@" in stripped):
             continue
 
-        if collecting:
-            if stripped and args_indent is not None and indent <= args_indent:
-                break
-            args_lines.append(stripped)
+        step_lines = _collect_step_lines(kani_block, idx)
 
-    if not args_lines:
-        raise ValueError("ci.yml kani job missing args block")
+        args_lines: list[str] = []
+        collecting = False
+        args_indent = None
+        for step_line in step_lines:
+            step_stripped = step_line.strip()
+            indent = len(step_line) - len(step_line.lstrip(" "))
+            if not collecting and step_stripped.startswith("args:"):
+                collecting = True
+                args_indent = indent
+                after_colon = step_stripped.split(":", 1)[1].strip()
+                if after_colon and after_colon not in {"|", "|-", ">", ">-"}:
+                    args_lines.append(after_colon)
+                continue
+            if collecting:
+                if step_stripped and args_indent is not None and indent <= args_indent:
+                    break
+                args_lines.append(step_stripped)
 
-    joined = " ".join(args_lines)
-    crates = set(re.findall(r"-p\s+([A-Za-z0-9_-]+)", joined))
-    if not crates:
-        raise ValueError("ci.yml kani args missing -p crate entries")
-    return crates
+        if not args_lines:
+            raise ValueError(
+                "ci.yml kani job missing args block for model-checking/kani-github-action"
+            )
+
+        joined = " ".join(args_lines)
+        crates = set(re.findall(r"-p\s+([A-Za-z0-9_-]+)", joined))
+        if not crates:
+            raise ValueError("ci.yml kani args missing -p crate entries")
+        return crates
+
+    raise ValueError("ci.yml kani job missing model-checking/kani-github-action step")
 
 
 def extract_guardrail_scripts(ci_text: str) -> set[str]:
@@ -236,7 +268,7 @@ def extract_just_recipe_body(just_text: str, recipe: str) -> list[str]:
 
     body: list[str] = []
     for line in lines[start:]:
-        if line and not line.startswith(" "):
+        if line and not line.startswith((" ", "\t")):
             break
         body.append(line.strip())
     return body
@@ -254,7 +286,7 @@ def extract_just_kani_required_crates(just_text: str) -> set[str]:
 
     block: list[str] = []
     for line in lines[start:]:
-        if line and not line.startswith(" "):
+        if line and not line.startswith((" ", "\t")):
             break
         block.append(line)
 
@@ -323,7 +355,7 @@ def validate() -> list[str]:
             errors.append(f"just verification-guardrail missing dependency: {dep}")
 
     required_trigger_cmd = "python3 scripts/verify_verification_trigger_contract.py"
-    if not any(required_trigger_cmd in line for line in trigger_body):
+    if not any(_is_required_just_command(line, required_trigger_cmd) for line in trigger_body):
         errors.append(
             "just verification-trigger-contract missing required command: "
             f"{required_trigger_cmd}"
@@ -356,6 +388,7 @@ jobs:
   changes:
     steps:
       - uses: dorny/paths-filter@v3
+        id: filter
         with:
           filters: |
             kani_required:
@@ -380,6 +413,27 @@ jobs:
   changes:
     steps:
       - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            kani_required:
+              - 'crates/logfwd-core/**'
+"""
+        entries = extract_paths_filter_entries(ci_text, "kani_required")
+        self.assertEqual(entries, {"crates/logfwd-core/**"})
+
+    def test_extract_paths_filter_entries_uses_filter_id_step(self) -> None:
+        ci_text = """
+jobs:
+  changes:
+    steps:
+      - uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            kani_required:
+              - 'docs/**'
+      - uses: dorny/paths-filter@v3
+        id: filter
         with:
           filters: |
             kani_required:
@@ -401,6 +455,22 @@ jobs:
             -Z function-contracts
 """
         self.assertEqual(extract_kani_args_crates(ci_text), {"logfwd-core", "logfwd-io"})
+
+    def test_extract_kani_args_crates_uses_kani_action_step(self) -> None:
+        ci_text = """
+jobs:
+  kani:
+    steps:
+      - uses: some/other-action@v1
+        with:
+          args: >-
+            -p fake
+      - uses: model-checking/kani-github-action@v1
+        with:
+          args: >-
+            -p logfwd-core
+"""
+        self.assertEqual(extract_kani_args_crates(ci_text), {"logfwd-core"})
 
     def test_extract_job_block_scopes_to_jobs_section(self) -> None:
         ci_text = """
@@ -425,6 +495,25 @@ verification-guardrail: verification-trigger-contract
             "python3 scripts/verify_verification_trigger_contract.py",
             body,
         )
+
+    def test_extract_just_recipe_body_accepts_tab_indentation(self) -> None:
+        just_text = (
+            "verification-trigger-contract:\n"
+            "\tpython3 scripts/verify_verification_trigger_contract.py\n"
+            "verification-guardrail: verification-trigger-contract\n"
+        )
+        body = extract_just_recipe_body(just_text, "verification-trigger-contract")
+        self.assertIn(
+            "python3 scripts/verify_verification_trigger_contract.py",
+            body,
+        )
+
+    def test_is_required_just_command(self) -> None:
+        required = "python3 scripts/verify_verification_trigger_contract.py"
+        self.assertTrue(_is_required_just_command(required, required))
+        self.assertTrue(_is_required_just_command(f"@{required}", required))
+        self.assertFalse(_is_required_just_command(f"echo '{required}'", required))
+        self.assertFalse(_is_required_just_command(f"# {required}", required))
 
 
 if __name__ == "__main__":
