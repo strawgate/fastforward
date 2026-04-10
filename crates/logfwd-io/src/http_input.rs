@@ -317,6 +317,9 @@ async fn handle_request(
     request: Request<Body>,
 ) -> Response {
     let success_response = || {
+        if state.success_response_code == StatusCode::NO_CONTENT {
+            return StatusCode::NO_CONTENT.into_response();
+        }
         if let Some(body) = &state.success_response_body {
             (state.success_response_code, body.clone()).into_response()
         } else {
@@ -441,6 +444,12 @@ fn normalize_options(mut options: HttpInputOptions) -> io::Result<HttpInputOptio
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "http input response_code must be one of: 200, 201, 202, 204",
+        ));
+    }
+    if options.response_code == 204 && options.response_body.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "http input response_body is not allowed when response_code is 204",
         ));
     }
     Ok(options)
@@ -729,6 +738,25 @@ mod tests {
         assert!(
             text.contains("\"message\":\"ok\""),
             "expected payload row: {text}"
+        );
+    }
+
+    #[test]
+    fn http_rejects_response_body_with_204() {
+        let options = HttpInputOptions {
+            path: "/ingest".to_string(),
+            response_code: 204,
+            response_body: Some("{\"ok\":true}".to_string()),
+            ..HttpInputOptions::default()
+        };
+        let err = match HttpInput::new_with_options("test", "127.0.0.1:0", options) {
+            Ok(_) => panic!("204 with response body should be rejected"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string()
+                .contains("response_body is not allowed when response_code is 204"),
+            "unexpected error: {err}"
         );
     }
 

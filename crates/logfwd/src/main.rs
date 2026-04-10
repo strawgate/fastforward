@@ -167,6 +167,7 @@ enum BlastDestination {
     #[value(alias = "elasticsearch_bulk")]
     Elasticsearch,
     Loki,
+    #[value(alias = "arrow_ipc", alias = "arrow")]
     ArrowIpc,
     Udp,
     Tcp,
@@ -1844,6 +1845,22 @@ mod cli_tests {
         match blast.command.expect("command") {
             Commands::Blast(args) => {
                 assert!(matches!(args.destination, Some(BlastDestination::Otlp)))
+            }
+            other => panic!("expected blast command, got {other:?}"),
+        }
+
+        let blast_arrow = Cli::try_parse_from([
+            "logfwd",
+            "blast",
+            "--destination",
+            "arrow_ipc",
+            "--endpoint",
+            "http://127.0.0.1:18081",
+        ])
+        .expect("arrow_ipc alias should parse");
+        match blast_arrow.command.expect("command") {
+            Commands::Blast(args) => {
+                assert!(matches!(args.destination, Some(BlastDestination::ArrowIpc)))
             }
             other => panic!("expected blast command, got {other:?}"),
         }
