@@ -84,10 +84,14 @@ pub fn resolve_blast_output_config(
     if auth_bearer_token.is_some() || !auth_header.is_empty() {
         if !matches!(
             output_type,
-            OutputType::Otlp | OutputType::Elasticsearch | OutputType::Loki | OutputType::ArrowIpc
+            OutputType::Otlp
+                | OutputType::Http
+                | OutputType::Elasticsearch
+                | OutputType::Loki
+                | OutputType::ArrowIpc
         ) {
             return Err(
-                "--auth-bearer-token/--auth-header are only supported for otlp, elasticsearch, loki, and arrow_ipc destinations"
+                "--auth-bearer-token/--auth-header are only supported for otlp, http, elasticsearch, loki, and arrow_ipc destinations"
                     .to_owned(),
             );
         }
@@ -255,6 +259,25 @@ mod tests {
         assert_eq!(
             cfg.endpoint.as_deref(),
             Some("http://127.0.0.1:8080/ingest")
+        );
+    }
+
+    #[test]
+    fn resolve_blast_output_config_http_allows_auth() {
+        let headers = vec!["X-API-Key=secret".to_owned()];
+        let cfg = resolve_blast_output_config(
+            OutputType::Http,
+            Some("http://127.0.0.1:8080/ingest"),
+            Some("token-123"),
+            &headers,
+        )
+        .expect("http blast destination should allow auth");
+
+        let auth = cfg.auth.expect("auth should be present");
+        assert_eq!(auth.bearer_token.as_deref(), Some("token-123"));
+        assert_eq!(
+            auth.headers.get("X-API-Key").map(String::as_str),
+            Some("secret")
         );
     }
 }
