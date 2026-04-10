@@ -190,6 +190,75 @@ fn test_tail_new_data() {
 }
 
 #[test]
+fn test_eof_requires_fresh_idle_window_after_data() {
+    let dir = tempfile::tempdir().unwrap();
+    let log_path = dir.path().join("eof-idle-reset.log");
+    File::create(&log_path).unwrap();
+
+    let config = TailConfig {
+        start_from_end: false,
+        poll_interval_ms: 50,
+        ..Default::default()
+    };
+    let mut tailer = make_file_tailer(std::slice::from_ref(&log_path), config);
+
+    // Reach an initial EOF cycle.
+    let _ = poll_until(
+        &mut tailer,
+        Duration::from_secs(2),
+        |events, _| {
+            events
+                .iter()
+                .any(|e| matches!(e, TailEvent::EndOfFile { .. }))
+        },
+        "timed out waiting for initial EOF",
+    );
+
+    // New data must reset EOF idle gating.
+    {
+        let mut f = fs::OpenOptions::new().append(true).open(&log_path).unwrap();
+        write!(f, "partial-without-newline").unwrap();
+    }
+    let _ = poll_until(
+        &mut tailer,
+        Duration::from_secs(2),
+        |events, _| events.iter().any(|e| matches!(e, TailEvent::Data { .. })),
+        "timed out waiting for post-EOF data",
+    );
+
+    // Two immediate no-data polls after fresh data should still not emit EOF.
+    std::thread::sleep(Duration::from_millis(60));
+    let no_data_1 = tailer.poll().unwrap();
+    assert!(
+        !no_data_1
+            .iter()
+            .any(|e| matches!(e, TailEvent::EndOfFile { .. })),
+        "first no-data poll after fresh data must not emit EOF"
+    );
+
+    std::thread::sleep(Duration::from_millis(60));
+    let no_data_2 = tailer.poll().unwrap();
+    assert!(
+        !no_data_2
+            .iter()
+            .any(|e| matches!(e, TailEvent::EndOfFile { .. })),
+        "second no-data poll before idle-duration gate must not emit EOF"
+    );
+
+    // EOF should re-emit once a fresh idle window fully elapses.
+    let _ = poll_until(
+        &mut tailer,
+        Duration::from_secs(2),
+        |events, _| {
+            events
+                .iter()
+                .any(|e| matches!(e, TailEvent::EndOfFile { .. }))
+        },
+        "timed out waiting for re-armed EOF",
+    );
+}
+
+#[test]
 fn test_tail_truncation() {
     let dir = tempfile::tempdir().unwrap();
     let log_path = dir.path().join("trunc.log");

@@ -31,6 +31,11 @@ use crate::background_http_task::BackgroundHttpTask;
 use crate::input::{InputEvent, InputSource};
 
 const CHANNEL_BOUND: usize = 4096;
+/// Max payloads drained from the internal channel in a single `poll()` call.
+///
+/// This bounds per-poll work and prevents one call from aggregating an
+/// arbitrarily deep queue into memory.
+const MAX_DRAINED_PAYLOADS_PER_POLL: usize = 256;
 
 /// OTLP receiver that listens for log exports via HTTP.
 pub struct OtlpReceiverInput {
@@ -246,21 +251,7 @@ impl InputSource for OtlpReceiverInput {
         let Some(rx) = self.rx.as_ref() else {
             return Ok(vec![]);
         };
-        let mut batches = Vec::new();
-
-        while let Ok(data) = rx.try_recv() {
-            batches.push((data.batch, data.accounted_bytes));
-        }
-
-        let events: Vec<InputEvent> = batches
-            .into_iter()
-            .map(|(batch, accounted_bytes)| InputEvent::Batch {
-                batch,
-                source_id: None,
-                accounted_bytes,
-            })
-            .collect();
-        Ok(events)
+        Ok(drain_receiver_payloads(rx, MAX_DRAINED_PAYLOADS_PER_POLL))
     }
 
     fn name(&self) -> &str {
@@ -284,4 +275,106 @@ impl InputSource for OtlpReceiverInput {
 /// [`logfwd_types::field_names::DEFAULT_RESOURCE_PREFIX`].
 pub fn decode_protobuf_to_batch(body: &[u8]) -> Result<RecordBatch, InputError> {
     decode_otlp_logs_to_batch(body)
+}
+
+fn drain_receiver_payloads(
+    rx: &mpsc::Receiver<ReceiverPayload>,
+    max_drained_payloads: usize,
+) -> Vec<InputEvent> {
+    let mut events = Vec::with_capacity(max_drained_payloads);
+    let mut drained_payloads = 0usize;
+
+    while drained_payloads < max_drained_payloads {
+        let Ok(data) = rx.try_recv() else {
+            break;
+        };
+        drained_payloads += 1;
+        events.push(InputEvent::Batch {
+            batch: data.batch,
+            source_id: None,
+            accounted_bytes: data.accounted_bytes,
+        });
+    }
+
+    events
+}
+
+#[cfg(test)]
+mod poll_tests {
+    use super::*;
+    use arrow::array::Int64Array;
+    use arrow::datatypes::{DataType, Field, Schema};
+
+    fn make_batch(value: i64) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Int64, false)]));
+        RecordBatch::try_new(schema, vec![Arc::new(Int64Array::from(vec![value]))])
+            .expect("record batch should build")
+    }
+
+    #[test]
+    fn drain_respects_limit_and_leaves_remainder_queued() {
+        let (tx, rx) = mpsc::sync_channel(8);
+        tx.send(ReceiverPayload {
+            batch: make_batch(1),
+            accounted_bytes: 10,
+        })
+        .expect("send payload 1");
+        tx.send(ReceiverPayload {
+            batch: make_batch(2),
+            accounted_bytes: 20,
+        })
+        .expect("send payload 2");
+        tx.send(ReceiverPayload {
+            batch: make_batch(3),
+            accounted_bytes: 30,
+        })
+        .expect("send payload 3");
+
+        let events = drain_receiver_payloads(&rx, 2);
+        assert_eq!(events.len(), 2);
+
+        let remainder = drain_receiver_payloads(&rx, 2);
+        assert_eq!(remainder.len(), 1, "one payload should remain queued");
+    }
+
+    #[test]
+    fn drain_preserves_batch_order_and_accounted_bytes() {
+        let (tx, rx) = mpsc::sync_channel(8);
+        tx.send(ReceiverPayload {
+            batch: make_batch(10),
+            accounted_bytes: 100,
+        })
+        .expect("send payload 1");
+        tx.send(ReceiverPayload {
+            batch: make_batch(20),
+            accounted_bytes: 200,
+        })
+        .expect("send payload 2");
+
+        let events = drain_receiver_payloads(&rx, 8);
+        assert_eq!(events.len(), 2);
+
+        match &events[0] {
+            InputEvent::Batch {
+                batch,
+                accounted_bytes,
+                ..
+            } => {
+                assert_eq!(batch.num_rows(), 1);
+                assert_eq!(*accounted_bytes, 100);
+            }
+            _ => panic!("expected first batch event"),
+        }
+        match &events[1] {
+            InputEvent::Batch {
+                batch,
+                accounted_bytes,
+                ..
+            } => {
+                assert_eq!(batch.num_rows(), 1);
+                assert_eq!(*accounted_bytes, 200);
+            }
+            _ => panic!("expected second batch event"),
+        }
+    }
 }
