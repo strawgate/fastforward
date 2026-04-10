@@ -251,7 +251,7 @@ pub(crate) fn process_cri_to_buf(
     process_cri_to_buf_with_plain_text_field(chunk, reassembler, json_prefix, "body", out)
 }
 
-/// Same as [`process_cri_to_buf`] but allows choosing the field name used when
+/// Same as `process_cri_to_buf` but allows choosing the field name used when
 /// wrapping non-JSON plain-text messages.
 pub fn process_cri_to_buf_with_plain_text_field(
     chunk: &[u8],
