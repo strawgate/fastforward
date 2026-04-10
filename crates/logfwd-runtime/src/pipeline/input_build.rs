@@ -70,7 +70,6 @@ pub(super) fn build_input_state(
     name: &str,
     cfg: &InputConfig,
     stats: Arc<ComponentStats>,
-    otlp_structured_ingress: bool,
 ) -> Result<InputState, String> {
     let (raw_source, format, buf_cap): (Box<dyn InputSource>, Format, usize) = match cfg.input_type
     {
@@ -198,22 +197,20 @@ pub(super) fn build_input_state(
                 .listen
                 .as_ref()
                 .ok_or_else(|| format!("input '{name}': otlp input requires 'listen'"))?;
+            let resource_prefix = cfg
+                .resource_prefix
+                .as_deref()
+                .unwrap_or(logfwd_types::field_names::DEFAULT_RESOURCE_PREFIX);
             let format = cfg.format.clone().unwrap_or(Format::Json);
             validate_input_format(name, InputType::Otlp, &format)?;
-            let source = if otlp_structured_ingress {
-                logfwd_io::otlp_receiver::OtlpReceiverInput::new_structured_with_stats(
+            let source =
+                logfwd_io::otlp_receiver::OtlpReceiverInput::new_with_stats_and_resource_prefix(
                     name,
                     addr,
                     Arc::clone(&stats),
+                    resource_prefix,
                 )
-            } else {
-                logfwd_io::otlp_receiver::OtlpReceiverInput::new_with_stats(
-                    name,
-                    addr,
-                    Arc::clone(&stats),
-                )
-            }
-            .map_err(|e| format!("input '{name}': failed to start OTLP receiver: {e}"))?;
+                .map_err(|e| format!("input '{name}': failed to start OTLP receiver: {e}"))?;
             (Box::new(source), format, 4 * 1024 * 1024)
         }
         InputType::Http => {
@@ -339,20 +336,6 @@ fn build_platform_sensor_beta_config(
     }
 }
 
-/// Returns whether OTLP input should use structured ingress mode.
-///
-/// Structured ingress preserves typed OTLP fields but does not synthesize the
-/// scanner-owned `_raw` column. We therefore keep legacy JSON-lines scanner mode
-/// whenever `ScanConfig.keep_raw` is enabled.
-pub(super) fn otlp_uses_structured_ingress(
-    scan_config: &logfwd_core::scan_config::ScanConfig,
-) -> bool {
-    // Structured OTLP ingress preserves typed log fields, but it does not yet
-    // synthesize scanner-owned `_raw`. Keep legacy JSON-lines -> scanner mode
-    // whenever the SQL plan requires `_raw` semantics.
-    !scan_config.keep_raw
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -403,6 +386,7 @@ mod tests {
             input_type: InputType::File,
             path: Some("/tmp/test.log".into()),
             listen: None,
+            resource_prefix: None,
             format: None,
             poll_interval_ms: None,
             read_buf_size: None,
@@ -421,7 +405,7 @@ mod tests {
         // error. A more involved test requires exposing or inspecting the internal
         // file tailer state, but here we at least verify it parses and maps defaults
         // cleanly for a valid file input configuration.
-        assert!(build_input_state("test_in", &cfg_defaults, Arc::clone(&stats), false).is_ok());
+        assert!(build_input_state("test_in", &cfg_defaults, Arc::clone(&stats)).is_ok());
 
         // Explicit tuning overrides
         let cfg_overrides = InputConfig {
@@ -429,6 +413,7 @@ mod tests {
             input_type: InputType::File,
             path: Some("/tmp/test.log".into()),
             listen: None,
+            resource_prefix: None,
             format: None,
             poll_interval_ms: Some(123),
             read_buf_size: Some(456),
@@ -442,7 +427,7 @@ mod tests {
             tls: None,
         };
 
-        assert!(build_input_state("test_in", &cfg_overrides, Arc::clone(&stats), false).is_ok());
+        assert!(build_input_state("test_in", &cfg_overrides, Arc::clone(&stats)).is_ok());
     }
 
     #[test]
@@ -459,6 +444,7 @@ mod tests {
                     input_type: input_type.clone(),
                     path: None,
                     listen: Some("127.0.0.1:0".to_string()),
+                    resource_prefix: None,
                     format: Some(format),
                     poll_interval_ms: None,
                     read_buf_size: None,
@@ -472,7 +458,7 @@ mod tests {
                     tls: None,
                 };
                 let stats = pm.add_input("in", "test");
-                let err = match build_input_state("in", &cfg, stats, true) {
+                let err = match build_input_state("in", &cfg, stats) {
                     Ok(_) => panic!("CRI/auto must be rejected for UDP/TCP inputs"),
                     Err(err) => err,
                 };
@@ -484,20 +470,5 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn otlp_structured_ingress_tracks_keep_raw_flag() {
-        let mut scan = logfwd_core::scan_config::ScanConfig::default();
-        scan.keep_raw = false;
-        assert!(
-            otlp_uses_structured_ingress(&scan),
-            "keep_raw=false should prefer structured OTLP ingress"
-        );
-        scan.keep_raw = true;
-        assert!(
-            !otlp_uses_structured_ingress(&scan),
-            "keep_raw=true should force legacy scanner ingress"
-        );
     }
 }
