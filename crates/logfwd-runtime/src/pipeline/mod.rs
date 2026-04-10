@@ -2812,7 +2812,7 @@ mod proptest_pipeline {
                 line_field_name: None,
                 validate_utf8: false,
             };
-            let mut scanner_whole = Scanner::new(ScanConfig { wanted_fields: vec![], extract_all: true, line_field_name: None, validate_utf8: false });
+            let mut scanner_whole = Scanner::new(config);
             let batch_whole = scanner_whole.scan_detached(Bytes::from(ndjson.clone())).unwrap();
 
             // Split into two chunks with remainder handling
@@ -2847,7 +2847,13 @@ mod proptest_pipeline {
                 buf.extend_from_slice(&combined);
             }
 
-            let config2 = ScanConfig { wanted_fields: vec![], extract_all: true, line_field_name: None, validate_utf8: false }; let mut scanner_split = Scanner::new(config2);
+            let config2 = ScanConfig {
+                wanted_fields: vec![],
+                extract_all: true,
+                line_field_name: None,
+                validate_utf8: false,
+            };
+            let mut scanner_split = Scanner::new(config2);
             let batch_split = scanner_split.scan_detached(Bytes::from(buf.clone())).unwrap();
 
             prop_assert_eq!(

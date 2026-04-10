@@ -93,11 +93,15 @@ impl StdoutSink {
 
         match self.format {
             StdoutFormat::Text => {
-                let msg_idx = resolve_message_idx(batch.schema().fields(), &self.message_field);
-                if let Some(idx) = msg_idx {
-                    let col = batch.column(idx);
+                let msg_indices =
+                    resolve_message_indices(batch.schema().fields(), &self.message_field);
+                if !msg_indices.is_empty() {
                     for row in 0..num_rows {
-                        if !col.is_null(row) {
+                        if let Some(col) = msg_indices
+                            .iter()
+                            .map(|&idx| batch.column(idx))
+                            .find(|col| !col.is_null(row))
+                        {
                             dest.write_all(
                                 safe_array_value_to_string(col.as_ref(), row).as_bytes(),
                             )?;
@@ -371,22 +375,47 @@ fn find_exact_column(fields: &arrow::datatypes::Fields, name: &str) -> Option<us
 ///
 /// Priority: canonical `body` → configured `message_field` → legacy aliases.
 fn resolve_message_idx(fields: &arrow::datatypes::Fields, message_field: &str) -> Option<usize> {
-    // Canonical body always wins when present.
-    if let Some(idx) = find_preferred_column(fields, field_names::BODY, &[], &[]) {
-        return Some(idx);
+    resolve_message_indices(fields, message_field)
+        .into_iter()
+        .next()
+}
+
+fn push_unique(indices: &mut Vec<usize>, idx: Option<usize>) {
+    if let Some(idx) = idx {
+        if !indices.contains(&idx) {
+            indices.push(idx);
+        }
     }
+}
+
+fn resolve_message_indices(fields: &arrow::datatypes::Fields, message_field: &str) -> Vec<usize> {
+    let mut indices = Vec::with_capacity(4);
+
+    // Canonical body always wins when present.
+    push_unique(
+        &mut indices,
+        find_preferred_column(fields, field_names::BODY, &[], &[]),
+    );
 
     // Then honor configured message field, including conflict-suffixed variant.
+    push_unique(&mut indices, find_exact_column(fields, message_field));
     let conflict_name = format!("{message_field}__str");
-    if let Some(idx) = fields
-        .iter()
-        .position(|f| f.name() == message_field || f.name().as_str() == conflict_name)
-    {
-        return Some(idx);
-    }
+    push_unique(
+        &mut indices,
+        find_exact_column(fields, conflict_name.as_str()),
+    );
 
     // Legacy fallbacks for external schemas.
-    find_preferred_column(fields, field_names::BODY, field_names::BODY_VARIANTS, &[])
+    for &name in field_names::BODY_VARIANTS {
+        push_unique(&mut indices, find_exact_column(fields, name));
+        let conflict_name = format!("{name}__str");
+        push_unique(
+            &mut indices,
+            find_exact_column(fields, conflict_name.as_str()),
+        );
+    }
+
+    indices
 }
 
 /// Convert an Arrow value to string without panicking or silently erasing errors.
@@ -590,6 +619,38 @@ mod tests {
 
         let output = String::from_utf8(out).unwrap();
         assert_eq!(output, "hello\nworld\n");
+    }
+
+    #[test]
+    fn text_format_falls_back_to_alias_when_body_is_null() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("body", DataType::Utf8, true),
+            Field::new("message", DataType::Utf8, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec![
+                    Some("body-1"),
+                    None,
+                    Some("body-3"),
+                ])),
+                Arc::new(StringArray::from(vec![None, Some("msg-2"), Some("msg-3")])),
+            ],
+        )
+        .unwrap();
+
+        let mut sink = StdoutSink::new(
+            "test-mixed-schema".to_string(),
+            StdoutFormat::Text,
+            Arc::new(ComponentStats::new()),
+        );
+        let mut out: Vec<u8> = Vec::new();
+        sink.write_batch_to(&batch, &make_metadata(), &mut out)
+            .unwrap();
+
+        let output = String::from_utf8(out).unwrap();
+        assert_eq!(output, "body-1\nmsg-2\nbody-3\n");
     }
 
     #[test]
