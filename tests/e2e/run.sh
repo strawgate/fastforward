@@ -49,8 +49,7 @@ wait_for() {
     if "$@" 2>/dev/null; then
         return 0
     fi
-    echo "E2E_FAIL_CATEGORY=TIMEOUT"
-    echo "FAIL[TIMEOUT]: timed out waiting for: $desc (${timeout}s)"
+    echo "FAIL: timed out waiting for: $desc (${timeout}s)"
     return 1
 }
 
@@ -149,8 +148,14 @@ k port-forward -n "$NAMESPACE" svc/blackhole-receiver 14318:4318 &
 PF_PID=$!
 
 # Wait for port-forward to accept connections instead of hardcoded sleep.
-wait_for "port-forward accepting connections" 15 \
-    curl --connect-timeout 1 --max-time 1 -sf http://localhost:14318/stats
+if ! wait_for "port-forward accepting connections" 15 \
+    curl --connect-timeout 1 --max-time 1 -sf http://localhost:14318/stats; then
+    echo ""
+    fail "PORT_FORWARD_NOT_READY" "port-forward did not start serving /stats in time"
+    k get pods -n "$NAMESPACE" -l app=blackhole-receiver -o wide 2>&1 || true
+    k logs -n "$NAMESPACE" -l app=blackhole-receiver --tail=50 2>&1 || true
+    exit 1
+fi
 
 echo "=== Phase 7: Verify ==="
 DEADLINE=$((SECONDS + TIMEOUT))
