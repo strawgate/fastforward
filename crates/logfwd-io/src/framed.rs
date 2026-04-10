@@ -501,6 +501,8 @@ mod tests {
         offsets: Vec<(SourceId, ByteOffset)>,
         source_paths: Vec<(SourceId, std::path::PathBuf)>,
         health: ComponentHealth,
+        cadence_signal: PollCadenceSignal,
+        cadence_max: u8,
     }
 
     impl MockSource {
@@ -511,6 +513,8 @@ mod tests {
                 offsets: vec![],
                 source_paths: vec![],
                 health: ComponentHealth::Healthy,
+                cadence_signal: PollCadenceSignal::default(),
+                cadence_max: 0,
             }
         }
 
@@ -562,6 +566,12 @@ mod tests {
             self.health = health;
             self
         }
+
+        fn with_cadence(mut self, signal: PollCadenceSignal, max: u8) -> Self {
+            self.cadence_signal = signal;
+            self.cadence_max = max;
+            self
+        }
     }
 
     impl InputSource for MockSource {
@@ -583,6 +593,14 @@ mod tests {
 
         fn source_paths(&self) -> Vec<(SourceId, std::path::PathBuf)> {
             self.source_paths.clone()
+        }
+
+        fn poll_cadence_signal(&self) -> PollCadenceSignal {
+            self.cadence_signal
+        }
+
+        fn adaptive_fast_polls_max(&self) -> u8 {
+            self.cadence_max
         }
     }
 
@@ -635,6 +653,33 @@ mod tests {
         );
 
         assert_eq!(framed.health(), ComponentHealth::Degraded);
+    }
+
+    #[test]
+    fn framed_input_forwards_cadence_hooks() {
+        let stats = make_stats();
+        let source = MockSource::new(vec![]).with_cadence(
+            PollCadenceSignal {
+                had_data: true,
+                hit_read_budget: true,
+            },
+            7,
+        );
+        let mut framed = FramedInput::new(
+            Box::new(source),
+            FormatDecoder::passthrough(Arc::clone(&stats)),
+            stats,
+        );
+
+        let _ = framed.poll().expect("framed poll should succeed");
+        assert_eq!(
+            framed.poll_cadence_signal(),
+            PollCadenceSignal {
+                had_data: true,
+                hit_read_budget: true,
+            }
+        );
+        assert_eq!(framed.adaptive_fast_polls_max(), 7);
     }
 
     #[test]
