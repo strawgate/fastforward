@@ -137,13 +137,29 @@ def extract_paths_filter_entries(ci_text: str, filter_name: str) -> set[str]:
 
 def extract_job_block(ci_text: str, job_name: str) -> list[str]:
     lines = ci_text.splitlines()
+    jobs_start = None
+    jobs_indent = None
+
+    for idx, line in enumerate(lines):
+        if line.strip() == "jobs:":
+            jobs_start = idx
+            jobs_indent = len(line) - len(line.lstrip(" "))
+            break
+
+    if jobs_start is None or jobs_indent is None:
+        raise ValueError("ci.yml missing top-level 'jobs' section")
+
     start = None
     job_indent = None
 
-    for idx, line in enumerate(lines):
-        if line.strip() == f"{job_name}:":
+    for idx, line in enumerate(lines[jobs_start + 1 :], start=jobs_start + 1):
+        stripped = line.strip()
+        indent = len(line) - len(line.lstrip(" "))
+        if stripped and indent <= jobs_indent:
+            break
+        if indent == jobs_indent + 2 and stripped == f"{job_name}:":
             start = idx
-            job_indent = len(line) - len(line.lstrip(" "))
+            job_indent = indent
             break
 
     if start is None or job_indent is None:
@@ -208,6 +224,24 @@ def extract_just_recipe_deps(just_text: str, recipe: str) -> set[str]:
     return {token for token in match.group(1).split() if token}
 
 
+def extract_just_recipe_body(just_text: str, recipe: str) -> list[str]:
+    lines = just_text.splitlines()
+    start = None
+    for idx, line in enumerate(lines):
+        if re.match(rf"^{re.escape(recipe)}:\s*(.*)$", line):
+            start = idx + 1
+            break
+    if start is None:
+        raise ValueError(f"justfile missing recipe '{recipe}'")
+
+    body: list[str] = []
+    for line in lines[start:]:
+        if line and not line.startswith(" "):
+            break
+        body.append(line.strip())
+    return body
+
+
 def extract_just_kani_required_crates(just_text: str) -> set[str]:
     lines = just_text.splitlines()
     start = None
@@ -254,6 +288,7 @@ def validate() -> list[str]:
     kani_just_crates = extract_just_kani_required_crates(just_text)
     guardrail_scripts = extract_guardrail_scripts(ci_text)
     guardrail_deps = extract_just_recipe_deps(just_text, "verification-guardrail")
+    trigger_body = extract_just_recipe_body(just_text, "verification-trigger-contract")
 
     for pattern in sorted(REQUIRED_KANI_FILTER_PATTERNS):
         if pattern not in kani_filter:
@@ -286,6 +321,13 @@ def validate() -> list[str]:
     for dep in sorted(REQUIRED_JUST_GUARDRAIL_RECIPES):
         if dep not in guardrail_deps:
             errors.append(f"just verification-guardrail missing dependency: {dep}")
+
+    required_trigger_cmd = "python3 scripts/verify_verification_trigger_contract.py"
+    if not any(required_trigger_cmd in line for line in trigger_body):
+        errors.append(
+            "just verification-trigger-contract missing required command: "
+            f"{required_trigger_cmd}"
+        )
 
     return errors
 
@@ -359,6 +401,30 @@ jobs:
             -Z function-contracts
 """
         self.assertEqual(extract_kani_args_crates(ci_text), {"logfwd-core", "logfwd-io"})
+
+    def test_extract_job_block_scopes_to_jobs_section(self) -> None:
+        ci_text = """
+metadata:
+  changes:
+    note: not a job
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+"""
+        block = extract_job_block(ci_text, "changes")
+        self.assertIn("    runs-on: ubuntu-latest", block)
+
+    def test_extract_just_recipe_body(self) -> None:
+        just_text = """
+verification-trigger-contract:
+    python3 scripts/verify_verification_trigger_contract.py
+verification-guardrail: verification-trigger-contract
+"""
+        body = extract_just_recipe_body(just_text, "verification-trigger-contract")
+        self.assertIn(
+            "python3 scripts/verify_verification_trigger_contract.py",
+            body,
+        )
 
 
 if __name__ == "__main__":
