@@ -69,12 +69,10 @@ jobs:
               - '.github/workflows/ci.yml'
             tla:
               - 'tla/**'
-              - 'crates/logfwd-core/src/pipeline/**'
               - 'crates/logfwd-types/src/pipeline/**'
               - 'crates/logfwd-runtime/src/pipeline/**'
               - 'crates/logfwd-io/src/tail/**'
-              - 'crates/logfwd/src/pipeline/**'
-              - 'crates/logfwd/src/worker_pool/**'
+              - 'crates/logfwd-runtime/src/worker_pool/**'
               - 'scripts/verify_tla_coverage.py'
               - '.github/workflows/ci.yml'
             frontend:
