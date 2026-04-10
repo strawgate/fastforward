@@ -247,6 +247,39 @@ output:
     }
 
     #[test]
+    fn validation_storage_data_dir_existing_non_directory_rejected() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time must be after unix epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "logfwd-config-storage-non-dir-{}-{unique}.tmp",
+            std::process::id()
+        ));
+        fs::write(&path, b"not-a-directory").expect("write temp file");
+
+        let yaml = format!(
+            r#"
+input:
+  type: file
+  path: /var/log/test.log
+output:
+  type: stdout
+storage:
+  data_dir: {}
+"#,
+            path.display()
+        );
+
+        let err = Config::load_str(&yaml).expect_err("non-directory storage.data_dir must fail");
+        assert!(
+            err.to_string().contains("exists but is not a directory"),
+            "expected non-directory storage.data_dir rejection, got: {err}"
+        );
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
     fn validation_udp_requires_listen() {
         let yaml = r"
 input:
@@ -2550,6 +2583,30 @@ pipelines:
         assert!(
             err.to_string().contains("path") && err.to_string().contains("empty"),
             "whitespace-only path must be rejected for geo_database: {err}"
+        );
+    }
+
+    /// Regression: arrow_ipc output with `compression: gzip` must be rejected.
+    /// Only `zstd` is supported. Before the fix, gzip was silently accepted
+    /// and would fail at runtime.
+    #[test]
+    fn arrow_ipc_output_rejects_gzip_compression() {
+        let yaml = r#"
+pipelines:
+  test:
+    inputs:
+      - type: file
+        path: /tmp/test.log
+    outputs:
+      - type: arrow_ipc
+        endpoint: http://localhost:4317
+        compression: gzip
+"#;
+        let err = Config::load_str(yaml).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("arrow_ipc output only supports 'zstd'") && msg.contains("'gzip'"),
+            "expected arrow_ipc-specific gzip rejection, got: {msg}"
         );
     }
 

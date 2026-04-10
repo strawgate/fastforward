@@ -15,9 +15,13 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 const DASHBOARD_HTML: &str = include_str!("../dashboard.html");
 const REDACTED_SECRET: &str = "***redacted***";
 const REDACTED_CONFIG_UNAVAILABLE: &str = "<redacted config unavailable>";
+const REDACTED_ENDPOINT: &str = "<redacted_endpoint>";
 
 fn redact_endpoint_credentials(endpoint: &str) -> String {
     let Ok(mut parsed) = url::Url::parse(endpoint) else {
+        if endpoint.contains('@') {
+            return REDACTED_ENDPOINT.to_string();
+        }
         return endpoint.to_string();
     };
     if parsed.username().is_empty() && parsed.password().is_none() {
@@ -74,7 +78,10 @@ fn redact_yaml_value(value: &mut serde_yaml_ng::Value, in_auth_block: bool) {
     }
 }
 
-fn redact_config_yaml(raw_yaml: &str) -> String {
+/// Redact credentials (auth tokens, bearer tokens, endpoint userinfo) from a
+/// config YAML string. Returns the redacted YAML, or a placeholder if parsing
+/// fails.
+pub fn redact_config_yaml(raw_yaml: &str) -> String {
     let Ok(mut parsed) = serde_yaml_ng::from_str::<serde_yaml_ng::Value>(raw_yaml) else {
         return REDACTED_CONFIG_UNAVAILABLE.to_string();
     };
@@ -1285,6 +1292,24 @@ output:
         let redacted = redact_config_yaml(raw);
         assert!(!redacted.contains("not-safe"));
         assert!(redacted.contains(REDACTED_SECRET));
+    }
+
+    #[test]
+    fn redact_config_yaml_masks_malformed_endpoint_userinfo() {
+        let raw = r#"
+output:
+  type: http
+  endpoint: "https://user:pass@exa mple.com/ingest"
+"#;
+        let redacted = redact_config_yaml(raw);
+        assert!(
+            !redacted.contains("user:pass@"),
+            "malformed endpoint credentials must not be exposed"
+        );
+        assert!(
+            redacted.contains(REDACTED_ENDPOINT),
+            "malformed endpoint with userinfo should be replaced with fail-closed marker"
+        );
     }
 
     #[test]

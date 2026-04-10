@@ -33,6 +33,23 @@ impl Config {
             }
         }
 
+        // Validate storage.data_dir is either absent/non-existent or an existing directory.
+        if let Some(ref dir) = self.storage.data_dir {
+            let path = Path::new(dir);
+            if path.exists() {
+                let md = path.metadata().map_err(|e| {
+                    ConfigError::Validation(format!(
+                        "storage.data_dir '{dir}' metadata lookup failed: {e}"
+                    ))
+                })?;
+                if !md.is_dir() {
+                    return Err(ConfigError::Validation(format!(
+                        "storage.data_dir '{dir}' exists but is not a directory"
+                    )));
+                }
+            }
+        }
+
         if self.pipelines.is_empty() {
             return Err(ConfigError::Validation(
                 "at least one pipeline must be defined".into(),
@@ -686,6 +703,19 @@ impl Config {
                                     "pipeline '{name}' output '{label}': elasticsearch 'index' must not be empty"
                                 )));
                             }
+                            if let Some(idx) = &output.index
+                                && let Some(bad) = es_illegal_index_char(idx)
+                            {
+                                let reason =
+                                    if matches!(bad, '-' | '_' | '+') && idx.starts_with(bad) {
+                                        format!("has illegal prefix '{bad}'")
+                                    } else {
+                                        format!("contains illegal character '{bad}'")
+                                    };
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' output '{label}': elasticsearch index '{idx}' {reason}"
+                                )));
+                            }
                             if let Some(mode) = output.request_mode.as_deref()
                                 && !matches!(mode, "buffered" | "streaming")
                             {
@@ -769,6 +799,14 @@ impl Config {
                 if output.output_type == OutputType::Loki && output.compression.is_some() {
                     return Err(ConfigError::Validation(format!(
                         "pipeline '{name}' output '{label}': 'compression' is not supported for loki outputs"
+                    )));
+                }
+                if output.output_type == OutputType::ArrowIpc
+                    && let Some(c) = output.compression.as_deref()
+                    && c != "zstd"
+                {
+                    return Err(ConfigError::Validation(format!(
+                        "pipeline '{name}' output '{label}': arrow_ipc output only supports 'zstd' compression, not '{c}'"
                     )));
                 }
                 if output.output_type != OutputType::Otlp && output.protocol.is_some() {
@@ -912,23 +950,25 @@ impl Config {
 
             // Guard against feedback loops: reject configs where a file output
             // path matches a file input path in the same pipeline (#1596).
-            let file_input_paths: Vec<std::path::PathBuf> = pipe
+            // Collect file input paths (exact) and glob patterns separately.
+            let mut exact_input_paths: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::new();
+            let mut glob_input_patterns: Vec<String> = Vec::new();
+
+            for input in pipe
                 .inputs
                 .iter()
                 .filter(|i| i.input_type == InputType::File)
-                .filter_map(|i| i.path.as_deref())
-                .filter(|p| !p.contains('*') && !p.contains('?'))
-                .map(std::path::PathBuf::from)
-                .collect();
-
-            let normalized_file_inputs: Vec<(std::path::PathBuf, std::path::PathBuf)> =
-                file_input_paths
-                    .into_iter()
-                    .map(|p| {
-                        let norm = normalize_path_for_compare(&p);
-                        (p, norm)
-                    })
-                    .collect();
+            {
+                if let Some(p) = input.path.as_deref() {
+                    if p.contains('*') || p.contains('?') || p.contains('[') {
+                        glob_input_patterns.push(p.to_string());
+                    } else {
+                        let pb = std::path::PathBuf::from(p);
+                        let norm = normalize_path_for_compare(&pb);
+                        exact_input_paths.push((pb, norm));
+                    }
+                }
+            }
 
             for (j, output) in pipe.outputs.iter().enumerate() {
                 let out_label = output
@@ -944,13 +984,26 @@ impl Config {
                 };
                 let out_pb = std::path::PathBuf::from(out_path);
                 let out_norm = normalize_path_for_compare(&out_pb);
-                for (in_pb, in_norm) in &normalized_file_inputs {
+
+                // Check exact input path match.
+                for (in_pb, in_norm) in &exact_input_paths {
                     if out_norm == *in_norm {
                         return Err(ConfigError::Validation(format!(
                             "pipeline '{name}' output '{out_label}': output path '{}' is the same \
                              as file input path '{}' — this creates an unbounded feedback loop",
                             out_path,
                             in_pb.display(),
+                        )));
+                    }
+                }
+
+                // Check if the output path could match any glob input pattern.
+                for glob_pattern in &glob_input_patterns {
+                    if is_glob_match_possible(glob_pattern, out_path) {
+                        return Err(ConfigError::Validation(format!(
+                            "pipeline '{name}' output '{out_label}': output path '{out_path}' \
+                             could match file input glob '{glob_pattern}' — this creates an \
+                             unbounded feedback loop",
                         )));
                     }
                 }
@@ -1231,10 +1284,49 @@ mod validate_host_port_tests {
     }
 }
 
+/// Redact userinfo (username:password) from a URL for safe inclusion in error
+/// messages.  Replaces `scheme://user:pass@host` with `scheme://***@host`.
+const REDACTED_URL_USERINFO: &str = "***redacted***";
+
+/// Redact userinfo (username:password) from a URL for safe inclusion in error
+/// messages.
+fn redact_url(endpoint: &str) -> String {
+    // Try to parse; if that fails, just redact anything between :// and @.
+    if let Ok(mut parsed) = Url::parse(endpoint) {
+        if !parsed.username().is_empty() || parsed.password().is_some() {
+            let _ = parsed.set_username(REDACTED_URL_USERINFO);
+            let _ = parsed.set_password(None);
+        }
+        parsed.to_string()
+    } else if let Some(scheme_end) = endpoint.find("://") {
+        let after_scheme = &endpoint[scheme_end + 3..];
+        if let Some(at) = after_scheme.find('@') {
+            format!(
+                "{}://{}@{}",
+                &endpoint[..scheme_end],
+                REDACTED_URL_USERINFO,
+                &after_scheme[at + 1..]
+            )
+        } else {
+            endpoint.to_string()
+        }
+    } else if let Some(at) = endpoint.rfind('@') {
+        // Last-resort redaction for malformed URLs: hide authority userinfo.
+        let authority_start = endpoint.find("://").map_or(0, |idx| idx + 3);
+        let prefix = &endpoint[..authority_start];
+        let suffix = &endpoint[at + 1..];
+        format!("{prefix}{REDACTED_URL_USERINFO}@{suffix}")
+    } else {
+        endpoint.to_string()
+    }
+}
+
 /// Validate that an endpoint URL has a recognised scheme and a non-empty host.
 fn validate_endpoint_url(endpoint: &str) -> Result<(), String> {
+    let safe = redact_url(endpoint);
+
     let parsed =
-        Url::parse(endpoint).map_err(|_| format!("endpoint '{endpoint}' is not a valid URL"))?;
+        Url::parse(endpoint).map_err(|_| format!("endpoint '{safe}' is not a valid URL"))?;
 
     let rest = if endpoint
         .get(..8)
@@ -1248,24 +1340,137 @@ fn validate_endpoint_url(endpoint: &str) -> Result<(), String> {
         &endpoint[7..]
     } else {
         return Err(format!(
-            "endpoint '{endpoint}' has no recognised scheme; expected 'http://' or 'https://'"
+            "endpoint '{safe}' has no recognised scheme; expected 'http://' or 'https://'"
         ));
     };
 
     // Reject malformed authority forms like `http:///bulk` or `https://?x=1`.
     if rest.is_empty() || rest.starts_with('/') || rest.starts_with('?') || rest.starts_with('#') {
-        return Err(format!(
-            "endpoint '{endpoint}' has no host after the scheme"
-        ));
+        return Err(format!("endpoint '{safe}' has no host after the scheme"));
     }
 
     if parsed.host_str().is_none_or(str::is_empty) {
-        return Err(format!(
-            "endpoint '{endpoint}' has no host after the scheme"
-        ));
+        return Err(format!("endpoint '{safe}' has no host after the scheme"));
     }
 
     Ok(())
+}
+
+/// Check if a file path could match a glob pattern by comparing the directory
+/// prefix. A glob like `/var/log/*.log` has prefix `/var/log/` and would match
+/// any output file in that directory with a `.log` extension.
+fn is_glob_match_possible(glob_pattern: &str, file_path: &str) -> bool {
+    let glob_path = Path::new(glob_pattern);
+    let file = Path::new(file_path);
+
+    let glob_dir = glob_path.parent().map(normalize_path_for_compare);
+    let file_dir = file.parent().map(normalize_path_for_compare);
+
+    let same_directory = matches!((&glob_dir, &file_dir), (Some(g), Some(f)) if g == f);
+    let recursive_double_star = glob_pattern.contains("**");
+    let recursive_root_match = if recursive_double_star {
+        let prefix = glob_pattern
+            .split("**")
+            .next()
+            .unwrap_or("")
+            .trim_end_matches(std::path::MAIN_SEPARATOR);
+        if prefix.is_empty() {
+            false
+        } else {
+            let normalized_prefix = normalize_path_lexically(Path::new(prefix));
+            let normalized_file = normalize_path_lexically(file);
+            normalized_file.starts_with(&normalized_prefix)
+        }
+    } else {
+        false
+    };
+    let recursive_prefix_match = if recursive_double_star {
+        if let (Some(g), Some(f)) = (&glob_dir, &file_dir) {
+            let mut prefix = std::path::PathBuf::new();
+            let mut saw_recursive = false;
+            for component in g.components() {
+                if component.as_os_str() == "**" {
+                    saw_recursive = true;
+                    break;
+                }
+                prefix.push(component.as_os_str());
+            }
+            saw_recursive && f.starts_with(prefix)
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+    let directory_wildcard_prefix_match = {
+        let raw_glob_dir = glob_path.parent().and_then(|p| p.to_str()).unwrap_or("");
+        if raw_glob_dir.contains(['*', '?', '[']) {
+            let prefix = raw_glob_dir
+                .split(|c| ['*', '?', '['].contains(&c))
+                .next()
+                .unwrap_or("")
+                .trim_end_matches(std::path::MAIN_SEPARATOR);
+            if prefix.is_empty() {
+                true
+            } else {
+                let normalized_prefix = normalize_path_lexically(Path::new(prefix));
+                let normalized_file = normalize_path_lexically(file);
+                normalized_file
+                    .to_string_lossy()
+                    .starts_with(normalized_prefix.to_string_lossy().as_ref())
+            }
+        } else {
+            false
+        }
+    };
+
+    // If the file is in the same directory as the glob (or the glob uses a
+    // recursive `**` prefix that includes the file directory), it could match.
+    if same_directory
+        || recursive_prefix_match
+        || recursive_root_match
+        || directory_wildcard_prefix_match
+    {
+        // Also check filename pattern if the glob has a simple `*.ext` form.
+        if let Some(glob_name) = glob_path.file_name().and_then(|n| n.to_str())
+            && let Some(file_name) = file.file_name().and_then(|n| n.to_str())
+        {
+            if let Some(ext) = glob_name.strip_prefix('*') {
+                if ext.contains(['*', '?', '[']) {
+                    return true;
+                }
+                return file_name.ends_with(ext);
+            }
+
+            // Literal filename (no wildcard chars) must match exactly.
+            if !glob_name.contains(['*', '?', '[']) {
+                return glob_name == file_name;
+            }
+
+            // Pattern contains wildcard syntax we don't parse here —
+            // conservatively report a possible match.
+            return true;
+        }
+        return true;
+    }
+    false
+}
+
+/// Return the first illegal character in an Elasticsearch index name, or None.
+/// ES rejects: uppercase, `*`, `?`, `"`, `<`, `>`, `|`, ` `, `,`, `#`, `:`, `\`, `/`.
+fn es_illegal_index_char(index: &str) -> Option<char> {
+    if let Some(c) = index.chars().next()
+        && matches!(c, '-' | '_' | '+')
+    {
+        return Some(c);
+    }
+    index.chars().find(|c| {
+        c.is_ascii_uppercase()
+            || matches!(
+                c,
+                '*' | '?' | '"' | '<' | '>' | '|' | ' ' | ',' | '#' | ':' | '\\' | '/'
+            )
+    })
 }
 
 #[cfg(test)]
@@ -1290,10 +1495,20 @@ mod validate_endpoint_url_tests {
             );
         }
     }
+
+    #[test]
+    fn endpoint_url_redacts_userinfo_for_malformed_urls() {
+        let err = validate_endpoint_url("https://user:secret@/bulk").expect_err("must fail");
+        assert!(
+            err.contains("***redacted***") && !err.contains("secret"),
+            "malformed endpoint errors must redact userinfo: {err}"
+        );
+    }
 }
 
 #[cfg(test)]
 mod feedback_loop_tests {
+    use super::is_glob_match_possible;
     use crate::types::Config;
 
     #[test]
@@ -1352,6 +1567,78 @@ pipelines:
             msg.contains("feedback loop") || msg.contains("same as file input"),
             "expected normalized-path feedback-loop rejection, got: {msg}"
         );
+    }
+
+    #[test]
+    fn glob_could_match_literal_filename_requires_exact_name() {
+        assert!(is_glob_match_possible(
+            "/var/log/access.log",
+            "/var/log/access.log"
+        ));
+        assert!(!is_glob_match_possible(
+            "/var/log/access.log",
+            "/var/log/other.log"
+        ));
+    }
+
+    #[test]
+    fn glob_could_match_wildcard_suffix_pattern() {
+        assert!(is_glob_match_possible(
+            "/var/log/*.log",
+            "/var/log/access.log"
+        ));
+        assert!(!is_glob_match_possible(
+            "/var/log/*.log",
+            "/var/log/access.txt"
+        ));
+    }
+
+    #[test]
+    fn glob_could_match_rejects_different_directory() {
+        assert!(!is_glob_match_possible("/var/log/*.log", "/tmp/access.log"));
+    }
+
+    #[test]
+    fn glob_could_match_nested_wildcards_are_conservative() {
+        assert!(is_glob_match_possible(
+            "/var/log/*test*.log",
+            "/var/log/mytest_file.log"
+        ));
+    }
+
+    #[test]
+    fn glob_could_match_recursive_double_star_matches_nested_directories() {
+        assert!(is_glob_match_possible(
+            "/var/log/**/access.log",
+            "/var/log/subdir/access.log"
+        ));
+        assert!(!is_glob_match_possible(
+            "/var/log/**/access.log",
+            "/var/log/subdir/error.log"
+        ));
+    }
+
+    #[test]
+    fn glob_could_match_recursive_double_star_directory_only_pattern() {
+        assert!(is_glob_match_possible(
+            "/var/log/**",
+            "/var/log/subdir/app.log"
+        ));
+        assert!(is_glob_match_possible("/var/log/**", "/var/log/app.log"));
+        assert!(!is_glob_match_possible("/var/log/**", "/srv/log/app.log"));
+    }
+
+    #[test]
+    fn glob_could_match_directory_wildcards_are_conservative() {
+        assert!(is_glob_match_possible("/var/*/app.log", "/var/log/app.log"));
+        assert!(is_glob_match_possible(
+            "/var/log[12]/*.log",
+            "/var/log1/a.log"
+        ));
+        assert!(!is_glob_match_possible(
+            "/var/*/app.log",
+            "/srv/log/app.log"
+        ));
     }
 }
 
@@ -1422,6 +1709,26 @@ pipelines:
         assert!(
             err.to_string().contains("index") && err.to_string().contains("must not be empty"),
             "whitespace-only index must be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn elasticsearch_index_prefix_rejected() {
+        let yaml = r#"
+pipelines:
+  test:
+    inputs:
+      - type: file
+        path: /tmp/test.log
+    outputs:
+      - type: elasticsearch
+        endpoint: http://localhost:9200
+        index: "_bad-index"
+"#;
+        let err = Config::load_str(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("has illegal prefix '_'"),
+            "expected prefix rejection: {err}"
         );
     }
 }
