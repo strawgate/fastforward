@@ -70,7 +70,6 @@ pub(super) fn build_input_state(
     name: &str,
     cfg: &InputConfig,
     stats: Arc<ComponentStats>,
-    otlp_structured_ingress: bool,
 ) -> Result<InputState, String> {
     let (raw_source, format, buf_cap): (Box<dyn InputSource>, Format, usize) = match cfg.input_type
     {
@@ -93,9 +92,19 @@ pub(super) fn build_input_state(
             }
             let is_glob = path.contains('*') || path.contains('?') || path.contains('[');
             let source = if is_glob {
-                FileInput::new_with_globs(name.to_string(), &[path.as_str()], tail_config)
+                FileInput::new_with_globs(
+                    name.to_string(),
+                    &[path.as_str()],
+                    tail_config,
+                    Arc::clone(&stats),
+                )
             } else {
-                FileInput::new(name.to_string(), &[PathBuf::from(path)], tail_config)
+                FileInput::new(
+                    name.to_string(),
+                    &[PathBuf::from(path)],
+                    tail_config,
+                    Arc::clone(&stats),
+                )
             }
             .map_err(|e| format!("input '{name}': failed to create tailer: {e}"))?;
             validate_input_format(name, InputType::File, &format)?;
@@ -198,22 +207,20 @@ pub(super) fn build_input_state(
                 .listen
                 .as_ref()
                 .ok_or_else(|| format!("input '{name}': otlp input requires 'listen'"))?;
+            let resource_prefix = cfg
+                .resource_prefix
+                .as_deref()
+                .unwrap_or(logfwd_types::field_names::DEFAULT_RESOURCE_PREFIX);
             let format = cfg.format.clone().unwrap_or(Format::Json);
             validate_input_format(name, InputType::Otlp, &format)?;
-            let source = if otlp_structured_ingress {
-                logfwd_io::otlp_receiver::OtlpReceiverInput::new_structured_with_stats(
+            let source =
+                logfwd_io::otlp_receiver::OtlpReceiverInput::new_with_stats_and_resource_prefix(
                     name,
                     addr,
                     Arc::clone(&stats),
+                    resource_prefix,
                 )
-            } else {
-                logfwd_io::otlp_receiver::OtlpReceiverInput::new_with_stats(
-                    name,
-                    addr,
-                    Arc::clone(&stats),
-                )
-            }
-            .map_err(|e| format!("input '{name}': failed to start OTLP receiver: {e}"))?;
+                .map_err(|e| format!("input '{name}': failed to start OTLP receiver: {e}"))?;
             (Box::new(source), format, 4 * 1024 * 1024)
         }
         InputType::Http => {
@@ -265,7 +272,7 @@ pub(super) fn build_input_state(
                     "input '{name}': CRI/auto format is not supported for UDP inputs (CRI is a file-based container log format)"
                 ));
             }
-            let source = logfwd_io::udp_input::UdpInput::new(name, addr)
+            let source = logfwd_io::udp_input::UdpInput::new(name, addr, Arc::clone(&stats))
                 .map_err(|e| format!("input '{name}': failed to bind UDP {addr}: {e}"))?;
             let format = cfg.format.clone().unwrap_or(Format::Json);
             validate_input_format(name, InputType::Udp, &format)?;
@@ -281,7 +288,7 @@ pub(super) fn build_input_state(
                     "input '{name}': CRI/auto format is not supported for TCP inputs (CRI is a file-based container log format)"
                 ));
             }
-            let source = logfwd_io::tcp_input::TcpInput::new(name, addr)
+            let source = logfwd_io::tcp_input::TcpInput::new(name, addr, Arc::clone(&stats))
                 .map_err(|e| format!("input '{name}': failed to bind TCP {addr}: {e}"))?;
             let format = cfg.format.clone().unwrap_or(Format::Json);
             validate_input_format(name, InputType::Tcp, &format)?;
@@ -348,7 +355,6 @@ pub(super) fn otlp_uses_structured_ingress(
 ) -> bool {
     !scan_config.captures_line()
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -399,6 +405,7 @@ mod tests {
             input_type: InputType::File,
             path: Some("/tmp/test.log".into()),
             listen: None,
+            resource_prefix: None,
             format: None,
             poll_interval_ms: None,
             read_buf_size: None,
@@ -417,7 +424,7 @@ mod tests {
         // error. A more involved test requires exposing or inspecting the internal
         // file tailer state, but here we at least verify it parses and maps defaults
         // cleanly for a valid file input configuration.
-        assert!(build_input_state("test_in", &cfg_defaults, Arc::clone(&stats), false).is_ok());
+        assert!(build_input_state("test_in", &cfg_defaults, Arc::clone(&stats)).is_ok());
 
         // Explicit tuning overrides
         let cfg_overrides = InputConfig {
@@ -425,6 +432,7 @@ mod tests {
             input_type: InputType::File,
             path: Some("/tmp/test.log".into()),
             listen: None,
+            resource_prefix: None,
             format: None,
             poll_interval_ms: Some(123),
             read_buf_size: Some(456),
@@ -438,7 +446,7 @@ mod tests {
             tls: None,
         };
 
-        assert!(build_input_state("test_in", &cfg_overrides, Arc::clone(&stats), false).is_ok());
+        assert!(build_input_state("test_in", &cfg_overrides, Arc::clone(&stats)).is_ok());
     }
 
     #[test]
@@ -455,6 +463,7 @@ mod tests {
                     input_type: input_type.clone(),
                     path: None,
                     listen: Some("127.0.0.1:0".to_string()),
+                    resource_prefix: None,
                     format: Some(format),
                     poll_interval_ms: None,
                     read_buf_size: None,
@@ -468,7 +477,7 @@ mod tests {
                     tls: None,
                 };
                 let stats = pm.add_input("in", "test");
-                let err = match build_input_state("in", &cfg, stats, true) {
+                let err = match build_input_state("in", &cfg, stats) {
                     Ok(_) => panic!("CRI/auto must be rejected for UDP/TCP inputs"),
                     Err(err) => err,
                 };
@@ -481,7 +490,6 @@ mod tests {
             }
         }
     }
-
     #[test]
     fn otlp_structured_ingress_tracks_line_capture_flag() {
         let mut scan = logfwd_core::scan_config::ScanConfig::default();
