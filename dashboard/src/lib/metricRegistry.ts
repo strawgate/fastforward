@@ -81,9 +81,7 @@ export function pushMetricSample<TSeries extends MetricSeriesRecord>(
   const metric = registry.byId[id];
   metric.ring.push(value);
   metric.value = formatted;
-  if (limit !== undefined) {
-    metric.limit = limit;
-  }
+  metric.limit = limit;
 }
 
 export function pushMetricHistorySample<TSeries extends MetricSeriesRecord>(

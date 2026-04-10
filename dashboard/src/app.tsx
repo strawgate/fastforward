@@ -329,8 +329,7 @@ export function App() {
             p.start_unix_ns === t.start_unix_ns &&
             p.total_ns === t.total_ns &&
             p.status === t.status &&
-            p.in_progress === t.in_progress &&
-            p.stage === t.stage &&
+            p.lifecycle_state === t.lifecycle_state &&
             p.errors === t.errors &&
             p.scan_ns === t.scan_ns &&
             p.transform_ns === t.transform_ns &&
@@ -346,7 +345,7 @@ export function App() {
             p.resp_bytes === t.resp_bytes &&
             p.flush_reason === t.flush_reason &&
             p.output_start_unix_ns === t.output_start_unix_ns &&
-            p.stage_start_unix_ns === t.stage_start_unix_ns &&
+            p.lifecycle_state_start_unix_ns === t.lifecycle_state_start_unix_ns &&
             p.scan_rows === t.scan_rows &&
             p.input_rows === t.input_rows &&
             p.output_rows === t.output_rows &&
@@ -425,7 +424,9 @@ export function App() {
       // Batch latency: rolling average of total_ns from recent traces.
       // This gives true ms/batch rather than the cumulative-rate approximation.
       if (tracesData && tracesData.traces.length > 0) {
-        const done = tracesData.traces.filter((t) => !t.in_progress && Number(t.total_ns) > 0).slice(0, 50);
+        const done = tracesData.traces
+          .filter((t) => t.lifecycle_state === "completed" && Number(t.total_ns) > 0)
+          .slice(0, 50);
         if (done.length > 0) {
           const avgMs = done.reduce((s, t) => s + (Number(t.total_ns ?? "0") || 0), 0) / done.length / 1e6;
           const formatted =

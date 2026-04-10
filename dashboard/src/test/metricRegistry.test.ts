@@ -79,4 +79,14 @@ describe("metric registry", () => {
     const incomplete = ALL_IDS.filter((id) => id !== "stalls").map(makeSeries);
     expect(() => createMetricRegistry(incomplete)).toThrow("missing metric id: stalls");
   });
+
+  it("clears limit when a later update omits it", () => {
+    const registry = createMetricRegistry(ALL_IDS.map(makeSeries));
+
+    pushMetricSample(registry, "mem", 100, "100 B", "/ 200 B resident");
+    expect(registry.byId.mem.limit).toBe("/ 200 B resident");
+
+    pushMetricSample(registry, "mem", 110, "110 B");
+    expect(registry.byId.mem.limit).toBeUndefined();
+  });
 });
