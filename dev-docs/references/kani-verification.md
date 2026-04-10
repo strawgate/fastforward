@@ -20,7 +20,7 @@ Do not use Kani for async orchestration or IO-heavy code.
 - Put harnesses in `#[cfg(kani)] mod verification` in the same file.
 - Name harnesses `verify_<fn>_<property>`.
 - Add unwind bounds for loops (`#[kani::unwind(N)]`).
-- Add `kani::cover!` for at least one non-trivial path.
+- Add `kani::cover!` for at least one non-trivial path (use 2+ covers when harnesses rely on `kani::assume()` to guard against vacuity).
 - Keep assumptions narrow and explicit.
 
 ## Proof Types We Require

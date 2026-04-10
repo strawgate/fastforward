@@ -6,7 +6,9 @@ If you are new, do this first:
 
 ```bash
 just ci
-cargo test -p logfwd-core
+just test
+# Optional crate-local shortcut during focused iteration:
+# cargo test -p logfwd-core
 ```
 
 Then read only the section needed for your task:

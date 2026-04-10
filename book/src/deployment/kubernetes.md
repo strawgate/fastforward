@@ -97,7 +97,7 @@ spec:
             - /etc/logfwd/config.yaml
           env:
             - name: OTEL_ENDPOINT
-              value: https://otel-collector.monitoring.svc.cluster.local:4317
+              value: http://otel-collector.monitoring.svc.cluster.local:4317
           ports:
             - name: diagnostics
               containerPort: 9090
@@ -243,7 +243,7 @@ Point logfwd at the collector:
 ```yaml
 output:
   type: otlp
-  endpoint: https://otel-collector:4317
+  endpoint: http://otel-collector:4317
   protocol: grpc
   compression: zstd
 ```

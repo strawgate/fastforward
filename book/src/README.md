@@ -6,7 +6,7 @@ A high-performance log forwarder built in Rust. Tails log files, parses JSON and
 log files → SIMD parse → Arrow RecordBatch → SQL transform → output
 ```
 
-logfwd is a single static binary with no runtime dependencies. Point it at log files, write a SQL query to filter and reshape the data, and forward the results to any OTLP-compatible collector — or directly to Elasticsearch, Loki, or stdout. SQL transforms are the core idea: instead of learning a vendor-specific DSL, you write standard SQL to control exactly what gets shipped.
+logfwd is a single static binary with no runtime dependencies. Point it at log files, write a SQL query to filter and reshape the data, and forward the results to any OTLP-compatible collector — or directly to Elasticsearch, Loki, file, or stdout. SQL transforms are the core idea: instead of learning a vendor-specific DSL, you write standard SQL to control exactly what gets shipped.
 
 ## Get started
 

@@ -70,6 +70,9 @@ def main() -> int:
         checked_files += 1
         failures.extend(validate_file(path))
 
+    if checked_files == 0:
+        failures.append(f"{ROOT}: no research note files found (only README.md)")
+
     if failures:
         print("Research metadata validation failed:")
         for failure in failures:

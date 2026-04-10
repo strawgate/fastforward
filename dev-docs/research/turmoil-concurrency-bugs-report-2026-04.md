@@ -293,16 +293,19 @@ cargo test --features turmoil --test turmoil_sim --release
 - **Function:** `run_async()`
 
 ### PipelineMachine
+
 - **File:** `crates/logfwd-types/src/pipeline/lifecycle.rs`
 - **Search:** `apply_ack()`, `record_ack_and_advance()`
 - **Key Methods:** `apply_ack()`, `record_ack_and_advance()`
 
 ### BatchTicket
+
 - **File:** `crates/logfwd-types/src/pipeline/batch.rs`
 - **Search:** `ack()`, `reject()`, `fail()`
 - **Key Methods:** `ack()`, `reject()`, `fail()`
 
 ### Worker Pool
+
 - **File:** `crates/logfwd-runtime/src/worker_pool/pool.rs`
 - **Search:** `submit()`, worker loop
 

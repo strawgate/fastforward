@@ -8,10 +8,7 @@ on:
       - "book/**"
       - "dev-docs/**"
       - "docs/**"
-      - "AGENTS.md"
-      - "CONTRIBUTING.md"
-      - "DEVELOPING.md"
-      - "README.md"
+      - "*.md"
       - "scripts/docs/**"
       - ".github/workflows/docs.yml"
   push:
@@ -22,7 +19,7 @@ on:
       - "bench/dashboard/**"
       - "crates/**"
       - "docs/**"
-      - "README.md"
+      - "*.md"
       - "scripts/docs/**"
       - ".github/workflows/docs.yml"
   workflow_dispatch:

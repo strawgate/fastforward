@@ -13,7 +13,7 @@ Reject new production-path code that introduces:
 
 ## Hot Path Checklist
 
-For reader -> framer -> scanner -> builder -> encoder paths:
+For reader → framer → scanner → builders → OTLP encoder → compress paths:
 
 - No avoidable allocations in per-line/per-record loops.
 - No accidental copies where borrowing/views are expected.

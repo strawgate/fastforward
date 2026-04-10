@@ -124,8 +124,9 @@ fields.
   stored as `Float64`.
 - A value without either is first tried as `Int64` via `parse_int_fast`.  On
   overflow (value does not fit in `i64`) it falls back to `Float64`.
-- `true` and `false` are stored as the strings `"true"` / `"false"` in the
-  field's string column.
+- `true` and `false` are stored in a native `Boolean` column for boolean-only
+  fields, or in the `bool: Boolean` child of conflict structs for mixed-type
+  fields.
 - `null` JSON values produce a null entry in the appropriate column.
 
 ### Batch reuse

@@ -5,7 +5,7 @@ Point-in-time investigations that informed architecture decisions.
 ## Rules
 
 - Research docs are not canonical behavior docs.
-- Every file must start with:
+- Every research note file (excluding `README.md`) must start with:
 
 ```markdown
 > **Status:** Active | Completed | Historical
