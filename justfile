@@ -215,7 +215,7 @@ tlc-tail:
 lint: fmt-check workspace-inheritance-guard clippy toml-check
 
 # Lint — full workspace (CI uses this)
-lint-all: fmt-check verification-guardrail clippy-all toml-check deny
+lint-all: fmt-check verification-guardrail workspace-inheritance-guard clippy-all toml-check deny
 
 # Quick CI — fast lint + test (default-members, no datafusion)
 ci: lint test

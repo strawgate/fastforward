@@ -269,8 +269,10 @@ fn strip_ansi(s: &str) -> String {
                             break;
                         }
                         if c2 == '\x1b' {
-                            // ST is \x1b\ — consume the trailing backslash.
-                            chars.next();
+                            // ST is \x1b\ — only consume and break if next is '\'.
+                            if chars.clone().next() == Some('\\') {
+                                chars.next();
+                            }
                             break;
                         }
                     }

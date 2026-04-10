@@ -92,8 +92,8 @@ impl Pipeline {
                 self.metrics.finish_active_batch(batch_id);
                 return false;
             }
-            ProcessorStageResult::AckDrop { reason } => {
-                tracing::info!(reason = %reason, "processor stage dropped batch");
+            ProcessorStageResult::PermanentError { reason } => {
+                tracing::warn!(reason = %reason, "processor stage permanent error; dropping batch");
                 self.ack_all_tickets(sending, super::checkpoint_policy::TicketDisposition::Ack);
                 self.metrics.inc_dropped_batch();
                 self.metrics.record_batch(0, scan_ns, transform_ns, 0);

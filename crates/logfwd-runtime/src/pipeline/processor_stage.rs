@@ -12,8 +12,8 @@ pub(super) enum ProcessorStageResult {
     },
     /// Processor reported a transient error; keep checkpoints queued.
     Hold { reason: String },
-    /// Processor reported a permanent error; drop batch and advance checkpoints.
-    AckDrop { reason: String },
+    /// Processor reported a permanent (non-retryable) error; drop batch and advance checkpoints.
+    PermanentError { reason: String },
     /// Processor emitted no rows; acknowledge without treating it as a drop.
     ZeroRow { reason: String },
     /// Processor reported a fatal error; shut down the pipeline and keep checkpoints queued.
@@ -40,7 +40,7 @@ pub(super) fn run_processor_stage(
                 return ProcessorStageResult::Hold { reason: e };
             }
             Err(crate::processor::ProcessorError::Permanent(e)) => {
-                return ProcessorStageResult::AckDrop { reason: e };
+                return ProcessorStageResult::PermanentError { reason: e };
             }
             Err(crate::processor::ProcessorError::Fatal(e)) => {
                 return ProcessorStageResult::Fatal { reason: e };
@@ -222,16 +222,16 @@ mod tests {
     }
 
     #[test]
-    fn permanent_processor_error_maps_to_ack_drop() {
+    fn permanent_processor_error_maps_to_permanent_error() {
         let mut processors: Vec<Box<dyn Processor>> = vec![Box::new(FailingProcessor {
             error: ProcessorError::Permanent("bad batch".to_string()),
         })];
         let out = run_processor_stage(&mut processors, int_batch("x", &[1]), &test_meta());
         match out {
-            ProcessorStageResult::AckDrop { reason } => {
+            ProcessorStageResult::PermanentError { reason } => {
                 assert!(reason.contains("bad batch"));
             }
-            _ => panic!("expected ack-drop result"),
+            _ => panic!("expected permanent-error result"),
         }
     }
 
