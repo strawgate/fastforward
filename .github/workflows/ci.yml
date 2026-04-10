@@ -411,14 +411,14 @@ jobs:
           key: miri
 
       - name: Set up Miri
-        run: cargo miri setup
+        run: cargo +nightly miri setup
         env:
           RUSTC_WRAPPER: ""
 
       - name: Run Miri test suite
         run: |
-          cargo miri test -p logfwd-core --lib
-          cargo miri test -p logfwd-types --lib
+          cargo +nightly miri test -p logfwd-core --lib
+          cargo +nightly miri test -p logfwd-types --lib
         env:
           RUSTC_WRAPPER: ""
           MIRIFLAGS: "-Zmiri-strict-provenance"
