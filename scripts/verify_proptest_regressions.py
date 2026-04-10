@@ -24,7 +24,13 @@ def iter_regression_files() -> list[Path]:
 
 
 def has_failure_persistence_none(text: str) -> bool:
-    return re.search(r"failure_persistence\s*:\s*None", text) is not None
+    return (
+        re.search(
+            r"failure_persistence\s*:\s*(?:None|(?:[A-Za-z_]\w*::)*FailurePersistence::None)",
+            text,
+        )
+        is not None
+    )
 
 
 def has_proptest_macro(text: str) -> bool:

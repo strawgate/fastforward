@@ -56,39 +56,65 @@ def parse_tlc_matrix_entries(workflow_text: str) -> list[TlcMatrixEntry]:
 
     entries: list[TlcMatrixEntry] = []
     current: dict[str, str] | None = None
+    in_include = False
+    include_indent: int | None = None
+    item_indent: int | None = None
+    allowed_keys = {"spec", "tla_file", "config", "property"}
+
+    def flush_current() -> None:
+        nonlocal current
+        if current is None:
+            return
+        entries.append(
+            TlcMatrixEntry(
+                spec=current.get("spec", ""),
+                tla_file=current.get("tla_file", ""),
+                config=current.get("config", ""),
+                property=current.get("property", ""),
+            )
+        )
+        current = None
 
     for line in tlc_lines:
         stripped = line.strip()
-        if stripped.startswith("- spec:"):
-            if current is not None:
-                entries.append(
-                    TlcMatrixEntry(
-                        spec=current["spec"],
-                        tla_file=current["tla_file"],
-                        config=current["config"],
-                        property=current["property"],
-                    )
-                )
-            current = {"spec": _strip_yaml_value(stripped.split(":", 1)[1])}
+        indent = len(line) - len(line.lstrip(" "))
+
+        if not in_include:
+            if stripped == "include:":
+                in_include = True
+                include_indent = indent
             continue
 
-        if current is None or ":" not in stripped or stripped.startswith("-"):
+        if stripped and include_indent is not None and indent <= include_indent:
+            flush_current()
+            break
+
+        if not stripped:
+            continue
+
+        if stripped.startswith("- "):
+            flush_current()
+            item_indent = indent
+            current = {}
+            stripped = stripped[2:].strip()
+            if ":" not in stripped:
+                continue
+
+            key, raw_value = stripped.split(":", 1)
+            key = key.strip()
+            if key in allowed_keys:
+                current[key] = _strip_yaml_value(raw_value)
+            continue
+
+        if current is None or item_indent is None or indent <= item_indent or ":" not in stripped:
             continue
 
         key, raw_value = stripped.split(":", 1)
         key = key.strip()
-        if key in {"spec", "tla_file", "config", "property"}:
+        if key in allowed_keys:
             current[key] = _strip_yaml_value(raw_value)
 
-    if current is not None:
-        entries.append(
-            TlcMatrixEntry(
-                spec=current["spec"],
-                tla_file=current["tla_file"],
-                config=current["config"],
-                property=current["property"],
-            )
-        )
+    flush_current()
 
     if not entries:
         raise ValueError("ci.yml tlc matrix has no entries")
