@@ -11,7 +11,6 @@ mod health;
 mod input_build;
 pub(crate) mod input_pipeline;
 mod input_poll;
-mod processor_stage;
 mod submit;
 
 use self::checkpoint_io::flush_checkpoint_with_retry;
@@ -444,7 +443,6 @@ impl Pipeline {
         let mut heartbeat_interval = tokio::time::interval(self.batch_timeout);
         heartbeat_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
-        let mut should_drain_input_channel = true;
         loop {
             tokio::select! {
                 biased;  // arms evaluated in source order; ack is first to prevent starvation
@@ -464,12 +462,7 @@ impl Pipeline {
 
                 msg = rx.recv() => {
                     if let Some(msg) = msg {
-                        if self.submit_batch(msg, shutdown).await {
-                            // `submit_batch` returns true only for processor fatal
-                            // shutdowns. Stop ingesting additional channel messages.
-                            should_drain_input_channel = false;
-                            break;
-                        }
+                        self.submit_batch(msg).await;
                     } else {
                         break;
                     }
@@ -512,15 +505,11 @@ impl Pipeline {
             }
         }
 
-        if should_drain_input_channel {
-            // Drain channel messages before joining input threads.
-            // This prevents deadlock during shutdown if a producer is blocked in
-            // `blocking_send` while the bounded channel is full.
-            while let Some(msg) = rx.recv().await {
-                if self.submit_batch(msg, shutdown).await {
-                    break;
-                }
-            }
+        // Drain channel messages before joining input threads.
+        // This prevents deadlock during shutdown if a producer is blocked in
+        // `blocking_send` while the bounded channel is full.
+        while let Some(msg) = rx.recv().await {
+            self.submit_batch(msg).await;
         }
 
         // All sender clones have now been dropped, so input threads/tasks can

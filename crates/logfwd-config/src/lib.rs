@@ -362,7 +362,10 @@ output:
     }
 
     #[test]
-    fn validation_arrow_ipc_requires_listen() {
+    fn validation_arrow_ipc_not_supported() {
+        // arrow_ipc is always rejected as "not yet supported" regardless of
+        // whether 'listen' is specified — the 'listen' check must not fire
+        // first and give a misleading error.
         let yaml = r"
 input:
   type: arrow_ipc
@@ -371,7 +374,10 @@ output:
 ";
         let err = Config::load_str(yaml).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("listen"), "expected 'listen' in error: {msg}");
+        assert!(
+            msg.contains("not yet supported"),
+            "expected 'not yet supported' in error: {msg}"
+        );
     }
 
     #[test]
@@ -668,7 +674,6 @@ pipelines:
             ("udp", "listen: 0.0.0.0:514"),
             ("tcp", "listen: 0.0.0.0:514"),
             ("otlp", "listen: 0.0.0.0:4317"),
-            ("arrow_ipc", "listen: 0.0.0.0:4319"),
             ("http", "listen: 0.0.0.0:8080"),
             ("generator", ""),
             ("linux_ebpf_sensor", ""),
@@ -767,7 +772,6 @@ output:
             ("tcp", "listen: 0.0.0.0:8080"),
             ("generator", ""),
             ("otlp", "listen: 0.0.0.0:4318"),
-            ("arrow_ipc", "listen: 0.0.0.0:4319"),
         ];
         let fields = [
             "poll_interval_ms: 100",
@@ -812,23 +816,6 @@ output:
         assert!(
             err.to_string()
                 .contains("'sensor' settings are only supported for sensor inputs")
-        );
-    }
-
-    #[test]
-    fn arrow_ipc_rejects_format_override() {
-        let yaml = r#"
-input:
-  type: arrow_ipc
-  listen: 0.0.0.0:4319
-  format: raw
-output:
-  type: stdout
-"#;
-        let err = Config::load_str(yaml).unwrap_err().to_string();
-        assert!(
-            err.contains("'format' is not supported for arrow_ipc inputs"),
-            "expected arrow_ipc format rejection, got: {err}"
         );
     }
 
@@ -1355,32 +1342,6 @@ output:
         Config::load_str(yaml).expect("absent max_open_files should be valid");
     }
 
-    #[test]
-    fn adaptive_fast_polls_max_zero_accepted_for_file() {
-        let yaml = r"
-input:
-  type: file
-  path: /var/log/test.log
-  adaptive_fast_polls_max: 0
-output:
-  type: stdout
-";
-        Config::load_str(yaml).expect("adaptive_fast_polls_max: 0 should be valid for file");
-    }
-
-    #[test]
-    fn adaptive_fast_polls_max_custom_accepted_for_file() {
-        let yaml = r"
-input:
-  type: file
-  path: /var/log/test.log
-  adaptive_fast_polls_max: 12
-output:
-  type: stdout
-";
-        Config::load_str(yaml).expect("adaptive_fast_polls_max should be configurable for file");
-    }
-
     // -----------------------------------------------------------------------
     // Bug #550: enrichment path validation at config load time
     // -----------------------------------------------------------------------
@@ -1847,25 +1808,6 @@ pipelines:
         assert!(
             err.to_string().contains("max_open_files"),
             "expected max_open_files rejection: {err}"
-        );
-    }
-
-    #[test]
-    fn tcp_input_rejects_adaptive_fast_polls_max() {
-        let yaml = r#"
-pipelines:
-  test:
-    inputs:
-      - type: tcp
-        listen: 0.0.0.0:514
-        adaptive_fast_polls_max: 4
-    outputs:
-      - type: null
-"#;
-        let err = Config::load_str(yaml).unwrap_err();
-        assert!(
-            err.to_string().contains("adaptive_fast_polls_max"),
-            "expected adaptive_fast_polls_max rejection: {err}"
         );
     }
 
@@ -2448,7 +2390,7 @@ pipelines:
     }
 
     #[test]
-    fn arrow_ipc_input_valid_with_listen() {
+    fn arrow_ipc_input_rejected() {
         let yaml = r#"
 pipelines:
   test:
@@ -2458,7 +2400,11 @@ pipelines:
     outputs:
       - type: null
 "#;
-        Config::load_str(yaml).expect("arrow_ipc input should validate when listen is provided");
+        let err = Config::load_str(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("not yet supported"),
+            "expected arrow_ipc rejection: {err}"
+        );
     }
 
     // -----------------------------------------------------------------------

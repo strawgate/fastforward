@@ -7,6 +7,7 @@ import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -54,12 +55,30 @@ def parse_tlc_matrix_entries(workflow_text: str) -> list[TlcMatrixEntry]:
                 break
         tlc_lines.append(line)
 
+    matrix_indent: int | None = None
+    include_indent: int | None = None
+    include_start = None
+    for idx, line in enumerate(tlc_lines):
+        stripped = line.strip()
+        if stripped == "matrix:":
+            matrix_indent = len(line) - len(line.lstrip(" "))
+            continue
+        if matrix_indent is None:
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        if indent <= matrix_indent and stripped:
+            break
+        if stripped == "include:" and indent > matrix_indent:
+            include_indent = indent
+            include_start = idx + 1
+            break
+
+    if include_indent is None or include_start is None:
+        raise ValueError("ci.yml tlc matrix missing include block")
+
     entries: list[TlcMatrixEntry] = []
     current: dict[str, str] | None = None
-    in_include = False
-    include_indent: int | None = None
-    item_indent: int | None = None
-    allowed_keys = {"spec", "tla_file", "config", "property"}
+    item_indent = None
 
     def flush_current() -> None:
         nonlocal current
@@ -67,54 +86,56 @@ def parse_tlc_matrix_entries(workflow_text: str) -> list[TlcMatrixEntry]:
             return
         entries.append(
             TlcMatrixEntry(
-                spec=current.get("spec", ""),
-                tla_file=current.get("tla_file", ""),
-                config=current.get("config", ""),
-                property=current.get("property", ""),
+                spec=current["spec"],
+                tla_file=current["tla_file"],
+                config=current["config"],
+                property=current["property"],
             )
         )
         current = None
 
-    for line in tlc_lines:
+    for line in tlc_lines[include_start:]:
         stripped = line.strip()
+        if not stripped:
+            continue
         indent = len(line) - len(line.lstrip(" "))
 
-        if not in_include:
-            if stripped == "include:":
-                in_include = True
-                include_indent = indent
-            continue
-
-        if stripped and include_indent is not None and indent <= include_indent:
+        if indent <= include_indent:
             flush_current()
             break
 
-        if not stripped:
-            continue
-
-        if stripped.startswith("- "):
+        if stripped.startswith("- spec:") and indent > include_indent:
             flush_current()
+            current = {"spec": _strip_yaml_value(stripped.split(":", 1)[1])}
             item_indent = indent
-            current = {}
-            stripped = stripped[2:].strip()
-            if ":" not in stripped:
-                continue
-
-            key, raw_value = stripped.split(":", 1)
-            key = key.strip()
-            if key in allowed_keys:
-                current[key] = _strip_yaml_value(raw_value)
             continue
 
-        if current is None or item_indent is None or indent <= item_indent or ":" not in stripped:
+        if current is None or item_indent is None:
             continue
 
+        if indent <= item_indent:
+            flush_current()
+            item_indent = None
+            continue
+
+        if ":" not in stripped:
+            continue
         key, raw_value = stripped.split(":", 1)
         key = key.strip()
-        if key in allowed_keys:
+        if key in {"spec", "tla_file", "config", "property"}:
             current[key] = _strip_yaml_value(raw_value)
 
     flush_current()
+
+    if current is not None:
+        entries.append(
+            TlcMatrixEntry(
+                spec=current["spec"],
+                tla_file=current["tla_file"],
+                config=current["config"],
+                property=current["property"],
+            )
+        )
 
     if not entries:
         raise ValueError("ci.yml tlc matrix has no entries")
@@ -212,6 +233,31 @@ def main() -> int:
 
     print("TLC matrix contract OK")
     return 0
+
+
+class ParseTlcMatrixEntriesTests(unittest.TestCase):
+    def test_parser_ignores_step_scope_keys(self) -> None:
+        workflow = """
+jobs:
+  tlc:
+    strategy:
+      matrix:
+        include:
+          - spec: PipelineMachine
+            tla_file: tla/MCPipelineMachine.tla
+            config: tla/PipelineMachine.cfg
+            property: safety
+    steps:
+      - name: TLC
+        run: echo "config: should-not-be-parsed"
+"""
+        entries = parse_tlc_matrix_entries(workflow)
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0].config, "tla/PipelineMachine.cfg")
+
+    def test_parser_requires_tlc_job(self) -> None:
+        with self.assertRaises(ValueError):
+            parse_tlc_matrix_entries("jobs:\n  lint:\n    runs-on: ubuntu-latest\n")
 
 
 if __name__ == "__main__":

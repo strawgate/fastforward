@@ -94,7 +94,6 @@ Tail one or more log files that match a glob pattern.
 | `poll_interval_ms` | integer | No | How often to poll the file when tailing, in milliseconds (default: 50). |
 | `read_buf_size` | integer | No | Buffer size for file reads in bytes (default: 262144, max: 4194304). |
 | `per_file_read_budget_bytes` | integer | No | Maximum bytes read per file per poll (default: 262144). |
-| `adaptive_fast_polls_max` | integer | No | Immediate repoll budget after a read-budget hit (default: 8, set `0` to disable adaptive fast repolls). |
 
 ```yaml
 input:
@@ -253,24 +252,10 @@ Compatibility note: legacy names `linux_sensor_beta`, `macos_sensor_beta`,
 `windows_sensor_beta`, plus the legacy `sensor_beta:` block, are still
 accepted as aliases for backward compatibility.
 
-### `arrow_ipc` input
+### `arrow_ipc` input *(not yet supported)*
 
-Receive Arrow IPC stream payloads over HTTP `POST` and forward decoded
-`RecordBatch` values directly into the pipeline (scanner bypass).
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `listen` | string | Yes | `host:port`, e.g. `0.0.0.0:4319`. |
-
-Behavior:
-- Route is fixed to `POST /v1/arrow` for MVP.
-- `arrow_ipc` is Arrow-native and rejects `format`.
-- Canonical payload types are `application/vnd.apache.arrow.stream` and
-  `application/vnd.apache.arrow.stream+zstd`.
-- `Content-Encoding: zstd` is also supported for compressed Arrow stream payloads.
-- The receiver currently decodes by payload bytes and may still accept requests
-  with missing/other content-type headers; use canonical content types for
-  predictable interoperability.
+Reserved for future Arrow IPC ingest. Config parsing recognizes the type, but
+config validation currently rejects it.
 
 ---
 
@@ -283,18 +268,17 @@ Behavior:
 | `udp` | Implemented | Receive log lines over UDP. |
 | `tcp` | Implemented | Accept log lines over TCP. |
 | `otlp` | Implemented | Receive OTLP logs over a bound listen address. |
-| `http` | Implemented | Receive newline-delimited payloads via HTTP `POST`. |
 | `linux_ebpf_sensor` | Implemented | Linux eBPF sensor input (Arrow-native control + signal rows). |
 | `macos_es_sensor` | Implemented | macOS EndpointSecurity sensor input (Arrow-native control + signal rows). |
 | `windows_ebpf_sensor` | Implemented | Windows eBPF sensor input (Arrow-native control + signal rows). |
-| `arrow_ipc` | Implemented | Receive Arrow IPC stream batches via HTTP `POST /v1/arrow`. |
+| `arrow_ipc` | Not yet supported | Reserved for future Arrow IPC ingest. |
 
 ---
 
 ## Formats
 
 The `format` field controls how raw bytes from the input are parsed into log records.
-`linux_ebpf_sensor`, `macos_es_sensor`, `windows_ebpf_sensor`, and `arrow_ipc` are
+`linux_ebpf_sensor`, `macos_es_sensor`, and `windows_ebpf_sensor` are
 Arrow-native and reject `format`.
 
 | Value | Description |
