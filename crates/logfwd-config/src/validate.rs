@@ -106,6 +106,11 @@ impl Config {
                         "pipeline '{name}' input '{label}': arrow_ipc input type is not yet supported"
                     )));
                 }
+                if input.input_type != InputType::Otlp && input.resource_prefix.is_some() {
+                    return Err(ConfigError::Validation(format!(
+                        "pipeline '{name}' input '{label}': 'resource_prefix' is only supported for otlp inputs"
+                    )));
+                }
                 match input.input_type {
                     InputType::File => {
                         match &input.path {
@@ -286,6 +291,18 @@ impl Config {
                         }
                     }
                     InputType::Otlp => {
+                        if let Some(prefix) = input.resource_prefix.as_deref() {
+                            if prefix.trim().is_empty() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': 'resource_prefix' must not be empty for otlp inputs"
+                                )));
+                            }
+                            if prefix != "resource.attributes." {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': unsupported otlp resource_prefix '{prefix}' (currently only 'resource.attributes.' is supported)"
+                                )));
+                            }
+                        }
                         if input.tls.is_some() {
                             return Err(ConfigError::Validation(format!(
                                 "pipeline '{name}' input '{label}': 'tls' is not supported for otlp inputs"
