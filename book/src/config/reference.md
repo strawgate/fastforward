@@ -164,6 +164,34 @@ input:
   resource_prefix: resource.attributes.
 ```
 
+### `http` input
+
+Receive newline-delimited payloads over HTTP `POST`.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `listen` | string | Yes | `host:port`, e.g. `0.0.0.0:8081`. |
+| `http.path` | string | No | Route path. Must start with `/`. Defaults to `/`. |
+| `http.strict_path` | boolean | No | When `true` (default), require exact path match. |
+| `http.method` | string | No | Accepted method. Defaults to `POST`. |
+| `http.max_request_body_size` | integer | No | Maximum request body size in bytes. Defaults to 20 MiB. |
+| `http.response_code` | integer | No | Success code. One of `200`, `201`, `202`, `204` (default `200`). |
+| `http.response_body` | string | No | Optional static success response body. Not allowed when `http.response_code: 204`. |
+
+```yaml
+input:
+  type: http
+  listen: 0.0.0.0:8081
+  format: json
+  http:
+    path: /ingest
+    strict_path: true
+    method: POST
+    max_request_body_size: 20971520
+    response_code: 200
+    response_body: '{"ok":true}'
+```
+
 ### `linux_ebpf_sensor` input
 
 Linux eBPF sensor input for platform-native ingestion. This input is
@@ -258,7 +286,7 @@ Arrow-native and reject `format`.
 | `auto` | Auto-detect (default). Tries CRI first, then JSON, then raw. |
 | `cri` | CRI container log format (`<timestamp> <stream> <flags> <message>`). Multi-line log reassembly via the `P` partial flag is supported. |
 | `json` | Newline-delimited JSON. Each line must be a single JSON object. |
-| `raw` | Treat each line as an opaque string stored in `_raw_str`. |
+| `raw` | Treat each line as an opaque string stored in `body`. |
 | `logfmt` | Key=value pairs (e.g. `level=info msg="hello"`). *Not yet implemented.* |
 | `console` | Human-readable coloured output for interactive debugging. Output mode only. |
 
@@ -430,7 +458,7 @@ Special columns added by the scanner / input format layer:
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `_raw` | string | Original input line (only when `keep_raw: true`, or when a non-JSON CRI line is wrapped for scanner safety). |
+| `body` | string | Original input line (when input line capture is enabled, e.g. `line_field: body`, or when a non-JSON CRI line is wrapped for scanner safety). |
 | `_timestamp` | string | Timestamp from the CRI header as an RFC 3339 string (CRI inputs only). |
 | `_stream` | string | CRI stream name (`stdout` / `stderr`). |
 

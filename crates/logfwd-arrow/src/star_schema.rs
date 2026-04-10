@@ -189,8 +189,24 @@ pub fn flat_to_star(batch: &RecordBatch) -> Result<StarSchema, ArrowError> {
             severity_col = Some(idx);
             continue;
         }
-        if body_col.is_none() && WELL_KNOWN_BODY.contains(&name) {
-            body_col = Some(idx);
+        if WELL_KNOWN_BODY.contains(&name) {
+            match body_col {
+                None => {
+                    body_col = Some(idx);
+                    continue;
+                }
+                Some(prev_idx) if name == "body" => {
+                    let prev_name = batch.schema().field(prev_idx).name().clone();
+                    if prev_name != "body" {
+                        attr_cols.push((prev_name, prev_idx));
+                        body_col = Some(idx);
+                        continue;
+                    }
+                }
+                Some(_) => {}
+            }
+        }
+        if name == "_raw" {
             continue;
         }
         if trace_id_col.is_none() && WELL_KNOWN_TRACE_ID.contains(&name) {
@@ -203,11 +219,6 @@ pub fn flat_to_star(batch: &RecordBatch) -> Result<StarSchema, ArrowError> {
         }
         if flags_col.is_none() && WELL_KNOWN_FLAGS.contains(&name) {
             flags_col = Some(idx);
-            continue;
-        }
-
-        // Skip _raw — internal only, not part of OTAP.
-        if name == "_raw" {
             continue;
         }
 
@@ -2246,6 +2257,95 @@ mod tests {
             .expect("str");
         assert_eq!(msg_arr.value(0), "hello");
         assert_eq!(msg_arr.value(1), "world");
+    }
+
+    #[test]
+    fn flat_to_star_prefers_canonical_body_over_message_alias() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("message", DataType::Utf8, true),
+            Field::new("body", DataType::Utf8, true),
+        ]));
+        let columns: Vec<ArrayRef> = vec![
+            Arc::new(StringArray::from(vec!["alias-value"])),
+            Arc::new(StringArray::from(vec!["canonical-value"])),
+        ];
+        let batch = RecordBatch::try_new(schema, columns).expect("valid");
+
+        let star = flat_to_star(&batch).expect("flat_to_star");
+        let body_idx = star.logs.schema().index_of("body_str").expect("body_str");
+        let body_arr = star
+            .logs
+            .column(body_idx)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("body_str should be Utf8");
+        assert_eq!(
+            body_arr.value(0),
+            "canonical-value",
+            "canonical body should win over alias columns"
+        );
+    }
+
+    #[test]
+    fn flat_to_star_excludes_internal_raw_attribute() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("body", DataType::Utf8, true),
+            Field::new("_raw", DataType::Utf8, true),
+        ]));
+        let columns: Vec<ArrayRef> = vec![
+            Arc::new(StringArray::from(vec!["canonical-value"])),
+            Arc::new(StringArray::from(vec!["wire-only"])),
+        ];
+        let batch = RecordBatch::try_new(schema, columns).expect("valid");
+
+        let star = flat_to_star(&batch).expect("flat_to_star");
+        let key_idx = star.log_attrs.schema().index_of("key").expect("key");
+        let keys = star
+            .log_attrs
+            .column(key_idx)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("key should be Utf8");
+
+        assert!(
+            !keys.iter().flatten().any(|key| key == "_raw"),
+            "_raw should remain internal-only"
+        );
+    }
+
+    #[test]
+    fn flat_to_star_keeps_unselected_body_alias_as_attribute() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("message", DataType::Utf8, true),
+            Field::new("body", DataType::Utf8, true),
+        ]));
+        let columns: Vec<ArrayRef> = vec![
+            Arc::new(StringArray::from(vec!["alias-value"])),
+            Arc::new(StringArray::from(vec!["canonical-value"])),
+        ];
+        let batch = RecordBatch::try_new(schema, columns).expect("valid");
+
+        let star = flat_to_star(&batch).expect("flat_to_star");
+        let key_idx = star.log_attrs.schema().index_of("key").expect("key");
+        let str_idx = star.log_attrs.schema().index_of("str").expect("str");
+        let keys = star
+            .log_attrs
+            .column(key_idx)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("key should be Utf8");
+        let values = star
+            .log_attrs
+            .column(str_idx)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("str should be Utf8");
+        let message_value = keys
+            .iter()
+            .zip(values.iter())
+            .find_map(|(key, value)| if key == Some("message") { value } else { None });
+
+        assert_eq!(message_value, Some("alias-value"));
     }
 
     #[test]

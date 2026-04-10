@@ -948,7 +948,7 @@ output:
         let mut scanner = Scanner::new(ScanConfig {
             wanted_fields: vec![],
             extract_all: true,
-            keep_raw: false,
+            line_field_name: None,
             validate_utf8: false,
         });
         let batch = scanner.scan_detached(Bytes::from(bytes.clone())).unwrap();
@@ -1009,6 +1009,24 @@ output:
         let pipe_cfg = &config.pipelines["default"];
         let pipeline = Pipeline::from_config("default", pipe_cfg, &test_meter(), None);
         assert!(pipeline.is_ok(), "got: {:?}", pipeline.err());
+    }
+
+    #[test]
+    fn otlp_structured_ingress_is_disabled_when_line_capture_is_required() {
+        let scan_config = ScanConfig {
+            line_field_name: Some(logfwd_types::field_names::BODY.to_string()),
+            ..ScanConfig::default()
+        };
+        assert!(!input_build::otlp_uses_structured_ingress(&scan_config));
+    }
+
+    #[test]
+    fn otlp_structured_ingress_is_enabled_when_line_capture_is_not_required() {
+        let scan_config = ScanConfig {
+            line_field_name: None,
+            ..ScanConfig::default()
+        };
+        assert!(input_build::otlp_uses_structured_ingress(&scan_config));
     }
 
     #[test]
@@ -2664,7 +2682,7 @@ mod format_integration_tests {
         let config = ScanConfig {
             wanted_fields: vec![],
             extract_all: true,
-            keep_raw: false,
+            line_field_name: None,
             validate_utf8: false,
         };
         let mut scanner = Scanner::new(config);
@@ -2675,20 +2693,71 @@ mod format_integration_tests {
         assert!(batch.schema().field_with_name("msg").is_ok());
     }
 
-    /// Raw format: lines captured as _raw when keep_raw is true.
+    /// Raw format: lines captured as body when line_capture is true.
     #[test]
     fn raw_format_captures_lines() {
         let input = b"plain text line 1\nplain text line 2\n";
         let config = ScanConfig {
             wanted_fields: vec![],
             extract_all: true,
-            keep_raw: true,
+            line_field_name: Some("body".to_string()),
             validate_utf8: false,
         };
         let mut scanner = Scanner::new(config);
         let batch = scanner.scan_detached(Bytes::from(input.to_vec())).unwrap();
         assert_eq!(batch.num_rows(), 2);
-        assert!(batch.schema().field_with_name("_raw").is_ok());
+        let body_col = batch
+            .column_by_name("body")
+            .expect("raw format should emit body column");
+        if let Some(arr) = body_col
+            .as_any()
+            .downcast_ref::<arrow::array::StringArray>()
+        {
+            assert_eq!(arr.value(0), "plain text line 1");
+            assert_eq!(arr.value(1), "plain text line 2");
+        } else if let Some(arr) = body_col
+            .as_any()
+            .downcast_ref::<arrow::array::StringViewArray>()
+        {
+            assert_eq!(arr.value(0), "plain text line 1");
+            assert_eq!(arr.value(1), "plain text line 2");
+        } else {
+            panic!("body column must be StringArray or StringViewArray");
+        }
+    }
+
+    /// Raw format treats each line as an opaque input record captured in `body`,
+    /// even when the payload itself looks like JSON.
+    #[test]
+    fn raw_format_json_line_prefers_full_line_body() {
+        let input = br#"{"body":"app message","level":"INFO"}"#;
+        let mut with_newline = input.to_vec();
+        with_newline.push(b'\n');
+        let config = ScanConfig {
+            wanted_fields: vec![],
+            extract_all: true,
+            line_field_name: Some("body".to_string()),
+            validate_utf8: false,
+        };
+        let mut scanner = Scanner::new(config);
+        let batch = scanner.scan_detached(Bytes::from(with_newline)).unwrap();
+        assert_eq!(batch.num_rows(), 1);
+        let body_col = batch
+            .column_by_name("body")
+            .expect("raw format should emit body column");
+        if let Some(arr) = body_col
+            .as_any()
+            .downcast_ref::<arrow::array::StringArray>()
+        {
+            assert_eq!(arr.value(0), std::str::from_utf8(input).unwrap());
+        } else if let Some(arr) = body_col
+            .as_any()
+            .downcast_ref::<arrow::array::StringViewArray>()
+        {
+            assert_eq!(arr.value(0), std::str::from_utf8(input).unwrap());
+        } else {
+            panic!("body column must be StringArray or StringViewArray");
+        }
     }
 
     /// CRI format: message extracted, timestamp/stream/flag stripped.
@@ -2703,7 +2772,7 @@ mod format_integration_tests {
         let config = ScanConfig {
             wanted_fields: vec![],
             extract_all: true,
-            keep_raw: false,
+            line_field_name: None,
             validate_utf8: false,
         };
         let mut scanner = Scanner::new(config);
@@ -2725,7 +2794,7 @@ mod format_integration_tests {
         let config = ScanConfig {
             wanted_fields: vec![],
             extract_all: true,
-            keep_raw: false,
+            line_field_name: None,
             validate_utf8: false,
         };
         let mut scanner = Scanner::new(config);
@@ -2774,10 +2843,10 @@ mod proptest_pipeline {
             let config = ScanConfig {
                 wanted_fields: vec![],
                 extract_all: true,
-                keep_raw: false,
+                line_field_name: None,
                 validate_utf8: false,
             };
-            let mut scanner_whole = Scanner::new(ScanConfig { wanted_fields: vec![], extract_all: true, keep_raw: false, validate_utf8: false });
+            let mut scanner_whole = Scanner::new(config);
             let batch_whole = scanner_whole.scan_detached(Bytes::from(ndjson.clone())).unwrap();
 
             // Split into two chunks with remainder handling
@@ -2812,7 +2881,13 @@ mod proptest_pipeline {
                 buf.extend_from_slice(&combined);
             }
 
-            let config2 = ScanConfig { wanted_fields: vec![], extract_all: true, keep_raw: false, validate_utf8: false }; let mut scanner_split = Scanner::new(config2);
+            let config2 = ScanConfig {
+                wanted_fields: vec![],
+                extract_all: true,
+                line_field_name: None,
+                validate_utf8: false,
+            };
+            let mut scanner_split = Scanner::new(config2);
             let batch_split = scanner_split.scan_detached(Bytes::from(buf.clone())).unwrap();
 
             prop_assert_eq!(

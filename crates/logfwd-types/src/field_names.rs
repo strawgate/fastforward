@@ -51,13 +51,10 @@ pub const SEVERITY_VARIANTS: &[&str] = &["severity", "log_level", "loglevel", "l
 /// Canonical body column — the log message text.
 ///
 /// Written by the OTLP receiver for the log record `body`.
-pub const BODY: &str = "message";
+pub const BODY: &str = "body";
 
 /// Additional names sinks accept for body from external sources.
-pub const BODY_VARIANTS: &[&str] = &["msg", "_msg", "body"];
-
-/// Raw unparsed line — fallback when no parsed body column exists.
-pub const RAW: &str = "_raw";
+pub const BODY_VARIANTS: &[&str] = &["message", "msg", "_msg"];
 
 // ---------------------------------------------------------------------------
 // Trace context

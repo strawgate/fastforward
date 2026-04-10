@@ -12,6 +12,7 @@ use logfwd_io::checkpoint::{
 };
 use logfwd_io::diagnostics::PipelineMetrics;
 use logfwd_output::{AsyncFanoutFactory, SinkFactory, build_sink_factory};
+use logfwd_types::field_names;
 use logfwd_types::pipeline::{PipelineMachine, SourceId};
 
 use super::input_build::build_input_state;
@@ -232,10 +233,11 @@ impl Pipeline {
             }
 
             let mut scan_config = transform.scan_config();
-            // Raw format sends non-JSON lines to the scanner. Without keep_raw,
-            // these produce empty rows. Force keep_raw so every line is captured.
+            // Raw format sends plain text directly to the scanner, so capture
+            // the original line in the canonical body field for downstream SQL
+            // and sinks. Auto mode wraps plain-text fallback into JSON.
             if matches!(input_cfg.format, Some(Format::Raw)) {
-                scan_config.keep_raw = true;
+                scan_config.line_field_name = Some(field_names::BODY.to_string());
             }
             let scanner = logfwd_arrow::scanner::Scanner::new(scan_config);
 
