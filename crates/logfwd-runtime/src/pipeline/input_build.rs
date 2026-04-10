@@ -418,6 +418,7 @@ mod tests {
             input_type,
             path: None,
             listen: None,
+            resource_prefix: None,
             format: Some(Format::Raw),
             poll_interval_ms: None,
             read_buf_size: None,
@@ -430,7 +431,7 @@ mod tests {
             sql: None,
             tls: None,
         };
-        let err = match build_input_state("sensor", &cfg, stats, true) {
+        let err = match build_input_state("sensor", &cfg, stats) {
             Ok(_) => panic!("sensor format must be rejected"),
             Err(err) => err,
         };
