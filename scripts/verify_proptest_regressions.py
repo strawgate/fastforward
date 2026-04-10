@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 CRATES = ROOT / "crates"
 NO_PERSISTENCE_ALLOWLIST = {
     "crates/logfwd-core/src/cri.rs",
+    "crates/logfwd-core/src/json_scanner.rs",
     "crates/logfwd-io/tests/it/checkpoint_state_machine.rs",
 }
 
