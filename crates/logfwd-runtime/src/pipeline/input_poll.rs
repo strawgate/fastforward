@@ -20,7 +20,7 @@ use super::submit::{scan_and_transform_for_send, transform_direct_batch_for_send
 use super::{ChannelMsg, InputState, InputTransform};
 
 #[inline]
-#[cfg(any(feature = "turmoil", test))]
+#[cfg(any(feature = "turmoil", test, kani))]
 const fn should_flush_buffer(
     buffered_len: usize,
     batch_target_bytes: usize,
@@ -211,5 +211,66 @@ mod tests {
                 expected
             );
         }
+    }
+}
+
+#[cfg(kani)]
+mod verification {
+    use super::should_flush_buffer;
+
+    #[kani::proof]
+    fn verify_empty_buffer_never_flushes() {
+        let batch_target_bytes = kani::any::<usize>().max(1);
+        let timeout_elapsed = kani::any::<bool>();
+        let should_flush = should_flush_buffer(0, batch_target_bytes, timeout_elapsed);
+        assert!(!should_flush);
+        kani::cover!(
+            !should_flush_buffer(0, batch_target_bytes, timeout_elapsed),
+            "empty-buffer non-flush path reachable"
+        );
+    }
+
+    #[kani::proof]
+    fn verify_timeout_only_flushes_when_buffered() {
+        let buffered_len = kani::any::<usize>();
+        let batch_target_bytes = kani::any::<usize>().max(1);
+        if buffered_len < batch_target_bytes {
+            assert_eq!(
+                should_flush_buffer(buffered_len, batch_target_bytes, false),
+                false
+            );
+            assert_eq!(
+                should_flush_buffer(buffered_len, batch_target_bytes, true),
+                buffered_len > 0
+            );
+        }
+        kani::cover!(
+            should_flush_buffer(1, 2, true),
+            "timeout flush path reachable"
+        );
+        kani::cover!(
+            !should_flush_buffer(0, 2, true),
+            "empty timeout no-flush path reachable"
+        );
+    }
+
+    #[kani::proof]
+    fn verify_flush_predicate_equivalence() {
+        let buffered_len = kani::any::<usize>();
+        let batch_target_bytes = kani::any::<usize>().max(1);
+        let timeout_elapsed = kani::any::<bool>();
+        let expected = buffered_len >= batch_target_bytes || (buffered_len > 0 && timeout_elapsed);
+        assert_eq!(
+            should_flush_buffer(buffered_len, batch_target_bytes, timeout_elapsed),
+            expected
+        );
+        kani::cover!(
+            should_flush_buffer(2, 2, false),
+            "batch-threshold flush path reachable"
+        );
+        kani::cover!(
+            !should_flush_buffer(0, 2, false),
+            "below-threshold non-flush path reachable"
+        );
     }
 }

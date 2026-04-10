@@ -130,6 +130,33 @@ mod tests {
         assert_eq!(backoff_delay_ms(100), 5000);
     }
 
+    #[test]
+    fn eof_state_requires_elapsed_idle_window_before_emit() {
+        let mut state = EofState::default();
+        let t0 = Instant::now();
+        let min_idle = Duration::from_millis(100);
+
+        assert!(!state.on_no_data(t0, min_idle));
+        assert!(!state.on_no_data(t0 + Duration::from_millis(50), min_idle));
+        assert!(state.on_no_data(t0 + Duration::from_millis(120), min_idle));
+    }
+
+    #[test]
+    fn eof_state_on_data_restarts_idle_window() {
+        let mut state = EofState::default();
+        let t0 = Instant::now();
+        let min_idle = Duration::from_millis(100);
+
+        assert!(!state.on_no_data(t0, min_idle));
+        assert!(state.on_no_data(t0 + Duration::from_millis(100), min_idle));
+
+        state.on_data();
+
+        assert!(!state.on_no_data(t0 + Duration::from_millis(100), min_idle));
+        assert!(!state.on_no_data(t0 + Duration::from_millis(150), min_idle));
+        assert!(state.on_no_data(t0 + Duration::from_millis(220), min_idle));
+    }
+
     proptest! {
         #[test]
         fn eof_model_only_emits_on_threshold_crossing(

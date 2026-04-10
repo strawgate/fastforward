@@ -19,6 +19,23 @@ const MAX_UDP_PAYLOAD: usize = 65507;
 /// cap it lower depending on `sysctl net.core.rmem_max`.
 const RECV_BUF_SIZE: usize = 8 * 1024 * 1024;
 
+/// Hard bound on datagrams drained in a single `poll()` call.
+///
+/// This prevents one busy socket from monopolizing an entire runtime tick.
+const MAX_DATAGRAMS_PER_POLL: usize = 256;
+
+/// Target bound on emitted bytes in a single `poll()` call.
+///
+/// This caps per-poll memory growth for high-rate UDP senders. Because UDP
+/// datagrams are consumed atomically, one poll can exceed this limit by at
+/// most one datagram (+ optional synthetic newline).
+const MAX_EMIT_BYTES_PER_POLL: usize = 1024 * 1024;
+
+#[inline]
+const fn should_stop_udp_drain(datagrams_read: usize, emitted_bytes: usize) -> bool {
+    datagrams_read >= MAX_DATAGRAMS_PER_POLL || emitted_bytes >= MAX_EMIT_BYTES_PER_POLL
+}
+
 /// UDP input that listens for datagrams. Each datagram is treated as one
 /// or more newline-delimited log lines.
 pub struct UdpInput {
@@ -106,6 +123,7 @@ impl UdpInput {
 impl InputSource for UdpInput {
     fn poll(&mut self) -> io::Result<Vec<InputEvent>> {
         let mut under_pressure = false;
+        let mut datagrams_read = 0usize;
 
         // Accumulate into a single byte buffer; avoid per-datagram Vec alloc.
         // We re-use `self.buf` for recv and build the output in a separate vec
@@ -117,19 +135,22 @@ impl InputSource for UdpInput {
         loop {
             // `recv` is cheaper than `recv_from` — we don't need the source addr.
             match self.socket.recv(&mut self.buf) {
-                Ok(0) => {
-                    // Zero-length datagram — valid in UDP. Nothing to append,
-                    // just continue draining.
-                }
                 Ok(n) => {
-                    source_bytes = source_bytes.saturating_add(n as u64);
-                    let data = &self.buf[..n];
-                    let out = total.get_or_insert_with(|| Vec::with_capacity(4096));
-                    out.extend_from_slice(data);
-                    // Ensure newline termination so the scanner always sees
-                    // complete lines, even if the sender omitted a trailing LF.
-                    if !data.ends_with(b"\n") {
-                        out.push(b'\n');
+                    datagrams_read = datagrams_read.saturating_add(1);
+                    if n > 0 {
+                        source_bytes = source_bytes.saturating_add(n as u64);
+                        let data = &self.buf[..n];
+                        let out = total.get_or_insert_with(|| Vec::with_capacity(4096));
+                        out.extend_from_slice(data);
+                        // Ensure newline termination so the scanner always sees
+                        // complete lines, even if the sender omitted a trailing LF.
+                        if !data.ends_with(b"\n") {
+                            out.push(b'\n');
+                        }
+                    }
+                    let emitted_bytes = total.as_ref().map_or(0, Vec::len);
+                    if should_stop_udp_drain(datagrams_read, emitted_bytes) {
+                        break;
                     }
                 }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
@@ -190,6 +211,7 @@ impl InputSource for UdpInput {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
     use std::net::UdpSocket as StdSocket;
 
     #[test]
@@ -470,5 +492,134 @@ mod tests {
         let events = input.poll().unwrap();
         assert!(events.is_empty());
         assert_eq!(input.health(), ComponentHealth::Healthy);
+    }
+
+    #[test]
+    fn stop_predicate_matches_bounded_drain_policy() {
+        assert!(!should_stop_udp_drain(0, 0));
+        assert!(should_stop_udp_drain(MAX_DATAGRAMS_PER_POLL, 0));
+        assert!(should_stop_udp_drain(0, MAX_EMIT_BYTES_PER_POLL));
+    }
+
+    proptest! {
+        #[test]
+        fn stop_predicate_equivalent_to_limit_expression(
+            datagrams_read in 0usize..512,
+            emitted_bytes in 0usize..(2 * MAX_EMIT_BYTES_PER_POLL),
+        ) {
+            let expected = datagrams_read >= MAX_DATAGRAMS_PER_POLL
+                || emitted_bytes >= MAX_EMIT_BYTES_PER_POLL;
+            prop_assert_eq!(should_stop_udp_drain(datagrams_read, emitted_bytes), expected);
+        }
+    }
+
+    #[test]
+    fn udp_poll_drain_is_bounded_and_recoverable_next_poll() {
+        let mut input = UdpInput::new(
+            "test",
+            "127.0.0.1:0",
+            Arc::new(logfwd_types::diagnostics::ComponentStats::new()),
+        )
+        .unwrap();
+        let addr = input.local_addr().unwrap();
+        let sender = StdSocket::bind("127.0.0.1:0").unwrap();
+
+        let total = MAX_DATAGRAMS_PER_POLL + 32;
+        for i in 0..total {
+            let msg = format!("pkt-{i}\n");
+            sender.send_to(msg.as_bytes(), addr).unwrap();
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis(75));
+
+        let first = input.poll().unwrap();
+        assert_eq!(first.len(), 1);
+        let first_lines = first
+            .iter()
+            .filter_map(|event| match event {
+                InputEvent::Data { bytes, .. } => {
+                    Some(bytes.iter().filter(|&&b| b == b'\n').count())
+                }
+                _ => None,
+            })
+            .sum::<usize>();
+        assert_eq!(
+            first_lines, MAX_DATAGRAMS_PER_POLL,
+            "first poll must stop at datagram drain cap"
+        );
+
+        let mut seen = Vec::new();
+        for event in first {
+            if let InputEvent::Data { bytes, .. } = event {
+                seen.extend_from_slice(&bytes);
+            }
+        }
+        for _ in 0..8 {
+            let events = input.poll().unwrap();
+            if events.is_empty() {
+                break;
+            }
+            for event in events {
+                if let InputEvent::Data { bytes, .. } = event {
+                    seen.extend_from_slice(&bytes);
+                }
+            }
+        }
+
+        let text = String::from_utf8_lossy(&seen);
+        for i in 0..total {
+            assert!(text.contains(&format!("pkt-{i}\n")), "missing pkt-{i}");
+        }
+    }
+}
+
+#[cfg(kani)]
+mod verification {
+    use super::{MAX_DATAGRAMS_PER_POLL, MAX_EMIT_BYTES_PER_POLL, should_stop_udp_drain};
+
+    #[kani::proof]
+    fn verify_zero_counters_do_not_stop_drain() {
+        assert!(!should_stop_udp_drain(0, 0));
+        kani::cover!(
+            !should_stop_udp_drain(0, 0),
+            "non-stopping path is reachable"
+        );
+    }
+
+    #[kani::proof]
+    fn verify_each_limit_independently_stops_drain() {
+        let emitted_bytes = kani::any::<usize>();
+        assert!(should_stop_udp_drain(MAX_DATAGRAMS_PER_POLL, emitted_bytes));
+        kani::cover!(
+            should_stop_udp_drain(MAX_DATAGRAMS_PER_POLL, 0),
+            "datagram-cap stop path is reachable"
+        );
+
+        let datagrams_read = kani::any::<usize>();
+        assert!(should_stop_udp_drain(
+            datagrams_read,
+            MAX_EMIT_BYTES_PER_POLL
+        ));
+        kani::cover!(
+            should_stop_udp_drain(0, MAX_EMIT_BYTES_PER_POLL),
+            "emit-byte-cap stop path is reachable"
+        );
+    }
+
+    #[kani::proof]
+    fn verify_stop_predicate_equivalence() {
+        let datagrams_read = kani::any::<usize>();
+        let emitted_bytes = kani::any::<usize>();
+        let expected =
+            datagrams_read >= MAX_DATAGRAMS_PER_POLL || emitted_bytes >= MAX_EMIT_BYTES_PER_POLL;
+        assert_eq!(
+            should_stop_udp_drain(datagrams_read, emitted_bytes),
+            expected
+        );
+        kani::cover!(
+            should_stop_udp_drain(MAX_DATAGRAMS_PER_POLL, 0),
+            "stop branch reachable"
+        );
+        kani::cover!(!should_stop_udp_drain(0, 0), "continue branch reachable");
     }
 }

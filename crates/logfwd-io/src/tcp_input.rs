@@ -40,6 +40,21 @@ const MAX_LINE_LENGTH: usize = 1024 * 1024; // 1 MiB
 /// flood data faster than the pipeline can drain it (fix for #576).
 const MAX_TOTAL_BUFFERED_BYTES: usize = 256 * 1024 * 1024; // 256 MiB
 
+/// Hard per-client byte bound for one `poll()` call.
+///
+/// Prevents one hot connection from monopolizing a full poll cycle.
+const MAX_BYTES_PER_CLIENT_PER_POLL: usize = 512 * 1024;
+
+/// Hard per-client read syscall bound for one `poll()` call.
+///
+/// Complements the byte cap so highly fragmented payloads are also bounded.
+const MAX_READS_PER_CLIENT_PER_POLL: usize = 64;
+
+#[inline]
+const fn should_stop_client_read(bytes_read: usize, reads_done: usize) -> bool {
+    bytes_read >= MAX_BYTES_PER_CLIENT_PER_POLL || reads_done >= MAX_READS_PER_CLIENT_PER_POLL
+}
+
 /// Derive a `SourceId` for a TCP connection from a monotonic counter.
 ///
 /// The counter is hashed to avoid trivially predictable identifiers and to
@@ -318,8 +333,19 @@ impl InputSource for TcpInput {
             }
 
             let mut got_data = false;
+            let mut bytes_read_for_client = 0usize;
+            let mut reads_for_client = 0usize;
             loop {
-                match client.stream.read(&mut self.buf) {
+                if should_stop_client_read(bytes_read_for_client, reads_for_client) {
+                    break;
+                }
+                let remaining_bytes =
+                    MAX_BYTES_PER_CLIENT_PER_POLL.saturating_sub(bytes_read_for_client);
+                if remaining_bytes == 0 {
+                    break;
+                }
+                let read_cap = remaining_bytes.min(self.buf.len());
+                match client.stream.read(&mut self.buf[..read_cap]) {
                     Ok(0) => {
                         // Clean EOF.
                         alive[i] = false;
@@ -329,6 +355,8 @@ impl InputSource for TcpInput {
                         let chunk = &self.buf[..n];
                         client.last_data = now;
                         got_data = true;
+                        bytes_read_for_client = bytes_read_for_client.saturating_add(n);
+                        reads_for_client = reads_for_client.saturating_add(1);
 
                         // Snapshot totals before this read so we can compute the
                         // net increase in buffered memory after parsing.
@@ -477,6 +505,7 @@ impl InputSource for TcpInput {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
     use std::io::Write;
     use std::net::TcpStream as StdTcpStream;
 
@@ -950,5 +979,150 @@ mod tests {
             source_ids.len(),
             "each TCP connection must have a distinct SourceId"
         );
+    }
+
+    #[test]
+    fn stop_predicate_matches_per_client_bounded_policy() {
+        assert!(!should_stop_client_read(0, 0));
+        assert!(should_stop_client_read(MAX_BYTES_PER_CLIENT_PER_POLL, 0));
+        assert!(should_stop_client_read(0, MAX_READS_PER_CLIENT_PER_POLL));
+    }
+
+    proptest! {
+        #[test]
+        fn stop_predicate_equivalent_to_limit_expression(
+            bytes_read in 0usize..(2 * MAX_BYTES_PER_CLIENT_PER_POLL),
+            reads_done in 0usize..(2 * MAX_READS_PER_CLIENT_PER_POLL),
+        ) {
+            let expected = bytes_read >= MAX_BYTES_PER_CLIENT_PER_POLL
+                || reads_done >= MAX_READS_PER_CLIENT_PER_POLL;
+            prop_assert_eq!(should_stop_client_read(bytes_read, reads_done), expected);
+        }
+    }
+
+    #[test]
+    fn noisy_client_is_bounded_and_quiet_client_still_progresses() {
+        let mut input = TcpInput::new(
+            "test",
+            "127.0.0.1:0",
+            std::sync::Arc::new(logfwd_types::diagnostics::ComponentStats::new()),
+        )
+        .unwrap();
+        let addr = input.local_addr().unwrap();
+
+        let mut noisy = StdTcpStream::connect(addr).unwrap();
+        let mut quiet = StdTcpStream::connect(addr).unwrap();
+
+        for _ in 0..10 {
+            let _ = input.poll().unwrap();
+            if input.client_count() >= 2 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            input.client_count(),
+            2,
+            "both clients must be accepted before write workload"
+        );
+
+        let noisy_payload = b"noisy-line\n".repeat((MAX_BYTES_PER_CLIENT_PER_POLL / 11) + 128);
+        noisy.write_all(&noisy_payload).unwrap();
+        noisy.flush().unwrap();
+
+        let quiet_payload = b"quiet-line\n";
+        quiet.write_all(quiet_payload).unwrap();
+        quiet.flush().unwrap();
+
+        std::thread::sleep(Duration::from_millis(75));
+
+        let events = input.poll().unwrap();
+        let mut bytes_by_source: std::collections::HashMap<SourceId, usize> =
+            std::collections::HashMap::new();
+        let mut saw_quiet = false;
+
+        for event in events {
+            if let InputEvent::Data {
+                bytes, source_id, ..
+            } = event
+                && let Some(source_id) = source_id
+            {
+                if bytes
+                    .windows(quiet_payload.len())
+                    .any(|w| w == quiet_payload)
+                {
+                    saw_quiet = true;
+                }
+                *bytes_by_source.entry(source_id).or_insert(0) += bytes.len();
+            }
+        }
+
+        assert!(saw_quiet, "quiet client should make progress in same poll");
+        assert!(
+            bytes_by_source.len() >= 2,
+            "expected data from both quiet and noisy connections"
+        );
+        let max_forwarded = bytes_by_source.values().copied().max().unwrap_or(0);
+        assert!(
+            max_forwarded > quiet_payload.len(),
+            "a larger noisy payload should also be forwarded"
+        );
+        assert!(
+            max_forwarded <= MAX_BYTES_PER_CLIENT_PER_POLL,
+            "a client's forwarded payload should respect per-poll bounded reads"
+        );
+    }
+}
+
+#[cfg(kani)]
+mod verification {
+    use super::{
+        MAX_BYTES_PER_CLIENT_PER_POLL, MAX_READS_PER_CLIENT_PER_POLL, should_stop_client_read,
+    };
+
+    #[kani::proof]
+    fn verify_zero_counters_do_not_stop_client_read() {
+        assert!(!should_stop_client_read(0, 0));
+        kani::cover!(
+            !should_stop_client_read(0, 0),
+            "non-stopping path is reachable"
+        );
+    }
+
+    #[kani::proof]
+    fn verify_each_limit_independently_stops_client_read() {
+        let reads_done = kani::any::<usize>();
+        assert!(should_stop_client_read(
+            MAX_BYTES_PER_CLIENT_PER_POLL,
+            reads_done
+        ));
+        kani::cover!(
+            should_stop_client_read(MAX_BYTES_PER_CLIENT_PER_POLL, 0),
+            "byte-cap stop path is reachable"
+        );
+
+        let bytes_read = kani::any::<usize>();
+        assert!(should_stop_client_read(
+            bytes_read,
+            MAX_READS_PER_CLIENT_PER_POLL
+        ));
+        kani::cover!(
+            should_stop_client_read(0, MAX_READS_PER_CLIENT_PER_POLL),
+            "read-cap stop path is reachable"
+        );
+    }
+
+    #[kani::proof]
+    fn verify_stop_predicate_equivalence() {
+        let bytes_read = kani::any::<usize>();
+        let reads_done = kani::any::<usize>();
+        let expected = bytes_read >= MAX_BYTES_PER_CLIENT_PER_POLL
+            || reads_done >= MAX_READS_PER_CLIENT_PER_POLL;
+        assert_eq!(should_stop_client_read(bytes_read, reads_done), expected);
+        kani::cover!(
+            should_stop_client_read(MAX_BYTES_PER_CLIENT_PER_POLL, 0),
+            "stop branch reachable"
+        );
+        kani::cover!(!should_stop_client_read(0, 0), "continue branch reachable");
     }
 }

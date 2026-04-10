@@ -173,3 +173,33 @@ mod tests {
         );
     }
 }
+
+#[cfg(kani)]
+mod verification {
+    use super::should_retry_flush;
+
+    #[kani::proof]
+    fn verify_zero_or_one_attempt_never_retries() {
+        let attempt = kani::any::<u32>();
+        assert!(!should_retry_flush(attempt, 0));
+        assert!(!should_retry_flush(attempt, 1));
+        kani::cover!(
+            !should_retry_flush(0, 0),
+            "zero-attempt no-retry path reachable"
+        );
+        kani::cover!(
+            !should_retry_flush(0, 1),
+            "one-attempt no-retry path reachable"
+        );
+    }
+
+    #[kani::proof]
+    fn verify_retry_window_equivalence() {
+        let attempt = kani::any::<u32>();
+        let max_attempts = kani::any::<u32>();
+        let expected = max_attempts > 0 && attempt.saturating_add(1) < max_attempts;
+        assert_eq!(should_retry_flush(attempt, max_attempts), expected);
+        kani::cover!(should_retry_flush(0, 2), "retry path reachable");
+        kani::cover!(!should_retry_flush(1, 2), "terminal-attempt path reachable");
+    }
+}

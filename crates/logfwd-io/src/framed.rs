@@ -336,6 +336,8 @@ impl InputSource for FramedInput {
                                         &mut self.out_buf,
                                     );
                                 }
+                                let emitted_line_count =
+                                    memchr::memchr_iter(b'\n', &remainder[process_start..]).count();
                                 if inject_source_path {
                                     if let Some(source_path) = source_path_for(
                                         key,
@@ -355,7 +357,7 @@ impl InputSource for FramedInput {
                                     }
                                 }
 
-                                self.stats.inc_lines(1);
+                                self.stats.inc_lines(emitted_line_count as u64);
 
                                 // Remainder was flushed — update tracker so
                                 // checkpointable_offset advances past the
@@ -1166,6 +1168,84 @@ mod tests {
 
         let events2 = framed.poll().unwrap();
         assert!(collect_data(events2).is_empty());
+    }
+
+    #[test]
+    fn eof_flushes_remainder_and_advances_checkpoint() {
+        let stats = make_stats();
+        let sid = SourceId(42);
+        let chunk = b"partial-line";
+        let source = MockSource::new(vec![
+            vec![InputEvent::Data {
+                bytes: chunk.to_vec(),
+                source_id: Some(sid),
+                accounted_bytes: chunk.len() as u64,
+            }],
+            vec![InputEvent::EndOfFile {
+                source_id: Some(sid),
+            }],
+        ])
+        .with_offsets(vec![(sid, ByteOffset(chunk.len() as u64))]);
+        let mut framed = FramedInput::new(
+            Box::new(source),
+            FormatDecoder::passthrough(Arc::clone(&stats)),
+            Arc::clone(&stats),
+        );
+
+        let events1 = framed.poll().expect("first poll");
+        assert!(collect_data(events1).is_empty());
+        let before_flush = framed.checkpoint_data();
+        assert_eq!(before_flush[0].0, sid);
+        assert!(
+            before_flush[0].1.0 < chunk.len() as u64,
+            "checkpoint should remain behind raw offset while remainder is buffered"
+        );
+
+        let events2 = framed.poll().expect("eof poll");
+        assert_eq!(collect_data(events2), b"partial-line\n");
+        let after_flush = framed.checkpoint_data();
+        assert_eq!(after_flush[0], (sid, ByteOffset(chunk.len() as u64)));
+    }
+
+    #[test]
+    fn eof_for_source_only_flushes_matching_remainder() {
+        let stats = make_stats();
+        let sid_a = SourceId(10);
+        let sid_b = SourceId(11);
+        let source = MockSource::new(vec![
+            vec![
+                InputEvent::Data {
+                    bytes: b"alpha".to_vec(),
+                    source_id: Some(sid_a),
+                    accounted_bytes: 5,
+                },
+                InputEvent::Data {
+                    bytes: b"beta".to_vec(),
+                    source_id: Some(sid_b),
+                    accounted_bytes: 4,
+                },
+            ],
+            vec![InputEvent::EndOfFile {
+                source_id: Some(sid_a),
+            }],
+        ]);
+        let mut framed = FramedInput::new(
+            Box::new(source),
+            FormatDecoder::passthrough(Arc::clone(&stats)),
+            Arc::clone(&stats),
+        );
+
+        let first = framed.poll().expect("first poll");
+        assert!(collect_data(first).is_empty());
+
+        let flushed = framed.poll().expect("second poll");
+        assert_eq!(collect_data(flushed), b"alpha\n");
+
+        let state_b = framed
+            .sources
+            .get(&Some(sid_b))
+            .expect("sid_b state should still exist");
+        assert_eq!(state_b.remainder, b"beta");
     }
 
     // -----------------------------------------------------------------------
