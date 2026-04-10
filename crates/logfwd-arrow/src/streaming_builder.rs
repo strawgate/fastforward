@@ -493,7 +493,7 @@ impl StreamingBuilder {
 
     /// Store a zero-copy view of the raw unparsed line.
     ///
-    /// Only has effect when the builder was created with `line_field_name: Some("body".to_string())`.
+    /// Only has effect when the builder was created with line capture enabled.
     /// The line must be a subslice of the buffer passed to `begin_batch`.
     ///
     /// First writer wins: if called multiple times in the same row, only the
@@ -506,12 +506,14 @@ impl StreamingBuilder {
             BuilderState::InRow,
             "append_line called outside of a row"
         );
-        if self.line_field_name.is_some()
-            && !self.line_written_this_row
-            && std::str::from_utf8(line).is_ok()
-        {
+        if self.line_field_name.is_some() && !self.line_written_this_row {
             let offset = self.offset_of(line);
-            self.line_views.push((offset, line.len() as u32));
+            let len = if std::str::from_utf8(line).is_ok() {
+                line.len() as u32
+            } else {
+                0
+            };
+            self.line_views.push((offset, len));
             self.line_written_this_row = true;
         }
     }
@@ -1411,22 +1413,30 @@ mod tests {
     }
 
     #[test]
-    fn test_append_line_rejects_invalid_utf8_and_reports_cardinality_error() {
+    fn test_append_line_invalid_utf8_uses_empty_placeholder() {
         let buf = bytes::Bytes::from(vec![0xff, b'\n']);
         let mut b = StreamingBuilder::new(Some("body".to_string()));
         b.begin_batch(buf.clone());
         b.begin_row();
-        b.append_line(&buf[0..1]); // invalid UTF-8, should be ignored
+        b.append_line(&buf[0..1]); // invalid UTF-8, should produce an empty placeholder
         b.end_row();
 
-        let err = b
+        let batch = b
             .finish_batch()
-            .expect_err("invalid UTF-8 line capture should fail cardinality check")
-            .to_string();
-        assert!(
-            err.contains("cardinality mismatch"),
-            "expected cardinality mismatch error, got: {err}"
-        );
+            .expect("invalid UTF-8 line capture should preserve row cardinality");
+        let body = batch
+            .column_by_name("body")
+            .expect("line capture column should be present");
+        if let Some(arr) = body
+            .as_any()
+            .downcast_ref::<arrow::array::StringViewArray>()
+        {
+            assert_eq!(arr.value(0), "");
+        } else if let Some(arr) = body.as_any().downcast_ref::<arrow::array::StringArray>() {
+            assert_eq!(arr.value(0), "");
+        } else {
+            panic!("body column must be StringArray or StringViewArray");
+        }
     }
 
     /// `append_line` is a no-op when `line_capture` is false -- `body` column absent.

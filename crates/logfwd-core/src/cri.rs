@@ -554,16 +554,26 @@ mod tests {
     }
 
     #[test]
-    fn test_write_json_line_plain_text_uses_configured_field() {
+    fn test_process_cri_to_buf_plain_text_uses_configured_field() {
+        let chunk = b"2024-01-15T10:30:00Z stdout F application started\n";
+        let mut reassembler = CriReassembler::new(1024 * 1024);
         let mut out = Vec::new();
-        write_json_line_with_plain_text_field(b"application started", None, "body", &mut out);
-        assert_eq!(out, b"{\"body\":\"application started\"}\n");
+        let (count, errors) = process_cri_to_buf_with_plain_text_field(
+            chunk,
+            &mut reassembler,
+            None,
+            "plain_text",
+            &mut out,
+        );
+        assert_eq!(count, 1);
+        assert_eq!(errors, 0);
+        assert_eq!(out, b"{\"plain_text\":\"application started\"}\n");
     }
 
     #[test]
     fn test_write_json_line_plain_text_escapes_special_chars() {
         // JSON-special characters in the message must be escaped.
-        let mut out = Vec::new();
+        let mut out = Vec::with_capacity(256);
         write_json_line(b"say \"hello\"", None, &mut out);
         assert_eq!(out, b"{\"body\":\"say \\\"hello\\\"\"}\n");
     }

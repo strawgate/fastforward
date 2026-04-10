@@ -16,7 +16,7 @@ use std::sync::Arc;
 /// - `PassthroughJson`: lines are expected to be JSON objects; non-JSON lines
 ///   are still forwarded but counted as `parse_errors`
 /// - `Cri`: parse CRI container log format, extract message body
-/// - `Auto`: try CRI, fall through to passthrough on parse failure
+/// - `Auto`: try CRI, preserve JSON fallback, wrap plain-text fallback
 #[non_exhaustive]
 pub enum FormatDecoder {
     Passthrough {
@@ -101,7 +101,11 @@ impl FormatDecoder {
         }
     }
 
-    /// Create an Auto format processor (tries CRI, falls through to passthrough).
+    /// Create an Auto format processor.
+    ///
+    /// CRI lines are decoded with `_timestamp` / `_stream` metadata. Non-CRI
+    /// JSON object lines pass through unchanged. Non-CRI plain-text lines are
+    /// wrapped into the configured plain-text field.
     pub fn auto(max_message_size: usize, stats: Arc<ComponentStats>) -> Self {
         Self::auto_with_plain_text_field(max_message_size, "body".to_string(), stats)
     }
@@ -276,14 +280,33 @@ fn extract_cri_messages(
             // Break any pending CRI aggregation at parse/fallback boundaries.
             reset_stream_aggregators(aggregators);
             if !line.is_empty() && passthrough_on_fail {
-                out.extend_from_slice(line);
-                out.push(b'\n');
+                if starts_with_json_object(line) {
+                    out.extend_from_slice(line);
+                    out.push(b'\n');
+                } else {
+                    write_plain_text_fallback(line, plain_text_field_name, out);
+                }
             } else if !line.is_empty() {
                 stats.inc_parse_errors(1);
             }
         }
         pos = eol + 1;
     }
+}
+
+fn starts_with_json_object(line: &[u8]) -> bool {
+    let first_nonws = line
+        .iter()
+        .position(|&b| !matches!(b, b' ' | b'\t' | b'\r'));
+    first_nonws.is_some_and(|idx| line[idx] == b'{')
+}
+
+fn write_plain_text_fallback(line: &[u8], plain_text_field_name: &str, out: &mut Vec<u8>) {
+    out.extend_from_slice(b"{\"");
+    json_escape_bytes(plain_text_field_name.as_bytes(), out);
+    out.extend_from_slice(b"\":\"");
+    json_escape_bytes(line, out);
+    out.extend_from_slice(b"\"}\n");
 }
 
 /// Inject `_timestamp` and `_stream` CRI metadata into a JSON message and
@@ -447,13 +470,23 @@ mod tests {
     }
 
     #[test]
-    fn auto_passthrough_for_non_cri() {
+    fn auto_passthrough_for_non_cri_json() {
         let stats = make_stats();
         let mut proc = FormatDecoder::auto(2 * 1024 * 1024, stats);
         let input = b"{\"msg\":\"plain json\"}\n";
         let mut out = Vec::new();
         proc.process_lines(input, &mut out);
         assert_eq!(out, b"{\"msg\":\"plain json\"}\n");
+    }
+
+    #[test]
+    fn auto_wraps_plain_text_for_non_cri() {
+        let stats = make_stats();
+        let mut proc = FormatDecoder::auto(2 * 1024 * 1024, stats);
+        let input = b"not a cri line\n";
+        let mut out = Vec::new();
+        proc.process_lines(input, &mut out);
+        assert_eq!(out, b"{\"body\":\"not a cri line\"}\n");
     }
 
     #[test]
@@ -481,7 +514,7 @@ mod tests {
         proc.process_lines(b"2024-01-15T10:30:00Z stdout F world\n", &mut out);
 
         let mut expected = Vec::new();
-        expected.extend_from_slice(b"not a cri line\n");
+        expected.extend_from_slice(b"{\"body\":\"not a cri line\"}\n");
         expected.extend_from_slice(
             b"{\"_timestamp\":\"2024-01-15T10:30:00Z\",\"_stream\":\"stdout\",\"body\":\"world\"}\n",
         );

@@ -233,10 +233,10 @@ impl Pipeline {
             }
 
             let mut scan_config = transform.scan_config();
-            // Raw and auto formats can send non-JSON lines to the scanner.
-            // Capture each full line in the canonical body field so downstream
-            // SQL/sinks can read it consistently.
-            if matches!(input_cfg.format, Some(Format::Raw | Format::Auto)) {
+            // Raw format sends plain text directly to the scanner, so capture
+            // the original line in the canonical body field for downstream SQL
+            // and sinks. Auto mode wraps plain-text fallback into JSON.
+            if matches!(input_cfg.format, Some(Format::Raw)) {
                 scan_config.line_field_name = Some(field_names::BODY.to_string());
             }
             let otlp_structured_ingress = otlp_uses_structured_ingress(&scan_config);

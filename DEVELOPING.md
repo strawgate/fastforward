@@ -199,9 +199,9 @@ carry them explicitly through `InputEvent::Data` or `InputEvent::Batch`.
 
 Compressed Arrow IPC is `StreamWriter` with `IpcWriteOptions::try_with_compression(Some(CompressionType::ZSTD))`. Any `RecordBatch` can be compressed. No special builder needed.
 
-### Line Capture Costs 65% Of Table Memory
+### Line Capture Can Dominate Table Memory
 
-The `body` column can store the full input line and is often larger than all parsed columns combined. Line capture is disabled unless configured (raw/auto inputs default to `line_field_name: body`).
+The `body` column can store the full input line and is often larger than all parsed columns combined. Line capture is disabled unless configured (raw inputs default to `line_field_name: body`).
 
 ### Always use `just clippy`, never bare `cargo clippy`
 
