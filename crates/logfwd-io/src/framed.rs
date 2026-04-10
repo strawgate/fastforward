@@ -21,6 +21,7 @@ use logfwd_types::pipeline::SourceId;
 use std::collections::HashMap;
 use std::io;
 use std::io::Write as _;
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 /// Maximum remainder buffer size before discarding (prevents OOM on
@@ -29,10 +30,10 @@ const MAX_REMAINDER_BYTES: usize = 2 * 1024 * 1024;
 
 /// Per-source state for framing and checkpoint tracking.
 ///
-/// Each logical source (identified by `Option<SourceId>`) gets its own
-/// remainder buffer, format processor, and checkpoint tracker. This
-/// prevents cross-contamination between sources for both newline framing
-/// and stateful format processing (e.g., CRI P/F aggregation).
+/// Each logical source gets its own remainder buffer, format processor, and
+/// checkpoint tracker. This prevents cross-contamination between sources for
+/// both newline framing and stateful format processing (e.g., CRI P/F
+/// aggregation).
 struct SourceState {
     /// Partial-line bytes after the last newline.
     remainder: Vec<u8>,
@@ -47,6 +48,48 @@ struct SourceState {
     overflow_tainted: bool,
 }
 
+/// Stable identity for framing state.
+///
+/// File-backed inputs key by `SourceId`. Push sources without a `SourceId`
+/// fall back to sender address when available so stateful decoders do not
+/// merge partial records across peers.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum SourceKey {
+    SourceId(SourceId),
+    Sender(SocketAddr),
+    Anonymous,
+}
+
+impl SourceKey {
+    fn from_event(source_id: Option<SourceId>, sender_addr: Option<SocketAddr>) -> Self {
+        if let Some(source_id) = source_id {
+            Self::SourceId(source_id)
+        } else if let Some(sender_addr) = sender_addr {
+            Self::Sender(sender_addr)
+        } else {
+            Self::Anonymous
+        }
+    }
+
+    fn from_source_id(source_id: Option<SourceId>) -> Self {
+        source_id.map_or(Self::Anonymous, Self::SourceId)
+    }
+
+    fn source_id(self) -> Option<SourceId> {
+        match self {
+            Self::SourceId(source_id) => Some(source_id),
+            Self::Sender(_) | Self::Anonymous => None,
+        }
+    }
+
+    fn sender_addr(self) -> Option<SocketAddr> {
+        match self {
+            Self::Sender(sender_addr) => Some(sender_addr),
+            Self::SourceId(_) | Self::Anonymous => None,
+        }
+    }
+}
+
 /// Wraps a raw [`InputSource`] with newline framing and format processing.
 ///
 /// The inner source provides raw bytes (from file, TCP, UDP, etc.). This
@@ -54,16 +97,15 @@ struct SourceState {
 /// and runs format-specific processing (CRI extraction, passthrough, etc.).
 /// The output is scanner-ready bytes.
 ///
-/// All per-source state (remainder, format, checkpoint tracker) is keyed by
-/// `Option<SourceId>` so that interleaved data from multiple sources never
-/// mixes partial lines or CRI aggregation state. Sources without identity
-/// (`None`) share a single state entry.
+/// All per-source state (remainder, format, checkpoint tracker) is keyed by a
+/// stable logical source so that interleaved data from different files or
+/// network peers never mixes partial lines or CRI aggregation state.
 pub struct FramedInput {
     inner: Box<dyn InputSource>,
     /// Template format processor — cloned per-source on first data arrival.
     format_template: FormatDecoder,
     /// Per-source state: remainder, format processor, checkpoint tracker.
-    sources: HashMap<Option<SourceId>, SourceState>,
+    sources: HashMap<SourceKey, SourceState>,
     out_buf: Vec<u8>,
     /// Spare buffer swapped in when out_buf is emitted, preserving capacity
     /// across polls without allocating.
@@ -109,7 +151,7 @@ impl InputSource for FramedInput {
                 } => {
                     self.stats.inc_bytes(accounted_bytes);
 
-                    let key = source_id;
+                    let key = SourceKey::from_event(source_id, sender_addr);
                     let n_bytes = bytes.len() as u64;
 
                     // Get or create per-source state.
@@ -164,7 +206,7 @@ impl InputSource for FramedInput {
                                     // eventually emit a complete line. Emit a warning
                                     // so the data loss is not silent.
                                     tracing::warn!(
-                                        source_id = ?key,
+                                        source = ?key,
                                         tail_bytes = tail.len(),
                                         max_remainder_bytes = MAX_REMAINDER_BYTES,
                                         "framed.remainder_overflow — partial line exceeds \
@@ -197,7 +239,7 @@ impl InputSource for FramedInput {
                                 // Same overflow policy as the tail case: warn, reset
                                 // format state, and keep the most recent bytes.
                                 tracing::warn!(
-                                    source_id = ?key,
+                                    source = ?key,
                                     chunk_bytes = chunk.len(),
                                     max_remainder_bytes = MAX_REMAINDER_BYTES,
                                     "framed.remainder_overflow — partial line exceeds \
@@ -301,7 +343,7 @@ impl InputSource for FramedInput {
                 | InputEvent::Truncated { source_id }) => {
                     match source_id {
                         Some(_) => {
-                            self.sources.remove(&source_id);
+                            self.sources.remove(&SourceKey::from_source_id(source_id));
                         }
                         None => {
                             self.sources.clear();
@@ -320,8 +362,8 @@ impl InputSource for FramedInput {
                 // remainder. When unknown (None), flush all remainders as a
                 // conservative fallback.
                 InputEvent::EndOfFile { source_id } => {
-                    let keys_to_flush: Vec<Option<SourceId>> = match source_id {
-                        Some(_) => vec![source_id],
+                    let keys_to_flush: Vec<SourceKey> = match source_id {
+                        Some(_) => vec![SourceKey::from_source_id(source_id)],
                         None => self.sources.keys().copied().collect(),
                     };
                     for key in keys_to_flush {
@@ -378,9 +420,9 @@ impl InputSource for FramedInput {
                                     std::mem::swap(&mut self.out_buf, &mut self.spare_buf);
                                     result_events.push(InputEvent::Data {
                                         bytes: data,
-                                        source_id: key,
+                                        source_id: key.source_id(),
                                         accounted_bytes: 0,
-                                        sender_addr: None,
+                                        sender_addr: key.sender_addr(),
                                     });
                                 }
                             }
@@ -419,15 +461,18 @@ impl InputSource for FramedInput {
             .checkpoint_data()
             .into_iter()
             .map(|(sid, offset)| {
-                let checkpointable = self.sources.get(&Some(sid)).map_or(offset.0, |state| {
-                    // The tracker's checkpointable_offset is relative to
-                    // the tracker's cumulative read_offset. We need to
-                    // translate: the inner source reports absolute file
-                    // offset, and the tracker reports how much remainder
-                    // to subtract.
-                    let remainder_len = state.tracker.remainder_len();
-                    offset.0.saturating_sub(remainder_len)
-                });
+                let checkpointable =
+                    self.sources
+                        .get(&SourceKey::SourceId(sid))
+                        .map_or(offset.0, |state| {
+                            // The tracker's checkpointable_offset is relative to
+                            // the tracker's cumulative read_offset. We need to
+                            // translate: the inner source reports absolute file
+                            // offset, and the tracker reports how much remainder
+                            // to subtract.
+                            let remainder_len = state.tracker.remainder_len();
+                            offset.0.saturating_sub(remainder_len)
+                        });
                 (sid, ByteOffset(checkpointable))
             })
             .collect()
@@ -443,11 +488,11 @@ impl InputSource for FramedInput {
 }
 
 fn source_path_for<'a>(
-    source_id: Option<SourceId>,
+    source_key: SourceKey,
     source_path_by_id: &'a mut Option<HashMap<SourceId, std::path::PathBuf>>,
     inner: &dyn InputSource,
 ) -> Option<&'a std::path::PathBuf> {
-    let sid = source_id?;
+    let sid = source_key.source_id()?;
     if source_path_by_id.is_none() {
         *source_path_by_id = Some(inner.source_paths().into_iter().collect());
     }
@@ -459,7 +504,7 @@ fn inject_source_path_metadata(chunk: &[u8], source_path: &std::path::Path, out:
     inject_json_metadata(chunk, b"_source_path", source_path_bytes.as_bytes(), out);
 }
 
-fn inject_sender_metadata(chunk: &[u8], sender: std::net::SocketAddr, out: &mut Vec<u8>) {
+fn inject_sender_metadata(chunk: &[u8], sender: SocketAddr, out: &mut Vec<u8>) {
     let mut pos = 0;
     while pos < chunk.len() {
         let eol = memchr::memchr(b'\n', &chunk[pos..]).map_or(chunk.len(), |o| pos + o);
@@ -765,7 +810,7 @@ mod tests {
     #[test]
     fn data_events_preserve_sender_addr() {
         let stats = make_stats();
-        let expected_sender: std::net::SocketAddr = "127.0.0.1:9001".parse().unwrap();
+        let expected_sender: SocketAddr = "127.0.0.1:9001".parse().unwrap();
         let source = MockSource::new(vec![vec![InputEvent::Data {
             bytes: b"line\n".to_vec(),
             source_id: None,
@@ -811,7 +856,7 @@ mod tests {
             1
         );
         // The overflow remainder is capped but NOT discarded.
-        let state = framed.sources.get(&None).unwrap();
+        let state = framed.sources.get(&SourceKey::Anonymous).unwrap();
         assert_eq!(
             state.remainder.len(),
             MAX_REMAINDER_BYTES,
@@ -850,7 +895,7 @@ mod tests {
             1
         );
         // The overflow remainder is preserved (not silently dropped).
-        let state = framed.sources.get(&None).unwrap();
+        let state = framed.sources.get(&SourceKey::Anonymous).unwrap();
         assert_eq!(
             state.remainder.len(),
             MAX_REMAINDER_BYTES,
@@ -934,10 +979,11 @@ mod tests {
 
     /// `checkpoint_data()` must account for overflow remainder when the source
     /// has a real `SourceId`.  With `source_id: None` the lookup in
-    /// `self.sources.get(&Some(sid))` silently falls back to the raw offset,
+    /// `self.sources.get(&SourceKey::SourceId(sid))` silently falls back to the raw offset,
     /// making the assertion trivially true regardless of correctness.  This
     /// test uses `from_chunks_with_source` so the per-source state is actually
-    /// keyed under `Some(SourceId(1))` and the checkpoint path is exercised.
+    /// keyed under `SourceKey::SourceId(SourceId(1))` and the checkpoint path
+    /// is exercised.
     #[test]
     fn checkpoint_data_accounts_for_overflow_remainder() {
         let stats = make_stats();
@@ -962,8 +1008,8 @@ mod tests {
         // is capped to MAX_REMAINDER_BYTES.
         let _ = framed.poll().unwrap();
 
-        // The per-source state must be reachable under Some(sid).
-        let state = framed.sources.get(&Some(sid)).unwrap();
+        // The per-source state must be reachable under SourceKey::SourceId(sid).
+        let state = framed.sources.get(&SourceKey::SourceId(sid)).unwrap();
         assert_eq!(state.remainder.len(), MAX_REMAINDER_BYTES);
 
         // checkpoint_data() must subtract the remainder length from the raw
@@ -984,7 +1030,7 @@ mod tests {
 
     /// `checkpoint_data()` must account for the overflow tail remainder when
     /// a newline precedes the overflow.  Uses `from_chunks_with_source` so the
-    /// assertion exercises the real `self.sources.get(&Some(sid))` path.
+    /// assertion exercises the real `self.sources.get(&SourceKey::SourceId(sid))` path.
     #[test]
     fn checkpoint_data_accounts_for_overflow_tail_remainder() {
         let stats = make_stats();
@@ -1005,8 +1051,8 @@ mod tests {
         let events = framed.poll().unwrap();
         assert_eq!(collect_data(events), b"ok\n");
 
-        // Per-source state is keyed under Some(sid).
-        let state = framed.sources.get(&Some(sid)).unwrap();
+        // Per-source state is keyed under SourceKey::SourceId(sid).
+        let state = framed.sources.get(&SourceKey::SourceId(sid)).unwrap();
         assert_eq!(state.remainder.len(), MAX_REMAINDER_BYTES);
 
         // The checkpoint must be behind the raw offset because the remainder
@@ -1455,6 +1501,69 @@ mod tests {
         );
     }
 
+    #[test]
+    fn cri_pf_state_isolated_between_udp_senders() {
+        let stats = make_stats();
+        let sender_a: SocketAddr = "127.0.0.1:9102".parse().unwrap();
+        let sender_b: SocketAddr = "127.0.0.1:9103".parse().unwrap();
+
+        let source = MockSource::new(vec![
+            vec![InputEvent::Data {
+                bytes: b"2024-01-15T10:30:00Z stdout P hello \n".to_vec(),
+                source_id: None,
+                accounted_bytes: 38,
+                sender_addr: Some(sender_a),
+            }],
+            vec![InputEvent::Data {
+                bytes: b"2024-01-15T10:30:01Z stderr F {\"msg\":\"world\"}\n".to_vec(),
+                source_id: None,
+                accounted_bytes: 50,
+                sender_addr: Some(sender_b),
+            }],
+            vec![InputEvent::Data {
+                bytes: b"2024-01-15T10:30:02Z stdout F from-A\n".to_vec(),
+                source_id: None,
+                accounted_bytes: 39,
+                sender_addr: Some(sender_a),
+            }],
+        ]);
+
+        let mut framed = FramedInput::new(
+            Box::new(source),
+            FormatDecoder::cri(2 * 1024 * 1024, Arc::clone(&stats)),
+            stats,
+        );
+
+        let events1 = framed.poll().unwrap();
+        assert!(collect_data(events1).is_empty());
+
+        let events2 = framed.poll().unwrap();
+        let data2 = collect_data(events2);
+        assert!(
+            data2
+                .windows(b"\"_sender\":\"127.0.0.1:9103\"".len())
+                .any(|window| window == b"\"_sender\":\"127.0.0.1:9103\""),
+            "sender B should remain isolated from sender A partial state"
+        );
+        assert!(
+            !data2.windows(5).any(|w| w == b"hello"),
+            "sender B output must not contain sender A partial content"
+        );
+
+        let events3 = framed.poll().unwrap();
+        let data3 = collect_data(events3);
+        assert!(
+            data3
+                .windows(b"\"_sender\":\"127.0.0.1:9102\"".len())
+                .any(|window| window == b"\"_sender\":\"127.0.0.1:9102\""),
+            "sender A completion should keep sender A attribution"
+        );
+        assert!(
+            data3.windows(5).any(|w| w == b"hello"),
+            "sender A output should contain the merged P+F data"
+        );
+    }
+
     /// CheckpointTracker is updated correctly through framing operations.
     #[test]
     fn checkpoint_tracker_tracks_remainder() {
@@ -1487,12 +1596,12 @@ mod tests {
 
         // After first poll: remainder is "wor" (3 bytes)
         let _ = framed.poll().unwrap();
-        let state = framed.sources.get(&Some(sid)).unwrap();
+        let state = framed.sources.get(&SourceKey::SourceId(sid)).unwrap();
         assert_eq!(state.tracker.remainder_len(), 3);
 
         // After second poll: remainder is empty (all consumed)
         let _ = framed.poll().unwrap();
-        let state = framed.sources.get(&Some(sid)).unwrap();
+        let state = framed.sources.get(&SourceKey::SourceId(sid)).unwrap();
         assert_eq!(state.tracker.remainder_len(), 0);
 
         // Checkpoint should reflect: 12 - 0 = 12
@@ -1529,7 +1638,7 @@ mod tests {
     fn file_json_injects_sender_metadata_column() {
         let stats = make_stats();
         let sid = SourceId(12);
-        let sender_addr: std::net::SocketAddr = "127.0.0.1:9100".parse().unwrap();
+        let sender_addr: SocketAddr = "127.0.0.1:9100".parse().unwrap();
         let source = MockSource::new(vec![vec![InputEvent::Data {
             bytes: b"{\"msg\":\"hello\"}\n".to_vec(),
             source_id: Some(sid),
@@ -1555,7 +1664,7 @@ mod tests {
     fn raw_passthrough_injects_sender_metadata_without_source_path_support() {
         let stats = make_stats();
         let sid = SourceId(13);
-        let sender_addr: std::net::SocketAddr = "127.0.0.1:9101".parse().unwrap();
+        let sender_addr: SocketAddr = "127.0.0.1:9101".parse().unwrap();
         let source = MockSource::new(vec![vec![InputEvent::Data {
             bytes: b"{\"msg\":\"hello\"}\n".to_vec(),
             source_id: Some(sid),

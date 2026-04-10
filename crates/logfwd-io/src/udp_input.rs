@@ -1,5 +1,5 @@
-//! UDP input source. Listens on a UDP socket and produces one InputEvent
-//! per received datagram.
+//! UDP input source. Listens on a UDP socket and produces `InputEvent::Data`
+//! batches while preserving sender attribution and receive order.
 use std::io;
 use std::net::UdpSocket;
 use std::sync::Arc;
@@ -18,8 +18,9 @@ const MAX_UDP_PAYLOAD: usize = 65507;
 /// cap it lower depending on `sysctl net.core.rmem_max`.
 const RECV_BUF_SIZE: usize = 8 * 1024 * 1024;
 
-/// UDP input that listens for datagrams. Each datagram is treated as one
-/// or more newline-delimited log lines.
+/// UDP input that listens for datagrams. Consecutive datagrams from the same
+/// sender in one poll cycle are coalesced into one event so allocation tracks
+/// sender runs instead of individual packets.
 pub struct UdpInput {
     name: String,
     socket: UdpSocket,
@@ -108,6 +109,25 @@ impl InputSource for UdpInput {
                 }
                 Ok((n, sender_addr)) => {
                     let data = &self.buf[..n];
+                    if let Some(InputEvent::Data {
+                        bytes,
+                        accounted_bytes,
+                        sender_addr: Some(last_sender),
+                        ..
+                    }) = events.last_mut()
+                    {
+                        if *last_sender == sender_addr {
+                            bytes.extend_from_slice(data);
+                            // Ensure newline termination so the scanner always sees
+                            // complete lines, even if the sender omitted a trailing LF.
+                            if !data.ends_with(b"\n") {
+                                bytes.push(b'\n');
+                            }
+                            *accounted_bytes = accounted_bytes.saturating_add(n as u64);
+                            continue;
+                        }
+                    }
+
                     let mut bytes = Vec::with_capacity(n + 1);
                     bytes.extend_from_slice(data);
                     // Ensure newline termination so the scanner always sees
@@ -190,8 +210,37 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(50));
 
         let events = input.poll().unwrap();
-        assert_eq!(events.len(), 2);
+        assert_eq!(events.len(), 1);
         assert_eq!(collect_data(events), b"hello world\nsecond line\n");
+    }
+
+    #[test]
+    fn coalesces_adjacent_datagrams_from_same_sender() {
+        let mut input = UdpInput::new("test", "127.0.0.1:0").unwrap();
+        let addr = input.local_addr().unwrap();
+
+        let sender = StdSocket::bind("127.0.0.1:0").unwrap();
+        let sender_addr = sender.local_addr().unwrap();
+        sender.send_to(b"one\n", addr).unwrap();
+        sender.send_to(b"two", addr).unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        let events = input.poll().unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            InputEvent::Data {
+                bytes,
+                accounted_bytes,
+                sender_addr: Some(actual_sender),
+                ..
+            } => {
+                assert_eq!(*actual_sender, sender_addr);
+                assert_eq!(*accounted_bytes, 7);
+                assert_eq!(bytes, b"one\ntwo\n");
+            }
+            _ => panic!("expected coalesced InputEvent::Data"),
+        }
     }
 
     #[test]
