@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+
 use logfwd_config::{Config, OutputConfig, OutputType};
 
 /// Fully rendered generated config plus its validated in-memory config.
@@ -120,23 +122,23 @@ pub fn render_blast_yaml(
     let mut yaml = String::new();
     yaml.push_str("pipelines:\n");
     yaml.push_str("  blast:\n");
-    yaml.push_str(&format!("    workers: {workers}\n"));
+    let _ = writeln!(yaml, "    workers: {workers}");
     yaml.push_str("    inputs:\n");
     yaml.push_str("      - type: generator\n");
     yaml.push_str("        format: json\n");
     yaml.push_str("        generator:\n");
-    yaml.push_str(&format!("          batch_size: {batch_lines}\n"));
+    let _ = writeln!(yaml, "          batch_size: {batch_lines}");
     yaml.push_str("          events_per_sec: 0\n");
     yaml.push_str("    outputs:\n");
-    yaml.push_str(&format!("      - type: {}\n", output_cfg.output_type));
+    let _ = writeln!(yaml, "      - type: {}", output_cfg.output_type);
 
     if let Some(endpoint) = &output_cfg.endpoint {
-        yaml.push_str(&format!("        endpoint: {}\n", yaml_quote(endpoint)));
+        let _ = writeln!(yaml, "        endpoint: {}", yaml_quote(endpoint));
     }
     if let Some(auth) = &output_cfg.auth {
         yaml.push_str("        auth:\n");
         if let Some(token) = &auth.bearer_token {
-            yaml.push_str(&format!("          bearer_token: {}\n", yaml_quote(token)));
+            let _ = writeln!(yaml, "          bearer_token: {}", yaml_quote(token));
         }
         if !auth.headers.is_empty() {
             yaml.push_str("          headers:\n");
@@ -144,21 +146,19 @@ pub fn render_blast_yaml(
             keys.sort();
             for key in keys {
                 if let Some(value) = auth.headers.get(key) {
-                    yaml.push_str(&format!(
-                        "            {}: {}\n",
+                    let _ = writeln!(
+                        yaml,
+                        "            {}: {}",
                         yaml_quote(key),
                         yaml_quote(value)
-                    ));
+                    );
                 }
             }
         }
     }
 
     yaml.push_str("server:\n");
-    yaml.push_str(&format!(
-        "  diagnostics: {}\n",
-        yaml_quote(diagnostics_addr)
-    ));
+    let _ = writeln!(yaml, "  diagnostics: {}", yaml_quote(diagnostics_addr));
     yaml
 }
 

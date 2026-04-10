@@ -377,6 +377,7 @@ fn build_platform_sensor_config(
 ///
 /// Structured ingress preserves typed OTLP fields but bypasses the scanner.
 /// If scanner line capture is required, use legacy scanner ingress.
+#[cfg(test)]
 pub(super) fn otlp_uses_structured_ingress(
     scan_config: &logfwd_core::scan_config::ScanConfig,
 ) -> bool {
