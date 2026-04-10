@@ -7,7 +7,7 @@ static ALLOC: dhat::Alloc = dhat::Alloc;
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 use std::env;
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, IsTerminal};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -204,19 +204,12 @@ impl BlastDestination {
         !matches!(self, Self::Null)
     }
 
-    fn has_auth_support(self) -> bool {
-        matches!(
-            self,
-            Self::Otlp | Self::Elasticsearch | Self::Loki | Self::ArrowIpc
-        )
-    }
-
     fn default_endpoint(self) -> &'static str {
         match self {
             Self::Otlp => "http://127.0.0.1:4318/v1/logs",
             Self::Elasticsearch => "http://127.0.0.1:9200",
             Self::Loki => "http://127.0.0.1:3100/loki/api/v1/push",
-            Self::ArrowIpc => "http://127.0.0.1:18081",
+            Self::ArrowIpc => "http://127.0.0.1:18081/v1/arrow",
             Self::Udp => "127.0.0.1:15514",
             Self::Tcp => "127.0.0.1:15140",
             Self::Null => "",
@@ -252,6 +245,18 @@ impl DevourMode {
             Self::Http => format!("http://{listen}/"),
             Self::ElasticsearchBulk => format!("http://{listen}/_bulk"),
             Self::Tcp | Self::Udp => listen.to_string(),
+        }
+    }
+
+    fn spec(self) -> logfwd_runtime::generated_cli::DevourModeSpec {
+        match self {
+            Self::Otlp => logfwd_runtime::generated_cli::DevourModeSpec::Otlp,
+            Self::Http => logfwd_runtime::generated_cli::DevourModeSpec::Http,
+            Self::ElasticsearchBulk => {
+                logfwd_runtime::generated_cli::DevourModeSpec::ElasticsearchBulk
+            }
+            Self::Tcp => logfwd_runtime::generated_cli::DevourModeSpec::Tcp,
+            Self::Udp => logfwd_runtime::generated_cli::DevourModeSpec::Udp,
         }
     }
 }
@@ -533,31 +538,42 @@ async fn cmd_blast(mut args: BlastArgs) -> Result<(), CliError> {
         ));
     }
 
-    let output_cfg = resolve_blast_output_config(&args)?;
-    let config_yaml = render_blast_yaml(&args, &output_cfg);
-    let config = logfwd_config::Config::load_str(&config_yaml)
-        .map_err(|e| CliError::Config(format!("build generated config: {e}")))?;
+    let destination = args
+        .destination
+        .ok_or_else(|| CliError::Config("blast requires --destination".to_owned()))?;
+    let generated = logfwd_runtime::generated_cli::build_blast_generated_config(
+        destination.as_output_type(),
+        args.endpoint.as_deref(),
+        args.auth_bearer_token.as_deref(),
+        &args.auth_header,
+        args.workers,
+        args.batch_lines,
+        &args.diagnostics_addr,
+    )
+    .map_err(CliError::Config)?;
 
     println!("Starting blast (runtime pipeline shortcut)...");
     println!(
         "destination={} workers={} batch_lines={}",
-        output_cfg.output_type, args.workers, args.batch_lines
+        destination.as_output_type(),
+        args.workers,
+        args.batch_lines
     );
     match args.duration_secs {
         Some(duration) => println!("duration={}s", duration),
         None => println!("duration=until-stopped (Ctrl-C)"),
     }
-    if let Some(endpoint) = &output_cfg.endpoint {
+    if let Some(endpoint) = &args.endpoint {
         println!("endpoint={endpoint}");
     }
     println!("diagnostics={}", args.diagnostics_addr);
 
     let auto_shutdown_after = args.duration_secs.map(Duration::from_secs);
     run_pipelines(
-        config,
+        generated.config,
         None,
         "<blast-generated>",
-        &config_yaml,
+        &generated.yaml,
         auto_shutdown_after,
     )
     .await
@@ -590,16 +606,19 @@ async fn cmd_devour(args: DevourArgs) -> Result<(), CliError> {
         println!("duration={}s", duration);
     }
 
-    let config_yaml = render_devour_yaml(&args, &listen);
-    let config = logfwd_config::Config::load_str(&config_yaml)
-        .map_err(|e| CliError::Config(format!("build generated config: {e}")))?;
+    let generated = logfwd_runtime::generated_cli::build_devour_generated_config(
+        args.mode.spec(),
+        &listen,
+        &args.diagnostics_addr,
+    )
+    .map_err(CliError::Config)?;
 
     let auto_shutdown_after = args.duration_secs.map(Duration::from_secs);
     run_pipelines(
-        config,
+        generated.config,
         None,
         "<devour-generated>",
-        &config_yaml,
+        &generated.yaml,
         auto_shutdown_after,
     )
     .await
@@ -680,152 +699,25 @@ fn resolve_blast_output_config(args: &BlastArgs) -> Result<logfwd_config::Output
     let destination = args
         .destination
         .ok_or_else(|| CliError::Config("blast requires --destination".to_owned()))?;
-
-    let mut output_cfg = logfwd_config::OutputConfig {
-        output_type: destination.as_output_type(),
-        ..logfwd_config::OutputConfig::default()
-    };
-
-    if destination.should_require_endpoint() {
-        let endpoint = args.endpoint.clone().ok_or_else(|| {
-            CliError::Config("blast requires --endpoint for this destination".to_owned())
-        })?;
-        output_cfg.endpoint = Some(endpoint);
-    }
-
-    if args.auth_bearer_token.is_some() || !args.auth_header.is_empty() {
-        if !destination.has_auth_support() {
-            return Err(CliError::Config(
-                "--auth-bearer-token/--auth-header are only supported for otlp, elasticsearch, loki, and arrow_ipc destinations"
-                    .to_owned(),
-            ));
-        }
-        let mut auth = output_cfg.auth.clone().unwrap_or_default();
-        if let Some(token) = &args.auth_bearer_token {
-            auth.bearer_token = Some(token.clone());
-        }
-        for spec in &args.auth_header {
-            let (key, value) = split_header(spec)?;
-            auth.headers.insert(key.to_string(), value.to_string());
-        }
-        output_cfg.auth = Some(auth);
-    }
-
-    Ok(output_cfg)
-}
-
-fn render_blast_yaml(args: &BlastArgs, output_cfg: &logfwd_config::OutputConfig) -> String {
-    let mut yaml = String::new();
-    yaml.push_str("pipelines:\n");
-    yaml.push_str("  blast:\n");
-    yaml.push_str(&format!("    workers: {}\n", args.workers));
-    yaml.push_str("    inputs:\n");
-    yaml.push_str("      - type: generator\n");
-    yaml.push_str("        format: json\n");
-    yaml.push_str("        generator:\n");
-    yaml.push_str(&format!("          batch_size: {}\n", args.batch_lines));
-    yaml.push_str("          events_per_sec: 0\n");
-    yaml.push_str("    outputs:\n");
-    yaml.push_str(&format!("      - type: {}\n", output_cfg.output_type));
-
-    if let Some(endpoint) = &output_cfg.endpoint {
-        yaml.push_str(&format!("        endpoint: {}\n", yaml_quote(endpoint)));
-    }
-    if let Some(auth) = &output_cfg.auth {
-        yaml.push_str("        auth:\n");
-        if let Some(token) = &auth.bearer_token {
-            yaml.push_str(&format!("          bearer_token: {}\n", yaml_quote(token)));
-        }
-        if !auth.headers.is_empty() {
-            yaml.push_str("          headers:\n");
-            let mut keys: Vec<_> = auth.headers.keys().collect();
-            keys.sort();
-            for key in keys {
-                if let Some(value) = auth.headers.get(key) {
-                    yaml.push_str(&format!(
-                        "            {}: {}\n",
-                        yaml_quote(key),
-                        yaml_quote(value)
-                    ));
-                }
-            }
-        }
-    }
-
-    yaml.push_str("server:\n");
-    yaml.push_str(&format!(
-        "  diagnostics: {}\n",
-        yaml_quote(&args.diagnostics_addr)
-    ));
-    yaml
+    logfwd_runtime::generated_cli::resolve_blast_output_config(
+        destination.as_output_type(),
+        args.endpoint.as_deref(),
+        args.auth_bearer_token.as_deref(),
+        &args.auth_header,
+    )
+    .map_err(CliError::Config)
 }
 
 fn render_devour_yaml(args: &DevourArgs, listen: &str) -> String {
-    let input = match args.mode {
-        DevourMode::Otlp => format!(
-            "input:\n  type: otlp\n  listen: {}\n  format: json\n",
-            yaml_quote(listen)
-        ),
-        DevourMode::Http => format!(
-            "input:\n  type: http\n  listen: {}\n  format: json\n  http:\n    path: '/'\n    strict_path: false\n    method: POST\n    response_code: 204\n",
-            yaml_quote(listen)
-        ),
-        DevourMode::ElasticsearchBulk => format!(
-            "input:\n  type: http\n  listen: {}\n  format: json\n  http:\n    path: '/_bulk'\n    strict_path: false\n    method: POST\n    response_code: 200\n    response_body: {}\n",
-            yaml_quote(listen),
-            yaml_quote("{\"errors\":false}")
-        ),
-        DevourMode::Tcp => format!(
-            "input:\n  type: tcp\n  listen: {}\n  format: json\n",
-            yaml_quote(listen)
-        ),
-        DevourMode::Udp => format!(
-            "input:\n  type: udp\n  listen: {}\n  format: json\n",
-            yaml_quote(listen)
-        ),
-    };
-
-    format!(
-        "{input}output:\n  type: null\nserver:\n  diagnostics: {}\n",
-        yaml_quote(&args.diagnostics_addr),
+    logfwd_runtime::generated_cli::render_devour_yaml(
+        args.mode.spec(),
+        listen,
+        &args.diagnostics_addr,
     )
 }
 
-fn split_header(spec: &str) -> Result<(&str, &str), CliError> {
-    let Some((key, value)) = spec.split_once('=') else {
-        return Err(CliError::Config(format!(
-            "invalid --auth-header '{spec}'; expected KEY=VALUE"
-        )));
-    };
-    if key.is_empty() {
-        return Err(CliError::Config(format!(
-            "invalid --auth-header '{spec}'; key must not be empty"
-        )));
-    }
-    Ok((key, value))
-}
-
 fn yaml_quote(value: &str) -> String {
-    let mut escaped = String::with_capacity(value.len() + 2);
-    escaped.push('"');
-    for ch in value.chars() {
-        match ch {
-            '\\' => escaped.push_str("\\\\"),
-            '"' => escaped.push_str("\\\""),
-            '\n' => escaped.push_str("\\n"),
-            '\r' => escaped.push_str("\\r"),
-            '\t' => escaped.push_str("\\t"),
-            '\u{08}' => escaped.push_str("\\b"),
-            '\u{0c}' => escaped.push_str("\\f"),
-            ch if ch.is_control() => {
-                let _ =
-                    std::fmt::Write::write_fmt(&mut escaped, format_args!("\\u{:04x}", ch as u32));
-            }
-            ch => escaped.push(ch),
-        }
-    }
-    escaped.push('"');
-    escaped
+    logfwd_runtime::generated_cli::yaml_quote(value)
 }
 
 fn cmd_generate_json(num_lines: usize, output_file: &str) -> Result<(), CliError> {
@@ -1979,7 +1871,7 @@ mod cli_tests {
     fn blast_arrow_ipc_default_endpoint_is_http_url() {
         assert_eq!(
             BlastDestination::ArrowIpc.default_endpoint(),
-            "http://127.0.0.1:18081"
+            "http://127.0.0.1:18081/v1/arrow"
         );
     }
 
@@ -1993,7 +1885,11 @@ mod cli_tests {
         };
         let yaml = render_devour_yaml(&args, "127.0.0.1:9200");
         assert!(yaml.contains("path: '/_bulk'"));
-        assert!(yaml.contains("response_body: \"{\\\"errors\\\":false}\""));
+        assert!(
+            yaml.contains(
+                "response_body: \"{\\\"took\\\":0,\\\"errors\\\":false,\\\"items\\\":[]}\""
+            )
+        );
     }
 
     #[test]
