@@ -2497,6 +2497,7 @@ dependencies = [
  "logfwd-arrow",
  "logfwd-config",
  "logfwd-core",
+ "logfwd-diagnostics",
  "logfwd-io",
  "logfwd-output",
  "logfwd-runtime",
@@ -2505,14 +2506,10 @@ dependencies = [
  "logfwd-types",
  "opentelemetry",
  "opentelemetry_sdk",
- "proptest",
  "serde_json",
- "serial_test",
  "stats_alloc",
  "tempfile",
- "tikv-jemalloc-ctl",
  "tikv-jemallocator",
- "tiny_http",
  "tokio",
  "tokio-util",
  "tracing",
@@ -2616,6 +2613,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "logfwd-diagnostics"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "logfwd-types",
+ "opentelemetry",
+ "opentelemetry_sdk",
+ "proptest",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "tiny_http",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "logfwd-ebpf-proto"
 version = "0.1.0"
 
@@ -2641,15 +2655,12 @@ dependencies = [
  "logfwd-types",
  "memchr",
  "notify",
- "opentelemetry",
  "opentelemetry-proto",
- "opentelemetry_sdk",
  "proptest",
  "proptest-state-machine",
  "prost",
  "serde",
  "serde_json",
- "serde_yaml_ng",
  "serial_test",
  "socket2",
  "sonic-rs",
@@ -2659,7 +2670,6 @@ dependencies = [
  "tokio",
  "tracing",
  "ureq",
- "url",
  "walkdir",
  "xxhash-rust",
  "zstd",
@@ -2728,6 +2738,7 @@ dependencies = [
  "logfwd-arrow",
  "logfwd-config",
  "logfwd-core",
+ "logfwd-diagnostics",
  "logfwd-io",
  "logfwd-output",
  "logfwd-test-utils",
@@ -2742,7 +2753,6 @@ dependencies = [
  "proptest",
  "serial_test",
  "smallvec",
- "stats_alloc",
  "tempfile",
  "thiserror",
  "tikv-jemalloc-ctl",

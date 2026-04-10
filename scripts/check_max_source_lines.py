@@ -20,6 +20,7 @@ SOURCE_SUFFIXES = {
     ".jsx",
     ".mjs",
     ".cjs",
+    ".html",
 }
 EXCLUDED_PARTS = {
     ".git",
@@ -28,7 +29,7 @@ EXCLUDED_PARTS = {
     "dashboard-dist",
 }
 EXCLUDED_FILES = {
-    "crates/logfwd-io/src/dashboard.html",
+    "crates/logfwd-diagnostics/src/dashboard.html",
 }
 
 

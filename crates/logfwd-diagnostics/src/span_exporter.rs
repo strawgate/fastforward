@@ -1,11 +1,11 @@
 //! In-process ring-buffer span exporter for the diagnostics trace explorer.
 //!
-//! [`RingBufferExporter`] implements [`SpanExporter`] and stores the last
+//! `RingBufferExporter` implements `SpanExporter` and stores the last
 //! `MAX_SPANS` completed spans in an `Arc<Mutex<VecDeque>>`. The
-//! [`SpanBuffer`] handle is shared with the diagnostics server, which reads
+//! `SpanBuffer` handle is shared with the diagnostics server, which reads
 //! from it to serve `/admin/v1/traces`.
 //!
-//! Spans are converted to [`TraceSpan`] (a lightweight, serde-serializable
+//! Spans are converted to `TraceSpan` (a lightweight, serde-serializable
 //! snapshot) on export so the raw SDK types don't escape this module.
 
 use opentelemetry::KeyValue;
@@ -22,6 +22,7 @@ const MAX_SPANS: usize = 16_000; // ~8000 batches × 2 spans each
 // Serializable span snapshot
 // ---------------------------------------------------------------------------
 
+/// Compact, serializable span snapshot served by diagnostics endpoints.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct TraceSpan {
     /// 32-char lowercase hex trace ID.
@@ -30,6 +31,7 @@ pub struct TraceSpan {
     pub span_id: String,
     /// 16-char lowercase hex parent span ID.  All-zeros = root span.
     pub parent_id: String,
+    /// Span name.
     pub name: String,
     /// Unix nanoseconds at span start.
     pub start_unix_ns: u64,
@@ -53,12 +55,17 @@ pub struct SpanBuffer {
 
 impl fmt::Debug for SpanBuffer {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let len = self.inner.lock().map(|b| b.len()).unwrap_or(0);
+        let len = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len();
         write!(f, "SpanBuffer({len} spans)")
     }
 }
 
 impl SpanBuffer {
+    /// Create a new shared ring buffer for completed spans.
     pub fn new() -> Self {
         Self {
             inner: Arc::new(Mutex::new(VecDeque::with_capacity(MAX_SPANS))),
@@ -67,10 +74,11 @@ impl SpanBuffer {
 
     /// Returns all buffered spans in insertion order (oldest first).
     pub fn get_spans(&self) -> Vec<TraceSpan> {
-        match self.inner.lock() {
-            Ok(buf) => buf.iter().cloned().collect(),
-            Err(_) => vec![],
-        }
+        let buf = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        buf.iter().cloned().collect()
     }
 }
 
@@ -84,12 +92,14 @@ impl Default for SpanBuffer {
 impl SpanBuffer {
     /// Push a span directly — test-only helper to populate the buffer.
     pub fn push_test_span(&self, span: TraceSpan) {
-        if let Ok(mut buf) = self.inner.lock() {
-            if buf.len() >= MAX_SPANS {
-                buf.pop_front();
-            }
-            buf.push_back(span);
+        let mut buf = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if buf.len() >= MAX_SPANS {
+            buf.pop_front();
         }
+        buf.push_back(span);
     }
 }
 
@@ -104,6 +114,7 @@ pub struct RingBufferExporter {
 }
 
 impl RingBufferExporter {
+    /// Create an exporter that pushes completed spans into `buf`.
     pub fn new(buf: SpanBuffer) -> Self {
         Self { buf }
     }
@@ -111,14 +122,17 @@ impl RingBufferExporter {
 
 impl SpanExporter for RingBufferExporter {
     fn export(&self, batch: Vec<SpanData>) -> impl Future<Output = OTelSdkResult> + Send {
-        let spans: Vec<TraceSpan> = batch.into_iter().map(convert).collect();
-        if let Ok(mut buf) = self.buf.inner.lock() {
-            for span in spans {
-                if buf.len() >= MAX_SPANS {
-                    buf.pop_front();
-                }
-                buf.push_back(span);
+        let mut buf = self
+            .buf
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for span_data in batch {
+            let span = convert(span_data);
+            if buf.len() >= MAX_SPANS {
+                buf.pop_front();
             }
+            buf.push_back(span);
         }
         std::future::ready(Ok(()))
     }

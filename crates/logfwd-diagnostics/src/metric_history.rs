@@ -71,8 +71,8 @@ impl MetricBuffer {
             name: name.to_string(),
             tiers: vec![
                 Tier::new(2.0, 300.0),   // 2s intervals, 5 min
-                Tier::new(10.0, 600.0),  // 10s intervals, 5-15 min
-                Tier::new(30.0, 2700.0), // 30s intervals, 15-60 min
+                Tier::new(10.0, 900.0),  // 10s intervals, contributes coverage up to 15 min
+                Tier::new(30.0, 3600.0), // 30s intervals, contributes coverage up to 60 min
             ],
         }
     }
@@ -131,8 +131,11 @@ impl MetricBuffer {
     }
 }
 
-/// Collection of metric histories. Thread-safe via Mutex (only accessed by
-/// the diagnostics thread for writes and HTTP handler for reads).
+/// Collection of metric histories.
+///
+/// The diagnostics sampler records into this buffer, and HTTP handlers read
+/// snapshots out of it. Internal synchronization is handled with a `Mutex`
+/// because writes are infrequent and isolated to the diagnostics path.
 pub struct MetricHistory {
     start: Instant,
     metrics: Mutex<Vec<MetricBuffer>>,
@@ -145,6 +148,7 @@ impl Default for MetricHistory {
 }
 
 impl MetricHistory {
+    /// Creates an empty history buffer anchored to the current instant.
     pub fn new() -> Self {
         Self {
             start: Instant::now(),
@@ -155,12 +159,18 @@ impl MetricHistory {
     /// Record a value for a named metric.
     pub fn record(&self, name: &str, value: f64) {
         let t = self.start.elapsed().as_secs_f64();
-        let mut metrics = self.metrics.lock().unwrap();
+        let mut metrics = self
+            .metrics
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let buf = match metrics.iter_mut().find(|m| m.name == name) {
             Some(b) => b,
             None => {
                 metrics.push(MetricBuffer::new(name));
-                metrics.last_mut().unwrap()
+                match metrics.last_mut() {
+                    Some(last) => last,
+                    None => return,
+                }
             }
         };
         buf.push(t, value);
@@ -169,30 +179,20 @@ impl MetricHistory {
     /// Get all history as JSON-ready data.
     /// Returns a map of metric name → list of [t, v] pairs.
     pub fn to_json(&self) -> String {
-        let metrics = self.metrics.lock().unwrap();
-        let mut out = String::from("{");
-        for (i, m) in metrics.iter().enumerate() {
-            if i > 0 {
-                out.push(',');
-            }
-            out.push('"');
-            out.push_str(&m.name);
-            out.push_str("\":[");
-            let points = m.points();
-            for (j, p) in points.iter().enumerate() {
-                if j > 0 {
-                    out.push(',');
-                }
-                out.push('[');
-                // Send time as seconds since start (dashboard converts)
-                use std::fmt::Write;
-                let _ = write!(out, "{:.1},{:.4}", p.t, p.v);
-                out.push(']');
-            }
-            out.push(']');
+        let metrics = self
+            .metrics
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut root = serde_json::Map::with_capacity(metrics.len());
+        for metric in metrics.iter() {
+            let points = metric
+                .points()
+                .into_iter()
+                .map(|p| serde_json::json!([p.t, p.v]))
+                .collect::<Vec<_>>();
+            root.insert(metric.name.clone(), serde_json::Value::Array(points));
         }
-        out.push('}');
-        out
+        serde_json::to_string(&root).unwrap_or_else(|_| "{}".to_string())
     }
 }
 
@@ -231,10 +231,12 @@ mod tests {
         for i in 0..100 {
             buf.push(i as f64 * 2.0, i as f64);
         }
+        let raw_points: usize = buf.tiers.iter().map(|tier| tier.points.len()).sum();
         let points = buf.points();
         // Should have points from all tiers, deduplicated
         assert!(!points.is_empty());
-        assert!(points.len() < 200); // some dedup happened
+        assert!(raw_points > points.len()); // duplicates across tiers were removed
+        assert_eq!(points.len(), 100); // highest-resolution tier preserves all unique timestamps
     }
 
     #[test]

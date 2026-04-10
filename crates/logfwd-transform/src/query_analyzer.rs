@@ -486,7 +486,32 @@ fn walk_table_factor(
         | sqlast::TableFactor::OpenJsonTable { json_expr, .. } => {
             collect_column_refs(json_expr, referenced_columns);
         }
-        _ => {}
+        sqlast::TableFactor::MatchRecognize {
+            table,
+            partition_by,
+            order_by,
+            measures,
+            rows_per_match: _,
+            after_match_skip: _,
+            pattern,
+            symbols,
+            alias: _,
+        } => {
+            walk_table_factor(table, referenced_columns, uses_select_star, except_fields);
+            for expr in partition_by {
+                collect_column_refs(expr, referenced_columns);
+            }
+            for order_expr in order_by {
+                collect_column_refs(&order_expr.expr, referenced_columns);
+            }
+            for measure in measures {
+                collect_column_refs(&measure.expr, referenced_columns);
+            }
+            for symbol_def in symbols {
+                collect_column_refs(&symbol_def.definition, referenced_columns);
+            }
+            walk_match_recognize_pattern(pattern);
+        }
     }
 }
 
@@ -518,6 +543,28 @@ fn walk_table_with_joins(
 
         if let Some(constraint) = extract_join_constraint(&join.join_operator) {
             collect_join_constraint_columns(constraint, referenced_columns);
+        }
+    }
+}
+
+/// Walk a MATCH_RECOGNIZE pattern tree.
+///
+/// Patterns name symbols rather than columns, so this traversal is currently
+/// just structural recursion that keeps the analyzer complete if the AST grows.
+fn walk_match_recognize_pattern(pattern: &sqlast::MatchRecognizePattern) {
+    match pattern {
+        sqlast::MatchRecognizePattern::Symbol(_)
+        | sqlast::MatchRecognizePattern::Exclude(_)
+        | sqlast::MatchRecognizePattern::Permute(_) => {}
+        sqlast::MatchRecognizePattern::Concat(patterns)
+        | sqlast::MatchRecognizePattern::Alternation(patterns) => {
+            for nested in patterns {
+                walk_match_recognize_pattern(nested);
+            }
+        }
+        sqlast::MatchRecognizePattern::Group(pattern)
+        | sqlast::MatchRecognizePattern::Repetition(pattern, _) => {
+            walk_match_recognize_pattern(pattern);
         }
     }
 }

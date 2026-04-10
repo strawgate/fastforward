@@ -4,6 +4,7 @@ members = [
     "crates/logfwd-config",
     "crates/logfwd-runtime",
     "crates/logfwd-types",
+    "crates/logfwd-diagnostics",
     "crates/logfwd-core",
     "crates/logfwd-arrow",
     "crates/logfwd-transform",
@@ -24,6 +25,7 @@ members = [
 default-members = [
     "crates/logfwd-config",
     "crates/logfwd-types",
+    "crates/logfwd-diagnostics",
     "crates/logfwd-core",
     "crates/logfwd-arrow",
     "crates/logfwd-io",
@@ -67,6 +69,12 @@ smallvec = { version = "1", features = ["union"] }
 thiserror = { version = "2", default-features = false }
 url = "2"
 anyhow = "1"
+axum = { version = "0.8", default-features = false }
+libc = "0.2"
+serde_json = "1"
+serde_yaml_ng = "0.10"
+proptest = "1"
+tiny_http = "0.12"
 
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }

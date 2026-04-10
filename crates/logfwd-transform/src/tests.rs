@@ -1423,6 +1423,30 @@ fn test_order_by_only_col_added_to_referenced_columns() {
     );
 }
 
+/// QueryAnalyzer must collect column refs from MATCH_RECOGNIZE expressions.
+#[test]
+fn test_query_analyzer_match_recognize_column_refs() {
+    let a = QueryAnalyzer::new(
+        "SELECT * FROM logs MATCH_RECOGNIZE (PARTITION BY host ORDER BY timestamp MEASURES status AS status_measure ONE ROW PER MATCH PATTERN (A) DEFINE A AS severity > 3)",
+    )
+    .unwrap();
+
+    for col in ["host", "timestamp", "status", "severity"] {
+        assert!(
+            a.referenced_columns.contains(col),
+            "MATCH_RECOGNIZE must add {col:?} to referenced_columns, got {:?}",
+            a.referenced_columns
+        );
+    }
+}
+
+/// Regression for #1684: `SELECT _raw, level FROM logs WHERE level = 'ERROR'`
+/// must produce `scan_config.keep_raw = true`.
+///
+/// Before the fix, `keep_raw` was unconditionally `false` for non-SELECT-*
+/// queries. The scanner therefore never called `append_raw`, `_raw` was absent
+/// from the batch schema, and DataFusion raised "column _raw not found" on the
+/// first batch, dropping all data.
 #[test]
 fn test_scan_config_selective_query_does_not_set_line_field() {
     let a = QueryAnalyzer::new("SELECT body, level FROM logs WHERE level = 'ERROR'").unwrap();

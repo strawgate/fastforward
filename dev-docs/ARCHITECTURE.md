@@ -39,6 +39,10 @@ IO, or async. logfwd-arrow bridges core's parsing to Arrow types.
 `logfwd-runtime` owns the long-lived async runtime, and the binary crate
 now stays focused on startup/CLI/bootstrap concerns.
 
+`logfwd-diagnostics` owns the diagnostics control-plane surface (diagnostics
+HTTP endpoints, readiness/status shaping, stderr/span buffering, and the
+generated `dashboard.html` asset served by diagnostics).
+
 ## Data flow
 
 ### 1. Reading: bytes enter the system
@@ -233,6 +237,9 @@ OutputSink / Sink traits       OtlpSink, ElasticsearchSink,
 ```
 
 `logfwd-runtime` wires these together in `pipeline.rs`.
+
+`logfwd-diagnostics` provides the diagnostics server and telemetry-facing
+snapshot types consumed by runtime/bootstrap wiring.
 
 ## Pipeline loop
 

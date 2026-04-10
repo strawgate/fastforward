@@ -8,11 +8,11 @@ use std::time::{Duration, Instant};
 
 use arrow::array::{Array, BooleanArray, Float64Array, Int64Array, StringArray};
 use arrow::record_batch::RecordBatch;
-use logfwd_io::diagnostics::ComponentStats;
 use logfwd_io::format::FormatDecoder;
 use logfwd_io::framed::FramedInput;
 use logfwd_io::input::{InputEvent, InputSource};
 use logfwd_io::otlp_receiver::OtlpReceiverInput;
+use logfwd_types::diagnostics::ComponentStats;
 use logfwd_types::field_names;
 use opentelemetry_proto::tonic::{
     collector::logs::v1::ExportLogsServiceRequest,
