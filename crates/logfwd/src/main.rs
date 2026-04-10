@@ -1911,7 +1911,7 @@ mod cli_tests {
             resolve_blast_output_config(&args).expect_err("udp destination should reject auth");
         assert!(
             err.to_string()
-                .contains("only supported for otlp, elasticsearch, loki, and arrow_ipc"),
+                .contains("only supported for otlp, http, elasticsearch, loki, and arrow_ipc"),
             "unexpected error: {err}"
         );
     }

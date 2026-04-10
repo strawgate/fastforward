@@ -428,6 +428,7 @@ jobs:
         env:
           RUSTC_WRAPPER: ""
           MIRIFLAGS: "-Zmiri-strict-provenance"
+          PROPTEST_DISABLE_FAILURE_PERSISTENCE: "1"
 
   # -------------------------------------------------------------------------
   # Turmoil deterministic simulation
