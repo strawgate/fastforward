@@ -79,7 +79,6 @@ jobs:
             frontend:
               - 'dashboard/**'
               - '.github/actions/build-dashboard/**'
-              - '.github/workflows/ci.yml'
             miri:
               - 'crates/logfwd-core/**'
               - 'crates/logfwd-types/**'
