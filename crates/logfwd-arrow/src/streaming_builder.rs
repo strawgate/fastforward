@@ -507,13 +507,25 @@ impl StreamingBuilder {
             "append_line called outside of a row"
         );
         if self.line_field_name.is_some() && !self.line_written_this_row {
-            let offset = self.offset_of(line);
-            let len = if std::str::from_utf8(line).is_ok() {
-                line.len() as u32
+            let line_view = if std::str::from_utf8(line).is_ok() {
+                Some((self.offset_of(line), line.len() as u32))
             } else {
-                0
+                let lossy = String::from_utf8_lossy(line);
+                let Ok(decoded_offset) = u32::try_from(self.decoded_buf.len()) else {
+                    return;
+                };
+                let Some(combined_offset) = u32::try_from(self.buf.len())
+                    .ok()
+                    .and_then(|buf_len| buf_len.checked_add(decoded_offset))
+                else {
+                    return;
+                };
+                self.decoded_buf.extend_from_slice(lossy.as_bytes());
+                Some((combined_offset, lossy.len() as u32))
             };
-            self.line_views.push((offset, len));
+            if let Some(line_view) = line_view {
+                self.line_views.push(line_view);
+            }
             self.line_written_this_row = true;
         }
     }
@@ -545,9 +557,9 @@ impl StreamingBuilder {
             combined.extend_from_slice(&self.decoded_buf);
             Buffer::from(combined)
         };
-        // Separate zero-copy buffer for line views (always into the original
-        // input buffer, never into decoded_buf).
-        let line_arrow_buf = Buffer::from(self.buf.clone());
+        // Line views may point into either the original input buffer or
+        // decoded_buf when lossy line preservation was needed.
+        let line_arrow_buf = arrow_buf.clone();
 
         let mut schema_fields: Vec<Field> = Vec::with_capacity(self.num_active);
         let mut arrays: Vec<ArrayRef> = Vec::with_capacity(self.num_active);
@@ -1033,11 +1045,10 @@ impl StreamingBuilder {
             }
             let total_bytes: usize = self.line_views.iter().map(|&(_, l)| l as usize).sum();
             let mut builder = arrow::array::StringBuilder::with_capacity(num_rows, total_bytes);
+            let has_decoded = !self.decoded_buf.is_empty();
             for row in 0..num_rows {
                 let (offset, len) = self.line_views[row];
-                // Line views always reference the original buffer (not decoded_buf).
-                let s = std::str::from_utf8(&self.buf[offset as usize..(offset + len) as usize])
-                    .unwrap_or("");
+                let s = self.read_str(offset, len, has_decoded);
                 builder.append_value(s);
             }
             let line_field_name = self
@@ -1413,12 +1424,12 @@ mod tests {
     }
 
     #[test]
-    fn test_append_line_invalid_utf8_uses_empty_placeholder() {
+    fn test_append_line_invalid_utf8_preserves_lossy_text() {
         let buf = bytes::Bytes::from(vec![0xff, b'\n']);
         let mut b = StreamingBuilder::new(Some("body".to_string()));
         b.begin_batch(buf.clone());
         b.begin_row();
-        b.append_line(&buf[0..1]); // invalid UTF-8, should produce an empty placeholder
+        b.append_line(&buf[0..1]);
         b.end_row();
 
         let batch = b
@@ -1431,12 +1442,33 @@ mod tests {
             .as_any()
             .downcast_ref::<arrow::array::StringViewArray>()
         {
-            assert_eq!(arr.value(0), "");
+            assert_eq!(arr.value(0), "\u{fffd}");
         } else if let Some(arr) = body.as_any().downcast_ref::<arrow::array::StringArray>() {
-            assert_eq!(arr.value(0), "");
+            assert_eq!(arr.value(0), "\u{fffd}");
         } else {
             panic!("body column must be StringArray or StringViewArray");
         }
+    }
+
+    #[test]
+    fn test_append_line_invalid_utf8_preserves_lossy_text_detached() {
+        let buf = bytes::Bytes::from(vec![0xff, b'\n']);
+        let mut b = StreamingBuilder::new(Some("body".to_string()));
+        b.begin_batch(buf.clone());
+        b.begin_row();
+        b.append_line(&buf[0..1]);
+        b.end_row();
+
+        let batch = b
+            .finish_batch_detached()
+            .expect("invalid UTF-8 line capture should preserve row cardinality");
+        let body = batch
+            .column_by_name("body")
+            .expect("line capture column should be present")
+            .as_any()
+            .downcast_ref::<arrow::array::StringArray>()
+            .expect("detached line capture must produce StringArray");
+        assert_eq!(body.value(0), "\u{fffd}");
     }
 
     /// `append_line` is a no-op when `line_capture` is false -- `body` column absent.
