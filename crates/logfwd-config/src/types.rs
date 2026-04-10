@@ -270,6 +270,9 @@ pub struct InputConfig {
     pub input_type: InputType,
     pub path: Option<String>,
     pub listen: Option<String>,
+    /// Prefix applied to OTLP resource attributes when flattening into columns.
+    /// Defaults to `resource.attributes.` when omitted.
+    pub resource_prefix: Option<String>,
     pub format: Option<Format>,
     /// File input poll cadence in milliseconds (default: 50, minimum: 1).
     pub poll_interval_ms: Option<u64>,
