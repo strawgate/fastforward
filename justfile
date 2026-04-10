@@ -139,7 +139,7 @@ test-all:
 kani:
     just kani-required
 
-# Run the Miri suite used by CI for proof-heavy pure crates.
+# Run local Miri checks for proof-heavy pure crates.
 # Requires:
 #   rustup component add --toolchain nightly miri rust-src
 miri-setup:
@@ -147,17 +147,14 @@ miri-setup:
 
 miri:
     just miri-setup
+    RUSTC_WRAPPER="" cargo +nightly miri setup
     just miri-core
     just miri-types
 
 miri-core:
-    just miri-setup
-    RUSTC_WRAPPER="" cargo +nightly miri setup
     RUSTC_WRAPPER="" MIRIFLAGS="-Zmiri-strict-provenance" cargo +nightly miri test -p logfwd-core --lib
 
 miri-types:
-    just miri-setup
-    RUSTC_WRAPPER="" cargo +nightly miri setup
     RUSTC_WRAPPER="" MIRIFLAGS="-Zmiri-strict-provenance" cargo +nightly miri test -p logfwd-types --lib
 
 # Run the required Kani crate set enforced by CI guardrails.
