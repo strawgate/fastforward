@@ -28,8 +28,11 @@ def main() -> int:
             failures.append(f"- unexpected root markdown file: {name}")
 
     claude = root / "CLAUDE.md"
-    if claude.exists() and not claude.is_symlink():
-        failures.append("- CLAUDE.md must be a symlink to AGENTS.md")
+    if claude.exists():
+        if not claude.is_symlink():
+            failures.append("- CLAUDE.md must be a symlink to AGENTS.md")
+        elif claude.readlink().name != "AGENTS.md":
+            failures.append("- CLAUDE.md must point to AGENTS.md")
 
     if failures:
         print("\n".join(failures))

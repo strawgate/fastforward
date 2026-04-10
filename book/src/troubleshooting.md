@@ -134,7 +134,7 @@ No validation errors.
 ### Common causes and fixes
 
 - Missing `input.path` for `file` input.
-- Missing `endpoint` for `otlp`/`elasticsearch`/`loki` outputs.
+- Missing `endpoint` for `otlp`/`http`/`elasticsearch`/`loki` outputs.
 - Mixing simple layout (`input`/`output`) with `pipelines` map in one file.
 - YAML scalar mistakes in SQL.
 
