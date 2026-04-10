@@ -28,7 +28,9 @@ pub struct PipelineMetrics {
     pub batch_rows_total: AtomicU64,
     pub flush_by_size: AtomicU64,
     pub flush_by_timeout: AtomicU64,
+    /// Number of immediate repolls performed instead of sleeping between polls.
     pub cadence_fast_repolls: AtomicU64,
+    /// Number of baseline poll-interval sleeps taken on idle input polls.
     pub cadence_idle_sleeps: AtomicU64,
     /// Batches that were dropped due to scan, transform, or output errors.
     pub dropped_batches_total: AtomicU64,
@@ -232,11 +234,13 @@ impl PipelineMetrics {
         self.otel_flush_by_timeout.add(1, &self.otel_attrs);
     }
 
+    /// Record one immediate adaptive repoll (sleep bypass).
     pub fn inc_cadence_fast_repoll(&self) {
         self.cadence_fast_repolls.fetch_add(1, Ordering::Relaxed);
         self.otel_cadence_fast_repolls.add(1, &self.otel_attrs);
     }
 
+    /// Record one idle poll that slept for the baseline poll interval.
     pub fn inc_cadence_idle_sleep(&self) {
         self.cadence_idle_sleeps.fetch_add(1, Ordering::Relaxed);
         self.otel_cadence_idle_sleeps.add(1, &self.otel_attrs);

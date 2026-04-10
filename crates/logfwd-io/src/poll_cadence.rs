@@ -34,12 +34,12 @@ impl AdaptivePollController {
     }
 
     /// Remaining immediate repolls in the current burst.
-    pub const fn fast_polls_remaining(&self) -> u8 {
+    pub const fn get_fast_polls_remaining(&self) -> u8 {
         self.fast_polls_remaining
     }
 
     /// Reset adaptive state (used when poll errors short-circuit normal flow).
-    pub fn clear(&mut self) {
+    pub fn reset_fast_polls(&mut self) {
         self.fast_polls_remaining = 0;
     }
 
@@ -49,7 +49,7 @@ impl AdaptivePollController {
     /// - read budget hit => arm a burst, then count it down on subsequent saturated polls
     /// - data without budget hit => decay burst
     /// - idle poll => disarm burst
-    pub fn observe(&mut self, signal: PollCadenceSignal) {
+    pub fn observe_signal(&mut self, signal: PollCadenceSignal) {
         if signal.hit_read_budget {
             if self.fast_polls_remaining == 0 {
                 self.fast_polls_remaining = self.fast_polls_max;
@@ -73,66 +73,66 @@ mod tests {
     #[test]
     fn budget_hit_arms_full_burst() {
         let mut controller = AdaptivePollController::new(8);
-        controller.observe(PollCadenceSignal {
+        controller.observe_signal(PollCadenceSignal {
             had_data: true,
             hit_read_budget: true,
         });
-        assert_eq!(controller.fast_polls_remaining(), 8);
+        assert_eq!(controller.get_fast_polls_remaining(), 8);
         assert!(controller.should_fast_poll());
     }
 
     #[test]
     fn data_without_budget_decays_burst() {
         let mut controller = AdaptivePollController::new(3);
-        controller.observe(PollCadenceSignal {
+        controller.observe_signal(PollCadenceSignal {
             had_data: true,
             hit_read_budget: true,
         });
-        controller.observe(PollCadenceSignal {
+        controller.observe_signal(PollCadenceSignal {
             had_data: true,
             hit_read_budget: false,
         });
-        assert_eq!(controller.fast_polls_remaining(), 2);
+        assert_eq!(controller.get_fast_polls_remaining(), 2);
     }
 
     #[test]
     fn idle_disarms_burst() {
         let mut controller = AdaptivePollController::new(3);
-        controller.observe(PollCadenceSignal {
+        controller.observe_signal(PollCadenceSignal {
             had_data: true,
             hit_read_budget: true,
         });
-        controller.observe(PollCadenceSignal {
+        controller.observe_signal(PollCadenceSignal {
             had_data: false,
             hit_read_budget: false,
         });
-        assert_eq!(controller.fast_polls_remaining(), 0);
+        assert_eq!(controller.get_fast_polls_remaining(), 0);
         assert!(!controller.should_fast_poll());
     }
 
     #[test]
     fn repeated_budget_hits_count_down_the_burst() {
         let mut controller = AdaptivePollController::new(3);
-        controller.observe(PollCadenceSignal {
+        controller.observe_signal(PollCadenceSignal {
             had_data: true,
             hit_read_budget: true,
         });
-        assert_eq!(controller.fast_polls_remaining(), 3);
-        controller.observe(PollCadenceSignal {
+        assert_eq!(controller.get_fast_polls_remaining(), 3);
+        controller.observe_signal(PollCadenceSignal {
             had_data: true,
             hit_read_budget: true,
         });
-        assert_eq!(controller.fast_polls_remaining(), 2);
-        controller.observe(PollCadenceSignal {
+        assert_eq!(controller.get_fast_polls_remaining(), 2);
+        controller.observe_signal(PollCadenceSignal {
             had_data: true,
             hit_read_budget: true,
         });
-        assert_eq!(controller.fast_polls_remaining(), 1);
-        controller.observe(PollCadenceSignal {
+        assert_eq!(controller.get_fast_polls_remaining(), 1);
+        controller.observe_signal(PollCadenceSignal {
             had_data: true,
             hit_read_budget: true,
         });
-        assert_eq!(controller.fast_polls_remaining(), 0);
+        assert_eq!(controller.get_fast_polls_remaining(), 0);
         assert!(!controller.should_fast_poll());
     }
 
@@ -144,11 +144,11 @@ mod tests {
         ) {
             let mut controller = AdaptivePollController::new(max);
             for (had_data, hit_read_budget) in signals {
-                controller.observe(PollCadenceSignal {
+                controller.observe_signal(PollCadenceSignal {
                     had_data,
                     hit_read_budget,
                 });
-                prop_assert!(controller.fast_polls_remaining() <= max);
+                prop_assert!(controller.get_fast_polls_remaining() <= max);
             }
         }
     }

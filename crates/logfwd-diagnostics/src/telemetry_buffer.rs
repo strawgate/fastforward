@@ -1165,6 +1165,7 @@ mod tests {
         pm.batches_total.store(10, Ordering::Relaxed);
         pm.backpressure_stalls.store(3, Ordering::Relaxed);
         pm.cadence_fast_repolls.store(5, Ordering::Relaxed);
+        pm.cadence_idle_sleeps.store(2, Ordering::Relaxed);
         pm.scan_nanos_total.store(500_000_000, Ordering::Relaxed);
 
         let buf = RingBuffer::new(1024);
@@ -1202,6 +1203,15 @@ mod tests {
             .expect("logfwd.input.poll_cadence.fast_repolls must be sampled");
         match fast_repolls.value {
             MetricValue::U64(v) => assert_eq!(v, 5),
+            _ => panic!("expected U64"),
+        }
+
+        let idle_sleeps = points
+            .iter()
+            .find(|p| p.name == "logfwd.input.poll_cadence.idle_sleeps")
+            .expect("logfwd.input.poll_cadence.idle_sleeps must be sampled");
+        match idle_sleeps.value {
+            MetricValue::U64(v) => assert_eq!(v, 2),
             _ => panic!("expected U64"),
         }
 

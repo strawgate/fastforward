@@ -11,12 +11,12 @@ try:
 except ModuleNotFoundError:  # pragma: no cover
     try:
         import tomli as tomllib  # type: ignore[no-redef]
-    except ModuleNotFoundError:
+    except ModuleNotFoundError as exc:
         print(
             "error: Python 3.11+ or the 'tomli' package is required to read TOML",
             file=sys.stderr,
         )
-        raise SystemExit(2)
+        raise SystemExit(2) from exc
 
 
 def find_cargo_tomls(repo_root: Path) -> list[Path]:

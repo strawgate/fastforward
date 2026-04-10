@@ -251,7 +251,7 @@ impl FileTailer {
             had_data: self.reader.last_read_had_data,
             hit_read_budget: self.reader.last_read_hit_budget,
         };
-        self.adaptive_poll.observe(self.last_poll_signal);
+        self.adaptive_poll.observe_signal(self.last_poll_signal);
 
         self.reader.evict_lru(self.config.max_open_files);
         self.update_error_backoff(had_error);
@@ -328,7 +328,7 @@ impl FileTailer {
 
     #[cfg(test)]
     pub(super) fn adaptive_fast_polls_remaining(&self) -> u8 {
-        self.adaptive_poll.fast_polls_remaining()
+        self.adaptive_poll.get_fast_polls_remaining()
     }
 
     pub fn file_offsets(&self) -> Vec<(SourceId, ByteOffset)> {

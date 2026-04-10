@@ -12,7 +12,9 @@ use crate::tail::{ByteOffset, FileTailer, TailConfig, TailEvent};
 /// Snapshot of source-driven cadence hints consumed by runtime poll loops.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct InputCadence {
+    /// Last poll feedback (data/no-data and read-budget saturation).
     pub signal: PollCadenceSignal,
+    /// Maximum immediate repolls allowed after a budget-saturated read.
     pub adaptive_fast_polls_max: u8,
 }
 
@@ -213,10 +215,11 @@ impl InputSource for FileInput {
         }
     }
 
-    fn get_cadence(&self) -> InputCadence {
-        InputCadence {
-            signal: self.tailer.get_poll_cadence_signal(),
-            adaptive_fast_polls_max: self.tailer.get_adaptive_fast_polls_max(),
-        }
+    fn get_poll_cadence_signal(&self) -> PollCadenceSignal {
+        self.tailer.get_poll_cadence_signal()
+    }
+
+    fn get_adaptive_fast_polls_max(&self) -> u8 {
+        self.tailer.get_adaptive_fast_polls_max()
     }
 }

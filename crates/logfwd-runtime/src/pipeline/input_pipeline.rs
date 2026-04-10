@@ -115,7 +115,7 @@ fn io_worker_loop(
         let events = match input.source.poll() {
             Ok(e) => e,
             Err(e) => {
-                adaptive_poll.clear();
+                adaptive_poll.reset_fast_polls();
                 input.stats.inc_errors();
                 input.stats.set_health(reduce_component_health(
                     input.stats.health(),
@@ -132,7 +132,7 @@ fn io_worker_loop(
             HealthTransitionEvent::Observed(input.source.health()),
         ));
         let cadence = input.source.get_cadence();
-        adaptive_poll.observe(cadence.signal);
+        adaptive_poll.observe_signal(cadence.signal);
 
         if events.is_empty() {
             if adaptive_poll.should_fast_poll() {

@@ -559,6 +559,37 @@ mod tests {
     }
 
     #[test]
+    fn poll_emits_batch_event_with_accounted_bytes() {
+        let mut receiver = ArrowIpcReceiver::new_with_capacity("test-poll", "127.0.0.1:0", 16)
+            .expect("bind should succeed");
+        let addr = receiver.local_addr();
+
+        let batch = make_test_batch();
+        let ipc_bytes = serialize_batch(&batch);
+        let url = format!("http://{addr}/v1/arrow");
+        let response = ureq::post(&url)
+            .header("Content-Type", "application/vnd.apache.arrow.stream")
+            .send(&ipc_bytes)
+            .expect("POST should succeed");
+        assert_eq!(response.status().as_u16(), 200);
+
+        let events = receiver.poll().expect("poll should succeed");
+        assert_eq!(events.len(), 1, "poll should emit one batch event");
+        match &events[0] {
+            InputEvent::Batch {
+                batch,
+                source_id,
+                accounted_bytes,
+            } => {
+                assert_eq!(batch.num_rows(), 2);
+                assert_eq!(*source_id, None);
+                assert_eq!(*accounted_bytes, ipc_bytes.len() as u64);
+            }
+            _ => panic!("expected InputEvent::Batch"),
+        }
+    }
+
+    #[test]
     fn receiver_accepts_zstd_compressed_arrow_ipc() {
         let receiver = ArrowIpcReceiver::new_with_capacity("test-zstd", "127.0.0.1:0", 16)
             .expect("bind should succeed");

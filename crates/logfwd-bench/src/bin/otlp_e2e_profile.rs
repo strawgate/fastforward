@@ -27,6 +27,7 @@ impl HttpPoster {
             .expect("tokio runtime");
         let client = reqwest::Client::builder()
             .pool_max_idle_per_host(max_idle_per_host.max(1))
+            // Keep benchmark traffic local and deterministic; ignore ambient proxy env.
             .no_proxy()
             .build()
             .expect("reqwest client");

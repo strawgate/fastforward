@@ -264,8 +264,13 @@ Receive Arrow IPC stream payloads over HTTP `POST` and forward decoded
 
 Behavior:
 - Route is fixed to `POST /v1/arrow` for MVP.
-- Accepts `application/vnd.apache.arrow.stream` and `application/vnd.apache.arrow.stream+zstd`.
-- Also accepts `Content-Encoding: zstd` on Arrow stream payloads.
+- `arrow_ipc` is Arrow-native and rejects `format`.
+- Canonical payload types are `application/vnd.apache.arrow.stream` and
+  `application/vnd.apache.arrow.stream+zstd`.
+- `Content-Encoding: zstd` is also supported for compressed Arrow stream payloads.
+- The receiver currently decodes by payload bytes and may still accept requests
+  with missing/other content-type headers; use canonical content types for
+  predictable interoperability.
 
 ---
 
@@ -289,7 +294,7 @@ Behavior:
 ## Formats
 
 The `format` field controls how raw bytes from the input are parsed into log records.
-`linux_ebpf_sensor`, `macos_es_sensor`, and `windows_ebpf_sensor` are
+`linux_ebpf_sensor`, `macos_es_sensor`, `windows_ebpf_sensor`, and `arrow_ipc` are
 Arrow-native and reject `format`.
 
 | Value | Description |

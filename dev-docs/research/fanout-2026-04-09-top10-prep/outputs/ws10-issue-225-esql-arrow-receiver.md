@@ -66,7 +66,9 @@ input:
 MVP validation rules:
 - `listen` is required.
 - reject input fields that do not apply to this receiver mode:
-  - `path`, `max_open_files`, `glob_rescan_interval_ms`, `http`, `generator`, `sensor_beta`, `tls`.
+  - `path`, `max_open_files`, `glob_rescan_interval_ms`, `poll_interval_ms`,
+    `read_buf_size`, `per_file_read_budget_bytes`, `adaptive_fast_polls_max`,
+    `format`, `http`, `generator`, `sensor`, `tls`.
 
 ### Why this is the right minimum
 
