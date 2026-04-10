@@ -313,6 +313,13 @@ fn json_any_value_to_string(v: &serde_json::Value) -> Result<Option<String>, Inp
             .map_err(|e| InputError::Receiver(format!("invalid OTLP JSON bytesValue: {e}")))?;
         return Ok(Some(hex::encode(&decoded)));
     }
+    // Structured types: serialize as JSON strings to match the protobuf decode path.
+    if let Some(arr) = v.get("arrayValue") {
+        return Ok(Some(serde_json::to_string(arr).unwrap_or_default()));
+    }
+    if let Some(kvlist) = v.get("kvlistValue") {
+        return Ok(Some(serde_json::to_string(kvlist).unwrap_or_default()));
+    }
     Ok(None)
 }
 

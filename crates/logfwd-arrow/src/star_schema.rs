@@ -126,7 +126,8 @@ pub fn attrs_schema() -> Schema {
 ///    attribute sets, assigns `resource_id`, builds RESOURCE_ATTRS table.
 /// 3. Maps well-known columns to LOGS fact table fields.
 /// 4. Remaining columns become LOG_ATTRS rows (column-to-row pivot).
-/// 5. Builds a single-row SCOPE_ATTRS (scope_name="logfwd").
+/// 5. Builds SCOPE_ATTRS: empty when real `scope.*` columns exist (they flow
+///    through LOG_ATTRS instead), or a default `scope_name="logfwd"` row otherwise.
 /// 6. Builds the LOGS fact table with foreign keys.
 pub fn flat_to_star(batch: &RecordBatch) -> Result<StarSchema, ArrowError> {
     let num_rows = batch.num_rows();
@@ -158,6 +159,7 @@ pub fn flat_to_star(batch: &RecordBatch) -> Result<StarSchema, ArrowError> {
     let mut trace_id_col: Option<usize> = None;
     let mut span_id_col: Option<usize> = None;
     let mut flags_col: Option<usize> = None;
+    let mut has_scope_cols = false;
     let mut attr_cols: Vec<(String, usize)> = Vec::new(); // (key, col_idx)
 
     for (idx, field) in schema.fields().iter().enumerate() {
@@ -221,6 +223,9 @@ pub fn flat_to_star(batch: &RecordBatch) -> Result<StarSchema, ArrowError> {
             flags_col = Some(idx);
             continue;
         }
+        if name == "scope.name" || name == "scope.version" {
+            has_scope_cols = true;
+        }
 
         attr_cols.push((name.to_string(), idx));
     }
@@ -259,8 +264,14 @@ pub fn flat_to_star(batch: &RecordBatch) -> Result<StarSchema, ArrowError> {
         build_resource_attrs_table(batch, &resource_cols, &resource_template_rows)?;
 
     // --- Build SCOPE_ATTRS table ---
-    // Single scope: scope_id=0, name="logfwd".
-    let scope_attrs_batch = build_scope_attrs()?;
+    // When real scope columns exist in the flat input, they flow through
+    // LOG_ATTRS and override scope defaults during star_to_flat round-trip.
+    // Only emit the hardcoded "logfwd" default when no scope columns are present.
+    let scope_attrs_batch = if has_scope_cols {
+        RecordBatch::new_empty(Arc::new(attrs_schema()))
+    } else {
+        build_scope_attrs()?
+    };
 
     // --- Build LOG_ATTRS table ---
     let log_attrs_batch = build_log_attrs(batch, &attr_cols, num_rows)?;

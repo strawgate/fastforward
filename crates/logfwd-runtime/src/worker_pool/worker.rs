@@ -81,6 +81,7 @@ pub(super) async fn worker_task(
                             cmp_bytes = tracing::field::Empty,
                             resp_bytes = tracing::field::Empty,
                         );
+                        let output_name = sink.name().to_string();
                         let process_result = AssertUnwindSafe(
                             process_item(
                                 id,
@@ -127,7 +128,7 @@ pub(super) async fn worker_task(
                             queue_wait_ns,
                             send_latency_ns,
                             batch_id,
-                            output_name: sink.name().to_string(),
+                            output_name,
                         };
                         if let Err(send_err) = ack_tx.send(ack) {
                             let mut lost_ack = send_err.0;
