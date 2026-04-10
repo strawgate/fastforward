@@ -278,6 +278,11 @@ impl Config {
                                 "pipeline '{name}' input '{label}': 'per_file_read_budget_bytes' is not supported for tcp/udp inputs"
                             )));
                         }
+                        if input.adaptive_fast_polls_max.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'adaptive_fast_polls_max' is not supported for tcp/udp inputs"
+                            )));
+                        }
                         if input.sensor.is_some() {
                             return Err(ConfigError::Validation(format!(
                                 "pipeline '{name}' input '{label}': 'sensor' settings are only supported for sensor inputs"
@@ -342,6 +347,53 @@ impl Config {
                                 "pipeline '{name}' input '{label}': 'per_file_read_budget_bytes' is not supported for otlp inputs"
                             )));
                         }
+                        if input.adaptive_fast_polls_max.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'adaptive_fast_polls_max' is not supported for otlp inputs"
+                            )));
+                        }
+                        if input.sensor.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'sensor' settings are only supported for sensor inputs"
+                            )));
+                        }
+                    }
+                    InputType::ArrowIpc => {
+                        if input.tls.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'tls' is not supported for arrow_ipc inputs"
+                            )));
+                        }
+                        if input.http.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'http' settings are only supported for http inputs"
+                            )));
+                        }
+                        if input.generator.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'generator' settings are only supported for generator inputs"
+                            )));
+                        }
+                        if input.path.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'path' is not supported for arrow_ipc inputs"
+                            )));
+                        }
+                        if input.max_open_files.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'max_open_files' is not supported for arrow_ipc inputs"
+                            )));
+                        }
+                        if input.glob_rescan_interval_ms.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'glob_rescan_interval_ms' is not supported for arrow_ipc inputs"
+                            )));
+                        }
+                        if input.adaptive_fast_polls_max.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'adaptive_fast_polls_max' is not supported for arrow_ipc inputs"
+                            )));
+                        }
                         if input.sensor.is_some() {
                             return Err(ConfigError::Validation(format!(
                                 "pipeline '{name}' input '{label}': 'sensor' settings are only supported for sensor inputs"
@@ -387,6 +439,11 @@ impl Config {
                         if input.per_file_read_budget_bytes.is_some() {
                             return Err(ConfigError::Validation(format!(
                                 "pipeline '{name}' input '{label}': 'per_file_read_budget_bytes' is not supported for http inputs"
+                            )));
+                        }
+                        if input.adaptive_fast_polls_max.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'adaptive_fast_polls_max' is not supported for http inputs"
                             )));
                         }
                         if input.sensor.is_some() {
@@ -465,6 +522,11 @@ impl Config {
                         if input.per_file_read_budget_bytes.is_some() {
                             return Err(ConfigError::Validation(format!(
                                 "pipeline '{name}' input '{label}': 'per_file_read_budget_bytes' is not supported for generator inputs"
+                            )));
+                        }
+                        if input.adaptive_fast_polls_max.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'adaptive_fast_polls_max' is not supported for generator inputs"
                             )));
                         }
                         if input.sensor.is_some() {
@@ -614,6 +676,12 @@ impl Config {
                                 input.input_type
                             )));
                         }
+                        if input.adaptive_fast_polls_max.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' input '{label}': 'adaptive_fast_polls_max' is not supported for {} inputs",
+                                input.input_type
+                            )));
+                        }
                         if input.tls.is_some() {
                             return Err(ConfigError::Validation(format!(
                                 "pipeline '{name}' input '{label}': 'tls' is not supported for {} inputs",
@@ -675,43 +743,6 @@ impl Config {
                                     )));
                                 }
                             }
-                        }
-                    }
-                    InputType::ArrowIpc => {
-                        if input.tls.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'tls' is not supported for arrow_ipc inputs"
-                            )));
-                        }
-                        if input.generator.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'generator' settings are only supported for generator inputs"
-                            )));
-                        }
-                        if input.http.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'http' settings are only supported for http inputs"
-                            )));
-                        }
-                        if input.path.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'path' is not supported for arrow_ipc inputs"
-                            )));
-                        }
-                        if input.max_open_files.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'max_open_files' is not supported for arrow_ipc inputs"
-                            )));
-                        }
-                        if input.glob_rescan_interval_ms.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'glob_rescan_interval_ms' is not supported for arrow_ipc inputs"
-                            )));
-                        }
-                        if input.sensor.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'sensor' settings are only supported for sensor inputs"
-                            )));
                         }
                     }
                 }

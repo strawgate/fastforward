@@ -86,6 +86,9 @@ pub(super) fn build_input_state(
             if let Some(interval) = cfg.glob_rescan_interval_ms {
                 tail_config.glob_rescan_interval_ms = interval;
             }
+            if let Some(max) = cfg.adaptive_fast_polls_max {
+                tail_config.adaptive_fast_polls_max = max;
+            }
             let is_glob = path.contains('*') || path.contains('?') || path.contains('[');
             let source = if is_glob {
                 FileInput::new_with_globs(
@@ -434,6 +437,7 @@ mod tests {
             poll_interval_ms: None,
             read_buf_size: None,
             per_file_read_budget_bytes: None,
+            adaptive_fast_polls_max: None,
             max_open_files: None,
             glob_rescan_interval_ms: None,
             generator: None,
@@ -471,6 +475,7 @@ mod tests {
             poll_interval_ms: None,
             read_buf_size: None,
             per_file_read_budget_bytes: None,
+            adaptive_fast_polls_max: None,
             max_open_files: None,
             glob_rescan_interval_ms: None,
             generator: None,
@@ -498,6 +503,7 @@ mod tests {
             poll_interval_ms: Some(123),
             read_buf_size: Some(456),
             per_file_read_budget_bytes: Some(789),
+            adaptive_fast_polls_max: Some(11),
             max_open_files: Some(10),
             glob_rescan_interval_ms: None,
             generator: None,
@@ -529,6 +535,7 @@ mod tests {
                     poll_interval_ms: None,
                     read_buf_size: None,
                     per_file_read_budget_bytes: None,
+                    adaptive_fast_polls_max: None,
                     max_open_files: None,
                     glob_rescan_interval_ms: None,
                     generator: None,

@@ -1336,6 +1336,32 @@ output:
         Config::load_str(yaml).expect("absent max_open_files should be valid");
     }
 
+    #[test]
+    fn adaptive_fast_polls_max_zero_accepted_for_file() {
+        let yaml = r"
+input:
+  type: file
+  path: /var/log/test.log
+  adaptive_fast_polls_max: 0
+output:
+  type: stdout
+";
+        Config::load_str(yaml).expect("adaptive_fast_polls_max: 0 should be valid for file");
+    }
+
+    #[test]
+    fn adaptive_fast_polls_max_custom_accepted_for_file() {
+        let yaml = r"
+input:
+  type: file
+  path: /var/log/test.log
+  adaptive_fast_polls_max: 12
+output:
+  type: stdout
+";
+        Config::load_str(yaml).expect("adaptive_fast_polls_max should be configurable for file");
+    }
+
     // -----------------------------------------------------------------------
     // Bug #550: enrichment path validation at config load time
     // -----------------------------------------------------------------------
@@ -1802,6 +1828,25 @@ pipelines:
         assert!(
             err.to_string().contains("max_open_files"),
             "expected max_open_files rejection: {err}"
+        );
+    }
+
+    #[test]
+    fn tcp_input_rejects_adaptive_fast_polls_max() {
+        let yaml = r#"
+pipelines:
+  test:
+    inputs:
+      - type: tcp
+        listen: 0.0.0.0:514
+        adaptive_fast_polls_max: 4
+    outputs:
+      - type: null
+"#;
+        let err = Config::load_str(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("adaptive_fast_polls_max"),
+            "expected adaptive_fast_polls_max rejection: {err}"
         );
     }
 

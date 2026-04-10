@@ -94,6 +94,7 @@ Tail one or more log files that match a glob pattern.
 | `poll_interval_ms` | integer | No | How often to poll the file when tailing, in milliseconds (default: 50). |
 | `read_buf_size` | integer | No | Buffer size for file reads in bytes (default: 262144, max: 4194304). |
 | `per_file_read_budget_bytes` | integer | No | Maximum bytes read per file per poll (default: 262144). |
+| `adaptive_fast_polls_max` | integer | No | Immediate repoll budget after a read-budget hit (default: 8, set `0` to disable adaptive fast repolls). |
 
 ```yaml
 input:

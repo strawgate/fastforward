@@ -132,8 +132,13 @@ fn io_worker_loop(
         ));
         adaptive_poll.observe(input.source.poll_cadence_signal());
 
-        if events.is_empty() && !adaptive_poll.should_fast_poll() {
-            std::thread::sleep(poll_interval);
+        if events.is_empty() {
+            if adaptive_poll.should_fast_poll() {
+                metrics.inc_cadence_fast_repoll();
+            } else {
+                metrics.inc_cadence_idle_sleep();
+                std::thread::sleep(poll_interval);
+            }
         } else {
             for event in events {
                 match event {
@@ -699,6 +704,95 @@ pipelines:
         assert_eq!(
             lines_in, 20,
             "expected 20 lines from both inputs, got {lines_in}"
+        );
+    }
+
+    /// End-to-end regression: file-tail read-budget signals should propagate
+    /// through framed input into the runtime adaptive cadence loop.
+    #[cfg(not(feature = "turmoil"))]
+    #[test]
+    fn split_pipeline_records_adaptive_fast_repolls() {
+        use std::sync::atomic::Ordering;
+
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("adaptive_fast_repolls.log");
+
+        let payload = "x".repeat(160);
+        let mut data = String::new();
+        for i in 0..40 {
+            data.push_str(&format!(
+                r#"{{"level":"INFO","seq":{},"msg":"{}"}}"#,
+                i, payload
+            ));
+            data.push('\n');
+        }
+        std::fs::write(&log_path, data.as_bytes()).unwrap();
+
+        let yaml = format!(
+            r#"
+input:
+  type: file
+  path: {}
+  format: json
+  poll_interval_ms: 200
+  per_file_read_budget_bytes: 64
+  adaptive_fast_polls_max: 4
+output:
+  type: 'null'
+"#,
+            log_path.display()
+        );
+
+        let config = logfwd_config::Config::load_str(&yaml).unwrap();
+        let pipe_cfg = &config.pipelines["default"];
+        let meter = opentelemetry::global::meter("test");
+        let mut pipeline =
+            crate::pipeline::Pipeline::from_config("default", pipe_cfg, &meter, None).unwrap();
+        pipeline.set_batch_timeout(Duration::from_millis(10));
+
+        let shutdown = CancellationToken::new();
+        let sd = shutdown.clone();
+        let metrics = pipeline.metrics().clone();
+        std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(8);
+            loop {
+                let lines_in = metrics.transform_in.lines_total.load(Ordering::Relaxed);
+                let fast_repolls = metrics.cadence_fast_repolls.load(Ordering::Relaxed);
+                if lines_in >= 40 && fast_repolls > 0 {
+                    sd.cancel();
+                    return;
+                }
+                if Instant::now() > deadline {
+                    sd.cancel();
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        });
+
+        let result = pipeline.run(&shutdown);
+        assert!(
+            result.is_ok(),
+            "adaptive cadence pipeline should run cleanly: {result:?}"
+        );
+
+        let lines_in = pipeline
+            .metrics
+            .transform_in
+            .lines_total
+            .load(Ordering::Relaxed);
+        assert!(
+            lines_in >= 40,
+            "expected to process test file rows, got {lines_in}"
+        );
+
+        let fast_repolls = pipeline
+            .metrics
+            .cadence_fast_repolls
+            .load(Ordering::Relaxed);
+        assert!(
+            fast_repolls > 0,
+            "expected adaptive cadence fast repolls to be recorded, got {fast_repolls}"
         );
     }
 

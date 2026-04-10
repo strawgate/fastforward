@@ -78,8 +78,13 @@ pub(super) async fn async_input_poll_loop(
         ));
         adaptive_poll.observe(input.source.poll_cadence_signal());
 
-        if events.is_empty() && !adaptive_poll.should_fast_poll() {
-            tokio::time::sleep(poll_interval).await;
+        if events.is_empty() {
+            if adaptive_poll.should_fast_poll() {
+                metrics.inc_cadence_fast_repoll();
+            } else {
+                metrics.inc_cadence_idle_sleep();
+                tokio::time::sleep(poll_interval).await;
+            }
         } else {
             for event in events {
                 match event {
