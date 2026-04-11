@@ -3,6 +3,10 @@ use std::time::Duration;
 use logfwd_io::checkpoint::CheckpointStore;
 
 use super::internal_faults;
+use super::transition::{
+    TransitionAction, TransitionEvent, TransitionEventEmitterHandle, TransitionOutcome,
+    TransitionPhase,
+};
 
 #[must_use]
 const fn should_retry_flush(attempt: u32, max_attempts: u32) -> bool {
@@ -35,7 +39,10 @@ const fn is_retryable_flush_error(kind: std::io::ErrorKind) -> bool {
 /// Uses `tokio::time::sleep` for the retry delay so the async task yields
 /// between attempts (Turmoil-compatible). Note: `store.flush()` itself is
 /// synchronous I/O; only the inter-retry sleep is non-blocking.
-pub(super) async fn flush_checkpoint_with_retry(store: &mut dyn CheckpointStore) {
+pub(super) async fn flush_checkpoint_with_retry(
+    store: &mut dyn CheckpointStore,
+    transition_events: &TransitionEventEmitterHandle,
+) {
     const MAX_ATTEMPTS: u32 = 3;
     const RETRY_DELAY: Duration = Duration::from_millis(100);
 
@@ -74,6 +81,17 @@ pub(super) async fn flush_checkpoint_with_retry(store: &mut dyn CheckpointStore)
                     crate::turmoil_barriers::RuntimeBarrierEvent::CheckpointFlush { success: true },
                 )
                 .await;
+                transition_events.emit_with(|seq, timestamp_nanos| {
+                    let mut event = TransitionEvent::new(
+                        seq,
+                        timestamp_nanos,
+                        TransitionPhase::Checkpoint,
+                        TransitionAction::FlushCheckpoint,
+                    );
+                    event.outcome = Some(TransitionOutcome::FlushSucceeded);
+                    event.attempt = Some(attempt + 1);
+                    event
+                });
                 if attempt > 0 {
                     tracing::info!(attempt, "pipeline: checkpoint flush succeeded after retry");
                 }
@@ -87,6 +105,17 @@ pub(super) async fn flush_checkpoint_with_retry(store: &mut dyn CheckpointStore)
                     },
                 )
                 .await;
+                transition_events.emit_with(|seq, timestamp_nanos| {
+                    let mut event = TransitionEvent::new(
+                        seq,
+                        timestamp_nanos,
+                        TransitionPhase::Checkpoint,
+                        TransitionAction::FlushCheckpoint,
+                    );
+                    event.outcome = Some(TransitionOutcome::FlushFailed);
+                    event.attempt = Some(attempt + 1);
+                    event
+                });
                 let retryable = is_retryable_flush_error(e.kind());
                 if retryable && should_retry_flush(attempt, MAX_ATTEMPTS) {
                     tracing::warn!(
@@ -119,7 +148,10 @@ mod tests {
     use logfwd_io::checkpoint::{CheckpointStore, SourceCheckpoint};
     use proptest::prelude::*;
 
-    use super::{flush_checkpoint_with_retry, is_retryable_flush_error, should_retry_flush};
+    use super::{
+        TransitionEventEmitterHandle, flush_checkpoint_with_retry, is_retryable_flush_error,
+        should_retry_flush,
+    };
 
     trait RetryFaultHook {
         fn fail_flush_attempt(&self, attempt: u32) -> bool;
@@ -280,7 +312,7 @@ mod tests {
             Err(io::Error::other("must not be observed")),
         ]);
 
-        flush_checkpoint_with_retry(&mut store).await;
+        flush_checkpoint_with_retry(&mut store, &TransitionEventEmitterHandle::noop()).await;
         assert_eq!(store.calls, 2, "flush should stop after first success");
     }
 
@@ -288,7 +320,7 @@ mod tests {
     async fn flush_retries_up_to_max_attempts() {
         let (mut store, calls) = AlwaysFailCheckpointStore::new();
 
-        flush_checkpoint_with_retry(&mut store).await;
+        flush_checkpoint_with_retry(&mut store, &TransitionEventEmitterHandle::noop()).await;
         assert_eq!(
             calls.load(Ordering::Relaxed),
             3,
@@ -326,7 +358,7 @@ mod tests {
         .expect("configure failpoint");
 
         let mut store = SequenceCheckpointStore::new(vec![Ok(()), Ok(())]);
-        flush_checkpoint_with_retry(&mut store).await;
+        flush_checkpoint_with_retry(&mut store, &TransitionEventEmitterHandle::noop()).await;
         assert_eq!(store.calls, 1, "one injected failure + one real success");
 
         fail::remove("runtime::pipeline::checkpoint_flush::before_flush");
@@ -343,7 +375,7 @@ mod tests {
             Ok(()),
         ]);
 
-        flush_checkpoint_with_retry(&mut store).await;
+        flush_checkpoint_with_retry(&mut store, &TransitionEventEmitterHandle::noop()).await;
         assert_eq!(
             store.calls, 1,
             "flush should stop immediately for non-retryable failures"

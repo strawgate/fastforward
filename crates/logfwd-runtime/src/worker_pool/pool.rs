@@ -10,11 +10,15 @@ use tokio_util::sync::CancellationToken;
 use logfwd_diagnostics::diagnostics::{ComponentHealth, ComponentStats, PipelineMetrics};
 use logfwd_output::sink::{OutputHealthEvent, SinkFactory};
 
+use crate::pipeline::TransitionEventEmitter;
+use crate::pipeline::transition::TransitionEventEmitterHandle;
+
 use super::health::{
     aggregate_output_health, idle_health_after_worker_insert, reduce_worker_slot_health,
 };
 use super::types::{AckItem, DeliveryOutcome, WorkItem, WorkerMsg};
 use super::worker::worker_task;
+use super::{emit_delivery_outcome, transition_outcome_for_delivery};
 
 #[cfg(test)]
 use super::dispatch::{ChannelState, DispatchOutcome, dispatch_step};
@@ -35,6 +39,7 @@ pub(super) struct WorkerConfig {
     pub(super) max_retry_delay: Duration,
     pub(super) metrics: Arc<PipelineMetrics>,
     pub(super) output_health: Arc<OutputHealthTracker>,
+    pub(super) transition_events: TransitionEventEmitterHandle,
 }
 
 pub(super) struct WorkerSlotCleanup {
@@ -214,6 +219,8 @@ pub struct OutputWorkerPool {
     metrics: Arc<PipelineMetrics>,
     /// Aggregated output health across live worker-local slots.
     output_health: Arc<OutputHealthTracker>,
+    /// Optional transition-event sink. Default handle is no-op.
+    transition_events: TransitionEventEmitterHandle,
 }
 
 impl OutputWorkerPool {
@@ -253,7 +260,17 @@ impl OutputWorkerPool {
             max_retry_delay: Duration::from_secs(30),
             metrics,
             output_health,
+            transition_events: TransitionEventEmitterHandle::noop(),
         }
+    }
+
+    /// Install a runtime transition-event emitter on this pool.
+    pub fn set_transition_event_emitter(&mut self, emitter: Arc<dyn TransitionEventEmitter>) {
+        self.transition_events = TransitionEventEmitterHandle::new(emitter);
+    }
+
+    pub(crate) fn set_transition_event_handle(&mut self, emitter: TransitionEventEmitterHandle) {
+        self.transition_events = emitter;
     }
 
     /// Submit a work item to the pool.
@@ -360,6 +377,13 @@ impl OutputWorkerPool {
     }
 
     fn reject_work_item(&self, item: WorkItem, outcome: DeliveryOutcome) {
+        emit_delivery_outcome(
+            &self.transition_events,
+            item.batch_id,
+            &item.tickets,
+            None,
+            transition_outcome_for_delivery(&outcome),
+        );
         let ticket_count = item.tickets.len();
         if self
             .ack_tx
@@ -494,6 +518,7 @@ impl OutputWorkerPool {
             max_retry_delay: self.max_retry_delay,
             metrics: Arc::clone(&self.metrics),
             output_health: Arc::clone(&self.output_health),
+            transition_events: self.transition_events.clone(),
         };
 
         self.join_set.spawn(worker_task(id, sink, rx, ack_tx, cfg));

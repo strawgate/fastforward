@@ -1,6 +1,6 @@
 # Verification
 
-logfwd uses four complementary verification techniques. Choose based on what you need to prove.
+logfwd uses six complementary verification techniques. Choose based on what you need to prove.
 
 ## Tool selection
 
@@ -9,12 +9,14 @@ logfwd uses four complementary verification techniques. Choose based on what you
 | **TLA+** | Design | Temporal properties: liveness, drain, protocol ordering | Not tied to code; models must be maintained separately |
 | **Kani** | Implementation | Exhaustive bounded inputs; pure functions; unsafe code | Slow on wide types; no async; no IO |
 | **proptest** | Integration | Heap-intensive, stateful, or async code | Incomplete coverage |
+| **Turmoil** | Integration/runtime | Deterministic fault injection for async/network runtime paths | Single-threaded simulation; not a proof system |
 | **Miri** | Runtime | UB detection; allocator behavior | Not exhaustive |
 | **Rust types** | Compile-time | Illegal state transitions; silent data loss | Only what the type system can encode |
 
 If the property is temporal ("eventually," "always," "never after X") → TLA+.  
 If the function is pure, bounded, and critical → Kani.  
 If it's stateful, heap-heavy, or async → proptest.  
+If it's runtime/network fault behavior under interleavings → Turmoil.  
 For unsafe code, use Kani and proptest both.
 
 ---
@@ -49,17 +51,24 @@ Update existing TLA+ specs when:
 | Property | Type | Description |
 |----------|------|-------------|
 | `DrainCompleteness` | Safety | `stop()` only reachable when all in-flight batches are resolved |
+| `NoHeldWorkAfterStop` | Safety | `Stopped` never leaves non-terminal held work behind |
 | `QuiescenceHasNoSilentStrandedWork` | Safety | `Stopped` never leaves sent batches without a terminal `acked`/`rejected`/`abandoned` outcome |
 | `NoUnresolvedSentAtQuiescence` | Safety | `Stopped` implies `sent \ terminal = {}` for every source (no stranded sent work) |
 | `StopMetadataConsistent` | Safety | `forced` and `stop_reason` stay phase-consistent (`Stopped` iff reason is non-`none`) |
 | `CheckpointOrderingInvariant` | Safety | `committed[s]=n` implies every sent batch `<= n` is terminalized via `acked`/`rejected`/`abandoned` and none are in-flight |
+| `UnresolvedWorkNotCommittedPast` | Safety | active or held in-flight work cannot be silently committed past |
+| `CheckpointNeverAheadOfTerminalizedPrefix` | Safety | committed checkpoint is never ahead of the ack/reject terminalized prefix |
 | `CommittedMonotonic` | Safety | Checkpoint never goes backwards |
 | `FailureTerminalizationPreservesCheckpoint` | Safety | Force/crash terminalization cannot advance checkpoints |
 | `FailureClassMustTerminalizePrototype` | Safety | Force/crash transitions must leave no sent-but-unterminalized batches |
+| `HeldTransitionsDoNotCommit` | Safety | hold/retry/force-stop held-state transitions do not advance checkpoints |
+| `ForceStopAbandonsAllInFlight` | Safety | force-stop explicitly moves every unresolved in-flight batch to `abandoned` |
 | `NoCreateAfterDrain` | Safety | No new batches after `begin_drain` |
 | `NoDoubleComplete` | Safety | In-flight batches are disjoint from `acked`, `rejected`, and `abandoned` terminal sets |
 | `EventualDrain` | Liveness | Every started drain eventually reaches Stopped |
 | `NoBatchLeftBehind` | Liveness | Every in-flight batch eventually terminalizes (`ack`/`reject`/`abandon`) |
+| `HeldBatchEventuallyReleased` | Liveness | Every non-terminal hold is eventually retried/released |
+| `PanickedBatchEventuallyAccountedFor` | Liveness | Panic-held work eventually reaches `ack`/`reject`/`abandon` |
 | `StoppedIsStable` | Liveness | Once Stopped, stays Stopped |
 
 `tla/MCPipelineMachine.tla` is the TLC model checker configuration (symmetry sets, model
@@ -76,10 +85,18 @@ java -cp /path/to/tla2tools.jar tlc2.TLC MCPipelineMachine.tla -config PipelineM
 
 Three models:
 - **Model 1 — Safety** (normal + ForceStop paths): `Sources={"s1","s2"}`,
-  `MaxBatchesPerSource=3`, ~50K states, < 30s
-- **Model 2 — Liveness**: `MaxBatchesPerSource=2`, ~5K states, < 5 min
+  `MaxBatchesPerSource=3`, `MaxNonTerminalHolds=1`, ~10.8M distinct states
+  locally with one TLC worker, < 10 min
+- **Model 2 — Liveness**: `MaxBatchesPerSource=2`, `MaxNonTerminalHolds=1`,
+  ~77K distinct states locally with one TLC worker, < 5 min
 - **Model 3 — Coverage**: reachability/vacuity witnesses via
   `PipelineMachine.coverage.cfg` (expected invariant violations as witnesses)
+
+The PipelineMachine model now explicitly includes bounded non-terminal
+hold/fail/retry/panic behavior. `HoldBatch` keeps a batch in `in_flight` without
+advancing checkpoints; `RetryHeldBatch` releases the hold; `PanicHoldBatch`
+records a panic-originated hold; `ForceStop` explicitly abandons unresolved
+work. The model still abstracts away retry backoff timing and payload retention.
 
 > Do NOT use `CONSTRAINT` to bound state space for liveness — it silently breaks liveness
 > by cutting off infinite behaviors before they converge. Use model constants instead.
@@ -279,6 +296,31 @@ types.
 
 ---
 
+## Turmoil (Tier 3b — deterministic runtime fault simulation)
+
+Use Turmoil for async/runtime correctness properties that depend on scheduling and
+network faults but are not practical to model exhaustively with Kani.
+
+Use cases:
+- partition/repair/hold/release behavior for networked components
+- retry/backoff and timeout behavior under deterministic seeds
+- panic/unwind and worker recycle paths in async shells
+- checkpoint durability behavior under flush failures and shutdown timing
+
+Rules for meaningful Turmoil tests:
+1. Assert runtime contracts, not synthetic test narratives.
+2. Prefer runtime-originated evidence (checkpoint updates, sink outcomes, worker/pool behavior)
+   over test-injected lifecycle markers.
+3. Always seed runs and print replay hints.
+4. Validate invariants (monotonic checkpointing, no durable-ahead-of-updates, no silent stalls),
+   not only "did not panic".
+5. Pair Turmoil tests with Kani/proptest on extracted pure reducers when possible.
+
+Reference:
+- `dev-docs/references/turmoil-simulation.md`
+
+---
+
 ## Compile-time (Tier 4)
 
 The Rust type system enforces invariants that no runtime verification can match:
@@ -343,7 +385,7 @@ logfwd-core is the proven kernel. All rules are CI-enforced.
 | `logfwd-io/framed.rs` | Per-source framing/remainder checkpoint boundary (`overflow_tainted`, EOF remainder flush, source-scoped EOF semantics) | Unit tests (remainder carry/overflow, per-source isolation, EOF flush + checkpoint advancement contracts) |
 | `logfwd-io/tail/verification.rs` | File tailer pure reducers for EOF emission + error backoff (`eof_model_transition`, `backoff_transition`) | Kani (7 proofs: EOF at-most-once thresholding, reset semantics, two-poll/repeat cycle, backoff cap/reset/monotonicity) + proptest (state reducer invariants in `tail/state.rs`) + **TLA+** (`tla/TailLifecycle.tla`) |
 | `logfwd-io/segment.rs` | Checkpoint segment envelope read/write/recovery (`LCHK` header/footer, checksum, replay plan) | Unit tests for panic/OOM/silent-mask hardening (unsupported-version, permission-denied I/O surfacing, write/read size-bound parity, recovery error semantics) |
-| `logfwd/pipeline/checkpoint_policy.rs` | Typed delivery outcome -> checkpoint disposition mapping (`Ack`, `Reject`, `Hold`) | Kani exhaustive (3 proofs) + unit tests + proptest sequence invariants (monotonicity + no-advance-on-reject/hold) |
+| `logfwd/pipeline/checkpoint_policy.rs` | Typed delivery outcome -> checkpoint disposition mapping plus bounded ordered-commit seam model (`Ack`, `Reject`, `Hold`) | Kani exhaustive/bounded (6 proofs: outcome mapping, hold no-advance, ack/reject terminal equivalence, mixed-sequence monotonicity/no-gap jumps) + unit tests + proptest ordered sequence invariants |
 | `logfwd/pipeline/checkpoint_io.rs` | Final checkpoint flush retry window (`MAX_ATTEMPTS`, retry/no-retry boundary, stop-on-success behavior) | Kani (2 proofs: zero/one-attempt no-retry, retry-window equivalence) + unit tests + proptest retry-window equivalence checks + async retry behavior tests |
 | `logfwd/pipeline/input_poll.rs` | Turmoil input-loop flush predicate (`should_flush_buffer`) for byte-batch/timeout emission policy | Kani (3 proofs: empty-buffer no-flush, timeout gate semantics, predicate equivalence) + unit tests + proptest policy equivalence |
 | `logfwd/worker_pool/health.rs` | Pool idle-phase insertion + worker-slot aggregation policy | Kani exhaustive (3 proofs) + unit tests + proptest aggregation checks |

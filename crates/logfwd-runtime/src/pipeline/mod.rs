@@ -14,11 +14,13 @@ mod input_poll;
 mod internal_faults;
 mod processor_stage;
 mod submit;
+pub(crate) mod transition;
 
 use self::checkpoint_io::flush_checkpoint_with_retry;
 use self::checkpoint_policy::{TicketDisposition, default_ticket_disposition};
 #[cfg(feature = "turmoil")]
 use self::input_poll::async_input_poll_loop;
+use self::transition::TransitionEventEmitterHandle;
 
 use std::collections::HashMap;
 use std::io;
@@ -52,6 +54,11 @@ use logfwd_output::build_sink_factory;
 use logfwd_output::{BatchMetadata, OnceAsyncFactory};
 use logfwd_types::pipeline::{PipelineMachine, Running, SourceId};
 use tokio_util::sync::CancellationToken;
+
+pub use self::transition::{
+    NoopTransitionEventEmitter, TransitionAction, TransitionDisposition, TransitionEvent,
+    TransitionEventEmitter, TransitionEventRecorder, TransitionOutcome, TransitionPhase,
+};
 
 // ---------------------------------------------------------------------------
 // block_in_place shim for simulation
@@ -164,6 +171,8 @@ pub struct Pipeline {
     last_checkpoint_flush: tokio::time::Instant,
     /// Checkpoint flush throttle interval. Default 5 seconds; overridable for tests.
     checkpoint_flush_interval: Duration,
+    /// Optional transition-event sink. Default handle is no-op.
+    transition_events: TransitionEventEmitterHandle,
 }
 
 impl Pipeline {
@@ -174,6 +183,8 @@ impl Pipeline {
         let name = self.name.clone();
         let factory = Arc::new(OnceAsyncFactory::new(name, sink));
         self.pool = OutputWorkerPool::new(factory, 1, Duration::MAX, Arc::clone(&self.metrics));
+        self.pool
+            .set_transition_event_handle(self.transition_events.clone());
         self
     }
 
@@ -206,6 +217,22 @@ impl Pipeline {
     pub fn with_checkpoint_store(mut self, store: Box<dyn CheckpointStore>) -> Self {
         self.checkpoint_store = Some(store);
         self
+    }
+
+    /// Install a runtime transition-event emitter.
+    pub fn with_transition_event_emitter(
+        mut self,
+        emitter: Arc<dyn TransitionEventEmitter>,
+    ) -> Self {
+        self.set_transition_event_emitter(emitter);
+        self
+    }
+
+    /// Replace the runtime transition-event emitter.
+    pub fn set_transition_event_emitter(&mut self, emitter: Arc<dyn TransitionEventEmitter>) {
+        let handle = TransitionEventEmitterHandle::new(emitter);
+        self.pool.set_transition_event_handle(handle.clone());
+        self.transition_events = handle;
     }
 
     /// Add a post-transform processor to the chain.
@@ -299,6 +326,7 @@ impl Pipeline {
             checkpoint_store: None,
             last_checkpoint_flush: tokio::time::Instant::now(),
             checkpoint_flush_interval: build::DEFAULT_CHECKPOINT_FLUSH_INTERVAL,
+            transition_events: TransitionEventEmitterHandle::noop(),
         }
     }
 
@@ -333,6 +361,7 @@ impl Pipeline {
             checkpoint_store: None,
             last_checkpoint_flush: tokio::time::Instant::now(),
             checkpoint_flush_interval: build::DEFAULT_CHECKPOINT_FLUSH_INTERVAL,
+            transition_events: TransitionEventEmitterHandle::noop(),
         }
     }
 
@@ -593,23 +622,68 @@ impl Pipeline {
 
         // Transition machine: Running → Draining → Stopped.
         if let Some(machine) = self.machine.take() {
+            let transition_events = self.transition_events.clone();
+            transition_events.emit_with(|seq, timestamp_nanos| {
+                let mut event = TransitionEvent::new(
+                    seq,
+                    timestamp_nanos,
+                    TransitionPhase::Lifecycle,
+                    TransitionAction::BeginDrain,
+                );
+                event.outcome = Some(TransitionOutcome::Started);
+                event
+            });
             let draining = machine.begin_drain();
             match draining.stop() {
                 Ok(stopped) => {
                     // All in-flight batches resolved — persist final checkpoints.
                     if let Some(ref mut store) = self.checkpoint_store {
                         for (source_id, offset) in stopped.final_checkpoints() {
+                            transition_events.emit_with(|seq, timestamp_nanos| {
+                                let mut event = TransitionEvent::new(
+                                    seq,
+                                    timestamp_nanos,
+                                    TransitionPhase::Checkpoint,
+                                    TransitionAction::UpdateCheckpoint,
+                                );
+                                event.source_id = Some(source_id.0);
+                                event.checkpoint_offset = Some(*offset);
+                                event.outcome = Some(TransitionOutcome::Advanced);
+                                event
+                            });
                             store.update(SourceCheckpoint {
                                 source_id: source_id.0,
                                 path: None, // path is metadata, not required for restore
                                 offset: *offset,
                             });
                         }
-                        flush_checkpoint_with_retry(store.as_mut()).await;
+                        flush_checkpoint_with_retry(store.as_mut(), &transition_events).await;
                     }
+                    transition_events.emit_with(|seq, timestamp_nanos| {
+                        let mut event = TransitionEvent::new(
+                            seq,
+                            timestamp_nanos,
+                            TransitionPhase::Lifecycle,
+                            TransitionAction::Stop,
+                        );
+                        event.outcome = Some(TransitionOutcome::Completed);
+                        event.in_flight_count = Some(0);
+                        event
+                    });
                 }
                 Err(still_draining) => {
                     let abandoned = still_draining.in_flight_count();
+                    transition_events.emit_with(|seq, timestamp_nanos| {
+                        let mut event = TransitionEvent::new(
+                            seq,
+                            timestamp_nanos,
+                            TransitionPhase::Lifecycle,
+                            TransitionAction::Stop,
+                        );
+                        event.outcome = Some(TransitionOutcome::Blocked);
+                        event.in_flight_count = Some(abandoned);
+                        event
+                    });
                     tracing::warn!(
                         in_flight = abandoned,
                         "pipeline: force-stopping with in-flight batches (checkpoint may not reflect latest delivered data)"
@@ -619,14 +693,37 @@ impl Pipeline {
                     // valid (they only reflect contiguously-acked batches).
                     if let Some(ref mut store) = self.checkpoint_store {
                         for (source_id, offset) in stopped.final_checkpoints() {
+                            transition_events.emit_with(|seq, timestamp_nanos| {
+                                let mut event = TransitionEvent::new(
+                                    seq,
+                                    timestamp_nanos,
+                                    TransitionPhase::Checkpoint,
+                                    TransitionAction::UpdateCheckpoint,
+                                );
+                                event.source_id = Some(source_id.0);
+                                event.checkpoint_offset = Some(*offset);
+                                event.outcome = Some(TransitionOutcome::Advanced);
+                                event
+                            });
                             store.update(SourceCheckpoint {
                                 source_id: source_id.0,
                                 path: None,
                                 offset: *offset,
                             });
                         }
-                        flush_checkpoint_with_retry(store.as_mut()).await;
+                        flush_checkpoint_with_retry(store.as_mut(), &transition_events).await;
                     }
+                    transition_events.emit_with(|seq, timestamp_nanos| {
+                        let mut event = TransitionEvent::new(
+                            seq,
+                            timestamp_nanos,
+                            TransitionPhase::Lifecycle,
+                            TransitionAction::ForceStop,
+                        );
+                        event.outcome = Some(TransitionOutcome::Forced);
+                        event.in_flight_count = Some(abandoned);
+                        event
+                    });
                 }
             }
         }
@@ -674,7 +771,11 @@ impl Pipeline {
             }
             self.metrics.output_error(&ack.output_name);
         }
-        self.ack_all_tickets(ack.tickets, default_ticket_disposition(&ack.outcome));
+        self.ack_all_tickets(
+            Some(ack.batch_id),
+            ack.tickets,
+            default_ticket_disposition(&ack.outcome),
+        );
     }
 
     /// Finalize Sending tickets and apply receipts to the machine when present.
@@ -682,15 +783,25 @@ impl Pipeline {
     /// Flushes are throttled to at most once per 5 seconds to avoid fsync storms.
     fn ack_all_tickets(
         &mut self,
+        batch_id: Option<u64>,
         tickets: Vec<logfwd_types::pipeline::BatchTicket<logfwd_types::pipeline::Sending, u64>>,
         disposition: TicketDisposition,
     ) {
         let Some(ref mut machine) = self.machine else {
             return;
         };
+        let transition_events = self.transition_events.clone();
         let mut any_advanced = false;
         let mut held = 0usize;
         for ticket in tickets {
+            let ticket_id = ticket.id().0;
+            let source_id = ticket.source().0;
+            let checkpoint_offset = *ticket.checkpoint();
+            let transition_disposition = match disposition {
+                TicketDisposition::Ack => TransitionDisposition::Ack,
+                TicketDisposition::Reject => TransitionDisposition::Reject,
+                TicketDisposition::Hold => TransitionDisposition::Hold,
+            };
             let receipt = match disposition {
                 TicketDisposition::Ack => Some(ticket.ack()),
                 TicketDisposition::Reject => Some(ticket.reject()),
@@ -706,7 +817,55 @@ impl Pipeline {
             };
             if let Some(receipt) = receipt {
                 let advance = machine.apply_ack(receipt);
+                let outcome = match disposition {
+                    TicketDisposition::Ack => {
+                        if advance.advanced {
+                            TransitionOutcome::Advanced
+                        } else {
+                            TransitionOutcome::Acked
+                        }
+                    }
+                    TicketDisposition::Reject => {
+                        if advance.advanced {
+                            TransitionOutcome::Advanced
+                        } else {
+                            TransitionOutcome::RejectedTicket
+                        }
+                    }
+                    TicketDisposition::Hold => TransitionOutcome::Held,
+                };
+                transition_events.emit_with(|seq, timestamp_nanos| {
+                    let mut event = TransitionEvent::new(
+                        seq,
+                        timestamp_nanos,
+                        TransitionPhase::Ticket,
+                        TransitionAction::ApplyDisposition,
+                    );
+                    event.batch_id = batch_id;
+                    event.ticket_id = Some(ticket_id);
+                    event.source_id = Some(source_id);
+                    event.checkpoint_offset = Some(checkpoint_offset);
+                    event.disposition = Some(transition_disposition);
+                    event.outcome = Some(outcome);
+                    event
+                });
                 if advance.advanced {
+                    if let Some(offset) = advance.checkpoint {
+                        transition_events.emit_with(|seq, timestamp_nanos| {
+                            let mut event = TransitionEvent::new(
+                                seq,
+                                timestamp_nanos,
+                                TransitionPhase::Checkpoint,
+                                TransitionAction::UpdateCheckpoint,
+                            );
+                            event.batch_id = batch_id;
+                            event.ticket_id = Some(ticket_id);
+                            event.source_id = Some(advance.source.0);
+                            event.checkpoint_offset = Some(offset);
+                            event.outcome = Some(TransitionOutcome::Advanced);
+                            event
+                        });
+                    }
                     if let (Some(ref mut store), Some(offset)) =
                         (self.checkpoint_store.as_mut(), advance.checkpoint)
                     {
@@ -718,6 +877,22 @@ impl Pipeline {
                         any_advanced = true;
                     }
                 }
+            } else {
+                transition_events.emit_with(|seq, timestamp_nanos| {
+                    let mut event = TransitionEvent::new(
+                        seq,
+                        timestamp_nanos,
+                        TransitionPhase::Ticket,
+                        TransitionAction::ApplyDisposition,
+                    );
+                    event.batch_id = batch_id;
+                    event.ticket_id = Some(ticket_id);
+                    event.source_id = Some(source_id);
+                    event.checkpoint_offset = Some(checkpoint_offset);
+                    event.disposition = Some(transition_disposition);
+                    event.outcome = Some(TransitionOutcome::Held);
+                    event
+                });
             }
         }
         if held > 0 {
@@ -731,7 +906,24 @@ impl Pipeline {
         if any_advanced && self.last_checkpoint_flush.elapsed() >= self.checkpoint_flush_interval {
             self.last_checkpoint_flush = tokio::time::Instant::now();
             if let Some(ref mut store) = self.checkpoint_store {
-                if let Err(e) = store.flush() {
+                let result = store.flush();
+                let flush_outcome = if result.is_ok() {
+                    TransitionOutcome::FlushSucceeded
+                } else {
+                    TransitionOutcome::FlushFailed
+                };
+                transition_events.emit_with(|seq, timestamp_nanos| {
+                    let mut event = TransitionEvent::new(
+                        seq,
+                        timestamp_nanos,
+                        TransitionPhase::Checkpoint,
+                        TransitionAction::FlushCheckpoint,
+                    );
+                    event.outcome = Some(flush_outcome);
+                    event.attempt = Some(1);
+                    event
+                });
+                if let Err(e) = result {
                     tracing::warn!(error = %e, "pipeline: checkpoint flush error");
                 }
             }

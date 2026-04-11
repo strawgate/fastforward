@@ -17,7 +17,10 @@ use super::internal_faults;
 use super::processor_stage::{ProcessorStageResult, run_processor_stage};
 #[cfg(feature = "turmoil")]
 use super::scan_maybe_blocking;
-use super::{ChannelMsg, Pipeline, now_nanos};
+use super::{
+    ChannelMsg, Pipeline, TransitionAction, TransitionEvent, TransitionOutcome, TransitionPhase,
+    now_nanos,
+};
 #[cfg(feature = "turmoil")]
 use super::{InputState, InputTransform};
 
@@ -58,14 +61,29 @@ impl Pipeline {
 
         // Create Queued tickets, then transition to Sending.
         // After begin_send, tickets MUST be acked or rejected.
+        let transition_events = self.transition_events.clone();
         let sending: Vec<_> = if let Some(ref mut machine) = self.machine {
-            checkpoints
-                .iter()
-                .map(|(&sid, &offset)| {
-                    let queued = machine.create_batch(sid, offset.0);
-                    machine.begin_send(queued)
-                })
-                .collect()
+            let mut sending = Vec::with_capacity(checkpoints.len());
+            for (&sid, &offset) in &checkpoints {
+                let queued = machine.create_batch(sid, offset.0);
+                let ticket = machine.begin_send(queued);
+                transition_events.emit_with(|seq, timestamp_nanos| {
+                    let mut event = TransitionEvent::new(
+                        seq,
+                        timestamp_nanos,
+                        TransitionPhase::Batch,
+                        TransitionAction::EnterSending,
+                    );
+                    event.batch_id = Some(batch_id);
+                    event.ticket_id = Some(ticket.id().0);
+                    event.source_id = Some(sid.0);
+                    event.checkpoint_offset = Some(offset.0);
+                    event.outcome = Some(TransitionOutcome::Entered);
+                    event
+                });
+                sending.push(ticket);
+            }
+            sending
         } else {
             Vec::new()
         };
@@ -75,7 +93,11 @@ impl Pipeline {
         // Handle zero-row results (SQL WHERE filtered all rows).
         // Ack tickets so the input doesn't re-read the same data.
         if num_rows == 0 {
-            self.ack_all_tickets(sending, super::checkpoint_policy::TicketDisposition::Ack);
+            self.ack_all_tickets(
+                Some(batch_id),
+                sending,
+                super::checkpoint_policy::TicketDisposition::Ack,
+            );
             self.metrics.record_batch(0, scan_ns, transform_ns, 0);
             self.metrics.finish_active_batch(batch_id);
             return false;
@@ -89,13 +111,21 @@ impl Pipeline {
             ProcessorStageResult::Forward { batch, output_rows } => (batch, output_rows),
             ProcessorStageResult::Hold { reason } => {
                 tracing::warn!(reason = %reason, "processor stage requested hold");
-                self.ack_all_tickets(sending, super::checkpoint_policy::TicketDisposition::Hold);
+                self.ack_all_tickets(
+                    Some(batch_id),
+                    sending,
+                    super::checkpoint_policy::TicketDisposition::Hold,
+                );
                 self.metrics.finish_active_batch(batch_id);
                 return false;
             }
             ProcessorStageResult::PermanentError { reason } => {
                 tracing::warn!(reason = %reason, "processor stage permanent error; dropping batch");
-                self.ack_all_tickets(sending, super::checkpoint_policy::TicketDisposition::Ack);
+                self.ack_all_tickets(
+                    Some(batch_id),
+                    sending,
+                    super::checkpoint_policy::TicketDisposition::Ack,
+                );
                 self.metrics.inc_dropped_batch();
                 self.metrics.record_batch(0, scan_ns, transform_ns, 0);
                 self.metrics.finish_active_batch(batch_id);
@@ -103,21 +133,33 @@ impl Pipeline {
             }
             ProcessorStageResult::ZeroRow { reason } => {
                 tracing::debug!(reason = %reason, "processor stage emitted zero rows");
-                self.ack_all_tickets(sending, super::checkpoint_policy::TicketDisposition::Ack);
+                self.ack_all_tickets(
+                    Some(batch_id),
+                    sending,
+                    super::checkpoint_policy::TicketDisposition::Ack,
+                );
                 self.metrics.record_batch(0, scan_ns, transform_ns, 0);
                 self.metrics.finish_active_batch(batch_id);
                 return false;
             }
             ProcessorStageResult::Fatal { reason } => {
                 tracing::error!(reason = %reason, "processor stage requested shutdown");
-                self.ack_all_tickets(sending, super::checkpoint_policy::TicketDisposition::Hold);
+                self.ack_all_tickets(
+                    Some(batch_id),
+                    sending,
+                    super::checkpoint_policy::TicketDisposition::Hold,
+                );
                 self.metrics.finish_active_batch(batch_id);
                 shutdown.cancel();
                 return true;
             }
             ProcessorStageResult::Reject { reason } => {
                 tracing::error!(reason = %reason, "processor stage rejected batch");
-                self.ack_all_tickets(sending, super::checkpoint_policy::TicketDisposition::Reject);
+                self.ack_all_tickets(
+                    Some(batch_id),
+                    sending,
+                    super::checkpoint_policy::TicketDisposition::Reject,
+                );
                 self.metrics.finish_active_batch(batch_id);
                 return false;
             }
@@ -130,7 +172,11 @@ impl Pipeline {
 
         if internal_faults::submit_before_pool_should_hold_and_shutdown() {
             tracing::warn!("internal failpoint: submit pre-pool hold+shutdown");
-            self.ack_all_tickets(sending, super::checkpoint_policy::TicketDisposition::Hold);
+            self.ack_all_tickets(
+                Some(batch_id),
+                sending,
+                super::checkpoint_policy::TicketDisposition::Hold,
+            );
             self.metrics.finish_active_batch(batch_id);
             shutdown.cancel();
             // Keep the select-loop on the normal shutdown path so run_async can

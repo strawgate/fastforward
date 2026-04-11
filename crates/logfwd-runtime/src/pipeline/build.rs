@@ -368,6 +368,7 @@ impl Pipeline {
             checkpoint_store,
             last_checkpoint_flush: tokio::time::Instant::now(),
             checkpoint_flush_interval: DEFAULT_CHECKPOINT_FLUSH_INTERVAL,
+            transition_events: super::transition::TransitionEventEmitterHandle::noop(),
         })
     }
 }
