@@ -136,18 +136,20 @@ impl ArrowIpcSink {
         }
 
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            let retry_after =
-                crate::http_classify::parse_retry_after(response.headers().get(reqwest::header::RETRY_AFTER))
-                    .unwrap_or(Duration::from_secs(DEFAULT_RETRY_AFTER_SECS));
+            let retry_after = crate::http_classify::parse_retry_after(
+                response.headers().get(reqwest::header::RETRY_AFTER),
+            )
+            .unwrap_or(Duration::from_secs(DEFAULT_RETRY_AFTER_SECS));
             // Consume the response body to free the connection for reuse.
             let _ = response.text().await;
             return Ok(SendResult::RetryAfter(retry_after));
         }
 
         if status.is_server_error() {
-            let retry_after =
-                crate::http_classify::parse_retry_after(response.headers().get(reqwest::header::RETRY_AFTER))
-                    .unwrap_or(Duration::from_secs(DEFAULT_RETRY_AFTER_SECS));
+            let retry_after = crate::http_classify::parse_retry_after(
+                response.headers().get(reqwest::header::RETRY_AFTER),
+            )
+            .unwrap_or(Duration::from_secs(DEFAULT_RETRY_AFTER_SECS));
             // Consume the response body to free the connection.
             let _body = response.text().await.unwrap_or_default();
             return Ok(SendResult::RetryAfter(retry_after));
