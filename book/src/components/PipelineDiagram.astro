@@ -1,10 +1,32 @@
 ---
-const stages = [
+type FlowType = 'pipeline' | 'list';
+type LayoutType = 'options' | 'pipeline';
+
+interface Component {
+  id: string;
+  label: string;
+  detail: string;
+  flow: string[];
+  flowType?: FlowType;
+  notes?: string;
+}
+
+interface Stage {
+  id: string;
+  label: string;
+  subtitle: string;
+  summary: string;
+  layout: LayoutType;
+  components: Component[];
+}
+
+const stages: Stage[] = [
   {
     id: 'inputs',
     label: 'Inputs',
     subtitle: '8 types',
     summary: 'Sources produce raw bytes or Arrow batches independently',
+    layout: 'options',
     components: [
       {
         id: 'file', label: 'File',
@@ -38,8 +60,8 @@ const stages = [
       },
       {
         id: 'arrow-ipc-in', label: 'Arrow IPC',
-        detail: 'Receive Arrow IPC stream payloads over HTTP POST. Bypasses the scanner entirely — decoded RecordBatches go directly into the pipeline.',
-        flow: ['HTTP POST /v1/arrow', 'Zstd Decompress', 'IPC Decode', 'RecordBatch'],
+        detail: 'Receive Arrow IPC stream payloads over HTTP POST. Bypasses the scanner — decoded RecordBatches go directly into the pipeline.',
+        flow: ['HTTP POST /v1/arrow', 'Zstd Decompress', 'IPC Stream Decode', 'RecordBatch'],
         notes: 'Scanner bypass: zero parsing overhead. Canonical content type: application/vnd.apache.arrow.stream.',
       },
       {
@@ -60,32 +82,32 @@ const stages = [
     id: 'scanner',
     label: 'Scanner',
     subtitle: '4 stages',
+    summary: 'SIMD-accelerated JSON/CRI to Arrow conversion',
     layout: 'pipeline',
-    summary: 'SIMD-accelerated JSON/CRI → Arrow conversion',
     components: [
       {
         id: 'format-detect', label: 'Format Parser',
         detail: 'Detects and parses CRI, JSON, or raw format. CRI parser strips timestamp/stream prefix and reassembles multi-line logs via the P partial flag.',
-        flow: ['Format Detect', 'CRI/JSON/Raw Parse', 'Line Extract', 'Remainder Track'],
-        notes: 'Auto mode: try CRI first → JSON → raw fallback. CRI reassembler buffers partials (P flag), emits on full (F flag). CRLF normalized.',
+        flow: ['Format Detect', 'CRI / JSON / Raw Parse', 'Line Extract', 'Remainder Track'],
+        notes: 'Auto mode: try CRI first, then JSON, then raw fallback. CRI reassembler buffers partials (P flag), emits on full (F flag). CRLF normalized.',
       },
       {
-        id: 'simd-index', label: 'SIMD Structural Index',
+        id: 'simd-index', label: 'Structural Index',
         detail: 'One vectorized pass over the entire buffer using platform-native SIMD. Classifies 10 structural characters simultaneously in 64-byte blocks.',
-        flow: ['64-byte Block Load', 'SIMD Compare (10 chars)', 'Escape Parity', 'Quote Mask', 'StructuralIndex'],
+        flow: ['64-byte Block Load', 'SIMD Compare', 'Escape Parity', 'Quote Mask', 'Bitmask Output'],
         notes: 'AVX2/SSE2 on x86_64, NEON on aarch64 via wide crate. Output: real_quotes + in_string bitmasks. O(1) string boundary lookup via trailing_zeros.',
       },
       {
         id: 'field-extract', label: 'Field Extraction',
         detail: 'Scalar state machine walks top-level JSON objects using pre-computed bitmasks. Resolves field names to column indices once per batch via HashMap.',
-        flow: ['Find Opening {', 'Key Resolve (HashMap)', 'Value Type Detect', 'Append to Builder'],
-        notes: 'Field pushdown: QueryAnalyzer extracts referenced columns from SQL. Scanner skips unwanted fields — 2-3x throughput on wide data.',
+        flow: ['Find Opening {', 'Key Resolve', 'Value Type Detect', 'Append to Builder'],
+        notes: 'Field pushdown: QueryAnalyzer extracts referenced columns from SQL. Scanner skips unwanted fields for 2-3x throughput on wide data.',
       },
       {
-        id: 'batch-builder', label: 'RecordBatch Builder',
+        id: 'batch-builder', label: 'Batch Builder',
         detail: 'Deferred builder pattern: collects (row, offset, len) views during scan, bulk-builds Arrow columns at finish. Zero-copy StringViewArray shares the input buffer.',
         flow: ['Accumulate Views', 'Type Resolution', 'Null Padding', 'finish_batch()', 'RecordBatch'],
-        notes: 'scan() → StringViewArray (zero-copy, buffer shared via Bytes refcount). scan_detached() → StringArray (single bulk copy). Resource metadata injected as columns.',
+        notes: 'scan() produces StringViewArray (zero-copy via Bytes refcount). scan_detached() produces StringArray (single bulk copy). Resource metadata injected as columns.',
       },
     ],
   },
@@ -94,6 +116,7 @@ const stages = [
     label: 'SQL Transform',
     subtitle: '3 components',
     summary: 'DataFusion SQL over Arrow RecordBatches',
+    layout: 'options',
     components: [
       {
         id: 'datafusion', label: 'DataFusion Engine',
@@ -122,10 +145,11 @@ const stages = [
     label: 'Outputs',
     subtitle: '8 types',
     summary: 'Fan-out to multiple destinations via bounded channels',
+    layout: 'options',
     components: [
       {
         id: 'otlp-out', label: 'OTLP',
-        detail: 'Encodes log records as OTLP protobuf with 3-phase encoding: encode LogRecords → group by resource/scope → write final protobuf with computed sizes.',
+        detail: 'Encodes log records as OTLP protobuf with 3-phase encoding: encode LogRecords, group by resource/scope, write final protobuf with computed sizes.',
         flow: ['Row Encode', 'Resource Group', 'Size Compute', 'Proto Serialize', 'Compress + Send'],
         notes: 'Groups rows by _resource_* columns into ResourceLogs. Two encoders: handwritten (full) and generated fast path. zstd/gzip compression. HTTP and gRPC protocols.',
       },
@@ -137,45 +161,40 @@ const stages = [
       },
       {
         id: 'loki', label: 'Loki',
-        detail: 'Pushes to Grafana Loki with automatic label grouping and key sanitization. Rejects configs where two sources collapse to the same label key.',
+        detail: 'Pushes to Grafana Loki with automatic label grouping and key sanitization.',
         flow: ['Label Extract', 'Key Sanitize', 'Stream Group', 'Proto Encode', 'HTTP Push'],
         notes: 'Label cardinality control via config. Duplicate label key detection at validation time.',
       },
       {
         id: 'stdout', label: 'stdout',
-        detail: 'Print to stdout for debugging. Console mode: colored, human-readable. JSON mode: one object per line. Text mode: raw body column.',
+        detail: 'Print to stdout for debugging. Console: colored, human-readable. JSON: one object per line. Text: raw body column.',
         flow: ['Format Select', 'Row Serialize', 'Write to fd 1'],
-        notes: 'Three formats: console (colored), json (NDJSON), text (raw). Zero network overhead — useful for pipeline validation.',
+        notes: 'Three formats: console (colored), json (NDJSON), text (raw). Zero network overhead.',
       },
       {
         id: 'file-out', label: 'File',
         detail: 'Write NDJSON or raw text to a local file for capture, replay testing, and local archival.',
         flow: ['Format Select', 'Serialize', 'File Write'],
-        notes: 'NDJSON or text output. Useful for capture and replay testing.',
       },
       {
         id: 'tcp-out', label: 'TCP',
         detail: 'Send records to a TCP endpoint with persistent connections and retry backoff.',
         flow: ['Connect', 'Serialize', 'Send', 'Retry on Error'],
-        notes: 'Persistent connection with automatic reconnect. Configurable encoding.',
       },
       {
         id: 'udp-out', label: 'UDP',
         detail: 'Fire-and-forget datagram output for low-overhead forwarding.',
         flow: ['Serialize', 'Send Datagram'],
-        notes: 'No ack, no retry. Lowest overhead output.',
       },
       {
         id: 'arrow-ipc-out', label: 'Arrow IPC',
         detail: 'Send Arrow IPC payloads for zero-copy handoff to downstream consumers.',
         flow: ['IPC Serialize', 'Optional Compress', 'HTTP Send'],
-        notes: 'Zero-copy when paired with Arrow IPC input. Supports zstd compression.',
       },
     ],
   },
 ];
 
-// SVG icons for each stage (inline, no external deps)
 const icons: Record<string, string> = {
   inputs: '<path d="M12 3v10m0 0l-3-3m3 3l3-3M5 17h14a2 2 0 002-2v0a2 2 0 00-2-2H5a2 2 0 00-2 2v0a2 2 0 002 2z" stroke="currentColor" fill="none" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>',
   scanner: '<path d="M13 10V3L4 14h7v7l9-11h-7z" stroke="currentColor" fill="none" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>',
@@ -185,24 +204,23 @@ const icons: Record<string, string> = {
 ---
 
 <div class="pd" data-pd-root>
-  <div class="pd-flow">
+  {/* Level 1: Use CSS Grid for pixel-perfect alignment */}
+  <div class="pd-grid">
     {stages.map((stage, i) => (
       <>
-        <button
-          class="pd-stage"
-          data-stage={stage.id}
-          aria-expanded="false"
-        >
-          <svg class="pd-stage-icon" viewBox="0 0 24 24" aria-hidden="true">
+        <button class="pd-stage" data-stage={stage.id} aria-expanded="false">
+          <svg class="pd-icon" viewBox="0 0 24 24" aria-hidden="true">
             <Fragment set:html={icons[stage.id]} />
           </svg>
-          <span class="pd-stage-label">{stage.label}</span>
-          <span class="pd-stage-count">{stage.subtitle ?? `${stage.components.length} types`}</span>
+          <span class="pd-label">{stage.label}</span>
+          <span class="pd-sub">{stage.subtitle}</span>
         </button>
         {i < stages.length - 1 && (
-          <div class="pd-connector" aria-hidden="true">
-            <div class="pd-connector-line"></div>
-            <div class="pd-connector-arrow"></div>
+          <div class="pd-arrow" aria-hidden="true">
+            <svg viewBox="0 0 40 12" preserveAspectRatio="none">
+              <line x1="0" y1="6" x2="32" y2="6" stroke="currentColor" stroke-width="2" stroke-dasharray="4 3" />
+              <polygon points="30,2 38,6 30,10" fill="currentColor" />
+            </svg>
           </div>
         )}
       </>
@@ -211,53 +229,62 @@ const icons: Record<string, string> = {
 
   <p class="pd-hint">Select a stage to explore its components</p>
 
+  {/* Level 2 + 3: Detail panels */}
   {stages.map((stage) => (
-    <div class="pd-detail" data-detail-stage={stage.id} hidden>
-      <div class="pd-detail-head">
-        <svg class="pd-detail-icon" viewBox="0 0 24 24" aria-hidden="true">
+    <div class="pd-panel" data-detail-stage={stage.id} hidden>
+      <div class="pd-panel-head">
+        <svg class="pd-panel-icon" viewBox="0 0 24 24" aria-hidden="true">
           <Fragment set:html={icons[stage.id]} />
         </svg>
         <div>
-          <h3>{stage.label}</h3>
-          <p>{stage.summary}</p>
+          <strong>{stage.label}</strong>
+          <span>{stage.summary}</span>
         </div>
       </div>
-      <div class={stage.layout === 'pipeline' ? 'pd-comp-pipeline' : 'pd-components'}>
+
+      <div class={stage.layout === 'pipeline' ? 'pd-chips pd-chips--pipeline' : 'pd-chips'}>
         {stage.components.map((comp, j) => (
           <>
-            <button
-              class="pd-comp"
-              data-component={comp.id}
-              aria-expanded="false"
-            >
+            <button class="pd-chip" data-component={comp.id} aria-expanded="false">
               {comp.label}
             </button>
             {stage.layout === 'pipeline' && j < stage.components.length - 1 && (
-              <div class="pd-comp-arrow" aria-hidden="true"></div>
+              <svg class="pd-chip-arrow" viewBox="0 0 16 8" aria-hidden="true">
+                <line x1="0" y1="4" x2="10" y2="4" stroke="currentColor" stroke-width="1.5" />
+                <polygon points="9,1 15,4 9,7" fill="currentColor" />
+              </svg>
             )}
           </>
         ))}
       </div>
+
       {stage.components.map((comp) => (
-        <div class="pd-impl" data-impl-component={comp.id} hidden>
-          <p class="pd-impl-desc">{comp.detail}</p>
+        <div class="pd-detail" data-impl-component={comp.id} hidden>
+          <p class="pd-detail-desc">{comp.detail}</p>
+
           {(comp.flowType ?? 'pipeline') === 'pipeline' ? (
-            <div class="pd-mini-flow">
+            <div class="pd-flow-steps">
               {comp.flow.map((step, j) => (
                 <>
-                  <div class="pd-mini-step">{step}</div>
-                  {j < comp.flow.length - 1 && <div class="pd-mini-arrow" aria-hidden="true"></div>}
+                  <span class="pd-step">{step}</span>
+                  {j < comp.flow.length - 1 && (
+                    <svg class="pd-step-arrow" viewBox="0 0 12 8" aria-hidden="true">
+                      <line x1="0" y1="4" x2="7" y2="4" stroke="currentColor" stroke-width="1.5" />
+                      <polygon points="6,1 12,4 6,7" fill="currentColor" />
+                    </svg>
+                  )}
                 </>
               ))}
             </div>
           ) : (
-            <div class="pd-mini-tags">
+            <div class="pd-tags">
               {comp.flow.map((item) => (
-                <span class="pd-mini-tag">{item}</span>
+                <code class="pd-tag">{item}</code>
               ))}
             </div>
           )}
-          {comp.notes && <p class="pd-impl-notes">{comp.notes}</p>}
+
+          {comp.notes && <p class="pd-detail-note">{comp.notes}</p>}
         </div>
       ))}
     </div>
@@ -265,419 +292,276 @@ const icons: Record<string, string> = {
 </div>
 
 <style>
-  /* ── Tokens ── */
   .pd {
-    --pd-bg: var(--sl-color-bg-nav);
-    --pd-surface: var(--sl-color-bg-sidebar);
-    --pd-border: var(--sl-color-hairline);
-    --pd-accent: var(--sl-color-accent);
-    --pd-accent-lo: color-mix(in srgb, var(--pd-accent) 12%, transparent);
-    --pd-accent-md: color-mix(in srgb, var(--pd-accent) 25%, transparent);
-    --pd-text: var(--sl-color-text);
-    --pd-muted: var(--sl-color-gray-3);
-    --pd-radius: 10px;
+    --c-bg: var(--sl-color-bg-sidebar);
+    --c-border: var(--sl-color-hairline);
+    --c-accent: var(--sl-color-accent);
+    --c-accent-lo: color-mix(in srgb, var(--c-accent) 10%, transparent);
+    --c-accent-md: color-mix(in srgb, var(--c-accent) 22%, transparent);
+    --c-text: var(--sl-color-text);
+    --c-muted: var(--sl-color-gray-3);
+    --radius: 10px;
     margin: 1.5rem 0;
   }
 
-  /* ── Level 1: Stage flow ── */
-  .pd-flow {
-    display: flex;
+  /* ══════════════ LEVEL 1: Grid layout ══════════════ */
+
+  .pd-grid {
+    display: grid;
+    grid-template-columns: 1fr auto 1fr auto 1fr auto 1fr;
     align-items: center;
-    justify-content: center;
-    gap: 0;
-    padding: 1.25rem 0;
+    justify-items: center;
+    padding: 1rem 0;
   }
+
+  /* Override Starlight's lobotomized owl spacing (+ * { margin-top }) */
+  .pd-grid > * { margin-top: 0 !important; }
 
   .pd-stage {
     display: flex;
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    gap: 0.4rem;
-    padding: 1.1rem 1.5rem;
-    border: 1.5px solid var(--pd-border);
-    border-radius: var(--pd-radius);
-    background: var(--pd-surface);
-    color: var(--pd-text);
+    gap: 0.35rem;
+    width: 132px;
+    height: 132px;
+    padding: 1rem;
+    border: 1.5px solid var(--c-border);
+    border-radius: var(--radius);
+    background: var(--c-bg);
+    color: var(--c-text);
     cursor: pointer;
-    transition: all 0.15s cubic-bezier(0.2, 0, 0, 1);
-    width: 140px;
-    height: 140px; /* fixed height for perfect alignment */
     font-family: inherit;
-    position: relative;
+    transition: border-color 0.15s, box-shadow 0.15s, transform 0.15s;
   }
 
   .pd-stage:hover {
-    border-color: var(--pd-accent);
-    transform: translateY(-3px);
-    box-shadow: 0 6px 20px rgba(0,0,0,.08);
+    border-color: var(--c-accent);
+    transform: translateY(-2px);
+    box-shadow: 0 4px 16px rgba(0,0,0,.06);
   }
 
   .pd-stage[aria-expanded="true"] {
-    border-color: var(--pd-accent);
-    background: var(--pd-accent-lo);
-    box-shadow: 0 0 0 3px var(--pd-accent-md);
+    border-color: var(--c-accent);
+    background: var(--c-accent-lo);
+    box-shadow: 0 0 0 3px var(--c-accent-md);
+    transform: none;
   }
 
-  .pd-stage-icon {
-    width: 28px;
-    height: 28px;
-    color: var(--pd-accent);
-    transition: transform 0.18s;
-  }
+  .pd-icon { width: 26px; height: 26px; color: var(--c-accent); }
+  .pd-label { font-weight: 700; font-size: 0.85rem; text-align: center; line-height: 1.2; }
+  .pd-sub { font-size: 0.7rem; color: var(--c-muted); }
 
-  .pd-stage:hover .pd-stage-icon {
-    transform: scale(1.1);
+  /* Arrows: inline SVG, always vertically centered by grid */
+  .pd-arrow {
+    width: 40px;
+    color: var(--c-accent);
+    opacity: 0.4;
   }
+  .pd-arrow svg { width: 100%; height: 12px; display: block; }
 
-  .pd-stage-label {
-    font-weight: 700;
-    font-size: 0.88rem;
-    letter-spacing: 0.01em;
-  }
-
-  .pd-stage-count {
-    font-size: 0.7rem;
-    color: var(--pd-muted);
-    font-weight: 500;
-  }
-
-  /* ── Connectors (animated dashed flow) ── */
-  .pd-connector {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 52px;
-    flex-shrink: 0;
-  }
-
-  .pd-connector-line {
-    flex: 1;
-    height: 2px;
-    background: repeating-linear-gradient(
-      90deg,
-      var(--pd-accent) 0 5px,
-      transparent 5px 10px
-    );
-    animation: pd-dash-right 0.6s linear infinite;
-    opacity: 0.45;
-    border-radius: 1px;
-  }
-
-  .pd-connector-arrow {
-    width: 0;
-    height: 0;
-    border-top: 5px solid transparent;
-    border-bottom: 5px solid transparent;
-    border-left: 8px solid var(--pd-accent);
-    opacity: 0.45;
-  }
-
-  /* Dashes flow left→right: increasing background-position-x shifts
-     the texture rightward, so the visible pattern moves right */
-  @keyframes pd-dash-right {
-    to { background-position: 10px 0; }
-  }
-
-  /* ── Hint ── */
   .pd-hint {
     text-align: center;
     font-size: 0.78rem;
-    color: var(--pd-muted);
-    margin: 0;
-    transition: opacity 0.25s;
+    color: var(--c-muted);
+    margin: 0.25rem 0 0;
+    transition: opacity 0.2s;
   }
 
-  /* ── Level 2: Detail panel ── */
-  .pd-detail {
+  /* ══════════════ LEVEL 2: Panel ══════════════ */
+
+  .pd-panel {
     margin-top: 1rem;
     padding: 1.25rem;
-    border: 1px solid var(--pd-border);
-    border-radius: var(--pd-radius);
-    background: var(--pd-surface);
-    animation: pd-expand 0.18s cubic-bezier(0.2, 0, 0, 1);
-    position: relative;
+    border: 1px solid var(--c-border);
+    border-radius: var(--radius);
+    background: var(--c-bg);
+    animation: pd-open 0.15s ease-out;
   }
 
-  /* Notch connecting panel to parent stage */
-  .pd-detail::before {
-    content: '';
-    position: absolute;
-    top: -6px;
-    left: var(--pd-notch-x, 50%);
-    transform: translateX(-50%) rotate(45deg);
-    width: 10px;
-    height: 10px;
-    background: var(--pd-surface);
-    border-top: 1px solid var(--pd-border);
-    border-left: 1px solid var(--pd-border);
+  @keyframes pd-open {
+    from { opacity: 0; transform: translateY(-4px); }
+    to { opacity: 1; transform: translateY(0); }
   }
 
-  @keyframes pd-expand {
-    from { opacity: 0; transform: scaleY(0.97) translateY(-4px); }
-    to { opacity: 1; transform: scaleY(1) translateY(0); }
-  }
-
-  .pd-detail-head {
+  .pd-panel-head {
     display: flex;
     align-items: center;
     gap: 0.75rem;
     margin-bottom: 1rem;
     padding-bottom: 0.75rem;
-    border-bottom: 1px solid var(--pd-border);
+    border-bottom: 1px solid var(--c-border);
   }
+  .pd-panel-icon { width: 28px; height: 28px; color: var(--c-accent); flex-shrink: 0; }
+  .pd-panel-head strong { display: block; font-size: 1rem; }
+  .pd-panel-head span { font-size: 0.8rem; color: var(--c-muted); }
 
-  .pd-detail-icon {
-    width: 32px;
-    height: 32px;
-    color: var(--pd-accent);
-    flex-shrink: 0;
-  }
-
-  .pd-detail-head h3 {
-    margin: 0;
-    font-size: 1.05rem;
-  }
-
-  .pd-detail-head p {
-    margin: 0.1rem 0 0;
-    font-size: 0.82rem;
-    color: var(--pd-muted);
-  }
-
-  /* ── Component layout: options (flat wrap) ── */
-  .pd-components {
+  /* Component chips */
+  .pd-chips {
     display: flex;
     flex-wrap: wrap;
     gap: 0.4rem;
-  }
-
-  /* ── Component layout: pipeline (sequential with arrows) ── */
-  .pd-comp-pipeline {
-    display: flex;
     align-items: center;
-    flex-wrap: wrap;
-    gap: 0;
-    row-gap: 0.4rem;
   }
+  .pd-chips--pipeline { gap: 0; }
 
-  .pd-comp-arrow {
-    width: 18px;
-    height: 2px;
-    background: var(--pd-accent);
-    opacity: 0.4;
-    flex-shrink: 0;
-    position: relative;
-  }
-
-  .pd-comp-arrow::after {
-    content: '';
-    position: absolute;
-    right: -1px;
-    top: -3px;
-    border-top: 4px solid transparent;
-    border-bottom: 4px solid transparent;
-    border-left: 5px solid var(--pd-accent);
-    opacity: 0.5;
-  }
-
-  .pd-comp {
-    padding: 0.5rem 0.9rem;
-    border: 1px solid var(--pd-border);
+  .pd-chip {
+    padding: 0.45rem 0.85rem;
+    border: 1px solid var(--c-border);
     border-radius: 6px;
     background: transparent;
-    color: var(--pd-text);
-    cursor: pointer;
+    color: var(--c-text);
     font-family: inherit;
     font-size: 0.82rem;
     font-weight: 500;
-    transition: all 0.15s ease;
+    cursor: pointer;
+    transition: all 0.12s;
   }
-
-  .pd-comp:hover {
-    border-color: var(--pd-accent);
-    background: var(--pd-accent-lo);
-  }
-
-  .pd-comp[aria-expanded="true"] {
-    border-color: var(--pd-accent);
-    background: var(--pd-accent);
+  .pd-chip:hover { border-color: var(--c-accent); background: var(--c-accent-lo); }
+  .pd-chip[aria-expanded="true"] {
+    border-color: var(--c-accent);
+    background: var(--c-accent);
     color: white;
     font-weight: 600;
   }
 
-  /* ── Level 3: Implementation detail ── */
-  .pd-impl {
-    margin-top: 0.75rem;
-    padding: 1rem 1.25rem;
-    border-left: 3px solid var(--pd-accent);
-    border-radius: 0 var(--pd-radius) var(--pd-radius) 0;
-    background: var(--pd-accent-lo);
-    animation: pd-expand 0.18s cubic-bezier(0.2, 0, 0, 1);
+  .pd-chip-arrow {
+    width: 16px;
+    height: 8px;
+    color: var(--c-accent);
+    opacity: 0.4;
+    flex-shrink: 0;
+    margin: 0 2px;
   }
 
-  .pd-impl-desc {
+  /* ══════════════ LEVEL 3: Detail ══════════════ */
+
+  .pd-detail {
+    margin-top: 0.75rem;
+    padding: 1rem 1.25rem;
+    border-left: 3px solid var(--c-accent);
+    border-radius: 0 var(--radius) var(--radius) 0;
+    background: var(--c-accent-lo);
+    animation: pd-open 0.12s ease-out;
+  }
+
+  .pd-detail-desc {
     margin: 0 0 0.75rem;
     font-size: 0.85rem;
     line-height: 1.6;
   }
 
-  /* ── Mini flow (sub-pipeline) ── */
-  .pd-mini-flow {
+  /* Mini pipeline flow */
+  .pd-flow-steps {
     display: flex;
     align-items: center;
-    gap: 0;
-    overflow-x: auto;
-    padding: 0.5rem 0;
-    margin: 0 -0.25rem;
+    flex-wrap: wrap;
+    row-gap: 0.4rem;
+    padding: 0.4rem 0;
   }
 
-  .pd-mini-step {
-    padding: 0.35rem 0.65rem;
-    background: var(--pd-surface);
-    border: 1px solid var(--pd-border);
+  .pd-step {
+    padding: 0.3rem 0.55rem;
+    background: var(--c-bg);
+    border: 1px solid var(--c-border);
     border-radius: 5px;
     font-size: 0.72rem;
     font-weight: 600;
     white-space: nowrap;
-    color: var(--pd-text);
-    letter-spacing: 0.01em;
   }
 
-  .pd-mini-arrow {
-    width: 20px;
-    height: 2px;
-    background: var(--pd-accent);
+  .pd-step-arrow {
+    width: 12px;
+    height: 8px;
+    color: var(--c-accent);
+    opacity: 0.5;
     flex-shrink: 0;
-    position: relative;
-    opacity: 0.6;
+    margin: 0 1px;
   }
 
-  .pd-mini-arrow::after {
-    content: '';
-    position: absolute;
-    right: -1px;
-    top: -3px;
-    width: 0;
-    height: 0;
-    border-top: 4px solid transparent;
-    border-bottom: 4px solid transparent;
-    border-left: 6px solid var(--pd-accent);
-    opacity: 0.6;
-  }
-
-  /* ── Mini flow: tag list (no arrows, just chips) ── */
-  .pd-mini-tags {
+  /* Tag list */
+  .pd-tags {
     display: flex;
     flex-wrap: wrap;
     gap: 0.35rem;
-    padding: 0.5rem 0;
+    padding: 0.4rem 0;
   }
 
-  .pd-mini-tag {
-    padding: 0.3rem 0.6rem;
-    background: var(--pd-surface);
-    border: 1px solid var(--pd-border);
-    border-radius: 5px;
+  .pd-tag {
+    padding: 0.25rem 0.5rem;
+    background: var(--c-bg);
+    border: 1px solid var(--c-border);
+    border-radius: 4px;
     font-size: 0.72rem;
-    font-weight: 500;
-    white-space: nowrap;
-    color: var(--pd-text);
-    font-family: var(--sl-font-mono, monospace);
   }
 
-  .pd-impl-notes {
+  .pd-detail-note {
     margin: 0.75rem 0 0;
     font-size: 0.78rem;
-    color: var(--pd-muted);
+    color: var(--c-muted);
     line-height: 1.5;
     font-style: italic;
   }
 
-  /* (animations defined inline above) */
+  /* ══════════════ Responsive ══════════════ */
 
-  /* ── Responsive ── */
-  @media (max-width: 700px) {
-    .pd-flow {
-      flex-direction: column;
+  @media (max-width: 680px) {
+    .pd-grid {
+      grid-template-columns: 1fr;
+      grid-template-rows: auto;
       gap: 0;
     }
-    .pd-connector {
-      width: 2px;
-      height: 32px;
-      flex-direction: column;
-    }
-    .pd-connector-line {
-      width: 2px;
-      height: 100%;
-      background: linear-gradient(180deg, var(--pd-border) 0%, var(--pd-accent) 100%);
-    }
-    .pd-connector-arrow {
-      border-top: 8px solid var(--pd-accent);
-      border-left: 5px solid transparent;
-      border-right: 5px solid transparent;
-      border-bottom: none;
-    }
-    .pd-stage {
-      width: 100%;
-      min-width: unset;
-      flex-direction: row;
-      gap: 0.75rem;
-      padding: 0.75rem 1rem;
-    }
-    .pd-stage-icon { width: 22px; height: 22px; }
-    .pd-mini-flow { flex-wrap: wrap; }
+    .pd-stage { width: 100%; height: auto; flex-direction: row; gap: 0.75rem; padding: 0.75rem 1rem; }
+    .pd-arrow { transform: rotate(90deg); width: 24px; margin: 0.25rem auto; }
+    .pd-icon { width: 22px; height: 22px; }
+    .pd-chips--pipeline { flex-wrap: wrap; gap: 0.4rem; }
+    .pd-chip-arrow { display: none; }
   }
 </style>
 
 <script>
-  document.querySelectorAll<HTMLDivElement>('[data-pd-root]').forEach((diagram) => {
-    const hint = diagram.querySelector<HTMLParagraphElement>('.pd-hint');
+  document.querySelectorAll<HTMLDivElement>('[data-pd-root]').forEach((root) => {
+    const hint = root.querySelector<HTMLParagraphElement>('.pd-hint');
 
-    diagram.querySelectorAll<HTMLButtonElement>('.pd-stage').forEach((btn) => {
+    root.querySelectorAll<HTMLButtonElement>('.pd-stage').forEach((btn) => {
       btn.addEventListener('click', () => {
-        const stageId = btn.dataset.stage;
-        const detail = diagram.querySelector<HTMLDivElement>(`[data-detail-stage="${stageId}"]`);
-        if (!detail) return;
-        const isOpen = btn.getAttribute('aria-expanded') === 'true';
+        const id = btn.dataset.stage!;
+        const panel = root.querySelector<HTMLDivElement>(`[data-detail-stage="${id}"]`);
+        if (!panel) return;
+        const open = btn.getAttribute('aria-expanded') === 'true';
 
-        diagram.querySelectorAll('.pd-stage').forEach(b => b.setAttribute('aria-expanded', 'false'));
-        diagram.querySelectorAll<HTMLDivElement>('.pd-detail').forEach(d => d.hidden = true);
-        // Close any open component details
-        diagram.querySelectorAll('.pd-comp').forEach(b => b.setAttribute('aria-expanded', 'false'));
-        diagram.querySelectorAll<HTMLDivElement>('.pd-impl').forEach(d => d.hidden = true);
+        // close everything
+        root.querySelectorAll<HTMLButtonElement>('.pd-stage').forEach(b => b.setAttribute('aria-expanded', 'false'));
+        root.querySelectorAll<HTMLDivElement>('.pd-panel').forEach(p => p.hidden = true);
+        root.querySelectorAll<HTMLButtonElement>('.pd-chip').forEach(b => b.setAttribute('aria-expanded', 'false'));
+        root.querySelectorAll<HTMLDivElement>('.pd-detail').forEach(d => d.hidden = true);
 
-        if (!isOpen) {
+        if (!open) {
           btn.setAttribute('aria-expanded', 'true');
-          detail.hidden = false;
+          panel.hidden = false;
           if (hint) hint.style.opacity = '0';
-          // Position the notch under the clicked stage
-          const diagramRect = diagram.getBoundingClientRect();
-          const btnRect = btn.getBoundingClientRect();
-          const notchX = btnRect.left + btnRect.width / 2 - diagramRect.left;
-          detail.style.setProperty('--pd-notch-x', `${notchX}px`);
-          detail.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+          panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
         } else if (hint) {
           hint.style.opacity = '1';
         }
       });
     });
 
-    diagram.querySelectorAll<HTMLButtonElement>('.pd-comp').forEach((btn) => {
+    root.querySelectorAll<HTMLButtonElement>('.pd-chip').forEach((btn) => {
       btn.addEventListener('click', () => {
-        const compId = btn.dataset.component;
-        const impl = diagram.querySelector<HTMLDivElement>(`[data-impl-component="${compId}"]`);
-        if (!impl) return;
-        const isOpen = btn.getAttribute('aria-expanded') === 'true';
-        const parent = btn.closest('.pd-detail');
-        if (!parent) return;
+        const id = btn.dataset.component!;
+        const detail = root.querySelector<HTMLDivElement>(`[data-impl-component="${id}"]`);
+        if (!detail) return;
+        const open = btn.getAttribute('aria-expanded') === 'true';
+        const panel = btn.closest('.pd-panel');
+        if (!panel) return;
 
-        parent.querySelectorAll('.pd-comp').forEach(b => b.setAttribute('aria-expanded', 'false'));
-        parent.querySelectorAll<HTMLDivElement>('.pd-impl').forEach(d => d.hidden = true);
+        panel.querySelectorAll<HTMLButtonElement>('.pd-chip').forEach(b => b.setAttribute('aria-expanded', 'false'));
+        panel.querySelectorAll<HTMLDivElement>('.pd-detail').forEach(d => d.hidden = true);
 
-        if (!isOpen) {
+        if (!open) {
           btn.setAttribute('aria-expanded', 'true');
-          impl.hidden = false;
+          detail.hidden = false;
         }
       });
     });
