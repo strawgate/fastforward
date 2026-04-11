@@ -855,7 +855,7 @@ fn cmd_wizard() -> Result<(), CliError> {
         ],
     )?;
 
-    let (cfg, sql_display) = if mode == 0 {
+    let cfg = if mode == 0 {
         // Use-case mode.
         let labels: Vec<&str> = USE_CASE_TEMPLATES.iter().map(|t| t.title).collect();
         let descs: Vec<&str> = USE_CASE_TEMPLATES.iter().map(|t| t.description).collect();
@@ -872,25 +872,28 @@ fn cmd_wizard() -> Result<(), CliError> {
         } else {
             sql.trim()
         };
-        let mut rendered = render_use_case(uc);
-        // If user changed the SQL, re-render with their SQL.
-        if sql_final != uc.transform {
-            // Re-render: build from the input/output snippets directly.
-            let fake_input = config_templates::InputTemplate {
-                id: uc.id,
-                label: uc.title,
-                description: uc.description,
-                snippet: uc.input,
-            };
-            let fake_output = config_templates::OutputTemplate {
-                id: uc.id,
-                label: uc.title,
-                description: uc.description,
-                snippet: uc.output,
-            };
-            rendered = render_config(&fake_input, &fake_output, sql_final);
+        if sql_final == uc.transform {
+            render_use_case(uc)
+        } else {
+            // User overrode the SQL — rebuild with the use-case header and
+            // their custom transform.
+            use std::fmt::Write;
+            let mut out = String::new();
+            let _ = writeln!(out, "# logfwd example");
+            let _ = writeln!(out, "# Use case: {}", uc.title);
+            let _ = writeln!(out, "# {}", uc.description);
+            out.push('\n');
+            out.push_str(uc.input);
+            out.push('\n');
+            out.push_str("transform: |\n");
+            for line in sql_final.lines() {
+                let _ = writeln!(out, "  {line}");
+            }
+            out.push('\n');
+            out.push_str(uc.output);
+            out.push_str("\n# Optional: diagnostics\n# server:\n#   diagnostics: 127.0.0.1:9191\n");
+            out
         }
-        (rendered, sql_final.to_owned())
     } else {
         // Manual input/output mode.
         let input_labels: Vec<&str> = INPUT_TEMPLATES.iter().map(|t| t.label).collect();
@@ -917,10 +920,8 @@ fn cmd_wizard() -> Result<(), CliError> {
 
         let input = &INPUT_TEMPLATES[input_idx];
         let output = &OUTPUT_TEMPLATES[output_idx];
-        (render_config(input, output, sql), sql.to_owned())
+        render_config(input, output, sql)
     };
-
-    let _ = sql_display; // used above in prompts
 
     let output_path = prompt_text("Output file path", "logfwd.generated.yaml")?;
     let path = std::path::PathBuf::from(output_path.trim());

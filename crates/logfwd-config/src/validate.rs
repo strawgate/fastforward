@@ -1157,7 +1157,7 @@ impl Config {
             Ok(())
         } else if all_errors.len() == 1 {
             Err(ConfigError::Validation(
-                all_errors.into_iter().next().unwrap(),
+                all_errors.into_iter().next().expect("checked len == 1"),
             ))
         } else {
             Err(ConfigError::Validation(format!(
