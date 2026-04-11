@@ -9,22 +9,6 @@ use arrow::util::display::array_value_to_string;
 
 use crate::conflict_columns::{ColInfo, get_array, is_null};
 
-/// Read a string value from a column at the given row.
-///
-/// Supports both `Utf8` (StringArray) and `Utf8View` (StringViewArray) columns,
-/// allowing output sinks to work transparently with either scanner.
-pub(crate) fn str_value(col: &dyn Array, row: usize) -> &str {
-    match col.data_type() {
-        DataType::Utf8 => col.as_string::<i32>().value(row),
-        DataType::Utf8View => col.as_string_view().value(row),
-        DataType::LargeUtf8 => col.as_string::<i64>().value(row),
-        _ => unreachable!(
-            "str_value called with non-string array type: {:?}",
-            col.data_type()
-        ),
-    }
-}
-
 /// Coalesce a conflict field to a `String` using `str_variants` ordering
 /// (Utf8 wins, then Boolean, Int64, Float64).  Returns `None` if all variants
 /// are null.

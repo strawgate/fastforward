@@ -295,7 +295,7 @@ impl Pipeline {
             machine: Some(PipelineMachine::new().start()),
             checkpoint_store: None,
             last_checkpoint_flush: tokio::time::Instant::now(),
-            checkpoint_flush_interval: Duration::from_secs(5),
+            checkpoint_flush_interval: build::DEFAULT_CHECKPOINT_FLUSH_INTERVAL,
         }
     }
 
@@ -329,7 +329,7 @@ impl Pipeline {
             machine: Some(PipelineMachine::new().start()),
             checkpoint_store: None,
             last_checkpoint_flush: tokio::time::Instant::now(),
-            checkpoint_flush_interval: Duration::from_secs(5),
+            checkpoint_flush_interval: build::DEFAULT_CHECKPOINT_FLUSH_INTERVAL,
         }
     }
 

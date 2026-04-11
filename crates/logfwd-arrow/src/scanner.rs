@@ -140,6 +140,7 @@ mod tests {
     use arrow::array::{Array, BooleanArray, Int64Array, StringArray};
     use bytes::Bytes;
     use logfwd_core::scan_config::{FieldSpec, ScanConfig};
+    use logfwd_types::field_names;
 
     fn default_scanner(_rows: usize) -> Scanner {
         Scanner::new(ScanConfig::default())
@@ -363,7 +364,7 @@ mod tests {
         assert_eq!(
             svc_field
                 .metadata()
-                .get("logfwd.resource_key")
+                .get(field_names::METADATA_RESOURCE_KEY)
                 .map(String::as_str),
             Some("service.name"),
             "field metadata must preserve original dotted key"

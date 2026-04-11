@@ -14,6 +14,19 @@ use logfwd_io::tail::TailConfig;
 
 use super::InputState;
 
+// ── File-input defaults ────────────────────────────────────────────────
+const DEFAULT_FILE_POLL_INTERVAL_MS: u64 = 50;
+const DEFAULT_READ_BUF_SIZE: usize = 256 * 1024;
+const DEFAULT_PER_FILE_READ_BUDGET_BYTES: usize = 256 * 1024;
+const DEFAULT_MAX_OPEN_FILES: usize = 1024;
+
+// ── Generator-input defaults ───────────────────────────────────────────
+const DEFAULT_GENERATOR_BATCH_SIZE: usize = 1000;
+
+// ── Platform-sensor defaults ───────────────────────────────────────────
+const DEFAULT_SENSOR_POLL_INTERVAL_MS: u64 = 10_000;
+const DEFAULT_SENSOR_CONTROL_RELOAD_INTERVAL_MS: u64 = 1_000;
+
 /// Build a format processor from the config format.
 fn make_format(
     name: &str,
@@ -77,10 +90,14 @@ pub(super) fn build_input_state(
             let format = cfg.format.clone().unwrap_or(Format::Auto);
             let mut tail_config = TailConfig {
                 start_from_end: false,
-                poll_interval_ms: cfg.poll_interval_ms.unwrap_or(50),
-                read_buf_size: cfg.read_buf_size.unwrap_or(256 * 1024),
-                per_file_read_budget_bytes: cfg.per_file_read_budget_bytes.unwrap_or(256 * 1024),
-                max_open_files: cfg.max_open_files.unwrap_or(1024),
+                poll_interval_ms: cfg
+                    .poll_interval_ms
+                    .unwrap_or(DEFAULT_FILE_POLL_INTERVAL_MS),
+                read_buf_size: cfg.read_buf_size.unwrap_or(DEFAULT_READ_BUF_SIZE),
+                per_file_read_budget_bytes: cfg
+                    .per_file_read_budget_bytes
+                    .unwrap_or(DEFAULT_PER_FILE_READ_BUDGET_BYTES),
+                max_open_files: cfg.max_open_files.unwrap_or(DEFAULT_MAX_OPEN_FILES),
                 ..Default::default()
             };
             if let Some(interval) = cfg.glob_rescan_interval_ms {
@@ -118,7 +135,9 @@ pub(super) fn build_input_state(
             let generator_cfg = cfg.generator.as_ref();
             let config = GeneratorConfig {
                 events_per_sec: generator_cfg.and_then(|c| c.events_per_sec).unwrap_or(0),
-                batch_size: generator_cfg.and_then(|c| c.batch_size).unwrap_or(1000),
+                batch_size: generator_cfg
+                    .and_then(|c| c.batch_size)
+                    .unwrap_or(DEFAULT_GENERATOR_BATCH_SIZE),
                 total_events: generator_cfg.and_then(|c| c.total_events).unwrap_or(0),
                 complexity: match generator_cfg.and_then(|c| c.complexity.clone()) {
                     Some(GeneratorComplexityConfig::Complex) => GeneratorComplexity::Complex,
@@ -358,10 +377,12 @@ pub(super) fn build_input_state(
 fn build_platform_sensor_config(
     cfg: Option<&PlatformSensorInputConfig>,
 ) -> logfwd_io::platform_sensor::PlatformSensorConfig {
-    let poll_interval_ms = cfg.and_then(|c| c.poll_interval_ms).unwrap_or(10_000);
+    let poll_interval_ms = cfg
+        .and_then(|c| c.poll_interval_ms)
+        .unwrap_or(DEFAULT_SENSOR_POLL_INTERVAL_MS);
     let control_reload_interval_ms = cfg
         .and_then(|c| c.control_reload_interval_ms)
-        .unwrap_or(1_000);
+        .unwrap_or(DEFAULT_SENSOR_CONTROL_RELOAD_INTERVAL_MS);
     logfwd_io::platform_sensor::PlatformSensorConfig {
         poll_interval: std::time::Duration::from_millis(poll_interval_ms.max(1)),
         control_path: cfg.and_then(|c| c.control_path.clone()).map(PathBuf::from),

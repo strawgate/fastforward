@@ -18,15 +18,12 @@ use logfwd_types::diagnostics::ComponentStats;
 
 use super::sink::{SendResult, Sink, SinkFactory};
 use super::{BatchMetadata, Compression};
+use crate::http_classify::DEFAULT_RETRY_AFTER_SECS;
 
 /// Content-Type for uncompressed Arrow IPC stream.
 const CONTENT_TYPE_ARROW: &str = "application/vnd.apache.arrow.stream";
 /// Content-Type for zstd-compressed Arrow IPC stream.
 const CONTENT_TYPE_ARROW_ZSTD: &str = "application/vnd.apache.arrow.stream+zstd";
-
-/// Default retry-after duration when the server returns 429 without a
-/// Retry-After header.
-const DEFAULT_RETRY_AFTER_SECS: u64 = 5;
 
 // ---------------------------------------------------------------------------
 // ArrowIpcSink

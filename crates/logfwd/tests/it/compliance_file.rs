@@ -49,8 +49,7 @@ input:
   path: {}
   format: json
 output:
-  type: stdout
-  format: json
+  type: null
 ",
         log_path.display()
     )
@@ -70,7 +69,7 @@ fn wait_for(predicate: impl Fn() -> bool, timeout: Duration) -> bool {
 /// Keep a generous wait budget for file-compliance tests.
 /// Coverage and busy CI hosts can introduce significant scheduling jitter.
 fn wait_timeout() -> Duration {
-    Duration::from_secs(30)
+    Duration::from_secs(90)
 }
 
 /// Build a pipeline config YAML for a glob input pattern.
@@ -86,8 +85,7 @@ input:
   format: json
   glob_rescan_interval_ms: 50
 output:
-  type: stdout
-  format: json
+  type: null
 "#,
         pattern
     )

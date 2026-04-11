@@ -62,6 +62,7 @@ use logfwd_types::diagnostics::ComponentStats;
 use super::arrow_ipc_sink::serialize_ipc;
 use super::sink::{SendResult, Sink, SinkFactory};
 use super::{BatchMetadata, Compression};
+use crate::http_classify::DEFAULT_RETRY_AFTER_SECS;
 
 mod generated_fast {
     include!("generated/otap_fast_v1.rs");
@@ -69,10 +70,6 @@ mod generated_fast {
 
 /// Content-Type for protobuf-encoded OTAP messages.
 const CONTENT_TYPE_PROTOBUF: &str = "application/x-protobuf";
-
-/// Default retry-after duration when the server returns 429 without a
-/// Retry-After header.
-const DEFAULT_RETRY_AFTER_SECS: u64 = 5;
 
 // ---------------------------------------------------------------------------
 // ArrowPayloadType enum values (from OTAP proto)

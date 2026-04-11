@@ -3,9 +3,8 @@
 // column order: "timestamp", "severity", "body", "trace_id", "span_id", "flags", "attributes"
 
 use arrow::array::Array;
-use super::{AttrArray, BatchColumns, BatchMetadata, encode_fixed32, encode_key_value_bool,
-    encode_key_value_double, encode_key_value_int, encode_key_value_string, encode_tag,
-    encode_varint, numeric_timestamp_ns, str_value};
+use super::{BatchColumns, BatchMetadata, encode_attr_array_value, encode_fixed32, encode_tag,
+    encode_varint, numeric_timestamp_ns};
 use logfwd_core::otlp::{self, Severity, bytes_field_size, encode_bytes_field, encode_fixed64,
     encode_varint_field, hex_decode, parse_severity, parse_timestamp_nanos};
 
@@ -16,16 +15,22 @@ pub(super) fn encode_row_as_log_record_fast_v1(
     metadata: &BatchMetadata,
     buf: &mut Vec<u8>,
 ) {
-    let timestamp_ns: u64 = if let Some((_, arr)) = columns.timestamp_num_col.as_ref() {
+    let timestamp_ns: Option<u64> = if let Some((_, arr)) = columns.timestamp_num_col.as_ref() {
         numeric_timestamp_ns(*arr, row)
     } else if let Some((_, arr)) = columns.timestamp_col.as_ref() {
         if arr.is_null(row) {
-            0
+            None
         } else {
-            parse_timestamp_nanos(arr.value(row).as_bytes()).unwrap_or(0)
+            match parse_timestamp_nanos(arr.value(row).as_bytes()) {
+                Some(ts) => Some(ts),
+                None => {
+                    tracing::debug!("timestamp parse fallback: event_time omitted for unparsable value");
+                    None
+                }
+            }
         }
     } else {
-        0
+        None
     };
 
     let (severity_num, severity_text): (Severity, &[u8]) =
@@ -54,7 +59,7 @@ pub(super) fn encode_row_as_log_record_fast_v1(
     };
     let body_bytes = body.as_bytes();
 
-    if timestamp_ns > 0 {
+    if let Some(timestamp_ns) = timestamp_ns {
         encode_fixed64(buf, otlp::LOG_RECORD_TIME_UNIX_NANO, timestamp_ns);
     }
 
@@ -74,58 +79,7 @@ pub(super) fn encode_row_as_log_record_fast_v1(
     }
 
     for (field_name, attr) in &columns.attribute_cols {
-        match attr {
-            AttrArray::Int(arr) => {
-                if !arr.is_null(row) {
-                    encode_key_value_int(
-                        buf,
-                        otlp::LOG_RECORD_ATTRIBUTES,
-                        field_name.as_bytes(),
-                        arr.value(row),
-                    );
-                }
-            }
-            AttrArray::Float(arr) => {
-                if !arr.is_null(row) {
-                    encode_key_value_double(
-                        buf,
-                        otlp::LOG_RECORD_ATTRIBUTES,
-                        field_name.as_bytes(),
-                        arr.value(row),
-                    );
-                }
-            }
-            AttrArray::Bool(arr) => {
-                if !arr.is_null(row) {
-                    encode_key_value_bool(
-                        buf,
-                        otlp::LOG_RECORD_ATTRIBUTES,
-                        field_name.as_bytes(),
-                        arr.value(row),
-                    );
-                }
-            }
-            AttrArray::Str(arr) => {
-                if !arr.is_null(row) {
-                    encode_key_value_string(
-                        buf,
-                        otlp::LOG_RECORD_ATTRIBUTES,
-                        field_name.as_bytes(),
-                        arr.value(row).as_bytes(),
-                    );
-                }
-            }
-            AttrArray::OtherStr(arr) => {
-                if !arr.is_null(row) {
-                    encode_key_value_string(
-                        buf,
-                        otlp::LOG_RECORD_ATTRIBUTES,
-                        field_name.as_bytes(),
-                        str_value(*arr, row).as_bytes(),
-                    );
-                }
-            }
-        }
+        encode_attr_array_value(buf, otlp::LOG_RECORD_ATTRIBUTES, field_name, attr, row);
     }
 
     if let Some((_, arr)) = columns.flags_col {
@@ -157,10 +111,10 @@ pub(super) fn encode_row_as_log_record_fast_v1(
         }
     }
 
-    let observed_ns = if let Some((_, arr)) = columns.observed_ts_col.as_ref() {
-        numeric_timestamp_ns(*arr, row)
-    } else {
-        metadata.observed_time_ns
-    };
+    let observed_ns = columns
+        .observed_ts_col
+        .as_ref()
+        .and_then(|(_, arr)| numeric_timestamp_ns(*arr, row))
+        .unwrap_or(metadata.observed_time_ns);
     encode_fixed64(buf, otlp::LOG_RECORD_OBSERVED_TIME_UNIX_NANO, observed_ns);
 }

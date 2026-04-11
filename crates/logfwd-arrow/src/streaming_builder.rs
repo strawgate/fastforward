@@ -21,8 +21,9 @@ use arrow::record_batch::{RecordBatch, RecordBatchOptions};
 use logfwd_core::scan_config::{parse_float_fast, parse_int_fast};
 use logfwd_core::scanner::BuilderState;
 
+use logfwd_types::field_names;
+
 use crate::check_dup_bits;
-use crate::star_schema::RESOURCE_PREFIX;
 
 #[cfg(kani)]
 type FieldIndexMap = std::collections::BTreeMap<Vec<u8>, usize>;
@@ -190,7 +191,7 @@ impl StreamingBuilder {
 
     fn resource_col_name(key: &str) -> String {
         // Canonical prefix + verbatim key. No mangling.
-        format!("{RESOURCE_PREFIX}{key}")
+        format!("{}{key}", field_names::DEFAULT_RESOURCE_PREFIX)
     }
 
     /// Start a new batch. Takes ownership of the input buffer via Bytes
@@ -834,7 +835,7 @@ impl StreamingBuilder {
                 }
             }
             let mut metadata = HashMap::new();
-            metadata.insert("logfwd.resource_key".to_string(), key.clone());
+            metadata.insert(field_names::METADATA_RESOURCE_KEY.to_string(), key.clone());
             schema_fields
                 .push(Field::new(col_name, DataType::Utf8View, true).with_metadata(metadata));
             arrays.push(Arc::new(builder.finish()) as ArrayRef);
@@ -1092,7 +1093,7 @@ impl StreamingBuilder {
                 builder.append_value(value);
             }
             let mut metadata = HashMap::new();
-            metadata.insert("logfwd.resource_key".to_string(), key.clone());
+            metadata.insert(field_names::METADATA_RESOURCE_KEY.to_string(), key.clone());
             schema_fields.push(Field::new(col_name, DataType::Utf8, true).with_metadata(metadata));
             arrays.push(Arc::new(builder.finish()) as ArrayRef);
         }
@@ -2452,14 +2453,14 @@ mod tests {
         assert_eq!(
             service_field
                 .metadata()
-                .get("logfwd.resource_key")
+                .get(field_names::METADATA_RESOURCE_KEY)
                 .map(String::as_str),
             Some("service.name")
         );
         assert_eq!(
             namespace_field
                 .metadata()
-                .get("logfwd.resource_key")
+                .get(field_names::METADATA_RESOURCE_KEY)
                 .map(String::as_str),
             Some("k8s.namespace")
         );

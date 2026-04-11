@@ -129,6 +129,8 @@ impossible.
 
 ```bash
 java -cp /path/to/tla2tools.jar tlc2.TLC tla/MCPipelineMachine.tla -config tla/PipelineMachine.thorough.cfg
+# Sources={"s1","s2","s3"}, MaxBatchesPerSource=4
+# Hundreds of millions of generated states, usually under 90 minutes in CI.
 ```
 
 **Sabotage test** — verify no invariant is vacuously true:

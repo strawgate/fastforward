@@ -33,10 +33,7 @@ use crate::InputError;
 use crate::background_http_task::BackgroundHttpTask;
 use crate::input::{InputEvent, InputSource};
 use crate::receiver_health::{ReceiverHealthEvent, reduce_receiver_health};
-use crate::receiver_http::{declared_content_length, read_limited_body};
-
-/// Maximum request body size: 10 MB.
-const MAX_BODY_SIZE: usize = 10 * 1024 * 1024;
+use crate::receiver_http::{MAX_REQUEST_BODY_SIZE, declared_content_length, read_limited_body};
 
 /// Bounded channel capacity — limits memory when the pipeline falls behind.
 const CHANNEL_BOUND: usize = 256;
@@ -219,12 +216,12 @@ fn decompress_zstd(body: &[u8]) -> Result<Vec<u8>, InputError> {
     let decoder = zstd::Decoder::new(body).map_err(|_| {
         InputError::Receiver("zstd decompression failed: invalid header".to_string())
     })?;
-    let mut decompressed = Vec::with_capacity(body.len().min(MAX_BODY_SIZE));
+    let mut decompressed = Vec::with_capacity(body.len().min(MAX_REQUEST_BODY_SIZE));
     match decoder
-        .take(MAX_BODY_SIZE as u64 + 1)
+        .take(MAX_REQUEST_BODY_SIZE as u64 + 1)
         .read_to_end(&mut decompressed)
     {
-        Ok(n) if n > MAX_BODY_SIZE => Err(InputError::Receiver(
+        Ok(n) if n > MAX_REQUEST_BODY_SIZE => Err(InputError::Receiver(
             "decompressed payload too large".to_string(),
         )),
         Ok(_) => Ok(decompressed),
@@ -265,7 +262,7 @@ async fn handle_arrow_ipc_request(
     body: Body,
 ) -> Response {
     let content_length = declared_content_length(&headers);
-    if content_length.is_some_and(|body_len| body_len > MAX_BODY_SIZE as u64) {
+    if content_length.is_some_and(|body_len| body_len > MAX_REQUEST_BODY_SIZE as u64) {
         return (StatusCode::PAYLOAD_TOO_LARGE, "payload too large").into_response();
     }
 
@@ -278,7 +275,7 @@ async fn handle_arrow_ipc_request(
         Err(status) => return (status, "invalid content-type header").into_response(),
     };
 
-    let body = match read_limited_body(body, MAX_BODY_SIZE, content_length).await {
+    let body = match read_limited_body(body, MAX_REQUEST_BODY_SIZE, content_length).await {
         Ok(body) => body,
         Err(status) => {
             let message = if status == StatusCode::PAYLOAD_TOO_LARGE {

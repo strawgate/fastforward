@@ -2,6 +2,9 @@ use axum::body::Body;
 use axum::http::{HeaderMap, StatusCode, header::CONTENT_LENGTH};
 use http_body_util::BodyExt as _;
 
+/// Maximum request body size shared by all HTTP receivers: 10 MB.
+pub(crate) const MAX_REQUEST_BODY_SIZE: usize = 10 * 1024 * 1024;
+
 pub(crate) fn declared_content_length(headers: &HeaderMap) -> Option<u64> {
     headers
         .get(CONTENT_LENGTH)
