@@ -10,7 +10,7 @@
 //!
 //! This module converts between the two representations at the boundary.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use arrow::array::{
@@ -20,6 +20,8 @@ use arrow::array::{
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use arrow::error::ArrowError;
 use arrow::record_batch::RecordBatch;
+
+use logfwd_types::field_names;
 
 use crate::conflict_schema::{has_conflict_struct_columns, normalize_conflict_columns};
 
@@ -45,23 +47,57 @@ pub struct StarSchema {
 // ---------------------------------------------------------------------------
 // Well-known column name mappings
 // ---------------------------------------------------------------------------
+// Canonical names and heuristic variants are defined in
+// `logfwd_types::field_names` — the single source of truth.  The helpers
+// below delegate to `field_names::matches_any` so that adding a new variant
+// in one place automatically propagates here.
 
-/// Columns that map to the LOGS fact table (not LOG_ATTRS).
+/// Returns `true` when `name` matches a well-known timestamp column.
 // `@timestamp` (Elasticsearch convention) is intentionally included.  Both
 // `field_names::TIMESTAMP_VARIANTS` and the Loki/ES sinks recognise it; the
 // OTAP conversion must be consistent.  Fixes #1669.
-const WELL_KNOWN_TIMESTAMP: &[&str] = &["_timestamp", "@timestamp", "timestamp", "time", "ts"];
-const WELL_KNOWN_SEVERITY: &[&str] = &["level", "severity", "log_level", "loglevel", "lvl"];
-const WELL_KNOWN_BODY: &[&str] = &["message", "msg", "_msg", "body"];
-const WELL_KNOWN_TRACE_ID: &[&str] = &["trace_id"];
-const WELL_KNOWN_SPAN_ID: &[&str] = &["span_id"];
-const WELL_KNOWN_FLAGS: &[&str] = &["flags", "trace_flags"];
+fn is_well_known_timestamp(name: &str) -> bool {
+    field_names::matches_any(
+        name,
+        field_names::TIMESTAMP,
+        field_names::TIMESTAMP_VARIANTS,
+    )
+}
+
+/// Returns `true` when `name` matches a well-known severity column.
+fn is_well_known_severity(name: &str) -> bool {
+    field_names::matches_any(name, field_names::SEVERITY, field_names::SEVERITY_VARIANTS)
+}
+
+/// Returns `true` when `name` matches a well-known body/message column.
+fn is_well_known_body(name: &str) -> bool {
+    field_names::matches_any(name, field_names::BODY, field_names::BODY_VARIANTS)
+}
+
+/// Returns `true` when `name` matches a well-known trace-ID column.
+fn is_well_known_trace_id(name: &str) -> bool {
+    name == field_names::TRACE_ID
+}
+
+/// Returns `true` when `name` matches a well-known span-ID column.
+fn is_well_known_span_id(name: &str) -> bool {
+    name == field_names::SPAN_ID
+}
+
+/// Returns `true` when `name` matches a well-known flags column.
+fn is_well_known_flags(name: &str) -> bool {
+    field_names::matches_any(
+        name,
+        field_names::TRACE_FLAGS,
+        field_names::TRACE_FLAGS_VARIANTS,
+    )
+}
 
 /// Canonical resource attribute prefix shared across receivers/sinks.
-pub(crate) const RESOURCE_PREFIX: &str = "resource.attributes.";
+const RESOURCE_PREFIX: &str = field_names::DEFAULT_RESOURCE_PREFIX;
 
 /// Legacy prefix for backwards compatibility with older batches.
-pub(crate) const LEGACY_RESOURCE_PREFIX: &str = "_resource_";
+const LEGACY_RESOURCE_PREFIX: &str = field_names::LEGACY_RESOURCE_PREFIX;
 
 // ---------------------------------------------------------------------------
 // Attribute type tags (stored in the `type` column of attrs tables)
@@ -173,7 +209,7 @@ pub fn flat_to_star(batch: &RecordBatch) -> Result<StarSchema, ArrowError> {
                 name.strip_prefix(LEGACY_RESOURCE_PREFIX).map(|stripped| {
                     field
                         .metadata()
-                        .get("logfwd.resource_key")
+                        .get(field_names::METADATA_RESOURCE_KEY)
                         .cloned()
                         .unwrap_or_else(|| stripped.to_string())
                 })
@@ -183,23 +219,23 @@ pub fn flat_to_star(batch: &RecordBatch) -> Result<StarSchema, ArrowError> {
             continue;
         }
 
-        if timestamp_col.is_none() && WELL_KNOWN_TIMESTAMP.contains(&name) {
+        if timestamp_col.is_none() && is_well_known_timestamp(name) {
             timestamp_col = Some(idx);
             continue;
         }
-        if severity_col.is_none() && WELL_KNOWN_SEVERITY.contains(&name) {
+        if severity_col.is_none() && is_well_known_severity(name) {
             severity_col = Some(idx);
             continue;
         }
-        if WELL_KNOWN_BODY.contains(&name) {
+        if is_well_known_body(name) {
             match body_col {
                 None => {
                     body_col = Some(idx);
                     continue;
                 }
-                Some(prev_idx) if name == "body" => {
+                Some(prev_idx) if name == field_names::BODY => {
                     let prev_name = batch.schema().field(prev_idx).name().clone();
-                    if prev_name != "body" {
+                    if prev_name != field_names::BODY {
                         attr_cols.push((prev_name, prev_idx));
                         body_col = Some(idx);
                         continue;
@@ -208,18 +244,18 @@ pub fn flat_to_star(batch: &RecordBatch) -> Result<StarSchema, ArrowError> {
                 Some(_) => {}
             }
         }
-        if name == "_raw" {
+        if name == field_names::RAW {
             continue;
         }
-        if trace_id_col.is_none() && WELL_KNOWN_TRACE_ID.contains(&name) {
+        if trace_id_col.is_none() && is_well_known_trace_id(name) {
             trace_id_col = Some(idx);
             continue;
         }
-        if span_id_col.is_none() && WELL_KNOWN_SPAN_ID.contains(&name) {
+        if span_id_col.is_none() && is_well_known_span_id(name) {
             span_id_col = Some(idx);
             continue;
         }
-        if flags_col.is_none() && WELL_KNOWN_FLAGS.contains(&name) {
+        if flags_col.is_none() && is_well_known_flags(name) {
             flags_col = Some(idx);
             continue;
         }
@@ -315,6 +351,8 @@ enum TypedColumn {
     Double(Vec<Option<f64>>),
     /// Boolean column (ATTR_TYPE_BOOL).
     Bool(Vec<Option<bool>>),
+    /// Binary column (ATTR_TYPE_BYTES).
+    Bytes(Vec<Option<Arc<[u8]>>>),
 }
 
 impl TypedColumn {
@@ -329,6 +367,38 @@ impl TypedColumn {
     }
     fn new_bool(n: usize) -> Self {
         Self::Bool(vec![None; n])
+    }
+    fn new_bytes(n: usize) -> Self {
+        Self::Bytes(vec![None; n])
+    }
+
+    fn matches_attr_type(&self, type_tag: u8) -> bool {
+        matches!(
+            (self, type_tag),
+            (Self::Str(_), ATTR_TYPE_STR)
+                | (Self::Int(_), ATTR_TYPE_INT)
+                | (Self::Double(_), ATTR_TYPE_DOUBLE)
+                | (Self::Bool(_), ATTR_TYPE_BOOL)
+                | (Self::Bytes(_), ATTR_TYPE_BYTES)
+        )
+    }
+
+    fn promote_to_str(&mut self) {
+        if matches!(self, Self::Str(_)) {
+            return;
+        }
+
+        let strings = match self {
+            Self::Str(_) => unreachable!("handled above"),
+            Self::Int(values) => values.iter().map(|v| v.map(|v| v.to_string())).collect(),
+            Self::Double(values) => values.iter().map(|v| v.map(|v| v.to_string())).collect(),
+            Self::Bool(values) => values.iter().map(|v| v.map(|v| v.to_string())).collect(),
+            Self::Bytes(values) => values
+                .iter()
+                .map(|v| v.as_ref().map(|v| hex_encode_lower(v)))
+                .collect(),
+        };
+        *self = Self::Str(strings);
     }
 
     /// Build the Arrow array and data type for this column.
@@ -353,6 +423,11 @@ impl TypedColumn {
             Self::Bool(v) => {
                 let arr: ArrayRef = Arc::new(BooleanArray::from(v.clone()));
                 (DataType::Boolean, arr)
+            }
+            Self::Bytes(v) => {
+                let refs: Vec<Option<&[u8]>> = v.iter().map(|o| o.as_deref()).collect();
+                let arr: ArrayRef = Arc::new(BinaryArray::from(refs));
+                (DataType::Binary, arr)
             }
         }
     }
@@ -400,6 +475,8 @@ pub fn star_to_flat(star: &StarSchema) -> Result<RecordBatch, ArrowError> {
     // Collect flat columns: name → TypedColumn.
     let mut flat_cols: Vec<(String, TypedColumn)> = Vec::new();
     let mut col_index: HashMap<String, usize> = HashMap::new();
+    let unprotected_cols: HashSet<String> = HashSet::new();
+    let mut protected_log_fact_cols: HashSet<String> = HashSet::new();
 
     // Helper to get or create a string column.
     let ensure_str_col = |name: &str,
@@ -443,6 +520,7 @@ pub fn star_to_flat(star: &StarSchema) -> Result<RecordBatch, ArrowError> {
             )));
         }
         let col_pos = ensure_str_col("_timestamp", &mut flat_cols, &mut col_index);
+        protected_log_fact_cols.insert("_timestamp".to_string());
         for row in 0..num_rows {
             if !ts_arr.is_null(row) {
                 // Timestamp is stored as i64 nanoseconds.
@@ -475,6 +553,7 @@ pub fn star_to_flat(star: &StarSchema) -> Result<RecordBatch, ArrowError> {
             )));
         }
         let col_pos = ensure_str_col("level", &mut flat_cols, &mut col_index);
+        protected_log_fact_cols.insert("level".to_string());
         for row in 0..num_rows {
             if !sev_arr.is_null(row) {
                 let val = str_from_array(sev_arr.as_ref(), row);
@@ -497,6 +576,7 @@ pub fn star_to_flat(star: &StarSchema) -> Result<RecordBatch, ArrowError> {
             )));
         }
         let col_pos = ensure_str_col("message", &mut flat_cols, &mut col_index);
+        protected_log_fact_cols.insert("message".to_string());
         for row in 0..num_rows {
             if !body_arr.is_null(row) {
                 let val = str_from_array(body_arr.as_ref(), row);
@@ -514,6 +594,7 @@ pub fn star_to_flat(star: &StarSchema) -> Result<RecordBatch, ArrowError> {
         let sev_num_arr = star.logs.column(sev_num_idx);
         if matches!(sev_num_arr.data_type(), DataType::Int32) {
             let col_pos = ensure_int_col("severity_number", &mut flat_cols, &mut col_index);
+            protected_log_fact_cols.insert("severity_number".to_string());
             let sev_num_arr = sev_num_arr
                 .as_any()
                 .downcast_ref::<arrow::array::Int32Array>()
@@ -533,6 +614,7 @@ pub fn star_to_flat(star: &StarSchema) -> Result<RecordBatch, ArrowError> {
         let trace_arr = star.logs.column(trace_idx);
         if matches!(trace_arr.data_type(), DataType::FixedSizeBinary(16)) {
             let col_pos = ensure_str_col("trace_id", &mut flat_cols, &mut col_index);
+            protected_log_fact_cols.insert("trace_id".to_string());
             let trace_arr = trace_arr
                 .as_any()
                 .downcast_ref::<arrow::array::FixedSizeBinaryArray>()
@@ -554,6 +636,7 @@ pub fn star_to_flat(star: &StarSchema) -> Result<RecordBatch, ArrowError> {
         let span_arr = star.logs.column(span_idx);
         if matches!(span_arr.data_type(), DataType::FixedSizeBinary(8)) {
             let col_pos = ensure_str_col("span_id", &mut flat_cols, &mut col_index);
+            protected_log_fact_cols.insert("span_id".to_string());
             let span_arr = span_arr
                 .as_any()
                 .downcast_ref::<arrow::array::FixedSizeBinaryArray>()
@@ -575,6 +658,7 @@ pub fn star_to_flat(star: &StarSchema) -> Result<RecordBatch, ArrowError> {
         let flags_arr = star.logs.column(flags_idx);
         if matches!(flags_arr.data_type(), DataType::UInt32) {
             let col_pos = ensure_int_col("flags", &mut flat_cols, &mut col_index);
+            protected_log_fact_cols.insert("flags".to_string());
             let flags_arr = flags_arr
                 .as_any()
                 .downcast_ref::<UInt32Array>()
@@ -605,6 +689,7 @@ pub fn star_to_flat(star: &StarSchema) -> Result<RecordBatch, ArrowError> {
             _ if key.starts_with("scope.") => key.to_string(),
             _ => format!("scope.{key}"),
         },
+        &unprotected_cols,
     )?;
 
     // --- Unpivot LOG_ATTRS → flat columns ---
@@ -615,6 +700,7 @@ pub fn star_to_flat(star: &StarSchema) -> Result<RecordBatch, ArrowError> {
         num_rows,
         |parent_id| parent_id as usize, // parent_id IS the row index
         str::to_string,                 // no prefix
+        &protected_log_fact_cols,
     )?;
 
     // --- Unpivot RESOURCE_ATTRS → resource.attributes.* columns ---
@@ -632,6 +718,7 @@ pub fn star_to_flat(star: &StarSchema) -> Result<RecordBatch, ArrowError> {
             parent_id as usize
         },
         |key| format!("{RESOURCE_PREFIX}{key}"),
+        &unprotected_cols,
     )?;
 
     // The unpivot above set values at the resource_id index, but we need to
@@ -1374,7 +1461,9 @@ pub(crate) fn parse_rfc3339_nanos(s: &str) -> Option<i64> {
 }
 
 /// Convert a civil date to days since Unix epoch (1970-01-01).
-/// Uses the algorithm from Howard Hinnant's date library.
+///
+/// Validates month/day ranges (including leap year rules) and delegates
+/// to the Kani-verified `logfwd_core::otlp::days_from_civil`.
 pub(crate) fn days_from_civil(year: i64, month: u32, day: u32) -> Option<i64> {
     if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
         return None;
@@ -1396,13 +1485,7 @@ pub(crate) fn days_from_civil(year: i64, month: u32, day: u32) -> Option<i64> {
         return None;
     }
 
-    let y = if month <= 2 { year - 1 } else { year };
-    let era = y.div_euclid(400);
-    let yoe = y.rem_euclid(400) as u32;
-    let m = if month > 2 { month - 3 } else { month + 9 };
-    let doy = (153 * m + 2) / 5 + day - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    Some(era * 146097 + doe as i64 - 719468)
+    Some(logfwd_core::otlp::days_from_civil(year, month, day))
 }
 
 /// Format nanosecond epoch timestamp as RFC 3339 string.
@@ -1477,6 +1560,10 @@ fn severity_text_to_number(text: &str) -> i32 {
 /// For each row in the attrs table, reads (parent_id, key, typed value) and
 /// writes the value into `flat_cols[key][row_for(parent_id)]`, preserving the
 /// original type from the `type` column.
+///
+/// Existing columns listed in `protected_existing_cols` are canonical fact
+/// columns; attrs with the same flat name are skipped because flat batches
+/// cannot represent duplicate column names.
 fn unpivot_attrs_to_flat(
     attrs_batch: &RecordBatch,
     flat_cols: &mut Vec<(String, TypedColumn)>,
@@ -1484,6 +1571,7 @@ fn unpivot_attrs_to_flat(
     num_rows: usize,
     row_for: impl Fn(u32) -> usize,
     map_key: impl Fn(&str) -> String,
+    protected_existing_cols: &HashSet<String>,
 ) -> Result<(), ArrowError> {
     if attrs_batch.num_rows() == 0 {
         return Ok(());
@@ -1581,6 +1669,13 @@ fn unpivot_attrs_to_flat(
         let mapped_key = map_key(key);
         let type_tag = type_arr.value(row);
 
+        // Preserve canonical LOGS fact fields when LOG_ATTRS use the same name.
+        if protected_existing_cols.contains(mapped_key.as_str())
+            && col_index.contains_key(mapped_key.as_str())
+        {
+            continue;
+        }
+
         // Get or create the flat column with the correct type.
         let col_pos = if let Some(&idx) = col_index.get(&mapped_key) {
             idx
@@ -1590,12 +1685,36 @@ fn unpivot_attrs_to_flat(
                 ATTR_TYPE_INT => TypedColumn::new_int(num_rows),
                 ATTR_TYPE_DOUBLE => TypedColumn::new_double(num_rows),
                 ATTR_TYPE_BOOL => TypedColumn::new_bool(num_rows),
+                ATTR_TYPE_BYTES => TypedColumn::new_bytes(num_rows),
                 _ => TypedColumn::new_str(num_rows),
             };
             flat_cols.push((mapped_key.clone(), col));
             col_index.insert(mapped_key, idx);
             idx
         };
+
+        if !matches!(
+            type_tag,
+            ATTR_TYPE_STR | ATTR_TYPE_INT | ATTR_TYPE_DOUBLE | ATTR_TYPE_BOOL | ATTR_TYPE_BYTES
+        ) {
+            return Err(ArrowError::SchemaError(format!(
+                "unknown attr type tag {type_tag} for key '{}'",
+                key_arr.value(row)
+            )));
+        }
+
+        if !flat_cols[col_pos].1.matches_attr_type(type_tag) {
+            flat_cols[col_pos].1.promote_to_str();
+        }
+
+        if let TypedColumn::Str(ref mut v) = flat_cols[col_pos].1 {
+            if let Some(value) = attrs_row_value_to_string(
+                type_tag, str_arr, int_arr, double_arr, bool_arr, bytes_arr, row,
+            ) {
+                v[target_row] = Some(value);
+            }
+            continue;
+        }
 
         // Write the typed value into the column.
         match type_tag {
@@ -1621,36 +1740,40 @@ fn unpivot_attrs_to_flat(
                 }
             }
             ATTR_TYPE_BYTES => {
-                // Bytes are stored in the binary column; hex-encode for flat schema.
+                // Bytes are stored in the binary column; preserve as raw bytes.
                 if !bytes_arr.is_null(row)
-                    && let TypedColumn::Str(ref mut v) = flat_cols[col_pos].1
+                    && let TypedColumn::Bytes(ref mut v) = flat_cols[col_pos].1
                 {
-                    let bytes = bytes_arr.value(row);
-                    let mut hex = String::with_capacity(bytes.len() * 2);
-                    for byte in bytes {
-                        use std::fmt::Write;
-                        let _ = write!(&mut hex, "{byte:02x}");
-                    }
-                    v[target_row] = Some(hex);
+                    v[target_row] = Some(Arc::<[u8]>::from(bytes_arr.value(row)));
                 }
             }
-            ATTR_TYPE_STR => {
-                if !str_arr.is_null(row)
-                    && let TypedColumn::Str(ref mut v) = flat_cols[col_pos].1
-                {
-                    v[target_row] = Some(str_arr.value(row).to_string());
-                }
-            }
-            _ => {
-                return Err(ArrowError::SchemaError(format!(
-                    "unknown attr type tag {type_tag} for key '{}'",
-                    key_arr.value(row)
-                )));
-            }
+            ATTR_TYPE_STR => {}
+            _ => unreachable!("type tags are validated before dispatch"),
         }
     }
 
     Ok(())
+}
+
+fn attrs_row_value_to_string(
+    type_tag: u8,
+    str_arr: &StringArray,
+    int_arr: &Int64Array,
+    double_arr: &Float64Array,
+    bool_arr: &BooleanArray,
+    bytes_arr: &BinaryArray,
+    row: usize,
+) -> Option<String> {
+    match type_tag {
+        ATTR_TYPE_STR => (!str_arr.is_null(row)).then(|| str_arr.value(row).to_string()),
+        ATTR_TYPE_INT => (!int_arr.is_null(row)).then(|| int_arr.value(row).to_string()),
+        ATTR_TYPE_DOUBLE => (!double_arr.is_null(row)).then(|| double_arr.value(row).to_string()),
+        ATTR_TYPE_BOOL => (!bool_arr.is_null(row)).then(|| bool_arr.value(row).to_string()),
+        ATTR_TYPE_BYTES => {
+            (!bytes_arr.is_null(row)).then(|| hex_encode_lower(bytes_arr.value(row)))
+        }
+        _ => None,
+    }
 }
 
 /// Scatter resource attribute values from the "template" rows (indexed by
@@ -1721,6 +1844,17 @@ fn scatter_resource_attrs(
                         let rid = resource_ids.value(row);
                         if let Some(val) = rid_to_val.get(&rid) {
                             *slot = *val;
+                        }
+                    }
+                }
+            }
+            TypedColumn::Bytes(values) => {
+                let rid_to_val = collect_resource_template_values(values, resource_ids, num_rows);
+                if let TypedColumn::Bytes(ref mut v) = flat_cols[col_pos].1 {
+                    for (row, slot) in v.iter_mut().enumerate().take(num_rows) {
+                        let rid = resource_ids.value(row);
+                        if let Some(val) = rid_to_val.get(&rid) {
+                            *slot = val.clone();
                         }
                     }
                 }
@@ -1819,6 +1953,20 @@ fn scatter_scope_attrs(
                         let sid = scope_ids.value(row);
                         if let Some(val) = sid_to_val.get(&sid) {
                             *slot = *val;
+                        }
+                    }
+                }
+            }
+            TypedColumn::Bytes(values) => {
+                let sid_to_val = collect_template_values_by_id(values, scope_ids, num_rows);
+                if let TypedColumn::Bytes(ref mut v) = flat_cols[col_pos].1 {
+                    for (row, slot) in v.iter_mut().enumerate().take(num_rows) {
+                        if slot.is_some() {
+                            continue;
+                        }
+                        let sid = scope_ids.value(row);
+                        if let Some(val) = sid_to_val.get(&sid) {
+                            *slot = val.clone();
                         }
                     }
                 }
@@ -2358,7 +2506,7 @@ mod tests {
     fn flat_to_star_excludes_internal_raw_attribute() {
         let schema = Arc::new(Schema::new(vec![
             Field::new("body", DataType::Utf8, true),
-            Field::new("_raw", DataType::Utf8, true),
+            Field::new(field_names::RAW, DataType::Utf8, true),
         ]));
         let columns: Vec<ArrayRef> = vec![
             Arc::new(StringArray::from(vec!["canonical-value"])),
@@ -2376,7 +2524,7 @@ mod tests {
             .expect("key should be Utf8");
 
         assert!(
-            !keys.iter().flatten().any(|key| key == "_raw"),
+            !keys.iter().flatten().any(|key| key == field_names::RAW),
             "_raw should remain internal-only"
         );
     }
@@ -2455,7 +2603,7 @@ mod tests {
     fn legacy_resource_column_uses_metadata_key_for_roundtrip() {
         let legacy_field = Field::new("_resource_service_name", DataType::Utf8, true)
             .with_metadata(HashMap::from([(
-                "logfwd.resource_key".to_string(),
+                field_names::METADATA_RESOURCE_KEY.to_string(),
                 "service.name".to_string(),
             )]));
         let schema = Arc::new(Schema::new(vec![legacy_field]));
@@ -2725,7 +2873,7 @@ mod tests {
     }
 
     #[test]
-    fn binary_attrs_roundtrip_as_hex_strings() {
+    fn binary_attrs_roundtrip_as_binary() {
         let schema = Arc::new(Schema::new(vec![
             Field::new("message", DataType::Utf8, true),
             Field::new("payload", DataType::Binary, true),
@@ -2747,15 +2895,125 @@ mod tests {
         let payload_arr = roundtrip
             .column(payload_idx)
             .as_any()
-            .downcast_ref::<StringArray>()
-            .expect("payload string");
+            .downcast_ref::<BinaryArray>()
+            .expect("payload binary");
 
-        assert_eq!(payload_arr.value(0), "000fff");
-        assert_eq!(payload_arr.value(1), "abcd");
+        assert_eq!(payload_arr.value(0), &[0x00, 0x0f, 0xff]);
+        assert_eq!(payload_arr.value(1), &[0xab, 0xcd]);
     }
 
     #[test]
-    fn binary_resource_attrs_roundtrip_as_hex_strings() {
+    fn mixed_attrs_promote_bytes_first_column_to_string() {
+        let logs = RecordBatch::try_new(
+            Arc::new(logs_schema()),
+            vec![
+                Arc::new(UInt32Array::from(vec![0_u32, 1])),
+                Arc::new(UInt32Array::from(vec![0_u32, 0])),
+                Arc::new(UInt32Array::from(vec![0_u32, 0])),
+                Arc::new(arrow::array::TimestampNanosecondArray::from(vec![
+                    None::<i64>,
+                    None,
+                ])),
+                Arc::new(arrow::array::Int32Array::from(vec![None::<i32>, None])),
+                Arc::new(StringArray::from(vec![None::<&str>, None])),
+                Arc::new(StringArray::from(vec![Some("row-0"), Some("row-1")])),
+                build_fixed_binary_array::<16>(&[None, None]).expect("trace ids"),
+                build_fixed_binary_array::<8>(&[None, None]).expect("span ids"),
+                Arc::new(UInt32Array::from(vec![None::<u32>, None])),
+                Arc::new(UInt32Array::from(vec![Some(0_u32), Some(0)])),
+            ],
+        )
+        .expect("valid logs");
+
+        let log_attrs = RecordBatch::try_new(
+            Arc::new(attrs_schema()),
+            vec![
+                Arc::new(UInt32Array::from(vec![0_u32, 1])),
+                Arc::new(StringArray::from(vec!["payload", "payload"])),
+                Arc::new(UInt8Array::from(vec![ATTR_TYPE_BYTES, ATTR_TYPE_STR])),
+                Arc::new(StringArray::from(vec![None, Some("text")])),
+                Arc::new(Int64Array::from(vec![None::<i64>, None])),
+                Arc::new(Float64Array::from(vec![None::<f64>, None])),
+                Arc::new(BooleanArray::from(vec![None::<bool>, None])),
+                Arc::new(BinaryArray::from(vec![Some(&[0xde_u8, 0xad_u8][..]), None])),
+            ],
+        )
+        .expect("valid attrs");
+
+        let star = StarSchema {
+            logs,
+            log_attrs,
+            resource_attrs: RecordBatch::new_empty(Arc::new(attrs_schema())),
+            scope_attrs: RecordBatch::new_empty(Arc::new(attrs_schema())),
+        };
+        let roundtrip = star_to_flat(&star).expect("star_to_flat");
+        let payload_idx = roundtrip.schema().index_of("payload").expect("payload");
+        let payload_arr = roundtrip
+            .column(payload_idx)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("mixed column promotes to Utf8");
+
+        assert_eq!(payload_arr.value(0), "dead");
+        assert_eq!(payload_arr.value(1), "text");
+    }
+
+    #[test]
+    fn log_attr_collision_does_not_overwrite_fact_column() {
+        let logs = RecordBatch::try_new(
+            Arc::new(logs_schema()),
+            vec![
+                Arc::new(UInt32Array::from(vec![0_u32])),
+                Arc::new(UInt32Array::from(vec![0_u32])),
+                Arc::new(UInt32Array::from(vec![0_u32])),
+                Arc::new(arrow::array::TimestampNanosecondArray::from(vec![
+                    None::<i64>,
+                ])),
+                Arc::new(arrow::array::Int32Array::from(vec![Some(9_i32)])),
+                Arc::new(StringArray::from(vec![Some("ERROR")])),
+                Arc::new(StringArray::from(vec![Some("row-0")])),
+                build_fixed_binary_array::<16>(&[None]).expect("trace ids"),
+                build_fixed_binary_array::<8>(&[None]).expect("span ids"),
+                Arc::new(UInt32Array::from(vec![Some(3_u32)])),
+                Arc::new(UInt32Array::from(vec![Some(0_u32)])),
+            ],
+        )
+        .expect("valid logs");
+
+        let log_attrs = RecordBatch::try_new(
+            Arc::new(attrs_schema()),
+            vec![
+                Arc::new(UInt32Array::from(vec![0_u32])),
+                Arc::new(StringArray::from(vec!["flags"])),
+                Arc::new(UInt8Array::from(vec![ATTR_TYPE_STR])),
+                Arc::new(StringArray::from(vec![Some("not-flags")])),
+                Arc::new(Int64Array::from(vec![None::<i64>])),
+                Arc::new(Float64Array::from(vec![None::<f64>])),
+                Arc::new(BooleanArray::from(vec![None::<bool>])),
+                Arc::new(BinaryArray::from(vec![None::<&[u8]>])),
+            ],
+        )
+        .expect("valid attrs");
+
+        let star = StarSchema {
+            logs,
+            log_attrs,
+            resource_attrs: RecordBatch::new_empty(Arc::new(attrs_schema())),
+            scope_attrs: RecordBatch::new_empty(Arc::new(attrs_schema())),
+        };
+        let roundtrip = star_to_flat(&star).expect("star_to_flat");
+        let flags_idx = roundtrip.schema().index_of("flags").expect("flags");
+        let flags_arr = roundtrip
+            .column(flags_idx)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .expect("fact flags stays int");
+
+        assert_eq!(flags_arr.value(0), 3);
+    }
+
+    #[test]
+    fn binary_resource_attrs_roundtrip_as_binary() {
         let schema = Arc::new(Schema::new(vec![
             Field::new("message", DataType::Utf8, true),
             Field::new("_resource_payload", DataType::Binary, true),
@@ -2785,12 +3043,12 @@ mod tests {
         let payload_arr = roundtrip
             .column(payload_idx)
             .as_any()
-            .downcast_ref::<StringArray>()
-            .expect("resource.attributes.payload string");
+            .downcast_ref::<BinaryArray>()
+            .expect("resource.attributes.payload binary");
 
-        assert_eq!(payload_arr.value(0), "deadbeef");
-        assert_eq!(payload_arr.value(1), "deadbeef");
-        assert_eq!(payload_arr.value(2), "0102");
+        assert_eq!(payload_arr.value(0), &[0xde, 0xad, 0xbe, 0xef]);
+        assert_eq!(payload_arr.value(1), &[0xde, 0xad, 0xbe, 0xef]);
+        assert_eq!(payload_arr.value(2), &[0x01, 0x02]);
     }
 
     #[test]

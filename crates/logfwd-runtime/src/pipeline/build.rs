@@ -18,6 +18,20 @@ use logfwd_types::pipeline::{PipelineMachine, SourceId};
 use super::input_build::build_input_state;
 use super::{InputTransform, Pipeline};
 
+// ── Pipeline defaults ──────────────────────────────────────────────────
+/// Default output worker count when `pipelines.<name>.workers` is unset.
+pub(crate) const DEFAULT_WORKERS: usize = 4;
+/// Default target batch size in bytes; reaching this target triggers a flush.
+pub(crate) const DEFAULT_BATCH_TARGET_BYTES: usize = 4 * 1024 * 1024;
+/// Default maximum time a partial batch waits before flushing.
+pub(crate) const DEFAULT_BATCH_TIMEOUT: Duration = Duration::from_millis(100);
+/// Default interval between input polls when `poll_interval_ms` is unset.
+pub(crate) const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(10);
+/// Default idle duration before recyclable output workers shut down.
+pub(crate) const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Default minimum interval between checkpoint flushes.
+pub(crate) const DEFAULT_CHECKPOINT_FLUSH_INTERVAL: Duration = Duration::from_secs(5);
+
 impl Pipeline {
     /// Construct a pipeline from parsed YAML config.
     pub fn from_config(
@@ -294,7 +308,10 @@ impl Pipeline {
         let (max_workers, idle_timeout) = if factory.is_single_use() {
             (1, Duration::MAX) // never idle-expire the sole worker
         } else {
-            (config.workers.unwrap_or(4), Duration::from_secs(30))
+            (
+                config.workers.unwrap_or(DEFAULT_WORKERS),
+                DEFAULT_IDLE_TIMEOUT,
+            )
         };
         let metrics = Arc::new(metrics);
         let pool = crate::worker_pool::OutputWorkerPool::new(
@@ -325,14 +342,20 @@ impl Pipeline {
             processors: vec![],
             pool,
             metrics,
-            batch_target_bytes: config.batch_target_bytes.unwrap_or(4 * 1024 * 1024),
-            batch_timeout: Duration::from_millis(config.batch_timeout_ms.unwrap_or(100)),
-            poll_interval: Duration::from_millis(config.poll_interval_ms.unwrap_or(10)),
+            batch_target_bytes: config
+                .batch_target_bytes
+                .unwrap_or(DEFAULT_BATCH_TARGET_BYTES),
+            batch_timeout: config
+                .batch_timeout_ms
+                .map_or(DEFAULT_BATCH_TIMEOUT, Duration::from_millis),
+            poll_interval: config
+                .poll_interval_ms
+                .map_or(DEFAULT_POLL_INTERVAL, Duration::from_millis),
             resource_attrs: Arc::new(resource_attrs),
             machine: Some(PipelineMachine::new().start()),
             checkpoint_store,
             last_checkpoint_flush: tokio::time::Instant::now(),
-            checkpoint_flush_interval: Duration::from_secs(5),
+            checkpoint_flush_interval: DEFAULT_CHECKPOINT_FLUSH_INTERVAL,
         })
     }
 }

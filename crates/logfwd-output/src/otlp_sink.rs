@@ -6,10 +6,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use arrow::array::{
-    Array, AsArray, LargeStringArray, PrimitiveArray, StringArray, StringViewArray,
+    Array, AsArray, BinaryArray, LargeBinaryArray, LargeStringArray, PrimitiveArray, StringArray,
+    StringViewArray,
 };
 use arrow::datatypes::{DataType, Float64Type, Int64Type, UInt64Type};
 use arrow::record_batch::RecordBatch;
+use arrow::util::display::array_value_to_string;
 use flate2::Compression as GzipLevel;
 use flate2::write::GzEncoder;
 
@@ -23,7 +25,7 @@ use logfwd_types::diagnostics::ComponentStats;
 use logfwd_types::field_names;
 use zstd::bulk::Compressor as ZstdCompressor;
 
-use super::{BatchMetadata, Compression, str_value};
+use super::{BatchMetadata, Compression};
 use crate::http_classify::{self, DEFAULT_RETRY_AFTER_SECS};
 
 mod generated {
@@ -67,9 +69,10 @@ pub struct OtlpSink {
     stats: Arc<ComponentStats>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum ResourceValueRef<'a> {
     Str(&'a str),
+    Bytes(&'a [u8]),
     Int(i64),
     Float(u64),
     Bool(bool),
@@ -214,8 +217,8 @@ impl OtlpSink {
 
         for row in 0..num_rows {
             let mut key: ResourceKey<'_> = Vec::with_capacity(columns.resource_cols.len());
-            for (_, attr) in &columns.resource_cols {
-                key.push(attr.value_ref(row));
+            for (field_name, attr) in &columns.resource_cols {
+                key.push(attr.value_ref(row, field_name));
             }
             let scope_name = columns.scope_name_col.as_ref().and_then(|(_, arr)| {
                 if arr.is_null(row) {
@@ -233,15 +236,15 @@ impl OtlpSink {
             });
             let scope_key = (scope_name, scope_version);
 
-            let group_idx = if let Some(existing) =
-                group_index_by_key.get(&(key.clone(), scope_key)).copied()
-            {
-                existing
-            } else {
-                let idx = grouped_ranges.len();
-                group_index_by_key.insert((key.clone(), scope_key), idx);
-                grouped_ranges.push((key, scope_key, Vec::new()));
-                idx
+            let group_idx = match group_index_by_key.entry((key, scope_key)) {
+                std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    let idx = grouped_ranges.len();
+                    let (group_key, group_scope) = entry.key();
+                    grouped_ranges.push((group_key.clone(), *group_scope, Vec::new()));
+                    entry.insert(idx);
+                    idx
+                }
             };
 
             let start = records_buf.len();
@@ -296,6 +299,12 @@ impl OtlpSink {
                             otlp::RESOURCE_ATTRIBUTES,
                             key_name.as_bytes(),
                             v.as_bytes(),
+                        ),
+                        ResourceValueRef::Bytes(v) => encode_key_value_bytes(
+                            &mut resource_msg,
+                            otlp::RESOURCE_ATTRIBUTES,
+                            key_name.as_bytes(),
+                            v,
                         ),
                         ResourceValueRef::Int(v) => encode_key_value_int(
                             &mut resource_msg,
@@ -737,6 +746,9 @@ impl OtlpStrCol<'_> {
 enum AttrArray<'a> {
     Str(OtlpStrCol<'a>),
     OtherStr(&'a dyn Array),
+    PreformattedStr(Vec<Option<String>>),
+    Bytes(&'a BinaryArray),
+    LargeBytes(&'a LargeBinaryArray),
     Int(&'a PrimitiveArray<Int64Type>),
     Float(&'a PrimitiveArray<Float64Type>),
     Bool(&'a arrow::array::BooleanArray),
@@ -744,11 +756,28 @@ enum AttrArray<'a> {
 
 impl AttrArray<'_> {
     #[inline(always)]
-    fn value_ref(&self, row: usize) -> Option<ResourceValueRef<'_>> {
+    fn value_ref(&self, row: usize, field_name: &str) -> Option<ResourceValueRef<'_>> {
         match self {
             Self::Str(arr) => (!arr.is_null(row)).then(|| ResourceValueRef::Str(arr.value(row))),
             Self::OtherStr(arr) => {
-                (!arr.is_null(row)).then(|| ResourceValueRef::Str(str_value(*arr, row)))
+                if !arr.is_null(row) {
+                    tracing::warn!(
+                        column = field_name,
+                        row,
+                        "skipping OTLP resource attribute: unsupported non-string column was not preformatted"
+                    );
+                }
+                None
+            }
+            Self::PreformattedStr(values) => values
+                .get(row)
+                .and_then(|value| value.as_deref())
+                .map(ResourceValueRef::Str),
+            Self::Bytes(arr) => {
+                (!arr.is_null(row)).then(|| ResourceValueRef::Bytes(arr.value(row)))
+            }
+            Self::LargeBytes(arr) => {
+                (!arr.is_null(row)).then(|| ResourceValueRef::Bytes(arr.value(row)))
             }
             Self::Int(arr) => (!arr.is_null(row)).then(|| ResourceValueRef::Int(arr.value(row))),
             Self::Float(arr) => {
@@ -896,7 +925,7 @@ fn resolve_batch_columns<'a>(
                     }
                 }
             }
-            "_raw" => {
+            field_names::RAW => {
                 excluded.push(idx);
             }
             _ => {}
@@ -965,7 +994,7 @@ fn resolve_batch_columns<'a>(
                     .map(|stripped| {
                         field
                             .metadata()
-                            .get("logfwd.resource_key")
+                            .get(field_names::METADATA_RESOURCE_KEY)
                             .cloned()
                             .unwrap_or_else(|| stripped.to_string())
                     })
@@ -977,6 +1006,22 @@ fn resolve_batch_columns<'a>(
                     AttrArray::Float(batch.column(idx).as_primitive::<Float64Type>())
                 }
                 DataType::Boolean => AttrArray::Bool(batch.column(idx).as_boolean()),
+                DataType::Binary => {
+                    let Some(arr) = batch.column(idx).as_any().downcast_ref::<BinaryArray>() else {
+                        continue;
+                    };
+                    AttrArray::Bytes(arr)
+                }
+                DataType::LargeBinary => {
+                    let Some(arr) = batch
+                        .column(idx)
+                        .as_any()
+                        .downcast_ref::<LargeBinaryArray>()
+                    else {
+                        continue;
+                    };
+                    AttrArray::LargeBytes(arr)
+                }
                 DataType::Struct(_) => {
                     tracing::warn!(
                         column = field_name,
@@ -986,7 +1031,12 @@ fn resolve_batch_columns<'a>(
                     continue;
                 }
                 _ => resolve_otlp_str_col(batch.column(idx).as_ref()).map_or_else(
-                    || AttrArray::OtherStr(batch.column(idx).as_ref()),
+                    || {
+                        AttrArray::PreformattedStr(preformat_non_string_attr_column(
+                            batch.column(idx).as_ref(),
+                            field_name,
+                        ))
+                    },
                     AttrArray::Str,
                 ),
             };
@@ -1001,11 +1051,33 @@ fn resolve_batch_columns<'a>(
             DataType::Int64 => AttrArray::Int(batch.column(idx).as_primitive::<Int64Type>()),
             DataType::Float64 => AttrArray::Float(batch.column(idx).as_primitive::<Float64Type>()),
             DataType::Boolean => AttrArray::Bool(batch.column(idx).as_boolean()),
+            DataType::Binary => {
+                let Some(arr) = batch.column(idx).as_any().downcast_ref::<BinaryArray>() else {
+                    continue;
+                };
+                AttrArray::Bytes(arr)
+            }
+            DataType::LargeBinary => {
+                let Some(arr) = batch
+                    .column(idx)
+                    .as_any()
+                    .downcast_ref::<LargeBinaryArray>()
+                else {
+                    continue;
+                };
+                AttrArray::LargeBytes(arr)
+            }
             // Non-conflict struct columns (e.g. nested objects not produced by the
             // type-conflict builder) cannot be encoded as a single typed OTLP attribute.
             // Conflict structs (Struct { int, str, float, bool }) are already normalized
             // to flat Utf8 by `encode_batch` before this function is called.
-            DataType::Struct(_) => continue,
+            DataType::Struct(_) => {
+                tracing::warn!(
+                    column = field.name().as_str(),
+                    "non-conflict struct column cannot be encoded as OTLP attribute, skipping"
+                );
+                continue;
+            }
             _ => resolve_otlp_str_col(batch.column(idx).as_ref()).map_or_else(
                 || AttrArray::OtherStr(batch.column(idx).as_ref()),
                 AttrArray::Str,
@@ -1034,7 +1106,7 @@ fn resolve_batch_columns<'a>(
 fn resource_prefix_from_batch(batch: &RecordBatch) -> String {
     let schema = batch.schema();
 
-    if let Some(prefix) = schema.metadata().get("logfwd.resource_prefix")
+    if let Some(prefix) = schema.metadata().get(field_names::METADATA_RESOURCE_PREFIX)
         && !prefix.is_empty()
     {
         return prefix.clone();
@@ -1049,7 +1121,7 @@ fn resource_prefix_from_batch(batch: &RecordBatch) -> String {
     }
 
     for field in schema.fields() {
-        if let Some(resource_key) = field.metadata().get("logfwd.resource_key")
+        if let Some(resource_key) = field.metadata().get(field_names::METADATA_RESOURCE_KEY)
             && let Some(prefix) = field.name().strip_suffix(resource_key)
             && !prefix.is_empty()
         {
@@ -1060,14 +1132,25 @@ fn resource_prefix_from_batch(batch: &RecordBatch) -> String {
     field_names::DEFAULT_RESOURCE_PREFIX.to_string()
 }
 
-fn numeric_timestamp_ns(arr: &dyn Array, row: usize) -> u64 {
+fn numeric_timestamp_ns(arr: &dyn Array, row: usize) -> Option<u64> {
     if arr.is_null(row) {
-        return 0;
+        return None;
     }
 
     match arr.data_type() {
-        DataType::Int64 => u64::try_from(arr.as_primitive::<Int64Type>().value(row)).unwrap_or(0),
-        DataType::UInt64 => arr.as_primitive::<UInt64Type>().value(row),
+        DataType::Int64 => {
+            let v = arr.as_primitive::<Int64Type>().value(row);
+            match u64::try_from(v) {
+                Ok(ns) => Some(ns),
+                Err(_) => {
+                    tracing::debug!(
+                        "timestamp parse fallback: negative i64 timestamp cannot convert to u64"
+                    );
+                    None
+                }
+            }
+        }
+        DataType::UInt64 => Some(arr.as_primitive::<UInt64Type>().value(row)),
         DataType::Timestamp(unit, _) => {
             use arrow::datatypes::{
                 TimeUnit, TimestampMicrosecondType, TimestampMillisecondType,
@@ -1090,9 +1173,17 @@ fn numeric_timestamp_ns(arr: &dyn Array, row: usize) -> u64 {
                     .value(row)
                     .checked_mul(1_000_000_000),
             };
-            raw_ns.and_then(|ns| u64::try_from(ns).ok()).unwrap_or(0)
+            match raw_ns.and_then(|ns| u64::try_from(ns).ok()) {
+                Some(ns) => Some(ns),
+                None => {
+                    tracing::debug!(
+                        "timestamp parse fallback: numeric timestamp overflow or negative value"
+                    );
+                    None
+                }
+            }
         }
-        _ => 0,
+        _ => None,
     }
 }
 
@@ -1105,16 +1196,24 @@ fn encode_row_as_log_record(
 ) {
     // --- Read per-row values from pre-resolved columns ---
 
-    let timestamp_ns: u64 = if let Some((_, arr)) = columns.timestamp_num_col.as_ref() {
+    let timestamp_ns: Option<u64> = if let Some((_, arr)) = columns.timestamp_num_col.as_ref() {
         numeric_timestamp_ns(*arr, row)
     } else if let Some((_, arr)) = columns.timestamp_col.as_ref() {
         if arr.is_null(row) {
-            0
+            None
         } else {
-            parse_timestamp_nanos(arr.value(row).as_bytes()).unwrap_or(0)
+            match parse_timestamp_nanos(arr.value(row).as_bytes()) {
+                Some(ts) => Some(ts),
+                None => {
+                    tracing::debug!(
+                        "timestamp parse fallback: event_time omitted for unparsable value"
+                    );
+                    None
+                }
+            }
         }
     } else {
-        0
+        None
     };
 
     let (severity_num, severity_text): (Severity, &[u8]) =
@@ -1146,7 +1245,7 @@ fn encode_row_as_log_record(
     // --- Write protobuf fields ---
 
     // LogRecord.time_unix_nano (fixed64)
-    if timestamp_ns > 0 {
+    if let Some(timestamp_ns) = timestamp_ns {
         encode_fixed64(buf, otlp::LOG_RECORD_TIME_UNIX_NANO, timestamp_ns);
     }
 
@@ -1170,58 +1269,7 @@ fn encode_row_as_log_record(
 
     // LogRecord.attributes — pre-resolved attribute columns
     for (field_name, attr) in &columns.attribute_cols {
-        match attr {
-            AttrArray::Int(arr) => {
-                if !arr.is_null(row) {
-                    encode_key_value_int(
-                        buf,
-                        otlp::LOG_RECORD_ATTRIBUTES,
-                        field_name.as_bytes(),
-                        arr.value(row),
-                    );
-                }
-            }
-            AttrArray::Float(arr) => {
-                if !arr.is_null(row) {
-                    encode_key_value_double(
-                        buf,
-                        otlp::LOG_RECORD_ATTRIBUTES,
-                        field_name.as_bytes(),
-                        arr.value(row),
-                    );
-                }
-            }
-            AttrArray::Bool(arr) => {
-                if !arr.is_null(row) {
-                    encode_key_value_bool(
-                        buf,
-                        otlp::LOG_RECORD_ATTRIBUTES,
-                        field_name.as_bytes(),
-                        arr.value(row),
-                    );
-                }
-            }
-            AttrArray::Str(arr) => {
-                if !arr.is_null(row) {
-                    encode_key_value_string(
-                        buf,
-                        otlp::LOG_RECORD_ATTRIBUTES,
-                        field_name.as_bytes(),
-                        arr.value(row).as_bytes(),
-                    );
-                }
-            }
-            AttrArray::OtherStr(arr) => {
-                if !arr.is_null(row) {
-                    encode_key_value_string(
-                        buf,
-                        otlp::LOG_RECORD_ATTRIBUTES,
-                        field_name.as_bytes(),
-                        str_value(*arr, row).as_bytes(),
-                    );
-                }
-            }
-        }
+        encode_attr_array_value(buf, otlp::LOG_RECORD_ATTRIBUTES, field_name, attr, row);
     }
 
     // LogRecord.flags (fixed32) — W3C trace flags.
@@ -1259,11 +1307,11 @@ fn encode_row_as_log_record(
     }
 
     // LogRecord.observed_time_unix_nano (fixed64)
-    let observed_ns = if let Some((_, arr)) = columns.observed_ts_col.as_ref() {
-        numeric_timestamp_ns(*arr, row)
-    } else {
-        metadata.observed_time_ns
-    };
+    let observed_ns = columns
+        .observed_ts_col
+        .as_ref()
+        .and_then(|(_, arr)| numeric_timestamp_ns(*arr, row))
+        .unwrap_or(metadata.observed_time_ns);
     encode_fixed64(buf, otlp::LOG_RECORD_OBSERVED_TIME_UNIX_NANO, observed_ns);
 }
 
@@ -1283,6 +1331,19 @@ fn encode_key_value_string(buf: &mut Vec<u8>, field_number: u32, key: &[u8], val
     encode_bytes_field(buf, otlp::ANY_VALUE_STRING_VALUE, value);
 }
 
+/// Encode a KeyValue with bytes AnyValue (`AnyValue.bytes_value`).
+fn encode_key_value_bytes(buf: &mut Vec<u8>, field_number: u32, key: &[u8], value: &[u8]) {
+    let anyvalue_inner = bytes_field_size(otlp::ANY_VALUE_BYTES_VALUE, value.len());
+    let kv_inner = bytes_field_size(otlp::KEY_VALUE_KEY, key.len())
+        + bytes_field_size(otlp::KEY_VALUE_VALUE, anyvalue_inner);
+    encode_tag(buf, field_number, otlp::WIRE_TYPE_LEN);
+    encode_varint(buf, kv_inner as u64);
+    encode_bytes_field(buf, otlp::KEY_VALUE_KEY, key);
+    encode_tag(buf, otlp::KEY_VALUE_VALUE, otlp::WIRE_TYPE_LEN);
+    encode_varint(buf, anyvalue_inner as u64);
+    encode_bytes_field(buf, otlp::ANY_VALUE_BYTES_VALUE, value);
+}
+
 /// Encode a KeyValue with int AnyValue (`AnyValue.int_value`).
 fn encode_key_value_int(buf: &mut Vec<u8>, field_number: u32, key: &[u8], value: i64) {
     let anyvalue_inner = 1 + varint_len(value as u64); // tag(1 byte) + varint
@@ -1294,6 +1355,86 @@ fn encode_key_value_int(buf: &mut Vec<u8>, field_number: u32, key: &[u8], value:
     encode_tag(buf, otlp::KEY_VALUE_VALUE, otlp::WIRE_TYPE_LEN);
     encode_varint(buf, anyvalue_inner as u64);
     encode_varint_field(buf, otlp::ANY_VALUE_INT_VALUE, value as u64);
+}
+
+fn encode_attr_array_value(
+    buf: &mut Vec<u8>,
+    field_number: u32,
+    field_name: &str,
+    attr: &AttrArray<'_>,
+    row: usize,
+) {
+    match attr {
+        AttrArray::Int(arr) => {
+            if !arr.is_null(row) {
+                encode_key_value_int(buf, field_number, field_name.as_bytes(), arr.value(row));
+            }
+        }
+        AttrArray::Float(arr) => {
+            if !arr.is_null(row) {
+                encode_key_value_double(buf, field_number, field_name.as_bytes(), arr.value(row));
+            }
+        }
+        AttrArray::Bool(arr) => {
+            if !arr.is_null(row) {
+                encode_key_value_bool(buf, field_number, field_name.as_bytes(), arr.value(row));
+            }
+        }
+        AttrArray::Str(arr) => {
+            if !arr.is_null(row) {
+                encode_key_value_string(
+                    buf,
+                    field_number,
+                    field_name.as_bytes(),
+                    arr.value(row).as_bytes(),
+                );
+            }
+        }
+        AttrArray::PreformattedStr(values) => {
+            if let Some(Some(value)) = values.get(row) {
+                encode_key_value_string(buf, field_number, field_name.as_bytes(), value.as_bytes());
+            }
+        }
+        AttrArray::Bytes(arr) => {
+            if !arr.is_null(row) {
+                encode_key_value_bytes(buf, field_number, field_name.as_bytes(), arr.value(row));
+            }
+        }
+        AttrArray::LargeBytes(arr) => {
+            if !arr.is_null(row) {
+                encode_key_value_bytes(buf, field_number, field_name.as_bytes(), arr.value(row));
+            }
+        }
+        AttrArray::OtherStr(arr) => {
+            if let Some(value) = format_non_string_attr_value(*arr, row, field_name) {
+                encode_key_value_string(buf, field_number, field_name.as_bytes(), value.as_bytes());
+            }
+        }
+    }
+}
+
+fn format_non_string_attr_value(arr: &dyn Array, row: usize, field_name: &str) -> Option<String> {
+    if arr.is_null(row) {
+        return None;
+    }
+    match array_value_to_string(arr, row) {
+        Ok(value) => Some(value),
+        Err(err) => {
+            tracing::warn!(
+                column = field_name,
+                row,
+                error = %err,
+                "skipping OTLP attribute value: failed to format non-string Arrow value"
+            );
+            None
+        }
+    }
+}
+
+fn preformat_non_string_attr_column(arr: &dyn Array, field_name: &str) -> Vec<Option<String>> {
+    (0..arr.len())
+        .map(|row| format_non_string_attr_value(arr, row, field_name))
+        .collect()
 }
 
 /// Encode a KeyValue with double AnyValue (`AnyValue.double_value`).
@@ -2218,6 +2359,71 @@ mod tests {
         assert_eq!(active_val, Some(true), "active attribute value mismatch");
     }
 
+    #[test]
+    fn binary_attributes_encode_as_otlp_bytes_values() {
+        use arrow::array::BinaryArray;
+        use opentelemetry_proto::tonic::{
+            collector::logs::v1::ExportLogsServiceRequest, common::v1::any_value::Value,
+        };
+        use prost::Message;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("body", DataType::Utf8, true),
+            Field::new("log_payload", DataType::Binary, true),
+            Field::new("_resource_resource_payload", DataType::Binary, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec![Some("binary attrs")])),
+                Arc::new(BinaryArray::from(vec![Some(&[0x00_u8, 0x0f, 0xff][..])])),
+                Arc::new(BinaryArray::from(vec![Some(&[0xde_u8, 0xad][..])])),
+            ],
+        )
+        .expect("valid batch");
+        let metadata = make_metadata();
+
+        let mut handwritten = make_sink();
+        handwritten.encode_batch(&batch, &metadata);
+
+        let mut generated = make_sink();
+        generated.encode_batch_generated_fast(&batch, &metadata);
+        assert_eq!(
+            generated.encoded_payload(),
+            handwritten.encoded_payload(),
+            "generated-fast payload drifted from handwritten binary attribute encoding"
+        );
+
+        let request = ExportLogsServiceRequest::decode(handwritten.encoder_buf.as_slice())
+            .expect("prost must decode binary attributes");
+        let resource = request.resource_logs[0]
+            .resource
+            .as_ref()
+            .expect("resource");
+        let resource_payload = resource
+            .attributes
+            .iter()
+            .find(|kv| kv.key == "resource_payload")
+            .and_then(|kv| kv.value.as_ref())
+            .and_then(|value| match &value.value {
+                Some(Value::BytesValue(bytes)) => Some(bytes.as_slice()),
+                _ => None,
+            });
+        assert_eq!(resource_payload, Some(&[0xde, 0xad][..]));
+
+        let record = &request.resource_logs[0].scope_logs[0].log_records[0];
+        let log_payload = record
+            .attributes
+            .iter()
+            .find(|kv| kv.key == "log_payload")
+            .and_then(|kv| kv.value.as_ref())
+            .and_then(|value| match &value.value {
+                Some(Value::BytesValue(bytes)) => Some(bytes.as_slice()),
+                _ => None,
+            });
+        assert_eq!(log_payload, Some(&[0x00, 0x0f, 0xff][..]));
+    }
+
     /// Roundtrip with minimal fields: only body, no timestamp, no severity,
     /// no trace context. Ensures sparse records encode correctly.
     #[test]
@@ -2493,7 +2699,7 @@ mod tests {
 
         let schema = Arc::new(Schema::new(vec![
             Field::new("body", DataType::Utf8, true),
-            Field::new("_raw", DataType::Utf8, true),
+            Field::new(field_names::RAW, DataType::Utf8, true),
         ]));
         let batch = RecordBatch::try_new(
             schema,
@@ -2511,7 +2717,7 @@ mod tests {
         let attrs = &request.resource_logs[0].scope_logs[0].log_records[0].attributes;
 
         assert!(
-            attrs.iter().all(|kv| kv.key != "_raw"),
+            attrs.iter().all(|kv| kv.key != field_names::RAW),
             "_raw should remain internal-only"
         );
     }
@@ -2567,12 +2773,12 @@ mod tests {
         // (containing dots) survive the round-trip through Arrow column names.
         let svc_field = Field::new("resource.attributes.service.name", DataType::Utf8, true)
             .with_metadata(std::collections::HashMap::from([(
-                "logfwd.resource_key".to_string(),
+                field_names::METADATA_RESOURCE_KEY.to_string(),
                 "service.name".to_string(),
             )]));
         let ns_field = Field::new("resource.attributes.k8s.namespace", DataType::Utf8, true)
             .with_metadata(std::collections::HashMap::from([(
-                "logfwd.resource_key".to_string(),
+                field_names::METADATA_RESOURCE_KEY.to_string(),
                 "k8s.namespace".to_string(),
             )]));
         let schema = Arc::new(Schema::new(vec![
@@ -2727,7 +2933,7 @@ mod tests {
 
         let shard_field = Field::new("resource.attributes.service.shard", DataType::Int64, true)
             .with_metadata(std::collections::HashMap::from([(
-                "logfwd.resource_key".to_string(),
+                field_names::METADATA_RESOURCE_KEY.to_string(),
                 "service.shard".to_string(),
             )]));
         let enabled_field = Field::new(
@@ -2736,7 +2942,7 @@ mod tests {
             true,
         )
         .with_metadata(std::collections::HashMap::from([(
-            "logfwd.resource_key".to_string(),
+            field_names::METADATA_RESOURCE_KEY.to_string(),
             "service.enabled".to_string(),
         )]));
         let schema = Arc::new(Schema::new(vec![
@@ -2834,12 +3040,12 @@ mod tests {
 
         let svc_field = Field::new("resource.attributes.service.name", DataType::Utf8, true)
             .with_metadata(std::collections::HashMap::from([(
-                "logfwd.resource_key".to_string(),
+                field_names::METADATA_RESOURCE_KEY.to_string(),
                 "service.name".to_string(),
             )]));
         let shard_field = Field::new("resource.attributes.service.shard", DataType::Int64, true)
             .with_metadata(std::collections::HashMap::from([(
-                "logfwd.resource_key".to_string(),
+                field_names::METADATA_RESOURCE_KEY.to_string(),
                 "service.shard".to_string(),
             )]));
 
@@ -3134,6 +3340,41 @@ mod tests {
         assert_eq!(
             lr.time_unix_nano, EXPECTED_NS,
             "Int64 time_unix_nano column must be encoded as LogRecord.time_unix_nano"
+        );
+    }
+
+    #[test]
+    fn epoch_zero_string_timestamp_is_encoded_as_valid_time() {
+        use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
+        use prost::Message;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("timestamp", DataType::Utf8, true),
+            Field::new("body", DataType::Utf8, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec![Some("1970-01-01T00:00:00Z")])),
+                Arc::new(StringArray::from(vec![Some("epoch")])),
+            ],
+        )
+        .expect("valid batch");
+
+        let mut handwritten = make_sink();
+        handwritten.encode_batch(&batch, &make_metadata());
+
+        let mut generated = make_sink();
+        generated.encode_batch_generated_fast(&batch, &make_metadata());
+        assert_eq!(generated.encoded_payload(), handwritten.encoded_payload());
+
+        let request = ExportLogsServiceRequest::decode(handwritten.encoder_buf.as_slice())
+            .expect("prost must decode epoch timestamp batch");
+        let record = &request.resource_logs[0].scope_logs[0].log_records[0];
+        assert_eq!(record.time_unix_nano, 0);
+        assert!(
+            contains_bytes(&handwritten.encoder_buf, &[0x09, 0, 0, 0, 0, 0, 0, 0, 0]),
+            "valid epoch-zero timestamp should be emitted, not treated as parse failure"
         );
     }
 
