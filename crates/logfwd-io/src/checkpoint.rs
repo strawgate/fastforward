@@ -152,7 +152,7 @@ pub fn default_data_dir() -> PathBuf {
 
     #[cfg(unix)]
     {
-        if libc_getuid() == 0 {
+        if libc_geteuid() == 0 {
             return PathBuf::from("/var/lib/logfwd");
         }
     }
@@ -165,7 +165,7 @@ pub fn default_data_dir() -> PathBuf {
 }
 
 #[cfg(unix)]
-fn libc_getuid() -> u32 {
+fn libc_geteuid() -> u32 {
     // SAFETY: `geteuid` has no preconditions and is safe to call in-process.
     unsafe { libc::geteuid() }
 }
@@ -365,9 +365,9 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn test_libc_getuid_matches_system_euid() {
+    fn test_libc_geteuid_matches_system_euid() {
         // SAFETY: `geteuid` has no preconditions and is safe to call in-process.
         let expected = unsafe { libc::geteuid() };
-        assert_eq!(libc_getuid(), expected);
+        assert_eq!(libc_geteuid(), expected);
     }
 }

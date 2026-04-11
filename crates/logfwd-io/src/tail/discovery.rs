@@ -56,6 +56,9 @@ fn identity_indicates_rotation(
         return false;
     }
 
+    // TODO: same-inode fingerprint rotation triggers drain+reopen which may
+    // produce duplicate events for copytruncate-style log rotation. Consider
+    // reset-offset-without-drain path.
     previous.fingerprint != current.fingerprint
 }
 
