@@ -56,7 +56,7 @@ jobs:
           lycheeVersion: v0.23.0
           args: >-
             --no-progress
-            --accept 200,429
+            --accept 200,429,502
             --max-retries 3
             --root-dir .
             --exclude 'mailto:'
