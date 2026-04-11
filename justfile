@@ -605,6 +605,23 @@ install-tools:
     @echo "Optional: cargo install inferno"
     @echo "Install just: https://just.systems/man/en/installation.html"
 
+# Install recommended VS Code extensions from .vscode/extensions.json
+install-extensions:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! command -v code &>/dev/null; then
+        echo "ERROR: 'code' CLI not found. Open VS Code and run:"
+        echo "  Cmd/Ctrl+Shift+P → 'Shell Command: Install code command in PATH'"
+        exit 1
+    fi
+    grep -oP '"[a-zA-Z0-9_-]+\.[a-zA-Z0-9._-]+"' .vscode/extensions.json \
+        | tr -d '"' \
+        | while read -r ext; do
+            echo "Installing $ext …"
+            code --install-extension "$ext" --force
+        done
+    echo "Done."
+
 # Set up git pre-commit hook (works from any worktree)
 install-hooks:
     #!/usr/bin/env bash
