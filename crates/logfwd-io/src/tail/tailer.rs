@@ -136,7 +136,9 @@ impl FileTailer {
             },
             reader: FileReader {
                 files: HashMap::new(),
-                read_buf: vec![0u8; config.read_buf_size],
+                // Prevent a zero-length buffer from turning non-empty files into
+                // perpetual "NoData" reads.
+                read_buf: vec![0u8; config.read_buf_size.max(1)],
                 evicted_offsets: HashMap::new(),
                 scratch_paths: Vec::new(),
                 last_read_had_data: false,
