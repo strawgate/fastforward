@@ -242,6 +242,38 @@ pub fn normalized_contract_trace(events: &[TraceEvent]) -> Vec<String> {
         .collect()
 }
 
+/// Validate transition history across multiple replay runs.
+///
+/// Ensures every run satisfies `TransitionValidator` and that all runs produce
+/// the same normalized contract trace as run 0.
+pub fn validate_replay_history_equivalence(
+    runs: &[Vec<TraceEvent>],
+) -> Result<Vec<String>, String> {
+    let Some(first) = runs.first() else {
+        return Err("no runs supplied for replay equivalence validation".to_string());
+    };
+
+    let validator = TransitionValidator::default();
+    validator
+        .validate(first)
+        .map_err(|err| format!("run 0 transition contract failed: {err}"))?;
+    let baseline = normalized_contract_trace(first);
+
+    for (idx, run) in runs.iter().enumerate().skip(1) {
+        validator
+            .validate(run)
+            .map_err(|err| format!("run {idx} transition contract failed: {err}"))?;
+        let normalized = normalized_contract_trace(run);
+        if normalized != baseline {
+            return Err(format!(
+                "run {idx} diverged from run 0 normalized contract trace"
+            ));
+        }
+    }
+
+    Ok(baseline)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PhaseState {
     Running,

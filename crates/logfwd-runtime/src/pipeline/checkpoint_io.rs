@@ -23,6 +23,12 @@ pub(super) async fn flush_checkpoint_with_retry(store: &mut dyn CheckpointStore)
     const RETRY_DELAY: Duration = Duration::from_millis(100);
 
     for attempt in 0..MAX_ATTEMPTS {
+        #[cfg(feature = "turmoil")]
+        crate::turmoil_barriers::trigger(
+            crate::turmoil_barriers::RuntimeBarrierEvent::BeforeCheckpointFlushAttempt { attempt },
+        )
+        .await;
+
         if internal_faults::checkpoint_flush_should_fail() {
             if should_retry_flush(attempt, MAX_ATTEMPTS) {
                 tracing::warn!(
