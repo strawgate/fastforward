@@ -110,9 +110,13 @@ fn advance_pending(client: &mut Client, consumed: usize) {
 
 #[inline]
 fn has_incomplete_octet_frame_tail(buf: &[u8]) -> bool {
-    parse_octet_prefix(buf)
-        .and_then(|(len, prefix_len)| prefix_len.checked_add(len))
-        .is_some_and(|needed| buf.len() < needed)
+    let Some((len, prefix_len)) = parse_octet_prefix(buf) else {
+        return false;
+    };
+    match prefix_len.checked_add(len) {
+        Some(needed) => buf.len() < needed,
+        None => true,
+    }
 }
 
 fn extract_complete_records(client: &mut Client, out: &mut Vec<u8>) {
@@ -982,6 +986,15 @@ mod tests {
         assert!(
             !rendered.contains("tes"),
             "incomplete octet-counted tail must be dropped on close; got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn overflowing_octet_prefix_is_treated_as_incomplete_tail() {
+        let buf = format!("{} ", usize::MAX).into_bytes();
+        assert!(
+            has_incomplete_octet_frame_tail(&buf),
+            "overflowing octet prefix must be treated as incomplete to avoid flushing malformed tails"
         );
     }
 

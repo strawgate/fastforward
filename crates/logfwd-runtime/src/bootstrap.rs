@@ -604,11 +604,12 @@ fn redact_url(url: &str) -> String {
     } else {
         ("", url)
     };
-    let authority_and_path = &rest[rest.rfind('@').map_or(0, |i| i + 1)..];
-    let host_end = authority_and_path
-        .find(['/', '?', '#'])
-        .unwrap_or(authority_and_path.len());
-    let host = &authority_and_path[..host_end];
+
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    let host = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
     if host.is_empty() {
         return url.to_string();
     }
@@ -691,5 +692,13 @@ mod tests {
     #[test]
     fn redact_url_keeps_original_when_host_is_empty() {
         assert_eq!(redact_url("https:///v1/traces"), "https:///v1/traces");
+    }
+
+    #[test]
+    fn redact_url_does_not_treat_query_at_as_userinfo() {
+        assert_eq!(
+            redact_url("https://example.com/path?email=user@domain.com"),
+            "https://example.com"
+        );
     }
 }
