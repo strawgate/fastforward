@@ -9,7 +9,6 @@ Start with the symptom table, run the exact checks, and compare expected output 
 :::tip[Before you start]
 - Use a config that passes validation: `logfwd validate --config config.yaml`.
 - Enable diagnostics while debugging:
-:::
 
 ```yaml
 server:
@@ -23,6 +22,7 @@ server:
 kubectl -n collectors logs -f daemonset/logfwd
 # or local/docker: docker logs -f logfwd
 ```
+:::
 
 ## Symptom-first triage
 
