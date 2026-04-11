@@ -480,8 +480,7 @@ impl Pipeline {
                     // Heartbeat for stateful processors: send an empty batch through
                     // the chain so stateful processors can check their internal timers
                     // and emit timed-out data.
-                    if !self.aborted
-                        && !self.processors.is_empty()
+                    if !self.processors.is_empty()
                         && self.processors.iter().any(|p| p.is_stateful())
                     {
                         let empty = RecordBatch::new_empty(
