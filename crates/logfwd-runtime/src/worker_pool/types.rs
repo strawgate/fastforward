@@ -65,17 +65,25 @@ impl DeliveryOutcome {
 }
 
 pub(super) fn bound_rejection_reason(mut reason: String) -> String {
-    if reason.len() <= MAX_REJECTION_REASON_BYTES {
-        return reason;
+    bound_reason_to_limit(&mut reason, MAX_REJECTION_REASON_BYTES);
+    reason
+}
+
+fn bound_reason_to_limit(reason: &mut String, max_bytes: usize) {
+    if reason.len() <= max_bytes {
+        return;
     }
-    let suffix = "...";
-    let mut boundary = MAX_REJECTION_REASON_BYTES.saturating_sub(suffix.len());
+    const SUFFIX: &str = "...";
+    if max_bytes <= SUFFIX.len() {
+        reason.truncate(max_bytes);
+        return;
+    }
+    let mut boundary = max_bytes - SUFFIX.len();
     while boundary > 0 && !reason.is_char_boundary(boundary) {
         boundary -= 1;
     }
     reason.truncate(boundary);
-    reason.push_str(suffix);
-    reason
+    reason.push_str(SUFFIX);
 }
 
 pub struct AckItem {
@@ -113,3 +121,40 @@ pub(super) enum WorkerMsg {
 }
 
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::{MAX_REJECTION_REASON_BYTES, bound_reason_to_limit, bound_rejection_reason};
+
+    #[test]
+    fn bound_rejection_reason_keeps_short_reason_unchanged() {
+        let reason = "transient backend error".to_string();
+        assert_eq!(bound_rejection_reason(reason.clone()), reason);
+    }
+
+    #[test]
+    fn bound_rejection_reason_respects_global_limit_and_appends_suffix() {
+        let reason = "x".repeat(MAX_REJECTION_REASON_BYTES + 64);
+        let bounded = bound_rejection_reason(reason);
+        assert_eq!(bounded.len(), MAX_REJECTION_REASON_BYTES);
+        assert!(bounded.ends_with("..."));
+    }
+
+    #[test]
+    fn bound_reason_to_limit_preserves_utf8_boundaries() {
+        let mut reason = "é".repeat(8);
+        // 8 * 2 bytes = 16 bytes; bounding to 7 bytes should become 4 bytes
+        // ("éé") plus suffix.
+        bound_reason_to_limit(&mut reason, 7);
+        assert_eq!(reason, "éé...");
+        assert_eq!(reason.len(), 7);
+    }
+
+    #[test]
+    fn bound_reason_to_limit_handles_tiny_limits_without_overflowing() {
+        let mut reason = "abcdef".to_string();
+        bound_reason_to_limit(&mut reason, 2);
+        assert_eq!(reason, "ab");
+        assert_eq!(reason.len(), 2);
+    }
+}
