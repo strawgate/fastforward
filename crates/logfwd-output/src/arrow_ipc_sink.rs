@@ -9,7 +9,7 @@ use std::future::Future;
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
@@ -105,25 +105,6 @@ impl ArrowIpcSink {
         }
     }
 
-    fn parse_retry_after(headers: &reqwest::header::HeaderMap, now: SystemTime) -> Duration {
-        let Some(value) = headers.get(reqwest::header::RETRY_AFTER) else {
-            return Duration::from_secs(DEFAULT_RETRY_AFTER_SECS);
-        };
-        let Ok(value_str) = value.to_str() else {
-            return Duration::from_secs(DEFAULT_RETRY_AFTER_SECS);
-        };
-
-        if let Ok(seconds) = value_str.parse::<u64>() {
-            return Duration::from_secs(seconds);
-        }
-
-        if let Ok(when) = httpdate::parse_http_date(value_str) {
-            return when.duration_since(now).unwrap_or_default();
-        }
-
-        Duration::from_secs(DEFAULT_RETRY_AFTER_SECS)
-    }
-
     /// POST the payload to the configured endpoint.
     ///
     /// Returns `SendResult::RetryAfter` for 429 / 5xx so the worker pool can
@@ -155,14 +136,18 @@ impl ArrowIpcSink {
         }
 
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            return Ok(SendResult::RetryAfter(Self::parse_retry_after(
-                response.headers(),
-                SystemTime::now(),
-            )));
+            let retry_after =
+                crate::http_classify::parse_retry_after(response.headers().get(reqwest::header::RETRY_AFTER))
+                    .unwrap_or(Duration::from_secs(DEFAULT_RETRY_AFTER_SECS));
+            // Consume the response body to free the connection for reuse.
+            let _ = response.text().await;
+            return Ok(SendResult::RetryAfter(retry_after));
         }
 
         if status.is_server_error() {
-            let retry_after = Self::parse_retry_after(response.headers(), SystemTime::now());
+            let retry_after =
+                crate::http_classify::parse_retry_after(response.headers().get(reqwest::header::RETRY_AFTER))
+                    .unwrap_or(Duration::from_secs(DEFAULT_RETRY_AFTER_SECS));
             // Consume the response body to free the connection.
             let _body = response.text().await.unwrap_or_default();
             return Ok(SendResult::RetryAfter(retry_after));
@@ -351,7 +336,7 @@ mod tests {
     use super::*;
     use arrow::array::{Float64Array, Int64Array, StringArray};
     use arrow::datatypes::{DataType, Field, Schema};
-    use std::time::{Duration, SystemTime};
+    use std::time::Duration;
 
     fn make_test_batch() -> RecordBatch {
         let schema = Arc::new(Schema::new(vec![
@@ -448,37 +433,21 @@ mod tests {
 
     #[test]
     fn retry_after_parses_delta_seconds() {
-        let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert(reqwest::header::RETRY_AFTER, "12".parse().unwrap());
-
-        let parsed = ArrowIpcSink::parse_retry_after(&headers, SystemTime::UNIX_EPOCH);
-        assert_eq!(parsed, Duration::from_secs(12));
-    }
-
-    #[test]
-    fn retry_after_parses_http_date() {
-        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
-        let later = now + Duration::from_secs(9);
-        let http_date = httpdate::fmt_http_date(later);
-        let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert(
-            reqwest::header::RETRY_AFTER,
-            http_date.parse().expect("http-date header value is valid"),
-        );
-
-        let parsed = ArrowIpcSink::parse_retry_after(&headers, now);
-        assert_eq!(parsed, Duration::from_secs(9));
+        let hv = reqwest::header::HeaderValue::from_static("12");
+        let parsed = crate::http_classify::parse_retry_after(Some(&hv));
+        assert_eq!(parsed, Some(Duration::from_secs(12)));
     }
 
     #[test]
     fn retry_after_defaults_on_invalid_header() {
-        let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert(
-            reqwest::header::RETRY_AFTER,
-            "definitely-not-valid".parse().unwrap(),
-        );
+        let hv = reqwest::header::HeaderValue::from_static("definitely-not-valid");
+        let parsed = crate::http_classify::parse_retry_after(Some(&hv));
+        assert_eq!(parsed, None);
+    }
 
-        let parsed = ArrowIpcSink::parse_retry_after(&headers, SystemTime::UNIX_EPOCH);
-        assert_eq!(parsed, Duration::from_secs(DEFAULT_RETRY_AFTER_SECS));
+    #[test]
+    fn retry_after_none_when_absent() {
+        let parsed = crate::http_classify::parse_retry_after(None);
+        assert_eq!(parsed, None);
     }
 }
