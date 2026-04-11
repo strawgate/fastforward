@@ -3,11 +3,14 @@ title: "Monitoring & Diagnostics"
 description: "Diagnostics API endpoints and metrics reference"
 ---
 
-Enable the diagnostics server in your config:
+:::tip
+Enable the diagnostics server to get health probes, pipeline metrics, and a built-in HTML dashboard.
+:::
 
 ```yaml
 server:
-  diagnostics: 127.0.0.1:9090
+  diagnostics: 0.0.0.0:9090
+  log_level: info
 ```
 
 ## Endpoints
