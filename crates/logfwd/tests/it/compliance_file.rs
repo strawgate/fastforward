@@ -72,6 +72,15 @@ fn wait_timeout() -> Duration {
     Duration::from_secs(90)
 }
 
+/// Extra budget for large pre-rotation ingestion gates.
+///
+/// The create-style rotation test intentionally waits for the full initial
+/// 5000-line file before rotating; on loaded CI hosts that can run slightly
+/// beyond the generic 60s budget.
+fn wait_timeout_large_ingest() -> Duration {
+    Duration::from_secs(90)
+}
+
 /// Build a pipeline config YAML for a glob input pattern.
 ///
 /// Uses a short `glob_rescan_interval_ms` so tests don't wait 5 seconds for
@@ -159,7 +168,7 @@ fn compliance_file_rotate_create() {
     // masking potential loss/duplicate behavior around the rename boundary.
     if !wait_for(
         || metrics.transform_in.lines_total.load(Ordering::Relaxed) >= 5000,
-        wait_timeout(),
+        wait_timeout_large_ingest(),
     ) {
         shutdown.cancel();
         panic!("timed out waiting for initial 5000 lines before create-style rotation");
