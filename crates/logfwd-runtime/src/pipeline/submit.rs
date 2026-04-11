@@ -133,7 +133,9 @@ impl Pipeline {
             self.ack_all_tickets(sending, super::checkpoint_policy::TicketDisposition::Hold);
             self.metrics.finish_active_batch(batch_id);
             shutdown.cancel();
-            return true;
+            // Keep the select-loop on the normal shutdown path so run_async can
+            // still drain the input channel and avoid producer-side deadlocks.
+            return false;
         }
 
         let batch_span = tracing::info_span!(

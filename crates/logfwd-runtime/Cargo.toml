@@ -44,7 +44,7 @@ thiserror = { workspace = true }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "sync"] }
 tokio-util = { version = "0.7" }
 futures-util = "0.3"
-fail = { version = "0.5", optional = true }
+fail = { workspace = true, optional = true }
 tracing = { workspace = true }
 tracing-opentelemetry = { workspace = true }
 tracing-subscriber = { workspace = true }

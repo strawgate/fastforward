@@ -277,19 +277,36 @@ fn trace_validator_detailed_error_contains_operator_context() {
     let validator = TransitionValidator::default();
     let err = validator
         .validate_detailed(&events)
-        .expect_err("checkpoint regression must fail with detailed diagnostics")
-        .to_string();
+        .expect_err("checkpoint regression must fail with detailed diagnostics");
+
+    assert_eq!(err.code(), "checkpoint_regression");
+    assert_eq!(err.index(), 2);
+    assert!(
+        err.message().contains("checkpoint regression"),
+        "unexpected detailed message: {}",
+        err.message()
+    );
+    assert_eq!(
+        err.event_summary(),
+        "checkpoint_update source_id=12 offset=3"
+    );
+    assert_eq!(
+        err.previous_event_summary(),
+        Some("checkpoint_update source_id=12 offset=42")
+    );
+
+    let rendered = err.to_string();
 
     assert!(
-        err.contains("[checkpoint_regression]"),
-        "expected stable machine-readable code: {err}"
+        rendered.contains("[checkpoint_regression]"),
+        "expected stable machine-readable code: {rendered}"
     );
     assert!(
-        err.contains("event #2"),
-        "expected failing index context: {err}"
+        rendered.contains("event #2"),
+        "expected failing index context: {rendered}"
     );
     assert!(
-        err.contains("previous=checkpoint_update source_id=12 offset=42"),
-        "expected previous event context for operator debugging: {err}"
+        rendered.contains("previous=checkpoint_update source_id=12 offset=42"),
+        "expected previous event context for operator debugging: {rendered}"
     );
 }

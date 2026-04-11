@@ -120,6 +120,10 @@ TypeOK ==
         /\ rejected[s] \cap abandoned[s] = {}
         /\ committed[s] \in 0..MaxBatchesPerSource
 
+StopMetadataConsistent ==
+    /\ (forced <=> stop_reason = "force")
+    /\ ((phase = "Stopped") <=> (stop_reason # "none"))
+
 (* ---------------------------------------------------------------------------
  * Initial state
  * ---------------------------------------------------------------------------*)

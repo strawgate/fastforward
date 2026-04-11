@@ -260,6 +260,10 @@ impl PhaseState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Structured validator failure for a single trace event position.
+///
+/// This is returned by `TransitionValidator::validate_detailed` so callers can
+/// inspect stable machine-readable fields without parsing formatted text.
 pub struct ValidationError {
     index: usize,
     code: &'static str,
@@ -291,6 +295,31 @@ impl ValidationError {
             previous_event_summary,
         }
     }
+
+    /// Index of the failing event in the trace.
+    pub fn index(&self) -> usize {
+        self.index
+    }
+
+    /// Stable short code for programmatic matching.
+    pub fn code(&self) -> &'static str {
+        self.code
+    }
+
+    /// Human-readable explanation of the violated condition.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// Summary of the event at `index`.
+    pub fn event_summary(&self) -> &str {
+        &self.event_summary
+    }
+
+    /// Summary of the event immediately before `index`, when present.
+    pub fn previous_event_summary(&self) -> Option<&str> {
+        self.previous_event_summary.as_deref()
+    }
 }
 
 impl fmt::Display for ValidationError {
@@ -320,6 +349,7 @@ pub struct NormalizedTrace {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Normalized event record used by pluggable validators.
 pub struct NormalizedTraceEvent {
     pub index: usize,
     pub kind: &'static str,
@@ -360,10 +390,12 @@ impl NormalizedTrace {
     }
 }
 
+/// Validator plug-in interface for normalized trace analysis.
 pub trait EventValidator {
     fn validate(&self, trace: &NormalizedTrace) -> Result<(), String>;
 }
 
+/// Minimal validator that enforces `running -> draining -> stopped` order.
 pub struct PhaseOrderValidator;
 
 impl EventValidator for PhaseOrderValidator {
@@ -412,6 +444,10 @@ impl TransitionValidator {
             .map_err(|err| err.to_string())
     }
 
+    /// Validate transition rules and return structured failure context.
+    ///
+    /// On success returns `Ok(())`. On failure returns `ValidationError`
+    /// with a stable code, failing event index, and neighboring summaries.
     pub fn validate_detailed(&self, events: &[TraceEvent]) -> Result<(), ValidationError> {
         if events.is_empty() {
             return Err(ValidationError::at(

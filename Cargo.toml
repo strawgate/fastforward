@@ -52,6 +52,7 @@ datafusion = { version = "48", default-features = false, features = [
     "regex_expressions",
     "recursive_protection",
 ] }
+fail = "0.5"
 globset = "0.4"
 opentelemetry = "0.31"
 opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"] }

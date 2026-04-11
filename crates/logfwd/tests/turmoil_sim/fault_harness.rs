@@ -287,10 +287,10 @@ impl FaultScenario {
                     });
 
                     let run_result = pipeline.run_async(&shutdown).await;
+                    run_result?;
                     trace_for_pipeline.record(TraceEvent::Phase {
                         phase: TracePhase::Stopped,
                     });
-                    run_result?;
                     Ok(())
                 });
             }
@@ -350,10 +350,10 @@ impl FaultScenario {
                     });
 
                     let run_result = pipeline.run_async(&shutdown).await;
+                    run_result?;
                     trace_for_pipeline.record(TraceEvent::Phase {
                         phase: TracePhase::Stopped,
                     });
-                    run_result?;
                     Ok(())
                 });
             }
@@ -410,10 +410,10 @@ impl FaultScenario {
                     });
 
                     let run_result = pipeline.run_async(&shutdown).await;
+                    run_result?;
                     trace_for_pipeline.record(TraceEvent::Phase {
                         phase: TracePhase::Stopped,
                     });
-                    run_result?;
                     Ok(())
                 });
             }
@@ -460,7 +460,12 @@ impl FaultScenario {
             Ok(Err(err)) => (false, Some(err.to_string())),
             Err(_) => (true, None),
         };
-        let trace_events = load_trace(&trace_path).unwrap_or_default();
+        let trace_events = load_trace(&trace_path).unwrap_or_else(|err| {
+            panic!(
+                "failed to load turmoil trace from {}: {err}",
+                trace_path.display()
+            )
+        });
         let trace_validation_error = TransitionValidator::default().validate(&trace_events).err();
         let normalized_trace = normalized_contract_trace(&trace_events);
 
