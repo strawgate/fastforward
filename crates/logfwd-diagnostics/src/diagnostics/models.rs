@@ -38,6 +38,7 @@ pub enum TraceLifecycleState {
 }
 
 impl TraceLifecycleState {
+    /// Returns the stable snake_case string representation of this lifecycle state.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::ScanInProgress => "scan_in_progress",

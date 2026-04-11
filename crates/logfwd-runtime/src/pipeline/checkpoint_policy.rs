@@ -304,7 +304,7 @@ mod tests {
 }
 
 #[cfg(kani)]
-mod kani_proofs {
+mod verification {
     use super::default_ticket_disposition;
     use super::{ORDERED_TICKET_WINDOW, OrderedCheckpointState, TicketDisposition};
     use crate::worker_pool::DeliveryOutcome;

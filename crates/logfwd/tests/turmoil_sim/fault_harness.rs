@@ -192,7 +192,13 @@ impl FaultScenario {
     }
 
     /// Crash deterministically on the Nth checkpoint flush (1-indexed).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `n` is 0 because the crash trigger is 1-indexed; 0 would
+    /// silently disable the crash path.
     pub fn with_checkpoint_crash_on_nth_flush(mut self, n: u64) -> Self {
+        assert!(n > 0, "crash trigger is 1-indexed; 0 disables crash path");
         self.crash_on_nth_flush = Some(n);
         self
     }

@@ -47,6 +47,8 @@ use crate::pipeline::{TransitionAction, TransitionEvent, TransitionOutcome, Tran
 pub use pool::OutputWorkerPool;
 pub use types::{AckItem, DeliveryOutcome, WorkItem};
 
+/// Maps a worker pool [`DeliveryOutcome`] to the pipeline-level [`TransitionOutcome`]
+/// used by the checkpoint and diagnostics subsystems.
 pub(super) const fn transition_outcome_for_delivery(
     outcome: &DeliveryOutcome,
 ) -> TransitionOutcome {
@@ -62,6 +64,9 @@ pub(super) const fn transition_outcome_for_delivery(
     }
 }
 
+/// Emits a [`TransitionEvent`] for each ticket in the batch (or a single
+/// event when `tickets` is empty) recording the delivery outcome against the
+/// diagnostics transition log.
 pub(super) fn emit_delivery_outcome(
     transition_events: &TransitionEventEmitterHandle,
     batch_id: u64,
