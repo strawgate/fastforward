@@ -8,12 +8,12 @@ import { PipelineView } from "./components/PipelineView";
 import { StatusBar } from "./components/StatusBar";
 import { fmt, fmtBytes, fmtBytesCompact, fmtCompact } from "./lib/format";
 import {
-  PIPELINE_METRIC_ORDER,
-  SYSTEM_METRIC_ORDER,
   createMetricRegistry,
   orderedMetrics,
+  PIPELINE_METRIC_ORDER,
   pushMetricHistorySample,
   pushMetricSample,
+  SYSTEM_METRIC_ORDER,
 } from "./lib/metricRegistry";
 import { RateTracker } from "./lib/rates";
 import { RingBuffer } from "./lib/ring";
@@ -226,7 +226,12 @@ export function App() {
             const totalMs = cpuUser[i][1] - cpuUser[i - 1][1] + (curSys - prevSys);
             let rate = totalMs / dt / 10; // ms/s → %
             if (rate < 0) rate = 0;
-            pushMetricHistorySample(metricRegistry, "cpu", now - (latestT - cpuUser[i][0]) * 1000, rate);
+            pushMetricHistorySample(
+              metricRegistry,
+              "cpu",
+              now - (latestT - cpuUser[i][0]) * 1000,
+              rate
+            );
           }
         }
       }
@@ -428,7 +433,8 @@ export function App() {
           .filter((t) => t.lifecycle_state === "completed" && Number(t.total_ns) > 0)
           .slice(0, 50);
         if (done.length > 0) {
-          const avgMs = done.reduce((s, t) => s + (Number(t.total_ns ?? "0") || 0), 0) / done.length / 1e6;
+          const avgMs =
+            done.reduce((s, t) => s + (Number(t.total_ns ?? "0") || 0), 0) / done.length / 1e6;
           const formatted =
             avgMs >= 1000 ? `${(avgMs / 1000).toFixed(1)}s` : `${avgMs.toFixed(0)}ms`;
           pushMetricSample(metricRegistry, "lat", avgMs, formatted);

@@ -1,10 +1,10 @@
 import {
-  PIPELINE_METRIC_ORDER,
-  SYSTEM_METRIC_ORDER,
   createMetricRegistry,
   orderedMetrics,
+  PIPELINE_METRIC_ORDER,
   pushMetricHistorySample,
   pushMetricSample,
+  SYSTEM_METRIC_ORDER,
 } from "../lib/metricRegistry";
 import type { MetricId } from "../types";
 

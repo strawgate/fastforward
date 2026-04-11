@@ -313,7 +313,7 @@ export function layoutSwimlane(
           : (t.worker_id ?? -1) >= 0 && (Number(t.output_start_unix_ns) ?? 0) > 0;
         const outStartMs =
           (Number(t.output_start_unix_ns) ?? 0) > 0
-            ? Number(t.output_start_unix_ns)! / 1e6
+            ? Number(t.output_start_unix_ns) / 1e6
             : startMs + scanMs + xfmMs;
         const actualQueueMs = Math.max(0, outStartMs - (startMs + scanMs + xfmMs));
 
@@ -477,7 +477,8 @@ function drawSwimlane(
     canvas.style.height = `${totalH}px`;
   }
 
-  const ctx = canvas.getContext("2d")!;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
   ctx.clearRect(0, 0, newW, newH);
   ctx.save();
   ctx.scale(dpr, dpr);
@@ -569,7 +570,7 @@ function drawSwimlane(
       // Worker row: apply fade-in animation (firstSeen state lives here in drawSwimlane)
       const traceId = bar.traceId;
       if (!firstSeen.has(traceId)) firstSeen.set(traceId, nowMs);
-      const age = nowMs - firstSeen.get(traceId)!;
+      const age = nowMs - (firstSeen.get(traceId) ?? nowMs);
       const fadeAlpha = Math.min(1, age / 150);
 
       ctx.save();
@@ -707,7 +708,7 @@ function hitTest(
     } else {
       const outStartMs =
         (Number(t.output_start_unix_ns) ?? 0) > 0
-          ? Number(t.output_start_unix_ns)! / 1e6
+          ? Number(t.output_start_unix_ns) / 1e6
           : sMs + scanMs + xfmMs;
       midMs = (sMs + outStartMs + outMs) / 2;
     }
@@ -760,9 +761,9 @@ function DetailPanel({ t }: { t: TraceRecord }) {
               <div class="t2-stage-sub">{pct(Number(t.send_ns ?? 0))}</div>
               {(t.req_bytes ?? 0) > 0 && (
                 <div class="t2-stage-sub">
-                  {fmtBytes(t.req_bytes!)}
+                  {fmtBytes(t.req_bytes ?? 0)}
                   {(t.cmp_bytes ?? 0) > 0 &&
-                    ` → ${fmtBytes(t.cmp_bytes!)} (${((t.cmp_bytes! / t.req_bytes!) * 100).toFixed(0)}%)`}
+                    ` → ${fmtBytes(t.cmp_bytes ?? 0)} (${(((t.cmp_bytes ?? 0) / (t.req_bytes ?? 1)) * 100).toFixed(0)}%)`}
                 </div>
               )}
             </div>
@@ -772,7 +773,7 @@ function DetailPanel({ t }: { t: TraceRecord }) {
               <div class="t2-stage-sub">{pct(Number(t.recv_ns ?? 0))}</div>
               {(t.took_ms ?? 0) > 0 && <div class="t2-stage-sub">ES took {t.took_ms}ms</div>}
               {(t.resp_bytes ?? 0) > 0 && (
-                <div class="t2-stage-sub">{fmtBytes(t.resp_bytes!)} received</div>
+                <div class="t2-stage-sub">{fmtBytes(t.resp_bytes ?? 0)} received</div>
               )}
             </div>
           </>

@@ -1,6 +1,5 @@
 // API response types from logfwd diagnostics server
 
-
 export type MetricId =
   | "lps"
   | "bps"
@@ -64,13 +63,7 @@ export interface PipelineData {
   bottleneck?: BottleneckData;
 }
 
-export type HealthState =
-  | "starting"
-  | "healthy"
-  | "degraded"
-  | "stopping"
-  | "stopped"
-  | "failed";
+export type HealthState = "starting" | "healthy" | "degraded" | "stopping" | "stopped" | "failed";
 
 export interface StatusSnapshot {
   status: string;
