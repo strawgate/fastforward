@@ -56,518 +56,522 @@ impl Config {
             ));
         }
 
+        let mut all_errors: Vec<String> = Vec::new();
         for (name, pipe) in &self.pipelines {
-            if pipe.batch_timeout_ms == Some(0) {
-                return Err(ConfigError::Validation(format!(
-                    "pipeline '{name}': batch_timeout_ms must be greater than 0"
-                )));
-            }
-            if pipe.poll_interval_ms == Some(0) {
-                return Err(ConfigError::Validation(format!(
-                    "pipeline '{name}': poll_interval_ms must be greater than 0"
-                )));
-            }
-            if pipe.workers == Some(0) {
-                return Err(ConfigError::Validation(format!(
-                    "pipeline '{name}': workers must be greater than 0"
-                )));
-            }
-            if pipe.batch_target_bytes == Some(0) {
-                return Err(ConfigError::Validation(format!(
-                    "pipeline '{name}': batch_target_bytes must be greater than 0"
-                )));
-            }
-            if let Some(sql) = &pipe.transform {
-                if sql.trim().is_empty() {
+            let result = (|| -> Result<(), ConfigError> {
+                if pipe.batch_timeout_ms == Some(0) {
                     return Err(ConfigError::Validation(format!(
-                        "pipeline '{name}': transform SQL cannot be empty"
+                        "pipeline '{name}': batch_timeout_ms must be greater than 0"
                     )));
                 }
-            }
-            if pipe.inputs.is_empty() {
-                return Err(ConfigError::Validation(format!(
-                    "pipeline '{name}' has no inputs"
-                )));
-            }
-            if pipe.outputs.is_empty() {
-                return Err(ConfigError::Validation(format!(
-                    "pipeline '{name}' has no outputs"
-                )));
-            }
-
-            for (i, input) in pipe.inputs.iter().enumerate() {
-                let label = input
-                    .name
-                    .as_deref()
-                    .map_or_else(|| format!("#{i}"), String::from);
-
-                if input.input_type != InputType::Otlp && input.resource_prefix.is_some() {
+                if pipe.poll_interval_ms == Some(0) {
                     return Err(ConfigError::Validation(format!(
-                        "pipeline '{name}' input '{label}': 'resource_prefix' is only supported for otlp inputs"
+                        "pipeline '{name}': poll_interval_ms must be greater than 0"
                     )));
                 }
-                match input.input_type {
-                    InputType::File => {
-                        match &input.path {
-                            None => {
-                                return Err(ConfigError::Validation(format!(
-                                    "pipeline '{name}' input '{label}': file input requires 'path'"
-                                )));
-                            }
-                            Some(p) if p.trim().is_empty() => {
-                                return Err(ConfigError::Validation(format!(
-                                    "pipeline '{name}' input '{label}': file input 'path' must not be empty"
-                                )));
-                            }
-                            _ => {}
-                        }
-                        if input.poll_interval_ms == Some(0) {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'poll_interval_ms' must be at least 1"
-                            )));
-                        }
-                        if input.read_buf_size == Some(0) {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'read_buf_size' must be at least 1"
-                            )));
-                        }
-                        if input.per_file_read_budget_bytes == Some(0) {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'per_file_read_budget_bytes' must be at least 1"
-                            )));
-                        }
+                if pipe.workers == Some(0) {
+                    return Err(ConfigError::Validation(format!(
+                        "pipeline '{name}': workers must be greater than 0"
+                    )));
+                }
+                if pipe.batch_target_bytes == Some(0) {
+                    return Err(ConfigError::Validation(format!(
+                        "pipeline '{name}': batch_target_bytes must be greater than 0"
+                    )));
+                }
+                if let Some(sql) = &pipe.transform {
+                    if sql.trim().is_empty() {
+                        return Err(ConfigError::Validation(format!(
+                            "pipeline '{name}': transform SQL cannot be empty"
+                        )));
                     }
-                    InputType::Udp | InputType::Tcp => {
-                        if input.listen.is_none() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': udp/tcp input requires 'listen'"
-                            )));
-                        }
-                        if let Some(addr) = &input.listen {
-                            if let Err(msg) = validate_bind_addr(addr) {
-                                return Err(ConfigError::Validation(format!(
-                                    "pipeline '{name}' input '{label}': {msg}"
-                                )));
-                            }
-                        }
-                        if let Some(tls) = &input.tls {
-                            if matches!(input.input_type, InputType::Udp) {
-                                return Err(ConfigError::Validation(format!(
-                                    "pipeline '{name}' input '{label}': TLS is not supported for UDP inputs (DTLS is not implemented)"
-                                )));
-                            }
-                            if matches!(input.input_type, InputType::Tcp) {
-                                return Err(ConfigError::Validation(format!(
-                                    "pipeline '{name}' input '{label}': TLS is not yet supported for TCP inputs (runtime TLS termination is not implemented)"
-                                )));
-                            }
-                            let has_cert =
-                                tls.cert_file.as_ref().is_some_and(|v| !v.trim().is_empty());
-                            let has_key =
-                                tls.key_file.as_ref().is_some_and(|v| !v.trim().is_empty());
-                            if has_cert != has_key {
-                                return Err(ConfigError::Validation(format!(
-                                    "pipeline '{name}' input '{label}': tls.cert_file and tls.key_file must be set together"
-                                )));
-                            }
-                            if !has_cert && tls.require_client_auth {
-                                return Err(ConfigError::Validation(format!(
-                                    "pipeline '{name}' input '{label}': tls.require_client_auth requires tls.cert_file and tls.key_file"
-                                )));
-                            }
-                            if tls.require_client_auth
-                                && tls
-                                    .client_ca_file
-                                    .as_ref()
-                                    .is_none_or(|v| v.trim().is_empty())
-                            {
-                                return Err(ConfigError::Validation(format!(
-                                    "pipeline '{name}' input '{label}': tls.client_ca_file is required when tls.require_client_auth=true"
-                                )));
-                            }
-                        }
-                    }
-                    InputType::Otlp | InputType::Http | InputType::ArrowIpc => {
-                        if input.listen.is_none() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'listen' is required for {} inputs",
-                                input.input_type
-                            )));
-                        }
-                        if let Some(addr) = &input.listen {
-                            if let Err(msg) = validate_bind_addr(addr) {
-                                return Err(ConfigError::Validation(format!(
-                                    "pipeline '{name}' input '{label}': {msg}"
-                                )));
-                            }
-                        }
-                    }
-                    InputType::Generator
-                    | InputType::LinuxEbpfSensor
-                    | InputType::MacosEsSensor
-                    | InputType::WindowsEbpfSensor => {}
+                }
+                if pipe.inputs.is_empty() {
+                    return Err(ConfigError::Validation(format!(
+                        "pipeline '{name}' has no inputs"
+                    )));
+                }
+                if pipe.outputs.is_empty() {
+                    return Err(ConfigError::Validation(format!(
+                        "pipeline '{name}' has no outputs"
+                    )));
                 }
 
-                // Reject fields that don't apply to this input type.
-                match input.input_type {
-                    InputType::File => {
-                        if input.generator.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'generator' settings are only supported for generator inputs"
-                            )));
-                        }
-                        if input.http.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'http' settings are only supported for http inputs"
-                            )));
-                        }
-                        if input.listen.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'listen' is not supported for file inputs"
-                            )));
-                        }
-                        if input.tls.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'tls' is not supported for file inputs"
-                            )));
-                        }
-                        if input.sensor.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'sensor' settings are only supported for sensor inputs"
-                            )));
-                        }
+                for (i, input) in pipe.inputs.iter().enumerate() {
+                    let label = input
+                        .name
+                        .as_deref()
+                        .map_or_else(|| format!("#{i}"), String::from);
+
+                    if input.input_type != InputType::Otlp && input.resource_prefix.is_some() {
+                        return Err(ConfigError::Validation(format!(
+                            "pipeline '{name}' input '{label}': 'resource_prefix' is only supported for otlp inputs"
+                        )));
                     }
-                    InputType::Tcp | InputType::Udp => {
-                        if input.generator.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'generator' settings are only supported for generator inputs"
-                            )));
+                    match input.input_type {
+                        InputType::File => {
+                            match &input.path {
+                                None => {
+                                    return Err(ConfigError::Validation(format!(
+                                        "pipeline '{name}' input '{label}': file input requires 'path'"
+                                    )));
+                                }
+                                Some(p) if p.trim().is_empty() => {
+                                    return Err(ConfigError::Validation(format!(
+                                        "pipeline '{name}' input '{label}': file input 'path' must not be empty"
+                                    )));
+                                }
+                                _ => {}
+                            }
+                            if input.poll_interval_ms == Some(0) {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': 'poll_interval_ms' must be at least 1"
+                                )));
+                            }
+                            if input.read_buf_size == Some(0) {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': 'read_buf_size' must be at least 1"
+                                )));
+                            }
+                            if input.per_file_read_budget_bytes == Some(0) {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': 'per_file_read_budget_bytes' must be at least 1"
+                                )));
+                            }
                         }
-                        if input.http.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'http' settings are only supported for http inputs"
-                            )));
+                        InputType::Udp | InputType::Tcp => {
+                            if input.listen.is_none() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': udp/tcp input requires 'listen'"
+                                )));
+                            }
+                            if let Some(addr) = &input.listen {
+                                if let Err(msg) = validate_bind_addr(addr) {
+                                    return Err(ConfigError::Validation(format!(
+                                        "pipeline '{name}' input '{label}': {msg}"
+                                    )));
+                                }
+                            }
+                            if let Some(tls) = &input.tls {
+                                if matches!(input.input_type, InputType::Udp) {
+                                    return Err(ConfigError::Validation(format!(
+                                        "pipeline '{name}' input '{label}': TLS is not supported for UDP inputs (DTLS is not implemented)"
+                                    )));
+                                }
+                                if matches!(input.input_type, InputType::Tcp) {
+                                    return Err(ConfigError::Validation(format!(
+                                        "pipeline '{name}' input '{label}': TLS is not yet supported for TCP inputs (runtime TLS termination is not implemented)"
+                                    )));
+                                }
+                                let has_cert =
+                                    tls.cert_file.as_ref().is_some_and(|v| !v.trim().is_empty());
+                                let has_key =
+                                    tls.key_file.as_ref().is_some_and(|v| !v.trim().is_empty());
+                                if has_cert != has_key {
+                                    return Err(ConfigError::Validation(format!(
+                                        "pipeline '{name}' input '{label}': tls.cert_file and tls.key_file must be set together"
+                                    )));
+                                }
+                                if !has_cert && tls.require_client_auth {
+                                    return Err(ConfigError::Validation(format!(
+                                        "pipeline '{name}' input '{label}': tls.require_client_auth requires tls.cert_file and tls.key_file"
+                                    )));
+                                }
+                                if tls.require_client_auth
+                                    && tls
+                                        .client_ca_file
+                                        .as_ref()
+                                        .is_none_or(|v| v.trim().is_empty())
+                                {
+                                    return Err(ConfigError::Validation(format!(
+                                        "pipeline '{name}' input '{label}': tls.client_ca_file is required when tls.require_client_auth=true"
+                                    )));
+                                }
+                            }
                         }
-                        if input.path.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'path' is not supported for tcp/udp inputs"
-                            )));
+                        InputType::Otlp | InputType::Http | InputType::ArrowIpc => {
+                            if input.listen.is_none() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': 'listen' is required for {} inputs",
+                                    input.input_type
+                                )));
+                            }
+                            if let Some(addr) = &input.listen {
+                                if let Err(msg) = validate_bind_addr(addr) {
+                                    return Err(ConfigError::Validation(format!(
+                                        "pipeline '{name}' input '{label}': {msg}"
+                                    )));
+                                }
+                            }
                         }
-                        if input.max_open_files.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'max_open_files' is not supported for tcp/udp inputs"
-                            )));
-                        }
-                        if input.glob_rescan_interval_ms.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'glob_rescan_interval_ms' is not supported for tcp/udp inputs"
-                            )));
-                        }
-                        if input.poll_interval_ms.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'poll_interval_ms' is not supported for tcp/udp inputs"
-                            )));
-                        }
-                        if input.read_buf_size.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'read_buf_size' is not supported for tcp/udp inputs"
-                            )));
-                        }
-                        if input.per_file_read_budget_bytes.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'per_file_read_budget_bytes' is not supported for tcp/udp inputs"
-                            )));
-                        }
-                        if input.adaptive_fast_polls_max.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'adaptive_fast_polls_max' is not supported for tcp/udp inputs"
-                            )));
-                        }
-                        if input.sensor.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'sensor' settings are only supported for sensor inputs"
-                            )));
-                        }
+                        InputType::Generator
+                        | InputType::LinuxEbpfSensor
+                        | InputType::MacosEsSensor
+                        | InputType::WindowsEbpfSensor => {}
                     }
-                    InputType::Otlp => {
-                        if let Some(prefix) = input.resource_prefix.as_deref() {
-                            if prefix.trim().is_empty() {
+
+                    // Reject fields that don't apply to this input type.
+                    match input.input_type {
+                        InputType::File => {
+                            if input.generator.is_some() {
                                 return Err(ConfigError::Validation(format!(
-                                    "pipeline '{name}' input '{label}': 'resource_prefix' must not be empty for otlp inputs"
+                                    "pipeline '{name}' input '{label}': 'generator' settings are only supported for generator inputs"
                                 )));
                             }
-                            if prefix != "resource.attributes." {
+                            if input.http.is_some() {
                                 return Err(ConfigError::Validation(format!(
-                                    "pipeline '{name}' input '{label}': unsupported otlp resource_prefix '{prefix}' (currently only 'resource.attributes.' is supported)"
+                                    "pipeline '{name}' input '{label}': 'http' settings are only supported for http inputs"
                                 )));
                             }
-                        }
-                        if input.tls.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'tls' is not supported for otlp inputs"
-                            )));
-                        }
-                        if input.http.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'http' settings are only supported for http inputs"
-                            )));
-                        }
-                        if input.generator.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'generator' settings are only supported for generator inputs"
-                            )));
-                        }
-                        if input.path.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'path' is not supported for otlp inputs"
-                            )));
-                        }
-                        if input.max_open_files.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'max_open_files' is not supported for otlp inputs"
-                            )));
-                        }
-                        if input.glob_rescan_interval_ms.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'glob_rescan_interval_ms' is not supported for otlp inputs"
-                            )));
-                        }
-                        if input.poll_interval_ms.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'poll_interval_ms' is not supported for otlp inputs"
-                            )));
-                        }
-                        if input.read_buf_size.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'read_buf_size' is not supported for otlp inputs"
-                            )));
-                        }
-                        if input.per_file_read_budget_bytes.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'per_file_read_budget_bytes' is not supported for otlp inputs"
-                            )));
-                        }
-                        if input.adaptive_fast_polls_max.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'adaptive_fast_polls_max' is not supported for otlp inputs"
-                            )));
-                        }
-                        if input.sensor.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'sensor' settings are only supported for sensor inputs"
-                            )));
-                        }
-                    }
-                    InputType::ArrowIpc => {
-                        if input.tls.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'tls' is not supported for arrow_ipc inputs"
-                            )));
-                        }
-                        if input.format.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'format' is not supported for arrow_ipc inputs"
-                            )));
-                        }
-                        if input.http.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'http' settings are only supported for http inputs"
-                            )));
-                        }
-                        if input.generator.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'generator' settings are only supported for generator inputs"
-                            )));
-                        }
-                        if input.path.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'path' is not supported for arrow_ipc inputs"
-                            )));
-                        }
-                        if input.max_open_files.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'max_open_files' is not supported for arrow_ipc inputs"
-                            )));
-                        }
-                        if input.glob_rescan_interval_ms.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'glob_rescan_interval_ms' is not supported for arrow_ipc inputs"
-                            )));
-                        }
-                        if input.poll_interval_ms.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'poll_interval_ms' is not supported for arrow_ipc inputs"
-                            )));
-                        }
-                        if input.read_buf_size.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'read_buf_size' is not supported for arrow_ipc inputs"
-                            )));
-                        }
-                        if input.per_file_read_budget_bytes.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'per_file_read_budget_bytes' is not supported for arrow_ipc inputs"
-                            )));
-                        }
-                        if input.adaptive_fast_polls_max.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'adaptive_fast_polls_max' is not supported for arrow_ipc inputs"
-                            )));
-                        }
-                        if input.sensor.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'sensor' settings are only supported for sensor inputs"
-                            )));
-                        }
-                    }
-                    InputType::Http => {
-                        if input.tls.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'tls' is not supported for http inputs"
-                            )));
-                        }
-                        if input.generator.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'generator' settings are only supported for generator inputs"
-                            )));
-                        }
-                        if input.path.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'path' is not supported for http inputs; use http.path"
-                            )));
-                        }
-                        if input.max_open_files.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'max_open_files' is not supported for http inputs"
-                            )));
-                        }
-                        if input.glob_rescan_interval_ms.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'glob_rescan_interval_ms' is not supported for http inputs"
-                            )));
-                        }
-                        if input.poll_interval_ms.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'poll_interval_ms' is not supported for http inputs"
-                            )));
-                        }
-                        if input.read_buf_size.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'read_buf_size' is not supported for http inputs"
-                            )));
-                        }
-                        if input.per_file_read_budget_bytes.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'per_file_read_budget_bytes' is not supported for http inputs"
-                            )));
-                        }
-                        if input.adaptive_fast_polls_max.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'adaptive_fast_polls_max' is not supported for http inputs"
-                            )));
-                        }
-                        if input.sensor.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'sensor' settings are only supported for sensor inputs"
-                            )));
-                        }
-                        if let Some(http) = &input.http {
-                            if let Some(path) = &http.path
-                                && !path.starts_with('/')
-                            {
+                            if input.listen.is_some() {
                                 return Err(ConfigError::Validation(format!(
-                                    "pipeline '{name}' input '{label}': http.path must start with '/'"
+                                    "pipeline '{name}' input '{label}': 'listen' is not supported for file inputs"
                                 )));
                             }
-                            if http.max_request_body_size == Some(0) {
+                            if input.tls.is_some() {
                                 return Err(ConfigError::Validation(format!(
-                                    "pipeline '{name}' input '{label}': http.max_request_body_size must be at least 1"
+                                    "pipeline '{name}' input '{label}': 'tls' is not supported for file inputs"
                                 )));
                             }
-                            if let Some(code) = http.response_code
-                                && !matches!(code, 200 | 201 | 202 | 204)
-                            {
+                            if input.sensor.is_some() {
                                 return Err(ConfigError::Validation(format!(
-                                    "pipeline '{name}' input '{label}': http.response_code must be one of 200, 201, 202, 204"
-                                )));
-                            }
-                            if http.response_code == Some(204) && http.response_body.is_some() {
-                                return Err(ConfigError::Validation(format!(
-                                    "pipeline '{name}' input '{label}': http.response_body is not allowed when http.response_code is 204"
+                                    "pipeline '{name}' input '{label}': 'sensor' settings are only supported for sensor inputs"
                                 )));
                             }
                         }
-                    }
-                    InputType::Generator => {
-                        if input.tls.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'tls' is not supported for generator inputs"
-                            )));
-                        }
-                        if input.listen.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'listen' is not supported for generator inputs; use generator.events_per_sec"
-                            )));
-                        }
-                        if input.http.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'http' settings are only supported for http inputs"
-                            )));
-                        }
-                        if input.path.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'path' is not supported for generator inputs"
-                            )));
-                        }
-                        if input.max_open_files.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'max_open_files' is not supported for generator inputs"
-                            )));
-                        }
-                        if input.glob_rescan_interval_ms.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'glob_rescan_interval_ms' is not supported for generator inputs"
-                            )));
-                        }
-                        if input.poll_interval_ms.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'poll_interval_ms' is not supported for generator inputs"
-                            )));
-                        }
-                        if input.read_buf_size.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'read_buf_size' is not supported for generator inputs"
-                            )));
-                        }
-                        if input.per_file_read_budget_bytes.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'per_file_read_budget_bytes' is not supported for generator inputs"
-                            )));
-                        }
-                        if input.adaptive_fast_polls_max.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'adaptive_fast_polls_max' is not supported for generator inputs"
-                            )));
-                        }
-                        if input.sensor.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'sensor' settings are only supported for sensor inputs"
-                            )));
-                        }
-                        if input.generator.as_ref().and_then(|cfg| cfg.batch_size) == Some(0) {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': generator.batch_size must be at least 1"
-                            )));
-                        }
-                        if let Some(generator) = &input.generator {
-                            let is_record_profile =
-                                matches!(generator.profile, Some(GeneratorProfileConfig::Record));
-                            if generator.attributes.keys().any(|key| key.trim().is_empty()) {
+                        InputType::Tcp | InputType::Udp => {
+                            if input.generator.is_some() {
                                 return Err(ConfigError::Validation(format!(
-                                    "pipeline '{name}' input '{label}': generator.attributes keys must not be empty"
+                                    "pipeline '{name}' input '{label}': 'generator' settings are only supported for generator inputs"
                                 )));
                             }
-                            if generator
+                            if input.http.is_some() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': 'http' settings are only supported for http inputs"
+                                )));
+                            }
+                            if input.path.is_some() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': 'path' is not supported for tcp/udp inputs"
+                                )));
+                            }
+                            if input.max_open_files.is_some() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': 'max_open_files' is not supported for tcp/udp inputs"
+                                )));
+                            }
+                            if input.glob_rescan_interval_ms.is_some() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': 'glob_rescan_interval_ms' is not supported for tcp/udp inputs"
+                                )));
+                            }
+                            if input.poll_interval_ms.is_some() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': 'poll_interval_ms' is not supported for tcp/udp inputs"
+                                )));
+                            }
+                            if input.read_buf_size.is_some() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': 'read_buf_size' is not supported for tcp/udp inputs"
+                                )));
+                            }
+                            if input.per_file_read_budget_bytes.is_some() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': 'per_file_read_budget_bytes' is not supported for tcp/udp inputs"
+                                )));
+                            }
+                            if input.adaptive_fast_polls_max.is_some() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': 'adaptive_fast_polls_max' is not supported for tcp/udp inputs"
+                                )));
+                            }
+                            if input.sensor.is_some() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': 'sensor' settings are only supported for sensor inputs"
+                                )));
+                            }
+                        }
+                        InputType::Otlp => {
+                            if let Some(prefix) = input.resource_prefix.as_deref() {
+                                if prefix.trim().is_empty() {
+                                    return Err(ConfigError::Validation(format!(
+                                        "pipeline '{name}' input '{label}': 'resource_prefix' must not be empty for otlp inputs"
+                                    )));
+                                }
+                                if prefix != "resource.attributes." {
+                                    return Err(ConfigError::Validation(format!(
+                                        "pipeline '{name}' input '{label}': unsupported otlp resource_prefix '{prefix}' (currently only 'resource.attributes.' is supported)"
+                                    )));
+                                }
+                            }
+                            if input.tls.is_some() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': 'tls' is not supported for otlp inputs"
+                                )));
+                            }
+                            if input.http.is_some() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': 'http' settings are only supported for http inputs"
+                                )));
+                            }
+                            if input.generator.is_some() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': 'generator' settings are only supported for generator inputs"
+                                )));
+                            }
+                            if input.path.is_some() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': 'path' is not supported for otlp inputs"
+                                )));
+                            }
+                            if input.max_open_files.is_some() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': 'max_open_files' is not supported for otlp inputs"
+                                )));
+                            }
+                            if input.glob_rescan_interval_ms.is_some() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': 'glob_rescan_interval_ms' is not supported for otlp inputs"
+                                )));
+                            }
+                            if input.poll_interval_ms.is_some() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': 'poll_interval_ms' is not supported for otlp inputs"
+                                )));
+                            }
+                            if input.read_buf_size.is_some() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': 'read_buf_size' is not supported for otlp inputs"
+                                )));
+                            }
+                            if input.per_file_read_budget_bytes.is_some() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': 'per_file_read_budget_bytes' is not supported for otlp inputs"
+                                )));
+                            }
+                            if input.adaptive_fast_polls_max.is_some() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': 'adaptive_fast_polls_max' is not supported for otlp inputs"
+                                )));
+                            }
+                            if input.sensor.is_some() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': 'sensor' settings are only supported for sensor inputs"
+                                )));
+                            }
+                        }
+                        InputType::ArrowIpc => {
+                            if input.tls.is_some() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': 'tls' is not supported for arrow_ipc inputs"
+                                )));
+                            }
+                            if input.format.is_some() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': 'format' is not supported for arrow_ipc inputs"
+                                )));
+                            }
+                            if input.http.is_some() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': 'http' settings are only supported for http inputs"
+                                )));
+                            }
+                            if input.generator.is_some() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': 'generator' settings are only supported for generator inputs"
+                                )));
+                            }
+                            if input.path.is_some() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': 'path' is not supported for arrow_ipc inputs"
+                                )));
+                            }
+                            if input.max_open_files.is_some() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': 'max_open_files' is not supported for arrow_ipc inputs"
+                                )));
+                            }
+                            if input.glob_rescan_interval_ms.is_some() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': 'glob_rescan_interval_ms' is not supported for arrow_ipc inputs"
+                                )));
+                            }
+                            if input.poll_interval_ms.is_some() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': 'poll_interval_ms' is not supported for arrow_ipc inputs"
+                                )));
+                            }
+                            if input.read_buf_size.is_some() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': 'read_buf_size' is not supported for arrow_ipc inputs"
+                                )));
+                            }
+                            if input.per_file_read_budget_bytes.is_some() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': 'per_file_read_budget_bytes' is not supported for arrow_ipc inputs"
+                                )));
+                            }
+                            if input.adaptive_fast_polls_max.is_some() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': 'adaptive_fast_polls_max' is not supported for arrow_ipc inputs"
+                                )));
+                            }
+                            if input.sensor.is_some() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': 'sensor' settings are only supported for sensor inputs"
+                                )));
+                            }
+                        }
+                        InputType::Http => {
+                            if input.tls.is_some() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': 'tls' is not supported for http inputs"
+                                )));
+                            }
+                            if input.generator.is_some() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': 'generator' settings are only supported for generator inputs"
+                                )));
+                            }
+                            if input.path.is_some() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': 'path' is not supported for http inputs; use http.path"
+                                )));
+                            }
+                            if input.max_open_files.is_some() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': 'max_open_files' is not supported for http inputs"
+                                )));
+                            }
+                            if input.glob_rescan_interval_ms.is_some() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': 'glob_rescan_interval_ms' is not supported for http inputs"
+                                )));
+                            }
+                            if input.poll_interval_ms.is_some() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': 'poll_interval_ms' is not supported for http inputs"
+                                )));
+                            }
+                            if input.read_buf_size.is_some() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': 'read_buf_size' is not supported for http inputs"
+                                )));
+                            }
+                            if input.per_file_read_budget_bytes.is_some() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': 'per_file_read_budget_bytes' is not supported for http inputs"
+                                )));
+                            }
+                            if input.adaptive_fast_polls_max.is_some() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': 'adaptive_fast_polls_max' is not supported for http inputs"
+                                )));
+                            }
+                            if input.sensor.is_some() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': 'sensor' settings are only supported for sensor inputs"
+                                )));
+                            }
+                            if let Some(http) = &input.http {
+                                if let Some(path) = &http.path
+                                    && !path.starts_with('/')
+                                {
+                                    return Err(ConfigError::Validation(format!(
+                                        "pipeline '{name}' input '{label}': http.path must start with '/'"
+                                    )));
+                                }
+                                if http.max_request_body_size == Some(0) {
+                                    return Err(ConfigError::Validation(format!(
+                                        "pipeline '{name}' input '{label}': http.max_request_body_size must be at least 1"
+                                    )));
+                                }
+                                if let Some(code) = http.response_code
+                                    && !matches!(code, 200 | 201 | 202 | 204)
+                                {
+                                    return Err(ConfigError::Validation(format!(
+                                        "pipeline '{name}' input '{label}': http.response_code must be one of 200, 201, 202, 204"
+                                    )));
+                                }
+                                if http.response_code == Some(204) && http.response_body.is_some() {
+                                    return Err(ConfigError::Validation(format!(
+                                        "pipeline '{name}' input '{label}': http.response_body is not allowed when http.response_code is 204"
+                                    )));
+                                }
+                            }
+                        }
+                        InputType::Generator => {
+                            if input.tls.is_some() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': 'tls' is not supported for generator inputs"
+                                )));
+                            }
+                            if input.listen.is_some() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': 'listen' is not supported for generator inputs; use generator.events_per_sec"
+                                )));
+                            }
+                            if input.http.is_some() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': 'http' settings are only supported for http inputs"
+                                )));
+                            }
+                            if input.path.is_some() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': 'path' is not supported for generator inputs"
+                                )));
+                            }
+                            if input.max_open_files.is_some() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': 'max_open_files' is not supported for generator inputs"
+                                )));
+                            }
+                            if input.glob_rescan_interval_ms.is_some() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': 'glob_rescan_interval_ms' is not supported for generator inputs"
+                                )));
+                            }
+                            if input.poll_interval_ms.is_some() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': 'poll_interval_ms' is not supported for generator inputs"
+                                )));
+                            }
+                            if input.read_buf_size.is_some() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': 'read_buf_size' is not supported for generator inputs"
+                                )));
+                            }
+                            if input.per_file_read_budget_bytes.is_some() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': 'per_file_read_budget_bytes' is not supported for generator inputs"
+                                )));
+                            }
+                            if input.adaptive_fast_polls_max.is_some() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': 'adaptive_fast_polls_max' is not supported for generator inputs"
+                                )));
+                            }
+                            if input.sensor.is_some() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': 'sensor' settings are only supported for sensor inputs"
+                                )));
+                            }
+                            if input.generator.as_ref().and_then(|cfg| cfg.batch_size) == Some(0) {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': generator.batch_size must be at least 1"
+                                )));
+                            }
+                            if let Some(generator) = &input.generator {
+                                let is_record_profile = matches!(
+                                    generator.profile,
+                                    Some(GeneratorProfileConfig::Record)
+                                );
+                                if generator.attributes.keys().any(|key| key.trim().is_empty()) {
+                                    return Err(ConfigError::Validation(format!(
+                                        "pipeline '{name}' input '{label}': generator.attributes keys must not be empty"
+                                    )));
+                                }
+                                if generator
                                 .attributes
                                 .values()
                                 .any(|value| matches!(value, GeneratorAttributeValueConfig::Float(v) if !v.is_finite()))
@@ -576,569 +580,592 @@ impl Config {
                                     "pipeline '{name}' input '{label}': generator.attributes float values must be finite"
                                 )));
                             }
-                            if !is_record_profile
-                                && (!generator.attributes.is_empty()
-                                    || generator.sequence.is_some()
-                                    || generator.event_created_unix_nano_field.is_some())
-                            {
-                                return Err(ConfigError::Validation(format!(
-                                    "pipeline '{name}' input '{label}': generator.attributes, generator.sequence, and generator.event_created_unix_nano_field require generator.profile=record"
-                                )));
-                            }
-                            if let Some(sequence) = &generator.sequence {
-                                if sequence.field.trim().is_empty() {
-                                    return Err(ConfigError::Validation(format!(
-                                        "pipeline '{name}' input '{label}': generator.sequence.field must not be empty"
-                                    )));
-                                }
-                                if generator.attributes.contains_key(&sequence.field) {
-                                    return Err(ConfigError::Validation(format!(
-                                        "pipeline '{name}' input '{label}': generator.sequence.field must not duplicate a generator.attributes key"
-                                    )));
-                                }
-                            }
-                            if generator
-                                .event_created_unix_nano_field
-                                .as_deref()
-                                .is_some_and(|field| field.trim().is_empty())
-                            {
-                                return Err(ConfigError::Validation(format!(
-                                    "pipeline '{name}' input '{label}': generator.event_created_unix_nano_field must not be empty"
-                                )));
-                            }
-                            if let Some(field) = generator.event_created_unix_nano_field.as_deref()
-                            {
-                                if generator.attributes.contains_key(field) {
-                                    return Err(ConfigError::Validation(format!(
-                                        "pipeline '{name}' input '{label}': generator.event_created_unix_nano_field must not duplicate a generator.attributes key"
-                                    )));
-                                }
-                                if generator
-                                    .sequence
-                                    .as_ref()
-                                    .is_some_and(|sequence| sequence.field == field)
+                                if !is_record_profile
+                                    && (!generator.attributes.is_empty()
+                                        || generator.sequence.is_some()
+                                        || generator.event_created_unix_nano_field.is_some())
                                 {
                                     return Err(ConfigError::Validation(format!(
-                                        "pipeline '{name}' input '{label}': generator.event_created_unix_nano_field must not duplicate generator.sequence.field"
+                                        "pipeline '{name}' input '{label}': generator.attributes, generator.sequence, and generator.event_created_unix_nano_field require generator.profile=record"
                                     )));
                                 }
-                            }
-                            if let Some(ts) = &generator.timestamp {
-                                if is_record_profile {
+                                if let Some(sequence) = &generator.sequence {
+                                    if sequence.field.trim().is_empty() {
+                                        return Err(ConfigError::Validation(format!(
+                                            "pipeline '{name}' input '{label}': generator.sequence.field must not be empty"
+                                        )));
+                                    }
+                                    if generator.attributes.contains_key(&sequence.field) {
+                                        return Err(ConfigError::Validation(format!(
+                                            "pipeline '{name}' input '{label}': generator.sequence.field must not duplicate a generator.attributes key"
+                                        )));
+                                    }
+                                }
+                                if generator
+                                    .event_created_unix_nano_field
+                                    .as_deref()
+                                    .is_some_and(|field| field.trim().is_empty())
+                                {
                                     return Err(ConfigError::Validation(format!(
-                                        "pipeline '{name}' input '{label}': generator.timestamp is only supported for the logs profile"
+                                        "pipeline '{name}' input '{label}': generator.event_created_unix_nano_field must not be empty"
                                     )));
                                 }
-                                if ts.step_ms == Some(0) {
-                                    return Err(ConfigError::Validation(format!(
-                                        "pipeline '{name}' input '{label}': generator.timestamp.step_ms must not be zero"
-                                    )));
+                                if let Some(field) =
+                                    generator.event_created_unix_nano_field.as_deref()
+                                {
+                                    if generator.attributes.contains_key(field) {
+                                        return Err(ConfigError::Validation(format!(
+                                            "pipeline '{name}' input '{label}': generator.event_created_unix_nano_field must not duplicate a generator.attributes key"
+                                        )));
+                                    }
+                                    if generator
+                                        .sequence
+                                        .as_ref()
+                                        .is_some_and(|sequence| sequence.field == field)
+                                    {
+                                        return Err(ConfigError::Validation(format!(
+                                            "pipeline '{name}' input '{label}': generator.event_created_unix_nano_field must not duplicate generator.sequence.field"
+                                        )));
+                                    }
                                 }
-                                if let Some(start) = &ts.start {
-                                    if !start.eq_ignore_ascii_case("now") {
-                                        if let Err(e) = validate_iso8601_timestamp(start) {
-                                            return Err(ConfigError::Validation(format!(
-                                                "pipeline '{name}' input '{label}': generator.timestamp.start: {e}"
-                                            )));
+                                if let Some(ts) = &generator.timestamp {
+                                    if is_record_profile {
+                                        return Err(ConfigError::Validation(format!(
+                                            "pipeline '{name}' input '{label}': generator.timestamp is only supported for the logs profile"
+                                        )));
+                                    }
+                                    if ts.step_ms == Some(0) {
+                                        return Err(ConfigError::Validation(format!(
+                                            "pipeline '{name}' input '{label}': generator.timestamp.step_ms must not be zero"
+                                        )));
+                                    }
+                                    if let Some(start) = &ts.start {
+                                        if !start.eq_ignore_ascii_case("now") {
+                                            if let Err(e) = validate_iso8601_timestamp(start) {
+                                                return Err(ConfigError::Validation(format!(
+                                                    "pipeline '{name}' input '{label}': generator.timestamp.start: {e}"
+                                                )));
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
-                    }
-                    InputType::LinuxEbpfSensor
-                    | InputType::MacosEsSensor
-                    | InputType::WindowsEbpfSensor => {
-                        if input.generator.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'generator' settings are only supported for generator inputs"
-                            )));
-                        }
-                        if input.listen.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'listen' is not supported for {} inputs",
-                                input.input_type
-                            )));
-                        }
-                        if input.poll_interval_ms.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'poll_interval_ms' is not supported for {} inputs",
-                                input.input_type
-                            )));
-                        }
-                        if input.read_buf_size.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'read_buf_size' is not supported for {} inputs",
-                                input.input_type
-                            )));
-                        }
-                        if input.per_file_read_budget_bytes.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'per_file_read_budget_bytes' is not supported for {} inputs",
-                                input.input_type
-                            )));
-                        }
-                        if input.path.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'path' is not supported for {} inputs",
-                                input.input_type
-                            )));
-                        }
-                        if input.max_open_files.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'max_open_files' is not supported for {} inputs",
-                                input.input_type
-                            )));
-                        }
-                        if input.glob_rescan_interval_ms.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'glob_rescan_interval_ms' is not supported for {} inputs",
-                                input.input_type
-                            )));
-                        }
-                        if input.adaptive_fast_polls_max.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'adaptive_fast_polls_max' is not supported for {} inputs",
-                                input.input_type
-                            )));
-                        }
-                        if input.tls.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'tls' is not supported for {} inputs",
-                                input.input_type
-                            )));
-                        }
-                        if input.http.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': 'http' settings are only supported for http inputs"
-                            )));
-                        }
-                        if input.format.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': sensor inputs do not support 'format' (Arrow-native input)"
-                            )));
-                        }
-                        if input.sensor.as_ref().and_then(|cfg| cfg.poll_interval_ms) == Some(0) {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': sensor.poll_interval_ms must be at least 1"
-                            )));
-                        }
-                        if input
-                            .sensor
-                            .as_ref()
-                            .and_then(|cfg| cfg.control_reload_interval_ms)
-                            == Some(0)
-                        {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': sensor.control_reload_interval_ms must be at least 1"
-                            )));
-                        }
-                        if input
-                            .sensor
-                            .as_ref()
-                            .and_then(|cfg| cfg.control_path.as_deref())
-                            .is_some_and(|path| path.trim().is_empty())
-                        {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '{label}': sensor.control_path must not be empty"
-                            )));
-                        }
-                        if let Some(families) = input
-                            .sensor
-                            .as_ref()
-                            .and_then(|cfg| cfg.enabled_families.as_ref())
-                        {
-                            for family in families {
-                                let normalized = family.trim();
-                                if normalized.is_empty() {
-                                    return Err(ConfigError::Validation(format!(
-                                        "pipeline '{name}' input '{label}': sensor.enabled_families entries must not be empty"
-                                    )));
-                                }
-                                if !is_sensor_family_supported(&input.input_type, normalized) {
-                                    return Err(ConfigError::Validation(format!(
-                                        "pipeline '{name}' input '{label}': unknown sensor family '{normalized}' for {} input (supported: {})",
-                                        input.input_type,
-                                        sensor_supported_families_csv(&input.input_type)
-                                    )));
+                        InputType::LinuxEbpfSensor
+                        | InputType::MacosEsSensor
+                        | InputType::WindowsEbpfSensor => {
+                            if input.generator.is_some() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': 'generator' settings are only supported for generator inputs"
+                                )));
+                            }
+                            if input.listen.is_some() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': 'listen' is not supported for {} inputs",
+                                    input.input_type
+                                )));
+                            }
+                            if input.poll_interval_ms.is_some() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': 'poll_interval_ms' is not supported for {} inputs",
+                                    input.input_type
+                                )));
+                            }
+                            if input.read_buf_size.is_some() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': 'read_buf_size' is not supported for {} inputs",
+                                    input.input_type
+                                )));
+                            }
+                            if input.per_file_read_budget_bytes.is_some() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': 'per_file_read_budget_bytes' is not supported for {} inputs",
+                                    input.input_type
+                                )));
+                            }
+                            if input.path.is_some() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': 'path' is not supported for {} inputs",
+                                    input.input_type
+                                )));
+                            }
+                            if input.max_open_files.is_some() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': 'max_open_files' is not supported for {} inputs",
+                                    input.input_type
+                                )));
+                            }
+                            if input.glob_rescan_interval_ms.is_some() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': 'glob_rescan_interval_ms' is not supported for {} inputs",
+                                    input.input_type
+                                )));
+                            }
+                            if input.adaptive_fast_polls_max.is_some() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': 'adaptive_fast_polls_max' is not supported for {} inputs",
+                                    input.input_type
+                                )));
+                            }
+                            if input.tls.is_some() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': 'tls' is not supported for {} inputs",
+                                    input.input_type
+                                )));
+                            }
+                            if input.http.is_some() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': 'http' settings are only supported for http inputs"
+                                )));
+                            }
+                            if input.format.is_some() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': sensor inputs do not support 'format' (Arrow-native input)"
+                                )));
+                            }
+                            if input.sensor.as_ref().and_then(|cfg| cfg.poll_interval_ms) == Some(0)
+                            {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': sensor.poll_interval_ms must be at least 1"
+                                )));
+                            }
+                            if input
+                                .sensor
+                                .as_ref()
+                                .and_then(|cfg| cfg.control_reload_interval_ms)
+                                == Some(0)
+                            {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': sensor.control_reload_interval_ms must be at least 1"
+                                )));
+                            }
+                            if input
+                                .sensor
+                                .as_ref()
+                                .and_then(|cfg| cfg.control_path.as_deref())
+                                .is_some_and(|path| path.trim().is_empty())
+                            {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': sensor.control_path must not be empty"
+                                )));
+                            }
+                            if let Some(families) = input
+                                .sensor
+                                .as_ref()
+                                .and_then(|cfg| cfg.enabled_families.as_ref())
+                            {
+                                for family in families {
+                                    let normalized = family.trim();
+                                    if normalized.is_empty() {
+                                        return Err(ConfigError::Validation(format!(
+                                            "pipeline '{name}' input '{label}': sensor.enabled_families entries must not be empty"
+                                        )));
+                                    }
+                                    if !is_sensor_family_supported(&input.input_type, normalized) {
+                                        return Err(ConfigError::Validation(format!(
+                                            "pipeline '{name}' input '{label}': unknown sensor family '{normalized}' for {} input (supported: {})",
+                                            input.input_type,
+                                            sensor_supported_families_csv(&input.input_type)
+                                        )));
+                                    }
                                 }
                             }
                         }
                     }
-                }
 
-                // Reject input formats that are not yet implemented.
-                if let Some(fmt @ (Format::Logfmt | Format::Syslog)) = &input.format {
-                    return Err(ConfigError::Validation(format!(
-                        "pipeline '{name}' input '{label}': format {fmt:?} is not yet implemented",
-                    )));
-                }
-
-                // max_open_files: 0 silently disables all file reading (#696).
-                if input.max_open_files == Some(0) {
-                    return Err(ConfigError::Validation(format!(
-                        "pipeline '{name}' input '{label}': max_open_files must be at least 1"
-                    )));
-                }
-
-                // Reject whitespace-only per-input SQL (mirrors pipeline-level check).
-                if let Some(sql) = &input.sql {
-                    if sql.trim().is_empty() {
+                    // Reject input formats that are not yet implemented.
+                    if let Some(fmt @ (Format::Logfmt | Format::Syslog)) = &input.format {
                         return Err(ConfigError::Validation(format!(
-                            "pipeline '{name}' input '{label}': per-input sql cannot be empty"
+                            "pipeline '{name}' input '{label}': format {fmt:?} is not yet implemented",
                         )));
                     }
-                }
-            }
 
-            for (i, output) in pipe.outputs.iter().enumerate() {
-                let label = output
-                    .name
-                    .as_deref()
-                    .map_or_else(|| format!("#{i}"), String::from);
+                    // max_open_files: 0 silently disables all file reading (#696).
+                    if input.max_open_files == Some(0) {
+                        return Err(ConfigError::Validation(format!(
+                            "pipeline '{name}' input '{label}': max_open_files must be at least 1"
+                        )));
+                    }
 
-                // Reject placeholder output types that are not yet implemented.
-                if matches!(output.output_type, OutputType::Parquet | OutputType::Http) {
-                    return Err(ConfigError::Validation(format!(
-                        "pipeline '{name}' output '{label}': {} output type is not yet implemented",
-                        output.output_type,
-                    )));
-                }
-
-                match output.output_type {
-                    OutputType::Otlp
-                    | OutputType::Elasticsearch
-                    | OutputType::Loki
-                    | OutputType::ArrowIpc => {
-                        if output.endpoint.is_none() {
+                    // Reject whitespace-only per-input SQL (mirrors pipeline-level check).
+                    if let Some(sql) = &input.sql {
+                        if sql.trim().is_empty() {
                             return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' output '{label}': {} output requires 'endpoint'",
-                                output.output_type,
-                            )));
-                        }
-                        if let Some(ep) = &output.endpoint
-                            && let Err(msg) = validate_endpoint_url(ep)
-                        {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' output '{label}': {msg}",
-                            )));
-                        }
-                        if output.output_type == OutputType::Elasticsearch {
-                            if let Some(idx) = &output.index
-                                && idx.trim().is_empty()
-                            {
-                                return Err(ConfigError::Validation(format!(
-                                    "pipeline '{name}' output '{label}': elasticsearch 'index' must not be empty"
-                                )));
-                            }
-                            if let Some(idx) = &output.index
-                                && let Some(bad) = es_illegal_index_char(idx)
-                            {
-                                let reason =
-                                    if matches!(bad, '-' | '_' | '+') && idx.starts_with(bad) {
-                                        format!("has illegal prefix '{bad}'")
-                                    } else {
-                                        format!("contains illegal character '{bad}'")
-                                    };
-                                return Err(ConfigError::Validation(format!(
-                                    "pipeline '{name}' output '{label}': elasticsearch index '{idx}' {reason}"
-                                )));
-                            }
-                            if let Some(mode) = output.request_mode.as_deref()
-                                && !matches!(mode, "buffered" | "streaming")
-                            {
-                                return Err(ConfigError::Validation(format!(
-                                    "pipeline '{name}' output '{label}': elasticsearch request_mode must be 'buffered' or 'streaming'"
-                                )));
-                            }
-                            if output.request_mode.as_deref() == Some("streaming")
-                                && output.compression.as_deref() == Some("gzip")
-                            {
-                                return Err(ConfigError::Validation(format!(
-                                    "pipeline '{name}' output '{label}': elasticsearch request_mode 'streaming' does not support gzip compression yet"
-                                )));
-                            }
-                        } else if output.request_mode.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' output '{label}': request_mode is only supported for elasticsearch outputs"
+                                "pipeline '{name}' input '{label}': per-input sql cannot be empty"
                             )));
                         }
                     }
-                    OutputType::File => {
-                        match &output.path {
-                            None => {
+                }
+
+                for (i, output) in pipe.outputs.iter().enumerate() {
+                    let label = output
+                        .name
+                        .as_deref()
+                        .map_or_else(|| format!("#{i}"), String::from);
+
+                    // Reject placeholder output types that are not yet implemented.
+                    if matches!(output.output_type, OutputType::Parquet | OutputType::Http) {
+                        return Err(ConfigError::Validation(format!(
+                            "pipeline '{name}' output '{label}': {} output type is not yet implemented",
+                            output.output_type,
+                        )));
+                    }
+
+                    match output.output_type {
+                        OutputType::Otlp
+                        | OutputType::Elasticsearch
+                        | OutputType::Loki
+                        | OutputType::ArrowIpc => {
+                            if output.endpoint.is_none() {
                                 return Err(ConfigError::Validation(format!(
-                                    "pipeline '{name}' output '{label}': {} output requires 'path'",
+                                    "pipeline '{name}' output '{label}': {} output requires 'endpoint'",
                                     output.output_type,
                                 )));
                             }
-                            Some(p) if p.trim().is_empty() => {
-                                return Err(ConfigError::Validation(format!(
-                                    "pipeline '{name}' output '{label}': file output 'path' must not be empty"
-                                )));
-                            }
-                            _ => {}
-                        }
-                        if let Some(fmt) = &output.format
-                            && !matches!(fmt, Format::Json | Format::Text)
-                        {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' output '{label}': file output only supports format json or text"
-                            )));
-                        }
-                    }
-                    OutputType::Stdout => {
-                        if let Some(fmt) = &output.format
-                            && !matches!(fmt, Format::Json | Format::Text | Format::Console)
-                        {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' output '{label}': stdout output only supports format json, text, or console"
-                            )));
-                        }
-                    }
-                    OutputType::Null => {}
-                    OutputType::Tcp | OutputType::Udp => {
-                        if output.endpoint.is_none() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' output '{label}': {} output requires 'endpoint'",
-                                output.output_type,
-                            )));
-                        }
-                        if let Some(ep) = &output.endpoint {
-                            if let Err(msg) = validate_host_port(ep) {
+                            if let Some(ep) = &output.endpoint
+                                && let Err(msg) = validate_endpoint_url(ep)
+                            {
                                 return Err(ConfigError::Validation(format!(
                                     "pipeline '{name}' output '{label}': {msg}",
                                 )));
                             }
+                            if output.output_type == OutputType::Elasticsearch {
+                                if let Some(idx) = &output.index
+                                    && idx.trim().is_empty()
+                                {
+                                    return Err(ConfigError::Validation(format!(
+                                        "pipeline '{name}' output '{label}': elasticsearch 'index' must not be empty"
+                                    )));
+                                }
+                                if let Some(idx) = &output.index
+                                    && let Some(bad) = es_illegal_index_char(idx)
+                                {
+                                    let reason =
+                                        if matches!(bad, '-' | '_' | '+') && idx.starts_with(bad) {
+                                            format!("has illegal prefix '{bad}'")
+                                        } else {
+                                            format!("contains illegal character '{bad}'")
+                                        };
+                                    return Err(ConfigError::Validation(format!(
+                                        "pipeline '{name}' output '{label}': elasticsearch index '{idx}' {reason}"
+                                    )));
+                                }
+                                if let Some(mode) = output.request_mode.as_deref()
+                                    && !matches!(mode, "buffered" | "streaming")
+                                {
+                                    return Err(ConfigError::Validation(format!(
+                                        "pipeline '{name}' output '{label}': elasticsearch request_mode must be 'buffered' or 'streaming'"
+                                    )));
+                                }
+                                if output.request_mode.as_deref() == Some("streaming")
+                                    && output.compression.as_deref() == Some("gzip")
+                                {
+                                    return Err(ConfigError::Validation(format!(
+                                        "pipeline '{name}' output '{label}': elasticsearch request_mode 'streaming' does not support gzip compression yet"
+                                    )));
+                                }
+                            } else if output.request_mode.is_some() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' output '{label}': request_mode is only supported for elasticsearch outputs"
+                                )));
+                            }
                         }
+                        OutputType::File => {
+                            match &output.path {
+                                None => {
+                                    return Err(ConfigError::Validation(format!(
+                                        "pipeline '{name}' output '{label}': {} output requires 'path'",
+                                        output.output_type,
+                                    )));
+                                }
+                                Some(p) if p.trim().is_empty() => {
+                                    return Err(ConfigError::Validation(format!(
+                                        "pipeline '{name}' output '{label}': file output 'path' must not be empty"
+                                    )));
+                                }
+                                _ => {}
+                            }
+                            if let Some(fmt) = &output.format
+                                && !matches!(fmt, Format::Json | Format::Text)
+                            {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' output '{label}': file output only supports format json or text"
+                                )));
+                            }
+                        }
+                        OutputType::Stdout => {
+                            if let Some(fmt) = &output.format
+                                && !matches!(fmt, Format::Json | Format::Text | Format::Console)
+                            {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' output '{label}': stdout output only supports format json, text, or console"
+                                )));
+                            }
+                        }
+                        OutputType::Null => {}
+                        OutputType::Tcp | OutputType::Udp => {
+                            if output.endpoint.is_none() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' output '{label}': {} output requires 'endpoint'",
+                                    output.output_type,
+                                )));
+                            }
+                            if let Some(ep) = &output.endpoint {
+                                if let Err(msg) = validate_host_port(ep) {
+                                    return Err(ConfigError::Validation(format!(
+                                        "pipeline '{name}' output '{label}': {msg}",
+                                    )));
+                                }
+                            }
+                        }
+                        // Http and Parquet are not yet implemented — already
+                        // rejected by the check above; these arms are unreachable
+                        // but required for exhaustiveness.
+                        OutputType::Http | OutputType::Parquet => {}
                     }
-                    // Http and Parquet are not yet implemented — already
-                    // rejected by the check above; these arms are unreachable
-                    // but required for exhaustiveness.
-                    OutputType::Http | OutputType::Parquet => {}
-                }
 
-                // Reject fields that don't apply to this output type.
-                if output.output_type != OutputType::Elasticsearch && output.index.is_some() {
-                    return Err(ConfigError::Validation(format!(
-                        "pipeline '{name}' output '{label}': 'index' is only supported for elasticsearch outputs"
-                    )));
-                }
-                if output.output_type == OutputType::Loki && output.compression.is_some() {
-                    return Err(ConfigError::Validation(format!(
-                        "pipeline '{name}' output '{label}': 'compression' is not supported for loki outputs"
-                    )));
-                }
-                if output.output_type == OutputType::ArrowIpc
-                    && let Some(c) = output.compression.as_deref()
-                    && c != "zstd"
-                {
-                    return Err(ConfigError::Validation(format!(
-                        "pipeline '{name}' output '{label}': arrow_ipc output only supports 'zstd' compression, not '{c}'"
-                    )));
-                }
-                if output.output_type != OutputType::Otlp && output.protocol.is_some() {
-                    return Err(ConfigError::Validation(format!(
-                        "pipeline '{name}' output '{label}': 'protocol' is only supported for otlp outputs"
-                    )));
-                }
-                if output.output_type != OutputType::Loki {
-                    if output.tenant_id.is_some() {
+                    // Reject fields that don't apply to this output type.
+                    if output.output_type != OutputType::Elasticsearch && output.index.is_some() {
                         return Err(ConfigError::Validation(format!(
-                            "pipeline '{name}' output '{label}': 'tenant_id' is only supported for loki outputs"
+                            "pipeline '{name}' output '{label}': 'index' is only supported for elasticsearch outputs"
                         )));
                     }
-                    if output.static_labels.is_some() {
+                    if output.output_type == OutputType::Loki && output.compression.is_some() {
                         return Err(ConfigError::Validation(format!(
-                            "pipeline '{name}' output '{label}': 'static_labels' is only supported for loki outputs"
+                            "pipeline '{name}' output '{label}': 'compression' is not supported for loki outputs"
                         )));
                     }
-                    if output.label_columns.is_some() {
+                    if output.output_type == OutputType::ArrowIpc
+                        && let Some(c) = output.compression.as_deref()
+                        && c != "zstd"
+                    {
                         return Err(ConfigError::Validation(format!(
-                            "pipeline '{name}' output '{label}': 'label_columns' is only supported for loki outputs"
+                            "pipeline '{name}' output '{label}': arrow_ipc output only supports 'zstd' compression, not '{c}'"
+                        )));
+                    }
+                    if output.output_type != OutputType::Otlp && output.protocol.is_some() {
+                        return Err(ConfigError::Validation(format!(
+                            "pipeline '{name}' output '{label}': 'protocol' is only supported for otlp outputs"
+                        )));
+                    }
+                    if output.output_type != OutputType::Loki {
+                        if output.tenant_id.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' output '{label}': 'tenant_id' is only supported for loki outputs"
+                            )));
+                        }
+                        if output.static_labels.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' output '{label}': 'static_labels' is only supported for loki outputs"
+                            )));
+                        }
+                        if output.label_columns.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' output '{label}': 'label_columns' is only supported for loki outputs"
+                            )));
+                        }
+                    }
+                    if !matches!(output.output_type, OutputType::File | OutputType::Parquet)
+                        && output.path.is_some()
+                    {
+                        return Err(ConfigError::Validation(format!(
+                            "pipeline '{name}' output '{label}': 'path' is only supported for file/parquet outputs"
+                        )));
+                    }
+                    // auth is only valid for HTTP-based outputs
+                    if !matches!(
+                        output.output_type,
+                        OutputType::Otlp
+                            | OutputType::Http
+                            | OutputType::Elasticsearch
+                            | OutputType::Loki
+                            | OutputType::ArrowIpc
+                    ) && output.auth.is_some()
+                    {
+                        return Err(ConfigError::Validation(format!(
+                            "pipeline '{name}' output '{label}': 'auth' is only supported for HTTP-based outputs"
+                        )));
+                    }
+                    // compression: only valid for outputs that support it
+                    if matches!(
+                        output.output_type,
+                        OutputType::Stdout
+                            | OutputType::Null
+                            | OutputType::Tcp
+                            | OutputType::Udp
+                            | OutputType::File
+                    ) && output.compression.is_some()
+                    {
+                        return Err(ConfigError::Validation(format!(
+                            "pipeline '{name}' output '{label}': 'compression' is not supported for this output type"
                         )));
                     }
                 }
-                if !matches!(output.output_type, OutputType::File | OutputType::Parquet)
-                    && output.path.is_some()
+
+                // Validate enrichment entries (#550).
+                for (j, enrichment) in pipe.enrichment.iter().enumerate() {
+                    match enrichment {
+                        EnrichmentConfig::GeoDatabase(geo_cfg) => {
+                            if geo_cfg.path.trim().is_empty() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' enrichment #{j}: geo_database 'path' must not be empty"
+                                )));
+                            }
+                            // Only check existence for absolute paths; relative paths
+                            // are resolved against base_path in Pipeline::from_config.
+                            let p = Path::new(&geo_cfg.path);
+                            if p.is_absolute() && !p.exists() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' enrichment #{j}: geo database file not found: {}",
+                                    geo_cfg.path,
+                                )));
+                            }
+                        }
+                        EnrichmentConfig::Static(cfg) => {
+                            if cfg.table_name.is_empty() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' enrichment #{j}: table_name must not be empty"
+                                )));
+                            }
+                            if cfg.labels.is_empty() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' enrichment #{j}: static enrichment requires at least one label"
+                                )));
+                            }
+                        }
+                        EnrichmentConfig::Csv(cfg) => {
+                            if cfg.table_name.is_empty() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' enrichment #{j}: table_name must not be empty"
+                                )));
+                            }
+                            if cfg.path.trim().is_empty() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' enrichment #{j}: csv 'path' must not be empty"
+                                )));
+                            }
+                            let p = Path::new(&cfg.path);
+                            if p.is_absolute() && !p.exists() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' enrichment #{j}: csv file not found: {}",
+                                    cfg.path,
+                                )));
+                            }
+                        }
+                        EnrichmentConfig::Jsonl(cfg) => {
+                            if cfg.table_name.is_empty() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' enrichment #{j}: table_name must not be empty"
+                                )));
+                            }
+                            if cfg.path.trim().is_empty() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' enrichment #{j}: jsonl 'path' must not be empty"
+                                )));
+                            }
+                            let p = Path::new(&cfg.path);
+                            if p.is_absolute() && !p.exists() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' enrichment #{j}: jsonl file not found: {}",
+                                    cfg.path,
+                                )));
+                            }
+                        }
+                        EnrichmentConfig::K8sPath(cfg) => {
+                            if cfg.table_name.is_empty() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' enrichment #{j}: table_name must not be empty"
+                                )));
+                            }
+                        }
+                        EnrichmentConfig::HostInfo(_) => {}
+                    }
+                }
+
+                // Guard against feedback loops: reject configs where a file output
+                // path matches a file input path in the same pipeline (#1596).
+                // Collect file input paths (exact) and glob patterns separately.
+                let mut exact_input_paths: Vec<(std::path::PathBuf, std::path::PathBuf)> =
+                    Vec::new();
+                let mut glob_input_patterns: Vec<String> = Vec::new();
+
+                for input in pipe
+                    .inputs
+                    .iter()
+                    .filter(|i| i.input_type == InputType::File)
                 {
-                    return Err(ConfigError::Validation(format!(
-                        "pipeline '{name}' output '{label}': 'path' is only supported for file/parquet outputs"
-                    )));
-                }
-                // auth is only valid for HTTP-based outputs
-                if !matches!(
-                    output.output_type,
-                    OutputType::Otlp
-                        | OutputType::Http
-                        | OutputType::Elasticsearch
-                        | OutputType::Loki
-                        | OutputType::ArrowIpc
-                ) && output.auth.is_some()
-                {
-                    return Err(ConfigError::Validation(format!(
-                        "pipeline '{name}' output '{label}': 'auth' is only supported for HTTP-based outputs"
-                    )));
-                }
-                // compression: only valid for outputs that support it
-                if matches!(
-                    output.output_type,
-                    OutputType::Stdout
-                        | OutputType::Null
-                        | OutputType::Tcp
-                        | OutputType::Udp
-                        | OutputType::File
-                ) && output.compression.is_some()
-                {
-                    return Err(ConfigError::Validation(format!(
-                        "pipeline '{name}' output '{label}': 'compression' is not supported for this output type"
-                    )));
-                }
-            }
-
-            // Validate enrichment entries (#550).
-            for (j, enrichment) in pipe.enrichment.iter().enumerate() {
-                match enrichment {
-                    EnrichmentConfig::GeoDatabase(geo_cfg) => {
-                        if geo_cfg.path.trim().is_empty() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' enrichment #{j}: geo_database 'path' must not be empty"
-                            )));
-                        }
-                        // Only check existence for absolute paths; relative paths
-                        // are resolved against base_path in Pipeline::from_config.
-                        let p = Path::new(&geo_cfg.path);
-                        if p.is_absolute() && !p.exists() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' enrichment #{j}: geo database file not found: {}",
-                                geo_cfg.path,
-                            )));
+                    if let Some(p) = input.path.as_deref() {
+                        if p.contains('*') || p.contains('?') || p.contains('[') {
+                            glob_input_patterns.push(p.to_string());
+                        } else {
+                            let pb = std::path::PathBuf::from(p);
+                            let norm = normalize_path_for_compare(&pb);
+                            exact_input_paths.push((pb, norm));
                         }
                     }
-                    EnrichmentConfig::Static(cfg) => {
-                        if cfg.table_name.is_empty() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' enrichment #{j}: table_name must not be empty"
-                            )));
-                        }
-                        if cfg.labels.is_empty() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' enrichment #{j}: static enrichment requires at least one label"
-                            )));
-                        }
-                    }
-                    EnrichmentConfig::Csv(cfg) => {
-                        if cfg.table_name.is_empty() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' enrichment #{j}: table_name must not be empty"
-                            )));
-                        }
-                        if cfg.path.trim().is_empty() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' enrichment #{j}: csv 'path' must not be empty"
-                            )));
-                        }
-                        let p = Path::new(&cfg.path);
-                        if p.is_absolute() && !p.exists() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' enrichment #{j}: csv file not found: {}",
-                                cfg.path,
-                            )));
-                        }
-                    }
-                    EnrichmentConfig::Jsonl(cfg) => {
-                        if cfg.table_name.is_empty() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' enrichment #{j}: table_name must not be empty"
-                            )));
-                        }
-                        if cfg.path.trim().is_empty() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' enrichment #{j}: jsonl 'path' must not be empty"
-                            )));
-                        }
-                        let p = Path::new(&cfg.path);
-                        if p.is_absolute() && !p.exists() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' enrichment #{j}: jsonl file not found: {}",
-                                cfg.path,
-                            )));
-                        }
-                    }
-                    EnrichmentConfig::K8sPath(cfg) => {
-                        if cfg.table_name.is_empty() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' enrichment #{j}: table_name must not be empty"
-                            )));
-                        }
-                    }
-                    EnrichmentConfig::HostInfo(_) => {}
                 }
-            }
 
-            // Guard against feedback loops: reject configs where a file output
-            // path matches a file input path in the same pipeline (#1596).
-            // Collect file input paths (exact) and glob patterns separately.
-            let mut exact_input_paths: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::new();
-            let mut glob_input_patterns: Vec<String> = Vec::new();
+                for (j, output) in pipe.outputs.iter().enumerate() {
+                    let out_label = output
+                        .name
+                        .as_deref()
+                        .map_or_else(|| format!("#{j}"), String::from);
 
-            for input in pipe
-                .inputs
-                .iter()
-                .filter(|i| i.input_type == InputType::File)
-            {
-                if let Some(p) = input.path.as_deref() {
-                    if p.contains('*') || p.contains('?') || p.contains('[') {
-                        glob_input_patterns.push(p.to_string());
-                    } else {
-                        let pb = std::path::PathBuf::from(p);
-                        let norm = normalize_path_for_compare(&pb);
-                        exact_input_paths.push((pb, norm));
+                    if !matches!(output.output_type, OutputType::File | OutputType::Parquet) {
+                        continue;
                     }
-                }
-            }
+                    let Some(out_path) = output.path.as_deref() else {
+                        continue;
+                    };
+                    let out_pb = std::path::PathBuf::from(out_path);
+                    let out_norm = normalize_path_for_compare(&out_pb);
 
-            for (j, output) in pipe.outputs.iter().enumerate() {
-                let out_label = output
-                    .name
-                    .as_deref()
-                    .map_or_else(|| format!("#{j}"), String::from);
-
-                if !matches!(output.output_type, OutputType::File | OutputType::Parquet) {
-                    continue;
-                }
-                let Some(out_path) = output.path.as_deref() else {
-                    continue;
-                };
-                let out_pb = std::path::PathBuf::from(out_path);
-                let out_norm = normalize_path_for_compare(&out_pb);
-
-                // Check exact input path match.
-                for (in_pb, in_norm) in &exact_input_paths {
-                    if out_norm == *in_norm {
-                        return Err(ConfigError::Validation(format!(
-                            "pipeline '{name}' output '{out_label}': output path '{}' is the same \
+                    // Check exact input path match.
+                    for (in_pb, in_norm) in &exact_input_paths {
+                        if out_norm == *in_norm {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' output '{out_label}': output path '{}' is the same \
                              as file input path '{}' — this creates an unbounded feedback loop",
-                            out_path,
-                            in_pb.display(),
-                        )));
+                                out_path,
+                                in_pb.display(),
+                            )));
+                        }
                     }
-                }
 
-                // Check if the output path could match any glob input pattern.
-                for glob_pattern in &glob_input_patterns {
-                    if is_glob_match_possible(glob_pattern, out_path) {
-                        return Err(ConfigError::Validation(format!(
-                            "pipeline '{name}' output '{out_label}': output path '{out_path}' \
+                    // Check if the output path could match any glob input pattern.
+                    for glob_pattern in &glob_input_patterns {
+                        if is_glob_match_possible(glob_pattern, out_path) {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' output '{out_label}': output path '{out_path}' \
                              could match file input glob '{glob_pattern}' — this creates an \
                              unbounded feedback loop",
-                        )));
+                            )));
+                        }
                     }
                 }
+
+                Ok(())
+            })();
+            match result {
+                Ok(()) => {}
+                Err(ConfigError::Validation(msg)) => all_errors.push(msg),
+                Err(other) => return Err(other),
             }
         }
 
-        Ok(())
+        if all_errors.is_empty() {
+            Ok(())
+        } else if all_errors.len() == 1 {
+            Err(ConfigError::Validation(
+                all_errors.into_iter().next().unwrap(),
+            ))
+        } else {
+            Err(ConfigError::Validation(format!(
+                "{} validation error(s):\n  {}",
+                all_errors.len(),
+                all_errors.join("\n  ")
+            )))
+        }
     }
 }
 

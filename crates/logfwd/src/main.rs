@@ -393,9 +393,9 @@ enum Commands {
         )]
         config: Option<String>,
     },
-    /// Generate starter config in current directory.
+    /// Generate starter config in current directory (logfwd.yaml).
     Init,
-    /// Interactive config wizard.
+    /// Interactive config wizard — pick a use-case or build your own pipeline.
     Wizard,
     /// Print shell completions.
     Completions {
@@ -447,6 +447,17 @@ async fn main_inner() -> i32 {
                 bold(),
                 path.display(),
                 reset()
+            );
+            eprintln!();
+        } else {
+            eprintln!(
+                "{}hint{}: no config found — try {}logfwd init{} or {}logfwd wizard{} to get started",
+                dim(),
+                reset(),
+                bold(),
+                reset(),
+                bold(),
+                reset(),
             );
             eprintln!();
         }
@@ -761,11 +772,20 @@ fn cmd_init() -> Result<(), CliError> {
     let template = r#"# logfwd configuration
 # Docs: https://github.com/strawgate/memagent
 
-# Simple pipeline: tail a log file, transform with SQL, send via OTLP.
+# ── Quick start ─────────────────────────────────────────────
+# 1. Generate sample data:  logfwd generate-json 10000 sample.json
+# 2. Validate this config:  logfwd validate --config logfwd.yaml
+# 3. Run the pipeline:      logfwd run --config logfwd.yaml
+#
+# For production, change the input path and output to your real
+# source/destination — see the examples in examples/use-cases/.
+# Or run `logfwd wizard` for an interactive setup.
+
+# Tail a JSON log file and stream new lines as they appear.
 input:
   type: file
-  path: /var/log/*.log
-  # format: json           # auto-detected; uncomment to force
+  path: ./sample.json
+  format: json
 
 # SQL transform (optional) — filter, reshape, or enrich logs.
 # Remove this section to forward all logs unmodified.
@@ -773,11 +793,11 @@ transform: |
   SELECT * FROM logs
   WHERE level IN ('WARN', 'ERROR')
 
+# Print matching logs to the terminal so you can see results immediately.
 output:
-  type: otlp
-  endpoint: http://localhost:4318/v1/logs
+  type: stdout
 
-# Optional: diagnostics dashboard
+# Optional: expose a diagnostics dashboard on http://127.0.0.1:9191
 # server:
 #   diagnostics: "127.0.0.1:9191"
 "#;
@@ -797,19 +817,26 @@ output:
                 CliError::Config(format!("cannot write {}: {e}", path.display()))
             }
         })?;
+    eprintln!("{}created{} {}", green(), reset(), path.display(),);
+    eprintln!();
+    eprintln!("{}Try it now:{}", bold(), reset());
     eprintln!(
-        "{}created{} {} — edit it, then run: {}logfwd validate --config logfwd.yaml{}",
-        green(),
-        reset(),
-        path.display(),
-        bold(),
-        reset(),
+        "  logfwd generate-json 10000 sample.json   {}# create sample data{}",
+        dim(),
+        reset()
+    );
+    eprintln!(
+        "  logfwd run --config logfwd.yaml           {}# run the pipeline{}",
+        dim(),
+        reset()
     );
     Ok(())
 }
 
 fn cmd_wizard() -> Result<(), CliError> {
-    use config_templates::{INPUT_TEMPLATES, OUTPUT_TEMPLATES, render_config};
+    use config_templates::{
+        INPUT_TEMPLATES, OUTPUT_TEMPLATES, USE_CASE_TEMPLATES, render_config, render_use_case,
+    };
 
     if !wizard_uses_interactive_terminals(io::stdin().is_terminal(), io::stdout().is_terminal()) {
         return Err(CliError::Config(
@@ -817,34 +844,86 @@ fn cmd_wizard() -> Result<(), CliError> {
         ));
     }
     println!("{}logfwd config wizard{}", bold(), reset());
-    println!("Pick what you want to collect and where to send it.");
     println!();
 
-    let input_idx = prompt_select(
-        "What do you want to collect?",
-        &INPUT_TEMPLATES.iter().map(|t| t.label).collect::<Vec<_>>(),
-    )?;
-    let output_idx = prompt_select(
-        "Where do you want to send logs?",
-        &OUTPUT_TEMPLATES.iter().map(|t| t.label).collect::<Vec<_>>(),
+    // Step 1: Choose between a use-case preset or custom input/output.
+    let mode = prompt_select(
+        "How do you want to get started?",
+        &[
+            "Start from a use-case preset",
+            "Pick input and output manually",
+        ],
     )?;
 
-    let sql = prompt_text(
-        "Optional SQL transform (blank = SELECT * FROM logs)",
-        "SELECT * FROM logs",
-    )?;
+    let (cfg, sql_display) = if mode == 0 {
+        // Use-case mode.
+        let labels: Vec<&str> = USE_CASE_TEMPLATES.iter().map(|t| t.title).collect();
+        let descs: Vec<&str> = USE_CASE_TEMPLATES.iter().map(|t| t.description).collect();
+        let uc_idx = prompt_select_described("Pick a scenario:", &labels, &descs)?;
+        let uc = &USE_CASE_TEMPLATES[uc_idx];
+        println!("{}selected{}: {}", green(), reset(), uc.title,);
+        println!();
+        let sql = prompt_text(
+            "SQL transform (blank = keep the preset default)",
+            uc.transform,
+        )?;
+        let sql_final = if sql.trim().is_empty() {
+            uc.transform
+        } else {
+            sql.trim()
+        };
+        let mut rendered = render_use_case(uc);
+        // If user changed the SQL, re-render with their SQL.
+        if sql_final != uc.transform {
+            // Re-render: build from the input/output snippets directly.
+            let fake_input = config_templates::InputTemplate {
+                id: uc.id,
+                label: uc.title,
+                description: uc.description,
+                snippet: uc.input,
+            };
+            let fake_output = config_templates::OutputTemplate {
+                id: uc.id,
+                label: uc.title,
+                description: uc.description,
+                snippet: uc.output,
+            };
+            rendered = render_config(&fake_input, &fake_output, sql_final);
+        }
+        (rendered, sql_final.to_owned())
+    } else {
+        // Manual input/output mode.
+        let input_labels: Vec<&str> = INPUT_TEMPLATES.iter().map(|t| t.label).collect();
+        let input_descs: Vec<&str> = INPUT_TEMPLATES.iter().map(|t| t.description).collect();
+        let input_idx =
+            prompt_select_described("What do you want to collect?", &input_labels, &input_descs)?;
+        let output_labels: Vec<&str> = OUTPUT_TEMPLATES.iter().map(|t| t.label).collect();
+        let output_descs: Vec<&str> = OUTPUT_TEMPLATES.iter().map(|t| t.description).collect();
+        let output_idx = prompt_select_described(
+            "Where do you want to send logs?",
+            &output_labels,
+            &output_descs,
+        )?;
+
+        let sql = prompt_text(
+            "Optional SQL transform (blank = SELECT * FROM logs)",
+            "SELECT * FROM logs",
+        )?;
+        let sql = if sql.trim().is_empty() {
+            "SELECT * FROM logs"
+        } else {
+            sql.trim()
+        };
+
+        let input = &INPUT_TEMPLATES[input_idx];
+        let output = &OUTPUT_TEMPLATES[output_idx];
+        (render_config(input, output, sql), sql.to_owned())
+    };
+
+    let _ = sql_display; // used above in prompts
 
     let output_path = prompt_text("Output file path", "logfwd.generated.yaml")?;
     let path = std::path::PathBuf::from(output_path.trim());
-
-    let input = &INPUT_TEMPLATES[input_idx];
-    let output = &OUTPUT_TEMPLATES[output_idx];
-    let sql = if sql.trim().is_empty() {
-        "SELECT * FROM logs"
-    } else {
-        sql.trim()
-    };
-    let cfg = render_config(input, output, sql);
     validate_generated_config_read_only(&cfg, &path)?;
 
     std::fs::OpenOptions::new()
@@ -909,6 +988,45 @@ fn prompt_select(prompt: &str, options: &[&str]) -> Result<usize, CliError> {
         println!("{prompt}");
         for (i, option) in options.iter().enumerate() {
             println!("  {}) {option}", i + 1);
+        }
+        print!("Enter choice [1-{}]: ", options.len());
+        stdout.flush()?;
+
+        let line = read_wizard_line(&mut stdin)?;
+        let trimmed = line.trim();
+        if let Ok(v) = trimmed.parse::<usize>()
+            && (1..=options.len()).contains(&v)
+        {
+            println!();
+            return Ok(v - 1);
+        }
+        eprintln!(
+            "{}invalid choice{}: enter a number from 1 to {}",
+            yellow(),
+            reset(),
+            options.len()
+        );
+    }
+}
+
+/// Like [`prompt_select`] but shows a one-line description below each option.
+fn prompt_select_described(
+    prompt: &str,
+    options: &[&str],
+    descriptions: &[&str],
+) -> Result<usize, CliError> {
+    let mut stdout = io::stdout();
+    let stdin = io::stdin();
+    let mut stdin = stdin.lock();
+    loop {
+        println!("{prompt}");
+        for (i, option) in options.iter().enumerate() {
+            println!("  {}{}) {option}{}", bold(), i + 1, reset());
+            if let Some(desc) = descriptions.get(i) {
+                if !desc.is_empty() {
+                    println!("     {}{desc}{}", dim(), reset());
+                }
+            }
         }
         print!("Enter choice [1-{}]: ", options.len());
         stdout.flush()?;
