@@ -1,4 +1,7 @@
-# Output Types
+---
+title: "Output Types"
+description: "Usage notes and examples for each output type"
+---
 
 Support status lives in the [Configuration Reference](reference.md#output-types).
 This page focuses on usage notes and examples.
@@ -19,9 +22,11 @@ output:
 
 ## HTTP (JSON Lines)
 
-> Not yet supported. `type: http` remains in the configuration reference so the
-> reserved surface is explicit, but config validation currently rejects it
-> until runtime sink support lands.
+:::danger
+Not yet supported. `type: http` remains in the configuration reference so the
+reserved surface is explicit, but config validation currently rejects it
+until runtime sink support lands.
+:::
 
 POST newline-delimited JSON to any HTTP endpoint.
 

@@ -1,4 +1,7 @@
-# Choose the Right Guide
+---
+title: "Choose the Right Guide"
+description: "Find the shortest path to your goal with logfwd"
+---
 
 Use this page to pick the shortest path for your goal.
 
@@ -19,12 +22,12 @@ This path includes validation, monitoring hooks, and safer defaults.
 
 ## I need to configure specific fields or behaviors
 
-Read [Config Reference](../config/reference.md).
+Read [Config Reference](../configuration/reference.md).
 Use this as the canonical source of truth for YAML options and defaults.
 
 ## I need SQL transform examples and function behavior
 
-Read [SQL Transforms](../config/sql-transforms.md).
+Read [SQL Transforms](../configuration/sql-transforms.md).
 This page includes DataFusion SQL patterns and built-in UDF guidance.
 
 ## I need deployment help
