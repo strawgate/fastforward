@@ -3,7 +3,7 @@ title: "Input Types"
 description: "Usage notes and examples for each input type"
 ---
 
-Support status lives in the [Configuration Reference](reference.md#input-types).
+Support status lives in the [Configuration Reference](/configuration/reference/#input-types).
 This page focuses on usage notes and examples.
 
 ## File
