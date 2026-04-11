@@ -964,9 +964,7 @@ impl TransitionValidator {
                 events,
                 events.len().saturating_sub(1),
                 "terminal_phase_missing",
-                format!(
-                    "trace ended before stopped transition (last phase: {phase:?})"
-                ),
+                format!("trace ended before stopped transition (last phase: {phase:?})"),
             ));
         }
         for (batch_id, batch) in &batches {
