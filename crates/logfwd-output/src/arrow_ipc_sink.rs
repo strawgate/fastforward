@@ -9,7 +9,7 @@ use std::future::Future;
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
@@ -105,6 +105,25 @@ impl ArrowIpcSink {
         }
     }
 
+    fn parse_retry_after(headers: &reqwest::header::HeaderMap, now: SystemTime) -> Duration {
+        let Some(value) = headers.get(reqwest::header::RETRY_AFTER) else {
+            return Duration::from_secs(DEFAULT_RETRY_AFTER_SECS);
+        };
+        let Ok(value_str) = value.to_str() else {
+            return Duration::from_secs(DEFAULT_RETRY_AFTER_SECS);
+        };
+
+        if let Ok(seconds) = value_str.parse::<u64>() {
+            return Duration::from_secs(seconds);
+        }
+
+        if let Ok(when) = httpdate::parse_http_date(value_str) {
+            return when.duration_since(now).unwrap_or_default();
+        }
+
+        Duration::from_secs(DEFAULT_RETRY_AFTER_SECS)
+    }
+
     /// POST the payload to the configured endpoint.
     ///
     /// Returns `SendResult::RetryAfter` for 429 / 5xx so the worker pool can
@@ -136,21 +155,17 @@ impl ArrowIpcSink {
         }
 
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            let retry_after = response
-                .headers()
-                .get("Retry-After")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(DEFAULT_RETRY_AFTER_SECS);
-            return Ok(SendResult::RetryAfter(Duration::from_secs(retry_after)));
+            return Ok(SendResult::RetryAfter(Self::parse_retry_after(
+                response.headers(),
+                SystemTime::now(),
+            )));
         }
 
         if status.is_server_error() {
+            let retry_after = Self::parse_retry_after(response.headers(), SystemTime::now());
             // Consume the response body to free the connection.
             let _body = response.text().await.unwrap_or_default();
-            return Ok(SendResult::RetryAfter(Duration::from_secs(
-                DEFAULT_RETRY_AFTER_SECS,
-            )));
+            return Ok(SendResult::RetryAfter(retry_after));
         }
 
         // 4xx client error — not retryable.
@@ -336,6 +351,7 @@ mod tests {
     use super::*;
     use arrow::array::{Float64Array, Int64Array, StringArray};
     use arrow::datatypes::{DataType, Field, Schema};
+    use std::time::{Duration, SystemTime};
 
     fn make_test_batch() -> RecordBatch {
         let schema = Arc::new(Schema::new(vec![
@@ -428,5 +444,41 @@ mod tests {
     fn deserialize_invalid_bytes_returns_error() {
         let result = deserialize_ipc(b"not arrow ipc data");
         assert!(result.is_err(), "invalid bytes should produce an error");
+    }
+
+    #[test]
+    fn retry_after_parses_delta_seconds() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::RETRY_AFTER, "12".parse().unwrap());
+
+        let parsed = ArrowIpcSink::parse_retry_after(&headers, SystemTime::UNIX_EPOCH);
+        assert_eq!(parsed, Duration::from_secs(12));
+    }
+
+    #[test]
+    fn retry_after_parses_http_date() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
+        let later = now + Duration::from_secs(9);
+        let http_date = httpdate::fmt_http_date(later);
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::RETRY_AFTER,
+            http_date.parse().expect("http-date header value is valid"),
+        );
+
+        let parsed = ArrowIpcSink::parse_retry_after(&headers, now);
+        assert_eq!(parsed, Duration::from_secs(9));
+    }
+
+    #[test]
+    fn retry_after_defaults_on_invalid_header() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::RETRY_AFTER,
+            "definitely-not-valid".parse().unwrap(),
+        );
+
+        let parsed = ArrowIpcSink::parse_retry_after(&headers, SystemTime::UNIX_EPOCH);
+        assert_eq!(parsed, Duration::from_secs(DEFAULT_RETRY_AFTER_SECS));
     }
 }

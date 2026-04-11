@@ -27,7 +27,6 @@ const MAX_DATAGRAM_PAYLOAD: usize = 1400;
 pub struct UdpSink {
     name: String,
     socket: UdpSocket,
-    target: String,
     /// Scratch buffer for serializing a single row before deciding whether
     /// it fits in the current datagram.
     row_buf: Vec<u8>,
@@ -47,17 +46,37 @@ impl UdpSink {
         target: impl Into<String>,
         stats: Arc<ComponentStats>,
     ) -> io::Result<Self> {
+        let target = target.into();
         let std_socket = std::net::UdpSocket::bind("0.0.0.0:0")?;
+        std_socket.connect(&target)?;
         std_socket.set_nonblocking(true)?;
         let socket = UdpSocket::from_std(std_socket)?;
         Ok(Self {
             name: name.into(),
-            target: target.into(),
             socket,
             row_buf: Vec::with_capacity(2048),
             dgram_buf: Vec::with_capacity(MAX_DATAGRAM_PAYLOAD),
             stats,
         })
+    }
+
+    /// Send one UDP datagram to the configured peer.
+    ///
+    /// Because the socket is connected in `new`, this uses `send` rather than
+    /// `send_to`, avoiding repeat address resolution work on every packet.
+    async fn send_packet(&self, buf: &[u8]) -> io::Result<()> {
+        match self.socket.send(buf).await {
+            Ok(n) if n == buf.len() => Ok(()),
+            Ok(_) => Err(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "UDP datagram was only partially sent",
+            )),
+            Err(e) if e.kind() == io::ErrorKind::ConnectionRefused => {
+                // Silently drop — UDP is best-effort.
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// Send the current datagram buffer if non-empty, then clear it.
@@ -67,13 +86,7 @@ impl UdpSink {
         if self.dgram_buf.is_empty() {
             return Ok(());
         }
-        match self.socket.send_to(&self.dgram_buf, &self.target).await {
-            Ok(_) => {}
-            Err(e) if e.kind() == io::ErrorKind::ConnectionRefused => {
-                // Silently drop — UDP is best-effort.
-            }
-            Err(e) => return Err(e),
-        }
+        self.send_packet(&self.dgram_buf).await?;
         self.dgram_buf.clear();
         Ok(())
     }
@@ -101,11 +114,7 @@ impl UdpSink {
             // but that is better than silently dropping data.
             if row_len > MAX_DATAGRAM_PAYLOAD {
                 self.flush_dgram().await?;
-                match self.socket.send_to(&self.row_buf, &self.target).await {
-                    Ok(_) => {}
-                    Err(e) if e.kind() == io::ErrorKind::ConnectionRefused => {}
-                    Err(e) => return Err(e),
-                }
+                self.send_packet(&self.row_buf).await?;
                 continue;
             }
 
@@ -134,7 +143,7 @@ impl Sink for UdpSink {
         Box::pin(async move {
             match self.do_send_batch(batch).await {
                 Ok(()) => SendResult::Ok,
-                Err(e) => SendResult::IoError(e),
+                Err(e) => SendResult::from_io_error(e),
             }
         })
     }
