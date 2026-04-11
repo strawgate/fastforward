@@ -217,9 +217,11 @@ pub(super) async fn process_item(
 ) -> (DeliveryOutcome, u64, usize) {
     sink.begin_batch();
 
-    // Retry budget per backoff cycle. When exhausted, we restart the cycle and
-    // keep retrying until cancellation so transient outages do not permanently
-    // drop in-flight batches after a short failure window.
+    // Retry budget for transient IoError failures. When exhausted the worker
+    // reports RetryExhausted so the pipeline can hold tickets and initiate an
+    // orderly shutdown (checkpoints do not advance past undelivered data).
+    // RetryAfter (server-specified backoff) resets the cycle and retries
+    // indefinitely until cancellation since the server explicitly asked to wait.
     const RETRY_BUDGET: usize = 3;
     const BATCH_TIMEOUT_SECS: u64 = 60;
 
@@ -307,41 +309,38 @@ pub(super) async fn process_item(
                     () = tokio::time::sleep(sleep_for) => {}
                 }
             }
-            Ok(SendResult::IoError(e)) => {
-                let delay = match backoff.next() {
-                    Some(delay) => delay,
-                    None => {
-                        tracing::warn!(
-                            worker_id,
-                            retry_budget = RETRY_BUDGET,
-                            error = %e,
-                            "worker_pool: retry budget exhausted on transient error; continuing until cancellation"
-                        );
-                        backoff = ExponentialBuilder::default()
-                            .with_min_delay(Duration::from_millis(100))
-                            .with_max_delay(max_retry_delay)
-                            .with_factor(2.0)
-                            .with_max_times(RETRY_BUDGET)
-                            .with_jitter()
-                            .build();
-                        backoff.next().unwrap_or(max_retry_delay)
+            Ok(SendResult::IoError(e)) => match backoff.next() {
+                Some(delay) => {
+                    retries_count += 1;
+                    output_health.apply_worker_event(worker_id, OutputHealthEvent::Retrying);
+                    tracing::warn!(
+                        worker_id,
+                        sleep_ms = delay.as_millis() as u64,
+                        error = %e,
+                        "worker_pool: transient error, retrying with jitter"
+                    );
+                    tokio::select! {
+                        biased;
+                        () = cancel.cancelled() => {
+                            tracing::warn!(worker_id, "worker_pool: cancellation observed during jitter backoff");
+                            return (DeliveryOutcome::PoolClosed, send_latency_ns, retries_count);
+                        }
+                        () = tokio::time::sleep(delay) => {}
                     }
-                };
-                retries_count += 1;
-                output_health.apply_worker_event(worker_id, OutputHealthEvent::Retrying);
-                tracing::warn!(
-                    worker_id,
-                    sleep_ms = delay.as_millis() as u64,
-                    error = %e,
-                    "worker_pool: transient error, retrying with jitter"
-                );
-                tokio::select! {
-                    biased;
-                    () = cancel.cancelled() => {
-                        tracing::warn!(worker_id, "worker_pool: cancellation observed during jitter backoff");
-                        return (DeliveryOutcome::PoolClosed, send_latency_ns, retries_count);
-                    }
-                    () = tokio::time::sleep(delay) => {}
+                }
+                None => {
+                    tracing::error!(
+                        worker_id,
+                        retry_budget = RETRY_BUDGET,
+                        error = %e,
+                        "worker_pool: retry budget exhausted on transient error"
+                    );
+                    output_health.apply_worker_event(worker_id, OutputHealthEvent::FatalFailure);
+                    return (
+                        DeliveryOutcome::RetryExhausted,
+                        send_latency_ns,
+                        retries_count,
+                    );
                 }
             }
             // Future SendResult variants (#[non_exhaustive]) — treat as failure.
