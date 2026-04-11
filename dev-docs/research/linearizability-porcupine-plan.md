@@ -1,8 +1,8 @@
+# Linearizability / Porcupine Plan
+
 > **Status:** Active
 > **Date:** 2026-04-11
 > **Context:** Plan linearizability checking for pipeline terminalization/checkpoint contracts.
-
-# Linearizability / Porcupine Plan
 
 ## Current state
 
