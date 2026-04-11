@@ -917,7 +917,11 @@ mod verification {
     #[kani::unwind(6)]
     fn verify_inject_non_json_msg_uses_body_key() {
         let msg: [u8; 4] = kani::any();
-        kani::assume(msg[0] != b'{');
+        kani::assume(
+            !msg.iter()
+                .find(|&&b| !matches!(b, b' ' | b'\t' | b'\n' | b'\r'))
+                .is_some_and(|&b| b == b'{'),
+        );
         let ts = b"TS";
         let stream = b"S";
         let mut out = Vec::new();

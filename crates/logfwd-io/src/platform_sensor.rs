@@ -304,7 +304,7 @@ impl PlatformSensorState<RunningState> {
         self.state.last_control_check = Instant::now();
 
         match read_control_file(path) {
-            Ok(None) => None,
+            Ok(None) => Some((Vec::new(), ComponentHealth::Healthy)),
             Ok(Some(file_cfg)) => {
                 let mut next = self.state.control.clone();
                 if let Some(enabled) = file_cfg.enabled_families {

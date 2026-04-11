@@ -356,6 +356,17 @@ async fn handle_request(
         Err(status) => return (status, "invalid content-encoding header").into_response(),
     };
 
+    if let Some(ref enc) = content_encoding {
+        if !matches!(enc.as_str(), "gzip" | "zstd" | "identity") {
+            return (
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                [(ACCEPT_ENCODING, SUPPORTED_CONTENT_ENCODINGS)],
+                format!("unsupported content-encoding: {enc}"),
+            )
+                .into_response();
+        }
+    }
+
     let mut body = match read_limited_body(
         request.into_body(),
         state.max_request_body_size,
@@ -381,14 +392,6 @@ async fn handle_request(
     ) {
         Ok(decoded) => decoded,
         Err(InputError::Receiver(msg)) => {
-            if msg.starts_with("unsupported content-encoding:") {
-                return (
-                    StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                    [(ACCEPT_ENCODING, SUPPORTED_CONTENT_ENCODINGS)],
-                    msg,
-                )
-                    .into_response();
-            }
             return (StatusCode::BAD_REQUEST, msg).into_response();
         }
         Err(InputError::Io(e)) if e.kind() == io::ErrorKind::InvalidData => {
