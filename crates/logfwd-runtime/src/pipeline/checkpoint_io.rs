@@ -11,19 +11,19 @@ const fn should_retry_flush(attempt: u32, max_attempts: u32) -> bool {
 
 #[must_use]
 const fn is_retryable_flush_error(kind: std::io::ErrorKind) -> bool {
-    match kind {
+    matches!(
+        kind,
         std::io::ErrorKind::Interrupted
-        | std::io::ErrorKind::WouldBlock
-        | std::io::ErrorKind::TimedOut
-        | std::io::ErrorKind::WriteZero
-        | std::io::ErrorKind::UnexpectedEof
-        | std::io::ErrorKind::ConnectionReset
-        | std::io::ErrorKind::ConnectionAborted
-        | std::io::ErrorKind::ConnectionRefused
-        | std::io::ErrorKind::NotConnected
-        | std::io::ErrorKind::BrokenPipe => true,
-        _ => false,
-    }
+            | std::io::ErrorKind::WouldBlock
+            | std::io::ErrorKind::TimedOut
+            | std::io::ErrorKind::WriteZero
+            | std::io::ErrorKind::UnexpectedEof
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::ConnectionRefused
+            | std::io::ErrorKind::NotConnected
+            | std::io::ErrorKind::BrokenPipe
+    )
 }
 
 /// Flush checkpoint store with bounded retry (3 attempts, 100ms between).
