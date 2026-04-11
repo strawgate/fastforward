@@ -13,6 +13,7 @@ use logfwd_output::sink::{OutputHealthEvent, SendResult, Sink};
 
 use super::pool::{OutputHealthTracker, WorkerConfig, WorkerSlotCleanup};
 use super::types::{AckItem, DeliveryOutcome, WorkItem, WorkerMsg, bound_rejection_reason};
+use super::{emit_delivery_outcome, transition_outcome_for_delivery};
 
 // Worker task
 // ---------------------------------------------------------------------------
@@ -36,6 +37,7 @@ pub(super) async fn worker_task(
         max_retry_delay,
         metrics,
         output_health,
+        transition_events,
     } = cfg;
     let _slot_cleanup = WorkerSlotCleanup {
         output_health: Arc::clone(&output_health),
@@ -110,6 +112,13 @@ pub(super) async fn worker_task(
                                 (DeliveryOutcome::InternalFailure, 0, 0)
                             }
                         };
+                        emit_delivery_outcome(
+                            &transition_events,
+                            batch_id,
+                            &tickets,
+                            Some(id),
+                            transition_outcome_for_delivery(&outcome),
+                        );
                         output_span.record("retries", retries);
                         output_span.record("send_ns", send_latency_ns);
                         let output_ns = submitted_at.elapsed().as_nanos() as u64 - queue_wait_ns;
@@ -368,6 +377,7 @@ mod tests {
     use logfwd_output::BatchMetadata;
     use logfwd_output::sink::{SendResult, Sink};
 
+    use crate::pipeline::transition::TransitionEventEmitterHandle;
     use crate::worker_pool::pool::OutputHealthTracker;
 
     use super::super::pool::WorkerConfig;
@@ -477,6 +487,7 @@ mod tests {
             max_retry_delay: Duration::from_millis(10),
             metrics: make_metrics(),
             output_health: Arc::new(OutputHealthTracker::new(vec![])),
+            transition_events: TransitionEventEmitterHandle::noop(),
         };
 
         let join = tokio::spawn(worker_task(0, Box::new(OkSink), rx, ack_tx, cfg));

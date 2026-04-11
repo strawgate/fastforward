@@ -12,7 +12,7 @@ use arrow::record_batch::RecordBatch;
 use logfwd_output::BatchMetadata;
 use logfwd_output::sink::{SendResult, Sink};
 
-use super::trace_bridge::{SinkOutcome, TraceEvent, TraceRecorder};
+use super::trace_bridge::{SinkOutcome, TraceDisposition, TraceEvent, TraceOutcome, TraceRecorder};
 
 /// What the sink should do on a given call.
 #[derive(Clone, Debug)]
@@ -195,8 +195,12 @@ impl Sink for InstrumentedSink {
                         .push(SinkOutcome::Ok);
                     delivered.fetch_add(rows, Ordering::Relaxed);
                     if let Some(trace) = &trace {
-                        trace.record(TraceEvent::SinkResult {
-                            outcome: SinkOutcome::Ok,
+                        trace.record(TraceEvent::BatchTerminal {
+                            batch_id: None,
+                            source_id: None,
+                            checkpoint: None,
+                            outcome: TraceOutcome::Delivered,
+                            disposition: TraceDisposition::Ack,
                             rows,
                         });
                     }
@@ -208,7 +212,7 @@ impl Sink for InstrumentedSink {
                         .expect("outcomes mutex poisoned")
                         .push(SinkOutcome::RetryAfter);
                     if let Some(trace) = &trace {
-                        trace.record(TraceEvent::SinkResult {
+                        trace.record(TraceEvent::SinkAttempt {
                             outcome: SinkOutcome::RetryAfter,
                             rows,
                         });
@@ -221,7 +225,7 @@ impl Sink for InstrumentedSink {
                         .expect("outcomes mutex poisoned")
                         .push(SinkOutcome::IoError);
                     if let Some(trace) = &trace {
-                        trace.record(TraceEvent::SinkResult {
+                        trace.record(TraceEvent::SinkAttempt {
                             outcome: SinkOutcome::IoError,
                             rows,
                         });
@@ -234,8 +238,12 @@ impl Sink for InstrumentedSink {
                         .expect("outcomes mutex poisoned")
                         .push(SinkOutcome::Rejected);
                     if let Some(trace) = &trace {
-                        trace.record(TraceEvent::SinkResult {
-                            outcome: SinkOutcome::Rejected,
+                        trace.record(TraceEvent::BatchTerminal {
+                            batch_id: None,
+                            source_id: None,
+                            checkpoint: None,
+                            outcome: TraceOutcome::Rejected,
+                            disposition: TraceDisposition::Reject,
                             rows,
                         });
                     }
@@ -249,8 +257,12 @@ impl Sink for InstrumentedSink {
                         .push(SinkOutcome::Ok);
                     delivered.fetch_add(rows, Ordering::Relaxed);
                     if let Some(trace) = &trace {
-                        trace.record(TraceEvent::SinkResult {
-                            outcome: SinkOutcome::Ok,
+                        trace.record(TraceEvent::BatchTerminal {
+                            batch_id: None,
+                            source_id: None,
+                            checkpoint: None,
+                            outcome: TraceOutcome::Delivered,
+                            disposition: TraceDisposition::Ack,
                             rows,
                         });
                     }
@@ -262,8 +274,12 @@ impl Sink for InstrumentedSink {
                         .expect("outcomes mutex poisoned")
                         .push(SinkOutcome::Panic);
                     if let Some(trace) = &trace {
-                        trace.record(TraceEvent::SinkResult {
-                            outcome: SinkOutcome::Panic,
+                        trace.record(TraceEvent::BatchTerminal {
+                            batch_id: None,
+                            source_id: None,
+                            checkpoint: None,
+                            outcome: TraceOutcome::InternalFailure,
+                            disposition: TraceDisposition::Hold,
                             rows,
                         });
                     }

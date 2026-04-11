@@ -2,13 +2,19 @@
 //!
 //! This stays test-only (`turmoil_sim`) and emits JSONL for easy human inspection.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use logfwd::pipeline::{
+    TransitionAction as RuntimeTransitionAction,
+    TransitionDisposition as RuntimeTransitionDisposition,
+    TransitionEvent as RuntimeTransitionEvent, TransitionOutcome as RuntimeTransitionOutcome,
+};
 use logfwd_runtime::turmoil_barriers::{PipelinePhase, RuntimeBarrierEvent};
 use logfwd_runtime::worker_pool::DeliveryOutcome;
 use serde_json::{Value, json};
@@ -16,10 +22,37 @@ use serde_json::{Value, json};
 /// Runtime trace event schema (JSONL row).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TraceEvent {
-    Phase { phase: TracePhase },
-    SinkResult { outcome: SinkOutcome, rows: u64 },
-    CheckpointUpdate { source_id: u64, offset: u64 },
-    CheckpointFlush { success: bool },
+    Phase {
+        phase: TracePhase,
+    },
+    BatchBegin {
+        batch_id: u64,
+        source_id: u64,
+        checkpoint: u64,
+    },
+    BatchTerminal {
+        batch_id: Option<u64>,
+        source_id: Option<u64>,
+        checkpoint: Option<u64>,
+        outcome: TraceOutcome,
+        disposition: TraceDisposition,
+        rows: u64,
+    },
+    SinkAttempt {
+        outcome: SinkOutcome,
+        rows: u64,
+    },
+    SinkResult {
+        outcome: SinkOutcome,
+        rows: u64,
+    },
+    CheckpointUpdate {
+        source_id: u64,
+        offset: u64,
+    },
+    CheckpointFlush {
+        success: bool,
+    },
 }
 
 impl TraceEvent {
@@ -99,6 +132,26 @@ pub enum SinkOutcome {
     Panic,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraceOutcome {
+    Delivered,
+    Rejected,
+    RetryExhausted,
+    TimedOut,
+    PoolClosed,
+    WorkerChannelClosed,
+    NoWorkersAvailable,
+    InternalFailure,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraceDisposition {
+    Ack,
+    Reject,
+    Hold,
+    Abandon,
+}
+
 impl TracePhase {
     fn as_str(self) -> &'static str {
         match self {
@@ -141,17 +194,108 @@ impl SinkOutcome {
     }
 }
 
+impl TraceOutcome {
+    fn as_str(self) -> &'static str {
+        match self {
+            TraceOutcome::Delivered => "delivered",
+            TraceOutcome::Rejected => "rejected",
+            TraceOutcome::RetryExhausted => "retry_exhausted",
+            TraceOutcome::TimedOut => "timed_out",
+            TraceOutcome::PoolClosed => "pool_closed",
+            TraceOutcome::WorkerChannelClosed => "worker_channel_closed",
+            TraceOutcome::NoWorkersAvailable => "no_workers_available",
+            TraceOutcome::InternalFailure => "internal_failure",
+        }
+    }
+
+    fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "delivered" | "ok" => Some(Self::Delivered),
+            "rejected" => Some(Self::Rejected),
+            "retry_exhausted" => Some(Self::RetryExhausted),
+            "timed_out" => Some(Self::TimedOut),
+            "pool_closed" => Some(Self::PoolClosed),
+            "worker_channel_closed" => Some(Self::WorkerChannelClosed),
+            "no_workers_available" => Some(Self::NoWorkersAvailable),
+            "internal_failure" | "panic" => Some(Self::InternalFailure),
+            _ => None,
+        }
+    }
+}
+
+impl TraceDisposition {
+    fn as_str(self) -> &'static str {
+        match self {
+            TraceDisposition::Ack => "ack",
+            TraceDisposition::Reject => "reject",
+            TraceDisposition::Hold => "hold",
+            TraceDisposition::Abandon => "abandon",
+        }
+    }
+
+    fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "ack" => Some(Self::Ack),
+            "reject" => Some(Self::Reject),
+            "hold" => Some(Self::Hold),
+            "abandon" => Some(Self::Abandon),
+            _ => None,
+        }
+    }
+}
+
 impl TraceEvent {
     pub fn to_json(&self) -> Value {
         match self {
             TraceEvent::Phase { phase } => {
                 json!({"event": "phase", "phase": phase.as_str()})
             }
+            TraceEvent::BatchBegin {
+                batch_id,
+                source_id,
+                checkpoint,
+            } => {
+                json!({
+                    "event": "transition",
+                    "phase": "begin_send",
+                    "batch": batch_id,
+                    "source": source_id,
+                    "checkpoint": checkpoint
+                })
+            }
+            TraceEvent::BatchTerminal {
+                batch_id,
+                source_id,
+                checkpoint,
+                outcome,
+                disposition,
+                rows,
+            } => {
+                json!({
+                    "event": "transition",
+                    "phase": "terminal",
+                    "batch": batch_id,
+                    "source": source_id,
+                    "checkpoint": checkpoint,
+                    "outcome": outcome.as_str(),
+                    "disposition": disposition.as_str(),
+                    "rows": rows
+                })
+            }
+            TraceEvent::SinkAttempt { outcome, rows } => {
+                json!({"event": "sink_attempt", "outcome": outcome.as_str(), "rows": rows})
+            }
             TraceEvent::SinkResult { outcome, rows } => {
                 json!({"event": "sink_result", "outcome": outcome.as_str(), "rows": rows})
             }
             TraceEvent::CheckpointUpdate { source_id, offset } => {
-                json!({"event": "checkpoint_update", "source_id": source_id, "offset": offset})
+                json!({
+                    "event": "checkpoint_update",
+                    "source_id": source_id,
+                    "source": source_id,
+                    "offset": offset,
+                    "checkpoint": offset
+                })
             }
             TraceEvent::CheckpointFlush { success } => {
                 json!({"event": "checkpoint_flush", "success": success})
@@ -174,6 +318,97 @@ impl TraceEvent {
                 };
                 Ok(Self::Phase { phase })
             }
+            "transition" | "batch_transition" => {
+                let Some(raw_phase) = v.get("phase").and_then(Value::as_str) else {
+                    return Err("transition event missing string field: phase".to_string());
+                };
+                match raw_phase {
+                    "begin_send" => {
+                        let batch_id = required_u64_any(v, &["batch", "batch_id"])?;
+                        let source_id = required_u64_any(v, &["source", "source_id"])?;
+                        let checkpoint = required_u64_any(v, &["checkpoint", "offset"])?;
+                        Ok(Self::BatchBegin {
+                            batch_id,
+                            source_id,
+                            checkpoint,
+                        })
+                    }
+                    "terminal" => {
+                        let Some(raw_outcome) = v.get("outcome").and_then(Value::as_str) else {
+                            return Err(
+                                "terminal transition missing string field: outcome".to_string()
+                            );
+                        };
+                        let Some(outcome) = TraceOutcome::from_str(raw_outcome) else {
+                            return Err(format!("unknown trace outcome '{raw_outcome}'"));
+                        };
+                        let Some(raw_disposition) = v.get("disposition").and_then(Value::as_str)
+                        else {
+                            return Err(
+                                "terminal transition missing string field: disposition".to_string()
+                            );
+                        };
+                        let Some(disposition) = TraceDisposition::from_str(raw_disposition) else {
+                            return Err(format!("unknown trace disposition '{raw_disposition}'"));
+                        };
+                        let rows = v.get("rows").and_then(Value::as_u64).unwrap_or(0);
+                        Ok(Self::BatchTerminal {
+                            batch_id: optional_u64_any(v, &["batch", "batch_id"]),
+                            source_id: optional_u64_any(v, &["source", "source_id"]),
+                            checkpoint: optional_u64_any(v, &["checkpoint", "offset"]),
+                            outcome,
+                            disposition,
+                            rows,
+                        })
+                    }
+                    other => Err(format!("unknown transition phase '{other}'")),
+                }
+            }
+            "batch_begin" => {
+                let batch_id = required_u64_any(v, &["batch", "batch_id"])?;
+                let source_id = required_u64_any(v, &["source", "source_id"])?;
+                let checkpoint = required_u64_any(v, &["checkpoint", "offset"])?;
+                Ok(Self::BatchBegin {
+                    batch_id,
+                    source_id,
+                    checkpoint,
+                })
+            }
+            "batch_terminal" => {
+                let Some(raw_outcome) = v.get("outcome").and_then(Value::as_str) else {
+                    return Err("batch_terminal missing string field: outcome".to_string());
+                };
+                let Some(outcome) = TraceOutcome::from_str(raw_outcome) else {
+                    return Err(format!("unknown trace outcome '{raw_outcome}'"));
+                };
+                let Some(raw_disposition) = v.get("disposition").and_then(Value::as_str) else {
+                    return Err("batch_terminal missing string field: disposition".to_string());
+                };
+                let Some(disposition) = TraceDisposition::from_str(raw_disposition) else {
+                    return Err(format!("unknown trace disposition '{raw_disposition}'"));
+                };
+                let rows = v.get("rows").and_then(Value::as_u64).unwrap_or(0);
+                Ok(Self::BatchTerminal {
+                    batch_id: optional_u64_any(v, &["batch", "batch_id"]),
+                    source_id: optional_u64_any(v, &["source", "source_id"]),
+                    checkpoint: optional_u64_any(v, &["checkpoint", "offset"]),
+                    outcome,
+                    disposition,
+                    rows,
+                })
+            }
+            "sink_attempt" => {
+                let Some(raw_outcome) = v.get("outcome").and_then(Value::as_str) else {
+                    return Err("sink_attempt missing string field: outcome".to_string());
+                };
+                let Some(outcome) = SinkOutcome::from_str(raw_outcome) else {
+                    return Err(format!("unknown sink outcome '{raw_outcome}'"));
+                };
+                let Some(rows) = v.get("rows").and_then(Value::as_u64) else {
+                    return Err("sink_attempt missing u64 field: rows".to_string());
+                };
+                Ok(Self::SinkAttempt { outcome, rows })
+            }
             "sink_result" => {
                 let Some(raw_outcome) = v.get("outcome").and_then(Value::as_str) else {
                     return Err("sink_result missing string field: outcome".to_string());
@@ -187,12 +422,8 @@ impl TraceEvent {
                 Ok(Self::SinkResult { outcome, rows })
             }
             "checkpoint_update" => {
-                let Some(source_id) = v.get("source_id").and_then(Value::as_u64) else {
-                    return Err("checkpoint_update missing u64 field: source_id".to_string());
-                };
-                let Some(offset) = v.get("offset").and_then(Value::as_u64) else {
-                    return Err("checkpoint_update missing u64 field: offset".to_string());
-                };
+                let source_id = required_u64_any(v, &["source_id", "source"])?;
+                let offset = required_u64_any(v, &["offset", "checkpoint"])?;
                 Ok(Self::CheckpointUpdate { source_id, offset })
             }
             "checkpoint_flush" => {
@@ -206,10 +437,26 @@ impl TraceEvent {
     }
 }
 
+fn required_u64_any(v: &Value, fields: &[&str]) -> Result<u64, String> {
+    optional_u64_any(v, fields).ok_or_else(|| {
+        format!(
+            "missing u64 field: {}",
+            fields.iter().copied().collect::<Vec<_>>().join(" or ")
+        )
+    })
+}
+
+fn optional_u64_any(v: &Value, fields: &[&str]) -> Option<u64> {
+    fields
+        .iter()
+        .find_map(|field| v.get(*field).and_then(Value::as_u64))
+}
+
 /// Simple JSONL recorder used by simulation-only codepaths.
 #[derive(Clone)]
 pub struct TraceRecorder {
     file: Arc<Mutex<File>>,
+    next_batch_id: Arc<AtomicU64>,
 }
 
 impl TraceRecorder {
@@ -221,6 +468,7 @@ impl TraceRecorder {
             .open(path)?;
         Ok(Self {
             file: Arc::new(Mutex::new(file)),
+            next_batch_id: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -232,6 +480,16 @@ impl TraceRecorder {
             .expect("trace recorder mutex poisoned while writing event");
         writeln!(file, "{line}").expect("failed to write trace event");
         file.flush().expect("failed to flush trace event");
+    }
+
+    pub fn record_batch_begin(&self, source_id: u64, checkpoint: u64) -> u64 {
+        let batch_id = self.next_batch_id.fetch_add(1, Ordering::SeqCst);
+        self.record(TraceEvent::BatchBegin {
+            batch_id,
+            source_id,
+            checkpoint,
+        });
+        batch_id
     }
 }
 
@@ -449,6 +707,7 @@ impl NormalizedTrace {
                     TraceEvent::CheckpointFlush { success } => {
                         attributes.insert("success", success.to_string());
                     }
+                    _ => {}
                 }
                 NormalizedTraceEvent {
                     index,
@@ -503,6 +762,23 @@ impl EventValidator for PhaseOrderValidator {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BatchStatus {
+    Open,
+    Held,
+    Acked,
+    Rejected,
+    Abandoned,
+}
+
+#[derive(Debug, Clone)]
+struct BatchState {
+    source_id: u64,
+    checkpoint: u64,
+    status: BatchStatus,
+    saw_failure_attempt: bool,
+}
+
 /// Declared transition contract for replay validation.
 #[derive(Debug, Default)]
 pub struct TransitionValidator {
@@ -529,10 +805,16 @@ impl TransitionValidator {
             ));
         }
         let mut phase: Option<PhaseState> = None;
+        let mut saw_stopped = false;
         let mut source_offsets = self.source_offsets.clone();
+        let mut batches = BTreeMap::<u64, BatchState>::new();
+        let mut source_batches = BTreeMap::<u64, VecDeque<u64>>::new();
         let saw_phase_marker = events
             .iter()
             .any(|event| matches!(event, TraceEvent::Phase { .. }));
+        let saw_batch_marker = events
+            .iter()
+            .any(|event| matches!(event, TraceEvent::BatchBegin { .. }));
 
         for (idx, event) in events.iter().enumerate() {
             match event {
@@ -574,18 +856,54 @@ impl TransitionValidator {
                         ));
                     }
                     phase = Some(PhaseState::Stopped);
+                    saw_stopped = true;
+                }
+                TraceEvent::BatchBegin {
+                    batch_id,
+                    source_id,
+                    checkpoint,
+                } => {
+                    reject_after_stopped(idx, saw_stopped, "begin_send")?;
+                    if batches.contains_key(batch_id) {
+                        return Err(format!("event {idx}: duplicate batch id {batch_id}"));
+                    }
+                    batches.insert(
+                        *batch_id,
+                        BatchState {
+                            source_id: *source_id,
+                            checkpoint: *checkpoint,
+                            status: BatchStatus::Open,
+                            saw_failure_attempt: false,
+                        },
+                    );
+                    source_batches
+                        .entry(*source_id)
+                        .or_default()
+                        .push_back(*batch_id);
+                }
+                TraceEvent::BatchTerminal {
+                    batch_id,
+                    source_id,
+                    checkpoint,
+                    outcome,
+                    disposition,
+                    rows: _,
+                } => {
+                    reject_after_stopped(idx, saw_stopped, "sink/disposition activity")?;
+                    apply_terminal_event(
+                        idx,
+                        &mut batches,
+                        &mut source_batches,
+                        saw_batch_marker,
+                        *batch_id,
+                        *source_id,
+                        *checkpoint,
+                        *outcome,
+                        *disposition,
+                    )?;
                 }
                 TraceEvent::CheckpointUpdate { source_id, offset } => {
-                    if phase == Some(PhaseState::Stopped) {
-                        return Err(ValidationError::at(
-                            events,
-                            idx,
-                            "event_after_stopped",
-                            format!(
-                                "checkpoint update after stopped (source_id={source_id}, offset={offset})"
-                            ),
-                        ));
-                    }
+                    reject_after_stopped(idx, saw_stopped, "checkpoint update")?;
                     let last = source_offsets.get(source_id).copied().unwrap_or(0);
                     if *offset < last {
                         return Err(ValidationError::at(
@@ -597,27 +915,46 @@ impl TransitionValidator {
                             ),
                         ));
                     }
+                    for (batch_id, batch) in &batches {
+                        if batch.source_id == *source_id
+                            && matches!(batch.status, BatchStatus::Open | BatchStatus::Held)
+                            && *offset >= batch.checkpoint
+                        {
+                            return Err(format!(
+                                "event {idx}: checkpoint advanced to {offset} past unresolved gap \
+                                 batch {batch_id} for source {source_id} at checkpoint {}",
+                                batch.checkpoint
+                            ));
+                        }
+                    }
                     source_offsets.insert(*source_id, *offset);
                 }
                 TraceEvent::CheckpointFlush { .. } => {
-                    if phase == Some(PhaseState::Stopped) {
-                        return Err(ValidationError::at(
-                            events,
-                            idx,
-                            "event_after_stopped",
-                            "checkpoint flush after stopped",
-                        ));
+                    reject_after_stopped(idx, saw_stopped, "flush")?;
+                }
+                TraceEvent::SinkAttempt { outcome, .. } => {
+                    reject_after_stopped(idx, saw_stopped, "sink activity")?;
+                    if matches!(
+                        outcome,
+                        SinkOutcome::RetryAfter | SinkOutcome::IoError | SinkOutcome::Panic
+                    ) {
+                        if let Some(batch_id) = first_open_batch(&batches, None) {
+                            if let Some(batch) = batches.get_mut(&batch_id) {
+                                batch.saw_failure_attempt = true;
+                            }
+                        }
                     }
                 }
-                TraceEvent::SinkResult { .. } => {
-                    if phase == Some(PhaseState::Stopped) {
-                        return Err(ValidationError::at(
-                            events,
-                            idx,
-                            "event_after_stopped",
-                            "sink activity after stopped",
-                        ));
-                    }
+                TraceEvent::SinkResult { outcome, rows } => {
+                    reject_after_stopped(idx, saw_stopped, "sink activity")?;
+                    apply_legacy_sink_result(
+                        idx,
+                        &mut batches,
+                        &mut source_batches,
+                        saw_batch_marker,
+                        *outcome,
+                        *rows,
+                    )?;
                 }
             }
         }
@@ -632,7 +969,313 @@ impl TransitionValidator {
                 ),
             ));
         }
+        for (batch_id, batch) in &batches {
+            if batch.status == BatchStatus::Open {
+                return Err(format!(
+                    "batch {batch_id}: begin_send was not terminalized or explicitly held \
+                     (source_id={}, checkpoint={}, saw_failure_attempt={})",
+                    batch.source_id, batch.checkpoint, batch.saw_failure_attempt
+                ));
+            }
+        }
         Ok(())
+    }
+}
+
+/// Project runtime-emitted transition events into the turmoil trace contract.
+pub fn trace_events_from_runtime(events: &[RuntimeTransitionEvent]) -> Vec<TraceEvent> {
+    if events.is_empty() {
+        return Vec::new();
+    }
+
+    let mut trace = Vec::with_capacity(events.len() + 2);
+    let mut current_phase = Some(TracePhase::Running);
+    let mut sink_outcomes_by_batch_source: BTreeMap<(u64, u64), TraceOutcome> = BTreeMap::new();
+
+    trace.push(TraceEvent::Phase {
+        phase: TracePhase::Running,
+    });
+
+    for event in events {
+        match event.action {
+            RuntimeTransitionAction::EnterSending => {
+                if let (Some(batch_id), Some(source_id), Some(checkpoint)) =
+                    (event.batch_id, event.source_id, event.checkpoint_offset)
+                {
+                    trace.push(TraceEvent::BatchBegin {
+                        batch_id,
+                        source_id,
+                        checkpoint,
+                    });
+                }
+            }
+            RuntimeTransitionAction::SinkOutcome => {
+                if let Some(outcome) = event.outcome.and_then(trace_outcome_from_runtime) {
+                    if let (Some(batch_id), Some(source_id)) = (event.batch_id, event.source_id) {
+                        sink_outcomes_by_batch_source.insert((batch_id, source_id), outcome);
+                    }
+                }
+            }
+            RuntimeTransitionAction::ApplyDisposition => {
+                if let Some(disposition) =
+                    event.disposition.and_then(trace_disposition_from_runtime)
+                {
+                    let outcome = match disposition {
+                        TraceDisposition::Ack => TraceOutcome::Delivered,
+                        TraceDisposition::Reject => TraceOutcome::Rejected,
+                        TraceDisposition::Abandon => TraceOutcome::InternalFailure,
+                        TraceDisposition::Hold => {
+                            if let (Some(batch_id), Some(source_id)) =
+                                (event.batch_id, event.source_id)
+                            {
+                                sink_outcomes_by_batch_source
+                                    .get(&(batch_id, source_id))
+                                    .copied()
+                                    .or_else(|| event.outcome.and_then(trace_outcome_from_runtime))
+                                    .unwrap_or(TraceOutcome::InternalFailure)
+                            } else {
+                                event
+                                    .outcome
+                                    .and_then(trace_outcome_from_runtime)
+                                    .unwrap_or(TraceOutcome::InternalFailure)
+                            }
+                        }
+                    };
+
+                    trace.push(TraceEvent::BatchTerminal {
+                        batch_id: event.batch_id,
+                        source_id: event.source_id,
+                        checkpoint: event.checkpoint_offset,
+                        outcome,
+                        disposition,
+                        rows: 0,
+                    });
+                }
+            }
+            RuntimeTransitionAction::UpdateCheckpoint => {
+                if let (Some(source_id), Some(offset)) = (event.source_id, event.checkpoint_offset)
+                {
+                    trace.push(TraceEvent::CheckpointUpdate { source_id, offset });
+                }
+            }
+            RuntimeTransitionAction::FlushCheckpoint => {
+                if let Some(outcome) = event.outcome {
+                    let success = matches!(outcome, RuntimeTransitionOutcome::FlushSucceeded);
+                    let failure = matches!(outcome, RuntimeTransitionOutcome::FlushFailed);
+                    if success || failure {
+                        trace.push(TraceEvent::CheckpointFlush { success });
+                    }
+                }
+            }
+            RuntimeTransitionAction::BeginDrain => {
+                if current_phase != Some(TracePhase::Draining) {
+                    current_phase = Some(TracePhase::Draining);
+                    trace.push(TraceEvent::Phase {
+                        phase: TracePhase::Draining,
+                    });
+                }
+            }
+            RuntimeTransitionAction::Stop | RuntimeTransitionAction::ForceStop => {
+                if matches!(
+                    event.outcome,
+                    Some(RuntimeTransitionOutcome::Completed | RuntimeTransitionOutcome::Forced)
+                ) && current_phase != Some(TracePhase::Stopped)
+                {
+                    current_phase = Some(TracePhase::Stopped);
+                    trace.push(TraceEvent::Phase {
+                        phase: TracePhase::Stopped,
+                    });
+                }
+            }
+        }
+    }
+
+    trace
+}
+
+fn trace_outcome_from_runtime(outcome: RuntimeTransitionOutcome) -> Option<TraceOutcome> {
+    match outcome {
+        RuntimeTransitionOutcome::Delivered => Some(TraceOutcome::Delivered),
+        RuntimeTransitionOutcome::Rejected => Some(TraceOutcome::Rejected),
+        RuntimeTransitionOutcome::RetryExhausted => Some(TraceOutcome::RetryExhausted),
+        RuntimeTransitionOutcome::TimedOut => Some(TraceOutcome::TimedOut),
+        RuntimeTransitionOutcome::PoolClosed => Some(TraceOutcome::PoolClosed),
+        RuntimeTransitionOutcome::WorkerChannelClosed => Some(TraceOutcome::WorkerChannelClosed),
+        RuntimeTransitionOutcome::NoWorkersAvailable => Some(TraceOutcome::NoWorkersAvailable),
+        RuntimeTransitionOutcome::InternalFailure => Some(TraceOutcome::InternalFailure),
+        _ => None,
+    }
+}
+
+fn trace_disposition_from_runtime(
+    disposition: RuntimeTransitionDisposition,
+) -> Option<TraceDisposition> {
+    match disposition {
+        RuntimeTransitionDisposition::Ack => Some(TraceDisposition::Ack),
+        RuntimeTransitionDisposition::Reject => Some(TraceDisposition::Reject),
+        RuntimeTransitionDisposition::Hold => Some(TraceDisposition::Hold),
+    }
+}
+
+fn reject_after_stopped(idx: usize, saw_stopped: bool, activity: &str) -> Result<(), String> {
+    if saw_stopped {
+        Err(format!("event {idx}: {activity} after Stopped"))
+    } else {
+        Ok(())
+    }
+}
+
+fn apply_legacy_sink_result(
+    idx: usize,
+    batches: &mut BTreeMap<u64, BatchState>,
+    source_batches: &mut BTreeMap<u64, VecDeque<u64>>,
+    saw_batch_marker: bool,
+    outcome: SinkOutcome,
+    rows: u64,
+) -> Result<(), String> {
+    match outcome {
+        SinkOutcome::Ok => apply_terminal_event(
+            idx,
+            batches,
+            source_batches,
+            saw_batch_marker,
+            None,
+            None,
+            None,
+            TraceOutcome::Delivered,
+            TraceDisposition::Ack,
+        ),
+        SinkOutcome::Rejected => apply_terminal_event(
+            idx,
+            batches,
+            source_batches,
+            saw_batch_marker,
+            None,
+            None,
+            None,
+            TraceOutcome::Rejected,
+            TraceDisposition::Reject,
+        ),
+        SinkOutcome::Panic => apply_terminal_event(
+            idx,
+            batches,
+            source_batches,
+            saw_batch_marker,
+            None,
+            None,
+            None,
+            TraceOutcome::InternalFailure,
+            TraceDisposition::Hold,
+        ),
+        SinkOutcome::RetryAfter | SinkOutcome::IoError => {
+            if rows > 0 {
+                if let Some(batch_id) = first_open_batch(batches, None) {
+                    if let Some(batch) = batches.get_mut(&batch_id) {
+                        batch.saw_failure_attempt = true;
+                    }
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_terminal_event(
+    idx: usize,
+    batches: &mut BTreeMap<u64, BatchState>,
+    source_batches: &mut BTreeMap<u64, VecDeque<u64>>,
+    saw_batch_marker: bool,
+    batch_id: Option<u64>,
+    source_id: Option<u64>,
+    checkpoint: Option<u64>,
+    outcome: TraceOutcome,
+    disposition: TraceDisposition,
+) -> Result<(), String> {
+    let Some(batch_id) = batch_id.or_else(|| first_open_batch(batches, source_id)) else {
+        if saw_batch_marker {
+            return Err(format!(
+                "event {idx}: terminal outcome {outcome:?}/{disposition:?} without open begin_send"
+            ));
+        }
+        return Ok(());
+    };
+
+    let Some(batch) = batches.get_mut(&batch_id) else {
+        return Err(format!(
+            "event {idx}: terminal outcome references unknown batch {batch_id}"
+        ));
+    };
+    if batch.status != BatchStatus::Open {
+        return Err(format!(
+            "event {idx}: terminal outcome for batch {batch_id} after prior {:?}",
+            batch.status
+        ));
+    }
+    if let Some(source_id) = source_id {
+        if source_id != batch.source_id {
+            return Err(format!(
+                "event {idx}: terminal outcome source mismatch for batch {batch_id}: \
+                 {source_id} != {}",
+                batch.source_id
+            ));
+        }
+    }
+    if let Some(checkpoint) = checkpoint {
+        if checkpoint != batch.checkpoint {
+            return Err(format!(
+                "event {idx}: terminal outcome checkpoint mismatch for batch {batch_id}: \
+                 {checkpoint} != {}",
+                batch.checkpoint
+            ));
+        }
+    }
+
+    batch.status = match disposition {
+        TraceDisposition::Ack => {
+            if outcome != TraceOutcome::Delivered {
+                return Err(format!(
+                    "event {idx}: ack disposition must carry delivered outcome, got {outcome:?}"
+                ));
+            }
+            BatchStatus::Acked
+        }
+        TraceDisposition::Reject => {
+            if outcome != TraceOutcome::Rejected {
+                return Err(format!(
+                    "event {idx}: reject disposition must carry rejected outcome, got {outcome:?}"
+                ));
+            }
+            BatchStatus::Rejected
+        }
+        TraceDisposition::Hold => BatchStatus::Held,
+        TraceDisposition::Abandon => BatchStatus::Abandoned,
+    };
+
+    if !matches!(batch.status, BatchStatus::Held) {
+        remove_from_source_queue(source_batches, batch.source_id, batch_id);
+    }
+    Ok(())
+}
+
+fn first_open_batch(batches: &BTreeMap<u64, BatchState>, source_id: Option<u64>) -> Option<u64> {
+    batches
+        .iter()
+        .find(|(_, batch)| {
+            batch.status == BatchStatus::Open && source_id.is_none_or(|sid| sid == batch.source_id)
+        })
+        .map(|(batch_id, _)| *batch_id)
+}
+
+fn remove_from_source_queue(
+    source_batches: &mut BTreeMap<u64, VecDeque<u64>>,
+    source_id: u64,
+    batch_id: u64,
+) {
+    if let Some(queue) = source_batches.get_mut(&source_id) {
+        if let Some(pos) = queue.iter().position(|candidate| *candidate == batch_id) {
+            queue.remove(pos);
+        }
     }
 }
 
