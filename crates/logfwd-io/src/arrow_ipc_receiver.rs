@@ -266,7 +266,7 @@ async fn handle_arrow_ipc_request(
         return (StatusCode::PAYLOAD_TOO_LARGE, "payload too large").into_response();
     }
 
-    let content_encoding = match parse_content_encoding(&headers) {
+    let content_encodings = match parse_content_encoding(&headers) {
         Ok(content_encoding) => content_encoding,
         Err(status) => return (status, "invalid content-encoding header").into_response(),
     };
@@ -288,7 +288,10 @@ async fn handle_arrow_ipc_request(
     };
     let raw_body_len = body.len() as u64;
 
-    let is_zstd = content_encoding.as_deref() == Some("zstd")
+    let has_zstd_content_encoding = content_encodings
+        .as_ref()
+        .is_some_and(|tokens| tokens.iter().any(|token| token == "zstd"));
+    let is_zstd = has_zstd_content_encoding
         || content_type.as_deref() == Some("application/vnd.apache.arrow.stream+zstd");
 
     let body = if is_zstd {
@@ -388,16 +391,21 @@ async fn handle_arrow_ipc_request(
     }
 }
 
-fn parse_content_encoding(headers: &HeaderMap) -> Result<Option<String>, StatusCode> {
+fn parse_content_encoding(headers: &HeaderMap) -> Result<Option<Vec<String>>, StatusCode> {
     let Some(value) = headers.get(CONTENT_ENCODING) else {
         return Ok(None);
     };
     let parsed = value.to_str().map_err(|_| StatusCode::BAD_REQUEST)?;
-    let normalized = parsed.trim().to_ascii_lowercase();
-    if normalized.is_empty() {
+    let tokens: Vec<String> = parsed
+        .split(',')
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect();
+    if tokens.is_empty() {
         return Err(StatusCode::BAD_REQUEST);
     }
-    Ok(Some(normalized))
+    Ok(Some(tokens))
 }
 
 fn parse_content_type(headers: &HeaderMap) -> Result<Option<String>, StatusCode> {
@@ -638,6 +646,31 @@ mod tests {
                 "Content-Type",
                 "application/vnd.apache.arrow.stream+zstd; charset=binary",
             )
+            .send(&compressed)
+            .expect("POST should succeed");
+        assert_eq!(response.status().as_u16(), 200);
+
+        let received = receiver
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("should receive a batch");
+        assert_eq!(received.num_rows(), 2);
+    }
+
+    #[test]
+    fn receiver_accepts_tokenized_content_encoding_with_zstd() {
+        let receiver =
+            ArrowIpcReceiver::new_with_capacity("test-zstd-tokenized", "127.0.0.1:0", 16)
+                .expect("bind should succeed");
+        let addr = receiver.local_addr();
+
+        let batch = make_test_batch();
+        let ipc_bytes = serialize_batch(&batch);
+        let compressed = zstd::bulk::compress(&ipc_bytes, 1).expect("zstd compress should succeed");
+
+        let url = format!("http://{addr}/v1/arrow");
+        let response = ureq::post(&url)
+            .header("Content-Type", "application/vnd.apache.arrow.stream")
+            .header("Content-Encoding", "identity, zstd")
             .send(&compressed)
             .expect("POST should succeed");
         assert_eq!(response.status().as_u16(), 200);

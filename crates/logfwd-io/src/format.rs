@@ -321,7 +321,7 @@ fn write_plain_text_fallback(line: &[u8], plain_text_field_name: &str, out: &mut
 /// Inject `_timestamp` and `_stream` CRI metadata into a JSON message and
 /// write the result with a trailing newline to `out`.
 ///
-/// If `msg` starts with `{`, produces:
+/// If `msg` starts with `{` (after optional leading ASCII whitespace), produces:
 ///   `{"_timestamp":"<ts>","_stream":"<stream>",<rest of msg>}\n`
 ///
 /// Otherwise wraps the plain-text message so no content is lost:
@@ -349,7 +349,11 @@ fn inject_cri_metadata(
     plain_text_field_name: &str,
     out: &mut Vec<u8>,
 ) {
-    if msg.first() == Some(&b'{') {
+    let json_start = msg.iter().position(|b| !b.is_ascii_whitespace());
+    if let Some(start) = json_start
+        && msg[start] == b'{'
+    {
+        let json_msg = &msg[start..];
         out.push(b'{');
         out.extend_from_slice(b"\"_timestamp\":\"");
         out.extend_from_slice(timestamp);
@@ -358,7 +362,7 @@ fn inject_cri_metadata(
         // Fixes #1658: if the message body after '{' is empty (just '}' possibly
         // with leading whitespace), do NOT emit a trailing comma — the result
         // would be invalid JSON.
-        let after_brace = &msg[1..];
+        let after_brace = &json_msg[1..];
         let rest = after_brace
             .iter()
             .position(|b| !b.is_ascii_whitespace())
@@ -691,6 +695,27 @@ mod tests {
         assert!(
             serde_json::from_str::<serde_json::Value>(trimmed).is_ok(),
             "whitespace JSON object must produce valid JSON, got: {trimmed:?}"
+        );
+    }
+
+    #[test]
+    fn cri_json_message_with_leading_whitespace_stays_json() {
+        let stats = make_stats();
+        let mut proc = FormatDecoder::cri(2 * 1024 * 1024, stats);
+        let input = b"2024-01-15T10:30:00Z stdout F   {\"msg\":\"cri\"}\n";
+        let mut out = Vec::new();
+        proc.process_lines(input, &mut out);
+        let output_str = std::str::from_utf8(&out).expect("output must be valid UTF-8");
+        let trimmed = output_str.trim_end_matches('\n');
+        let value: serde_json::Value =
+            serde_json::from_str(trimmed).expect("output must remain valid JSON");
+        assert_eq!(
+            value.get("msg").and_then(serde_json::Value::as_str),
+            Some("cri")
+        );
+        assert!(
+            value.get("body").is_none(),
+            "JSON message must not be wrapped as plain text: {trimmed:?}"
         );
     }
 

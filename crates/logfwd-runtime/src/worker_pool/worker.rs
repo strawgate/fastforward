@@ -342,7 +342,7 @@ pub(super) async fn process_item(
                         retries_count,
                     );
                 }
-            }
+            },
             // Future SendResult variants (#[non_exhaustive]) — treat as failure.
             Ok(_) => {
                 output_health.apply_worker_event(worker_id, OutputHealthEvent::FatalFailure);
