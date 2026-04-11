@@ -305,8 +305,8 @@ pub(crate) fn render_config(
     out
 }
 
-/// Render one complete config from a single use-case preset.
-pub(crate) fn render_use_case(use_case: &UseCaseTemplate) -> String {
+/// Render a use-case preset, optionally with a custom SQL transform.
+pub(crate) fn render_use_case(use_case: &UseCaseTemplate, sql: &str) -> String {
     let mut out = String::new();
     out.push_str("# logfwd example\n");
     let _ = writeln!(out, "# Use case: {}", use_case.title);
@@ -315,7 +315,7 @@ pub(crate) fn render_use_case(use_case: &UseCaseTemplate) -> String {
     out.push_str(use_case.input);
     out.push('\n');
     out.push_str("transform: |\n");
-    for line in use_case.transform.lines() {
+    for line in sql.lines() {
         let _ = writeln!(out, "  {line}");
     }
     out.push('\n');

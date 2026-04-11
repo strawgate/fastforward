@@ -872,28 +872,7 @@ fn cmd_wizard() -> Result<(), CliError> {
         } else {
             sql.trim()
         };
-        if sql_final == uc.transform {
-            render_use_case(uc)
-        } else {
-            // User overrode the SQL — rebuild with the use-case header and
-            // their custom transform.
-            use std::fmt::Write;
-            let mut out = String::new();
-            let _ = writeln!(out, "# logfwd example");
-            let _ = writeln!(out, "# Use case: {}", uc.title);
-            let _ = writeln!(out, "# {}", uc.description);
-            out.push('\n');
-            out.push_str(uc.input);
-            out.push('\n');
-            out.push_str("transform: |\n");
-            for line in sql_final.lines() {
-                let _ = writeln!(out, "  {line}");
-            }
-            out.push('\n');
-            out.push_str(uc.output);
-            out.push_str("\n# Optional: diagnostics\n# server:\n#   diagnostics: 127.0.0.1:9191\n");
-            out
-        }
+        render_use_case(uc, sql_final)
     } else {
         // Manual input/output mode.
         let input_labels: Vec<&str> = INPUT_TEMPLATES.iter().map(|t| t.label).collect();

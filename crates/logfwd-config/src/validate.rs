@@ -1153,6 +1153,7 @@ impl Config {
             }
         }
 
+        all_errors.sort();
         if all_errors.is_empty() {
             Ok(())
         } else if all_errors.len() == 1 {
