@@ -57,7 +57,11 @@ pub struct StarSchema {
 // `field_names::TIMESTAMP_VARIANTS` and the Loki/ES sinks recognise it; the
 // OTAP conversion must be consistent.  Fixes #1669.
 fn is_well_known_timestamp(name: &str) -> bool {
-    field_names::matches_any(name, field_names::TIMESTAMP, field_names::TIMESTAMP_VARIANTS)
+    field_names::matches_any(
+        name,
+        field_names::TIMESTAMP,
+        field_names::TIMESTAMP_VARIANTS,
+    )
 }
 
 /// Returns `true` when `name` matches a well-known severity column.
@@ -82,7 +86,11 @@ fn is_well_known_span_id(name: &str) -> bool {
 
 /// Returns `true` when `name` matches a well-known flags column.
 fn is_well_known_flags(name: &str) -> bool {
-    field_names::matches_any(name, field_names::TRACE_FLAGS, field_names::TRACE_FLAGS_VARIANTS)
+    field_names::matches_any(
+        name,
+        field_names::TRACE_FLAGS,
+        field_names::TRACE_FLAGS_VARIANTS,
+    )
 }
 
 /// Canonical resource attribute prefix shared across receivers/sinks.
@@ -344,7 +352,7 @@ enum TypedColumn {
     /// Boolean column (ATTR_TYPE_BOOL).
     Bool(Vec<Option<bool>>),
     /// Binary column (ATTR_TYPE_BYTES).
-    Bytes(Vec<Option<Vec<u8>>>),
+    Bytes(Vec<Option<Arc<[u8]>>>),
 }
 
 impl TypedColumn {
@@ -362,6 +370,35 @@ impl TypedColumn {
     }
     fn new_bytes(n: usize) -> Self {
         Self::Bytes(vec![None; n])
+    }
+
+    fn matches_attr_type(&self, type_tag: u8) -> bool {
+        matches!(
+            (self, type_tag),
+            (Self::Str(_), ATTR_TYPE_STR)
+                | (Self::Int(_), ATTR_TYPE_INT)
+                | (Self::Double(_), ATTR_TYPE_DOUBLE)
+                | (Self::Bool(_), ATTR_TYPE_BOOL)
+                | (Self::Bytes(_), ATTR_TYPE_BYTES)
+        )
+    }
+
+    fn promote_to_str(&mut self) {
+        if matches!(self, Self::Str(_)) {
+            return;
+        }
+
+        let strings = match self {
+            Self::Str(_) => unreachable!("handled above"),
+            Self::Int(values) => values.iter().map(|v| v.map(|v| v.to_string())).collect(),
+            Self::Double(values) => values.iter().map(|v| v.map(|v| v.to_string())).collect(),
+            Self::Bool(values) => values.iter().map(|v| v.map(|v| v.to_string())).collect(),
+            Self::Bytes(values) => values
+                .iter()
+                .map(|v| v.as_ref().map(|v| hex_encode_lower(v)))
+                .collect(),
+        };
+        *self = Self::Str(strings);
     }
 
     /// Build the Arrow array and data type for this column.
@@ -1632,6 +1669,29 @@ fn unpivot_attrs_to_flat(
             idx
         };
 
+        if !matches!(
+            type_tag,
+            ATTR_TYPE_STR | ATTR_TYPE_INT | ATTR_TYPE_DOUBLE | ATTR_TYPE_BOOL | ATTR_TYPE_BYTES
+        ) {
+            return Err(ArrowError::SchemaError(format!(
+                "unknown attr type tag {type_tag} for key '{}'",
+                key_arr.value(row)
+            )));
+        }
+
+        if !flat_cols[col_pos].1.matches_attr_type(type_tag) {
+            flat_cols[col_pos].1.promote_to_str();
+        }
+
+        if let TypedColumn::Str(ref mut v) = flat_cols[col_pos].1 {
+            if let Some(value) = attrs_row_value_to_string(
+                type_tag, str_arr, int_arr, double_arr, bool_arr, bytes_arr, row,
+            ) {
+                v[target_row] = Some(value);
+            }
+            continue;
+        }
+
         // Write the typed value into the column.
         match type_tag {
             ATTR_TYPE_INT => {
@@ -1660,26 +1720,36 @@ fn unpivot_attrs_to_flat(
                 if !bytes_arr.is_null(row)
                     && let TypedColumn::Bytes(ref mut v) = flat_cols[col_pos].1
                 {
-                    v[target_row] = Some(bytes_arr.value(row).to_vec());
+                    v[target_row] = Some(Arc::<[u8]>::from(bytes_arr.value(row)));
                 }
             }
-            ATTR_TYPE_STR => {
-                if !str_arr.is_null(row)
-                    && let TypedColumn::Str(ref mut v) = flat_cols[col_pos].1
-                {
-                    v[target_row] = Some(str_arr.value(row).to_string());
-                }
-            }
-            _ => {
-                return Err(ArrowError::SchemaError(format!(
-                    "unknown attr type tag {type_tag} for key '{}'",
-                    key_arr.value(row)
-                )));
-            }
+            ATTR_TYPE_STR => {}
+            _ => unreachable!("type tags are validated before dispatch"),
         }
     }
 
     Ok(())
+}
+
+fn attrs_row_value_to_string(
+    type_tag: u8,
+    str_arr: &StringArray,
+    int_arr: &Int64Array,
+    double_arr: &Float64Array,
+    bool_arr: &BooleanArray,
+    bytes_arr: &BinaryArray,
+    row: usize,
+) -> Option<String> {
+    match type_tag {
+        ATTR_TYPE_STR => (!str_arr.is_null(row)).then(|| str_arr.value(row).to_string()),
+        ATTR_TYPE_INT => (!int_arr.is_null(row)).then(|| int_arr.value(row).to_string()),
+        ATTR_TYPE_DOUBLE => (!double_arr.is_null(row)).then(|| double_arr.value(row).to_string()),
+        ATTR_TYPE_BOOL => (!bool_arr.is_null(row)).then(|| bool_arr.value(row).to_string()),
+        ATTR_TYPE_BYTES => {
+            (!bytes_arr.is_null(row)).then(|| hex_encode_lower(bytes_arr.value(row)))
+        }
+        _ => None,
+    }
 }
 
 /// Scatter resource attribute values from the "template" rows (indexed by
@@ -2806,6 +2876,62 @@ mod tests {
 
         assert_eq!(payload_arr.value(0), &[0x00, 0x0f, 0xff]);
         assert_eq!(payload_arr.value(1), &[0xab, 0xcd]);
+    }
+
+    #[test]
+    fn mixed_attrs_promote_bytes_first_column_to_string() {
+        let logs = RecordBatch::try_new(
+            Arc::new(logs_schema()),
+            vec![
+                Arc::new(UInt32Array::from(vec![0_u32, 1])),
+                Arc::new(UInt32Array::from(vec![0_u32, 0])),
+                Arc::new(UInt32Array::from(vec![0_u32, 0])),
+                Arc::new(arrow::array::TimestampNanosecondArray::from(vec![
+                    None::<i64>,
+                    None,
+                ])),
+                Arc::new(arrow::array::Int32Array::from(vec![None::<i32>, None])),
+                Arc::new(StringArray::from(vec![None::<&str>, None])),
+                Arc::new(StringArray::from(vec![Some("row-0"), Some("row-1")])),
+                build_fixed_binary_array::<16>(&[None, None]).expect("trace ids"),
+                build_fixed_binary_array::<8>(&[None, None]).expect("span ids"),
+                Arc::new(UInt32Array::from(vec![None::<u32>, None])),
+                Arc::new(UInt32Array::from(vec![Some(0_u32), Some(0)])),
+            ],
+        )
+        .expect("valid logs");
+
+        let log_attrs = RecordBatch::try_new(
+            Arc::new(attrs_schema()),
+            vec![
+                Arc::new(UInt32Array::from(vec![0_u32, 1])),
+                Arc::new(StringArray::from(vec!["payload", "payload"])),
+                Arc::new(UInt8Array::from(vec![ATTR_TYPE_BYTES, ATTR_TYPE_STR])),
+                Arc::new(StringArray::from(vec![None, Some("text")])),
+                Arc::new(Int64Array::from(vec![None::<i64>, None])),
+                Arc::new(Float64Array::from(vec![None::<f64>, None])),
+                Arc::new(BooleanArray::from(vec![None::<bool>, None])),
+                Arc::new(BinaryArray::from(vec![Some(&[0xde_u8, 0xad_u8][..]), None])),
+            ],
+        )
+        .expect("valid attrs");
+
+        let star = StarSchema {
+            logs,
+            log_attrs,
+            resource_attrs: RecordBatch::new_empty(Arc::new(attrs_schema())),
+            scope_attrs: RecordBatch::new_empty(Arc::new(attrs_schema())),
+        };
+        let roundtrip = star_to_flat(&star).expect("star_to_flat");
+        let payload_idx = roundtrip.schema().index_of("payload").expect("payload");
+        let payload_arr = roundtrip
+            .column(payload_idx)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("mixed column promotes to Utf8");
+
+        assert_eq!(payload_arr.value(0), "dead");
+        assert_eq!(payload_arr.value(1), "text");
     }
 
     #[test]

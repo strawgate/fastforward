@@ -13,9 +13,7 @@ use logfwd_types::diagnostics::{ComponentHealth, ComponentStats};
 use crate::InputError;
 use crate::receiver_http::{MAX_REQUEST_BODY_SIZE, declared_content_length, read_limited_body};
 
-use super::decode::{
-    decode_otlp_json, decode_otlp_protobuf, decompress_gzip, decompress_zstd,
-};
+use super::decode::{decode_otlp_json, decode_otlp_protobuf, decompress_gzip, decompress_zstd};
 use super::{OtlpServerState, ReceiverPayload};
 
 pub(super) fn record_error(stats: Option<&Arc<ComponentStats>>) {

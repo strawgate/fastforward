@@ -90,7 +90,9 @@ pub(super) fn build_input_state(
             let format = cfg.format.clone().unwrap_or(Format::Auto);
             let mut tail_config = TailConfig {
                 start_from_end: false,
-                poll_interval_ms: cfg.poll_interval_ms.unwrap_or(DEFAULT_FILE_POLL_INTERVAL_MS),
+                poll_interval_ms: cfg
+                    .poll_interval_ms
+                    .unwrap_or(DEFAULT_FILE_POLL_INTERVAL_MS),
                 read_buf_size: cfg.read_buf_size.unwrap_or(DEFAULT_READ_BUF_SIZE),
                 per_file_read_budget_bytes: cfg
                     .per_file_read_budget_bytes

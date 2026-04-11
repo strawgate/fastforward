@@ -19,11 +19,17 @@ use super::input_build::build_input_state;
 use super::{InputTransform, Pipeline};
 
 // ── Pipeline defaults ──────────────────────────────────────────────────
+/// Default output worker count when `pipelines.<name>.workers` is unset.
 pub(crate) const DEFAULT_WORKERS: usize = 4;
+/// Default target batch size in bytes; reaching this target triggers a flush.
 pub(crate) const DEFAULT_BATCH_TARGET_BYTES: usize = 4 * 1024 * 1024;
+/// Default maximum time a partial batch waits before flushing.
 pub(crate) const DEFAULT_BATCH_TIMEOUT: Duration = Duration::from_millis(100);
+/// Default interval between input polls when `poll_interval_ms` is unset.
 pub(crate) const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(10);
+/// Default idle duration before recyclable output workers shut down.
 pub(crate) const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Default minimum interval between checkpoint flushes.
 pub(crate) const DEFAULT_CHECKPOINT_FLUSH_INTERVAL: Duration = Duration::from_secs(5);
 
 impl Pipeline {
@@ -302,7 +308,10 @@ impl Pipeline {
         let (max_workers, idle_timeout) = if factory.is_single_use() {
             (1, Duration::MAX) // never idle-expire the sole worker
         } else {
-            (config.workers.unwrap_or(DEFAULT_WORKERS), DEFAULT_IDLE_TIMEOUT)
+            (
+                config.workers.unwrap_or(DEFAULT_WORKERS),
+                DEFAULT_IDLE_TIMEOUT,
+            )
         };
         let metrics = Arc::new(metrics);
         let pool = crate::worker_pool::OutputWorkerPool::new(
