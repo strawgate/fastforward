@@ -76,9 +76,7 @@ impl TraceEvent {
                 source_id,
                 checkpoint,
             } => {
-                format!(
-                    "batch_begin batch={batch_id} source={source_id} checkpoint={checkpoint}"
-                )
+                format!("batch_begin batch={batch_id} source={source_id} checkpoint={checkpoint}")
             }
             Self::BatchTerminal {
                 batch_id,
