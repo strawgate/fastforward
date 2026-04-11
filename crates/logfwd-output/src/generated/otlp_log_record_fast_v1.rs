@@ -3,9 +3,10 @@
 // column order: "timestamp", "severity", "body", "trace_id", "span_id", "flags", "attributes"
 
 use arrow::array::Array;
+use arrow::util::display::array_value_to_string;
 use super::{AttrArray, BatchColumns, BatchMetadata, encode_fixed32, encode_key_value_bool,
     encode_key_value_double, encode_key_value_int, encode_key_value_string, encode_tag,
-    encode_varint, numeric_timestamp_ns, str_value};
+    encode_varint, numeric_timestamp_ns};
 use logfwd_core::otlp::{self, Severity, bytes_field_size, encode_bytes_field, encode_fixed64,
     encode_varint_field, hex_decode, parse_severity, parse_timestamp_nanos};
 
@@ -22,7 +23,11 @@ pub(super) fn encode_row_as_log_record_fast_v1(
         if arr.is_null(row) {
             0
         } else {
-            parse_timestamp_nanos(arr.value(row).as_bytes()).unwrap_or(0)
+            let ts = parse_timestamp_nanos(arr.value(row).as_bytes()).unwrap_or(0);
+            if ts == 0 {
+                tracing::debug!("timestamp parse fallback: event_time omitted for unparseable value");
+            }
+            ts
         }
     } else {
         0
@@ -117,11 +122,12 @@ pub(super) fn encode_row_as_log_record_fast_v1(
             }
             AttrArray::OtherStr(arr) => {
                 if !arr.is_null(row) {
+                    let s = array_value_to_string(*arr, row).unwrap_or_default();
                     encode_key_value_string(
                         buf,
                         otlp::LOG_RECORD_ATTRIBUTES,
                         field_name.as_bytes(),
-                        str_value(*arr, row).as_bytes(),
+                        s.as_bytes(),
                     );
                 }
             }

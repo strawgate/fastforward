@@ -11,10 +11,10 @@ use axum::response::{IntoResponse, Response};
 use logfwd_types::diagnostics::{ComponentHealth, ComponentStats};
 
 use crate::InputError;
-use crate::receiver_http::{declared_content_length, read_limited_body};
+use crate::receiver_http::{MAX_REQUEST_BODY_SIZE, declared_content_length, read_limited_body};
 
 use super::decode::{
-    MAX_BODY_SIZE, decode_otlp_json, decode_otlp_protobuf, decompress_gzip, decompress_zstd,
+    decode_otlp_json, decode_otlp_protobuf, decompress_gzip, decompress_zstd,
 };
 use super::{OtlpServerState, ReceiverPayload};
 
@@ -36,7 +36,7 @@ pub(super) async fn handle_otlp_request(
     body: Body,
 ) -> Response {
     let content_length = declared_content_length(&headers);
-    if content_length.is_some_and(|body_len| body_len > MAX_BODY_SIZE as u64) {
+    if content_length.is_some_and(|body_len| body_len > MAX_REQUEST_BODY_SIZE as u64) {
         record_error(state.stats.as_ref());
         return (StatusCode::PAYLOAD_TOO_LARGE, "payload too large").into_response();
     }
@@ -49,7 +49,7 @@ pub(super) async fn handle_otlp_request(
         }
     };
 
-    let mut body = match read_limited_body(body, MAX_BODY_SIZE, content_length).await {
+    let mut body = match read_limited_body(body, MAX_REQUEST_BODY_SIZE, content_length).await {
         Ok(body) => body,
         Err(status) => {
             record_error(state.stats.as_ref());

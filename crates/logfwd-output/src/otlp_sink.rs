@@ -9,6 +9,7 @@ use arrow::array::{
     Array, AsArray, LargeStringArray, PrimitiveArray, StringArray, StringViewArray,
 };
 use arrow::datatypes::{DataType, Float64Type, Int64Type, UInt64Type};
+use arrow::util::display::array_value_to_string;
 use arrow::record_batch::RecordBatch;
 use flate2::Compression as GzipLevel;
 use flate2::write::GzEncoder;
@@ -23,7 +24,7 @@ use logfwd_types::diagnostics::ComponentStats;
 use logfwd_types::field_names;
 use zstd::bulk::Compressor as ZstdCompressor;
 
-use super::{BatchMetadata, Compression, str_value};
+use super::{BatchMetadata, Compression};
 use crate::http_classify::{self, DEFAULT_RETRY_AFTER_SECS};
 
 mod generated {
@@ -67,9 +68,11 @@ pub struct OtlpSink {
     stats: Arc<ComponentStats>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum ResourceValueRef<'a> {
     Str(&'a str),
+    /// Owned stringified value for non-string Arrow types (e.g. UInt64 from `hash()` UDF).
+    OwnedStr(String),
     Int(i64),
     Float(u64),
     Bool(bool),
@@ -292,6 +295,12 @@ impl OtlpSink {
                 if let Some(v) = value {
                     match v {
                         ResourceValueRef::Str(v) => encode_key_value_string(
+                            &mut resource_msg,
+                            otlp::RESOURCE_ATTRIBUTES,
+                            key_name.as_bytes(),
+                            v.as_bytes(),
+                        ),
+                        ResourceValueRef::OwnedStr(v) => encode_key_value_string(
                             &mut resource_msg,
                             otlp::RESOURCE_ATTRIBUTES,
                             key_name.as_bytes(),
@@ -747,9 +756,11 @@ impl AttrArray<'_> {
     fn value_ref(&self, row: usize) -> Option<ResourceValueRef<'_>> {
         match self {
             Self::Str(arr) => (!arr.is_null(row)).then(|| ResourceValueRef::Str(arr.value(row))),
-            Self::OtherStr(arr) => {
-                (!arr.is_null(row)).then(|| ResourceValueRef::Str(str_value(*arr, row)))
-            }
+            Self::OtherStr(arr) => (!arr.is_null(row)).then(|| {
+                ResourceValueRef::OwnedStr(
+                    array_value_to_string(*arr, row).unwrap_or_default(),
+                )
+            }),
             Self::Int(arr) => (!arr.is_null(row)).then(|| ResourceValueRef::Int(arr.value(row))),
             Self::Float(arr) => {
                 (!arr.is_null(row)).then(|| ResourceValueRef::Float(arr.value(row).to_bits()))
@@ -896,7 +907,7 @@ fn resolve_batch_columns<'a>(
                     }
                 }
             }
-            "_raw" => {
+            field_names::RAW => {
                 excluded.push(idx);
             }
             _ => {}
@@ -965,7 +976,7 @@ fn resolve_batch_columns<'a>(
                     .map(|stripped| {
                         field
                             .metadata()
-                            .get("logfwd.resource_key")
+                            .get(field_names::METADATA_RESOURCE_KEY)
                             .cloned()
                             .unwrap_or_else(|| stripped.to_string())
                     })
@@ -1005,7 +1016,13 @@ fn resolve_batch_columns<'a>(
             // type-conflict builder) cannot be encoded as a single typed OTLP attribute.
             // Conflict structs (Struct { int, str, float, bool }) are already normalized
             // to flat Utf8 by `encode_batch` before this function is called.
-            DataType::Struct(_) => continue,
+            DataType::Struct(_) => {
+                tracing::warn!(
+                    column = field.name().as_str(),
+                    "non-conflict struct column cannot be encoded as OTLP attribute, skipping"
+                );
+                continue;
+            }
             _ => resolve_otlp_str_col(batch.column(idx).as_ref()).map_or_else(
                 || AttrArray::OtherStr(batch.column(idx).as_ref()),
                 AttrArray::Str,
@@ -1034,7 +1051,7 @@ fn resolve_batch_columns<'a>(
 fn resource_prefix_from_batch(batch: &RecordBatch) -> String {
     let schema = batch.schema();
 
-    if let Some(prefix) = schema.metadata().get("logfwd.resource_prefix")
+    if let Some(prefix) = schema.metadata().get(field_names::METADATA_RESOURCE_PREFIX)
         && !prefix.is_empty()
     {
         return prefix.clone();
@@ -1049,7 +1066,7 @@ fn resource_prefix_from_batch(batch: &RecordBatch) -> String {
     }
 
     for field in schema.fields() {
-        if let Some(resource_key) = field.metadata().get("logfwd.resource_key")
+        if let Some(resource_key) = field.metadata().get(field_names::METADATA_RESOURCE_KEY)
             && let Some(prefix) = field.name().strip_suffix(resource_key)
             && !prefix.is_empty()
         {
@@ -1066,7 +1083,16 @@ fn numeric_timestamp_ns(arr: &dyn Array, row: usize) -> u64 {
     }
 
     match arr.data_type() {
-        DataType::Int64 => u64::try_from(arr.as_primitive::<Int64Type>().value(row)).unwrap_or(0),
+        DataType::Int64 => {
+            let v = arr.as_primitive::<Int64Type>().value(row);
+            match u64::try_from(v) {
+                Ok(ns) => ns,
+                Err(_) => {
+                    tracing::debug!("timestamp parse fallback: negative i64 timestamp cannot convert to u64");
+                    0
+                }
+            }
+        }
         DataType::UInt64 => arr.as_primitive::<UInt64Type>().value(row),
         DataType::Timestamp(unit, _) => {
             use arrow::datatypes::{
@@ -1090,7 +1116,13 @@ fn numeric_timestamp_ns(arr: &dyn Array, row: usize) -> u64 {
                     .value(row)
                     .checked_mul(1_000_000_000),
             };
-            raw_ns.and_then(|ns| u64::try_from(ns).ok()).unwrap_or(0)
+            match raw_ns.and_then(|ns| u64::try_from(ns).ok()) {
+                Some(ns) => ns,
+                None => {
+                    tracing::debug!("timestamp parse fallback: numeric timestamp overflow or negative value");
+                    0
+                }
+            }
         }
         _ => 0,
     }
@@ -1111,7 +1143,11 @@ fn encode_row_as_log_record(
         if arr.is_null(row) {
             0
         } else {
-            parse_timestamp_nanos(arr.value(row).as_bytes()).unwrap_or(0)
+            let ts = parse_timestamp_nanos(arr.value(row).as_bytes()).unwrap_or(0);
+            if ts == 0 {
+                tracing::debug!("timestamp parse fallback: event_time omitted for unparseable value");
+            }
+            ts
         }
     } else {
         0
@@ -1213,11 +1249,12 @@ fn encode_row_as_log_record(
             }
             AttrArray::OtherStr(arr) => {
                 if !arr.is_null(row) {
+                    let s = array_value_to_string(*arr, row).unwrap_or_default();
                     encode_key_value_string(
                         buf,
                         otlp::LOG_RECORD_ATTRIBUTES,
                         field_name.as_bytes(),
-                        str_value(*arr, row).as_bytes(),
+                        s.as_bytes(),
                     );
                 }
             }
@@ -2493,7 +2530,7 @@ mod tests {
 
         let schema = Arc::new(Schema::new(vec![
             Field::new("body", DataType::Utf8, true),
-            Field::new("_raw", DataType::Utf8, true),
+            Field::new(field_names::RAW, DataType::Utf8, true),
         ]));
         let batch = RecordBatch::try_new(
             schema,
@@ -2511,7 +2548,7 @@ mod tests {
         let attrs = &request.resource_logs[0].scope_logs[0].log_records[0].attributes;
 
         assert!(
-            attrs.iter().all(|kv| kv.key != "_raw"),
+            attrs.iter().all(|kv| kv.key != field_names::RAW),
             "_raw should remain internal-only"
         );
     }
@@ -2567,12 +2604,12 @@ mod tests {
         // (containing dots) survive the round-trip through Arrow column names.
         let svc_field = Field::new("resource.attributes.service.name", DataType::Utf8, true)
             .with_metadata(std::collections::HashMap::from([(
-                "logfwd.resource_key".to_string(),
+                field_names::METADATA_RESOURCE_KEY.to_string(),
                 "service.name".to_string(),
             )]));
         let ns_field = Field::new("resource.attributes.k8s.namespace", DataType::Utf8, true)
             .with_metadata(std::collections::HashMap::from([(
-                "logfwd.resource_key".to_string(),
+                field_names::METADATA_RESOURCE_KEY.to_string(),
                 "k8s.namespace".to_string(),
             )]));
         let schema = Arc::new(Schema::new(vec![
@@ -2727,7 +2764,7 @@ mod tests {
 
         let shard_field = Field::new("resource.attributes.service.shard", DataType::Int64, true)
             .with_metadata(std::collections::HashMap::from([(
-                "logfwd.resource_key".to_string(),
+                field_names::METADATA_RESOURCE_KEY.to_string(),
                 "service.shard".to_string(),
             )]));
         let enabled_field = Field::new(
@@ -2736,7 +2773,7 @@ mod tests {
             true,
         )
         .with_metadata(std::collections::HashMap::from([(
-            "logfwd.resource_key".to_string(),
+            field_names::METADATA_RESOURCE_KEY.to_string(),
             "service.enabled".to_string(),
         )]));
         let schema = Arc::new(Schema::new(vec![
@@ -2834,12 +2871,12 @@ mod tests {
 
         let svc_field = Field::new("resource.attributes.service.name", DataType::Utf8, true)
             .with_metadata(std::collections::HashMap::from([(
-                "logfwd.resource_key".to_string(),
+                field_names::METADATA_RESOURCE_KEY.to_string(),
                 "service.name".to_string(),
             )]));
         let shard_field = Field::new("resource.attributes.service.shard", DataType::Int64, true)
             .with_metadata(std::collections::HashMap::from([(
-                "logfwd.resource_key".to_string(),
+                field_names::METADATA_RESOURCE_KEY.to_string(),
                 "service.shard".to_string(),
             )]));
 

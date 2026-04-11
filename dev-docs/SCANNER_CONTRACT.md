@@ -129,6 +129,16 @@ fields.
   fields.
 - `null` JSON values produce a null entry in the appropriate column.
 
+### String escape decoding
+
+JSON escape sequences in string values (`\"`, `\\`, `\/`, `\b`, `\f`, `\n`,
+`\r`, `\t`, `\uXXXX`) are decoded to their UTF-8 representation during
+extraction.  This prevents double-escaping when values are re-serialized
+downstream (see issue #410).
+
+The `body` line-capture column is **not** decoded — it stores the original raw
+line verbatim.
+
 ### Batch reuse
 
 `Scanner` can be reused across batches. Each call to `scan()` or
@@ -148,8 +158,5 @@ carried over.
   beyond will not be detected and may silently produce incorrect data.
 - **`StreamingBuilder` offsets are `u32`** — buffers larger than 4 GB are
   unsupported.
-- **No escape decoding of string values** — string values are stored as
-  raw bytes (including any JSON escape sequences such as `\n`, `\uXXXX`).
-  Callers that need decoded strings must unescape them.
 - **`body` column** — setting `line_field_name` is supported by both `scan()` and
   `scan_detached()` modes.

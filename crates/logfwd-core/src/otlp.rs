@@ -531,7 +531,7 @@ fn parse_2digits(s: &[u8], off: usize) -> u8 {
     // Required so `stub_verified(days_from_civil)` keeps nanos arithmetic within u64.
     && *result <= 213_400
 ))]
-fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
+pub fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
     let y = if month <= 2 { year - 1 } else { year };
     let m = if month <= 2 {
         month as i64 + 9
