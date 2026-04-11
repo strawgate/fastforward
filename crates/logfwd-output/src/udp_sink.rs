@@ -65,17 +65,21 @@ impl UdpSink {
         })
     }
 
-    /// Resolve the target address asynchronously and return the first
+    /// Resolve the target address asynchronously and return the first IPv4
     /// `SocketAddr`. Uses `tokio::net::lookup_host` so DNS happens on the
     /// async runtime without blocking an OS thread.
+    ///
+    /// The socket is bound to `0.0.0.0:0` (IPv4), so we filter for IPv4
+    /// addresses to avoid address-family mismatches on dual-stack systems
+    /// where `lookup_host` may return IPv6 addresses first.
     async fn resolve_target(&self) -> io::Result<std::net::SocketAddr> {
         tokio::net::lookup_host(&self.target)
             .await?
-            .next()
+            .find(std::net::SocketAddr::is_ipv4)
             .ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::AddrNotAvailable,
-                    format!("DNS lookup returned no addresses for {}", self.target),
+                    format!("DNS lookup returned no IPv4 addresses for {}", self.target),
                 )
             })
     }

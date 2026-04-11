@@ -452,4 +452,18 @@ mod tests {
         let parsed = crate::http_classify::parse_retry_after(None);
         assert_eq!(parsed, None);
     }
+
+    #[test]
+    fn retry_after_parses_http_date() {
+        // Use a far-future HTTP-date so the parsed duration is always positive.
+        let hv =
+            reqwest::header::HeaderValue::from_static("Thu, 01 Jan 2099 00:00:00 GMT");
+        let parsed = crate::http_classify::parse_retry_after(Some(&hv));
+        let duration = parsed.expect("should parse a far-future HTTP-date");
+        // The duration should be large (decades away) but finite.
+        assert!(
+            duration.as_secs() > 3600,
+            "expected duration > 1 hour for a far-future date, got {duration:?}"
+        );
+    }
 }
