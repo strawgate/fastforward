@@ -1,7 +1,14 @@
-//! Userspace loader for the logfwd eBPF EDR sensor.
+//! Userspace loader for the logfwd eBPF EDR sensor (standalone prototype).
 //!
 //! Loads eBPF programs, attaches to tracepoints/kprobes, and consumes events
-//! from a shared ring buffer. Prints structured JSON to stdout.
+//! from a shared ring buffer. Currently prints human-readable or JSON text to
+//! stdout for debugging.
+//!
+//! **Integration path:** When wired into the logfwd pipeline, the ring buffer
+//! consumer should build Arrow `RecordBatch` directly from the `repr(C)` event
+//! structs — the same pattern `platform_sensor.rs` uses. The JSON output here
+//! is a prototype convenience and must NOT be routed through a JSON parser to
+//! produce Arrow columns.
 //!
 //! Usage:
 //!   sudo ./sensor-ebpf `<ebpf-binary-path>` \[--json\] \[--duration `<seconds>`\] \[--no-file-open\]
