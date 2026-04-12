@@ -349,6 +349,15 @@ async fn handle_request(
         Ok(content_encoding) => content_encoding,
         Err(status) => return (status, "invalid content-encoding header").into_response(),
     };
+    if let Some(encoding) = content_encoding.as_deref()
+        && !is_supported_content_encoding(encoding)
+    {
+        return (
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            format!("unsupported content-encoding: {encoding}"),
+        )
+            .into_response();
+    }
 
     let mut body = match read_limited_body(
         request.into_body(),
@@ -497,6 +506,10 @@ fn decode_content(
             "unsupported content-encoding: {other}"
         ))),
     }
+}
+
+fn is_supported_content_encoding(content_encoding: &str) -> bool {
+    matches!(content_encoding, "identity" | "gzip" | "zstd")
 }
 
 fn decompress_zstd(body: &[u8], max_request_body_size: usize) -> Result<Vec<u8>, InputError> {
@@ -821,6 +834,30 @@ Connection: close\r\n\
         );
         let data = poll_until_data(&mut input, Duration::from_millis(100));
         assert!(data.is_empty(), "malformed requests must not enqueue data");
+    }
+
+    #[test]
+    fn http_rejects_unsupported_content_encoding_before_enqueue() {
+        let mut input =
+            HttpInput::new_with_options("test", "127.0.0.1:0", HttpInputOptions::default())
+                .expect("http input binds");
+        let url = format!("http://{}/ingest", input.local_addr());
+
+        let status = match ureq::post(&url)
+            .header("Content-Encoding", "br")
+            .send(b"{\"x\":1}\n")
+        {
+            Ok(resp) => resp.status().as_u16(),
+            Err(ureq::Error::StatusCode(code)) => code,
+            Err(err) => panic!("unexpected request failure: {err}"),
+        };
+
+        assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE.as_u16());
+        let data = poll_until_data(&mut input, Duration::from_millis(100));
+        assert!(
+            data.is_empty(),
+            "unsupported encodings must not enqueue data"
+        );
     }
 
     #[test]
