@@ -783,11 +783,11 @@ mod verification {
 
     /// Prove the configurable plain-text field wrapper path never panics.
     #[kani::proof]
-    #[kani::unwind(40)]
+    #[kani::unwind(52)]
+    #[kani::solver(kissat)]
     fn verify_process_cri_to_buf_with_plain_text_field_no_panic() {
-        let chunk: [u8; 32] = kani::any();
+        let chunk: [u8; 48] = kani::any();
         let prefix: [u8; 4] = kani::any();
-
         let mut out = Vec::new();
         let mut reassembler = CriReassembler::new(64);
         let _ = process_cri_to_buf_with_plain_text_field(
