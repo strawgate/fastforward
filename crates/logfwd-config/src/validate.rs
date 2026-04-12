@@ -353,6 +353,19 @@ impl Config {
                                     }
                                 }
                             }
+                            // linux_ebpf_sensor requires a non-empty ebpf_binary_path.
+                            if matches!(&input.type_config, InputTypeConfig::LinuxEbpfSensor(_)) {
+                                let path_empty = s
+                                    .sensor
+                                    .as_ref()
+                                    .and_then(|cfg| cfg.ebpf_binary_path.as_deref())
+                                    .is_none_or(|p| p.trim().is_empty());
+                                if path_empty {
+                                    return Err(ConfigError::Validation(format!(
+                                        "pipeline '{name}' input '{label}': linux_ebpf_sensor requires a non-empty 'sensor.ebpf_binary_path'"
+                                    )));
+                                }
+                            }
                         }
                         InputTypeConfig::ArrowIpc(a) => {
                             if let Err(msg) = validate_bind_addr(&a.listen) {

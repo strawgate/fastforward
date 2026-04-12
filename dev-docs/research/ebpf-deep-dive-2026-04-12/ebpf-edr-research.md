@@ -68,7 +68,8 @@ All LSM hooks return 0 (no blocking). Defer `fmod_ret` blocking until stability 
 ## Architecture Plan (Current → Next → Target)
 
 ### Current State
-```
+
+```text
 12 independent tracepoint/kprobe programs
   → single 16MB RingBuf → sleep-loop consumer → per-event JSON to stdout
 
@@ -76,7 +77,8 @@ Gaps: no ancestry (ppid=0), no syscall success/failure, no filtering, no drop vi
 ```
 
 ### Next State (Priorities 1–5, ~2–3 months)
-```
+
+```text
 raw_tracepoint sys_enter/sys_exit dispatcher
   → tail-call dispatch by syscall ID
   → per-TID inflight correlation map
@@ -88,7 +90,8 @@ Wins: return values, ancestry, drop visibility, 3–5x throughput
 ```
 
 ### Target State (Priorities 6–10+, ~6–9 months)
-```
+
+```text
 Syscall dispatcher + LSM hooks + targeted kprobes
   → map-backed policy filtering (syscall bitmap → cgroup → path prefix)
   → two-tier capture (metadata-first, selective enrichment)
@@ -156,7 +159,7 @@ static PROC_MAP: LruHashMap<u32, ProcessEntry> = LruHashMap::with_max_entries(32
 
 ### Tail-Call Dispatch
 
-```
+```text
 raw_tracepoint/sys_enter
   └→ tail_call(sys_enter_init_tail, syscall_id)
        └→ saves args + task context to TASK_INFO

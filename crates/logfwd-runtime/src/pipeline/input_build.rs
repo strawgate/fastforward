@@ -399,6 +399,20 @@ pub(super) fn build_input_state(
                     ));
                 }
 
+                // Warn on tuning fields that are ignored by the eBPF sensor.
+                if let Some(sensor) = s.sensor.as_ref() {
+                    if sensor.poll_interval_ms.is_some() {
+                        tracing::warn!(
+                            "input '{name}': sensor.poll_interval_ms is ignored for linux_ebpf_sensor (event-driven, not polled)"
+                        );
+                    }
+                    if sensor.max_rows_per_poll.is_some() {
+                        tracing::warn!(
+                            "input '{name}': sensor.max_rows_per_poll is ignored for linux_ebpf_sensor; use sensor.max_events_per_poll instead"
+                        );
+                    }
+                }
+
                 let ebpf_path = s
                     .sensor
                     .as_ref()
@@ -549,7 +563,10 @@ fn build_host_metrics_config(
         ),
         enabled_families: cfg.and_then(|c| c.enabled_families.clone()),
         emit_signal_rows: cfg.and_then(|c| c.emit_signal_rows).unwrap_or(true),
-        max_rows_per_poll: cfg.and_then(|c| c.max_rows_per_poll).unwrap_or(256),
+        max_rows_per_poll: cfg
+            .and_then(|c| c.max_rows_per_poll)
+            .filter(|&n| n > 0)
+            .unwrap_or(256),
     }
 }
 

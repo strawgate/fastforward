@@ -284,6 +284,7 @@ statistics via `sysinfo`. This input is Arrow-native and does not support
 | `sensor.control_reload_interval_ms` | integer | No | Reload check interval in milliseconds. Must be `>= 1`. Defaults to `1000`. |
 | `sensor.enabled_families` | array[string] | No | Optional enabled signal families. Omit to use defaults; set `[]` to disable all families. |
 | `sensor.emit_signal_rows` | boolean | No | Emit periodic per-family sample rows. Defaults to `true`. |
+| `sensor.max_rows_per_poll` | integer | No | Upper bound on data rows returned per collection cycle. Defaults to `256`. Set to `0` or omit for the default. |
 
 ```yaml
 input:

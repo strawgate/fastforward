@@ -27,12 +27,19 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
-    let ebpf_path = args.get(1).map_or(
-        "sensor-ebpf-kern/target/bpfel-unknown-none/release/sensor-ebpf",
-        String::as_str,
-    );
     let json_mode = args.iter().any(|a| a == "--json");
     let no_file_open = args.iter().any(|a| a == "--no-file-open");
+
+    // First positional (non-flag) argument is the eBPF binary path.
+    let ebpf_path = args
+        .iter()
+        .skip(1)
+        .filter(|a| !a.starts_with("--"))
+        .next()
+        .map_or(
+            "sensor-ebpf-kern/target/bpfel-unknown-none/release/sensor-ebpf",
+            String::as_str,
+        );
     let duration_secs: u64 = args
         .iter()
         .position(|a| a == "--duration")
@@ -71,6 +78,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ];
 
     for (prog_name, category, tracepoint) in tracepoints {
+        if no_file_open && *tracepoint == "sys_enter_openat" {
+            eprintln!("  SKIP {prog_name}: --no-file-open set");
+            continue;
+        }
         match ebpf.program_mut(prog_name) {
             Some(prog) => {
                 let tp: &mut TracePoint = prog.try_into()?;
