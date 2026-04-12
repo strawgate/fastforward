@@ -41,9 +41,8 @@ for seed in {1..100}; do TURMOIL_SEED=$seed cargo test --features turmoil --test
 Replay and history-specific checks:
 
 ```bash
-cargo test -p logfwd --features turmoil --test turmoil_sim replay_equivalence_seed_supports_three_identical_replays -- --exact
-# Requires Go toolchain for scripts/linearizability; test may skip if `go` is unavailable.
-cargo test -p logfwd --features turmoil --test turmoil_sim porcupine_checker_accepts_runtime_history -- --exact
+cargo test -p logfwd --features turmoil --test turmoil_sim fault_scenario_sim::replay_equivalence_same_seed_produces_same_normalized_contract_trace -- --exact
+cargo test -p logfwd --features turmoil --test turmoil_sim fault_scenario_sim::replay_equivalence_seed_matrix_keeps_history_equivalent -- --exact
 ```
 
 ## Canonical Docs

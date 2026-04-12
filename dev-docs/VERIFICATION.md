@@ -1,6 +1,6 @@
 # Verification
 
-logfwd uses four complementary verification techniques. Choose based on what you need to prove.
+logfwd uses five complementary verification techniques. Choose based on what you need to prove.
 
 ## Tool selection
 

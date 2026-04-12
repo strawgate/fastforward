@@ -7,8 +7,8 @@
 ## Current state
 
 - We now capture runtime-origin transition events in turmoil scenarios (not synthetic trace events).
-- We already enforce phase/order/checkpoint invariants with the transition validator.
-- We do **not** currently run a linearizability checker (Porcupine or equivalent) in CI.
+- The transition validator already enforces phase/order/checkpoint invariants.
+- CI does **not** currently run a linearizability checker (Porcupine or equivalent).
 
 ## Why add linearizability now
 
