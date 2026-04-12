@@ -1690,10 +1690,10 @@ fn write_f64_neg_infinity_emits_null() {
 #[test]
 fn write_f64_finite_unchanged() {
     let mut out = Vec::new();
-    write_f64_to_buf(&mut out, 3.14);
+    write_f64_to_buf(&mut out, 1.25);
     let text = String::from_utf8(out).unwrap();
     assert!(
-        text.starts_with("3.14"),
+        text.starts_with("1.25"),
         "finite float should be formatted normally: {text}"
     );
 }

@@ -1116,7 +1116,7 @@ fn test_poll_truncated_then_data_uses_new_source_id() {
             TailEvent::Data { source_id, .. } => *source_id,
             _ => None,
         })
-        .last()
+        .next_back()
         .expect("should have a source_id from initial data");
 
     // Truncate-and-rewrite the file (copytruncate simulation): new content is
@@ -1838,9 +1838,9 @@ fn test_evicted_offset_clamped_when_file_shrinks() {
     assert_eq!(tailer.num_files(), 1, "one file should be evicted");
 
     let evicted = if tailer.get_offset(&a).is_none() {
-        a.clone()
+        a
     } else if tailer.get_offset(&b).is_none() {
-        b.clone()
+        b
     } else {
         panic!("expected either a.log or b.log to be evicted");
     };
@@ -2004,7 +2004,7 @@ fn test_directory_path_does_not_fail_construction() {
     let tailer = FileTailer::new(
         std::slice::from_ref(&directory_as_path),
         config,
-        std::sync::Arc::new(logfwd_types::diagnostics::ComponentStats::new()),
+        create_test_stats(),
     );
     assert!(
         tailer.is_ok(),
@@ -2030,7 +2030,7 @@ fn test_poll_during_active_backoff_still_records_watcher_errors() {
             poll_interval_ms: 60_000,
             ..Default::default()
         },
-        std::sync::Arc::new(logfwd_types::diagnostics::ComponentStats::new()),
+        create_test_stats(),
     )
     .unwrap();
 
@@ -2064,7 +2064,7 @@ fn test_watcher_error_updates_backoff_even_without_poll_tick() {
             poll_interval_ms: 60_000,
             ..Default::default()
         },
-        std::sync::Arc::new(logfwd_types::diagnostics::ComponentStats::new()),
+        create_test_stats(),
     )
     .unwrap();
     let (tx, rx) = crossbeam_channel::unbounded();
@@ -2094,7 +2094,7 @@ fn test_source_id_for_missing_path_is_none() {
             poll_interval_ms: 10,
             ..Default::default()
         },
-        std::sync::Arc::new(logfwd_types::diagnostics::ComponentStats::new()),
+        create_test_stats(),
     )
     .unwrap();
 

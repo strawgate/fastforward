@@ -325,7 +325,9 @@ impl FileTailer {
     #[cfg(test)]
     pub(super) fn force_poll_due(&mut self) {
         let elapsed_ms = self.config.poll_interval_ms.max(1);
-        self.last_poll = Instant::now() - Duration::from_millis(elapsed_ms);
+        self.last_poll = Instant::now()
+            .checked_sub(Duration::from_millis(elapsed_ms))
+            .expect("poll interval before now should be representable");
     }
 
     #[cfg(test)]

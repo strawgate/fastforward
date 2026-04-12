@@ -618,10 +618,10 @@ pub(super) fn write_u64_to_buf_simple(out: &mut Vec<u8>, n: u64) {
 
 #[cfg(test)]
 pub(super) fn write_f64_to_buf_simple(out: &mut Vec<u8>, d: f64) {
-    if !d.is_finite() {
-        out.extend_from_slice(b"null");
-    } else {
+    if d.is_finite() {
         out.extend_from_slice(d.to_string().as_bytes());
+    } else {
+        out.extend_from_slice(b"null");
     }
 }
 

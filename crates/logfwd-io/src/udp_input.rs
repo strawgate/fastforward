@@ -537,9 +537,7 @@ mod tests {
         let first_lines = first
             .iter()
             .filter_map(|event| match event {
-                InputEvent::Data { bytes, .. } => {
-                    Some(bytes.iter().filter(|&&b| b == b'\n').count())
-                }
+                InputEvent::Data { bytes, .. } => Some(memchr::memchr_iter(b'\n', bytes).count()),
                 _ => None,
             })
             .sum::<usize>();

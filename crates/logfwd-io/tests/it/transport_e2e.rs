@@ -637,7 +637,10 @@ fn otlp_protobuf_roundtrip() {
     // Poll for the decoded batches.
     let batches = poll_until_batches(&mut input, Duration::from_secs(5));
     assert!(!batches.is_empty(), "expected at least one batch");
-    let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    let total_rows: usize = batches
+        .iter()
+        .map(arrow::record_batch::RecordBatch::num_rows)
+        .sum();
     assert_eq!(total_rows, 1, "expected exactly one row");
 
     let severities = collect_string_column(&batches, logfwd_types::field_names::SEVERITY);

@@ -888,13 +888,12 @@ Connection: close\r\n\
                     outcomes.push(outcome);
                 }
 
-                if !dropped {
-                    if let Some(drop_ms) = drop_after_ms
-                        && start.elapsed() >= Duration::from_millis(u64::from(drop_ms))
-                    {
-                        drop(maybe_input.take());
-                        dropped = true;
-                    }
+                if !dropped
+                    && let Some(drop_ms) = drop_after_ms
+                    && start.elapsed() >= Duration::from_millis(u64::from(drop_ms))
+                {
+                    drop(maybe_input.take());
+                    dropped = true;
                 }
 
                 if let Some(input) = maybe_input.as_mut() {

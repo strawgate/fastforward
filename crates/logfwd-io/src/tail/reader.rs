@@ -831,7 +831,7 @@ mod tests {
         let mut reader = test_reader();
         let file = OpenOptions::new().write(true).open(&path).unwrap();
         reader.files.insert(
-            path.clone(),
+            path,
             TailedFile {
                 identity: FileIdentity {
                     device: 1,
