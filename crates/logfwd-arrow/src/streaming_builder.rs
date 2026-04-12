@@ -57,7 +57,7 @@ fn append_string_view(
     offset: u32,
     len: u32,
 ) -> Result<(), ArrowError> {
-    if offset < original_len {
+    if offset < original_len || (len == 0 && offset == original_len) {
         builder.try_append_view(original_block, offset, len)
     } else if let Some(decoded_block) = decoded_block {
         let decoded_offset = offset.checked_sub(original_len).ok_or_else(|| {
@@ -2519,6 +2519,34 @@ mod tests {
         assert_eq!(
             col.data_buffers()[1].len(),
             b"decoded string value longer than inline".len()
+        );
+    }
+
+    #[test]
+    fn finish_batch_preserves_empty_decoded_string_without_decoded_block() {
+        let json = b"original";
+        let buf = bytes::Bytes::from(json.to_vec());
+        let mut b = StreamingBuilder::new(None);
+        b.begin_batch(buf);
+        let idx = b.resolve_field(b"msg");
+
+        b.begin_row();
+        b.append_decoded_str_by_idx(idx, b"");
+        b.end_row();
+
+        let batch = b.finish_batch().expect("finish batch");
+        let col = batch
+            .column_by_name("msg")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::StringViewArray>()
+            .unwrap();
+
+        assert_eq!(col.value(0), "");
+        assert_eq!(
+            col.data_buffers().len(),
+            1,
+            "empty decoded strings should not require a decoded StringView block"
         );
     }
 
