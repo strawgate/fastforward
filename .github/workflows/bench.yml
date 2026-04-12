@@ -394,9 +394,9 @@ jobs:
           GITHUB_RUN_ID: ${{ github.run_id }}
           GITHUB_SHA: ${{ github.sha }}
 
-      - name: Parse competitive benchmark output to OTLP (benchkit)
+      - name: Parse competitive benchmark output to OTLP (benchkit 0.2.3)
         id: parse_competitive_otlp
-        uses: strawgate/o11ykit/actions/parse-results@main-dist
+        uses: strawgate/o11ykit/actions/parse-results@1dabdc45cb73ac44a576d826f3acadd5d159a691
         with:
           mode: file
           results: gh-bench.json
@@ -409,10 +409,10 @@ jobs:
           min-datapoints: "0"
           summary: "true"
 
-      - name: Parse rate benchmark output to OTLP (benchkit)
+      - name: Parse rate benchmark output to OTLP (benchkit 0.2.3)
         id: parse_rate_otlp
         if: hashFiles('rate-results/rate-gh-bench.json') != ''
-        uses: strawgate/o11ykit/actions/parse-results@main-dist
+        uses: strawgate/o11ykit/actions/parse-results@1dabdc45cb73ac44a576d826f3acadd5d159a691
         with:
           mode: file
           results: rate-results/rate-gh-bench.json
@@ -425,10 +425,10 @@ jobs:
           min-datapoints: "0"
           summary: "true"
 
-      - name: Parse criterion benchmark output to OTLP (benchkit)
+      - name: Parse criterion benchmark output to OTLP (benchkit 0.2.3)
         id: parse_criterion_otlp
         if: hashFiles('micro/micro_raw.txt') != ''
-        uses: strawgate/o11ykit/actions/parse-results@main-dist
+        uses: strawgate/o11ykit/actions/parse-results@1dabdc45cb73ac44a576d826f3acadd5d159a691
         with:
           mode: file
           results: micro/micro_raw.txt
