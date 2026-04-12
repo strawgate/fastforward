@@ -411,6 +411,8 @@ jobs:
         uses: model-checking/kani-github-action@v1
         with:
           args: >-
+            -Z function-contracts
+            -Z stubbing
             -p logfwd-core
             -p logfwd-arrow
             -p logfwd-types
