@@ -351,10 +351,6 @@ async function main() {
     const benchmarks = latest.benchmarks || {};
     const tbody = document.getElementById('criterion-tbody');
 
-    // Gather all benchmark names across runs for trends
-    const allBenchNames = new Set();
-    criterionRuns.forEach(r => Object.keys(r.benchmarks || {}).forEach(n => allBenchNames.add(n)));
-
     let sparkIdx = 0;
     let rowsHtml = '';
     for (const name of Object.keys(benchmarks)) {

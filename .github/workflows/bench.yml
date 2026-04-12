@@ -257,7 +257,7 @@ jobs:
           results = {}
           for est_file in glob.glob('target/criterion/**/new/estimates.json', recursive=True):
               parts = est_file.split('/criterion/')[1].split('/new/')[0]
-              bench_name = parts.replace('/', '/')
+              bench_name = parts
               with open(est_file) as f:
                   data = json.load(f)
               mean_ns = data.get('mean', {}).get('point_estimate', 0)
@@ -266,7 +266,7 @@ jobs:
           # Also grab throughput if available.
           for thr_file in glob.glob('target/criterion/**/new/benchmark.json', recursive=True):
               parts = thr_file.split('/criterion/')[1].split('/new/')[0]
-              bench_name = parts.replace('/', '/')
+              bench_name = parts
               with open(thr_file) as f:
                   data = json.load(f)
               tp = data.get('throughput')
