@@ -245,11 +245,19 @@ main {
 .bottleneck-badge {
   margin-left: 8px;
 }
-.bottleneck-output { color: #f87171; }
-.bottleneck-input  { color: #fb923c; }
+.bottleneck-output {
+  color: #f87171;
+}
+.bottleneck-input {
+  color: #fb923c;
+}
 .bottleneck-transform,
-.bottleneck-scan   { color: #facc15; }
-.bottleneck-none   { color: #4ade80; }
+.bottleneck-scan {
+  color: #facc15;
+}
+.bottleneck-none {
+  color: #4ade80;
+}
 
 /* === Pipeline === */
 .pipe-flow {
@@ -360,10 +368,6 @@ main {
   color: var(--t4);
   font-family: var(--mono);
   font-size: 10px;
-}
-.pipe-traces .t2-body {
-  padding: 10px 12px;
-  background: transparent;
 }
 
 /* === Inspector === */
@@ -594,6 +598,10 @@ main {
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+.pipe-traces .t2-body {
+  padding: 10px 12px;
+  background: transparent;
 }
 
 /* Top bar: stats + window picker */
