@@ -31,6 +31,8 @@ pub(crate) const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 pub(crate) const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Default minimum interval between checkpoint flushes.
 pub(crate) const DEFAULT_CHECKPOINT_FLUSH_INTERVAL: Duration = Duration::from_secs(5);
+/// Default maximum time to wait for worker-pool drain before cancellation.
+pub(crate) const DEFAULT_POOL_DRAIN_TIMEOUT: Duration = Duration::from_secs(60);
 
 impl Pipeline {
     /// Construct a pipeline from parsed YAML config.
@@ -41,22 +43,16 @@ impl Pipeline {
         base_path: Option<&std::path::Path>,
     ) -> Result<Self, String> {
         if config.inputs.is_empty() {
-            return Err("pipeline must have at least one input".to_string());
+            return Err("at least one input is required".to_string());
         }
         if config.outputs.is_empty() {
-            return Err("pipeline must have at least one output".to_string());
+            return Err("at least one output is required".to_string());
         }
         if config.workers == Some(0) {
             return Err("workers must be >= 1".to_string());
         }
         if config.batch_target_bytes == Some(0) {
             return Err("batch_target_bytes must be > 0".to_string());
-        }
-        if config.batch_timeout_ms == Some(0) {
-            return Err("batch_timeout_ms must be > 0".to_string());
-        }
-        if config.poll_interval_ms == Some(0) {
-            return Err("poll_interval_ms must be > 0".to_string());
         }
 
         // Collect enrichment sources once — they are shared across all
@@ -384,8 +380,7 @@ impl Pipeline {
             held_tickets: Vec::new(),
             last_checkpoint_flush: tokio::time::Instant::now(),
             checkpoint_flush_interval: DEFAULT_CHECKPOINT_FLUSH_INTERVAL,
-            pool_drain_timeout: Duration::from_secs(60),
-            transition_events: super::transition::TransitionEventEmitterHandle::noop(),
+            pool_drain_timeout: DEFAULT_POOL_DRAIN_TIMEOUT,
         })
     }
 }
