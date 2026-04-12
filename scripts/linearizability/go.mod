@@ -1,5 +1,5 @@
 module logfwd/linearizability
 
-go 1.26.0
+go 1.22
 
 require github.com/anishathalye/porcupine v1.0.3

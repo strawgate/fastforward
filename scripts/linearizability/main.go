@@ -61,10 +61,15 @@ func cloneState(s modelState) modelState {
 	for k, v := range s.Batches {
 		batchesCopy[k] = v
 	}
+	var durableCopy *uint64
+	if s.Durable != nil {
+		d := *s.Durable
+		durableCopy = &d
+	}
 	return modelState{
 		Committed:    s.Committed,
 		HasCommitted: s.HasCommitted,
-		Durable:      s.Durable,
+		Durable:      durableCopy,
 		Order:        orderCopy,
 		Batches:      batchesCopy,
 	}

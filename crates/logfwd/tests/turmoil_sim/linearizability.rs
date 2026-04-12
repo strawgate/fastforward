@@ -156,6 +156,9 @@ fn build_porcupine_history(
 
     let mut operations = Vec::new();
     for (batch_id, submit) in &submits {
+        // `submit.call_ts.saturating_mul(2)` leaves odd timestamp slots for
+        // interleaved resolve operations before the JSON history entry below.
+        // Saturation keeps max-value simulated timestamps from overflowing.
         let call = submit.call_ts.saturating_mul(2);
         operations.push(json!({
             "client_id": submit.source_id,

@@ -87,7 +87,7 @@ fn trace_bridge_end_to_end_validates_runtime_transitions() {
     let validator = TransitionValidator::default();
     validator
         .validate(&events)
-        .expect("runtime trace should satisfy declared transition contract");
+        .expect("runtime event stream should satisfy declared trace contract");
 }
 
 #[test]
@@ -198,7 +198,7 @@ fn trace_validator_rejects_sink_activity_after_stopped() {
         .validate(&events)
         .expect_err("sink activity after stopped must be rejected");
     assert!(
-        err.contains("sink activity after stopped"),
+        err.contains("activity after Stopped"),
         "unexpected validator error: {err}"
     );
 }

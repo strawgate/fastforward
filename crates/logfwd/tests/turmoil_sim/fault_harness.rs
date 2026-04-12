@@ -166,6 +166,7 @@ pub struct FaultScenario {
     pool_drain_timeout: Duration,
     checkpoint_flush_interval: Option<Duration>,
     arm_checkpoint_crash_after: Option<Duration>,
+    crash_on_nth_flush: Option<u64>,
     network_faults: Vec<NetworkFault>,
     fail_rate: Option<f64>,
     typed_contract: Option<TypedInvariantBundle>,
@@ -190,6 +191,7 @@ impl FaultScenario {
             pool_drain_timeout: profile.pool_drain_timeout,
             checkpoint_flush_interval: None,
             arm_checkpoint_crash_after: None,
+            crash_on_nth_flush: None,
             network_faults: Vec::new(),
             fail_rate: None,
             typed_contract: None,
@@ -273,6 +275,13 @@ impl FaultScenario {
         self
     }
 
+    /// Simulate a crash exactly on the Nth checkpoint flush attempt.
+    pub fn with_checkpoint_crash_on_nth_flush(mut self, n: u64) -> Self {
+        assert!(n > 0, "crash trigger is 1-indexed; 0 disables crash path");
+        self.crash_on_nth_flush = Some(n);
+        self
+    }
+
     /// Schedule an additional network fault for the simulation.
     pub fn with_network_fault(mut self, fault: NetworkFault) -> Self {
         self.network_faults.push(fault);
@@ -335,6 +344,7 @@ impl FaultScenario {
                 let scenario = self.clone();
                 let maybe_checkpoint = if scenario.checkpoint_flush_interval.is_some()
                     || scenario.arm_checkpoint_crash_after.is_some()
+                    || scenario.crash_on_nth_flush.is_some()
                 {
                     let (store, handle) = ObservableCheckpointStore::new();
                     checkpoint_handle = Some(handle.clone());
@@ -362,6 +372,9 @@ impl FaultScenario {
 
                     if let Some((store, handle)) = maybe_checkpoint {
                         pipeline = pipeline.with_checkpoint_store(Box::new(store));
+                        if let Some(n) = scenario.crash_on_nth_flush {
+                            handle.crash_on_nth_flush(n);
+                        }
                         if let Some(crash_after) = scenario.arm_checkpoint_crash_after {
                             tokio::spawn(async move {
                                 tokio::time::sleep(crash_after).await;
@@ -390,6 +403,7 @@ impl FaultScenario {
                 let scenario = self.clone();
                 let maybe_checkpoint = if scenario.checkpoint_flush_interval.is_some()
                     || scenario.arm_checkpoint_crash_after.is_some()
+                    || scenario.crash_on_nth_flush.is_some()
                 {
                     let (store, handle) = ObservableCheckpointStore::new();
                     checkpoint_handle = Some(handle.clone());
@@ -416,6 +430,9 @@ impl FaultScenario {
 
                     if let Some((store, handle)) = maybe_checkpoint {
                         pipeline = pipeline.with_checkpoint_store(Box::new(store));
+                        if let Some(n) = scenario.crash_on_nth_flush {
+                            handle.crash_on_nth_flush(n);
+                        }
                         if let Some(crash_after) = scenario.arm_checkpoint_crash_after {
                             tokio::spawn(async move {
                                 tokio::time::sleep(crash_after).await;
@@ -442,6 +459,7 @@ impl FaultScenario {
 
                 let maybe_checkpoint = if scenario.checkpoint_flush_interval.is_some()
                     || scenario.arm_checkpoint_crash_after.is_some()
+                    || scenario.crash_on_nth_flush.is_some()
                 {
                     let (store, handle) = ObservableCheckpointStore::new();
                     checkpoint_handle = Some(handle.clone());
@@ -468,6 +486,9 @@ impl FaultScenario {
 
                     if let Some((store, handle)) = maybe_checkpoint {
                         pipeline = pipeline.with_checkpoint_store(Box::new(store));
+                        if let Some(n) = scenario.crash_on_nth_flush {
+                            handle.crash_on_nth_flush(n);
+                        }
                         if let Some(crash_after) = scenario.arm_checkpoint_crash_after {
                             tokio::spawn(async move {
                                 tokio::time::sleep(crash_after).await;
@@ -699,6 +720,7 @@ enum Invariant {
         source_id: u64,
     },
     CheckpointCrashCountGe(u64),
+    CheckpointFlushCountGe(u64),
     CheckpointUpdatesGe {
         source_id: u64,
         min: usize,
@@ -708,6 +730,12 @@ enum Invariant {
     CheckpointDurableEq {
         source_id: u64,
         expected: Option<u64>,
+    },
+    CheckpointDurableAbsent {
+        source_id: u64,
+    },
+    CheckpointDurableNotAheadOfUpdates {
+        source_id: u64,
     },
     TraceContractValid,
 }
@@ -759,6 +787,12 @@ impl InvariantSet {
         self
     }
 
+    /// Require that at least `min` checkpoint flushes succeeded.
+    pub fn checkpoint_flush_count_ge(mut self, min: u64) -> Self {
+        self.invariants.push(Invariant::CheckpointFlushCountGe(min));
+        self
+    }
+
     /// Require a minimum number of checkpoint updates for a source.
     pub fn checkpoint_updates_ge(mut self, source_id: u64, min: usize) -> Self {
         self.invariants
@@ -785,6 +819,20 @@ impl InvariantSet {
             source_id,
             expected,
         });
+        self
+    }
+
+    /// Require that durable checkpoint is absent for a source.
+    pub fn checkpoint_durable_absent(mut self, source_id: u64) -> Self {
+        self.invariants
+            .push(Invariant::CheckpointDurableAbsent { source_id });
+        self
+    }
+
+    /// Require durable checkpoint not to exceed observed checkpoint updates.
+    pub fn checkpoint_durable_not_ahead_of_updates(mut self, source_id: u64) -> Self {
+        self.invariants
+            .push(Invariant::CheckpointDurableNotAheadOfUpdates { source_id });
         self
     }
 
@@ -851,6 +899,19 @@ impl InvariantSet {
                         outcome.replay_hint()
                     );
                 }
+                Invariant::CheckpointFlushCountGe(minimum) => {
+                    let checkpoint = outcome
+                        .checkpoint()
+                        .expect("checkpoint invariant requested without checkpoint handle");
+                    assert!(
+                        checkpoint.flush_count() >= *minimum,
+                        "scenario '{}' expected flush_count >= {}, got {} ({})",
+                        outcome.scenario_name,
+                        minimum,
+                        checkpoint.flush_count(),
+                        outcome.replay_hint()
+                    );
+                }
                 Invariant::CheckpointUpdatesGe { source_id, min } => {
                     let checkpoint = outcome
                         .checkpoint()
@@ -909,6 +970,27 @@ impl InvariantSet {
                         durable,
                         outcome.replay_hint()
                     );
+                }
+                Invariant::CheckpointDurableAbsent { source_id } => {
+                    let checkpoint = outcome
+                        .checkpoint()
+                        .expect("checkpoint invariant requested without checkpoint handle");
+                    let durable = checkpoint.durable_offset(*source_id);
+                    assert_eq!(
+                        durable,
+                        None,
+                        "scenario '{}' expected absent durable checkpoint for source {}, got {:?} ({})",
+                        outcome.scenario_name,
+                        source_id,
+                        durable,
+                        outcome.replay_hint()
+                    );
+                }
+                Invariant::CheckpointDurableNotAheadOfUpdates { source_id } => {
+                    let checkpoint = outcome
+                        .checkpoint()
+                        .expect("checkpoint invariant requested without checkpoint handle");
+                    checkpoint.assert_durable_not_ahead_of_updates(*source_id);
                 }
                 Invariant::TraceContractValid => {
                     if let Some(err) = &outcome.trace_validation_error {
