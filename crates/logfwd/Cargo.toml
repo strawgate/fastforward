@@ -14,6 +14,7 @@ dhat-heap = ["dhat", "logfwd-runtime/dhat-heap"]
 cpu-profiling = ["logfwd-runtime/cpu-profiling"]
 turmoil = ["logfwd-runtime/turmoil"]
 datafusion = ["dep:logfwd-transform", "logfwd-runtime/datafusion"]
+otlp-research = ["logfwd-config/otlp-research", "logfwd-runtime/otlp-research", "logfwd-io/otlp-research"]
 
 [dependencies]
 clap = { workspace = true, features = ["derive"] }

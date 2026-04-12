@@ -2,6 +2,8 @@ use crate::types::{
     Config, ConfigError, EnrichmentConfig, Format, GeneratorAttributeValueConfig,
     GeneratorProfileConfig, InputType, InputTypeConfig, JournaldBackendConfig, OutputType,
 };
+#[cfg(not(feature = "otlp-research"))]
+use crate::types::OtlpProtobufDecodeModeConfig;
 use std::path::Path;
 use url::Url;
 
@@ -168,6 +170,18 @@ impl Config {
                                         "pipeline '{name}' input '{label}': unsupported otlp resource_prefix '{prefix}' (currently only 'resource.attributes.' is supported)"
                                     )));
                                 }
+                            }
+                            #[cfg(not(feature = "otlp-research"))]
+                            if matches!(
+                                o.protobuf_decode_mode,
+                                Some(
+                                    OtlpProtobufDecodeModeConfig::ProjectedFallback
+                                        | OtlpProtobufDecodeModeConfig::ProjectedOnly
+                                )
+                            ) {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': protobuf_decode_mode projected modes require building with the otlp-research feature"
+                                )));
                             }
                         }
                         InputTypeConfig::Http(h) => {
