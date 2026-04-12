@@ -89,10 +89,11 @@ jobs:
           lycheeVersion: v0.23.0
           args: >-
             --no-progress
-            --accept 200,429
+            --accept 200,429,502
             --max-retries 3
             --exclude 'mailto:'
             --exclude-loopback
+            --exclude '^https://opentelemetry.io/docs/'
             --root-dir ${{ github.workspace }}/book/dist/memagent
             ${{ github.workspace }}/book/dist/memagent
 

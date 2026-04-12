@@ -461,7 +461,10 @@ jobs:
   turmoil:
     name: Turmoil simulation
     needs: [changes]
-    if: github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'ci:full')
+    if: |
+      github.event_name == 'push' ||
+      contains(github.event.pull_request.labels.*.name, 'ci:full') ||
+      (github.event.pull_request.draft == false && needs.changes.outputs.rust == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
