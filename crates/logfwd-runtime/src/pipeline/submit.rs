@@ -117,7 +117,7 @@ impl Pipeline {
                         sending,
                         super::checkpoint_policy::TicketDisposition::Hold,
                     )
-                    .held;
+                    .has_held;
                 self.metrics.finish_active_batch(batch_id);
                 if held {
                     shutdown.cancel();

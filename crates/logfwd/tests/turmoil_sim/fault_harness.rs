@@ -346,7 +346,10 @@ impl FaultScenario {
                     || scenario.arm_checkpoint_crash_after.is_some()
                     || scenario.crash_on_nth_flush.is_some()
                 {
-                    let (store, handle) = ObservableCheckpointStore::new();
+                    let (mut store, handle) = ObservableCheckpointStore::new();
+                    if let Some(n) = self.crash_on_nth_flush {
+                        store = store.with_crash_on_nth_flush(n);
+                    }
                     checkpoint_handle = Some(handle.clone());
                     Some((store, handle))
                 } else {
@@ -372,9 +375,6 @@ impl FaultScenario {
 
                     if let Some((store, handle)) = maybe_checkpoint {
                         pipeline = pipeline.with_checkpoint_store(Box::new(store));
-                        if let Some(n) = scenario.crash_on_nth_flush {
-                            handle.crash_on_nth_flush(n);
-                        }
                         if let Some(crash_after) = scenario.arm_checkpoint_crash_after {
                             tokio::spawn(async move {
                                 tokio::time::sleep(crash_after).await;
@@ -405,7 +405,10 @@ impl FaultScenario {
                     || scenario.arm_checkpoint_crash_after.is_some()
                     || scenario.crash_on_nth_flush.is_some()
                 {
-                    let (store, handle) = ObservableCheckpointStore::new();
+                    let (mut store, handle) = ObservableCheckpointStore::new();
+                    if let Some(n) = self.crash_on_nth_flush {
+                        store = store.with_crash_on_nth_flush(n);
+                    }
                     checkpoint_handle = Some(handle.clone());
                     Some((store, handle))
                 } else {
@@ -430,9 +433,6 @@ impl FaultScenario {
 
                     if let Some((store, handle)) = maybe_checkpoint {
                         pipeline = pipeline.with_checkpoint_store(Box::new(store));
-                        if let Some(n) = scenario.crash_on_nth_flush {
-                            handle.crash_on_nth_flush(n);
-                        }
                         if let Some(crash_after) = scenario.arm_checkpoint_crash_after {
                             tokio::spawn(async move {
                                 tokio::time::sleep(crash_after).await;
@@ -461,7 +461,10 @@ impl FaultScenario {
                     || scenario.arm_checkpoint_crash_after.is_some()
                     || scenario.crash_on_nth_flush.is_some()
                 {
-                    let (store, handle) = ObservableCheckpointStore::new();
+                    let (mut store, handle) = ObservableCheckpointStore::new();
+                    if let Some(n) = self.crash_on_nth_flush {
+                        store = store.with_crash_on_nth_flush(n);
+                    }
                     checkpoint_handle = Some(handle.clone());
                     Some((store, handle))
                 } else {
@@ -486,9 +489,6 @@ impl FaultScenario {
 
                     if let Some((store, handle)) = maybe_checkpoint {
                         pipeline = pipeline.with_checkpoint_store(Box::new(store));
-                        if let Some(n) = scenario.crash_on_nth_flush {
-                            handle.crash_on_nth_flush(n);
-                        }
                         if let Some(crash_after) = scenario.arm_checkpoint_crash_after {
                             tokio::spawn(async move {
                                 tokio::time::sleep(crash_after).await;

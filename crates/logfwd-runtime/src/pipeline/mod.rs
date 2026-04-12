@@ -104,7 +104,7 @@ pub(crate) struct ChannelMsg {
 
 #[derive(Debug, Default)]
 struct TicketApplication {
-    held: bool,
+    has_held: bool,
     checkpoint_advances: Vec<(u64, u64)>,
 }
 
@@ -822,7 +822,7 @@ impl Pipeline {
             },
         )
         .await;
-        application.held
+        application.has_held
     }
 
     /// Finalize Sending tickets and apply receipts to the machine when present.
@@ -947,7 +947,7 @@ impl Pipeline {
             }
         }
         if held > 0 {
-            application.held = true;
+            application.has_held = true;
             tracing::warn!(
                 held_tickets = held,
                 "pipeline: terminal hold requested; stopping ingestion so checkpoints do not advance past undelivered data"
@@ -980,6 +980,7 @@ impl Pipeline {
                 }
             }
         }
+        application.checkpoint_advances.sort_unstable();
         application
     }
 }
@@ -2830,7 +2831,7 @@ output:
         assert!(
             pipeline
                 .ack_all_tickets(None, vec![ticket], TicketDisposition::Hold)
-                .held,
+                .has_held,
             "hold disposition must request terminal shutdown to bound held-ticket growth"
         );
 

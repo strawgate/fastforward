@@ -414,7 +414,7 @@ fn one_way_fault_schedule_recovers_after_directional_repair() {
 }
 
 fn replay_equivalence_run(seed: u64, name: &str) -> Vec<TraceEvent> {
-    FaultScenario::builder(name)
+    let outcome = FaultScenario::builder(name)
         .with_seed(seed)
         .with_line_count(16)
         .with_sink_script(vec![
@@ -423,9 +423,12 @@ fn replay_equivalence_run(seed: u64, name: &str) -> Vec<TraceEvent> {
         ])
         .with_checkpoint_flush_interval(Duration::from_millis(30))
         .with_shutdown_after(Duration::from_secs(3))
-        .run()
-        .trace_events()
-        .to_vec()
+        .run();
+    InvariantSet::new()
+        .no_sim_error()
+        .trace_contract_valid()
+        .verify(&outcome);
+    outcome.trace_events().to_vec()
 }
 
 #[test]
