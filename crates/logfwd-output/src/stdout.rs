@@ -948,9 +948,9 @@ mod tests {
 
         let mut expected = Vec::new();
         sink.write_batch_to(&batch, &meta, &mut expected).unwrap();
-        let expected_lines = expected.iter().filter(|b| **b == b'\n').count() as u64;
+        let expected_lines = memchr_iter(b'\n', &expected).count() as u64;
 
-        let _ = sink.send_batch(&batch, &meta).await.unwrap();
+        sink.send_batch(&batch, &meta).await.unwrap();
 
         assert_eq!(
             stats.lines_total.load(Ordering::Relaxed),
