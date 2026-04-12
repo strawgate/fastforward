@@ -39,7 +39,7 @@ export async function fetchBenchIndex(signal) {
   try {
     return await fetchIndex(benchDataSource, signal);
   } catch {
-    return fetchJsonAtPath("data/index.json", signal);
+    return null;
   }
 }
 
@@ -47,7 +47,7 @@ export async function fetchBenchRun(runId, signal) {
   try {
     return await fetchRun(benchDataSource, runId, signal);
   } catch {
-    return fetchJsonAtPath(`data/runs/${runId}.json`, signal);
+    return null;
   }
 }
 
