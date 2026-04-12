@@ -27,9 +27,6 @@ const MAX_DATAGRAM_PAYLOAD: usize = 1400;
 pub struct UdpSink {
     name: String,
     socket: UdpSocket,
-    /// The target address string (host:port). DNS resolution is deferred to
-    /// each `send_to` call so the sink tolerates DNS being temporarily
-    /// unavailable at startup and picks up address changes over time.
     target: String,
     /// Scratch buffer for serializing a single row before deciding whether
     /// it fits in the current datagram.
@@ -42,11 +39,8 @@ pub struct UdpSink {
 impl UdpSink {
     /// Create a new UDP sink.
     ///
-    /// Binds a UDP socket to an ephemeral port (`0.0.0.0:0`) for outbound-only
-    /// traffic. DNS resolution of `target` is deferred to the first
-    /// [`send_batch`](Sink::send_batch) call, avoiding synchronous DNS on the
-    /// async runtime thread and allowing the sink to be constructed even when
-    /// DNS is temporarily unavailable.
+    /// Binds an outbound UDP socket and defers target DNS resolution until send
+    /// time so startup does not block on or fail due to transient DNS issues.
     pub fn new(
         name: impl Into<String>,
         target: impl Into<String>,
@@ -65,15 +59,8 @@ impl UdpSink {
         })
     }
 
-    /// Resolve the target address asynchronously and return the first IPv4
-    /// `SocketAddr`. Uses `tokio::net::lookup_host` so DNS happens on the
-    /// async runtime without blocking an OS thread.
-    ///
-    /// The socket is bound to `0.0.0.0:0` (IPv4), so we filter for IPv4
-    /// addresses to avoid address-family mismatches on dual-stack systems
-    /// where `lookup_host` may return IPv6 addresses first.
-    async fn resolve_target(&self) -> io::Result<std::net::SocketAddr> {
-        tokio::net::lookup_host(&self.target)
+    async fn send_packet(&self, payload: &[u8]) -> io::Result<()> {
+        let addr = tokio::net::lookup_host(&self.target)
             .await?
             .find(std::net::SocketAddr::is_ipv4)
             .ok_or_else(|| {
@@ -81,26 +68,14 @@ impl UdpSink {
                     io::ErrorKind::AddrNotAvailable,
                     format!("DNS lookup returned no IPv4 addresses for {}", self.target),
                 )
-            })
-    }
-
-    /// Send one UDP datagram to the configured peer.
-    ///
-    /// Resolves the target address on each call via async DNS, then uses
-    /// `send_to` on the unconnected socket. This defers and repeats
-    /// resolution so DNS changes are picked up automatically.
-    async fn send_packet(&self, buf: &[u8]) -> io::Result<()> {
-        let addr = self.resolve_target().await?;
-        match self.socket.send_to(buf, addr).await {
-            Ok(n) if n == buf.len() => Ok(()),
+            })?;
+        match self.socket.send_to(payload, addr).await {
+            Ok(n) if n == payload.len() => Ok(()),
             Ok(_) => Err(io::Error::new(
                 io::ErrorKind::WriteZero,
                 "UDP datagram was only partially sent",
             )),
-            Err(e) if e.kind() == io::ErrorKind::ConnectionRefused => {
-                // Silently drop — UDP is best-effort.
-                Ok(())
-            }
+            Err(e) if e.kind() == io::ErrorKind::ConnectionRefused => Ok(()),
             Err(e) => Err(e),
         }
     }
