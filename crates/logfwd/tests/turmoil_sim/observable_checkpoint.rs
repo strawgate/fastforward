@@ -35,7 +35,6 @@ pub struct CheckpointState {
 pub struct CheckpointHandle {
     state: Arc<Mutex<CheckpointState>>,
     crash_armed: Arc<AtomicBool>,
-    crash_on_flush_number: Arc<AtomicU64>,
 }
 
 #[allow(dead_code)]
@@ -59,11 +58,6 @@ impl CheckpointHandle {
     /// Arm a crash — next flush() will fail and lose pending data.
     pub fn arm_crash(&self) {
         self.crash_armed.store(true, Ordering::SeqCst);
-    }
-
-    /// Crash exactly on the Nth `flush` call (1-indexed).
-    pub fn crash_on_nth_flush(&self, n: u64) {
-        self.crash_on_flush_number.store(n, Ordering::SeqCst);
     }
 
     /// Verify that offsets for a given source never decrease in update history.
@@ -153,7 +147,6 @@ impl ObservableCheckpointStore {
         let handle = CheckpointHandle {
             state: state.clone(),
             crash_armed: crash_armed.clone(),
-            crash_on_flush_number: crash_on_flush_number.clone(),
         };
         let store = Self {
             state,
@@ -171,6 +164,13 @@ impl ObservableCheckpointStore {
     /// `CheckpointFlush` events as the pipeline updates and flushes state.
     pub fn with_trace_recorder(mut self, trace: TraceRecorder) -> Self {
         self.trace = Some(trace);
+        self
+    }
+
+    /// Configure the store to fail exactly on the Nth `flush` call (1-indexed).
+    pub fn with_crash_on_nth_flush(self, n: u64) -> Self {
+        assert!(n > 0, "crash trigger is 1-indexed; 0 disables crash path");
+        self.crash_on_flush_number.store(n, Ordering::SeqCst);
         self
     }
 }

@@ -50,6 +50,7 @@ type modelState struct {
 	Committed    uint64
 	HasCommitted bool
 	Durable      *uint64
+	SourceID     *uint64
 	Order        []uint64
 	Batches      map[uint64]batchState
 }
@@ -66,10 +67,16 @@ func cloneState(s modelState) modelState {
 		d := *s.Durable
 		durableCopy = &d
 	}
+	var sourceCopy *uint64
+	if s.SourceID != nil {
+		source := *s.SourceID
+		sourceCopy = &source
+	}
 	return modelState{
 		Committed:    s.Committed,
 		HasCommitted: s.HasCommitted,
 		Durable:      durableCopy,
+		SourceID:     sourceCopy,
 		Order:        orderCopy,
 		Batches:      batchesCopy,
 	}
@@ -96,6 +103,7 @@ func buildModel() porcupine.Model {
 				Committed:    0,
 				HasCommitted: false,
 				Durable:      nil,
+				SourceID:     nil,
 				Order:        make([]uint64, 0),
 				Batches:      make(map[uint64]batchState),
 			}
@@ -107,6 +115,12 @@ func buildModel() porcupine.Model {
 			switch input.Op {
 			case "submit":
 				if _, exists := state.Batches[input.BatchID]; exists {
+					return false, state
+				}
+				if state.SourceID == nil {
+					source := input.SourceID
+					state.SourceID = &source
+				} else if input.SourceID != *state.SourceID {
 					return false, state
 				}
 				state.Batches[input.BatchID] = batchState{
@@ -187,6 +201,9 @@ func buildModel() porcupine.Model {
 				}
 				return true, state
 			case "read_durable":
+				if state.SourceID == nil || input.SourceID != *state.SourceID {
+					return false, state
+				}
 				if state.Durable == nil {
 					return output.Durable == nil, state
 				}
@@ -205,6 +222,12 @@ func buildModel() porcupine.Model {
 				return false
 			}
 			if left.Durable != nil && *left.Durable != *right.Durable {
+				return false
+			}
+			if (left.SourceID == nil) != (right.SourceID == nil) {
+				return false
+			}
+			if left.SourceID != nil && *left.SourceID != *right.SourceID {
 				return false
 			}
 			for i := range left.Order {
