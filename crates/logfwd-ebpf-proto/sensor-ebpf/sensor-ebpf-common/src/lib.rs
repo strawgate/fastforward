@@ -48,7 +48,7 @@ pub struct EventHeader {
     pub tgid: u32,
     /// Thread ID.
     pub pid: u32,
-    /// Parent thread group ID.
+    /// Parent thread group ID (currently set to 0; requires task_struct reading).
     pub ppid: u32,
     /// UID of the calling process.
     pub uid: u32,

@@ -119,9 +119,13 @@ fn wall_clock_ns() -> u64 {
         .as_nanos() as u64
 }
 
-/// Format an IPv4 address from a network-byte-order u32 and port into "IP:port".
+/// Format an IPv4 address from a `__be32` u32 and port into "IP:port".
+///
+/// The kernel stores `saddr`/`daddr` as `__be32`: the raw bytes in memory are
+/// already in network order. `to_ne_bytes()` gives those raw bytes on any
+/// platform, and `Ipv4Addr::from([u8; 4])` interprets them in network order.
 fn format_addr(addr: u32, port: u16) -> String {
-    let ip = Ipv4Addr::from(addr.to_be());
+    let ip = Ipv4Addr::from(addr.to_ne_bytes());
     format!("{ip}:{port}")
 }
 
@@ -156,9 +160,9 @@ struct EventRow {
 }
 
 impl EventRow {
-    fn from_header(header: &EventHeader, kind: &'static str) -> Self {
+    fn from_header(header: &EventHeader, kind: &'static str, mono_to_wall_offset_ns: u64) -> Self {
         Self {
-            timestamp_unix_nano: wall_clock_ns(),
+            timestamp_unix_nano: header.timestamp_ns.saturating_add(mono_to_wall_offset_ns),
             event_kind: kind,
             tgid: header.tgid,
             pid: header.pid,
@@ -338,6 +342,19 @@ impl PlatformSensorInput {
         let mut ring = RingBuf::try_from(events_map)
             .map_err(|e| io::Error::other(format!("failed to create ring buffer: {e}")))?;
 
+        // Compute monotonic-to-wall-clock offset once per drain batch.
+        // bpf_ktime_get_ns() is CLOCK_MONOTONIC; we offset to CLOCK_REALTIME.
+        let mono_to_wall_offset_ns = {
+            let mut ts = libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
+            // SAFETY: valid pointer to stack-allocated timespec.
+            unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &raw mut ts) };
+            let mono_now_ns = ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64;
+            wall_clock_ns().saturating_sub(mono_now_ns)
+        };
+
         let mut rows = Vec::with_capacity(max_events.min(256));
         let mut drained = 0_usize;
 
@@ -345,6 +362,8 @@ impl PlatformSensorInput {
             let Some(item) = ring.next() else {
                 break;
             };
+            drained += 1;
+
             let ptr = item.as_ptr();
             let len = item.len();
 
@@ -360,10 +379,9 @@ impl PlatformSensorInput {
                 continue;
             }
 
-            if let Some(row) = parse_event(ptr, len, header) {
+            if let Some(row) = parse_event(ptr, len, header, mono_to_wall_offset_ns) {
                 rows.push(row);
             }
-            drained += 1;
         }
 
         if rows.is_empty() {
@@ -384,26 +402,31 @@ impl PlatformSensorInput {
 /// Parse a single ring buffer event into an `EventRow`.
 ///
 /// Returns `None` for malformed or unknown events.
-fn parse_event(ptr: *const u8, len: usize, header: &EventHeader) -> Option<EventRow> {
+fn parse_event(
+    ptr: *const u8,
+    len: usize,
+    header: &EventHeader,
+    mono_to_wall_offset_ns: u64,
+) -> Option<EventRow> {
     match header.kind {
         k if k == EventKind::ProcessExec as u32 && len >= size_of::<ProcessExecEvent>() => {
             // SAFETY: Length checked >= size_of::<ProcessExecEvent>(); ring buffer is 8-byte aligned.
             let ev = unsafe { &*(ptr.cast::<ProcessExecEvent>()) };
-            let mut row = EventRow::from_header(header, "exec");
+            let mut row = EventRow::from_header(header, "exec", mono_to_wall_offset_ns);
             row.filename = Some(safe_str(&ev.filename, ev.filename_len as usize).to_string());
             Some(row)
         }
         k if k == EventKind::ProcessExit as u32 && len >= size_of::<ProcessExitEvent>() => {
             // SAFETY: Length checked >= size_of::<ProcessExitEvent>(); ring buffer is 8-byte aligned.
             let ev = unsafe { &*(ptr.cast::<ProcessExitEvent>()) };
-            let mut row = EventRow::from_header(header, "exit");
+            let mut row = EventRow::from_header(header, "exit", mono_to_wall_offset_ns);
             row.exit_code = Some(ev.exit_code);
             Some(row)
         }
         k if k == EventKind::TcpConnect as u32 && len >= size_of::<TcpConnectEvent>() => {
             // SAFETY: Length checked >= size_of::<TcpConnectEvent>(); ring buffer is 8-byte aligned.
             let ev = unsafe { &*(ptr.cast::<TcpConnectEvent>()) };
-            let mut row = EventRow::from_header(header, "tcp_connect");
+            let mut row = EventRow::from_header(header, "tcp_connect", mono_to_wall_offset_ns);
             row.src_addr = Some(format_addr(ev.saddr, ev.sport));
             row.dst_addr = Some(format_addr(ev.daddr, ev.dport));
             row.src_port = Some(ev.sport);
@@ -413,7 +436,7 @@ fn parse_event(ptr: *const u8, len: usize, header: &EventHeader) -> Option<Event
         k if k == EventKind::TcpAccept as u32 && len >= size_of::<TcpAcceptEvent>() => {
             // SAFETY: Length checked >= size_of::<TcpAcceptEvent>(); ring buffer is 8-byte aligned.
             let ev = unsafe { &*(ptr.cast::<TcpAcceptEvent>()) };
-            let mut row = EventRow::from_header(header, "tcp_accept");
+            let mut row = EventRow::from_header(header, "tcp_accept", mono_to_wall_offset_ns);
             row.src_addr = Some(format_addr(ev.saddr, ev.sport));
             row.dst_addr = Some(format_addr(ev.daddr, ev.dport));
             row.src_port = Some(ev.sport);
@@ -423,7 +446,7 @@ fn parse_event(ptr: *const u8, len: usize, header: &EventHeader) -> Option<Event
         k if k == EventKind::FileOpen as u32 && len >= size_of::<FileOpenEvent>() => {
             // SAFETY: Length checked >= size_of::<FileOpenEvent>(); ring buffer is 8-byte aligned.
             let ev = unsafe { &*(ptr.cast::<FileOpenEvent>()) };
-            let mut row = EventRow::from_header(header, "file_open");
+            let mut row = EventRow::from_header(header, "file_open", mono_to_wall_offset_ns);
             row.filename = Some(safe_str(&ev.filename, ev.filename_len as usize).to_string());
             row.flags = Some(ev.flags);
             Some(row)
@@ -431,7 +454,7 @@ fn parse_event(ptr: *const u8, len: usize, header: &EventHeader) -> Option<Event
         k if k == EventKind::FileDelete as u32 && len >= size_of::<FileDeleteEvent>() => {
             // SAFETY: Length checked >= size_of::<FileDeleteEvent>(); ring buffer is 8-byte aligned.
             let ev = unsafe { &*(ptr.cast::<FileDeleteEvent>()) };
-            let mut row = EventRow::from_header(header, "file_delete");
+            let mut row = EventRow::from_header(header, "file_delete", mono_to_wall_offset_ns);
             row.filename = Some(safe_str(&ev.pathname, ev.pathname_len as usize).to_string());
             row.flags = Some(ev.flags);
             Some(row)
@@ -439,7 +462,7 @@ fn parse_event(ptr: *const u8, len: usize, header: &EventHeader) -> Option<Event
         k if k == EventKind::FileRename as u32 && len >= size_of::<FileRenameEvent>() => {
             // SAFETY: Length checked >= size_of::<FileRenameEvent>(); ring buffer is 8-byte aligned.
             let ev = unsafe { &*(ptr.cast::<FileRenameEvent>()) };
-            let mut row = EventRow::from_header(header, "file_rename");
+            let mut row = EventRow::from_header(header, "file_rename", mono_to_wall_offset_ns);
             row.old_path = Some(safe_str(&ev.oldname, ev.oldname_len as usize).to_string());
             row.new_path = Some(safe_str(&ev.newname, ev.newname_len as usize).to_string());
             Some(row)
@@ -447,21 +470,21 @@ fn parse_event(ptr: *const u8, len: usize, header: &EventHeader) -> Option<Event
         k if k == EventKind::Setuid as u32 && len >= size_of::<SetuidEvent>() => {
             // SAFETY: Length checked >= size_of::<SetuidEvent>(); ring buffer is 8-byte aligned.
             let ev = unsafe { &*(ptr.cast::<SetuidEvent>()) };
-            let mut row = EventRow::from_header(header, "setuid");
+            let mut row = EventRow::from_header(header, "setuid", mono_to_wall_offset_ns);
             row.target_uid = Some(ev.target_uid);
             Some(row)
         }
         k if k == EventKind::Setgid as u32 && len >= size_of::<SetgidEvent>() => {
             // SAFETY: Length checked >= size_of::<SetgidEvent>(); ring buffer is 8-byte aligned.
             let ev = unsafe { &*(ptr.cast::<SetgidEvent>()) };
-            let mut row = EventRow::from_header(header, "setgid");
+            let mut row = EventRow::from_header(header, "setgid", mono_to_wall_offset_ns);
             row.target_gid = Some(ev.target_gid);
             Some(row)
         }
         k if k == EventKind::ModuleLoad as u32 && len >= size_of::<ModuleLoadEvent>() => {
             // SAFETY: Length checked >= size_of::<ModuleLoadEvent>(); ring buffer is 8-byte aligned.
             let ev = unsafe { &*(ptr.cast::<ModuleLoadEvent>()) };
-            let mut row = EventRow::from_header(header, "module_load");
+            let mut row = EventRow::from_header(header, "module_load", mono_to_wall_offset_ns);
             row.filename = Some(safe_str(&ev.name, ev.name_len as usize).to_string());
             row.module_taints = Some(ev.taints);
             Some(row)
@@ -469,7 +492,7 @@ fn parse_event(ptr: *const u8, len: usize, header: &EventHeader) -> Option<Event
         k if k == EventKind::Ptrace as u32 && len >= size_of::<PtraceEvent>() => {
             // SAFETY: Length checked >= size_of::<PtraceEvent>(); ring buffer is 8-byte aligned.
             let ev = unsafe { &*(ptr.cast::<PtraceEvent>()) };
-            let mut row = EventRow::from_header(header, "ptrace");
+            let mut row = EventRow::from_header(header, "ptrace", mono_to_wall_offset_ns);
             row.ptrace_request = Some(ptrace_request_name(ev.request).to_string());
             row.ptrace_target_pid = Some(ev.target_pid);
             Some(row)
@@ -477,7 +500,7 @@ fn parse_event(ptr: *const u8, len: usize, header: &EventHeader) -> Option<Event
         k if k == EventKind::MemfdCreate as u32 && len >= size_of::<MemfdCreateEvent>() => {
             // SAFETY: Length checked >= size_of::<MemfdCreateEvent>(); ring buffer is 8-byte aligned.
             let ev = unsafe { &*(ptr.cast::<MemfdCreateEvent>()) };
-            let mut row = EventRow::from_header(header, "memfd_create");
+            let mut row = EventRow::from_header(header, "memfd_create", mono_to_wall_offset_ns);
             row.filename = Some(safe_str(&ev.name, ev.name_len as usize).to_string());
             row.flags = Some(ev.flags);
             Some(row)
@@ -586,24 +609,31 @@ impl InputSource for PlatformSensorInput {
 
         match state {
             SensorState::Init { config, schema } => {
-                let (ebpf, skipped_probes) = Self::load_ebpf(&config)?;
-                let health = if skipped_probes.is_empty() {
-                    ComponentHealth::Healthy
-                } else {
-                    tracing::warn!(
-                        "eBPF sensor degraded — skipped probes: {}",
-                        skipped_probes.join(", ")
-                    );
-                    ComponentHealth::Degraded
-                };
-                self.state = SensorState::Running {
-                    schema,
-                    config,
-                    ebpf,
-                    health,
-                    self_tgid: std::process::id(),
-                    skipped_probes,
-                };
+                match Self::load_ebpf(&config) {
+                    Ok((ebpf, skipped_probes)) => {
+                        let health = if skipped_probes.is_empty() {
+                            ComponentHealth::Healthy
+                        } else {
+                            tracing::warn!(
+                                "eBPF sensor degraded — skipped probes: {}",
+                                skipped_probes.join(", ")
+                            );
+                            ComponentHealth::Degraded
+                        };
+                        self.state = SensorState::Running {
+                            schema,
+                            config,
+                            ebpf,
+                            health,
+                            self_tgid: std::process::id(),
+                            skipped_probes,
+                        };
+                    }
+                    Err(e) => {
+                        tracing::warn!("eBPF load failed, will retry on next poll: {e}");
+                        self.state = SensorState::Init { config, schema };
+                    }
+                }
                 // First poll after load returns empty — data arrives next cycle.
                 Ok(Vec::new())
             }

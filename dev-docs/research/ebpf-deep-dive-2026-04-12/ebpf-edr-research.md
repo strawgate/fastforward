@@ -257,7 +257,7 @@ Catches: `dlopen()`, `LD_PRELOAD`, `memfd_create()` + `mmap(PROT_EXEC)`.
 |----------|--------------------|
 | #2 Process state | Ancestry-based behavioral detection across all tactics |
 | #3 Correlation | T1055 (injection), success/failure discrimination |
-| #4 Argv capture | T1059.* (command/scripting), T1574.* (hijack), T1036 (masquerade) |
+| #4 Argv capture | T1059.\* (command/scripting), T1574.\* (hijack), T1036 (masquerade) |
 | #6 LSM hooks | T1003.007/.008 (credential dump), T1098.004 (SSH key), T1546.004 (shell config), T1053.003 (cron) |
 | #9 Namespace | T1611 (container escape) — Critical severity |
 | #10 Socket | T1090/T1572 (proxy/tunneling), reverse shells |

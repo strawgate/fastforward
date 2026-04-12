@@ -40,6 +40,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(10);
 
+    if duration_secs == 0 {
+        eprintln!("error: --duration must be > 0");
+        std::process::exit(1);
+    }
+
     let self_tgid = std::process::id();
 
     eprintln!("Loading eBPF from {ebpf_path}...");
@@ -98,7 +103,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     eprintln!("Sensor running for {duration_secs}s. Events on stdout.");
 
-    let mut ring = RingBuf::try_from(ebpf.map_mut("EVENTS").unwrap())?;
+    let events_map = ebpf
+        .map_mut("EVENTS")
+        .ok_or_else(|| std::io::Error::other("eBPF object is missing EVENTS ring buffer"))?;
+    let mut ring = RingBuf::try_from(events_map)?;
     let mut stdout = std::io::stdout().lock();
     let start = Instant::now();
     let deadline = Duration::from_secs(duration_secs);
