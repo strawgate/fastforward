@@ -1,3 +1,5 @@
+#[cfg_attr(not(kani), allow(unused_imports))]
+use std::io::ErrorKind;
 use std::time::Duration;
 
 use logfwd_io::checkpoint::CheckpointStore;
@@ -7,6 +9,25 @@ use super::internal_faults;
 #[must_use]
 const fn should_retry_flush(attempt: u32, max_attempts: u32) -> bool {
     attempt < max_attempts.saturating_sub(1)
+}
+
+/// Returns `true` if the given I/O error kind is transient and worth retrying.
+#[must_use]
+#[cfg_attr(not(kani), allow(dead_code))]
+const fn is_retryable_flush_error(kind: ErrorKind) -> bool {
+    matches!(
+        kind,
+        ErrorKind::Interrupted
+            | ErrorKind::WouldBlock
+            | ErrorKind::TimedOut
+            | ErrorKind::WriteZero
+            | ErrorKind::UnexpectedEof
+            | ErrorKind::ConnectionReset
+            | ErrorKind::ConnectionAborted
+            | ErrorKind::ConnectionRefused
+            | ErrorKind::NotConnected
+            | ErrorKind::BrokenPipe
+    )
 }
 
 /// Flush checkpoint store with bounded retry (3 attempts, 100ms between).
