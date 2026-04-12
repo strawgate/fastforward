@@ -208,8 +208,7 @@ impl OtlpSink {
         let columns = resolve_batch_columns(batch, self.message_field.as_str(), &resource_prefix);
 
         // Phase 1: encode all LogRecords and assign each row to a resource group.
-        let mut records_buf: Vec<u8> =
-            Vec::with_capacity(estimate_records_buf_capacity(num_rows, &columns));
+        let mut records_buf: Vec<u8> = Vec::with_capacity(num_rows * 128);
         let mut grouped_ranges: Vec<ResourceGroup<'_>> = Vec::new();
         let mut group_index_by_key: std::collections::HashMap<
             (ResourceKey<'_>, ScopeKey<'_>),
@@ -449,18 +448,6 @@ impl OtlpSink {
     pub fn encoded_payload(&self) -> &[u8] {
         &self.encoder_buf
     }
-}
-
-fn estimate_records_buf_capacity(num_rows: usize, columns: &BatchColumns<'_>) -> usize {
-    const MIN_RECORD_BYTES: usize = 128;
-    const ATTR_BYTES_HINT: usize = 48;
-    const MAX_INITIAL_RECORDS_BUF: usize = 64 * 1024 * 1024;
-
-    let hinted_attrs = columns.attribute_cols.len().min(64);
-    let bytes_per_row = MIN_RECORD_BYTES.saturating_add(hinted_attrs * ATTR_BYTES_HINT);
-    num_rows
-        .saturating_mul(bytes_per_row)
-        .min(MAX_INITIAL_RECORDS_BUF)
 }
 
 impl OtlpSink {
@@ -858,8 +845,8 @@ fn resolve_batch_columns<'a>(
     let mut trace_id_col: Option<(usize, OtlpStrCol<'_>)> = None;
     let mut span_id_col: Option<(usize, OtlpStrCol<'_>)> = None;
     let mut flags_col: Option<(usize, &PrimitiveArray<Int64Type>)> = None;
-    // Column indices to exclude from attributes.
-    let mut excluded = vec![false; schema.fields().len()];
+    // Indices of columns to exclude from attributes.
+    let mut excluded: Vec<usize> = Vec::with_capacity(4);
 
     for (idx, field) in schema.fields().iter().enumerate() {
         let col_name = field.name().as_str();
@@ -874,13 +861,13 @@ fn resolve_batch_columns<'a>(
                 if timestamp_col.is_none() && timestamp_num_col.is_none() {
                     if let Some(arr) = resolve_otlp_str_col(batch.column(idx).as_ref()) {
                         timestamp_col = Some((idx, arr));
-                        excluded[idx] = true;
+                        excluded.push(idx);
                     } else if matches!(
                         field.data_type(),
                         DataType::Int64 | DataType::UInt64 | DataType::Timestamp(_, _)
                     ) {
                         timestamp_num_col = Some((idx, batch.column(idx).as_ref()));
-                        excluded[idx] = true;
+                        excluded.push(idx);
                     }
                 }
             }
@@ -894,7 +881,7 @@ fn resolve_batch_columns<'a>(
                     && let Some(arr) = resolve_otlp_str_col(batch.column(idx).as_ref())
                 {
                     level_col = Some((idx, arr));
-                    excluded[idx] = true;
+                    excluded.push(idx);
                 }
             }
             field_names::TRACE_ID => {
@@ -902,7 +889,7 @@ fn resolve_batch_columns<'a>(
                     && let Some(arr) = resolve_otlp_str_col(batch.column(idx).as_ref())
                 {
                     trace_id_col = Some((idx, arr));
-                    excluded[idx] = true;
+                    excluded.push(idx);
                 }
             }
             field_names::SPAN_ID => {
@@ -910,7 +897,7 @@ fn resolve_batch_columns<'a>(
                     && let Some(arr) = resolve_otlp_str_col(batch.column(idx).as_ref())
                 {
                     span_id_col = Some((idx, arr));
-                    excluded[idx] = true;
+                    excluded.push(idx);
                 }
             }
             name if field_names::matches_any(
@@ -921,7 +908,7 @@ fn resolve_batch_columns<'a>(
             {
                 if flags_col.is_none() && matches!(field.data_type(), DataType::Int64) {
                     flags_col = Some((idx, batch.column(idx).as_primitive::<Int64Type>()));
-                    excluded[idx] = true;
+                    excluded.push(idx);
                 }
             }
             name if name == message_field
@@ -939,13 +926,13 @@ fn resolve_batch_columns<'a>(
                 }
             }
             field_names::RAW => {
-                excluded[idx] = true;
+                excluded.push(idx);
             }
             _ => {}
         }
     }
     if let Some((idx, _)) = body_col {
-        excluded[idx] = true;
+        excluded.push(idx);
     }
 
     // --- Second pass: new well-known columns and attribute/resource classification ---
@@ -956,7 +943,7 @@ fn resolve_batch_columns<'a>(
     let mut attribute_cols: Vec<(String, AttrArray<'_>)> = Vec::new();
     let mut resource_cols: Vec<(String, AttrArray<'_>)> = Vec::new();
     for (idx, field) in schema.fields().iter().enumerate() {
-        if excluded[idx] {
+        if excluded.contains(&idx) {
             continue;
         }
         let field_name = field.name().as_str();
