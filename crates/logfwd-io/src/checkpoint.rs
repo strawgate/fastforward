@@ -166,38 +166,9 @@ pub fn default_data_dir() -> PathBuf {
 
 #[cfg(unix)]
 fn libc_getuid() -> u32 {
-    // Use the raw syscall via std rather than pulling in libc.
-    // std::os::unix doesn't expose getuid directly, so we use a cfg-guarded
-    // approach: on non-root systems HOME is always set, so the root check is
-    // mostly a documentation hint. We fall back to HOME-based path if unsure.
-    //
-    // Using nix or libc would be cleaner but they aren't dependencies.
-    // Instead we read /proc/self/status (Linux) or skip the check (macOS).
-    #[cfg(target_os = "linux")]
-    {
-        if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
-            for line in status.lines() {
-                #[allow(clippy::collapsible_if)]
-                if let Some(rest) = line.strip_prefix("Uid:") {
-                    // /proc/self/status "Uid:" fields are:
-                    // real, effective, saved set, filesystem.
-                    // Use effective uid for permission checks.
-                    if let Some(uid_str) = rest.split_whitespace().nth(1) {
-                        if let Ok(uid) = uid_str.parse::<u32>() {
-                            return uid;
-                        }
-                    }
-                }
-            }
-        }
-        // Couldn't determine, assume non-root.
-        1000
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        // On macOS / other unices, default to non-root path.
-        1000
-    }
+    // SAFETY: `geteuid` has no preconditions and returns the current process
+    // effective uid on all Unix targets.
+    unsafe { libc::geteuid() }
 }
 
 // ---------------------------------------------------------------------------
