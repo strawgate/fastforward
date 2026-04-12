@@ -4,7 +4,7 @@
 > **Date:** 2026-04-11
 > **Context:** Fanout plan for linearizability/Porcupine evaluation and implementation.
 
-Date: 2026-04-11  
+Date: 2026-04-11
 Branch target for cloud tasks: `main`
 
 ## Goal
@@ -13,15 +13,15 @@ Produce decision-grade evidence and implementation proposals for adding lineariz
 
 ## Workstreams
 
-1. `ws01-model-contract`  
+1. `ws01-model-contract`
    Define minimal legal sequential model for checkpoint/ack/flush semantics.
-2. `ws02-history-capture`  
+2. `ws02-history-capture`
    Ensure runtime-emitted events are sufficient and stable for checker input.
-3. `ws03-porcupine-checker`  
+3. `ws03-porcupine-checker`
    Implement a small checker CLI over exported histories.
-4. `ws04-ci-integration`  
+4. `ws04-ci-integration`
    Propose and prototype low-cost CI wiring + regression corpus strategy.
-5. `ws05-alternatives-and-risks`  
+5. `ws05-alternatives-and-risks`
    Compare Porcupine vs lighter in-repo checker strategy and recommend default lane.
 
 ## Fan-in rubric
