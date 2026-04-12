@@ -462,7 +462,7 @@ fn retry_after_respects_server_backoff() {
 // - durable checkpoint never advances while the first failed ticket remains held.
 
 #[test]
-fn panic_first_batch_recycles_worker_without_checkpoint_advance() {
+fn panic_first_batch_triggers_terminal_hold_without_checkpoint_advance() {
     let mut sim = super::build_sim(90, 1);
 
     // Factory scripts are popped from the end:
@@ -506,19 +506,24 @@ fn panic_first_batch_recycles_worker_without_checkpoint_advance() {
     );
 
     let calls = call_counter.load(Ordering::Relaxed);
-    // Under the terminal-hold model, the pipeline shuts down immediately
-    // after the panic ack. The first batch panics and subsequent batches
-    // are not processed because ingestion is stopped.
-    assert!(
-        calls >= 1,
-        "expected at least the panic send call; calls={calls}"
-    );
-
-    // Terminal hold means no further delivery after the panic.
     let delivered = delivered_counter.load(Ordering::Relaxed);
     eprintln!(
         "panic_first_batch test: {delivered} rows delivered, {calls} calls \
          (terminal-hold model stops ingestion after panic ack)"
+    );
+
+    // Under the terminal-hold model, the pipeline shuts down immediately
+    // after the panic ack. The first batch panics and no subsequent batches
+    // are processed because ingestion is stopped — no worker recycling.
+    assert_eq!(
+        calls, 1,
+        "terminal-hold model must issue exactly 1 send call (the panic); calls={calls}"
+    );
+
+    // Terminal hold means zero deliveries: the only batch panicked.
+    assert_eq!(
+        delivered, 0,
+        "terminal-hold model must not deliver any rows after panic; delivered={delivered}"
     );
 
     // Held first ticket must block checkpoint advancement entirely.
@@ -595,15 +600,18 @@ fn panic_after_initial_success_does_not_advance_checkpoint_past_gap() {
     let calls = call_counter.load(Ordering::Relaxed);
     let durable = ckpt_handle.durable_offset(1);
 
+    eprintln!(
+        "panic_after_initial_success test: {delivered} rows delivered, {calls} calls, durable={durable:?}"
+    );
     assert!(
         delivered > 0,
         "expected at least some successful deliveries before panic; delivered={delivered}"
     );
-    // Under the terminal-hold model: success + panic = 2 calls minimum.
+    // Under the terminal-hold model: exactly 1 success + 1 panic = 2 calls.
     // No recovery calls because ingestion stops after the panic ack.
-    assert!(
-        calls >= 2,
-        "expected at least success + panic calls; calls={calls}"
+    assert_eq!(
+        calls, 2,
+        "terminal-hold model must issue exactly 2 send calls (1 success + 1 panic); calls={calls}"
     );
     // The first successful batch may or may not have triggered a checkpoint
     // update depending on flush timing. Either way, checkpoint must not
