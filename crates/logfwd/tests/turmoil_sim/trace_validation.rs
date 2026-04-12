@@ -198,7 +198,7 @@ fn trace_validator_rejects_sink_activity_after_stopped() {
         .validate(&events)
         .expect_err("sink activity after stopped must be rejected");
     assert!(
-        err.contains("activity after Stopped"),
+        err.contains("sink activity after stopped"),
         "unexpected validator error: {err}"
     );
 }
