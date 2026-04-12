@@ -102,7 +102,7 @@ impl FileTailer {
     /// cannot be created.
     pub fn new(
         paths: &[PathBuf],
-        mut config: TailConfig,
+        config: TailConfig,
         stats: std::sync::Arc<ComponentStats>,
     ) -> io::Result<Self> {
         let (tx, rx) = crossbeam_channel::unbounded();
@@ -125,9 +125,7 @@ impl FileTailer {
             }
         }
 
-        // Prevent a zero-length buffer from turning non-empty files into
-        // perpetual "NoData" reads.
-        config.read_buf_size = config.read_buf_size.max(1);
+        let read_buf_size = config.read_buf_size.max(1);
 
         let mut tailer = FileTailer {
             discovery: FileDiscovery {
@@ -140,7 +138,7 @@ impl FileTailer {
             },
             reader: FileReader {
                 files: HashMap::new(),
-                read_buf: vec![0u8; config.read_buf_size],
+                read_buf: vec![0u8; read_buf_size],
                 evicted_offsets: HashMap::new(),
                 scratch_paths: Vec::new(),
                 last_read_had_data: false,
