@@ -1,161 +1,8 @@
 ---
-const sampleLine = '{"level":"ERROR","message":"request failed","status":503,"duration_ms":42.7}';
-const bytes = sampleLine.split('');
-
-const charClasses: Record<string, { cls: string; label: string }> = {
-  '"': { cls: 'sc-quote', label: 'Quote' },
-  '\\': { cls: 'sc-escape', label: 'Escape' },
-  ',': { cls: 'sc-comma', label: 'Comma' },
-  ':': { cls: 'sc-colon', label: 'Colon' },
-  '{': { cls: 'sc-brace', label: 'Brace' },
-  '}': { cls: 'sc-brace', label: 'Brace' },
-  '[': { cls: 'sc-bracket', label: 'Bracket' },
-  ']': { cls: 'sc-bracket', label: 'Bracket' },
-};
-
-let inString = false;
-const stringMask = bytes.map((b) => {
-  if (b === '"') { inString = !inString; return false; }
-  return inString;
-});
-
-// Pre-compute: is this byte a structural char outside a string?
-const structOutside = bytes.map((b, i) => charClasses[b] && !stringMask[i]);
-
-// All field ranges for the extraction demo
-const fields = [
-  { key: 'level', keyStart: 2, keyEnd: 6, colon: 8, value: 'ERROR', valStart: 10, valEnd: 14, color: 0 },
-  { key: 'message', keyStart: 18, keyEnd: 24, colon: 26, value: 'request failed', valStart: 28, valEnd: 41, color: 1 },
-  { key: 'status', keyStart: 45, keyEnd: 50, colon: 52, value: '503', valStart: 53, valEnd: 55, color: 2 },
-  { key: 'duration_ms', keyStart: 58, keyEnd: 68, colon: 70, value: '42.7', valStart: 71, valEnd: 74, color: 3 },
-];
-
-// Build per-byte field membership
-const byteField = bytes.map((_, i) => {
-  for (const f of fields) {
-    if (i >= f.keyStart && i <= f.keyEnd) return { role: 'key', color: f.color };
-    if (i === f.colon) return { role: 'colon', color: f.color };
-    if (i >= f.valStart && i <= f.valEnd) return { role: 'value', color: f.color };
-  }
-  return null;
-});
+// Thin shell — all logic in client-side script to avoid Astro template compilation issues
 ---
 
-<div class="sa" data-sa-root data-step="raw">
-  {/* Play controls */}
-  <div class="sa-playbar">
-    <button class="sa-play-btn" data-sa-play aria-label="Play animation">
-      <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
-        <path class="sa-icon-play" d="M8 5v14l11-7z" />
-        <path class="sa-icon-pause" d="M6 4h4v16H6zm8 0h4v16h-4z" style="display:none" />
-      </svg>
-    </button>
-    <div class="sa-progress">
-      <div class="sa-progress-fill" data-sa-progress></div>
-    </div>
-    <div class="sa-step-pills">
-      <button class="sa-pill sa-pill--active" data-step="raw" data-index="0">1</button>
-      <button class="sa-pill" data-step="detect" data-index="1">2</button>
-      <button class="sa-pill" data-step="strings" data-index="2">3</button>
-      <button class="sa-pill" data-step="result" data-index="3">4</button>
-      <button class="sa-pill" data-step="extract" data-index="4">5</button>
-      <button class="sa-pill" data-step="allfields" data-index="5">6</button>
-      <button class="sa-pill" data-step="complete" data-index="6">7</button>
-    </div>
-  </div>
-
-  {/* Explanation */}
-  <div class="sa-explanation" data-sa-explanation>
-    <strong>Step 1: Raw bytes</strong>
-    <p>A JSON log line arrives as raw bytes. logfwd processes the entire buffer in 64-byte SIMD blocks — not character by character.</p>
-  </div>
-
-  {/* Byte grid */}
-  <div class="sa-byte-grid" data-sa-grid>
-    {bytes.map((byte, i) => {
-      const cc = charClasses[byte];
-      return (
-        <div
-          class="sa-byte"
-          data-index={i}
-          data-cls={cc ? cc.cls : ''}
-          data-structural={cc ? 'true' : 'false'}
-          data-in-string={stringMask[i] ? 'true' : 'false'}
-          data-struct-outside={structOutside[i] ? 'true' : 'false'}
-          data-field-role={byteField[i]?.role ?? ''}
-          data-field-color={byteField[i]?.color ?? ''}
-        >
-          <span class="sa-byte-char">{byte === ' ' ? '\u00B7' : byte}</span>
-          <span class="sa-byte-pos">{i}</span>
-        </div>
-      );
-    })}
-  </div>
-
-  {/* Bitmask — always visible, starts as dashes */}
-  <div class="sa-bitmask">
-    <div class="sa-bitmask-label">Bitmask:</div>
-    <div class="sa-bitmask-bits" data-sa-bits>
-      {bytes.map((_, i) => (
-        <span class="sa-bit" data-index={i} data-is-structural={structOutside[i] ? 'true' : 'false'}>
-          ·
-        </span>
-      ))}
-    </div>
-  </div>
-
-  {/* Extraction result — shown in step 5 */}
-  <div class="sa-extract" data-sa-extract hidden>
-    <div class="sa-extract-result">
-      <span class="sa-extract-label">Extracted:</span>
-      <code class="sa-extract-key">level</code>
-      <span class="sa-extract-sep">=</span>
-      <code class="sa-extract-val">ERROR</code>
-    </div>
-    <p class="sa-extract-desc">
-      The field extractor jumps directly to colon position <strong>8</strong> using <code>trailing_zeros(colon_mask)</code>,
-      reads the key to the left and value to the right. No scanning — just two bitmask lookups. This repeats for every field in the record.
-    </p>
-  </div>
-
-  {/* Step 6: All fields highlighted */}
-  <div class="sa-allfields" data-sa-allfields hidden>
-    <div class="sa-allfields-grid">
-      <span class="sa-field-chip" style="--fc: var(--sa-f0)"><strong>level</strong> = ERROR</span>
-      <span class="sa-field-chip" style="--fc: var(--sa-f1)"><strong>message</strong> = request failed</span>
-      <span class="sa-field-chip" style="--fc: var(--sa-f2)"><strong>status</strong> = 503</span>
-      <span class="sa-field-chip" style="--fc: var(--sa-f3)"><strong>duration_ms</strong> = 42.7</span>
-    </div>
-  </div>
-
-  {/* Step 7: All fields extracted — Arrow RecordBatch */}
-  <div class="sa-complete" data-sa-complete hidden>
-    <div class="sa-complete-head">
-      <strong>Arrow RecordBatch</strong>
-      <span>4 columns, 1 row — ready for SQL</span>
-    </div>
-    <table class="sa-complete-table">
-      <thead>
-        <tr><th>level <span>Utf8</span></th><th>message <span>Utf8</span></th><th>status <span>Int64</span></th><th>duration_ms <span>Float64</span></th></tr>
-      </thead>
-      <tbody>
-        <tr><td>ERROR</td><td>request failed</td><td>503</td><td>42.7</td></tr>
-      </tbody>
-    </table>
-    <p class="sa-complete-desc">
-      All fields extracted in a single pass. The result is an Apache Arrow <strong>RecordBatch</strong> — columnar, typed, zero-copy.
-      This batch goes directly to DataFusion for SQL execution. No serialization, no intermediate format.
-    </p>
-  </div>
-
-  {/* Legend */}
-  <div class="sa-legend">
-    <span class="sa-legend-item"><span class="sa-swatch sc-quote"></span> Quote</span>
-    <span class="sa-legend-item"><span class="sa-swatch sc-colon"></span> Colon</span>
-    <span class="sa-legend-item"><span class="sa-swatch sc-comma"></span> Comma</span>
-    <span class="sa-legend-item"><span class="sa-swatch sc-brace"></span> Brace</span>
-  </div>
-</div>
+<div class="sa" id="scanner-anim"></div>
 
 <style>
   .sa {
@@ -164,475 +11,264 @@ const byteField = bytes.map((_, i) => {
     --sa-accent: var(--sl-color-accent);
     --sa-text: var(--sl-color-text);
     --sa-muted: var(--sl-color-gray-3);
-    --sa-green: #22c55e;
-    --sa-f0: #22c55e; --sa-f1: #8b5cf6; --sa-f2: #f59e0b; --sa-f3: #ec4899;
+    --f0: #22c55e; --f1: #8b5cf6; --f2: #f59e0b; --f3: #ec4899;
     margin: 1.5rem 0;
   }
+  .sa * { margin-top: 0 !important; }
 
-  .sa :is(.sa-playbar, .sa-explanation, .sa-byte-grid, .sa-bitmask, .sa-bitmask-bits, .sa-legend, .sa-step-pills, .sa-extract, .sa-complete, .sa-complete-head) > * {
-    margin-top: 0 !important;
-  }
-
-  /* ── Play bar ── */
-  .sa-playbar {
-    display: flex;
-    align-items: center;
-    gap: 0.6rem;
-    margin-bottom: 0.75rem;
-  }
-
-  .sa-play-btn {
-    width: 32px; height: 32px;
-    border-radius: 50%;
-    border: 1.5px solid var(--sa-accent);
-    background: transparent;
-    color: var(--sa-accent);
-    cursor: pointer;
+  /* Playbar */
+  .sa-bar { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.6rem; }
+  .sa-play {
+    width: 30px; height: 30px; border-radius: 50%;
+    border: 1.5px solid var(--sa-accent); background: transparent;
+    color: var(--sa-accent); cursor: pointer;
     display: flex; align-items: center; justify-content: center;
-    flex-shrink: 0;
-    transition: background 0.12s;
   }
-  .sa-play-btn:hover { background: color-mix(in srgb, var(--sa-accent) 12%, transparent); }
-  .sa[data-playing="true"] .sa-icon-play { display: none; }
-  .sa[data-playing="true"] .sa-icon-pause { display: block !important; }
-
-  .sa-progress {
-    flex: 1;
-    height: 4px;
-    background: var(--sa-border);
-    border-radius: 2px;
-    overflow: hidden;
-  }
-  .sa-progress-fill {
-    height: 100%;
-    width: 0%;
-    background: var(--sa-accent);
-    border-radius: 2px;
-    transition: width 0.3s linear;
-  }
-
-  .sa-step-pills {
-    display: flex;
-    gap: 3px;
-  }
+  .sa-play:hover { background: color-mix(in srgb, var(--sa-accent) 12%, transparent); }
+  .sa-prog { flex: 1; height: 3px; background: var(--sa-border); border-radius: 2px; overflow: hidden; }
+  .sa-prog-fill { height: 100%; width: 0; background: var(--sa-accent); transition: width 0.3s; }
+  .sa-pills { display: flex; gap: 3px; }
   .sa-pill {
-    width: 24px; height: 24px;
-    border-radius: 50%;
-    border: 1px solid var(--sa-border);
-    background: transparent;
-    color: var(--sa-muted);
-    font-size: 0.65rem;
-    font-weight: 700;
-    font-family: inherit;
-    cursor: pointer;
-    display: flex; align-items: center; justify-content: center;
-    transition: all 0.12s;
+    width: 22px; height: 22px; border-radius: 50%;
+    border: 1px solid var(--sa-border); background: transparent;
+    color: var(--sa-muted); font-size: 0.6rem; font-weight: 700;
+    cursor: pointer; display: flex; align-items: center; justify-content: center;
   }
   .sa-pill:hover { border-color: var(--sa-accent); }
-  .sa-pill--active {
-    border-color: var(--sa-accent);
-    background: var(--sa-accent);
-    color: white;
-  }
+  .sa-pill.on { border-color: var(--sa-accent); background: var(--sa-accent); color: white; }
 
-  /* ── Explanation ── */
-  .sa-explanation {
-    padding: 0.65rem 0.9rem;
-    background: var(--sa-bg);
-    border: 1px solid var(--sa-border);
-    border-radius: 8px;
-    margin-bottom: 0.75rem;
-    min-height: 4.5rem;
+  /* Explanation */
+  .sa-exp {
+    padding: 0.6rem 0.85rem; background: var(--sa-bg);
+    border: 1px solid var(--sa-border); border-radius: 7px;
+    margin-bottom: 0.6rem; min-height: 3rem;
+    font-size: 0.78rem; line-height: 1.5;
   }
-  .sa-explanation strong { font-size: 0.82rem; display: block; margin-bottom: 0.2rem; }
-  .sa-explanation p { margin: 0; font-size: 0.78rem; line-height: 1.5; }
+  .sa-exp b { display: block; font-size: 0.82rem; margin-bottom: 0.15rem; }
 
-  /* ── Byte grid ── */
-  .sa-byte-grid {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 2px;
-    padding: 0.4rem 0;
-    font-family: var(--sl-font-mono, monospace);
+  /* Raw log */
+  .sa-log {
+    padding: 0.7rem 0.9rem; background: #1e1e2e; border-radius: 7px;
+    overflow-x: auto; margin-bottom: 0.5rem;
   }
+  .sa-log code { font-size: 0.73rem; color: #cdd6f4; white-space: pre; font-family: var(--sl-font-mono, monospace); }
 
+  /* Byte grid */
+  .sa-grid { display: flex; flex-wrap: wrap; gap: 2px; padding: 0.3rem 0; font-family: var(--sl-font-mono, monospace); }
   .sa-byte {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    width: 24px; height: 36px;
-    border: 1px solid var(--sa-border);
-    border-radius: 3px;
-    background: var(--sa-bg);
-    transition: all 0.25s;
+    display: flex; flex-direction: column; align-items: center;
+    width: 24px; height: 34px; border: 1px solid transparent;
+    border-radius: 2px; transition: all 0.25s; background: var(--sa-bg);
   }
+  .sa-ch { font-size: 0.68rem; font-weight: 500; line-height: 22px; }
+  .sa-pos { font-size: 0.38rem; color: var(--sa-muted); line-height: 1; }
 
-  .sa-byte-char { font-size: 0.68rem; font-weight: 600; line-height: 22px; }
-  .sa-byte-pos { font-size: 0.4rem; color: var(--sa-muted); line-height: 1; }
+  /* Structural colors */
+  .sa-byte.cQ { border-color: #e879a0; background: #e879a00a; }
+  .sa-byte.cC { border-color: #60a5fa; background: #60a5fa0a; }
+  .sa-byte.cM { border-color: #a78bfa; background: #a78bfa0a; }
+  .sa-byte.cB { border-color: #f59e0b; background: #f59e0b0a; }
 
-  /* Structural char colors */
-  .sa-byte.sc-quote { border-color: #e879a0; }
-  .sa-byte.sc-colon { border-color: #60a5fa; }
-  .sa-byte.sc-comma { border-color: #a78bfa; }
-  .sa-byte.sc-brace { border-color: #f59e0b; }
-  .sa-byte.sc-bracket { border-color: #34d399; }
+  /* Step states (applied by JS via data-step on root) */
+  [data-step="detect"] .sa-byte.lit { transform: scale(1.12); font-weight: 700; }
+  [data-step="strings"] .sa-byte.dim { opacity: 0.35; }
+  [data-step="strings"] .sa-byte.dimS { opacity: 0.2; border-style: dashed; transform: none; }
+  [data-step="result"] .sa-byte { opacity: 0.25; }
+  [data-step="result"] .sa-byte.keep { opacity: 1; transform: scale(1.12); font-weight: 700; }
+  [data-step="extract"] .sa-byte { opacity: 0.15; }
+  [data-step="extract"] .sa-byte.fK { opacity: 1; border-color: var(--f0); border-width: 1.5px; background: color-mix(in srgb, var(--f0) 10%, transparent); }
+  [data-step="extract"] .sa-byte.fCol { opacity: 1; border-color: #60a5fa; border-width: 2px; background: #60a5fa15; transform: translateY(-3px); box-shadow: 0 3px 10px rgba(96,165,250,0.25); }
+  [data-step="extract"] .sa-byte.fV { opacity: 1; border-color: #f97316; border-width: 1.5px; background: color-mix(in srgb, #f97316 10%, transparent); }
+  [data-step="allfields"] .sa-byte { opacity: 0.12; }
+  [data-step="allfields"] .sa-byte[data-fc] { opacity: 1; border-width: 1.5px; }
+  [data-step="allfields"] .sa-byte[data-fc="0"] { border-color: var(--f0); background: color-mix(in srgb, var(--f0) 10%, transparent); }
+  [data-step="allfields"] .sa-byte[data-fc="1"] { border-color: var(--f1); background: color-mix(in srgb, var(--f1) 10%, transparent); }
+  [data-step="allfields"] .sa-byte[data-fc="2"] { border-color: var(--f2); background: color-mix(in srgb, var(--f2) 10%, transparent); }
+  [data-step="allfields"] .sa-byte[data-fc="3"] { border-color: var(--f3); background: color-mix(in srgb, var(--f3) 10%, transparent); }
 
-  /* Step 2: detect */
-  .sa[data-step="detect"] .sa-byte[data-structural="true"] {
-    border-width: 2px;
-    transform: translateY(-2px);
-    box-shadow: 0 2px 6px rgba(0,0,0,0.08);
-  }
-  .sa[data-step="detect"] .sa-byte.sc-quote { background: #e879a012; }
-  .sa[data-step="detect"] .sa-byte.sc-colon { background: #60a5fa12; }
-  .sa[data-step="detect"] .sa-byte.sc-comma { background: #a78bfa12; }
-  .sa[data-step="detect"] .sa-byte.sc-brace { background: #f59e0b12; }
+  /* Bitmask */
+  .sa-mask { display: flex; align-items: center; gap: 0.4rem; padding: 0.2rem 0; font-family: var(--sl-font-mono, monospace); }
+  .sa-mask-lbl { font-size: 0.62rem; font-weight: 600; color: var(--sa-muted); }
+  .sa-bits { display: flex; flex-wrap: wrap; gap: 0px; }
+  .sa-bit { width: 12px; height: 14px; display: flex; align-items: center; justify-content: center; font-size: 0.45rem; font-weight: 700; color: var(--sa-muted); transition: all 0.15s; }
+  .sa-bit.on { color: var(--sa-accent); background: color-mix(in srgb, var(--sa-accent) 15%, transparent); border-radius: 1px; }
 
-  /* Step 3: strings */
-  .sa[data-step="strings"] .sa-byte[data-in-string="true"] { opacity: 0.4; }
-  .sa[data-step="strings"] .sa-byte[data-structural="true"] { border-width: 2px; }
-  .sa[data-step="strings"] .sa-byte[data-structural="true"][data-in-string="true"] {
-    opacity: 0.25; border-style: dashed; transform: none;
-  }
+  /* Field chips */
+  .sa-fields { padding: 0.4rem 0; }
+  .sa-fields-row { display: flex; flex-wrap: wrap; gap: 0.35rem; }
+  .sa-fc { padding: 0.3rem 0.6rem; border: 1.5px solid var(--fc); border-radius: 5px; background: color-mix(in srgb, var(--fc) 8%, transparent); font-size: 0.75rem; font-family: var(--sl-font-mono, monospace); }
+  .sa-fc b { color: var(--fc); }
+  .sa-fields p { margin: 0.4rem 0 0; font-size: 0.75rem; line-height: 1.5; }
 
-  /* Step 4: result */
-  .sa[data-step="result"] .sa-byte { opacity: 0.3; }
-  .sa[data-step="result"] .sa-byte[data-struct-outside="true"] {
-    opacity: 1; border-width: 2px;
-    transform: translateY(-3px);
-    box-shadow: 0 3px 10px rgba(0,0,0,0.12);
-  }
-  .sa[data-step="result"] .sa-byte.sc-quote[data-struct-outside="true"] { background: #e879a018; }
-  .sa[data-step="result"] .sa-byte.sc-colon[data-struct-outside="true"] { background: #60a5fa18; }
-  .sa[data-step="result"] .sa-byte.sc-comma[data-struct-outside="true"] { background: #a78bfa18; }
-  .sa[data-step="result"] .sa-byte.sc-brace[data-struct-outside="true"] { background: #f59e0b18; }
-
-  /* Step 5: single field extract (field 0 = level) */
-  .sa[data-step="extract"] .sa-byte { opacity: 0.2; }
-  .sa[data-step="extract"] .sa-byte[data-field-role="key"][data-field-color="0"] {
-    opacity: 1; border-color: var(--sa-f0); border-width: 2px;
-    background: color-mix(in srgb, var(--sa-f0) 12%, transparent);
-  }
-  .sa[data-step="extract"] .sa-byte[data-field-role="colon"][data-field-color="0"] {
-    opacity: 1; border-color: #60a5fa; border-width: 2px;
-    background: #60a5fa18;
-    transform: translateY(-4px);
-    box-shadow: 0 4px 14px rgba(96,165,250,0.3);
-  }
-  .sa[data-step="extract"] .sa-byte[data-field-role="value"][data-field-color="0"] {
-    opacity: 1; border-color: #f97316; border-width: 2px;
-    background: color-mix(in srgb, #f97316 12%, transparent);
-  }
-
-  /* Step 6: all fields highlighted */
-  .sa[data-step="allfields"] .sa-byte { opacity: 0.15; }
-  .sa[data-step="allfields"] .sa-byte[data-field-role] { border-width: 2px; }
-
-  .sa[data-step="allfields"] .sa-byte[data-field-role="key"][data-field-color="0"],
-  .sa[data-step="allfields"] .sa-byte[data-field-role="value"][data-field-color="0"],
-  .sa[data-step="allfields"] .sa-byte[data-field-role="colon"][data-field-color="0"] {
-    opacity: 1; border-color: var(--sa-f0); background: color-mix(in srgb, var(--sa-f0) 10%, transparent);
-  }
-  .sa[data-step="allfields"] .sa-byte[data-field-role="key"][data-field-color="1"],
-  .sa[data-step="allfields"] .sa-byte[data-field-role="value"][data-field-color="1"],
-  .sa[data-step="allfields"] .sa-byte[data-field-role="colon"][data-field-color="1"] {
-    opacity: 1; border-color: var(--sa-f1); background: color-mix(in srgb, var(--sa-f1) 10%, transparent);
-  }
-  .sa[data-step="allfields"] .sa-byte[data-field-role="key"][data-field-color="2"],
-  .sa[data-step="allfields"] .sa-byte[data-field-role="value"][data-field-color="2"],
-  .sa[data-step="allfields"] .sa-byte[data-field-role="colon"][data-field-color="2"] {
-    opacity: 1; border-color: var(--sa-f2); background: color-mix(in srgb, var(--sa-f2) 10%, transparent);
-  }
-  .sa[data-step="allfields"] .sa-byte[data-field-role="key"][data-field-color="3"],
-  .sa[data-step="allfields"] .sa-byte[data-field-role="value"][data-field-color="3"],
-  .sa[data-step="allfields"] .sa-byte[data-field-role="colon"][data-field-color="3"] {
-    opacity: 1; border-color: var(--sa-f3); background: color-mix(in srgb, var(--sa-f3) 10%, transparent);
-  }
-
-  /* ── Bitmask ── */
-  .sa-bitmask {
-    display: flex; align-items: center; gap: 0.4rem;
-    padding: 0.3rem 0;
-    font-family: var(--sl-font-mono, monospace);
-  }
-  .sa-bitmask-label { font-size: 0.68rem; font-weight: 600; color: var(--sa-muted); flex-shrink: 0; }
-  .sa-bitmask-bits { display: flex; flex-wrap: wrap; gap: 1px; }
-
-  .sa-bit {
-    width: 13px; height: 16px;
-    display: flex; align-items: center; justify-content: center;
-    font-size: 0.5rem; font-weight: 700;
-    color: var(--sa-muted);
-    border-radius: 2px;
-    transition: all 0.15s;
-  }
-  .sa-bit.sa-bit--on {
-    color: var(--sa-accent);
-    background: color-mix(in srgb, var(--sa-accent) 15%, transparent);
-  }
-
-  /* ── Extract result ── */
-  .sa-extract {
-    padding: 0.75rem 1rem;
-    background: color-mix(in srgb, var(--sa-green) 6%, var(--sa-bg));
-    border: 1px solid color-mix(in srgb, var(--sa-green) 25%, transparent);
-    border-radius: 8px;
-    margin-top: 0.5rem;
-    animation: sa-fadein 0.3s ease-out;
-  }
-  .sa-extract-result {
-    display: flex; align-items: center; gap: 0.4rem;
-    margin-bottom: 0.4rem; font-size: 0.9rem;
-  }
-  .sa-extract-label { font-weight: 600; color: var(--sa-green); font-size: 0.78rem; }
-  .sa-extract-key {
-    padding: 0.15rem 0.4rem; border-radius: 4px;
-    background: color-mix(in srgb, var(--sa-green) 12%, transparent);
-    color: var(--sa-green); font-weight: 700;
-  }
-  .sa-extract-sep { color: var(--sa-muted); }
-  .sa-extract-val {
-    padding: 0.15rem 0.4rem; border-radius: 4px;
-    background: color-mix(in srgb, #f97316 12%, transparent);
-    color: #f97316; font-weight: 700;
-  }
-  .sa-extract-desc { margin: 0; font-size: 0.78rem; line-height: 1.5; }
-  .sa-extract-desc code { font-size: 0.72rem; }
-
-  /* ── Step 6: Complete ── */
-  .sa-complete {
-    padding: 0.75rem 1rem;
-    background: color-mix(in srgb, var(--sa-accent) 5%, var(--sa-bg));
-    border: 1px solid color-mix(in srgb, var(--sa-accent) 20%, transparent);
-    border-radius: 8px;
-    margin-top: 0.5rem;
-    animation: sa-fadein 0.3s ease-out;
-  }
-  .sa-complete > * { margin-top: 0 !important; }
-  .sa-complete-head {
-    display: flex; align-items: baseline; gap: 0.5rem;
-    margin-bottom: 0.5rem;
-  }
-  .sa-complete-head strong { font-size: 0.85rem; color: var(--sa-accent); }
-  .sa-complete-head span { font-size: 0.72rem; color: var(--sa-muted); }
-
-  .sa-complete-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 0.78rem;
-    margin-bottom: 0.5rem;
-  }
-  .sa-complete-table th {
-    text-align: left;
-    padding: 0.35rem 0.6rem;
-    border-bottom: 2px solid var(--sa-accent);
-    font-weight: 700;
-    font-size: 0.75rem;
-  }
-  .sa-complete-table th span {
-    font-weight: 400;
-    font-size: 0.6rem;
-    color: var(--sa-muted);
-    margin-left: 0.25rem;
-  }
-  .sa-complete-table td {
-    padding: 0.35rem 0.6rem;
-    border-bottom: 1px solid var(--sa-border);
-    font-family: var(--sl-font-mono, monospace);
-    font-size: 0.75rem;
-  }
-  .sa-complete-desc { margin: 0; font-size: 0.78rem; line-height: 1.5; }
-
-  /* ── All-fields chips ── */
-  .sa-allfields {
-    padding: 0.5rem 0;
-    animation: sa-fadein 0.3s ease-out;
-  }
-  .sa-allfields > * { margin-top: 0 !important; }
-  .sa-allfields-grid {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.4rem;
-  }
-  .sa-allfields-grid > * { margin-top: 0 !important; }
-  .sa-field-chip {
-    padding: 0.35rem 0.7rem;
-    border: 1.5px solid var(--fc);
-    border-radius: 6px;
-    background: color-mix(in srgb, var(--fc) 8%, transparent);
-    font-size: 0.78rem;
-    font-family: var(--sl-font-mono, monospace);
-    animation: sa-fadein 0.2s ease-out;
-  }
-  .sa-field-chip strong { color: var(--fc); }
-
-  /* Step 7: hide byte grid, show table */
-  .sa[data-step="complete"] .sa-byte-grid { display: none; }
-  .sa[data-step="complete"] .sa-bitmask { display: none; }
-  .sa[data-step="complete"] .sa-legend { display: none; }
-
-  @keyframes sa-fadein {
-    from { opacity: 0; transform: translateY(-4px); }
-    to { opacity: 1; transform: translateY(0); }
-  }
-
-  /* ── Legend ── */
-  .sa-legend {
-    display: flex; flex-wrap: wrap; gap: 0.6rem;
-    padding: 0.4rem 0; font-size: 0.68rem; color: var(--sa-muted);
-  }
-  .sa-legend-item { display: flex; align-items: center; gap: 0.25rem; }
-  .sa-swatch { width: 10px; height: 10px; border-radius: 2px; border: 2px solid; }
-  .sa-swatch.sc-quote { border-color: #e879a0; }
-  .sa-swatch.sc-colon { border-color: #60a5fa; }
-  .sa-swatch.sc-comma { border-color: #a78bfa; }
-  .sa-swatch.sc-brace { border-color: #f59e0b; }
+  /* Legend */
+  .sa-leg { display: flex; flex-wrap: wrap; gap: 0.5rem; padding: 0.3rem 0; font-size: 0.62rem; color: var(--sa-muted); }
+  .sa-leg span { display: flex; align-items: center; gap: 0.2rem; }
+  .sa-sw { width: 8px; height: 8px; border-radius: 2px; border: 2px solid; display: inline-block; }
 </style>
 
 <script>
-  document.querySelectorAll<HTMLDivElement>('[data-sa-root]').forEach((root) => {
-    const explanation = root.querySelector<HTMLDivElement>('[data-sa-explanation]')!;
-    const byteEls = root.querySelectorAll<HTMLDivElement>('.sa-byte');
-    const bits = root.querySelectorAll<HTMLSpanElement>('.sa-bit');
-    const extract = root.querySelector<HTMLDivElement>('[data-sa-extract]')!;
-    const allfields = root.querySelector<HTMLDivElement>('[data-sa-allfields]')!;
-    const complete = root.querySelector<HTMLDivElement>('[data-sa-complete]')!;
-    const pills = root.querySelectorAll<HTMLButtonElement>('.sa-pill');
-    const playBtn = root.querySelector<HTMLButtonElement>('[data-sa-play]')!;
-    const progressFill = root.querySelector<HTMLDivElement>('[data-sa-progress]')!;
+(function() {
+  var root = document.getElementById('scanner-anim');
+  if (!root) return;
 
-    const colorClasses = ['sc-quote', 'sc-colon', 'sc-comma', 'sc-brace', 'sc-bracket', 'sc-escape'];
+  var LINE = '{"level":"ERROR","message":"request failed","status":503,"duration_ms":42.7}';
+  var chars = LINE.split('');
 
-    const stepData = [
-      { id: 'raw', title: 'Step 1: Raw bytes',
-        desc: 'A JSON log line arrives as raw bytes. logfwd processes the entire buffer in 64-byte SIMD blocks — not character by character.' },
-      { id: 'detect', title: 'Step 2: SIMD structural detection',
-        desc: 'One SIMD instruction compares all bytes against 10 structural characters simultaneously. On AVX2, 32 bytes per cycle. Watch the structural characters light up as the bitmask fills in.' },
-      { id: 'strings', title: 'Step 3: String interior mask',
-        desc: 'Quote positions feed into <code>prefix_xor</code> — 6 XOR shifts that produce a mask of which bytes are inside strings. Structural characters inside strings (like colons in <em>"request failed"</em>) get dashed borders — they\'re ignored.' },
-      { id: 'result', title: 'Step 4: Usable structural positions',
-        desc: 'The final bitmask: only structural characters <strong>outside</strong> strings survive. Finding the next colon or comma is a single <code>trailing_zeros</code> instruction — O(1) instead of scanning byte-by-byte.' },
-      { id: 'extract', title: 'Step 5: First field extraction',
-        desc: 'The field extractor jumps to the first colon using <code>trailing_zeros(colon_mask)</code>, reads the key to the left and value to the right. One bitmask lookup — no scanning.' },
-      { id: 'allfields', title: 'Step 6: All fields extracted',
-        desc: 'The same O(1) jump repeats for every colon in the bitmask. All four fields are extracted in a single pass through the buffer. Each key-value pair is colored below.' },
-      { id: 'complete', title: 'Step 7: Arrow RecordBatch',
-        desc: 'The extracted fields become typed Arrow columns. The result is a columnar RecordBatch — ready for SQL. No serialization, no intermediate format. This goes straight to DataFusion.' },
-    ];
-
-    let currentStep = 0;
-    let playing = false;
-    let autoTimer: number | null = null;
-    let sweepTimers: number[] = [];
-    const STEP_DURATION = 4000;
-
-    function clearSweepTimers() {
-      sweepTimers.forEach(t => clearTimeout(t));
-      sweepTimers = [];
-    }
-
-    function stripColors() {
-      byteEls.forEach(el => colorClasses.forEach(c => el.classList.remove(c)));
-    }
-
-    function applyAllColors() {
-      byteEls.forEach(el => {
-        const cls = el.dataset.cls;
-        if (cls) el.classList.add(cls);
-      });
-    }
-
-    function goToStep(index: number) {
-      currentStep = index;
-      const step = stepData[index];
-      root.dataset.step = step.id;
-      clearSweepTimers();
-
-      pills.forEach((p, i) => p.classList.toggle('sa-pill--active', i === index));
-      explanation.innerHTML = `<strong>${step.title}</strong><p>${step.desc}</p>`;
-      progressFill.style.width = `${((index + 1) / stepData.length) * 100}%`;
-
-      // Hide all result panels by default
-      extract.hidden = true;
-      allfields.hidden = true;
-      complete.hidden = true;
-
-      if (step.id === 'raw') {
-        // Step 1: plain bytes, no colors, empty bitmask
-        stripColors();
-        bits.forEach(b => { b.textContent = '·'; b.classList.remove('sa-bit--on'); });
-
-      } else if (step.id === 'detect') {
-        // Step 2: sweep — color each byte AND its bitmask bit simultaneously
-        stripColors();
-        bits.forEach(b => { b.textContent = '·'; b.classList.remove('sa-bit--on'); });
-
-        byteEls.forEach((el, i) => {
-          const cls = el.dataset.cls;
-          const isStruct = el.dataset.structural === 'true';
-          const bit = bits[i];
-          sweepTimers.push(window.setTimeout(() => {
-            if (cls) el.classList.add(cls);
-            if (bit) {
-              bit.textContent = isStruct ? '1' : '0';
-              if (isStruct) bit.classList.add('sa-bit--on');
-            }
-          }, i * 14));
-        });
-
-      } else {
-        // Steps 3-5: all colors applied immediately, full bitmask shown
-        applyAllColors();
-        bits.forEach(b => {
-          const isStruct = b.dataset.isStructural === 'true';
-          b.textContent = isStruct ? '1' : '0';
-          b.classList.toggle('sa-bit--on', isStruct);
-        });
-        extract.hidden = step.id !== 'extract';
-        allfields.hidden = step.id !== 'allfields';
-        complete.hidden = step.id !== 'complete';
-      }
-    }
-
-    function startPlaying() {
-      playing = true;
-      root.dataset.playing = 'true';
-      scheduleNext();
-    }
-
-    function stopPlaying() {
-      playing = false;
-      root.dataset.playing = 'false';
-      if (autoTimer !== null) { clearTimeout(autoTimer); autoTimer = null; }
-    }
-
-    function scheduleNext() {
-      if (!playing) return;
-      const delay = currentStep === stepData.length - 1 ? 5000 : STEP_DURATION;
-      autoTimer = window.setTimeout(() => {
-        if (!playing) return;
-        const next = (currentStep + 1) % stepData.length;
-        goToStep(next);
-        scheduleNext();
-      }, delay);
-    }
-
-    playBtn.addEventListener('click', () => {
-      if (playing) {
-        stopPlaying();
-      } else {
-        if (currentStep >= stepData.length - 1) goToStep(0);
-        startPlaying();
-      }
-    });
-
-    pills.forEach((pill) => {
-      pill.addEventListener('click', () => {
-        stopPlaying();
-        goToStep(parseInt(pill.dataset.index!, 10));
-      });
-    });
-
-    goToStep(0);
+  // Classify each byte
+  var CLS = { '"':'cQ', ':':'cC', ',':'cM', '{':'cB', '}':'cB' };
+  var inStr = false;
+  var info = chars.map(function(c, i) {
+    var isQ = c === '"';
+    if (isQ) inStr = !inStr;
+    var cls = CLS[c] || '';
+    var isIn = isQ ? false : inStr;
+    return { c: c, cls: cls, isStruct: cls !== '', inStr: isIn, structOut: cls !== '' && !isIn };
   });
+
+  // Field ranges: [startIdx, endIdx, fieldColor, role]
+  var FR = [
+    [2,6,0,'k'],[8,8,0,'c'],[10,14,0,'v'],       // level:ERROR
+    [18,24,1,'k'],[26,26,1,'c'],[28,41,1,'v'],     // message:request failed
+    [45,50,2,'k'],[52,52,2,'c'],[53,55,2,'v'],      // status:503
+    [58,68,3,'k'],[70,70,3,'c'],[71,74,3,'v'],      // duration_ms:42.7
+  ];
+  // Mark field membership on info
+  FR.forEach(function(r) { for (var i = r[0]; i <= r[1]; i++) { info[i].fc = r[2]; info[i].fr = r[3]; } });
+
+  var STEPS = [
+    { id:'log', t:'Step 1: The log line', dur:4000,
+      d:'A request fails. The application writes a JSON log line. This is what it looks like in your log file.' },
+    { id:'detect', t:'Step 2: SIMD detection', dur:5000,
+      d:'logfwd runs one SIMD pass. Structural characters light up as the bitmask fills in — 32 bytes per CPU cycle.' },
+    { id:'strings', t:'Step 3: String mask', dur:4500,
+      d:'<code>prefix_xor</code> identifies bytes inside strings. Structural chars inside strings (dashed) are false positives.' },
+    { id:'result', t:'Step 4: Usable positions', dur:4500,
+      d:'Only structural characters outside strings survive. Next colon or comma: one <code>trailing_zeros</code> — O(1).' },
+    { id:'extract', t:'Step 5: First field', dur:4000,
+      d:'Jump to colon at position 8 via bitmask. Read key left, value right. No scanning.' },
+    { id:'allfields', t:'Step 6: All fields', dur:6000,
+      d:'Same O(1) jump for every colon. All four fields extracted in one pass.' },
+  ];
+
+  // Build DOM
+  var bar = el('div','sa-bar');
+  var playBtn = el('button','sa-play'); playBtn.innerHTML = '&#9654;';
+  var prog = el('div','sa-prog'); var progFill = el('div','sa-prog-fill'); prog.appendChild(progFill);
+  var pills = el('div','sa-pills');
+  var pillBtns = STEPS.map(function(_,i) { var b = el('button','sa-pill'); b.textContent = ''+(i+1); b.dataset.i = ''+i; return b; });
+  pillBtns.forEach(function(b) { pills.appendChild(b); });
+  bar.appendChild(playBtn); bar.appendChild(prog); bar.appendChild(pills);
+
+  var exp = el('div','sa-exp');
+  var logEl = el('div','sa-log'); logEl.innerHTML = '<code>' + LINE + '</code>';
+  var grid = el('div','sa-grid');
+  var byteEls = chars.map(function(c, i) {
+    var d = el('div','sa-byte'); d.dataset.i = ''+i;
+    if (info[i].fc !== undefined) d.dataset.fc = ''+info[i].fc;
+    var ch = el('span','sa-ch'); ch.textContent = c;
+    var pos = el('span','sa-pos'); pos.textContent = ''+i;
+    d.appendChild(ch); d.appendChild(pos);
+    grid.appendChild(d);
+    return d;
+  });
+  var mask = el('div','sa-mask');
+  var maskLbl = el('span','sa-mask-lbl'); maskLbl.textContent = 'Structural:';
+  var bitsEl = el('div','sa-bits');
+  var bitEls = chars.map(function(_, i) { var b = el('span','sa-bit'); b.textContent = '\u00b7'; bitsEl.appendChild(b); return b; });
+  mask.appendChild(maskLbl); mask.appendChild(bitsEl);
+
+  var extractEl = el('div','sa-fields'); extractEl.hidden = true;
+  extractEl.innerHTML = '<div class="sa-fields-row"><span class="sa-fc" style="--fc:var(--f0)"><b>level</b> = ERROR</span></div><p>Jumped to colon at position <b>8</b> via <code>trailing_zeros(colon_mask)</code>. Key left, value right — no scanning.</p>';
+
+  var allfieldsEl = el('div','sa-fields'); allfieldsEl.hidden = true;
+  allfieldsEl.innerHTML = '<div class="sa-fields-row"><span class="sa-fc" style="--fc:var(--f0)"><b>level</b> = ERROR</span><span class="sa-fc" style="--fc:var(--f1)"><b>message</b> = request failed</span><span class="sa-fc" style="--fc:var(--f2)"><b>status</b> = 503</span><span class="sa-fc" style="--fc:var(--f3)"><b>duration_ms</b> = 42.7</span></div><p>4 fields extracted in one pass. Ready for <code>SELECT level, status FROM logs WHERE status >= 500</code></p>';
+
+  var leg = el('div','sa-leg');
+  leg.innerHTML = '<span><i class="sa-sw" style="border-color:#e879a0"></i> Quote</span><span><i class="sa-sw" style="border-color:#60a5fa"></i> Colon</span><span><i class="sa-sw" style="border-color:#a78bfa"></i> Comma</span><span><i class="sa-sw" style="border-color:#f59e0b"></i> Brace</span>';
+
+  root.appendChild(bar); root.appendChild(exp); root.appendChild(logEl);
+  root.appendChild(grid); root.appendChild(mask);
+  root.appendChild(extractEl); root.appendChild(allfieldsEl); root.appendChild(leg);
+
+  // State
+  var cur = 0, playing = false, timer = null, sweeps = [];
+
+  function el(tag, cls) { var e = document.createElement(tag); if (cls) e.className = cls; return e; }
+
+  function clearT() { sweeps.forEach(clearTimeout); sweeps = []; if (timer) { clearTimeout(timer); timer = null; } }
+
+  function go(idx) {
+    cur = idx; var s = STEPS[idx]; root.dataset.step = s.id; clearT();
+    pillBtns.forEach(function(p,i) { p.classList.toggle('on', i===idx); });
+    exp.innerHTML = '<b>'+s.t+'</b><p>'+s.d+'</p>';
+    progFill.style.width = ((idx+1)/STEPS.length*100)+'%';
+
+    // Visibility
+    logEl.style.display = s.id==='log' ? '' : 'none';
+    grid.style.display = s.id==='log' ? 'none' : '';
+    mask.style.display = s.id==='log' ? 'none' : '';
+    leg.style.display = (s.id==='log'||s.id==='allfields'||s.id==='extract') ? 'none' : '';
+    extractEl.hidden = s.id !== 'extract';
+    allfieldsEl.hidden = s.id !== 'allfields';
+
+    // Reset byte classes
+    byteEls.forEach(function(b) { b.className = 'sa-byte'; });
+
+    if (s.id === 'log') {
+      bitEls.forEach(function(b) { b.textContent = '\u00b7'; b.className = 'sa-bit'; });
+    } else if (s.id === 'detect') {
+      bitEls.forEach(function(b) { b.textContent = '\u00b7'; b.className = 'sa-bit'; });
+      byteEls.forEach(function(b, i) {
+        sweeps.push(setTimeout(function() {
+          if (info[i].cls) b.classList.add(info[i].cls, 'lit');
+          bitEls[i].textContent = info[i].isStruct ? '1' : '0';
+          if (info[i].isStruct) bitEls[i].classList.add('on');
+        }, i * 16));
+      });
+    } else {
+      // Show full bitmask + colors
+      byteEls.forEach(function(b, i) { if (info[i].cls) b.classList.add(info[i].cls); });
+      bitEls.forEach(function(b, i) {
+        b.textContent = info[i].structOut ? '1' : '0';
+        b.className = info[i].structOut ? 'sa-bit on' : 'sa-bit';
+      });
+      // Step-specific classes
+      if (s.id === 'strings') {
+        byteEls.forEach(function(b, i) {
+          if (info[i].inStr) b.classList.add('dim');
+          if (info[i].isStruct && info[i].inStr) { b.classList.remove('dim'); b.classList.add('dimS'); }
+        });
+      } else if (s.id === 'result') {
+        byteEls.forEach(function(b, i) { if (info[i].structOut) b.classList.add('keep'); });
+      } else if (s.id === 'extract') {
+        byteEls.forEach(function(b, i) {
+          if (info[i].fc === 0 && info[i].fr === 'k') b.classList.add('fK');
+          if (info[i].fc === 0 && info[i].fr === 'c') b.classList.add('fCol');
+          if (info[i].fc === 0 && info[i].fr === 'v') b.classList.add('fV');
+        });
+      }
+    }
+
+    playBtn.innerHTML = playing ? '&#9646;&#9646;' : '&#9654;';
+  }
+
+  function next() {
+    if (!playing) return;
+    timer = setTimeout(function() {
+      if (!playing) return;
+      go((cur + 1) % STEPS.length);
+      next();
+    }, STEPS[cur].dur);
+  }
+
+  playBtn.addEventListener('click', function() {
+    if (playing) { playing = false; clearT(); playBtn.innerHTML = '&#9654;'; }
+    else { playing = true; playBtn.innerHTML = '&#9646;&#9646;'; if (cur >= STEPS.length-1) go(0); next(); }
+  });
+  pillBtns.forEach(function(b) {
+    b.addEventListener('click', function() { playing = false; clearT(); go(+b.dataset.i); });
+  });
+
+  go(0);
+})();
 </script>
