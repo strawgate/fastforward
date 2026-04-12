@@ -1,4 +1,4 @@
-@import url("https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap");
+@import "https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap";
 
 :root {
   --bg: #f4f8ff;
@@ -14,7 +14,7 @@
   --good: #0f9d58;
   --bad: #ef4444;
   --warning: #f59e0b;
-  --mono: "IBM Plex Mono", "SFMono-Regular", Menlo, Monaco, Consolas, monospace;
+  --mono: "IBM Plex Mono", "SFMono-Regular", "Menlo", "Monaco", "Consolas", monospace;
   --sans: "Sora", "Avenir Next", "Segoe UI", sans-serif;
   --radius-lg: 18px;
   --radius-md: 12px;
@@ -209,7 +209,8 @@ h3 {
   font: 500 11px/1.35 var(--mono);
   color: var(--ink-muted);
   white-space: pre-wrap;
-  word-break: break-word;
+  overflow-wrap: anywhere;
+  word-break: normal;
 }
 
 .breadcrumb {
