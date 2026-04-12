@@ -591,19 +591,7 @@ mod tests {
     use alloc::string::String;
     use alloc::vec::Vec;
     use proptest::prelude::*;
-
-    fn miri_aware_proptest_config() -> proptest::test_runner::Config {
-        #[cfg(miri)]
-        {
-            let mut cfg = proptest::test_runner::Config::default();
-            cfg.failure_persistence = None;
-            cfg
-        }
-        #[cfg(not(miri))]
-        {
-            proptest::test_runner::Config::default()
-        }
-    }
+    use proptest::test_runner::Config as ProptestConfig;
 
     /// Minimal ScanBuilder for testing — captures fields as strings.
     struct TestBuilder {
@@ -1110,7 +1098,10 @@ mod tests {
     }
 
     proptest! {
-        #![proptest_config(miri_aware_proptest_config())]
+        #![proptest_config(ProptestConfig {
+            failure_persistence: None,
+            .. ProptestConfig::default()
+        })]
         /// CRLF normalization invariant: scanning a JSON object with CRLF line endings
         /// must yield the same field values as scanning the same object with LF endings,
         /// and neither captured line values nor any field value must contain a bare \r.

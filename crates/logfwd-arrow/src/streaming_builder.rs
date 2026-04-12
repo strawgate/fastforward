@@ -49,14 +49,39 @@ fn new_emitted_name_set() -> EmittedNameSet {
     EmittedNameSet::new()
 }
 
+fn append_string_view(
+    builder: &mut StringViewBuilder,
+    original_block: u32,
+    decoded_block: Option<u32>,
+    original_len: u32,
+    offset: u32,
+    len: u32,
+) -> Result<(), ArrowError> {
+    if offset < original_len || (len == 0 && offset == original_len) {
+        builder.try_append_view(original_block, offset, len)
+    } else if let Some(decoded_block) = decoded_block {
+        let decoded_offset = offset.checked_sub(original_len).ok_or_else(|| {
+            ArrowError::InvalidArgumentError("decoded string offset underflow".to_string())
+        })?;
+        builder.try_append_view(decoded_block, decoded_offset, len)
+    } else {
+        Err(ArrowError::InvalidArgumentError(format!(
+            "string view offset {offset} requires decoded buffer, but decoded buffer is absent"
+        )))
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Per-field state
 // ---------------------------------------------------------------------------
 
 struct FieldColumns {
     name: Vec<u8>,
-    /// String values: row plus block-local view coordinates.
-    str_views: Vec<StringView>,
+    /// String values: (row, offset_in_buffer, len). Views into the shared
+    /// buffer. Offsets `< buf.len()` reference the original input buffer;
+    /// offsets `>= buf.len()` reference the decoded-strings buffer at
+    /// `offset - buf.len()`. See `StreamingBuilder::decoded_buf`.
+    str_views: Vec<(u32, u32, u32)>,
     /// Int values: (row, parsed_value).
     int_values: Vec<(u32, i64)>,
     /// Float values: (row, parsed_value).
@@ -69,67 +94,6 @@ struct FieldColumns {
     has_bool: bool,
     /// The last row this field was written to, used for dedup when idx >= 64.
     last_row: u32,
-}
-
-#[derive(Clone, Copy)]
-enum StringBlock {
-    Input,
-    Decoded,
-}
-
-#[derive(Clone, Copy)]
-struct StringView {
-    row: u32,
-    block: StringBlock,
-    offset: u32,
-    len: u32,
-}
-
-#[derive(Clone, Copy)]
-struct LineView {
-    block: StringBlock,
-    offset: u32,
-    len: u32,
-}
-
-fn append_string_view(
-    builder: &mut StringViewBuilder,
-    input_block: u32,
-    decoded_block: Option<u32>,
-    view: StringView,
-) -> Result<(), ArrowError> {
-    let block = match view.block {
-        StringBlock::Input => input_block,
-        StringBlock::Decoded if view.len == 0 && decoded_block.is_none() => {
-            builder.append_value("");
-            return Ok(());
-        }
-        StringBlock::Decoded => decoded_block.ok_or_else(|| {
-            ArrowError::InvalidArgumentError(
-                "decoded string view without decoded block".to_string(),
-            )
-        })?,
-    };
-    builder.try_append_view(block, view.offset, view.len)
-}
-
-fn append_line_view(
-    builder: &mut StringViewBuilder,
-    input_block: u32,
-    decoded_block: Option<u32>,
-    view: LineView,
-) -> Result<(), ArrowError> {
-    let block = match view.block {
-        StringBlock::Input => input_block,
-        StringBlock::Decoded if view.len == 0 && decoded_block.is_none() => {
-            builder.append_value("");
-            return Ok(());
-        }
-        StringBlock::Decoded => decoded_block.ok_or_else(|| {
-            ArrowError::InvalidArgumentError("decoded line view without decoded block".to_string())
-        })?,
-    };
-    builder.try_append_view(block, view.offset, view.len)
 }
 
 impl FieldColumns {
@@ -200,14 +164,14 @@ pub struct StreamingBuilder {
     /// and shared with Arrow StringViewArrays in finish_batch.
     buf: bytes::Bytes,
     /// Secondary buffer for decoded string values (JSON escape sequences).
-    /// String views with `StringBlock::Decoded` reference this buffer.
-    /// Allocated lazily; empty when no escapes are decoded.
+    /// String views with offsets `>= buf.len()` reference this buffer at
+    /// `offset - buf.len()`. Allocated lazily; empty when no escapes are decoded.
     decoded_buf: Vec<u8>,
     /// Optional output column name used for full-line capture.
     line_field_name: Option<String>,
-    /// Line views per row, in row order.
+    /// Line views: (offset_in_buf, len) per row, in row order.
     /// Populated only when `line_field_name` is set.
-    line_views: Vec<LineView>,
+    line_views: Vec<(u32, u32)>,
     /// Tracks whether `append_line` has been called for the current row.
     /// Used for duplicate detection since `line_views` is not indexed by field.
     line_written_this_row: bool,
@@ -383,56 +347,29 @@ impl StreamingBuilder {
         if std::str::from_utf8(value).is_err() {
             return;
         }
+        let Ok(len) = u32::try_from(value.len()) else {
+            return;
+        };
         if idx >= u64::BITS as usize {
             self.fields[idx].last_row = self.row_count;
         }
         let offset = self.offset_of(value);
         let fc = &mut self.fields[idx];
         fc.has_str = true;
-        fc.str_views.push(StringView {
-            row: self.row_count,
-            block: StringBlock::Input,
-            offset,
-            len: value.len() as u32,
-        });
+        fc.str_views.push((self.row_count, offset, len));
     }
 
-    /// Append a string slice into the batch input buffer whose UTF-8 validity
-    /// was checked by the caller.
     #[inline(always)]
     pub fn append_validated_str_by_idx(&mut self, idx: usize, value: &[u8]) {
-        debug_assert_eq!(
-            self.state,
-            BuilderState::InRow,
-            "append_validated_str_by_idx called outside of a row"
-        );
-        debug_assert!(std::str::from_utf8(value).is_ok());
-        if check_dup_bits(&mut self.written_bits, idx) {
-            return;
-        }
-        if idx >= u64::BITS as usize && self.fields[idx].last_row == self.row_count {
-            return;
-        }
-        if idx >= u64::BITS as usize {
-            self.fields[idx].last_row = self.row_count;
-        }
-        let offset = self.offset_of(value);
-        let fc = &mut self.fields[idx];
-        fc.has_str = true;
-        fc.str_views.push(StringView {
-            row: self.row_count,
-            block: StringBlock::Input,
-            offset,
-            len: value.len() as u32,
-        });
+        self.append_str_by_idx(idx, value);
     }
 
     /// Append a decoded string value that is NOT a subslice of the input
     /// buffer. Used for strings whose JSON escape sequences have been decoded
     /// (see issue #410). Appends the bytes to `decoded_buf` and records a
     /// view in the same `str_views` vector as regular strings, with the
-    /// offset shifted by `buf.len()` so that `finish_batch` can create a
-    /// combined Arrow buffer.
+    /// offset shifted by `buf.len()` so that `finish_batch` can select the
+    /// decoded Arrow StringView block without copying the original input.
     #[inline(always)]
     pub fn append_decoded_str_by_idx(&mut self, idx: usize, value: &[u8]) {
         debug_assert_eq!(
@@ -449,13 +386,22 @@ impl StreamingBuilder {
         if std::str::from_utf8(value).is_err() {
             return;
         }
-        // Compute the decoded-buffer offset before mutating decoded_buf so that a bail-out
+        let Ok(len) = u32::try_from(value.len()) else {
+            return;
+        };
+        // Compute both offsets before mutating decoded_buf so that a bail-out
         // on overflow does not leave unreferenced bytes in decoded_buf.
         let Ok(decoded_offset) = u32::try_from(self.decoded_buf.len()) else {
             // decoded_buf has grown past 4 GiB; drop this field rather than panic.
             return;
         };
-        let Ok(len) = u32::try_from(value.len()) else {
+        // Offset into the combined buffer: original buf bytes come first,
+        // decoded bytes follow at buf.len() + decoded_offset.
+        let Some(combined_offset) = u32::try_from(self.buf.len())
+            .ok()
+            .and_then(|buf_len| buf_len.checked_add(decoded_offset))
+        else {
+            // Combined offset would overflow u32; drop this field rather than panic.
             return;
         };
         // All validation passed — safe to update dedup guard and extend decoded_buf.
@@ -465,49 +411,12 @@ impl StreamingBuilder {
         self.decoded_buf.extend_from_slice(value);
         let fc = &mut self.fields[idx];
         fc.has_str = true;
-        fc.str_views.push(StringView {
-            row: self.row_count,
-            block: StringBlock::Decoded,
-            offset: decoded_offset,
-            len,
-        });
+        fc.str_views.push((self.row_count, combined_offset, len));
     }
 
-    /// Append a decoded string value whose UTF-8 validity was checked by the
-    /// caller. This avoids a second validation pass in protocol decoders that
-    /// must reject malformed wire strings before falling back.
     #[inline(always)]
     pub fn append_validated_decoded_str_by_idx(&mut self, idx: usize, value: &[u8]) {
-        debug_assert_eq!(
-            self.state,
-            BuilderState::InRow,
-            "append_validated_decoded_str_by_idx called outside of a row"
-        );
-        debug_assert!(std::str::from_utf8(value).is_ok());
-        if check_dup_bits(&mut self.written_bits, idx) {
-            return;
-        }
-        if idx >= u64::BITS as usize && self.fields[idx].last_row == self.row_count {
-            return;
-        }
-        let Ok(decoded_offset) = u32::try_from(self.decoded_buf.len()) else {
-            return;
-        };
-        let Ok(len) = u32::try_from(value.len()) else {
-            return;
-        };
-        if idx >= u64::BITS as usize {
-            self.fields[idx].last_row = self.row_count;
-        }
-        self.decoded_buf.extend_from_slice(value);
-        let fc = &mut self.fields[idx];
-        fc.has_str = true;
-        fc.str_views.push(StringView {
-            row: self.row_count,
-            block: StringBlock::Decoded,
-            offset: decoded_offset,
-            len,
-        });
+        self.append_decoded_str_by_idx(idx, value);
     }
 
     #[inline(always)]
@@ -653,11 +562,10 @@ impl StreamingBuilder {
         );
         if self.line_field_name.is_some() && !self.line_written_this_row {
             let line_view = if std::str::from_utf8(line).is_ok() {
-                Some(LineView {
-                    block: StringBlock::Input,
-                    offset: self.offset_of(line),
-                    len: line.len() as u32,
-                })
+                let Ok(line_len) = u32::try_from(line.len()) else {
+                    return;
+                };
+                Some((self.offset_of(line), line_len))
             } else {
                 let lossy = String::from_utf8_lossy(line);
                 let Ok(lossy_len) = u32::try_from(lossy.len()) else {
@@ -666,12 +574,14 @@ impl StreamingBuilder {
                 let Ok(decoded_offset) = u32::try_from(self.decoded_buf.len()) else {
                     return;
                 };
+                let Some(combined_offset) = u32::try_from(self.buf.len())
+                    .ok()
+                    .and_then(|buf_len| buf_len.checked_add(decoded_offset))
+                else {
+                    return;
+                };
                 self.decoded_buf.extend_from_slice(lossy.as_bytes());
-                Some(LineView {
-                    block: StringBlock::Decoded,
-                    offset: decoded_offset,
-                    len: lossy_len,
-                })
+                Some((combined_offset, lossy_len))
             };
             if let Some(line_view) = line_view {
                 self.line_views.push(line_view);
@@ -684,8 +594,8 @@ impl StreamingBuilder {
     ///
     /// When no JSON escape sequences were decoded, the resulting RecordBatch
     /// shares the input buffer via Bytes reference counting (zero-copy).
-    /// When decoded strings exist, StringViewArrays reference a second Arrow
-    /// block containing only decoded/generated bytes, avoiding a full input copy.
+    /// When decoded strings exist, the original and decoded buffers are exposed
+    /// as separate Arrow StringView blocks to avoid copying the whole input.
     pub fn finish_batch(&mut self) -> Result<RecordBatch, ArrowError> {
         debug_assert_eq!(
             self.state,
@@ -694,10 +604,13 @@ impl StreamingBuilder {
         );
         let num_rows = self.row_count as usize;
 
-        // Keep input and decoded strings in separate Arrow blocks. This
-        // preserves the input zero-copy path even when a few generated strings
-        // (trace/span hex, lossy lines, decoded escapes) are present.
-        let input_arrow_buf = Buffer::from(self.buf.clone());
+        // StringView offsets use original-buffer offsets for unescaped strings
+        // and offsets >= original_buf_len for decoded strings. Keep those as two
+        // Arrow blocks so decoding one field never copies the full input buffer.
+        let original_buf_len = u32::try_from(self.buf.len()).map_err(|_| {
+            ArrowError::InvalidArgumentError("input buffer exceeds StringView offset range".into())
+        })?;
+        let arrow_buf = Buffer::from(self.buf.clone());
         let decoded_arrow_buf = if self.decoded_buf.is_empty() {
             None
         } else {
@@ -780,17 +693,24 @@ impl StreamingBuilder {
                 }
 
                 if fc.has_str {
-                    let mut builder = StringViewBuilder::with_capacity(num_rows);
-                    let input_block = builder.append_block(input_arrow_buf.clone());
+                    let mut builder = StringViewBuilder::new();
+                    let original_block = builder.append_block(arrow_buf.clone());
                     let decoded_block = decoded_arrow_buf
                         .as_ref()
                         .map(|buf| builder.append_block(buf.clone()));
                     let mut vi = 0;
                     for row in 0..num_rows as u32 {
-                        if vi < fc.str_views.len() && fc.str_views[vi].row == row {
-                            let view = fc.str_views[vi];
-                            append_string_view(&mut builder, input_block, decoded_block, view)
-                                .expect("offset/len pre-validated by append methods");
+                        if vi < fc.str_views.len() && fc.str_views[vi].0 == row {
+                            let (_, offset, len) = fc.str_views[vi];
+                            append_string_view(
+                                &mut builder,
+                                original_block,
+                                decoded_block,
+                                original_buf_len,
+                                offset,
+                                len,
+                            )
+                            .expect("offset/len pre-validated by offset_of and UTF-8 check");
                             vi += 1;
                         } else {
                             builder.append_null();
@@ -872,18 +792,25 @@ impl StreamingBuilder {
 
                 if fc.has_str {
                     reserve_name(name.as_ref())?;
-                    let mut builder = StringViewBuilder::with_capacity(num_rows);
-                    let input_block = builder.append_block(input_arrow_buf.clone());
+                    let mut builder = StringViewBuilder::new();
+                    let original_block = builder.append_block(arrow_buf.clone());
                     let decoded_block = decoded_arrow_buf
                         .as_ref()
                         .map(|buf| builder.append_block(buf.clone()));
 
                     let mut vi = 0;
                     for row in 0..num_rows as u32 {
-                        if vi < fc.str_views.len() && fc.str_views[vi].row == row {
-                            let view = fc.str_views[vi];
-                            append_string_view(&mut builder, input_block, decoded_block, view)
-                                .expect("offset/len pre-validated by append methods");
+                        if vi < fc.str_views.len() && fc.str_views[vi].0 == row {
+                            let (_, offset, len) = fc.str_views[vi];
+                            append_string_view(
+                                &mut builder,
+                                original_block,
+                                decoded_block,
+                                original_buf_len,
+                                offset,
+                                len,
+                            )
+                            .expect("offset/len pre-validated by offset_of and UTF-8 check");
                             vi += 1;
                         } else {
                             builder.append_null();
@@ -926,16 +853,21 @@ impl StreamingBuilder {
                     num_rows
                 )));
             }
-            let mut builder = StringViewBuilder::with_capacity(num_rows);
+            let mut builder = StringViewBuilder::new();
             if num_rows > 0 {
-                let input_block = builder.append_block(input_arrow_buf);
-                let decoded_block = decoded_arrow_buf.map(|buf| builder.append_block(buf));
+                let original_block = builder.append_block(arrow_buf);
+                let decoded_block = decoded_arrow_buf
+                    .as_ref()
+                    .map(|buf| builder.append_block(buf.clone()));
                 for row in 0..num_rows {
-                    append_line_view(
+                    let (offset, len) = self.line_views[row];
+                    append_string_view(
                         &mut builder,
-                        input_block,
+                        original_block,
                         decoded_block,
-                        self.line_views[row],
+                        original_buf_len,
+                        offset,
+                        len,
                     )
                     .expect("line view offset/len must be within buffer");
                 }
@@ -955,12 +887,17 @@ impl StreamingBuilder {
         for (key, value) in &self.resource_attrs {
             let col_name = Self::resource_col_name(key);
             reserve_name(&col_name)?;
-            let mut builder = StringViewBuilder::with_capacity(num_rows);
+            let mut builder = StringViewBuilder::new();
             if num_rows > 0 {
+                let Ok(value_len) = u32::try_from(value.len()) else {
+                    return Err(ArrowError::InvalidArgumentError(format!(
+                        "resource attribute value too large for Utf8View: {key}"
+                    )));
+                };
                 let block = builder.append_block(Buffer::from(value.as_bytes().to_vec()));
                 for _ in 0..num_rows {
                     builder
-                        .try_append_view(block, 0, value.len() as u32)
+                        .try_append_view(block, 0, value_len)
                         .expect("resource attr constant view must be valid");
                 }
             }
@@ -995,6 +932,7 @@ impl StreamingBuilder {
             "finish_batch_detached called outside of a batch"
         );
         let num_rows = self.row_count as usize;
+        let has_decoded = !self.decoded_buf.is_empty();
 
         let mut schema_fields: Vec<Field> = Vec::with_capacity(self.num_active);
         let mut arrays: Vec<ArrayRef> = Vec::with_capacity(self.num_active);
@@ -1063,15 +1001,18 @@ impl StreamingBuilder {
                 }
 
                 if fc.has_str {
-                    let total_bytes: usize =
-                        fc.str_views.iter().map(|view| view.len as usize).sum();
+                    let total_bytes: usize = fc.str_views.iter().map(|&(_, _, l)| l as usize).sum();
                     let mut builder =
                         arrow::array::StringBuilder::with_capacity(num_rows, total_bytes);
                     let mut vi = 0;
                     for row in 0..num_rows as u32 {
-                        if vi < fc.str_views.len() && fc.str_views[vi].row == row {
-                            let s = self.read_str(fc.str_views[vi]);
-                            builder.append_value(s);
+                        if vi < fc.str_views.len() && fc.str_views[vi].0 == row {
+                            let (_, offset, len) = fc.str_views[vi];
+                            if let Some(s) = self.read_str(offset, len, has_decoded) {
+                                builder.append_value(s);
+                            } else {
+                                builder.append_null();
+                            }
                             vi += 1;
                         } else {
                             builder.append_null();
@@ -1146,15 +1087,18 @@ impl StreamingBuilder {
 
                 if fc.has_str {
                     reserve_name(name.as_ref())?;
-                    let total_bytes: usize =
-                        fc.str_views.iter().map(|view| view.len as usize).sum();
+                    let total_bytes: usize = fc.str_views.iter().map(|&(_, _, l)| l as usize).sum();
                     let mut builder =
                         arrow::array::StringBuilder::with_capacity(num_rows, total_bytes);
                     let mut vi = 0;
                     for row in 0..num_rows as u32 {
-                        if vi < fc.str_views.len() && fc.str_views[vi].row == row {
-                            let s = self.read_str(fc.str_views[vi]);
-                            builder.append_value(s);
+                        if vi < fc.str_views.len() && fc.str_views[vi].0 == row {
+                            let (_, offset, len) = fc.str_views[vi];
+                            if let Some(s) = self.read_str(offset, len, has_decoded) {
+                                builder.append_value(s);
+                            } else {
+                                builder.append_null();
+                            }
                             vi += 1;
                         } else {
                             builder.append_null();
@@ -1193,11 +1137,16 @@ impl StreamingBuilder {
                     num_rows
                 )));
             }
-            let total_bytes: usize = self.line_views.iter().map(|view| view.len as usize).sum();
+            let total_bytes: usize = self.line_views.iter().map(|&(_, l)| l as usize).sum();
             let mut builder = arrow::array::StringBuilder::with_capacity(num_rows, total_bytes);
+            let has_decoded = !self.decoded_buf.is_empty();
             for row in 0..num_rows {
-                let s = self.read_line_str(self.line_views[row]);
-                builder.append_value(s);
+                let (offset, len) = self.line_views[row];
+                if let Some(s) = self.read_str(offset, len, has_decoded) {
+                    builder.append_value(s);
+                } else {
+                    builder.append_null();
+                }
             }
             let line_field_name = self
                 .line_field_name
@@ -1232,23 +1181,22 @@ impl StreamingBuilder {
         result
     }
 
-    fn read_str(&self, view: StringView) -> &str {
-        self.read_block_str(view.block, view.offset, view.len)
-    }
-
-    fn read_line_str(&self, view: LineView) -> &str {
-        self.read_block_str(view.block, view.offset, view.len)
-    }
-
-    /// Read a string value from one of the builder's backing buffers.
-    fn read_block_str(&self, block: StringBlock, offset: u32, len: u32) -> &str {
+    /// Read a string value from the buffer(s) by offset and length.
+    ///
+    /// Offsets `< buf.len()` read from the original input buffer.
+    /// Offsets `>= buf.len()` read from `decoded_buf` at `offset - buf.len()`.
+    fn read_str(&self, offset: u32, len: u32, has_decoded: bool) -> Option<&str> {
         let start = offset as usize;
-        let end = start.saturating_add(len as usize);
-        let bytes = match block {
-            StringBlock::Input => self.buf.get(start..end).unwrap_or(b""),
-            StringBlock::Decoded => self.decoded_buf.get(start..end).unwrap_or(b""),
+        let end = start.checked_add(len as usize)?;
+        let buf_len = self.buf.len();
+        let bytes = if !has_decoded || start < buf_len {
+            self.buf.get(start..end)?
+        } else {
+            let dec_start = start.checked_sub(buf_len)?;
+            let dec_end = end.checked_sub(buf_len)?;
+            self.decoded_buf.get(dec_start..dec_end)?
         };
-        std::str::from_utf8(bytes).unwrap_or("")
+        std::str::from_utf8(bytes).ok()
     }
 }
 
@@ -1329,22 +1277,6 @@ mod tests {
         let child_names: Vec<&str> = sa.fields().iter().map(|f| f.name().as_str()).collect();
         assert!(child_names.contains(&"int"), "missing int child");
         assert!(child_names.contains(&"str"), "missing str child");
-    }
-
-    #[test]
-    fn decoded_empty_string_finishes_without_decoded_block() {
-        let mut b = StreamingBuilder::new(None);
-        b.begin_batch(bytes::Bytes::from_static(b"input"));
-        let idx = b.resolve_field(b"empty");
-
-        b.begin_row();
-        b.append_validated_decoded_str_by_idx(idx, b"");
-        b.end_row();
-
-        let batch = b.finish_batch().unwrap();
-        assert_eq!(batch.num_rows(), 1);
-        let col = batch.column_by_name("empty").expect("empty column");
-        assert_eq!(col.to_data().len(), 1);
     }
 
     #[test]
@@ -1796,11 +1728,11 @@ mod tests {
         let mut b = StreamingBuilder::new(None);
         b.begin_batch(buf.clone());
 
-        let res = b.read_block_str(StringBlock::Input, 0, 10); // Out of bounds length
-        assert_eq!(res, ""); // Handled safely
+        let res = b.read_str(0, 10, false); // Out of bounds length
+        assert_eq!(res, None); // Handled safely
 
-        let res2 = b.read_block_str(StringBlock::Input, 10, 2); // Out of bounds offset
-        assert_eq!(res2, ""); // Handled safely
+        let res2 = b.read_str(10, 2, false); // Out of bounds offset
+        assert_eq!(res2, None); // Handled safely
     }
 
     #[test]
@@ -2553,6 +2485,72 @@ mod tests {
     }
 
     #[test]
+    fn finish_batch_keeps_original_and_decoded_buffers_separate() {
+        let json = b"original string value longer than inline";
+        let buf = bytes::Bytes::from(json.to_vec());
+        let mut b = StreamingBuilder::new(None);
+        b.begin_batch(buf.clone());
+        let idx = b.resolve_field(b"msg");
+
+        b.begin_row();
+        b.append_str_by_idx(idx, &buf[..]);
+        b.end_row();
+
+        b.begin_row();
+        b.append_decoded_str_by_idx(idx, b"decoded string value longer than inline");
+        b.end_row();
+
+        let batch = b.finish_batch().expect("finish batch");
+        let col = batch
+            .column_by_name("msg")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::StringViewArray>()
+            .unwrap();
+
+        assert_eq!(col.value(0), "original string value longer than inline");
+        assert_eq!(col.value(1), "decoded string value longer than inline");
+        assert_eq!(
+            col.data_buffers().len(),
+            2,
+            "decoded strings should add a second StringView block, not concatenate into one buffer"
+        );
+        assert_eq!(col.data_buffers()[0].len(), json.len());
+        assert_eq!(
+            col.data_buffers()[1].len(),
+            b"decoded string value longer than inline".len()
+        );
+    }
+
+    #[test]
+    fn finish_batch_preserves_empty_decoded_string_without_decoded_block() {
+        let json = b"original";
+        let buf = bytes::Bytes::from(json.to_vec());
+        let mut b = StreamingBuilder::new(None);
+        b.begin_batch(buf);
+        let idx = b.resolve_field(b"msg");
+
+        b.begin_row();
+        b.append_decoded_str_by_idx(idx, b"");
+        b.end_row();
+
+        let batch = b.finish_batch().expect("finish batch");
+        let col = batch
+            .column_by_name("msg")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::StringViewArray>()
+            .unwrap();
+
+        assert_eq!(col.value(0), "");
+        assert_eq!(
+            col.data_buffers().len(),
+            1,
+            "empty decoded strings should not require a decoded StringView block"
+        );
+    }
+
+    #[test]
     fn test_resource_columns_injected_with_metadata_in_finish_batch() {
         let buf = bytes::Bytes::from_static(b"unused");
         let mut b = StreamingBuilder::new(None);
@@ -2765,11 +2763,7 @@ mod verification {
         b.fields.push(FieldColumns::new(b"x"));
         b.num_active = 1;
         b.row_count = 7;
-        b.line_views.push(LineView {
-            block: StringBlock::Input,
-            offset: 1,
-            len: 2,
-        });
+        b.line_views.push((1, 2));
         b.decoded_buf.extend_from_slice(b"decoded");
         b.begin_batch(bytes::Bytes::from_static(b"test data pad"));
         assert_eq!(b.num_active, 0);
