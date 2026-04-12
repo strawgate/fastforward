@@ -91,8 +91,9 @@ fn require_non_empty<'a>(
     Ok(value)
 }
 
+#[cfg_attr(feature = "otlp-research", allow(clippy::unnecessary_wraps))]
 fn resolve_otlp_protobuf_decode_mode(
-    name: &str,
+    _name: &str,
     mode: Option<OtlpProtobufDecodeModeConfig>,
 ) -> Result<logfwd_io::otlp_receiver::OtlpProtobufDecodeMode, String> {
     match mode.unwrap_or_default() {
@@ -107,7 +108,7 @@ fn resolve_otlp_protobuf_decode_mode(
             #[cfg(not(feature = "otlp-research"))]
             {
                 Err(format!(
-                    "input '{name}': protobuf_decode_mode projected_fallback requires building with the otlp-research feature"
+                    "input '{_name}': protobuf_decode_mode projected_fallback requires building with the otlp-research feature"
                 ))
             }
         }
@@ -119,13 +120,10 @@ fn resolve_otlp_protobuf_decode_mode(
             #[cfg(not(feature = "otlp-research"))]
             {
                 Err(format!(
-                    "input '{name}': protobuf_decode_mode projected_only requires building with the otlp-research feature"
+                    "input '{_name}': protobuf_decode_mode projected_only requires building with the otlp-research feature"
                 ))
             }
         }
-        _ => Err(format!(
-            "input '{name}': unsupported protobuf_decode_mode value"
-        )),
     }
 }
 

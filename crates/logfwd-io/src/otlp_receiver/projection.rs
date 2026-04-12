@@ -135,6 +135,11 @@ mod spec {
     }
 }
 
+/// Decode an OTLP ExportLogsServiceRequest payload directly into an Arrow batch.
+///
+/// `body` contains the protobuf payload bytes and `resource_prefix` selects the
+/// column prefix used for projected resource attributes. This detached variant
+/// decodes strings into builder-owned storage before returning a `RecordBatch`.
 pub(super) fn decode_projected_otlp_logs(
     body: &[u8],
     resource_prefix: &str,
@@ -149,6 +154,12 @@ pub(super) fn decode_projected_otlp_logs(
 }
 
 #[cfg(any(feature = "otlp-research", test))]
+/// Decode an OTLP ExportLogsServiceRequest payload into an Arrow batch that
+/// views the request buffer where possible.
+///
+/// `body` is cloned as a cheap `Bytes` handle for batch backing storage, while
+/// `resource_prefix` selects the projected resource-attribute column prefix.
+/// This variant is available for `otlp-research` and tests.
 pub(super) fn decode_projected_otlp_logs_view_bytes(
     body: Bytes,
     resource_prefix: &str,
@@ -633,6 +644,7 @@ fn resolve_record_attr_field(
 
 fn decode_any_value_wire(value: &[u8]) -> Result<Option<WireAny<'_>>, ProjectionError> {
     let mut out = None;
+    let mut unsupported = None;
     for_each_field(value, |field, field_value| {
         match (field, field_value) {
             (spec::any_value::STRING, WireField::Len(bytes)) => {
@@ -677,7 +689,8 @@ fn decode_any_value_wire(value: &[u8]) -> Result<Option<WireAny<'_>>, Projection
                 ));
             }
             (spec::any_value::ARRAY, WireField::Len(_)) => {
-                return Err(ProjectionError::Unsupported("AnyValue::ArrayValue"));
+                out = None;
+                unsupported = Some("AnyValue::ArrayValue");
             }
             (spec::any_value::ARRAY, _) => {
                 return Err(ProjectionError::Invalid(
@@ -685,7 +698,8 @@ fn decode_any_value_wire(value: &[u8]) -> Result<Option<WireAny<'_>>, Projection
                 ));
             }
             (spec::any_value::KVLIST, WireField::Len(_)) => {
-                return Err(ProjectionError::Unsupported("AnyValue::KvListValue"));
+                out = None;
+                unsupported = Some("AnyValue::KvListValue");
             }
             (spec::any_value::KVLIST, _) => {
                 return Err(ProjectionError::Invalid(
@@ -696,6 +710,11 @@ fn decode_any_value_wire(value: &[u8]) -> Result<Option<WireAny<'_>>, Projection
         }
         Ok(())
     })?;
+    if let Some(reason) = unsupported
+        && out.is_none()
+    {
+        return Err(ProjectionError::Unsupported(reason));
+    }
     Ok(out)
 }
 
@@ -803,11 +822,7 @@ fn for_each_field<'a>(
 ) -> Result<(), ProjectionError> {
     while !input.is_empty() {
         let key = read_varint(&mut input)?;
-        let field = u32::try_from(key >> 3)
-            .map_err(|_| ProjectionError::Invalid("protobuf field number overflow"))?;
-        if field == 0 {
-            return Err(ProjectionError::Invalid("protobuf field number zero"));
-        }
+        let field = decode_field_number(key)?;
         let wire_type = (key & 0x07) as u8;
         match wire_type {
             0 => visit(field, WireField::Varint(read_varint(&mut input)?))?,
@@ -825,7 +840,8 @@ fn for_each_field<'a>(
                 )?;
             }
             2 => {
-                let len = read_varint(&mut input)? as usize;
+                let len = usize::try_from(read_varint(&mut input)?)
+                    .map_err(|_| ProjectionError::Invalid("protobuf length exceeds usize"))?;
                 if input.len() < len {
                     return Err(ProjectionError::Invalid("truncated length-delimited field"));
                 }
@@ -846,11 +862,65 @@ fn for_each_field<'a>(
                     )),
                 )?;
             }
-            3 | 4 => return Err(ProjectionError::Invalid("protobuf group wire type")),
+            3 => skip_group(&mut input, field)?,
+            4 => return Err(ProjectionError::Invalid("unexpected protobuf end group")),
             _ => return Err(ProjectionError::Invalid("invalid protobuf wire type")),
         }
     }
     Ok(())
+}
+
+fn decode_field_number(key: u64) -> Result<u32, ProjectionError> {
+    const PROTOBUF_MAX_FIELD_NUMBER: u64 = 0x1FFF_FFFF;
+
+    let field = key >> 3;
+    if field == 0 {
+        return Err(ProjectionError::Invalid("protobuf field number zero"));
+    }
+    if field > PROTOBUF_MAX_FIELD_NUMBER {
+        return Err(ProjectionError::Invalid(
+            "protobuf field number out of range",
+        ));
+    }
+    u32::try_from(field).map_err(|_| ProjectionError::Invalid("protobuf field number overflow"))
+}
+
+fn skip_group(input: &mut &[u8], start_field: u32) -> Result<(), ProjectionError> {
+    while !input.is_empty() {
+        let key = read_varint(input)?;
+        let field = decode_field_number(key)?;
+        let wire_type = (key & 0x07) as u8;
+        match wire_type {
+            0 => {
+                let _ = read_varint(input)?;
+            }
+            1 => {
+                if input.len() < 8 {
+                    return Err(ProjectionError::Invalid("truncated fixed64 field"));
+                }
+                *input = &input[8..];
+            }
+            2 => {
+                let len = usize::try_from(read_varint(input)?)
+                    .map_err(|_| ProjectionError::Invalid("protobuf length exceeds usize"))?;
+                if input.len() < len {
+                    return Err(ProjectionError::Invalid("truncated length-delimited field"));
+                }
+                *input = &input[len..];
+            }
+            3 => skip_group(input, field)?,
+            4 if field == start_field => return Ok(()),
+            4 => return Err(ProjectionError::Invalid("mismatched protobuf end group")),
+            5 => {
+                if input.len() < 4 {
+                    return Err(ProjectionError::Invalid("truncated fixed32 field"));
+                }
+                *input = &input[4..];
+            }
+            _ => return Err(ProjectionError::Invalid("invalid protobuf wire type")),
+        }
+    }
+    Err(ProjectionError::Invalid("unterminated protobuf group"))
 }
 
 fn read_varint(input: &mut &[u8]) -> Result<u64, ProjectionError> {
@@ -1117,20 +1187,13 @@ mod tests {
     }
 
     #[test]
-    fn projected_group_wire_type_is_invalid_not_unsupported() {
+    fn projected_unknown_group_wire_type_matches_prost_conversion() {
         let mut payload = Vec::new();
-        encode_varint(
-            &mut payload,
-            (u64::from(spec::export_logs_service_request::RESOURCE_LOGS) << 3) | 3,
-        );
+        encode_varint(&mut payload, (99_u64 << 3) | 3);
+        encode_varint_field(&mut payload, 99, 123);
+        encode_varint(&mut payload, (99_u64 << 3) | 4);
 
-        let err = decode_projected_otlp_logs(&payload, field_names::DEFAULT_RESOURCE_PREFIX)
-            .expect_err("protobuf group wire types should fail projection");
-
-        assert!(
-            matches!(err, ProjectionError::Invalid(_)),
-            "expected invalid projection reason, got {err:?}"
-        );
+        assert_projected_payload_matches_prost(&payload);
     }
 
     #[test]
@@ -1182,6 +1245,39 @@ mod tests {
 
         let mut log_record = Vec::new();
         encode_len_field(&mut log_record, spec::log_record::ATTRIBUTES, &attr);
+
+        let mut scope_logs = Vec::new();
+        encode_len_field(&mut scope_logs, spec::scope_logs::LOG_RECORDS, &log_record);
+
+        let mut resource_logs = Vec::new();
+        encode_len_field(
+            &mut resource_logs,
+            spec::resource_logs::SCOPE_LOGS,
+            &scope_logs,
+        );
+
+        let mut payload = Vec::new();
+        encode_len_field(
+            &mut payload,
+            spec::export_logs_service_request::RESOURCE_LOGS,
+            &resource_logs,
+        );
+
+        assert_projected_payload_matches_prost(&payload);
+    }
+
+    #[test]
+    fn projected_anyvalue_unsupported_oneof_followed_by_primitive_matches_prost() {
+        let mut any_value = Vec::new();
+        encode_len_field(
+            &mut any_value,
+            spec::any_value::ARRAY,
+            &ArrayValue::default().encode_to_vec(),
+        );
+        encode_len_field(&mut any_value, spec::any_value::STRING, b"kept");
+
+        let mut log_record = Vec::new();
+        encode_len_field(&mut log_record, spec::log_record::BODY, &any_value);
 
         let mut scope_logs = Vec::new();
         encode_len_field(&mut scope_logs, spec::scope_logs::LOG_RECORDS, &log_record);

@@ -75,7 +75,6 @@ impl fmt::Display for InputType {
 /// OTLP protobuf decode strategy for OTLP inputs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
-#[non_exhaustive]
 pub enum OtlpProtobufDecodeModeConfig {
     /// Decode through the generated prost OTLP model.
     #[default]

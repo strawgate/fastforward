@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use logfwd_bench::{generators, make_otlp_sink};
 use logfwd_io::otlp_receiver::{
-    decode_protobuf_bytes_to_batch_projected_experimental, decode_protobuf_to_batch,
+    decode_protobuf_bytes_to_batch_projected_only_experimental, decode_protobuf_to_batch,
     decode_protobuf_to_batch_projected_detached_experimental,
     decode_protobuf_to_batch_prost_reference,
 };
@@ -267,10 +267,10 @@ fn run_profile(fixture: &FixtureData, mode: Mode, iterations: usize) -> ProfileR
                 decode_protobuf_to_batch_projected_detached_experimental(&fixture.payload)
                     .expect("warmup projected decode")
             }
-            Mode::E2eProjectedView => {
-                decode_protobuf_bytes_to_batch_projected_experimental(fixture.payload_bytes.clone())
-                    .expect("warmup projected view decode")
-            }
+            Mode::E2eProjectedView => decode_protobuf_bytes_to_batch_projected_only_experimental(
+                fixture.payload_bytes.clone(),
+            )
+            .expect("warmup projected view decode"),
             Mode::ProstReferenceToBatch
             | Mode::ProductionToBatch
             | Mode::ProjectedDetachedDecode
@@ -300,7 +300,7 @@ fn run_profile(fixture: &FixtureData, mode: Mode, iterations: usize) -> ProfileR
                 black_box(batch.num_rows());
             }
             Mode::ProjectedViewDecode => {
-                let batch = decode_protobuf_bytes_to_batch_projected_experimental(
+                let batch = decode_protobuf_bytes_to_batch_projected_only_experimental(
                     fixture.payload_bytes.clone(),
                 )
                 .expect("projected view");
@@ -325,7 +325,7 @@ fn run_profile(fixture: &FixtureData, mode: Mode, iterations: usize) -> ProfileR
                 black_box(sink.encoded_payload().len());
             }
             Mode::E2eProjectedView => {
-                let batch = decode_protobuf_bytes_to_batch_projected_experimental(
+                let batch = decode_protobuf_bytes_to_batch_projected_only_experimental(
                     fixture.payload_bytes.clone(),
                 )
                 .expect("projected view");
@@ -389,7 +389,7 @@ fn build_fixture(profile: FixtureProfile) -> FixtureData {
         .expect("projected fixture decodes");
     assert_batch_matches(&batch, &projected, profile.name);
     assert_encode_paths_match(&projected, profile.name);
-    let view = decode_protobuf_bytes_to_batch_projected_experimental(payload_bytes.clone())
+    let view = decode_protobuf_bytes_to_batch_projected_only_experimental(payload_bytes.clone())
         .expect("view fixture decodes");
     let detached_view = logfwd_arrow::materialize::detach(&view);
     assert_batch_matches(&batch, &detached_view, profile.name);

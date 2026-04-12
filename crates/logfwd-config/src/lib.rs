@@ -330,7 +330,6 @@ output:
         ));
     }
 
-    #[cfg(feature = "otlp-research")]
     #[test]
     fn otlp_input_accepts_experimental_protobuf_decode_mode() {
         let yaml = r#"
@@ -349,26 +348,6 @@ output:
             InputTypeConfig::Otlp(o)
                 if o.protobuf_decode_mode == Some(OtlpProtobufDecodeModeConfig::ProjectedFallback)
         ));
-    }
-
-    #[cfg(not(feature = "otlp-research"))]
-    #[test]
-    fn otlp_input_rejects_experimental_protobuf_decode_mode_without_feature() {
-        let yaml = r#"
-input:
-  type: otlp
-  listen: 127.0.0.1:4318
-  protobuf_decode_mode: projected_fallback
-output:
-  type: stdout
-"#;
-        let err = Config::load_str(yaml)
-            .expect_err("projected protobuf_decode_mode requires otlp-research");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("protobuf_decode_mode") && msg.contains("otlp-research"),
-            "expected otlp-research protobuf_decode_mode validation error, got: {msg}"
-        );
     }
 
     #[test]
