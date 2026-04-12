@@ -46,7 +46,7 @@ export default defineConfig({
           ],
         },
         {
-          label: "Architecture",
+          label: "Collector University",
           items: [
             { label: "How logfwd Works", slug: "architecture" },
             { label: "Why Tailing Is Hard", slug: "architecture/tailing" },
