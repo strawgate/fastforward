@@ -3,7 +3,7 @@ title: "Output Types"
 description: "Usage notes and examples for each output type"
 ---
 
-Support status lives in the [Configuration Reference](/configuration/reference/#output-types).
+Support status lives in the [Configuration Reference](./reference.mdx#output-types).
 This page focuses on usage notes and examples.
 
 ## OTLP

@@ -7,6 +7,8 @@ pub(crate) struct InputTemplate {
     pub(crate) id: &'static str,
     /// Human-friendly label shown in prompts.
     pub(crate) label: &'static str,
+    /// One-line description shown below the label in prompts.
+    pub(crate) description: &'static str,
     /// YAML fragment injected into the generated config.
     pub(crate) snippet: &'static str,
 }
@@ -18,6 +20,8 @@ pub(crate) struct OutputTemplate {
     pub(crate) id: &'static str,
     /// Human-friendly label shown in prompts.
     pub(crate) label: &'static str,
+    /// One-line description shown below the label in prompts.
+    pub(crate) description: &'static str,
     /// YAML fragment injected into the generated config.
     pub(crate) snippet: &'static str,
 }
@@ -44,26 +48,31 @@ pub(crate) const INPUT_TEMPLATES: &[InputTemplate] = &[
     InputTemplate {
         id: "file_json",
         label: "File tailing (JSON logs)",
+        description: "Watch JSON log files on disk and stream new lines as they appear.",
         snippet: "input:\n  type: file\n  path: /var/log/app/*.json\n  format: json\n",
     },
     InputTemplate {
         id: "file_cri",
         label: "File tailing (Kubernetes CRI)",
+        description: "Tail Kubernetes container logs in CRI format from node filesystems.",
         snippet: "input:\n  type: file\n  path: /var/log/containers/*.log\n  format: cri\n",
     },
     InputTemplate {
         id: "udp_raw",
         label: "UDP listener (newline-delimited raw logs)",
+        description: "Receive raw log lines over UDP, e.g. syslog or custom agents.",
         snippet: "input:\n  type: udp\n  listen: 0.0.0.0:5514\n  format: raw\n",
     },
     InputTemplate {
         id: "tcp_json",
         label: "TCP listener (newline JSON)",
+        description: "Accept newline-delimited JSON logs over a TCP socket.",
         snippet: "input:\n  type: tcp\n  listen: 0.0.0.0:9000\n  format: json\n",
     },
     InputTemplate {
         id: "otlp_receiver",
         label: "OTLP log receiver",
+        description: "Receive logs via the OpenTelemetry Protocol (OTLP/HTTP).",
         snippet: "input:\n  type: otlp\n  listen: 0.0.0.0:4318\n",
     },
 ];
@@ -73,38 +82,42 @@ pub(crate) const OUTPUT_TEMPLATES: &[OutputTemplate] = &[
     OutputTemplate {
         id: "otlp",
         label: "OTLP collector",
+        description: "Send logs to an OpenTelemetry collector via OTLP/HTTP.",
         snippet: "output:\n  type: otlp\n  endpoint: http://localhost:4318/v1/logs\n",
     },
     OutputTemplate {
         id: "loki",
         label: "Grafana Loki",
+        description: "Push logs to Grafana Loki for querying with LogQL.",
         snippet: "output:\n  type: loki\n  endpoint: http://localhost:3100\n  static_labels:\n    service: logfwd\n  label_columns:\n    - level\n    - app\n",
     },
     OutputTemplate {
         id: "elasticsearch",
         label: "Elasticsearch",
+        description: "Index logs in Elasticsearch for full-text search.",
         snippet: "output:\n  type: elasticsearch\n  endpoint: http://localhost:9200\n  index: logs-%Y.%m.%d\n",
     },
     OutputTemplate {
         id: "stdout",
-        label: "stdout",
+        label: "stdout (for testing)",
+        description: "Print logs to the terminal. Great for trying things out.",
         snippet: "output:\n  type: stdout\n",
     },
     OutputTemplate {
         id: "file",
         label: "NDJSON file",
+        description: "Write logs as newline-delimited JSON to a local file.",
         snippet: "output:\n  type: file\n  path: ./out.ndjson\n",
     },
     OutputTemplate {
         id: "null",
         label: "null sink (drop data)",
+        description: "Discard all logs. Useful for benchmarking or dry runs.",
         snippet: "output:\n  type: null\n",
     },
 ];
 
-// Intentionally kept for upcoming wizard mode that starts from opinionated
-// use-case presets before selecting input/output details.
-#[allow(dead_code)]
+/// Opinionated end-to-end presets for `logfwd wizard`.
 pub(crate) const USE_CASE_TEMPLATES: &[UseCaseTemplate] = &[
     UseCaseTemplate {
         id: "redis_to_otlp",
@@ -292,9 +305,8 @@ pub(crate) fn render_config(
     out
 }
 
-/// Render one complete config from a single use-case preset.
-#[allow(dead_code)]
-pub(crate) fn render_use_case(use_case: &UseCaseTemplate) -> String {
+/// Render a use-case preset, optionally with a custom SQL transform.
+pub(crate) fn render_use_case(use_case: &UseCaseTemplate, sql: &str) -> String {
     let mut out = String::new();
     out.push_str("# logfwd example\n");
     let _ = writeln!(out, "# Use case: {}", use_case.title);
@@ -303,7 +315,7 @@ pub(crate) fn render_use_case(use_case: &UseCaseTemplate) -> String {
     out.push_str(use_case.input);
     out.push('\n');
     out.push_str("transform: |\n");
-    for line in use_case.transform.lines() {
+    for line in sql.lines() {
         let _ = writeln!(out, "  {line}");
     }
     out.push('\n');
