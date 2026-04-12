@@ -31,7 +31,7 @@ permissions:
   id-token: write
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: pages
   cancel-in-progress: true
 
 jobs:
@@ -83,26 +83,18 @@ jobs:
       - name: Build docs (Starlight)
         run: cd book && npm run build
 
-      - name: Prepare Starlight link-check root
-        run: |
-          rm -rf book/dist-linkcheck
-          mkdir -p book/dist-linkcheck/memagent
-          cp -R book/dist/. book/dist-linkcheck/memagent/
-
-      - name: Link check (Starlight built output)
+      - name: Link check (built site)
         uses: lycheeverse/lychee-action@v2
         with:
           lycheeVersion: v0.23.0
           args: >-
             --no-progress
-            --accept 200,429,502
+            --accept 200,429
             --max-retries 3
             --exclude 'mailto:'
             --exclude-loopback
-            --exclude '^https://opentelemetry.io/docs/'
-            --exclude '^https://strawgate.github.io/memagent/'
-            --root-dir ${{ github.workspace }}/book/dist-linkcheck
-            ${{ github.workspace }}/book/dist-linkcheck/memagent
+            --root-dir book/dist
+            book/dist
 
       - name: Build rustdoc (public API only)
         run: |
