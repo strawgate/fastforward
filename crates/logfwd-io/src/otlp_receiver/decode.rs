@@ -62,6 +62,13 @@ pub(super) fn decode_otlp_protobuf(
         )));
     }
 
+    decode_otlp_protobuf_with_prost(body, resource_prefix)
+}
+
+pub(super) fn decode_otlp_protobuf_with_prost(
+    body: &[u8],
+    resource_prefix: &str,
+) -> Result<RecordBatch, InputError> {
     let request = ExportLogsServiceRequest::decode(body)
         .map_err(|e| InputError::Receiver(format!("invalid protobuf: {e}")))?;
 
