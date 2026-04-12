@@ -10,7 +10,7 @@ pub mod filter_hints;
 pub mod format;
 pub mod framed;
 pub mod generator;
-/// Platform sensor inputs and Arrow-native control/sample event emission.
+/// Host metrics inputs backed by periodic system snapshots.
 pub mod host_metrics;
 /// HTTP NDJSON input source.
 pub mod http_input;

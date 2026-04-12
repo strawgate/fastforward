@@ -423,13 +423,15 @@ pub(super) fn build_input_state(
                         )
                     })?;
 
+                let max_events = s
+                    .sensor
+                    .as_ref()
+                    .and_then(|c| c.max_events_per_poll)
+                    .filter(|&n| n > 0)
+                    .unwrap_or(1024);
                 let sensor_cfg = logfwd_io::platform_sensor::PlatformSensorConfig {
                     ebpf_binary_path: ebpf_path.into(),
-                    max_events_per_poll: s
-                        .sensor
-                        .as_ref()
-                        .and_then(|c| c.max_events_per_poll)
-                        .unwrap_or(4096),
+                    max_events_per_poll: max_events,
                     filter_self: true,
                 };
 

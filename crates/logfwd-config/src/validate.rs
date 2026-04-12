@@ -891,6 +891,11 @@ fn normalize_unit_name(name: &str) -> String {
 fn sensor_supported_families(input_type: &InputType) -> &'static [&'static str] {
     match input_type {
         InputType::LinuxEbpfSensor => &["process", "file", "network", "dns", "authz"],
+        // HostMetrics is compile-time selected per platform; accept the union so
+        // configs are portable across Linux/macOS/Windows.
+        InputType::HostMetrics => &[
+            "process", "file", "network", "dns", "module", "registry", "authz",
+        ],
         InputType::MacosEsSensor => &["process", "file", "network", "dns", "module", "authz"],
         InputType::WindowsEbpfSensor => &[
             "process", "file", "network", "dns", "module", "registry", "authz",
@@ -902,6 +907,7 @@ fn sensor_supported_families(input_type: &InputType) -> &'static [&'static str] 
 fn sensor_supported_families_csv(input_type: &InputType) -> &'static str {
     match input_type {
         InputType::LinuxEbpfSensor => "process,file,network,dns,authz",
+        InputType::HostMetrics => "process,file,network,dns,module,registry,authz",
         InputType::MacosEsSensor => "process,file,network,dns,module,authz",
         InputType::WindowsEbpfSensor => "process,file,network,dns,module,registry,authz",
         _ => "",

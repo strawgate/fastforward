@@ -39,8 +39,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .iter()
         .position(|a| a == "--duration")
         .and_then(|i| args.get(i + 1))
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(10);
+        .map_or(10, |s| {
+            s.parse().unwrap_or_else(|_| {
+                eprintln!("error: --duration requires a positive integer");
+                std::process::exit(1);
+            })
+        });
 
     if duration_secs == 0 {
         eprintln!("error: --duration must be > 0");
@@ -560,9 +564,9 @@ fn ptrace_request_name(req: u64) -> &'static str {
         16 => "ATTACH",
         17 => "DETACH",
         24 => "SYSCALL",
-        31 => "SETOPTIONS",
-        16896 => "SEIZE",
-        16897 => "INTERRUPT",
+        0x4200 => "SETOPTIONS",
+        0x4206 => "SEIZE",
+        0x4207 => "INTERRUPT",
         _ => "UNKNOWN",
     }
 }

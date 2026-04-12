@@ -55,12 +55,14 @@ fn fill_header(header: &mut EventHeader, kind: EventKind) {
     let pid_tgid = bpf_get_current_pid_tgid();
     let uid_gid = bpf_get_current_uid_gid();
 
+    // SAFETY: bpf_ktime_get_ns is always safe to call in BPF program context.
     header.timestamp_ns = unsafe { bpf_ktime_get_ns() };
     header.kind = kind as u32;
     header.pid = pid_tgid as u32;
     header.tgid = (pid_tgid >> 32) as u32;
     header.uid = uid_gid as u32;
     header.gid = (uid_gid >> 32) as u32;
+    // SAFETY: bpf_get_current_cgroup_id is always safe to call in BPF program context.
     header.cgroup_id = unsafe { bpf_get_current_cgroup_id() };
     header.ppid = 0;
 
@@ -73,6 +75,7 @@ fn fill_header(header: &mut EventHeader, kind: EventKind) {
 /// Fill event header from stashed ConnProcessInfo (for kprobe→tracepoint handoff).
 #[inline(always)]
 fn fill_header_from_info(header: &mut EventHeader, kind: EventKind, info: &ConnProcessInfo) {
+    // SAFETY: bpf_ktime_get_ns is always safe to call in BPF program context.
     header.timestamp_ns = unsafe { bpf_ktime_get_ns() };
     header.kind = kind as u32;
     header.tgid = info.tgid;
@@ -85,6 +88,10 @@ fn fill_header_from_info(header: &mut EventHeader, kind: EventKind, info: &ConnP
 }
 
 /// Read a user-space string into a buffer, returning the length captured.
+///
+/// # Safety
+/// `ptr` must be a valid user-space pointer or null (null is handled).
+/// `buf` must be a valid mutable slice with sufficient length for the BPF helper.
 #[inline(always)]
 unsafe fn read_user_str(ptr: *const u8, buf: &mut [u8]) -> u32 {
     if ptr.is_null() {
@@ -118,8 +125,11 @@ fn try_process_exec(ctx: &TracePointContext) -> Result<(), i64> {
     };
 
     let event = entry.as_mut_ptr();
+    // SAFETY: `event` is a valid pointer from RingBuf::reserve; fields are written
+    // before submit. ctx.as_ptr() points to the tracepoint payload and the
+    // data_loc offset is kernel-provided, so the derived filename_ptr is valid
+    // for a kernel string read.
     unsafe {
-        fill_header(&mut (*event).header, EventKind::ProcessExec);
 
         let data_loc: u32 = ctx.read_at(8).unwrap_or(0);
         let offset = (data_loc & 0xFFFF) as usize;
@@ -153,6 +163,8 @@ fn try_process_exit(_ctx: &TracePointContext) -> Result<(), i64> {
     };
 
     let event = entry.as_mut_ptr();
+    // SAFETY: `event` is a valid pointer from RingBuf::reserve; all fields are
+    // written before submit.
     unsafe {
         fill_header(&mut (*event).header, EventKind::ProcessExit);
         (*event).exit_code = 0;
@@ -184,6 +196,9 @@ fn try_file_open(ctx: &TracePointContext) -> Result<(), i64> {
     };
 
     let event = entry.as_mut_ptr();
+    // SAFETY: `event` points to RingBuf-reserved memory; tracepoint offsets are
+    // fixed by the kernel ABI. User-space pointer from ctx.read_at is passed to
+    // read_user_str which null-checks before reading.
     unsafe {
         fill_header(&mut (*event).header, EventKind::FileOpen);
         let flags: u64 = ctx.read_at(32).unwrap_or(0);
@@ -213,6 +228,8 @@ fn try_file_delete(ctx: &TracePointContext) -> Result<(), i64> {
     };
 
     let event = entry.as_mut_ptr();
+    // SAFETY: `event` points to RingBuf-reserved memory; user-space pointer
+    // from ctx.read_at is null-checked by read_user_str.
     unsafe {
         fill_header(&mut (*event).header, EventKind::FileDelete);
         let flags: u64 = ctx.read_at(32).unwrap_or(0);
@@ -242,6 +259,8 @@ fn try_file_rename(ctx: &TracePointContext) -> Result<(), i64> {
     };
 
     let event = entry.as_mut_ptr();
+    // SAFETY: `event` points to RingBuf-reserved memory; user-space pointers
+    // from ctx.read_at are null-checked by read_user_str.
     unsafe {
         fill_header(&mut (*event).header, EventKind::FileRename);
         let oldname_ptr: *const u8 = ctx.read_at(24).unwrap_or(core::ptr::null());
@@ -275,6 +294,8 @@ fn try_setuid(ctx: &TracePointContext) -> Result<(), i64> {
     };
 
     let event = entry.as_mut_ptr();
+    // SAFETY: `event` points to RingBuf-reserved memory; tracepoint field at
+    // fixed offset 16 read via ctx.read_at.
     unsafe {
         fill_header(&mut (*event).header, EventKind::Setuid);
         let uid: u64 = ctx.read_at(16).unwrap_or(0);
@@ -303,6 +324,8 @@ fn try_setgid(ctx: &TracePointContext) -> Result<(), i64> {
     };
 
     let event = entry.as_mut_ptr();
+    // SAFETY: `event` points to RingBuf-reserved memory; tracepoint field at
+    // fixed offset 16 read via ctx.read_at.
     unsafe {
         fill_header(&mut (*event).header, EventKind::Setgid);
         let gid: u64 = ctx.read_at(16).unwrap_or(0);
@@ -331,6 +354,8 @@ fn try_module_load(ctx: &TracePointContext) -> Result<(), i64> {
     };
 
     let event = entry.as_mut_ptr();
+    // SAFETY: `event` points to RingBuf-reserved memory; data_loc offset from
+    // the kernel gives a valid pointer for bpf_probe_read_kernel_str_bytes.
     unsafe {
         fill_header(&mut (*event).header, EventKind::ModuleLoad);
         (*event).taints = ctx.read_at(8).unwrap_or(0);
@@ -368,6 +393,8 @@ fn try_ptrace(ctx: &TracePointContext) -> Result<(), i64> {
     };
 
     let event = entry.as_mut_ptr();
+    // SAFETY: `event` points to RingBuf-reserved memory; tracepoint fields at
+    // fixed offsets 16 and 24 read via ctx.read_at.
     unsafe {
         fill_header(&mut (*event).header, EventKind::Ptrace);
         (*event).request = ctx.read_at(16).unwrap_or(0);
@@ -395,6 +422,8 @@ fn try_memfd_create(ctx: &TracePointContext) -> Result<(), i64> {
     };
 
     let event = entry.as_mut_ptr();
+    // SAFETY: `event` points to RingBuf-reserved memory; user-space pointer
+    // from ctx.read_at is null-checked by read_user_str.
     unsafe {
         fill_header(&mut (*event).header, EventKind::MemfdCreate);
         let flags: u64 = ctx.read_at(24).unwrap_or(0);
@@ -433,7 +462,7 @@ fn try_tcp_v4_connect(ctx: &ProbeContext) -> Result<(), i64> {
         pid: pid_tgid as u32,
         uid: uid_gid as u32,
         gid: (uid_gid >> 32) as u32,
-        cgroup_id: unsafe { bpf_get_current_cgroup_id() },
+        cgroup_id: unsafe { bpf_get_current_cgroup_id() }, // SAFETY: always valid in BPF ctx
         comm: bpf_get_current_comm().unwrap_or([0u8; COMM_SIZE]),
     };
 
@@ -454,12 +483,13 @@ pub fn inet_sock_set_state(ctx: TracePointContext) -> u32 {
 }
 
 fn try_sock_state(ctx: &TracePointContext) -> Result<(), i64> {
+    // SAFETY: tracepoint field reads at fixed kernel ABI offsets.
     let oldstate: i32 = unsafe { ctx.read_at(16)? };
     let newstate: i32 = unsafe { ctx.read_at(20)? };
 
     // Outbound connect: SYN_SENT → ESTABLISHED
     if oldstate == TCP_SYN_SENT && newstate == TCP_ESTABLISHED {
-        let skaddr: u64 = unsafe { ctx.read_at(8).unwrap_or(0) };
+        let skaddr: u64 = unsafe { ctx.read_at(8).unwrap_or(0) }; // SAFETY: fixed ABI offset
 
         let mut entry = match EVENTS.reserve::<TcpConnectEvent>(0) {
             Some(e) => e,
@@ -467,6 +497,8 @@ fn try_sock_state(ctx: &TracePointContext) -> Result<(), i64> {
         };
 
         let event = entry.as_mut_ptr();
+        // SAFETY: `event` points to RingBuf-reserved memory; SOCK_OWNERS lookup
+        // and read_sock_addrs use valid tracepoint offsets.
         unsafe {
             if let Some(info) = SOCK_OWNERS.get(&skaddr) {
                 fill_header_from_info(&mut (*event).header, EventKind::TcpConnect, info);
@@ -488,6 +520,8 @@ fn try_sock_state(ctx: &TracePointContext) -> Result<(), i64> {
         };
 
         let event = entry.as_mut_ptr();
+        // SAFETY: `event` points to RingBuf-reserved memory; read_sock_addrs
+        // uses valid tracepoint offsets.
         unsafe {
             fill_header(&mut (*event).header, EventKind::TcpAccept);
             read_sock_addrs(ctx, &mut (*event).saddr, &mut (*event).daddr,
@@ -499,7 +533,11 @@ fn try_sock_state(ctx: &TracePointContext) -> Result<(), i64> {
     Ok(())
 }
 
-/// Read socket address fields from the inet_sock_set_state tracepoint.
+/// Read socket address fields from an inet_sock_set_state tracepoint context.
+///
+/// # Safety
+/// The caller must ensure `ctx` points to a valid inet_sock_set_state tracepoint
+/// payload with sport at offset 24, dport at 26, saddr at 32, daddr at 36.
 #[inline(always)]
 unsafe fn read_sock_addrs(
     ctx: &TracePointContext,

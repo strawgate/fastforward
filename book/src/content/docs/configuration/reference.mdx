@@ -275,7 +275,8 @@ accepted as aliases for backward compatibility.
 
 Host metrics input that collects process snapshots, CPU, memory, and network
 statistics via `sysinfo`. This input is Arrow-native and does not support
-`format`. It auto-detects the current OS at startup.
+`format`. The OS-specific implementation is selected at compile time based on
+the build target.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|

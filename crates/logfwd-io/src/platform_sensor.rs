@@ -630,8 +630,11 @@ impl InputSource for PlatformSensorInput {
                         };
                     }
                     Err(e) => {
-                        tracing::warn!("eBPF load failed, will retry on next poll: {e}");
+                        tracing::error!("eBPF load failed: {e}");
                         self.state = SensorState::Init { config, schema };
+                        return Err(io::Error::other(format!(
+                            "eBPF sensor initialization failed: {e}"
+                        )));
                     }
                 }
                 // First poll after load returns empty — data arrives next cycle.
