@@ -321,10 +321,12 @@ jobs:
 
       - name: Network integration tests
         run: |
-          cargo nextest run --no-tests fail -p logfwd-io --profile ci --run-ignored ignored-only --test it transport_e2e
-          cargo nextest run --no-tests fail -p logfwd-io --profile ci --run-ignored ignored-only --lib otap_receiver::tests::
-          cargo nextest run --no-tests fail -p logfwd-io --profile ci --run-ignored ignored-only --lib otlp_receiver::tests:: -- --skip bench_writer_helpers_fast_vs_simple
-          cargo nextest run --no-tests fail -p logfwd-diagnostics --profile ci --run-ignored ignored-only --lib diagnostics::server::tests::
+          # `transport_e2e` tests may be ignored or non-ignored depending on harness evolution.
+          # Run both to avoid false "no tests to run" failures while still failing on real test errors.
+          cargo nextest run --no-tests fail -p logfwd-io --profile ci --run-ignored all --test it transport_e2e
+          cargo nextest run --no-tests fail -p logfwd-io --profile ci --run-ignored all --lib otap_receiver::tests::
+          cargo nextest run --no-tests fail -p logfwd-io --profile ci --run-ignored all --lib otlp_receiver::tests:: -- --skip bench_writer_helpers_fast_vs_simple
+          cargo nextest run --no-tests fail -p logfwd-diagnostics --profile ci --run-ignored all --lib diagnostics::server::tests::
 
   # -------------------------------------------------------------------------
   # Build check — aarch64 cross-compile only (release check removed:

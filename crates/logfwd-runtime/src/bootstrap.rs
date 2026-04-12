@@ -607,10 +607,17 @@ fn redact_url(url: &str) -> String {
 
     let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     let authority = &rest[..authority_end];
-    let host = authority
+    let (has_userinfo, host) = authority
         .rsplit_once('@')
-        .map_or(authority, |(_, host)| host);
+        .map_or((false, authority), |(_, host)| (true, host));
     if host.is_empty() {
+        if has_userinfo {
+            return if scheme.is_empty() {
+                String::new()
+            } else {
+                format!("{scheme}://")
+            };
+        }
         return url.to_string();
     }
     if scheme.is_empty() {
@@ -700,5 +707,10 @@ mod tests {
             redact_url("https://example.com/path?email=user@domain.com"),
             "https://example.com"
         );
+    }
+
+    #[test]
+    fn redact_url_redacts_hostless_userinfo() {
+        assert_eq!(redact_url("http://user:pass@/v1/traces"), "http://");
     }
 }

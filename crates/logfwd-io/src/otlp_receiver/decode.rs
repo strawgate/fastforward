@@ -241,13 +241,23 @@ fn decode_otlp_logs_json(body: &[u8], resource_prefix: &str) -> Result<Vec<u8>, 
 
                 if let Some(tid) = record.get("traceId").and_then(|v| v.as_str()) {
                     if !tid.is_empty() {
-                        write_json_string_field(&mut out, field_names::TRACE_ID, tid);
+                        let normalized_trace_id = normalize_otlp_hex_id(tid, 32, "traceId")?;
+                        write_json_string_field(
+                            &mut out,
+                            field_names::TRACE_ID,
+                            &normalized_trace_id,
+                        );
                         out.push(b',');
                     }
                 }
                 if let Some(sid) = record.get("spanId").and_then(|v| v.as_str()) {
                     if !sid.is_empty() {
-                        write_json_string_field(&mut out, field_names::SPAN_ID, sid);
+                        let normalized_span_id = normalize_otlp_hex_id(sid, 16, "spanId")?;
+                        write_json_string_field(
+                            &mut out,
+                            field_names::SPAN_ID,
+                            &normalized_span_id,
+                        );
                         out.push(b',');
                     }
                 }
@@ -285,6 +295,19 @@ fn decode_otlp_logs_json(body: &[u8], resource_prefix: &str) -> Result<Vec<u8>, 
     }
 
     Ok(out)
+}
+
+fn normalize_otlp_hex_id(
+    raw: &str,
+    expected_len: usize,
+    field_name: &str,
+) -> Result<String, InputError> {
+    if raw.len() != expected_len || !raw.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(InputError::Receiver(format!(
+            "invalid OTLP JSON {field_name}: expected {expected_len} hex chars"
+        )));
+    }
+    Ok(raw.to_ascii_lowercase())
 }
 
 /// Extract a scalar OTLP JSON AnyValue as an owned string.

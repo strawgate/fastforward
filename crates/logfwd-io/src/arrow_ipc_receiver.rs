@@ -405,6 +405,12 @@ fn parse_content_encoding(headers: &HeaderMap) -> Result<Option<Vec<String>>, St
     if tokens.is_empty() {
         return Err(StatusCode::BAD_REQUEST);
     }
+    if tokens
+        .iter()
+        .any(|token| token != "identity" && token != "zstd")
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
     Ok(Some(tokens))
 }
 
@@ -679,6 +685,28 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(2))
             .expect("should receive a batch");
         assert_eq!(received.num_rows(), 2);
+    }
+
+    #[test]
+    fn receiver_rejects_unsupported_content_encoding() {
+        let receiver =
+            ArrowIpcReceiver::new_with_capacity("test-unsupported-encoding", "127.0.0.1:0", 16)
+                .expect("bind should succeed");
+        let addr = receiver.local_addr();
+        let batch = make_test_batch();
+        let ipc_bytes = serialize_batch(&batch);
+
+        let url = format!("http://{addr}/v1/arrow");
+        let result = ureq::post(&url)
+            .header("Content-Type", "application/vnd.apache.arrow.stream")
+            .header("Content-Encoding", "gzip")
+            .send(&ipc_bytes);
+        let status = match result {
+            Ok(resp) => resp.status().as_u16(),
+            Err(ureq::Error::StatusCode(code)) => code,
+            Err(e) => panic!("unexpected error: {e}"),
+        };
+        assert_eq!(status, 400);
     }
 
     #[test]

@@ -845,6 +845,72 @@ fn invalid_json_flags_returns_error() {
 }
 
 #[test]
+fn invalid_json_trace_id_returns_error() {
+    let result = decode_otlp_json(
+        br#"{
+            "resourceLogs": [{
+                "scopeLogs": [{
+                    "logRecords": [{
+                        "traceId": "abc123"
+                    }]
+                }]
+            }]
+        }"#,
+        field_names::DEFAULT_RESOURCE_PREFIX,
+    );
+
+    assert!(result.is_err(), "invalid traceId must fail");
+}
+
+#[test]
+fn invalid_json_span_id_returns_error() {
+    let result = decode_otlp_json(
+        br#"{
+            "resourceLogs": [{
+                "scopeLogs": [{
+                    "logRecords": [{
+                        "spanId": "zzzzzzzzzzzzzzzz"
+                    }]
+                }]
+            }]
+        }"#,
+        field_names::DEFAULT_RESOURCE_PREFIX,
+    );
+
+    assert!(result.is_err(), "invalid spanId must fail");
+}
+
+#[test]
+fn json_trace_and_span_ids_are_normalized_to_lower_hex() {
+    let batch = decode_otlp_json(
+        br#"{
+            "resourceLogs": [{
+                "scopeLogs": [{
+                    "logRecords": [{
+                        "traceId": "0123456789ABCDEF0123456789ABCDEF",
+                        "spanId": "89ABCDEF01234567"
+                    }]
+                }]
+            }]
+        }"#,
+        field_names::DEFAULT_RESOURCE_PREFIX,
+    )
+    .expect("valid trace/span ids should decode");
+
+    let trace_col = batch
+        .column_by_name(field_names::TRACE_ID)
+        .expect("trace_id column must exist");
+    let span_col = batch
+        .column_by_name(field_names::SPAN_ID)
+        .expect("span_id column must exist");
+    assert_eq!(
+        string_value_at(trace_col.as_ref(), 0),
+        "0123456789abcdef0123456789abcdef"
+    );
+    assert_eq!(string_value_at(span_col.as_ref(), 0), "89abcdef01234567");
+}
+
+#[test]
 fn zero_json_time_unix_nano_is_accepted_and_omitted() {
     let batch = decode_otlp_json(
         br#"{
