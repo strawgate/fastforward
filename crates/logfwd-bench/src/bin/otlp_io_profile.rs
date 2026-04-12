@@ -263,9 +263,13 @@ fn run_profile(fixture: &FixtureData, mode: Mode, iterations: usize) -> ProfileR
             Mode::E2eProduction => {
                 decode_protobuf_to_batch(&fixture.payload).expect("warmup production decode")
             }
-            Mode::E2eProjectedDetached | Mode::E2eProjectedView => {
+            Mode::E2eProjectedDetached => {
                 decode_protobuf_to_batch_projected_detached_experimental(&fixture.payload)
                     .expect("warmup projected decode")
+            }
+            Mode::E2eProjectedView => {
+                decode_protobuf_bytes_to_batch_projected_experimental(fixture.payload_bytes.clone())
+                    .expect("warmup projected view decode")
             }
             Mode::ProstReferenceToBatch
             | Mode::ProductionToBatch

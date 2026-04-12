@@ -1,9 +1,9 @@
+#[cfg(not(feature = "otlp-research"))]
+use crate::types::OtlpProtobufDecodeModeConfig;
 use crate::types::{
     Config, ConfigError, EnrichmentConfig, Format, GeneratorAttributeValueConfig,
     GeneratorProfileConfig, InputType, InputTypeConfig, JournaldBackendConfig, OutputType,
 };
-#[cfg(not(feature = "otlp-research"))]
-use crate::types::OtlpProtobufDecodeModeConfig;
 use std::path::Path;
 use url::Url;
 

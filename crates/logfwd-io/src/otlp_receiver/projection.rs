@@ -443,41 +443,46 @@ fn decode_log_record_wire(
                 ));
             }
             (spec::log_record::SEVERITY_NUMBER, WireField::Varint(value)) => {
-                severity_number = value as i64;
+                severity_number = i64::from(value as i32);
             }
             (spec::log_record::SEVERITY_NUMBER, _) => {
                 return Err(ProjectionError::Invalid(
                     "invalid wire type for LogRecord.severity_number",
                 ));
             }
-            (spec::log_record::SEVERITY_TEXT, WireField::Len(value)) if !value.is_empty() => {
-                severity_text = Some(require_utf8(value, "invalid UTF-8 severity text")?);
+            (spec::log_record::SEVERITY_TEXT, WireField::Len(value)) => {
+                severity_text = if value.is_empty() {
+                    None
+                } else {
+                    Some(require_utf8(value, "invalid UTF-8 severity text")?)
+                };
             }
-            (spec::log_record::SEVERITY_TEXT, WireField::Len(_)) => {}
             (spec::log_record::SEVERITY_TEXT, _) => {
                 return Err(ProjectionError::Invalid(
                     "invalid wire type for LogRecord.severity_text",
                 ));
             }
-            (spec::log_record::BODY, WireField::Len(value)) => body = decode_any_value_wire(value)?,
+            (spec::log_record::BODY, WireField::Len(value)) => {
+                if let Some(value) = decode_any_value_wire(value)? {
+                    body = Some(value);
+                }
+            }
             (spec::log_record::BODY, _) => {
                 return Err(ProjectionError::Invalid(
                     "invalid wire type for LogRecord.body",
                 ));
             }
-            (spec::log_record::TRACE_ID, WireField::Len(value)) if !value.is_empty() => {
-                trace_id = Some(value);
+            (spec::log_record::TRACE_ID, WireField::Len(value)) => {
+                trace_id = (!value.is_empty()).then_some(value);
             }
-            (spec::log_record::TRACE_ID, WireField::Len(_)) => {}
             (spec::log_record::TRACE_ID, _) => {
                 return Err(ProjectionError::Invalid(
                     "invalid wire type for LogRecord.trace_id",
                 ));
             }
-            (spec::log_record::SPAN_ID, WireField::Len(value)) if !value.is_empty() => {
-                span_id = Some(value);
+            (spec::log_record::SPAN_ID, WireField::Len(value)) => {
+                span_id = (!value.is_empty()).then_some(value);
             }
-            (spec::log_record::SPAN_ID, WireField::Len(_)) => {}
             (spec::log_record::SPAN_ID, _) => {
                 return Err(ProjectionError::Invalid(
                     "invalid wire type for LogRecord.span_id",
@@ -501,6 +506,15 @@ fn decode_log_record_wire(
         }
         Ok(())
     })?;
+
+    let mut decoded_attrs = Vec::with_capacity(scratch.attr_ranges.len());
+    for attr_idx in 0..scratch.attr_ranges.len() {
+        let (start, len) = scratch.attr_ranges[attr_idx];
+        let attr = &log_record[start..start + len];
+        if let Some((key, value)) = decode_key_value_wire(attr)? {
+            decoded_attrs.push((attr_idx, key, value));
+        }
+    }
 
     builder.begin_row();
 
@@ -548,14 +562,9 @@ fn decode_log_record_wire(
         append_validated_wire_str(builder, fields.scope_version, value, string_storage);
     }
 
-    for attr_idx in 0..scratch.attr_ranges.len() {
-        let (start, len) = scratch.attr_ranges[attr_idx];
-        let attr = &log_record[start..start + len];
-        if let Some((key, value)) = decode_key_value_wire(attr)? {
-            let idx =
-                resolve_record_attr_field(builder, &mut scratch.attr_field_cache, attr_idx, key);
-            append_wire_any(builder, idx, value, scratch, string_storage);
-        }
+    for (attr_idx, key, value) in decoded_attrs {
+        let idx = resolve_record_attr_field(builder, &mut scratch.attr_field_cache, attr_idx, key);
+        append_wire_any(builder, idx, value, scratch, string_storage);
     }
 
     for &(idx, value) in resource_attrs {
@@ -580,7 +589,9 @@ fn decode_key_value_wire(kv: &[u8]) -> Result<Option<(&[u8], WireAny<'_>)>, Proj
                 ));
             }
             (spec::key_value::VALUE, WireField::Len(bytes)) => {
-                value = decode_any_value_wire(bytes)?;
+                if let Some(decoded) = decode_any_value_wire(bytes)? {
+                    value = Some(decoded);
+                }
             }
             (spec::key_value::VALUE, _) => {
                 return Err(ProjectionError::Invalid(
@@ -792,7 +803,8 @@ fn for_each_field<'a>(
 ) -> Result<(), ProjectionError> {
     while !input.is_empty() {
         let key = read_varint(&mut input)?;
-        let field = (key >> 3) as u32;
+        let field = u32::try_from(key >> 3)
+            .map_err(|_| ProjectionError::Invalid("protobuf field number overflow"))?;
         if field == 0 {
             return Err(ProjectionError::Invalid("protobuf field number zero"));
         }
@@ -834,7 +846,8 @@ fn for_each_field<'a>(
                     )),
                 )?;
             }
-            _ => return Err(ProjectionError::Unsupported("protobuf group wire type")),
+            3 | 4 => return Err(ProjectionError::Invalid("protobuf group wire type")),
+            _ => return Err(ProjectionError::Invalid("invalid protobuf wire type")),
         }
     }
     Ok(())
@@ -1085,6 +1098,136 @@ mod tests {
         encode_fixed64_field(&mut payload, 99, 0x0102_0304_0506_0708);
         encode_len_field(&mut payload, 100, b"ignored-top-level-field");
         encode_fixed32_field(&mut payload, 101, 0x0a0b_0c0d);
+
+        assert_projected_payload_matches_prost(&payload);
+    }
+
+    #[test]
+    fn projected_oversized_field_number_is_invalid() {
+        let mut payload = Vec::new();
+        encode_varint(&mut payload, (u64::from(u32::MAX) + 1) << 3);
+
+        let err = decode_projected_otlp_logs(&payload, field_names::DEFAULT_RESOURCE_PREFIX)
+            .expect_err("oversized protobuf field number should fail projection");
+
+        assert!(
+            matches!(err, ProjectionError::Invalid(_)),
+            "expected invalid projection reason, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn projected_group_wire_type_is_invalid_not_unsupported() {
+        let mut payload = Vec::new();
+        encode_varint(
+            &mut payload,
+            (u64::from(spec::export_logs_service_request::RESOURCE_LOGS) << 3) | 3,
+        );
+
+        let err = decode_projected_otlp_logs(&payload, field_names::DEFAULT_RESOURCE_PREFIX)
+            .expect_err("protobuf group wire types should fail projection");
+
+        assert!(
+            matches!(err, ProjectionError::Invalid(_)),
+            "expected invalid projection reason, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn projected_repeated_empty_log_record_fields_match_prost_conversion() {
+        let mut log_record = Vec::new();
+        encode_len_field(&mut log_record, spec::log_record::SEVERITY_TEXT, b"INFO");
+        encode_len_field(&mut log_record, spec::log_record::SEVERITY_TEXT, b"");
+        encode_len_field(
+            &mut log_record,
+            spec::log_record::BODY,
+            &any_string("first").encode_to_vec(),
+        );
+        encode_len_field(&mut log_record, spec::log_record::BODY, b"");
+        encode_len_field(&mut log_record, spec::log_record::TRACE_ID, &[0xaa; 16]);
+        encode_len_field(&mut log_record, spec::log_record::TRACE_ID, b"");
+        encode_len_field(&mut log_record, spec::log_record::SPAN_ID, &[0xbb; 8]);
+        encode_len_field(&mut log_record, spec::log_record::SPAN_ID, b"");
+
+        let mut scope_logs = Vec::new();
+        encode_len_field(&mut scope_logs, spec::scope_logs::LOG_RECORDS, &log_record);
+
+        let mut resource_logs = Vec::new();
+        encode_len_field(
+            &mut resource_logs,
+            spec::resource_logs::SCOPE_LOGS,
+            &scope_logs,
+        );
+
+        let mut payload = Vec::new();
+        encode_len_field(
+            &mut payload,
+            spec::export_logs_service_request::RESOURCE_LOGS,
+            &resource_logs,
+        );
+
+        assert_projected_payload_matches_prost(&payload);
+    }
+
+    #[test]
+    fn projected_repeated_empty_key_value_value_matches_prost_conversion() {
+        let mut attr = Vec::new();
+        encode_len_field(&mut attr, spec::key_value::KEY, b"attr");
+        encode_len_field(
+            &mut attr,
+            spec::key_value::VALUE,
+            &any_string("kept").encode_to_vec(),
+        );
+        encode_len_field(&mut attr, spec::key_value::VALUE, b"");
+
+        let mut log_record = Vec::new();
+        encode_len_field(&mut log_record, spec::log_record::ATTRIBUTES, &attr);
+
+        let mut scope_logs = Vec::new();
+        encode_len_field(&mut scope_logs, spec::scope_logs::LOG_RECORDS, &log_record);
+
+        let mut resource_logs = Vec::new();
+        encode_len_field(
+            &mut resource_logs,
+            spec::resource_logs::SCOPE_LOGS,
+            &scope_logs,
+        );
+
+        let mut payload = Vec::new();
+        encode_len_field(
+            &mut payload,
+            spec::export_logs_service_request::RESOURCE_LOGS,
+            &resource_logs,
+        );
+
+        assert_projected_payload_matches_prost(&payload);
+    }
+
+    #[test]
+    fn projected_severity_number_uses_int32_truncation_like_prost() {
+        let mut log_record = Vec::new();
+        encode_varint_field(
+            &mut log_record,
+            spec::log_record::SEVERITY_NUMBER,
+            u64::from(u32::MAX),
+        );
+
+        let mut scope_logs = Vec::new();
+        encode_len_field(&mut scope_logs, spec::scope_logs::LOG_RECORDS, &log_record);
+
+        let mut resource_logs = Vec::new();
+        encode_len_field(
+            &mut resource_logs,
+            spec::resource_logs::SCOPE_LOGS,
+            &scope_logs,
+        );
+
+        let mut payload = Vec::new();
+        encode_len_field(
+            &mut payload,
+            spec::export_logs_service_request::RESOURCE_LOGS,
+            &resource_logs,
+        );
 
         assert_projected_payload_matches_prost(&payload);
     }

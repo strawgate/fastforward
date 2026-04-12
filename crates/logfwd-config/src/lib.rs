@@ -22,8 +22,8 @@ pub use types::{
     GeneratorInputConfig, GeneratorProfileConfig, GeneratorSequenceConfig, GeneratorTypeConfig,
     GeoDatabaseConfig, GeoDatabaseFormat, HostInfoConfig, HttpInputConfig, HttpMethodConfig,
     HttpTypeConfig, InputConfig, InputType, InputTypeConfig, JournaldBackendConfig,
-    JournaldInputConfig, JournaldTypeConfig, JsonlEnrichmentConfig, K8sPathConfig, OtlpTypeConfig,
-    OtlpProtobufDecodeModeConfig, OutputConfig, OutputType, PipelineConfig,
+    JournaldInputConfig, JournaldTypeConfig, JsonlEnrichmentConfig, K8sPathConfig,
+    OtlpProtobufDecodeModeConfig, OtlpTypeConfig, OutputConfig, OutputType, PipelineConfig,
     PlatformSensorInputConfig, SensorTypeConfig, ServerConfig, StaticEnrichmentConfig,
     StorageConfig, TcpTypeConfig, TlsInputConfig, UdpTypeConfig,
 };

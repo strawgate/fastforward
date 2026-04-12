@@ -678,7 +678,7 @@ mod tests {
                 }) as fn(&str) -> InputTypeConfig,
             ),
         ] {
-                for format in [Format::Cri, Format::Auto] {
+            for format in [Format::Cri, Format::Auto] {
                 let cfg = InputConfig {
                     name: Some("in".to_string()),
                     format: Some(format),

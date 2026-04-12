@@ -17,9 +17,10 @@ use crate::receiver_http::{
 };
 
 use super::decode::{
-    decode_otlp_json, decode_otlp_protobuf_bytes_with_mode, decompress_gzip, decompress_zstd,
+    decode_otlp_json, decode_otlp_protobuf, decode_otlp_protobuf_bytes_with_mode, decompress_gzip,
+    decompress_zstd,
 };
-use super::{OtlpServerState, ReceiverPayload};
+use super::{OtlpProtobufDecodeMode, OtlpServerState, ReceiverPayload};
 
 pub(super) fn record_error(stats: Option<&Arc<ComponentStats>>) {
     if let Some(stats) = stats {
@@ -119,6 +120,8 @@ pub(super) async fn handle_otlp_request(
 
     let batch = if is_json {
         decode_otlp_json(&body, &state.resource_prefix)
+    } else if state.protobuf_decode_mode == OtlpProtobufDecodeMode::Prost {
+        decode_otlp_protobuf(&body, &state.resource_prefix)
     } else {
         decode_otlp_protobuf_bytes_with_mode(
             Bytes::from(body),
