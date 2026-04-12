@@ -360,6 +360,13 @@ impl Pipeline {
             "inputs and input_transforms must have the same length"
         );
 
+        if config.batch_timeout_ms == Some(0) {
+            return Err("batch_timeout_ms must be > 0".to_string());
+        }
+        if config.poll_interval_ms == Some(0) {
+            return Err("poll_interval_ms must be > 0".to_string());
+        }
+
         Ok(Pipeline {
             name: name.to_string(),
             inputs,
