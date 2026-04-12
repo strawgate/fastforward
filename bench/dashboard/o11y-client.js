@@ -36,19 +36,11 @@ export async function fetchBenchJson(filePath, signal) {
 }
 
 export async function fetchBenchIndex(signal) {
-  try {
-    return await fetchIndex(benchDataSource, signal);
-  } catch {
-    return fetchJsonAtPath("data/index.json", signal);
-  }
+  return fetchIndex(benchDataSource, signal);
 }
 
 export async function fetchBenchRun(runId, signal) {
-  try {
-    return await fetchRun(benchDataSource, runId, signal);
-  } catch {
-    return fetchJsonAtPath(`data/runs/${runId}.json`, signal);
-  }
+  return fetchRun(benchDataSource, runId, signal);
 }
 
 export function toTrendDataset(metricName, points, options = {}) {
