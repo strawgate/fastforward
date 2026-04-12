@@ -1,6 +1,6 @@
 # Verification
 
-logfwd uses six complementary verification techniques. Choose based on what you need to prove.
+logfwd uses five complementary verification techniques. Choose based on what you need to prove.
 
 ## Tool selection
 
@@ -9,14 +9,12 @@ logfwd uses six complementary verification techniques. Choose based on what you 
 | **TLA+** | Design | Temporal properties: liveness, drain, protocol ordering | Not tied to code; models must be maintained separately |
 | **Kani** | Implementation | Exhaustive bounded inputs; pure functions; unsafe code | Slow on wide types; no async; no IO |
 | **proptest** | Integration | Heap-intensive, stateful, or async code | Incomplete coverage |
-| **Turmoil** | Integration/runtime | Deterministic fault injection for async/network runtime paths | Single-threaded simulation; not a proof system |
 | **Miri** | Runtime | UB detection; allocator behavior | Not exhaustive |
 | **Rust types** | Compile-time | Illegal state transitions; silent data loss | Only what the type system can encode |
 
 If the property is temporal ("eventually," "always," "never after X") → TLA+.  
 If the function is pure, bounded, and critical → Kani.  
 If it's stateful, heap-heavy, or async → proptest.  
-If it's runtime/network fault behavior under interleavings → Turmoil.  
 For unsafe code, use Kani and proptest both.
 
 ---
@@ -55,7 +53,7 @@ Update existing TLA+ specs when:
 | `QuiescenceHasNoSilentStrandedWork` | Safety | `Stopped` never leaves sent batches without a terminal `acked`/`rejected`/`abandoned` outcome |
 | `NoUnresolvedSentAtQuiescence` | Safety | `Stopped` implies `sent \ terminal = {}` for every source (no stranded sent work) |
 | `StopMetadataConsistent` | Safety | `forced` and `stop_reason` stay phase-consistent (`Stopped` iff reason is non-`none`) |
-| `CheckpointOrderingInvariant` | Safety | `committed[s]=n` implies every sent batch `<= n` is terminalized via `acked`/`rejected`/`abandoned` and none are in-flight |
+| `CheckpointOrderingInvariant` | Safety | `committed[s]=n` implies every sent batch `<= n` is commit-terminal via `acked`/`rejected` and none are in-flight |
 | `UnresolvedWorkNotCommittedPast` | Safety | active or held in-flight work cannot be silently committed past |
 | `CheckpointNeverAheadOfTerminalizedPrefix` | Safety | committed checkpoint is never ahead of the ack/reject terminalized prefix |
 | `CommittedMonotonic` | Safety | Checkpoint never goes backwards |
@@ -98,7 +96,7 @@ Three models:
 - **Model 3 — Coverage**: reachability/vacuity witnesses via
   `PipelineMachine.coverage.cfg` (expected invariant violations as witnesses)
 
-The PipelineMachine model now explicitly includes bounded non-terminal
+The PipelineMachine model explicitly includes bounded non-terminal
 hold/fail/retry/panic behavior. `HoldBatch` keeps a batch in `in_flight` without
 advancing checkpoints; `RetryHeldBatch` releases the hold; `PanicHoldBatch`
 records a panic-originated hold; `ForceStop` explicitly abandons unresolved
@@ -299,31 +297,6 @@ duplicate-key inputs.
 Run with `PROPTEST_CASES=2000` minimum for the scanner. proptest finds bugs on: escapes
 crossing 64-byte boundaries, fields in different orders, duplicate keys with different
 types.
-
----
-
-## Turmoil (Tier 3b — deterministic runtime fault simulation)
-
-Use Turmoil for async/runtime correctness properties that depend on scheduling and
-network faults but are not practical to model exhaustively with Kani.
-
-Use cases:
-- partition/repair/hold/release behavior for networked components
-- retry/backoff and timeout behavior under deterministic seeds
-- panic/unwind and worker recycle paths in async shells
-- checkpoint durability behavior under flush failures and shutdown timing
-
-Rules for meaningful Turmoil tests:
-1. Assert runtime contracts, not synthetic test narratives.
-2. Prefer runtime-originated evidence (checkpoint updates, sink outcomes, worker/pool behavior)
-   over test-injected lifecycle markers.
-3. Always seed runs and print replay hints.
-4. Validate invariants (monotonic checkpointing, no durable-ahead-of-updates, no silent stalls),
-   not only "did not panic".
-5. Pair Turmoil tests with Kani/proptest on extracted pure reducers when possible.
-
-Reference:
-- `dev-docs/references/turmoil-simulation.md`
 
 ---
 
