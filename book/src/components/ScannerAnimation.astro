@@ -26,7 +26,7 @@
   }
   .sa-play:hover { background: color-mix(in srgb, var(--sa-accent) 12%, transparent); }
   .sa-prog { flex: 1; height: 3px; background: var(--sa-border); border-radius: 2px; overflow: hidden; }
-  .sa-prog-fill { height: 100%; width: 0; background: var(--sa-accent); transition: width 0.3s; }
+  .sa-prog-fill { height: 100%; width: 0; background: var(--sa-accent); transition: none; }
   .sa-pills { display: flex; gap: 3px; }
   .sa-pill {
     width: 22px; height: 22px; border-radius: 50%;
@@ -43,6 +43,7 @@
     border: 1px solid var(--sa-border); border-radius: 7px;
     margin-bottom: 0.6rem; min-height: 3rem;
     font-size: 0.78rem; line-height: 1.5;
+    transition: opacity 0.3s;
   }
   .sa-exp b { display: block; font-size: 0.82rem; margin-bottom: 0.15rem; }
 
@@ -151,8 +152,11 @@
   ];
 
   // Build DOM
+  var PLAY_SVG = '<svg viewBox="0 0 24 24" width="16" height="16"><path d="M8 5v14l11-7z" fill="currentColor"/></svg>';
+  var PAUSE_SVG = '<svg viewBox="0 0 24 24" width="16" height="16"><path d="M6 4h4v16H6zM14 4h4v16h-4z" fill="currentColor"/></svg>';
+
   var bar = el('div','sa-bar');
-  var playBtn = el('button','sa-play'); playBtn.innerHTML = '&#9654;';
+  var playBtn = el('button','sa-play'); playBtn.innerHTML = PLAY_SVG;
   var prog = el('div','sa-prog'); var progFill = el('div','sa-prog-fill'); prog.appendChild(progFill);
   var pills = el('div','sa-pills');
   var pillBtns = STEPS.map(function(_,i) { var b = el('button','sa-pill'); b.textContent = ''+(i+1); b.dataset.i = ''+i; return b; });
@@ -249,27 +253,48 @@
       }
     }
 
-    playBtn.innerHTML = playing ? '&#9646;&#9646;' : '&#9654;';
+    updatePlayIcon();
   }
 
-  function next() {
+  function updatePlayIcon() {
+    playBtn.innerHTML = playing
+      ? '<svg viewBox="0 0 24 24" width="16" height="16"><path d="M6 4h4v16H6zM14 4h4v16h-4z" fill="currentColor"/></svg>'
+      : '<svg viewBox="0 0 24 24" width="16" height="16"><path d="M8 5v14l11-7z" fill="currentColor"/></svg>';
+  }
+
+  function startPlay() {
+    playing = true;
+    updatePlayIcon();
+    scheduleNext();
+  }
+
+  function stopPlay() {
+    playing = false;
+    clearT();
+    updatePlayIcon();
+  }
+
+  function scheduleNext() {
     if (!playing) return;
     timer = setTimeout(function() {
       if (!playing) return;
       go((cur + 1) % STEPS.length);
-      next();
+      scheduleNext();
     }, STEPS[cur].dur);
   }
 
   playBtn.addEventListener('click', function() {
-    if (playing) { playing = false; clearT(); playBtn.innerHTML = '&#9654;'; }
-    else { playing = true; playBtn.innerHTML = '&#9646;&#9646;'; if (cur >= STEPS.length-1) go(0); next(); }
+    if (playing) { stopPlay(); }
+    else { if (cur >= STEPS.length - 1) go(0); startPlay(); }
   });
   pillBtns.forEach(function(b) {
-    b.addEventListener('click', function() { playing = false; clearT(); go(+b.dataset.i); });
+    b.addEventListener('click', function() { stopPlay(); go(+b.dataset.i); });
   });
 
   go(0);
+
+  // Auto-start after 1.5 seconds
+  setTimeout(function() { startPlay(); }, 1500);
 
   // Scroll sync: map page headings to animation steps
   var headingToStep = {
