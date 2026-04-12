@@ -58,9 +58,10 @@ jobs:
             --no-progress
             --accept 200,429
             --max-retries 3
-            --exclude 'mailto:'
+            --root-dir .
+            --exclude mailto:
             --exclude-loopback
-            --exclude '^/[a-z]'
+            --exclude ^/[a-z]
             README.md book/src/content/docs dev-docs docs
 
       - name: Validate required operational doc sections

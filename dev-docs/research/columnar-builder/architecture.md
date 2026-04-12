@@ -1,8 +1,8 @@
+# Columnar Builder Architecture Brief
+
 > **Status:** Active
 > **Date:** 2026-04-11
 > **Context:** Foundation brief for evolving `StreamingBuilder` into a long-lived shared columnar construction architecture.
-
-# Columnar Builder Architecture Brief
 
 ## Problem
 

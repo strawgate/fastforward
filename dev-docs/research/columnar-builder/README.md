@@ -1,15 +1,18 @@
 # Columnar Builder Foundation
 
-This directory is the foundation for the OTLP direct-to-Arrow architecture fanout.
-It frames the shared builder direction, benchmark contract, correctness oracle,
-and workstream prompts that cloud agents should use when prototyping alternatives.
+> **Status:** Active
+> **Date:** 2026-04-11
+> **Context:** Index for the OTLP direct-to-Arrow columnar builder architecture foundation.
+
+This directory is the foundation for the OTLP direct-to-Arrow architecture
+decision. It frames the shared builder direction, benchmark contract, and
+correctness oracle that implementation experiments should use when prototyping
+alternatives.
 
 Read these in order:
 
 1. [architecture.md](architecture.md) - design target and open architecture decisions.
 2. [experiment-contract.md](experiment-contract.md) - required benchmark, correctness, and reporting rules.
-3. [fanout-plan.md](fanout-plan.md) - proposed workstreams and fan-in rubric.
-4. [prompts/](prompts/) - self-contained cloud-agent prompts for each workstream.
 
 The current working theory is that `StreamingBuilder` should stop being the only
 column construction abstraction. Instead, `logfwd-arrow` should expose a shared

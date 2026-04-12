@@ -1,11 +1,11 @@
+# Experiment Contract
+
 > **Status:** Active
 > **Date:** 2026-04-11
 > **Context:** Required benchmark, correctness, and reporting contract for columnar builder experiments.
 
-# Experiment Contract
-
-Every columnar-builder fanout experiment must be comparable. Use this contract
-unless the prompt explicitly narrows the scope.
+Every columnar-builder experiment must be comparable. Use this contract unless a
+design note explicitly narrows the scope.
 
 ## Repository Assumptions
 
@@ -85,7 +85,7 @@ just bench-otlp-io
 
 ## Baseline To Report Against
 
-Use the current branch baseline unless your prompt provides a more recent table.
+Use the current branch baseline unless a design note provides a more recent table.
 Representative baseline after the foundation optimizations:
 
 | Fixture | Mode | Time |
@@ -102,13 +102,12 @@ Allocation baseline:
 | attrs-heavy | projected-view decode | ~2142 | ~0.443 |
 | wide-10k | projected-view decode | ~1555 | ~0.055 |
 
-Always include raw command output snippets in the deliverable so fan-in can audit
-what was actually measured.
+Always include raw command output snippets in the deliverable so reviewers can
+audit what was actually measured.
 
 ## Required Deliverable Format
 
-Each workstream must leave one markdown report at the path requested by its
-prompt. Use these sections:
+Use these sections when reporting an experiment:
 
 1. `Recommendation`: Adopt, reject, or investigate further.
 2. `What I changed or prototyped`: include file paths and design shape.
