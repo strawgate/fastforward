@@ -176,7 +176,7 @@ fn parse_content_encoding(headers: &HeaderMap) -> Result<Option<String>, StatusC
     let Some(value) = headers.get(CONTENT_ENCODING) else {
         return Ok(None);
     };
-    let parsed = value.to_str().map_err(|_| StatusCode::BAD_REQUEST)?;
+    let parsed = value.to_str().map_err(|_| StatusCode::BAD_REQUEST)?.trim();
     Ok(Some(parsed.to_ascii_lowercase()))
 }
 

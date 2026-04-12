@@ -428,7 +428,7 @@ fn parse_content_encoding(headers: &HeaderMap) -> Result<Option<String>, StatusC
     let Some(value) = headers.get(CONTENT_ENCODING) else {
         return Ok(None);
     };
-    let parsed = value.to_str().map_err(|_| StatusCode::BAD_REQUEST)?;
+    let parsed = value.to_str().map_err(|_| StatusCode::BAD_REQUEST)?.trim();
     Ok(Some(parsed.to_ascii_lowercase()))
 }
 
@@ -819,6 +819,22 @@ Connection: close\r\n\
         );
         let data = poll_until_data(&mut input, Duration::from_millis(100));
         assert!(data.is_empty(), "malformed requests must not enqueue data");
+    }
+
+    #[test]
+    fn content_encoding_trims_optional_whitespace() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            CONTENT_ENCODING,
+            " gzip ".parse().expect("valid content-encoding header"),
+        );
+
+        assert_eq!(
+            parse_content_encoding(&headers)
+                .expect("header parses")
+                .as_deref(),
+            Some("gzip")
+        );
     }
 
     fn decode_observed_seq(bytes: &[u8]) -> BTreeSet<u64> {

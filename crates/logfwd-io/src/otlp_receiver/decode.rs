@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::io;
 use std::io::Read as _;
 use std::sync::Arc;
@@ -297,17 +298,21 @@ fn decode_otlp_logs_json(body: &[u8], resource_prefix: &str) -> Result<Vec<u8>, 
     Ok(out)
 }
 
-fn normalize_otlp_hex_id(
-    raw: &str,
+fn normalize_otlp_hex_id<'a>(
+    raw: &'a str,
     expected_len: usize,
     field_name: &str,
-) -> Result<String, InputError> {
+) -> Result<Cow<'a, str>, InputError> {
     if raw.len() != expected_len || !raw.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(InputError::Receiver(format!(
             "invalid OTLP JSON {field_name}: expected {expected_len} hex chars"
         )));
     }
-    Ok(raw.to_ascii_lowercase())
+    if raw.bytes().all(|b| !b.is_ascii_uppercase()) {
+        Ok(Cow::Borrowed(raw))
+    } else {
+        Ok(Cow::Owned(raw.to_ascii_lowercase()))
+    }
 }
 
 /// Extract a scalar OTLP JSON AnyValue as an owned string.
@@ -470,4 +475,28 @@ fn write_json_any_value_field_from_json(
     }
 
     Ok(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::borrow::Cow;
+
+    use super::*;
+
+    #[test]
+    fn normalize_otlp_hex_id_borrows_lowercase_ids() {
+        let id = normalize_otlp_hex_id("0123456789abcdef0123456789abcdef", 32, "traceId")
+            .expect("lowercase id is valid");
+
+        assert!(matches!(id, Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn normalize_otlp_hex_id_allocates_only_when_case_changes() {
+        let id = normalize_otlp_hex_id("0123456789ABCDEF0123456789ABCDEF", 32, "traceId")
+            .expect("uppercase id is valid");
+
+        assert_eq!(id.as_ref(), "0123456789abcdef0123456789abcdef");
+        assert!(matches!(id, Cow::Owned(_)));
+    }
 }
