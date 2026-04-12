@@ -1,12 +1,23 @@
 use axum::body::Body;
-use axum::http::{HeaderMap, StatusCode, header::CONTENT_LENGTH, header::CONTENT_TYPE};
+use axum::http::{
+    HeaderMap, StatusCode,
+    header::{CONTENT_LENGTH, CONTENT_TYPE},
+};
 use http_body_util::BodyExt as _;
 
 /// Maximum request body size shared by all HTTP receivers: 10 MB.
 pub(crate) const MAX_REQUEST_BODY_SIZE: usize = 10 * 1024 * 1024;
 
-/// Parse the `Content-Type` header, stripping parameters (e.g., `; charset=utf-8`).
-/// Returns the lowercased media type, or `None` if the header is absent.
+/// Parses the Content-Length header value.
+///
+/// Returns `None` when the header is missing, non-UTF-8, or not a valid `u64`.
+pub(crate) fn parse_content_length(headers: &HeaderMap) -> Option<u64> {
+    headers
+        .get(CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+}
+
 pub(crate) fn parse_content_type(headers: &HeaderMap) -> Result<Option<String>, StatusCode> {
     let Some(value) = headers.get(CONTENT_TYPE) else {
         return Ok(None);
@@ -17,13 +28,6 @@ pub(crate) fn parse_content_type(headers: &HeaderMap) -> Result<Option<String>, 
         return Err(StatusCode::BAD_REQUEST);
     }
     Ok(Some(media_type.to_ascii_lowercase()))
-}
-
-pub(crate) fn declared_content_length(headers: &HeaderMap) -> Option<u64> {
-    headers
-        .get(CONTENT_LENGTH)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<u64>().ok())
 }
 
 pub(crate) async fn read_limited_body(

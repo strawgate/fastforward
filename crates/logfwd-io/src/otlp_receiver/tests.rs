@@ -525,57 +525,6 @@ fn invalid_json_bytes_value_returns_error() {
 }
 
 #[test]
-fn json_trace_and_span_ids_decode_as_hex_bytes() {
-    let batch = decode_otlp_json(
-        br#"{
-            "resourceLogs": [{
-                "scopeLogs": [{
-                    "logRecords": [{
-                        "traceId": "00112233445566778899AABBCCDDEEFF",
-                        "spanId": "0123456789ABCDEF"
-                    }]
-                }]
-            }]
-        }"#,
-        field_names::DEFAULT_RESOURCE_PREFIX,
-    )
-    .expect("valid OTLP JSON trace/span ids should decode");
-
-    assert_eq!(batch.num_rows(), 1);
-
-    let trace = batch
-        .column_by_name(field_names::TRACE_ID)
-        .expect("trace.id column must exist");
-    assert_eq!(
-        string_value_at(trace.as_ref(), 0),
-        "00112233445566778899aabbccddeeff"
-    );
-
-    let span = batch
-        .column_by_name(field_names::SPAN_ID)
-        .expect("span.id column must exist");
-    assert_eq!(string_value_at(span.as_ref(), 0), "0123456789abcdef");
-}
-
-#[test]
-fn json_invalid_trace_id_returns_error() {
-    let result = decode_otlp_json(
-        br#"{
-            "resourceLogs": [{
-                "scopeLogs": [{
-                    "logRecords": [{
-                        "traceId": "not-hex"
-                    }]
-                }]
-            }]
-        }"#,
-        field_names::DEFAULT_RESOURCE_PREFIX,
-    );
-
-    assert!(result.is_err(), "invalid traceId must fail");
-}
-
-#[test]
 fn json_bytes_value_accepts_urlsafe_and_unpadded_base64() {
     let batch = decode_otlp_json(
         br#"{
@@ -896,6 +845,72 @@ fn invalid_json_flags_returns_error() {
 }
 
 #[test]
+fn invalid_json_trace_id_returns_error() {
+    let result = decode_otlp_json(
+        br#"{
+            "resourceLogs": [{
+                "scopeLogs": [{
+                    "logRecords": [{
+                        "traceId": "abc123"
+                    }]
+                }]
+            }]
+        }"#,
+        field_names::DEFAULT_RESOURCE_PREFIX,
+    );
+
+    assert!(result.is_err(), "invalid traceId must fail");
+}
+
+#[test]
+fn invalid_json_span_id_returns_error() {
+    let result = decode_otlp_json(
+        br#"{
+            "resourceLogs": [{
+                "scopeLogs": [{
+                    "logRecords": [{
+                        "spanId": "zzzzzzzzzzzzzzzz"
+                    }]
+                }]
+            }]
+        }"#,
+        field_names::DEFAULT_RESOURCE_PREFIX,
+    );
+
+    assert!(result.is_err(), "invalid spanId must fail");
+}
+
+#[test]
+fn json_trace_and_span_ids_are_normalized_to_lower_hex() {
+    let batch = decode_otlp_json(
+        br#"{
+            "resourceLogs": [{
+                "scopeLogs": [{
+                    "logRecords": [{
+                        "traceId": "0123456789ABCDEF0123456789ABCDEF",
+                        "spanId": "89ABCDEF01234567"
+                    }]
+                }]
+            }]
+        }"#,
+        field_names::DEFAULT_RESOURCE_PREFIX,
+    )
+    .expect("valid trace/span ids should decode");
+
+    let trace_col = batch
+        .column_by_name(field_names::TRACE_ID)
+        .expect("trace_id column must exist");
+    let span_col = batch
+        .column_by_name(field_names::SPAN_ID)
+        .expect("span_id column must exist");
+    assert_eq!(
+        string_value_at(trace_col.as_ref(), 0),
+        "0123456789abcdef0123456789abcdef"
+    );
+    assert_eq!(string_value_at(span_col.as_ref(), 0), "89abcdef01234567");
+}
+
+#[test]
 fn zero_json_time_unix_nano_is_accepted_and_omitted() {
     let batch = decode_otlp_json(
         br#"{
@@ -1033,7 +1048,6 @@ fn handles_invalid_protobuf() {
 }
 
 #[test]
-#[ignore = "network integration test; run with `just test-network`"]
 fn invalid_protobuf_increments_parse_errors_when_stats_hooked() {
     let stats = Arc::new(ComponentStats::new());
     let receiver = OtlpReceiverInput::new_with_capacity_and_stats(
@@ -1361,7 +1375,6 @@ fn json_escaping_key_chars() {
 /// Regression test: when the pipeline channel is full the receiver must
 /// return 429 rather than silently dropping the payload and returning 200.
 #[test]
-#[ignore = "network integration test; run with `just test-network`"]
 fn returns_429_when_channel_full_not_200() {
     let mut receiver = OtlpReceiverInput::new_with_capacity("test", "127.0.0.1:0", 2).unwrap();
     let addr = receiver.local_addr();
@@ -1405,7 +1418,7 @@ fn returns_429_when_channel_full_not_200() {
         status, 200,
         "channel-full request must not return 200 (got {status})"
     );
-    assert_eq!(status, 429, "channel-full request should return 429");
+    assert_eq!(status, 429, "expected 429 for backpressure, got {status}");
     assert_eq!(receiver.health(), ComponentHealth::Degraded);
 
     // Drain the two buffered entries so the receiver is valid.
@@ -1422,7 +1435,6 @@ fn returns_429_when_channel_full_not_200() {
 
 // Bug #686: /v1/logsFOO and /v1/logs/extra should return 404, not 200.
 #[test]
-#[ignore = "network integration test; run with `just test-network`"]
 fn path_prefix_variants_return_404() {
     let receiver = OtlpReceiverInput::new_with_capacity("test", "127.0.0.1:0", 16).unwrap();
     let port = receiver.local_addr().port();
@@ -1440,7 +1452,6 @@ fn path_prefix_variants_return_404() {
 
 // Bug #687: Content-Type: Application/JSON (capital A) should be treated as JSON.
 #[test]
-#[ignore = "network integration test; run with `just test-network`"]
 fn content_type_matching_is_case_insensitive() {
     let mut receiver = OtlpReceiverInput::new_with_capacity("test", "127.0.0.1:0", 16).unwrap();
     let port = receiver.local_addr().port();
@@ -1479,7 +1490,6 @@ fn content_type_matching_is_case_insensitive() {
 }
 
 #[test]
-#[ignore = "network integration test; run with `just test-network`"]
 fn content_type_substring_match_does_not_route_json() {
     let receiver = OtlpReceiverInput::new_with_capacity("test", "127.0.0.1:0", 16).unwrap();
     let port = receiver.local_addr().port();
@@ -1509,9 +1519,26 @@ fn content_type_substring_match_does_not_route_json() {
     );
 }
 
+#[test]
+fn blank_content_encoding_returns_bad_request() {
+    let receiver = OtlpReceiverInput::new_with_capacity("test", "127.0.0.1:0", 16).unwrap();
+    let port = receiver.local_addr().port();
+    let url = format!("http://127.0.0.1:{port}/v1/logs");
+
+    let status = match loopback_http_client()
+        .post(&url)
+        .header("content-encoding", "   ")
+        .send(&make_test_request())
+    {
+        Ok(resp) => resp.status().as_u16(),
+        Err(ureq::Error::StatusCode(code)) => code,
+        Err(e) => panic!("unexpected error: {e}"),
+    };
+    assert_eq!(status, 400, "blank Content-Encoding must be malformed");
+}
+
 // Bug #723: wrong HTTP method should return 405, not 404.
 #[test]
-#[ignore = "network integration test; run with `just test-network`"]
 fn wrong_http_method_returns_405() {
     let receiver = OtlpReceiverInput::new_with_capacity("test", "127.0.0.1:0", 16).unwrap();
     let port = receiver.local_addr().port();
@@ -1535,7 +1562,6 @@ fn wrong_http_method_returns_405() {
 
 // Bug #722: JSON body missing resourceLogs should return 400, not 200.
 #[test]
-#[ignore = "network integration test; run with `just test-network`"]
 fn missing_resource_logs_returns_400() {
     let receiver = OtlpReceiverInput::new_with_capacity("test", "127.0.0.1:0", 16).unwrap();
     let port = receiver.local_addr().port();
@@ -1557,7 +1583,6 @@ fn missing_resource_logs_returns_400() {
 }
 
 #[test]
-#[ignore = "network integration test; run with `just test-network`"]
 fn receiver_shuts_down_cleanly_on_drop() {
     let receiver =
         OtlpReceiverInput::new("test-drop", "127.0.0.1:0").expect("should bind successfully");
@@ -1573,7 +1598,6 @@ fn receiver_shuts_down_cleanly_on_drop() {
 }
 
 #[test]
-#[ignore = "network integration test; run with `just test-network`"]
 fn receiver_health_is_healthy_while_running() {
     let receiver =
         OtlpReceiverInput::new("test-health", "127.0.0.1:0").expect("should bind successfully");
@@ -1582,7 +1606,6 @@ fn receiver_health_is_healthy_while_running() {
 }
 
 #[test]
-#[ignore = "network integration test; run with `just test-network`"]
 fn receiver_health_reports_stopping_when_shutdown_requested() {
     let receiver = OtlpReceiverInput::new("test-health-stop", "127.0.0.1:0")
         .expect("should bind successfully");
@@ -1595,7 +1618,6 @@ fn receiver_health_reports_stopping_when_shutdown_requested() {
 }
 
 #[test]
-#[ignore = "network integration test; run with `just test-network`"]
 fn receiver_health_reports_failed_when_server_thread_exits() {
     let mut receiver = OtlpReceiverInput::new("test-health-failed", "127.0.0.1:0")
         .expect("should bind successfully");
@@ -1613,7 +1635,6 @@ fn receiver_health_reports_failed_when_server_thread_exits() {
 }
 
 #[test]
-#[ignore = "network integration test; run with `just test-network`"]
 fn receiver_health_reports_failed_when_pipeline_disconnects() {
     let mut receiver = OtlpReceiverInput::new_with_capacity("test-disconnect", "127.0.0.1:0", 16)
         .expect("should bind successfully");
@@ -1638,7 +1659,6 @@ fn receiver_health_reports_failed_when_pipeline_disconnects() {
 
 // Valid OTLP JSON should still return 200 after the 400 fix.
 #[test]
-#[ignore = "network integration test; run with `just test-network`"]
 fn valid_otlp_json_returns_200() {
     let receiver = OtlpReceiverInput::new_with_capacity("test", "127.0.0.1:0", 16).unwrap();
     let port = receiver.local_addr().port();
@@ -1685,10 +1705,10 @@ fn write_f64_neg_infinity_emits_null() {
 #[test]
 fn write_f64_finite_unchanged() {
     let mut out = Vec::new();
-    write_f64_to_buf(&mut out, 3.14);
+    write_f64_to_buf(&mut out, 1.25);
     let text = String::from_utf8(out).unwrap();
     assert!(
-        text.starts_with("3.14"),
+        text.starts_with("1.25"),
         "finite float should be formatted normally: {text}"
     );
 }

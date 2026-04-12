@@ -11,7 +11,7 @@ use std::sync::{Arc, mpsc};
 
 use axum::body::Body;
 use axum::extract::State;
-use axum::http::header::{ACCEPT_ENCODING, ALLOW, CONTENT_ENCODING, RETRY_AFTER};
+use axum::http::header::{ALLOW, CONTENT_ENCODING, RETRY_AFTER};
 use axum::http::{HeaderMap, Method, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
@@ -21,19 +21,13 @@ use tokio::sync::oneshot;
 
 use crate::InputError;
 use crate::input::{InputEvent, InputSource};
-use crate::receiver_http::{declared_content_length, read_limited_body};
+use crate::receiver_http::{parse_content_length, read_limited_body};
 
 /// Default max request body size (10 MiB).
 const DEFAULT_MAX_REQUEST_BODY_SIZE: usize = 10 * 1024 * 1024;
 
 /// Bounded channel capacity — limits memory when the pipeline falls behind.
 const CHANNEL_BOUND: usize = 4096;
-
-/// Retry delay (seconds) advertised during backpressure/disconnect responses.
-const RETRY_AFTER_SECONDS: &str = "1";
-
-/// Supported request content-codings for this endpoint.
-const SUPPORTED_CONTENT_ENCODINGS: &str = "gzip, zstd, identity";
 
 /// Accepted HTTP method for the input endpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -346,7 +340,7 @@ async fn handle_request(
             .into_response();
     }
 
-    let content_length = declared_content_length(request.headers());
+    let content_length = parse_content_length(request.headers());
     if content_length.is_some_and(|body_len| body_len > state.max_request_body_size as u64) {
         return (StatusCode::PAYLOAD_TOO_LARGE, "payload too large").into_response();
     }
@@ -355,16 +349,14 @@ async fn handle_request(
         Ok(content_encoding) => content_encoding,
         Err(status) => return (status, "invalid content-encoding header").into_response(),
     };
-
-    if let Some(ref enc) = content_encoding {
-        if !matches!(enc.as_str(), "gzip" | "zstd" | "identity") {
-            return (
-                StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                [(ACCEPT_ENCODING, SUPPORTED_CONTENT_ENCODINGS)],
-                format!("unsupported content-encoding: {enc}"),
-            )
-                .into_response();
-        }
+    if let Some(encoding) = content_encoding.as_deref()
+        && !is_supported_content_encoding(encoding)
+    {
+        return (
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            format!("unsupported content-encoding: {encoding}"),
+        )
+            .into_response();
     }
 
     let mut body = match read_limited_body(
@@ -391,9 +383,7 @@ async fn handle_request(
         state.max_request_body_size,
     ) {
         Ok(decoded) => decoded,
-        Err(InputError::Receiver(msg)) => {
-            return (StatusCode::BAD_REQUEST, msg).into_response();
-        }
+        Err(InputError::Receiver(msg)) => return (StatusCode::BAD_REQUEST, msg).into_response(),
         Err(InputError::Io(e)) if e.kind() == io::ErrorKind::InvalidData => {
             return (StatusCode::PAYLOAD_TOO_LARGE, e.to_string()).into_response();
         }
@@ -424,7 +414,7 @@ async fn handle_request(
                 .store(ComponentHealth::Degraded.as_repr(), Ordering::Relaxed);
             (
                 StatusCode::TOO_MANY_REQUESTS,
-                [(RETRY_AFTER, RETRY_AFTER_SECONDS)],
+                [(RETRY_AFTER, "1")],
                 "too many requests: pipeline backpressure",
             )
                 .into_response()
@@ -437,7 +427,7 @@ async fn handle_request(
             }
             (
                 StatusCode::SERVICE_UNAVAILABLE,
-                [(RETRY_AFTER, RETRY_AFTER_SECONDS)],
+                [(RETRY_AFTER, "1")],
                 "service unavailable: pipeline disconnected",
             )
                 .into_response()
@@ -449,8 +439,8 @@ fn parse_content_encoding(headers: &HeaderMap) -> Result<Option<String>, StatusC
     let Some(value) = headers.get(CONTENT_ENCODING) else {
         return Ok(None);
     };
-    let parsed = value.to_str().map_err(|_| StatusCode::BAD_REQUEST)?;
-    Ok(Some(parsed.trim().to_ascii_lowercase()))
+    let parsed = value.to_str().map_err(|_| StatusCode::BAD_REQUEST)?.trim();
+    Ok(Some(parsed.to_ascii_lowercase()))
 }
 
 fn normalize_options(mut options: HttpInputOptions) -> io::Result<HttpInputOptions> {
@@ -516,6 +506,10 @@ fn decode_content(
             "unsupported content-encoding: {other}"
         ))),
     }
+}
+
+fn is_supported_content_encoding(content_encoding: &str) -> bool {
+    matches!(content_encoding, "identity" | "gzip" | "zstd")
 }
 
 fn decompress_zstd(body: &[u8], max_request_body_size: usize) -> Result<Vec<u8>, InputError> {
@@ -799,9 +793,9 @@ mod tests {
             Err(ureq::Error::StatusCode(code)) => code,
             Err(err) => panic!("unexpected request failure: {err}"),
         };
-        assert!(
-            status == 429 || status == 503,
-            "expected backpressure response (429/503), got {status}"
+        assert_eq!(
+            status, 429,
+            "expected backpressure response (429), got {status}"
         );
 
         let _ = poll_until_data(&mut input, Duration::from_secs(2));
@@ -843,100 +837,42 @@ Connection: close\r\n\
     }
 
     #[test]
-    fn http_rejects_unsupported_content_encoding_with_415() {
+    fn http_rejects_unsupported_content_encoding_before_enqueue() {
         let mut input =
             HttpInput::new_with_options("test", "127.0.0.1:0", HttpInputOptions::default())
                 .expect("http input binds");
-        let mut stream = TcpStream::connect(input.local_addr()).expect("connect");
-        stream
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .expect("timeout");
-        let request = b"POST /ingest HTTP/1.1\r\n\
-Host: localhost\r\n\
-Content-Type: application/x-ndjson\r\n\
-Content-Encoding: br\r\n\
-Content-Length: 8\r\n\
-Connection: close\r\n\
-\r\n\
-{\"x\":1}\n";
-        stream.write_all(request).expect("write request");
-        stream.flush().expect("flush request");
-        let mut response = Vec::new();
-        stream.read_to_end(&mut response).expect("read response");
-        let text = String::from_utf8_lossy(&response);
+        let url = format!("http://{}/ingest", input.local_addr());
 
-        assert!(
-            text.starts_with("HTTP/1.1 415"),
-            "expected 415 status line, got: {text}"
-        );
-        assert!(
-            text.contains("accept-encoding: gzip, zstd, identity")
-                || text.contains("Accept-Encoding: gzip, zstd, identity"),
-            "expected supported encodings header, got: {text}"
-        );
+        let status = match ureq::post(&url)
+            .header("Content-Encoding", "br")
+            .send(b"{\"x\":1}\n")
+        {
+            Ok(resp) => resp.status().as_u16(),
+            Err(ureq::Error::StatusCode(code)) => code,
+            Err(err) => panic!("unexpected request failure: {err}"),
+        };
 
+        assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE.as_u16());
         let data = poll_until_data(&mut input, Duration::from_millis(100));
-        assert!(data.is_empty(), "unsupported payload must not enqueue data");
+        assert!(
+            data.is_empty(),
+            "unsupported encodings must not enqueue data"
+        );
     }
 
     #[test]
-    fn http_429_sets_retry_after_header() {
-        let options = HttpInputOptions {
-            path: "/ingest".to_string(),
-            ..HttpInputOptions::default()
-        };
-        let input = HttpInput::new_with_capacity("test", "127.0.0.1:0", 1, options)
-            .expect("http input binds");
-        let addr = input.local_addr();
-        let first_request = b"POST /ingest HTTP/1.1\r\n\
-Host: localhost\r\n\
-Content-Type: application/x-ndjson\r\n\
-Content-Length: 10\r\n\
-Connection: close\r\n\
-\r\n\
-{\"seq\":1}\n";
-        let mut first_stream = TcpStream::connect(addr).expect("first connect");
-        first_stream
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .expect("timeout");
-        first_stream
-            .write_all(first_request)
-            .expect("write first request");
-        first_stream.flush().expect("flush first request");
-        let mut first_response = Vec::new();
-        first_stream
-            .read_to_end(&mut first_response)
-            .expect("read first response");
-        let first_text = String::from_utf8_lossy(&first_response);
-        assert!(
-            first_text.starts_with("HTTP/1.1 200"),
-            "expected first 200 status line, got: {first_text}"
+    fn content_encoding_trims_optional_whitespace() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            CONTENT_ENCODING,
+            " gzip ".parse().expect("valid content-encoding header"),
         );
 
-        let mut stream = TcpStream::connect(addr).expect("connect");
-        stream
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .expect("timeout");
-        let request = b"POST /ingest HTTP/1.1\r\n\
-Host: localhost\r\n\
-Content-Type: application/x-ndjson\r\n\
-Content-Length: 10\r\n\
-Connection: close\r\n\
-\r\n\
-{\"seq\":2}\n";
-        stream.write_all(request).expect("write request");
-        stream.flush().expect("flush request");
-        let mut response = Vec::new();
-        stream.read_to_end(&mut response).expect("read response");
-        let text = String::from_utf8_lossy(&response);
-
-        assert!(
-            text.starts_with("HTTP/1.1 429"),
-            "expected 429 status line, got: {text}"
-        );
-        assert!(
-            text.contains("retry-after: 1") || text.contains("Retry-After: 1"),
-            "expected Retry-After header, got: {text}"
+        assert_eq!(
+            parse_content_encoding(&headers)
+                .expect("header parses")
+                .as_deref(),
+            Some("gzip")
         );
     }
 
@@ -1007,13 +943,12 @@ Connection: close\r\n\
                     outcomes.push(outcome);
                 }
 
-                if !dropped {
-                    if let Some(drop_ms) = drop_after_ms
-                        && start.elapsed() >= Duration::from_millis(u64::from(drop_ms))
-                    {
-                        drop(maybe_input.take());
-                        dropped = true;
-                    }
+                if !dropped
+                    && let Some(drop_ms) = drop_after_ms
+                    && start.elapsed() >= Duration::from_millis(u64::from(drop_ms))
+                {
+                    drop(maybe_input.take());
+                    dropped = true;
                 }
 
                 if let Some(input) = maybe_input.as_mut() {

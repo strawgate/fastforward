@@ -190,6 +190,43 @@ fn test_tail_new_data() {
 }
 
 #[test]
+fn test_zero_read_buf_size_is_normalized_by_public_constructor() {
+    let dir = tempfile::tempdir().unwrap();
+    let log_path = dir.path().join("zero-read-buf.log");
+    fs::write(&log_path, b"abcdef").unwrap();
+
+    let config = TailConfig {
+        start_from_end: false,
+        poll_interval_ms: 10,
+        read_buf_size: 0,
+        ..Default::default()
+    };
+
+    let mut tailer =
+        FileTailer::new(std::slice::from_ref(&log_path), config, create_test_stats()).unwrap();
+    let events = poll_until(
+        &mut tailer,
+        Duration::from_secs(1),
+        |events, _| {
+            events
+                .iter()
+                .any(|event| matches!(event, TailEvent::Data { .. }))
+        },
+        "timed out waiting for zero read buffer normalization data",
+    );
+
+    let data: Vec<u8> = events
+        .iter()
+        .filter_map(|event| match event {
+            TailEvent::Data { bytes, .. } => Some(bytes.clone()),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    assert_eq!(data, b"abcdef");
+}
+
+#[test]
 fn test_eof_requires_fresh_idle_window_after_data() {
     let dir = tempfile::tempdir().unwrap();
     let log_path = dir.path().join("eof-idle-reset.log");
@@ -228,8 +265,6 @@ fn test_eof_requires_fresh_idle_window_after_data() {
     );
 
     // Two immediate no-data polls after fresh data should still not emit EOF.
-    // Force cadence for each poll so assertions cannot pass vacuously via
-    // poll-interval short-circuiting.
     tailer.force_poll_due();
     let no_data_1 = tailer.poll().unwrap();
     assert!(
@@ -1118,7 +1153,7 @@ fn test_poll_truncated_then_data_uses_new_source_id() {
             TailEvent::Data { source_id, .. } => *source_id,
             _ => None,
         })
-        .last()
+        .next_back()
         .expect("should have a source_id from initial data");
 
     // Truncate-and-rewrite the file (copytruncate simulation): new content is
@@ -1799,16 +1834,16 @@ fn glob_rescan_respects_start_from_end() {
     );
 }
 
-/// #1043: open_file_at must not restore an evicted offset that exceeds EOF.
+/// #1043: reopening an evicted shrunken file must emit truncation before data.
 #[test]
-fn test_evicted_offset_clamped_when_file_shrinks() {
+fn test_evicted_offset_emits_truncation_when_file_shrinks() {
     let dir = tempfile::tempdir().unwrap();
     let a = dir.path().join("a.log");
     let b = dir.path().join("b.log");
 
     // Both files share the same 4-byte fingerprint prefix so that
     // whichever file gets evicted will still match identity after truncation,
-    // exercising the stale-offset clamping path (not the identity-mismatch path).
+    // exercising the stale-offset truncation path (not the identity-mismatch path).
     {
         let mut fa = File::create(&a).unwrap();
         // 200 bytes so restored offset can exceed the later truncated size.
@@ -1840,9 +1875,9 @@ fn test_evicted_offset_clamped_when_file_shrinks() {
     assert_eq!(tailer.num_files(), 1, "one file should be evicted");
 
     let evicted = if tailer.get_offset(&a).is_none() {
-        a.clone()
+        a
     } else if tailer.get_offset(&b).is_none() {
-        b.clone()
+        b
     } else {
         panic!("expected either a.log or b.log to be evicted");
     };
@@ -1859,6 +1894,12 @@ fn test_evicted_offset_clamped_when_file_shrinks() {
         &mut tailer,
         Duration::from_secs(2),
         |events, _| {
+            let has_truncation = events.iter().any(|e| {
+                matches!(
+                    e,
+                    TailEvent::Truncated { path, .. } if path == &evicted
+                )
+            });
             let data: Vec<u8> = events
                 .iter()
                 .filter_map(|e| match e {
@@ -1867,13 +1908,23 @@ fn test_evicted_offset_clamped_when_file_shrinks() {
                 })
                 .flatten()
                 .collect();
-            String::from_utf8_lossy(&data).contains("ABCD_shrunk")
+            has_truncation && String::from_utf8_lossy(&data).contains("ABCD_shrunk")
         },
         "timed out waiting for stale-offset rescan data",
     );
 
-    // If stale offset is incorrectly restored past EOF, we'd read nothing.
-    // With clamping, we should read from beginning and see "ABCD_shrunk".
+    let trunc_pos = events
+        .iter()
+        .position(|e| matches!(e, TailEvent::Truncated { path, .. } if path == &evicted))
+        .expect("should emit truncation for shrunken evicted file");
+    let data_pos = events
+        .iter()
+        .position(|e| matches!(e, TailEvent::Data { path, .. } if path == &evicted))
+        .expect("should emit data after shrunken evicted file truncation");
+    assert!(trunc_pos < data_pos, "Truncated must precede Data");
+
+    // If stale offset is incorrectly reset before reopen, truncation is skipped.
+    // Preserving it lets read_new_data observe EOF-before-offset, seek to 0, and read.
     let data: Vec<u8> = events
         .iter()
         .filter_map(|e| match e {
@@ -2006,7 +2057,7 @@ fn test_directory_path_does_not_fail_construction() {
     let tailer = FileTailer::new(
         std::slice::from_ref(&directory_as_path),
         config,
-        std::sync::Arc::new(logfwd_types::diagnostics::ComponentStats::new()),
+        create_test_stats(),
     );
     assert!(
         tailer.is_ok(),
@@ -2032,7 +2083,7 @@ fn test_poll_during_active_backoff_still_records_watcher_errors() {
             poll_interval_ms: 60_000,
             ..Default::default()
         },
-        std::sync::Arc::new(logfwd_types::diagnostics::ComponentStats::new()),
+        create_test_stats(),
     )
     .unwrap();
 
@@ -2066,7 +2117,7 @@ fn test_watcher_error_updates_backoff_even_without_poll_tick() {
             poll_interval_ms: 60_000,
             ..Default::default()
         },
-        std::sync::Arc::new(logfwd_types::diagnostics::ComponentStats::new()),
+        create_test_stats(),
     )
     .unwrap();
     let (tx, rx) = crossbeam_channel::unbounded();
@@ -2096,7 +2147,7 @@ fn test_source_id_for_missing_path_is_none() {
             poll_interval_ms: 10,
             ..Default::default()
         },
-        std::sync::Arc::new(logfwd_types::diagnostics::ComponentStats::new()),
+        create_test_stats(),
     )
     .unwrap();
 
@@ -2323,36 +2374,6 @@ fn test_adaptive_fast_poll_stays_idle_for_small_live_tail_updates() {
     // before poll_interval should remain idle.
     let second = tailer.poll().unwrap();
     assert!(second.is_empty(), "idle live-tail should not spin");
-}
-
-#[test]
-fn test_zero_read_buffer_size_is_safely_promoted() {
-    let dir = tempfile::tempdir().unwrap();
-    let log_path = dir.path().join("zero-read-buf.log");
-    fs::write(&log_path, b"hello\n").unwrap();
-
-    let mut tailer = FileTailer::new(
-        std::slice::from_ref(&log_path),
-        TailConfig {
-            start_from_end: false,
-            poll_interval_ms: 0,
-            read_buf_size: 0,
-            ..Default::default()
-        },
-        create_test_stats(),
-    )
-    .expect("tailer should construct with zero read buffer config");
-
-    let events = poll_until(
-        &mut tailer,
-        Duration::from_secs(1),
-        |events, _| events.iter().any(|e| matches!(e, TailEvent::Data { .. })),
-        "timed out waiting for data with zero read_buf_size",
-    );
-    assert!(
-        events.iter().any(|e| matches!(e, TailEvent::Data { .. })),
-        "tailer should still emit data when configured read_buf_size is zero"
-    );
 }
 
 /// Directional benchmark for issue #1258.

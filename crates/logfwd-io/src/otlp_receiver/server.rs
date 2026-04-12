@@ -12,7 +12,7 @@ use logfwd_types::diagnostics::{ComponentHealth, ComponentStats};
 
 use crate::InputError;
 use crate::receiver_http::{
-    MAX_REQUEST_BODY_SIZE, declared_content_length, parse_content_type, read_limited_body,
+    MAX_REQUEST_BODY_SIZE, parse_content_length, parse_content_type, read_limited_body,
 };
 
 use super::decode::{decode_otlp_json, decode_otlp_protobuf, decompress_gzip, decompress_zstd};
@@ -35,7 +35,7 @@ pub(super) async fn handle_otlp_request(
     headers: HeaderMap,
     body: Body,
 ) -> Response {
-    let content_length = declared_content_length(&headers);
+    let content_length = parse_content_length(&headers);
     if content_length.is_some_and(|body_len| body_len > MAX_REQUEST_BODY_SIZE as u64) {
         record_error(state.stats.as_ref());
         return (StatusCode::PAYLOAD_TOO_LARGE, "payload too large").into_response();
@@ -178,6 +178,9 @@ fn parse_content_encoding(headers: &HeaderMap) -> Result<Option<String>, StatusC
     let Some(value) = headers.get(CONTENT_ENCODING) else {
         return Ok(None);
     };
-    let parsed = value.to_str().map_err(|_| StatusCode::BAD_REQUEST)?;
+    let parsed = value.to_str().map_err(|_| StatusCode::BAD_REQUEST)?.trim();
+    if parsed.is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
     Ok(Some(parsed.to_ascii_lowercase()))
 }

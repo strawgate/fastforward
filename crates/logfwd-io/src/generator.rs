@@ -260,13 +260,17 @@ struct GeneratorGeneratedFieldState {
 
 impl GeneratorInput {
     pub fn new(name: impl Into<String>, config: GeneratorConfig) -> Self {
-        debug_assert!(config.batch_size > 0, "batch_size must be at least 1");
         let name = name.into();
+        // The generator treats a zero batch size as the smallest useful batch.
+        // User-facing config validation should reject zero before construction.
+        let batch_size = config.batch_size.max(1);
         let initial_rate_credit_events = if config.events_per_sec > 0 {
-            config.batch_size as f64
+            batch_size as f64
         } else {
             0.0
         };
+        let mut config = config;
+        config.batch_size = batch_size;
         let mut attributes: Vec<(&String, &GeneratorAttributeValue)> =
             config.attributes.iter().collect();
         attributes.sort_by(|a, b| a.0.cmp(b.0));
@@ -286,7 +290,7 @@ impl GeneratorInput {
         };
         Self {
             name,
-            buf: Vec::with_capacity(config.batch_size * 512),
+            buf: Vec::with_capacity(batch_size * 512),
             config,
             counter: 0,
             done: false,
@@ -427,10 +431,6 @@ impl GeneratorInput {
 
 impl InputSource for GeneratorInput {
     fn poll(&mut self) -> io::Result<Vec<InputEvent>> {
-        if self.config.batch_size == 0 {
-            return Ok(vec![]);
-        }
-
         if self.done {
             return Ok(vec![]);
         }
@@ -737,9 +737,7 @@ mod tests {
         let emitted_rows: usize = second
             .iter()
             .map(|event| match event {
-                InputEvent::Data { bytes, .. } => {
-                    bytes.iter().filter(|byte| **byte == b'\n').count()
-                }
+                InputEvent::Data { bytes, .. } => memchr::memchr_iter(b'\n', bytes).count(),
                 _ => 0,
             })
             .sum();
@@ -807,9 +805,7 @@ mod tests {
         let emitted_rows: usize = second
             .iter()
             .map(|event| match event {
-                InputEvent::Data { bytes, .. } => {
-                    bytes.iter().filter(|byte| **byte == b'\n').count()
-                }
+                InputEvent::Data { bytes, .. } => memchr::memchr_iter(b'\n', bytes).count(),
                 _ => 0,
             })
             .sum();
@@ -845,9 +841,7 @@ mod tests {
         let emitted_rows: usize = second
             .iter()
             .map(|event| match event {
-                InputEvent::Data { bytes, .. } => {
-                    bytes.iter().filter(|byte| **byte == b'\n').count()
-                }
+                InputEvent::Data { bytes, .. } => memchr::memchr_iter(b'\n', bytes).count(),
                 _ => 0,
             })
             .sum();

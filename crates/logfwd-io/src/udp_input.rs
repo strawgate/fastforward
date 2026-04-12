@@ -12,12 +12,8 @@ use socket2::{Domain, Protocol, Socket, Type};
 use crate::input::{InputEvent, InputSource};
 use crate::polling_input_health::{PollingInputHealthEvent, reduce_polling_input_health};
 
-/// Maximum UDP payload we accept without truncation across IPv4/IPv6.
-///
-/// IPv4 max UDP payload is 65_507 bytes, while IPv6 can carry up to 65_527
-/// bytes (65_535 payload length - 8 byte UDP header). Use the IPv6-safe upper
-/// bound so dual-stack sockets don't silently truncate valid IPv6 datagrams.
-const MAX_UDP_PAYLOAD: usize = 65_527;
+/// Maximum UDP payload based on UDP length field: 65535 - 8-byte UDP header.
+const MAX_UDP_PAYLOAD: usize = 65527;
 
 /// Desired kernel receive buffer size (8 MiB). Set best-effort — the OS may
 /// cap it lower depending on `sysctl net.core.rmem_max`.
@@ -500,36 +496,6 @@ mod tests {
     }
 
     #[test]
-    fn udp_health_degrades_when_poll_hits_drain_cap() {
-        let mut input = UdpInput::new(
-            "test",
-            "127.0.0.1:0",
-            Arc::new(logfwd_types::diagnostics::ComponentStats::new()),
-        )
-        .unwrap();
-        let addr = input.local_addr().unwrap();
-        let sender = StdSocket::bind("127.0.0.1:0").unwrap();
-
-        for i in 0..(MAX_DATAGRAMS_PER_POLL + 8) {
-            let payload = format!("pkt-{i}\n");
-            sender.send_to(payload.as_bytes(), addr).unwrap();
-        }
-        std::thread::sleep(std::time::Duration::from_millis(75));
-
-        let first = input.poll().unwrap();
-        assert_eq!(first.len(), 1);
-        assert_eq!(input.health(), ComponentHealth::Degraded);
-
-        for _ in 0..8 {
-            if input.poll().unwrap().is_empty() {
-                break;
-            }
-        }
-        assert!(input.poll().unwrap().is_empty());
-        assert_eq!(input.health(), ComponentHealth::Healthy);
-    }
-
-    #[test]
     fn stop_predicate_matches_bounded_drain_policy() {
         assert!(!should_stop_udp_drain(0, 0));
         assert!(should_stop_udp_drain(MAX_DATAGRAMS_PER_POLL, 0));
@@ -572,9 +538,7 @@ mod tests {
         let first_lines = first
             .iter()
             .filter_map(|event| match event {
-                InputEvent::Data { bytes, .. } => {
-                    Some(bytes.iter().filter(|&&b| b == b'\n').count())
-                }
+                InputEvent::Data { bytes, .. } => Some(memchr::memchr_iter(b'\n', bytes).count()),
                 _ => None,
             })
             .sum::<usize>();

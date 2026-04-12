@@ -105,6 +105,7 @@ impl FileTailer {
         mut config: TailConfig,
         stats: std::sync::Arc<ComponentStats>,
     ) -> io::Result<Self> {
+        config.read_buf_size = config.read_buf_size.max(1);
         let (tx, rx) = crossbeam_channel::unbounded();
         let adaptive_fast_polls_max = config.adaptive_fast_polls_max;
 
@@ -125,9 +126,7 @@ impl FileTailer {
             }
         }
 
-        // Prevent a zero-length buffer from turning non-empty files into
-        // perpetual "NoData" reads.
-        config.read_buf_size = config.read_buf_size.max(1);
+        let read_buf_size = config.read_buf_size;
 
         let mut tailer = FileTailer {
             discovery: FileDiscovery {
@@ -140,7 +139,7 @@ impl FileTailer {
             },
             reader: FileReader {
                 files: HashMap::new(),
-                read_buf: vec![0u8; config.read_buf_size],
+                read_buf: vec![0u8; read_buf_size],
                 evicted_offsets: HashMap::new(),
                 scratch_paths: Vec::new(),
                 last_read_had_data: false,
@@ -327,7 +326,9 @@ impl FileTailer {
     #[cfg(test)]
     pub(super) fn force_poll_due(&mut self) {
         let elapsed_ms = self.config.poll_interval_ms.max(1);
-        self.last_poll = Instant::now() - Duration::from_millis(elapsed_ms);
+        self.last_poll = Instant::now()
+            .checked_sub(Duration::from_millis(elapsed_ms))
+            .expect("poll interval before now should be representable");
     }
 
     #[cfg(test)]

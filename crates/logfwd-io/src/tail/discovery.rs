@@ -36,32 +36,6 @@ pub(super) struct FileDiscovery {
     pub(super) last_glob_rescan: Instant,
 }
 
-fn identity_indicates_rotation(
-    previous: &FileIdentity,
-    current: &FileIdentity,
-    tailed_offset: u64,
-    fingerprint_bytes: usize,
-) -> bool {
-    if previous.device != current.device || previous.inode != current.inode {
-        return true;
-    }
-
-    // Empty-file sentinel can transition from fingerprint=0 to non-zero when
-    // the same inode receives its first bytes. That is not a rotation.
-    if previous.fingerprint == 0 {
-        return false;
-    }
-
-    if tailed_offset < fingerprint_bytes as u64 {
-        return false;
-    }
-
-    // TODO: same-inode fingerprint rotation triggers drain+reopen which may
-    // produce duplicate events for copytruncate-style log rotation. Consider
-    // reset-offset-without-drain path.
-    previous.fingerprint != current.fingerprint
-}
-
 impl FileDiscovery {
     pub(super) fn watch_dir(&mut self, dir: &Path) -> io::Result<()> {
         if self.watched_dirs.contains(dir) {
@@ -145,9 +119,15 @@ impl FileDiscovery {
             };
 
             let is_rotated = reader.files.get(path).is_some_and(|tailed| {
-                identity_indicates_rotation(
+                let is_previous_handle_deleted = tailed
+                    .file
+                    .metadata()
+                    .map(|meta| has_metadata_indicating_deletion(&meta))
+                    .unwrap_or(false);
+                should_rotate_file(
                     &tailed.identity,
                     &current_identity,
+                    is_previous_handle_deleted,
                     tailed.offset,
                     reader.config.fingerprint_bytes,
                 )
@@ -188,7 +168,7 @@ impl FileDiscovery {
                 tailed
                     .file
                     .metadata()
-                    .map(|m| metadata_indicates_deleted(&m))
+                    .map(|m| has_metadata_indicating_deletion(&m))
                     .unwrap_or(true)
             })
             .map(|(path, _)| path.clone())
@@ -208,14 +188,50 @@ impl FileDiscovery {
 }
 
 #[cfg(unix)]
-fn metadata_indicates_deleted(meta: &std::fs::Metadata) -> bool {
+fn has_metadata_indicating_deletion(meta: &std::fs::Metadata) -> bool {
     use std::os::unix::fs::MetadataExt;
     meta.nlink() == 0
 }
 
 #[cfg(not(unix))]
-fn metadata_indicates_deleted(_meta: &std::fs::Metadata) -> bool {
+fn has_metadata_indicating_deletion(_meta: &std::fs::Metadata) -> bool {
     false
+}
+
+#[inline]
+fn should_identity_rotate(
+    previous: &FileIdentity,
+    current: &FileIdentity,
+    tailed_offset: u64,
+    fingerprint_bytes: usize,
+) -> bool {
+    if previous.device != current.device || previous.inode != current.inode {
+        return true;
+    }
+
+    // Empty-file sentinel can transition from fingerprint=0 to non-zero when
+    // the same inode receives its first bytes. That is not a rotation.
+    if previous.fingerprint == 0 {
+        return false;
+    }
+
+    if tailed_offset < fingerprint_bytes as u64 {
+        return false;
+    }
+
+    previous.fingerprint != current.fingerprint
+}
+
+#[inline]
+fn should_rotate_file(
+    previous: &FileIdentity,
+    current: &FileIdentity,
+    is_previous_handle_deleted: bool,
+    tailed_offset: u64,
+    fingerprint_bytes: usize,
+) -> bool {
+    is_previous_handle_deleted
+        || should_identity_rotate(previous, current, tailed_offset, fingerprint_bytes)
 }
 
 #[cfg(test)]
@@ -309,7 +325,9 @@ mod tests {
             glob_patterns: Vec::new(),
             watch_paths: vec![path.clone()],
             fs_events: rx,
-            last_glob_rescan: Instant::now() - Duration::from_secs(1),
+            last_glob_rescan: Instant::now()
+                .checked_sub(Duration::from_secs(1))
+                .expect("one second before now should be representable"),
         };
 
         let mut events = Vec::new();
@@ -341,6 +359,127 @@ mod tests {
         assert!(
             !appended_text.contains("old replaced content"),
             "historical content must remain skipped"
+        );
+    }
+
+    #[test]
+    fn identity_fingerprint_drift_without_inode_change_is_not_rotation() {
+        let previous = FileIdentity {
+            device: 1,
+            inode: 2,
+            fingerprint: 3,
+        };
+        let current = FileIdentity {
+            device: 1,
+            inode: 2,
+            fingerprint: 4,
+        };
+        assert!(
+            !should_identity_rotate(&previous, &current, 0, 1024),
+            "fingerprint drift during append must not be treated as rotation"
+        );
+    }
+
+    #[test]
+    fn identity_fingerprint_drift_after_fingerprint_window_is_rotation() {
+        let previous = FileIdentity {
+            device: 1,
+            inode: 2,
+            fingerprint: 3,
+        };
+        let current = FileIdentity {
+            device: 1,
+            inode: 2,
+            fingerprint: 4,
+        };
+        assert!(
+            should_identity_rotate(&previous, &current, 1024, 1024),
+            "same-inode fingerprint drift after the fingerprint window must be treated as rotation"
+        );
+    }
+
+    #[test]
+    fn identity_empty_sentinel_fingerprint_update_is_not_rotation() {
+        let previous = FileIdentity {
+            device: 1,
+            inode: 2,
+            fingerprint: 0,
+        };
+        let current = FileIdentity {
+            device: 1,
+            inode: 2,
+            fingerprint: 4,
+        };
+        assert!(
+            !should_identity_rotate(&previous, &current, 1024, 1024),
+            "empty-file fingerprint sentinel must not rotate when first bytes appear"
+        );
+    }
+
+    #[test]
+    fn deleted_handle_always_rotates_even_when_identity_matches() {
+        let previous = FileIdentity {
+            device: 1,
+            inode: 2,
+            fingerprint: 3,
+        };
+        let current = FileIdentity {
+            device: 1,
+            inode: 2,
+            fingerprint: 3,
+        };
+        assert!(
+            should_rotate_file(&previous, &current, true, 0, 1024),
+            "unlinked previous handle must rotate to the current path file"
+        );
+    }
+
+    #[test]
+    fn detect_changes_treats_fingerprint_mismatch_as_rotation_for_same_inode() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("inode-reuse.log");
+        fs::write(&path, vec![b'x'; 4096]).expect("write file");
+
+        let mut file = fs::File::open(&path).expect("open file");
+        let current_identity =
+            super::super::identity::identify_open_file(&mut file, 1024).expect("identify current");
+
+        let stale_identity = FileIdentity {
+            device: current_identity.device,
+            inode: current_identity.inode,
+            fingerprint: current_identity.fingerprint ^ 0xA5A5_A5A5_A5A5_A5A5,
+        };
+
+        let mut reader = test_reader();
+        reader.files.insert(
+            path.clone(),
+            TailedFile {
+                identity: stale_identity,
+                file,
+                offset: 2048,
+                last_read: Instant::now(),
+                eof_state: super::super::state::EofState::default(),
+            },
+        );
+
+        let (watcher, rx) = test_watcher();
+        let discovery = FileDiscovery {
+            watcher,
+            watched_dirs: HashSet::new(),
+            glob_patterns: Vec::new(),
+            watch_paths: vec![path.clone()],
+            fs_events: rx,
+            last_glob_rescan: Instant::now(),
+        };
+
+        let mut events = Vec::new();
+        let had_error = discovery.detect_changes(&mut reader, &mut events);
+        assert!(!had_error, "detect_changes should succeed");
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, TailEvent::Rotated { path: p, .. } if *p == path)),
+            "fingerprint mismatch with same inode must trigger rotation event"
         );
     }
 
@@ -447,103 +586,5 @@ mod tests {
             "test",
             Err(io::Error::other("open failed"))
         ));
-    }
-
-    #[test]
-    fn detect_changes_treats_fingerprint_mismatch_as_rotation_for_same_inode() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("inode-reuse.log");
-        fs::write(&path, vec![b'x'; 4096]).expect("write file");
-
-        let mut file = fs::File::open(&path).expect("open file");
-        let current_identity =
-            super::super::identity::identify_open_file(&mut file, 1024).expect("identify current");
-
-        let stale_identity = FileIdentity {
-            device: current_identity.device,
-            inode: current_identity.inode,
-            fingerprint: current_identity.fingerprint ^ 0xA5A5_A5A5_A5A5_A5A5,
-        };
-
-        let mut reader = test_reader();
-        reader.files.insert(
-            path.clone(),
-            TailedFile {
-                identity: stale_identity,
-                file,
-                offset: 2048,
-                last_read: Instant::now(),
-                eof_state: Default::default(),
-            },
-        );
-
-        let (watcher, rx) = test_watcher();
-        let discovery = FileDiscovery {
-            watcher,
-            watched_dirs: HashSet::new(),
-            glob_patterns: Vec::new(),
-            watch_paths: vec![path.clone()],
-            fs_events: rx,
-            last_glob_rescan: Instant::now(),
-        };
-
-        let mut events = Vec::new();
-        let had_error = discovery.detect_changes(&mut reader, &mut events);
-        assert!(!had_error, "detect_changes should succeed");
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, TailEvent::Rotated { path: p, .. } if *p == path)),
-            "fingerprint mismatch with same inode must trigger rotation event"
-        );
-    }
-
-    #[test]
-    fn detect_changes_does_not_rotate_when_empty_sentinel_fingerprint_updates() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("empty-sentinel.log");
-        fs::write(&path, b"first line\n").expect("write file");
-
-        let mut file = fs::File::open(&path).expect("open file");
-        let current_identity =
-            super::super::identity::identify_open_file(&mut file, 1024).expect("identify current");
-
-        let sentinel_identity = FileIdentity {
-            device: current_identity.device,
-            inode: current_identity.inode,
-            fingerprint: 0,
-        };
-
-        let mut reader = test_reader();
-        reader.files.insert(
-            path.clone(),
-            TailedFile {
-                identity: sentinel_identity,
-                file,
-                offset: 0,
-                last_read: Instant::now(),
-                eof_state: Default::default(),
-            },
-        );
-
-        let (watcher, rx) = test_watcher();
-        let discovery = FileDiscovery {
-            watcher,
-            watched_dirs: HashSet::new(),
-            glob_patterns: Vec::new(),
-            watch_paths: vec![path.clone()],
-            fs_events: rx,
-            last_glob_rescan: Instant::now(),
-        };
-
-        let mut events = Vec::new();
-        let had_error = discovery.detect_changes(&mut reader, &mut events);
-        assert!(!had_error, "detect_changes should succeed");
-        assert!(
-            !events
-                .iter()
-                .any(|e| matches!(e, TailEvent::Rotated { .. })),
-            "sentinel fingerprint transition on same inode must not emit rotation"
-        );
     }
 }

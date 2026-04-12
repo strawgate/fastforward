@@ -22,7 +22,7 @@ use arrow::ipc::reader::StreamReader;
 use arrow::record_batch::RecordBatch;
 use axum::body::Body;
 use axum::extract::State;
-use axum::http::header::CONTENT_ENCODING;
+use axum::http::header::{CONTENT_ENCODING, CONTENT_TYPE};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
@@ -33,14 +33,10 @@ use crate::InputError;
 use crate::background_http_task::BackgroundHttpTask;
 use crate::input::{InputEvent, InputSource};
 use crate::receiver_health::{ReceiverHealthEvent, reduce_receiver_health};
-use crate::receiver_http::{
-    MAX_REQUEST_BODY_SIZE, declared_content_length, parse_content_type, read_limited_body,
-};
+use crate::receiver_http::{MAX_REQUEST_BODY_SIZE, parse_content_length, read_limited_body};
 
 /// Bounded channel capacity — limits memory when the pipeline falls behind.
 const CHANNEL_BOUND: usize = 256;
-const CONTENT_TYPE_ARROW: &str = "application/vnd.apache.arrow.stream";
-const CONTENT_TYPE_ARROW_ZSTD: &str = "application/vnd.apache.arrow.stream+zstd";
 
 /// Arrow IPC receiver that listens for Arrow stream data via HTTP POST.
 ///
@@ -265,35 +261,19 @@ async fn handle_arrow_ipc_request(
     headers: HeaderMap,
     body: Body,
 ) -> Response {
-    let content_length = declared_content_length(&headers);
+    let content_length = parse_content_length(&headers);
     if content_length.is_some_and(|body_len| body_len > MAX_REQUEST_BODY_SIZE as u64) {
         return (StatusCode::PAYLOAD_TOO_LARGE, "payload too large").into_response();
     }
 
-    let content_encoding = match parse_content_encoding(&headers) {
+    let content_encodings = match parse_content_encoding(&headers) {
         Ok(content_encoding) => content_encoding,
-        Err(StatusCode::UNSUPPORTED_MEDIA_TYPE) => {
-            return (
-                StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                "unsupported content-encoding: only identity or zstd are supported",
-            )
-                .into_response();
-        }
         Err(status) => return (status, "invalid content-encoding header").into_response(),
     };
     let content_type = match parse_content_type(&headers) {
         Ok(content_type) => content_type,
         Err(status) => return (status, "invalid content-type header").into_response(),
     };
-    if content_type.as_deref().is_some_and(|content_type| {
-        content_type != CONTENT_TYPE_ARROW && content_type != CONTENT_TYPE_ARROW_ZSTD
-    }) {
-        return (
-            StatusCode::UNSUPPORTED_MEDIA_TYPE,
-            "unsupported content-type for Arrow IPC receiver",
-        )
-            .into_response();
-    }
 
     let body = match read_limited_body(body, MAX_REQUEST_BODY_SIZE, content_length).await {
         Ok(body) => body,
@@ -308,8 +288,13 @@ async fn handle_arrow_ipc_request(
     };
     let raw_body_len = body.len() as u64;
 
-    let is_zstd = content_encoding.as_deref() == Some("zstd")
-        || content_type.as_deref() == Some(CONTENT_TYPE_ARROW_ZSTD);
+    let has_zstd_content_encoding = content_encodings
+        .as_ref()
+        .is_some_and(|encoding| encoding.has_zstd);
+    let is_zstd = has_zstd_content_encoding
+        || content_type.as_ref().is_some_and(|media_type| {
+            media_type.eq_ignore_ascii_case("application/vnd.apache.arrow.stream+zstd")
+        });
 
     let body = if is_zstd {
         match decompress_zstd(&body) {
@@ -408,27 +393,45 @@ async fn handle_arrow_ipc_request(
     }
 }
 
-fn parse_content_encoding(headers: &HeaderMap) -> Result<Option<String>, StatusCode> {
+#[derive(Debug, Default, Eq, PartialEq)]
+struct ContentEncodingFlags {
+    has_zstd: bool,
+}
+
+fn parse_content_encoding(headers: &HeaderMap) -> Result<Option<ContentEncodingFlags>, StatusCode> {
     let Some(value) = headers.get(CONTENT_ENCODING) else {
         return Ok(None);
     };
     let parsed = value.to_str().map_err(|_| StatusCode::BAD_REQUEST)?;
-    let mut is_zstd = false;
-    for token in parsed.split(',') {
-        let encoding = token.trim().to_ascii_lowercase();
-        if encoding.is_empty() {
+    let mut flags = ContentEncodingFlags::default();
+    let mut has_token = false;
+    for token in parsed.split(',').map(str::trim) {
+        if token.is_empty() {
             return Err(StatusCode::BAD_REQUEST);
         }
-        if encoding == "identity" {
-            continue;
+        if token.eq_ignore_ascii_case("zstd") {
+            flags.has_zstd = true;
+        } else if !token.eq_ignore_ascii_case("identity") {
+            return Err(StatusCode::BAD_REQUEST);
         }
-        if encoding == "zstd" {
-            is_zstd = true;
-            continue;
-        }
-        return Err(StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        has_token = true;
     }
-    Ok(is_zstd.then_some("zstd".to_string()))
+    if !has_token {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    Ok(Some(flags))
+}
+
+fn parse_content_type(headers: &HeaderMap) -> Result<Option<&str>, StatusCode> {
+    let Some(value) = headers.get(CONTENT_TYPE) else {
+        return Ok(None);
+    };
+    let parsed = value.to_str().map_err(|_| StatusCode::BAD_REQUEST)?;
+    let media_type = parsed.split(';').next().unwrap_or(parsed).trim();
+    if media_type.is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    Ok(Some(media_type))
 }
 
 impl Drop for ArrowIpcReceiver {
@@ -480,7 +483,6 @@ impl InputSource for ArrowIpcReceiver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::http::header::CONTENT_TYPE;
 
     // Regression test for issue #1142: clean shutdown
     #[test]
@@ -635,6 +637,101 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(2))
             .expect("should receive a batch");
         assert_eq!(received.num_rows(), 2);
+    }
+
+    #[test]
+    fn receiver_accepts_zstd_content_type_with_parameters() {
+        let receiver = ArrowIpcReceiver::new_with_capacity("test-zstd-params", "127.0.0.1:0", 16)
+            .expect("bind should succeed");
+        let addr = receiver.local_addr();
+
+        let batch = make_test_batch();
+        let ipc_bytes = serialize_batch(&batch);
+        let compressed = zstd::bulk::compress(&ipc_bytes, 1).expect("zstd compress should succeed");
+
+        let url = format!("http://{addr}/v1/arrow");
+        let response = ureq::post(&url)
+            .header(
+                "Content-Type",
+                "application/vnd.apache.arrow.stream+zstd; charset=binary",
+            )
+            .send(&compressed)
+            .expect("POST should succeed");
+        assert_eq!(response.status().as_u16(), 200);
+
+        let received = receiver
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("should receive a batch");
+        assert_eq!(received.num_rows(), 2);
+    }
+
+    #[test]
+    fn receiver_accepts_tokenized_content_encoding_with_zstd() {
+        let receiver =
+            ArrowIpcReceiver::new_with_capacity("test-zstd-tokenized", "127.0.0.1:0", 16)
+                .expect("bind should succeed");
+        let addr = receiver.local_addr();
+
+        let batch = make_test_batch();
+        let ipc_bytes = serialize_batch(&batch);
+        let compressed = zstd::bulk::compress(&ipc_bytes, 1).expect("zstd compress should succeed");
+
+        let url = format!("http://{addr}/v1/arrow");
+        let response = ureq::post(&url)
+            .header("Content-Type", "application/vnd.apache.arrow.stream")
+            .header("Content-Encoding", "identity, zstd")
+            .send(&compressed)
+            .expect("POST should succeed");
+        assert_eq!(response.status().as_u16(), 200);
+
+        let received = receiver
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("should receive a batch");
+        assert_eq!(received.num_rows(), 2);
+    }
+
+    #[test]
+    fn receiver_rejects_unsupported_content_encoding() {
+        let receiver =
+            ArrowIpcReceiver::new_with_capacity("test-unsupported-encoding", "127.0.0.1:0", 16)
+                .expect("bind should succeed");
+        let addr = receiver.local_addr();
+        let batch = make_test_batch();
+        let ipc_bytes = serialize_batch(&batch);
+
+        let url = format!("http://{addr}/v1/arrow");
+        let result = ureq::post(&url)
+            .header("Content-Type", "application/vnd.apache.arrow.stream")
+            .header("Content-Encoding", "gzip")
+            .send(&ipc_bytes);
+        let status = match result {
+            Ok(resp) => resp.status().as_u16(),
+            Err(ureq::Error::StatusCode(code)) => code,
+            Err(e) => panic!("unexpected error: {e}"),
+        };
+        assert_eq!(status, 400);
+    }
+
+    #[test]
+    fn receiver_rejects_empty_content_encoding_token() {
+        let receiver =
+            ArrowIpcReceiver::new_with_capacity("test-empty-encoding-token", "127.0.0.1:0", 16)
+                .expect("bind should succeed");
+        let addr = receiver.local_addr();
+        let batch = make_test_batch();
+        let ipc_bytes = serialize_batch(&batch);
+
+        let url = format!("http://{addr}/v1/arrow");
+        let result = ureq::post(&url)
+            .header("Content-Type", "application/vnd.apache.arrow.stream")
+            .header("Content-Encoding", "identity,,zstd")
+            .send(&ipc_bytes);
+        let status = match result {
+            Ok(resp) => resp.status().as_u16(),
+            Err(ureq::Error::StatusCode(code)) => code,
+            Err(e) => panic!("unexpected error: {e}"),
+        };
+        assert_eq!(status, 400);
     }
 
     #[test]
@@ -876,31 +973,5 @@ mod tests {
     fn decode_ipc_stream_invalid_body() {
         let result = decode_ipc_stream(b"not arrow data");
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn parse_content_type_accepts_parameters() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            CONTENT_TYPE,
-            "application/vnd.apache.arrow.stream; charset=binary"
-                .parse()
-                .expect("valid header value"),
-        );
-        assert_eq!(
-            parse_content_type(&headers).expect("parse should succeed"),
-            Some(CONTENT_TYPE_ARROW.to_string())
-        );
-    }
-
-    #[test]
-    fn parse_content_encoding_rejects_unsupported_values() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            CONTENT_ENCODING,
-            "gzip".parse().expect("valid header value"),
-        );
-        let status = parse_content_encoding(&headers).expect_err("gzip must be rejected");
-        assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
     }
 }
