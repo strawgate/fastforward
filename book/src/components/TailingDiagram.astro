@@ -261,7 +261,40 @@
 
   updateStats();
 
-  // Auto-start after a brief delay
-  timer = setTimeout(tick, 1000);
+  // Add play/pause button
+  var controls = el('div', 'tl-controls');
+  controls.style.cssText = 'display:flex;gap:0.5rem;align-items:center;margin-bottom:0.75rem;';
+  var playBtn = el('button', 'tl-play');
+  playBtn.style.cssText = 'width:32px;height:32px;border-radius:50%;border:1.5px solid var(--tl-accent);background:transparent;color:var(--tl-accent);cursor:pointer;display:flex;align-items:center;justify-content:center;';
+  playBtn.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16"><path d="M8 5v14l11-7z" fill="currentColor"/></svg>';
+  var statusText = el('span', '');
+  statusText.style.cssText = 'font-size:0.78rem;color:var(--tl-muted);';
+  statusText.textContent = 'Press play to watch file tailing, rotation, and recovery';
+  controls.appendChild(playBtn);
+  controls.appendChild(statusText);
+  root.insertBefore(controls, stageEl);
+
+  var playing = false;
+
+  function updatePlayBtn() {
+    playBtn.innerHTML = playing
+      ? '<svg viewBox="0 0 24 24" width="16" height="16"><path d="M6 4h4v16H6zM14 4h4v16h-4z" fill="currentColor"/></svg>'
+      : '<svg viewBox="0 0 24 24" width="16" height="16"><path d="M8 5v14l11-7z" fill="currentColor"/></svg>';
+    statusText.textContent = playing ? 'Playing — watch the simulation below' : 'Paused';
+  }
+
+  playBtn.addEventListener('click', function() {
+    if (playing) {
+      playing = false;
+      if (timer) { clearTimeout(timer); timer = null; }
+      updatePlayBtn();
+    } else {
+      playing = true;
+      updatePlayBtn();
+      tick();
+    }
+  });
+
+  // Do NOT auto-start — let user press play
 })();
 </script>
