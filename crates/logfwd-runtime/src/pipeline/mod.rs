@@ -2869,6 +2869,9 @@ output:
         let log_path = dir.path().join("held-pool-ack.log");
         std::fs::write(&log_path, "").unwrap();
         let mut pipeline = pipeline_with_sink(&log_path, Box::new(DevNullSink));
+        // Set threshold to 1 so a single hold triggers shutdown (tests the
+        // safety-valve mechanism with the lowest possible threshold).
+        pipeline.max_held_batches = 1;
         let machine = pipeline.machine.as_mut().unwrap();
         let ticket = machine.create_batch(SourceId(42), 1000);
         let ticket = machine.begin_send(ticket);
@@ -2891,7 +2894,7 @@ output:
 
         assert!(
             should_stop,
-            "held worker outcomes must terminalize ingestion instead of accumulating tickets"
+            "held count reaching max_held_batches must request terminal shutdown"
         );
         assert_eq!(pipeline.held_tickets.len(), 1);
         assert_eq!(
