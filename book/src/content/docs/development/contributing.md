@@ -1,7 +1,23 @@
 ---
 title: "Contributing"
-description: "Workspace layout, build commands, and development tips"
+description: "Build, test, and contribute to logfwd"
 ---
+
+## Quick reference
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh   # install Rust
+cargo install just                                                  # install task runner
+just install-tools                                                  # install dev tools
+
+just build          # release binary
+just test           # all tests
+just lint           # fmt + clippy + toml + deny + typos
+just ci             # full CI suite
+just bench          # Criterion microbenchmarks
+cargo test -p logfwd-core                  # core crate only (fastest)
+cargo test -p logfwd-io -- tail            # specific test subset
+```
 
 ## Workspace layout
 
