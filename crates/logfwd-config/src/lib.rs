@@ -24,8 +24,8 @@ pub use types::{
     HttpMethodConfig, HttpTypeConfig, InputConfig, InputType, InputTypeConfig,
     JournaldBackendConfig, JournaldInputConfig, JournaldTypeConfig, JsonlEnrichmentConfig,
     K8sPathConfig, OtlpProtobufDecodeModeConfig, OtlpTypeConfig, OutputConfig, OutputType,
-    PipelineConfig, PlatformSensorInputConfig, SensorTypeConfig, ServerConfig,
-    StaticEnrichmentConfig, StorageConfig, TcpTypeConfig, TlsInputConfig, UdpTypeConfig,
+    PipelineConfig, SensorTypeConfig, ServerConfig, StaticEnrichmentConfig, StorageConfig,
+    TcpTypeConfig, TlsInputConfig, UdpTypeConfig,
 };
 pub use validate::validate_host_port;
 

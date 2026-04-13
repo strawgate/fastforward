@@ -31,10 +31,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let no_file_open = args.iter().any(|a| a == "--no-file-open");
 
     // First positional (non-flag) argument is the eBPF binary path.
-    let ebpf_path = args.iter().skip(1).find(|a| !a.starts_with("--")).map_or(
-        "sensor-ebpf-kern/target/bpfel-unknown-none/release/sensor-ebpf",
-        String::as_str,
-    );
+    // Skip values that follow known flags (e.g., --duration 30).
+    let flags_with_values: &[&str] = &["--duration"];
+    let ebpf_path = {
+        let mut skip_next = false;
+        let mut found: Option<&str> = None;
+        for arg in args.iter().skip(1) {
+            if skip_next {
+                skip_next = false;
+                continue;
+            }
+            if flags_with_values.contains(&arg.as_str()) {
+                skip_next = true;
+                continue;
+            }
+            if arg.starts_with("--") {
+                continue;
+            }
+            found = Some(arg.as_str());
+            break;
+        }
+        found.unwrap_or("sensor-ebpf-kern/target/bpfel-unknown-none/release/sensor-ebpf")
+    };
     let duration_secs: u64 = args
         .iter()
         .position(|a| a == "--duration")

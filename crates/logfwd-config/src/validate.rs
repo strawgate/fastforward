@@ -356,6 +356,28 @@ impl Config {
                             // NOTE: ebpf_binary_path for linux_ebpf_sensor is validated
                             // at runtime when the sensor loads, not here — the path may
                             // be auto-discovered or provided via environment variable.
+                            //
+                            // Reject eBPF-specific fields on host_metrics inputs.
+                            if matches!(input.input_type(), InputType::HostMetrics) {
+                                if s.sensor
+                                    .as_ref()
+                                    .and_then(|cfg| cfg.ebpf_binary_path.as_ref())
+                                    .is_some()
+                                {
+                                    return Err(ConfigError::Validation(format!(
+                                        "pipeline '{name}' input '{label}': sensor.ebpf_binary_path is not supported for host_metrics inputs"
+                                    )));
+                                }
+                                if s.sensor
+                                    .as_ref()
+                                    .and_then(|cfg| cfg.max_events_per_poll)
+                                    .is_some()
+                                {
+                                    return Err(ConfigError::Validation(format!(
+                                        "pipeline '{name}' input '{label}': sensor.max_events_per_poll is not supported for host_metrics inputs"
+                                    )));
+                                }
+                            }
                         }
                         InputTypeConfig::ArrowIpc(a) => {
                             if let Err(msg) = validate_bind_addr(&a.listen) {

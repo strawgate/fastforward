@@ -104,9 +104,13 @@ fn ptrace_request_name(req: u64) -> &'static str {
         16 => "ATTACH",
         17 => "DETACH",
         24 => "SYSCALL",
-        31 => "SETOPTIONS",
-        16896 => "SEIZE",
-        16897 => "INTERRUPT",
+        7 => "CONT",
+        8 => "KILL",
+        9 => "SINGLESTEP",
+        0x4200 => "SETOPTIONS",
+        0x4201 => "GETEVENTMSG",
+        0x4206 => "SEIZE",
+        0x4207 => "INTERRUPT",
         _ => "UNKNOWN",
     }
 }
@@ -119,14 +123,14 @@ fn wall_clock_ns() -> u64 {
         .as_nanos() as u64
 }
 
-/// Format an IPv4 address from a `__be32` u32 and port into "IP:port".
+/// Format an IPv4 address from a `__be32` u32.
 ///
 /// The kernel stores `saddr`/`daddr` as `__be32`: the raw bytes in memory are
 /// already in network order. `to_ne_bytes()` gives those raw bytes on any
 /// platform, and `Ipv4Addr::from([u8; 4])` interprets them in network order.
-fn format_addr(addr: u32, port: u16) -> String {
+fn format_addr(addr: u32) -> String {
     let ip = Ipv4Addr::from(addr.to_ne_bytes());
-    format!("{ip}:{port}")
+    ip.to_string()
 }
 
 // ── Per-event row accumulator ──────────────────────────────────────────
@@ -427,8 +431,8 @@ fn parse_event(
             // SAFETY: Length checked >= size_of::<TcpConnectEvent>(); ring buffer is 8-byte aligned.
             let ev = unsafe { &*(ptr.cast::<TcpConnectEvent>()) };
             let mut row = EventRow::from_header(header, "tcp_connect", mono_to_wall_offset_ns);
-            row.src_addr = Some(format_addr(ev.saddr, ev.sport));
-            row.dst_addr = Some(format_addr(ev.daddr, ev.dport));
+            row.src_addr = Some(format_addr(ev.saddr));
+            row.dst_addr = Some(format_addr(ev.daddr));
             row.src_port = Some(ev.sport);
             row.dst_port = Some(ev.dport);
             Some(row)
@@ -437,8 +441,8 @@ fn parse_event(
             // SAFETY: Length checked >= size_of::<TcpAcceptEvent>(); ring buffer is 8-byte aligned.
             let ev = unsafe { &*(ptr.cast::<TcpAcceptEvent>()) };
             let mut row = EventRow::from_header(header, "tcp_accept", mono_to_wall_offset_ns);
-            row.src_addr = Some(format_addr(ev.saddr, ev.sport));
-            row.dst_addr = Some(format_addr(ev.daddr, ev.dport));
+            row.src_addr = Some(format_addr(ev.saddr));
+            row.dst_addr = Some(format_addr(ev.daddr));
             row.src_port = Some(ev.sport);
             row.dst_port = Some(ev.dport);
             Some(row)

@@ -5,7 +5,7 @@ use bytes::BytesMut;
 use logfwd_config::{
     Format, GeneratorAttributeValueConfig, GeneratorComplexityConfig, GeneratorProfileConfig,
     HostMetricsInputConfig, HttpMethodConfig, InputConfig, InputType, InputTypeConfig,
-    OtlpProtobufDecodeModeConfig, PlatformSensorInputConfig,
+    OtlpProtobufDecodeModeConfig,
 };
 use logfwd_diagnostics::diagnostics::ComponentStats;
 use logfwd_io::format::FormatDecoder;
@@ -482,6 +482,10 @@ pub(super) fn build_input_state(
             let target = HostMetricsTarget::Macos;
             #[cfg(target_os = "windows")]
             let target = HostMetricsTarget::Windows;
+            #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+            return Err(format!(
+                "input '{name}': host_metrics is not supported on this platform"
+            ));
 
             if cfg.format.is_some() {
                 return Err(format!(
