@@ -514,6 +514,22 @@ fn try_sock_state(ctx: &TracePointContext) -> Result<(), i64> {
         entry.submit(0);
     }
 
+    // Failed connect: SYN_SENT → anything other than ESTABLISHED (refused, timeout, reset).
+    // Clean up cached process info so SOCK_OWNERS does not leak entries (#1934).
+    if oldstate == TCP_SYN_SENT && newstate != TCP_ESTABLISHED {
+        // SAFETY: fixed ABI offset for skaddr
+        let skaddr: u64 = unsafe { ctx.read_at(8).unwrap_or(0) };
+        SOCK_OWNERS.remove(&skaddr).ok();
+    }
+
+    // Safety net: any transition to CLOSE removes stale entries that survived
+    // unexpected state paths (e.g. aborted handshakes, resets after ESTABLISHED).
+    if newstate == TCP_CLOSE && oldstate != TCP_SYN_SENT {
+        // SAFETY: fixed ABI offset for skaddr
+        let skaddr: u64 = unsafe { ctx.read_at(8).unwrap_or(0) };
+        SOCK_OWNERS.remove(&skaddr).ok();
+    }
+
     // Inbound accept: SYN_RECV → ESTABLISHED
     if oldstate == TCP_SYN_RECV && newstate == TCP_ESTABLISHED {
         let mut entry = match EVENTS.reserve::<TcpAcceptEvent>(0) {
