@@ -10,6 +10,9 @@ pub const MAX_FILENAME: usize = 256;
 /// Maximum kernel module name length.
 pub const MAX_MODULE_NAME: usize = 64;
 
+/// Maximum DNS query name length.
+pub const MAX_DNS_NAME: usize = 253;
+
 /// Maximum comm (process name) length in Linux.
 pub const COMM_SIZE: usize = 16;
 
@@ -31,6 +34,7 @@ pub enum EventKind {
     ModuleLoad = 10,
     Ptrace = 11,
     MemfdCreate = 12,
+    DnsQuery = 13,
 }
 
 // ── Common header ───────────────────────────────────────────────────────
@@ -205,6 +209,26 @@ pub struct MemfdCreateEvent {
     pub flags: u32,
     pub name_len: u32,
     pub name: [u8; MAX_FILENAME],
+}
+
+// ── DNS query ───────────────────────────────────────────────────────────
+
+/// Emitted on `tracepoint/syscalls/sys_enter_sendto` when destination port is 53.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct DnsQueryEvent {
+    pub header: EventHeader,
+    /// DNS query name in dotted notation (e.g. "www.google.com").
+    pub qname: [u8; MAX_DNS_NAME],
+    pub qname_len: u16,
+    /// DNS query type (A=1, AAAA=28, CNAME=5, MX=15, TXT=16).
+    pub qtype: u16,
+    /// DNS transaction ID for response correlation.
+    pub tx_id: u16,
+    /// Destination IP (DNS server).
+    pub dst_addr: u32,
+    /// Destination port (should be 53).
+    pub dst_port: u16,
 }
 
 // ── Process info stash (kernel-internal, for kprobe→tracepoint correlation) ─

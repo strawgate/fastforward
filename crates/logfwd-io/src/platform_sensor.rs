@@ -72,6 +72,9 @@ fn platform_sensor_schema() -> Arc<Schema> {
         Field::new("dst_addr", DataType::Utf8, true),
         Field::new("src_port", DataType::UInt16, true),
         Field::new("dst_port", DataType::UInt16, true),
+        Field::new("dns_qname", DataType::Utf8, true),
+        Field::new("dns_qtype", DataType::UInt16, true),
+        Field::new("dns_tx_id", DataType::UInt16, true),
     ]))
 }
 
@@ -161,6 +164,9 @@ struct EventRow {
     dst_addr: Option<String>,
     src_port: Option<u16>,
     dst_port: Option<u16>,
+    dns_qname: Option<String>,
+    dns_qtype: Option<u16>,
+    dns_tx_id: Option<u16>,
 }
 
 impl EventRow {
@@ -189,6 +195,9 @@ impl EventRow {
             dst_addr: None,
             src_port: None,
             dst_port: None,
+            dns_qname: None,
+            dns_qtype: None,
+            dns_tx_id: None,
         }
     }
 }
@@ -212,6 +221,7 @@ const TRACEPOINTS: &[(&str, &str, &str)] = &[
         "sys_enter_memfd_create",
     ),
     ("inet_sock_set_state", "sock", "inet_sock_set_state"),
+    ("sys_enter_sendto", "syscalls", "sys_enter_sendto"),
 ];
 
 /// Kprobes to attach: (program name, kernel function).
@@ -509,6 +519,17 @@ fn parse_event(
             row.flags = Some(ev.flags);
             Some(row)
         }
+        k if k == EventKind::DnsQuery as u32 && len >= size_of::<DnsQueryEvent>() => {
+            // SAFETY: Length checked >= size_of::<DnsQueryEvent>(); ring buffer is 8-byte aligned.
+            let ev = unsafe { &*(ptr.cast::<DnsQueryEvent>()) };
+            let mut row = EventRow::from_header(header, "dns_query", mono_to_wall_offset_ns);
+            row.dns_qname = Some(safe_str(&ev.qname, ev.qname_len as usize).to_string());
+            row.dns_qtype = Some(ev.qtype);
+            row.dns_tx_id = Some(ev.tx_id);
+            row.dst_addr = Some(format_addr(ev.dst_addr));
+            row.dst_port = Some(ev.dst_port);
+            Some(row)
+        }
         _ => None,
     }
 }
@@ -543,6 +564,9 @@ fn build_record_batch(schema: &Arc<Schema>, rows: &[EventRow]) -> io::Result<Rec
     let mut dst_addr: Vec<Option<&str>> = Vec::with_capacity(len);
     let mut src_port: Vec<Option<u16>> = Vec::with_capacity(len);
     let mut dst_port: Vec<Option<u16>> = Vec::with_capacity(len);
+    let mut dns_qname: Vec<Option<&str>> = Vec::with_capacity(len);
+    let mut dns_qtype: Vec<Option<u16>> = Vec::with_capacity(len);
+    let mut dns_tx_id: Vec<Option<u16>> = Vec::with_capacity(len);
 
     for row in rows {
         timestamp_unix_nano.push(row.timestamp_unix_nano);
@@ -569,6 +593,9 @@ fn build_record_batch(schema: &Arc<Schema>, rows: &[EventRow]) -> io::Result<Rec
         dst_addr.push(row.dst_addr.as_deref());
         src_port.push(row.src_port);
         dst_port.push(row.dst_port);
+        dns_qname.push(row.dns_qname.as_deref());
+        dns_qtype.push(row.dns_qtype);
+        dns_tx_id.push(row.dns_tx_id);
     }
 
     let columns: Vec<ArrayRef> = vec![
@@ -595,6 +622,9 @@ fn build_record_batch(schema: &Arc<Schema>, rows: &[EventRow]) -> io::Result<Rec
         Arc::new(StringArray::from(dst_addr)),
         Arc::new(UInt16Array::from(src_port)),
         Arc::new(UInt16Array::from(dst_port)),
+        Arc::new(StringArray::from(dns_qname)),
+        Arc::new(UInt16Array::from(dns_qtype)),
+        Arc::new(UInt16Array::from(dns_tx_id)),
     ];
 
     RecordBatch::try_new(Arc::clone(schema), columns).map_err(|e| {

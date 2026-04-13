@@ -13,6 +13,7 @@
 //!   - module/module_load       → kernel module loading
 //!   - sys_enter_ptrace         → process injection / debugging
 //!   - sys_enter_memfd_create   → fileless malware staging
+//!   - sys_enter_sendto         → DNS query monitoring (UDP port 53)
 //!
 //! Build:
 //!   cargo +nightly build --target bpfel-unknown-none -Z build-std=core --release
@@ -25,7 +26,7 @@ use aya_ebpf::{
     helpers::{
         bpf_get_current_cgroup_id, bpf_get_current_comm, bpf_get_current_pid_tgid,
         bpf_get_current_uid_gid, bpf_ktime_get_ns, bpf_probe_read_kernel_str_bytes,
-        bpf_probe_read_user_str_bytes,
+        bpf_probe_read_user, bpf_probe_read_user_buf, bpf_probe_read_user_str_bytes,
     },
     macros::{kprobe, map, tracepoint},
     maps::{HashMap, RingBuf},
@@ -38,6 +39,17 @@ use sensor_ebpf_common::*;
 const TCP_ESTABLISHED: i32 = 1;
 const TCP_SYN_SENT: i32 = 2;
 const TCP_SYN_RECV: i32 = 3;
+
+// DNS parsing constants
+/// Minimum DNS header size (ID + flags + 4 count fields = 12 bytes).
+const DNS_HEADER_SIZE: usize = 12;
+/// Maximum DNS label count to prevent verifier unbounded loop.
+const MAX_DNS_LABELS: usize = 32;
+/// Maximum bytes to read from UDP payload for DNS parsing.
+const MAX_DNS_READ: usize = 280; // 12 header + 253 name + 4 qtype/qclass + margin
+
+// sockaddr_in constants
+const AF_INET: u16 = 2;
 
 /// 16 MB ring buffer — ~100ms headroom at high event rate.
 #[map]
@@ -552,6 +564,149 @@ unsafe fn read_sock_addrs(
     *dport = u16::from_be(ctx.read_at(26).unwrap_or(0));
     *saddr = ctx.read_at(32).unwrap_or(0);
     *daddr = ctx.read_at(36).unwrap_or(0);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// DNS EVENTS
+// ═══════════════════════════════════════════════════════════════════════
+
+// ── DNS query (sendto to port 53) ───────────────────────────────────────
+
+/// sys_enter_sendto tracepoint:
+///   fd at offset 16, buf at 24, len at 32, flags at 40, dest_addr at 48, addr_len at 56
+#[tracepoint]
+pub fn sys_enter_sendto(ctx: TracePointContext) -> u32 {
+    match try_dns_query(&ctx) {
+        Ok(()) | Err(_) => 0,
+    }
+}
+
+fn try_dns_query(ctx: &TracePointContext) -> Result<(), i64> {
+    // SAFETY: tracepoint field reads at fixed kernel ABI offsets.
+    let dest_addr_ptr: u64 = unsafe { ctx.read_at(48)? };
+    if dest_addr_ptr == 0 {
+        return Ok(());
+    }
+
+    // Read sockaddr_in to check if this is AF_INET, port 53 (DNS).
+    // SAFETY: dest_addr_ptr points to a user-space sockaddr provided by the syscall.
+    let sa_family: u16 = unsafe {
+        bpf_probe_read_user(dest_addr_ptr as *const u16).map_err(|e| e as i64)?
+    };
+    if sa_family != AF_INET {
+        return Ok(());
+    }
+
+    // sin_port is at offset 2 in sockaddr_in, in network byte order.
+    // SAFETY: dest_addr_ptr + 2 is within the sockaddr_in struct.
+    let sin_port: u16 = unsafe {
+        bpf_probe_read_user((dest_addr_ptr + 2) as *const u16).map_err(|e| e as i64)?
+    };
+    if u16::from_be(sin_port) != 53 {
+        return Ok(());
+    }
+
+    // Read destination IP (sin_addr at offset 4 in sockaddr_in).
+    // SAFETY: dest_addr_ptr + 4 is within the sockaddr_in struct.
+    let dst_ip: u32 = unsafe {
+        bpf_probe_read_user((dest_addr_ptr + 4) as *const u32).map_err(|e| e as i64)?
+    };
+
+    // Read the UDP payload (DNS message).
+    // SAFETY: tracepoint field reads at fixed kernel ABI offsets.
+    let buf_ptr: u64 = unsafe { ctx.read_at(24)? };
+    let buf_len: u64 = unsafe { ctx.read_at(32)? };
+    if buf_ptr == 0 || (buf_len as usize) < DNS_HEADER_SIZE {
+        return Ok(());
+    }
+
+    let read_len = (buf_len as usize).min(MAX_DNS_READ);
+    let mut dns_buf = [0u8; MAX_DNS_READ];
+
+    // SAFETY: buf_ptr is a valid user-space buffer from the sendto syscall.
+    unsafe {
+        bpf_probe_read_user_buf(buf_ptr as *const u8, &mut dns_buf[..read_len])
+            .map_err(|e| e as i64)?;
+    }
+
+    // Parse DNS header: txid (2), flags (2), qdcount (2), ...
+    let tx_id = u16::from_be_bytes([dns_buf[0], dns_buf[1]]);
+    let qdcount = u16::from_be_bytes([dns_buf[4], dns_buf[5]]);
+    if qdcount == 0 {
+        return Ok(());
+    }
+
+    // Parse question section: label-encoded name starting at offset 12.
+    let mut entry = match EVENTS.reserve::<DnsQueryEvent>(0) {
+        Some(e) => e,
+        None => return Ok(()),
+    };
+
+    let event = entry.as_mut_ptr();
+    // SAFETY: event points to RingBuf-reserved memory; all fields are written
+    // before submit. dns_buf indices are bounds-checked against read_len/MAX_DNS_READ.
+    unsafe {
+        fill_header(&mut (*event).header, EventKind::DnsQuery);
+        (*event).tx_id = tx_id;
+        (*event).dst_addr = dst_ip;
+        (*event).dst_port = 53;
+
+        // Parse DNS labels into dotted notation.
+        let mut src_off = DNS_HEADER_SIZE; // start of question section
+        let mut dst_off = 0usize;
+        let mut label_count = 0usize;
+
+        // Bounded loop for eBPF verifier.
+        let mut i = 0usize;
+        while i < MAX_DNS_LABELS {
+            if src_off >= read_len || src_off >= MAX_DNS_READ {
+                break;
+            }
+            let label_len = dns_buf[src_off] as usize;
+            if label_len == 0 {
+                src_off += 1;
+                break;
+            }
+            if label_len > 63 || src_off + 1 + label_len > read_len {
+                break;
+            }
+
+            // Add dot separator between labels.
+            if label_count > 0 && dst_off < MAX_DNS_NAME {
+                (*event).qname[dst_off] = b'.';
+                dst_off += 1;
+            }
+
+            // Copy label bytes.
+            let mut j = 0usize;
+            while j < label_len && j < 63 {
+                if dst_off >= MAX_DNS_NAME {
+                    break;
+                }
+                if src_off + 1 + j < MAX_DNS_READ {
+                    (*event).qname[dst_off] = dns_buf[src_off + 1 + j];
+                    dst_off += 1;
+                }
+                j += 1;
+            }
+
+            src_off += 1 + label_len;
+            label_count += 1;
+            i += 1;
+        }
+
+        (*event).qname_len = dst_off as u16;
+
+        // Read qtype (2 bytes after the name).
+        if src_off + 2 <= read_len && src_off + 2 <= MAX_DNS_READ {
+            (*event).qtype = u16::from_be_bytes([dns_buf[src_off], dns_buf[src_off + 1]]);
+        } else {
+            (*event).qtype = 0;
+        }
+    }
+
+    entry.submit(0);
+    Ok(())
 }
 
 #[panic_handler]

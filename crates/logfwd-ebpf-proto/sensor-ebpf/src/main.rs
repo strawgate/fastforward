@@ -92,6 +92,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "sys_enter_memfd_create",
         ),
         ("inet_sock_set_state", "sock", "inet_sock_set_state"),
+        ("sys_enter_sendto", "syscalls", "sys_enter_sendto"),
     ];
 
     for (prog_name, category, tracepoint) in tracepoints {
@@ -496,6 +497,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
 
+                // ── DNS query ─────────────────────────────────
+                k if k == EventKind::DnsQuery as u32 && len >= size_of::<DnsQueryEvent>() => {
+                    // SAFETY: length checked >= size_of::<DnsQueryEvent>(); ring buffer is 8-byte aligned.
+                    let ev = unsafe { &*(ptr.cast::<DnsQueryEvent>()) };
+                    counts.dns_query += 1;
+                    let qname = safe_str(&ev.qname, ev.qname_len as usize);
+                    let dst = Ipv4Addr::from(ev.dst_addr.to_ne_bytes());
+                    if json_mode {
+                        writeln!(
+                            stdout,
+                            r#"{{"ts":{},"kind":"dns_query","tgid":{},"pid":{},"uid":{},"gid":{},"cgroup":{},"comm":"{}","qname":"{}","qtype":{},"tx_id":{},"dst":"{}:{}"}}"#,
+                            now_wall,
+                            header.tgid,
+                            header.pid,
+                            header.uid,
+                            header.gid,
+                            header.cgroup_id,
+                            comm_esc,
+                            json_escape(qname),
+                            ev.qtype,
+                            ev.tx_id,
+                            dst,
+                            ev.dst_port
+                        )?;
+                    } else {
+                        writeln!(
+                            stdout,
+                            "DNS   tgid={:<6} comm={:<16} {} type={} txid={:#06x} -> {}:{}",
+                            header.tgid, comm, qname, ev.qtype, ev.tx_id, dst, ev.dst_port
+                        )?;
+                    }
+                }
+
                 _ => {
                     counts.malformed += 1;
                 }
@@ -517,6 +551,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("  module_load:   {}", counts.module_load);
     eprintln!("  ptrace:        {}", counts.ptrace);
     eprintln!("  memfd_create:  {}", counts.memfd_create);
+    eprintln!("  dns_query:     {}", counts.dns_query);
     eprintln!("  self_filtered: {}", counts.self_filtered);
     eprintln!("  malformed:     {}", counts.malformed);
     eprintln!(
@@ -603,6 +638,7 @@ struct EventCounts {
     module_load: u64,
     ptrace: u64,
     memfd_create: u64,
+    dns_query: u64,
     self_filtered: u64,
     malformed: u64,
 }
@@ -621,5 +657,6 @@ impl EventCounts {
             + self.module_load
             + self.ptrace
             + self.memfd_create
+            + self.dns_query
     }
 }
