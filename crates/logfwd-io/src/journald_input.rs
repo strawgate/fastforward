@@ -360,11 +360,6 @@ fn native_reader_loop(
 
             match journal.next() {
                 Ok(true) => {
-                    // Save cursor before reading data (cheap string copy).
-                    if let Ok(c) = journal.cursor() {
-                        last_cursor = Some(c);
-                    }
-
                     // Build JSON from entry fields.
                     match entry_to_json(&mut journal, &exclude_units, &mut json_buf) {
                         Ok(Some(())) => {
@@ -394,7 +389,14 @@ fn native_reader_loop(
                         }
                     }
                 }
-                Ok(false) => break, // No more entries; wait.
+                Ok(false) => {
+                    // Save cursor once per drain cycle (not per-entry) to
+                    // avoid an allocation on every entry in the hot path.
+                    if let Ok(c) = journal.cursor() {
+                        last_cursor = Some(c);
+                    }
+                    break; // No more entries; wait.
+                }
                 Err(e) => {
                     tracing::warn!(error = %e, "sd_journal_next error");
                     break;
@@ -409,13 +411,17 @@ fn native_reader_loop(
                 // handle state may be stale, causing next() to return false
                 // even when new entries exist. Re-seek to restore position.
                 if let Some(ref cursor) = last_cursor {
-                    if let Err(e) = journal.seek_cursor(cursor) {
-                        tracing::warn!(error = %e, "failed to re-seek after journal invalidate");
+                    match journal.seek_cursor(cursor) {
+                        Ok(()) => {
+                            // seek_cursor positions ON the cursor entry (already
+                            // emitted). Advance past it so the drain loop reads
+                            // only new entries.
+                            let _ = journal.next();
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "failed to re-seek after journal invalidate");
+                        }
                     }
-                    // seek_cursor positions ON the cursor entry (already
-                    // emitted). Advance past it so the drain loop reads
-                    // only new entries.
-                    let _ = journal.next();
                 } else {
                     // No entries read yet — restore initial seek position.
                     if let Err(e) = seek_start(&mut journal, config) {

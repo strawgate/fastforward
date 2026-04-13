@@ -33,7 +33,11 @@ fn journald_available() -> bool {
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
-        && Command::new("logger").arg("--version").output().is_ok()
+        && Command::new("logger")
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
 }
 
 /// Write `n` test entries to the journal with a unique tag and message prefix.
@@ -159,14 +163,9 @@ fn subprocess_reads_journal_entries() {
         return;
     }
 
-    let tag = unique_tag("subprocess-basic");
-    write_journal_entries(&tag, 5);
-
-    // Small sleep to let journal flush.
-    std::thread::sleep(Duration::from_millis(200));
-
     let config = JournaldConfig {
         backend: JournaldBackendPref::Subprocess,
+        since_now: true,
         current_boot_only: true,
         ..Default::default()
     };
@@ -176,15 +175,21 @@ fn subprocess_reads_journal_entries() {
 
     assert_eq!(input.backend(), JournaldBackend::Subprocess);
 
-    let lines = poll_until_lines(&mut input, 1, Duration::from_secs(10));
+    // Write entries AFTER creating the input in since_now mode.
+    std::thread::sleep(Duration::from_millis(500));
+    let tag = unique_tag("subprocess-basic");
+    write_journal_entries(&tag, 5);
 
+    let lines = poll_until_match(&mut input, &tag, Duration::from_secs(10));
+
+    let our_entries: Vec<&String> = lines.iter().filter(|l| l.contains(&tag)).collect();
     assert!(
-        !lines.is_empty(),
-        "expected at least one journal entry via subprocess backend"
+        !our_entries.is_empty(),
+        "expected entries with tag={tag} via subprocess backend"
     );
 
     // Verify output is valid JSON.
-    for line in &lines {
+    for line in &our_entries {
         let parsed: serde_json::Value = serde_json::from_str(line)
             .unwrap_or_else(|e| panic!("invalid JSON: {e}\nline: {line}"));
         assert!(parsed.is_object(), "expected JSON object, got {parsed}");
@@ -308,7 +313,13 @@ fn subprocess_since_now_skips_history() {
     );
 }
 
-/// Exclude units filter works.
+/// Exclude units filter works — entries from excluded systemd units are dropped.
+///
+/// Note: `logger(1)` entries typically have no `_SYSTEMD_UNIT` field, so we
+/// verify the filter doesn't suppress our test entries (positive case) and
+/// that the underlying filter mechanism is wired up. The exclude_units logic
+/// operates on `_SYSTEMD_UNIT`, which is set by systemd for service-managed
+/// processes.
 #[test]
 #[ignore]
 fn subprocess_exclude_units_filters() {
@@ -317,26 +328,35 @@ fn subprocess_exclude_units_filters() {
         return;
     }
 
+    // Exclude a common system unit. Our logger entries don't carry
+    // _SYSTEMD_UNIT, so they should always pass through regardless.
     let config = JournaldConfig {
         backend: JournaldBackendPref::Subprocess,
         since_now: true,
         current_boot_only: true,
-        // Exclude sshd — a commonly noisy unit on the test host.
-        exclude_units: vec!["sshd".to_string()],
+        exclude_units: vec!["ssh.service".to_string()],
         ..Default::default()
     };
 
     let mut input = JournaldInput::new("test-exclude", config, make_stats())
         .expect("failed to create journald input");
 
-    // Write an entry that should appear (logger goes to user/syslog, not sshd).
+    // Write entries that should NOT be excluded (logger → no _SYSTEMD_UNIT).
+    std::thread::sleep(Duration::from_millis(500));
     let tag = unique_tag("subprocess-excl");
-    write_journal_entries(&tag, 2);
+    write_journal_entries(&tag, 3);
 
-    let lines = poll_until_lines(&mut input, 1, Duration::from_secs(10));
+    let lines = poll_until_match(&mut input, &tag, Duration::from_secs(10));
 
-    // Verify no sshd entries snuck through.
-    let sshd_entries: Vec<&String> = lines
+    // Our logger entries must pass through the exclude filter.
+    let our_entries: Vec<&String> = lines.iter().filter(|l| l.contains(&tag)).collect();
+    assert!(
+        !our_entries.is_empty(),
+        "logger entries should not be excluded (tag={tag})"
+    );
+
+    // Verify no ssh.service entries snuck through (if any were generated).
+    let excluded_entries: Vec<&String> = lines
         .iter()
         .filter(|l| {
             serde_json::from_str::<serde_json::Value>(l)
@@ -346,15 +366,15 @@ fn subprocess_exclude_units_filters() {
                         .and_then(|u| u.as_str())
                         .map(String::from)
                 })
-                .map(|u| u.contains("sshd"))
+                .map(|u| u.contains("ssh"))
                 .unwrap_or(false)
         })
         .collect();
 
     assert!(
-        sshd_entries.is_empty(),
-        "exclude_units should filter sshd entries, found {} sshd lines",
-        sshd_entries.len()
+        excluded_entries.is_empty(),
+        "exclude_units should filter ssh.service entries, found {} lines",
+        excluded_entries.len()
     );
 }
 
@@ -413,7 +433,7 @@ fn subprocess_drop_stops_reader() {
     // Capture the backend confirmation.
     assert_eq!(input.backend(), JournaldBackend::Subprocess);
 
-    // Drop should kill the child process and join the reader thread.
+    // Drop signals the reader thread to stop (via the running flag / child kill).
     drop(input);
 
     // If we reach here without hanging, the reader thread exited cleanly.
@@ -436,12 +456,9 @@ fn native_reads_journal_entries() {
         return;
     }
 
-    let tag = unique_tag("native-basic");
-    write_journal_entries(&tag, 5);
-    std::thread::sleep(Duration::from_millis(200));
-
     let config = JournaldConfig {
         backend: JournaldBackendPref::Native,
+        since_now: true,
         current_boot_only: true,
         ..Default::default()
     };
@@ -451,15 +468,21 @@ fn native_reads_journal_entries() {
 
     assert_eq!(input.backend(), JournaldBackend::Native);
 
-    let lines = poll_until_lines(&mut input, 1, Duration::from_secs(10));
+    // Write entries AFTER creating the input in since_now mode.
+    std::thread::sleep(Duration::from_millis(500));
+    let tag = unique_tag("native-basic");
+    write_journal_entries(&tag, 5);
 
+    let lines = poll_until_match(&mut input, &tag, Duration::from_secs(10));
+
+    let our_entries: Vec<&String> = lines.iter().filter(|l| l.contains(&tag)).collect();
     assert!(
-        !lines.is_empty(),
-        "expected at least one journal entry via native backend"
+        !our_entries.is_empty(),
+        "expected entries with tag={tag} via native backend"
     );
 
     // Verify output is valid JSON.
-    for line in &lines {
+    for line in &our_entries {
         let parsed: serde_json::Value = serde_json::from_str(line)
             .unwrap_or_else(|e| panic!("invalid JSON: {e}\nline: {line}"));
         assert!(parsed.is_object(), "expected JSON object");
