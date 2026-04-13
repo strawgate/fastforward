@@ -52,7 +52,7 @@ impl ChunkCompressor {
     /// Reuses internal buffers to avoid allocation.
     pub fn compress(&mut self, raw: &[u8]) -> io::Result<CompressedChunk> {
         let raw_size = raw.len();
-        let raw_size_u32 = checked_wire_size("raw size", raw_size)?;
+        let raw_size_u32 = check_wire_size("raw size", raw_size)?;
 
         // Worst case: zstd may expand data. zstd_safe::compress_bound gives the max.
         let max_compressed = zstd::zstd_safe::compress_bound(raw_size);
@@ -74,7 +74,7 @@ impl ChunkCompressor {
 
         // Validate that compressed size fits in u32; the wire format only has
         // 4 bytes per size field.
-        let compressed_size_u32 = checked_wire_size("compressed size", compressed_size)?;
+        let compressed_size_u32 = check_wire_size("compressed size", compressed_size)?;
 
         // Compute checksum over the compressed payload.
         let checksum =
@@ -112,7 +112,7 @@ impl ChunkCompressor {
     }
 }
 
-fn checked_wire_size(name: &str, size: usize) -> io::Result<u32> {
+fn check_wire_size(name: &str, size: usize) -> io::Result<u32> {
     u32::try_from(size).map_err(|_| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -223,13 +223,14 @@ mod tests {
     #[cfg(target_pointer_width = "64")]
     fn test_oversized_raw_input_rejected() {
         let oversized: usize = u32::MAX as usize + 1;
-        let result = checked_wire_size("raw size", oversized);
+        let result = check_wire_size("raw size", oversized);
         assert!(
             result.is_err(),
-            "checked_wire_size should fail for values > u32::MAX"
+            "check_wire_size should fail for values > u32::MAX"
         );
 
         let err = result.expect_err("oversized raw input must be rejected");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
         assert!(err.to_string().contains("raw size"));
         assert!(err.to_string().contains("exceeds u32::MAX"));
     }
