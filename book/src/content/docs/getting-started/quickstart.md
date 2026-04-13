@@ -58,7 +58,7 @@ output:
 You'll see a startup banner followed by colored output for every log line:
 
 ```
-logfwd v0.1.0
+logfwd v0.x.x (abc1234 2026-04-01, release)
 
   ✓  default
      in   file  logs.json

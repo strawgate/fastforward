@@ -16,12 +16,14 @@ Send logs as OpenTelemetry protobuf over HTTP or gRPC.
 ```yaml
 output:
   type: otlp
-  endpoint: https://collector:4318
+  endpoint: https://collector:4318/v1/logs
   protocol: http       # http | grpc
   compression: zstd    # zstd | gzip | none
   auth:
     bearer_token: "${OTEL_TOKEN}"
 ```
+
+The `endpoint` must include the full path (e.g. `/v1/logs` for HTTP). logfwd posts directly to this URL.
 
 </TabItem>
 <TabItem label="HTTP (JSON Lines)">
@@ -118,7 +120,7 @@ Use the plural `outputs` key for fan-out to multiple destinations.
 outputs:
   - name: collector
     type: otlp
-    endpoint: https://collector:4318
+    endpoint: https://collector:4318/v1/logs
   - name: debug
     type: stdout
     format: console

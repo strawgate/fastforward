@@ -3,7 +3,7 @@ title: logfwd
 description: Tail log files. Transform with SQL. Ship anywhere.
 template: splash
 hero:
-  tagline: "Tail log files. Transform with SQL. Ship anywhere. logfwd parses JSON and Kubernetes CRI at 2.8M lines/sec, lets you filter with standard SQL, and forwards to OTLP, Elasticsearch, Loki, or stdout. One binary, no runtime dependencies."
+  tagline: "Tail log files. Transform with SQL. Ship anywhere."
   actions:
     - text: Quick Start
       link: /memagent/getting-started/quickstart/
@@ -20,7 +20,7 @@ import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
 <CardGrid>
   <LinkCard title="SQL Transforms" description="Write standard SQL to filter, reshape, and enrich every batch. No vendor DSL — just SELECT, WHERE, GROUP BY, and custom UDFs." href="/memagent/configuration/sql-transforms/" />
   <LinkCard title="SIMD-Powered Scanner" description="Parse JSON and CRI at 2.8M lines/sec per core. Zero-copy Arrow RecordBatches via platform-native SIMD (AVX2, SSE2, NEON)." href="/memagent/architecture/scanner/" />
-  <LinkCard title="Single Binary" description="One static binary, no runtime dependencies. Download, configure, run. Ships as a container image for Kubernetes DaemonSets." href="/memagent/getting-started/installation/" />
+  <LinkCard title="Single Binary" description="One static binary, no runtime dependencies. Build, configure, run. Ships as a container image for Kubernetes DaemonSets." href="/memagent/getting-started/installation/" />
   <LinkCard title="OTLP Native" description="First-class OpenTelemetry support. Protobuf encoding with zstd compression. Works with any OTLP-compatible collector." href="/memagent/configuration/outputs/" />
 </CardGrid>
 
