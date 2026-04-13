@@ -45,7 +45,7 @@ edition = "2024"
 rust-version = "1.85"
 
 [workspace.dependencies]
-arrow = { version = "55", default-features = false, features = [
+arrow = { version = "58", default-features = false, features = [
     "ipc_compression",
 ] }
 backon = { version = "1", default-features = false, features = ["tokio-sleep"] }
@@ -54,7 +54,7 @@ chrono = { version = "0.4.44", default-features = false }
 clap = "4.5"
 clap_complete = "4.5"
 clap_complete_nushell = "4.6"
-arrow-json = "55"
+arrow-json = "58"
 datafusion = { version = "48", default-features = false, features = [
     "string_expressions",
     "unicode_expressions",
