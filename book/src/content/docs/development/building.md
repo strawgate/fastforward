@@ -1,41 +1,46 @@
 ---
 title: "Building & Testing"
-description: "Prerequisites, common commands, and project structure"
+description: "Quick reference for building and testing logfwd"
 ---
+
+This page is a quick reference. For workspace layout, profiling, and hard-won development lessons, see [Contributing](/memagent/development/contributing/).
 
 ## Prerequisites
 
 ```bash
-# Install Rust stable
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-
-# Install task runner
 cargo install just
-
-# Install development tools
 just install-tools
 ```
 
 ## Common commands
 
 ```bash
-just ci          # Fast CI tier: lint + test (default workspace, no DataFusion)
-just ci-all      # Full CI tier: lint + test across all workspace members
-just fmt         # Format code
-just clippy      # Run lints
-just test        # Run all tests
-just bench       # Run Criterion microbenchmarks
-just build       # Build release binary (full package, includes DataFusion SQL)
-just build-dev-lite # Build dev-only fast binary (no DataFusion SQL)
+just build          # Release binary
+just test           # All tests
+just lint           # fmt + clippy + toml + deny + typos
+just ci             # Full CI suite (lint + test)
+just bench          # Criterion microbenchmarks
+```
+
+## Quick iteration
+
+```bash
+cargo test -p logfwd-core                  # Core crate only (fastest)
+cargo test -p logfwd-io -- tail            # Specific test subset
+just clippy                                # Lint only (no test)
 ```
 
 ## Project structure
 
 ```
-crates/logfwd/           # Binary entry point, CLI, pipeline orchestrator
-crates/logfwd-core/      # Scanner, file tailer, CRI parser, diagnostics
+crates/logfwd/           # Binary entry point, CLI
+crates/logfwd-runtime/   # Async pipeline orchestration
+crates/logfwd-core/      # Scanner, parsers, state machine (no_std)
+crates/logfwd-arrow/     # Arrow builders, SIMD backends
 crates/logfwd-config/    # YAML config parser
-crates/logfwd-output/    # Output sinks (OTLP, HTTP, stdout)
+crates/logfwd-io/        # File tailing, network inputs, checkpointing
+crates/logfwd-output/    # Output sinks (OTLP, HTTP, ES, Loki, stdout)
 crates/logfwd-transform/ # SQL transforms via DataFusion, UDFs
-crates/logfwd-bench/     # Benchmarks (Criterion + exploratory)
+crates/logfwd-bench/     # Benchmarks and profiling tools
 ```

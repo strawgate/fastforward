@@ -7,15 +7,12 @@ Get a working logfwd pipeline in about 10 minutes, then build on it.
 
 ## Prerequisites
 
-You need the `logfwd` binary. See [Installation](/memagent/getting-started/installation/) for all options, or grab it quickly:
+You need the `logfwd` binary. See [Installation](/memagent/getting-started/installation/) for all options, or build from source:
 
 ```bash
-# Download the latest release (macOS Apple Silicon shown)
-curl -fsSL https://github.com/strawgate/memagent/releases/latest/download/logfwd-darwin-arm64 -o logfwd
-chmod +x logfwd
-
-# Or build from source (Rust 1.85+)
-cargo build --release --bin logfwd && cp target/release/logfwd .
+git clone https://github.com/strawgate/memagent.git && cd memagent
+cargo build --release -p logfwd
+cp target/release/logfwd .
 ```
 
 Verify it works:

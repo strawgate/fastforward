@@ -3,7 +3,7 @@ title: "Performance"
 description: "Benchmarks, throughput targets, and optimization techniques"
 ---
 
-:::tip[The headline]
+:::tip[Performance at a glance]
 logfwd processes **~2.8 million log lines per second** on a single CPU core — parsing JSON, running SQL, encoding OTLP protobuf, and compressing with zstd. Total CPU time: 36ms per 100K lines.
 :::
 

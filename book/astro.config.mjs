@@ -50,7 +50,7 @@ export default defineConfig({
         {
           label: "Collector University",
           items: [
-            { label: "How logfwd Works", slug: "architecture" },
+            { label: "Interactive Pipeline Explorer", slug: "architecture" },
             { label: "Why Tailing Is Hard", slug: "architecture/tailing" },
             { label: "Why Columnar Storage Matters", slug: "architecture/columnar" },
             { label: "Scanner Deep Dive", slug: "architecture/scanner" },

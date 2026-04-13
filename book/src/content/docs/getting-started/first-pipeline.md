@@ -3,10 +3,10 @@ title: "Your First Pipeline"
 description: "Production-ready logfwd config with monitoring, CRI format, and multi-pipeline setup"
 ---
 
-This guide builds on the [Quick Start](/getting-started/quickstart/) to set up a production-ready pipeline. You'll configure CRI log parsing for Kubernetes, enable monitoring, and set up multiple pipelines.
+This guide builds on the [Quick Start](/memagent/getting-started/quickstart/) to set up a production-ready pipeline. You'll configure CRI log parsing for Kubernetes, enable monitoring, and set up multiple pipelines.
 
 :::tip[Prerequisites]
-You need `logfwd` installed and working. If you haven't run through the [Quick Start](/getting-started/quickstart/) yet, do that first — it takes about 10 minutes and covers the basics.
+You need `logfwd` installed and working. If you haven't run through the [Quick Start](/memagent/getting-started/quickstart/) yet, do that first — it takes about 10 minutes and covers the basics.
 :::
 
 ## A production config
@@ -152,14 +152,14 @@ transform: |
   WHERE l.level IN ('ERROR', 'WARN')
 ```
 
-The `static` enrichment creates a one-row table with your labels. `CROSS JOIN` attaches them to every log record. See the [Configuration Reference](/configuration/reference/#enrichment-tables) for other enrichment types including `k8s_path` and `host_info`.
+The `static` enrichment creates a one-row table with your labels. `CROSS JOIN` attaches them to every log record. See the [Configuration Reference](/memagent/configuration/reference/#enrichment-tables) for other enrichment types including `k8s_path` and `host_info`.
 
 ## What's next
 
 | Guide | What you'll learn |
 |-------|-------------------|
-| [Configuration Reference](/configuration/reference/) | Every YAML field, input/output type, and option |
-| [SQL Transforms](/configuration/sql-transforms/) | Full SQL reference — UDFs, enrichment tables, column naming |
-| [Kubernetes Deployment](/deployment/kubernetes/) | DaemonSet manifest, resource sizing, OTLP collector integration |
-| [Monitoring & Diagnostics](/deployment/monitoring/) | Diagnostics API endpoints and metrics |
-| [Troubleshooting](/troubleshooting/) | Symptom-based triage for common issues |
+| [Configuration Reference](/memagent/configuration/reference/) | Every YAML field, input/output type, and option |
+| [SQL Transforms](/memagent/configuration/sql-transforms/) | Full SQL reference — UDFs, enrichment tables, column naming |
+| [Kubernetes Deployment](/memagent/deployment/kubernetes/) | DaemonSet manifest, resource sizing, OTLP collector integration |
+| [Monitoring & Diagnostics](/memagent/deployment/monitoring/) | Diagnostics API endpoints and metrics |
+| [Troubleshooting](/memagent/troubleshooting/) | Symptom-based triage for common issues |
