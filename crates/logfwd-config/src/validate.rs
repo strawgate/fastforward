@@ -5,6 +5,8 @@ use crate::types::{
 use std::path::Path;
 use url::Url;
 
+const MAX_READ_BUF_SIZE: usize = 4_194_304;
+
 impl Config {
     /// Validate the loaded configuration.
     pub(crate) fn validate(&self) -> Result<(), ConfigError> {
@@ -130,9 +132,9 @@ impl Config {
                                 )));
                             }
                             if let Some(sz) = f.read_buf_size {
-                                if sz > 4_194_304 {
+                                if sz > MAX_READ_BUF_SIZE {
                                     return Err(ConfigError::Validation(format!(
-                                        "pipeline '{name}' input '{label}': 'read_buf_size' must not exceed 4194304 (4 MiB)"
+                                        "pipeline '{name}' input '{label}': 'read_buf_size' must not exceed {MAX_READ_BUF_SIZE} (4 MiB)"
                                     )));
                                 }
                             }
@@ -616,10 +618,10 @@ impl Config {
                     }
                     if output.output_type == OutputType::ArrowIpc
                         && let Some(c) = output.compression.as_deref()
-                        && c != "zstd"
+                        && !matches!(c, "zstd" | "none")
                     {
                         return Err(ConfigError::Validation(format!(
-                            "pipeline '{name}' output '{label}': arrow_ipc output only supports 'zstd' compression, not '{c}'"
+                            "pipeline '{name}' output '{label}': arrow_ipc output only supports 'zstd' or 'none' compression, not '{c}'"
                         )));
                     }
                     if output.output_type != OutputType::Otlp && output.protocol.is_some() {
@@ -654,8 +656,8 @@ impl Config {
                                     )));
                                 }
                             }
-                            // ArrowIpc already validated above; other types
-                            // either reject compression entirely or accept any.
+                            // ArrowIpc allows zstd/none and is validated above.
+                            // Other types either reject compression entirely or accept any.
                             _ => {}
                         }
                     }
