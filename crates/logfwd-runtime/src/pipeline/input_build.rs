@@ -4,8 +4,8 @@ use std::sync::Arc;
 use bytes::BytesMut;
 use logfwd_config::{
     Format, GeneratorAttributeValueConfig, GeneratorComplexityConfig, GeneratorProfileConfig,
-    HttpMethodConfig, InputConfig, InputType, InputTypeConfig, OtlpProtobufDecodeModeConfig,
-    PlatformSensorInputConfig,
+    HostMetricsInputConfig, HttpMethodConfig, InputConfig, InputType, InputTypeConfig,
+    OtlpProtobufDecodeModeConfig,
 };
 use logfwd_diagnostics::diagnostics::ComponentStats;
 use logfwd_io::format::FormatDecoder;
@@ -383,15 +383,74 @@ pub(super) fn build_input_state(
             validate_input_format(name, InputType::Tcp, &format)?;
             (Box::new(source), format, 4 * 1024 * 1024)
         }
-        InputTypeConfig::LinuxEbpfSensor(s)
-        | InputTypeConfig::MacosEsSensor(s)
-        | InputTypeConfig::WindowsEbpfSensor(s) => {
-            use logfwd_io::platform_sensor::{PlatformSensorInput, PlatformSensorTarget};
+        InputTypeConfig::LinuxEbpfSensor(s) => {
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = s;
+                return Err(format!("input '{name}': linux_ebpf_sensor requires Linux"));
+            }
+            #[cfg(target_os = "linux")]
+            {
+                use logfwd_io::platform_sensor::PlatformSensorInput;
+
+                if cfg.format.is_some() {
+                    return Err(format!(
+                        "input '{name}': sensor inputs do not support 'format' (Arrow-native input)"
+                    ));
+                }
+
+                // Warn on tuning fields that are ignored by the eBPF sensor.
+                if let Some(sensor) = s.sensor.as_ref() {
+                    if sensor.poll_interval_ms.is_some() {
+                        tracing::warn!(
+                            "input '{name}': sensor.poll_interval_ms is ignored for linux_ebpf_sensor (event-driven, not polled)"
+                        );
+                    }
+                    if sensor.max_rows_per_poll.is_some() {
+                        tracing::warn!(
+                            "input '{name}': sensor.max_rows_per_poll is ignored for linux_ebpf_sensor; use sensor.max_events_per_poll instead"
+                        );
+                    }
+                }
+
+                let ebpf_path = s
+                    .sensor
+                    .as_ref()
+                    .and_then(|c| c.ebpf_binary_path.clone())
+                    .ok_or_else(|| {
+                        format!(
+                            "input '{name}': linux_ebpf_sensor requires 'sensor.ebpf_binary_path'"
+                        )
+                    })?;
+
+                let max_events = s
+                    .sensor
+                    .as_ref()
+                    .and_then(|c| c.max_events_per_poll)
+                    .filter(|&n| n > 0)
+                    .unwrap_or(1024);
+                let sensor_cfg = logfwd_io::platform_sensor::PlatformSensorConfig {
+                    ebpf_binary_path: ebpf_path.into(),
+                    max_events_per_poll: max_events,
+                    filter_self: true,
+                };
+
+                let source = PlatformSensorInput::new(name, sensor_cfg).map_err(|e| {
+                    format!("input '{name}': failed to initialize eBPF sensor: {e}")
+                })?;
+                return Ok(InputState {
+                    source: Box::new(source),
+                    buf: BytesMut::with_capacity(64 * 1024),
+                    stats,
+                });
+            }
+        }
+        InputTypeConfig::MacosEsSensor(s) | InputTypeConfig::WindowsEbpfSensor(s) => {
+            use logfwd_io::host_metrics::{HostMetricsInput, HostMetricsTarget};
 
             let target = match &cfg.type_config {
-                InputTypeConfig::LinuxEbpfSensor(_) => PlatformSensorTarget::Linux,
-                InputTypeConfig::MacosEsSensor(_) => PlatformSensorTarget::Macos,
-                InputTypeConfig::WindowsEbpfSensor(_) => PlatformSensorTarget::Windows,
+                InputTypeConfig::MacosEsSensor(_) => HostMetricsTarget::Macos,
+                InputTypeConfig::WindowsEbpfSensor(_) => HostMetricsTarget::Windows,
                 _ => unreachable!("handled by outer match"),
             };
 
@@ -401,12 +460,42 @@ pub(super) fn build_input_state(
                 ));
             }
 
-            let sensor_cfg = build_platform_sensor_config(s.sensor.as_ref());
-            let source = PlatformSensorInput::new(name, target, sensor_cfg).map_err(|e| {
+            let sensor_cfg = build_host_metrics_config(s.sensor.as_ref());
+            let source = HostMetricsInput::new(name, target, sensor_cfg).map_err(|e| {
                 format!(
                     "input '{name}': failed to initialize {} input: {e}",
                     cfg.input_type()
                 )
+            })?;
+            return Ok(InputState {
+                source: Box::new(source),
+                buf: BytesMut::with_capacity(64 * 1024),
+                stats,
+            });
+        }
+        InputTypeConfig::HostMetrics(s) => {
+            use logfwd_io::host_metrics::{HostMetricsInput, HostMetricsTarget};
+
+            #[cfg(target_os = "linux")]
+            let target = HostMetricsTarget::Linux;
+            #[cfg(target_os = "macos")]
+            let target = HostMetricsTarget::Macos;
+            #[cfg(target_os = "windows")]
+            let target = HostMetricsTarget::Windows;
+            #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+            return Err(format!(
+                "input '{name}': host_metrics is not supported on this platform"
+            ));
+
+            if cfg.format.is_some() {
+                return Err(format!(
+                    "input '{name}': host_metrics input does not support 'format' (Arrow-native input)"
+                ));
+            }
+
+            let metrics_cfg = build_host_metrics_config(s.sensor.as_ref());
+            let source = HostMetricsInput::new(name, target, metrics_cfg).map_err(|e| {
+                format!("input '{name}': failed to initialize host_metrics input: {e}")
             })?;
             return Ok(InputState {
                 source: Box::new(source),
@@ -463,16 +552,16 @@ pub(super) fn build_input_state(
     })
 }
 
-fn build_platform_sensor_config(
-    cfg: Option<&PlatformSensorInputConfig>,
-) -> logfwd_io::platform_sensor::PlatformSensorConfig {
+fn build_host_metrics_config(
+    cfg: Option<&HostMetricsInputConfig>,
+) -> logfwd_io::host_metrics::HostMetricsConfig {
     let poll_interval_ms = cfg
         .and_then(|c| c.poll_interval_ms)
         .unwrap_or(DEFAULT_SENSOR_POLL_INTERVAL_MS);
     let control_reload_interval_ms = cfg
         .and_then(|c| c.control_reload_interval_ms)
         .unwrap_or(DEFAULT_SENSOR_CONTROL_RELOAD_INTERVAL_MS);
-    logfwd_io::platform_sensor::PlatformSensorConfig {
+    logfwd_io::host_metrics::HostMetricsConfig {
         poll_interval: std::time::Duration::from_millis(poll_interval_ms.max(1)),
         control_path: cfg.and_then(|c| c.control_path.clone()).map(PathBuf::from),
         control_reload_interval: std::time::Duration::from_millis(
@@ -480,6 +569,10 @@ fn build_platform_sensor_config(
         ),
         enabled_families: cfg.and_then(|c| c.enabled_families.clone()),
         emit_signal_rows: cfg.and_then(|c| c.emit_signal_rows).unwrap_or(true),
+        max_rows_per_poll: cfg
+            .and_then(|c| c.max_rows_per_poll)
+            .filter(|&n| n > 0)
+            .unwrap_or(256),
     }
 }
 

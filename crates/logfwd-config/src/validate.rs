@@ -301,7 +301,8 @@ impl Config {
                         }
                         InputTypeConfig::LinuxEbpfSensor(s)
                         | InputTypeConfig::MacosEsSensor(s)
-                        | InputTypeConfig::WindowsEbpfSensor(s) => {
+                        | InputTypeConfig::WindowsEbpfSensor(s)
+                        | InputTypeConfig::HostMetrics(s) => {
                             let input_type = input.input_type();
                             if input.format.is_some() {
                                 return Err(ConfigError::Validation(format!(
@@ -350,6 +351,31 @@ impl Config {
                                             sensor_supported_families_csv(&input_type)
                                         )));
                                     }
+                                }
+                            }
+                            // NOTE: ebpf_binary_path for linux_ebpf_sensor is validated
+                            // at runtime when the sensor loads, not here — the path may
+                            // be auto-discovered or provided via environment variable.
+                            //
+                            // Reject eBPF-specific fields on host_metrics inputs.
+                            if matches!(input.input_type(), InputType::HostMetrics) {
+                                if s.sensor
+                                    .as_ref()
+                                    .and_then(|cfg| cfg.ebpf_binary_path.as_ref())
+                                    .is_some()
+                                {
+                                    return Err(ConfigError::Validation(format!(
+                                        "pipeline '{name}' input '{label}': sensor.ebpf_binary_path is not supported for host_metrics inputs"
+                                    )));
+                                }
+                                if s.sensor
+                                    .as_ref()
+                                    .and_then(|cfg| cfg.max_events_per_poll)
+                                    .is_some()
+                                {
+                                    return Err(ConfigError::Validation(format!(
+                                        "pipeline '{name}' input '{label}': sensor.max_events_per_poll is not supported for host_metrics inputs"
+                                    )));
                                 }
                             }
                         }
@@ -887,6 +913,26 @@ fn normalize_unit_name(name: &str) -> String {
 fn sensor_supported_families(input_type: &InputType) -> &'static [&'static str] {
     match input_type {
         InputType::LinuxEbpfSensor => &["process", "file", "network", "dns", "authz"],
+        InputType::HostMetrics => {
+            #[cfg(target_os = "linux")]
+            {
+                &["process", "file", "network", "dns", "authz"]
+            }
+            #[cfg(target_os = "macos")]
+            {
+                &["process", "file", "network", "dns", "module", "authz"]
+            }
+            #[cfg(target_os = "windows")]
+            {
+                &[
+                    "process", "file", "network", "dns", "module", "registry", "authz",
+                ]
+            }
+            #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+            {
+                &[]
+            }
+        }
         InputType::MacosEsSensor => &["process", "file", "network", "dns", "module", "authz"],
         InputType::WindowsEbpfSensor => &[
             "process", "file", "network", "dns", "module", "registry", "authz",
@@ -898,6 +944,24 @@ fn sensor_supported_families(input_type: &InputType) -> &'static [&'static str] 
 fn sensor_supported_families_csv(input_type: &InputType) -> &'static str {
     match input_type {
         InputType::LinuxEbpfSensor => "process,file,network,dns,authz",
+        InputType::HostMetrics => {
+            #[cfg(target_os = "linux")]
+            {
+                "process,file,network,dns,authz"
+            }
+            #[cfg(target_os = "macos")]
+            {
+                "process,file,network,dns,module,authz"
+            }
+            #[cfg(target_os = "windows")]
+            {
+                "process,file,network,dns,module,registry,authz"
+            }
+            #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+            {
+                ""
+            }
+        }
         InputType::MacosEsSensor => "process,file,network,dns,module,authz",
         InputType::WindowsEbpfSensor => "process,file,network,dns,module,registry,authz",
         _ => "",

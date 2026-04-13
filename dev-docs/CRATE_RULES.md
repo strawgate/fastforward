@@ -88,6 +88,24 @@ Rules and constraints for each crate. Enforced by CI, not just convention.
 | Pipeline decisions still go through core state machine via `logfwd-runtime` | Architecture |
 | Pure seam Kani boundary status tracked in `dev-docs/verification/kani-boundary-contract.toml` | CI script: `python3 scripts/verify_kani_boundary_contract.py` |
 
+## sensor-ebpf (prototype)
+
+| Rule | Enforcement |
+|------|-------------|
+| Standalone eBPF sensor binary for manual testing. Linux-only. Not part of pipeline. | Convention |
+
+## sensor-ebpf-common
+
+| Rule | Enforcement |
+|------|-------------|
+| Shared `repr(C)` event types for eBPF kernel↔userspace boundary. `no_std` compatible. | Compilation |
+
+## sensor-ebpf-kern (excluded)
+
+| Rule | Enforcement |
+|------|-------------|
+| eBPF kernel programs. Requires nightly + `bpfel-unknown-none` target. Excluded from workspace. | Cargo.toml `exclude` |
+
 ## Adding a new crate
 
 1. Define its purpose in one sentence

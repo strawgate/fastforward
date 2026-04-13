@@ -10,6 +10,8 @@ pub mod filter_hints;
 pub mod format;
 pub mod framed;
 pub mod generator;
+/// Host metrics inputs backed by periodic system snapshots.
+pub mod host_metrics;
 /// HTTP NDJSON input source.
 pub mod http_input;
 pub mod input;
@@ -19,7 +21,8 @@ pub mod journal_ffi;
 pub mod journald_input;
 pub mod otap_receiver;
 pub mod otlp_receiver;
-/// Platform sensor inputs and Arrow-native control/sample event emission.
+/// eBPF-based platform sensor input (Linux only).
+#[cfg(target_os = "linux")]
 pub mod platform_sensor;
 /// Adaptive polling primitives shared by file-tail and runtime input loops.
 pub mod poll_cadence;
