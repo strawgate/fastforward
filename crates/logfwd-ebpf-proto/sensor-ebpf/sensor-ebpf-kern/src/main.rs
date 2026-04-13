@@ -141,6 +141,8 @@ fn try_process_exec(ctx: &TracePointContext) -> Result<(), i64> {
             Err(_) => (*event).filename_len = 0,
         }
         (*event).pad = 0;
+
+        fill_header(&mut (*event).header, EventKind::ProcessExec);
     }
 
     entry.submit(0);
@@ -546,8 +548,8 @@ unsafe fn read_sock_addrs(
     sport: &mut u16,
     dport: &mut u16,
 ) {
-    *sport = ctx.read_at(24).unwrap_or(0);
-    *dport = ctx.read_at(26).unwrap_or(0);
+    *sport = u16::from_be(ctx.read_at(24).unwrap_or(0));
+    *dport = u16::from_be(ctx.read_at(26).unwrap_or(0));
     *saddr = ctx.read_at(32).unwrap_or(0);
     *daddr = ctx.read_at(36).unwrap_or(0);
 }

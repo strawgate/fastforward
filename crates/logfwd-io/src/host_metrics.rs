@@ -1192,6 +1192,7 @@ fn enabled_families_csv(control: &ControlState) -> String {
         .join(",")
 }
 
+#[cfg(target_os = "linux")]
 fn extract_container_id(pid: u32) -> Option<String> {
     let path = format!("/proc/{pid}/cgroup");
     let content = std::fs::read_to_string(path).ok()?;
@@ -1208,6 +1209,11 @@ fn extract_container_id(pid: u32) -> Option<String> {
             }
         }
     }
+    None
+}
+
+#[cfg(not(target_os = "linux"))]
+fn extract_container_id(_pid: u32) -> Option<String> {
     None
 }
 
