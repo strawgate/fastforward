@@ -94,6 +94,40 @@ fn safe_str(buf: &[u8], len: usize) -> &str {
     std::str::from_utf8(&slice[..nul]).unwrap_or("<invalid>")
 }
 
+/// Parse DNS wire-format label-encoded bytes into a dotted domain name.
+///
+/// Returns `(name, qtype)` where `qtype` is the query type extracted after
+/// the name terminator, or 0 if not available.
+fn dns_wire_to_dotted(wire: &[u8]) -> (String, u16) {
+    let mut name = String::with_capacity(wire.len());
+    let mut pos = 0;
+    while pos < wire.len() {
+        let label_len = wire[pos] as usize;
+        if label_len == 0 {
+            pos += 1;
+            break;
+        }
+        if label_len > 63 || pos + 1 + label_len > wire.len() {
+            return (name, 0);
+        }
+        if !name.is_empty() {
+            name.push('.');
+        }
+        let label = &wire[pos + 1..pos + 1 + label_len];
+        match std::str::from_utf8(label) {
+            Ok(s) => name.push_str(s),
+            Err(_) => return (name, 0),
+        }
+        pos += 1 + label_len;
+    }
+    let qtype = if pos + 2 <= wire.len() {
+        u16::from_be_bytes([wire[pos], wire[pos + 1]])
+    } else {
+        0
+    };
+    (name, qtype)
+}
+
 /// Map a ptrace request code to a human-readable name.
 fn ptrace_request_name(req: u64) -> &'static str {
     match req {
@@ -523,8 +557,10 @@ fn parse_event(
             // SAFETY: Length checked >= size_of::<DnsQueryEvent>(); ring buffer is 8-byte aligned.
             let ev = unsafe { &*(ptr.cast::<DnsQueryEvent>()) };
             let mut row = EventRow::from_header(header, "dns_query", mono_to_wall_offset_ns);
-            row.dns_qname = Some(safe_str(&ev.qname, ev.qname_len as usize).to_string());
-            row.dns_qtype = Some(ev.qtype);
+            let wire = &ev.qname[..ev.qname_len as usize];
+            let (qname, qtype) = dns_wire_to_dotted(wire);
+            row.dns_qname = Some(qname);
+            row.dns_qtype = Some(qtype);
             row.dns_tx_id = Some(ev.tx_id);
             row.dst_addr = Some(format_addr(ev.dst_addr));
             row.dst_port = Some(ev.dst_port);

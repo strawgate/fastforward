@@ -43,8 +43,6 @@ const TCP_SYN_RECV: i32 = 3;
 // DNS parsing constants
 /// Minimum DNS header size (ID + flags + 4 count fields = 12 bytes).
 const DNS_HEADER_SIZE: usize = 12;
-/// Maximum DNS label count to prevent verifier unbounded loop.
-const MAX_DNS_LABELS: usize = 32;
 /// Maximum bytes to read from UDP payload for DNS parsing.
 const MAX_DNS_READ: usize = 280; // 12 header + 253 name + 4 qtype/qclass + margin
 
@@ -589,6 +587,16 @@ fn try_dns_query(ctx: &TracePointContext) -> Result<(), i64> {
     }
 
     // Read sockaddr_in to check if this is AF_INET, port 53 (DNS).
+    // TODO(#1940): add AF_INET6 support for IPv6 DNS resolvers.
+    //
+    // Read addr_len first — the kernel validates the actual address struct later,
+    // but we need at least sizeof(sockaddr_in) = 16 bytes to safely read fields.
+    // SAFETY: dest_addr_len is at a fixed tracepoint ABI offset.
+    let addr_len: u64 = unsafe { ctx.read_at(56)? };
+    if addr_len < 16 {
+        return Ok(());
+    }
+
     // SAFETY: dest_addr_ptr points to a user-space sockaddr provided by the syscall.
     let sa_family: u16 = unsafe {
         bpf_probe_read_user(dest_addr_ptr as *const u16).map_err(|e| e as i64)?
@@ -651,58 +659,36 @@ fn try_dns_query(ctx: &TracePointContext) -> Result<(), i64> {
         (*event).dst_addr = dst_ip;
         (*event).dst_port = 53;
 
-        // Parse DNS labels into dotted notation.
-        let mut src_off = DNS_HEADER_SIZE; // start of question section
-        let mut dst_off = 0usize;
-        let mut label_count = 0usize;
-
-        // Bounded loop for eBPF verifier.
-        let mut i = 0usize;
-        while i < MAX_DNS_LABELS {
-            if src_off >= read_len || src_off >= MAX_DNS_READ {
-                break;
-            }
-            let label_len = dns_buf[src_off] as usize;
-            if label_len == 0 {
-                src_off += 1;
-                break;
-            }
-            if label_len > 63 || src_off + 1 + label_len > read_len {
-                break;
-            }
-
-            // Add dot separator between labels.
-            if label_count > 0 && dst_off < MAX_DNS_NAME {
-                (*event).qname[dst_off] = b'.';
-                dst_off += 1;
-            }
-
-            // Copy label bytes.
-            let mut j = 0usize;
-            while j < label_len && j < 63 {
-                if dst_off >= MAX_DNS_NAME {
-                    break;
-                }
-                if src_off + 1 + j < MAX_DNS_READ {
-                    (*event).qname[dst_off] = dns_buf[src_off + 1 + j];
-                    dst_off += 1;
-                }
-                j += 1;
-            }
-
-            src_off += 1 + label_len;
-            label_count += 1;
-            i += 1;
-        }
-
-        (*event).qname_len = dst_off as u16;
-
-        // Read qtype (2 bytes after the name).
-        if src_off + 2 <= read_len && src_off + 2 <= MAX_DNS_READ {
-            (*event).qtype = u16::from_be_bytes([dns_buf[src_off], dns_buf[src_off + 1]]);
+        // Copy raw DNS question section bytes (wire format with label encoding).
+        // Parsing label encoding into dotted notation is done in userspace to
+        // avoid verifier path explosion from loops with internal branching.
+        let question_start = DNS_HEADER_SIZE;
+        let available = if read_len > question_start {
+            read_len - question_start
         } else {
-            (*event).qtype = 0;
+            0
+        };
+        let copy_len = if available < MAX_DNS_NAME {
+            available
+        } else {
+            MAX_DNS_NAME
+        };
+        (*event).qname_len = copy_len as u16;
+
+        // Unrolled copy: the verifier needs a fixed bound with no internal
+        // branching. Copy up to 64 bytes (covers >99% of real DNS names).
+        let mut k = 0usize;
+        while k < 64 {
+            if k >= copy_len {
+                break;
+            }
+            (*event).qname[k] = dns_buf[question_start + k];
+            k += 1;
         }
+
+        // qtype is not parsed here — userspace walks the label-encoded name
+        // to find the qtype position. Set to 0 as "unknown".
+        (*event).qtype = 0;
     }
 
     entry.submit(0);

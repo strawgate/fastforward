@@ -502,8 +502,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // SAFETY: length checked >= size_of::<DnsQueryEvent>(); ring buffer is 8-byte aligned.
                     let ev = unsafe { &*(ptr.cast::<DnsQueryEvent>()) };
                     counts.dns_query += 1;
-                    let qname = safe_str(&ev.qname, ev.qname_len as usize);
-                    let dst = Ipv4Addr::from(ev.dst_addr.to_ne_bytes());
+                    let wire = &ev.qname[..ev.qname_len as usize];
+                    let (qname, qtype) = dns_wire_to_dotted(wire);
+                    let dst = Ipv4Addr::from(ev.dst_addr.to_be());
                     if json_mode {
                         writeln!(
                             stdout,
@@ -515,8 +516,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             header.gid,
                             header.cgroup_id,
                             comm_esc,
-                            json_escape(qname),
-                            ev.qtype,
+                            json_escape(&qname),
+                            qtype,
                             ev.tx_id,
                             dst,
                             ev.dst_port
@@ -525,7 +526,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         writeln!(
                             stdout,
                             "DNS   tgid={:<6} comm={:<16} {} type={} txid={:#06x} -> {}:{}",
-                            header.tgid, comm, qname, ev.qtype, ev.tx_id, dst, ev.dst_port
+                            header.tgid, comm, qname, qtype, ev.tx_id, dst, ev.dst_port
                         )?;
                     }
                 }
@@ -579,6 +580,42 @@ fn safe_str(buf: &[u8], len: usize) -> &str {
     let slice = &buf[..end];
     let nul = slice.iter().position(|&b| b == 0).unwrap_or(end);
     std::str::from_utf8(&slice[..nul]).unwrap_or("<invalid>")
+}
+
+/// Parse DNS wire-format label-encoded bytes into a dotted domain name.
+///
+/// Returns `(name, qtype)` where `qtype` is the query type extracted after
+/// the name terminator, or 0 if not available.
+fn dns_wire_to_dotted(wire: &[u8]) -> (String, u16) {
+    let mut name = String::with_capacity(wire.len());
+    let mut pos = 0;
+    while pos < wire.len() {
+        let label_len = wire[pos] as usize;
+        if label_len == 0 {
+            pos += 1; // skip the 0-terminator
+            break;
+        }
+        // Compression pointer or invalid — stop parsing.
+        if label_len > 63 || pos + 1 + label_len > wire.len() {
+            return (name, 0);
+        }
+        if !name.is_empty() {
+            name.push('.');
+        }
+        let label = &wire[pos + 1..pos + 1 + label_len];
+        match std::str::from_utf8(label) {
+            Ok(s) => name.push_str(s),
+            Err(_) => return (name, 0),
+        }
+        pos += 1 + label_len;
+    }
+    // Extract qtype (2 bytes big-endian) after the name terminator.
+    let qtype = if pos + 2 <= wire.len() {
+        u16::from_be_bytes([wire[pos], wire[pos + 1]])
+    } else {
+        0
+    };
+    (name, qtype)
 }
 
 /// Escape a string for safe interpolation into JSON string values.

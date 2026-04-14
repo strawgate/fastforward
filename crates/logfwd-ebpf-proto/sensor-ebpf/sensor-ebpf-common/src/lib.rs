@@ -34,6 +34,7 @@ pub enum EventKind {
     ModuleLoad = 10,
     Ptrace = 11,
     MemfdCreate = 12,
+    /// DNS query captured from `sys_enter_sendto` to port 53.
     DnsQuery = 13,
 }
 
@@ -220,6 +221,7 @@ pub struct DnsQueryEvent {
     pub header: EventHeader,
     /// DNS query name in dotted notation (e.g. "www.google.com").
     pub qname: [u8; MAX_DNS_NAME],
+    /// Length of the valid portion of `qname`.
     pub qname_len: u16,
     /// DNS query type (A=1, AAAA=28, CNAME=5, MX=15, TXT=16).
     pub qtype: u16,
