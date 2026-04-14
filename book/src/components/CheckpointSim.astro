@@ -1,0 +1,575 @@
+---
+// Interactive checkpoint ordering visualizer.
+// Shows how out-of-order ACKs work and why checkpoints only advance contiguously.
+---
+
+<div class="ck" id="checkpoint-sim"></div>
+
+<style is:global>
+  .ck {
+    --ck-bg: var(--sl-color-bg-sidebar);
+    --ck-border: var(--sl-color-hairline);
+    --ck-accent: var(--sl-color-accent);
+    --ck-text: var(--sl-color-text);
+    --ck-muted: var(--sl-color-gray-3);
+    --ck-green: #22c55e;
+    --ck-amber: #f59e0b;
+    --ck-red: #ef4444;
+    --ck-blue: #60a5fa;
+    --ck-purple: #a78bfa;
+    --ck-pink: #ec4899;
+    margin: 1.5rem 0;
+  }
+  .ck * { margin-top: 0 !important; }
+
+  /* Controls */
+  .ck-controls {
+    display: flex; align-items: center; gap: 0.5rem;
+    padding: 0.5rem 0.75rem; background: var(--ck-bg);
+    border: 1px solid var(--ck-border); border-radius: 8px;
+    margin-bottom: 0.6rem; flex-wrap: wrap;
+  }
+  .ck-play {
+    width: 28px; height: 28px; border-radius: 50%;
+    border: 1.5px solid var(--ck-accent); background: transparent;
+    color: var(--ck-accent); cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 0.7rem;
+  }
+  .ck-play:hover { background: color-mix(in srgb, var(--ck-accent) 12%, transparent); }
+  .ck-step-btn {
+    padding: 0.2rem 0.5rem; border-radius: 4px; border: 1px solid var(--ck-border);
+    background: transparent; color: var(--ck-text); font-size: 0.65rem;
+    cursor: pointer; font-weight: 600;
+  }
+  .ck-step-btn:hover { border-color: var(--ck-accent); }
+  .ck-reset-btn {
+    padding: 0.2rem 0.5rem; border-radius: 4px; border: 1px solid var(--ck-border);
+    background: transparent; color: var(--ck-muted); font-size: 0.65rem;
+    cursor: pointer;
+  }
+  .ck-reset-btn:hover { border-color: var(--ck-accent); color: var(--ck-text); }
+  .ck-step-info {
+    font-size: 0.7rem; color: var(--ck-muted); margin-left: auto;
+    font-family: var(--sl-font-mono, monospace);
+  }
+
+  /* Scenario tabs */
+  .ck-tabs {
+    display: flex; gap: 0.25rem; margin-bottom: 0.6rem;
+  }
+  .ck-tab {
+    padding: 0.3rem 0.65rem; border-radius: 5px; border: 1px solid var(--ck-border);
+    background: transparent; color: var(--ck-text); font-size: 0.65rem;
+    cursor: pointer; font-weight: 500;
+  }
+  .ck-tab:hover { border-color: var(--ck-accent); }
+  .ck-tab.active {
+    border-color: var(--ck-accent); background: var(--ck-accent); color: white;
+  }
+
+  /* Batch timeline */
+  .ck-timeline {
+    display: flex; gap: 4px; margin-bottom: 0.5rem;
+    padding: 0.5rem; background: var(--ck-bg);
+    border: 1px solid var(--ck-border); border-radius: 8px;
+    overflow-x: auto; align-items: flex-end;
+  }
+  .ck-batch {
+    display: flex; flex-direction: column; align-items: center;
+    min-width: 52px; padding: 0.3rem 0.2rem;
+    border: 1.5px solid var(--ck-border); border-radius: 6px;
+    transition: all 0.4s ease;
+    position: relative;
+  }
+  .ck-batch.in-flight {
+    border-color: var(--ck-blue);
+    background: color-mix(in srgb, var(--ck-blue) 8%, transparent);
+  }
+  .ck-batch.pending-ack {
+    border-color: var(--ck-amber);
+    background: color-mix(in srgb, var(--ck-amber) 10%, transparent);
+  }
+  .ck-batch.committed {
+    border-color: var(--ck-green);
+    background: color-mix(in srgb, var(--ck-green) 10%, transparent);
+  }
+  .ck-batch.rejected {
+    border-color: var(--ck-red);
+    background: color-mix(in srgb, var(--ck-red) 8%, transparent);
+  }
+  .ck-batch.stalling {
+    animation: ck-pulse 1s infinite;
+  }
+  @keyframes ck-pulse {
+    0%, 100% { box-shadow: none; }
+    50% { box-shadow: 0 0 8px color-mix(in srgb, var(--ck-amber) 40%, transparent); }
+  }
+  .ck-batch.highlight {
+    transform: scale(1.08);
+    box-shadow: 0 0 10px color-mix(in srgb, var(--ck-accent) 30%, transparent);
+  }
+  .ck-batch-id {
+    font-family: var(--sl-font-mono, monospace); font-size: 0.7rem;
+    font-weight: 700; margin-bottom: 0.15rem;
+  }
+  .ck-batch-state {
+    font-size: 0.48rem; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.04em; padding: 0.08rem 0.25rem; border-radius: 3px;
+  }
+  .ck-batch-state.in-flight { background: color-mix(in srgb, var(--ck-blue) 20%, transparent); color: var(--ck-blue); }
+  .ck-batch-state.pending-ack { background: color-mix(in srgb, var(--ck-amber) 20%, transparent); color: var(--ck-amber); }
+  .ck-batch-state.committed { background: color-mix(in srgb, var(--ck-green) 20%, transparent); color: var(--ck-green); }
+  .ck-batch-state.rejected { background: color-mix(in srgb, var(--ck-red) 20%, transparent); color: var(--ck-red); }
+  .ck-batch-cp {
+    font-size: 0.45rem; color: var(--ck-muted); margin-top: 0.1rem;
+    font-family: var(--sl-font-mono, monospace);
+  }
+
+  /* Checkpoint marker */
+  .ck-cp-row {
+    display: flex; align-items: center; gap: 0.4rem;
+    padding: 0.4rem 0.6rem; margin-bottom: 0.5rem;
+  }
+  .ck-cp-label {
+    font-size: 0.65rem; font-weight: 700; color: var(--ck-green);
+    white-space: nowrap;
+  }
+  .ck-cp-bar {
+    flex: 1; height: 6px; background: var(--ck-border); border-radius: 3px;
+    position: relative; overflow: visible;
+  }
+  .ck-cp-fill {
+    height: 100%; background: var(--ck-green); border-radius: 3px;
+    transition: width 0.5s ease;
+  }
+  .ck-cp-marker {
+    position: absolute; top: -5px; width: 16px; height: 16px;
+    background: var(--ck-green); border-radius: 50%;
+    border: 2px solid white; box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+    transition: left 0.5s ease;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 0.4rem; font-weight: 700; color: white;
+  }
+  .ck-cp-val {
+    font-family: var(--sl-font-mono, monospace); font-size: 0.7rem;
+    font-weight: 700; color: var(--ck-green); min-width: 50px;
+  }
+
+  /* Explanation */
+  .ck-explain {
+    padding: 0.55rem 0.75rem; background: var(--ck-bg);
+    border: 1px solid var(--ck-border); border-radius: 7px;
+    font-size: 0.75rem; line-height: 1.5;
+    transition: border-color 0.3s;
+    margin-bottom: 0.5rem;
+  }
+  .ck-explain.highlight { border-color: var(--ck-accent); }
+  .ck-explain.warn { border-color: var(--ck-amber); }
+  .ck-explain b { display: block; font-size: 0.78rem; margin-bottom: 0.1rem; }
+
+  /* Legend */
+  .ck-legend {
+    display: flex; gap: 0.75rem; flex-wrap: wrap;
+    font-size: 0.6rem; padding: 0.3rem 0;
+  }
+  .ck-legend-item { display: flex; align-items: center; gap: 0.25rem; }
+  .ck-legend-dot {
+    width: 10px; height: 10px; border-radius: 2px; border: 1.5px solid;
+  }
+  .ck-dot-flight { border-color: var(--ck-blue); background: color-mix(in srgb, var(--ck-blue) 20%, transparent); }
+  .ck-dot-pending { border-color: var(--ck-amber); background: color-mix(in srgb, var(--ck-amber) 20%, transparent); }
+  .ck-dot-committed { border-color: var(--ck-green); background: color-mix(in srgb, var(--ck-green) 20%, transparent); }
+  .ck-dot-rejected { border-color: var(--ck-red); background: color-mix(in srgb, var(--ck-red) 20%, transparent); }
+
+  /* TLA+ property callout */
+  .ck-tla {
+    display: flex; align-items: flex-start; gap: 0.5rem;
+    padding: 0.45rem 0.65rem; border-radius: 6px;
+    border: 1px solid var(--ck-purple);
+    background: color-mix(in srgb, var(--ck-purple) 5%, var(--ck-bg));
+    font-size: 0.65rem; line-height: 1.5;
+    margin-top: 0.4rem;
+  }
+  .ck-tla-icon {
+    font-size: 0.9rem; min-width: 1.2em; text-align: center;
+  }
+  .ck-tla code {
+    font-family: var(--sl-font-mono, monospace); font-size: 0.6rem;
+    background: color-mix(in srgb, var(--ck-purple) 12%, transparent);
+    padding: 0.05rem 0.3rem; border-radius: 3px;
+  }
+</style>
+
+<script>
+(function() {
+  var root = document.getElementById('checkpoint-sim');
+  if (!root) return;
+
+  function el(tag, cls) { var e = document.createElement(tag); if (cls) e.className = cls; return e; }
+
+  // --- Scenarios ---
+  var SCENARIOS = {
+    'happy': {
+      name: 'Happy Path',
+      desc: 'Batches acked in order \u2014 checkpoint advances smoothly',
+      steps: [
+        { action: 'create', id: 0, cp: '0KB' },
+        { action: 'create', id: 1, cp: '128KB' },
+        { action: 'send', id: 0 },
+        { action: 'send', id: 1 },
+        { action: 'create', id: 2, cp: '256KB' },
+        { action: 'send', id: 2 },
+        { action: 'ack', id: 0, explain: 'Batch #0 acked. It\'s the lowest in-flight \u2192 checkpoint advances to 0KB.' },
+        { action: 'ack', id: 1, explain: 'Batch #1 acked. #0 already committed \u2192 checkpoint advances to 128KB.' },
+        { action: 'ack', id: 2, explain: 'Batch #2 acked. All prior committed \u2192 checkpoint advances to 256KB. All drained!' },
+      ]
+    },
+    'ooo': {
+      name: 'Out-of-Order ACK',
+      desc: 'Collector acks #2 before #0 \u2014 watch the checkpoint stall',
+      steps: [
+        { action: 'create', id: 0, cp: '0KB' },
+        { action: 'create', id: 1, cp: '128KB' },
+        { action: 'create', id: 2, cp: '256KB' },
+        { action: 'send', id: 0 },
+        { action: 'send', id: 1 },
+        { action: 'send', id: 2 },
+        { action: 'ack', id: 2, explain: 'Batch #2 acked first! But #0 and #1 are still in-flight. Checkpoint CANNOT advance \u2014 it moves to pending_acks.' },
+        { action: 'ack', id: 1, explain: 'Batch #1 acked. Still waiting for #0 \u2014 both #1 and #2 sit in pending_acks. Checkpoint still frozen.' },
+        { action: 'ack', id: 0, explain: '\uD83C\uDF89 Batch #0 finally acked! Now the contiguous chain clears: #0 \u2192 #1 \u2192 #2 all advance. Checkpoint jumps from none to 256KB in one step!' },
+      ]
+    },
+    'reject': {
+      name: 'Permanent Rejection',
+      desc: 'Batch #1 is 413 Too Large \u2014 rejected but checkpoint still advances',
+      steps: [
+        { action: 'create', id: 0, cp: '0KB' },
+        { action: 'create', id: 1, cp: '128KB' },
+        { action: 'create', id: 2, cp: '256KB' },
+        { action: 'send', id: 0 },
+        { action: 'send', id: 1 },
+        { action: 'send', id: 2 },
+        { action: 'ack', id: 0, explain: 'Batch #0 acked normally. Checkpoint advances to 0KB.' },
+        { action: 'reject', id: 1, explain: 'Batch #1 rejected (413 Too Large)! Rejection is terminal \u2014 the batch is undeliverable. Checkpoint advances past it to 128KB to prevent infinite stall.' },
+        { action: 'ack', id: 2, explain: 'Batch #2 acked. All prior resolved \u2192 checkpoint advances to 256KB. One batch was lost, but the pipeline didn\'t stall forever.' },
+      ]
+    },
+    'stall': {
+      name: 'Stalled Batch',
+      desc: 'Batch #0 retries forever \u2014 checkpoint freezes while others complete',
+      steps: [
+        { action: 'create', id: 0, cp: '0KB' },
+        { action: 'create', id: 1, cp: '128KB' },
+        { action: 'create', id: 2, cp: '256KB' },
+        { action: 'create', id: 3, cp: '384KB' },
+        { action: 'send', id: 0 },
+        { action: 'send', id: 1 },
+        { action: 'send', id: 2 },
+        { action: 'send', id: 3 },
+        { action: 'ack', id: 1, explain: 'Batch #1 acked, but #0 is still in-flight (retrying). Checkpoint cannot advance.' },
+        { action: 'ack', id: 3, explain: 'Batch #3 acked too. Three batches in pending_acks, but #0 blocks them all. The checkpoint is frozen at the start.' },
+        { action: 'ack', id: 2, explain: 'Batch #2 acked. Now #1, #2, #3 all pending. But #0 is STILL retrying. On restart, logfwd would re-send ALL data from offset 0. This is at-least-once delivery.' },
+        { action: 'ack', id: 0, explain: '\uD83C\uDF89 Batch #0 finally succeeds! The entire pending chain collapses: checkpoint leaps from none \u2192 384KB. No data was lost.' },
+      ]
+    }
+  };
+
+  var currentScenario = 'happy';
+  var stepIndex = 0;
+  var autoPlaying = false;
+  var autoTimer = null;
+
+  // State
+  var batches = {}; // id -> { state, cp }
+  var committedCp = null;
+  var committedId = -1;
+
+  // --- Build DOM ---
+
+  // Tabs
+  var tabs = el('div', 'ck-tabs');
+  var tabBtns = {};
+  Object.keys(SCENARIOS).forEach(function(key) {
+    var btn = el('button', 'ck-tab' + (key === currentScenario ? ' active' : ''));
+    btn.textContent = SCENARIOS[key].name;
+    btn.onclick = function() { selectScenario(key); };
+    tabs.appendChild(btn);
+    tabBtns[key] = btn;
+  });
+  root.appendChild(tabs);
+
+  // Controls
+  var ctrlBar = el('div', 'ck-controls');
+  var playBtn = el('button', 'ck-play'); playBtn.innerHTML = '&#9654;';
+  var stepBtn = el('button', 'ck-step-btn'); stepBtn.textContent = 'Step \u25B6';
+  var resetBtn = el('button', 'ck-reset-btn'); resetBtn.textContent = 'Reset';
+  var stepInfo = el('span', 'ck-step-info');
+  ctrlBar.appendChild(playBtn);
+  ctrlBar.appendChild(stepBtn);
+  ctrlBar.appendChild(resetBtn);
+  ctrlBar.appendChild(stepInfo);
+  root.appendChild(ctrlBar);
+
+  // Timeline
+  var timelineEl = el('div', 'ck-timeline');
+  root.appendChild(timelineEl);
+
+  // Checkpoint progress bar
+  var cpRow = el('div', 'ck-cp-row');
+  var cpLabel = el('span', 'ck-cp-label'); cpLabel.textContent = 'Committed:';
+  var cpBar = el('div', 'ck-cp-bar');
+  var cpFill = el('div', 'ck-cp-fill'); cpFill.style.width = '0%';
+  var cpMarker = el('div', 'ck-cp-marker'); cpMarker.style.left = '0%'; cpMarker.textContent = '\u2713';
+  cpBar.appendChild(cpFill);
+  cpBar.appendChild(cpMarker);
+  var cpVal = el('span', 'ck-cp-val'); cpVal.textContent = 'none';
+  cpRow.appendChild(cpLabel);
+  cpRow.appendChild(cpBar);
+  cpRow.appendChild(cpVal);
+  root.appendChild(cpRow);
+
+  // Explanation
+  var explainEl = el('div', 'ck-explain');
+  root.appendChild(explainEl);
+
+  // Legend
+  var legend = el('div', 'ck-legend');
+  var legendItems = [
+    ['In-flight', 'ck-dot-flight'],
+    ['Pending ACK', 'ck-dot-pending'],
+    ['Committed', 'ck-dot-committed'],
+    ['Rejected', 'ck-dot-rejected'],
+  ];
+  legendItems.forEach(function(item) {
+    var li = el('span', 'ck-legend-item');
+    var dot = el('span', 'ck-legend-dot ' + item[1]);
+    var txt = document.createTextNode(' ' + item[0]);
+    li.appendChild(dot); li.appendChild(txt);
+    legend.appendChild(li);
+  });
+  root.appendChild(legend);
+
+  // TLA+ callout
+  var tlaEl = el('div', 'ck-tla');
+  tlaEl.innerHTML = '<span class="ck-tla-icon">\uD83D\uDD2C</span><div><b>Formally verified.</b> TLA+ spec <code>PipelineMachine.tla</code> proves <code>CommittedNeverAheadOfTerminalizedPrefix</code> \u2014 the checkpoint can never advance past an unresolved batch. This invariant holds across 70+ model-checked properties.</div>';
+  root.appendChild(tlaEl);
+
+  // --- Rendering ---
+  function render() {
+    var sc = SCENARIOS[currentScenario];
+    stepInfo.textContent = 'Step ' + stepIndex + '/' + sc.steps.length;
+
+    // Render batches
+    timelineEl.innerHTML = '';
+    var ids = Object.keys(batches).map(Number).sort(function(a, b) { return a - b; });
+    var totalBatches = ids.length || 1;
+
+    ids.forEach(function(id) {
+      var b = batches[id];
+      var batchEl = el('div', 'ck-batch ' + b.state);
+
+      // Highlight the last-changed batch
+      if (b.justChanged) {
+        batchEl.classList.add('highlight');
+        b.justChanged = false;
+      }
+      // Pulse stalling batches
+      if (b.state === 'in-flight' && hasPendingAckAbove(id)) {
+        batchEl.classList.add('stalling');
+      }
+
+      var idEl = el('div', 'ck-batch-id'); idEl.textContent = '#' + id;
+      var stateEl = el('div', 'ck-batch-state ' + b.state);
+      var stateLabels = {
+        'queued': 'QUEUED', 'in-flight': 'IN-FLIGHT',
+        'pending-ack': 'PENDING', 'committed': 'COMMITTED', 'rejected': 'REJECTED'
+      };
+      stateEl.textContent = stateLabels[b.state] || b.state.toUpperCase();
+      var cpEl = el('div', 'ck-batch-cp'); cpEl.textContent = b.cp;
+
+      batchEl.appendChild(idEl);
+      batchEl.appendChild(stateEl);
+      batchEl.appendChild(cpEl);
+      timelineEl.appendChild(batchEl);
+    });
+
+    // Checkpoint bar
+    var maxId = ids.length > 0 ? Math.max.apply(null, ids) : 0;
+    var pct = committedId >= 0 ? ((committedId + 1) / totalBatches) * 100 : 0;
+    cpFill.style.width = Math.min(100, pct) + '%';
+    cpMarker.style.left = 'calc(' + Math.min(100, pct) + '% - 8px)';
+    cpMarker.style.display = committedId >= 0 ? 'flex' : 'none';
+    cpVal.textContent = committedCp || 'none';
+  }
+
+  function hasPendingAckAbove(id) {
+    var ids = Object.keys(batches).map(Number);
+    return ids.some(function(other) {
+      return other > id && (batches[other].state === 'pending-ack');
+    });
+  }
+
+  // --- Step execution ---
+  function executeStep() {
+    var sc = SCENARIOS[currentScenario];
+    if (stepIndex >= sc.steps.length) {
+      stopAuto();
+      return;
+    }
+
+    var step = sc.steps[stepIndex];
+    stepIndex++;
+
+    // Clear justChanged
+    Object.keys(batches).forEach(function(k) { batches[k].justChanged = false; });
+
+    switch (step.action) {
+      case 'create':
+        batches[step.id] = { state: 'queued', cp: step.cp, justChanged: true };
+        explainEl.className = 'ck-explain';
+        explainEl.innerHTML = '<b>Create batch #' + step.id + '</b>New batch created for source at checkpoint ' + step.cp + '. Not yet in-flight \u2014 the ticket is Queued.';
+        break;
+
+      case 'send':
+        if (batches[step.id]) {
+          batches[step.id].state = 'in-flight';
+          batches[step.id].justChanged = true;
+        }
+        explainEl.className = 'ck-explain';
+        explainEl.innerHTML = '<b>Send batch #' + step.id + '</b>Batch registered as in-flight via <code>begin_send()</code>. The pipeline now owns it \u2014 it MUST be acked, rejected, or failed.';
+        break;
+
+      case 'ack':
+        if (batches[step.id]) {
+          batches[step.id].state = 'pending-ack';
+          batches[step.id].justChanged = true;
+        }
+        // Try advance
+        tryAdvance();
+        explainEl.className = step.explain && step.explain.includes('\uD83C\uDF89') ? 'ck-explain highlight' : (step.explain && step.explain.includes('CANNOT') ? 'ck-explain warn' : 'ck-explain');
+        explainEl.innerHTML = '<b>ACK batch #' + step.id + '</b>' + (step.explain || '');
+        break;
+
+      case 'reject':
+        if (batches[step.id]) {
+          batches[step.id].state = 'rejected';
+          batches[step.id].justChanged = true;
+        }
+        tryAdvance();
+        explainEl.className = 'ck-explain warn';
+        explainEl.innerHTML = '<b>Reject batch #' + step.id + ' (terminal)</b>' + (step.explain || '');
+        break;
+    }
+
+    render();
+  }
+
+  function tryAdvance() {
+    // Advance committed checkpoint by consuming contiguous resolved batches
+    var ids = Object.keys(batches).map(Number).sort(function(a, b) { return a - b; });
+    var advanced = true;
+    while (advanced) {
+      advanced = false;
+      for (var i = 0; i < ids.length; i++) {
+        var id = ids[i];
+        var b = batches[id];
+        if (id <= committedId) continue;
+
+        // Check if all lower IDs are resolved
+        var allLowerResolved = true;
+        for (var j = 0; j < ids.length; j++) {
+          var lower = ids[j];
+          if (lower >= id) break;
+          if (lower <= committedId) continue;
+          var ls = batches[lower].state;
+          if (ls !== 'committed' && ls !== 'rejected' && ls !== 'pending-ack') {
+            allLowerResolved = false;
+            break;
+          }
+        }
+
+        if (allLowerResolved && (b.state === 'pending-ack' || b.state === 'rejected')) {
+          // Also need all lower to be committed already or be pending-ack/rejected
+          var canCommit = true;
+          for (var k = 0; k < ids.length; k++) {
+            var checkId = ids[k];
+            if (checkId >= id) break;
+            if (checkId <= committedId) continue;
+            if (batches[checkId].state === 'in-flight' || batches[checkId].state === 'queued') {
+              canCommit = false;
+              break;
+            }
+          }
+          if (canCommit) {
+            if (b.state === 'pending-ack') {
+              b.state = 'committed';
+            }
+            // rejected stays rejected but counts as resolved
+            committedCp = b.cp;
+            committedId = id;
+            advanced = true;
+          }
+        }
+      }
+    }
+  }
+
+  // --- Controls ---
+  function selectScenario(key) {
+    stopAuto();
+    currentScenario = key;
+    Object.keys(tabBtns).forEach(function(k) {
+      tabBtns[k].className = 'ck-tab' + (k === key ? ' active' : '');
+    });
+    resetSim();
+  }
+
+  function resetSim() {
+    stopAuto();
+    stepIndex = 0;
+    batches = {};
+    committedCp = null;
+    committedId = -1;
+    var sc = SCENARIOS[currentScenario];
+    explainEl.className = 'ck-explain';
+    explainEl.innerHTML = '<b>' + sc.name + '</b>' + sc.desc + '. Click <b>Step</b> to advance one event at a time, or <b>Play</b> to auto-advance.';
+    render();
+  }
+
+  function stopAuto() {
+    autoPlaying = false;
+    if (autoTimer) { clearInterval(autoTimer); autoTimer = null; }
+    playBtn.innerHTML = '&#9654;';
+  }
+
+  function toggleAuto() {
+    if (autoPlaying) {
+      stopAuto();
+    } else {
+      autoPlaying = true;
+      playBtn.innerHTML = '&#10074;&#10074;';
+      autoTimer = setInterval(function() {
+        var sc = SCENARIOS[currentScenario];
+        if (stepIndex >= sc.steps.length) {
+          stopAuto();
+          return;
+        }
+        executeStep();
+      }, 1200);
+    }
+  }
+
+  playBtn.onclick = toggleAuto;
+  stepBtn.onclick = function() { stopAuto(); executeStep(); };
+  resetBtn.onclick = resetSim;
+
+  // --- Init ---
+  resetSim();
+
+  // Cleanup
+  document.addEventListener('astro:before-swap', function() {
+    stopAuto();
+  }, { once: true });
+})();
+</script>
