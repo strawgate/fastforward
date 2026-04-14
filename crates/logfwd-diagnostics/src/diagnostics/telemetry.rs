@@ -20,11 +20,15 @@ use super::render::{esc, now_nanos};
 // Intermediate types (not OTLP — just collection containers)
 // ---------------------------------------------------------------------------
 
+/// Whether a metric is a monotonic counter or a point-in-time gauge.
 pub(super) enum MetricValue {
+    /// A point-in-time measurement (e.g. inflight batches, memory usage).
     Gauge(f64),
+    /// A monotonically increasing counter (e.g. input lines, output bytes).
     Sum(u64),
 }
 
+/// A single metric observation with optional key-value attributes.
 pub(super) struct MetricPoint {
     pub name: &'static str,
     pub value: MetricValue,
@@ -37,6 +41,7 @@ pub(super) struct MetricSnapshot {
     pub time: Instant,
 }
 
+/// A single span record ready for OTLP JSON serialization.
 pub(super) struct SpanRecord {
     pub trace_id: String,
     pub span_id: String,
@@ -49,6 +54,7 @@ pub(super) struct SpanRecord {
     pub in_progress: bool,
 }
 
+/// A single log record ready for OTLP JSON serialization.
 pub(super) struct LogRecord {
     pub timestamp_unix_ns: u64,
     pub severity: &'static str,
@@ -273,7 +279,11 @@ pub(super) fn compute_rate_gauges(
         .iter()
         .filter_map(|p| match p.value {
             MetricValue::Sum(v) => {
-                let pipeline = p.attributes.iter().find(|(k, _)| *k == "pipeline").map(|(_, v)| v.as_str());
+                let pipeline = p
+                    .attributes
+                    .iter()
+                    .find(|(k, _)| *k == "pipeline")
+                    .map(|(_, v)| v.as_str());
                 Some(((p.name, pipeline), v))
             }
             MetricValue::Gauge(_) => None,

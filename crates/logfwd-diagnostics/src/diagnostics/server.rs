@@ -872,18 +872,21 @@ fn build_traces_body(state: &DiagnosticsState) -> String {
         }
         // In-progress batches — live entries shown before completion.
         for pm in &state.pipelines {
-            let active = pm.active_batches.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                for (id, b) in active.iter() {
-                    if !first {
-                        out.push(',');
-                    }
-                    first = false;
-                    let worker_id_json = b
-                        .worker_id
-                        .map_or_else(|| "null".to_string(), |wid| wid.to_string());
-                    let _ = write!(
-                        out,
-                        "{{\
+            let active = pm
+                .active_batches
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for (id, b) in active.iter() {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                let worker_id_json = b
+                    .worker_id
+                    .map_or_else(|| "null".to_string(), |wid| wid.to_string());
+                let _ = write!(
+                    out,
+                    "{{\
                             \"trace_id\":\"live-{id}\",\
                             \"pipeline\":\"{pl}\",\
                             \"start_unix_ns\":\"{st}\",\
@@ -911,18 +914,18 @@ fn build_traces_body(state: &DiagnosticsState) -> String {
                             \"lifecycle_state\":\"{lifecycle_state}\",\
                             \"lifecycle_state_start_unix_ns\":\"{state_start}\"\
                         }}",
-                        id = id,
-                        pl = esc(&pm.name),
-                        st = b.start_unix_ns,
-                        scan = b.scan_ns,
-                        xfm = b.transform_ns,
-                        out_st = b.output_start_unix_ns,
-                        wid = worker_id_json,
-                        lifecycle_state =
-                            lifecycle_state_for_active_batch(b.stage, b.worker_id).as_str(),
-                        state_start = b.stage_start_unix_ns,
-                    );
-                }
+                    id = id,
+                    pl = esc(&pm.name),
+                    st = b.start_unix_ns,
+                    scan = b.scan_ns,
+                    xfm = b.transform_ns,
+                    out_st = b.output_start_unix_ns,
+                    wid = worker_id_json,
+                    lifecycle_state =
+                        lifecycle_state_for_active_batch(b.stage, b.worker_id).as_str(),
+                    state_start = b.stage_start_unix_ns,
+                );
+            }
         }
         out.push_str("]}");
         out

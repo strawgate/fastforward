@@ -37,7 +37,8 @@ impl BackgroundHttpTask {
 
 impl Drop for BackgroundHttpTask {
     fn drop(&mut self) {
-        // Signal shutdown; thread join happens if still pending.
+        // Signal shutdown only. Dropping the JoinHandle detaches the thread;
+        // to wait for exit, call `shutdown_and_join()` instead.
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
         }

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "preact/hooks";
+import { useCallback, useEffect, useState } from "preact/hooks";
 import { api } from "./api";
 import type { ChartConfig } from "./components/Chart";
 import { ChartGrid } from "./components/ChartGrid";
@@ -192,7 +192,8 @@ export function App() {
           const aIp = a.lifecycle_state !== "completed" ? 1 : 0;
           const bIp = b.lifecycle_state !== "completed" ? 1 : 0;
           if (aIp !== bIp) return bIp - aIp;
-          return Number(BigInt(b.start_unix_ns) - BigInt(a.start_unix_ns));
+          const diff = BigInt(b.start_unix_ns) - BigInt(a.start_unix_ns);
+          return diff > 0n ? 1 : diff < 0n ? -1 : 0;
         });
         merged.length = MAX_TRACES;
       }
@@ -254,10 +255,6 @@ export function App() {
   const ready = status?.ready.status ?? "not_ready";
   const statusReason = status?.ready.reason ?? status?.component_health.reason ?? "";
 
-  // Stable chart config arrays — composition never changes.
-  const pipelineCharts = useMemo(() => PIPELINE_CHARTS, []);
-  const systemCharts = useMemo(() => SYSTEM_CHARTS, []);
-
   return (
     <>
       <StatusBar
@@ -274,12 +271,12 @@ export function App() {
 
         <div class="section">
           <div class="heading">Pipeline Metrics</div>
-          <ChartGrid store={store} charts={pipelineCharts} tick={tick} />
+          <ChartGrid store={store} charts={PIPELINE_CHARTS} tick={tick} />
         </div>
 
         <div class="section">
           <div class="heading">System Metrics</div>
-          <ChartGrid store={store} charts={systemCharts} tick={tick} />
+          <ChartGrid store={store} charts={SYSTEM_CHARTS} tick={tick} />
         </div>
 
         <LogViewer />

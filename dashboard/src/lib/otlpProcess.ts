@@ -133,7 +133,7 @@ export function extractTraceRecords(doc: OtlpTracesDocument): TraceRecord[] {
     }
 
     const status: TraceRecord["status"] =
-      root.status.code === 2 ? "error" : root.status.code === 1 ? "ok" : "unset";
+      root.status?.code === 2 ? "error" : root.status?.code === 1 ? "ok" : "unset";
 
     records.push({
       trace_id: traceId,

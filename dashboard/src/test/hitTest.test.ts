@@ -160,7 +160,7 @@ describe("hitTest", () => {
     expect(result!.trace_id).toBe("t2");
   });
 
-  it("returns null when negative relY produces li < 0", () => {
+  it("falls back to first lane when click is above canvas top", () => {
     // Click above the canvas top — relY would be negative
     const y = CANVAS_TOP - 50;
     const x = CANVAS_LEFT + LABEL_W + 100;

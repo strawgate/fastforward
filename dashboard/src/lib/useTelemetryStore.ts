@@ -20,14 +20,18 @@ export function useTelemetryStore(lastMessage: OtlpMessage | null): {
   store: TelemetryStore;
   tick: number;
 } {
-  const storeRef = useRef<TelemetryStore>(createTelemetryStore({ maxAgeMs: MAX_AGE_MS }));
+  const storeRef = useRef<TelemetryStore | null>(null);
+  if (!storeRef.current) {
+    storeRef.current = createTelemetryStore({ maxAgeMs: MAX_AGE_MS });
+  }
+  const store = storeRef.current;
   const [tick, setTick] = useState(0);
 
   useEffect(() => {
     if (!lastMessage) return;
-    storeRef.current.ingest(lastMessage.data);
+    store.ingest(lastMessage.data);
     setTick((n) => n + 1);
   }, [lastMessage]);
 
-  return { store: storeRef.current, tick };
+  return { store, tick };
 }
