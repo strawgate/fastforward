@@ -498,8 +498,8 @@
     var items = [
       ['Throughput', throughput.toFixed(1) + ' batch/s', throughput < 0.5 ? 'red' : (throughput < 1.0 ? 'amber' : 'green')],
       ['Latency', latVal, latClass],
-      ['Produced', '' + totalProduced, ''],
-      ['Delivered', '' + totalDelivered, 'green'],
+      ['Produced', '' + Math.round(totalProduced), ''],
+      ['Delivered', '' + Math.round(totalDelivered), 'green'],
       ['I/O', ioBlocked ? 'BLOCKED' : 'polling', ioBlocked ? 'red' : 'green'],
       ['CPU', cpuBlocked ? 'BLOCKED' : 'scanning', cpuBlocked ? 'red' : 'green'],
     ];
@@ -572,16 +572,18 @@
 
     var outDrain = (outputSpeed / 100) * OUT_MAX_RATE;
 
-    // Output workers drain
+    // Output workers drain — accumulate fractional amounts, don't round per-worker
     var totalWorkerFill = workerFills.reduce(function(a, b) { return a + b; }, 0);
     var drained = Math.min(totalWorkerFill, outDrain);
     var remaining = drained;
+    var tickDelivered = 0;
     for (var w = 0; w < NUM_WORKERS && remaining > 0; w++) {
       var take = Math.min(workerFills[w], remaining);
       workerFills[w] -= take;
       remaining -= take;
-      if (take > 0) totalDelivered += Math.round(take);
+      tickDelivered += take;
     }
+    totalDelivered += tickDelivered;
 
     // Pipeline drains into workers (MRU dispatch)
     if (pipelineFill > 0) {
@@ -602,7 +604,7 @@
       var cpuDrain = Math.min(ioCpuFill, CPU_RATE, PIPELINE_CAP - pipelineFill);
       ioCpuFill -= cpuDrain;
       pipelineFill += cpuDrain;
-      totalProduced += Math.round(cpuDrain);
+      totalProduced += cpuDrain;
     }
 
     // I/O worker produces into I/O-CPU channel
