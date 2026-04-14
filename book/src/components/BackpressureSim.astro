@@ -292,18 +292,19 @@
 
   // --- Build DOM ---
   var controls = el('div', 'bp-controls');
-  var lbl = el('span', 'bp-label'); lbl.textContent = 'Output Speed';
+  var lbl = el('label', 'bp-label'); lbl.htmlFor = 'bp-output-speed'; lbl.textContent = 'Output Speed';
   var sliderWrap = el('div', 'bp-slider-wrap');
   var slider = el('input', 'bp-slider');
+  slider.id = 'bp-output-speed';
   slider.type = 'range'; slider.min = '0'; slider.max = '100'; slider.value = '100';
   var speedVal = el('span', 'bp-speed-val'); speedVal.textContent = '100%';
   sliderWrap.appendChild(slider);
   sliderWrap.appendChild(speedVal);
 
   var btns = el('div', 'bp-btns');
-  var btnFast = el('button', 'bp-btn active'); btnFast.textContent = 'Fast';
-  var btnSlow = el('button', 'bp-btn'); btnSlow.textContent = 'Slow';
-  var btnDown = el('button', 'bp-btn'); btnDown.textContent = 'Outage';
+  var btnFast = el('button', 'bp-btn active'); btnFast.type = 'button'; btnFast.textContent = 'Fast'; btnFast.setAttribute('aria-pressed', 'true');
+  var btnSlow = el('button', 'bp-btn'); btnSlow.type = 'button'; btnSlow.textContent = 'Slow'; btnSlow.setAttribute('aria-pressed', 'false');
+  var btnDown = el('button', 'bp-btn'); btnDown.type = 'button'; btnDown.textContent = 'Outage'; btnDown.setAttribute('aria-pressed', 'false');
   btns.appendChild(btnFast); btns.appendChild(btnSlow); btns.appendChild(btnDown);
 
   controls.appendChild(lbl);
@@ -378,7 +379,11 @@
   // --- Preset buttons ---
   var presets = [btnFast, btnSlow, btnDown];
   function setPreset(idx) {
-    presets.forEach(function(b, i) { b.className = 'bp-btn' + (i === idx ? ' active' : ''); });
+    presets.forEach(function(b, i) {
+      var active = i === idx;
+      b.className = 'bp-btn' + (active ? ' active' : '');
+      b.setAttribute('aria-pressed', active ? 'true' : 'false');
+    });
     if (idx === 0) { slider.value = '100'; outputSpeed = 100; }
     else if (idx === 1) { slider.value = '30'; outputSpeed = 30; }
     else { slider.value = '0'; outputSpeed = 0; }
@@ -389,11 +394,22 @@
   btnDown.onclick = function() { setPreset(2); };
 
   slider.oninput = function() {
-    outputSpeed = parseInt(slider.value);
+    outputSpeed = parseInt(slider.value, 10);
     speedVal.textContent = outputSpeed + '%';
-    presets.forEach(function(b) { b.className = 'bp-btn'; });
-    if (outputSpeed === 100) btnFast.className = 'bp-btn active';
-    else if (outputSpeed === 0) btnDown.className = 'bp-btn active';
+    presets.forEach(function(b) {
+      b.className = 'bp-btn';
+      b.setAttribute('aria-pressed', 'false');
+    });
+    if (outputSpeed === 100) {
+      btnFast.className = 'bp-btn active';
+      btnFast.setAttribute('aria-pressed', 'true');
+    } else if (outputSpeed === 30) {
+      btnSlow.className = 'bp-btn active';
+      btnSlow.setAttribute('aria-pressed', 'true');
+    } else if (outputSpeed === 0) {
+      btnDown.className = 'bp-btn active';
+      btnDown.setAttribute('aria-pressed', 'true');
+    }
   };
 
   // --- Alert system ---

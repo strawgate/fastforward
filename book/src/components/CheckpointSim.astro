@@ -362,10 +362,15 @@
 
   // Tabs
   var tabs = el('div', 'ck-tabs');
+  tabs.setAttribute('role', 'tablist');
+  tabs.setAttribute('aria-label', 'Checkpoint scenarios');
   var tabBtns = {};
   Object.keys(SCENARIOS).forEach(function(key) {
     var btn = el('button', 'ck-tab' + (key === currentScenario ? ' active' : ''));
+    btn.type = 'button';
     btn.textContent = SCENARIOS[key].name;
+    btn.setAttribute('role', 'tab');
+    btn.setAttribute('aria-selected', key === currentScenario ? 'true' : 'false');
     btn.onclick = function() { selectScenario(key); };
     tabs.appendChild(btn);
     tabBtns[key] = btn;
@@ -374,9 +379,9 @@
 
   // Controls
   var ctrlBar = el('div', 'ck-controls');
-  var playBtn = el('button', 'ck-play'); playBtn.innerHTML = '&#9654;';
-  var stepBtn = el('button', 'ck-step-btn'); stepBtn.textContent = 'Step \u25B6';
-  var resetBtn = el('button', 'ck-reset-btn'); resetBtn.textContent = 'Reset';
+  var playBtn = el('button', 'ck-play'); playBtn.type = 'button'; playBtn.innerHTML = '&#9654;'; playBtn.setAttribute('aria-label', 'Play scenario');
+  var stepBtn = el('button', 'ck-step-btn'); stepBtn.type = 'button'; stepBtn.textContent = 'Step \u25B6';
+  var resetBtn = el('button', 'ck-reset-btn'); resetBtn.type = 'button'; resetBtn.textContent = 'Reset';
   var stepInfo = el('span', 'ck-step-info');
   ctrlBar.appendChild(playBtn);
   ctrlBar.appendChild(stepBtn);
@@ -603,7 +608,9 @@
     stopAuto();
     currentScenario = key;
     Object.keys(tabBtns).forEach(function(k) {
-      tabBtns[k].className = 'ck-tab' + (k === key ? ' active' : '');
+      var active = k === key;
+      tabBtns[k].className = 'ck-tab' + (active ? ' active' : '');
+      tabBtns[k].setAttribute('aria-selected', active ? 'true' : 'false');
     });
     resetSim();
   }
@@ -634,6 +641,7 @@
     autoPlaying = false;
     if (autoTimer) { clearInterval(autoTimer); autoTimer = null; }
     playBtn.innerHTML = '&#9654;';
+    playBtn.setAttribute('aria-label', 'Play scenario');
   }
 
   function toggleAuto() {
@@ -642,6 +650,7 @@
     } else {
       autoPlaying = true;
       playBtn.innerHTML = '&#10074;&#10074;';
+      playBtn.setAttribute('aria-label', 'Pause scenario');
       autoTimer = setInterval(function() {
         var sc = SCENARIOS[currentScenario];
         if (stepIndex >= sc.steps.length) {
