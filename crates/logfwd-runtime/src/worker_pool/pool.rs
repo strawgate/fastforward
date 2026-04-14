@@ -493,6 +493,7 @@ impl OutputWorkerPool {
         } else {
             self.output_health.set_pool_health(ComponentHealth::Stopped);
         }
+        self.cancel.cancel();
     }
 
     /// Spawn a new worker task and return a handle.
@@ -1527,7 +1528,7 @@ mod tests {
             Some(&"503".to_string())
         );
         assert!(
-            capture.contains_event_message("worker_pool: transient error, retrying with jitter"),
+            capture.contains_event_message("worker_pool: transient error, retrying"),
             "expected retry log event"
         );
         assert!(
