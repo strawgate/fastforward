@@ -264,12 +264,14 @@
   }
 
   function startPlay() {
+    if (startupTimer) { clearTimeout(startupTimer); startupTimer = null; }
     playing = true;
     updatePlayIcon();
     scheduleNext();
   }
 
   function stopPlay() {
+    if (startupTimer) { clearTimeout(startupTimer); startupTimer = null; }
     playing = false;
     clearT();
     updatePlayIcon();
