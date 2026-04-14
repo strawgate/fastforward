@@ -371,7 +371,7 @@ fn subprocess_exclude_units_filters() {
             serde_json::from_str::<serde_json::Value>(l)
                 .ok()
                 .and_then(|v| {
-                    v.get("_SYSTEMD_UNIT")
+                    v.get("_systemd_unit")
                         .and_then(|u| u.as_str())
                         .map(String::from)
                 })
