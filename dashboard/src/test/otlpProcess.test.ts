@@ -1,14 +1,16 @@
-import { describe, expect, it } from "vitest";
 import type { OtlpMetricsDocument, OtlpTracesDocument } from "@otlpkit/otlpjson";
-import { extractMetricSnapshot, extractTraceRecords, extractUptimeSeconds } from "../lib/otlpProcess";
+import { describe, expect, it } from "vitest";
+import {
+  extractMetricSnapshot,
+  extractTraceRecords,
+  extractUptimeSeconds,
+} from "../lib/otlpProcess";
 
 // ---------------------------------------------------------------------------
 // Helpers to build OTLP JSON documents
 // ---------------------------------------------------------------------------
 
-function metricsDoc(
-  metrics: Array<Record<string, unknown>>
-): OtlpMetricsDocument {
+function metricsDoc(metrics: Array<Record<string, unknown>>): OtlpMetricsDocument {
   return {
     resourceMetrics: [
       {
@@ -65,9 +67,7 @@ function sum(name: string, value: number, attrs?: Record<string, unknown>) {
   };
 }
 
-function tracesDoc(
-  spans: Array<Record<string, unknown>>
-): OtlpTracesDocument {
+function tracesDoc(spans: Array<Record<string, unknown>>): OtlpTracesDocument {
   return {
     resourceSpans: [
       {
@@ -254,16 +254,12 @@ describe("extractTraceRecords", () => {
   it("reconstructs child spans into root TraceRecord", () => {
     const doc = tracesDoc([
       rootSpan({
-        attributes: [
-          { key: "pipeline", value: { stringValue: "main" } },
-        ],
+        attributes: [{ key: "pipeline", value: { stringValue: "main" } }],
       }),
       childSpan("scan", {
         startTimeUnixNano: "1000000000",
         endTimeUnixNano: "1200000000",
-        attributes: [
-          { key: "rows", value: { intValue: "50" } },
-        ],
+        attributes: [{ key: "rows", value: { intValue: "50" } }],
       }),
       childSpan("transform", {
         spanId: "0000000000000003",
@@ -342,16 +338,12 @@ describe("extractTraceRecords", () => {
     const doc = tracesDoc([
       rootSpan({
         traceId: "aaaa0000000000000000000000000001",
-        attributes: [
-          { key: "pipeline", value: { stringValue: "p1" } },
-        ],
+        attributes: [{ key: "pipeline", value: { stringValue: "p1" } }],
       }),
       rootSpan({
         traceId: "aaaa0000000000000000000000000002",
         spanId: "0000000000000099",
-        attributes: [
-          { key: "pipeline", value: { stringValue: "p2" } },
-        ],
+        attributes: [{ key: "pipeline", value: { stringValue: "p2" } }],
       }),
     ]);
 

@@ -292,34 +292,36 @@ pub(super) fn collect_new_spans(
         pm.name.hash(&mut hasher);
         let pipeline_hash = hasher.finish();
 
-        if let Ok(active) = pm.active_batches.lock() {
-            for (id, b) in active.iter() {
-                let elapsed = now.saturating_sub(b.start_unix_ns);
-                let mut attrs: Vec<(&'static str, String)> = vec![
-                    ("pipeline", pm.name.clone()),
-                    ("stage", b.stage.to_string()),
-                    ("stage_start_unix_ns", b.stage_start_unix_ns.to_string()),
-                    ("scan_ns", b.scan_ns.to_string()),
-                    ("transform_ns", b.transform_ns.to_string()),
-                ];
-                if let Some(wid) = b.worker_id {
-                    attrs.push(("worker_id", wid.to_string()));
-                }
-                if b.output_start_unix_ns > 0 {
-                    attrs.push(("output_start_unix_ns", b.output_start_unix_ns.to_string()));
-                }
-                spans.push(SpanRecord {
-                    trace_id: format!("{:016x}{:016x}", pipeline_hash, id),
-                    span_id: format!("{:016x}", id ^ pipeline_hash),
-                    parent_id: "0000000000000000".to_string(),
-                    name: "batch".to_string(),
-                    start_unix_ns: b.start_unix_ns,
-                    duration_ns: elapsed,
-                    attributes: attrs,
-                    status: "unset",
-                    in_progress: true,
-                });
+        let active = pm
+            .active_batches
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for (id, b) in active.iter() {
+            let elapsed = now.saturating_sub(b.start_unix_ns);
+            let mut attrs: Vec<(&'static str, String)> = vec![
+                ("pipeline", pm.name.clone()),
+                ("stage", b.stage.to_string()),
+                ("stage_start_unix_ns", b.stage_start_unix_ns.to_string()),
+                ("scan_ns", b.scan_ns.to_string()),
+                ("transform_ns", b.transform_ns.to_string()),
+            ];
+            if let Some(wid) = b.worker_id {
+                attrs.push(("worker_id", wid.to_string()));
             }
+            if b.output_start_unix_ns > 0 {
+                attrs.push(("output_start_unix_ns", b.output_start_unix_ns.to_string()));
+            }
+            spans.push(SpanRecord {
+                trace_id: format!("{:016x}{:016x}", pipeline_hash, id),
+                span_id: format!("{:016x}", id ^ pipeline_hash),
+                parent_id: "0000000000000000".to_string(),
+                name: "batch".to_string(),
+                start_unix_ns: b.start_unix_ns,
+                duration_ns: elapsed,
+                attributes: attrs,
+                status: "unset",
+                in_progress: true,
+            });
         }
     }
 

@@ -27,10 +27,10 @@ impl BackgroundHttpTask {
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
         }
-        if let Some(handle) = self.handle.take() {
-            if let Err(_panic) = handle.join() {
-                tracing::error!("diagnostics HTTP worker panicked during shutdown");
-            }
+        if let Some(handle) = self.handle.take()
+            && let Err(_panic) = handle.join()
+        {
+            tracing::error!("diagnostics HTTP worker panicked during shutdown");
         }
     }
 }

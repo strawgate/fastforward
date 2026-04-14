@@ -1,5 +1,17 @@
 // API response types from logfwd diagnostics server
 
+export type MetricId =
+  | "lps"
+  | "bps"
+  | "obps"
+  | "err"
+  | "cpu"
+  | "mem"
+  | "lat"
+  | "inflight"
+  | "batches"
+  | "stalls";
+
 export interface ComponentData {
   name: string;
   type: string;
@@ -156,6 +168,15 @@ export interface TraceRecord {
   stage?: string;
   /** Unix ns when the current in-progress stage started. */
   stage_start_unix_ns?: string;
+  /** Lifecycle state derived from in_progress + stage. */
+  lifecycle_state:
+    | "scan_in_progress"
+    | "transform_in_progress"
+    | "queued_for_output"
+    | "output_in_progress"
+    | "completed";
+  /** Unix ns when the current lifecycle state started. */
+  lifecycle_state_start_unix_ns?: string;
 }
 
 export interface TracesResponse {

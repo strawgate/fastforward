@@ -35,6 +35,7 @@ function makeTr(overrides: Partial<TraceRecord> = {}): TraceRecord {
     flush_reason: "size",
     errors: 0,
     status: "unset",
+    lifecycle_state: "completed",
     ...overrides,
   };
 }
@@ -200,8 +201,8 @@ describe("layoutSwimlane", () => {
       scan_ns: 100_000_000, // short initial value — will be overridden by live extension
       transform_ns: 0,
       in_progress: true,
-      stage: "scan",
-      stage_start_unix_ns: stageStartNs,
+      lifecycle_state: "scan_in_progress",
+      lifecycle_state_start_unix_ns: stageStartNs,
     });
     const scanLane = makeLane(SCAN_LANE, [tr]);
     const bars = layoutSwimlane([scanLane], windowMs, nowMs, null, tr.bytes_in, W);
@@ -230,8 +231,8 @@ describe("layoutSwimlane", () => {
       scan_ns: 50_000_000,
       transform_ns: 0,
       in_progress: true,
-      stage: "scan",
-      stage_start_unix_ns: stageStartNs,
+      lifecycle_state: "scan_in_progress",
+      lifecycle_state_start_unix_ns: stageStartNs,
     });
     const scanLane = makeLane(SCAN_LANE, [tr]);
     const bars = layoutSwimlane([scanLane], windowMs, nowMs, null, tr.bytes_in, W);
@@ -255,8 +256,8 @@ describe("layoutSwimlane", () => {
       scan_ns: staticScanNs,
       transform_ns: 0,
       in_progress: true,
-      stage: "scan",
-      stage_start_unix_ns: stageStartNs,
+      lifecycle_state: "scan_in_progress",
+      lifecycle_state_start_unix_ns: stageStartNs,
     });
     const scanLane = makeLane(SCAN_LANE, [tr]);
     const bars = layoutSwimlane([scanLane], windowMs, nowMs, null, tr.bytes_in, W);
@@ -316,8 +317,8 @@ describe("layoutSwimlane", () => {
       output_start_unix_ns: 0, // not yet assigned
       worker_id: -1, // no worker yet
       in_progress: true,
-      stage: "output",
-      stage_start_unix_ns: stageStartNs,
+      lifecycle_state: "queued_for_output",
+      lifecycle_state_start_unix_ns: stageStartNs,
     });
     const workerLane = makeLane(0, [tr]);
     const bars = layoutSwimlane(

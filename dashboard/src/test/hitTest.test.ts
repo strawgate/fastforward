@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   hitTest,
-  type Lane,
   LABEL_W,
   LANE_H,
+  type Lane,
   PEND_BOX_W,
   SCAN_H,
   SCAN_LANE,

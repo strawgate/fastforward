@@ -1,5 +1,5 @@
+import { act, renderHook } from "@testing-library/preact";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { renderHook, act } from "@testing-library/preact";
 import { useTelemetryWebSocket } from "../lib/useTelemetryWebSocket";
 
 // ─── mock WebSocket ──────────────────────────────────────────────────────────

@@ -320,166 +320,158 @@ export function App() {
   const { lastMessage } = useTelemetryWebSocket();
 
   // Process OTLP metrics from WebSocket push.
-  const processOtlpMetrics = useCallback(
-    (doc: import("@otlpkit/otlpjson").OtlpMetricsDocument) => {
-      const snap = extractMetricSnapshot(doc);
-      setConnected(true);
+  const processOtlpMetrics = useCallback((doc: import("@otlpkit/otlpjson").OtlpMetricsDocument) => {
+    const snap = extractMetricSnapshot(doc);
+    setConnected(true);
 
-      const metricRegistry = metricRegistryRef.current;
+    const metricRegistry = metricRegistryRef.current;
 
-      const lps = rates.rate("lps", snap.inputLines);
-      const bps = rates.rate("bps", snap.inputBytes);
-      const eps = rates.rate("eps", snap.outputErrors);
-      const obpsRate = rates.rate("obps", snap.outputBytes);
+    const lps = rates.rate("lps", snap.inputLines);
+    const bps = rates.rate("bps", snap.inputBytes);
+    const eps = rates.rate("eps", snap.outputErrors);
+    const obpsRate = rates.rate("obps", snap.outputBytes);
 
-      if (lps != null) pushMetricSample(metricRegistry, "lps", lps, fmt(lps));
-      if (bps != null) pushMetricSample(metricRegistry, "bps", bps, fmtBytes(bps));
-      if (eps != null) pushMetricSample(metricRegistry, "err", eps, fmt(eps));
-      if (obpsRate != null) pushMetricSample(metricRegistry, "obps", obpsRate, fmtBytes(obpsRate));
+    if (lps != null) pushMetricSample(metricRegistry, "lps", lps, fmt(lps));
+    if (bps != null) pushMetricSample(metricRegistry, "bps", bps, fmtBytes(bps));
+    if (eps != null) pushMetricSample(metricRegistry, "err", eps, fmt(eps));
+    if (obpsRate != null) pushMetricSample(metricRegistry, "obps", obpsRate, fmtBytes(obpsRate));
 
-      if (snap.cpuUserMs != null && snap.cpuSysMs != null) {
-        const cpuMs = snap.cpuUserMs + snap.cpuSysMs;
-        const cpuRate = rates.rate("cpu_ms", cpuMs);
-        if (cpuRate != null) {
-          const cpuPct = cpuRate / 10;
-          pushMetricSample(metricRegistry, "cpu", cpuPct, cpuPct.toFixed(1));
-        }
+    if (snap.cpuUserMs != null && snap.cpuSysMs != null) {
+      const cpuMs = snap.cpuUserMs + snap.cpuSysMs;
+      const cpuRate = rates.rate("cpu_ms", cpuMs);
+      if (cpuRate != null) {
+        const cpuPct = cpuRate / 10;
+        pushMetricSample(metricRegistry, "cpu", cpuPct, cpuPct.toFixed(1));
       }
+    }
 
-      const memBytes = snap.memAllocated ?? snap.rssBytes;
-      if (memBytes != null) {
-        const limit = snap.memResident
-          ? `/ ${fmtBytes(snap.memResident)} resident`
-          : undefined;
-        pushMetricSample(metricRegistry, "mem", memBytes, fmtBytes(memBytes), limit);
-      }
+    const memBytes = snap.memAllocated ?? snap.rssBytes;
+    if (memBytes != null) {
+      const limit = snap.memResident ? `/ ${fmtBytes(snap.memResident)} resident` : undefined;
+      pushMetricSample(metricRegistry, "mem", memBytes, fmtBytes(memBytes), limit);
+    }
 
-      pushMetricSample(
-        metricRegistry,
-        "inflight",
-        snap.inflightBatches,
-        snap.inflightBatches.toFixed(0)
-      );
+    pushMetricSample(
+      metricRegistry,
+      "inflight",
+      snap.inflightBatches,
+      snap.inflightBatches.toFixed(0)
+    );
 
-      const batchRate = rates.rate("batches", snap.batches);
-      if (batchRate != null) {
-        const bpm = batchRate * 60;
-        pushMetricSample(metricRegistry, "batches", bpm, fmtCompact(bpm));
-      }
+    const batchRate = rates.rate("batches", snap.batches);
+    if (batchRate != null) {
+      const bpm = batchRate * 60;
+      pushMetricSample(metricRegistry, "batches", bpm, fmtCompact(bpm));
+    }
 
-      const stallRate = rates.rate("stalls", snap.backpressureStalls);
-      if (stallRate != null) {
-        pushMetricSample(metricRegistry, "stalls", stallRate, stallRate.toFixed(1));
-      }
+    const stallRate = rates.rate("stalls", snap.backpressureStalls);
+    if (stallRate != null) {
+      pushMetricSample(metricRegistry, "stalls", stallRate, stallRate.toFixed(1));
+    }
 
-      // Build a synthetic StatsResponse for MetricBadges and latency.
-      setStats({
-        uptime_sec: snap.uptimeSeconds,
-        rss_bytes: snap.rssBytes,
-        cpu_user_ms: snap.cpuUserMs,
-        cpu_sys_ms: snap.cpuSysMs,
-        input_lines: snap.inputLines,
-        input_bytes: snap.inputBytes,
-        output_lines: 0,
-        output_bytes: snap.outputBytes,
-        output_errors: snap.outputErrors,
-        batches: snap.batches,
-        scan_sec: snap.scanNanos / 1e9,
-        transform_sec: snap.transformNanos / 1e9,
-        output_sec: snap.outputNanos / 1e9,
-        backpressure_stalls: snap.backpressureStalls,
-        inflight_batches: snap.inflightBatches,
-        mem_resident: snap.memResident ?? undefined,
-        mem_allocated: snap.memAllocated ?? undefined,
-        mem_active: snap.memActive ?? undefined,
-      });
+    // Build a synthetic StatsResponse for MetricBadges and latency.
+    setStats({
+      uptime_sec: snap.uptimeSeconds,
+      rss_bytes: snap.rssBytes,
+      cpu_user_ms: snap.cpuUserMs,
+      cpu_sys_ms: snap.cpuSysMs,
+      input_lines: snap.inputLines,
+      input_bytes: snap.inputBytes,
+      output_lines: 0,
+      output_bytes: snap.outputBytes,
+      output_errors: snap.outputErrors,
+      batches: snap.batches,
+      scan_sec: snap.scanNanos / 1e9,
+      transform_sec: snap.transformNanos / 1e9,
+      output_sec: snap.outputNanos / 1e9,
+      backpressure_stalls: snap.backpressureStalls,
+      inflight_batches: snap.inflightBatches,
+      mem_resident: snap.memResident ?? undefined,
+      mem_allocated: snap.memAllocated ?? undefined,
+      mem_active: snap.memActive ?? undefined,
+    });
 
-      setTotalErrors(snap.outputErrors);
-      forceUpdate((n) => n + 1);
-    },
-    []
-  );
+    setTotalErrors(snap.outputErrors);
+    forceUpdate((n) => n + 1);
+  }, []);
 
   // Max traces to retain in the dashboard (prevents unbounded growth).
   const MAX_TRACES = 1000;
 
   // Process OTLP spans from WebSocket push (delta delivery).
   // Server sends only NEW completed spans + all current in-progress spans.
-  const processOtlpTraces = useCallback(
-    (doc: import("@otlpkit/otlpjson").OtlpTracesDocument) => {
-      const incoming = extractTraceRecords(doc);
-      setTraces((prev) => {
-        // Separate incoming into completed and in-progress.
-        const incomingCompleted: TraceRecord[] = [];
-        const incomingInProgress = new Map<string, TraceRecord>();
-        for (const t of incoming) {
-          if (t.lifecycle_state === "completed") {
-            incomingCompleted.push(t);
-          } else {
-            incomingInProgress.set(t.trace_id, t);
-          }
+  const processOtlpTraces = useCallback((doc: import("@otlpkit/otlpjson").OtlpTracesDocument) => {
+    const incoming = extractTraceRecords(doc);
+    setTraces((prev) => {
+      // Separate incoming into completed and in-progress.
+      const incomingCompleted: TraceRecord[] = [];
+      const incomingInProgress = new Map<string, TraceRecord>();
+      for (const t of incoming) {
+        if (t.lifecycle_state === "completed") {
+          incomingCompleted.push(t);
+        } else {
+          incomingInProgress.set(t.trace_id, t);
         }
-
-        // Start with all previously completed traces (stable, won't be re-sent).
-        const merged: TraceRecord[] = [];
-        for (const t of prev) {
-          if (t.lifecycle_state === "completed") {
-            merged.push(t);
-          }
-          // Drop old in-progress entries — they'll be replaced by the fresh set.
-        }
-
-        // Add new completed traces from this tick.
-        const seen = new Set(merged.map((t) => t.trace_id));
-        for (const t of incomingCompleted) {
-          if (!seen.has(t.trace_id)) {
-            merged.push(t);
-            seen.add(t.trace_id);
-          }
-        }
-
-        // Append fresh in-progress traces.
-        for (const t of incomingInProgress.values()) {
-          if (!seen.has(t.trace_id)) {
-            merged.push(t);
-          }
-        }
-
-        // Cap to most recent traces (in-progress always kept, oldest completed trimmed).
-        if (merged.length > MAX_TRACES) {
-          // Sort: in-progress first, then by start time descending.
-          merged.sort((a, b) => {
-            const aIp = a.lifecycle_state !== "completed" ? 1 : 0;
-            const bIp = b.lifecycle_state !== "completed" ? 1 : 0;
-            if (aIp !== bIp) return bIp - aIp;
-            return Number(BigInt(b.start_unix_ns) - BigInt(a.start_unix_ns));
-          });
-          merged.length = MAX_TRACES;
-        }
-
-        return merged;
-      });
-
-      // Compute batch latency from completed traces.
-      const done = incoming
-        .filter((t) => t.lifecycle_state === "completed" && Number(t.total_ns) > 0)
-        .slice(0, 50);
-      if (done.length > 0) {
-        const avgMs =
-          done.reduce((s, t) => s + (Number(t.total_ns ?? "0") || 0), 0) / done.length / 1e6;
-        const formatted =
-          avgMs >= 1000
-            ? `${(avgMs / 1000).toFixed(1)}s`
-            : avgMs >= 1
-              ? `${avgMs.toFixed(0)}ms`
-              : `${avgMs.toFixed(1)}ms`;
-        pushMetricSample(metricRegistryRef.current, "lat", avgMs, formatted);
       }
 
-      forceUpdate((n) => n + 1);
-    },
-    []
-  );
+      // Start with all previously completed traces (stable, won't be re-sent).
+      const merged: TraceRecord[] = [];
+      for (const t of prev) {
+        if (t.lifecycle_state === "completed") {
+          merged.push(t);
+        }
+        // Drop old in-progress entries — they'll be replaced by the fresh set.
+      }
+
+      // Add new completed traces from this tick.
+      const seen = new Set(merged.map((t) => t.trace_id));
+      for (const t of incomingCompleted) {
+        if (!seen.has(t.trace_id)) {
+          merged.push(t);
+          seen.add(t.trace_id);
+        }
+      }
+
+      // Append fresh in-progress traces.
+      for (const t of incomingInProgress.values()) {
+        if (!seen.has(t.trace_id)) {
+          merged.push(t);
+        }
+      }
+
+      // Cap to most recent traces (in-progress always kept, oldest completed trimmed).
+      if (merged.length > MAX_TRACES) {
+        // Sort: in-progress first, then by start time descending.
+        merged.sort((a, b) => {
+          const aIp = a.lifecycle_state !== "completed" ? 1 : 0;
+          const bIp = b.lifecycle_state !== "completed" ? 1 : 0;
+          if (aIp !== bIp) return bIp - aIp;
+          return Number(BigInt(b.start_unix_ns) - BigInt(a.start_unix_ns));
+        });
+        merged.length = MAX_TRACES;
+      }
+
+      return merged;
+    });
+
+    // Compute batch latency from completed traces.
+    const done = incoming
+      .filter((t) => t.lifecycle_state === "completed" && Number(t.total_ns) > 0)
+      .slice(0, 50);
+    if (done.length > 0) {
+      const avgMs =
+        done.reduce((s, t) => s + (Number(t.total_ns ?? "0") || 0), 0) / done.length / 1e6;
+      const formatted =
+        avgMs >= 1000
+          ? `${(avgMs / 1000).toFixed(1)}s`
+          : avgMs >= 1
+            ? `${avgMs.toFixed(0)}ms`
+            : `${avgMs.toFixed(1)}ms`;
+      pushMetricSample(metricRegistryRef.current, "lat", avgMs, formatted);
+    }
+
+    forceUpdate((n) => n + 1);
+  }, []);
 
   // ── Route WebSocket messages to the correct handler ────────────────────────
   useEffect(() => {
@@ -511,6 +503,9 @@ export function App() {
             if (statusData) {
               setStatus(statusData);
               setConnected(true);
+            } else {
+              setConnected(false);
+              setStatus(null);
             }
             backoff = pollMs;
           },
@@ -573,11 +568,11 @@ export function App() {
 
         <LogViewer />
 
-        {status?.pipelines.map((p) => (
+        {status?.pipelines.map((p, i) => (
           <PipelineView
             key={p.name}
             pipeline={p}
-            traces={traces.filter((t) => t.pipeline === p.name || t.pipeline === "")}
+            traces={traces.filter((t) => t.pipeline === p.name || (t.pipeline === "" && i === 0))}
             pollMs={pollMs}
             setPollMs={setPollMs}
           />

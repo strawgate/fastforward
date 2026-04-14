@@ -1,4 +1,3 @@
-import { useEffect, useRef, useState } from "preact/hooks";
 import type {
   OtlpDocument,
   OtlpLogsDocument,
@@ -11,6 +10,7 @@ import {
   isTracesDocument,
   parseOtlpJson,
 } from "@otlpkit/otlpjson";
+import { useEffect, useRef, useState } from "preact/hooks";
 
 /** Minimum delay between reconnect attempts (ms). */
 const RECONNECT_BASE_MS = 1_000;
@@ -31,7 +31,6 @@ export type OtlpMessage =
  * and exposed as `lastMessage`.
  *
  * Automatically reconnects with exponential backoff on close or error.
- * The caller should fall back to HTTP polling when `wsConnected` is false.
  */
 export function useTelemetryWebSocket(): {
   wsConnected: boolean;

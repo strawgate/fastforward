@@ -6,12 +6,8 @@
  * and our existing dashboard state (MetricSeries ring buffers, TraceRecord[]).
  */
 
-import {
-  collectMetricPoints,
-  collectSpans,
-  toNumber,
-} from "@otlpkit/otlpjson";
 import type { OtlpMetricsDocument, OtlpTracesDocument } from "@otlpkit/otlpjson";
+import { collectMetricPoints, collectSpans, toNumber } from "@otlpkit/otlpjson";
 import type { TraceRecord } from "../types";
 
 // ---------------------------------------------------------------------------
@@ -163,15 +159,13 @@ export function extractTraceRecords(doc: OtlpTracesDocument): TraceRecord[] {
     const startNs = root.startTimeUnixNano ?? "0";
     const endNs = root.endTimeUnixNano ?? "0";
     const durationNs =
-      BigInt(endNs) > BigInt(startNs)
-        ? (BigInt(endNs) - BigInt(startNs)).toString()
-        : "0";
+      BigInt(endNs) > BigInt(startNs) ? (BigInt(endNs) - BigInt(startNs)).toString() : "0";
 
     let scanNs = 0;
     let scanRows = 0;
     let transformNs = 0;
     let outputNs = 0;
-    let outputStartUnixNs = 0;
+    let outputStartUnixNs = "0";
     let workerId: number | null = null;
     let sendNs = 0;
     let recvNs = 0;
@@ -187,9 +181,7 @@ export function extractTraceRecords(doc: OtlpTracesDocument): TraceRecord[] {
       const kidStartNs = kid.startTimeUnixNano ?? "0";
       const kidEndNs = kid.endTimeUnixNano ?? "0";
       const kidDur =
-        BigInt(kidEndNs) > BigInt(kidStartNs)
-          ? Number(BigInt(kidEndNs) - BigInt(kidStartNs))
-          : 0;
+        BigInt(kidEndNs) > BigInt(kidStartNs) ? Number(BigInt(kidEndNs) - BigInt(kidStartNs)) : 0;
 
       switch (kid.name) {
         case "scan":
@@ -201,7 +193,7 @@ export function extractTraceRecords(doc: OtlpTracesDocument): TraceRecord[] {
           break;
         case "output":
           outputNs = kidDur;
-          outputStartUnixNs = Number(BigInt(kidStartNs));
+          outputStartUnixNs = kidStartNs;
           workerId = toNumber(kid.attributes.worker_id);
           sendNs = kidNum("send_ns");
           recvNs = kidNum("recv_ns");
@@ -259,13 +251,13 @@ export function extractTraceRecords(doc: OtlpTracesDocument): TraceRecord[] {
       scan_ns: String(scanNs),
       transform_ns: String(transformNs),
       output_ns: String(outputNs),
-      output_start_unix_ns: outputStartUnixNs > 0 ? String(outputStartUnixNs) : undefined,
+      output_start_unix_ns: outputStartUnixNs !== "0" ? outputStartUnixNs : undefined,
       scan_rows: scanRows,
       input_rows: inputRows,
       output_rows: outputRows,
       bytes_in: bytesIn,
       queue_wait_ns: queueWaitNs || "0",
-      worker_id: workerId,
+      worker_id: workerId ?? -1,
       send_ns: sendNs > 0 ? String(sendNs) : undefined,
       recv_ns: recvNs > 0 ? String(recvNs) : undefined,
       took_ms: tookMs > 0 ? tookMs : undefined,
