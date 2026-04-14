@@ -107,8 +107,12 @@ pub struct ColumnarBatchBuilder {
     plan: BatchPlan,
     lifecycle: RowLifecycle,
     columns: Vec<ColumnAccumulator>,
-    /// Shared buffer for string values written via `write_str`.
-    /// StringRef offsets point into this buffer.
+    /// Optional original input buffer for zero-copy string references.
+    /// `write_str_ref` offsets below `original_buf.len()` point here.
+    original_buf: Vec<u8>,
+    /// Generated buffer for string values written via `write_str`.
+    /// StringRef offsets at or above `original_buf.len()` point here
+    /// (shifted by original_buf.len()).
     string_buf: Vec<u8>,
 }
 
@@ -128,6 +132,7 @@ impl ColumnarBatchBuilder {
             plan,
             lifecycle: RowLifecycle::new(),
             columns,
+            original_buf: Vec::new(),
             string_buf: Vec::new(),
         }
     }
@@ -138,7 +143,22 @@ impl ColumnarBatchBuilder {
         for col in &mut self.columns {
             col.clear();
         }
+        self.original_buf.clear();
         self.string_buf.clear();
+    }
+
+    /// Set the original input buffer for zero-copy string references.
+    ///
+    /// Call after `begin_batch` and before any writes. `write_str_ref` with
+    /// offsets below `original_buf.len()` will reference this buffer at
+    /// materialization time.
+    pub fn set_original_buffer(&mut self, buf: &[u8]) {
+        debug_assert_eq!(self.lifecycle.state(), BuilderState::InBatch);
+        debug_assert!(
+            self.original_buf.is_empty(),
+            "set_original_buffer called twice in the same batch"
+        );
+        self.original_buf.extend_from_slice(buf);
     }
 
     /// Start a new row.
@@ -248,7 +268,11 @@ impl ColumnarBatchBuilder {
         if self.is_duplicate(handle) {
             return Ok(());
         }
-        let offset = u32::try_from(self.string_buf.len()).map_err(|_| {
+        // Generated string offsets are shifted by original_buf.len() so that
+        // the 2-buffer model can distinguish original vs generated at
+        // materialization time.
+        let raw_offset = self.original_buf.len() + self.string_buf.len();
+        let offset = u32::try_from(raw_offset).map_err(|_| {
             BuilderError::StringBufferOverflow {
                 buffer_len: self.string_buf.len(),
                 value_len: value.len(),
@@ -299,11 +323,10 @@ impl ColumnarBatchBuilder {
         debug_assert_eq!(self.lifecycle.state(), BuilderState::InBatch);
         let num_rows = self.lifecycle.row_count() as usize;
 
-        // Detached mode: string_buf is the "generated" buffer, no original.
         // utf8_trusted: true because write_str takes &str (Rust guarantees UTF-8)
         // and write_str_ref is only used with scanner-validated buffers.
         let mode = FinalizationMode::Detached {
-            original_buf: &[],
+            original_buf: &self.original_buf,
             generated_buf: &self.string_buf,
             utf8_trusted: true,
         };
@@ -867,6 +890,68 @@ mod tests {
             result.is_err(),
             "finish_batch should fail for out-of-bounds StringRef"
         );
+    }
+
+    #[test]
+    fn zero_copy_original_buffer_round_trip() {
+        let input = b"helloworld";
+        let mut plan = BatchPlan::new();
+        let a = plan.declare_planned("a", FieldKind::Utf8View).unwrap();
+        let b_h = plan.declare_planned("b", FieldKind::Utf8View).unwrap();
+        let mut b = ColumnarBatchBuilder::new(plan);
+
+        b.begin_batch();
+        b.set_original_buffer(input);
+        b.begin_row();
+        b.write_str_ref(a, StringRef { offset: 0, len: 5 });
+        b.write_str_ref(b_h, StringRef { offset: 5, len: 5 });
+        b.end_row();
+        b.begin_row();
+        b.write_str_ref(a, StringRef { offset: 5, len: 5 });
+        b.write_str_ref(b_h, StringRef { offset: 0, len: 5 });
+        b.end_row();
+
+        let batch = b.finish_batch().unwrap();
+        assert_eq!(batch.num_rows(), 2);
+        let col_a = batch.column_by_name("a").unwrap().as_string::<i32>();
+        let col_b = batch.column_by_name("b").unwrap().as_string::<i32>();
+        assert_eq!(col_a.value(0), "hello");
+        assert_eq!(col_a.value(1), "world");
+        assert_eq!(col_b.value(0), "world");
+        assert_eq!(col_b.value(1), "hello");
+    }
+
+    #[test]
+    fn mixed_zero_copy_and_generated_strings() {
+        let input = b"from-input";
+        let mut plan = BatchPlan::new();
+        let ref_field = plan
+            .declare_planned("ref_field", FieldKind::Utf8View)
+            .unwrap();
+        let gen_field = plan
+            .declare_planned("gen_field", FieldKind::Utf8View)
+            .unwrap();
+        let mut b = ColumnarBatchBuilder::new(plan);
+
+        b.begin_batch();
+        b.set_original_buffer(input);
+        b.begin_row();
+        b.write_str_ref(ref_field, StringRef { offset: 0, len: 10 });
+        b.write_str(gen_field, "generated-value").unwrap();
+        b.end_row();
+        b.begin_row();
+        b.write_str(gen_field, "another-gen").unwrap();
+        b.write_str_ref(ref_field, StringRef { offset: 5, len: 5 });
+        b.end_row();
+
+        let batch = b.finish_batch().unwrap();
+        assert_eq!(batch.num_rows(), 2);
+        let r = batch.column_by_name("ref_field").unwrap().as_string::<i32>();
+        let g = batch.column_by_name("gen_field").unwrap().as_string::<i32>();
+        assert_eq!(r.value(0), "from-input");
+        assert_eq!(r.value(1), "input");
+        assert_eq!(g.value(0), "generated-value");
+        assert_eq!(g.value(1), "another-gen");
     }
 
     // -----------------------------------------------------------------------
