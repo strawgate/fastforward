@@ -26,10 +26,9 @@
 //! Use DataFusion's `json()` / `json_str()` UDFs to extract specific fields
 //! from `acct_json` in a subsequent SQL transform.
 //!
-//! ## Config (not yet wired — call `HttpEnrichProcessor::new` directly)
+//! ## Config
 //!
 //! ```yaml
-//! # Planned config schema:
 //! processors:
 //!   - type: http_enrich
 //!     source_column: customer_id
@@ -281,8 +280,8 @@ impl HttpEnrichProcessor {
         let concurrency = self.config.max_concurrency.clamp(1, 64);
 
         for chunk in keys.chunks(concurrency) {
-            // Keep a reference to the chunk keys so we can recover them on panic.
             let chunk_keys: Vec<&str> = chunk.iter().map(String::as_str).collect();
+            let results_before = all_results.len();
 
             std::thread::scope(|s| {
                 let handles: Vec<_> = chunk_keys
@@ -308,13 +307,15 @@ impl HttpEnrichProcessor {
                     }
                 }
 
-                // Check for any keys missing from results (due to panicked threads).
-                let result_keys: HashSet<&str> =
-                    all_results.iter().map(|(k, _)| k.as_str()).collect();
+                // Check this chunk's results only for missing keys (panicked threads).
+                let chunk_result_keys: HashSet<&str> = all_results[results_before..]
+                    .iter()
+                    .map(|(k, _)| k.as_str())
+                    .collect();
                 let missing: Vec<String> = chunk_keys
                     .iter()
-                    .filter(|k| !result_keys.contains(**k))
-                    .map(ToString::to_string)
+                    .filter(|k| !chunk_result_keys.contains(**k))
+                    .map(|k| (*k).to_owned())
                     .collect();
                 for key in missing {
                     all_results.push((
@@ -346,6 +347,19 @@ impl Processor for HttpEnrichProcessor {
         let num_rows = batch.num_rows();
         let json_col_name = format!("{}_json", self.config.prefix);
         let status_col_name = format!("{}_status", self.config.prefix);
+
+        // Reject duplicate output column names early.
+        let schema = batch.schema();
+        if schema.column_with_name(&json_col_name).is_some() {
+            return Err(ProcessorError::Permanent(format!(
+                "http_enrich: output column '{json_col_name}' already exists in batch"
+            )));
+        }
+        if schema.column_with_name(&status_col_name).is_some() {
+            return Err(ProcessorError::Permanent(format!(
+                "http_enrich: output column '{status_col_name}' already exists in batch"
+            )));
+        }
 
         if num_rows == 0 {
             // Return an empty batch with the correct enriched schema so

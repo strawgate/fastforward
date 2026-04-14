@@ -270,7 +270,19 @@ fn append_pre_built_columns(
     let match_name = format!("{prefix}_match");
     let cat_name = format!("{prefix}_category");
 
-    let mut fields = batch.schema().fields().to_vec();
+    let schema = batch.schema();
+    if schema.column_with_name(&match_name).is_some() {
+        return Err(ProcessorError::Permanent(format!(
+            "blocklist: output column '{match_name}' already exists in batch"
+        )));
+    }
+    if schema.column_with_name(&cat_name).is_some() {
+        return Err(ProcessorError::Permanent(format!(
+            "blocklist: output column '{cat_name}' already exists in batch"
+        )));
+    }
+
+    let mut fields = schema.fields().to_vec();
     fields.push(Arc::new(Field::new(&match_name, DataType::Boolean, false)));
     fields.push(Arc::new(Field::new(&cat_name, DataType::Utf8, true)));
 

@@ -11,6 +11,7 @@ pub mod udf {
     pub mod geo_lookup {
         pub use logfwd_transform::udf::geo_lookup::MmdbDatabase;
     }
+    /// CSV IP-range geo database backend for runtime pipeline wiring.
     pub use logfwd_transform::udf::CsvRangeDatabase;
 }
 

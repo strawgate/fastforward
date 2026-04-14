@@ -2015,7 +2015,9 @@ mod tests {
     #[cfg(unix)] // Windows env vars are case-insensitive; both names map to one var.
     fn env_table_rejects_duplicate_columns_after_lowercasing() {
         // Set env vars that collide after lowercasing the suffix.
-        // SAFETY: test is run single-threaded (--test-threads=1).
+        // SAFETY: test is run single-threaded via `cargo nextest` (which isolates
+        // each test in its own process) or `--test-threads=1`. The vars use a
+        // unique prefix (LOGFWD_DUPTEST_) to avoid collisions with real env.
         unsafe {
             std::env::set_var("LOGFWD_DUPTEST_FOO", "a");
             std::env::set_var("LOGFWD_DUPTEST_foo", "b");

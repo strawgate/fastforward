@@ -173,6 +173,11 @@ impl Pipeline {
                                     }
                                 }
                             });
+                            } else {
+                                tracing::warn!(
+                                    path = %path.display(),
+                                    "refresh_interval ignored: no active Tokio runtime"
+                                );
                             }
 
                             geo_database = Some(
@@ -250,6 +255,11 @@ impl Pipeline {
                                         }
                                     }
                                 });
+                            } else {
+                                tracing::warn!(
+                                    table = %name,
+                                    "refresh_interval ignored: no active Tokio runtime"
+                                );
                             }
                         }
                         enrichment_tables.push(table);
@@ -298,6 +308,11 @@ impl Pipeline {
                                         }
                                     }
                                 });
+                            } else {
+                                tracing::warn!(
+                                    table = %name,
+                                    "refresh_interval ignored: no active Tokio runtime"
+                                );
                             }
                         }
                         enrichment_tables.push(table);
@@ -359,6 +374,11 @@ impl Pipeline {
                                         }
                                     }
                                 });
+                            } else {
+                                tracing::warn!(
+                                    table = %name,
+                                    "refresh_interval ignored: no active Tokio runtime"
+                                );
                             }
                         }
                         enrichment_tables.push(table);

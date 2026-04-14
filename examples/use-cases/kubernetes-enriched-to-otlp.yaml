@@ -39,18 +39,24 @@ pipelines:
         h.hostname,
         h.os_type,
         n.primary_ipv4 AS host_ip,
+        p.agent_version,
         c.container_runtime,
         -- k8s_cluster_info is collector-scoped (logfwd's own pod).
         -- For per-log pod namespace, use k8s_path.namespace instead.
         k.node_name    AS k8s_node,
         k.cluster_name AS k8s_cluster,
+        kp.namespace   AS k8s_namespace,
+        kp.pod_name    AS k8s_pod,
+        kp.container_name AS k8s_container,
         os.pretty_name AS os_name,
         lbl.environment
       FROM logs l
       CROSS JOIN host_info h
       CROSS JOIN network_info n
+      CROSS JOIN process_info p
       CROSS JOIN container_info c
       CROSS JOIN k8s_cluster_info k
+      LEFT JOIN k8s_path kp ON l._path = kp.path
       CROSS JOIN os_release os
       CROSS JOIN labels lbl
 
