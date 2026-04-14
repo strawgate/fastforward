@@ -414,14 +414,30 @@ fn native_reader_loop(
                 if let Some(ref cursor) = last_cursor {
                     match journal.seek_cursor(cursor) {
                         Ok(()) => {
-                            // If the cursor entry still exists, we're
-                            // positioned ON it (already emitted) and must
-                            // skip past it. If it was rotated out,
-                            // seek_cursor positioned us on the next closest
-                            // entry which hasn't been emitted yet — don't
-                            // skip it.
-                            if journal.test_cursor(cursor).unwrap_or(false) {
-                                let _ = journal.next();
+                            // seek_cursor sets up position but does NOT land
+                            // on an entry — must call next() first, which
+                            // returns the cursor entry (if it still exists)
+                            // or the next closest entry.
+                            match journal.next() {
+                                Ok(true) => {
+                                    if journal.test_cursor(cursor).unwrap_or(false) {
+                                        // On the cursor entry (already
+                                        // emitted). The drain loop's next()
+                                        // will advance to new entries.
+                                    } else {
+                                        // Cursor was rotated out; we landed
+                                        // on the first unread entry. Back up
+                                        // so the drain loop's next() returns
+                                        // it instead of skipping it.
+                                        let _ = journal.previous();
+                                    }
+                                }
+                                Ok(false) => {
+                                    // No entries at or after cursor.
+                                }
+                                Err(e) => {
+                                    tracing::warn!(error = %e, "sd_journal_next error during invalidate recovery");
+                                }
                             }
                         }
                         Err(e) => {
