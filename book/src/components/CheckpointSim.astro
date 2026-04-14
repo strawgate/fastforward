@@ -422,7 +422,7 @@
 
   // TLA+ callout
   var tlaEl = el('div', 'ck-tla');
-  tlaEl.innerHTML = '<span class="ck-tla-icon">\uD83D\uDD2C</span><div><b>Formally verified.</b> TLA+ spec <code>PipelineMachine.tla</code> proves <code>CommittedNeverAheadOfTerminalizedPrefix</code> \u2014 the checkpoint can never advance past an unresolved batch. This invariant holds across 70+ model-checked properties.</div>';
+  tlaEl.innerHTML = '<span class="ck-tla-icon">\uD83D\uDD2C</span><div><b>Formally verified.</b> TLA+ spec <code>PipelineMachine.tla</code> proves <code>CheckpointNeverAheadOfTerminalizedPrefix</code> \u2014 the checkpoint can never advance past an unresolved batch. This invariant holds across 70+ model-checked properties.</div>';
   root.appendChild(tlaEl);
 
   // --- Callout system ---

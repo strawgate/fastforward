@@ -45,8 +45,10 @@ create_batch() → BatchTicket<Queued>
        └── fail()   → BatchTicket<Queued> ← transient failure, retry
 ```
 
-The `#[must_use]` annotation on `begin_send()` means dropping a `Sending` ticket without
-resolving it is a compiler warning — preventing silent batch loss.
+The `#[must_use]` annotation on `begin_send()` warns if the returned `Sending` ticket is
+ignored at the call site. The deeper enforcement comes from the **typestate pattern**: the
+`Sending` ticket's self-consuming transition methods (`ack()`, `reject()`, `fail()`) are the
+only way to resolve it — you cannot drop a `Sending` ticket without calling one of these.
 
 ## Why rejection advances the checkpoint
 
@@ -65,11 +67,11 @@ The TLA+ specification `PipelineMachine.tla` proves 70+ properties including:
 
 | Property | What it guarantees |
 |----------|--------------------|
-| `CommittedNeverAheadOfTerminalizedPrefix` | Checkpoint never skips an unresolved batch |
+| `CheckpointNeverAheadOfTerminalizedPrefix` | Checkpoint never skips an unresolved batch |
 | `DrainCompleteness` | `stop()` is unreachable unless all batches resolved |
-| `CheckpointMonotonicity` | Committed offset never decreases |
-| `BatchIdUniqueness` | No two batches share an ID |
-| `Liveness` | Every in-flight batch eventually resolves (ack/reject/abandon) |
+| `CommittedMonotonic` | Committed offset never decreases |
+| `CheckpointOrderingInvariant` | Every sent batch below the committed watermark is terminally resolved |
+| `NoBatchLeftBehind` | Every in-flight batch eventually resolves (ack/reject/abandon) |
 
 The Rust implementation mirrors the TLA+ spec field-by-field — `committed`, `in_flight`,
 and `pending_acks` map directly to the specification variables.
