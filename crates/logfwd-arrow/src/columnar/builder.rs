@@ -15,7 +15,9 @@
 
 use std::sync::Arc;
 
-use arrow::array::{ArrayRef, BooleanArray, Float64Array, Int64Array, StringViewArray};
+use arrow::array::{
+    ArrayRef, BooleanArray, Float64Array, Int64Array, StringArray, StringViewArray,
+};
 use arrow::buffer::{Buffer, NullBuffer};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::error::ArrowError;
@@ -441,7 +443,7 @@ impl ColumnarBatchBuilder {
                     // no values were written). Dynamic fields with no data are
                     // omitted — this matches StreamingBuilder behavior.
                     if let FieldSchemaMode::Planned(kind) = field_mode {
-                        let (field, array) = null_column(name, *kind, num_rows);
+                        let (field, array) = null_column(name, *kind, num_rows, mode.utf8_trusted);
                         schema_fields.push(field);
                         arrays.push(array);
                     }
@@ -470,7 +472,12 @@ impl ColumnarBatchBuilder {
 // ---------------------------------------------------------------------------
 
 /// Create an all-null column of the appropriate Arrow type for a planned field.
-fn null_column(name: &str, kind: FieldKind, num_rows: usize) -> (Field, ArrayRef) {
+fn null_column(
+    name: &str,
+    kind: FieldKind,
+    num_rows: usize,
+    utf8_trusted: bool,
+) -> (Field, ArrayRef) {
     match kind {
         FieldKind::Int64 => {
             let nulls = NullBuffer::new_null(num_rows);
@@ -488,8 +495,13 @@ fn null_column(name: &str, kind: FieldKind, num_rows: usize) -> (Field, ArrayRef
             (Field::new(name, DataType::Boolean, true), Arc::new(arr))
         }
         FieldKind::Utf8View => {
-            let arr = StringViewArray::new_null(num_rows);
-            (Field::new(name, DataType::Utf8View, true), Arc::new(arr))
+            if utf8_trusted {
+                let arr = StringViewArray::new_null(num_rows);
+                (Field::new(name, DataType::Utf8View, true), Arc::new(arr))
+            } else {
+                let arr = StringArray::new_null(num_rows);
+                (Field::new(name, DataType::Utf8, true), Arc::new(arr))
+            }
         }
         FieldKind::BinaryView => {
             let arr = arrow::array::BinaryViewArray::new_null(num_rows);
@@ -964,7 +976,11 @@ mod tests {
         let batch = b.finish_batch().unwrap();
         let col = batch.column_by_name("x").unwrap();
         let arr = col.as_primitive::<Int64Type>();
-        assert_eq!(arr.value(0), 42, "correct-type write after wrong-type must succeed");
+        assert_eq!(
+            arr.value(0),
+            42,
+            "correct-type write after wrong-type must succeed"
+        );
     }
 
     // -----------------------------------------------------------------------

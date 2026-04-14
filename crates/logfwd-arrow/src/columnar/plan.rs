@@ -239,11 +239,12 @@ impl BatchPlan {
                 }),
             }
         } else {
-            debug_assert_eq!(
-                self.fields.len(),
-                self.num_planned,
-                "declare_planned called after resolve_dynamic"
-            );
+            if self.fields.len() != self.num_planned {
+                return Err(PlanError::ModeMismatch {
+                    field: name.to_string(),
+                    reason: "planned fields must be declared before any dynamic resolution",
+                });
+            }
             let handle = self.alloc_handle()?;
             let shared_name: Arc<str> = Arc::from(name);
             self.fields.push(FieldEntry {
@@ -557,5 +558,19 @@ mod tests {
         let h = plan.resolve_dynamic("level", FieldKind::Int64).unwrap();
         assert_eq!(h.index(), 2);
         assert_eq!(plan.len(), 3);
+    }
+
+    #[test]
+    fn declare_planned_after_dynamic_is_error() {
+        let mut plan = BatchPlan::new();
+        plan.declare_planned("ts", FieldKind::Int64).unwrap();
+        plan.resolve_dynamic("level", FieldKind::Utf8View).unwrap();
+        let err = plan
+            .declare_planned("msg", FieldKind::Utf8View)
+            .unwrap_err();
+        assert!(
+            matches!(err, PlanError::ModeMismatch { .. }),
+            "expected ModeMismatch, got {err:?}"
+        );
     }
 }
