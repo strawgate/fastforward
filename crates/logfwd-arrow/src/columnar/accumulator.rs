@@ -618,11 +618,11 @@ fn build_string_view_trusted(
             // Validate UTF-8 for all referenced string bytes in debug builds.
             let mut ok = true;
             for &(_, sref) in facts {
-                if let Ok(bytes) = read_str_bytes(original_buf, generated_buf, original_len, sref) {
-                    if std::str::from_utf8(bytes).is_err() {
-                        ok = false;
-                        break;
-                    }
+                if let Ok(bytes) = read_str_bytes(original_buf, generated_buf, original_len, sref)
+                    && std::str::from_utf8(bytes).is_err()
+                {
+                    ok = false;
+                    break;
                 }
             }
             ok

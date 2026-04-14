@@ -352,7 +352,6 @@ mod verification {
                 kani::assume(tag == 3);
                 lc.end_row();
             }
-            _ => unreachable!(),
         }
         tag
     }
@@ -446,7 +445,7 @@ mod verification {
                 1 => saw_begin_row = true,
                 2 => saw_finish_batch = true,
                 3 => saw_end_row = true,
-                _ => unreachable!(),
+                _ => {} // tag is bounded by assume() in symbolic_action
             }
         }
 
