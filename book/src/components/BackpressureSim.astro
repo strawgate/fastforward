@@ -241,18 +241,26 @@
 
   /* File log viz */
   .bp-file-viz {
-    font-family: var(--sl-font-mono, monospace); font-size: 0.51rem;
+    font-family: var(--sl-font-mono, monospace); font-size: 0.5rem;
     background: color-mix(in srgb, var(--bp-text) 6%, transparent);
     border-radius: 3px; padding: 0.25rem 0.4rem;
-    min-height: 56px; line-height: 1.55; overflow: hidden;
+    line-height: 1.6; overflow: hidden;
   }
-  .bp-file-old { color: var(--bp-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .bp-file-old {
+    color: var(--bp-muted); white-space: nowrap; overflow: hidden;
+    text-overflow: ellipsis; min-height: 1.6em;
+  }
+  .bp-file-cursor-row {
+    color: var(--bp-green); font-weight: 600;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .bp-file-cursor-row.stalled {
+    color: var(--bp-red); animation: bp-blocked-pulse 2s ease-in-out infinite;
+  }
   .bp-file-more {
-    color: var(--bp-amber); text-align: center; font-size: 0.47rem;
-    font-style: italic; padding: 0.05rem 0; min-height: 1.3em;
+    color: var(--bp-amber); font-size: 0.46rem; font-style: italic;
+    min-height: 1.4em; padding-top: 0.05rem;
   }
-  .bp-file-cursor { color: var(--bp-green); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .bp-file-cursor.stalled { color: var(--bp-red); animation: bp-blocked-pulse 2s ease-in-out infinite; }
 
   /* UDP mini */
   .bp-mini-udp { display: flex; gap: 0.5rem; align-items: flex-end; }
@@ -344,9 +352,31 @@
   var otlpBatchNum = 0, otlpAccepted = 0, otlpRejected = 0;
 
   var srcNameEl, srcVizEl, srcTabBtns;
-  var fileMiniMore, fileMiniCursor;
+  var fileLogRow1, fileLogRow2, fileCursorRow, fileMiniMore;
+  var filePrevRead = 0, fileLogBuf = ['', ''];
+  var FILE_LOG_MSGS = [
+    'INFO  checkpoint flushed',
+    'WARN  slow consumer backoff',
+    'INFO  batch queued ok',
+    'DEBUG scan: 512 rows',
+    'INFO  SQL transform ok',
+    'DEBUG inotify IN_MODIFY',
+    'INFO  output dispatch ok',
+    'WARN  pipeline 8/16 full',
+    'INFO  flush complete',
+    'DEBUG poll() returned 1',
+  ];
   var udpMiniFill, udpMiniDropCount;
   var otlpMiniLogEl;
+
+  function fakeLogLine(n) {
+    var t = 8 * 3600 + 23 * 60 + 40 + Math.floor(n / 4);
+    var h = Math.floor(t / 3600) % 24;
+    var m = Math.floor((t % 3600) / 60);
+    var s = t % 60;
+    var ts = (h < 10 ? '0' : '') + h + ':' + (m < 10 ? '0' : '') + m + ':' + (s < 10 ? '0' : '') + s;
+    return ts + ' ' + FILE_LOG_MSGS[n % FILE_LOG_MSGS.length];
+  }
 
   // --- Build control bar ---
   var controls = el('div', 'bp-controls');
@@ -498,19 +528,19 @@
 
   function buildSourceViz() {
     srcVizEl.innerHTML = '';
-    fileMiniMore = null; fileMiniCursor = null;
+    fileLogRow1 = null; fileLogRow2 = null; fileCursorRow = null; fileMiniMore = null;
+    filePrevRead = 0; fileLogBuf = ['', ''];
     udpMiniFill = null; udpMiniDropCount = null;
     otlpMiniLogEl = null;
 
     if (sourceMode === 'file') {
       var viz = el('div', 'bp-file-viz');
-      var l1 = el('div', 'bp-file-old'); l1.textContent = '[10:23:41] ERROR db conn refused';
-      var l2 = el('div', 'bp-file-old'); l2.textContent = '[10:23:42] WARN  retry attempt 1';
+      fileLogRow1 = el('div', 'bp-file-old');
+      fileLogRow2 = el('div', 'bp-file-old');
+      fileCursorRow = el('div', 'bp-file-cursor-row');
       fileMiniMore = el('div', 'bp-file-more');
-      fileMiniCursor = el('div', 'bp-file-cursor');
-      fileMiniCursor.textContent = '\u25B6 [10:23:42] INFO  watching...';
-      viz.appendChild(l1); viz.appendChild(l2);
-      viz.appendChild(fileMiniMore); viz.appendChild(fileMiniCursor);
+      viz.appendChild(fileLogRow1); viz.appendChild(fileLogRow2);
+      viz.appendChild(fileCursorRow); viz.appendChild(fileMiniMore);
       srcVizEl.appendChild(viz);
     } else if (sourceMode === 'udp') {
       var row = el('div', 'bp-mini-udp');
@@ -543,19 +573,31 @@
 
   function updateSourceViz() {
     if (sourceMode === 'file') {
-      if (!fileMiniMore) return;
+      if (!fileCursorRow) return;
+      var readInt = Math.floor(fileRead);
+      // Scroll the log buffer forward as logfwd reads new lines (only when not blocked)
+      if (!ioBlocked) {
+        while (readInt > filePrevRead) {
+          fileLogBuf[0] = fileLogBuf[1];
+          fileLogBuf[1] = fakeLogLine(filePrevRead + 1);
+          filePrevRead++;
+        }
+      }
+      fileLogRow1.textContent = fileLogBuf[0];
+      fileLogRow2.textContent = fileLogBuf[1];
       var gap = Math.round(fileWritten - fileRead);
-      var readLine = Math.round(fileRead);
-      var sec = readLine % 60;
-      var secStr = sec < 10 ? '0' + sec : '' + sec;
-      if (gap <= 0) {
-        fileMiniMore.textContent = '';
-        fileMiniCursor.className = 'bp-file-cursor';
-        fileMiniCursor.textContent = '\u25B6 [10:23:' + secStr + '] INFO  offset ' + readLine;
+      if (ioBlocked && gap > 0) {
+        fileCursorRow.className = 'bp-file-cursor-row stalled';
+        fileCursorRow.textContent = '\u25B6 ' + fakeLogLine(readInt) + ' \u2190 stalled';
+        fileMiniMore.textContent = '\u2026 +' + gap + ' unread';
+      } else if (gap > 0) {
+        fileCursorRow.className = 'bp-file-cursor-row';
+        fileCursorRow.textContent = '\u25B6 ' + fakeLogLine(readInt);
+        fileMiniMore.textContent = '\u2026 +' + gap + ' catching up';
       } else {
-        fileMiniMore.textContent = '\u2026 ' + gap + ' more line' + (gap === 1 ? '' : 's') + ' \u2026';
-        fileMiniCursor.className = 'bp-file-cursor' + (ioBlocked ? ' stalled' : '');
-        fileMiniCursor.textContent = '\u25B6 offset ' + readLine + (ioBlocked ? ' \u2014 stalled' : ' \u2190 reading');
+        fileCursorRow.className = 'bp-file-cursor-row';
+        fileCursorRow.textContent = '\u25B6 ' + fakeLogLine(readInt);
+        fileMiniMore.textContent = '';
       }
     } else if (sourceMode === 'udp') {
       if (!udpMiniFill) return;
@@ -746,6 +788,7 @@
 
     // I/O worker produces into I/O-CPU channel
     ioBlocked = ioCpuFill >= IO_CPU_CAP;
+    var ioCpuFillSnap = ioCpuFill; // snapshot pre-refill for stage coloring
     if (!ioBlocked) {
       ioCpuFill += Math.min(IO_RATE, IO_CPU_CAP - ioCpuFill);
     }
@@ -780,13 +823,13 @@
     checkTransitions();
 
     // Render pipeline stages
-    // Update source stage coloring inline (no slot bars — viz in srcVizEl)
-    var ioPct = ioCpuFill / IO_CPU_CAP;
-    if (ioPct >= 1.0) {
+    // Update source stage coloring — use pre-refill snapshot so recovery shows correctly
+    var ioPctSnap = ioCpuFillSnap / IO_CPU_CAP;
+    if (ioBlocked) {
       ioStage.el.className = 'bp-stage blocked';
       ioStage.tag.className = 'bp-stage-tag bp-tag-blocked'; ioStage.tag.textContent = 'BLOCKED';
       ioStage.actFill.className = 'bp-activity-fill blocked';
-    } else if (ioPct > 0.5) {
+    } else if (ioPctSnap > 0.5) {
       ioStage.el.className = 'bp-stage pressured';
       ioStage.tag.className = 'bp-stage-tag bp-tag-slow'; ioStage.tag.textContent = 'PRESSURE';
       ioStage.actFill.className = 'bp-activity-fill flowing pressured';
