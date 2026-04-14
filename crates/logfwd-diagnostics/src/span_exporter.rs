@@ -103,7 +103,11 @@ impl SpanBuffer {
 
     /// Returns true if the buffer contains no spans.
     pub fn is_empty(&self) -> bool {
-        self.len() == 0
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .buf
+            .is_empty()
     }
 
     /// Returns spans added since the cursor `since`, which tracks

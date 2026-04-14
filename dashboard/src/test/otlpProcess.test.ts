@@ -1,71 +1,10 @@
-import type { OtlpMetricsDocument, OtlpTracesDocument } from "@otlpkit/otlpjson";
+import type { OtlpTracesDocument } from "@otlpkit/otlpjson";
 import { describe, expect, it } from "vitest";
-import {
-  extractMetricSnapshot,
-  extractTraceRecords,
-  extractUptimeSeconds,
-} from "../lib/otlpProcess";
+import { extractTraceRecords } from "../lib/otlpProcess";
 
 // ---------------------------------------------------------------------------
 // Helpers to build OTLP JSON documents
 // ---------------------------------------------------------------------------
-
-function metricsDoc(metrics: Array<Record<string, unknown>>): OtlpMetricsDocument {
-  return {
-    resourceMetrics: [
-      {
-        resource: { attributes: [] },
-        scopeMetrics: [
-          {
-            scope: { name: "logfwd.diagnostics" },
-            metrics,
-          },
-        ],
-      },
-    ],
-  } as unknown as OtlpMetricsDocument;
-}
-
-function gauge(name: string, value: number, attrs?: Record<string, unknown>) {
-  return {
-    name,
-    gauge: {
-      dataPoints: [
-        {
-          timeUnixNano: "1000000000",
-          asDouble: value,
-          attributes: attrs
-            ? Object.entries(attrs).map(([k, v]) => ({
-                key: k,
-                value: { stringValue: String(v) },
-              }))
-            : [],
-        },
-      ],
-    },
-  };
-}
-
-function sum(name: string, value: number, attrs?: Record<string, unknown>) {
-  return {
-    name,
-    sum: {
-      isMonotonic: true,
-      dataPoints: [
-        {
-          timeUnixNano: "1000000000",
-          asDouble: value,
-          attributes: attrs
-            ? Object.entries(attrs).map(([k, v]) => ({
-                key: k,
-                value: { stringValue: String(v) },
-              }))
-            : [],
-        },
-      ],
-    },
-  };
-}
 
 function tracesDoc(spans: Array<Record<string, unknown>>): OtlpTracesDocument {
   return {
@@ -110,99 +49,6 @@ function childSpan(name: string, overrides: Record<string, unknown> = {}) {
     ...overrides,
   };
 }
-
-// ---------------------------------------------------------------------------
-// extractMetricSnapshot
-// ---------------------------------------------------------------------------
-
-describe("extractMetricSnapshot", () => {
-  it("extracts basic counters from OTLP metrics", () => {
-    const doc = metricsDoc([
-      sum("logfwd.input_lines", 100),
-      sum("logfwd.input_bytes", 2048),
-      sum("logfwd.output_bytes", 1024),
-      sum("logfwd.output_errors", 3),
-      sum("logfwd.batches", 10),
-      gauge("logfwd.inflight_batches", 2),
-      sum("logfwd.backpressure_stalls", 1),
-      gauge("logfwd.uptime_seconds", 42.5),
-    ]);
-
-    const snap = extractMetricSnapshot(doc);
-    expect(snap.inputLines).toBe(100);
-    expect(snap.inputBytes).toBe(2048);
-    expect(snap.outputBytes).toBe(1024);
-    expect(snap.outputErrors).toBe(3);
-    expect(snap.batches).toBe(10);
-    expect(snap.inflightBatches).toBe(2);
-    expect(snap.backpressureStalls).toBe(1);
-    expect(snap.uptimeSeconds).toBe(42.5);
-  });
-
-  it("extracts stage nanos by attribute", () => {
-    const doc = metricsDoc([
-      sum("logfwd.stage_nanos", 500, { stage: "scan" }),
-      sum("logfwd.stage_nanos", 300, { stage: "transform" }),
-      sum("logfwd.stage_nanos", 200, { stage: "output" }),
-    ]);
-
-    const snap = extractMetricSnapshot(doc);
-    expect(snap.scanNanos).toBe(500);
-    expect(snap.transformNanos).toBe(300);
-    expect(snap.outputNanos).toBe(200);
-  });
-
-  it("extracts process metrics", () => {
-    const doc = metricsDoc([
-      gauge("process.cpu.user_ms", 1500),
-      gauge("process.cpu.sys_ms", 300),
-      gauge("process.memory.rss", 50_000_000),
-      gauge("process.memory.resident", 80_000_000),
-      gauge("process.memory.allocated", 45_000_000),
-      gauge("process.memory.active", 40_000_000),
-    ]);
-
-    const snap = extractMetricSnapshot(doc);
-    expect(snap.cpuUserMs).toBe(1500);
-    expect(snap.cpuSysMs).toBe(300);
-    expect(snap.rssBytes).toBe(50_000_000);
-    expect(snap.memResident).toBe(80_000_000);
-    expect(snap.memAllocated).toBe(45_000_000);
-    expect(snap.memActive).toBe(40_000_000);
-  });
-
-  it("returns null for missing process metrics", () => {
-    const doc = metricsDoc([gauge("logfwd.uptime_seconds", 10)]);
-    const snap = extractMetricSnapshot(doc);
-    expect(snap.cpuUserMs).toBeNull();
-    expect(snap.cpuSysMs).toBeNull();
-    expect(snap.rssBytes).toBeNull();
-    expect(snap.memResident).toBeNull();
-  });
-
-  it("handles empty metrics document", () => {
-    const doc = metricsDoc([]);
-    const snap = extractMetricSnapshot(doc);
-    expect(snap.inputLines).toBe(0);
-    expect(snap.uptimeSeconds).toBe(0);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// extractUptimeSeconds
-// ---------------------------------------------------------------------------
-
-describe("extractUptimeSeconds", () => {
-  it("returns uptime from gauge", () => {
-    const doc = metricsDoc([gauge("logfwd.uptime_seconds", 123.4)]);
-    expect(extractUptimeSeconds(doc)).toBe(123.4);
-  });
-
-  it("returns 0 when no uptime metric", () => {
-    const doc = metricsDoc([gauge("logfwd.input_lines", 5)]);
-    expect(extractUptimeSeconds(doc)).toBe(0);
-  });
-});
 
 // ---------------------------------------------------------------------------
 // extractTraceRecords

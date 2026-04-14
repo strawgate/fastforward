@@ -1,17 +1,5 @@
 // API response types from logfwd diagnostics server
 
-export type MetricId =
-  | "lps"
-  | "bps"
-  | "obps"
-  | "err"
-  | "cpu"
-  | "mem"
-  | "lat"
-  | "inflight"
-  | "batches"
-  | "stalls";
-
 export interface ComponentData {
   name: string;
   type: string;

@@ -872,7 +872,7 @@ fn build_traces_body(state: &DiagnosticsState) -> String {
         }
         // In-progress batches — live entries shown before completion.
         for pm in &state.pipelines {
-            if let Ok(active) = pm.active_batches.lock() {
+            let active = pm.active_batches.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 for (id, b) in active.iter() {
                     if !first {
                         out.push(',');
@@ -923,7 +923,6 @@ fn build_traces_body(state: &DiagnosticsState) -> String {
                         state_start = b.stage_start_unix_ns,
                     );
                 }
-            }
         }
         out.push_str("]}");
         out
@@ -1072,6 +1071,7 @@ async fn sampler_loop(state: Arc<DiagnosticsState>) {
     let mut ws_last_log_count: usize = 0;
     let mut ws_last_span_count: usize = 0;
     let mut prev_health = std::collections::HashMap::new();
+    let mut prev_snapshot: Option<super::telemetry::MetricSnapshot> = None;
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
@@ -1099,14 +1099,32 @@ async fn sampler_loop(state: Arc<DiagnosticsState>) {
         // Push OTLP JSON telemetry to WebSocket clients.
         // Three separate messages: resourceMetrics, resourceSpans, resourceLogs.
         if state.telemetry_tx.receiver_count() > 0 {
-            let metrics = super::telemetry::sample_metrics(
+            let mut metrics = super::telemetry::sample_metrics(
                 &state.pipelines,
                 state.memory_stats_fn,
                 state.start_time.elapsed(),
             );
+
+            // Append pre-computed rate gauges (counter diffs → dashboard-ready rates).
+            if let Some(prev) = &prev_snapshot {
+                let rate_gauges = super::telemetry::compute_rate_gauges(&metrics, prev);
+                metrics.extend(rate_gauges);
+            }
+
             let _ = state
                 .telemetry_tx
                 .send(super::telemetry::metrics_to_otlp_json(&metrics));
+
+            // Store current snapshot for next tick's rate computation.
+            // Re-sample (cheap) to get a clean snapshot without the rate gauges mixed in.
+            prev_snapshot = Some(super::telemetry::MetricSnapshot {
+                points: super::telemetry::sample_metrics(
+                    &state.pipelines,
+                    state.memory_stats_fn,
+                    state.start_time.elapsed(),
+                ),
+                time: Instant::now(),
+            });
 
             let spans = super::telemetry::collect_new_spans(
                 state.trace_buf.as_ref(),

@@ -9,7 +9,7 @@ use std::fmt::Write;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::metrics::PipelineMetrics;
 use super::models::MemoryStats;
@@ -29,6 +29,12 @@ pub(super) struct MetricPoint {
     pub name: &'static str,
     pub value: MetricValue,
     pub attributes: Vec<(&'static str, String)>,
+}
+
+/// A snapshot of metric points with a timestamp, used for rate computation.
+pub(super) struct MetricSnapshot {
+    pub points: Vec<MetricPoint>,
+    pub time: Instant,
 }
 
 pub(super) struct SpanRecord {
@@ -231,6 +237,110 @@ pub(super) fn sample_metrics(
     }
 
     pts
+}
+
+// Rate gauge definitions: (counter_name, rate_gauge_name, multiplier).
+// multiplier converts from "per second" to the desired unit (e.g. 60 for per minute).
+const RATE_DEFS: &[(&str, &str, f64)] = &[
+    ("logfwd.input_lines", "logfwd.input_lines_per_sec", 1.0),
+    ("logfwd.input_bytes", "logfwd.input_bytes_per_sec", 1.0),
+    ("logfwd.output_bytes", "logfwd.output_bytes_per_sec", 1.0),
+    ("logfwd.output_errors", "logfwd.output_errors_per_sec", 1.0),
+    ("logfwd.batches", "logfwd.batches_per_min", 60.0),
+    (
+        "logfwd.backpressure_stalls",
+        "logfwd.backpressure_stalls_per_sec",
+        1.0,
+    ),
+];
+
+/// Compute pre-computed rate gauges by diffing the current snapshot against a
+/// previous one. Returns gauge `MetricPoint`s for the dashboard's chart layer.
+///
+/// CPU percent is derived specially: `(Δcpu_user_ms + Δcpu_sys_ms) / Δt_ms / 10`.
+pub(super) fn compute_rate_gauges(
+    current: &[MetricPoint],
+    prev: &MetricSnapshot,
+) -> Vec<MetricPoint> {
+    let dt = prev.time.elapsed().as_secs_f64();
+    if dt <= 0.0 {
+        return Vec::new();
+    }
+
+    // Build a lookup from (name, pipeline_attr) → Sum value for the previous snapshot.
+    let prev_lookup: std::collections::HashMap<(&str, Option<&str>), u64> = prev
+        .points
+        .iter()
+        .filter_map(|p| match p.value {
+            MetricValue::Sum(v) => {
+                let pipeline = p.attributes.iter().find(|(k, _)| *k == "pipeline").map(|(_, v)| v.as_str());
+                Some(((p.name, pipeline), v))
+            }
+            MetricValue::Gauge(_) => None,
+        })
+        .collect();
+
+    let mut out = Vec::new();
+
+    // Per-pipeline rate gauges.
+    for def in RATE_DEFS {
+        for p in current {
+            if p.name != def.0 {
+                continue;
+            }
+            let MetricValue::Sum(cur_val) = p.value else {
+                continue;
+            };
+            // Skip stage-attributed variants (e.g. stage_nanos with stage=scan).
+            if p.attributes.iter().any(|(k, _)| *k == "stage") {
+                continue;
+            }
+            let pipeline = p
+                .attributes
+                .iter()
+                .find(|(k, _)| *k == "pipeline")
+                .map(|(_, v)| v.as_str());
+            if let Some(&prev_val) = prev_lookup.get(&(def.0, pipeline)) {
+                let delta = cur_val.saturating_sub(prev_val);
+                let rate = (delta as f64 / dt) * def.2;
+                out.push(MetricPoint {
+                    name: def.1,
+                    value: MetricValue::Gauge(rate),
+                    attributes: p.attributes.clone(),
+                });
+            }
+        }
+    }
+
+    // CPU percent: (Δuser_ms + Δsys_ms) / Δt_s / 10.
+    let cur_user = current
+        .iter()
+        .find(|p| p.name == "process.cpu.user_ms")
+        .and_then(|p| match p.value {
+            MetricValue::Sum(v) => Some(v),
+            MetricValue::Gauge(_) => None,
+        });
+    let cur_sys = current
+        .iter()
+        .find(|p| p.name == "process.cpu.sys_ms")
+        .and_then(|p| match p.value {
+            MetricValue::Sum(v) => Some(v),
+            MetricValue::Gauge(_) => None,
+        });
+    let prev_user = prev_lookup.get(&("process.cpu.user_ms", None)).copied();
+    let prev_sys = prev_lookup.get(&("process.cpu.sys_ms", None)).copied();
+
+    if let (Some(cu), Some(cs), Some(pu), Some(ps)) = (cur_user, cur_sys, prev_user, prev_sys) {
+        let delta_ms = (cu.saturating_sub(pu) + cs.saturating_sub(ps)) as f64;
+        let cpu_pct = delta_ms / (dt * 1000.0) * 100.0;
+        out.push(MetricPoint {
+            name: "logfwd.cpu_percent",
+            value: MetricValue::Gauge(cpu_pct),
+            attributes: vec![],
+        });
+    }
+
+    out
 }
 
 /// Collect completed spans from the trace buffer + in-progress active batches.

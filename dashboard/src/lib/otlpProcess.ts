@@ -1,122 +1,14 @@
 /**
- * Convert OTLP JSON metrics and spans into the dashboard's internal types.
+ * Convert OTLP JSON spans into the dashboard's internal TraceRecord type.
  *
  * The diagnostics WebSocket pushes OTLP JSON (resourceMetrics, resourceSpans,
- * resourceLogs). This module bridges the gap between @otlpkit's parsed records
- * and our existing dashboard state (MetricSeries ring buffers, TraceRecord[]).
+ * resourceLogs). Metrics are now handled directly by the TelemetryStore from
+ * @otlpkit/views. This module only bridges OTLP spans → TraceRecord[].
  */
 
-import type { OtlpMetricsDocument, OtlpTracesDocument } from "@otlpkit/otlpjson";
-import { collectMetricPoints, collectSpans, toNumber } from "@otlpkit/otlpjson";
+import type { OtlpTracesDocument } from "@otlpkit/otlpjson";
+import { collectSpans, toNumber } from "@otlpkit/otlpjson";
 import type { TraceRecord } from "../types";
-
-// ---------------------------------------------------------------------------
-// Metrics → dashboard metric map
-// ---------------------------------------------------------------------------
-
-/** Extracted counters/gauges from one OTLP metrics push. */
-export interface OtlpMetricSnapshot {
-  inputLines: number;
-  inputBytes: number;
-  outputBytes: number;
-  outputErrors: number;
-  batches: number;
-  inflightBatches: number;
-  backpressureStalls: number;
-  cpuUserMs: number | null;
-  cpuSysMs: number | null;
-  rssBytes: number | null;
-  memResident: number | null;
-  memAllocated: number | null;
-  memActive: number | null;
-  scanNanos: number;
-  transformNanos: number;
-  outputNanos: number;
-  uptimeSeconds: number;
-}
-
-/**
- * Extract a flat metric snapshot from an OTLP metrics document.
- * Sums across all pipelines for aggregate values.
- */
-export function extractMetricSnapshot(doc: OtlpMetricsDocument): OtlpMetricSnapshot {
-  const snap: OtlpMetricSnapshot = {
-    inputLines: 0,
-    inputBytes: 0,
-    outputBytes: 0,
-    outputErrors: 0,
-    batches: 0,
-    inflightBatches: 0,
-    backpressureStalls: 0,
-    cpuUserMs: null,
-    cpuSysMs: null,
-    rssBytes: null,
-    memResident: null,
-    memAllocated: null,
-    memActive: null,
-    scanNanos: 0,
-    transformNanos: 0,
-    outputNanos: 0,
-    uptimeSeconds: 0,
-  };
-
-  for (const pt of collectMetricPoints(doc)) {
-    const v = pt.point.kind === "number" ? (pt.point.value ?? 0) : 0;
-    const stage = pt.point.attributes.stage as string | undefined;
-
-    switch (pt.metric.name) {
-      case "logfwd.input_lines":
-        snap.inputLines += v;
-        break;
-      case "logfwd.input_bytes":
-        snap.inputBytes += v;
-        break;
-      case "logfwd.output_bytes":
-        snap.outputBytes += v;
-        break;
-      case "logfwd.output_errors":
-        snap.outputErrors += v;
-        break;
-      case "logfwd.batches":
-        snap.batches += v;
-        break;
-      case "logfwd.inflight_batches":
-        snap.inflightBatches += v;
-        break;
-      case "logfwd.backpressure_stalls":
-        snap.backpressureStalls += v;
-        break;
-      case "logfwd.stage_nanos":
-        if (stage === "scan") snap.scanNanos += v;
-        else if (stage === "transform") snap.transformNanos += v;
-        else if (stage === "output") snap.outputNanos += v;
-        break;
-      case "logfwd.uptime_seconds":
-        snap.uptimeSeconds = v;
-        break;
-      case "process.cpu.user_ms":
-        snap.cpuUserMs = v;
-        break;
-      case "process.cpu.sys_ms":
-        snap.cpuSysMs = v;
-        break;
-      case "process.memory.rss":
-        snap.rssBytes = v;
-        break;
-      case "process.memory.resident":
-        snap.memResident = v;
-        break;
-      case "process.memory.allocated":
-        snap.memAllocated = v;
-        break;
-      case "process.memory.active":
-        snap.memActive = v;
-        break;
-    }
-  }
-
-  return snap;
-}
 
 // ---------------------------------------------------------------------------
 // Spans → TraceRecord[]
@@ -274,14 +166,4 @@ export function extractTraceRecords(doc: OtlpTracesDocument): TraceRecord[] {
   }
 
   return records;
-}
-
-/** Convert an OTLP uptime gauge to seconds for display. */
-export function extractUptimeSeconds(doc: OtlpMetricsDocument): number {
-  for (const pt of collectMetricPoints(doc)) {
-    if (pt.metric.name === "logfwd.uptime_seconds" && pt.point.kind === "number") {
-      return pt.point.value ?? 0;
-    }
-  }
-  return 0;
 }
