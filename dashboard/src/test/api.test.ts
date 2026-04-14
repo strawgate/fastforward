@@ -49,7 +49,7 @@ describe("api", () => {
       mockFetch.mockResolvedValue(jsonResponse(body));
 
       const result = await api.config();
-      expect(result).toEqual(body);
+      expect(result).toEqual({ data: body, errorMessage: null });
       expect(mockFetch).toHaveBeenCalledWith("/admin/v1/config");
     });
 
@@ -98,14 +98,32 @@ describe("api", () => {
         json: () => Promise.reject(new SyntaxError("Unexpected token")),
       } as Response);
 
+      // config uses getWithReason — returns { data: null, errorMessage }
       const result = await api.config();
-      expect(result).toBeNull();
+      expect(result).toEqual({ data: null, errorMessage: "Network error" });
     });
 
     it("returns null on abort/timeout", async () => {
       mockFetch.mockRejectedValue(new DOMException("The operation was aborted", "AbortError"));
       const result = await api.history();
       expect(result).toBeNull();
+    });
+
+    it("config() returns server error message on 403", async () => {
+      mockFetch.mockResolvedValue(
+        jsonResponse(
+          {
+            error: "config_endpoint_disabled",
+            message: "set LOGFWD_UNSAFE_EXPOSE_CONFIG=1 to enable /admin/v1/config",
+          },
+          403
+        )
+      );
+      const result = await api.config();
+      expect(result).toEqual({
+        data: null,
+        errorMessage: "set LOGFWD_UNSAFE_EXPOSE_CONFIG=1 to enable /admin/v1/config",
+      });
     });
   });
 });
