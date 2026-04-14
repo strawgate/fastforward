@@ -7,6 +7,7 @@
 #[cfg(feature = "_test-internals")]
 pub mod columnar;
 #[cfg(not(feature = "_test-internals"))]
+#[allow(dead_code)]
 pub(crate) mod columnar;
 pub mod conflict_schema;
 pub mod materialize;

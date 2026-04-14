@@ -23,5 +23,9 @@ bytes = "1"
 serial_test = "3"
 stats_alloc = "0.1"
 
+[[bin]]
+name = "builder_profile"
+required-features = ["_test-internals"]
+
 [lints]
 workspace = true
