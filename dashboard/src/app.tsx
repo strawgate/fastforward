@@ -317,7 +317,7 @@ export function App() {
   }, []);
 
   // ── WebSocket telemetry (preferred) ────────────────────────────────────────
-  const { wsConnected, lastMessage } = useTelemetryWebSocket();
+  const { lastMessage } = useTelemetryWebSocket();
 
   // Process OTLP metrics from WebSocket push.
   const processOtlpMetrics = useCallback(
@@ -460,151 +460,6 @@ export function App() {
     []
   );
 
-  // Process data from HTTP polling (status + stats + traces REST endpoints).
-  const processData = useCallback(
-    (
-      statusData: StatusResponse | null,
-      statsData: StatsResponse | null,
-      tracesList: TraceRecord[] | null
-    ) => {
-      if (tracesList) {
-        setTraces((prev) => {
-          const incoming = tracesList;
-          const prevById = new Map(prev.map((t) => [t.trace_id, t]));
-          const next = incoming.map((t) => {
-            const p = prevById.get(t.trace_id);
-            if (
-              p &&
-              p.pipeline === t.pipeline &&
-              p.start_unix_ns === t.start_unix_ns &&
-              p.total_ns === t.total_ns &&
-              p.status === t.status &&
-              p.lifecycle_state === t.lifecycle_state &&
-              p.errors === t.errors &&
-              p.scan_ns === t.scan_ns &&
-              p.transform_ns === t.transform_ns &&
-              p.output_ns === t.output_ns &&
-              p.queue_wait_ns === t.queue_wait_ns &&
-              p.worker_id === t.worker_id &&
-              p.send_ns === t.send_ns &&
-              p.recv_ns === t.recv_ns &&
-              p.took_ms === t.took_ms &&
-              p.retries === t.retries &&
-              p.req_bytes === t.req_bytes &&
-              p.cmp_bytes === t.cmp_bytes &&
-              p.resp_bytes === t.resp_bytes &&
-              p.flush_reason === t.flush_reason &&
-              p.output_start_unix_ns === t.output_start_unix_ns &&
-              p.lifecycle_state_start_unix_ns === t.lifecycle_state_start_unix_ns &&
-              p.scan_rows === t.scan_rows &&
-              p.input_rows === t.input_rows &&
-              p.output_rows === t.output_rows &&
-              p.bytes_in === t.bytes_in
-            ) {
-              return p;
-            }
-            return t;
-          });
-          return next;
-        });
-      }
-
-      if (statusData) {
-        setConnected(true);
-        setStatus(statusData);
-
-        let tl = 0,
-          tb = 0,
-          te = 0;
-        for (const p of statusData.pipelines) {
-          tl += p.transform.lines_in;
-          for (const i of p.inputs) tb += i.bytes_total;
-          for (const o of p.outputs) te += o.errors;
-        }
-        setTotalErrors(te);
-
-        const metricRegistry = metricRegistryRef.current;
-        const lps = rates.rate("lps", tl);
-        const bps = rates.rate("bps", tb);
-        const eps = rates.rate("eps", te);
-
-        if (lps != null) {
-          pushMetricSample(metricRegistry, "lps", lps, fmt(lps));
-        }
-        if (bps != null) {
-          pushMetricSample(metricRegistry, "bps", bps, fmtBytes(bps));
-        }
-        if (eps != null) {
-          pushMetricSample(metricRegistry, "err", eps, fmt(eps));
-        }
-      } else {
-        setConnected(false);
-        setStatus(null);
-      }
-
-      if (statsData) {
-        setStats(statsData);
-        const metricRegistry = metricRegistryRef.current;
-
-        const obpsRate = rates.rate("obps", statsData.output_bytes);
-        if (obpsRate != null) {
-          pushMetricSample(metricRegistry, "obps", obpsRate, fmtBytes(obpsRate));
-        }
-
-        if (statsData.cpu_user_ms != null && statsData.cpu_sys_ms != null) {
-          const cpuMs = statsData.cpu_user_ms + statsData.cpu_sys_ms;
-          const cpuRate = rates.rate("cpu_ms", cpuMs);
-          if (cpuRate != null) {
-            const cpuPct = cpuRate / 10;
-            pushMetricSample(metricRegistry, "cpu", cpuPct, cpuPct.toFixed(1));
-          }
-        }
-
-        const memBytes = statsData.mem_allocated ?? statsData.rss_bytes;
-        if (memBytes != null) {
-          const limit = statsData.mem_resident
-            ? `/ ${fmtBytes(statsData.mem_resident)} resident`
-            : undefined;
-          pushMetricSample(metricRegistry, "mem", memBytes, fmtBytes(memBytes), limit);
-        }
-
-        if (tracesList && tracesList.length > 0) {
-          const done = tracesList
-            .filter((t) => t.lifecycle_state === "completed" && Number(t.total_ns) > 0)
-            .slice(0, 50);
-          if (done.length > 0) {
-            const avgMs =
-              done.reduce((s, t) => s + (Number(t.total_ns ?? "0") || 0), 0) / done.length / 1e6;
-            const formatted =
-              avgMs >= 1000 ? `${(avgMs / 1000).toFixed(1)}s` : `${avgMs.toFixed(0)}ms`;
-            pushMetricSample(metricRegistry, "lat", avgMs, formatted);
-          }
-        }
-
-        pushMetricSample(
-          metricRegistry,
-          "inflight",
-          statsData.inflight_batches,
-          statsData.inflight_batches.toFixed(0)
-        );
-
-        const batchRate = rates.rate("batches", statsData.batches);
-        if (batchRate != null) {
-          const bpm = batchRate * 60;
-          pushMetricSample(metricRegistry, "batches", bpm, fmtCompact(bpm));
-        }
-
-        const stallRate = rates.rate("stalls", statsData.backpressure_stalls);
-        if (stallRate != null) {
-          pushMetricSample(metricRegistry, "stalls", stallRate, stallRate.toFixed(1));
-        }
-      }
-
-      forceUpdate((n) => n + 1);
-    },
-    []
-  );
-
   // ── Route WebSocket messages to the correct handler ────────────────────────
   useEffect(() => {
     if (!lastMessage) return;
@@ -639,6 +494,7 @@ export function App() {
             backoff = pollMs;
           },
           () => {
+            setConnected(false);
             backoff = Math.min(backoff * 2, 30_000);
           }
         )
@@ -653,46 +509,6 @@ export function App() {
       clearTimeout(timer);
     };
   }, [pollMs]);
-
-  // ── HTTP polling fallback (only when WebSocket is disconnected) ────────────
-  const poll = useCallback(async () => {
-    const [statusData, statsData, tracesData] = await Promise.all([
-      api.status(),
-      api.stats(),
-      api.traces(),
-    ]);
-    processData(statusData, statsData, tracesData?.traces ?? null);
-  }, [processData]);
-
-  useEffect(() => {
-    // Don't poll when the WebSocket is connected — server pushes data.
-    if (wsConnected) return;
-
-    let cancelled = false;
-    let timer: ReturnType<typeof setTimeout>;
-    let backoff = pollMs;
-
-    const loop = () => {
-      poll()
-        .then(
-          () => {
-            backoff = pollMs;
-          },
-          () => {
-            backoff = Math.min(backoff * 2, 30_000);
-          }
-        )
-        .finally(() => {
-          if (!cancelled) timer = setTimeout(loop, backoff);
-        });
-    };
-
-    loop();
-    return () => {
-      cancelled = true;
-      clearTimeout(timer);
-    };
-  }, [poll, pollMs, wsConnected]);
 
   const version = status?.system?.version ?? "?";
   const uptime = stats?.uptime_sec ?? status?.system?.uptime_seconds ?? 0;
