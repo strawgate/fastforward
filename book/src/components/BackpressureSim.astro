@@ -53,6 +53,7 @@
     background: var(--bp-accent); border: 2px solid white; cursor: pointer;
     box-shadow: 0 1px 3px rgba(0,0,0,0.25);
   }
+  .bp-slider:focus-visible { outline: 2px solid var(--bp-accent); outline-offset: 3px; }
   .bp-speed-val {
     font-family: var(--sl-font-mono, monospace); font-size: 0.7rem;
     font-weight: 700; min-width: 40px; text-align: right;
@@ -95,7 +96,7 @@
     border-radius: 3px; text-transform: uppercase; letter-spacing: 0.04em;
   }
   .bp-tag-ok { background: color-mix(in srgb, var(--bp-green) 15%, transparent); color: var(--bp-green); }
-  .bp-tag-slow { background: color-mix(in srgb, var(--bp-amber) 15%, transparent); color: var(--bp-amber); }
+  .bp-tag-pressure { background: color-mix(in srgb, var(--bp-amber) 15%, transparent); color: var(--bp-amber); }
   .bp-tag-blocked { background: color-mix(in srgb, var(--bp-red) 15%, transparent); color: var(--bp-red); }
   .bp-stage-desc { font-size: 0.58rem; color: var(--bp-muted); margin-bottom: 0.4rem; }
 
@@ -303,6 +304,17 @@
   .bp-mini-req .s200 { color: var(--bp-green); font-weight: 700; }
   .bp-mini-req .s429 { color: var(--bp-red); font-weight: 700; }
   .bp-mini-req .rnote { color: var(--bp-amber); font-size: 0.48rem; }
+
+  /* Disable keyframe animations for users who prefer reduced motion */
+  @media (prefers-reduced-motion: reduce) {
+    .bp-activity-fill.flowing,
+    .bp-activity-fill.blocked { animation: none; }
+    .bp-arrow.flowing .bp-arrow-dot { animation: none; opacity: 0; }
+    .bp-log-entry { animation: none; }
+    .bp-alert, .bp-alert.exiting { animation: none; }
+    .bp-mini-req { animation: none; }
+    .bp-file-cursor-row.stalled { animation: none; }
+  }
 </style>
 
 <script>
@@ -321,6 +333,7 @@
   var PIPELINE_CAP = 16;
   var WORKER_CAP = 1;
   var NUM_WORKERS = 3;
+  var MRU_DISPATCH_CAP = 0.8; // max batch sent to one worker per tick
 
   var ioCpuFill = 0;
   var pipelineFill = 0;
@@ -529,7 +542,12 @@
     fileWritten = 0; fileRead = 0;
     udpBuf = 0; udpDrops = 0;
     otlpBatchNum = 0; otlpAccepted = 0; otlpRejected = 0;
+    // Reset pipeline so switching source doesn't carry over stale pressure
+    ioCpuFill = 0; pipelineFill = 0; workerFills = [0, 0, 0];
+    totalProduced = 0; totalDelivered = 0;
+    prevIoState = 'ok'; prevCpuState = 'ok'; prevOutState = 'ok';
     buildSourceViz();
+    addLog('Source \u2192 ' + newMode + ' \u2014 pipeline reset', 'ok');
   }
 
   function buildSourceViz() {
@@ -636,7 +654,10 @@
     entry.innerHTML = '<span class="ts">t=' + ts + '</span> ' + (cls ? '<span class="' + cls + '">' + msg + '</span>' : msg);
     logEl.appendChild(entry);
     if (logEl.children.length > 40) logEl.removeChild(logEl.firstChild);
-    logEl.scrollTop = logEl.scrollHeight;
+    // Only auto-scroll if the user hasn't scrolled up to read older entries
+    if (logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 12) {
+      logEl.scrollTop = logEl.scrollHeight;
+    }
   }
 
   // --- Visual helpers ---
@@ -663,7 +684,7 @@
       stage.actFill.className = 'bp-activity-fill blocked';
     } else if (pct > 0.5) {
       stage.el.className = 'bp-stage pressured';
-      stage.tag.className = 'bp-stage-tag bp-tag-slow'; stage.tag.textContent = 'PRESSURE';
+      stage.tag.className = 'bp-stage-tag bp-tag-pressure'; stage.tag.textContent = 'PRESSURE';
       stage.actFill.className = 'bp-activity-fill flowing pressured';
     } else {
       stage.el.className = 'bp-stage';
@@ -779,7 +800,7 @@
         if (pipelineFill <= 0) break;
         var space = WORKER_CAP - workerFills[w2];
         if (space > 0) {
-          var send = Math.min(space, pipelineFill, 0.8);
+          var send = Math.min(space, pipelineFill, MRU_DISPATCH_CAP);
           workerFills[w2] += send; pipelineFill -= send;
         }
       }
@@ -837,7 +858,7 @@
       ioStage.actFill.className = 'bp-activity-fill blocked';
     } else if (ioPctSnap > 0.5) {
       ioStage.el.className = 'bp-stage pressured';
-      ioStage.tag.className = 'bp-stage-tag bp-tag-slow'; ioStage.tag.textContent = 'PRESSURE';
+      ioStage.tag.className = 'bp-stage-tag bp-tag-pressure'; ioStage.tag.textContent = 'PRESSURE';
       ioStage.actFill.className = 'bp-activity-fill flowing pressured';
     } else {
       ioStage.el.className = 'bp-stage';
@@ -862,7 +883,7 @@
       outStage.actFill.className = 'bp-activity-fill blocked';
     } else if (workerBusy >= 2) {
       outStage.el.className = 'bp-stage pressured';
-      outStage.tag.className = 'bp-stage-tag bp-tag-slow'; outStage.tag.textContent = 'BUSY';
+      outStage.tag.className = 'bp-stage-tag bp-tag-pressure'; outStage.tag.textContent = 'BUSY';
       outStage.actFill.className = 'bp-activity-fill flowing pressured';
     } else {
       outStage.el.className = 'bp-stage';

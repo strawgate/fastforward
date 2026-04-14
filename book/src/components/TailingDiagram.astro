@@ -77,6 +77,9 @@
     color: var(--tl-text);
   }
   /* Close button — only shown for manual (persistent) overlays */
+  .tl-overlay-close:focus-visible {
+    outline: 2px solid var(--tl-text); outline-offset: -2px;
+  }
   .tl-overlay-close {
     position: absolute; top: 0.35rem; right: 0.35rem;
     width: 1.3rem; height: 1.3rem;
@@ -280,6 +283,11 @@
     });
   }
 
+  function setButtonState(btn, active) {
+    btn.className = 'tl-btn' + (active ? ' active' : '');
+    btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+  }
+
   function updateProgress() {
     if (!autoMode) { progressFill.style.width = '0%'; return; }
     if (!playing) return;
@@ -328,8 +336,7 @@
     if (!autoMode) return;
     autoMode = false;
     autoLineCount = 0;
-    btnAuto.className = 'tl-btn';
-    btnAuto.setAttribute('aria-pressed', 'false');
+    setButtonState(btnAuto, false);
     updateProgress();
     updateStats();
   }
@@ -416,13 +423,11 @@
     playing = !playing;
     if (playing) {
       btnPlay.textContent = '\u23F8 Pause';
-      btnPlay.className = 'tl-btn active';
-      btnPlay.setAttribute('aria-pressed', 'true');
+      setButtonState(btnPlay, true);
       startTicker();
     } else {
       btnPlay.textContent = '\u25B6 Play';
-      btnPlay.className = 'tl-btn';
-      btnPlay.setAttribute('aria-pressed', 'false');
+      setButtonState(btnPlay, false);
       stopTicker();
     }
   };
@@ -430,8 +435,7 @@
   btnAuto.onclick = function() {
     autoMode = !autoMode;
     autoLineCount = 0;
-    btnAuto.className = 'tl-btn' + (autoMode ? ' active' : '');
-    btnAuto.setAttribute('aria-pressed', autoMode ? 'true' : 'false');
+    setButtonState(btnAuto, autoMode);
     updateProgress();
     updateStats();
   };
@@ -457,8 +461,7 @@
   } else {
     playing = false;
     btnPlay.textContent = '\u25B6 Play';
-    btnPlay.className = 'tl-btn';
-    btnPlay.setAttribute('aria-pressed', 'false');
+    setButtonState(btnPlay, false);
     for (var rm = 1; rm <= 8; rm++) {
       var rmText = genLine(rm);
       addLine(mainFile, rm, rmText);
