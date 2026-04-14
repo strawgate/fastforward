@@ -547,6 +547,8 @@ async fn cmd_blast(mut args: BlastArgs) -> Result<(), CliError> {
             "--batch-lines must be at least 1".to_owned(),
         ));
     }
+    logfwd_config::validate_host_port(&args.diagnostics_addr)
+        .map_err(|e| CliError::Config(format!("invalid diagnostics address: {e}")))?;
 
     let destination = args
         .destination
