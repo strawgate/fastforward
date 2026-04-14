@@ -38,6 +38,7 @@ use sensor_ebpf_common::*;
 const TCP_ESTABLISHED: i32 = 1;
 const TCP_SYN_SENT: i32 = 2;
 const TCP_SYN_RECV: i32 = 3;
+const TCP_CLOSE: i32 = 7;
 
 /// 16 MB ring buffer — ~100ms headroom at high event rate.
 #[map]
@@ -491,7 +492,7 @@ fn try_sock_state(ctx: &TracePointContext) -> Result<(), i64> {
 
     // Outbound connect: SYN_SENT → ESTABLISHED
     if oldstate == TCP_SYN_SENT && newstate == TCP_ESTABLISHED {
-        let skaddr: u64 = unsafe { ctx.read_at(8).unwrap_or(0) }; // SAFETY: fixed ABI offset
+        let skaddr: u64 = unsafe { ctx.read_at(8)? };
 
         let mut entry = match EVENTS.reserve::<TcpConnectEvent>(0) {
             Some(e) => e,
@@ -514,19 +515,23 @@ fn try_sock_state(ctx: &TracePointContext) -> Result<(), i64> {
         entry.submit(0);
     }
 
-    // Failed connect: SYN_SENT → anything other than ESTABLISHED (refused, timeout, reset).
-    // Clean up cached process info so SOCK_OWNERS does not leak entries (#1934).
-    if oldstate == TCP_SYN_SENT && newstate != TCP_ESTABLISHED {
-        // SAFETY: fixed ABI offset for skaddr
-        let skaddr: u64 = unsafe { ctx.read_at(8).unwrap_or(0) };
+    // Failed connect: clean up SOCK_OWNERS on terminal failure states.
+    // Excludes SYN_SENT → SYN_RECV (simultaneous open) and
+    // SYN_SENT → ESTABLISHED (handled above). (#1934)
+    if oldstate == TCP_SYN_SENT
+        && newstate != TCP_ESTABLISHED
+        && newstate != TCP_SYN_RECV
+    {
+        let skaddr: u64 = unsafe { ctx.read_at(8)? };
         SOCK_OWNERS.remove(&skaddr).ok();
     }
 
-    // Safety net: any transition to CLOSE removes stale entries that survived
-    // unexpected state paths (e.g. aborted handshakes, resets after ESTABLISHED).
+    // Safety net: on transition to CLOSE, remove any stale entries that
+    // survived unexpected state paths (e.g. resets after ESTABLISHED).
+    // Only fires for sockets that passed through tcp_v4_connect (kprobe),
+    // so the hashmap lookup is bounded by the connect rate.
     if newstate == TCP_CLOSE && oldstate != TCP_SYN_SENT {
-        // SAFETY: fixed ABI offset for skaddr
-        let skaddr: u64 = unsafe { ctx.read_at(8).unwrap_or(0) };
+        let skaddr: u64 = unsafe { ctx.read_at(8)? };
         SOCK_OWNERS.remove(&skaddr).ok();
     }
 
