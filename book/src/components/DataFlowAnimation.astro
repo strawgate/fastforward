@@ -42,10 +42,13 @@
     gap: 0.5rem;
     min-height: 80px;
     position: relative;
+    overflow-x: auto;
+    flex-wrap: wrap;
   }
 
   .df-stage-box {
     flex: 1;
+    min-width: 70px;
     padding: 0.5rem;
     border: 1px solid var(--df-border);
     border-radius: 8px;
@@ -185,6 +188,17 @@
     }, step.pause);
   }
 
-  show(0);
+  if (!window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    show(0);
+  } else {
+    // Show the first step statically without scheduling the next transition
+    cur = 0;
+    var step = STEPS[0];
+    stageEls.forEach(function(el, i) { el.classList.toggle('active', i === step.stage); });
+    dataEl.textContent = step.data;
+  }
+
+  // Cleanup on page nav (Starlight SPA)
+  document.addEventListener('astro:before-swap', function() { clearTimeout(timer); }, { once: true });
 })();
 </script>

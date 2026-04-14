@@ -156,10 +156,10 @@
   var PAUSE_SVG = '<svg viewBox="0 0 24 24" width="16" height="16"><path d="M6 4h4v16H6zM14 4h4v16h-4z" fill="currentColor"/></svg>';
 
   var bar = el('div','sa-bar');
-  var playBtn = el('button','sa-play'); playBtn.innerHTML = PLAY_SVG;
+  var playBtn = el('button','sa-play'); playBtn.innerHTML = PLAY_SVG; playBtn.setAttribute('aria-label', 'Play animation');
   var prog = el('div','sa-prog'); var progFill = el('div','sa-prog-fill'); prog.appendChild(progFill);
   var pills = el('div','sa-pills');
-  var pillBtns = STEPS.map(function(_,i) { var b = el('button','sa-pill'); b.textContent = ''+(i+1); b.dataset.i = ''+i; return b; });
+  var pillBtns = STEPS.map(function(_,i) { var b = el('button','sa-pill'); b.textContent = ''+(i+1); b.dataset.i = ''+i; b.setAttribute('aria-label', 'Go to step ' + (i+1) + ': ' + STEPS[i].t); return b; });
   pillBtns.forEach(function(b) { pills.appendChild(b); });
   bar.appendChild(playBtn); bar.appendChild(prog); bar.appendChild(pills);
 
@@ -260,15 +260,18 @@
     playBtn.innerHTML = playing
       ? '<svg viewBox="0 0 24 24" width="16" height="16"><path d="M6 4h4v16H6zM14 4h4v16h-4z" fill="currentColor"/></svg>'
       : '<svg viewBox="0 0 24 24" width="16" height="16"><path d="M8 5v14l11-7z" fill="currentColor"/></svg>';
+    playBtn.setAttribute('aria-label', playing ? 'Pause animation' : 'Play animation');
   }
 
   function startPlay() {
+    if (startupTimer) { clearTimeout(startupTimer); startupTimer = null; }
     playing = true;
     updatePlayIcon();
     scheduleNext();
   }
 
   function stopPlay() {
+    if (startupTimer) { clearTimeout(startupTimer); startupTimer = null; }
     playing = false;
     clearT();
     updatePlayIcon();
@@ -293,8 +296,11 @@
 
   go(0);
 
-  // Auto-start playback after a brief delay
-  setTimeout(function() { startPlay(); }, 1200);
+  // Auto-start playback after a brief delay (skip if user prefers reduced motion)
+  var startupTimer = null;
+  if (!window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    startupTimer = setTimeout(function() { startupTimer = null; startPlay(); }, 1200);
+  }
 
   // Scroll sync: map page headings to animation steps
   var headingToStep = {
@@ -325,5 +331,11 @@
       if (heading) observer.observe(heading);
     });
   }
+
+  // Cleanup on SPA navigation
+  document.addEventListener('astro:before-swap', function() {
+    if (startupTimer) { clearTimeout(startupTimer); startupTimer = null; }
+    stopPlay();
+  }, { once: true });
 })();
 </script>

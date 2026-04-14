@@ -65,9 +65,10 @@
   .bp-pipeline {
     display: flex; gap: 0; align-items: stretch;
     margin-bottom: 0.6rem; overflow-x: auto;
+    flex-wrap: wrap;
   }
   .bp-stage {
-    flex: 1; min-width: 120px; padding: 0.5rem;
+    flex: 1; min-width: 90px; padding: 0.5rem;
     border: 1.5px solid var(--bp-border); background: var(--bp-bg);
     border-radius: 8px; position: relative;
     transition: border-color 0.4s, background 0.4s;
@@ -672,7 +673,10 @@
     interval = null;
   }
 
+  var reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
   function handleVisibilityChange() {
+    if (reducedMotion) return;
     if (document.hidden) {
       stopSimulation();
     } else {
@@ -680,7 +684,9 @@
     }
   }
 
-  startSimulation();
+  if (!reducedMotion) {
+    startSimulation();
+  }
   document.addEventListener('visibilitychange', handleVisibilityChange);
 
   // Cleanup on page nav (Starlight SPA)

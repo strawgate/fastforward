@@ -1,6 +1,6 @@
 ---
 // Auto-playing tailing simulation: shows normal tailing, then rotation, then recovery.
-// Events accumulate as a timeline — nothing disappears.
+// Fixed-height viewport with tooltips pointing at interesting events.
 ---
 
 <div class="tl" id="tailing-diagram"></div>
@@ -17,35 +17,19 @@
     --tl-amber: #f59e0b;
     --tl-blue: #60a5fa;
     margin: 1.5rem 0;
-    /* no sticky — scroll naturally with the page */
   }
   .tl * { margin-top: 0 !important; }
 
-  .tl-events {
-    display: flex; flex-direction: column; gap: 0.4rem;
-    margin-bottom: 0.5rem;
-  }
-  .tl-event {
-    padding: 0.45rem 0.65rem;
-    background: var(--tl-bg);
-    border: 1px solid var(--tl-border);
-    border-radius: 6px;
-    font-size: 0.78rem; line-height: 1.45;
-    animation: tl-fadein 0.3s ease-out;
-  }
-  @keyframes tl-fadein { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; } }
-  .tl-event.warn { border-color: var(--tl-amber); background: color-mix(in srgb, var(--tl-amber) 6%, var(--tl-bg)); }
-  .tl-event.ok { border-color: var(--tl-green); background: color-mix(in srgb, var(--tl-green) 6%, var(--tl-bg)); }
-  .tl-event b { font-size: 0.82rem; }
-
-  .tl-sim {
+  /* Main layout: fixed-height container */
+  .tl-container {
     display: flex; gap: 0.75rem; flex-wrap: wrap;
-    margin-bottom: 0.5rem; align-items: flex-start;
+    align-items: flex-start;
   }
 
+  /* File panel */
   .tl-file {
     border: 1.5px solid var(--tl-border); border-radius: 8px;
-    padding: 0.5rem; flex: 1; min-width: 200px; max-width: 380px;
+    padding: 0.5rem; flex: 1; min-width: 220px; max-width: 380px;
     background: var(--tl-bg); transition: border-color 0.3s, opacity 0.5s;
   }
   .tl-file.active { border-color: var(--tl-green); }
@@ -60,9 +44,14 @@
   .tl-fname { font-family: var(--sl-font-mono, monospace); }
   .tl-fmeta { font-size: 0.58rem; color: var(--tl-muted); font-weight: 400; }
 
+  /* Fixed-height log viewport — never grows */
   .tl-lines {
     font-family: var(--sl-font-mono, monospace); font-size: 0.58rem;
-    line-height: 1.5; max-height: 160px; overflow-y: auto;
+    line-height: 1.5; height: 180px; overflow-y: hidden;
+    position: relative;
+  }
+  .tl-lines-inner {
+    position: absolute; bottom: 0; left: 0; right: 0;
   }
   .tl-line { display: flex; gap: 0.25rem; }
   .tl-line-num { color: var(--tl-muted); min-width: 18px; text-align: right; user-select: none; }
@@ -76,14 +65,40 @@
     font-size: 0.58rem; color: var(--tl-accent); font-weight: 600;
   }
 
+  /* Stats row */
   .tl-stats {
     display: flex; gap: 0.75rem; flex-wrap: wrap;
-    font-size: 0.68rem; padding: 0.3rem 0;
+    font-size: 0.68rem; padding: 0.4rem 0;
   }
   .tl-stat { display: flex; flex-direction: column; }
   .tl-stat-label { font-size: 0.55rem; color: var(--tl-muted); text-transform: uppercase; letter-spacing: 0.03em; }
   .tl-stat-val { font-weight: 700; font-family: var(--sl-font-mono, monospace); }
   .tl-stat-val.green { color: var(--tl-green); }
+
+  /* Tooltip — positioned relative to the container */
+  .tl-tooltip {
+    position: relative;
+    padding: 0.5rem 0.7rem; margin-top: 0.5rem;
+    background: var(--tl-bg); border: 1.5px solid var(--tl-border);
+    border-radius: 7px; font-size: 0.75rem; line-height: 1.45;
+    opacity: 0; transform: translateY(4px);
+    transition: opacity 0.3s, transform 0.3s, border-color 0.3s;
+    min-height: 2.2rem;
+  }
+  .tl-tooltip.visible { opacity: 1; transform: translateY(0); }
+  .tl-tooltip.warn { border-color: var(--tl-amber); }
+  .tl-tooltip.ok { border-color: var(--tl-green); }
+  .tl-tooltip b { font-size: 0.78rem; }
+
+  /* Progress bar */
+  .tl-progress {
+    height: 3px; background: var(--tl-border); border-radius: 2px;
+    overflow: hidden; margin-top: 0.5rem;
+  }
+  .tl-progress-fill {
+    height: 100%; width: 0; background: var(--tl-accent);
+    transition: width 0.3s linear;
+  }
 </style>
 
 <script>
@@ -100,22 +115,37 @@
     return '{"level":"' + LEVELS[n % LEVELS.length] + '","msg":"' + MSGS[n % MSGS.length] + '","n":' + n + '}';
   }
 
-  var eventsEl = el('div', 'tl-events');
-  var simEl = el('div', 'tl-sim');
+  // Build DOM
+  var containerEl = el('div', 'tl-container');
   var statsEl = el('div', 'tl-stats');
-  root.appendChild(eventsEl);
-  root.appendChild(simEl);
+  var tooltipEl = el('div', 'tl-tooltip');
+  tooltipEl.setAttribute('role', 'status');
+  tooltipEl.setAttribute('aria-live', 'polite');
+  var progressEl = el('div', 'tl-progress');
+  var progressFill = el('div', 'tl-progress-fill');
+  progressEl.appendChild(progressFill);
+  root.appendChild(containerEl);
   root.appendChild(statsEl);
+  root.appendChild(tooltipEl);
+  root.appendChild(progressEl);
 
   var lineNum = 1, offset = 0, linesRead = 0, fileInode = 12345;
   var ROTATE_AT = 10;
+  var TOTAL_STEPS = ROTATE_AT + 2 + 6; // tailing + rotate + new tailing
+  var step = 0;
   var phase = 'tailing';
   var mainFile = null, oldFile = null, timer = null;
 
-  function addEvent(html, cls) {
-    var ev = el('div', 'tl-event' + (cls ? ' ' + cls : ''));
-    ev.innerHTML = html;
-    eventsEl.appendChild(ev);
+  function showTooltip(html, cls) {
+    tooltipEl.className = 'tl-tooltip' + (cls ? ' ' + cls : '');
+    tooltipEl.innerHTML = html;
+    // Force reflow then show
+    void tooltipEl.offsetHeight;
+    tooltipEl.classList.add('visible');
+  }
+
+  function hideTooltip() {
+    tooltipEl.classList.remove('visible');
   }
 
   function createFileEl(name, inode, cls) {
@@ -125,16 +155,18 @@
     var fmeta = el('span', 'tl-fmeta'); fmeta.textContent = 'inode: ' + inode;
     head.appendChild(fname); head.appendChild(fmeta);
     f.appendChild(head);
-    var lines = el('div', 'tl-lines');
-    f.appendChild(lines);
+    var linesWrap = el('div', 'tl-lines');
+    var linesInner = el('div', 'tl-lines-inner');
+    linesWrap.appendChild(linesInner);
+    f.appendChild(linesWrap);
     var cursor = el('div', 'tl-cursor');
     f.appendChild(cursor);
-    return { el: f, lines: lines, cursor: cursor, fname: fname, fmeta: fmeta };
+    return { el: f, linesInner: linesInner, cursor: cursor, fname: fname, fmeta: fmeta };
   }
 
   function updateStats() {
     statsEl.innerHTML = '';
-    [['Lines read', linesRead, 'green'], ['Offset', offset + ' B', ''], ['Inode', fileInode, ''], ['Phase', phase, phase.indexOf('tailing') >= 0 ? 'green' : '']].forEach(function(item) {
+    [['Lines read', linesRead, 'green'], ['Offset', offset + ' B', ''], ['Inode', fileInode, ''], ['Phase', phase.replace('-', ' '), phase.indexOf('tailing') >= 0 ? 'green' : '']].forEach(function(item) {
       var s = el('div', 'tl-stat');
       var l = el('div', 'tl-stat-label'); l.textContent = item[0];
       var v = el('div', 'tl-stat-val' + (item[2] ? ' ' + item[2] : '')); v.textContent = '' + item[1];
@@ -147,13 +179,19 @@
     var numEl = el('span', 'tl-line-num'); numEl.textContent = '' + num;
     var textEl = el('span', 'tl-line-text'); textEl.textContent = text;
     line.appendChild(numEl); line.appendChild(textEl);
-    fileObj.lines.appendChild(line);
-    fileObj.lines.scrollTop = fileObj.lines.scrollHeight;
+    fileObj.linesInner.appendChild(line);
   }
 
-  addEvent('<b>Tailing app.log</b> — logfwd reads new lines as they appear.');
+  function updateProgress() {
+    step++;
+    var pct = Math.min(100, (step / TOTAL_STEPS) * 100);
+    progressFill.style.width = pct + '%';
+  }
+
+  // Init
+  showTooltip('<b>Tailing app.log</b> \u2014 logfwd reads new lines as they appear.');
   mainFile = createFileEl('app.log', fileInode, 'active');
-  simEl.appendChild(mainFile.el);
+  containerEl.appendChild(mainFile.el);
   mainFile.cursor.textContent = '\u25B6 reading...';
   updateStats();
 
@@ -164,33 +202,36 @@
       lineNum++; linesRead++;
       mainFile.cursor.textContent = '\u25B6 offset: ' + offset;
       updateStats();
+      updateProgress();
 
       if (lineNum > ROTATE_AT) {
         phase = 'rotating';
-        addEvent('<b>\u26A0 Log rotation!</b> — logrotate renames <code>app.log</code> \u2192 <code>app.log.1</code> and creates a new empty <code>app.log</code>. The inode changes. A naive <code>tail -f</code> would keep reading the old file and miss new data.', 'warn');
+        showTooltip('<b>\u26A0 Log rotation!</b> \u2014 logrotate renames <code>app.log</code> \u2192 <code>app.log.1</code> and creates a new empty file. The inode changes. A naive <code>tail -f</code> would keep reading the old file and miss new data.', 'warn');
 
         mainFile.el.className = 'tl-file old';
         mainFile.fname.textContent = 'app.log.1';
         mainFile.fmeta.textContent = 'inode: ' + fileInode + ' (old)';
-        mainFile.cursor.textContent = '\u25B6 EOF — drained';
+        mainFile.cursor.textContent = '\u25B6 EOF \u2014 drained';
 
-        var oldInode = fileInode;
         fileInode = 67890;
         oldFile = mainFile;
         mainFile = createFileEl('app.log', fileInode, 'active');
-        simEl.insertBefore(mainFile.el, oldFile.el);
+        containerEl.insertBefore(mainFile.el, oldFile.el);
         mainFile.cursor.textContent = '\u25B6 new inode ' + fileInode;
         offset = 0; lineNum = 1;
         updateStats();
-        timer = setTimeout(tick, 2000);
+        updateProgress();
+        timer = setTimeout(tick, 2500);
         return;
       }
       timer = setTimeout(tick, 400);
 
     } else if (phase === 'rotating') {
-      addEvent('<b>\u2705 Rotation detected</b> — logfwd saw inode change from 12345 \u2192 ' + fileInode + '. Drained old file, opened new file at offset 0. <b>No data lost.</b>', 'ok');
+      showTooltip('<b>\u2705 Rotation detected</b> \u2014 logfwd saw inode change from 12345 \u2192 ' + fileInode + '. Drained old file, opened new file at offset 0. <b>No data lost.</b>', 'ok');
       phase = 'new-tailing';
-      timer = setTimeout(tick, 1000);
+      updateStats();
+      updateProgress();
+      timer = setTimeout(tick, 1500);
 
     } else if (phase === 'new-tailing') {
       addLine(mainFile, lineNum, genLine(lineNum));
@@ -198,18 +239,28 @@
       lineNum++; linesRead++;
       mainFile.cursor.textContent = '\u25B6 offset: ' + offset;
       updateStats();
+      updateProgress();
+
+      if (lineNum <= 4) {
+        showTooltip('<b>Tailing new app.log</b> \u2014 Reading from offset 0 on the new inode. Old file is fully drained.', 'ok');
+      } else {
+        hideTooltip();
+      }
 
       if (lineNum > 6) {
         phase = 'done';
+        showTooltip('<b>Done!</b> \u2014 logfwd handled rotation seamlessly: drained old file, detected new inode, resumed tailing. <b>' + linesRead + ' lines read, zero lost.</b>', 'ok');
         timer = setTimeout(function() {
           // Reset for next loop
-          eventsEl.innerHTML = '';
-          simEl.innerHTML = '';
+          containerEl.innerHTML = '';
+          hideTooltip();
+          progressFill.style.width = '0%';
+          step = 0;
           lineNum = 1; offset = 0; linesRead = 0; fileInode = 12345;
           phase = 'tailing';
-          addEvent('<b>Tailing app.log</b> — logfwd reads new lines as they appear.');
+          showTooltip('<b>Tailing app.log</b> \u2014 logfwd reads new lines as they appear.');
           mainFile = createFileEl('app.log', fileInode, 'active');
-          simEl.appendChild(mainFile.el);
+          containerEl.appendChild(mainFile.el);
           mainFile.cursor.textContent = '\u25B6 reading...';
           updateStats();
           timer = setTimeout(tick, 800);
@@ -220,7 +271,25 @@
     }
   }
 
-  // Auto-start after a brief delay
-  timer = setTimeout(tick, 800);
+  // Respect reduced motion — show final state statically
+  var prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (!prefersReducedMotion) {
+    timer = setTimeout(tick, 800);
+  } else {
+    // Show a populated static view so users still see the concept
+    for (var rm = 1; rm <= 6; rm++) {
+      addLine(mainFile, rm, genLine(rm));
+      offset += genLine(rm).length + 1;
+      lineNum++; linesRead++;
+    }
+    mainFile.cursor.textContent = '\u25B6 offset: ' + offset;
+    updateStats();
+    showTooltip('<b>Tailing app.log</b> \u2014 logfwd reads new lines as they appear. Animation paused (reduced motion).', '');
+  }
+
+  // Cleanup
+  document.addEventListener('astro:before-swap', function() {
+    if (timer) { clearTimeout(timer); timer = null; }
+  }, { once: true });
 })();
 </script>
