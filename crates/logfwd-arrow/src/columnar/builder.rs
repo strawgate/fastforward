@@ -472,9 +472,10 @@ fn null_column(name: &str, kind: FieldKind, num_rows: usize) -> (Field, ArrayRef
             (Field::new(name, DataType::BinaryView, true), Arc::new(arr))
         }
         FieldKind::FixedBinary(n) => {
-            let arr = arrow::array::FixedSizeBinaryArray::new_null(n as i32, num_rows);
+            let width = i32::try_from(n).expect("FixedBinary width exceeds i32::MAX");
+            let arr = arrow::array::FixedSizeBinaryArray::new_null(width, num_rows);
             (
-                Field::new(name, DataType::FixedSizeBinary(n as i32), true),
+                Field::new(name, DataType::FixedSizeBinary(width), true),
                 Arc::new(arr),
             )
         }
