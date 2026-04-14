@@ -546,12 +546,18 @@
 
   // Init
   goStep(0);
-  startupTimer = setTimeout(function() {
-    startupTimer = null;
-    if (!playing) startAuto();
-  }, 1500);
+  var prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (!prefersReducedMotion) {
+    startupTimer = setTimeout(function() {
+      startupTimer = null;
+      if (!playing) startAuto();
+    }, 1500);
+  }
 
   // Cleanup
-  document.addEventListener('astro:before-swap', function() { stopAuto(); }, { once: true });
+  document.addEventListener('astro:before-swap', function() {
+    stopAuto();
+    if (startupTimer) { clearTimeout(startupTimer); startupTimer = null; }
+  }, { once: true });
 })();
 </script>
