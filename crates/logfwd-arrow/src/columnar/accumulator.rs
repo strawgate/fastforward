@@ -416,6 +416,10 @@ pub enum FinalizationMode<'a> {
         original_buf: &'a [u8],
         /// Generated/decoded buffer, for reading decoded strings.
         generated_buf: &'a [u8],
+        /// When true, all string data is known to be valid UTF-8 (validated
+        /// at the ingestion boundary — scanner, OTLP decoder, etc.). Skips
+        /// redundant validation in Arrow array construction.
+        utf8_trusted: bool,
     },
     /// Zero-copy `StringViewArray` backed by Arrow buffers.
     View {
@@ -525,14 +529,11 @@ fn build_string(
         FinalizationMode::Detached {
             original_buf,
             generated_buf,
+            utf8_trusted,
         } => {
             let original_len = original_buf.len();
             let dense = facts.len() == num_rows;
             // Build offsets + values directly, skipping per-value UTF-8 validation.
-            // Safety argument: all strings entered via write_str(&str) are already
-            // valid UTF-8 by Rust's type system. StringRef data written via
-            // write_str_ref may originate from arbitrary bytes, so we validate
-            // the entire concatenated values buffer once at the end.
             let mut offsets: Vec<i32> = Vec::with_capacity(num_rows + 1);
             let mut values: Vec<u8> =
                 Vec::with_capacity(facts.iter().map(|(_, sref)| sref.len as usize).sum());
@@ -559,12 +560,13 @@ fn build_string(
             }
             offsets.push(values.len() as i32);
 
-            // UTF-8 validation: skip when original_buf is empty, because all
-            // string data came through write_str(&str), which guarantees UTF-8
-            // by Rust's type system. Only validate when original_buf is present
-            // (write_str_ref data from external sources).
-            if !original_buf.is_empty() && std::str::from_utf8(&values).is_err() {
-                // Find the offending string for a precise error.
+            // UTF-8 validation strategy:
+            // - utf8_trusted: ingestion boundary (scanner/decoder) already validated.
+            //   Skip entirely — Arrow's StringArray::new does redundant validation.
+            // - original_buf empty: all data from write_str(&str) — Rust type system
+            //   guarantees UTF-8. Skip.
+            // - otherwise: external bytes via write_str_ref need validation.
+            if !utf8_trusted && !original_buf.is_empty() && std::str::from_utf8(&values).is_err() {
                 let mut fvi = 0;
                 for row in 0..num_rows as u32 {
                     if fvi < facts.len() && facts[fvi].0 == row {
@@ -582,13 +584,31 @@ fn build_string(
                 }
             }
 
-            let nulls = if facts.len() == num_rows {
+            let nulls = if dense {
                 None
             } else {
                 Some(NullBuffer::from(validity))
             };
             let offset_buf = OffsetBuffer::new(ScalarBuffer::from(offsets));
-            let array = StringArray::new(offset_buf, Buffer::from_vec(values), nulls);
+            let values_buf = Buffer::from_vec(values);
+
+            let array = if *utf8_trusted || original_buf.is_empty() {
+                debug_assert!(
+                    std::str::from_utf8(values_buf.as_slice()).is_ok(),
+                    "utf8_trusted was set but string buffer contains invalid UTF-8 — \
+                     the ingestion boundary (scanner/decoder) has a validation bug"
+                );
+                // SAFETY: offsets are built sequentially from 0..values.len(),
+                // each pair spans a contiguous slice from the source buffers.
+                // UTF-8 validity is guaranteed by either:
+                // - utf8_trusted: scanner/decoder validated at ingestion
+                //   (see ScanConfig::validate_utf8, scanner.rs debug_assert)
+                // - original_buf empty: all data from write_str(&str), which
+                //   is valid UTF-8 by Rust's type system
+                unsafe { StringArray::new_unchecked(offset_buf, values_buf, nulls) }
+            } else {
+                StringArray::new(offset_buf, values_buf, nulls)
+            };
             Ok((Arc::new(array), DataType::Utf8))
         }
         FinalizationMode::View {
@@ -783,6 +803,7 @@ mod tests {
         let mode = FinalizationMode::Detached {
             original_buf: &[],
             generated_buf: &[],
+            utf8_trusted: true,
         };
         let (field, arr) = acc.materialize("ts", 3, mode).unwrap().unwrap();
         assert_eq!(field.name(), "ts");
@@ -802,6 +823,7 @@ mod tests {
         let mode = FinalizationMode::Detached {
             original_buf: input,
             generated_buf: &[],
+            utf8_trusted: true,
         };
         let (_, arr) = acc.materialize("msg", 2, mode).unwrap().unwrap();
         let a = arr.as_string::<i32>();
@@ -849,6 +871,7 @@ mod tests {
         let mode = FinalizationMode::Detached {
             original_buf: input,
             generated_buf: generated,
+            utf8_trusted: true,
         };
         let (_, arr) = acc.materialize("msg", 2, mode).unwrap().unwrap();
         let a = arr.as_string::<i32>();
@@ -865,6 +888,7 @@ mod tests {
         let mode = FinalizationMode::Detached {
             original_buf: &[],
             generated_buf: &[],
+            utf8_trusted: true,
         };
         let (field, arr) = acc.materialize("x", 2, mode).unwrap().unwrap();
         assert_eq!(field.data_type(), &DataType::Int64);
@@ -884,6 +908,7 @@ mod tests {
         let mode = FinalizationMode::Detached {
             original_buf: input,
             generated_buf: &[],
+            utf8_trusted: true,
         };
         let (field, arr) = acc.materialize("status", 2, mode).unwrap().unwrap();
         assert!(matches!(field.data_type(), DataType::Struct(_)));
@@ -900,6 +925,7 @@ mod tests {
         let mode = FinalizationMode::Detached {
             original_buf: &[],
             generated_buf: &[],
+            utf8_trusted: true,
         };
         assert!(acc.materialize("x", 3, mode).unwrap().is_none());
     }
@@ -914,6 +940,7 @@ mod tests {
         let mode = FinalizationMode::Detached {
             original_buf: &[],
             generated_buf: &[],
+            utf8_trusted: true,
         };
         assert!(acc.materialize("x", 1, mode).unwrap().is_none()); // no int facts → None
     }
@@ -928,6 +955,7 @@ mod tests {
         let mode = FinalizationMode::Detached {
             original_buf: &[],
             generated_buf: &[],
+            utf8_trusted: true,
         };
         let (_, arr) = acc.materialize("x", 1, mode).unwrap().unwrap();
         assert_eq!(arr.as_primitive::<Int64Type>().value(0), 200);
@@ -975,6 +1003,7 @@ mod tests {
         let mode = FinalizationMode::Detached {
             original_buf: b"short",
             generated_buf: &[],
+            utf8_trusted: true,
         };
         let result = acc.materialize("x", 1, mode);
         assert!(result.is_err());
@@ -994,6 +1023,7 @@ mod tests {
         let mode = FinalizationMode::Detached {
             original_buf: bad_bytes,
             generated_buf: &[],
+            utf8_trusted: false,
         };
         let result = acc.materialize("x", 1, mode);
         assert!(result.is_err());

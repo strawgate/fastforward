@@ -293,16 +293,19 @@ impl ColumnarBatchBuilder {
 
     /// Materialize all deferred facts into an Arrow `RecordBatch` (detached).
     ///
-    /// Copies string data into `StringBuilder` arrays. The builder's internal
-    /// buffers can be reused after this call.
+    /// Copies string data into contiguous `StringArray` arrays. The builder's
+    /// internal buffers can be reused after this call.
     pub fn finish_batch(&mut self) -> Result<RecordBatch, BuilderError> {
         debug_assert_eq!(self.lifecycle.state(), BuilderState::InBatch);
         let num_rows = self.lifecycle.row_count() as usize;
 
         // Detached mode: string_buf is the "generated" buffer, no original.
+        // utf8_trusted: true because write_str takes &str (Rust guarantees UTF-8)
+        // and write_str_ref is only used with scanner-validated buffers.
         let mode = FinalizationMode::Detached {
             original_buf: &[],
             generated_buf: &self.string_buf,
+            utf8_trusted: true,
         };
 
         let result = self.materialize_all(num_rows, mode)?;
