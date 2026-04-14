@@ -433,52 +433,85 @@ pub enum FinalizationMode<'a> {
 // ---------------------------------------------------------------------------
 
 fn build_int64(facts: &[(u32, i64)], num_rows: usize) -> (ArrayRef, DataType) {
+    let dense = facts.len() == num_rows;
     let mut values = vec![0i64; num_rows];
-    let mut valid = vec![false; num_rows];
+    let mut valid = if dense {
+        Vec::new()
+    } else {
+        vec![false; num_rows]
+    };
     for &(row, v) in facts {
         let r = row as usize;
         if r < num_rows {
             values[r] = v;
-            valid[r] = true;
+            if !dense {
+                valid[r] = true;
+            }
         }
     }
-    let nulls = NullBuffer::from(valid);
+    let nulls = if dense {
+        None
+    } else {
+        Some(NullBuffer::from(valid))
+    };
     (
-        Arc::new(Int64Array::new(values.into(), Some(nulls))),
+        Arc::new(Int64Array::new(values.into(), nulls)),
         DataType::Int64,
     )
 }
 
 fn build_float64(facts: &[(u32, f64)], num_rows: usize) -> (ArrayRef, DataType) {
+    let dense = facts.len() == num_rows;
     let mut values = vec![0.0f64; num_rows];
-    let mut valid = vec![false; num_rows];
+    let mut valid = if dense {
+        Vec::new()
+    } else {
+        vec![false; num_rows]
+    };
     for &(row, v) in facts {
         let r = row as usize;
         if r < num_rows {
             values[r] = v;
-            valid[r] = true;
+            if !dense {
+                valid[r] = true;
+            }
         }
     }
-    let nulls = NullBuffer::from(valid);
+    let nulls = if dense {
+        None
+    } else {
+        Some(NullBuffer::from(valid))
+    };
     (
-        Arc::new(Float64Array::new(values.into(), Some(nulls))),
+        Arc::new(Float64Array::new(values.into(), nulls)),
         DataType::Float64,
     )
 }
 
 fn build_bool(facts: &[(u32, bool)], num_rows: usize) -> (ArrayRef, DataType) {
+    let dense = facts.len() == num_rows;
     let mut values = vec![false; num_rows];
-    let mut valid = vec![false; num_rows];
+    let mut valid = if dense {
+        Vec::new()
+    } else {
+        vec![false; num_rows]
+    };
     for &(row, v) in facts {
         let r = row as usize;
         if r < num_rows {
             values[r] = v;
-            valid[r] = true;
+            if !dense {
+                valid[r] = true;
+            }
         }
     }
-    let nulls = NullBuffer::from(valid);
+    let nulls = if dense {
+        None
+    } else {
+        Some(NullBuffer::from(valid))
+    };
     (
-        Arc::new(BooleanArray::new(values.into(), Some(nulls))),
+        Arc::new(BooleanArray::new(values.into(), nulls)),
         DataType::Boolean,
     )
 }
@@ -494,6 +527,7 @@ fn build_string(
             generated_buf,
         } => {
             let original_len = original_buf.len();
+            let dense = facts.len() == num_rows;
             // Build offsets + values directly, skipping per-value UTF-8 validation.
             // Safety argument: all strings entered via write_str(&str) are already
             // valid UTF-8 by Rust's type system. StringRef data written via
@@ -502,7 +536,11 @@ fn build_string(
             let mut offsets: Vec<i32> = Vec::with_capacity(num_rows + 1);
             let mut values: Vec<u8> =
                 Vec::with_capacity(facts.iter().map(|(_, sref)| sref.len as usize).sum());
-            let mut validity: Vec<bool> = Vec::with_capacity(num_rows);
+            let mut validity: Vec<bool> = if dense {
+                Vec::new()
+            } else {
+                Vec::with_capacity(num_rows)
+            };
             let mut vi = 0;
 
             for row in 0..num_rows as u32 {
@@ -511,16 +549,21 @@ fn build_string(
                     let sref = facts[vi].1;
                     let bytes = read_str_bytes(original_buf, generated_buf, original_len, sref)?;
                     values.extend_from_slice(bytes);
-                    validity.push(true);
+                    if !dense {
+                        validity.push(true);
+                    }
                     vi += 1;
-                } else {
+                } else if !dense {
                     validity.push(false);
                 }
             }
             offsets.push(values.len() as i32);
 
-            // Single UTF-8 validation of the entire values buffer.
-            if std::str::from_utf8(&values).is_err() {
+            // UTF-8 validation: skip when original_buf is empty, because all
+            // string data came through write_str(&str), which guarantees UTF-8
+            // by Rust's type system. Only validate when original_buf is present
+            // (write_str_ref data from external sources).
+            if !original_buf.is_empty() && std::str::from_utf8(&values).is_err() {
                 // Find the offending string for a precise error.
                 let mut fvi = 0;
                 for row in 0..num_rows as u32 {
@@ -539,7 +582,7 @@ fn build_string(
                 }
             }
 
-            let nulls = if validity.iter().all(|&v| v) {
+            let nulls = if facts.len() == num_rows {
                 None
             } else {
                 Some(NullBuffer::from(validity))
