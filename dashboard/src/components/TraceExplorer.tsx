@@ -324,11 +324,16 @@ export function layoutSwimlane(
             stageStartMs > 0
               ? Math.max(startMs + scanMs + xfmMs + 1, nowMs)
               : startMs + scanMs + xfmMs + 1;
-        } else {
-          // Use full outMs for layout (drawSwimlane applies drawInFrac when rendering).
-          // Clamp to nowMs: clock skew or in-progress batches can produce a future
-          // timestamp, which would extend the bar past chartRight (right-wall bug).
+        } else if (isInProgress(t)) {
+          // In-progress: clamp to nowMs so the bar grows with the clock.
           barEndMs = Math.min(outStartMs + outMs, nowMs);
+        } else {
+          // Completed: use the actual end position — no nowMs clamp.
+          // Clamping completed bars to nowMs pins them to the right edge when
+          // the server clock is slightly ahead of the client clock.
+          // The rendering layer (Math.min(chartRight, x1raw)) already handles
+          // bars that extend past the visible area.
+          barEndMs = outStartMs + outMs;
         }
 
         const x0raw = toXRaw(startMs);
