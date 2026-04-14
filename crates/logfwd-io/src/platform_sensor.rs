@@ -293,6 +293,16 @@ impl PlatformSensorInput {
 
         let mut skipped = Vec::new();
 
+        // Configure runtime parameters via the CONFIG BPF map BEFORE attaching
+        // any programs, so events emitted during startup have valid config.
+        match Self::configure_ebpf_params(&mut ebpf) {
+            Ok(()) => tracing::debug!("configured eBPF runtime parameters (exit_code offset)"),
+            Err(e) => {
+                tracing::warn!("eBPF config: exit_code offset unavailable, using sentinel: {e}");
+                skipped.push(format!("exit_code offset unavailable: {e}"));
+            }
+        }
+
         // Attach tracepoints.
         for (prog_name, category, tracepoint) in TRACEPOINTS {
             match ebpf.program_mut(prog_name) {
@@ -337,15 +347,7 @@ impl PlatformSensorInput {
             }
         }
 
-        // Configure runtime parameters via the CONFIG BPF map.
-        let mut warnings = skipped;
-        match Self::configure_ebpf_params(&mut ebpf) {
-            Ok(()) => tracing::debug!("configured eBPF runtime parameters (exit_code offset)"),
-            Err(e) => {
-                tracing::warn!("eBPF config: exit_code offset unavailable, using sentinel: {e}");
-                warnings.push(format!("exit_code offset unavailable: {e}"));
-            }
-        }
+        let warnings = skipped;
 
         Ok((ebpf, warnings))
     }
@@ -378,40 +380,47 @@ impl PlatformSensorInput {
 
     /// Discover `task_struct.exit_code` offset from `/sys/kernel/btf/vmlinux`.
     ///
-    /// Tries `pahole` first (standard BTF introspection tool), then falls back
-    /// to parsing `/proc/kallsyms` heuristics. Returns the byte offset on success.
+    /// Uses `pahole` (from the `dwarves` package) to introspect kernel BTF.
+    /// Returns the byte offset on success.
     fn find_exit_code_offset() -> io::Result<u32> {
         // Try pahole — the standard tool for BTF struct layout.
-        if let Ok(output) = std::process::Command::new("pahole")
+        let output = std::process::Command::new("pahole")
             .args(["-C", "task_struct", "/sys/kernel/btf/vmlinux"])
             .output()
-        {
-            if output.status.success() {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                // pahole output: "	int  exit_code;  /*  1234  4 */"
-                for line in stdout.lines() {
-                    let trimmed = line.trim();
-                    if trimmed.contains("exit_code") && trimmed.contains("/*") {
-                        if let Some(comment) = trimmed.split("/*").nth(1) {
-                            let parts: Vec<&str> = comment.split_whitespace().collect();
-                            if let Some(offset_str) = parts.first() {
-                                if let Ok(offset) = offset_str.parse::<u32>() {
-                                    if offset > 0 && offset < 16384 {
-                                        return Ok(offset);
-                                    }
-                                }
+            .map_err(|e| {
+                io::Error::other(format!(
+                    "pahole not available (install dwarves package for exit_code support): {e}"
+                ))
+            })?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(io::Error::other(format!(
+                "pahole failed (exit {}): {stderr}",
+                output.status
+            )));
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // pahole output: "	int  exit_code;  /*  1234  4 */"
+        for line in stdout.lines() {
+            let trimmed = line.trim();
+            if trimmed.contains("exit_code") && trimmed.contains("/*") {
+                if let Some(comment) = trimmed.split("/*").nth(1) {
+                    let parts: Vec<&str> = comment.split_whitespace().collect();
+                    if let Some(offset_str) = parts.first() {
+                        if let Ok(offset) = offset_str.parse::<u32>() {
+                            if offset > 0 && offset < 16384 {
+                                return Ok(offset);
                             }
                         }
                     }
                 }
-                return Err(io::Error::other(
-                    "exit_code field not found in pahole output",
-                ));
             }
         }
 
         Err(io::Error::other(
-            "pahole not available; install dwarves package for exit_code support",
+            "exit_code field not found in pahole output",
         ))
     }
 
@@ -507,7 +516,12 @@ fn parse_event(
             // SAFETY: Length checked >= size_of::<ProcessExitEvent>(); ring buffer is 8-byte aligned.
             let ev = unsafe { &*(ptr.cast::<ProcessExitEvent>()) };
             let mut row = EventRow::from_header(header, "exit", mono_to_wall_offset_ns);
-            row.exit_code = Some(ev.exit_code);
+            // Sentinel -1 means offset was unavailable; treat as null.
+            row.exit_code = if ev.exit_code == -1 {
+                None
+            } else {
+                Some(ev.exit_code)
+            };
             Some(row)
         }
         k if k == EventKind::TcpConnect as u32 && len >= size_of::<TcpConnectEvent>() => {

@@ -215,7 +215,7 @@ pub struct MemfdCreateEvent {
 #[derive(Clone, Copy)]
 pub struct EbpfConfig {
     /// Byte offset of `exit_code` in `task_struct`. Set from BTF at load time.
-    /// When 0, the eBPF program uses −1 (unknown) as the exit_code sentinel.
+    /// When 0, the eBPF program uses -1 (unknown) as the exit_code sentinel.
     pub task_exit_code_offset: u32,
     pub pad: u32,
 }

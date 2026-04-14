@@ -22,11 +22,11 @@
 #![allow(dangerous_implicit_autorefs)]
 
 use aya_ebpf::{
-    bindings::bpf_get_current_task,
     helpers::{
         bpf_get_current_cgroup_id, bpf_get_current_comm, bpf_get_current_pid_tgid,
-        bpf_get_current_uid_gid, bpf_ktime_get_ns, bpf_probe_read_kernel,
-        bpf_probe_read_kernel_str_bytes, bpf_probe_read_user_str_bytes,
+        bpf_get_current_task, bpf_get_current_uid_gid, bpf_ktime_get_ns,
+        bpf_probe_read_kernel, bpf_probe_read_kernel_str_bytes,
+        bpf_probe_read_user_str_bytes,
     },
     macros::{kprobe, map, tracepoint},
     maps::{Array, HashMap, RingBuf},
@@ -180,7 +180,8 @@ fn try_process_exit(_ctx: &TracePointContext) -> Result<(), i64> {
         let mut exit_code: i32 = -1;
         if let Some(cfg) = CONFIG.get(0) {
             let offset = cfg.task_exit_code_offset;
-            if offset > 0 {
+            // Sanity check: offset must be within a reasonable task_struct range.
+            if offset > 0 && offset < 16384 {
                 // SAFETY: bpf_get_current_task returns a pointer to the current
                 // task_struct; offset is from kernel BTF set by userspace loader.
                 let task = bpf_get_current_task();
@@ -188,7 +189,9 @@ fn try_process_exit(_ctx: &TracePointContext) -> Result<(), i64> {
                     let ptr = (task as *const u8).add(offset as usize) as *const i32;
                     // SAFETY: ptr points into task_struct at the BTF-verified offset.
                     if let Ok(code) = bpf_probe_read_kernel(ptr) {
-                        exit_code = code;
+                        // Linux task_struct.exit_code packs: (status << 8) | signal.
+                        // Extract the exit status for userspace.
+                        exit_code = code >> 8;
                     }
                 }
             }
@@ -573,8 +576,10 @@ unsafe fn read_sock_addrs(
     sport: &mut u16,
     dport: &mut u16,
 ) {
-    *sport = u16::from_be(ctx.read_at(24).unwrap_or(0));
-    *dport = u16::from_be(ctx.read_at(26).unwrap_or(0));
+    // The inet_sock_set_state tracepoint stores ports in host byte order
+    // (the kernel's trace_inet_sock_set_state does ntohs() internally).
+    *sport = ctx.read_at(24).unwrap_or(0);
+    *dport = ctx.read_at(26).unwrap_or(0);
     *saddr = ctx.read_at(32).unwrap_or(0);
     *daddr = ctx.read_at(36).unwrap_or(0);
 }

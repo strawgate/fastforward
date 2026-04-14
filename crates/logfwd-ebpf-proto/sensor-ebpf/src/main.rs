@@ -83,6 +83,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ebpf_bytes = std::fs::read(ebpf_path)?;
     let mut ebpf = Ebpf::load(&ebpf_bytes)?;
 
+    // Configure exit_code offset from kernel BTF BEFORE attaching programs,
+    // so events emitted during startup have valid config.
+    match configure_exit_code(&mut ebpf) {
+        Ok(offset) => eprintln!("  configured exit_code offset: {offset}"),
+        Err(e) => eprintln!("  exit_code offset unavailable (sentinel mode): {e}"),
+    }
+
     // Attach tracepoints.
     let tracepoints: &[(&str, &str, &str)] = &[
         ("sched_process_exec", "sched", "sched_process_exec"),
@@ -135,12 +142,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 eprintln!("  SKIP kprobe/{prog_name}: not found in eBPF binary");
             }
         }
-    }
-
-    // Configure exit_code offset from kernel BTF.
-    match configure_exit_code(&mut ebpf) {
-        Ok(offset) => eprintln!("  configured exit_code offset: {offset}"),
-        Err(e) => eprintln!("  exit_code offset unavailable (sentinel mode): {e}"),
     }
 
     eprintln!("Sensor running for {duration_secs}s. Events on stdout.");
