@@ -276,7 +276,7 @@
   var workerFills = [0, 0, 0];
 
   // Rates tuned so output must be above ~50% to keep up with input.
-  // At 100% output drains 3x faster than input — recovery is visible.
+  // At 100% output drains 2x faster than input — recovery is visible.
   // Below ~50% output, pressure builds; at 0% it's a full outage.
   var IO_RATE = 1.2;      // chunks/tick from I/O
   var CPU_RATE = 1.2;     // batches/tick CPU can process

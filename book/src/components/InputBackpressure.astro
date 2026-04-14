@@ -224,10 +224,8 @@
   var statsEl = el('div', 'ib-stats');
   root.appendChild(statsEl);
 
-  // Callout
+  // Callout — no aria-live since it updates every 250ms (would spam screen readers)
   var calloutEl = el('div', 'ib-callout');
-  calloutEl.setAttribute('role', 'status');
-  calloutEl.setAttribute('aria-live', 'polite');
   root.appendChild(calloutEl);
 
   // --- Mode switching ---
@@ -356,9 +354,11 @@
         fileGapEl.textContent = gap + ' lines behind \u2014 significant lag';
       }
 
-      // Reset bars if they fill
+      // Reset bars if they fill — keep the gap intact
       if (fileWritten > maxLines) {
-        fileWritten -= maxLines; fileRead -= maxLines;
+        var gap = fileWritten - fileRead;
+        fileWritten = gap + 100; // keep some headroom
+        fileRead = 100;
       }
 
     } else if (mode === 'udp') {
@@ -514,6 +514,19 @@
   if (!reducedMotion) {
     timer = setInterval(simTick, 250);
   } else {
+    // Show a representative static state so the component isn't blank
+    fileWritten = 400; fileRead = 250;
+    udpBuffer = 100; udpDropped = 45; udpReceived = 300;
+    otlpAccepted = 8; otlpRejected = 3; otlpRetrying = true;
+    buildViz();
+    // Populate file bars statically
+    if (mode === 'file' && fileBarWritten && fileBarRead) {
+      fileBarWritten.style.width = '40%';
+      fileBarRead.style.width = '25%';
+      fileGapEl.className = 'ib-file-gap far-behind';
+      fileGapEl.textContent = '150 lines behind — animation paused (reduced motion)';
+    }
+    updateStats();
     updateCallout();
   }
 
