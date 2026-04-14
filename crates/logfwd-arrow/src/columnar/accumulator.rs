@@ -633,21 +633,20 @@ fn build_string_view_trusted(
             )?;
         }
     } else {
-        // Sparse: walk facts in row order, null rows stay as 0 (zero-length view).
+        // Sparse: iterate all facts, assign by row index (last-write-wins for duplicates).
         let mut valid = vec![false; num_rows];
-        let mut vi = 0;
-        for (row, view_slot) in views.iter_mut().enumerate() {
-            if vi < facts.len() && facts[vi].0 as usize == row {
-                *view_slot = make_string_view(
-                    facts[vi].1,
+        for &(row, sref) in facts {
+            let r = row as usize;
+            if r < num_rows {
+                views[r] = make_string_view(
+                    sref,
                     original_buf,
                     generated_buf,
                     original_len,
                     orig_block,
                     gen_block,
                 )?;
-                valid[row] = true;
-                vi += 1;
+                valid[r] = true;
             }
         }
         nulls = Some(NullBuffer::from(valid));
@@ -716,7 +715,14 @@ fn make_string_view(
     };
 
     let local_start = local_offset as usize;
-    let local_end = local_start + len as usize;
+    let local_end =
+        local_start
+            .checked_add(len as usize)
+            .ok_or(MaterializeError::StringRefOutOfBounds {
+                offset: sref.offset,
+                len: sref.len,
+                buffer_len: buf.len(),
+            })?;
     if local_end > buf.len() {
         return Err(MaterializeError::StringRefOutOfBounds {
             offset: sref.offset,
@@ -779,16 +785,24 @@ fn build_string_array_validated(
             values.extend_from_slice(bytes);
         }
     } else {
-        let mut vi = 0;
-        for row in 0..num_rows as u32 {
+        // Sparse: two-pass to handle duplicate row indices correctly.
+        // First pass: find last fact index per row (last-write-wins).
+        let mut last_fact_for_row: Vec<Option<usize>> = vec![None; num_rows];
+        for (fi, &(row, _)) in facts.iter().enumerate() {
+            let r = row as usize;
+            if r < num_rows {
+                last_fact_for_row[r] = Some(fi);
+            }
+        }
+        // Second pass: build offsets and values in row order.
+        for entry in &last_fact_for_row {
             let off = i32::try_from(values.len()).map_err(|_| MaterializeError::OffsetOverflow)?;
             offsets.push(off);
-            if vi < facts.len() && facts[vi].0 == row {
-                let sref = facts[vi].1;
+            if let Some(fi) = entry {
+                let sref = facts[*fi].1;
                 let bytes = read_str_bytes(original_buf, generated_buf, original_len, sref)?;
                 values.extend_from_slice(bytes);
                 validity.push(true);
-                vi += 1;
             } else {
                 validity.push(false);
             }
@@ -799,19 +813,15 @@ fn build_string_array_validated(
 
     // Validate UTF-8 for external bytes.
     if !original_buf.is_empty() && std::str::from_utf8(&values).is_err() {
-        let mut fvi = 0;
-        for row in 0..num_rows as u32 {
-            if fvi < facts.len() && facts[fvi].0 == row {
-                let sref = facts[fvi].1;
-                let start = offsets[row as usize] as usize;
-                let end = offsets[row as usize + 1] as usize;
-                if std::str::from_utf8(&values[start..end]).is_err() {
-                    return Err(MaterializeError::InvalidUtf8 {
-                        offset: sref.offset,
-                        len: sref.len,
-                    });
-                }
-                fvi += 1;
+        // Identify which row contains the invalid UTF-8.
+        for row in 0..num_rows {
+            let start = offsets[row] as usize;
+            let end = offsets[row + 1] as usize;
+            if start < end && std::str::from_utf8(&values[start..end]).is_err() {
+                return Err(MaterializeError::InvalidUtf8 {
+                    offset: offsets[row] as u32,
+                    len: (end - start) as u32,
+                });
             }
         }
     }
