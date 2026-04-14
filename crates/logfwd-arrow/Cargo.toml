@@ -20,6 +20,7 @@ arrow = { workspace = true }
 bytes = "1"
 
 [dev-dependencies]
+proptest = { workspace = true }
 serial_test = "3"
 stats_alloc = "0.1"
 

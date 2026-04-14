@@ -300,3 +300,126 @@ mod tests {
         lc.finish_batch();
     }
 }
+
+// ---------------------------------------------------------------------------
+// Kani proofs — exhaustive state machine verification
+// ---------------------------------------------------------------------------
+//
+// Pattern: symbolic action sequences (same technique as checkpoint_tracker.rs).
+// Explores all valid transition orderings to prove safety invariants hold
+// for every reachable state.
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    /// Dispatch a valid action based on current state.
+    /// Returns the action tag for coverage tracking.
+    fn symbolic_action(lc: &mut RowLifecycle) -> u8 {
+        let tag: u8 = kani::any();
+        match lc.state() {
+            // Idle: only begin_batch is valid.
+            BuilderState::Idle => {
+                kani::assume(tag == 0);
+                lc.begin_batch();
+            }
+            // InBatch: begin_row (1), finish_batch (2), or begin_batch restart (0).
+            BuilderState::InBatch => {
+                kani::assume(tag <= 2);
+                match tag {
+                    0 => lc.begin_batch(),
+                    1 => lc.begin_row(),
+                    _ => lc.finish_batch(),
+                }
+            }
+            // InRow: end_row is the only valid transition.
+            BuilderState::InRow => {
+                kani::assume(tag == 3);
+                lc.end_row();
+            }
+            _ => unreachable!(),
+        }
+        tag
+    }
+
+    /// Row count never decreases within a batch and resets on begin_batch.
+    ///
+    /// 8-step symbolic action sequence covers batches with 0–3 rows plus
+    /// cross-batch restart (begin_batch + 3×(begin_row+end_row) + finish = 8).
+    #[kani::proof]
+    #[kani::solver(kissat)]
+    #[kani::unwind(10)]
+    fn verify_row_count_monotonic() {
+        let mut lc = RowLifecycle::new();
+        let mut prev_count: u32 = 0;
+
+        for _ in 0..8 {
+            let tag = symbolic_action(&mut lc);
+            let count = lc.row_count();
+
+            if tag == 0 {
+                // begin_batch resets to 0.
+                assert_eq!(count, 0, "begin_batch must reset row_count");
+                prev_count = 0;
+            } else if tag == 3 {
+                // end_row increments by exactly 1.
+                assert_eq!(count, prev_count + 1, "end_row must increment by 1");
+                prev_count = count;
+            } else {
+                // Other actions preserve row_count.
+                assert_eq!(count, prev_count, "non-row actions preserve count");
+            }
+        }
+
+        kani::cover!(prev_count > 0, "at least one row completed");
+        kani::cover!(prev_count > 2, "multiple rows completed");
+    }
+
+    /// written_bits is zero at the start of every row.
+    #[kani::proof]
+    #[kani::solver(kissat)]
+    #[kani::unwind(7)]
+    fn verify_written_bits_reset_on_begin_row() {
+        let mut lc = RowLifecycle::new();
+
+        for _ in 0..5 {
+            let tag = symbolic_action(&mut lc);
+
+            if tag == 1 {
+                // begin_row just fired → bits must be zero.
+                assert_eq!(
+                    *lc.written_bits_mut(),
+                    0,
+                    "written_bits must be zero after begin_row"
+                );
+                // Simulate field writes in this row.
+                *lc.written_bits_mut() = kani::any();
+            }
+        }
+
+        kani::cover!(lc.row_count() > 0, "completed at least one row");
+    }
+
+    /// State machine only reaches valid states: Idle, InBatch, InRow.
+    #[kani::proof]
+    #[kani::solver(kissat)]
+    #[kani::unwind(9)]
+    fn verify_state_always_valid() {
+        let mut lc = RowLifecycle::new();
+
+        for _ in 0..7 {
+            symbolic_action(&mut lc);
+            let s = lc.state();
+            assert!(
+                matches!(
+                    s,
+                    BuilderState::Idle | BuilderState::InBatch | BuilderState::InRow
+                ),
+                "state must always be a valid RowLifecycle state"
+            );
+        }
+
+        kani::cover!(lc.state() == BuilderState::Idle, "reached Idle");
+        kani::cover!(lc.state() == BuilderState::InBatch, "reached InBatch");
+        kani::cover!(lc.state() == BuilderState::InRow, "reached InRow");
+    }
+}

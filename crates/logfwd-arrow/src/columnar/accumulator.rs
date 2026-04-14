@@ -887,6 +887,8 @@ fn build_conflict_struct(
 
 #[cfg(test)]
 mod tests {
+    use std::mem::size_of_val;
+
     use super::*;
     use arrow::array::{Array, AsArray};
     use arrow::datatypes::Int64Type;
@@ -1068,8 +1070,8 @@ mod tests {
         let planned = ColumnAccumulator::for_planned(FieldKind::Int64);
         let dynamic = ColumnAccumulator::dynamic();
 
-        let planned_size = std::mem::size_of_val(&planned);
-        let dynamic_size = std::mem::size_of_val(&dynamic);
+        let planned_size = size_of_val(&planned);
+        let dynamic_size = size_of_val(&dynamic);
 
         // The enum discriminant means planned isn't dramatically smaller in stack
         // size due to enum sizing rules, but the heap allocation count differs.
@@ -1150,5 +1152,361 @@ mod tests {
         };
         let result = acc.materialize("x", 1, mode);
         assert!(result.is_err());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Kani proofs — exhaustive verification of pure u128 packing logic
+// ---------------------------------------------------------------------------
+//
+// Verification strategy (aligned with project conventions in VERIFICATION.md):
+//   - Kani: pure logic only — no heap allocations, no Arrow construction
+//   - proptest: allocation-heavy paths (build_int64/float64/bool, read_str_bytes)
+//   - Unit tests: Arrow integration (RecordBatch, finish_batch)
+//
+// build_int64/float64/bool and read_str_bytes are verified via proptest below
+// because they allocate Vecs and/or use slice operations that cause CBMC solver
+// timeouts (>10 min for read_str_bytes on [u8; 16]).
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    // ── make_string_view ────────────────────────────────────────────────────
+
+    /// Inline path (len ≤ 12): length encodes correctly, data bytes round-trip.
+    #[kani::proof]
+    #[kani::unwind(17)]
+    fn verify_make_string_view_inline_roundtrip() {
+        let len: u32 = kani::any();
+        kani::assume(len > 0 && len <= 12);
+
+        let mut buf = [0u8; 12];
+        for i in 0..12 {
+            buf[i] = kani::any();
+        }
+
+        let sref = StringRef { offset: 0, len };
+        let view =
+            make_string_view(sref, &buf[..len as usize], &[], len as usize, 0, None).unwrap();
+
+        // Extract length from view — bytes 0..4 little-endian.
+        let extracted_len = (view & 0xFFFF_FFFF) as u32;
+        assert_eq!(extracted_len, len, "encoded length must match");
+
+        // Extract inline data — bytes 4..4+len.
+        let view_bytes = view.to_le_bytes();
+        for i in 0..len as usize {
+            assert_eq!(
+                view_bytes[4 + i],
+                buf[i],
+                "inline data byte must match source"
+            );
+        }
+
+        kani::cover!(len == 1, "minimal inline");
+        kani::cover!(len == 12, "max inline");
+    }
+
+    /// Zero-length string encodes as zero u128.
+    #[kani::proof]
+    fn verify_make_string_view_zero_length() {
+        let sref = StringRef { offset: 0, len: 0 };
+        let view = make_string_view(sref, &[], &[], 0, 0, None).unwrap();
+        assert_eq!(view, 0u128, "zero-length string must be all-zero view");
+    }
+
+    /// Buffer-ref path (len > 12): u128 field packing is non-overlapping and
+    /// each 32-bit lane round-trips correctly.
+    #[kani::proof]
+    fn verify_make_string_view_buffer_ref_packing() {
+        let len: u32 = kani::any();
+        kani::assume(len > 12 && len <= 64);
+        let block_idx: u32 = kani::any();
+        let local_offset: u32 = kani::any();
+        kani::assume((local_offset as usize) + (len as usize) <= 256);
+
+        let buf_len = local_offset as usize + len as usize;
+        let buf = vec![0xABu8; buf_len];
+
+        let sref = StringRef {
+            offset: local_offset,
+            len,
+        };
+        let view = make_string_view(sref, &buf, &[], buf_len, block_idx, None).unwrap();
+
+        // Lane 0: length
+        assert_eq!((view & 0xFFFF_FFFF) as u32, len);
+        // Lane 1: prefix (first 4 bytes of string data = 0xAB repeated)
+        let expected_prefix = u32::from_le_bytes([0xAB, 0xAB, 0xAB, 0xAB]);
+        assert_eq!(((view >> 32) & 0xFFFF_FFFF) as u32, expected_prefix);
+        // Lane 2: block index
+        assert_eq!(((view >> 64) & 0xFFFF_FFFF) as u32, block_idx);
+        // Lane 3: local offset
+        assert_eq!(((view >> 96) & 0xFFFF_FFFF) as u32, local_offset);
+    }
+
+    /// Out-of-bounds StringRef returns error, never panics.
+    #[kani::proof]
+    fn verify_make_string_view_out_of_bounds() {
+        let offset: u32 = kani::any();
+        let len: u32 = kani::any();
+        kani::assume(len > 0);
+        let buf_len: usize = kani::any();
+        kani::assume(buf_len < 256);
+        let total = (offset as usize).saturating_add(len as usize);
+        kani::assume(total > buf_len);
+
+        let buf = vec![0u8; buf_len];
+        let sref = StringRef { offset, len };
+        let result = make_string_view(sref, &buf, &[], buf_len, 0, None);
+        assert!(result.is_err(), "OOB reference must return error");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Proptest — statistical verification for allocation-heavy materialization
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use arrow::array::Array;
+    use proptest::prelude::*;
+
+    // ── build_int64 ─────────────────────────────────────────────────────────
+
+    proptest! {
+        /// Dense int64: all rows present, no nulls.
+        #[test]
+        fn build_int64_dense(values in prop::collection::vec(any::<i64>(), 1..=64)) {
+            let num_rows = values.len();
+            let facts: Vec<(u32, i64)> = values.iter().enumerate()
+                .map(|(i, &v)| (i as u32, v)).collect();
+            let (arr, dt) = build_int64(&facts, num_rows);
+            prop_assert_eq!(dt, DataType::Int64);
+            prop_assert_eq!(arr.len(), num_rows);
+            prop_assert_eq!(arr.null_count(), 0, "dense path must have no nulls");
+            let typed = arr.as_any().downcast_ref::<Int64Array>().unwrap();
+            for (i, &v) in values.iter().enumerate() {
+                prop_assert_eq!(typed.value(i), v);
+            }
+        }
+
+        /// Sparse int64: random subset of rows, gaps are null.
+        #[test]
+        fn build_int64_sparse(
+            num_rows in 1usize..=32,
+            seed in any::<u64>(),
+        ) {
+            // Deterministic sparse pattern from seed.
+            let mut facts: Vec<(u32, i64)> = Vec::new();
+            for row in 0..num_rows as u32 {
+                if (seed.wrapping_mul(row as u64 + 1)) % 3 != 0 {
+                    facts.push((row, row as i64 * 100));
+                }
+            }
+            if facts.is_empty() {
+                // Ensure at least one fact for a meaningful test.
+                facts.push((0, 42));
+            }
+            let (arr, _) = build_int64(&facts, num_rows);
+            prop_assert_eq!(arr.len(), num_rows);
+
+            let typed = arr.as_any().downcast_ref::<Int64Array>().unwrap();
+            let mut fi = 0;
+            for row in 0..num_rows {
+                if fi < facts.len() && facts[fi].0 as usize == row {
+                    prop_assert!(!typed.is_null(row), "fact row must not be null");
+                    prop_assert_eq!(typed.value(row), facts[fi].1);
+                    fi += 1;
+                } else {
+                    prop_assert!(typed.is_null(row), "gap row must be null");
+                }
+            }
+        }
+    }
+
+    // ── build_float64 ───────────────────────────────────────────────────────
+
+    proptest! {
+        /// Dense float64: all rows present, no nulls.
+        #[test]
+        fn build_float64_dense(
+            values in prop::collection::vec(
+                any::<f64>().prop_filter("finite", |v| v.is_finite()),
+                1..=64,
+            )
+        ) {
+            let num_rows = values.len();
+            let facts: Vec<(u32, f64)> = values.iter().enumerate()
+                .map(|(i, &v)| (i as u32, v)).collect();
+            let (arr, dt) = build_float64(&facts, num_rows);
+            prop_assert_eq!(dt, DataType::Float64);
+            prop_assert_eq!(arr.len(), num_rows);
+            prop_assert_eq!(arr.null_count(), 0);
+            let typed = arr.as_any().downcast_ref::<Float64Array>().unwrap();
+            for (i, &v) in values.iter().enumerate() {
+                prop_assert_eq!(typed.value(i).to_bits(), v.to_bits());
+            }
+        }
+
+        /// Sparse float64: gaps are null.
+        #[test]
+        fn build_float64_sparse(num_rows in 1usize..=32, seed in any::<u64>()) {
+            let mut facts: Vec<(u32, f64)> = Vec::new();
+            for row in 0..num_rows as u32 {
+                if (seed.wrapping_mul(row as u64 + 1)) % 3 != 0 {
+                    facts.push((row, row as f64 * 1.5));
+                }
+            }
+            if facts.is_empty() {
+                facts.push((0, 42.0));
+            }
+            let (arr, _) = build_float64(&facts, num_rows);
+            prop_assert_eq!(arr.len(), num_rows);
+
+            let typed = arr.as_any().downcast_ref::<Float64Array>().unwrap();
+            let mut fi = 0;
+            for row in 0..num_rows {
+                if fi < facts.len() && facts[fi].0 as usize == row {
+                    prop_assert!(!typed.is_null(row));
+                    prop_assert_eq!(
+                        typed.value(row).to_bits(),
+                        facts[fi].1.to_bits(),
+                        "value mismatch at row {}", row
+                    );
+                    fi += 1;
+                } else {
+                    prop_assert!(typed.is_null(row));
+                }
+            }
+        }
+    }
+
+    // ── build_bool ──────────────────────────────────────────────────────────
+
+    proptest! {
+        /// Dense bool: all rows present, no nulls.
+        #[test]
+        fn build_bool_dense(values in prop::collection::vec(any::<bool>(), 1..=64)) {
+            let num_rows = values.len();
+            let facts: Vec<(u32, bool)> = values.iter().enumerate()
+                .map(|(i, &v)| (i as u32, v)).collect();
+            let (arr, dt) = build_bool(&facts, num_rows);
+            prop_assert_eq!(dt, DataType::Boolean);
+            prop_assert_eq!(arr.len(), num_rows);
+            prop_assert_eq!(arr.null_count(), 0);
+            let typed = arr.as_any().downcast_ref::<BooleanArray>().unwrap();
+            for (i, &v) in values.iter().enumerate() {
+                prop_assert_eq!(typed.value(i), v);
+            }
+        }
+
+        /// Sparse bool: gaps are null.
+        #[test]
+        fn build_bool_sparse(num_rows in 1usize..=32, seed in any::<u64>()) {
+            let mut facts: Vec<(u32, bool)> = Vec::new();
+            for row in 0..num_rows as u32 {
+                if (seed.wrapping_mul(row as u64 + 1)) % 3 != 0 {
+                    facts.push((row, row % 2 == 0));
+                }
+            }
+            if facts.is_empty() {
+                facts.push((0, true));
+            }
+            let (arr, _) = build_bool(&facts, num_rows);
+            prop_assert_eq!(arr.len(), num_rows);
+
+            let typed = arr.as_any().downcast_ref::<BooleanArray>().unwrap();
+            let mut fi = 0;
+            for row in 0..num_rows {
+                if fi < facts.len() && facts[fi].0 as usize == row {
+                    prop_assert!(!typed.is_null(row));
+                    prop_assert_eq!(typed.value(row), facts[fi].1);
+                    fi += 1;
+                } else {
+                    prop_assert!(typed.is_null(row));
+                }
+            }
+        }
+    }
+
+    // ── read_str_bytes ──────────────────────────────────────────────────────
+
+    proptest! {
+        /// Strings in the original buffer resolve correctly.
+        #[test]
+        fn read_str_bytes_original_buffer(
+            orig_len in 1usize..=128,
+            offset in 0u32..128,
+            len in 1u32..=64,
+        ) {
+            prop_assume!((offset as usize) + (len as usize) <= orig_len);
+            let original = vec![0xCCu8; orig_len];
+            let generated: Vec<u8> = vec![0xDDu8; 16];
+
+            let sref = StringRef { offset, len };
+            let result = read_str_bytes(&original, &generated, orig_len, sref);
+            prop_assert!(result.is_ok());
+            let bytes = result.unwrap();
+            prop_assert_eq!(bytes.len(), len as usize);
+            for &b in bytes {
+                prop_assert_eq!(b, 0xCC);
+            }
+        }
+
+        /// Strings in the generated buffer resolve correctly.
+        #[test]
+        fn read_str_bytes_generated_buffer(
+            orig_len in 1usize..=64,
+            gen_len in 1usize..=128,
+            gen_offset in 0u32..128,
+            len in 1u32..=64,
+        ) {
+            prop_assume!((gen_offset as usize) + (len as usize) <= gen_len);
+            let original = vec![0xCCu8; orig_len];
+            let generated = vec![0xDDu8; gen_len];
+
+            let sref = StringRef {
+                offset: orig_len as u32 + gen_offset,
+                len,
+            };
+            let result = read_str_bytes(&original, &generated, orig_len, sref);
+            prop_assert!(result.is_ok());
+            let bytes = result.unwrap();
+            prop_assert_eq!(bytes.len(), len as usize);
+            for &b in bytes {
+                prop_assert_eq!(b, 0xDD);
+            }
+        }
+
+        /// A string starting in original but extending past it is rejected.
+        #[test]
+        fn read_str_bytes_spanning_rejected(
+            offset in 0u32..8,
+            len in 2u32..=12,
+        ) {
+            let orig_len = 8usize;
+            prop_assume!((offset as usize) < orig_len);
+            prop_assume!((offset as usize + len as usize) > orig_len);
+
+            let original = [0xCCu8; 8];
+            let generated = [0xDDu8; 8];
+            let sref = StringRef { offset, len };
+            let result = read_str_bytes(&original, &generated, orig_len, sref);
+            prop_assert!(result.is_err(), "spanning strings must be rejected");
+        }
+
+        /// Completely out-of-bounds references always fail.
+        #[test]
+        fn read_str_bytes_out_of_bounds(
+            offset in 128u32..256,
+            len in 1u32..=32,
+        ) {
+            let original = [0xCCu8; 8];
+            let generated = [0xDDu8; 8];
+            let sref = StringRef { offset, len };
+            let result = read_str_bytes(&original, &generated, 8, sref);
+            prop_assert!(result.is_err());
+        }
     }
 }
