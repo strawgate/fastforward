@@ -34,19 +34,24 @@
     white-space: nowrap;
   }
   .bp-slider-wrap {
-    display: flex; align-items: center; gap: 0.4rem; flex: 1; min-width: 160px;
+    display: flex; align-items: center; gap: 0.5rem; flex: 1; min-width: 160px;
+    background: color-mix(in srgb, var(--bp-text) 4%, transparent);
+    border: 1px solid var(--bp-border); border-radius: 5px; padding: 0.2rem 0.5rem;
   }
   .bp-slider {
-    flex: 1; height: 4px; -webkit-appearance: none; appearance: none;
-    background: var(--bp-border); border-radius: 2px; outline: none; cursor: pointer;
+    flex: 1; height: 5px; -webkit-appearance: none; appearance: none;
+    background: var(--bp-border); border-radius: 3px; outline: none; cursor: pointer;
+    box-shadow: inset 0 1px 2px rgba(0,0,0,0.2);
   }
   .bp-slider::-webkit-slider-thumb {
-    -webkit-appearance: none; width: 14px; height: 14px; border-radius: 50%;
-    background: var(--bp-accent); border: none; cursor: pointer;
+    -webkit-appearance: none; width: 16px; height: 16px; border-radius: 50%;
+    background: var(--bp-accent); border: 2px solid white; cursor: pointer;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.25);
   }
   .bp-slider::-moz-range-thumb {
-    width: 14px; height: 14px; border-radius: 50%;
-    background: var(--bp-accent); border: none; cursor: pointer;
+    width: 16px; height: 16px; border-radius: 50%;
+    background: var(--bp-accent); border: 2px solid white; cursor: pointer;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.25);
   }
   .bp-speed-val {
     font-family: var(--sl-font-mono, monospace); font-size: 0.7rem;
@@ -105,13 +110,14 @@
   .bp-slot.full { background: var(--bp-red); border-color: var(--bp-red); }
   .bp-queue-label { font-size: 0.5rem; color: var(--bp-muted); text-align: center; font-family: var(--sl-font-mono, monospace); }
 
-  /* Activity bar */
+  /* Activity bar — flush at bottom of stage box */
   .bp-activity {
-    height: 3px; border-radius: 1.5px; margin-top: 0.35rem;
+    height: 4px; border-radius: 0 0 6px 6px;
+    margin: 0.4rem -0.5rem -0.5rem -0.5rem;
     background: var(--bp-border); overflow: hidden; position: relative;
   }
   .bp-activity-fill {
-    position: absolute; inset: 0; border-radius: 1.5px;
+    position: absolute; inset: 0; border-radius: 0 0 6px 6px;
     background: var(--bp-green); transform-origin: left;
     transition: transform 0.3s ease, background-color 0.4s;
   }
@@ -565,7 +571,7 @@
     if (!otlpMiniLogEl) return;
     var row = el('div', 'bp-mini-req');
     var sCls = status === 200 ? 's200' : 's429';
-    row.innerHTML = '#' + batch + '\u00A0<span class="' + sCls + '">' + status + '</span>' +
+    row.innerHTML = 'req\u00A0#' + batch + '\u00A0\u00A0<span class="' + sCls + '">' + status + '</span>' +
       (note ? '\u00A0<span class="rnote">' + note + '</span>' : '');
     otlpMiniLogEl.appendChild(row);
     while (otlpMiniLogEl.children.length > 4) otlpMiniLogEl.removeChild(otlpMiniLogEl.firstChild);
