@@ -170,7 +170,7 @@ struct HostMetricsCommon {
     schema: Arc<Schema>,
     system: System,
     networks: Networks,
-    /// Monotonically increasing counter used to rotate the budget remainder
+    /// Wrapping counter used to rotate the budget remainder
     /// across families so no single family is permanently starved (#1935).
     poll_count: usize,
 }
@@ -659,7 +659,6 @@ impl HostMetricsCommon {
             let extra =
                 usize::from((family_idx + active_count - start_idx) % active_count < remainder);
             emitted += self.emit_disk_io_rows(control, out, per_family_budget + extra);
-            let _ = family_idx;
         }
 
         emitted
@@ -2299,9 +2298,9 @@ mod tests {
 
         // Track how many extra rows each family position gets over 3 cycles.
         let mut extras = [0usize; 3];
-        for poll_count in 0..3 {
+        for poll_count in 0..active_count {
             let start_idx = poll_count % active_count;
-            for family_idx in 0..3 {
+            for family_idx in 0..active_count {
                 let extra =
                     usize::from((family_idx + active_count - start_idx) % active_count < remainder);
                 extras[family_idx] += extra;
@@ -2323,9 +2322,9 @@ mod tests {
         let max_rows = 1usize;
         let remainder = max_rows % active_count; // 1
         let mut totals = [0usize; 3];
-        for poll_count in 0..3 {
+        for poll_count in 0..active_count {
             let start_idx = poll_count % active_count;
-            for family_idx in 0..3 {
+            for family_idx in 0..active_count {
                 let extra =
                     usize::from((family_idx + active_count - start_idx) % active_count < remainder);
                 totals[family_idx] += extra;
