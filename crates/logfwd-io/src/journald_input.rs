@@ -607,10 +607,10 @@ fn normalize_fields(fields: &mut Vec<(Vec<u8>, Vec<u8>)>) {
         }
 
         // Parse _SOURCE_REALTIME_TIMESTAMP to µs before lowercasing (avoids clone).
-        if name == b"_SOURCE_REALTIME_TIMESTAMP" {
-            if let Ok(s) = std::str::from_utf8(value) {
-                source_ts_usec = s.parse::<i64>().ok();
-            }
+        if name == b"_SOURCE_REALTIME_TIMESTAMP"
+            && let Ok(s) = std::str::from_utf8(value)
+        {
+            source_ts_usec = s.parse::<i64>().ok();
         }
 
         // Lowercase the field name in-place.
@@ -628,21 +628,19 @@ fn normalize_fields(fields: &mut Vec<(Vec<u8>, Vec<u8>)>) {
     });
 
     // Synthesize `timestamp` from `_source_realtime_timestamp` (µs epoch → RFC 3339).
-    if !has_timestamp {
-        if let Some(us) = source_ts_usec {
-            if let Some(rfc3339) = usec_to_rfc3339(us) {
-                fields.push((b"timestamp".to_vec(), rfc3339.into_bytes()));
-            }
-        }
+    if !has_timestamp
+        && let Some(us) = source_ts_usec
+        && let Some(rfc3339) = usec_to_rfc3339(us)
+    {
+        fields.push((b"timestamp".to_vec(), rfc3339.into_bytes()));
     }
 
     // Synthesize `level` from PRIORITY (syslog 0-7 → OTLP severity text).
-    if !has_level {
-        if let Some(prio) = priority_value {
-            if let Some(level_text) = syslog_priority_to_level(prio) {
-                fields.push((b"level".to_vec(), level_text.as_bytes().to_vec()));
-            }
-        }
+    if !has_level
+        && let Some(prio) = priority_value
+        && let Some(level_text) = syslog_priority_to_level(prio)
+    {
+        fields.push((b"level".to_vec(), level_text.as_bytes().to_vec()));
     }
 }
 
