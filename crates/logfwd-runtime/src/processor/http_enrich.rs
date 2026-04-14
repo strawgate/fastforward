@@ -366,7 +366,7 @@ impl Processor for HttpEnrichProcessor {
         // 1. Extract keys from the source column.
         let keys: Vec<Option<String>> = match batch.column_by_name(&self.config.source_column) {
             None => vec![None; num_rows],
-            Some(col) => extract_strings(col, num_rows),
+            Some(col) => extract_strings(col, num_rows, &self.config.source_column)?,
         };
 
         // 2. Deduplicate keys and check cache.
@@ -453,12 +453,16 @@ impl Processor for HttpEnrichProcessor {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn extract_strings(col: &Arc<dyn arrow::array::Array>, num_rows: usize) -> Vec<Option<String>> {
+fn extract_strings(
+    col: &Arc<dyn arrow::array::Array>,
+    num_rows: usize,
+    column_name: &str,
+) -> Result<Vec<Option<String>>, ProcessorError> {
     use arrow::array::{Array, AsArray};
     match col.data_type() {
         DataType::Utf8 => {
             let arr = col.as_string::<i32>();
-            (0..num_rows)
+            Ok((0..num_rows)
                 .map(|i| {
                     if arr.is_null(i) {
                         None
@@ -466,11 +470,11 @@ fn extract_strings(col: &Arc<dyn arrow::array::Array>, num_rows: usize) -> Vec<O
                         Some(arr.value(i).to_owned())
                     }
                 })
-                .collect()
+                .collect())
         }
         DataType::Utf8View => {
             let arr = col.as_string_view();
-            (0..num_rows)
+            Ok((0..num_rows)
                 .map(|i| {
                     if arr.is_null(i) {
                         None
@@ -478,11 +482,11 @@ fn extract_strings(col: &Arc<dyn arrow::array::Array>, num_rows: usize) -> Vec<O
                         Some(arr.value(i).to_owned())
                     }
                 })
-                .collect()
+                .collect())
         }
         DataType::LargeUtf8 => {
             let arr = col.as_string::<i64>();
-            (0..num_rows)
+            Ok((0..num_rows)
                 .map(|i| {
                     if arr.is_null(i) {
                         None
@@ -490,9 +494,11 @@ fn extract_strings(col: &Arc<dyn arrow::array::Array>, num_rows: usize) -> Vec<O
                         Some(arr.value(i).to_owned())
                     }
                 })
-                .collect()
+                .collect())
         }
-        _ => vec![None; num_rows],
+        other => Err(ProcessorError::Permanent(format!(
+            "http_enrich: source column '{column_name}' has unsupported type {other}; expected a string type"
+        ))),
     }
 }
 
