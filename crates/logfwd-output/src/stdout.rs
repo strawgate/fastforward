@@ -80,12 +80,17 @@ impl StdoutSink {
         }
     }
 
-    /// Write into an arbitrary `Write` destination (useful for testing).
-    pub fn write_batch_to<W: Write>(
+    /// Write a batch into a `Vec<u8>` destination.
+    ///
+    /// All production callers (FileSink, StdoutSink::serialize_batch) pass
+    /// `&mut Vec<u8>`, allowing the JSON path to write directly without an
+    /// intermediate per-row scratch buffer.  Console format still uses
+    /// `self.buf` to build each row before flushing it.
+    pub fn write_batch_to(
         &mut self,
         batch: &RecordBatch,
         _metadata: &BatchMetadata,
-        dest: &mut W,
+        dest: &mut Vec<u8>,
     ) -> io::Result<()> {
         let num_rows = batch.num_rows();
         if num_rows == 0 {
@@ -112,10 +117,8 @@ impl StdoutSink {
                     }
                     let cols = build_col_infos(batch);
                     for row in 0..num_rows {
-                        self.buf.clear();
-                        write_row_json(batch, row, &cols, &mut self.buf)?;
-                        self.buf.push(b'\n');
-                        dest.write_all(&self.buf)?;
+                        write_row_json(batch, row, &cols, dest)?;
+                        dest.push(b'\n');
                     }
                 } else {
                     for row in 0..num_rows {
@@ -124,10 +127,10 @@ impl StdoutSink {
                             .map(|&idx| batch.column(idx))
                             .find(|col| !col.is_null(row))
                         {
-                            dest.write_all(
+                            dest.extend_from_slice(
                                 safe_array_value_to_string(col.as_ref(), row).as_bytes(),
-                            )?;
-                            dest.write_all(b"\n")?;
+                            );
+                            dest.push(b'\n');
                         }
                     }
                 }
@@ -135,10 +138,9 @@ impl StdoutSink {
             StdoutFormat::Json => {
                 let cols = build_col_infos(batch);
                 for row in 0..num_rows {
-                    self.buf.clear();
-                    write_row_json(batch, row, &cols, &mut self.buf)?;
-                    self.buf.push(b'\n');
-                    dest.write_all(&self.buf)?;
+                    // Write directly into dest — no intermediate scratch copy.
+                    write_row_json(batch, row, &cols, dest)?;
+                    dest.push(b'\n');
                 }
             }
             StdoutFormat::Console => {
@@ -152,9 +154,10 @@ impl StdoutSink {
     ///
     /// This avoids writing row-by-row to the async writer; instead the whole
     /// batch is rendered into the reusable output buffer and then flushed in a
-    /// single `write_all` to `tokio::io::Stdout`.  `self.buf` is used as
-    /// row-level scratch space by `write_batch_to`, so the output buffer is
-    /// temporarily taken out to avoid aliasing borrows.
+    /// single `write_all` to `tokio::io::Stdout`.  Console format uses
+    /// `self.buf` as per-row scratch space, so the output buffer is temporarily
+    /// taken out to avoid aliasing borrows.  JSON and Text formats write
+    /// directly into the destination buffer and do not use `self.buf`.
     fn serialize_batch(&mut self, batch: &RecordBatch, metadata: &BatchMetadata) -> io::Result<()> {
         let mut output = std::mem::take(&mut self.output_buf);
         output.clear();
@@ -163,7 +166,7 @@ impl StdoutSink {
         result
     }
 
-    fn write_console<W: Write>(&mut self, batch: &RecordBatch, dest: &mut W) -> io::Result<()> {
+    fn write_console(&mut self, batch: &RecordBatch, dest: &mut Vec<u8>) -> io::Result<()> {
         let schema = batch.schema();
         let fields = schema.fields();
 
@@ -316,7 +319,7 @@ impl StdoutSink {
             }
 
             self.buf.push(b'\n');
-            dest.write_all(&self.buf)?;
+            Write::write_all(dest, &self.buf)?;
         }
         Ok(())
     }
