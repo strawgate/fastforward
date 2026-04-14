@@ -557,7 +557,8 @@ fn parse_event(
             // SAFETY: Length checked >= size_of::<DnsQueryEvent>(); ring buffer is 8-byte aligned.
             let ev = unsafe { &*(ptr.cast::<DnsQueryEvent>()) };
             let mut row = EventRow::from_header(header, "dns_query", mono_to_wall_offset_ns);
-            let wire = &ev.qname[..ev.qname_len as usize];
+            let wire_len = (ev.qname_len as usize).min(MAX_DNS_NAME);
+            let wire = &ev.qname[..wire_len];
             let (qname, qtype) = dns_wire_to_dotted(wire);
             row.dns_qname = Some(qname);
             row.dns_qtype = Some(qtype);

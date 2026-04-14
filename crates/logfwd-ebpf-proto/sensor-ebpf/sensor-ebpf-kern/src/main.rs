@@ -676,9 +676,11 @@ fn try_dns_query(ctx: &TracePointContext) -> Result<(), i64> {
         (*event).qname_len = copy_len as u16;
 
         // Unrolled copy: the verifier needs a fixed bound with no internal
-        // branching. Copy up to 64 bytes (covers >99% of real DNS names).
+        // branching. Copy up to MAX_DNS_NAME (253) bytes to avoid truncation.
+        // This loop has only a single conditional break, so the verifier handles
+        // it without path explosion (unlike the label-parsing loop).
         let mut k = 0usize;
-        while k < 64 {
+        while k < MAX_DNS_NAME {
             if k >= copy_len {
                 break;
             }

@@ -219,7 +219,8 @@ pub struct MemfdCreateEvent {
 #[derive(Clone, Copy)]
 pub struct DnsQueryEvent {
     pub header: EventHeader,
-    /// DNS query name in dotted notation (e.g. "www.google.com").
+    /// DNS query name in raw wire format (label-encoded, e.g. `\x03www\x06google\x03com\x00`).
+    /// Parsed to dotted notation in userspace.
     pub qname: [u8; MAX_DNS_NAME],
     /// Length of the valid portion of `qname`.
     pub qname_len: u16,

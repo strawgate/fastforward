@@ -162,7 +162,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let now_wall = wall_clock_ns();
             let comm = comm_str(&header.comm);
-            let comm_esc = json_escape(comm);
+            let comm_esc = if json_mode { json_escape(comm) } else { String::new() };
 
             match header.kind {
                 // ── Process exec ──────────────────────────────
@@ -458,8 +458,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // SAFETY: length checked >= size_of::<TcpConnectEvent>(); ring buffer is 8-byte aligned.
                     let ev = unsafe { &*(ptr.cast::<TcpConnectEvent>()) };
                     counts.tcp_connect += 1;
-                    let src = Ipv4Addr::from(ev.saddr.to_be());
-                    let dst = Ipv4Addr::from(ev.daddr.to_be());
+                    let src = Ipv4Addr::from(ev.saddr.to_ne_bytes());
+                    let dst = Ipv4Addr::from(ev.daddr.to_ne_bytes());
                     if json_mode {
                         writeln!(
                             stdout,
@@ -480,8 +480,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // SAFETY: length checked >= size_of::<TcpAcceptEvent>(); ring buffer is 8-byte aligned.
                     let ev = unsafe { &*(ptr.cast::<TcpAcceptEvent>()) };
                     counts.tcp_accept += 1;
-                    let src = Ipv4Addr::from(ev.saddr.to_be());
-                    let dst = Ipv4Addr::from(ev.daddr.to_be());
+                    let src = Ipv4Addr::from(ev.saddr.to_ne_bytes());
+                    let dst = Ipv4Addr::from(ev.daddr.to_ne_bytes());
                     if json_mode {
                         writeln!(
                             stdout,
@@ -502,9 +502,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // SAFETY: length checked >= size_of::<DnsQueryEvent>(); ring buffer is 8-byte aligned.
                     let ev = unsafe { &*(ptr.cast::<DnsQueryEvent>()) };
                     counts.dns_query += 1;
-                    let wire = &ev.qname[..ev.qname_len as usize];
+                    let wire_len = (ev.qname_len as usize).min(MAX_DNS_NAME);
+                    let wire = &ev.qname[..wire_len];
                     let (qname, qtype) = dns_wire_to_dotted(wire);
-                    let dst = Ipv4Addr::from(ev.dst_addr.to_be());
+                    let dst = Ipv4Addr::from(ev.dst_addr.to_ne_bytes());
                     if json_mode {
                         writeln!(
                             stdout,
