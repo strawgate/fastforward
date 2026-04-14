@@ -183,7 +183,7 @@
     transform: translateX(-50%); z-index: 10;
     padding: 0.35rem 0.55rem; border-radius: 6px;
     font-size: 0.62rem; font-weight: 600; line-height: 1.35;
-    white-space: nowrap; max-width: 220px; white-space: normal;
+    max-width: 220px; white-space: normal;
     pointer-events: none;
     animation: bp-alert-in 0.3s ease-out forwards;
     box-shadow: 0 2px 8px rgba(0,0,0,0.15);
@@ -484,7 +484,7 @@
   }
 
   function updateStats() {
-    var throughput = (outputSpeed / 100) * OUT_MAX_RATE;
+    var throughput = (outputSpeed / 100) * OUT_MAX_RATE * 4; // 4 ticks/s (250ms interval)
     var latClass = '';
     var latVal = '';
     if (outputSpeed === 0) { latVal = '\u221E'; latClass = 'red'; }
@@ -658,12 +658,35 @@
   updateStats();
   addLog('Pipeline started \u2014 drag the slider or click a preset', 'ok');
 
-  // Start animation
-  var interval = setInterval(simTick, 250);
+  // Start animation (pause when tab is hidden to save CPU/battery)
+  var interval = null;
+
+  function startSimulation() {
+    if (interval !== null || document.hidden) return;
+    interval = setInterval(simTick, 250);
+  }
+
+  function stopSimulation() {
+    if (interval === null) return;
+    clearInterval(interval);
+    interval = null;
+  }
+
+  function handleVisibilityChange() {
+    if (document.hidden) {
+      stopSimulation();
+    } else {
+      startSimulation();
+    }
+  }
+
+  startSimulation();
+  document.addEventListener('visibilitychange', handleVisibilityChange);
 
   // Cleanup on page nav (Starlight SPA)
   document.addEventListener('astro:before-swap', function() {
-    clearInterval(interval);
+    document.removeEventListener('visibilitychange', handleVisibilityChange);
+    stopSimulation();
     running = false;
   }, { once: true });
 })();
