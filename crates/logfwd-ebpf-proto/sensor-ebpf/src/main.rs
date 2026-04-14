@@ -653,16 +653,15 @@ fn configure_exit_code(ebpf: &mut Ebpf) -> Result<u32, Box<dyn std::error::Error
     let mut offset: Option<u32> = None;
     for line in stdout.lines() {
         let trimmed = line.trim();
-        if trimmed.contains("exit_code") && trimmed.contains("/*") {
-            if let Some(comment) = trimmed.split("/*").nth(1) {
-                let parts: Vec<&str> = comment.split_whitespace().collect();
-                if let Some(off) = parts.first().and_then(|s| s.parse::<u32>().ok()) {
-                    if off > 0 && off < 16384 {
-                        offset = Some(off);
-                        break;
-                    }
-                }
-            }
+        if trimmed.contains("exit_code")
+            && trimmed.contains("/*")
+            && let Some(comment) = trimmed.split("/*").nth(1)
+            && let Some(off) = comment.split_whitespace().next().and_then(|s| s.parse::<u32>().ok())
+            && off > 0
+            && off < 16384
+        {
+            offset = Some(off);
+            break;
         }
     }
 
