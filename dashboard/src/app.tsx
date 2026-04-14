@@ -740,7 +740,7 @@ export function App() {
           <PipelineView
             key={p.name}
             pipeline={p}
-            traces={traces.filter((t) => t.pipeline === p.name)}
+            traces={traces.filter((t) => t.pipeline === p.name || t.pipeline === "")}
             pollMs={pollMs}
             setPollMs={setPollMs}
           />
