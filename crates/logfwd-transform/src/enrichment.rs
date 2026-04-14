@@ -1254,9 +1254,10 @@ fn parse_cgroup_for_container(content: &str) -> Option<(String, String)> {
                     .extension()
                     .is_some_and(|ext| ext.eq_ignore_ascii_case("scope"))
         }) {
+            // Strip prefix and extension case-insensitively via rsplit_once.
             let inner = seg
                 .strip_prefix("docker-")
-                .and_then(|s| s.strip_suffix(".scope"))
+                .and_then(|s| s.rsplit_once('.').map(|(base, _)| base))
                 .unwrap_or("");
             if is_hex_container_id(inner) {
                 return Some((inner.to_string(), "docker".to_string()));
@@ -1882,463 +1883,462 @@ mod tests {
         // Final state should have data.
         assert!(table.snapshot().is_some());
     }
-}
 
-// -- ReloadableGeoDb ----------------------------------------------------
+    // -- ReloadableGeoDb ----------------------------------------------------
 
-#[allow(dead_code)]
-struct FixedGeoDb(GeoResult);
-impl GeoDatabase for FixedGeoDb {
-    fn lookup(&self, _ip: &str) -> Option<GeoResult> {
-        Some(self.0.clone())
-    }
-}
-
-#[test]
-fn reloadable_geo_db_initial_lookup() {
-    let result = GeoResult {
-        country_code: Some("US".to_string()),
-        ..Default::default()
-    };
-    let db = Arc::new(FixedGeoDb(result));
-    let reloadable = Arc::new(ReloadableGeoDb::new(db));
-    let got = reloadable.lookup("1.2.3.4").unwrap();
-    assert_eq!(got.country_code.as_deref(), Some("US"));
-}
-
-#[test]
-fn reloadable_geo_db_swap_replaces_backend() {
-    let first = Arc::new(FixedGeoDb(GeoResult {
-        country_code: Some("US".to_string()),
-        ..Default::default()
-    }));
-    let reloadable = Arc::new(ReloadableGeoDb::new(first));
-    let handle = reloadable.reload_handle();
-
-    let second = Arc::new(FixedGeoDb(GeoResult {
-        country_code: Some("DE".to_string()),
-        ..Default::default()
-    }));
-    handle.replace(second);
-
-    let got = reloadable.lookup("1.2.3.4").unwrap();
-    assert_eq!(got.country_code.as_deref(), Some("DE"));
-}
-
-#[test]
-fn reloadable_geo_db_concurrent_reads() {
-    let db = Arc::new(FixedGeoDb(GeoResult {
-        country_code: Some("AU".to_string()),
-        ..Default::default()
-    }));
-    let reloadable = Arc::new(ReloadableGeoDb::new(db));
-    let handle = reloadable.reload_handle();
-
-    let reader = Arc::clone(&reloadable);
-    let reader_thread = std::thread::spawn(move || {
-        for _ in 0..100 {
-            let _ = reader.lookup("8.8.8.8");
+    struct FixedGeoDb(GeoResult);
+    impl GeoDatabase for FixedGeoDb {
+        fn lookup(&self, _ip: &str) -> Option<GeoResult> {
+            Some(self.0.clone())
         }
-    });
-
-    // Swap pointer while reader is running.
-    handle.replace(Arc::new(FixedGeoDb(GeoResult {
-        country_code: Some("GB".to_string()),
-        ..Default::default()
-    })));
-
-    reader_thread.join().unwrap();
-}
-
-// -- EnvTable -----------------------------------------------------------
-
-#[test]
-fn env_table_reads_prefix() {
-    // SAFETY: test sets and clears env vars; must not run in parallel with other
-    // tests that read the same vars.
-    unsafe {
-        std::env::set_var("LOGFWD_TEST_CLUSTER", "prod");
-        std::env::set_var("LOGFWD_TEST_REGION", "us-east-1");
     }
 
-    let table = EnvTable::from_prefix("deploy", "LOGFWD_TEST_").expect("should succeed");
-    assert_eq!(table.name(), "deploy");
-    let batch = table.snapshot().unwrap();
-    assert_eq!(batch.num_rows(), 1);
-
-    // Columns exist for the two vars we set (plus any pre-existing matches).
-    assert!(batch.column_by_name("cluster").is_some());
-    assert!(batch.column_by_name("region").is_some());
-
-    let cluster = batch
-        .column_by_name("cluster")
-        .unwrap()
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .unwrap();
-    assert_eq!(cluster.value(0), "prod");
-
-    unsafe {
-        std::env::remove_var("LOGFWD_TEST_CLUSTER");
-        std::env::remove_var("LOGFWD_TEST_REGION");
+    #[test]
+    fn reloadable_geo_db_initial_lookup() {
+        let result = GeoResult {
+            country_code: Some("US".to_string()),
+            ..Default::default()
+        };
+        let db = Arc::new(FixedGeoDb(result));
+        let reloadable = Arc::new(ReloadableGeoDb::new(db));
+        let got = reloadable.lookup("1.2.3.4").unwrap();
+        assert_eq!(got.country_code.as_deref(), Some("US"));
     }
-}
 
-#[test]
-fn env_table_no_match_returns_error() {
-    let result = EnvTable::from_prefix("nothing", "LOGFWD_NONEXISTENT_PREFIX_XYZZY_12345_");
-    assert!(result.is_err());
-}
+    #[test]
+    fn reloadable_geo_db_swap_replaces_backend() {
+        let first = Arc::new(FixedGeoDb(GeoResult {
+            country_code: Some("US".to_string()),
+            ..Default::default()
+        }));
+        let reloadable = Arc::new(ReloadableGeoDb::new(first));
+        let handle = reloadable.reload_handle();
 
-#[test]
-fn env_table_rejects_duplicate_columns_after_lowercasing() {
-    // Set env vars that collide after lowercasing the suffix.
-    // SAFETY: test is run single-threaded (--test-threads=1).
-    unsafe {
-        std::env::set_var("LOGFWD_DUPTEST_FOO", "a");
-        std::env::set_var("LOGFWD_DUPTEST_foo", "b");
+        let second = Arc::new(FixedGeoDb(GeoResult {
+            country_code: Some("DE".to_string()),
+            ..Default::default()
+        }));
+        handle.replace(second);
+
+        let got = reloadable.lookup("1.2.3.4").unwrap();
+        assert_eq!(got.country_code.as_deref(), Some("DE"));
     }
-    let result = EnvTable::from_prefix("dup_test", "LOGFWD_DUPTEST_");
-    // Clean up before asserting.
-    unsafe {
-        std::env::remove_var("LOGFWD_DUPTEST_FOO");
-        std::env::remove_var("LOGFWD_DUPTEST_foo");
+
+    #[test]
+    fn reloadable_geo_db_concurrent_reads() {
+        let db = Arc::new(FixedGeoDb(GeoResult {
+            country_code: Some("AU".to_string()),
+            ..Default::default()
+        }));
+        let reloadable = Arc::new(ReloadableGeoDb::new(db));
+        let handle = reloadable.reload_handle();
+
+        let reader = Arc::clone(&reloadable);
+        let reader_thread = std::thread::spawn(move || {
+            for _ in 0..100 {
+                let _ = reader.lookup("8.8.8.8");
+            }
+        });
+
+        // Swap pointer while reader is running.
+        handle.replace(Arc::new(FixedGeoDb(GeoResult {
+            country_code: Some("GB".to_string()),
+            ..Default::default()
+        })));
+
+        reader_thread.join().unwrap();
     }
-    assert!(result.is_err());
-    let msg = format!("{}", result.err().unwrap());
-    assert!(msg.contains("duplicate column name"), "got: {msg}");
-}
 
-// -- ProcessInfoTable -------------------------------------------------------
+    // -- EnvTable -----------------------------------------------------------
 
-#[test]
-fn process_info_has_expected_columns() {
-    let table = ProcessInfoTable::new();
-    let batch = table.snapshot().expect("should have snapshot");
-    assert_eq!(batch.num_rows(), 1);
-    assert!(batch.column_by_name("agent_name").is_some());
-    assert!(batch.column_by_name("agent_version").is_some());
-    assert!(batch.column_by_name("pid").is_some());
-    assert!(batch.column_by_name("start_time").is_some());
+    #[test]
+    fn env_table_reads_prefix() {
+        // SAFETY: test sets and clears env vars; must not run in parallel with other
+        // tests that read the same vars.
+        unsafe {
+            std::env::set_var("LOGFWD_TEST_CLUSTER", "prod");
+            std::env::set_var("LOGFWD_TEST_REGION", "us-east-1");
+        }
 
-    let name_col = batch
-        .column_by_name("agent_name")
-        .unwrap()
-        .as_any()
-        .downcast_ref::<StringArray>()
+        let table = EnvTable::from_prefix("deploy", "LOGFWD_TEST_").expect("should succeed");
+        assert_eq!(table.name(), "deploy");
+        let batch = table.snapshot().unwrap();
+        assert_eq!(batch.num_rows(), 1);
+
+        // Columns exist for the two vars we set (plus any pre-existing matches).
+        assert!(batch.column_by_name("cluster").is_some());
+        assert!(batch.column_by_name("region").is_some());
+
+        let cluster = batch
+            .column_by_name("cluster")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(cluster.value(0), "prod");
+
+        unsafe {
+            std::env::remove_var("LOGFWD_TEST_CLUSTER");
+            std::env::remove_var("LOGFWD_TEST_REGION");
+        }
+    }
+
+    #[test]
+    fn env_table_no_match_returns_error() {
+        let result = EnvTable::from_prefix("nothing", "LOGFWD_NONEXISTENT_PREFIX_XYZZY_12345_");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn env_table_rejects_duplicate_columns_after_lowercasing() {
+        // Set env vars that collide after lowercasing the suffix.
+        // SAFETY: test is run single-threaded (--test-threads=1).
+        unsafe {
+            std::env::set_var("LOGFWD_DUPTEST_FOO", "a");
+            std::env::set_var("LOGFWD_DUPTEST_foo", "b");
+        }
+        let result = EnvTable::from_prefix("dup_test", "LOGFWD_DUPTEST_");
+        // Clean up before asserting.
+        unsafe {
+            std::env::remove_var("LOGFWD_DUPTEST_FOO");
+            std::env::remove_var("LOGFWD_DUPTEST_foo");
+        }
+        assert!(result.is_err());
+        let msg = format!("{}", result.err().unwrap());
+        assert!(msg.contains("duplicate column name"), "got: {msg}");
+    }
+
+    // -- ProcessInfoTable -------------------------------------------------------
+
+    #[test]
+    fn process_info_has_expected_columns() {
+        let table = ProcessInfoTable::new();
+        let batch = table.snapshot().expect("should have snapshot");
+        assert_eq!(batch.num_rows(), 1);
+        assert!(batch.column_by_name("agent_name").is_some());
+        assert!(batch.column_by_name("agent_version").is_some());
+        assert!(batch.column_by_name("pid").is_some());
+        assert!(batch.column_by_name("start_time").is_some());
+
+        let name_col = batch
+            .column_by_name("agent_name")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(name_col.value(0), "logfwd");
+
+        let pid_col = batch
+            .column_by_name("pid")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let pid: u32 = pid_col.value(0).parse().expect("pid should be numeric");
+        assert!(pid > 0);
+    }
+
+    #[test]
+    fn process_info_start_time_is_iso8601() {
+        let table = ProcessInfoTable::new();
+        let batch = table.snapshot().unwrap();
+        let ts = batch
+            .column_by_name("start_time")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap()
+            .value(0)
+            .to_string();
+        // Should look like "2026-04-12T06:20:13Z"
+        assert!(ts.ends_with('Z'), "expected UTC: {ts}");
+        assert_eq!(ts.len(), 20, "expected ISO 8601 length: {ts}");
+    }
+
+    #[test]
+    fn process_info_table_name() {
+        let table = ProcessInfoTable::new();
+        assert_eq!(table.name(), "process_info");
+    }
+
+    // -- epoch_days_to_ymd -------------------------------------------------------
+
+    #[test]
+    fn epoch_days_known_dates() {
+        // Unix epoch: 1970-01-01
+        assert_eq!(epoch_days_to_ymd(0), (1970, 1, 1));
+        // 2000-01-01 is day 10957
+        assert_eq!(epoch_days_to_ymd(10957), (2000, 1, 1));
+        // 2024-02-29 (leap day) is day 19782
+        assert_eq!(epoch_days_to_ymd(19782), (2024, 2, 29));
+    }
+
+    // -- KvFileTable -------------------------------------------------------
+
+    #[test]
+    fn kv_file_parses_os_release_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("os-release");
+        std::fs::write(
+            &path,
+            r#"# This is a comment
+    NAME="Ubuntu"
+    VERSION_ID="22.04"
+    ID=ubuntu
+    PRETTY_NAME="Ubuntu 22.04.3 LTS"
+    "#,
+        )
         .unwrap();
-    assert_eq!(name_col.value(0), "logfwd");
 
-    let pid_col = batch
-        .column_by_name("pid")
-        .unwrap()
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .unwrap();
-    let pid: u32 = pid_col.value(0).parse().expect("pid should be numeric");
-    assert!(pid > 0);
-}
+        let table = KvFileTable::new("os", &path);
+        let n = table.reload().unwrap();
+        assert_eq!(n, 4);
 
-#[test]
-fn process_info_start_time_is_iso8601() {
-    let table = ProcessInfoTable::new();
-    let batch = table.snapshot().unwrap();
-    let ts = batch
-        .column_by_name("start_time")
-        .unwrap()
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .unwrap()
-        .value(0)
-        .to_string();
-    // Should look like "2026-04-12T06:20:13Z"
-    assert!(ts.ends_with('Z'), "expected UTC: {ts}");
-    assert_eq!(ts.len(), 20, "expected ISO 8601 length: {ts}");
-}
+        let batch = table.snapshot().unwrap();
+        assert_eq!(batch.num_rows(), 1);
 
-#[test]
-fn process_info_table_name() {
-    let table = ProcessInfoTable::new();
-    assert_eq!(table.name(), "process_info");
-}
+        let name_col = batch
+            .column_by_name("name")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(name_col.value(0), "Ubuntu");
 
-// -- epoch_days_to_ymd -------------------------------------------------------
+        let id_col = batch
+            .column_by_name("id")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(id_col.value(0), "ubuntu");
+    }
 
-#[test]
-fn epoch_days_known_dates() {
-    // Unix epoch: 1970-01-01
-    assert_eq!(epoch_days_to_ymd(0), (1970, 1, 1));
-    // 2000-01-01 is day 10957
-    assert_eq!(epoch_days_to_ymd(10957), (2000, 1, 1));
-    // 2024-02-29 (leap day) is day 19782
-    assert_eq!(epoch_days_to_ymd(19782), (2024, 2, 29));
-}
+    #[test]
+    fn kv_file_handles_single_quotes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.env");
+        std::fs::write(&path, "KEY='single quoted'\n").unwrap();
 
-// -- KvFileTable -------------------------------------------------------
+        let table = KvFileTable::new("test", &path);
+        table.reload().unwrap();
+        let batch = table.snapshot().unwrap();
+        let val = batch
+            .column_by_name("key")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap()
+            .value(0);
+        assert_eq!(val, "single quoted");
+    }
 
-#[test]
-fn kv_file_parses_os_release_format() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("os-release");
-    std::fs::write(
-        &path,
-        r#"# This is a comment
-NAME="Ubuntu"
-VERSION_ID="22.04"
-ID=ubuntu
-PRETTY_NAME="Ubuntu 22.04.3 LTS"
-"#,
-    )
-    .unwrap();
+    #[test]
+    fn kv_file_handles_single_char_quoted_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.env");
+        // A single quote character as the entire value — previously panicked.
+        std::fs::write(&path, "KEY=\"\nOTHER=ok\n").unwrap();
 
-    let table = KvFileTable::new("os", &path);
-    let n = table.reload().unwrap();
-    assert_eq!(n, 4);
+        let table = KvFileTable::new("test", &path);
+        table.reload().unwrap();
+        let batch = table.snapshot().unwrap();
+        // The single `"` should be kept as-is (not stripped).
+        let val = batch
+            .column_by_name("key")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap()
+            .value(0);
+        assert_eq!(val, "\"");
+    }
 
-    let batch = table.snapshot().unwrap();
-    assert_eq!(batch.num_rows(), 1);
+    #[test]
+    fn kv_file_empty_file_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty.env");
+        std::fs::write(&path, "# only comments\n\n").unwrap();
 
-    let name_col = batch
-        .column_by_name("name")
-        .unwrap()
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .unwrap();
-    assert_eq!(name_col.value(0), "Ubuntu");
+        let table = KvFileTable::new("empty", &path);
+        assert!(table.reload().is_err());
+    }
 
-    let id_col = batch
-        .column_by_name("id")
-        .unwrap()
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .unwrap();
-    assert_eq!(id_col.value(0), "ubuntu");
-}
+    #[test]
+    fn kv_file_missing_file_returns_error() {
+        let table = KvFileTable::new("missing", Path::new("/nonexistent/file.env"));
+        assert!(table.reload().is_err());
+    }
 
-#[test]
-fn kv_file_handles_single_quotes() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("test.env");
-    std::fs::write(&path, "KEY='single quoted'\n").unwrap();
+    #[test]
+    fn kv_file_reload_updates_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("update.env");
+        std::fs::write(&path, "VERSION=1\n").unwrap();
 
-    let table = KvFileTable::new("test", &path);
-    table.reload().unwrap();
-    let batch = table.snapshot().unwrap();
-    let val = batch
-        .column_by_name("key")
-        .unwrap()
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .unwrap()
-        .value(0);
-    assert_eq!(val, "single quoted");
-}
+        let table = KvFileTable::new("ver", &path);
+        table.reload().unwrap();
+        let v1 = table
+            .snapshot()
+            .unwrap()
+            .column_by_name("version")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap()
+            .value(0)
+            .to_string();
+        assert_eq!(v1, "1");
 
-#[test]
-fn kv_file_handles_single_char_quoted_value() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("test.env");
-    // A single quote character as the entire value — previously panicked.
-    std::fs::write(&path, "KEY=\"\nOTHER=ok\n").unwrap();
+        std::fs::write(&path, "VERSION=2\n").unwrap();
+        table.reload().unwrap();
+        let v2 = table
+            .snapshot()
+            .unwrap()
+            .column_by_name("version")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap()
+            .value(0)
+            .to_string();
+        assert_eq!(v2, "2");
+    }
 
-    let table = KvFileTable::new("test", &path);
-    table.reload().unwrap();
-    let batch = table.snapshot().unwrap();
-    // The single `"` should be kept as-is (not stripped).
-    let val = batch
-        .column_by_name("key")
-        .unwrap()
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .unwrap()
-        .value(0);
-    assert_eq!(val, "\"");
-}
+    // -- NetworkInfoTable -------------------------------------------------------
 
-#[test]
-fn kv_file_empty_file_returns_error() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("empty.env");
-    std::fs::write(&path, "# only comments\n\n").unwrap();
+    #[test]
+    fn network_info_has_expected_columns() {
+        let table = NetworkInfoTable::new();
+        let batch = table.snapshot().expect("should have snapshot");
+        assert_eq!(batch.num_rows(), 1);
+        assert!(batch.column_by_name("hostname").is_some());
+        assert!(batch.column_by_name("primary_ipv4").is_some());
+        assert!(batch.column_by_name("primary_ipv6").is_some());
+        assert!(batch.column_by_name("all_ipv4").is_some());
+        assert!(batch.column_by_name("all_ipv6").is_some());
 
-    let table = KvFileTable::new("empty", &path);
-    assert!(table.reload().is_err());
-}
+        // Hostname should be non-empty on any real system
+        let hostname = batch
+            .column_by_name("hostname")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap()
+            .value(0);
+        assert!(!hostname.is_empty());
+    }
 
-#[test]
-fn kv_file_missing_file_returns_error() {
-    let table = KvFileTable::new("missing", Path::new("/nonexistent/file.env"));
-    assert!(table.reload().is_err());
-}
+    #[test]
+    fn network_info_table_name() {
+        let table = NetworkInfoTable::new();
+        assert_eq!(table.name(), "network_info");
+    }
 
-#[test]
-fn kv_file_reload_updates_snapshot() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("update.env");
-    std::fs::write(&path, "VERSION=1\n").unwrap();
+    // -- format_ipv6_hex -------------------------------------------------------
 
-    let table = KvFileTable::new("ver", &path);
-    table.reload().unwrap();
-    let v1 = table
-        .snapshot()
-        .unwrap()
-        .column_by_name("version")
-        .unwrap()
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .unwrap()
-        .value(0)
-        .to_string();
-    assert_eq!(v1, "1");
+    #[test]
+    fn format_ipv6_hex_known_address() {
+        // 2001:0db8:0000:0000:0000:0000:0000:0001
+        let hex = "20010db8000000000000000000000001";
+        let formatted = format_ipv6_hex(hex).unwrap();
+        assert_eq!(formatted, "2001:db8:0:0:0:0:0:1");
+    }
 
-    std::fs::write(&path, "VERSION=2\n").unwrap();
-    table.reload().unwrap();
-    let v2 = table
-        .snapshot()
-        .unwrap()
-        .column_by_name("version")
-        .unwrap()
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .unwrap()
-        .value(0)
-        .to_string();
-    assert_eq!(v2, "2");
-}
+    #[test]
+    fn format_ipv6_hex_all_zeros() {
+        let hex = "00000000000000000000000000000000";
+        let formatted = format_ipv6_hex(hex).unwrap();
+        assert_eq!(formatted, "0:0:0:0:0:0:0:0");
+    }
 
-// -- NetworkInfoTable -------------------------------------------------------
+    #[test]
+    fn format_ipv6_hex_wrong_length() {
+        assert!(format_ipv6_hex("abc").is_none());
+    }
 
-#[test]
-fn network_info_has_expected_columns() {
-    let table = NetworkInfoTable::new();
-    let batch = table.snapshot().expect("should have snapshot");
-    assert_eq!(batch.num_rows(), 1);
-    assert!(batch.column_by_name("hostname").is_some());
-    assert!(batch.column_by_name("primary_ipv4").is_some());
-    assert!(batch.column_by_name("primary_ipv6").is_some());
-    assert!(batch.column_by_name("all_ipv4").is_some());
-    assert!(batch.column_by_name("all_ipv6").is_some());
+    // -- ContainerInfoTable -----------------------------------------------------
 
-    // Hostname should be non-empty on any real system
-    let hostname = batch
-        .column_by_name("hostname")
-        .unwrap()
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .unwrap()
-        .value(0);
-    assert!(!hostname.is_empty());
-}
+    #[test]
+    fn container_info_has_expected_columns() {
+        let table = ContainerInfoTable::new();
+        let batch = table.snapshot().expect("should have snapshot");
+        assert_eq!(batch.num_rows(), 1);
+        assert!(batch.column_by_name("container_id").is_some());
+        assert!(batch.column_by_name("container_runtime").is_some());
+    }
 
-#[test]
-fn network_info_table_name() {
-    let table = NetworkInfoTable::new();
-    assert_eq!(table.name(), "network_info");
-}
+    #[test]
+    fn container_info_table_name() {
+        let table = ContainerInfoTable::new();
+        assert_eq!(table.name(), "container_info");
+    }
 
-// -- format_ipv6_hex -------------------------------------------------------
+    #[test]
+    fn parse_cgroup_docker_format() {
+        let content =
+            "12:memory:/docker/abc123def456abc123def456abc123def456abc123def456abc123def456abc1\n";
+        let result = parse_cgroup_for_container(content);
+        assert!(result.is_some());
+        let (id, runtime) = result.unwrap();
+        assert_eq!(runtime, "docker");
+        assert_eq!(id.len(), 64);
+    }
 
-#[test]
-fn format_ipv6_hex_known_address() {
-    // 2001:0db8:0000:0000:0000:0000:0000:0001
-    let hex = "20010db8000000000000000000000001";
-    let formatted = format_ipv6_hex(hex).unwrap();
-    assert_eq!(formatted, "2001:db8:0:0:0:0:0:1");
-}
+    #[test]
+    fn parse_cgroup_docker_scope_v2() {
+        let id_hex = "a1b2c3d4".repeat(8); // 64 hex chars
+        let content = format!("0::/system.slice/docker-{id_hex}.scope\n");
+        let result = parse_cgroup_for_container(&content);
+        assert!(result.is_some());
+        let (id, runtime) = result.unwrap();
+        assert_eq!(runtime, "docker");
+        assert_eq!(id, id_hex);
+    }
 
-#[test]
-fn format_ipv6_hex_all_zeros() {
-    let hex = "00000000000000000000000000000000";
-    let formatted = format_ipv6_hex(hex).unwrap();
-    assert_eq!(formatted, "0:0:0:0:0:0:0:0");
-}
+    #[test]
+    fn parse_cgroup_not_container() {
+        let content = "0::/init.scope\n";
+        let result = parse_cgroup_for_container(content);
+        assert!(result.is_none());
+    }
 
-#[test]
-fn format_ipv6_hex_wrong_length() {
-    assert!(format_ipv6_hex("abc").is_none());
-}
+    // -- K8sClusterInfoTable ----------------------------------------------------
 
-// -- ContainerInfoTable -----------------------------------------------------
+    #[test]
+    fn k8s_cluster_info_has_expected_columns() {
+        let table = K8sClusterInfoTable::new();
+        let batch = table.snapshot().expect("should have snapshot");
+        assert_eq!(batch.num_rows(), 1);
+        assert!(batch.column_by_name("namespace").is_some());
+        assert!(batch.column_by_name("pod_name").is_some());
+        assert!(batch.column_by_name("node_name").is_some());
+        assert!(batch.column_by_name("service_account").is_some());
+        assert!(batch.column_by_name("cluster_name").is_some());
+    }
 
-#[test]
-fn container_info_has_expected_columns() {
-    let table = ContainerInfoTable::new();
-    let batch = table.snapshot().expect("should have snapshot");
-    assert_eq!(batch.num_rows(), 1);
-    assert!(batch.column_by_name("container_id").is_some());
-    assert!(batch.column_by_name("container_runtime").is_some());
-}
+    #[test]
+    fn k8s_cluster_info_table_name() {
+        let table = K8sClusterInfoTable::new();
+        assert_eq!(table.name(), "k8s_cluster_info");
+    }
 
-#[test]
-fn container_info_table_name() {
-    let table = ContainerInfoTable::new();
-    assert_eq!(table.name(), "container_info");
-}
+    // -- is_hex_container_id ----------------------------------------------------
 
-#[test]
-fn parse_cgroup_docker_format() {
-    let content =
-        "12:memory:/docker/abc123def456abc123def456abc123def456abc123def456abc123def456abc1\n";
-    let result = parse_cgroup_for_container(content);
-    assert!(result.is_some());
-    let (id, runtime) = result.unwrap();
-    assert_eq!(runtime, "docker");
-    assert_eq!(id.len(), 64);
-}
+    #[test]
+    fn hex_container_id_valid() {
+        let id = "a".repeat(64);
+        assert!(is_hex_container_id(&id));
+    }
 
-#[test]
-fn parse_cgroup_docker_scope_v2() {
-    let id_hex = "a1b2c3d4".repeat(8); // 64 hex chars
-    let content = format!("0::/system.slice/docker-{id_hex}.scope\n");
-    let result = parse_cgroup_for_container(&content);
-    assert!(result.is_some());
-    let (id, runtime) = result.unwrap();
-    assert_eq!(runtime, "docker");
-    assert_eq!(id, id_hex);
-}
+    #[test]
+    fn hex_container_id_too_short() {
+        assert!(!is_hex_container_id("abc123"));
+    }
 
-#[test]
-fn parse_cgroup_not_container() {
-    let content = "0::/init.scope\n";
-    let result = parse_cgroup_for_container(content);
-    assert!(result.is_none());
-}
-
-// -- K8sClusterInfoTable ----------------------------------------------------
-
-#[test]
-fn k8s_cluster_info_has_expected_columns() {
-    let table = K8sClusterInfoTable::new();
-    let batch = table.snapshot().expect("should have snapshot");
-    assert_eq!(batch.num_rows(), 1);
-    assert!(batch.column_by_name("namespace").is_some());
-    assert!(batch.column_by_name("pod_name").is_some());
-    assert!(batch.column_by_name("node_name").is_some());
-    assert!(batch.column_by_name("service_account").is_some());
-    assert!(batch.column_by_name("cluster_name").is_some());
-}
-
-#[test]
-fn k8s_cluster_info_table_name() {
-    let table = K8sClusterInfoTable::new();
-    assert_eq!(table.name(), "k8s_cluster_info");
-}
-
-// -- is_hex_container_id ----------------------------------------------------
-
-#[test]
-fn hex_container_id_valid() {
-    let id = "a".repeat(64);
-    assert!(is_hex_container_id(&id));
-}
-
-#[test]
-fn hex_container_id_too_short() {
-    assert!(!is_hex_container_id("abc123"));
-}
-
-#[test]
-fn hex_container_id_non_hex() {
-    let id = "g".repeat(64);
-    assert!(!is_hex_container_id(&id));
+    #[test]
+    fn hex_container_id_non_hex() {
+        let id = "g".repeat(64);
+        assert!(!is_hex_container_id(&id));
+    }
 }

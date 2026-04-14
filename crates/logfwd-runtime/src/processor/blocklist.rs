@@ -187,9 +187,13 @@ impl Processor for BlocklistProcessor {
                 }
             }
             _ => {
-                // Unsupported column type — all rows are non-matches.
-                let enriched = append_columns(batch, num_rows, &self.prefix, None)?;
-                return Ok(smallvec![enriched]);
+                // Unsupported column type — return an error rather than silently
+                // treating all rows as non-matches, which would hide schema drift.
+                return Err(ProcessorError::Permanent(format!(
+                    "blocklist: source_column '{}' has unsupported type {:?} (expected Utf8/Utf8View/LargeUtf8)",
+                    self.source_column,
+                    col.data_type()
+                )));
             }
         }
 

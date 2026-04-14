@@ -660,7 +660,7 @@ pub enum EnrichmentConfig {
     Jsonl(JsonlEnrichmentConfig),
     /// Populate a one-row enrichment table from environment variables.
     EnvVars(EnvVarsEnrichmentConfig),
-    /// Agent self-metadata: name, version, PID, start time.
+    /// Agent self-metadata: `agent_name`, `agent_version`, `pid`, `start_time`.
     ProcessInfo(ProcessInfoConfig),
     /// Parse a KEY=value properties file into a one-row enrichment table.
     KvFile(KvFileEnrichmentConfig),

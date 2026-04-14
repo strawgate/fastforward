@@ -97,6 +97,10 @@ pub struct HttpEnrichConfig {
     pub ttl: Duration,
     /// Maximum number of concurrent HTTP lookups per batch (capped at 64).
     pub max_concurrency: usize,
+    /// Maximum response body size in bytes. Responses larger than this are
+    /// classified as errors to protect against unbounded memory growth.
+    /// Defaults to 1 MiB.
+    pub max_body_bytes: u64,
 }
 
 impl HttpEnrichConfig {
@@ -114,6 +118,7 @@ impl HttpEnrichConfig {
             max_entries: 50_000,
             ttl: Duration::from_secs(300),
             max_concurrency: 8,
+            max_body_bytes: 1_048_576, // 1 MiB
         }
     }
 }
@@ -220,8 +225,20 @@ impl HttpEnrichProcessor {
             Ok(resp) => {
                 let status = resp.status();
                 if status == 200 {
-                    match resp.into_body().read_to_string() {
-                        Ok(body) if !body.trim().is_empty() => LookupResult::Hit(body),
+                    use std::io::Read;
+                    let limit = self.config.max_body_bytes;
+                    let mut buf = String::new();
+                    match resp
+                        .into_body()
+                        .as_reader()
+                        .take(limit + 1)
+                        .read_to_string(&mut buf)
+                    {
+                        Ok(n) if n as u64 > limit => LookupResult::Error(format!(
+                            "response body exceeds {} byte limit",
+                            limit
+                        )),
+                        Ok(_) if !buf.trim().is_empty() => LookupResult::Hit(buf),
                         Ok(_) => LookupResult::Miss,
                         Err(e) => LookupResult::Error(format!("body read failed: {e}")),
                     }
