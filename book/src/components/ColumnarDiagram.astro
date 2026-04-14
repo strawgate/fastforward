@@ -114,6 +114,7 @@
   var tabBtns = steps.map(function(s, i) {
     var b = el('button', 'cd-tab' + (i === 0 ? ' on' : ''));
     b.textContent = (i + 1) + '. ' + s.title;
+    b.setAttribute('aria-label', 'Step ' + (i + 1) + ': ' + s.title);
     b.dataset.i = '' + i;
     tabs.appendChild(b);
     return b;

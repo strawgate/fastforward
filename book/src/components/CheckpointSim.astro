@@ -371,6 +371,7 @@
     btn.textContent = SCENARIOS[key].name;
     btn.setAttribute('role', 'tab');
     btn.setAttribute('aria-selected', key === currentScenario ? 'true' : 'false');
+    btn.setAttribute('aria-label', 'Scenario: ' + SCENARIOS[key].name);
     btn.onclick = function() { selectScenario(key); };
     tabs.appendChild(btn);
     tabBtns[key] = btn;
@@ -380,8 +381,8 @@
   // Controls
   var ctrlBar = el('div', 'ck-controls');
   var playBtn = el('button', 'ck-play'); playBtn.type = 'button'; playBtn.innerHTML = '&#9654;'; playBtn.setAttribute('aria-label', 'Play scenario');
-  var stepBtn = el('button', 'ck-step-btn'); stepBtn.type = 'button'; stepBtn.textContent = 'Step \u25B6';
-  var resetBtn = el('button', 'ck-reset-btn'); resetBtn.type = 'button'; resetBtn.textContent = 'Reset';
+  var stepBtn = el('button', 'ck-step-btn'); stepBtn.type = 'button'; stepBtn.textContent = 'Step \u25B6'; stepBtn.setAttribute('aria-label', 'Step forward one action');
+  var resetBtn = el('button', 'ck-reset-btn'); resetBtn.type = 'button'; resetBtn.textContent = 'Reset'; resetBtn.setAttribute('aria-label', 'Reset simulation to beginning');
   var stepInfo = el('span', 'ck-step-info');
   ctrlBar.appendChild(playBtn);
   ctrlBar.appendChild(stepBtn);
