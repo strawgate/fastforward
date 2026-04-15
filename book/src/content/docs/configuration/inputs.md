@@ -53,10 +53,10 @@ data source is required.
 |---------|-------------|--------|------------|
 | `logs` (default) | Generic JSON logs with timestamp, level, message | JSON | ~200–800B |
 | `record` | Custom attribute-based records | JSON | varies |
-| `envoy` | Envoy proxy access logs with realistic traffic patterns | JSON | ~600B |
-| `cri_k8s` | CRI-format Kubernetes container logs | CRI | ~300B |
-| `wide` | Wide structured logs with 20+ fields | JSON | ~1200B |
-| `narrow` | Narrow JSON logs with 5 fields | JSON | ~150B |
+| `envoy` | Envoy proxy access logs with realistic traffic patterns | JSON | ~420B |
+| `cri_k8s` | CRI-format Kubernetes container logs | CRI | ~350B |
+| `wide` | Wide structured logs with 20+ fields | JSON | ~600B |
+| `narrow` | Narrow JSON logs with 5 fields | JSON | ~120B |
 | `cloud_trail` | CloudTrail-like AWS audit events | JSON | ~1400B |
 
 > **Note:** The `cri_k8s` profile produces CRI-format output. logfwd auto-defaults `format: cri` when this profile is selected, so you do not need to set it explicitly.
