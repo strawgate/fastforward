@@ -2,7 +2,7 @@ use std::io::{self, Write};
 
 use arrow::array::{
     Array, AsArray, BinaryArray, FixedSizeBinaryArray, LargeBinaryArray, LargeStringArray,
-    StringArray, StringViewArray, StructArray,
+    StringArray, StructArray,
 };
 use arrow::datatypes::DataType;
 use arrow::record_batch::RecordBatch;
@@ -232,7 +232,7 @@ pub(crate) fn write_json_value(arr: &dyn Array, row: usize, out: &mut Vec<u8>) -
             write_json_string(out, str_arr.value(row))?;
         }
         DataType::Utf8View => {
-            let Some(str_arr) = arr.as_any().downcast_ref::<StringViewArray>() else {
+            let Some(str_arr) = arr.as_any().downcast_ref::<arrow::array::StringViewArray>() else {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     "DataType::Utf8View did not downcast to StringViewArray",

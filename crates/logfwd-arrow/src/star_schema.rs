@@ -922,6 +922,11 @@ fn str_from_array(arr: &dyn Array, row: usize) -> String {
             .downcast_ref::<arrow::array::StringViewArray>()
             .map(|a| a.value(row).to_string())
             .unwrap_or_default(),
+        DataType::LargeUtf8 => arr
+            .as_any()
+            .downcast_ref::<LargeStringArray>()
+            .map(|a| a.value(row).to_string())
+            .unwrap_or_default(),
         _ => String::new(),
     }
 }
@@ -3466,6 +3471,13 @@ mod str_value_at_tests {
         let f64_arr = Float64Array::from(vec![Some(2.718f64)]);
         let val = str_value_at(&f64_arr, 0);
         assert!(val.starts_with("2.718"), "got: {val}");
+    }
+
+    #[test]
+    #[test]
+    fn large_utf8_in_str_from_array() {
+        let arr = LargeStringArray::from(vec![Some("hello large")]);
+        assert_eq!(str_from_array(&arr, 0), "hello large");
     }
 
     #[test]

@@ -101,7 +101,13 @@ impl ArrowIpcSink {
     fn maybe_compress(&self) -> io::Result<Vec<u8>> {
         match self.config.compression {
             Compression::Zstd => zstd::bulk::compress(&self.ipc_buf, 1).map_err(io::Error::other),
-            Compression::None | Compression::Gzip => Ok(self.ipc_buf.clone()),
+            Compression::Gzip => {
+                let mut encoder =
+                    flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+                io::Write::write_all(&mut encoder, &self.ipc_buf)?;
+                encoder.finish()
+            }
+            Compression::None => Ok(self.ipc_buf.clone()),
         }
     }
 
@@ -122,6 +128,8 @@ impl ArrowIpcSink {
 
         if self.config.compression == Compression::Zstd {
             req = req.header("Content-Encoding", "zstd");
+        } else if self.config.compression == Compression::Gzip {
+            req = req.header("Content-Encoding", "gzip");
         }
 
         for (k, v) in &self.config.headers {
@@ -330,6 +338,50 @@ pub fn deserialize_ipc(bytes: &[u8]) -> io::Result<Vec<RecordBatch>> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn arrow_ipc_gzip_compression() {
+        use arrow::array::StringArray;
+        use arrow::record_batch::RecordBatch;
+        use std::sync::Arc;
+
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new("msg", DataType::Utf8, true)])),
+            vec![
+                Arc::new(StringArray::from(vec![Some("hello"), Some("world")]))
+                    as arrow::array::ArrayRef,
+            ],
+        )
+        .unwrap();
+
+        let config_none = Arc::new(ArrowIpcSinkConfig {
+            endpoint: "http://localhost:9999".to_string(),
+            compression: Compression::None,
+            headers: Vec::new(),
+        });
+        let config_gzip = Arc::new(ArrowIpcSinkConfig {
+            endpoint: "http://localhost:9999".to_string(),
+            compression: Compression::Gzip,
+            headers: Vec::new(),
+        });
+
+        let client = reqwest::Client::new();
+        let stats = Arc::new(ComponentStats::new());
+
+        let mut sink_none =
+            ArrowIpcSink::new("t1".to_string(), config_none, client.clone(), stats.clone());
+        let mut sink_gzip = ArrowIpcSink::new("t2".to_string(), config_gzip, client, stats);
+
+        sink_none.serialize_batch(&batch).unwrap();
+        sink_gzip.serialize_batch(&batch).unwrap();
+
+        let uncompressed = sink_none.maybe_compress().unwrap();
+        let compressed = sink_gzip.maybe_compress().unwrap();
+
+        assert!(!compressed.is_empty());
+        assert_ne!(uncompressed.len(), compressed.len());
+        assert_ne!(uncompressed, compressed);
+    }
+
     use super::*;
     use arrow::array::{Float64Array, Int64Array, StringArray};
     use arrow::datatypes::{DataType, Field, Schema};
