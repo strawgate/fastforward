@@ -194,6 +194,11 @@ impl ScalarUDFImpl for RegexpExtractUdf {
         let idx = match group_idx {
             ColumnarValue::Scalar(s) => {
                 if let datafusion::common::ScalarValue::Int64(Some(v)) = s {
+                    if *v < 0 {
+                        return Err(datafusion::error::DataFusionError::Plan(format!(
+                            "regexp_extract() group_index must be >= 0, got {v}"
+                        )));
+                    }
                     *v as usize
                 } else {
                     0
