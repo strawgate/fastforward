@@ -450,6 +450,9 @@ fn native_reader_loop(
                         tracing::warn!(error = %e, "failed to re-seek after journal invalidate");
                     }
                 }
+                // INVALIDATE is still a successful wait (journal was recreated);
+                // clear any prior degraded state.
+                health.store(HEALTH_OK, Ordering::Release);
             }
             Ok(_) => {
                 health.store(HEALTH_OK, Ordering::Release);
@@ -1213,7 +1216,10 @@ mod tests {
 
         // Since it's malformed and triggers integer overflow, it should safely return false.
         let result = read_export_entries(reader, &tx, &running, &[]);
-        assert!(!result, "should return false on malformed input (integer overflow)");
+        assert!(
+            !result,
+            "should return false on malformed input (integer overflow)"
+        );
     }
 
     // ── build_command (subprocess) ────────────────────────────────────
