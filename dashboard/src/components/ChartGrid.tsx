@@ -20,14 +20,20 @@ export function ChartGrid({ store, charts, tick: _tick, annotations }: Props) {
           metricName: cfg.metricName,
           intervalMs: INTERVAL_MS,
           reduce: "last",
+          ...(cfg.splitBy ? { splitBy: cfg.splitBy } : {}),
         });
-        const latest = frame.series[0]?.points;
-        const lastPt = latest?.[latest.length - 1];
+        // Sum the last point from every series so multi-pipeline totals are
+        // shown in the header rather than only the first pipeline's value.
+        const total = frame.series.reduce<number | null>((acc, s) => {
+          const last = s.points[s.points.length - 1];
+          if (last == null) return acc;
+          return (acc ?? 0) + last.value;
+        }, null);
         const displayVal =
-          lastPt != null
+          total != null
             ? cfg.fmtAxis
-              ? cfg.fmtAxis(lastPt.value)
-              : String(Math.round(lastPt.value))
+              ? cfg.fmtAxis(total)
+              : String(Math.round(total))
             : "-";
         return (
           <div class="chart-card" key={cfg.metricName}>

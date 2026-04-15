@@ -43,7 +43,7 @@ memchr = "2"
 opentelemetry = { workspace = true }
 opentelemetry-otlp = { workspace = true }
 opentelemetry_sdk = { workspace = true }
-pprof = { version = "0.15", features = ["flamegraph"], optional = true }
+pprof = { version = "0.15", features = ["flamegraph", "prost-codec"], optional = true }
 smallvec = { workspace = true }
 thiserror = { workspace = true }
 tokio = { version = "1", features = [
