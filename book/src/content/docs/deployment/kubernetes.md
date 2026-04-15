@@ -172,8 +172,7 @@ every log record:
 
 ```yaml
 enrichment:
-  k8s:
-    type: k8s_path
+  - type: k8s_path
 
 transform: |
   SELECT
