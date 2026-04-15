@@ -87,7 +87,7 @@ const SYSTEM_CHARTS: ChartConfig[] = [
     yRange: [0, 10],
   },
   {
-    metricName: "logfwd.memory.resident",
+    metricName: "process.memory.resident",
     label: "Memory",
     color: "#06b6d4",
     unit: "",
@@ -95,7 +95,7 @@ const SYSTEM_CHARTS: ChartConfig[] = [
     yRange: [0, 67108864],
   },
   {
-    metricName: "logfwd.batch.inflight",
+    metricName: "logfwd.inflight_batches",
     label: "Inflight Batches",
     color: "#f97316",
     unit: "",
@@ -106,7 +106,7 @@ const SYSTEM_CHARTS: ChartConfig[] = [
 
 /** Optional overlay chart — shown via toggle button alongside Memory chart. */
 const MEMORY_ALLOCATED_CHART: ChartConfig = {
-  metricName: "logfwd.memory.allocated",
+  metricName: "process.memory.allocated",
   label: "Memory (Allocated)",
   color: "#10b981",
   unit: "",
@@ -157,10 +157,10 @@ export function App() {
       transform_sec: 0,
       output_sec: 0,
       backpressure_stalls: sum("logfwd.backpressure_stalls"),
-      inflight_batches: sum("logfwd.batch.inflight"),
-      mem_resident: val("logfwd.memory.resident") || undefined,
-      mem_allocated: val("logfwd.memory.allocated") || undefined,
-      mem_active: val("logfwd.memory.active") || undefined,
+      inflight_batches: sum("logfwd.inflight_batches"),
+      mem_resident: val("process.memory.resident") || undefined,
+      mem_allocated: val("process.memory.allocated") || undefined,
+      mem_active: val("process.memory.active") || undefined,
     });
     setTotalErrors(sum("logfwd.output_errors"));
   }, [store]);
