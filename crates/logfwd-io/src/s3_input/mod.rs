@@ -283,12 +283,15 @@ impl S3Input {
 
         let sqs_client: Option<Arc<SqsClient>> = if let Some(ref queue_url) = settings.sqs_queue_url
         {
-            // Let SqsClient auto-detect the region from the queue URL so
-            // cross-region setups (bucket in one region, queue in another)
-            // sign SQS requests with the correct region.
+            // Try to auto-detect the SQS region from the queue URL first (handles
+            // cross-region setups where bucket and queue are in different regions).
+            // Fall back to the configured S3 region for custom endpoints (e.g.,
+            // LocalStack, MinIO) where URL parsing cannot determine the region.
+            let sqs_region = sqs::extract_region_from_sqs_url(queue_url)
+                .unwrap_or_else(|| settings.region.clone());
             Some(Arc::new(SqsClient::new(
                 queue_url.clone(),
-                None,
+                Some(sqs_region),
                 settings.access_key_id.clone(),
                 settings.secret_access_key.clone(),
                 settings.session_token.clone(),
@@ -656,7 +659,10 @@ async fn run_list_discovery(
                                 if kc.success {
                                     completed_set.insert(kc.key);
                                 } else {
+                                    // Remove from both in_flight AND dispatched so
+                                    // the key is cleanly retried without duplication.
                                     in_flight.remove(&kc.key);
+                                    dispatched.retain(|k| k != &kc.key);
                                 }
                             }
 
@@ -672,6 +678,7 @@ async fn run_list_discovery(
                                         completed_set.insert(kc.key);
                                     } else {
                                         in_flight.remove(&kc.key);
+                                        dispatched.retain(|k| k != &kc.key);
                                     }
                                 }
                             }
@@ -690,6 +697,7 @@ async fn run_list_discovery(
                             completed_set.insert(kc.key);
                         } else {
                             in_flight.remove(&kc.key);
+                            dispatched.retain(|k| k != &kc.key);
                         }
                     }
                     while let Some(front) = dispatched.first() {

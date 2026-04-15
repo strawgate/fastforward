@@ -352,7 +352,7 @@ fn extract_host(url: &str) -> io::Result<String> {
 /// Extract AWS region from an SQS queue URL.
 ///
 /// For `https://sqs.{region}.amazonaws.com/…` URLs only.
-fn extract_region_from_sqs_url(url: &str) -> Option<String> {
+pub(super) fn extract_region_from_sqs_url(url: &str) -> Option<String> {
     // Strip scheme + host prefix "sqs."
     let host = url
         .find("://")
