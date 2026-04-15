@@ -405,7 +405,7 @@ impl SinkFactory for FileSinkFactory {
                 }
                 let std_file = opts
                     .open(&self.current_path)
-                    .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Failed to open file: {}", e)))?;
+                    .map_err(|e| io::Error::other(format!("Failed to open file: {}", e)))?;
                 let file = tokio::fs::File::from_std(std_file);
                 FileSink::create_writer(file, &self.compression)
             }
