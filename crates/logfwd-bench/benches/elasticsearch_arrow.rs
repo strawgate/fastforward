@@ -264,6 +264,10 @@ fn main() {
         vec![],
         false,
         ElasticsearchRequestMode::Buffered,
+        None,
+        None,
+        None,
+        None,
         stats,
     )
     .expect("failed to create sink factory");

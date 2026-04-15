@@ -600,6 +600,24 @@ pub struct OutputConfig {
     /// Elasticsearch: Maximum uncompressed bulk payload size in bytes. Default is 5242880 (5 MiB).
     #[serde(default)]
     pub max_bulk_bytes: Option<usize>,
+    /// Host for socket-based IPC.
+    #[serde(default)]
+    pub host: Option<String>,
+    /// Port for socket-based IPC.
+    #[serde(default)]
+    pub port: Option<u16>,
+    /// Write the legacy IPC format (default: false).
+    #[serde(default)]
+    pub write_legacy_ipc_format: Option<bool>,
+    /// Buffer size for the IPC writer in bytes.
+    #[serde(default)]
+    pub buffer_size_bytes: Option<usize>,
+    /// Number of Arrow records per IPC batch.
+    #[serde(default)]
+    pub batch_size: Option<usize>,
+    /// Whether to write the schema immediately upon connection.
+    #[serde(default)]
+    pub write_schema_on_connect: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]

@@ -700,10 +700,10 @@ impl Config {
                     }
                     if output.output_type == OutputType::ArrowIpc
                         && let Some(c) = output.compression.as_deref()
-                        && !matches!(c, "zstd" | "none")
+                        && !matches!(c, "lz4" | "zstd" | "none")
                     {
                         return Err(ConfigError::Validation(format!(
-                            "pipeline '{name}' output '{label}': arrow_ipc output only supports 'zstd' or 'none' compression, not '{c}'"
+                            "pipeline '{name}' output '{label}': arrow_ipc output only supports 'lz4', 'zstd', or 'none' compression, not '{c}'"
                         )));
                     }
                     if output.output_type != OutputType::Otlp && output.protocol.is_some() {
@@ -737,7 +737,7 @@ impl Config {
                                     )));
                                 }
                             }
-                            // ArrowIpc allows zstd/none and is validated above.
+                            // ArrowIpc allows lz4/zstd/none and is validated above.
                             // Other types either reject compression entirely or accept any.
                             _ => {}
                         }
@@ -804,6 +804,39 @@ impl Config {
                         return Err(ConfigError::Validation(format!(
                             "pipeline '{name}' output '{label}': 'compression' is not supported for this output type"
                         )));
+                    }
+
+                    if output.output_type != OutputType::ArrowIpc {
+                        if output.host.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' output '{label}': 'host' is only supported for arrow_ipc outputs"
+                            )));
+                        }
+                        if output.port.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' output '{label}': 'port' is only supported for arrow_ipc outputs"
+                            )));
+                        }
+                        if output.write_legacy_ipc_format.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' output '{label}': 'write_legacy_ipc_format' is only supported for arrow_ipc outputs"
+                            )));
+                        }
+                        if output.buffer_size_bytes.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' output '{label}': 'buffer_size_bytes' is only supported for arrow_ipc outputs"
+                            )));
+                        }
+                        if output.batch_size.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' output '{label}': 'batch_size' is only supported for arrow_ipc outputs"
+                            )));
+                        }
+                        if output.write_schema_on_connect.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' output '{label}': 'write_schema_on_connect' is only supported for arrow_ipc outputs"
+                            )));
+                        }
                     }
                 }
 
