@@ -81,6 +81,13 @@ struct Client {
     discard_octet_bytes: usize,
     /// Whether we are dropping newline-delimited bytes until a newline appears.
     discard_until_newline: bool,
+    /// Raw bytes read from the socket that have not yet been charged to an
+    /// outgoing `Data` event.  Incremented on every successful `read()` call
+    /// and drained (reset to 0) when a `Data` event is emitted for this client
+    /// — including on the EOF flush path.  This ensures bytes that land in
+    /// `pending` without producing a complete record in the same poll are
+    /// correctly counted when the record is eventually flushed.
+    unaccounted_bytes: u64,
 }
 
 fn parse_octet_prefix(buf: &[u8]) -> Option<(usize, usize)> {
@@ -306,7 +313,14 @@ impl InputSource for TcpInput {
                         continue; // dropped immediately
                     }
                     Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
-                    Err(_) => break, // transient accept error, not fatal
+                    Err(e) => {
+                        if let Some(raw) = e.raw_os_error()
+                            && (raw == libc::EMFILE || raw == libc::ENFILE)
+                        {
+                            under_pressure = true;
+                        }
+                        break; // transient accept error, not fatal
+                    }
                 }
             }
             match self.listener.accept() {
@@ -337,6 +351,7 @@ impl InputSource for TcpInput {
                         octet_counting_mode: false,
                         discard_octet_bytes: 0,
                         discard_until_newline: false,
+                        unaccounted_bytes: 0,
                     });
                 }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
@@ -361,7 +376,6 @@ impl InputSource for TcpInput {
         let mut alive = vec![true; self.clients.len()];
         // Per-client data buffers — only allocated when data arrives.
         let mut client_data: Vec<Option<Vec<u8>>> = vec![None; self.clients.len()];
-        let mut client_bytes_read: Vec<u64> = vec![0; self.clients.len()];
 
         // Running total of bytes stored in client_data during this poll.
         // When this reaches MAX_TOTAL_BUFFERED_BYTES we stop reading from
@@ -409,7 +423,8 @@ impl InputSource for TcpInput {
                         let pending_before = client.pending.len(); // before extend
 
                         client.pending.extend_from_slice(chunk);
-                        client_bytes_read[i] += n as u64;
+                        client.unaccounted_bytes =
+                            client.unaccounted_bytes.saturating_add(n as u64);
                         extract_complete_records(client, out);
 
                         // Net new bytes held in memory for this client after this
@@ -466,7 +481,11 @@ impl InputSource for TcpInput {
             if let Some(bytes) = data
                 && !bytes.is_empty()
             {
-                let accounted_bytes = client_bytes_read[i];
+                // Drain the per-client raw-byte counter into accounted_bytes.
+                // Bytes that accumulated in client.pending across previous polls
+                // without producing a complete record are included here because
+                // unaccounted_bytes is persistent on the Client struct.
+                let accounted_bytes = std::mem::replace(&mut self.clients[i].unaccounted_bytes, 0);
                 events.push(InputEvent::Data {
                     bytes,
                     source_id: Some(self.clients[i].source_id),
@@ -502,7 +521,12 @@ impl InputSource for TcpInput {
                 if has_pending && !mid_discard && !incomplete_octet_tail {
                     let mut tail = std::mem::take(&mut client.pending);
                     tail.push(b'\n');
-                    let accounted_bytes = 0;
+                    // Drain any raw bytes accumulated but not yet charged to a
+                    // Data event (e.g. bytes that never completed a record
+                    // before EOF).  Resetting to 0 prevents double-counting if
+                    // a Data event was already emitted earlier in this same poll
+                    // for this client.
+                    let accounted_bytes = std::mem::replace(&mut client.unaccounted_bytes, 0);
                     events.push(InputEvent::Data {
                         bytes: tail,
                         source_id: Some(client.source_id),
