@@ -524,14 +524,41 @@ impl LokiSinkFactory {
         label_columns: Vec<String>,
         headers: Vec<(String, String)>,
         compression: Compression,
-        request_timeout_ms: Option<u64>,
+        request_timeout: Option<String>,
 
         stats: Arc<ComponentStats>,
     ) -> io::Result<Self> {
+        let timeout_duration = match request_timeout.as_deref() {
+            Some(s) => {
+                let s = s.trim();
+                if let Some(ms) = s.strip_suffix("ms") {
+                    std::time::Duration::from_millis(
+                        ms.parse::<u64>()
+                            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?,
+                    )
+                } else if let Some(secs) = s.strip_suffix('s') {
+                    std::time::Duration::from_secs(
+                        secs.parse::<u64>()
+                            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?,
+                    )
+                } else if let Some(mins) = s.strip_suffix('m') {
+                    std::time::Duration::from_secs(
+                        mins.parse::<u64>()
+                            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?
+                            * 60,
+                    )
+                } else {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("invalid duration string: {}", s),
+                    ));
+                }
+            }
+            None => std::time::Duration::from_secs(30),
+        };
+
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_millis(
-                request_timeout_ms.unwrap_or(30_000),
-            ))
+            .timeout(timeout_duration)
             .build()
             .map_err(io::Error::other)?;
 
@@ -650,7 +677,7 @@ mod tests {
             vec![],
             vec![],
             Compression::Gzip,
-            Some(5000),
+            Some("5000ms".to_string()),
             Arc::new(ComponentStats::new()),
         );
         assert!(factory.is_ok());

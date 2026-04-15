@@ -98,7 +98,10 @@ pub fn build_sink_factory(
                 cfg.label_columns.clone().unwrap_or_default(),
                 auth_headers,
                 compression,
-                cfg.request_timeout_ms,
+                cfg.request
+                    .as_ref()
+                    .and_then(|r| r.timeout.as_ref())
+                    .cloned(),
                 stats,
             )
             .map_err(|e| {

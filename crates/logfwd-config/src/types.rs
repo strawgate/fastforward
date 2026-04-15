@@ -598,30 +598,12 @@ pub struct OutputConfig {
     pub auth: Option<AuthConfig>,
     /// Tenant ID used in multi-tenant outputs like Loki.
     pub tenant_id: Option<String>,
-    /// Maximum size of a batch in bytes before flushing.
-    #[serde(default)]
-    pub batch_size_bytes: Option<usize>,
-    /// Maximum time in milliseconds to wait before flushing a batch.
-    #[serde(default)]
-    pub batch_timeout_ms: Option<u64>,
-    /// Alias for batch_timeout_ms.
-    #[serde(default)]
-    pub max_batch_age_ms: Option<u64>,
-    /// Maximum number of retries for transient errors.
-    #[serde(default)]
-    pub retry_attempts: Option<usize>,
-    /// Initial backoff delay in milliseconds for retries.
-    #[serde(default)]
-    pub retry_initial_backoff_ms: Option<u64>,
-    /// Maximum backoff delay in milliseconds for retries.
-    #[serde(default)]
-    pub retry_max_backoff_ms: Option<u64>,
-    /// HTTP request timeout in milliseconds.
-    #[serde(default)]
-    pub request_timeout_ms: Option<u64>,
-    /// Maximum number of batches to queue in memory before applying backpressure.
-    #[serde(default)]
-    pub queue_capacity: Option<usize>,
+    /// Batching configuration.
+    pub batch: Option<BatchConfig>,
+    /// Retry backoff configuration.
+    pub retry: Option<RetryConfig>,
+    /// Request configuration.
+    pub request: Option<RequestConfig>,
     /// Statically configured labels added to metrics or streams (e.g. Loki).
     pub static_labels: Option<HashMap<String, String>>,
     /// Record columns used to automatically extract and assign stream labels (e.g. Loki).
@@ -803,4 +785,34 @@ pub struct Config {
     pub pipelines: HashMap<String, PipelineConfig>,
     pub server: ServerConfig,
     pub storage: StorageConfig,
+}
+
+/// Batching configuration for outputs.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct BatchConfig {
+    /// Maximum size of a batch in bytes before flushing.
+    pub max_bytes: Option<usize>,
+    /// Maximum time to wait before flushing a batch.
+    pub timeout: Option<String>,
+}
+
+/// Retry backoff configuration for transient output errors.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct RetryConfig {
+    /// Maximum number of retries before dropping a batch.
+    pub max_attempts: Option<usize>,
+    /// Initial backoff delay before the first retry.
+    pub initial_interval: Option<String>,
+    /// Maximum backoff delay between subsequent retries.
+    pub max_interval: Option<String>,
+}
+
+/// Request configuration for HTTP-based outputs.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct RequestConfig {
+    /// HTTP request timeout duration.
+    pub timeout: Option<String>,
 }

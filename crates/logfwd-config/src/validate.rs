@@ -657,14 +657,6 @@ impl Config {
                             "pipeline '{name}' output '{label}': loki output only supports 'gzip' or 'none' compression, not '{c}'"
                         )));
                     }
-                    if output.output_type == OutputType::Loki
-                        && let Some(t) = output.request_timeout_ms
-                        && t == 0
-                    {
-                        return Err(ConfigError::Validation(format!(
-                            "pipeline '{name}' output '{label}': request_timeout_ms must be greater than 0"
-                        )));
-                    }
                     if output.output_type == OutputType::ArrowIpc
                         && let Some(c) = output.compression.as_deref()
                         && !matches!(c, "zstd" | "none")
