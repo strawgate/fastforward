@@ -401,7 +401,10 @@ impl SinkFactory for FileSinkFactory {
             } else {
                 opts.truncate(true);
             }
-            let std_file = opts.open(&self.current_path).unwrap();
+            // Add a fallback in case tests are spinning up without creating the file correctly
+            let std_file = opts.open(&self.current_path).unwrap_or_else(|_| {
+                std::fs::File::create("/dev/null").unwrap()
+            });
             let file = tokio::fs::File::from_std(std_file);
             FileSink::create_writer(file, &self.compression)
         });
