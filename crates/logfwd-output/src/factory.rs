@@ -265,10 +265,8 @@ pub fn build_sink_factory(
             )))
         }
         OutputType::Null => Ok(Arc::new(NullSinkFactory::new(name.to_string(), stats))),
-        OutputType::Parquet => Err(OutputError::Construction(format!(
-            "output '{name}': type {:?} not yet supported",
-            cfg.output_type
-        ))),
+        // OutputType is #[non_exhaustive]; this catches Parquet and any future variants
+        // that are not yet wired to a real sink implementation.
         _ => Err(OutputError::Construction(format!(
             "output '{name}': type {:?} not yet supported",
             cfg.output_type
