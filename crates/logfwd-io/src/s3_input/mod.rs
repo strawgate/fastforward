@@ -283,12 +283,12 @@ impl S3Input {
 
         let sqs_client: Option<Arc<SqsClient>> = if let Some(ref queue_url) = settings.sqs_queue_url
         {
-            // Pass the resolved region (from config, env, or default) to ensure
-            // SQS signing uses the same region as S3. SqsClient can auto-detect
-            // from the URL when None, but explicit is safer for cross-region setups.
+            // Let SqsClient auto-detect the region from the queue URL so
+            // cross-region setups (bucket in one region, queue in another)
+            // sign SQS requests with the correct region.
             Some(Arc::new(SqsClient::new(
                 queue_url.clone(),
-                Some(settings.region.clone()),
+                None,
                 settings.access_key_id.clone(),
                 settings.secret_access_key.clone(),
                 settings.session_token.clone(),
@@ -609,9 +609,6 @@ async fn run_list_discovery(
     // Keys stay in in_flight until the watermark cursor advances past them,
     // preventing re-discovery of completed-but-not-yet-cursored keys.
     let mut in_flight: std::collections::HashSet<String> = std::collections::HashSet::new();
-    // Keys that failed are removed from in_flight (so they can be retried)
-    // but not added to completed_set (so cursor doesn't advance past them).
-    let mut failed_set: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     while is_running.load(Ordering::Relaxed) {
         let mut continuation: Option<String> = None;
@@ -659,8 +656,6 @@ async fn run_list_discovery(
                                 if kc.success {
                                     completed_set.insert(kc.key);
                                 } else {
-                                    // Failed: allow retry by removing from in_flight.
-                                    failed_set.insert(kc.key.clone());
                                     in_flight.remove(&kc.key);
                                 }
                             }
@@ -676,7 +671,6 @@ async fn run_list_discovery(
                                     if kc.success {
                                         completed_set.insert(kc.key);
                                     } else {
-                                        failed_set.insert(kc.key.clone());
                                         in_flight.remove(&kc.key);
                                     }
                                 }
@@ -695,7 +689,6 @@ async fn run_list_discovery(
                         if kc.success {
                             completed_set.insert(kc.key);
                         } else {
-                            failed_set.insert(kc.key.clone());
                             in_flight.remove(&kc.key);
                         }
                     }
@@ -705,14 +698,11 @@ async fn run_list_discovery(
                             completed_set.remove(&key);
                             in_flight.remove(&key);
                             start_after = Some(key);
-                        } else if failed_set.contains(front) {
-                            // Failed key: remove from dispatched to unblock the
-                            // watermark but don't advance start_after so the
-                            // key is re-listed on the next poll cycle.
-                            let key = dispatched.remove(0);
-                            failed_set.remove(&key);
-                            // in_flight was already cleared when failure arrived.
                         } else {
+                            // Stop at the first key that hasn't succeeded.
+                            // Failed keys stay in dispatched so the cursor
+                            // never advances past them, ensuring ListObjectsV2
+                            // re-discovers them on the next poll cycle.
                             break;
                         }
                     }
@@ -830,12 +820,18 @@ async fn run_orchestrator(
                 let prev = tracker.remaining.fetch_sub(1, Ordering::AcqRel);
                 if prev == 1 {
                     // All records from this message have completed — stop heartbeating.
-                    let mut guard = in_progress.lock().await;
-                    guard.retain(|h| h != &tracker.receipt_handle);
+                    // Remove from heartbeat set first, then release lock
+                    // before any network I/O to avoid blocking other heartbeats.
+                    let should_delete = {
+                        let mut guard = in_progress.lock().await;
+                        guard.retain(|h| h != &tracker.receipt_handle);
+                        // Check if all records succeeded.
+                        let success_count = tracker.successes.load(Ordering::Acquire);
+                        success_count == tracker.total
+                    };
+                    // guard dropped — lock is released before awaiting delete.
 
-                    // If all records succeeded, delete the SQS message.
-                    let success_count = tracker.successes.load(Ordering::Acquire);
-                    if success_count == tracker.total {
+                    if should_delete {
                         if let Some(sqs) = &sqs {
                             if let Err(e) = sqs.delete_message(&tracker.receipt_handle).await {
                                 warn!(name = %name, error = %e, "SQS delete message failed");
