@@ -19,7 +19,7 @@ use arrow::ipc::reader::StreamReader;
 use arrow::record_batch::RecordBatch;
 use axum::body::Body;
 use axum::extract::State;
-use axum::http::header::{CONTENT_TYPE, CONTENT_ENCODING};
+use axum::http::header::{CONTENT_ENCODING, CONTENT_TYPE};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
@@ -35,7 +35,9 @@ use tokio::sync::oneshot;
 use crate::InputError;
 use crate::background_http_task::BackgroundHttpTask;
 use crate::receiver_health::{ReceiverHealthEvent, reduce_receiver_health};
-use crate::receiver_http::{MAX_REQUEST_BODY_SIZE, parse_content_length, read_limited_body, parse_content_type};
+use crate::receiver_http::{
+    MAX_REQUEST_BODY_SIZE, parse_content_length, parse_content_type, read_limited_body,
+};
 
 /// Bounded channel capacity.
 const CHANNEL_BOUND: usize = 256;
@@ -247,7 +249,11 @@ async fn handle_otap_request(
     match parse_content_type(&headers) {
         Ok(Some(content_type)) => {
             if content_type != "application/x-protobuf" {
-                return (StatusCode::UNSUPPORTED_MEDIA_TYPE, "unsupported content-type").into_response();
+                return (
+                    StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                    "unsupported content-type",
+                )
+                    .into_response();
             }
         }
         Ok(None) => {
@@ -276,12 +282,19 @@ async fn handle_otap_request(
     let body = match content_encoding.as_deref() {
         Some("gzip") => match decompress_gzip(&body, MAX_REQUEST_BODY_SIZE) {
             Ok(decompressed) => decompressed,
+            Err(InputError::Io(_)) => {
+                return (StatusCode::PAYLOAD_TOO_LARGE, "payload too large").into_response();
+            }
             Err(_) => {
                 return (StatusCode::BAD_REQUEST, "gzip decompression failed").into_response();
             }
         },
         Some(other) => {
-            return (StatusCode::BAD_REQUEST, format!("unsupported content-encoding: {other}")).into_response();
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("unsupported content-encoding: {other}"),
+            )
+                .into_response();
         }
         None => body,
     };
