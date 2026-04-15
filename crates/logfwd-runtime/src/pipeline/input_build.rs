@@ -53,7 +53,15 @@ fn make_format(
 
 fn validate_input_format(name: &str, input_type: InputType, format: &Format) -> Result<(), String> {
     match input_type {
-        InputType::Generator | InputType::Otlp | InputType::ArrowIpc => {
+        InputType::Generator => {
+            if !matches!(format, Format::Json | Format::Cri) {
+                return Err(format!(
+                    "input '{name}': format {:?} is not supported for {:?} inputs (expected json or cri)",
+                    format, input_type
+                ));
+            }
+        }
+        InputType::Otlp | InputType::ArrowIpc => {
             if !matches!(format, Format::Json) {
                 return Err(format!(
                     "input '{name}': format {:?} is not supported for {:?} inputs (expected json)",
@@ -274,7 +282,13 @@ pub(super) fn build_input_state(
                 },
                 seed: 42,
             };
-            let format = cfg.format.clone().unwrap_or(Format::Json);
+            let format = match cfg.format.clone() {
+                Some(f) => f,
+                None => match config.profile {
+                    GeneratorProfile::CriK8s => Format::Cri,
+                    _ => Format::Json,
+                },
+            };
             validate_input_format(name, InputType::Generator, &format)?;
             let source = GeneratorInput::new(name, config);
             (Box::new(source), format, 4 * 1024 * 1024)

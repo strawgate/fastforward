@@ -22,7 +22,7 @@ logfwd-types = { version = "0.1.0", path = "../logfwd-types" }
 arrow = { workspace = true }
 bytes = "1"
 crossbeam-channel = "0.5"
-fastrand = "2"
+fastrand = { workspace = true }
 flate2 = "1"
 globset = { workspace = true }
 http-body-util = "0.1"

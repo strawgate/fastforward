@@ -138,7 +138,7 @@ pub(crate) fn write_cloudtrail_line(
     };
     let tls_details = build_tls_details_json(rng, service.kind, profile.optional_field_density);
 
-    let mut event = JsonObjectWriter::new(1_280);
+    let mut event = JsonObjectWriter::new(1_536);
     event.field_str("eventVersion", CLOUDTRAIL_EVENT_VERSION);
     event.field_str("eventTime", &event_time);
     event.field_str("eventSource", service.event_source);
