@@ -191,11 +191,15 @@ fn test_json_lines_serializes_body_column() {
     ]);
     let batch = RecordBatch::try_new(schema, vec![Arc::new(raw)]).unwrap();
 
+    let config = Arc::new(crate::json_lines::JsonLinesSinkConfig {
+        url: "http://localhost:9200".to_string(),
+        compression: Compression::None,
+        headers: vec![],
+    });
     let mut sink = JsonLinesSink::new(
         "test-jsonl".to_string(),
-        "http://localhost:9200".to_string(),
-        reqwest::header::HeaderMap::new(),
-        Compression::None,
+        config,
+        reqwest::Client::new(),
         Arc::new(ComponentStats::new()),
     );
     sink.serialize_batch(&batch).unwrap();
@@ -575,11 +579,15 @@ fn test_json_lines_body_only_no_panic() {
     let schema = Arc::new(Schema::new(vec![Field::new("body", DataType::Utf8, true)]));
     let raw = StringArray::from(vec![Some(r#"{"x":1}"#)]);
     let batch = RecordBatch::try_new(schema, vec![Arc::new(raw)]).unwrap();
+    let config = Arc::new(crate::json_lines::JsonLinesSinkConfig {
+        url: "http://localhost:9200".to_string(),
+        compression: Compression::None,
+        headers: vec![],
+    });
     let mut sink = JsonLinesSink::new(
         "test-jsonl".to_string(),
-        "http://localhost:9200".to_string(),
-        reqwest::header::HeaderMap::new(),
-        Compression::None,
+        config,
+        reqwest::Client::new(),
         Arc::new(ComponentStats::new()),
     );
     // Must not panic.

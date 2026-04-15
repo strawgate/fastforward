@@ -134,7 +134,10 @@ impl JsonLinesSink {
             Compression::Gzip => {
                 use std::io::Write;
                 self.compress_buf.clear();
-                let mut encoder = flate2::write::GzEncoder::new(&mut self.compress_buf, flate2::Compression::default());
+                let mut encoder = flate2::write::GzEncoder::new(
+                    &mut self.compress_buf,
+                    flate2::Compression::default(),
+                );
                 encoder.write_all(&self.batch_buf)?;
                 encoder.finish()?;
                 Ok(&self.compress_buf)
@@ -173,11 +176,9 @@ impl JsonLinesSink {
         let retry_after = response.headers().get("Retry-After").cloned();
         let body = response.text().await.unwrap_or_default();
 
-        if let Some(send_result) = crate::http_classify::classify_http_status(
-            status.as_u16(),
-            retry_after.as_ref(),
-            &body,
-        ) {
+        if let Some(send_result) =
+            crate::http_classify::classify_http_status(status.as_u16(), retry_after.as_ref(), &body)
+        {
             return Ok(send_result);
         }
 
