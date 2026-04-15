@@ -180,15 +180,32 @@ impl Pipeline {
                             .map_err(|e| format!("enrichment '{}': {e}", cfg.table_name))?;
                         enrichment_tables.push(table);
                     }
-                    // These enrichment types inject metadata at runtime (env vars,
-                    // process info, network info, container info, K8s cluster info)
-                    // and do not require build-time table initialization.
-                    EnrichmentConfig::EnvVars(_)
-                    | EnrichmentConfig::ProcessInfo(_)
-                    | EnrichmentConfig::KvFile(_)
-                    | EnrichmentConfig::NetworkInfo(_)
-                    | EnrichmentConfig::ContainerInfo(_)
-                    | EnrichmentConfig::K8sClusterInfo(_) => {}
+                    EnrichmentConfig::EnvVars(_) => {
+                        return Err("enrichment type 'env_vars' is not yet implemented".to_string());
+                    }
+                    EnrichmentConfig::ProcessInfo(_) => {
+                        return Err(
+                            "enrichment type 'process_info' is not yet implemented".to_string()
+                        );
+                    }
+                    EnrichmentConfig::KvFile(_) => {
+                        return Err("enrichment type 'kv_file' is not yet implemented".to_string());
+                    }
+                    EnrichmentConfig::NetworkInfo(_) => {
+                        return Err(
+                            "enrichment type 'network_info' is not yet implemented".to_string()
+                        );
+                    }
+                    EnrichmentConfig::ContainerInfo(_) => {
+                        return Err(
+                            "enrichment type 'container_info' is not yet implemented".to_string()
+                        );
+                    }
+                    EnrichmentConfig::K8sClusterInfo(_) => {
+                        return Err(
+                            "enrichment type 'k8s_cluster_info' is not yet implemented".to_string()
+                        );
+                    }
                 }
             }
 

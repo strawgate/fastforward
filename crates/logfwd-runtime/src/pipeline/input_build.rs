@@ -195,11 +195,17 @@ pub(super) fn build_input_state(
             };
             let generator_cfg = g.generator.as_ref();
             let config = GeneratorConfig {
-                events_per_sec: generator_cfg.and_then(|c| c.events_per_sec).unwrap_or(0),
+                // Accept legacy aliases: events_per_second → events_per_sec,
+                // num_lines → total_events (for backward compatibility).
+                events_per_sec: generator_cfg
+                    .and_then(|c| c.events_per_sec.or(c.events_per_second))
+                    .unwrap_or(0),
                 batch_size: generator_cfg
                     .and_then(|c| c.batch_size)
                     .unwrap_or(DEFAULT_GENERATOR_BATCH_SIZE),
-                total_events: generator_cfg.and_then(|c| c.total_events).unwrap_or(0),
+                total_events: generator_cfg
+                    .and_then(|c| c.total_events.or(c.num_lines))
+                    .unwrap_or(0),
                 message_template: generator_cfg.and_then(|c| c.message_template.clone()),
                 field_count: generator_cfg.and_then(|c| c.field_count),
                 seed: 42,
