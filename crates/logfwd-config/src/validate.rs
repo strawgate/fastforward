@@ -739,6 +739,77 @@ impl Config {
                             "pipeline '{name}' output '{label}': arrow_ipc output only supports 'lz4', 'zstd', or 'none' compression, not '{c}'"
                         )));
                     }
+
+                    if output.output_type != OutputType::Otlp {
+                        if output.tls.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' output '{label}': 'tls' is only supported for otlp outputs"
+                            )));
+                        }
+                        if output.headers.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' output '{label}': 'headers' is only supported for otlp outputs"
+                            )));
+                        }
+                        if output.retry_attempts.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' output '{label}': 'retry_attempts' is only supported for otlp outputs"
+                            )));
+                        }
+                        if output.retry_initial_backoff_ms.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' output '{label}': 'retry_initial_backoff_ms' is only supported for otlp outputs"
+                            )));
+                        }
+                        if output.retry_max_backoff_ms.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' output '{label}': 'retry_max_backoff_ms' is only supported for otlp outputs"
+                            )));
+                        }
+                        if output.request_timeout_ms.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' output '{label}': 'request_timeout_ms' is only supported for otlp outputs"
+                            )));
+                        }
+                        if output.batch_timeout_ms.is_some() {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' output '{label}': 'batch_timeout_ms' is only supported for otlp outputs"
+                            )));
+                        }
+                    }
+
+                    // Validate OTLP-specific field values when set.
+                    if output.output_type == OutputType::Otlp {
+                        if output.request_timeout_ms == Some(0) {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' output '{label}': 'request_timeout_ms' must be at least 1"
+                            )));
+                        }
+                        if output.batch_timeout_ms == Some(0) {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' output '{label}': 'batch_timeout_ms' must be at least 1"
+                            )));
+                        }
+                        if output.retry_initial_backoff_ms == Some(0) {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' output '{label}': 'retry_initial_backoff_ms' must be at least 1"
+                            )));
+                        }
+                        if output.retry_max_backoff_ms == Some(0) {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' output '{label}': 'retry_max_backoff_ms' must be at least 1"
+                            )));
+                        }
+                        if let (Some(initial), Some(max)) =
+                            (output.retry_initial_backoff_ms, output.retry_max_backoff_ms)
+                            && initial > max
+                        {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' output '{label}': 'retry_initial_backoff_ms' must be <= 'retry_max_backoff_ms'"
+                            )));
+                        }
+                    }
+
                     if output.output_type != OutputType::Otlp && output.protocol.is_some() {
                         return Err(ConfigError::Validation(format!(
                             "pipeline '{name}' output '{label}': 'protocol' is only supported for otlp outputs"
@@ -860,9 +931,9 @@ impl Config {
                                 "pipeline '{name}' output '{label}': 'buffer_size_bytes' is only supported for arrow_ipc outputs"
                             )));
                         }
-                        if output.batch_size.is_some() {
+                        if output.batch_size.is_some() && output.output_type != OutputType::Otlp {
                             return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' output '{label}': 'batch_size' is only supported for arrow_ipc outputs"
+                                "pipeline '{name}' output '{label}': 'batch_size' is only supported for otlp and arrow_ipc outputs"
                             )));
                         }
                         if output.write_schema_on_connect.is_some() {
@@ -2139,6 +2210,129 @@ mod validate_metrics_endpoint_tests {
             msg.contains("metrics_endpoint") && msg.contains("scheme"),
             "expected metrics_endpoint scheme rejection: {msg}"
         );
+    }
+}
+
+#[cfg(test)]
+mod validate_otlp_options_tests {
+    use crate::types::Config;
+
+    #[test]
+    fn otlp_accepts_new_options() {
+        let yaml = r#"
+pipelines:
+  test:
+    inputs:
+      - type: file
+        path: /tmp/test.log
+    outputs:
+      - type: otlp
+        endpoint: http://localhost:4317
+        retry_attempts: 3
+        retry_initial_backoff_ms: 100
+        retry_max_backoff_ms: 1000
+        request_timeout_ms: 5000
+        batch_size: 2048
+        batch_timeout_ms: 1000
+        headers:
+          X-Custom: value
+        tls:
+          insecure_skip_verify: true
+"#;
+        Config::load_str(yaml).expect("otlp options should be accepted");
+    }
+
+    #[test]
+    fn non_otlp_rejects_new_options() {
+        let yaml = r#"
+pipelines:
+  test:
+    inputs:
+      - type: file
+        path: /tmp/test.log
+    outputs:
+      - type: stdout
+        retry_attempts: 3
+"#;
+        let err = Config::load_str(yaml).unwrap_err().to_string();
+        assert!(err.contains("'retry_attempts' is only supported for otlp outputs"));
+    }
+
+    #[test]
+    fn otlp_rejects_zero_request_timeout_ms() {
+        let yaml = r#"
+pipelines:
+  test:
+    inputs:
+      - type: file
+        path: /tmp/test.log
+    outputs:
+      - type: otlp
+        endpoint: http://localhost:4317
+        request_timeout_ms: 0
+"#;
+        let err = Config::load_str(yaml).unwrap_err().to_string();
+        assert!(
+            err.contains("request_timeout_ms") && err.contains("at least 1"),
+            "expected zero timeout rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn otlp_rejects_zero_batch_timeout_ms() {
+        let yaml = r#"
+pipelines:
+  test:
+    inputs:
+      - type: file
+        path: /tmp/test.log
+    outputs:
+      - type: otlp
+        endpoint: http://localhost:4317
+        batch_timeout_ms: 0
+"#;
+        let err = Config::load_str(yaml).unwrap_err().to_string();
+        assert!(
+            err.contains("batch_timeout_ms") && err.contains("at least 1"),
+            "expected zero batch_timeout_ms rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn otlp_rejects_initial_backoff_exceeding_max() {
+        let yaml = r#"
+pipelines:
+  test:
+    inputs:
+      - type: file
+        path: /tmp/test.log
+    outputs:
+      - type: otlp
+        endpoint: http://localhost:4317
+        retry_initial_backoff_ms: 5000
+        retry_max_backoff_ms: 1000
+"#;
+        let err = Config::load_str(yaml).unwrap_err().to_string();
+        assert!(
+            err.contains("retry_initial_backoff_ms") && err.contains("retry_max_backoff_ms"),
+            "expected backoff ordering rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn arrow_ipc_accepts_batch_size() {
+        let yaml = r#"
+pipelines:
+  test:
+    inputs:
+      - type: file
+        path: /tmp/test.log
+    outputs:
+      - type: arrow_ipc
+        endpoint: http://localhost:9000
+        batch_size: 512
+"#;
+        Config::load_str(yaml).expect("arrow_ipc should accept batch_size");
     }
 }
 
