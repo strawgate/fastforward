@@ -1,0 +1,34 @@
+--- crates/logfwd-arrow/src/streaming_builder.rs
++++ crates/logfwd-arrow/src/streaming_builder.rs
+@@ -1071,6 +1071,32 @@
+         assert_eq!(col.value(0), "val");
+         assert_eq!(col.value(1), "value");
+     }
++
++    #[test]
++    fn test_issue_1337_utf8_validation_dedup() {
++        let buf = bytes::Bytes::from_static(b"v\xFFv2"); // invalid UTF-8 followed by valid
++        let mut b = StreamingBuilder::new(false);
++        b.begin_batch(buf.clone());
++
++        let mut indices = Vec::new();
++        for i in 0..65u8 {
++            let name = format!("field{}", i);
++            indices.push(b.resolve_field(name.as_bytes()));
++        }
++        let idx_64 = indices[64];
++
++        b.begin_row();
++        b.append_decoded_str_by_idx(idx_64, &buf[0..2]); // "v\xFF" - invalid
++        b.append_decoded_str_by_idx(idx_64, &buf[2..4]); // "v2" - valid
++        b.end_row();
++
++        let batch = b.finish_batch().unwrap();
++        let col = batch
++            .column_by_name("field64")
++            .unwrap()
++            .as_any()
++            .downcast_ref::<arrow::array::StringViewArray>()
++            .unwrap();
++        assert_eq!(col.value(0), "v2"); // Should not be skipped as duplicate
++    }

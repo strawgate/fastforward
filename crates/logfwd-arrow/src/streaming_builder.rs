@@ -308,6 +308,9 @@ impl StreamingBuilder {
         if std::str::from_utf8(value).is_err() {
             return;
         }
+        if idx >= u64::BITS as usize {
+            self.fields[idx].last_row = self.row_count;
+        }
         // Compute both offsets before mutating decoded_buf so that a bail-out
         // on overflow does not leave unreferenced bytes in decoded_buf.
         let Ok(decoded_offset) = u32::try_from(self.decoded_buf.len()) else {
@@ -323,10 +326,7 @@ impl StreamingBuilder {
             // Combined offset would overflow u32; drop this field rather than panic.
             return;
         };
-        // All validation passed — safe to update dedup guard and extend decoded_buf.
-        if idx >= u64::BITS as usize {
-            self.fields[idx].last_row = self.row_count;
-        }
+        // All validation passed — safe to extend decoded_buf.
         self.decoded_buf.extend_from_slice(value);
         let fc = &mut self.fields[idx];
         fc.has_str = true;
@@ -349,9 +349,11 @@ impl StreamingBuilder {
             if fc.last_row == self.row_count {
                 return;
             }
-            fc.last_row = self.row_count;
         }
         if let Some(v) = parse_int_fast(value) {
+            if idx >= 64 {
+                fc.last_row = self.row_count;
+            }
             fc.has_int = true;
             fc.int_values.push((self.row_count, v));
         }
@@ -372,9 +374,11 @@ impl StreamingBuilder {
             if fc.last_row == self.row_count {
                 return;
             }
-            fc.last_row = self.row_count;
         }
         if let Some(v) = parse_float_fast(value) {
+            if idx >= 64 {
+                fc.last_row = self.row_count;
+            }
             fc.has_float = true;
             fc.float_values.push((self.row_count, v));
         }
@@ -2183,5 +2187,69 @@ mod verification {
         assert_eq!(batch.num_rows(), num_rows as usize);
         kani::cover!(num_rows == 0, "empty batch");
         kani::cover!(num_rows > 0, "non-empty batch");
+    }
+}
+#[cfg(test)]
+mod issue_tests {
+    use super::*;
+    use arrow::array::Array;
+    #[test]
+    fn test_issue_1337_utf8_validation_dedup() {
+        let buf = bytes::Bytes::from_static(b"v\xFFv2"); // invalid UTF-8 followed by valid
+        let mut b = StreamingBuilder::new(false);
+        b.begin_batch(buf.clone());
+
+        let mut indices = Vec::new();
+        for i in 0..65u8 {
+            let name = format!("field{}", i);
+            indices.push(b.resolve_field(name.as_bytes()));
+        }
+        let idx_64 = indices[64];
+
+        b.begin_row();
+        b.append_decoded_str_by_idx(idx_64, &buf[0..2]); // "v\xFF" - invalid
+        b.append_decoded_str_by_idx(idx_64, &buf[2..4]); // "v2" - valid
+        b.end_row();
+
+        let batch = b.finish_batch().unwrap();
+        let col = batch
+            .column_by_name("field64")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::StringViewArray>()
+            .unwrap();
+        assert_eq!(col.value(0), "v2"); // Should not be skipped as duplicate
+    }
+}
+#[cfg(test)]
+mod issue_tests_int {
+    use super::*;
+    use arrow::array::Array;
+    #[test]
+    fn test_issue_1337_int_validation_dedup() {
+        let buf = bytes::Bytes::from_static(b"xx42"); // invalid int followed by valid int
+        let mut b = StreamingBuilder::new(false);
+        b.begin_batch(buf.clone());
+
+        let mut indices = Vec::new();
+        for i in 0..65u8 {
+            let name = format!("field{}", i);
+            indices.push(b.resolve_field(name.as_bytes()));
+        }
+        let idx_64 = indices[64];
+
+        b.begin_row();
+        b.append_int_by_idx(idx_64, &buf[0..2]); // "xx" - invalid
+        b.append_int_by_idx(idx_64, &buf[2..4]); // "42" - valid
+        b.end_row();
+
+        let batch = b.finish_batch().unwrap();
+        let col = batch
+            .column_by_name("field64")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::Int64Array>()
+            .unwrap();
+        assert_eq!(col.value(0), 42); // Should not be skipped as duplicate
     }
 }
