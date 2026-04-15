@@ -1,10 +1,14 @@
+use std::io;
+
 use axum::body::Body;
 use axum::http::{
     HeaderMap, StatusCode,
     header::{CONTENT_LENGTH, CONTENT_TYPE},
 };
+use flate2::read::GzDecoder;
 use http_body_util::BodyExt as _;
 
+use crate::InputError;
 /// Maximum request body size shared by all HTTP receivers: 10 MB.
 pub(crate) const MAX_REQUEST_BODY_SIZE: usize = 10 * 1024 * 1024;
 
@@ -59,4 +63,61 @@ pub(crate) async fn read_limited_body(
         out.extend_from_slice(&chunk);
     }
     Ok(out)
+}
+
+/// Decompress gzip-encoded body with size limit.
+///
+/// Returns an error if the decompressed payload exceeds `max_request_body_size`.
+pub(crate) fn decompress_gzip(
+    body: &[u8],
+    max_request_body_size: usize,
+) -> Result<Vec<u8>, InputError> {
+    let decoder = GzDecoder::new(body);
+    read_decompressed_body(
+        decoder,
+        body.len(),
+        max_request_body_size,
+        "gzip decompression failed",
+    )
+}
+
+/// Decompress zstd-encoded body with size limit.
+///
+/// Returns an error if the decompressed payload exceeds `max_request_body_size`.
+pub(crate) fn decompress_zstd(
+    body: &[u8],
+    max_request_body_size: usize,
+) -> Result<Vec<u8>, InputError> {
+    let decoder = zstd::Decoder::new(body)
+        .map_err(|_| InputError::Receiver("zstd decompression failed".to_string()))?;
+    read_decompressed_body(
+        decoder,
+        body.len(),
+        max_request_body_size,
+        "zstd decompression failed",
+    )
+}
+
+/// Read from a decompressor with a bounded take to enforce size limits.
+///
+/// Returns an error if the decompressed size exceeds `max_request_body_size`.
+fn read_decompressed_body(
+    reader: impl io::Read,
+    compressed_len: usize,
+    max_request_body_size: usize,
+    error_label: &str,
+) -> Result<Vec<u8>, InputError> {
+    use io::Read;
+    let mut decompressed = Vec::with_capacity(compressed_len.min(max_request_body_size));
+    match reader
+        .take(max_request_body_size as u64 + 1)
+        .read_to_end(&mut decompressed)
+    {
+        Ok(n) if n > max_request_body_size => Err(InputError::Io(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "payload too large",
+        ))),
+        Ok(_) => Ok(decompressed),
+        Err(_) => Err(InputError::Receiver(error_label.to_string())),
+    }
 }

@@ -5,7 +5,6 @@
 //! to the pipeline scanner path as [`crate::input::InputEvent::Data`].
 
 use std::io;
-use std::io::Read as _;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, mpsc};
 
@@ -15,13 +14,12 @@ use axum::http::header::{ALLOW, CONTENT_ENCODING, RETRY_AFTER};
 use axum::http::{HeaderMap, Method, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
-use flate2::read::GzDecoder;
 use logfwd_types::diagnostics::ComponentHealth;
 use tokio::sync::oneshot;
 
 use crate::InputError;
 use crate::input::{InputEvent, InputSource};
-use crate::receiver_http::{parse_content_length, read_limited_body};
+use crate::receiver_http::{decompress_gzip, decompress_zstd, parse_content_length, read_limited_body};
 
 /// Default max request body size (10 MiB).
 const DEFAULT_MAX_REQUEST_BODY_SIZE: usize = 10 * 1024 * 1024;
@@ -531,47 +529,6 @@ fn decode_content(
 
 fn is_supported_content_encoding(content_encoding: &str) -> bool {
     matches!(content_encoding, "identity" | "gzip" | "zstd")
-}
-
-fn decompress_zstd(body: &[u8], max_request_body_size: usize) -> Result<Vec<u8>, InputError> {
-    let decoder = zstd::Decoder::new(body)
-        .map_err(|_| InputError::Receiver("zstd decompression failed".to_string()))?;
-    read_decompressed_body(
-        decoder,
-        body.len(),
-        max_request_body_size,
-        "zstd decompression failed",
-    )
-}
-
-fn decompress_gzip(body: &[u8], max_request_body_size: usize) -> Result<Vec<u8>, InputError> {
-    let decoder = GzDecoder::new(body);
-    read_decompressed_body(
-        decoder,
-        body.len(),
-        max_request_body_size,
-        "gzip decompression failed",
-    )
-}
-
-fn read_decompressed_body(
-    reader: impl io::Read,
-    compressed_len: usize,
-    max_request_body_size: usize,
-    error_label: &str,
-) -> Result<Vec<u8>, InputError> {
-    let mut decompressed = Vec::with_capacity(compressed_len.min(max_request_body_size));
-    match reader
-        .take(max_request_body_size as u64 + 1)
-        .read_to_end(&mut decompressed)
-    {
-        Ok(n) if n > max_request_body_size => Err(InputError::Io(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "payload too large",
-        ))),
-        Ok(_) => Ok(decompressed),
-        Err(_) => Err(InputError::Receiver(error_label.to_string())),
-    }
 }
 
 #[cfg(test)]

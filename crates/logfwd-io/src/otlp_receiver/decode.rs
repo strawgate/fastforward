@@ -1,11 +1,8 @@
 use std::borrow::Cow;
-use std::io;
-use std::io::Read as _;
 use std::sync::Arc;
 
 use arrow::record_batch::RecordBatch;
 use bytes::Bytes;
-use flate2::read::GzDecoder;
 use logfwd_arrow::Scanner;
 use logfwd_core::scan_config::ScanConfig;
 use logfwd_types::field_names;
@@ -22,53 +19,6 @@ use super::convert::{
 };
 #[cfg(any(feature = "otlp-research", test))]
 use super::projection::ProjectionError;
-
-pub(super) fn decompress_zstd(
-    body: &[u8],
-    max_request_body_size: usize,
-) -> Result<Vec<u8>, InputError> {
-    let decoder = zstd::Decoder::new(body)
-        .map_err(|_| InputError::Receiver("zstd decompression failed".to_string()))?;
-    read_decompressed_body(
-        decoder,
-        body.len(),
-        max_request_body_size,
-        "zstd decompression failed",
-    )
-}
-
-pub(super) fn decompress_gzip(
-    body: &[u8],
-    max_request_body_size: usize,
-) -> Result<Vec<u8>, InputError> {
-    let decoder = GzDecoder::new(body);
-    read_decompressed_body(
-        decoder,
-        body.len(),
-        max_request_body_size,
-        "gzip decompression failed",
-    )
-}
-
-pub(super) fn read_decompressed_body(
-    reader: impl io::Read,
-    compressed_len: usize,
-    max_request_body_size: usize,
-    error_label: &str,
-) -> Result<Vec<u8>, InputError> {
-    let mut decompressed = Vec::with_capacity(compressed_len.min(max_request_body_size));
-    match reader
-        .take(max_request_body_size as u64 + 1)
-        .read_to_end(&mut decompressed)
-    {
-        Ok(n) if n > max_request_body_size => Err(InputError::Io(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "payload too large",
-        ))),
-        Ok(_) => Ok(decompressed),
-        Err(_) => Err(InputError::Receiver(error_label.to_string())),
-    }
-}
 
 /// Decode an OTLP ExportLogsServiceRequest from protobuf and produce a
 /// structured Arrow RecordBatch.

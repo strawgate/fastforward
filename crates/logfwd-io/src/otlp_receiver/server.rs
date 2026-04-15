@@ -13,12 +13,12 @@ use logfwd_types::diagnostics::{ComponentHealth, ComponentStats};
 
 use crate::InputError;
 use crate::receiver_http::{
-    MAX_REQUEST_BODY_SIZE, parse_content_length, parse_content_type, read_limited_body,
+    decompress_gzip, decompress_zstd, parse_content_length, parse_content_type,
+    read_limited_body, MAX_REQUEST_BODY_SIZE,
 };
 
 use super::decode::{
-    decode_otlp_json, decode_otlp_protobuf, decode_otlp_protobuf_bytes_with_mode, decompress_gzip,
-    decompress_zstd,
+    decode_otlp_json, decode_otlp_protobuf, decode_otlp_protobuf_bytes_with_mode,
 };
 use super::{OtlpProtobufDecodeMode, OtlpServerState, ReceiverPayload};
 
