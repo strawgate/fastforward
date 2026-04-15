@@ -87,6 +87,8 @@ pub(super) fn make_string_view_raw(
 ) -> Result<u128, MaterializeError> {
     let len = sref.len;
     if len == 0 {
+        // Validate offset even for empty refs so behaviour matches read_str_bytes_raw.
+        read_str_bytes_raw(original_buf, generated_buf, original_len, sref)?;
         return Ok(0u128);
     }
 
@@ -324,7 +326,10 @@ mod tests {
 
         // Starts in original (offset=2), but len=4 extends past original_len=4.
         let sref = StringRef { offset: 2, len: 4 };
-        assert!(store.read_str_bytes(sref).is_err());
+        assert!(matches!(
+            store.read_str_bytes(sref),
+            Err(MaterializeError::StringRefSpansBoundary { .. })
+        ));
     }
 
     #[test]
@@ -338,7 +343,10 @@ mod tests {
             offset: 4 + 3,
             len: 1,
         };
-        assert!(store.read_str_bytes(sref).is_err());
+        assert!(matches!(
+            store.read_str_bytes(sref),
+            Err(MaterializeError::StringRefOutOfBounds { .. })
+        ));
     }
 
     #[test]
@@ -419,6 +427,31 @@ mod tests {
         let store = BlockStore::empty();
         let sref = StringRef { offset: 0, len: 0 };
         assert_eq!(store.make_string_view(sref, 0, None).unwrap(), 0);
+    }
+
+    #[test]
+    fn make_string_view_empty_oob_offset_rejected() {
+        let original = Buffer::from_vec(b"orig".to_vec());
+        let store = BlockStore::new(original, Buffer::from(Vec::<u8>::new()));
+        // Zero-length but offset is past all buffers — should fail like read_str_bytes.
+        let sref = StringRef { offset: 99, len: 0 };
+        assert!(matches!(
+            store.make_string_view(sref, 0, None),
+            Err(MaterializeError::StringRefOutOfBounds { .. })
+        ));
+    }
+
+    #[test]
+    fn make_string_view_spanning_rejected() {
+        let original = Buffer::from_vec(b"orig".to_vec());
+        let generated = Buffer::from_vec(b"gen".to_vec());
+        let store = BlockStore::new(original, generated);
+        // Starts in original (offset=2), extends past original_len=4.
+        let sref = StringRef { offset: 2, len: 4 };
+        assert!(matches!(
+            store.make_string_view(sref, 0, Some(1)),
+            Err(MaterializeError::StringRefSpansBoundary { .. })
+        ));
     }
 
     #[test]
