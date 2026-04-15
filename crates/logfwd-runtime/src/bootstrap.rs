@@ -165,7 +165,8 @@ pub async fn run_pipelines(
                         if let Ok(file) = std::fs::File::create("profile.pb.gz") {
                             let mut gz =
                                 flate2::write::GzEncoder::new(file, flate2::Compression::default());
-                            if let Err(e) = gz.write_all(&buf) {
+                            if let Err(e) = gz.write_all(&buf).and_then(|_| gz.finish().map(|_| ()))
+                            {
                                 eprintln!("warn: failed to write profile.pb.gz: {e}");
                             }
                         }
