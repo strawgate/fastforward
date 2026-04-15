@@ -172,7 +172,8 @@ impl JsonLinesSink {
                     Vec::with_capacity(cap),
                 ))
             }
-            Compression::Snappy => Err(io::Error::other(
+            Compression::Snappy => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
                 "snappy compression is not supported by json_lines sink",
             )),
             Compression::Lz4 => Err(io::Error::new(
