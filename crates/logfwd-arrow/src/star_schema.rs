@@ -546,7 +546,10 @@ pub fn star_to_flat(star: &StarSchema) -> Result<RecordBatch, ArrowError> {
     // severity_text → level
     if let Ok(sev_idx) = logs_schema.index_of("severity_text") {
         let sev_arr = star.logs.column(sev_idx);
-        if !matches!(sev_arr.data_type(), DataType::Utf8 | DataType::Utf8View) {
+        if !matches!(
+            sev_arr.data_type(),
+            DataType::Utf8 | DataType::Utf8View | DataType::LargeUtf8
+        ) {
             return Err(ArrowError::SchemaError(format!(
                 "severity_text must be Utf8 or Utf8View, got {}",
                 sev_arr.data_type()
@@ -569,7 +572,10 @@ pub fn star_to_flat(star: &StarSchema) -> Result<RecordBatch, ArrowError> {
     // body_str → message
     if let Ok(body_idx) = logs_schema.index_of("body_str") {
         let body_arr = star.logs.column(body_idx);
-        if !matches!(body_arr.data_type(), DataType::Utf8 | DataType::Utf8View) {
+        if !matches!(
+            body_arr.data_type(),
+            DataType::Utf8 | DataType::Utf8View | DataType::LargeUtf8
+        ) {
             return Err(ArrowError::SchemaError(format!(
                 "body_str must be Utf8 or Utf8View, got {}",
                 body_arr.data_type()
@@ -922,6 +928,11 @@ fn str_from_array(arr: &dyn Array, row: usize) -> String {
             .downcast_ref::<arrow::array::StringViewArray>()
             .map(|a| a.value(row).to_string())
             .unwrap_or_default(),
+        DataType::LargeUtf8 => arr
+            .as_any()
+            .downcast_ref::<LargeStringArray>()
+            .map(|a| a.value(row).to_string())
+            .unwrap_or_default(),
         _ => String::new(),
     }
 }
@@ -1204,7 +1215,7 @@ fn build_log_attrs(
                 _ => {
                     // String (default).
                     let val = str_value_at(arr.as_ref(), row);
-                    str_vals.push(if val.is_empty() { None } else { Some(val) });
+                    str_vals.push(Some(val));
                     int_vals.push(None);
                     double_vals.push(None);
                     bool_vals.push(None);
@@ -1311,7 +1322,7 @@ fn build_logs_fact(
                     None
                 } else {
                     let s = str_value_at(arr.as_ref(), row);
-                    if s.is_empty() { None } else { Some(s) }
+                    Some(s)
                 }
             })
             .collect()
@@ -1825,7 +1836,12 @@ fn unpivot_attrs_to_flat(
                 }
             }
             ATTR_TYPE_STR => {}
-            _ => unreachable!("type tags are validated before dispatch"),
+            _ => {
+                return Err(ArrowError::SchemaError(format!(
+                    "unsupported column type: {}",
+                    type_tag
+                )));
+            }
         }
     }
 
