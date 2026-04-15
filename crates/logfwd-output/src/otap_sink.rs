@@ -251,7 +251,11 @@ pub fn decode_batch_status(data: &[u8]) -> io::Result<BatchStatus> {
             (3, 2) => {
                 // status_message: string (length-delimited)
                 let (len, new_pos) = decode_varint(data, pos)?;
-                let end = new_pos + len as usize;
+                let len_usize = usize::try_from(len)
+                    .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "length too large"))?;
+                let end = new_pos
+                    .checked_add(len_usize)
+                    .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "length overflow"))?;
                 if end > data.len() {
                     return Err(io::Error::new(
                         io::ErrorKind::UnexpectedEof,
@@ -299,7 +303,11 @@ pub fn decode_batch_arrow_records(data: &[u8]) -> io::Result<(i64, Vec<DecodedPa
             (2, 2) => {
                 // ArrowPayload submessage
                 let (len, new_pos) = decode_varint(data, pos)?;
-                let end = new_pos + len as usize;
+                let len_usize = usize::try_from(len)
+                    .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "length too large"))?;
+                let end = new_pos
+                    .checked_add(len_usize)
+                    .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "length overflow"))?;
                 if end > data.len() {
                     return Err(io::Error::new(
                         io::ErrorKind::UnexpectedEof,
@@ -313,7 +321,11 @@ pub fn decode_batch_arrow_records(data: &[u8]) -> io::Result<(i64, Vec<DecodedPa
             (3, 2) => {
                 // headers
                 let (len, new_pos) = decode_varint(data, pos)?;
-                let end = new_pos + len as usize;
+                let len_usize = usize::try_from(len)
+                    .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "length too large"))?;
+                let end = new_pos
+                    .checked_add(len_usize)
+                    .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "length overflow"))?;
                 if end > data.len() {
                     return Err(io::Error::new(
                         io::ErrorKind::UnexpectedEof,
@@ -348,7 +360,11 @@ fn decode_arrow_payload(data: &[u8]) -> io::Result<DecodedPayload> {
             (1, 2) => {
                 // schema_id: string
                 let (len, new_pos) = decode_varint(data, pos)?;
-                let end = new_pos + len as usize;
+                let len_usize = usize::try_from(len)
+                    .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "length too large"))?;
+                let end = new_pos
+                    .checked_add(len_usize)
+                    .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "length overflow"))?;
                 if end > data.len() {
                     return Err(io::Error::new(
                         io::ErrorKind::UnexpectedEof,
@@ -367,7 +383,11 @@ fn decode_arrow_payload(data: &[u8]) -> io::Result<DecodedPayload> {
             (3, 2) => {
                 // record: bytes
                 let (len, new_pos) = decode_varint(data, pos)?;
-                let end = new_pos + len as usize;
+                let len_usize = usize::try_from(len)
+                    .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "length too large"))?;
+                let end = new_pos
+                    .checked_add(len_usize)
+                    .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "length overflow"))?;
                 if end > data.len() {
                     return Err(io::Error::new(
                         io::ErrorKind::UnexpectedEof,
