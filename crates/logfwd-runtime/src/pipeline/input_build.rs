@@ -607,7 +607,8 @@ pub(super) fn build_input_state(
                     s3_cfg.visibility_timeout_secs,
                     compression_override,
                     s3_cfg.poll_interval_ms,
-                );
+                )
+                .map_err(|e| format!("input '{name}': {e}"))?;
 
                 let source = S3Input::new(name, settings)
                     .map_err(|e| format!("input '{name}': failed to create S3 input: {e}"))?;

@@ -90,10 +90,13 @@ impl SqsClient {
 
     /// Long-poll for up to `max_messages` messages (max 10 per SQS limit),
     /// waiting up to `wait_secs` seconds (max 20).
+    /// Sets VisibilityTimeout on receive so messages are hidden for the configured
+    /// duration, not just the queue default.
     pub async fn receive_messages(
         &self,
         max_messages: u8,
         wait_secs: u8,
+        visibility_timeout_secs: u32,
     ) -> io::Result<Vec<SqsMessage>> {
         let n = max_messages.clamp(1, 10);
         let w = wait_secs.min(20);
@@ -102,6 +105,10 @@ impl SqsClient {
         params.insert("Action".to_string(), "ReceiveMessage".to_string());
         params.insert("MaxNumberOfMessages".to_string(), n.to_string());
         params.insert("WaitTimeSeconds".to_string(), w.to_string());
+        params.insert(
+            "VisibilityTimeout".to_string(),
+            visibility_timeout_secs.to_string(),
+        );
         params.insert("AttributeName.1".to_string(), "All".to_string());
         params.insert("Version".to_string(), "2012-11-05".to_string());
 

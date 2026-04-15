@@ -146,8 +146,27 @@ impl S3InputSettings {
         visibility_timeout_secs: Option<u32>,
         compression_override: Option<Compression>,
         poll_interval_ms: Option<u64>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, String> {
+        let access_key_id = access_key_id
+            .or_else(|| std::env::var("AWS_ACCESS_KEY_ID").ok())
+            .unwrap_or_default();
+        let secret_access_key = secret_access_key
+            .or_else(|| std::env::var("AWS_SECRET_ACCESS_KEY").ok())
+            .unwrap_or_default();
+
+        if access_key_id.is_empty() {
+            return Err(
+                "s3.access_key_id is required (or set AWS_ACCESS_KEY_ID env var)".to_string(),
+            );
+        }
+        if secret_access_key.is_empty() {
+            return Err(
+                "s3.secret_access_key is required (or set AWS_SECRET_ACCESS_KEY env var)"
+                    .to_string(),
+            );
+        }
+
+        Ok(Self {
             bucket,
             region: region
                 .or_else(|| std::env::var("AWS_DEFAULT_REGION").ok())
@@ -156,12 +175,8 @@ impl S3InputSettings {
             prefix,
             sqs_queue_url,
             start_after,
-            access_key_id: access_key_id
-                .or_else(|| std::env::var("AWS_ACCESS_KEY_ID").ok())
-                .unwrap_or_default(),
-            secret_access_key: secret_access_key
-                .or_else(|| std::env::var("AWS_SECRET_ACCESS_KEY").ok())
-                .unwrap_or_default(),
+            access_key_id,
+            secret_access_key,
             session_token: session_token.or_else(|| std::env::var("AWS_SESSION_TOKEN").ok()),
             part_size_bytes: part_size_bytes.unwrap_or(DEFAULT_PART_SIZE).max(1),
             max_concurrent_fetches: max_concurrent_fetches
@@ -174,7 +189,7 @@ impl S3InputSettings {
                 .unwrap_or(DEFAULT_VISIBILITY_TIMEOUT_SECS),
             compression_override,
             poll_interval_ms: poll_interval_ms.unwrap_or(DEFAULT_POLL_INTERVAL_MS),
-        }
+        })
     }
 }
 
@@ -460,7 +475,7 @@ async fn run_sqs_discovery(
     });
 
     while is_running.load(Ordering::Relaxed) {
-        let messages = match sqs.receive_messages(10, 20).await {
+        let messages = match sqs.receive_messages(10, 20, visibility_timeout).await {
             Ok(msgs) => msgs,
             Err(e) => {
                 warn!(name = %name, error = %e, "SQS receive failed");
