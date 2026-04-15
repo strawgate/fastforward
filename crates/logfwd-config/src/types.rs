@@ -274,6 +274,15 @@ pub struct HttpInputConfig {
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct GeneratorInputConfig {
+    #[serde(default)]
+    pub events_per_second: Option<u64>,
+    #[serde(default)]
+    pub num_lines: Option<u64>,
+    #[serde(default)]
+    pub message_template: Option<String>,
+    #[serde(default)]
+    pub field_count: Option<usize>,
+
     pub events_per_sec: Option<u64>,
     pub batch_size: Option<usize>,
     pub total_events: Option<u64>,

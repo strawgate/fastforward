@@ -212,11 +212,19 @@ pub(super) fn build_input_state(
             };
             let generator_cfg = g.generator.as_ref();
             let config = GeneratorConfig {
-                events_per_sec: generator_cfg.and_then(|c| c.events_per_sec).unwrap_or(0),
+                events_per_sec: generator_cfg
+                    .and_then(|c| c.events_per_second)
+                    .or_else(|| generator_cfg.and_then(|c| c.events_per_sec))
+                    .unwrap_or(0),
                 batch_size: generator_cfg
                     .and_then(|c| c.batch_size)
                     .unwrap_or(DEFAULT_GENERATOR_BATCH_SIZE),
-                total_events: generator_cfg.and_then(|c| c.total_events).unwrap_or(0),
+                total_events: generator_cfg
+                    .and_then(|c| c.num_lines)
+                    .or_else(|| generator_cfg.and_then(|c| c.total_events))
+                    .unwrap_or(0),
+                message_template: generator_cfg.and_then(|c| c.message_template.clone()),
+                field_count: generator_cfg.and_then(|c| c.field_count),
                 complexity: match generator_cfg.and_then(|c| c.complexity.clone()) {
                     Some(GeneratorComplexityConfig::Complex) => GeneratorComplexity::Complex,
                     Some(GeneratorComplexityConfig::Simple) | None => GeneratorComplexity::Simple,
