@@ -187,7 +187,6 @@ fn verify_batches(
                         let val = match col.data_type() {
                             arrow::datatypes::DataType::Utf8 => col.as_string::<i32>().value(row),
                             arrow::datatypes::DataType::Utf8View => col.as_string_view().value(row),
-                            arrow::datatypes::DataType::LargeUtf8 => col.as_string::<i64>().value(row),
                             _ => "",
                         };
                         val == source_id
