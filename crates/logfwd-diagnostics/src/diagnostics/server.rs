@@ -936,7 +936,7 @@ fn build_traces_body(state: &DiagnosticsState) -> String {
 
 fn build_logs_body(state: &DiagnosticsState) -> String {
     let lines = state.stderr.get_logs();
-    let dropped = state.stderr.lines_dropped();
+    let dropped = state.stderr.count_lines_dropped();
     let mut body = String::with_capacity(lines.len() * 80 + 64);
     body.push_str(r#"{"lines":["#);
     for (i, line) in lines.iter().enumerate() {

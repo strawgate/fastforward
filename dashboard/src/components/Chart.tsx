@@ -197,6 +197,12 @@ export function Chart({ frame, config }: Props) {
   const frameRef = useRef(frame);
   frameRef.current = frame;
 
+  // Cache buildAlignedData result — only rebuild when frame identity changes.
+  const cachedAlignedRef = useRef<{
+    frame: TimeSeriesFrame;
+    result: ReturnType<typeof buildAlignedData>;
+  } | null>(null);
+
   // RAF loop: creates the plot when data arrives, updates each frame.
   useEffect(() => {
     const el = containerRef.current;
@@ -204,7 +210,20 @@ export function Chart({ frame, config }: Props) {
 
     const tick = () => {
       const now = Date.now() / 1000;
-      const { data, seriesCount, age } = buildAlignedData(frameRef.current, now);
+      const currentFrame = frameRef.current;
+
+      // Reuse cached aligned data if the frame hasn't changed.
+      let aligned: ReturnType<typeof buildAlignedData>;
+      if (cachedAlignedRef.current && cachedAlignedRef.current.frame === currentFrame) {
+        aligned = cachedAlignedRef.current.result;
+        // Update only the synthetic trailing point (x-scale "now" marker).
+        const xs = aligned.data[0] as number[];
+        if (xs.length > 0) xs[xs.length - 1] = now;
+      } else {
+        aligned = buildAlignedData(currentFrame, now);
+        cachedAlignedRef.current = { frame: currentFrame, result: aligned };
+      }
+      const { data, seriesCount, age } = aligned;
       const totalPoints = (data[0] as number[]).length;
 
       if (totalPoints < 2) {

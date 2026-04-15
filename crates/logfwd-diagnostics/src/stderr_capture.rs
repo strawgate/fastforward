@@ -70,7 +70,7 @@ impl LogBuf {
     }
 
     /// Monotonic count of lines evicted from the buffer or dropped (oversized).
-    fn lines_dropped(&self) -> u64 {
+    fn count_lines_dropped(&self) -> u64 {
         self.lines_dropped
     }
 }
@@ -123,10 +123,10 @@ impl CaptureState {
         }
     }
 
-    fn lines_dropped(&self) -> u64 {
+    fn count_lines_dropped(&self) -> u64 {
         match self.buf.lock() {
-            Ok(buf) => buf.lines_dropped(),
-            Err(_) => 0,
+            Ok(buf) => buf.count_lines_dropped(),
+            Err(poisoned) => poisoned.into_inner().count_lines_dropped(),
         }
     }
 }
@@ -172,8 +172,8 @@ impl StderrCapture {
     }
 
     /// Monotonic count of log lines evicted from the buffer or dropped.
-    pub fn lines_dropped(&self) -> u64 {
-        self.state.lines_dropped()
+    pub fn count_lines_dropped(&self) -> u64 {
+        self.state.count_lines_dropped()
     }
 
     /// Is capture currently active?
@@ -536,14 +536,14 @@ mod tests {
         assert_eq!(cursor, 1);
     }
 
-    // ── lines_dropped counter ──────────────────────────────────────
+    // ── count_lines_dropped counter ──────────────────────────────────
 
     #[test]
     fn oversized_line_increments_drop_count() {
         let mut buf = LogBuf::new();
         let big = "x".repeat(MAX_BYTES + 1);
         buf.push(big);
-        assert_eq!(buf.lines_dropped(), 1);
+        assert_eq!(buf.count_lines_dropped(), 1);
         assert_eq!(buf.total_pushed, 0);
     }
 
@@ -557,12 +557,15 @@ mod tests {
         }
         // Some lines were evicted — drop count should be positive.
         assert!(
-            buf.lines_dropped() > 0,
-            "lines_dropped={}",
-            buf.lines_dropped()
+            buf.count_lines_dropped() > 0,
+            "count_lines_dropped={}",
+            buf.count_lines_dropped()
         );
         // Total pushed minus retained equals dropped.
-        assert_eq!(buf.lines_dropped(), buf.total_pushed - buf.len() as u64,);
+        assert_eq!(
+            buf.count_lines_dropped(),
+            buf.total_pushed - buf.len() as u64,
+        );
     }
 
     #[test]
@@ -570,6 +573,6 @@ mod tests {
         let state = CaptureState::new();
         state.push_line("hello".into());
         state.push_line("world".into());
-        assert_eq!(state.lines_dropped(), 0);
+        assert_eq!(state.count_lines_dropped(), 0);
     }
 }
