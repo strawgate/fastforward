@@ -148,6 +148,22 @@ impl Config {
                                     "pipeline '{name}' input '{label}': max_open_files must be at least 1"
                                 )));
                             }
+                            if let Some(encoding) = &f.encoding {
+                                let valid_encodings = ["utf-8", "utf8", "ascii"];
+                                if !valid_encodings.contains(&encoding.to_lowercase().as_str()) {
+                                    return Err(ConfigError::Validation(format!(
+                                        "pipeline '{name}' input '{label}': unsupported encoding '{encoding}'"
+                                    )));
+                                }
+                            }
+                            if let Some(m) = &f.multiline
+                                && let Err(err) = regex::Regex::new(&m.pattern)
+                            {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': invalid multiline pattern '{}': {err}",
+                                    m.pattern
+                                )));
+                            }
                         }
                         InputTypeConfig::Udp(u) => {
                             if let Err(msg) = validate_bind_addr(&u.listen) {
@@ -246,15 +262,6 @@ impl Config {
                                     "pipeline '{name}' input '{label}': generator.attributes float values must be finite"
                                 )));
                             }
-                                if let Some((key, _)) =
-                                    generator.attributes.iter().find(|(_, v)| {
-                                        matches!(v, GeneratorAttributeValueConfig::Unsupported(_))
-                                    })
-                                {
-                                    return Err(ConfigError::Validation(format!(
-                                        "pipeline '{name}' input '{label}': generator.attributes '{key}' has an unsupported type (expected scalar value)"
-                                    )));
-                                }
                                 if !is_record_profile
                                     && (!generator.attributes.is_empty()
                                         || generator.sequence.is_some()
@@ -715,17 +722,6 @@ impl Config {
                             )));
                         }
                     }
-
-                    if let Some(labels) = &output.static_labels {
-                        for (k, v) in labels {
-                            if k.trim().is_empty() || v.trim().is_empty() {
-                                return Err(ConfigError::Validation(format!(
-                                    "pipeline '{name}' output '{label}': 'static_labels' keys and values must not be empty"
-                                )));
-                            }
-                        }
-                    }
-
                     if !matches!(output.output_type, OutputType::File | OutputType::Parquet)
                         && output.path.is_some()
                     {

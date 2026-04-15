@@ -172,14 +172,15 @@ pub(super) fn build_input_state(
                 start_from_end: f
                     .start_position
                     .as_ref()
-                    .is_some_and(|pos| matches!(pos, logfwd_config::FileStartPosition::End)),
+                    .map(|pos| matches!(pos, logfwd_config::FileStartPosition::End))
+                    .unwrap_or(true),
                 poll_interval_ms: f.poll_interval_ms.unwrap_or(DEFAULT_FILE_POLL_INTERVAL_MS),
                 read_buf_size: f.read_buf_size.unwrap_or(DEFAULT_READ_BUF_SIZE),
                 per_file_read_budget_bytes: f
                     .per_file_read_budget_bytes
                     .unwrap_or(DEFAULT_PER_FILE_READ_BUDGET_BYTES),
                 max_open_files: f.max_open_files.unwrap_or(DEFAULT_MAX_OPEN_FILES),
-                follow_symlinks: f.follow_symlinks.unwrap_or(true),
+                follow_symlinks: f.follow_symlinks.unwrap_or(false),
                 ignore_older_than_secs: f.ignore_older_than_secs,
                 encoding: f.encoding.clone(),
                 multiline: f
@@ -390,9 +391,6 @@ pub(super) fn build_input_state(
                 }
                 if let Some(max_request_body_size) = http.max_request_body_size {
                     options.max_request_body_size = max_request_body_size;
-                }
-                if let Some(max_drained_bytes_per_poll) = http.max_drained_bytes_per_poll {
-                    options.max_drained_bytes_per_poll = max_drained_bytes_per_poll;
                 }
                 if let Some(response_code) = http.response_code {
                     options.response_code = response_code;
