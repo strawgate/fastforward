@@ -550,12 +550,15 @@ fn apply_unit_matches(
 
 /// Seek to the starting position based on config.
 fn seek_start(journal: &mut journal_ffi::Journal, config: &JournaldConfig) -> io::Result<()> {
-    if let Some(cursor_path) = &config.cursor_path
-        && let Ok(cursor) = std::fs::read_to_string(cursor_path)
-        && !cursor.trim().is_empty()
-        && let Ok(()) = journal.seek_cursor(cursor.trim())
-    {
-        return Ok(());
+    #[allow(clippy::collapsible_if)]
+    if let Some(cursor_path) = &config.cursor_path {
+        if let Ok(cursor) = std::fs::read_to_string(cursor_path) {
+            if !cursor.trim().is_empty() {
+                if let Ok(()) = journal.seek_cursor(cursor.trim()) {
+                    return Ok(());
+                }
+            }
+        }
     }
 
     if config.since_now {
@@ -845,11 +848,13 @@ fn build_command(config: &JournaldConfig) -> Command {
         cmd.arg(format!("PRIORITY={p}"));
     }
 
-    if let Some(cursor_path) = &config.cursor_path
-        && let Ok(cursor) = std::fs::read_to_string(cursor_path)
-        && !cursor.trim().is_empty()
-    {
-        cmd.arg(format!("--after-cursor={}", cursor.trim()));
+    #[allow(clippy::collapsible_if)]
+    if let Some(cursor_path) = &config.cursor_path {
+        if let Ok(cursor) = std::fs::read_to_string(cursor_path) {
+            if !cursor.trim().is_empty() {
+                cmd.arg(format!("--after-cursor={}", cursor.trim()));
+            }
+        }
     }
 
     cmd
