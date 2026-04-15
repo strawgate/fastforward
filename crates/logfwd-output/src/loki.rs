@@ -202,12 +202,17 @@ impl LokiSink {
             // --- Labels ---
             // Use coalesce_as_str so that struct conflict columns (and plain Utf8
             // columns alike) always produce a string value for the label.
-            let mut labels: Vec<(String, String)> = self.config.static_labels.clone();
+            let mut labels: Vec<(String, String)> = self
+                .config
+                .static_labels
+                .iter()
+                .map(|(k, v)| (sanitize_label_name(k), v.clone()))
+                .collect();
             for (label_name, col_info) in &label_col_infos {
                 if let Some(val) = coalesce_as_str(batch, row, col_info) {
                     // Skip empty label values — Loki API rejects them with HTTP 400.
                     if !val.is_empty() {
-                        labels.push((label_name.clone(), val));
+                        labels.push((sanitize_label_name(label_name), val));
                     }
                 }
             }
@@ -456,6 +461,40 @@ impl super::sink::SinkFactory for LokiSinkFactory {
 }
 
 // ---------------------------------------------------------------------------
+// Label sanitization
+// ---------------------------------------------------------------------------
+
+/// Sanitize a label name for Loki.
+/// Loki labels must match the regex `^[a-zA-Z_][a-zA-Z0-9_]*$`.
+fn sanitize_label_name(name: &str) -> String {
+    if name.is_empty() {
+        return String::new();
+    }
+    let mut chars = name.chars();
+    let mut sanitized = String::with_capacity(name.len());
+
+    // First character must be [a-zA-Z_]
+    if let Some(first) = chars.next() {
+        if first.is_ascii_alphabetic() || first == '_' {
+            sanitized.push(first);
+        } else {
+            sanitized.push('_');
+        }
+    }
+
+    // Remaining characters must be [a-zA-Z0-9_]
+    for c in chars {
+        if c.is_ascii_alphanumeric() || c == '_' {
+            sanitized.push(c);
+        } else {
+            sanitized.push('_');
+        }
+    }
+
+    sanitized
+}
+
+// ---------------------------------------------------------------------------
 // JSON escaping helpers
 // ---------------------------------------------------------------------------
 
@@ -479,18 +518,18 @@ fn escape_json(s: &str) -> String {
     out
 }
 
-/// Wrap an already-valid JSON value (log line) as a JSON string.
-/// If it's a JSON object/array, wrap it in quotes with escaping.
-/// If it already starts with `"`, return as-is (already a JSON string).
+/// Validate complete, well-formed JSON before passthrough.
+/// If it's any valid JSON (object, array, string, number, bool, null), return as-is.
+/// Otherwise, escape it as a plain string value.
 fn escape_json_raw(s: &str) -> String {
     let trimmed = s.trim();
     // Bug #1048: leading quote is not enough to guarantee valid JSON string.
-    // Verify it actually parses as a JSON string.
-    if trimmed.starts_with('"') && serde_json::from_str::<String>(trimmed).is_ok() {
-        // Already a valid JSON string.
+    // Verify it actually parses as a valid JSON value.
+    if serde_json::from_str::<serde_json::Value>(trimmed).is_ok() {
+        // Already valid JSON. Pass through original string to avoid re-formatting.
         trimmed.to_string()
     } else {
-        // A JSON object/array or plain string — escape it as a string value.
+        // Not valid JSON. Escape it as a string value.
         format!("\"{}\"", escape_json(trimmed))
     }
 }
@@ -688,6 +727,11 @@ mod tests {
             "malformed JSON starting with quote should be escaped and wrapped"
         );
         assert_eq!(escaped, "\"\\\"not valid json\"", "should be fully escaped");
+
+        // Object with trailing characters
+        let malformed_obj = "{\"key\": \"value\"} trailing";
+        let escaped_obj = escape_json_raw(malformed_obj);
+        assert_eq!(escaped_obj, "\"{\\\"key\\\": \\\"value\\\"} trailing\"");
     }
 
     #[test]
@@ -700,10 +744,19 @@ mod tests {
 
     #[test]
     fn test_escape_json_raw_object() {
-        // JSON object should be escaped and wrapped
+        // Valid JSON object should be passed through unmodified
         let obj = "{\"key\": \"value\"}";
         let escaped = escape_json_raw(obj);
-        assert_eq!(escaped, "\"{\\\"key\\\": \\\"value\\\"}\"");
+        assert_eq!(escaped, obj);
+    }
+
+    #[test]
+    fn test_label_sanitization() {
+        assert_eq!(sanitize_label_name("valid_label_1"), "valid_label_1");
+        assert_eq!(sanitize_label_name("my.label.name"), "my_label_name");
+        assert_eq!(sanitize_label_name("1invalid_start"), "_invalid_start");
+        assert_eq!(sanitize_label_name("a-b*c/d"), "a_b_c_d");
+        assert_eq!(sanitize_label_name(""), "");
     }
 
     #[test]
