@@ -1,7 +1,7 @@
 ---
-// Tailing simulation: continuous log fill with play/pause, auto-events (rotate/truncate),
-// and manual event buttons. Rotation/truncation shown as an overlay on the log panels.
-// Manual events turn Auto off and keep the overlay until dismissed.
+// Rotation-only tailing demo. Streams log lines into app.log, shows auto-rotate
+// progress counter, and provides a full-width manual rotate button.
+// Truncation is handled by TruncationDemo.astro.
 ---
 
 <div class="tl" id="tailing-diagram"></div>
@@ -16,7 +16,6 @@
     --tl-green: #22c55e;
     --tl-red: #ef4444;
     --tl-amber: #f59e0b;
-    --tl-blue: #60a5fa;
     margin: 1.5rem 0;
   }
   .tl * { margin-top: 0 !important; }
@@ -37,16 +36,13 @@
     border-color: var(--tl-accent);
     background: color-mix(in srgb, var(--tl-accent) 15%, transparent);
   }
-  .tl-btn.event { border-color: var(--tl-amber); color: var(--tl-amber); }
-  .tl-btn.event:hover { background: color-mix(in srgb, var(--tl-amber) 12%, transparent); }
-  .tl-btn-sep { width: 1px; height: 20px; background: var(--tl-border); margin: 0 0.1rem; }
-  .tl-ctrl-label { font-size: 0.62rem; color: var(--tl-muted); font-weight: 500; }
 
   /* Panels wrapper — position:relative so overlay can cover it */
-  .tl-panels { position: relative; margin-bottom: 0.5rem; min-height: 230px; }
+  .tl-panels { position: relative; margin-bottom: 0.5rem; }
   .tl-panels-inner {
-    display: flex; gap: 0.75rem; flex-wrap: wrap;
-    align-items: flex-start;
+    display: flex; gap: 0.75rem;
+    align-items: flex-start; overflow: hidden;
+    height: 220px; /* fixed height prevents page grow on two-panel state */
   }
 
   /* Overlay */
@@ -76,7 +72,6 @@
     font-family: var(--sl-font-mono, monospace); font-size: 0.65rem;
     color: var(--tl-text);
   }
-  /* Close button — only shown for manual (persistent) overlays */
   .tl-overlay-close:focus-visible {
     outline: 2px solid var(--tl-text); outline-offset: -2px;
   }
@@ -97,6 +92,8 @@
     border: 1.5px solid var(--tl-border); border-radius: 8px;
     padding: 0.5rem; flex: 1; min-width: 220px; max-width: 380px;
     background: var(--tl-bg); transition: border-color 0.3s, opacity 0.5s;
+    height: 100%; box-sizing: border-box; overflow: hidden;
+    display: flex; flex-direction: column;
   }
   .tl-file.active { border-color: var(--tl-green); }
   .tl-file.old { border-color: var(--tl-amber); opacity: 0.55; }
@@ -105,15 +102,15 @@
     display: flex; justify-content: space-between; align-items: center;
     padding-bottom: 0.3rem; margin-bottom: 0.3rem;
     border-bottom: 1px solid var(--tl-border);
-    font-size: 0.72rem; font-weight: 600;
+    font-size: 0.72rem; font-weight: 600; flex-shrink: 0;
   }
   .tl-fname { font-family: var(--sl-font-mono, monospace); }
   .tl-fmeta { font-size: 0.58rem; color: var(--tl-muted); font-weight: 400; }
 
-  /* Fixed-height log viewport — fills from bottom, never grows */
+  /* Fixed-height log viewport */
   .tl-lines {
     font-family: var(--sl-font-mono, monospace); font-size: 0.58rem;
-    line-height: 1.5; height: 160px; overflow-y: hidden; position: relative;
+    line-height: 1.5; flex: 1; overflow: hidden; position: relative;
   }
   .tl-lines-inner { position: absolute; bottom: 0; left: 0; right: 0; }
   .tl-line { display: flex; gap: 0.25rem; }
@@ -126,7 +123,37 @@
     margin-top: 0.25rem; padding-top: 0.25rem;
     border-top: 1px dashed var(--tl-border);
     font-size: 0.58rem; color: var(--tl-accent); font-weight: 600;
+    flex-shrink: 0;
   }
+
+  /* Auto-rotate progress row */
+  .tl-autorow {
+    display: flex; align-items: center; gap: 0.6rem;
+    margin-bottom: 0.5rem;
+  }
+  .tl-autobar-track {
+    flex: 1; height: 5px; background: var(--tl-border); border-radius: 3px; overflow: hidden;
+  }
+  .tl-autobar-fill {
+    height: 100%; width: 0; background: var(--tl-amber); border-radius: 3px;
+    transition: width 0.5s linear;
+  }
+  .tl-autorow-label {
+    font-size: 0.62rem; color: var(--tl-muted); white-space: nowrap; min-width: 155px; text-align: right;
+  }
+
+  /* Full-width action button */
+  .tl-action-btn {
+    display: block; width: 100%; padding: 0.65rem 1rem;
+    border-radius: 7px; border: 1.5px solid var(--tl-amber);
+    background: color-mix(in srgb, var(--tl-amber) 8%, transparent);
+    color: var(--tl-amber); font-size: 0.78rem; font-weight: 700;
+    cursor: pointer; transition: background 0.2s; margin-bottom: 0.6rem;
+    box-sizing: border-box; text-align: center;
+  }
+  .tl-action-btn:hover { background: color-mix(in srgb, var(--tl-amber) 18%, transparent); }
+  .tl-action-btn.ok-btn { border-color: var(--tl-green); color: var(--tl-green); background: color-mix(in srgb, var(--tl-green) 8%, transparent); }
+  .tl-action-btn.ok-btn:hover { background: color-mix(in srgb, var(--tl-green) 18%, transparent); }
 
   /* Stats row */
   .tl-stats {
@@ -137,81 +164,38 @@
   .tl-stat-label { font-size: 0.55rem; color: var(--tl-muted); text-transform: uppercase; letter-spacing: 0.03em; }
   .tl-stat-val { font-weight: 700; font-family: var(--sl-font-mono, monospace); }
   .tl-stat-val.green { color: var(--tl-green); }
-
-  /* Progress bar — shows time-to-next-auto-event */
-  .tl-progress {
-    height: 3px; background: var(--tl-border); border-radius: 2px;
-    overflow: hidden; margin-top: 0.5rem;
-  }
-  .tl-progress-fill {
-    height: 100%; width: 0; background: var(--tl-accent);
-    transition: width 0.4s linear;
-  }
 </style>
 
 <script>
-(function() {
-  var root = document.getElementById('tailing-diagram');
+import { makeTailingSim, AUTO_THRESHOLD } from '../scripts/tailing-sim';
+import { el } from '../scripts/dom-utils';
+
+function init() {
+  const root = document.getElementById('tailing-diagram');
   if (!root) return;
 
-  function el(tag, cls) { var e = document.createElement(tag); if (cls) e.className = cls; return e; }
+  const sim = makeTailingSim();
 
-  var LEVELS = ['INFO','INFO','DEBUG','INFO','WARN','INFO','INFO','ERROR','INFO','INFO'];
-  var MSGS = ['request handled','conn opened','query exec','cache hit','slow resp','health ok','batch done','conn refused','session new','auth ok'];
+  // UI-only state
+  let playing = true;
+  let linesRead = 0;
+  let mainFile: ReturnType<typeof createFileEl> | null = null;
+  let oldFile: ReturnType<typeof createFileEl> | null = null;
+  let pendingRemoval: ReturnType<typeof createFileEl> | null = null;
+  let ticker: ReturnType<typeof setInterval> | null = null;
 
-  function genLine(n) {
-    return '{"level":"' + LEVELS[n % LEVELS.length] + '","msg":"' + MSGS[n % MSGS.length] + '","n":' + n + '}';
-  }
-
-  // State
-  var playing = true;
-  var autoMode = true;
-  var lineNum = 1, offset = 0, linesRead = 0, fileInode = 12345;
-  var autoLineCount = 0;
-  var autoEventIdx = 0;
-  var AUTO_EVENTS = ['rotate', 'truncate'];
-  var AUTO_THRESHOLDS = [14, 10];
-  var mainFile = null, oldFile = null;
-  var pendingRemoval = null; // old file panel to remove when overlay is dismissed
-  var ticker = null;
-
-  // ----- Build DOM -----
+  // ----- DOM -----
   var ctrlEl = el('div', 'tl-controls');
-
   var btnPlay = el('button', 'tl-btn active');
   btnPlay.type = 'button'; btnPlay.textContent = '\u23F8 Pause';
   btnPlay.setAttribute('aria-pressed', 'true');
-
-  var btnAuto = el('button', 'tl-btn active');
-  btnAuto.type = 'button'; btnAuto.textContent = 'Auto';
-  btnAuto.title = 'Automatically fires rotate then truncate events as the log fills';
-  btnAuto.setAttribute('aria-pressed', 'true');
-
-  var sep = el('div', 'tl-btn-sep');
-  var manualLbl = el('span', 'tl-ctrl-label'); manualLbl.textContent = 'Manual:';
-
-  var btnRotate = el('button', 'tl-btn event');
-  btnRotate.type = 'button'; btnRotate.textContent = '\u21BB Rotate';
-  btnRotate.title = 'Rename app.log \u2192 app.log.1 and start a new file (turns Auto off)';
-
-  var btnTruncate = el('button', 'tl-btn event');
-  btnTruncate.type = 'button'; btnTruncate.textContent = '\u2702 Truncate';
-  btnTruncate.title = 'Wipe file content, same inode, offset reset (turns Auto off)';
-
   ctrlEl.appendChild(btnPlay);
-  ctrlEl.appendChild(btnAuto);
-  ctrlEl.appendChild(sep);
-  ctrlEl.appendChild(manualLbl);
-  ctrlEl.appendChild(btnRotate);
-  ctrlEl.appendChild(btnTruncate);
   root.appendChild(ctrlEl);
 
-  // Panels wrapper
+  // Panels
   var panelsEl = el('div', 'tl-panels');
   var panelsInner = el('div', 'tl-panels-inner');
   panelsEl.appendChild(panelsInner);
-
-  // Overlay (absolute, covers panelsEl)
   var overlayEl = el('div', 'tl-overlay');
   overlayEl.setAttribute('role', 'status');
   overlayEl.setAttribute('aria-live', 'polite');
@@ -221,27 +205,34 @@
   var overlayClose = el('button', 'tl-overlay-close');
   overlayClose.type = 'button'; overlayClose.textContent = '\u00D7';
   overlayClose.setAttribute('aria-label', 'Dismiss');
-  overlayInner.appendChild(overlayTitle);
-  overlayInner.appendChild(overlayBody);
-  overlayInner.appendChild(overlayClose);
+  overlayInner.appendChild(overlayTitle); overlayInner.appendChild(overlayBody); overlayInner.appendChild(overlayClose);
   overlayEl.appendChild(overlayInner);
   panelsEl.appendChild(overlayEl);
   root.appendChild(panelsEl);
 
+  // Auto-rotate row
+  var autoRowEl = el('div', 'tl-autorow');
+  var autoBarTrack = el('div', 'tl-autobar-track');
+  var autoBarFill = el('div', 'tl-autobar-fill');
+  autoBarTrack.appendChild(autoBarFill);
+  var autoBarLabel = el('span', 'tl-autorow-label');
+  autoRowEl.appendChild(autoBarTrack); autoRowEl.appendChild(autoBarLabel);
+  root.appendChild(autoRowEl);
+
+  // Full-width rotate button
+  var rotateBtnEl = el('button', 'tl-action-btn');
+  rotateBtnEl.type = 'button'; rotateBtnEl.textContent = '\u21BB Rotate the Log';
+  root.appendChild(rotateBtnEl);
+
   var statsEl = el('div', 'tl-stats');
   root.appendChild(statsEl);
-
-  var progressEl = el('div', 'tl-progress');
-  var progressFill = el('div', 'tl-progress-fill');
-  progressEl.appendChild(progressFill);
-  root.appendChild(progressEl);
 
   // ----- File panel -----
   function createFileEl(name, inode, cls) {
     var f = el('div', 'tl-file ' + cls);
     var head = el('div', 'tl-file-head');
     var fname = el('span', 'tl-fname'); fname.textContent = name;
-    var fmeta = el('span', 'tl-fmeta'); fmeta.textContent = 'inode: ' + inode;
+    var fmeta = el('span', 'tl-fmeta'); fmeta.textContent = 'inode:\u00A0' + inode;
     head.appendChild(fname); head.appendChild(fmeta);
     f.appendChild(head);
     var linesWrap = el('div', 'tl-lines');
@@ -249,7 +240,7 @@
     linesWrap.appendChild(linesInner);
     f.appendChild(linesWrap);
     var cursor = el('div', 'tl-cursor');
-    cursor.textContent = '\u25B6 reading...';
+    cursor.textContent = '\u25B6 reading\u2026';
     f.appendChild(cursor);
     return { el: f, linesInner: linesInner, cursor: cursor, fname: fname, fmeta: fmeta };
   }
@@ -269,16 +260,14 @@
 
   function updateStats() {
     statsEl.innerHTML = '';
-    var items = [
-      ['Lines read', linesRead, 'green'],
-      ['Offset', offset + ' B', ''],
-      ['Inode', fileInode, ''],
-      ['Mode', autoMode ? 'auto' : 'manual', autoMode ? 'green' : ''],
-    ];
-    items.forEach(function(item) {
-      var s = el('div', 'tl-stat');
-      var l = el('div', 'tl-stat-label'); l.textContent = item[0];
-      var v = el('div', 'tl-stat-val' + (item[2] ? ' ' + item[2] : '')); v.textContent = '' + item[1];
+    [
+      ['Lines read', sim.linesRead, 'green'],
+      ['Offset', sim.offset + '\u00A0B', ''],
+      ['Inode', sim.fileInode, ''],
+    ].forEach(function (item) {
+      const s = el('div', 'tl-stat');
+      const l = el('div', 'tl-stat-label'); l.textContent = String(item[0]);
+      const v = el('div', 'tl-stat-val' + (item[2] ? ' ' + item[2] : '')); v.textContent = '' + item[1];
       s.appendChild(l); s.appendChild(v); statsEl.appendChild(s);
     });
   }
@@ -288,160 +277,84 @@
     btn.setAttribute('aria-pressed', active ? 'true' : 'false');
   }
 
-  function updateProgress() {
-    if (!autoMode) { progressFill.style.width = '0%'; return; }
-    if (!playing) return;
-    var threshold = AUTO_THRESHOLDS[autoEventIdx % AUTO_THRESHOLDS.length];
-    progressFill.style.width = Math.min(100, (autoLineCount / threshold) * 100) + '%';
+  function updateAutoRow() {
+    const pct = Math.min(100, (sim.autoLineCount / AUTO_THRESHOLD) * 100);
+    autoBarFill.style.width = pct + '%';
+    autoBarLabel.textContent = 'auto-rotates at\u00A0' + AUTO_THRESHOLD + '\u00A0lines\u00A0\u00B7\u00A0' + sim.autoLineCount + '/' + AUTO_THRESHOLD;
   }
 
   // ----- Overlay -----
   var overlayTimer = null;
-
   function dismissOverlay() {
     if (overlayTimer) { clearTimeout(overlayTimer); overlayTimer = null; }
     overlayEl.classList.remove('visible');
-    overlayClose.className = 'tl-overlay-close'; // hide close button
-    // Remove any pending old file panel
+    overlayClose.className = 'tl-overlay-close';
     if (pendingRemoval) {
-      var toRemove = pendingRemoval;
-      pendingRemoval = null;
-      setTimeout(function() {
+      var toRemove = pendingRemoval; pendingRemoval = null;
+      setTimeout(function () {
         if (toRemove.el.parentNode) toRemove.el.parentNode.removeChild(toRemove.el);
         if (oldFile === toRemove) oldFile = null;
       }, 280);
     }
   }
-
-  // autoDismissMs: if provided, overlay auto-closes after that delay.
-  // If null, overlay stays until user clicks ✕.
   function showOverlay(title, body, level, autoDismissMs) {
     if (overlayTimer) { clearTimeout(overlayTimer); overlayTimer = null; }
     overlayInner.className = 'tl-overlay-inner ' + (level || 'warn');
     overlayTitle.textContent = title;
     overlayBody.innerHTML = body;
-    // Show close button only for persistent (manual) overlays
     overlayClose.className = 'tl-overlay-close' + (autoDismissMs ? '' : ' shown');
     void overlayEl.offsetHeight;
     overlayEl.classList.add('visible');
-    if (autoDismissMs) {
-      overlayTimer = setTimeout(dismissOverlay, autoDismissMs);
-    }
+    if (autoDismissMs) overlayTimer = setTimeout(dismissOverlay, autoDismissMs);
   }
-
   overlayClose.onclick = dismissOverlay;
 
-  // ----- Auto off -----
-  function setManualMode() {
-    if (!autoMode) return;
-    autoMode = false;
-    autoLineCount = 0;
-    setButtonState(btnAuto, false);
-    updateProgress();
-    updateStats();
-  }
-
-  // ----- Event triggers -----
-  // isAuto=true: overlay auto-dismisses, old panel removed after timer
-  // isAuto=false: overlay stays until ✕, old panel stays until dismissed
-  function triggerRotate(isAuto) {
+  // ----- Rotation -----
+  function triggerRotate(isAuto: boolean) {
     if (!mainFile) return;
-    var oldInode = fileInode;
-    fileInode = (fileInode === 12345 ? 67890 : 12345);
-
+    const { oldInode, newInode } = sim.rotate();
     showOverlay(
-      '\u26A0 logrotate: rotation detected',
+      '\u26A0\uFE0F logrotate: rotation detected',
       '<code>app.log</code> \u2192 <code>app.log.1</code><br>' +
-      'inode\u00A0' + oldInode + '\u00A0\u2192\u00A0' + fileInode + '<br>' +
+      'inode\u00A0' + oldInode + '\u00A0\u2192\u00A0' + newInode + '<br>' +
       'logfwd drains old file, opens new at offset\u00A00. No data lost.',
-      'warn',
-      isAuto ? 3500 : null
+      'warn', isAuto ? 3500 : null
     );
-
     mainFile.el.className = 'tl-file old';
     mainFile.fname.textContent = 'app.log.1';
-    mainFile.fmeta.textContent = 'inode: ' + oldInode + ' (old)';
+    mainFile.fmeta.textContent = 'inode:\u00A0' + oldInode + '\u00A0(old)';
     mainFile.cursor.textContent = '\u25B6 EOF \u2014 drained';
     oldFile = mainFile;
-
-    mainFile = createFileEl('app.log', fileInode, 'active');
-    offset = 0; lineNum = 1;
-    panelsInner.insertBefore(mainFile.el, oldFile.el);
-    mainFile.cursor.textContent = '\u25B6 new inode ' + fileInode;
-    updateStats();
-
-    // For both auto and manual: old panel is removed when overlay is dismissed.
-    // Auto overlay dismisses after 3500ms; manual overlay dismissed by ✕ button.
     pendingRemoval = oldFile;
-  }
-
-  function triggerTruncate(isAuto) {
-    if (!mainFile) return;
-    showOverlay(
-      '\u2702 Truncation detected',
-      'File size shrank, inode unchanged\u00A0(' + fileInode + ').<br>' +
-      'logfwd offset\u00A0>\u00A0file size \u2014 resets to\u00A00.<br>' +
-      'Reads fresh content from the beginning.',
-      'ok',
-      isAuto ? 3500 : null
-    );
-    mainFile.linesInner.innerHTML = '';
-    offset = 0; lineNum = 1;
-    mainFile.cursor.textContent = '\u25B6 truncated \u2014 offset:\u00A00';
-    updateStats();
+    mainFile = createFileEl('app.log', newInode, 'active');
+    panelsInner.insertBefore(mainFile.el, oldFile.el);
+    mainFile.cursor.textContent = '\u25B6 new inode\u00A0' + newInode;
+    updateStats(); updateAutoRow();
   }
 
   // ----- Ticker -----
   function tickFn() {
     if (!playing || !mainFile) return;
-    var lineText = genLine(lineNum);
+    const { lineNum, lineText, newOffset, autoRotated } = sim.tick();
     addLine(mainFile, lineNum, lineText);
-    offset += lineText.length + 1;
-    lineNum++; linesRead++;
-    mainFile.cursor.textContent = '\u25B6 offset: ' + offset;
-    updateStats();
-    autoLineCount++;
-    updateProgress();
-
-    if (autoMode) {
-      var threshold = AUTO_THRESHOLDS[autoEventIdx % AUTO_THRESHOLDS.length];
-      if (autoLineCount >= threshold) {
-        autoLineCount = 0;
-        var eventName = AUTO_EVENTS[autoEventIdx % AUTO_EVENTS.length];
-        autoEventIdx++;
-        if (eventName === 'rotate') triggerRotate(true);
-        else triggerTruncate(true);
-      }
-    }
+    mainFile.cursor.textContent = '\u25B6 offset:\u00A0' + newOffset;
+    updateStats(); updateAutoRow();
+    if (autoRotated) triggerRotate(true);
   }
 
   function startTicker() { if (!ticker) ticker = setInterval(tickFn, 700); }
-  function stopTicker() { if (ticker) { clearInterval(ticker); ticker = null; } }
+  function stopTicker()  { if (ticker) { clearInterval(ticker); ticker = null; } }
 
-  // ----- Button handlers -----
-  btnPlay.onclick = function() {
+  // ----- Handlers -----
+  btnPlay.onclick = function () {
     playing = !playing;
     if (playing) {
-      btnPlay.textContent = '\u23F8 Pause';
-      setButtonState(btnPlay, true);
-      startTicker();
+      btnPlay.textContent = '\u23F8 Pause'; setButtonState(btnPlay, true); startTicker();
     } else {
-      btnPlay.textContent = '\u25B6 Play';
-      setButtonState(btnPlay, false);
-      stopTicker();
+      btnPlay.textContent = '\u25B6 Play'; setButtonState(btnPlay, false); stopTicker();
     }
   };
-
-  btnAuto.onclick = function() {
-    autoMode = !autoMode;
-    autoLineCount = 0;
-    setButtonState(btnAuto, autoMode);
-    updateProgress();
-    updateStats();
-  };
-
-  btnRotate.onclick = function() { setManualMode(); triggerRotate(false); };
-  btnTruncate.onclick = function() { setManualMode(); triggerTruncate(false); };
+  rotateBtnEl.onclick = function () { triggerRotate(false); };
 
   function handleVisibility() {
     if (document.hidden) stopTicker();
@@ -449,34 +362,29 @@
   }
 
   // ----- Init -----
-  mainFile = createFileEl('app.log', fileInode, 'active');
+  mainFile = createFileEl('app.log', sim.fileInode, 'active');
   panelsInner.appendChild(mainFile.el);
-  updateStats();
-  updateProgress();
+  updateStats(); updateAutoRow();
 
-  var reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   if (!reducedMotion) {
     document.addEventListener('visibilitychange', handleVisibility);
     startTicker();
   } else {
     playing = false;
-    btnPlay.textContent = '\u25B6 Play';
-    setButtonState(btnPlay, false);
-    for (var rm = 1; rm <= 8; rm++) {
-      var rmText = genLine(rm);
-      addLine(mainFile, rm, rmText);
-      offset += rmText.length + 1;
-      lineNum++; linesRead++;
+    btnPlay.textContent = '\u25B6 Play'; setButtonState(btnPlay, false);
+    for (let i = 0; i < 8; i++) {
+      const { lineNum, lineText, newOffset } = sim.tick();
+      addLine(mainFile, lineNum, lineText);
     }
-    mainFile.cursor.textContent = '\u25B6 offset: ' + offset + ' (reduced motion)';
-    updateStats();
+    mainFile.cursor.textContent = '\u25B6 offset:\u00A0' + sim.offset + '\u00A0(reduced motion)';
+    updateStats(); updateAutoRow();
   }
 
-  // ----- Cleanup -----
-  document.addEventListener('astro:before-swap', function() {
+  document.addEventListener('astro:before-swap', function () {
     document.removeEventListener('visibilitychange', handleVisibility);
-    stopTicker();
-    dismissOverlay();
+    stopTicker(); dismissOverlay();
   }, { once: true });
-})();
+}
+init();
 </script>

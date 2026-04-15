@@ -16,8 +16,6 @@
     --bp-green: #22c55e;
     --bp-amber: #f59e0b;
     --bp-red: #ef4444;
-    --bp-blue: #60a5fa;
-    --bp-purple: #a78bfa;
     margin: 1.5rem 0;
   }
   .bp * { margin-top: 0 !important; }
@@ -111,21 +109,24 @@
   .bp-slot.full { background: var(--bp-red); border-color: var(--bp-red); }
   .bp-queue-label { font-size: 0.5rem; color: var(--bp-muted); text-align: center; font-family: var(--sl-font-mono, monospace); }
 
-  /* Activity bar — flush at bottom of stage box */
+  /* Activity bar — pinned to absolute bottom of stage */
   .bp-activity {
-    height: 4px; border-radius: 0 0 6px 6px;
-    margin: 0.4rem -0.5rem -0.5rem -0.5rem;
-    background: var(--bp-border); overflow: hidden; position: relative;
+    position: absolute; bottom: 0; left: 0; right: 0;
+    height: 3px; border-radius: 0 0 6px 6px;
+    background: color-mix(in srgb, var(--bp-text) 6%, transparent);
+    overflow: hidden;
   }
   .bp-activity-fill {
     position: absolute; inset: 0; border-radius: 0 0 6px 6px;
-    background: var(--bp-green); transform-origin: left;
+    background: color-mix(in srgb, var(--bp-green) 55%, transparent);
+    transform-origin: left;
     transition: transform 0.3s ease, background-color 0.4s;
   }
   .bp-activity-fill.flowing { animation: bp-flow 1.5s ease-in-out infinite; }
-  .bp-activity-fill.pressured { background: var(--bp-amber); }
+  .bp-activity-fill.pressured { background: color-mix(in srgb, var(--bp-amber) 55%, transparent); }
   .bp-activity-fill.blocked {
-    background: var(--bp-red); animation: bp-blocked-pulse 2s ease-in-out infinite;
+    background: color-mix(in srgb, var(--bp-red) 55%, transparent);
+    animation: bp-blocked-pulse 2s ease-in-out infinite;
   }
   @keyframes bp-flow {
     0%   { transform: scaleX(0.15); translate: 0% 0; }
@@ -226,26 +227,6 @@
 
   .bp-mini-viz { margin-bottom: 0.3rem; font-size: 0.58rem; min-height: 52px; }
 
-  /* File mini */
-  .bp-mini-bar-track {
-    height: 10px; background: rgba(0,0,0,0.3); border-radius: 3px;
-    position: relative; overflow: hidden; margin-bottom: 0.25rem;
-  }
-  .bp-mini-bar-written {
-    position: absolute; top: 0; left: 0; height: 100%;
-    background: rgba(255,255,255,0.18); border-radius: 3px;
-    transition: width 0.25s;
-  }
-  .bp-mini-bar-read {
-    position: absolute; top: 0; left: 0; height: 100%;
-    background: var(--bp-green); opacity: 0.65;
-    border-radius: 3px; transition: width 0.25s;
-  }
-  .bp-mini-gap { font-family: var(--sl-font-mono, monospace); font-size: 0.57rem; }
-  .bp-mini-gap.ok  { color: var(--bp-green); }
-  .bp-mini-gap.warn { color: var(--bp-amber); }
-  .bp-mini-gap.err  { color: var(--bp-red); }
-
   /* File log viz */
   .bp-file-viz {
     font-family: var(--sl-font-mono, monospace); font-size: 0.5rem;
@@ -318,72 +299,35 @@
 </style>
 
 <script>
-(function() {
-  var root = document.getElementById('backpressure-sim');
+import {
+  makeSim, classifyState,
+  IO_CPU_CAP, PIPELINE_CAP, WORKER_CAP, NUM_WORKERS, UDP_CAP, OUT_MAX_RATE,
+} from '../scripts/backpressure-sim';
+import { el } from '../scripts/dom-utils';
+
+function init() {
+  const root = document.getElementById('backpressure-sim');
   if (!root) return;
 
-  function el(tag, cls) { var e = document.createElement(tag); if (cls) e.className = cls; return e; }
+  const sim = makeSim();
+  let running = true;
 
-  // --- Pipeline state ---
-  var outputSpeed = 100;
-  var running = true;
-  var tick = 0;
-
-  var IO_CPU_CAP = 4;
-  var PIPELINE_CAP = 16;
-  var WORKER_CAP = 1;
-  var NUM_WORKERS = 3;
-  var MRU_DISPATCH_CAP = 0.8; // max batch sent to one worker per tick
-
-  var ioCpuFill = 0;
-  var pipelineFill = 0;
-  var workerFills = [0, 0, 0];
-
-  var IO_RATE = 1.2;
-  var CPU_RATE = 1.2;
-  var OUT_MAX_RATE = 2.4;
-
-  var totalProduced = 0;
-  var totalDelivered = 0;
-  var ioBlocked = false;
-  var cpuBlocked = false;
-
-  var prevIoState = 'ok';
-  var prevCpuState = 'ok';
-  var prevOutState = 'ok';
-
-  // --- Source state ---
-  var sourceMode = 'file';
   var SRC_MODES = [
     { id: 'file',  label: 'File',  name: 'File Input'  },
     { id: 'udp',   label: 'UDP',   name: 'UDP Input'   },
     { id: 'otlp',  label: 'OTLP',  name: 'OTLP Input'  },
   ];
 
-  var fileWritten = 0, fileRead = 0;
-  var FILE_MAX = 400;
-  var FILE_WRITE_RATE = 0.55;
-
-  var UDP_CAP = 16;
-  var udpBuf = 0, udpDrops = 0;
-  var UDP_ARRIVE_RATE = 1.8;
-
-  var otlpBatchNum = 0, otlpAccepted = 0, otlpRejected = 0;
-
+  // DOM refs for source viz (rebuilt on mode switch)
   var srcNameEl, srcVizEl, srcTabBtns;
   var fileLogRow1, fileLogRow2, fileCursorRow, fileMiniMore;
   var filePrevRead = 0, fileLogBuf = ['', ''];
   var FILE_LOG_MSGS = [
-    'INFO  checkpoint flushed',
-    'WARN  slow consumer backoff',
-    'INFO  batch queued ok',
-    'DEBUG scan: 512 rows',
-    'INFO  SQL transform ok',
-    'DEBUG inotify IN_MODIFY',
-    'INFO  output dispatch ok',
-    'WARN  pipeline 8/16 full',
-    'INFO  flush complete',
-    'DEBUG poll() returned 1',
+    'INFO  checkpoint flushed', 'WARN  slow consumer backoff',
+    'INFO  batch queued ok',    'DEBUG scan: 512 rows',
+    'INFO  SQL transform ok',   'DEBUG inotify IN_MODIFY',
+    'INFO  output dispatch ok', 'WARN  pipeline 8/16 full',
+    'INFO  flush complete',     'DEBUG poll() returned 1',
   ];
   var udpMiniFill, udpMiniDropCount;
   var otlpMiniLogEl;
@@ -430,9 +374,9 @@
   // Source mode tabs
   var srcTabsEl = el('div', 'bp-source-tabs');
   srcTabBtns = SRC_MODES.map(function(m) {
-    var btn = el('button', 'bp-source-tab' + (m.id === sourceMode ? ' active' : ''));
+    var btn = el('button', 'bp-source-tab' + (m.id === sim.sourceMode ? ' active' : ''));
     btn.type = 'button'; btn.textContent = m.label;
-    btn.setAttribute('aria-pressed', m.id === sourceMode ? 'true' : 'false');
+    btn.setAttribute('aria-pressed', m.id === sim.sourceMode ? 'true' : 'false');
     btn.onclick = function() { switchSourceMode(m.id); };
     srcTabsEl.appendChild(btn);
     return btn;
@@ -505,47 +449,39 @@
   // --- Preset buttons ---
   var presets = [btnFast, btnSlow, btnDown];
   function setPreset(idx) {
-    presets.forEach(function(b, i) {
+    presets.forEach(function (b, i) {
       var active = i === idx;
       b.className = 'bp-btn' + (active ? ' active' : '');
       b.setAttribute('aria-pressed', active ? 'true' : 'false');
     });
-    if (idx === 0) { slider.value = '100'; outputSpeed = 100; }
-    else if (idx === 1) { slider.value = '30'; outputSpeed = 30; }
-    else { slider.value = '0'; outputSpeed = 0; }
-    speedVal.textContent = outputSpeed + '%';
+    if (idx === 0) { slider.value = '100'; sim.outputSpeed = 100; }
+    else if (idx === 1) { slider.value = '30';  sim.outputSpeed = 30;  }
+    else               { slider.value = '0';   sim.outputSpeed = 0;   }
+    speedVal.textContent = sim.outputSpeed + '%';
   }
-  btnFast.onclick = function() { setPreset(0); };
-  btnSlow.onclick = function() { setPreset(1); };
-  btnDown.onclick = function() { setPreset(2); };
+  btnFast.onclick = function () { setPreset(0); };
+  btnSlow.onclick = function () { setPreset(1); };
+  btnDown.onclick = function () { setPreset(2); };
 
-  slider.oninput = function() {
-    outputSpeed = parseInt(slider.value, 10);
-    speedVal.textContent = outputSpeed + '%';
-    presets.forEach(function(b) { b.className = 'bp-btn'; b.setAttribute('aria-pressed', 'false'); });
-    if (outputSpeed === 100) { btnFast.className = 'bp-btn active'; btnFast.setAttribute('aria-pressed', 'true'); }
-    else if (outputSpeed === 30) { btnSlow.className = 'bp-btn active'; btnSlow.setAttribute('aria-pressed', 'true'); }
-    else if (outputSpeed === 0) { btnDown.className = 'bp-btn active'; btnDown.setAttribute('aria-pressed', 'true'); }
+  slider.oninput = function () {
+    sim.outputSpeed = parseInt(slider.value, 10);
+    speedVal.textContent = sim.outputSpeed + '%';
+    presets.forEach(function (b) { b.className = 'bp-btn'; b.setAttribute('aria-pressed', 'false'); });
+    if (sim.outputSpeed === 100) { btnFast.className = 'bp-btn active'; btnFast.setAttribute('aria-pressed', 'true'); }
+    else if (sim.outputSpeed === 30)  { btnSlow.className = 'bp-btn active'; btnSlow.setAttribute('aria-pressed', 'true'); }
+    else if (sim.outputSpeed === 0)   { btnDown.className = 'bp-btn active'; btnDown.setAttribute('aria-pressed', 'true'); }
   };
 
-  // --- Source mode functions ---
+  // --- Source mode ---
   function switchSourceMode(newMode) {
-    sourceMode = newMode;
-    SRC_MODES.forEach(function(m, i) {
+    sim.sourceMode = newMode;
+    sim.reset();
+    SRC_MODES.forEach(function (m, i) {
       var active = m.id === newMode;
       srcTabBtns[i].className = 'bp-source-tab' + (active ? ' active' : '');
       srcTabBtns[i].setAttribute('aria-pressed', active ? 'true' : 'false');
+      if (active) srcNameEl.textContent = m.name;
     });
-    for (var i = 0; i < SRC_MODES.length; i++) {
-      if (SRC_MODES[i].id === newMode) { srcNameEl.textContent = SRC_MODES[i].name; break; }
-    }
-    fileWritten = 0; fileRead = 0;
-    udpBuf = 0; udpDrops = 0;
-    otlpBatchNum = 0; otlpAccepted = 0; otlpRejected = 0;
-    // Reset pipeline so switching source doesn't carry over stale pressure
-    ioCpuFill = 0; pipelineFill = 0; workerFills = [0, 0, 0];
-    totalProduced = 0; totalDelivered = 0;
-    prevIoState = 'ok'; prevCpuState = 'ok'; prevOutState = 'ok';
     buildSourceViz();
     addLog('Source \u2192 ' + newMode + ' \u2014 pipeline reset', 'ok');
   }
@@ -557,7 +493,7 @@
     udpMiniFill = null; udpMiniDropCount = null;
     otlpMiniLogEl = null;
 
-    if (sourceMode === 'file') {
+    if (sim.sourceMode === 'file') {
       var viz = el('div', 'bp-file-viz');
       fileLogRow1 = el('div', 'bp-file-old');
       fileLogRow2 = el('div', 'bp-file-old');
@@ -566,7 +502,7 @@
       viz.appendChild(fileLogRow1); viz.appendChild(fileLogRow2);
       viz.appendChild(fileCursorRow); viz.appendChild(fileMiniMore);
       srcVizEl.appendChild(viz);
-    } else if (sourceMode === 'udp') {
+    } else if (sim.sourceMode === 'udp') {
       var row = el('div', 'bp-mini-udp');
       var gwrap = el('div', 'bp-mini-gauge-wrap');
       var gauge = el('div', 'bp-mini-gauge');
@@ -596,11 +532,10 @@
   }
 
   function updateSourceViz() {
-    if (sourceMode === 'file') {
+    if (sim.sourceMode === 'file') {
       if (!fileCursorRow) return;
-      var readInt = Math.floor(fileRead);
-      // Scroll the log buffer forward as logfwd reads new lines (only when not blocked)
-      if (!ioBlocked) {
+      var readInt = Math.floor(sim.fileRead);
+      if (!sim.ioBlocked) {
         while (readInt > filePrevRead) {
           fileLogBuf[0] = fileLogBuf[1];
           fileLogBuf[1] = fakeLogLine(filePrevRead + 1);
@@ -609,8 +544,8 @@
       }
       fileLogRow1.textContent = fileLogBuf[0];
       fileLogRow2.textContent = fileLogBuf[1];
-      var gap = Math.round(fileWritten - fileRead);
-      if (ioBlocked && gap > 0) {
+      var gap = Math.round(sim.fileWritten - sim.fileRead);
+      if (sim.ioBlocked && gap > 0) {
         fileCursorRow.className = 'bp-file-cursor-row stalled';
         fileCursorRow.textContent = '\u25B6 ' + fakeLogLine(readInt) + ' \u2190 stalled';
         fileMiniMore.textContent = '\u2026 +' + gap + ' unread';
@@ -623,15 +558,15 @@
         fileCursorRow.textContent = '\u25B6 ' + fakeLogLine(readInt);
         fileMiniMore.textContent = '';
       }
-    } else if (sourceMode === 'udp') {
+    } else if (sim.sourceMode === 'udp') {
       if (!udpMiniFill) return;
-      var fillPct = (udpBuf / UDP_CAP) * 100;
+      var fillPct = (sim.udpBuf / UDP_CAP) * 100;
       udpMiniFill.style.height = fillPct + '%';
       udpMiniFill.className = 'bp-mini-gauge-fill' + (fillPct > 90 ? ' full' : fillPct > 60 ? ' warn' : '');
-      udpMiniDropCount.textContent = '' + Math.round(udpDrops);
-      udpMiniDropCount.className = 'bp-mini-drops-count ' + (udpDrops >= 1 ? 'dropping' : 'zero');
+      udpMiniDropCount.textContent = '' + Math.round(sim.udpDrops);
+      udpMiniDropCount.className = 'bp-mini-drops-count ' + (sim.udpDrops >= 1 ? 'dropping' : 'zero');
     }
-    // OTLP log is updated in-place by addOtlpEntry
+    // OTLP entries are pushed via handleEvent → addOtlpEntry
   }
 
   // --- Alert system ---
@@ -650,24 +585,48 @@
   // --- Log helper ---
   function addLog(msg, cls) {
     var entry = el('div', 'bp-log-entry');
-    var ts = tick.toString().padStart(4, '0');
+    var ts = sim.tickCount.toString().padStart(4, '0');
     entry.innerHTML = '<span class="ts">t=' + ts + '</span> ' + (cls ? '<span class="' + cls + '">' + msg + '</span>' : msg);
     logEl.appendChild(entry);
     if (logEl.children.length > 40) logEl.removeChild(logEl.firstChild);
-    // Only auto-scroll if the user hasn't scrolled up to read older entries
     if (logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 12) {
       logEl.scrollTop = logEl.scrollHeight;
     }
   }
 
-  // --- Visual helpers ---
-  function classifyState(fill, cap) {
-    var pct = fill / cap;
-    if (pct >= 1.0) return 'blocked';
-    if (pct > 0.5) return 'pressured';
-    return 'ok';
+  // --- Event handler: translates sim transition events into alerts + log entries ---
+  function handleEvent(e) {
+    if (e.type === 'otlp') { addOtlpEntry(e.batch, e.status, e.note); return; }
+    if (e.type !== 'transition') return;
+    if (e.stage === 'out') {
+      if (e.to === 'blocked')        { showAlert(outStage, 'All workers full \u2014 retrying with backoff', 'err');       addLog('Output workers full \u2014 backpressure starts here', 'err'); }
+      else if (e.to === 'pressured') { showAlert(outStage, 'Workers busy \u2014 MRU dispatch consolidating', 'warn');    addLog('Output workers busy \u2014 MRU consolidation active', 'warn'); }
+      else                           { showAlert(outStage, 'Workers draining \u2014 pressure cleared', 'ok');            addLog('Output recovered \u2014 workers draining normally', 'ok'); }
+    } else if (e.stage === 'cpu') {
+      if (e.to === 'blocked')        { showAlert(cpuStage, 'Pipeline full! CPU worker blocked on blocking_send', 'err'); addLog('CPU worker blocked \u2014 pipeline channel full (' + e.pipelineFill + '/16)', 'err'); }
+      else if (e.to === 'pressured') { showAlert(cpuStage, 'Pipeline filling \u2014 pressure building', 'warn');         addLog('Pipeline channel filling (' + e.pipelineFill + '/16)', 'warn'); }
+      else                           { showAlert(cpuStage, 'Pipeline draining \u2014 CPU worker unblocked', 'ok');       addLog('CPU worker unblocked \u2014 pipeline draining', 'ok'); }
+    } else if (e.stage === 'io') {
+      if (e.to === 'blocked') {
+        var srcMsg = e.sourceMode === 'file' ? 'File read stalling \u2014 falling behind'
+                   : e.sourceMode === 'udp'  ? 'UDP buffer filling \u2014 drops imminent'
+                   :                           'Returning 429 to upstream';
+        showAlert(ioStage, srcMsg, 'err');
+        addLog('I/O blocked \u2014 bounded(4) full. ' + srcMsg, 'err');
+      } else if (e.to === 'pressured') {
+        showAlert(ioStage, 'I/O\u2192CPU channel filling', 'warn');
+        addLog('I/O\u2192CPU channel filling', 'warn');
+      } else {
+        var recoverMsg = e.sourceMode === 'file' ? 'File reader catching up'
+                       : e.sourceMode === 'udp'  ? 'UDP buffer draining'
+                       :                           'OTLP accepting again';
+        showAlert(ioStage, recoverMsg, 'ok');
+        addLog('I/O resumed \u2014 ' + recoverMsg, 'ok');
+      }
+    }
   }
 
+  // --- Render helpers ---
   function updateStage(stage, fill, cap, label) {
     var pct = fill / cap;
     for (var i = 0; i < stage.slots.length; i++) {
@@ -678,19 +637,7 @@
       }
     }
     stage.qlabel.textContent = Math.ceil(fill) + '/' + cap + ' ' + label;
-    if (pct >= 1.0) {
-      stage.el.className = 'bp-stage blocked';
-      stage.tag.className = 'bp-stage-tag bp-tag-blocked'; stage.tag.textContent = 'BLOCKED';
-      stage.actFill.className = 'bp-activity-fill blocked';
-    } else if (pct > 0.5) {
-      stage.el.className = 'bp-stage pressured';
-      stage.tag.className = 'bp-stage-tag bp-tag-pressure'; stage.tag.textContent = 'PRESSURE';
-      stage.actFill.className = 'bp-activity-fill flowing pressured';
-    } else {
-      stage.el.className = 'bp-stage';
-      stage.tag.className = 'bp-stage-tag bp-tag-ok'; stage.tag.textContent = 'OK';
-      stage.actFill.className = 'bp-activity-fill flowing';
-    }
+    setStageState(stage, classifyState(fill, cap));
   }
 
   function updateArrow(arrowEl, pressure) {
@@ -699,39 +646,54 @@
     else arrowEl.className = 'bp-arrow flowing';
   }
 
-  function updateStats() {
-    var throughput = (outputSpeed / 100) * OUT_MAX_RATE * 4;
-    var latClass = '', latVal = '';
-    if (outputSpeed === 0) { latVal = '\u221E'; latClass = 'red'; }
-    else if (outputSpeed < 30) { latVal = '>500ms'; latClass = 'red'; }
-    else if (outputSpeed < 70) { latVal = '~200ms'; latClass = 'amber'; }
-    else { latVal = '<50ms'; latClass = 'green'; }
+  // Sets stage border, tag badge, and activity bar colours in one call.
+  // tagText overrides the default label (e.g. 'FULL' / 'BUSY' for the output pool).
+  var _stateClasses = {
+    blocked:   ['bp-stage blocked',   'bp-stage-tag bp-tag-blocked',  'bp-activity-fill blocked',         'BLOCKED'],
+    pressured: ['bp-stage pressured', 'bp-stage-tag bp-tag-pressure', 'bp-activity-fill flowing pressured','PRESSURE'],
+    ok:        ['bp-stage',           'bp-stage-tag bp-tag-ok',       'bp-activity-fill flowing',          'OK'],
+  };
+  function setStageState(stage, state, tagText) {
+    var c = _stateClasses[state];
+    stage.el.className      = c[0];
+    stage.tag.className     = c[1];
+    stage.tag.textContent   = tagText || c[3];
+    stage.actFill.className = c[2];
+  }
 
-    // Source-specific stat
+  // --- Render: stats bar ---
+  function updateStats() {
+    var throughput = (sim.outputSpeed / 100) * OUT_MAX_RATE * 4;
+    var latClass = '', latVal = '';
+    if (sim.outputSpeed === 0)       { latVal = '\u221E';    latClass = 'red'; }
+    else if (sim.outputSpeed < 30)   { latVal = '>500ms';   latClass = 'red'; }
+    else if (sim.outputSpeed < 70)   { latVal = '~200ms';   latClass = 'amber'; }
+    else                             { latVal = '<50ms';    latClass = 'green'; }
+
     var srcStat = '', srcCls = '';
-    if (sourceMode === 'file') {
-      var fgap = Math.round(fileWritten - fileRead);
-      srcStat = ioBlocked ? (fgap > 0 ? fgap + ' behind' : 'stalled') : 'caught up';
-      srcCls = ioBlocked ? (fgap > 30 ? 'red' : 'amber') : 'green';
-    } else if (sourceMode === 'udp') {
-      var drops = Math.round(udpDrops);
-      srcStat = drops > 0 ? drops + ' dropped' : (ioBlocked ? 'filling' : 'ok');
-      srcCls = drops > 0 ? 'red' : (ioBlocked ? 'amber' : 'green');
+    if (sim.sourceMode === 'file') {
+      var fgap = Math.round(sim.fileWritten - sim.fileRead);
+      srcStat = sim.ioBlocked ? (fgap > 0 ? fgap + ' behind' : 'stalled') : 'caught up';
+      srcCls  = sim.ioBlocked ? (fgap > 30 ? 'red' : 'amber') : 'green';
+    } else if (sim.sourceMode === 'udp') {
+      var drops = Math.round(sim.udpDrops);
+      srcStat = drops > 0 ? drops + ' dropped' : (sim.ioBlocked ? 'filling' : 'ok');
+      srcCls  = drops > 0 ? 'red' : (sim.ioBlocked ? 'amber' : 'green');
     } else {
-      srcStat = ioBlocked ? (otlpRejected + ' 429s') : (otlpAccepted + ' ok');
-      srcCls = ioBlocked ? 'red' : 'green';
+      srcStat = sim.ioBlocked ? (sim.otlpRejected + ' 429s') : (sim.otlpAccepted + ' ok');
+      srcCls  = sim.ioBlocked ? 'red' : 'green';
     }
 
     statsEl.innerHTML = '';
     var items = [
       ['Throughput', throughput.toFixed(1) + ' batch/s', throughput < 0.5 ? 'red' : (throughput < 1.0 ? 'amber' : 'green')],
-      ['Latency', latVal, latClass],
-      ['Produced', '' + Math.round(totalProduced), ''],
-      ['Delivered', '' + Math.round(totalDelivered), 'green'],
-      ['Source', srcStat, srcCls],
-      ['CPU', cpuBlocked ? 'BLOCKED' : 'scanning', cpuBlocked ? 'red' : 'green'],
+      ['Latency',   latVal,                              latClass],
+      ['Produced',  '' + Math.round(sim.totalProduced),  ''],
+      ['Delivered', '' + Math.round(sim.totalDelivered), 'green'],
+      ['Source',    srcStat,                             srcCls],
+      ['CPU',       sim.cpuBlocked ? 'BLOCKED' : 'scanning', sim.cpuBlocked ? 'red' : 'green'],
     ];
-    items.forEach(function(item) {
+    items.forEach(function (item) {
       var s = el('div', 'bp-stat');
       var l = el('div', 'bp-stat-label'); l.textContent = item[0];
       var v = el('div', 'bp-stat-val' + (item[2] ? ' ' + item[2] : '')); v.textContent = item[1];
@@ -739,171 +701,48 @@
     });
   }
 
-  // --- Transition alerts ---
-  function checkTransitions() {
-    var ioState = classifyState(ioCpuFill, IO_CPU_CAP);
-    var cpuState = classifyState(pipelineFill, PIPELINE_CAP);
-    var workerBusy = workerFills.filter(function(f) { return f > 0.1; }).length;
-    var allFull = workerFills.every(function(f) { return f >= WORKER_CAP * 0.9; });
-    var outState = allFull ? 'blocked' : (workerBusy >= 2 ? 'pressured' : 'ok');
-
-    if (outState !== prevOutState) {
-      if (outState === 'blocked') { showAlert(outStage, 'All workers full \u2014 retrying with backoff', 'err'); addLog('Output workers full \u2014 backpressure starts here', 'err'); }
-      else if (outState === 'pressured' && prevOutState === 'ok') { showAlert(outStage, 'Workers busy \u2014 MRU dispatch consolidating', 'warn'); addLog('Output workers busy \u2014 MRU consolidation active', 'warn'); }
-      else if (outState === 'ok' && prevOutState !== 'ok') { showAlert(outStage, 'Workers draining \u2014 pressure cleared', 'ok'); addLog('Output recovered \u2014 workers draining normally', 'ok'); }
-      prevOutState = outState;
-    }
-    if (cpuState !== prevCpuState) {
-      if (cpuState === 'blocked') { showAlert(cpuStage, 'Pipeline full! CPU worker blocked on blocking_send', 'err'); addLog('CPU worker blocked \u2014 pipeline channel full (' + Math.ceil(pipelineFill) + '/16)', 'err'); }
-      else if (cpuState === 'pressured' && prevCpuState === 'ok') { showAlert(cpuStage, 'Pipeline filling \u2014 pressure building', 'warn'); addLog('Pipeline channel filling (' + Math.ceil(pipelineFill) + '/16)', 'warn'); }
-      else if (cpuState === 'ok' && prevCpuState !== 'ok') { showAlert(cpuStage, 'Pipeline draining \u2014 CPU worker unblocked', 'ok'); addLog('CPU worker unblocked \u2014 pipeline draining', 'ok'); }
-      prevCpuState = cpuState;
-    }
-    if (ioState !== prevIoState) {
-      if (ioState === 'blocked') {
-        var srcMsg = sourceMode === 'file' ? 'File read stalling \u2014 falling behind' : (sourceMode === 'udp' ? 'UDP buffer filling \u2014 drops imminent' : 'Returning 429 to upstream');
-        showAlert(ioStage, srcMsg, 'err');
-        addLog('I/O blocked \u2014 bounded(4) full. ' + srcMsg, 'err');
-      } else if (ioState === 'pressured' && prevIoState === 'ok') {
-        showAlert(ioStage, 'I/O\u2192CPU channel filling', 'warn');
-        addLog('I/O\u2192CPU channel filling (' + Math.ceil(ioCpuFill) + '/4)', 'warn');
-      } else if (ioState === 'ok' && prevIoState !== 'ok') {
-        var recoverMsg = sourceMode === 'file' ? 'File reader catching up' : (sourceMode === 'udp' ? 'UDP buffer draining' : 'OTLP accepting again');
-        showAlert(ioStage, recoverMsg, 'ok');
-        addLog('I/O resumed \u2014 ' + recoverMsg, 'ok');
-      }
-      prevIoState = ioState;
-    }
-  }
-
-  // --- Simulation tick ---
-  function simTick() {
-    if (!running) return;
-    tick++;
-
-    var outDrain = (outputSpeed / 100) * OUT_MAX_RATE;
-
-    // Output workers drain
-    var totalWorkerFill = workerFills.reduce(function(a, b) { return a + b; }, 0);
-    var drained = Math.min(totalWorkerFill, outDrain);
-    var remaining = drained;
-    var tickDelivered = 0;
-    for (var w = 0; w < NUM_WORKERS && remaining > 0; w++) {
-      var take = Math.min(workerFills[w], remaining);
-      workerFills[w] -= take; remaining -= take; tickDelivered += take;
-    }
-    totalDelivered += tickDelivered;
-
-    // Pipeline drains into workers (MRU dispatch)
-    if (pipelineFill > 0) {
-      for (var w2 = 0; w2 < NUM_WORKERS; w2++) {
-        if (pipelineFill <= 0) break;
-        var space = WORKER_CAP - workerFills[w2];
-        if (space > 0) {
-          var send = Math.min(space, pipelineFill, MRU_DISPATCH_CAP);
-          workerFills[w2] += send; pipelineFill -= send;
-        }
-      }
-    }
-
-    // CPU worker drains I/O queue, fills pipeline
-    cpuBlocked = pipelineFill >= PIPELINE_CAP;
-    if (!cpuBlocked && ioCpuFill > 0) {
-      var cpuDrain = Math.min(ioCpuFill, CPU_RATE, PIPELINE_CAP - pipelineFill);
-      ioCpuFill -= cpuDrain; pipelineFill += cpuDrain; totalProduced += cpuDrain;
-    }
-
-    // I/O worker produces into I/O-CPU channel
-    ioBlocked = ioCpuFill >= IO_CPU_CAP;
-    var ioCpuFillSnap = ioCpuFill; // snapshot pre-refill for stage coloring
-    if (!ioBlocked) {
-      ioCpuFill += Math.min(IO_RATE, IO_CPU_CAP - ioCpuFill);
-    }
-
-    // Clamp
-    ioCpuFill = Math.max(0, Math.min(IO_CPU_CAP, ioCpuFill));
-    pipelineFill = Math.max(0, Math.min(PIPELINE_CAP, pipelineFill));
-    for (var w3 = 0; w3 < NUM_WORKERS; w3++) {
-      workerFills[w3] = Math.max(0, Math.min(WORKER_CAP, workerFills[w3]));
-    }
-
-    // Source side effects (depends on ioBlocked, computed above)
-    if (sourceMode === 'file') {
-      fileWritten += FILE_WRITE_RATE;
-      if (!ioBlocked) fileRead = Math.min(fileRead + IO_RATE * 0.85, fileWritten);
-      if (fileWritten > FILE_MAX) {
-        var fg = fileWritten - fileRead; fileWritten = fg + 50; fileRead = 50;
-      }
-    } else if (sourceMode === 'udp') {
-      udpBuf += UDP_ARRIVE_RATE;
-      if (!ioBlocked) udpBuf = Math.max(0, udpBuf - IO_RATE * 1.1);
-      if (udpBuf > UDP_CAP) { udpDrops += (udpBuf - UDP_CAP); udpBuf = UDP_CAP; }
-    } else {
-      if (tick % 6 === 0) {
-        otlpBatchNum++;
-        if (ioBlocked) { otlpRejected++; addOtlpEntry(otlpBatchNum, 429, 'retry'); }
-        else { otlpAccepted++; addOtlpEntry(otlpBatchNum, 200, null); }
-      }
-    }
+  // --- Full render pass (called after every sim.tick()) ---
+  function render() {
     updateSourceViz();
 
-    checkTransitions();
+    var ioState = sim.ioBlocked ? 'blocked' : (sim.ioCpuFillSnap / IO_CPU_CAP > 0.5 ? 'pressured' : 'ok');
+    setStageState(ioStage, ioState);
 
-    // Render pipeline stages
-    // Update source stage coloring — use pre-refill snapshot so recovery shows correctly
-    var ioPctSnap = ioCpuFillSnap / IO_CPU_CAP;
-    if (ioBlocked) {
-      ioStage.el.className = 'bp-stage blocked';
-      ioStage.tag.className = 'bp-stage-tag bp-tag-blocked'; ioStage.tag.textContent = 'BLOCKED';
-      ioStage.actFill.className = 'bp-activity-fill blocked';
-    } else if (ioPctSnap > 0.5) {
-      ioStage.el.className = 'bp-stage pressured';
-      ioStage.tag.className = 'bp-stage-tag bp-tag-pressure'; ioStage.tag.textContent = 'PRESSURE';
-      ioStage.actFill.className = 'bp-activity-fill flowing pressured';
-    } else {
-      ioStage.el.className = 'bp-stage';
-      ioStage.tag.className = 'bp-stage-tag bp-tag-ok'; ioStage.tag.textContent = 'OK';
-      ioStage.actFill.className = 'bp-activity-fill flowing';
-    }
-    updateStage(cpuStage, pipelineFill, PIPELINE_CAP, 'slots');
+    updateStage(cpuStage, sim.pipelineFill, PIPELINE_CAP, 'slots');
 
-    var workerBusy = workerFills.filter(function(f) { return f > 0.1; }).length;
+    var workerBusy = sim.workerFills.filter(function (f) { return f > 0.1; }).length;
     outStage.qlabel.textContent = workerBusy + '/' + NUM_WORKERS + ' busy';
     for (var i = 0; i < outStage.slots.length; i++) {
-      if (workerFills[i] > 0.5) {
-        outStage.slots[i].className = workerFills[i] >= WORKER_CAP ? 'bp-slot full' : 'bp-slot filling';
-      } else {
-        outStage.slots[i].className = workerFills[i] > 0.1 ? 'bp-slot filled' : 'bp-slot';
-      }
+      var wf = sim.workerFills[i];
+      outStage.slots[i].className = wf > 0.5
+        ? (wf >= WORKER_CAP ? 'bp-slot full' : 'bp-slot filling')
+        : (wf > 0.1 ? 'bp-slot filled' : 'bp-slot');
     }
-    var allWorkersFull = workerFills.every(function(f) { return f >= WORKER_CAP * 0.9; });
-    if (allWorkersFull) {
-      outStage.el.className = 'bp-stage blocked';
-      outStage.tag.className = 'bp-stage-tag bp-tag-blocked'; outStage.tag.textContent = 'FULL';
-      outStage.actFill.className = 'bp-activity-fill blocked';
-    } else if (workerBusy >= 2) {
-      outStage.el.className = 'bp-stage pressured';
-      outStage.tag.className = 'bp-stage-tag bp-tag-pressure'; outStage.tag.textContent = 'BUSY';
-      outStage.actFill.className = 'bp-activity-fill flowing pressured';
-    } else {
-      outStage.el.className = 'bp-stage';
-      outStage.tag.className = 'bp-stage-tag bp-tag-ok'; outStage.tag.textContent = 'OK';
-      outStage.actFill.className = 'bp-activity-fill flowing';
-    }
+    var allWorkersFull = sim.workerFills.every(function (f) { return f >= WORKER_CAP * 0.9; });
+    var outState = allWorkersFull ? 'blocked' : (workerBusy >= 2 ? 'pressured' : 'ok');
+    setStageState(outStage, outState, allWorkersFull ? 'FULL' : (workerBusy >= 2 ? 'BUSY' : null));
 
-    updateArrow(arrow1, ioCpuFill / IO_CPU_CAP);
-    updateArrow(arrow2, pipelineFill / PIPELINE_CAP);
+    updateArrow(arrow1, sim.ioCpuFill / IO_CPU_CAP);
+    updateArrow(arrow2, sim.pipelineFill / PIPELINE_CAP);
     updateStats();
+  }
+
+  // --- Main loop ---
+  function step() {
+    if (!running) return;
+    var events = sim.tick();
+    events.forEach(handleEvent);
+    render();
   }
 
   // --- Init ---
   buildSourceViz();
-  updateStats();
+  render();
   addLog('Pipeline started \u2014 drag the slider or click a preset', 'ok');
 
   var interval = null;
-  function startSimulation() { if (interval !== null || document.hidden) return; interval = setInterval(simTick, 250); }
-  function stopSimulation() { if (interval === null) return; clearInterval(interval); interval = null; }
+  function startSimulation() { if (interval !== null || document.hidden) return; interval = setInterval(step, 250); }
+  function stopSimulation()  { if (interval === null) return; clearInterval(interval); interval = null; }
 
   var reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   function handleVisibilityChange() {
@@ -913,11 +752,11 @@
 
   if (!reducedMotion) startSimulation();
   document.addEventListener('visibilitychange', handleVisibilityChange);
-
-  document.addEventListener('astro:before-swap', function() {
+  document.addEventListener('astro:before-swap', function () {
     document.removeEventListener('visibilitychange', handleVisibilityChange);
     stopSimulation();
     running = false;
   }, { once: true });
-})();
+}
+init();
 </script>
