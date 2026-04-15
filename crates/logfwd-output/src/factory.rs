@@ -3,7 +3,6 @@ use std::sync::Arc;
 
 use logfwd_config::{Format, OutputConfig, OutputType};
 use logfwd_types::diagnostics::ComponentStats;
-use logfwd_types::field_names;
 
 use crate::arrow_ipc_sink::ArrowIpcSinkFactory;
 use crate::build_auth_headers;
@@ -95,24 +94,38 @@ pub fn build_sink_factory(
             Ok(Arc::new(factory))
         }
         OutputType::ArrowIpc => {
-            let endpoint = cfg.endpoint.as_ref().ok_or_else(|| {
-                OutputError::Construction(format!("output '{name}': arrow_ipc requires 'endpoint'"))
-            })?;
+            // Accept either an explicit `endpoint` URL or a `host` + `port` pair.
+            let endpoint = if let Some(ep) = cfg.endpoint.as_ref() {
+                ep.clone()
+            } else if let (Some(host), Some(port)) = (cfg.host.as_ref(), cfg.port) {
+                format!("http://{host}:{port}")
+            } else {
+                return Err(OutputError::Construction(format!(
+                    "output '{name}': arrow_ipc requires either 'endpoint' or both 'host' and 'port'"
+                )));
+            };
             let compression = match cfg.compression.as_deref() {
                 Some("zstd") => Compression::Zstd,
+                Some("lz4") => Compression::Lz4,
                 Some("none") => Compression::None,
                 Some(other) => {
                     return Err(OutputError::Construction(format!(
-                        "output '{name}': arrow_ipc does not support '{other}' compression (use 'zstd', 'none', or omit)"
+                        "output '{name}': arrow_ipc does not support '{other}' compression (use 'lz4', 'zstd', 'none', or omit)"
                     )));
                 }
                 None => Compression::None,
             };
+            let write_legacy_ipc_format = cfg.write_legacy_ipc_format.unwrap_or(false);
+            let write_schema_on_connect = cfg.write_schema_on_connect.unwrap_or(false);
             let factory = ArrowIpcSinkFactory::new(
                 name.to_string(),
-                endpoint.clone(),
+                endpoint,
                 compression,
                 auth_headers,
+                write_legacy_ipc_format,
+                cfg.buffer_size_bytes,
+                cfg.batch_size,
+                write_schema_on_connect,
                 stats,
             )
             .map_err(|e| {
@@ -172,13 +185,59 @@ pub fn build_sink_factory(
                     )));
                 }
             };
+
+            let mut client_builder = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_millis(
+                    cfg.request_timeout_secs.unwrap_or(30) * 1000,
+                ))
+                .pool_max_idle_per_host(64);
+
+            #[allow(clippy::collapsible_if)]
+            if let Some(tls) = &cfg.tls {
+                if tls.insecure_skip_verify {
+                    client_builder = client_builder.danger_accept_invalid_certs(true);
+                }
+                if let Some(ca) = &tls.ca_file {
+                    if let Ok(ca_cert) = std::fs::read(ca) {
+                        if let Ok(cert) = reqwest::Certificate::from_pem(&ca_cert) {
+                            client_builder = client_builder.add_root_certificate(cert);
+                        }
+                    }
+                }
+                if let (Some(cert), Some(key)) = (&tls.cert_file, &tls.key_file) {
+                    if let (Ok(cert_data), Ok(key_data)) = (std::fs::read(cert), std::fs::read(key))
+                    {
+                        let mut pem = cert_data;
+                        pem.push(b'\n');
+                        pem.extend(key_data);
+                        if let Ok(identity) = reqwest::Identity::from_pem(&pem) {
+                            client_builder = client_builder.identity(identity);
+                        }
+                    }
+                }
+            }
+
+            let mut all_headers = auth_headers;
+            if let Some(cfg_headers) = &cfg.headers {
+                for (k, v) in cfg_headers {
+                    all_headers.push((k.clone(), v.clone()));
+                }
+            }
+
+            let client = client_builder.build().map_err(|e| {
+                OutputError::Construction(format!(
+                    "output '{name}': otlp client builder error: {e}"
+                ))
+            })?;
+
             let factory = OtlpSinkFactory::new(
                 name.to_string(),
                 endpoint.clone(),
                 protocol,
                 compression,
-                auth_headers,
-                field_names::BODY.to_string(),
+                all_headers,
+                logfwd_types::field_names::BODY.to_string(),
+                client,
                 stats,
             )
             .map_err(|e| {
