@@ -237,11 +237,11 @@ export function App() {
   const pipelineCount = status?.pipelines?.length ?? 0;
   const defaultExpanded = pipelineCount <= 3;
 
-  // Build annotation for memory chart: "/ 80MB alloc"
+  // Build annotation for memory chart: "(81MB alloc)"
   const memAnnotations = useMemo(() => {
     const alloc = stats?.mem_allocated;
     if (alloc == null || alloc <= 0) return undefined;
-    return { "process.memory.resident": `/ ${fmtBytesCompact(alloc)} alloc` };
+    return { "process.memory.resident": `(${fmtBytesCompact(alloc)} alloc)` };
   }, [stats?.mem_allocated]);
 
   return (

@@ -331,7 +331,8 @@ main {
 }
 .pn-row {
   display: flex;
-  justify-content: space-between;
+  align-items: center;
+  gap: 4px;
   font-size: 11px;
   line-height: 1.5;
   font-variant-numeric: tabular-nums;
