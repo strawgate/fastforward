@@ -474,30 +474,6 @@ output:
         );
     }
 
-    #[test]
-    fn validation_unimplemented_output_type() {
-        // Each placeholder type should be caught by Config::validate() before
-        // pipeline construction, not silently accepted.
-        for otype in ["http"] {
-            let yaml = format!(
-                "input:\n  type: file\n  path: /tmp/x.log\noutput:\n  type: {otype}\n  endpoint: http://x\n  path: /tmp/x\n"
-            );
-            let result = Config::load_str(&yaml);
-            assert!(
-                result.is_err(),
-                "validation should reject unimplemented type '{otype}'"
-            );
-            let msg = result.unwrap_err().to_string();
-            assert!(
-                msg.contains("not yet implemented"),
-                "error message should mention 'not yet implemented' for '{otype}': {msg}"
-            );
-            assert!(
-                msg.contains(otype),
-                "error message should include the type name '{otype}': {msg}"
-            );
-        }
-    }
 
     #[test]
     fn validation_unimplemented_input_format() {
@@ -551,22 +527,6 @@ output:
             Config::load_str(&yaml).unwrap_or_else(|e| panic!("failed for {otype}: {e}"));
         }
 
-        // Placeholder output types must be rejected at validation time.
-        for otype in ["http"] {
-            let yaml = format!(
-                "input:\n  type: file\n  path: /tmp/x.log\noutput:\n  type: {otype}\n  endpoint: http://x\n  path: /tmp/x\n"
-            );
-            let result = Config::load_str(&yaml);
-            assert!(
-                result.is_err(),
-                "expected error for unimplemented type {otype}"
-            );
-            let msg = result.unwrap_err().to_string();
-            assert!(
-                msg.contains("not yet implemented"),
-                "expected 'not yet implemented' for {otype}: {msg}"
-            );
-        }
     }
 
     #[test]
@@ -588,23 +548,6 @@ output:
         }
     }
 
-    #[test]
-    fn http_output_is_rejected() {
-        let yaml = r"
-input:
-  type: file
-  path: /tmp/x.log
-output:
-  type: http
-  endpoint: http://localhost:9200
-";
-        let err = Config::load_str(yaml).expect_err("http output should be rejected");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("not yet implemented"),
-            "error should mention 'not yet implemented': {msg}"
-        );
-    }
 
     #[test]
     fn pipelines_form_rejects_top_level_transform() {
