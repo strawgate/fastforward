@@ -570,21 +570,33 @@ pub struct JournaldTypeConfig {
     pub journald: Option<JournaldInputConfig>,
 }
 
+/// Configuration for an output sink in a pipeline.
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct OutputConfig {
+    /// Optional name for this output. Defaults to a generated name based on type.
     pub name: Option<String>,
+    /// The type of output to send logs to (e.g. `loki`, `elasticsearch`, `stdout`).
     #[serde(rename = "type")]
     pub output_type: OutputType,
+    /// Destination endpoint URL for HTTP-based outputs.
     pub endpoint: Option<String>,
+    /// Network protocol for OTLP outputs (e.g. `http` or `grpc`).
     pub protocol: Option<String>,
+    /// Payload compression setting (e.g. `gzip`, `snappy`, `zstd`, `none`).
     pub compression: Option<String>,
+    /// Request mode setting (used in Elasticsearch experimental streaming).
     pub request_mode: Option<String>,
+    /// Output format for stdout or file sinks.
     pub format: Option<Format>,
+    /// Destination file path for file-based outputs.
     pub path: Option<String>,
+    /// Index name for Elasticsearch outputs.
     pub index: Option<String>,
+    /// Authentication settings for HTTP-based outputs.
     #[serde(default)]
     pub auth: Option<AuthConfig>,
+    /// Tenant ID used in multi-tenant outputs like Loki.
     pub tenant_id: Option<String>,
     /// Maximum size of a batch in bytes before flushing.
     #[serde(default)]
@@ -610,7 +622,9 @@ pub struct OutputConfig {
     /// Maximum number of batches to queue in memory before applying backpressure.
     #[serde(default)]
     pub queue_capacity: Option<usize>,
+    /// Statically configured labels added to metrics or streams (e.g. Loki).
     pub static_labels: Option<HashMap<String, String>>,
+    /// Record columns used to automatically extract and assign stream labels (e.g. Loki).
     pub label_columns: Option<Vec<String>>,
 }
 

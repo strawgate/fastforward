@@ -99,12 +99,6 @@ pub fn build_sink_factory(
                 auth_headers,
                 compression,
                 cfg.request_timeout_ms,
-                cfg.batch_size_bytes,
-                cfg.max_batch_age_ms.or(cfg.batch_timeout_ms),
-                cfg.retry_attempts,
-                cfg.retry_initial_backoff_ms,
-                cfg.retry_max_backoff_ms,
-                cfg.queue_capacity,
                 stats,
             )
             .map_err(|e| {
