@@ -414,6 +414,29 @@ impl Config {
                                         "pipeline '{name}' input '{label}': sensor.max_events_per_poll is not supported for host_metrics inputs"
                                     )));
                                 }
+                                if s.sensor.as_ref().and_then(|cfg| cfg.collection_interval_ms)
+                                    == Some(0)
+                                {
+                                    return Err(ConfigError::Validation(format!(
+                                        "pipeline '{name}' input '{label}': sensor.collection_interval_ms must be at least 1"
+                                    )));
+                                }
+                                if let Some(scrapers) =
+                                    s.sensor.as_ref().and_then(|cfg| cfg.scrapers.as_ref())
+                                {
+                                    for scraper in scrapers {
+                                        let normalized = scraper.trim().to_lowercase();
+                                        if !matches!(
+                                            normalized.as_str(),
+                                            "cpu" | "memory" | "disk" | "network" | "filesystem"
+                                        ) {
+                                            return Err(ConfigError::Validation(format!(
+                                                "pipeline '{name}' input '{label}': unknown scraper '{}' (supported: cpu, memory, disk, network, filesystem)",
+                                                scraper.trim()
+                                            )));
+                                        }
+                                    }
+                                }
                             }
                         }
                         InputTypeConfig::ArrowIpc(a) => {
