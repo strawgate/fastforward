@@ -519,7 +519,7 @@ Special columns added by the scanner / input format layer:
 | `body` | string | Original input line (when input line capture is enabled, e.g. `line_field: body`, or when a non-JSON CRI line is wrapped for scanner safety). |
 | `_timestamp` | string | Timestamp from the CRI header as an RFC 3339 string (CRI inputs only). |
 | `_stream` | string | CRI stream name (`stdout` / `stderr`). |
-| `_source_path` | string | Full path to the source log file (file inputs only). |
+| `_source_path` | string | Path of the file being tailed (file-backed inputs only). |
 
 ### Built-in UDFs
 
@@ -527,7 +527,7 @@ Special columns added by the scanner / input format layer:
 |----------|-----------|-------------|
 | `int(expr)` | `int(any) → int64` | Cast any value to int64. Returns NULL on failure. |
 | `float(expr)` | `float(any) → float64` | Cast any value to float64. Returns NULL on failure. |
-| `grok(input, pattern)` | `grok(utf8, utf8) → Struct` | Apply a Grok pattern to `input` and return a struct with one Utf8 field per named capture. Non-matching rows produce NULL struct fields. |
+| `grok(input, pattern)` | `grok(utf8, utf8) → Struct` | Apply a Grok pattern to `input` and return the captures as a struct. |
 | `regexp_extract(input, pattern, group)` | `regexp_extract(utf8, utf8, int64) → utf8` | Return capture group `group` from a regex match. |
 
 Examples:
