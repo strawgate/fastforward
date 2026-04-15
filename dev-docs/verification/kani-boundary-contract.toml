@@ -221,3 +221,9 @@ path = "crates/logfwd-transform/src/udf/regexp_extract.rs"
 status = "required"
 reason = "Group-index i64-to-usize conversion correctness (negative → 0, non-negative → exact) is a bounded pure seam covering the *v as usize → try_from fix."
 issue = 2147
+
+[[seams]]
+path = "crates/logfwd-transform/src/udf/hash.rs"
+status = "required"
+reason = "FNV-1a spec-constant verification and bounded XOR-then-multiply order oracle are pure deterministic seams — hash stability is safety-critical for sampling decisions."
+issue = 2147
