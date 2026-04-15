@@ -53,11 +53,19 @@ fn make_format(
 
 fn validate_input_format(name: &str, input_type: InputType, format: &Format) -> Result<(), String> {
     match input_type {
-        InputType::Generator | InputType::Otlp | InputType::ArrowIpc => {
+        InputType::Otlp | InputType::ArrowIpc => {
             if !matches!(format, Format::Json) {
                 return Err(format!(
                     "input '{name}': format {:?} is not supported for {:?} inputs (expected json)",
                     format, input_type
+                ));
+            }
+        }
+        InputType::Generator => {
+            if !matches!(format, Format::Json | Format::Cri) {
+                return Err(format!(
+                    "input '{name}': format {:?} is not supported for generator inputs (expected json or cri)",
+                    format
                 ));
             }
         }
@@ -276,7 +284,14 @@ pub(super) fn build_input_state(
                     }
                 },
             };
-            let format = cfg.format.clone().unwrap_or(Format::Json);
+            // CriK8s output is CRI-envelope format; all other profiles emit JSON.
+            let format = cfg.format.clone().unwrap_or_else(|| {
+                if config.profile == GeneratorProfile::CriK8s {
+                    Format::Cri
+                } else {
+                    Format::Json
+                }
+            });
             validate_input_format(name, InputType::Generator, &format)?;
             let source = GeneratorInput::new(name, config);
             (Box::new(source), format, 4 * 1024 * 1024)
@@ -300,6 +315,27 @@ pub(super) fn build_input_state(
                 protobuf_decode_mode,
             )
             .map_err(|e| format!("input '{name}': failed to start OTLP receiver: {e}"))?;
+            #[cfg(not(feature = "otlp-research"))]
+            {
+                // The HTTP-based OTLP receiver does not support TLS or gRPC
+                // settings; warn when a user configures them so they are not
+                // silently ignored.
+                if o.tls.is_some() {
+                    tracing::warn!(
+                        "input '{name}': tls is configured but not supported by the HTTP OTLP receiver; field is ignored"
+                    );
+                }
+                if o.grpc_keepalive_time_ms.is_some() {
+                    tracing::warn!(
+                        "input '{name}': grpc_keepalive_time_ms is configured but not supported by the HTTP OTLP receiver; field is ignored"
+                    );
+                }
+                if o.grpc_max_concurrent_streams.is_some() {
+                    tracing::warn!(
+                        "input '{name}': grpc_max_concurrent_streams is configured but not supported by the HTTP OTLP receiver; field is ignored"
+                    );
+                }
+            }
             #[cfg(not(feature = "otlp-research"))]
             let max_body_size = o
                 .max_recv_message_size_bytes

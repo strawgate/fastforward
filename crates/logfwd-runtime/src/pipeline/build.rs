@@ -104,6 +104,10 @@ impl Pipeline {
                                         })?;
                                 Arc::new(mmdb)
                             }
+                            GeoDatabaseFormat::CsvRange => {
+                                return Err("geo database format CsvRange is not yet implemented"
+                                    .to_string());
+                            }
                             _ => {
                                 return Err(format!(
                                     "unsupported geo database format: {:?}",
