@@ -383,8 +383,8 @@ impl OtapSink {
         match self.config.compression {
             Compression::Zstd => req = req.header("Content-Encoding", "zstd"),
             Compression::Gzip => req = req.header("Content-Encoding", "gzip"),
-            Compression::Lz4 => req = req.header("Content-Encoding", "lz4"),
-            Compression::None => {}
+            // Lz4 is rejected by maybe_compress() above; no header should be set.
+            Compression::Lz4 | Compression::None => {}
         }
 
         for (k, v) in &self.config.headers {

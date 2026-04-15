@@ -11,7 +11,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use arrow::ipc::writer::StreamWriter;
+use arrow::ipc::writer::{IpcWriteOptions, StreamWriter};
 use arrow::record_batch::RecordBatch;
 
 use logfwd_types::diagnostics::ComponentStats;
@@ -49,6 +49,21 @@ pub(crate) struct ArrowIpcSinkConfig {
     endpoint: String,
     compression: Compression,
     headers: Vec<(reqwest::header::HeaderName, reqwest::header::HeaderValue)>,
+    /// Write IPC streams using the legacy pre-1.0 Arrow IPC format.
+    pub write_legacy_ipc_format: bool,
+    /// IPC write buffer size in bytes.
+    pub buffer_size_bytes: Option<usize>,
+    /// Number of Arrow records per IPC batch.
+    ///
+    /// Reserved for a future TCP socket mode; not yet used by the HTTP sink.
+    #[expect(dead_code)]
+    pub batch_size: Option<usize>,
+    /// Write the Arrow schema message immediately upon connection.
+    ///
+    /// Reserved for a future TCP socket mode; not yet used by the HTTP sink
+    /// (the HTTP `StreamWriter` always writes the schema on init).
+    #[expect(dead_code)]
+    pub write_schema_on_connect: bool,
 }
 
 impl ArrowIpcSink {
@@ -58,11 +73,12 @@ impl ArrowIpcSink {
         client: reqwest::Client,
         stats: Arc<ComponentStats>,
     ) -> Self {
+        let buf_capacity = config.buffer_size_bytes.unwrap_or(64 * 1024);
         ArrowIpcSink {
             name,
             config,
             client,
-            ipc_buf: Vec::with_capacity(64 * 1024),
+            ipc_buf: Vec::with_capacity(buf_capacity),
             stats,
         }
     }
@@ -71,14 +87,27 @@ impl ArrowIpcSink {
     ///
     /// Writes the schema message followed by one batch message into
     /// `self.ipc_buf`. The stream is complete (includes EOS marker).
+    /// Uses the legacy IPC format if `write_legacy_ipc_format` is set.
     fn serialize_batch(&mut self, batch: &RecordBatch) -> io::Result<()> {
         self.ipc_buf.clear();
         if batch.num_rows() == 0 {
             return Ok(());
         }
 
+        let write_options = if self.config.write_legacy_ipc_format {
+            IpcWriteOptions::try_new(8, true, arrow::ipc::MetadataVersion::V4).map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("Arrow IPC write options failed: {e}"),
+                )
+            })?
+        } else {
+            IpcWriteOptions::default()
+        };
+
         let mut writer =
-            StreamWriter::try_new(&mut self.ipc_buf, &batch.schema()).map_err(|e| {
+            StreamWriter::try_new_with_options(&mut self.ipc_buf, &batch.schema(), write_options)
+                .map_err(|e| {
                 io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!("Arrow IPC writer init failed: {e}"),
@@ -241,11 +270,20 @@ impl ArrowIpcSinkFactory {
     /// - `endpoint`: Target HTTP URL
     /// - `compression`: Compression algorithm (Zstd or None)
     /// - `headers`: Authentication / custom headers as `(key, value)` pairs
+    /// - `write_legacy_ipc_format`: Use legacy pre-1.0 Arrow IPC format
+    /// - `buffer_size_bytes`: IPC write buffer size in bytes
+    /// - `batch_size`: Number of Arrow records per IPC batch
+    /// - `write_schema_on_connect`: Write Arrow schema immediately upon connection
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         name: String,
         endpoint: String,
         compression: Compression,
         headers: Vec<(String, String)>,
+        write_legacy_ipc_format: bool,
+        buffer_size_bytes: Option<usize>,
+        batch_size: Option<usize>,
+        write_schema_on_connect: bool,
         stats: Arc<ComponentStats>,
     ) -> io::Result<Self> {
         let parsed_headers = headers
@@ -271,6 +309,10 @@ impl ArrowIpcSinkFactory {
                 endpoint,
                 compression,
                 headers: parsed_headers,
+                write_legacy_ipc_format,
+                buffer_size_bytes,
+                batch_size,
+                write_schema_on_connect,
             }),
             client,
             stats,
@@ -367,11 +409,19 @@ mod tests {
             endpoint: "http://localhost:9999".to_string(),
             compression: Compression::None,
             headers: Vec::new(),
+            write_legacy_ipc_format: false,
+            buffer_size_bytes: None,
+            batch_size: None,
+            write_schema_on_connect: false,
         });
         let config_gzip = Arc::new(ArrowIpcSinkConfig {
             endpoint: "http://localhost:9999".to_string(),
             compression: Compression::Gzip,
             headers: Vec::new(),
+            write_legacy_ipc_format: false,
+            buffer_size_bytes: None,
+            batch_size: None,
+            write_schema_on_connect: false,
         });
 
         let client = reqwest::Client::new();
@@ -502,6 +552,10 @@ mod tests {
             endpoint: "http://localhost:9999".to_string(),
             compression: Compression::None,
             headers: Vec::new(),
+            write_legacy_ipc_format: false,
+            buffer_size_bytes: None,
+            batch_size: None,
+            write_schema_on_connect: false,
         });
         let stats = Arc::new(ComponentStats::new());
         let client = reqwest::Client::new();
