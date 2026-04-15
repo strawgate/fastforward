@@ -61,6 +61,13 @@ impl Config {
             }
         }
 
+        if let Some(interval) = self.storage.checkpoint_flush_interval
+            && interval.is_zero() {
+                return Err(ConfigError::Validation(
+                    "storage.checkpoint_flush_interval must be greater than 0".into(),
+                ));
+            }
+
         if self.pipelines.is_empty() {
             return Err(ConfigError::Validation(
                 "at least one pipeline must be defined".into(),

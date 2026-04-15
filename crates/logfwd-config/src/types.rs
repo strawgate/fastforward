@@ -1,5 +1,5 @@
 use crate::compat;
-use crate::serde_helpers::deserialize_one_or_many;
+use crate::serde_helpers::{deserialize_duration, deserialize_one_or_many};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::fmt;
@@ -758,6 +758,8 @@ pub struct ServerConfig {
 #[serde(deny_unknown_fields)]
 pub struct StorageConfig {
     pub data_dir: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_duration")]
+    pub checkpoint_flush_interval: Option<std::time::Duration>,
 }
 
 #[derive(Debug, Clone)]
