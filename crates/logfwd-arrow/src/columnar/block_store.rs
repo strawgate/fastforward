@@ -91,6 +91,16 @@ pub(super) fn make_string_view_raw(
     }
 
     let start = sref.offset as usize;
+    let end = start.wrapping_add(len as usize);
+
+    // Detect spanning references before resolving to a single buffer.
+    if start < original_len && end > original_len {
+        return Err(MaterializeError::StringRefSpansBoundary {
+            offset: sref.offset,
+            len: sref.len,
+            original_len,
+        });
+    }
 
     // Resolve buffer, block index, and local offset.
     let (buf, block_idx, local_offset) = if start < original_len {
