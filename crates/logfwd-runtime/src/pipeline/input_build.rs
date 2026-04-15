@@ -168,18 +168,18 @@ pub(super) fn build_input_state(
         InputTypeConfig::File(f) => {
             let path = require_non_empty(name, "file", "path", Some(&f.path))?;
             let format = cfg.format.clone().unwrap_or(Format::Auto);
-                        let mut tail_config = TailConfig {
+            let mut tail_config = TailConfig {
                 start_from_end: f
                     .start_position
                     .as_ref()
-                    .is_none_or(|pos| matches!(pos, logfwd_config::FileStartPosition::End)),
+                    .map_or(false, |pos| matches!(pos, logfwd_config::FileStartPosition::End)),
                 poll_interval_ms: f.poll_interval_ms.unwrap_or(DEFAULT_FILE_POLL_INTERVAL_MS),
                 read_buf_size: f.read_buf_size.unwrap_or(DEFAULT_READ_BUF_SIZE),
                 per_file_read_budget_bytes: f
                     .per_file_read_budget_bytes
                     .unwrap_or(DEFAULT_PER_FILE_READ_BUDGET_BYTES),
                 max_open_files: f.max_open_files.unwrap_or(DEFAULT_MAX_OPEN_FILES),
-                follow_symlinks: f.follow_symlinks.unwrap_or(true),
+                follow_symlinks: f.follow_symlinks.unwrap_or(false),
                 ignore_older_than_secs: f.ignore_older_than_secs,
                 encoding: f.encoding.clone(),
                 multiline: f
