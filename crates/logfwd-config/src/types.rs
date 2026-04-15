@@ -210,6 +210,7 @@ pub enum GeneratorAttributeValueConfig {
     Integer(i64),
     Float(f64),
     Bool(bool),
+    Unsupported(serde_yaml_ng::Value),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
