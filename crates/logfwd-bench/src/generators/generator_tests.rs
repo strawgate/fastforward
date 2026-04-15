@@ -1,6 +1,15 @@
-use super::test_support::{assert_batch_matches_scanned_json, scan_json};
-use super::*;
 use std::collections::HashSet;
+
+use super::cri::{
+    gen_cri_k8s, gen_narrow, gen_narrow_batch, gen_production_mixed, gen_production_mixed_batch,
+};
+use super::envoy::{
+    EnvoyAccessProfile, gen_envoy_access_batch_with_profile, gen_envoy_access_with_profile,
+};
+use super::test_support::{assert_batch_matches_scanned_json, scan_json};
+use super::wide::{gen_wide, gen_wide_batch};
+
+// ── CRI K8s ────────────────────────────────────────────────────────────
 
 #[test]
 fn cri_k8s_deterministic() {
@@ -62,6 +71,8 @@ fn cri_k8s_has_partial_lines() {
     );
 }
 
+// ── Production mixed ───────────────────────────────────────────────────
+
 #[test]
 fn production_mixed_deterministic() {
     let a = gen_production_mixed(100, 42);
@@ -94,6 +105,8 @@ fn production_mixed_has_length_variety() {
         "expected significant length variety: min={min}, max={max}"
     );
 }
+
+// ── Narrow / Wide ──────────────────────────────────────────────────────
 
 #[test]
 fn narrow_deterministic() {
@@ -128,6 +141,8 @@ fn wide_valid_json() {
             serde_json::from_str(line).unwrap_or_else(|e| panic!("invalid JSON: {e}: {line}"));
     }
 }
+
+// ── Envoy access log ───────────────────────────────────────────────────
 
 #[test]
 fn envoy_access_deterministic() {
@@ -197,6 +212,44 @@ fn envoy_access_valid_json_and_realistic_skew() {
 }
 
 #[test]
+fn envoy_access_scale_controls_cardinality() {
+    let narrow_data = gen_envoy_access_with_profile(300, 5, EnvoyAccessProfile::for_scale(1));
+    let wide_data = gen_envoy_access_with_profile(300, 5, EnvoyAccessProfile::for_scale(4));
+
+    let narrow_routes: HashSet<String> = std::str::from_utf8(&narrow_data)
+        .expect("valid UTF-8")
+        .lines()
+        .map(|line| {
+            let v: serde_json::Value = serde_json::from_str(line).expect("valid JSON");
+            v["route_name"]
+                .as_str()
+                .expect("route_name string")
+                .to_string()
+        })
+        .collect();
+    let wide_routes: HashSet<String> = std::str::from_utf8(&wide_data)
+        .expect("valid UTF-8")
+        .lines()
+        .map(|line| {
+            let v: serde_json::Value = serde_json::from_str(line).expect("valid JSON");
+            v["route_name"]
+                .as_str()
+                .expect("route_name string")
+                .to_string()
+        })
+        .collect();
+
+    assert!(
+        wide_routes.len() > narrow_routes.len(),
+        "scale should increase route cardinality: narrow={} wide={}",
+        narrow_routes.len(),
+        wide_routes.len()
+    );
+}
+
+// ── Batch matches scanned JSON ─────────────────────────────────────────
+
+#[test]
 fn narrow_batch_matches_scanned_json() {
     let scanned = scan_json(gen_narrow(256, 42));
     let direct = gen_narrow_batch(256, 42);
@@ -223,40 +276,4 @@ fn envoy_access_batch_matches_scanned_json() {
     let scanned = scan_json(gen_envoy_access_with_profile(256, 42, profile));
     let direct = gen_envoy_access_batch_with_profile(256, 42, profile);
     assert_batch_matches_scanned_json(&scanned, &direct);
-}
-
-#[test]
-fn envoy_access_scale_controls_cardinality() {
-    let narrow = gen_envoy_access_with_profile(300, 5, EnvoyAccessProfile::for_scale(1));
-    let wide = gen_envoy_access_with_profile(300, 5, EnvoyAccessProfile::for_scale(4));
-
-    let narrow_routes: HashSet<String> = std::str::from_utf8(&narrow)
-        .expect("valid UTF-8")
-        .lines()
-        .map(|line| {
-            let v: serde_json::Value = serde_json::from_str(line).expect("valid JSON");
-            v["route_name"]
-                .as_str()
-                .expect("route_name string")
-                .to_string()
-        })
-        .collect();
-    let wide_routes: HashSet<String> = std::str::from_utf8(&wide)
-        .expect("valid UTF-8")
-        .lines()
-        .map(|line| {
-            let v: serde_json::Value = serde_json::from_str(line).expect("valid JSON");
-            v["route_name"]
-                .as_str()
-                .expect("route_name string")
-                .to_string()
-        })
-        .collect();
-
-    assert!(
-        wide_routes.len() > narrow_routes.len(),
-        "scale should increase route cardinality: narrow={} wide={}",
-        narrow_routes.len(),
-        wide_routes.len()
-    );
 }
