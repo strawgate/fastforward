@@ -249,17 +249,14 @@ impl JournaldInput {
 impl Drop for JournaldInput {
     fn drop(&mut self) {
         self.is_running.store(false, Ordering::Release);
-        #[cfg(unix)]
-        {
-            // Atomically take the child PID (if any) so only one thread calls kill.
-            let pid = self.child_pid.swap(0, Ordering::AcqRel);
-            if pid != 0 {
-                // SAFETY: sending SIGKILL to a child PID we exclusively own via the
-                // swap above. The reader thread also uses swap(0) before child.wait(),
-                // so only one side ever sends the signal.
-                unsafe {
-                    libc::kill(pid as i32, libc::SIGKILL);
-                }
+        // Atomically take the child PID (if any) so only one thread calls kill.
+        let pid = self.child_pid.swap(0, Ordering::AcqRel);
+        if pid != 0 {
+            // SAFETY: sending SIGKILL to a child PID we exclusively own via the
+            // swap above. The reader thread also uses swap(0) before child.wait(),
+            // so only one side ever sends the signal.
+            unsafe {
+                libc::kill(pid as i32, libc::SIGKILL);
             }
         }
     }

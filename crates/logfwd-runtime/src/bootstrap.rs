@@ -218,6 +218,11 @@ pub async fn run_pipelines(
         .try_init();
     opentelemetry::global::set_tracer_provider(tracer_provider.clone());
 
+    let checkpoint_flush_interval = config
+        .storage
+        .checkpoint_flush_interval_ms
+        .map_or(Duration::from_secs(5), Duration::from_millis);
+
     let mut pipelines = Vec::new();
     for (name, pipe_cfg) in &config.pipelines {
         match Pipeline::from_config_with_data_dir(
@@ -227,7 +232,10 @@ pub async fn run_pipelines(
             base_path,
             configured_data_dir.as_deref(),
         ) {
-            Ok(pipeline) => pipelines.push(pipeline),
+            Ok(mut pipeline) => {
+                pipeline.set_checkpoint_flush_interval(checkpoint_flush_interval);
+                pipelines.push(pipeline);
+            }
             Err(e) => return Err(RuntimeError::Config(format!("pipeline '{name}': {e}"))),
         }
     }

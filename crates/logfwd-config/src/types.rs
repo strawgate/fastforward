@@ -850,6 +850,10 @@ pub struct ServerConfig {
 #[serde(deny_unknown_fields)]
 pub struct StorageConfig {
     pub data_dir: Option<String>,
+    /// Minimum interval between checkpoint flushes to disk, in milliseconds.
+    /// Defaults to `5000` (5 seconds). Must be greater than zero.
+    #[serde(default)]
+    pub checkpoint_flush_interval_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
