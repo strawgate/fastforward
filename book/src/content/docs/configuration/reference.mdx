@@ -519,7 +519,6 @@ Special columns added by the scanner / input format layer:
 | `body` | string | Original input line (when input line capture is enabled, e.g. `line_field: body`, or when a non-JSON CRI line is wrapped for scanner safety). |
 | `_timestamp` | string | Timestamp from the CRI header as an RFC 3339 string (CRI inputs only). |
 | `_stream` | string | CRI stream name (`stdout` / `stderr`). |
-| `_source_path` | string | Path of the file being tailed (file-backed inputs only). |
 
 ### Built-in UDFs
 
@@ -687,11 +686,7 @@ Parses Kubernetes pod log paths (e.g.
 The source-path metadata is automatically injected into the `logs` table as
 `_source_path` for file-backed inputs.
 
-```yaml
-enrichment:
-  - type: k8s_path
-    table_name: k8s_pods   # optional, defaults to "k8s_pods"
-```
+Columns exposed by `k8s`:
 
 | Column | Description |
 |--------|-------------|
