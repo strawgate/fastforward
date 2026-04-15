@@ -56,6 +56,8 @@ jobs:
         run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
 
       - name: Build config WASM
+        env:
+          RUSTC_WRAPPER: ""
         run: |
           wasm-pack build crates/logfwd-config-wasm \
             --target web \
