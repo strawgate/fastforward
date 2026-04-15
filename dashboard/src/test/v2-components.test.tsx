@@ -153,8 +153,8 @@ describe("DataLossIndicator", () => {
       transform: {
         sql: "",
         lines_in: 10_000,
-        lines_out: 10_000,
-        filter_drop_rate: 0,
+        lines_out: 9_950,
+        filter_drop_rate: 0.005,
       },
       outputs: [
         {
@@ -176,8 +176,8 @@ describe("DataLossIndicator", () => {
       transform: {
         sql: "",
         lines_in: 10_000,
-        lines_out: 10_000,
-        filter_drop_rate: 0,
+        lines_out: 9_800,
+        filter_drop_rate: 0.02,
       },
       outputs: [
         {
@@ -250,8 +250,8 @@ describe("DataLossIndicator", () => {
       transform: {
         sql: "",
         lines_in: 5000,
-        lines_out: 5000,
-        filter_drop_rate: 0,
+        lines_out: 4900,
+        filter_drop_rate: 0.02,
       },
       outputs: [
         {
@@ -268,8 +268,8 @@ describe("DataLossIndicator", () => {
       transform: {
         sql: "",
         lines_in: 5000,
-        lines_out: 5000,
-        filter_drop_rate: 0,
+        lines_out: 4900,
+        filter_drop_rate: 0.02,
       },
       outputs: [
         {

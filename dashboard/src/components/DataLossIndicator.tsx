@@ -35,8 +35,9 @@ export function DataLossIndicator({ pipelines }: Props) {
   const perPipeline: PipelineLoss[] = [];
 
   for (const p of pipelines) {
-    const linesIn = p.transform.lines_in || sumLines(p.inputs);
-    const linesOut = sumLines(p.outputs);
+    const linesIn = p.transform.lines_in ?? sumLines(p.inputs);
+    // Use transform.lines_out as canonical count — summing outputs double-counts in fan-out.
+    const linesOut = p.transform.lines_out ?? sumLines(p.outputs);
     const errors = sumErrors(p.outputs);
     const dropped = Math.max(0, linesIn - linesOut);
 

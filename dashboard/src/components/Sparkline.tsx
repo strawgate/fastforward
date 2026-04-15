@@ -103,8 +103,10 @@ export function Sparkline({
       ctx.lineTo(toX(pts.length - 1), h - pad);
       ctx.lineTo(toX(0), h - pad);
       ctx.closePath();
-      ctx.fillStyle = activeColor + "40"; // 25% opacity
+      ctx.globalAlpha = 0.25;
+      ctx.fillStyle = activeColor;
       ctx.fill();
+      ctx.globalAlpha = 1.0;
       // Re-draw the line on top.
       ctx.beginPath();
       ctx.moveTo(toX(0), toY(pts[0]));

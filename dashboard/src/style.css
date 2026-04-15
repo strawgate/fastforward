@@ -869,9 +869,6 @@ main {
   color: var(--t4);
   transition: transform 0.15s;
 }
-.collapsible.open .collapsible-arrow {
-  transform: rotate(90deg);
-}
 .collapsible-title {
   font-size: 12px;
   font-weight: 600;

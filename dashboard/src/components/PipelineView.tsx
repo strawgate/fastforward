@@ -1,4 +1,5 @@
 import type { TelemetryStore } from "@otlpkit/views";
+import { Fragment } from "preact";
 import { useRef, useState } from "preact/hooks";
 import { fmt, fmtBytes } from "../lib/format";
 import { RateTracker } from "../lib/rates";
@@ -61,17 +62,16 @@ function HealthDot({ errors, rate }: { errors: number; rate?: number | null }) {
 }
 
 /** Extract sparkline data for a metric, optionally filtered by pipeline. */
-function useSparkline(store: TelemetryStore, metricName: string, pipeline?: string): number[] {
+function selectSparkline(store: TelemetryStore, metricName: string, pipeline?: string): number[] {
   const frame = store.selectTimeSeries({
     metricName,
     intervalMs: 2000,
     reduce: "last",
     ...(pipeline ? { splitBy: "pipeline" } : {}),
   });
-  // Find the series matching our pipeline, or take first.
-  const series = pipeline
-    ? (frame.series.find((s) => s.key === pipeline) ?? frame.series[0])
-    : frame.series[0];
+  if (!pipeline) return frame.series[0]?.points.map((p) => p.value) ?? [];
+  // Only return the matching series — don't fall back to a different pipeline's data.
+  const series = frame.series.find((s) => s.key === pipeline);
   return series?.points.map((p) => p.value) ?? [];
 }
 
@@ -111,10 +111,10 @@ export function PipelineView({ pipeline: p, traces, store, tick: _tick, defaultE
   }, 0);
 
   // Sparkline data for this pipeline.
-  const inputRateSpark = useSparkline(store, "logfwd.input_lines_per_sec", p.name);
-  const outputRateSpark = useSparkline(store, "logfwd.output_bytes_per_sec", p.name);
-  const errorSpark = useSparkline(store, "logfwd.output_errors_per_sec", p.name);
-  const stallSpark = useSparkline(store, "logfwd.backpressure_stalls_per_sec", p.name);
+  const inputRateSpark = selectSparkline(store, "logfwd.input_lines_per_sec", p.name);
+  const outputRateSpark = selectSparkline(store, "logfwd.output_bytes_per_sec", p.name);
+  const errorSpark = selectSparkline(store, "logfwd.output_errors_per_sec", p.name);
+  const stallSpark = selectSparkline(store, "logfwd.backpressure_stalls_per_sec", p.name);
 
   // Stage breakdown from status data.
   const stages = p.stage_seconds;
@@ -157,7 +157,7 @@ export function PipelineView({ pipeline: p, traces, store, tick: _tick, defaultE
           {/* ── Flow diagram with sparklines ── */}
           <div class="pipe-flow">
             {p.inputs.map((inp, i) => (
-              <>
+              <Fragment key={inp.name}>
                 {i > 0 && <Arrow />}
                 <button
                   type="button"
@@ -165,7 +165,7 @@ export function PipelineView({ pipeline: p, traces, store, tick: _tick, defaultE
                   onClick={() => toggle(`i${i}`)}
                 >
                   <span class="pn-top">
-                    <HealthDot errors={inp.errors} />
+                    <HealthDot errors={inp.errors + (inp.parse_errors ?? 0)} />
                     <span class="pn-type">{typeLabel(inp.type)}</span>
                   </span>
                   {!isGenericName(inp.name) && <span class="pn-name">{inp.name}</span>}
@@ -173,15 +173,8 @@ export function PipelineView({ pipeline: p, traces, store, tick: _tick, defaultE
                     <span>rate</span>
                     <b>{compRate(inp, "lines_total")}</b>
                   </span>
-                  <Sparkline
-                    values={inputRateSpark}
-                    width={56}
-                    height={14}
-                    color="var(--ok)"
-                    style="area"
-                  />
                 </button>
-              </>
+              </Fragment>
             ))}
             <Arrow />
             <button
@@ -210,7 +203,7 @@ export function PipelineView({ pipeline: p, traces, store, tick: _tick, defaultE
             </button>
             <Arrow />
             {p.outputs.map((out, i) => (
-              <>
+              <Fragment key={out.name}>
                 {i > 0 && <Arrow />}
                 <button
                   type="button"
@@ -226,20 +219,33 @@ export function PipelineView({ pipeline: p, traces, store, tick: _tick, defaultE
                     <span>rate</span>
                     <b>{compRate(out, "bytes_total")}</b>
                   </span>
-                  <Sparkline
-                    values={outputRateSpark}
-                    width={56}
-                    height={14}
-                    color="var(--purple)"
-                    style="area"
-                  />
                 </button>
-              </>
+              </Fragment>
             ))}
           </div>
 
           {/* ── Inline stats strip ── */}
           <div class="pipe-stats">
+            <span class="pipe-stat">
+              <span class="pipe-stat-label">In</span>
+              <Sparkline
+                values={inputRateSpark}
+                width={56}
+                height={14}
+                color="var(--ok)"
+                style="area"
+              />
+            </span>
+            <span class="pipe-stat">
+              <span class="pipe-stat-label">Out</span>
+              <Sparkline
+                values={outputRateSpark}
+                width={56}
+                height={14}
+                color="var(--purple)"
+                style="area"
+              />
+            </span>
             {latencyMs != null && (
               <span class="pipe-stat">
                 <span class="pipe-stat-label">Latency</span>
