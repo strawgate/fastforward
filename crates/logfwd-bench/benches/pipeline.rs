@@ -119,13 +119,13 @@ fn bench_cri(c: &mut Criterion) {
                     let end =
                         memchr::memchr(b'\n', &data[start..]).map_or(data.len(), |p| start + p);
                     if let Some(cri) = parse_cri_line(&data[start..end]) {
-                        match reassembler.feed(&cri) {
-                            ReassembleResult::Complete(msg) | ReassembleResult::Truncated(msg) => {
+                        match reassembler.feed(cri.message, cri.is_full) {
+                            AggregateResult::Complete(msg) | AggregateResult::Truncated(msg) => {
                                 json_buf.extend_from_slice(msg);
                                 json_buf.push(b'\n');
                                 reassembler.reset();
                             }
-                            ReassembleResult::Pending => {}
+                            AggregateResult::Pending => {}
                         }
                     }
                     start = end + 1;
