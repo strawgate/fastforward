@@ -91,7 +91,6 @@ pub fn parse_cri_line(line: &[u8]) -> Option<CriLine<'_>> {
     })
 }
 
-
 /// Process a chunk of CRI-formatted log data. Parses each CRI line, reassembles
 /// partials, and calls `emit` with each complete log message.
 ///
@@ -357,10 +356,16 @@ mod tests {
         let mut reassembler = CriReassembler::new(1024 * 1024);
 
         let p1 = parse_cri_line(b"2024-01-15T10:30:00Z stdout P first part").unwrap();
-        assert!(matches!(reassembler.feed(p1.message, p1.is_full), AggregateResult::Pending));
+        assert!(matches!(
+            reassembler.feed(p1.message, p1.is_full),
+            AggregateResult::Pending
+        ));
 
         let p2 = parse_cri_line(b"2024-01-15T10:30:00Z stdout P second part").unwrap();
-        assert!(matches!(reassembler.feed(p2.message, p2.is_full), AggregateResult::Pending));
+        assert!(matches!(
+            reassembler.feed(p2.message, p2.is_full),
+            AggregateResult::Pending
+        ));
 
         let f = parse_cri_line(b"2024-01-15T10:30:00Z stdout F final part").unwrap();
         match reassembler.feed(f.message, f.is_full) {
