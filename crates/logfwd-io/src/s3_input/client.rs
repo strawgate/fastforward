@@ -63,6 +63,8 @@ impl S3Client {
 
         let client = reqwest::Client::builder()
             .pool_max_idle_per_host(max_idle_connections)
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(300))
             .use_rustls_tls()
             .build()
             .map_err(|e| io::Error::other(format!("S3 client build: {e}")))?;
@@ -416,8 +418,8 @@ impl S3Client {
         let list_path = Self::list_signing_path();
 
         let headers = if self.path_style {
-            // For path-style MinIO: the signing path includes the bucket.
-            let signing_path = format!("/{}/", self.bucket);
+            // For path-style MinIO: the signing path includes the bucket (no trailing slash).
+            let signing_path = format!("/{}", self.bucket);
             self.signed_headers(
                 "GET",
                 &signing_path,

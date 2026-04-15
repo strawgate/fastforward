@@ -54,7 +54,7 @@ fn try_connect_minio() -> Option<Arc<S3Client>> {
 
 /// Create a test bucket and upload objects for benchmarking.
 #[cfg(feature = "s3")]
-async fn setup_bench_objects(rt: &Runtime) -> Option<()> {
+async fn setup_bench_objects() -> Option<()> {
     let endpoint = minio_endpoint();
     let access_key = minio_access_key();
     let secret_key = minio_secret_key();
@@ -74,6 +74,7 @@ async fn setup_bench_objects(rt: &Runtime) -> Option<()> {
     let _create = client
         .put(format!("{endpoint}/{BENCH_BUCKET}"))
         .header("Content-Length", "0")
+        .basic_auth(&access_key, Some(&secret_key))
         .send()
         .await;
 
@@ -99,10 +100,19 @@ async fn setup_bench_objects(rt: &Runtime) -> Option<()> {
             continue;
         }
         let data = generate_log_bytes(*size_bytes);
-        upload_object_raw(&client, &endpoint, BENCH_BUCKET, name, &data).await?;
+        upload_object_raw(
+            &client,
+            &endpoint,
+            BENCH_BUCKET,
+            name,
+            &data,
+            &access_key,
+            &secret_key,
+        )
+        .await?;
     }
 
-    rt.block_on(async { Some(()) })
+    Some(())
 }
 
 /// Generate synthetic log lines.
@@ -118,19 +128,21 @@ fn generate_log_bytes(size: usize) -> Vec<u8> {
     out
 }
 
-/// Upload bytes to MinIO using a raw PUT request (no SigV4 needed for local MinIO
-/// with anonymous PUT if bucket policy allows, but we use basic auth here).
+/// Upload bytes to MinIO using a raw PUT request with basic auth for local MinIO.
 async fn upload_object_raw(
     client: &reqwest::Client,
     endpoint: &str,
     bucket: &str,
     key: &str,
     data: &[u8],
+    access_key: &str,
+    secret_key: &str,
 ) -> Option<()> {
     let url = format!("{endpoint}/{bucket}/{key}");
     let resp = client
         .put(&url)
         .header("Content-Length", data.len().to_string())
+        .basic_auth(access_key, Some(secret_key))
         .body(data.to_vec())
         .send()
         .await
@@ -169,7 +181,7 @@ fn bench_s3_download(c: &mut Criterion) {
     }
 
     // Setup objects.
-    let setup_ok = rt.block_on(async { setup_bench_objects(&rt).await });
+    let setup_ok = rt.block_on(async { setup_bench_objects().await });
     if setup_ok.is_none() {
         eprintln!("s3_bench: setup failed — skipping S3 benchmarks");
         return;

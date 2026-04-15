@@ -576,14 +576,19 @@ pub(super) fn build_input_state(
                 use logfwd_io::s3_input::decompress::Compression;
                 use logfwd_io::s3_input::{S3Input, S3InputSettings};
 
-                let compression_override: Option<Compression> =
-                    s3_cfg.compression.as_deref().and_then(|s: &str| {
-                        if s.eq_ignore_ascii_case("auto") {
-                            None
-                        } else {
-                            Compression::from_config_str(s)
+                let compression_override: Option<Compression> = match s3_cfg.compression.as_deref()
+                {
+                    None => None,
+                    Some(s) if s.eq_ignore_ascii_case("auto") => None,
+                    Some(s) => match Compression::from_config_str(s) {
+                        Some(c) => Some(c),
+                        None => {
+                            return Err(format!(
+                                "input '{name}': unknown S3 compression value '{s}'"
+                            ));
                         }
-                    });
+                    },
+                };
 
                 let settings = S3InputSettings::from_fields(
                     s3_cfg.bucket.clone(),

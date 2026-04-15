@@ -69,6 +69,8 @@ impl SqsClient {
             })?;
 
         let http = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(60))
             .use_rustls_tls()
             .build()
             .map_err(|e| io::Error::other(format!("SQS client build: {e}")))?;

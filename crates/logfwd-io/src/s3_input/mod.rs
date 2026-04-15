@@ -186,7 +186,7 @@ pub struct S3Input {
     rx: mpsc::Receiver<ChunkPayload>,
     health: Arc<AtomicU8>,
     is_running: Arc<AtomicBool>,
-    _thread_handle: std::thread::JoinHandle<()>,
+    thread_handle: Option<std::thread::JoinHandle<()>>,
 }
 
 // ── Internal types ─────────────────────────────────────────────────────────
@@ -228,6 +228,9 @@ impl S3Input {
 
         let sqs_client: Option<Arc<SqsClient>> = if let Some(ref queue_url) = settings.sqs_queue_url
         {
+            // Pass the resolved region (from config, env, or default) to ensure
+            // SQS signing uses the same region as S3. SqsClient can auto-detect
+            // from the URL when None, but explicit is safer for cross-region setups.
             Some(Arc::new(SqsClient::new(
                 queue_url.clone(),
                 Some(settings.region.clone()),
@@ -363,7 +366,7 @@ impl S3Input {
             rx,
             health,
             is_running,
-            _thread_handle: handle,
+            thread_handle: Some(handle),
         })
     }
 }
@@ -402,6 +405,9 @@ impl Drop for S3Input {
         self.health
             .store(ComponentHealth::Stopping.as_repr(), Ordering::Relaxed);
         self.is_running.store(false, Ordering::Relaxed);
+        if let Some(handle) = self.thread_handle.take() {
+            let _ = handle.join();
+        }
     }
 }
 
@@ -648,6 +654,8 @@ async fn fetch_object(
 
     let compression = compression_override.unwrap_or_else(|| detect_compression(key, None));
 
+    // TODO: Stream decompression incrementally instead of buffering the entire
+    // object in memory. This will reduce peak memory for large objects.
     // For compressed objects, use a single stream download.
     // For uncompressed objects (with known size), use parallel range-GETs.
     let raw: bytes::Bytes = if compression != Compression::None || size == 0 {
@@ -676,7 +684,11 @@ async fn fetch_object(
             bytes: chunk.to_vec(),
             accounted_bytes: ab,
         };
-        if out_tx.send(payload).is_err() {
+        let out_tx = out_tx.clone();
+        let send_result = tokio::task::spawn_blocking(move || out_tx.send(payload))
+            .await
+            .map_err(|e| io::Error::other(format!("spawn_blocking send: {e}")))?;
+        if send_result.is_err() {
             // Consumer dropped — pipeline is shutting down.
             break;
         }
