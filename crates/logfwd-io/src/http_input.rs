@@ -966,6 +966,75 @@ Connection: close\r\n\
         );
     }
 
+    #[test]
+    fn http_rejects_empty_content_encoding_header() {
+        let mut input =
+            HttpInput::new_with_options("test", "127.0.0.1:0", HttpInputOptions::default())
+                .expect("http input binds");
+        let url = format!("http://{}/ingest", input.local_addr());
+
+        let status = match ureq::post(&url)
+            .header("Content-Encoding", " ")
+            .send(b"{\"x\":1}\n")
+        {
+            Ok(resp) => resp.status().as_u16(),
+            Err(ureq::Error::StatusCode(code)) => code,
+            Err(err) => panic!("unexpected request failure: {err}"),
+        };
+
+        assert_eq!(status, StatusCode::BAD_REQUEST.as_u16());
+        let data = poll_until_data(&mut input, Duration::from_millis(100));
+        assert!(data.is_empty(), "bad requests must not enqueue data");
+    }
+
+    #[test]
+    fn http_poll_respects_max_drained_bytes() {
+        let options = HttpInputOptions {
+            path: "/ingest".to_string(),
+            max_drained_bytes_per_poll: 40,
+            ..HttpInputOptions::default()
+        };
+        // Channel bound is large enough to hold all requests
+        let mut input = HttpInput::new_with_capacity("test", "127.0.0.1:0", 1000, options)
+            .expect("http input binds");
+        let url = format!("http://{}/ingest", input.local_addr());
+
+        let payload = b"{\"x\":1}\n"; // 8 bytes
+        let num_requests = 100; // 800 bytes total
+
+        let mut handles = Vec::with_capacity(num_requests);
+        for _ in 0..num_requests {
+            let url = url.clone();
+            handles.push(std::thread::spawn(move || {
+                let _ = ureq::post(&url).send(payload);
+            }));
+        }
+
+        for handle in handles {
+            handle.join().expect("POST worker should join");
+        }
+
+        let first_events = input.poll().expect("poll should succeed");
+        let first_drained_bytes = if let InputEvent::Data { bytes, .. } = &first_events[0] {
+            bytes.len()
+        } else {
+            0
+        };
+
+        // We set the limit to 40 bytes per poll. Each payload is 8 bytes.
+        // It will pull 5 payloads (40 bytes), and then stop.
+        assert_eq!(first_drained_bytes, 40);
+
+        let second_events = input.poll().expect("poll should succeed");
+        let second_drained_bytes = if let InputEvent::Data { bytes, .. } = &second_events[0] {
+            bytes.len()
+        } else {
+            0
+        };
+
+        assert_eq!(second_drained_bytes, 40);
+    }
+
     fn decode_observed_seq(bytes: &[u8]) -> BTreeSet<u64> {
         let mut observed = BTreeSet::new();
         for line in bytes.split(|&b| b == b'\n').filter(|line| !line.is_empty()) {
