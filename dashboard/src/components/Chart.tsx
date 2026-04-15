@@ -27,7 +27,7 @@ export interface ChartConfig {
 }
 
 /** Palette for multi-pipeline series. Cycles through these colors. */
-const SERIES_PALETTE = [
+export const SERIES_PALETTE = [
   "#3b82f6",
   "#22c55e",
   "#f59e0b",

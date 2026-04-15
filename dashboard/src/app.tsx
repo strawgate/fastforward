@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "preact/hooks";
 import { api } from "./api";
 import type { ChartConfig } from "./components/Chart";
-import { ChartGrid } from "./components/ChartGrid";
+import { ChartGrid, PipelineLegend, discoverPipelines } from "./components/ChartGrid";
 import { ConfigView } from "./components/ConfigView";
 import { LogViewer } from "./components/LogViewer";
 import { PipelineView } from "./components/PipelineView";
@@ -113,6 +113,7 @@ export function App() {
   const [traces, setTraces] = useState<TraceRecord[]>([]);
   const [totalErrors, setTotalErrors] = useState(0);
   const [showMoreCharts, setShowMoreCharts] = useState(false);
+  const [hiddenPipelines, setHiddenPipelines] = useState<Set<string>>(new Set());
 
   // ── WebSocket telemetry → TelemetryStore ─────────────────────────────────
   const { store, tick, ingest } = useTelemetryStore();
@@ -237,6 +238,18 @@ export function App() {
   const pipelineCount = status?.pipelines?.length ?? 0;
   const defaultExpanded = pipelineCount <= 3;
 
+  // Discover pipeline names for the legend from chart data.
+  const allPipelineCharts = [...PRIMARY_CHARTS, ...EXTRA_CHARTS];
+  const pipelineNames = discoverPipelines(store, allPipelineCharts);
+  const togglePipeline = useCallback((key: string) => {
+    setHiddenPipelines((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }, []);
+
   return (
     <>
       <StatusBar
@@ -253,7 +266,17 @@ export function App() {
         {/* ── Pipeline charts ── */}
         <div class="section">
           <div class="heading">Pipeline Metrics</div>
-          <ChartGrid store={store} charts={[...PRIMARY_CHARTS, ...visibleExtras]} tick={tick} />
+          <PipelineLegend
+            pipelines={pipelineNames}
+            hidden={hiddenPipelines}
+            onToggle={togglePipeline}
+          />
+          <ChartGrid
+            store={store}
+            charts={[...PRIMARY_CHARTS, ...visibleExtras]}
+            tick={tick}
+            hiddenPipelines={hiddenPipelines}
+          />
           {hasHiddenCharts && (
             <button type="button" class="show-more-btn" onClick={() => setShowMoreCharts(true)}>
               Show More Charts
