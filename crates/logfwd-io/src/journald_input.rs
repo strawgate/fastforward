@@ -552,10 +552,11 @@ fn apply_unit_matches(
 fn seek_start(journal: &mut journal_ffi::Journal, config: &JournaldConfig) -> io::Result<()> {
     if let Some(cursor_path) = &config.cursor_path
         && let Ok(cursor) = std::fs::read_to_string(cursor_path)
-            && !cursor.trim().is_empty()
-                && let Ok(()) = journal.seek_cursor(cursor.trim()) {
-                    return Ok(());
-                }
+        && !cursor.trim().is_empty()
+        && let Ok(()) = journal.seek_cursor(cursor.trim())
+    {
+        return Ok(());
+    }
 
     if config.since_now {
         // Seek to tail, then the read loop will pick up only new entries.
@@ -846,9 +847,10 @@ fn build_command(config: &JournaldConfig) -> Command {
 
     if let Some(cursor_path) = &config.cursor_path
         && let Ok(cursor) = std::fs::read_to_string(cursor_path)
-            && !cursor.trim().is_empty() {
-                cmd.arg(format!("--after-cursor={}", cursor.trim()));
-            }
+        && !cursor.trim().is_empty()
+    {
+        cmd.arg(format!("--after-cursor={}", cursor.trim()));
+    }
 
     cmd
 }
