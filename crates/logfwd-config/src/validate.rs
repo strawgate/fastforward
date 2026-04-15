@@ -155,6 +155,16 @@ impl Config {
                                     "pipeline '{name}' input '{label}': {msg}"
                                 )));
                             }
+                            if u.max_message_size_bytes == Some(0) {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': max_message_size_bytes cannot be 0"
+                                )));
+                            }
+                            if u.so_rcvbuf == Some(0) {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': so_rcvbuf cannot be 0"
+                                )));
+                            }
                         }
                         InputTypeConfig::Tcp(t) => {
                             if let Err(msg) = validate_bind_addr(&t.listen) {
@@ -166,6 +176,21 @@ impl Config {
                                 // TCP TLS is not yet implemented at runtime.
                                 return Err(ConfigError::Validation(format!(
                                     "pipeline '{name}' input '{label}': TLS is not yet supported for TCP inputs (runtime TLS termination is not implemented)"
+                                )));
+                            }
+                            if t.max_connections == Some(0) {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': max_connections cannot be 0"
+                                )));
+                            }
+                            if t.connection_timeout_ms == Some(0) {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': connection_timeout_ms cannot be 0"
+                                )));
+                            }
+                            if t.read_timeout_ms == Some(0) {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': read_timeout_ms cannot be 0"
                                 )));
                             }
                         }
@@ -246,6 +271,15 @@ impl Config {
                                     "pipeline '{name}' input '{label}': generator.attributes float values must be finite"
                                 )));
                             }
+                                if let Some((key, _)) =
+                                    generator.attributes.iter().find(|(_, v)| {
+                                        matches!(v, GeneratorAttributeValueConfig::Unsupported(_))
+                                    })
+                                {
+                                    return Err(ConfigError::Validation(format!(
+                                        "pipeline '{name}' input '{label}': generator.attributes '{key}' has an unsupported type (expected scalar value)"
+                                    )));
+                                }
                                 if !is_record_profile
                                     && (!generator.attributes.is_empty()
                                         || generator.sequence.is_some()
@@ -409,6 +443,16 @@ impl Config {
                             if input.format.is_some() {
                                 return Err(ConfigError::Validation(format!(
                                     "pipeline '{name}' input '{label}': 'format' is not supported for arrow_ipc inputs"
+                                )));
+                            }
+                            if a.max_connections == Some(0) {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': max_connections cannot be 0"
+                                )));
+                            }
+                            if a.max_message_size_bytes == Some(0) {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': max_message_size_bytes cannot be 0"
                                 )));
                             }
                         }
@@ -706,6 +750,17 @@ impl Config {
                             )));
                         }
                     }
+
+                    if let Some(labels) = &output.static_labels {
+                        for (k, v) in labels {
+                            if k.trim().is_empty() || v.trim().is_empty() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' output '{label}': 'static_labels' keys and values must not be empty"
+                                )));
+                            }
+                        }
+                    }
+
                     if !matches!(output.output_type, OutputType::File | OutputType::Parquet)
                         && output.path.is_some()
                     {

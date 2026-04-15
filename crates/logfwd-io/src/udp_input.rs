@@ -39,7 +39,7 @@ const fn should_stop_udp_drain(datagrams_read: usize, emitted_bytes: usize) -> b
 #[derive(Debug, Clone)]
 pub struct UdpInputOptions {
     /// Maximum UDP packet payload size in bytes. Defaults to `MAX_UDP_PAYLOAD`.
-    pub max_packet_size: usize,
+    pub max_message_size_bytes: usize,
     /// Desired socket receive buffer size (SO_RCVBUF). Defaults to `RECV_BUF_SIZE`.
     pub so_rcvbuf: usize,
 }
@@ -47,7 +47,7 @@ pub struct UdpInputOptions {
 impl Default for UdpInputOptions {
     fn default() -> Self {
         Self {
-            max_packet_size: MAX_UDP_PAYLOAD,
+            max_message_size_bytes: MAX_UDP_PAYLOAD,
             so_rcvbuf: RECV_BUF_SIZE,
         }
     }
@@ -105,7 +105,7 @@ impl UdpInput {
         Ok(Self {
             name: name.into(),
             socket,
-            buf: vec![0u8; options.max_packet_size],
+            buf: vec![0u8; options.max_message_size_bytes],
             actual_recv_buf,
             drops_detected: Arc::new(AtomicU64::new(0)),
             health: ComponentHealth::Healthy,
@@ -371,7 +371,7 @@ mod tests {
     #[test]
     fn test_udp_custom_options() {
         let options = UdpInputOptions {
-            max_packet_size: 1024,
+            max_message_size_bytes: 1024,
             so_rcvbuf: 131072, // 128KB
         };
         let input = UdpInput::with_options(

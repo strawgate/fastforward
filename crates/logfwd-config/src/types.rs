@@ -220,6 +220,7 @@ pub enum GeneratorAttributeValueConfig {
     Integer(i64),
     Float(f64),
     Bool(bool),
+    Unsupported(serde_yaml_ng::Value),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -262,6 +263,8 @@ pub struct HttpInputConfig {
     pub strict_path: Option<bool>,
     pub method: Option<HttpMethodConfig>,
     pub max_request_body_size: Option<usize>,
+    /// Max bytes to drain per poll call. Default matches OTLP receiver (1GB).
+    pub max_drained_bytes_per_poll: Option<usize>,
     pub response_code: Option<u16>,
     /// Optional static body returned on successful ingest.
     /// Must be omitted when `response_code` is `204`.
@@ -271,6 +274,15 @@ pub struct HttpInputConfig {
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct GeneratorInputConfig {
+    #[serde(default)]
+    pub events_per_second: Option<u64>,
+    #[serde(default)]
+    pub num_lines: Option<u64>,
+    #[serde(default)]
+    pub message_template: Option<String>,
+    #[serde(default)]
+    pub field_count: Option<usize>,
+
     pub events_per_sec: Option<u64>,
     pub batch_size: Option<usize>,
     pub total_events: Option<u64>,
@@ -333,6 +345,18 @@ pub struct JournaldInputConfig {
     /// Systemd units to exclude.
     #[serde(default)]
     pub exclude_units: Vec<String>,
+    /// Syslog identifiers (`SYSLOG_IDENTIFIER=`) to include.
+    #[serde(default)]
+    pub identifiers: Vec<String>,
+    /// Priority/log levels (e.g. `0`, `3`, `info`, `err`) to include.
+    #[serde(default)]
+    pub priorities: Vec<String>,
+    /// Path to persist the cursor. Allows resuming after restarts.
+    #[serde(default)]
+    pub cursor_path: Option<String>,
+    /// Include `_BOOT_ID` field in output (default: false).
+    #[serde(default)]
+    pub include_boot_id: bool,
     /// Only include entries from the current boot (default: true).
     #[serde(default = "default_true")]
     pub current_boot_only: bool,
@@ -378,6 +402,10 @@ impl Default for JournaldInputConfig {
         Self {
             include_units: Vec::new(),
             exclude_units: Vec::new(),
+            identifiers: Vec::new(),
+            priorities: Vec::new(),
+            cursor_path: None,
+            include_boot_id: false,
             current_boot_only: true,
             since_now: false,
             journalctl_path: None,
@@ -479,7 +507,7 @@ pub struct FileTypeConfig {
 pub struct UdpTypeConfig {
     pub listen: String,
     #[serde(default)]
-    pub max_packet_size: Option<usize>,
+    pub max_message_size_bytes: Option<usize>,
     #[serde(default)]
     pub so_rcvbuf: Option<usize>,
 }
@@ -507,6 +535,14 @@ pub struct OtlpTypeConfig {
     pub resource_prefix: Option<String>,
     /// Experimental OTLP protobuf decode strategy. Defaults to `prost`.
     pub protobuf_decode_mode: Option<OtlpProtobufDecodeModeConfig>,
+    #[serde(default)]
+    pub max_recv_message_size_bytes: Option<usize>,
+    #[serde(default)]
+    pub tls: Option<TlsInputConfig>,
+    #[serde(default)]
+    pub grpc_keepalive_time_ms: Option<u64>,
+    #[serde(default)]
+    pub grpc_max_concurrent_streams: Option<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
