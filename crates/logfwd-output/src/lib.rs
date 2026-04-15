@@ -43,9 +43,7 @@ pub use otlp_sink::{OtlpProtocol, OtlpSink, OtlpSinkFactory};
 pub use sink::{
     AsyncFanoutFactory, AsyncFanoutSink, OnceAsyncFactory, SendResult, Sink, SinkFactory,
 };
-pub use stdout::StdoutSinkFactory;
-#[cfg(test)]
-use stdout::*;
+pub use stdout::{StdoutFormat, StdoutSink, StdoutSinkFactory};
 pub use tcp_sink::{TcpSink, TcpSinkFactory};
 pub use udp_sink::{UdpSink, UdpSinkFactory};
 
