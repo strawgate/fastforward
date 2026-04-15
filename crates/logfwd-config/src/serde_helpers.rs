@@ -35,17 +35,17 @@ where
         where
             E: serde::de::Error,
         {
-            if value.ends_with("ms") {
-                let ms: u64 = value[..value.len() - 2].parse().map_err(serde::de::Error::custom)?;
+            if let Some(stripped) = value.strip_suffix("ms") {
+                let ms: u64 = stripped.parse().map_err(serde::de::Error::custom)?;
                 Ok(Some(std::time::Duration::from_millis(ms)))
-            } else if value.ends_with('s') {
-                let s: u64 = value[..value.len() - 1].parse().map_err(serde::de::Error::custom)?;
+            } else if let Some(stripped) = value.strip_suffix('s') {
+                let s: u64 = stripped.parse().map_err(serde::de::Error::custom)?;
                 Ok(Some(std::time::Duration::from_secs(s)))
-            } else if value.ends_with('m') {
-                let m: u64 = value[..value.len() - 1].parse().map_err(serde::de::Error::custom)?;
+            } else if let Some(stripped) = value.strip_suffix('m') {
+                let m: u64 = stripped.parse().map_err(serde::de::Error::custom)?;
                 Ok(Some(std::time::Duration::from_secs(m * 60)))
-            } else if value.ends_with('h') {
-                let h: u64 = value[..value.len() - 1].parse().map_err(serde::de::Error::custom)?;
+            } else if let Some(stripped) = value.strip_suffix('h') {
+                let h: u64 = stripped.parse().map_err(serde::de::Error::custom)?;
                 Ok(Some(std::time::Duration::from_secs(h * 3600)))
             } else {
                 Err(serde::de::Error::custom(format!("invalid duration string: {}", value)))
