@@ -1750,6 +1750,7 @@ mod verification {
         );
 
         // Non-vacuity: both single-byte and multi-byte varints are exercised.
+        kani::cover!(value == 0, "zero encodes as single byte 0x00");
         kani::cover!(buf.len() == 1, "single-byte varint (value < 128)");
         kani::cover!(buf.len() == 10, "10-byte varint (u64::MAX region)");
         kani::cover!(buf.len() > 1 && buf.len() < 10, "multi-byte varint");
@@ -1774,9 +1775,14 @@ mod verification {
         let pos: usize = kani::any_where(|&p| p <= N);
 
         // Result is either Ok or Err — never a panic.
-        let _ = decode_varint(&buf[..len], pos);
+        let result = decode_varint(&buf[..len], pos);
 
         // Non-vacuity: interesting cases are reachable under the assumptions.
+        kani::cover!(result.is_ok(), "valid varint: Ok path is reachable");
+        kani::cover!(
+            result.is_err(),
+            "invalid/truncated input: Err path is reachable"
+        );
         kani::cover!(len > 0 && pos < len, "non-empty buffer with valid start");
         kani::cover!(pos == len, "pos at end — must return Err immediately");
     }

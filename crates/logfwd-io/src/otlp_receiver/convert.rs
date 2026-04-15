@@ -670,6 +670,7 @@ mod verification {
     /// `out[pos]` is never evaluated with the wrapped value. This proof pins
     /// that invariant by verifying spec-correct output for key boundary inputs.
     #[kani::proof]
+    #[kani::unwind(22)] // digit-count + digit-write loops: u64::MAX has 20 digits + 2 overhead
     fn verify_write_u64_known_values() {
         // Spec values: correct decimal strings for boundary u64 inputs.
         let mut buf = Vec::new();
@@ -696,6 +697,7 @@ mod verification {
     ///
     /// Also verifies sign, zero, and max boundary values.
     #[kani::proof]
+    #[kani::unwind(22)] // digit-count + digit-write loops: i64::MAX has 19 digits + 2 overhead
     fn verify_write_i64_known_values() {
         let mut buf = Vec::new();
         write_i64_to_buf(&mut buf, 0);
