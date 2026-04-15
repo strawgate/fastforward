@@ -1,7 +1,5 @@
 input:
   type: generator
-  generator:
-    profile: envoy
 transform: |
   SELECT * FROM logs WHERE level != 'DEBUG'
 output:

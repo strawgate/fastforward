@@ -689,7 +689,10 @@ pub fn weighted_pick<T: Copy>(rng: &mut fastrand::Rng, items: &[(T, usize)]) -> 
 }
 
 pub fn weighted_choice_pick<T: WeightedChoice + Copy>(rng: &mut fastrand::Rng, items: &[T]) -> T {
-    debug_assert!(!items.is_empty());
+    assert!(
+        !items.is_empty(),
+        "weighted_choice_pick requires non-empty items"
+    );
     let total: usize = items.iter().map(WeightedChoice::weight).sum();
     let mut roll = rng.usize(..total.max(1));
     for item in items {

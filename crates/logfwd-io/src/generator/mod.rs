@@ -851,9 +851,12 @@ mod tests {
 
         // Simulate a huge scheduler stall: 1000 seconds of credits.
         // The burst cap is max(events_per_sec, batch_size) = 5_000 events.
+        // Use checked_sub since Instant can't go before the monotonic epoch;
+        // fall back to a shorter but still sufficient stall.
         input.last_refill = std::time::Instant::now()
             .checked_sub(std::time::Duration::from_secs(1000))
-            .unwrap_or_else(std::time::Instant::now);
+            .or_else(|| std::time::Instant::now().checked_sub(std::time::Duration::from_secs(10)))
+            .expect("system uptime too short for rate-limit test");
 
         let second = input.poll().unwrap();
         let emitted_rows: usize = second
