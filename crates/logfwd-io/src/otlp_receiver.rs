@@ -37,8 +37,17 @@ use tokio::sync::oneshot;
 use crate::InputError;
 use crate::background_http_task::BackgroundHttpTask;
 use crate::input::{InputEvent, InputSource};
+use crate::receiver_http::MAX_REQUEST_BODY_SIZE;
 
 const CHANNEL_BOUND: usize = 4096;
+
+/// Default maximum OTLP request body size (10 MiB).
+///
+/// Used as the fallback when `max_recv_message_size_bytes` is not set in
+/// configuration. Pass this to
+/// [`OtlpReceiverInput::new_with_stats_resource_prefix_and_body_size`] when no
+/// user-supplied override is needed.
+pub const DEFAULT_MAX_REQUEST_BODY_SIZE: usize = MAX_REQUEST_BODY_SIZE;
 /// Max payloads drained from the internal channel in a single `poll()` call.
 ///
 /// This bounds per-poll work and prevents one call from aggregating an
@@ -91,6 +100,7 @@ struct OtlpServerState {
     resource_prefix: String,
     protobuf_decode_mode: OtlpProtobufDecodeMode,
     stats: Option<Arc<ComponentStats>>,
+    max_request_body_size: usize,
 }
 
 impl OtlpReceiverInput {
@@ -183,13 +193,34 @@ impl OtlpReceiverInput {
         stats: Option<Arc<ComponentStats>>,
         resource_prefix: String,
     ) -> io::Result<Self> {
-        Self::new_with_capacity_stats_prefix_and_decode_mode(
+        Self::new_with_capacity_stats_prefix_decode_mode_and_body_size(
             name,
             addr,
             capacity,
             stats,
             resource_prefix,
             OtlpProtobufDecodeMode::Prost,
+            MAX_REQUEST_BODY_SIZE,
+        )
+    }
+
+    /// Like [`Self::new_with_stats_and_resource_prefix`], but also configures
+    /// the maximum request body size accepted by the receiver.
+    pub fn new_with_stats_resource_prefix_and_body_size(
+        name: impl Into<String>,
+        addr: &str,
+        stats: Arc<ComponentStats>,
+        resource_prefix: impl Into<String>,
+        max_request_body_size: usize,
+    ) -> io::Result<Self> {
+        Self::new_with_capacity_stats_prefix_decode_mode_and_body_size(
+            name,
+            addr,
+            CHANNEL_BOUND,
+            Some(stats),
+            resource_prefix.into(),
+            OtlpProtobufDecodeMode::Prost,
+            max_request_body_size,
         )
     }
 
@@ -202,23 +233,25 @@ impl OtlpReceiverInput {
         resource_prefix: impl Into<String>,
         protobuf_decode_mode: OtlpProtobufDecodeMode,
     ) -> io::Result<Self> {
-        Self::new_with_capacity_stats_prefix_and_decode_mode(
+        Self::new_with_capacity_stats_prefix_decode_mode_and_body_size(
             name,
             addr,
             CHANNEL_BOUND,
             stats,
             resource_prefix.into(),
             protobuf_decode_mode,
+            MAX_REQUEST_BODY_SIZE,
         )
     }
 
-    fn new_with_capacity_stats_prefix_and_decode_mode(
+    fn new_with_capacity_stats_prefix_decode_mode_and_body_size(
         name: impl Into<String>,
         addr: &str,
         capacity: usize,
         stats: Option<Arc<ComponentStats>>,
         resource_prefix: String,
         protobuf_decode_mode: OtlpProtobufDecodeMode,
+        max_request_body_size: usize,
     ) -> io::Result<Self> {
         let std_listener = std::net::TcpListener::bind(addr)
             .map_err(|e| io::Error::other(format!("OTLP receiver bind {addr}: {e}")))?;
@@ -237,6 +270,7 @@ impl OtlpReceiverInput {
             resource_prefix,
             protobuf_decode_mode,
             stats,
+            max_request_body_size,
         });
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let state_for_server = Arc::clone(&state);

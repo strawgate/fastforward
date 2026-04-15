@@ -67,6 +67,14 @@ pub struct JournaldConfig {
     pub include_units: Vec<String>,
     /// Systemd units to exclude.
     pub exclude_units: Vec<String>,
+    /// Syslog identifiers (`SYSLOG_IDENTIFIER=`) to include (empty = all).
+    pub identifiers: Vec<String>,
+    /// Priority levels to include (empty = all).
+    pub priorities: Vec<String>,
+    /// Path to persist the journal cursor across restarts.
+    pub cursor_path: Option<String>,
+    /// Include `_BOOT_ID` field in output.
+    pub include_boot_id: bool,
     /// Only read entries from the current boot.
     pub current_boot_only: bool,
     /// Start reading from "now" (skip history).
@@ -86,6 +94,10 @@ impl Default for JournaldConfig {
         Self {
             include_units: Vec::new(),
             exclude_units: Vec::new(),
+            identifiers: Vec::new(),
+            priorities: Vec::new(),
+            cursor_path: None,
+            include_boot_id: false,
             current_boot_only: true,
             since_now: false,
             journalctl_path: "journalctl".to_string(),
@@ -971,7 +983,7 @@ fn read_export_entries(
                 );
                 // Skip past the oversized field data + trailing newline.
                 // Read in chunks to avoid huge allocations.
-                let mut remaining = data_len_u64 + 1; // +1 for trailing \n
+                let mut remaining = data_len_u64.saturating_add(1); // +1 for trailing \n
                 let mut discard = vec![0u8; 64 * 1024];
                 while remaining > 0 {
                     let chunk = remaining.min(discard.len() as u64) as usize;

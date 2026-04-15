@@ -18,7 +18,7 @@ loom-tests = []
 internal-failpoints = ["dep:fail", "fail/failpoints"]
 datafusion = ["dep:logfwd-transform"]
 dhat-heap = ["dep:dhat"]
-cpu-profiling = ["dep:pprof"]
+cpu-profiling = ["dep:pprof", "dep:flate2"]
 otlp-research = ["logfwd-config/otlp-research", "logfwd-io/otlp-research"]
 s3 = ["logfwd-io/s3"]
 
@@ -28,6 +28,7 @@ backon = { workspace = true }
 bytes = { workspace = true }
 dhat = { version = "0.3", optional = true }
 fail = { workspace = true, optional = true }
+flate2 = { version = "1", optional = true }
 futures-util = { workspace = true }
 libc = "0.2"
 logfwd-arrow = { version = "0.1.0", path = "../logfwd-arrow" }

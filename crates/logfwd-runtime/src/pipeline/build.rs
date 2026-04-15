@@ -176,6 +176,15 @@ impl Pipeline {
                             .map_err(|e| format!("enrichment '{}': {e}", cfg.table_name))?;
                         enrichment_tables.push(table);
                     }
+                    // These enrichment types inject metadata at runtime (env vars,
+                    // process info, network info, container info, K8s cluster info)
+                    // and do not require build-time table initialization.
+                    EnrichmentConfig::EnvVars(_)
+                    | EnrichmentConfig::ProcessInfo(_)
+                    | EnrichmentConfig::KvFile(_)
+                    | EnrichmentConfig::NetworkInfo(_)
+                    | EnrichmentConfig::ContainerInfo(_)
+                    | EnrichmentConfig::K8sClusterInfo(_) => {}
                 }
             }
 

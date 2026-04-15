@@ -2987,6 +2987,7 @@ dependencies = [
  "bytes",
  "dhat",
  "fail",
+ "flate2",
  "futures-util",
  "libc",
  "logfwd-arrow",

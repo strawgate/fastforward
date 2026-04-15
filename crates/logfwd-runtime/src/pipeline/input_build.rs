@@ -192,6 +192,9 @@ pub(super) fn build_input_state(
                     .and_then(|c| c.batch_size)
                     .unwrap_or(DEFAULT_GENERATOR_BATCH_SIZE),
                 total_events: generator_cfg.and_then(|c| c.total_events).unwrap_or(0),
+                message_template: generator_cfg.and_then(|c| c.message_template.clone()),
+                field_count: generator_cfg.and_then(|c| c.field_count),
+                seed: 42,
                 complexity: match generator_cfg.and_then(|c| c.complexity.clone()) {
                     Some(GeneratorComplexityConfig::Complex) => GeneratorComplexity::Complex,
                     Some(GeneratorComplexityConfig::Simple) | None => GeneratorComplexity::Simple,
@@ -201,8 +204,13 @@ pub(super) fn build_input_state(
                 },
                 profile: match generator_cfg.and_then(|c| c.profile.clone()) {
                     Some(GeneratorProfileConfig::Record) => GeneratorProfile::Record,
+                    Some(GeneratorProfileConfig::Envoy) => GeneratorProfile::Envoy,
+                    Some(GeneratorProfileConfig::CriK8s) => GeneratorProfile::CriK8s,
+                    Some(GeneratorProfileConfig::Wide) => GeneratorProfile::Wide,
+                    Some(GeneratorProfileConfig::Narrow) => GeneratorProfile::Narrow,
+                    Some(GeneratorProfileConfig::CloudTrail) => GeneratorProfile::CloudTrail,
                     Some(GeneratorProfileConfig::Logs) | None => GeneratorProfile::Logs,
-                    // Non-exhaustive config enum: future variants default to
+                    // Non-exhaustive config enum: future profile variants default to
                     // Logs to preserve backward-compatible behavior.
                     Some(_) => GeneratorProfile::Logs,
                 },
@@ -293,12 +301,16 @@ pub(super) fn build_input_state(
             )
             .map_err(|e| format!("input '{name}': failed to start OTLP receiver: {e}"))?;
             #[cfg(not(feature = "otlp-research"))]
-            let source =
-                logfwd_io::otlp_receiver::OtlpReceiverInput::new_with_stats_and_resource_prefix(
+            let max_body_size = o
+                .max_recv_message_size_bytes
+                .unwrap_or(logfwd_io::otlp_receiver::DEFAULT_MAX_REQUEST_BODY_SIZE);
+            #[cfg(not(feature = "otlp-research"))]
+            let source = logfwd_io::otlp_receiver::OtlpReceiverInput::new_with_stats_resource_prefix_and_body_size(
                     name,
                     addr,
                     Arc::clone(&stats),
                     resource_prefix,
+                    max_body_size,
                 )
                 .map_err(|e| format!("input '{name}': failed to start OTLP receiver: {e}"))?;
             #[cfg(not(feature = "otlp-research"))]
@@ -587,6 +599,10 @@ pub(super) fn build_input_state(
             let config = JournaldConfig {
                 include_units: jd_cfg.map(|c| c.include_units.clone()).unwrap_or_default(),
                 exclude_units: jd_cfg.map(|c| c.exclude_units.clone()).unwrap_or_default(),
+                identifiers: jd_cfg.map(|c| c.identifiers.clone()).unwrap_or_default(),
+                priorities: jd_cfg.map(|c| c.priorities.clone()).unwrap_or_default(),
+                cursor_path: jd_cfg.and_then(|c| c.cursor_path.clone()),
+                include_boot_id: jd_cfg.is_some_and(|c| c.include_boot_id),
                 current_boot_only: jd_cfg.is_none_or(|c| c.current_boot_only),
                 since_now: jd_cfg.is_some_and(|c| c.since_now),
                 journalctl_path: jd_cfg
