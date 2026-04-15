@@ -191,7 +191,7 @@ fn test_json_lines_serializes_body_column() {
     ]);
     let batch = RecordBatch::try_new(schema, vec![Arc::new(raw)]).unwrap();
 
-    let config = Arc::new(crate::json_lines::JsonLinesSinkConfig {
+    let config = Arc::new(json_lines::JsonLinesSinkConfig {
         url: "http://localhost:9200".to_string(),
         compression: Compression::None,
         headers: vec![],
@@ -579,7 +579,7 @@ fn test_json_lines_body_only_no_panic() {
     let schema = Arc::new(Schema::new(vec![Field::new("body", DataType::Utf8, true)]));
     let raw = StringArray::from(vec![Some(r#"{"x":1}"#)]);
     let batch = RecordBatch::try_new(schema, vec![Arc::new(raw)]).unwrap();
-    let config = Arc::new(crate::json_lines::JsonLinesSinkConfig {
+    let config = Arc::new(json_lines::JsonLinesSinkConfig {
         url: "http://localhost:9200".to_string(),
         compression: Compression::None,
         headers: vec![],
