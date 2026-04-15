@@ -262,7 +262,7 @@ pub fn flat_to_star(batch: &RecordBatch) -> Result<StarSchema, ArrowError> {
             flags_col = Some(idx);
             continue;
         }
-        if name.starts_with("scope.") {
+        if name.starts_with("scope.") || name.starts_with("_scope_") {
             has_scope_cols = true;
         }
 
@@ -692,7 +692,7 @@ pub fn star_to_flat(star: &StarSchema) -> Result<RecordBatch, ArrowError> {
         |key| match key {
             "scope_name" => "scope.name".to_string(),
             "scope_version" => "scope.version".to_string(),
-            _ if key.starts_with("scope.") => key.to_string(),
+            _ if key.starts_with("scope.") || key.starts_with("_scope_") => key.to_string(),
             _ => format!("scope.{key}"),
         },
         &unprotected_cols,
@@ -1577,7 +1577,7 @@ pub(crate) fn days_from_civil(year: i64, month: u32, day: u32) -> Option<i64> {
 }
 
 /// Format nanosecond epoch timestamp as RFC 3339 string.
-fn chrono_timestamp(secs: i64, nanos: u32) -> String {
+pub fn chrono_timestamp(secs: i64, nanos: u32) -> String {
     // Reverse the days_from_civil calculation.
     let total_days = secs.div_euclid(86400);
     let day_secs = secs.rem_euclid(86400);
@@ -1984,7 +1984,7 @@ fn scatter_scope_attrs(
 ) {
     let scope_col_indices: Vec<usize> = col_index
         .iter()
-        .filter(|(name, _)| name.starts_with("scope."))
+        .filter(|(name, _)| name.starts_with("scope.") || name.starts_with("_scope_"))
         .map(|(_, &idx)| idx)
         .collect();
 
