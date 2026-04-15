@@ -441,7 +441,7 @@ fn status_payload(state: &DiagnosticsState) -> StatusSnapshotResponse {
             .max()
             .unwrap_or(0);
         let drop_rate = if lines_in > 0 {
-            1.0 - (lines_out as f64 / lines_in as f64)
+            (1.0 - (lines_out as f64 / lines_in as f64)).clamp(0.0, 1.0)
         } else {
             0.0
         };
@@ -497,9 +497,9 @@ fn status_payload(state: &DiagnosticsState) -> StatusSnapshotResponse {
         }
 
         let batch_latency_avg_ns = if latency_batches > 0 {
-            batch_latency_total / latency_batches
+            Some(batch_latency_total / latency_batches)
         } else {
-            0
+            None
         };
         let inflight = pm.inflight_batches.load(Ordering::Relaxed);
         let backpressure = pm.backpressure_stalls.load(Ordering::Relaxed);
@@ -936,7 +936,8 @@ fn build_traces_body(state: &DiagnosticsState) -> String {
 
 fn build_logs_body(state: &DiagnosticsState) -> String {
     let lines = state.stderr.get_logs();
-    let mut body = String::with_capacity(lines.len() * 80 + 32);
+    let dropped = state.stderr.lines_dropped();
+    let mut body = String::with_capacity(lines.len() * 80 + 64);
     body.push_str(r#"{"lines":["#);
     for (i, line) in lines.iter().enumerate() {
         if i > 0 {
@@ -952,6 +953,8 @@ fn build_logs_body(state: &DiagnosticsState) -> String {
     } else {
         "false"
     });
+    body.push_str(r#","lines_dropped":"#);
+    body.push_str(&dropped.to_string());
     body.push('}');
     body
 }
