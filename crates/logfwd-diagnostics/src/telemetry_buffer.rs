@@ -851,9 +851,27 @@ pub fn sample_stderr_logs(
     buf: &RingBuffer<LogPoint>,
     last_cursor: &mut u64,
 ) {
-    let (new_lines, new_cursor) = stderr.get_logs_since(*last_cursor);
+    let prev_cursor = *last_cursor;
+    let (new_lines, new_cursor) = stderr.get_logs_since(prev_cursor);
     *last_cursor = new_cursor;
     let now = now_nanos();
+
+    // If more lines were pushed than we received, some were evicted from the
+    // capture buffer before we could read them.  Emit a warning so the
+    // dashboard makes the gap visible.
+    let total_new = new_cursor.saturating_sub(prev_cursor);
+    if total_new > new_lines.len() as u64 {
+        let dropped = total_new - new_lines.len() as u64;
+        buf.push(LogPoint {
+            severity: Severity::Warn,
+            body: format!(
+                "Ring buffer evicted {} stderr lines before they could be read",
+                dropped
+            ),
+            attributes: vec![("source", "stderr".to_string())],
+            time_unix_nano: now,
+        });
+    }
 
     for line in new_lines {
         buf.push(LogPoint {

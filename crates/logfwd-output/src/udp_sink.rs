@@ -83,11 +83,14 @@ impl UdpSink {
     /// Send the current datagram buffer if non-empty, then clear it.
     /// ECONNREFUSED (ICMP port-unreachable) is silently ignored because UDP
     /// is fire-and-forget — the destination may come back later.
-    async fn flush_dgram(&mut self) -> io::Result<()> {
+    async fn flush_dgram(&mut self, rows_in_dgram: u64) -> io::Result<()> {
         if self.dgram_buf.is_empty() {
             return Ok(());
         }
+        let len = self.dgram_buf.len() as u64;
         self.send_packet(&self.dgram_buf).await?;
+        self.stats.inc_lines(rows_in_dgram);
+        self.stats.inc_bytes(len);
         self.dgram_buf.clear();
         Ok(())
     }
@@ -99,7 +102,7 @@ impl UdpSink {
         }
 
         let cols = build_col_infos(batch);
-        let mut total_bytes: u64 = 0;
+        let mut rows_in_dgram = 0;
 
         for row in 0..batch.num_rows() {
             // Serialize row into scratch buffer.
@@ -108,29 +111,31 @@ impl UdpSink {
             self.row_buf.push(b'\n');
 
             let row_len = self.row_buf.len();
-            total_bytes += row_len as u64;
 
             // If this single row exceeds the MTU, send it alone as an
             // oversized datagram (up to 65507). The network may fragment it
             // but that is better than silently dropping data.
             if row_len > MAX_DATAGRAM_PAYLOAD {
-                self.flush_dgram().await?;
+                self.flush_dgram(rows_in_dgram).await?;
+                rows_in_dgram = 0;
                 self.send_packet(&self.row_buf).await?;
+                self.stats.inc_lines(1);
+                self.stats.inc_bytes(row_len as u64);
                 continue;
             }
 
             // Would adding this row overflow the current datagram?
             if self.dgram_buf.len() + row_len > MAX_DATAGRAM_PAYLOAD {
-                self.flush_dgram().await?;
+                self.flush_dgram(rows_in_dgram).await?;
+                rows_in_dgram = 0;
             }
 
             self.dgram_buf.extend_from_slice(&self.row_buf);
+            rows_in_dgram += 1;
         }
 
         // Flush any remaining rows.
-        self.flush_dgram().await?;
-        self.stats.inc_lines(batch.num_rows() as u64);
-        self.stats.inc_bytes(total_bytes);
+        self.flush_dgram(rows_in_dgram).await?;
         Ok(())
     }
 }
@@ -150,7 +155,7 @@ impl Sink for UdpSink {
     }
 
     fn flush(&mut self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
-        Box::pin(async move { self.flush_dgram().await })
+        Box::pin(async move { self.flush_dgram(0).await })
     }
 
     fn name(&self) -> &str {
@@ -158,7 +163,7 @@ impl Sink for UdpSink {
     }
 
     fn shutdown(&mut self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
-        Box::pin(async move { self.flush_dgram().await })
+        Box::pin(async move { self.flush_dgram(0).await })
     }
 }
 
