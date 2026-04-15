@@ -59,6 +59,84 @@ pub(crate) const fn reduce_receiver_health(
     }
 }
 
+/// Trait for types that can report their completion status.
+pub(crate) trait IsFinished {
+    fn is_finished(&self) -> bool;
+}
+
+impl IsFinished for tokio::task::JoinHandle<()> {
+    fn is_finished(&self) -> bool {
+        self.is_finished()
+    }
+}
+
+impl IsFinished for crate::background_http_task::BackgroundHttpTask {
+    fn is_finished(&self) -> bool {
+        self.is_finished()
+    }
+}
+
+/// Helper to compute receiver health combining stored state with task status.
+///
+/// Returns Failed if the background task is finished but shutdown was not requested.
+/// Accepts any type that has an `is_finished(&self) -> bool` method.
+pub(crate) fn compute_receiver_health<T>(
+    health: &std::sync::atomic::AtomicU8,
+    background_task: &T,
+    shutdown: &std::sync::atomic::AtomicBool,
+) -> ComponentHealth
+where
+    T: IsFinished,
+{
+    let stored = ComponentHealth::from_repr(health.load(std::sync::atomic::Ordering::Relaxed));
+    if background_task.is_finished() && !shutdown.load(std::sync::atomic::Ordering::Relaxed) {
+        ComponentHealth::Failed
+    } else {
+        stored
+    }
+}
+
+/// Helper to store a receiver health event with atomic compare-exchange loop.
+pub(crate) fn store_health_event(
+    health: &std::sync::atomic::AtomicU8,
+    event: ReceiverHealthEvent,
+) {
+    let mut current = health.load(std::sync::atomic::Ordering::Relaxed);
+    loop {
+        let current_health = ComponentHealth::from_repr(current);
+        let next = reduce_receiver_health(current_health, event).as_repr();
+        match health.compare_exchange_weak(
+            current,
+            next,
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+        ) {
+            Ok(_) => break,
+            Err(observed) => current = observed,
+        }
+    }
+}
+
+/// Helper to perform shutdown sequence for receiver drop.
+///
+/// Updates health through ShutdownRequested -> ShutdownCompleted transitions.
+pub(crate) fn shutdown_receiver(
+    health: &std::sync::atomic::AtomicU8,
+    shutdown: &std::sync::atomic::AtomicBool,
+) {
+    let current = ComponentHealth::from_repr(health.load(std::sync::atomic::Ordering::Relaxed));
+    health.store(
+        reduce_receiver_health(current, ReceiverHealthEvent::ShutdownRequested).as_repr(),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
+    let current = ComponentHealth::from_repr(health.load(std::sync::atomic::Ordering::Relaxed));
+    health.store(
+        reduce_receiver_health(current, ReceiverHealthEvent::ShutdownCompleted).as_repr(),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::{ReceiverHealthEvent, reduce_receiver_health};

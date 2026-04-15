@@ -32,7 +32,9 @@ use tokio::sync::oneshot;
 use crate::InputError;
 use crate::background_http_task::BackgroundHttpTask;
 use crate::input::{InputEvent, InputSource};
-use crate::receiver_health::{ReceiverHealthEvent, reduce_receiver_health};
+use crate::receiver_health::{
+    compute_receiver_health, shutdown_receiver, store_health_event, ReceiverHealthEvent,
+};
 use crate::receiver_http::{MAX_REQUEST_BODY_SIZE, parse_content_length, read_limited_body};
 
 /// Bounded channel capacity — limits memory when the pipeline falls behind.
@@ -202,12 +204,7 @@ impl ArrowIpcReceiver {
 
     /// Coarse runtime health for readiness and diagnostics integration.
     pub fn health(&self) -> ComponentHealth {
-        let stored = ComponentHealth::from_repr(self.health.load(Ordering::Relaxed));
-        if self.background_task.is_finished() && !self.shutdown.load(Ordering::Relaxed) {
-            ComponentHealth::Failed
-        } else {
-            stored
-        }
+        compute_receiver_health(&self.health, &self.background_task, &self.shutdown)
     }
 }
 
@@ -242,18 +239,6 @@ fn decode_ipc_stream(body: &[u8]) -> Result<Vec<RecordBatch>, InputError> {
     reader
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| InputError::Receiver(format!("failed to read Arrow IPC batch: {e}")))
-}
-
-fn store_health_event(health: &AtomicU8, event: ReceiverHealthEvent) {
-    let mut current = health.load(Ordering::Relaxed);
-    loop {
-        let current_health = ComponentHealth::from_repr(current);
-        let next = reduce_receiver_health(current_health, event).as_repr();
-        match health.compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed) {
-            Ok(_) => break,
-            Err(observed) => current = observed,
-        }
-    }
 }
 
 async fn handle_arrow_ipc_request(
@@ -436,18 +421,8 @@ fn parse_content_type(headers: &HeaderMap) -> Result<Option<&str>, StatusCode> {
 
 impl Drop for ArrowIpcReceiver {
     fn drop(&mut self) {
-        let current = ComponentHealth::from_repr(self.health.load(Ordering::Relaxed));
-        self.health.store(
-            reduce_receiver_health(current, ReceiverHealthEvent::ShutdownRequested).as_repr(),
-            Ordering::Relaxed,
-        );
-        self.shutdown.store(true, Ordering::Relaxed);
+        shutdown_receiver(&self.health, &self.shutdown);
         self.rx.take();
-        let current = ComponentHealth::from_repr(self.health.load(Ordering::Relaxed));
-        self.health.store(
-            reduce_receiver_health(current, ReceiverHealthEvent::ShutdownCompleted).as_repr(),
-            Ordering::Relaxed,
-        );
     }
 }
 
