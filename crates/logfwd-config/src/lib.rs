@@ -474,7 +474,6 @@ output:
         );
     }
 
-
     #[test]
     fn validation_unimplemented_input_format() {
         // Unimplemented input formats must be rejected at config validation time,
@@ -526,7 +525,6 @@ output:
             );
             Config::load_str(&yaml).unwrap_or_else(|e| panic!("failed for {otype}: {e}"));
         }
-
     }
 
     #[test]
@@ -547,7 +545,6 @@ output:
             );
         }
     }
-
 
     #[test]
     fn pipelines_form_rejects_top_level_transform() {
