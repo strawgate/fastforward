@@ -110,8 +110,7 @@ impl FileReader {
                 // Eviction staleness fix: If the file identity mismatched, the old identity's
                 // state is removed from `evicted_offsets` globally so the "new file"
                 // truly starts from the beginning without stale state causing truncation.
-                self.evicted_offsets
-                    .retain(|_, e| e.identity != evicted.identity);
+                self.evicted_offsets.retain(|_, e| e.identity != evicted.identity);
 
                 if start_from_end {
                     file.seek(SeekFrom::End(0))?
