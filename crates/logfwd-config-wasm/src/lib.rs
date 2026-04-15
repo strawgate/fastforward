@@ -281,19 +281,6 @@ const OUTPUT_TEMPLATES: &[OutputTemplate] = &[
         ],
     },
     OutputTemplate {
-        id: "http",
-        label: "HTTP endpoint",
-        description: "POST logs as JSON to any HTTP endpoint.",
-        snippet: "output:\n  type: http\n  endpoint: http://localhost:8080/ingest\n",
-        fields: &[FieldDef {
-            key: "endpoint",
-            label: "Endpoint",
-            default_val: "http://localhost:8080/ingest",
-            placeholder: "http://server:8080/ingest",
-            options: &[],
-        }],
-    },
-    OutputTemplate {
         id: "file",
         label: "NDJSON file",
         description: "Write logs as newline-delimited JSON to a file.",

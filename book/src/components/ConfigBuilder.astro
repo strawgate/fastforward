@@ -76,7 +76,7 @@
       <div class="cb-output-header">
         <span class="cb-output-title">Generated config</span>
         <div class="cb-output-actions">
-          <span id="cb-validation-badge" class="cb-badge"></span>
+          <span id="cb-validation-badge" class="cb-badge" role="status" aria-live="polite"></span>
           <button id="cb-copy-btn" class="cb-btn cb-btn-secondary" title="Copy to clipboard">Copy</button>
           <button id="cb-download-btn" class="cb-btn cb-btn-primary" title="Download as logfwd.yaml">Download</button>
         </div>
@@ -909,7 +909,7 @@
       a.href = URL.createObjectURL(blob);
       a.download = 'logfwd.yaml';
       a.click();
-      URL.revokeObjectURL(a.href);
+      setTimeout(() => URL.revokeObjectURL(a.href), 100);
     });
 
     // Show main, hide spinner
