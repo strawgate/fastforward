@@ -65,6 +65,7 @@ datafusion = { version = "53", default-features = false, features = [
 ] }
 fail = "0.5"
 fastrand = "2"
+flate2 = "1"
 futures-util = "0.3"
 globset = "0.4"
 opentelemetry = "0.31"

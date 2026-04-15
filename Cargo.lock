@@ -3002,6 +3002,7 @@ dependencies = [
  "bytes",
  "dhat",
  "fail",
+ "fastrand",
  "flate2",
  "futures-util",
  "libc",

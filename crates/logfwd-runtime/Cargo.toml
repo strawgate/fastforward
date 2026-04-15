@@ -28,7 +28,8 @@ backon = { workspace = true }
 bytes = { workspace = true }
 dhat = { version = "0.3", optional = true }
 fail = { workspace = true, optional = true }
-flate2 = { version = "1", optional = true }
+fastrand = { workspace = true }
+flate2 = { workspace = true, optional = true }
 futures-util = { workspace = true }
 libc = "0.2"
 logfwd-arrow = { version = "0.1.0", path = "../logfwd-arrow" }

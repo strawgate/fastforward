@@ -208,7 +208,9 @@ pub(super) fn build_input_state(
                     .unwrap_or(0),
                 message_template: generator_cfg.and_then(|c| c.message_template.clone()),
                 field_count: generator_cfg.and_then(|c| c.field_count),
-                seed: 42,
+                // Use a random seed so each process start produces distinct output.
+                // Benchmarks and tests should supply an explicit seed via GeneratorConfig.
+                seed: fastrand::u64(..),
                 complexity: match generator_cfg.and_then(|c| c.complexity.clone()) {
                     Some(GeneratorComplexityConfig::Complex) => GeneratorComplexity::Complex,
                     Some(GeneratorComplexityConfig::Simple) | None => GeneratorComplexity::Simple,
@@ -323,14 +325,14 @@ pub(super) fn build_input_state(
             .map_err(|e| format!("input '{name}': failed to start OTLP receiver: {e}"))?;
             #[cfg(not(feature = "otlp-research"))]
             {
-                // The HTTP-based OTLP receiver does not support TLS or gRPC
-                // settings; warn when a user configures them so they are not
-                // silently ignored.
+                // TLS is a security-sensitive setting — reject it explicitly
+                // rather than silently running plain HTTP.
                 if o.tls.is_some() {
-                    tracing::warn!(
-                        "input '{name}': tls is configured but not supported by the HTTP OTLP receiver; field is ignored"
-                    );
+                    return Err(format!(
+                        "input '{name}': tls is not yet supported by the HTTP OTLP receiver"
+                    ));
                 }
+                // gRPC performance settings are not applicable to the HTTP receiver.
                 if o.grpc_keepalive_time_ms.is_some() {
                     tracing::warn!(
                         "input '{name}': grpc_keepalive_time_ms is configured but not supported by the HTTP OTLP receiver; field is ignored"

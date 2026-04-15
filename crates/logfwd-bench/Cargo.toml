@@ -20,7 +20,7 @@ criterion = { version = "0.7", features = ["html_reports"] }
 datafusion = { workspace = true }
 dhat = { version = "0.3", optional = true }
 fastrand = "2"
-flate2 = "1"
+flate2 = { workspace = true }
 http-body-util = "0.1"
 hyper = { version = "1", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["server", "http1", "tokio"] }

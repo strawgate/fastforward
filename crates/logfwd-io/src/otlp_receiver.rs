@@ -48,11 +48,6 @@ const CHANNEL_BOUND: usize = 4096;
 /// [`OtlpReceiverInput::new_with_stats_resource_prefix_and_body_size`] when no
 /// user-supplied override is needed.
 pub const DEFAULT_MAX_REQUEST_BODY_SIZE: usize = MAX_REQUEST_BODY_SIZE;
-/// Max payloads drained from the internal channel in a single `poll()` call.
-///
-/// This bounds per-poll work and prevents one call from aggregating an
-/// arbitrarily deep queue into memory.
-const MAX_DRAINED_PAYLOADS_PER_POLL: usize = 256;
 
 /// Protobuf decode strategy used by the OTLP HTTP receiver.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -353,7 +348,7 @@ impl InputSource for OtlpReceiverInput {
         let Some(rx) = self.rx.as_ref() else {
             return Ok(vec![]);
         };
-        Ok(drain_receiver_payloads(rx, MAX_DRAINED_PAYLOADS_PER_POLL))
+        Ok(drain_receiver_payloads(rx))
     }
 
     fn name(&self) -> &str {
@@ -429,18 +424,10 @@ pub fn decode_protobuf_to_batch_prost_reference(body: &[u8]) -> Result<RecordBat
     decode_otlp_protobuf_with_prost(body, field_names::DEFAULT_RESOURCE_PREFIX)
 }
 
-fn drain_receiver_payloads(
-    rx: &mpsc::Receiver<ReceiverPayload>,
-    max_drained_payloads: usize,
-) -> Vec<InputEvent> {
-    let mut events = Vec::with_capacity(max_drained_payloads);
-    let mut drained_payloads = 0usize;
+fn drain_receiver_payloads(rx: &mpsc::Receiver<ReceiverPayload>) -> Vec<InputEvent> {
+    let mut events = Vec::new();
 
-    while drained_payloads < max_drained_payloads {
-        let Ok(data) = rx.try_recv() else {
-            break;
-        };
-        drained_payloads += 1;
+    while let Ok(data) = rx.try_recv() {
         events.push(InputEvent::Batch {
             batch: data.batch,
             source_id: None,
@@ -464,7 +451,7 @@ mod poll_tests {
     }
 
     #[test]
-    fn drain_respects_limit_and_leaves_remainder_queued() {
+    fn drain_consumes_all_queued_payloads() {
         let (tx, rx) = mpsc::sync_channel(8);
         tx.send(ReceiverPayload {
             batch: make_batch(1),
@@ -482,11 +469,15 @@ mod poll_tests {
         })
         .expect("send payload 3");
 
-        let events = drain_receiver_payloads(&rx, 2);
-        assert_eq!(events.len(), 2);
+        let events = drain_receiver_payloads(&rx);
+        assert_eq!(events.len(), 3, "drain must consume all 3 queued payloads");
 
-        let remainder = drain_receiver_payloads(&rx, 2);
-        assert_eq!(remainder.len(), 1, "one payload should remain queued");
+        let second_drain = drain_receiver_payloads(&rx);
+        assert_eq!(
+            second_drain.len(),
+            0,
+            "channel must be empty after full drain"
+        );
     }
 
     #[test]
@@ -503,7 +494,7 @@ mod poll_tests {
         })
         .expect("send payload 2");
 
-        let events = drain_receiver_payloads(&rx, 8);
+        let events = drain_receiver_payloads(&rx);
         assert_eq!(events.len(), 2);
 
         match &events[0] {

@@ -304,7 +304,7 @@ impl Config {
                                 if let Some(ts) = &generator.timestamp {
                                     if is_record_profile {
                                         return Err(ConfigError::Validation(format!(
-                                            "pipeline '{name}' input '{label}': generator.timestamp is only supported for the logs profile"
+                                            "pipeline '{name}' input '{label}': generator.timestamp is not supported for the record profile"
                                         )));
                                     }
                                     if ts.step_ms == Some(0) {
