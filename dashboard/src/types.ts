@@ -29,6 +29,11 @@ export interface BatchesData {
   rows_total?: number;
 }
 
+export interface BottleneckData {
+  stage: "output" | "input" | "transform" | "scan" | "none";
+  reason: string;
+}
+
 export interface PipelineData {
   name: string;
   inputs: ComponentData[];
@@ -43,13 +48,39 @@ export interface PipelineData {
     send?: number;
   };
   backpressure_stalls?: number;
+  bottleneck?: BottleneckData;
 }
 
-export interface PipelinesResponse {
+export type HealthState = "starting" | "healthy" | "degraded" | "stopping" | "stopped" | "failed";
+
+export interface StatusSnapshot {
+  status: string;
+  reason: string;
+  observed_at_unix_ns: string;
+}
+
+export interface ComponentHealthSnapshot extends StatusSnapshot {
+  status: HealthState;
+  readiness_impact: "ready" | "non_blocking" | "gating";
+}
+
+export interface StatusResponse {
+  live: StatusSnapshot & {
+    status: "live";
+  };
+  ready: StatusSnapshot & {
+    status: "ready" | "not_ready";
+  };
+  component_health: ComponentHealthSnapshot;
   pipelines: PipelineData[];
   system: {
     uptime_seconds: number;
     version: string;
+    memory?: {
+      resident: number;
+      allocated: number;
+      active: number;
+    };
   };
 }
 

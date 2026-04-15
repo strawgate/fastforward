@@ -12,9 +12,9 @@ use logfwd_bench::{NullSink, generators};
 use logfwd_core::cri::{CriReassembler, ReassembleResult, parse_cri_line};
 use logfwd_core::scan_config::{FieldSpec, ScanConfig};
 use logfwd_io::compress::ChunkCompressor;
-use logfwd_io::diagnostics::ComponentStats;
 use logfwd_output::{ElasticsearchRequestMode, ElasticsearchSinkFactory};
 use logfwd_transform::SqlTransform;
+use logfwd_types::diagnostics::ComponentStats;
 
 // ---------------------------------------------------------------------------
 // Scanner benchmarks
@@ -59,7 +59,7 @@ fn bench_scanner(c: &mut Criterion) {
                     },
                 ],
                 extract_all: false,
-                keep_raw: false,
+                line_field_name: None,
                 validate_utf8: false,
             };
             let mut scanner = Scanner::new(config);

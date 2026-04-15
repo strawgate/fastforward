@@ -41,7 +41,7 @@ function fmtMs(ms: number): string {
   return `${ms.toFixed(0)}ms`;
 }
 
-function computeStats(traces: TraceRecord[]) {
+export function computeStats(traces: TraceRecord[]) {
   // Only use completed (non-in-progress) traces for timing stats
   const done = traces.filter((t) => !t.in_progress);
   if (done.length < 2) return null;
@@ -112,10 +112,12 @@ export function buildLanes(traces: TraceRecord[]): LanesResult {
   const byWorker = new Map<number, TraceRecord[]>();
 
   for (const t of traces) {
-    if (t.worker_id >= 0) {
+    const hasAssignedWorkerId = typeof t.worker_id === "number" && t.worker_id >= 0;
+
+    if (hasAssignedWorkerId) {
       if (!byWorker.has(t.worker_id)) byWorker.set(t.worker_id, []);
       byWorker.get(t.worker_id)?.push(t);
-    } else if (t.in_progress && t.stage === "output") {
+    } else if (t.in_progress && (t.stage === "output" || t.stage === "queued")) {
       pendingTraces.push(t);
     }
   }
@@ -323,8 +325,10 @@ export function layoutSwimlane(
               ? Math.max(startMs + scanMs + xfmMs + 1, nowMs)
               : startMs + scanMs + xfmMs + 1;
         } else {
-          // Use full outMs for layout (drawSwimlane applies drawInFrac when rendering)
-          barEndMs = outStartMs + outMs;
+          // Use full outMs for layout (drawSwimlane applies drawInFrac when rendering).
+          // Clamp to nowMs: clock skew or in-progress batches can produce a future
+          // timestamp, which would extend the bar past chartRight (right-wall bug).
+          barEndMs = Math.min(outStartMs + outMs, nowMs);
         }
 
         const x0raw = toXRaw(startMs);
