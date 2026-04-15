@@ -2861,9 +2861,9 @@ pipelines:
     }
 }
 
-    #[test]
-    fn validation_storage_checkpoint_flush_interval_zero_rejected() {
-        let yaml = r#"
+#[test]
+fn validation_storage_checkpoint_flush_interval_zero_rejected() {
+    let yaml = r#"
 input:
   type: tcp
   listen: 0.0.0.0:8080
@@ -2875,9 +2875,10 @@ server: {}
 storage:
   checkpoint_flush_interval: 0s
 "#;
-        let err = Config::load_str(yaml).expect_err("0s flush interval must fail");
-        assert!(
-            err.to_string().contains("storage.checkpoint_flush_interval must be greater than 0"),
-            "expected non-zero flush interval rejection, got: {err}"
-        );
-    }
+    let err = Config::load_str(yaml).expect_err("0s flush interval must fail");
+    assert!(
+        err.to_string()
+            .contains("storage.checkpoint_flush_interval must be greater than 0"),
+        "expected non-zero flush interval rejection, got: {err}"
+    );
+}

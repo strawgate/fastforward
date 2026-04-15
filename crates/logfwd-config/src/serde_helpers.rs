@@ -18,7 +18,9 @@ where
     }
 }
 
-pub(crate) fn deserialize_duration<'de, D>(deserializer: D) -> Result<Option<std::time::Duration>, D::Error>
+pub(crate) fn deserialize_duration<'de, D>(
+    deserializer: D,
+) -> Result<Option<std::time::Duration>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -43,14 +45,21 @@ where
                 Ok(Some(std::time::Duration::from_secs(s)))
             } else if let Some(stripped) = value.strip_suffix('m') {
                 let m: u64 = stripped.parse().map_err(serde::de::Error::custom)?;
-                let secs = m.checked_mul(60).ok_or_else(|| serde::de::Error::custom("duration minutes overflow"))?;
+                let secs = m
+                    .checked_mul(60)
+                    .ok_or_else(|| serde::de::Error::custom("duration minutes overflow"))?;
                 Ok(Some(std::time::Duration::from_secs(secs)))
             } else if let Some(stripped) = value.strip_suffix('h') {
                 let h: u64 = stripped.parse().map_err(serde::de::Error::custom)?;
-                let secs = h.checked_mul(3600).ok_or_else(|| serde::de::Error::custom("duration hours overflow"))?;
+                let secs = h
+                    .checked_mul(3600)
+                    .ok_or_else(|| serde::de::Error::custom("duration hours overflow"))?;
                 Ok(Some(std::time::Duration::from_secs(secs)))
             } else {
-                Err(serde::de::Error::custom(format!("invalid duration string: {}", value)))
+                Err(serde::de::Error::custom(format!(
+                    "invalid duration string: {}",
+                    value
+                )))
             }
         }
 
