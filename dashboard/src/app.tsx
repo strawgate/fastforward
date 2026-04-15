@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "preact/hooks";
+import { useCallback, useEffect, useMemo, useState } from "preact/hooks";
 import { api } from "./api";
 import type { ChartConfig } from "./components/Chart";
 import { ChartGrid } from "./components/ChartGrid";
@@ -104,17 +104,7 @@ const SYSTEM_CHARTS: ChartConfig[] = [
   },
 ];
 
-/** Optional overlay chart — shown via toggle button alongside Memory chart. */
-const MEMORY_ALLOCATED_CHART: ChartConfig = {
-  metricName: "process.memory.allocated",
-  label: "Memory (Allocated)",
-  color: "#10b981",
-  unit: "",
-  fmtAxis: fmtBytesCompact,
-  yRange: [0, 67108864],
-};
-
-const POLL_MS = 2000;
+const POLL_MS = 1000;
 
 export function App() {
   const [connected, setConnected] = useState(false);
@@ -123,7 +113,6 @@ export function App() {
   const [traces, setTraces] = useState<TraceRecord[]>([]);
   const [totalErrors, setTotalErrors] = useState(0);
   const [showMoreCharts, setShowMoreCharts] = useState(false);
-  const [showAllocChart, setShowAllocChart] = useState(false);
 
   // ── WebSocket telemetry → TelemetryStore ─────────────────────────────────
   const { store, tick, ingest } = useTelemetryStore();
@@ -236,7 +225,7 @@ export function App() {
     : EXTRA_CHARTS.filter((cfg) => {
         const frame = store.selectTimeSeries({
           metricName: cfg.metricName,
-          intervalMs: 2000,
+          intervalMs: 1000,
           reduce: "last",
           ...(cfg.splitBy ? { splitBy: cfg.splitBy } : {}),
         });
@@ -247,6 +236,13 @@ export function App() {
 
   const pipelineCount = status?.pipelines?.length ?? 0;
   const defaultExpanded = pipelineCount <= 3;
+
+  // Build annotation for memory chart: "/ 80MB alloc"
+  const memAnnotations = useMemo(() => {
+    const alloc = stats?.mem_allocated;
+    if (alloc == null || alloc <= 0) return undefined;
+    return { "process.memory.resident": `/ ${fmtBytesCompact(alloc)} alloc` };
+  }, [stats?.mem_allocated]);
 
   return (
     <>
@@ -279,20 +275,12 @@ export function App() {
 
         {/* ── System charts ── */}
         <div class="section">
-          <div class="heading">
-            System Metrics
-            <button
-              type="button"
-              class="show-more-btn inline"
-              onClick={() => setShowAllocChart(!showAllocChart)}
-            >
-              {showAllocChart ? "Hide Allocated" : "Show Allocated"}
-            </button>
-          </div>
+          <div class="heading">System Metrics</div>
           <ChartGrid
             store={store}
-            charts={showAllocChart ? [...SYSTEM_CHARTS, MEMORY_ALLOCATED_CHART] : SYSTEM_CHARTS}
+            charts={SYSTEM_CHARTS}
             tick={tick}
+            annotations={memAnnotations}
           />
         </div>
 

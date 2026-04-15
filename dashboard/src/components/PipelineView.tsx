@@ -113,6 +113,7 @@ export function PipelineView({ pipeline: p, traces, store, tick: _tick, defaultE
   // Sparkline data for this pipeline.
   const inputRateSpark = selectSparkline(store, "logfwd.input_lines_per_sec", p.name);
   const outputRateSpark = selectSparkline(store, "logfwd.output_lines_per_sec", p.name);
+  const stallsSpark = selectSparkline(store, "logfwd.backpressure_stalls_per_sec", p.name);
 
   // Stage breakdown from status data.
   const stages = p.stage_seconds;
@@ -193,6 +194,13 @@ export function PipelineView({ pipeline: p, traces, store, tick: _tick, defaultE
                       <span class="pn-row">
                         <span>stalls</span>
                         <b class="text-warn">{sr.toFixed(1)}/s</b>
+                        <Sparkline
+                          values={stallsSpark}
+                          width={40}
+                          height={12}
+                          color="var(--warn)"
+                          style="area"
+                        />
                       </span>
                     ) : null;
                   })()}
@@ -299,16 +307,12 @@ export function PipelineView({ pipeline: p, traces, store, tick: _tick, defaultE
                   <div class="ik-l">Drop Rate</div>
                   <div class="ik-v">{(p.transform.filter_drop_rate * 100).toFixed(1)}%</div>
                 </div>
-                {stages?.scan != null && (
+                {totalStageTime > 0 && stages?.transform != null && (
                   <div class="insp-kv">
-                    <div class="ik-l">Scan Time</div>
-                    <div class="ik-v">{stages.scan.toFixed(3)}s</div>
-                  </div>
-                )}
-                {stages?.transform != null && (
-                  <div class="insp-kv">
-                    <div class="ik-l">Transform Time</div>
-                    <div class="ik-v">{stages.transform.toFixed(3)}s</div>
+                    <div class="ik-l">Time Share</div>
+                    <div class="ik-v">
+                      {((stages.transform / totalStageTime) * 100).toFixed(1)}%
+                    </div>
                   </div>
                 )}
               </div>

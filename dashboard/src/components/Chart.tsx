@@ -22,6 +22,8 @@ export interface ChartConfig {
   readonly yRange?: [number, number];
   /** When set, `selectTimeSeries` splits by this attribute (e.g. "pipeline"). */
   readonly splitBy?: string;
+  /** Optional annotation shown after the current value (e.g. "/ 16GB"). */
+  readonly annotation?: string;
 }
 
 /** Palette for multi-pipeline series. Cycles through these colors. */
