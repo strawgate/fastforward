@@ -527,7 +527,7 @@ Special columns added by the scanner / input format layer:
 |----------|-----------|-------------|
 | `int(expr)` | `int(any) → int64` | Cast any value to int64. Returns NULL on failure. |
 | `float(expr)` | `float(any) → float64` | Cast any value to float64. Returns NULL on failure. |
-| `grok(column, pattern)` | `grok(utf8, utf8) → struct` | Apply a Grok pattern to `column` and return the captures as a struct. |
+| `grok(input, pattern)` | `grok(utf8, utf8) → Struct` | Apply a Grok pattern to `input` and return the captures as a struct. |
 | `regexp_extract(input, pattern, group)` | `regexp_extract(utf8, utf8, int64) → utf8` | Return capture group `group` from a regex match. |
 
 Examples:
