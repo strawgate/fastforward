@@ -469,6 +469,7 @@ fn native_reader_loop(
                 health.store(HEALTH_DEGRADED, Ordering::Release);
                 // Brief sleep to avoid spinning on persistent errors.
                 std::thread::sleep(Duration::from_millis(100));
+                tracing::trace!("sd_journal_wait recovered, restoring health to OK");
                 health.store(HEALTH_OK, Ordering::Release);
             }
         }
