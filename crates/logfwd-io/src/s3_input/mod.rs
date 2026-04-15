@@ -241,7 +241,12 @@ struct ObjectWork {
 /// Only deletes the message when all records have been successfully processed.
 struct MessageTracker {
     receipt_handle: String,
+    /// Total number of records in this message (set once at creation).
+    total: usize,
+    /// Remaining records not yet completed (success or failure). Starts at `total`.
     remaining: std::sync::atomic::AtomicUsize,
+    /// Number of records that completed successfully.
+    successes: std::sync::atomic::AtomicUsize,
 }
 
 // ── Constructor ────────────────────────────────────────────────────────────
@@ -528,9 +533,12 @@ async fn run_sqs_discovery(
 
             // Create a shared tracker for all records in this SQS message.
             // The message is only deleted when all records are successfully processed.
+            let record_count = msg.records.len();
             let tracker = Arc::new(MessageTracker {
                 receipt_handle: msg.receipt_handle.clone(),
-                remaining: std::sync::atomic::AtomicUsize::new(msg.records.len()),
+                total: record_count,
+                remaining: std::sync::atomic::AtomicUsize::new(record_count),
+                successes: std::sync::atomic::AtomicUsize::new(0),
             });
 
             for record in msg.records {
@@ -571,6 +579,8 @@ async fn run_list_discovery(
     // Cursor only advances past the contiguous prefix of completed keys.
     let mut dispatched: Vec<String> = Vec::new();
     let mut completed_set: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Deduplicate: skip keys that are still in flight from a previous poll cycle.
+    let mut in_flight: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     while is_running.load(Ordering::Relaxed) {
         let mut continuation: Option<String> = None;
@@ -602,14 +612,21 @@ async fn run_list_discovery(
                 }
                 Ok((objects, next_token)) => {
                     for obj in &objects {
+                        // Skip keys still being processed from a previous poll cycle.
+                        if in_flight.contains(&obj.key) {
+                            continue;
+                        }
+
                         dispatched.push(obj.key.clone());
+                        in_flight.insert(obj.key.clone());
 
                         // Acquire a send permit, interleaving with completion
                         // draining to prevent deadlock when the work channel
                         // is full and completions are pending.
                         let permit = loop {
                             while let Ok(key) = completed_rx.try_recv() {
-                                completed_set.insert(key);
+                                completed_set.insert(key.clone());
+                                in_flight.remove(&key);
                             }
 
                             tokio::select! {
@@ -620,7 +637,8 @@ async fn run_list_discovery(
                                     }
                                 }
                                 Some(key) = completed_rx.recv() => {
-                                    completed_set.insert(key);
+                                    completed_set.insert(key.clone());
+                                    in_flight.remove(&key);
                                 }
                             }
                         };
@@ -634,12 +652,14 @@ async fn run_list_discovery(
 
                     // Final drain + watermark advance.
                     while let Ok(key) = completed_rx.try_recv() {
-                        completed_set.insert(key);
+                        completed_set.insert(key.clone());
+                        in_flight.remove(&key);
                     }
                     while let Some(front) = dispatched.first() {
                         if completed_set.contains(front) {
                             let key = dispatched.remove(0);
                             completed_set.remove(&key);
+                            in_flight.remove(&key);
                             start_after = Some(key);
                         } else {
                             break;
@@ -719,17 +739,23 @@ async fn run_orchestrator(
                     "S3 fetch object failed"
                 );
                 health.store(ComponentHealth::Degraded.as_repr(), Ordering::Relaxed);
-                // receipt_handle not deleted → SQS retry after visibility timeout.
+                // Don't delete the SQS message — it will become visible again
+                // after the visibility timeout expires (once we stop heartbeating).
             } else {
                 // Restore health after a successful fetch.
                 health.store(ComponentHealth::Healthy.as_repr(), Ordering::Relaxed);
 
                 // For SQS messages with multiple records, only delete the
                 // message once ALL records have been successfully processed.
+                // Note: we track successes separately from the decrement below.
                 if let (Some(sqs), Some(tracker)) = (&sqs, &work.message_tracker) {
-                    let prev = tracker.remaining.fetch_sub(1, Ordering::AcqRel);
-                    if prev == 1 {
-                        // Last record in this message — safe to delete.
+                    // Mark this record as successful.
+                    tracker.successes.fetch_add(1, Ordering::AcqRel);
+                    // Check if all records completed and all succeeded.
+                    let remaining_after = tracker.remaining.load(Ordering::Acquire);
+                    let success_count = tracker.successes.load(Ordering::Acquire);
+                    let total = tracker.total;
+                    if remaining_after == 0 && success_count == total {
                         if let Err(e) = sqs.delete_message(&tracker.receipt_handle).await {
                             warn!(name = %name, error = %e, "SQS delete message failed");
                         }
@@ -742,13 +768,12 @@ async fn run_orchestrator(
                 }
             }
 
-            // Remove from in-progress heartbeat set only when all records
-            // from the SQS message are complete (success or error).
-            // On success the counter was decremented above; on error it was not,
-            // so the receipt stays for heartbeat extension until visibility timeout.
+            // Always decrement remaining so heartbeat cleanup happens once
+            // all records are done (success or failure).
             if let Some(tracker) = &work.message_tracker {
-                // remaining == 0 means all records finished successfully.
-                if tracker.remaining.load(Ordering::Acquire) == 0 {
+                let prev = tracker.remaining.fetch_sub(1, Ordering::AcqRel);
+                if prev == 1 {
+                    // All records from this message have completed — stop heartbeating.
                     let mut guard = in_progress.lock().await;
                     guard.retain(|h| h != &tracker.receipt_handle);
                 }

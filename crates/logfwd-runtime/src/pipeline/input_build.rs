@@ -573,7 +573,6 @@ pub(super) fn build_input_state(
 
             #[cfg(feature = "s3")]
             {
-
                 use logfwd_io::s3_input::decompress::Compression;
                 use logfwd_io::s3_input::{S3Input, S3InputSettings};
 
@@ -614,8 +613,7 @@ pub(super) fn build_input_state(
                     .map_err(|e| format!("input '{name}': failed to create S3 input: {e}"))?;
                 let format = cfg.format.clone().unwrap_or(Format::Auto);
                 let format_proc = make_format(name, InputType::S3, &format, &stats)?;
-                let framed =
-                    FramedInput::new(Box::new(source), format_proc, Arc::clone(&stats));
+                let framed = FramedInput::new(Box::new(source), format_proc, Arc::clone(&stats));
                 return Ok(InputState {
                     source: Box::new(framed),
                     buf: BytesMut::with_capacity(4 * 1024 * 1024),

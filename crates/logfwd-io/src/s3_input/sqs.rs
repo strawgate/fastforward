@@ -442,26 +442,19 @@ fn parse_s3_event_body(body: &str) -> Vec<S3EventRecord> {
         return vec![];
     }
 
-    // Some deployments wrap the S3 event in an SNS envelope.
-    // Try to unwrap: if body has a "Message" field, use that as the actual event.
-    let event_json: &str = if let Ok(wrapper) = serde_json::from_str::<serde_json::Value>(body) {
-        if wrapper.get("Message").and_then(|v| v.as_str()).is_some() {
-            // SNS-wrapped — the actual payload is in wrapper["Message"]
-            // We'll re-parse below.
-            return parse_s3_records_from_value(
-                &serde_json::from_str(wrapper["Message"].as_str().unwrap_or("{}"))
-                    .unwrap_or(serde_json::Value::Null),
-            );
-        }
-        return parse_s3_records_from_value(&wrapper);
-    } else {
-        body
+    let Ok(wrapper) = serde_json::from_str::<serde_json::Value>(body) else {
+        return vec![];
     };
 
-    match serde_json::from_str::<serde_json::Value>(event_json) {
-        Ok(v) => parse_s3_records_from_value(&v),
-        Err(_) => vec![],
+    // SNS-wrapped: actual payload is in wrapper["Message"].
+    if let Some(inner) = wrapper.get("Message").and_then(|v| v.as_str()) {
+        if let Ok(inner_val) = serde_json::from_str::<serde_json::Value>(inner) {
+            return parse_s3_records_from_value(&inner_val);
+        }
+        return vec![];
     }
+
+    parse_s3_records_from_value(&wrapper)
 }
 
 fn parse_s3_records_from_value(v: &serde_json::Value) -> Vec<S3EventRecord> {
