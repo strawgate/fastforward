@@ -223,8 +223,12 @@ export function Chart({ frame, config }: Props) {
         aligned = buildAlignedData(currentFrame, now);
         cachedAlignedRef.current = { frame: currentFrame, result: aligned };
       }
-      const { data, seriesCount, age } = aligned;
-      const totalPoints = (data[0] as number[]).length;
+      const { data, seriesCount } = aligned;
+      // Recompute age from live `now` so the x-axis window stays current
+      // even when the cached aligned data is reused across ticks.
+      const xs = data[0] as number[];
+      const age = xs.length > 0 ? now - xs[0] : 0;
+      const totalPoints = xs.length;
 
       if (totalPoints < 2) {
         if (plotRef.current) {
