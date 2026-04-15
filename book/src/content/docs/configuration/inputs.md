@@ -59,8 +59,8 @@ data source is required.
 | `narrow` | Narrow JSON logs with 5 fields | JSON | ~150B |
 | `cloud_trail` | CloudTrail-like AWS audit events | JSON | ~1400B |
 
-> **Note:** The `cri_k8s` profile produces CRI-format output. When using it, set `format: cri` on the input (logfwd auto-defaults this when omitted).
-
+> **Note:** The `cri_k8s` profile produces CRI-format output. logfwd auto-defaults `format: cri` when this profile is selected, so you do not need to set it explicitly.
+>
 > **Note:** The `generator.timestamp` configuration only applies to the `logs` profile.
 
 ```yaml
