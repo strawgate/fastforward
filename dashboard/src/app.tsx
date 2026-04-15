@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "preact/hooks";
+import { useCallback, useEffect, useState } from "preact/hooks";
 import { api } from "./api";
 import type { ChartConfig } from "./components/Chart";
 import { ChartGrid } from "./components/ChartGrid";
@@ -87,8 +87,8 @@ const SYSTEM_CHARTS: ChartConfig[] = [
     yRange: [0, 10],
   },
   {
-    metricName: "process.memory.resident",
-    label: "Memory",
+    metricName: "process.memory.rss",
+    label: "Memory (RSS)",
     color: "#06b6d4",
     unit: "",
     fmtAxis: fmtBytesCompact,
@@ -237,13 +237,6 @@ export function App() {
   const pipelineCount = status?.pipelines?.length ?? 0;
   const defaultExpanded = pipelineCount <= 3;
 
-  // Build annotation for memory chart: "(81MB alloc)"
-  const memAnnotations = useMemo(() => {
-    const alloc = stats?.mem_allocated;
-    if (alloc == null || alloc <= 0) return undefined;
-    return { "process.memory.resident": `(${fmtBytesCompact(alloc)} alloc)` };
-  }, [stats?.mem_allocated]);
-
   return (
     <>
       <StatusBar
@@ -280,7 +273,6 @@ export function App() {
             store={store}
             charts={SYSTEM_CHARTS}
             tick={tick}
-            annotations={memAnnotations}
           />
         </div>
 
