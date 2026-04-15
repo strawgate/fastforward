@@ -545,8 +545,8 @@ mod verification {
     /// resumes exactly at the checkpoint offset. No bytes between the
     /// checkpoint and the old processed offset are skipped.
     ///
-    /// Uses depth 8 (4 reads + optional checkpoints, then restart + verify)
-    /// to cover realistic multi-read scenarios.
+    /// Uses 6 read iterations (with optional checkpoints between each, then
+    /// restart + verify) to cover realistic multi-read scenarios.
     #[kani::proof]
     #[kani::unwind(9)]
     #[kani::solver(kissat)]
