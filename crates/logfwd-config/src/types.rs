@@ -313,6 +313,30 @@ pub struct HostMetricsInputConfig {
     pub ebpf_binary_path: Option<String>,
     /// Maximum events to drain per poll cycle (default: 4096).
     pub max_events_per_poll: Option<usize>,
+    /// Optional list of scrapers to run (e.g. `["cpu", "memory", "disk", "network", "filesystem"]`).
+    #[serde(default)]
+    pub scrapers: Option<Vec<String>>,
+    /// Cadence for metrics collection in milliseconds.
+    #[serde(default)]
+    pub collection_interval_ms: Option<u64>,
+    /// List of disk devices to include.
+    #[serde(default)]
+    pub disk_include_devices: Option<Vec<String>>,
+    /// List of disk devices to exclude.
+    #[serde(default)]
+    pub disk_exclude_devices: Option<Vec<String>>,
+    /// List of network interfaces to include.
+    #[serde(default)]
+    pub network_include_interfaces: Option<Vec<String>>,
+    /// List of network interfaces to exclude.
+    #[serde(default)]
+    pub network_exclude_interfaces: Option<Vec<String>>,
+    /// List of filesystem mount points to include.
+    #[serde(default)]
+    pub filesystem_include_mount_points: Option<Vec<String>>,
+    /// List of filesystem mount points to exclude.
+    #[serde(default)]
+    pub filesystem_exclude_mount_points: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]

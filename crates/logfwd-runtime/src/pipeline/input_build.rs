@@ -601,6 +601,8 @@ fn build_host_metrics_config(
     let control_reload_interval_ms = cfg
         .and_then(|c| c.control_reload_interval_ms)
         .unwrap_or(DEFAULT_SENSOR_CONTROL_RELOAD_INTERVAL_MS);
+    let collection_interval_ms = cfg.and_then(|c| c.collection_interval_ms).unwrap_or(10_000);
+
     logfwd_io::host_metrics::HostMetricsConfig {
         poll_interval: std::time::Duration::from_millis(poll_interval_ms.max(1)),
         control_path: cfg.and_then(|c| c.control_path.clone()).map(PathBuf::from),
@@ -613,6 +615,16 @@ fn build_host_metrics_config(
             .and_then(|c| c.max_rows_per_poll)
             .filter(|&n| n > 0)
             .unwrap_or(256),
+        scrapers: cfg.and_then(|c| c.scrapers.clone()),
+        collection_interval: std::time::Duration::from_millis(collection_interval_ms.max(1)),
+        disk_include_devices: cfg.and_then(|c| c.disk_include_devices.clone()),
+        disk_exclude_devices: cfg.and_then(|c| c.disk_exclude_devices.clone()),
+        network_include_interfaces: cfg.and_then(|c| c.network_include_interfaces.clone()),
+        network_exclude_interfaces: cfg.and_then(|c| c.network_exclude_interfaces.clone()),
+        filesystem_include_mount_points: cfg
+            .and_then(|c| c.filesystem_include_mount_points.clone()),
+        filesystem_exclude_mount_points: cfg
+            .and_then(|c| c.filesystem_exclude_mount_points.clone()),
     }
 }
 
