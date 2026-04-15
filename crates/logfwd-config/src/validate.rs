@@ -771,11 +771,6 @@ impl Config {
                                 "pipeline '{name}' output '{label}': 'request_timeout_ms' is only supported for otlp outputs"
                             )));
                         }
-                        if output.batch_size.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' output '{label}': 'batch_size' is only supported for otlp outputs"
-                            )));
-                        }
                         if output.batch_timeout_ms.is_some() {
                             return Err(ConfigError::Validation(format!(
                                 "pipeline '{name}' output '{label}': 'batch_timeout_ms' is only supported for otlp outputs"
@@ -904,9 +899,9 @@ impl Config {
                                 "pipeline '{name}' output '{label}': 'buffer_size_bytes' is only supported for arrow_ipc outputs"
                             )));
                         }
-                        if output.batch_size.is_some() {
+                        if output.batch_size.is_some() && output.output_type != OutputType::Otlp {
                             return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' output '{label}': 'batch_size' is only supported for arrow_ipc outputs"
+                                "pipeline '{name}' output '{label}': 'batch_size' is only supported for otlp and arrow_ipc outputs"
                             )));
                         }
                         if output.write_schema_on_connect.is_some() {
