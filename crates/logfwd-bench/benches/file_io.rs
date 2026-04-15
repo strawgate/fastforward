@@ -14,8 +14,8 @@ use std::io::Write;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
 use logfwd_core::cri::{CriReassembler, parse_cri_line};
-use logfwd_core::reassembler::AggregateResult;
 use logfwd_core::framer::NewlineFramer;
+use logfwd_core::reassembler::AggregateResult;
 use logfwd_io::generator::cri::{gen_cri_k8s, gen_narrow, gen_production_mixed};
 
 // ---------------------------------------------------------------------------
