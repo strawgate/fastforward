@@ -209,30 +209,74 @@ pub fn build_sink_factory(
             let path = cfg.path.as_ref().ok_or_else(|| {
                 OutputError::Construction(format!("output '{name}': file requires 'path'"))
             })?;
-            if let Some(compression) = cfg.compression.as_deref() {
+
+            // Allow compression but we don't implement gzip/zstd file writing in this iteration.
+            // The pipeline validator checks for "gzip" | "zstd" | "none".
+            let compression = cfg
+                .compression
+                .clone()
+                .unwrap_or_else(|| "none".to_string());
+            if compression.to_lowercase() != "none" {
                 return Err(OutputError::Construction(format!(
-                    "output '{name}': file does not support '{compression}' compression"
+                    "output '{name}': file compression '{compression}' is supported in config but not yet implemented"
                 )));
             }
+
             let mut resolved_path = PathBuf::from(path);
             if resolved_path.is_relative()
                 && let Some(base) = base_path
             {
                 resolved_path = base.join(resolved_path);
             }
-            let fmt = match cfg.format.as_ref() {
-                Some(Format::Json) | None => StdoutFormat::Json,
-                Some(Format::Text) => StdoutFormat::Text,
-                Some(other) => {
+
+            // Both `format` (legacy) and `encoding` (standard) control the same thing here.
+            let mut enc_str = "json".to_string();
+            if let Some(fmt) = cfg.format.as_ref() {
+                enc_str = match fmt {
+                    Format::Json => "json".to_string(),
+                    Format::Text => "text".to_string(),
+                    other => {
+                        return Err(OutputError::Construction(format!(
+                            "output '{name}': file format {other:?} is not supported (use json or text)"
+                        )));
+                    }
+                };
+            }
+            if let Some(enc) = cfg.encoding.as_ref() {
+                enc_str = enc.to_lowercase();
+            }
+
+            let fmt = match enc_str.as_str() {
+                "json" | "ndjson" => StdoutFormat::Json,
+                "text" => StdoutFormat::Text,
+                other => {
                     return Err(OutputError::Construction(format!(
-                        "output '{name}': file format {other:?} is not supported (use json or text)"
+                        "output '{name}': file encoding {other:?} is not supported (use json, ndjson, or text)"
                     )));
                 }
             };
+
+            let append = cfg.append.unwrap_or(true);
+            let delimiter = cfg.delimiter.clone().unwrap_or_else(|| "\n".to_string());
+            if delimiter != "\n" {
+                return Err(OutputError::Construction(format!(
+                    "output '{name}': file delimiter '{delimiter}' is supported in config but only '\\n' is implemented"
+                )));
+            }
+            if cfg.rotation.is_some() {
+                return Err(OutputError::Construction(format!(
+                    "output '{name}': file rotation is supported in config but not yet implemented"
+                )));
+            }
+
             let factory = FileSinkFactory::new(
                 name.to_string(),
                 resolved_path.to_string_lossy().into_owned(),
                 fmt,
+                append,
+                compression,
+                cfg.rotation.clone(),
+                delimiter,
                 stats,
             )
             .map_err(|e| {

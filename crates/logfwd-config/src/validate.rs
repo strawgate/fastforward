@@ -611,6 +611,14 @@ impl Config {
                                     "pipeline '{name}' output '{label}': file output only supports format json or text"
                                 )));
                             }
+                            if let Some(enc) = &output.encoding {
+                                let enc_lower = enc.to_lowercase();
+                                if !matches!(enc_lower.as_str(), "json" | "ndjson" | "text") {
+                                    return Err(ConfigError::Validation(format!(
+                                        "pipeline '{name}' output '{label}': file output encoding '{enc}' is not supported (use json, ndjson, or text)"
+                                    )));
+                                }
+                            }
                         }
                         OutputType::Stdout => {
                             if let Some(fmt) = &output.format
@@ -750,16 +758,23 @@ impl Config {
                     // compression: only valid for outputs that support it
                     if matches!(
                         output.output_type,
-                        OutputType::Stdout
-                            | OutputType::Null
-                            | OutputType::Tcp
-                            | OutputType::Udp
-                            | OutputType::File
+                        OutputType::Stdout | OutputType::Null | OutputType::Tcp | OutputType::Udp
                     ) && output.compression.is_some()
                     {
                         return Err(ConfigError::Validation(format!(
                             "pipeline '{name}' output '{label}': 'compression' is not supported for this output type"
                         )));
+                    }
+
+                    if matches!(output.output_type, OutputType::File)
+                        && let Some(comp) = &output.compression
+                    {
+                        let comp_lower = comp.to_lowercase();
+                        if !matches!(comp_lower.as_str(), "gzip" | "zstd" | "none") {
+                            return Err(ConfigError::Validation(format!(
+                                "pipeline '{name}' output '{label}': file output compression '{comp}' is not supported (use gzip, zstd, or none)"
+                            )));
+                        }
                     }
                 }
 

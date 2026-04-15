@@ -25,9 +25,9 @@ pub use types::{
     HttpTypeConfig, InputConfig, InputType, InputTypeConfig, JournaldBackendConfig,
     JournaldInputConfig, JournaldTypeConfig, JsonlEnrichmentConfig, K8sClusterInfoConfig,
     K8sPathConfig, KvFileEnrichmentConfig, NetworkInfoConfig, OtlpProtobufDecodeModeConfig,
-    OtlpTypeConfig, OutputConfig, OutputType, PipelineConfig, ProcessInfoConfig, SensorTypeConfig,
-    ServerConfig, StaticEnrichmentConfig, StorageConfig, TcpTypeConfig, TlsInputConfig,
-    UdpTypeConfig,
+    OtlpTypeConfig, OutputConfig, OutputType, PipelineConfig, ProcessInfoConfig, RotationConfig,
+    SensorTypeConfig, ServerConfig, StaticEnrichmentConfig, StorageConfig, TcpTypeConfig,
+    TlsInputConfig, UdpTypeConfig,
 };
 pub use validate::validate_host_port;
 
@@ -666,11 +666,9 @@ pipelines:
     }
 
     #[test]
-    fn file_output_rejects_compression() {
+    fn file_output_accepts_compression_now() {
         let yaml = "input:\n  type: file\n  path: /tmp/x.log\noutput:\n  type: file\n  path: /tmp/out.ndjson\n  compression: zstd\n";
-        let err = Config::load_str(yaml).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("'compression' is not supported"));
+        let _ = Config::load_str(yaml).unwrap();
     }
 
     #[test]

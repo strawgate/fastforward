@@ -539,6 +539,18 @@ pub struct JournaldTypeConfig {
 
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
+#[allow(clippy::struct_field_names)]
+pub struct RotationConfig {
+    #[serde(default)]
+    pub max_size_bytes: Option<u64>,
+    #[serde(default)]
+    pub max_age_seconds: Option<u64>,
+    #[serde(default)]
+    pub max_files: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct OutputConfig {
     pub name: Option<String>,
     #[serde(rename = "type")]
@@ -549,6 +561,14 @@ pub struct OutputConfig {
     pub request_mode: Option<String>,
     pub format: Option<Format>,
     pub path: Option<String>,
+    #[serde(default)]
+    pub encoding: Option<String>,
+    #[serde(default)]
+    pub append: Option<bool>,
+    #[serde(default)]
+    pub rotation: Option<RotationConfig>,
+    #[serde(default)]
+    pub delimiter: Option<String>,
     pub index: Option<String>,
     #[serde(default)]
     pub auth: Option<AuthConfig>,

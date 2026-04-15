@@ -365,7 +365,9 @@ fn test_build_sink_factory_file_rejects_compression() {
     };
     assert!(
         err.to_string()
-            .contains("does not support 'zstd' compression")
+            .contains("file compression 'zstd' is supported in config but not yet implemented"),
+        "error message did not match expected: {}",
+        err
     );
 }
 

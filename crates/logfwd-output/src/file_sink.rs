@@ -15,36 +15,77 @@ use crate::sink::{SendResult, Sink, SinkFactory};
 use super::stdout::{StdoutFormat, StdoutSink};
 use logfwd_types::field_names;
 
+use async_compression::tokio::write::{GzipEncoder, ZstdEncoder};
+use logfwd_config::RotationConfig;
 /// Append-only file sink.
 ///
 /// Uses the same row serialization logic as `StdoutSink` so `stdout` and
 /// `file` stay behaviorally aligned.
+use tokio::io::AsyncWrite;
+
+type AsyncWriter = Arc<Mutex<Option<Pin<Box<dyn AsyncWrite + Send + Sync>>>>>;
+
 pub struct FileSink {
     serializer: StdoutSink,
-    file: Arc<Mutex<tokio::fs::File>>,
+    path_template: String,
+    append: bool,
+    compression: String,
+    delimiter: String,
+    rotation: Option<RotationConfig>,
+    current_path: String,
+    current_file_size: u64,
+    created_at: std::time::Instant,
+    writer: AsyncWriter,
     output_buf: Vec<u8>,
+    replaced_buf: Vec<u8>,
     stats: Arc<ComponentStats>,
 }
 
 impl FileSink {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         name: String,
         format: StdoutFormat,
-        file: Arc<Mutex<tokio::fs::File>>,
+        path_template: String,
+        append: bool,
+        compression: String,
+        rotation: Option<RotationConfig>,
+        delimiter: String,
+        current_path: String,
+        writer: Pin<Box<dyn AsyncWrite + Send + Sync>>,
         stats: Arc<ComponentStats>,
     ) -> Self {
-        Self::with_message_field(name, format, field_names::BODY.to_string(), file, stats)
+        Self::with_message_field(
+            name,
+            format,
+            field_names::BODY.to_string(),
+            path_template,
+            append,
+            compression,
+            rotation,
+            delimiter,
+            current_path,
+            writer,
+            stats,
+        )
     }
 
     /// Create a file sink with a custom text/console message field fallback.
     ///
     /// The serializer prefers canonical `body` when present, then this
     /// configured field, then legacy aliases.
+    #[allow(clippy::too_many_arguments)]
     pub fn with_message_field(
         name: String,
         format: StdoutFormat,
         message_field: String,
-        file: Arc<Mutex<tokio::fs::File>>,
+        path_template: String,
+        append: bool,
+        compression: String,
+        rotation: Option<RotationConfig>,
+        delimiter: String,
+        current_path: String,
+        writer: Pin<Box<dyn AsyncWrite + Send + Sync>>,
         stats: Arc<ComponentStats>,
     ) -> Self {
         Self {
@@ -54,10 +95,131 @@ impl FileSink {
                 message_field,
                 Arc::clone(&stats),
             ),
-            file,
+            path_template,
+            append,
+            compression,
+            rotation,
+            delimiter,
+            current_path,
+            writer: Arc::new(Mutex::new(Some(writer))),
             output_buf: Vec::with_capacity(64 * 1024),
+            replaced_buf: Vec::with_capacity(64 * 1024),
+            current_file_size: 0,
+            created_at: std::time::Instant::now(),
             stats,
         }
+    }
+
+    fn create_writer(
+        file: tokio::fs::File,
+        compression: &str,
+    ) -> Pin<Box<dyn AsyncWrite + Send + Sync>> {
+        match compression.to_lowercase().as_str() {
+            "gzip" => Box::pin(GzipEncoder::new(file)),
+            "zstd" => Box::pin(ZstdEncoder::new(file)),
+            _ => Box::pin(file),
+        }
+    }
+
+    async fn ensure_open(&mut self, next_write_size: u64) -> io::Result<()> {
+        let mut force_rotate = false;
+
+        if let Some(rot) = &self.rotation {
+            if let Some(max_age) = rot.max_age_seconds
+                && self.created_at.elapsed().as_secs() >= max_age
+            {
+                force_rotate = true;
+            }
+            if let Some(max_size) = rot.max_size_bytes
+                && self.current_file_size + next_write_size > max_size
+            {
+                force_rotate = true;
+            }
+        }
+
+        let now = chrono::Utc::now();
+        let mut expected_path = now.format(&self.path_template).to_string();
+
+        if force_rotate && expected_path == self.current_path {
+            expected_path = format!("{}.{}", expected_path, now.timestamp_millis());
+        }
+
+        if expected_path != self.current_path {
+            let mut opts = std::fs::OpenOptions::new();
+            opts.create(true).write(true);
+            if self.append {
+                opts.append(true);
+            } else {
+                opts.truncate(true);
+            }
+
+            let std_file = opts.open(&expected_path)?;
+            let meta = std_file.metadata()?;
+            let new_file = tokio::fs::File::from_std(std_file);
+
+            let mut writer_guard = self.writer.lock().await;
+            if let Some(mut old_writer) = writer_guard.take() {
+                let _ = old_writer.shutdown().await;
+            }
+
+            *writer_guard = Some(Self::create_writer(new_file, &self.compression));
+            self.current_path = expected_path.clone();
+            self.current_file_size = meta.len();
+            self.created_at = std::time::Instant::now();
+
+            if let Some(rot) = &self.rotation
+                && let Some(max_files) = rot.max_files
+            {
+                self.prune_old_files(max_files).await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn prune_old_files(&self, max_files: u64) -> io::Result<()> {
+        if max_files == 0 {
+            return Ok(());
+        }
+
+        let path = std::path::Path::new(&self.path_template);
+        let dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+
+        // Find a constant prefix for the files to avoid deleting unrelated files.
+        let file_name = path.file_name().unwrap_or_default().to_string_lossy();
+        let prefix = file_name.split('%').next().unwrap_or(&file_name);
+
+        let mut entries = match tokio::fs::read_dir(dir).await {
+            Ok(entries) => entries,
+            Err(_) => return Ok(()),
+        };
+        let mut files = Vec::new();
+
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let entry_name = entry.file_name().to_string_lossy().into_owned();
+            if !entry_name.starts_with(prefix) {
+                continue;
+            }
+
+            if let Ok(meta) = entry.metadata().await
+                && meta.is_file()
+            {
+                files.push((
+                    entry.path(),
+                    meta.modified().unwrap_or(std::time::SystemTime::now()),
+                ));
+            }
+        }
+
+        files.sort_by_key(|(_, time)| *time);
+
+        if files.len() as u64 > max_files {
+            let to_remove = files.len() as u64 - max_files;
+            for (file_path, _) in files.into_iter().take(to_remove as usize) {
+                let _ = tokio::fs::remove_file(file_path).await;
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -76,13 +238,45 @@ impl Sink for FileSink {
                 return SendResult::from_io_error(e);
             }
 
-            let bytes_written = self.output_buf.len() as u64;
             let lines_written = memchr::memchr_iter(b'\n', &self.output_buf).count() as u64;
-            let mut file = self.file.lock().await;
-            if let Err(e) = file.write_all(&self.output_buf).await {
+
+            let bytes_written = if self.delimiter == "\n" {
+                self.output_buf.len() as u64
+            } else {
+                self.replaced_buf.clear();
+                let delim_bytes = self.delimiter.as_bytes();
+
+                let mut start = 0;
+                for idx in memchr::memchr_iter(b'\n', &self.output_buf) {
+                    self.replaced_buf
+                        .extend_from_slice(&self.output_buf[start..idx]);
+                    self.replaced_buf.extend_from_slice(delim_bytes);
+                    start = idx + 1;
+                }
+                if start < self.output_buf.len() {
+                    self.replaced_buf
+                        .extend_from_slice(&self.output_buf[start..]);
+                }
+                self.replaced_buf.len() as u64
+            };
+
+            if let Err(e) = self.ensure_open(bytes_written).await {
                 return SendResult::from_io_error(e);
             }
 
+            let mut writer_guard = self.writer.lock().await;
+            if let Some(writer) = writer_guard.as_mut() {
+                let buf = if self.delimiter == "\n" {
+                    &self.output_buf
+                } else {
+                    &self.replaced_buf
+                };
+                if let Err(e) = writer.write_all(buf).await {
+                    return SendResult::from_io_error(e);
+                }
+            }
+
+            self.current_file_size += bytes_written;
             self.stats.inc_lines(lines_written);
             self.stats.inc_bytes(bytes_written);
             SendResult::Ok
@@ -91,9 +285,11 @@ impl Sink for FileSink {
 
     fn flush(&mut self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
         Box::pin(async move {
-            let mut file = self.file.lock().await;
-            file.flush().await?;
-            file.sync_data().await
+            let mut writer_guard = self.writer.lock().await;
+            if let Some(writer) = writer_guard.as_mut() {
+                writer.flush().await?;
+            }
+            Ok(())
         })
     }
 
@@ -103,9 +299,11 @@ impl Sink for FileSink {
 
     fn shutdown(&mut self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
         Box::pin(async move {
-            let mut file = self.file.lock().await;
-            file.flush().await?;
-            file.sync_data().await
+            let mut writer_guard = self.writer.lock().await;
+            if let Some(mut writer) = writer_guard.take() {
+                writer.shutdown().await?;
+            }
+            Ok(())
         })
     }
 }
@@ -113,39 +311,81 @@ impl Sink for FileSink {
 pub struct FileSinkFactory {
     name: String,
     format: StdoutFormat,
+    path_template: String,
+    append: bool,
+    compression: String,
+    rotation: Option<RotationConfig>,
+    delimiter: String,
     message_field: String,
-    file: Arc<Mutex<tokio::fs::File>>,
+    current_path: String,
+    writer: AsyncWriter,
     stats: Arc<ComponentStats>,
 }
 
 impl FileSinkFactory {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         name: String,
-        path: String,
+        path_template: String,
         format: StdoutFormat,
+        append: bool,
+        compression: String,
+        rotation: Option<RotationConfig>,
+        delimiter: String,
         stats: Arc<ComponentStats>,
     ) -> io::Result<Self> {
-        Self::with_message_field(name, path, format, field_names::BODY.to_string(), stats)
+        Self::with_message_field(
+            name,
+            path_template,
+            format,
+            append,
+            compression,
+            rotation,
+            delimiter,
+            field_names::BODY.to_string(),
+            stats,
+        )
     }
 
     /// Create a file sink factory with a custom text/console message field fallback.
+    #[allow(clippy::too_many_arguments)]
     pub fn with_message_field(
         name: String,
-        path: String,
+        path_template: String,
         format: StdoutFormat,
+        append: bool,
+        compression: String,
+        rotation: Option<RotationConfig>,
+        delimiter: String,
         message_field: String,
         stats: Arc<ComponentStats>,
     ) -> io::Result<Self> {
-        let std_file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)?;
+        let now = chrono::Utc::now();
+        let current_path = now.format(&path_template).to_string();
+
+        let mut opts = std::fs::OpenOptions::new();
+        opts.create(true).write(true);
+        if append {
+            opts.append(true);
+        } else {
+            opts.truncate(true);
+        }
+        let std_file = opts.open(&current_path)?;
         let file = tokio::fs::File::from_std(std_file);
+
+        let writer = FileSink::create_writer(file, &compression);
+
         Ok(Self {
             name,
             format,
+            path_template,
+            append,
+            compression,
+            rotation,
+            delimiter,
             message_field,
-            file: Arc::new(Mutex::new(file)),
+            current_path,
+            writer: Arc::new(Mutex::new(Some(writer))),
             stats,
         })
     }
@@ -153,11 +393,30 @@ impl FileSinkFactory {
 
 impl SinkFactory for FileSinkFactory {
     fn create(&self) -> io::Result<Box<dyn Sink>> {
+        let writer = self.writer.try_lock().unwrap().take().unwrap_or_else(|| {
+            let mut opts = std::fs::OpenOptions::new();
+            opts.create(true).write(true);
+            if self.append {
+                opts.append(true);
+            } else {
+                opts.truncate(true);
+            }
+            let std_file = opts.open(&self.current_path).unwrap();
+            let file = tokio::fs::File::from_std(std_file);
+            FileSink::create_writer(file, &self.compression)
+        });
+
         Ok(Box::new(FileSink::with_message_field(
             self.name.clone(),
             self.format,
             self.message_field.clone(),
-            Arc::clone(&self.file),
+            self.path_template.clone(),
+            self.append,
+            self.compression.clone(),
+            self.rotation.clone(),
+            self.delimiter.clone(),
+            self.current_path.clone(),
+            writer,
             Arc::clone(&self.stats),
         )))
     }
@@ -205,6 +464,10 @@ mod tests {
             "capture".to_string(),
             path.to_string_lossy().into_owned(),
             StdoutFormat::Json,
+            true,
+            "none".to_string(),
+            None,
+            "\n".to_string(),
             Arc::clone(&stats),
         )
         .unwrap();
@@ -242,6 +505,10 @@ mod tests {
             "capture".to_string(),
             path.to_string_lossy().into_owned(),
             StdoutFormat::Text,
+            true,
+            "none".to_string(),
+            None,
+            "\n".to_string(),
             Arc::clone(&stats),
         )
         .unwrap();
@@ -274,6 +541,10 @@ mod tests {
             "capture".to_string(),
             path.to_string_lossy().into_owned(),
             StdoutFormat::Text,
+            true,
+            "none".to_string(),
+            None,
+            "\n".to_string(),
             Arc::clone(&stats),
         )
         .unwrap();
