@@ -1138,7 +1138,7 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<DiagnosticsState>) {
 // ---------------------------------------------------------------------------
 
 async fn sampler_loop(state: Arc<DiagnosticsState>) {
-    let mut last_stderr_cursor: usize = 0;
+    let mut last_stderr_cursor: u64 = 0;
     let mut prev_health = std::collections::HashMap::new();
     let mut prev_snapshot: Option<super::telemetry::MetricSnapshot> = None;
     loop {
