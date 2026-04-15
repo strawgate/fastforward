@@ -2904,7 +2904,8 @@ storage:
 "#;
         let err = Config::load_str(yaml).expect_err("0s flush interval must fail");
         assert!(
-            err.to_string().contains("storage.checkpoint_flush_interval must be greater than 0"),
+            err.to_string()
+                .contains("storage.checkpoint_flush_interval must be greater than 0"),
             "expected non-zero flush interval rejection, got: {err}"
         );
     }

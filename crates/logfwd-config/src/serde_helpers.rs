@@ -18,7 +18,13 @@ where
     }
 }
 
-pub(crate) fn deserialize_duration<'de, D>(deserializer: D) -> Result<Option<std::time::Duration>, D::Error>
+/// Deserialize an optional duration from a human-readable string.
+///
+/// Accepted formats: `"100ms"` (milliseconds), `"5s"` (seconds), `"2m"` (minutes), `"1h"` (hours).
+/// Returns `None` if the field is absent or `null`.
+pub(crate) fn deserialize_duration<'de, D>(
+    deserializer: D,
+) -> Result<Option<std::time::Duration>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -48,7 +54,10 @@ where
                 let h: u64 = stripped.parse().map_err(serde::de::Error::custom)?;
                 Ok(Some(std::time::Duration::from_secs(h * 3600)))
             } else {
-                Err(serde::de::Error::custom(format!("invalid duration string: {}", value)))
+                Err(serde::de::Error::custom(format!(
+                    "invalid duration string: {}",
+                    value
+                )))
             }
         }
 
