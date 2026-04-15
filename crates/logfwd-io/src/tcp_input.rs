@@ -73,6 +73,7 @@ struct Client {
     stream: TcpStream,
     source_id: SourceId,
     last_data: Instant,
+    last_read: Instant,
     /// Unparsed bytes for this connection.
     pending: Vec<u8>,
     /// Set after the first successfully parsed octet-counted frame.
@@ -227,12 +228,38 @@ fn extract_complete_records(client: &mut Client, out: &mut Vec<u8>) {
 ///
 /// Each connection is assigned a unique `SourceId` so downstream components
 /// can track per-connection state (e.g., partial-line remainders).
+#[derive(Debug, Clone)]
+pub struct TcpInputOptions {
+    /// Maximum number of concurrent connections. Defaults to `MAX_CLIENTS` (1024).
+    pub max_connections: usize,
+    /// Connection idle timeout in milliseconds. Defaults to 60000 (60s).
+    pub connection_timeout_ms: u64,
+    /// Connection read timeout in milliseconds (disconnects if a read yields incomplete data and the next read takes too long). Defaults to no timeout.
+    pub read_timeout_ms: Option<u64>,
+}
+
+impl Default for TcpInputOptions {
+    fn default() -> Self {
+        Self {
+            max_connections: MAX_CLIENTS,
+            connection_timeout_ms: DEFAULT_IDLE_TIMEOUT.as_millis() as u64,
+            read_timeout_ms: None,
+        }
+    }
+}
+
+/// TCP input that accepts connections and reads newline-delimited data.
+///
+/// Each connection is assigned a unique `SourceId` so downstream components
+/// can track per-connection state (e.g., partial-line remainders).
 pub struct TcpInput {
     name: String,
     listener: TcpListener,
     clients: Vec<Client>,
     buf: Vec<u8>,
     idle_timeout: Duration,
+    read_timeout: Option<Duration>,
+    max_connections: usize,
     /// Total connections accepted since creation (never decreases).
     connections_accepted: u64,
     /// Monotonic counter for generating per-connection `SourceId` values.
@@ -243,20 +270,11 @@ pub struct TcpInput {
 }
 
 impl TcpInput {
-    /// Bind to `addr` (e.g. "0.0.0.0:5140") with the default idle timeout.
-    pub fn new(
+    /// Bind to `addr` (e.g. "0.0.0.0:5140") with the given options.
+    pub fn with_options(
         name: impl Into<String>,
         addr: &str,
-        stats: std::sync::Arc<logfwd_types::diagnostics::ComponentStats>,
-    ) -> io::Result<Self> {
-        Self::with_idle_timeout(name, addr, DEFAULT_IDLE_TIMEOUT, stats)
-    }
-
-    /// Bind to `addr` with a custom idle timeout.
-    pub fn with_idle_timeout(
-        name: impl Into<String>,
-        addr: &str,
-        idle_timeout: Duration,
+        options: TcpInputOptions,
         stats: std::sync::Arc<logfwd_types::diagnostics::ComponentStats>,
     ) -> io::Result<Self> {
         let listener = TcpListener::bind(addr)?;
@@ -266,12 +284,37 @@ impl TcpInput {
             listener,
             clients: Vec::new(),
             buf: vec![0u8; READ_BUF_SIZE],
-            idle_timeout,
+            idle_timeout: Duration::from_millis(options.connection_timeout_ms),
+            read_timeout: options.read_timeout_ms.map(Duration::from_millis),
+            max_connections: options.max_connections,
             connections_accepted: 0,
             next_connection_seq: 0,
             health: ComponentHealth::Healthy,
             stats,
         })
+    }
+
+    /// Bind to `addr` (e.g. "0.0.0.0:5140") with the default options.
+    pub fn new(
+        name: impl Into<String>,
+        addr: &str,
+        stats: std::sync::Arc<logfwd_types::diagnostics::ComponentStats>,
+    ) -> io::Result<Self> {
+        Self::with_options(name, addr, TcpInputOptions::default(), stats)
+    }
+
+    /// Bind to `addr` with a custom idle timeout. (Legacy, use with_options())
+    pub fn with_idle_timeout(
+        name: impl Into<String>,
+        addr: &str,
+        idle_timeout: Duration,
+        stats: std::sync::Arc<logfwd_types::diagnostics::ComponentStats>,
+    ) -> io::Result<Self> {
+        let options = TcpInputOptions {
+            connection_timeout_ms: idle_timeout.as_millis() as u64,
+            ..Default::default()
+        };
+        Self::with_options(name, addr, options, stats)
     }
 
     /// Returns the local address this listener is bound to.
@@ -299,7 +342,7 @@ impl InputSource for TcpInput {
 
         // Accept new connections up to the limit.
         loop {
-            if self.clients.len() >= MAX_CLIENTS {
+            if self.clients.len() >= self.max_connections {
                 // Drain (and drop) any pending connections beyond the limit so
                 // the kernel accept queue does not fill up and stall.
                 match self.listener.accept() {
@@ -343,10 +386,12 @@ impl InputSource for TcpInput {
                         self.connections_accepted,
                         std::sync::atomic::Ordering::Relaxed,
                     );
+                    let now = Instant::now();
                     self.clients.push(Client {
                         stream,
                         source_id: sid,
-                        last_data: Instant::now(),
+                        last_data: now,
+                        last_read: now,
                         pending: Vec::new(),
                         octet_counting_mode: false,
                         discard_octet_bytes: 0,
@@ -412,6 +457,7 @@ impl InputSource for TcpInput {
                     Ok(n) => {
                         let chunk = &self.buf[..n];
                         client.last_data = now;
+                        client.last_read = now;
                         got_data = true;
                         bytes_read_for_client = bytes_read_for_client.saturating_add(n);
                         reads_for_client = reads_for_client.saturating_add(1);
@@ -469,6 +515,13 @@ impl InputSource for TcpInput {
             // Check idle AFTER reading — data may have arrived since last poll.
             if !got_data && alive[i] && now.duration_since(client.last_data) > self.idle_timeout {
                 alive[i] = false;
+            } else if !got_data && alive[i] && !client.pending.is_empty() {
+                let has_timed_out = self
+                    .read_timeout
+                    .is_some_and(|rt| now.duration_since(client.last_read) > rt);
+                if has_timed_out {
+                    alive[i] = false;
+                }
             }
         }
 
@@ -762,6 +815,26 @@ mod tests {
             0,
             "idle client should have been disconnected"
         );
+    }
+
+    #[test]
+    fn test_tcp_custom_options() {
+        let mut options = TcpInputOptions::default();
+        options.max_connections = 2;
+        options.connection_timeout_ms = 1000;
+        options.read_timeout_ms = Some(500);
+
+        let input = TcpInput::with_options(
+            "test_custom",
+            "127.0.0.1:0",
+            options,
+            std::sync::Arc::new(logfwd_types::diagnostics::ComponentStats::new()),
+        )
+        .unwrap();
+
+        assert_eq!(input.max_connections, 2);
+        assert_eq!(input.idle_timeout.as_millis(), 1000);
+        assert_eq!(input.read_timeout.unwrap().as_millis(), 500);
     }
 
     #[test]

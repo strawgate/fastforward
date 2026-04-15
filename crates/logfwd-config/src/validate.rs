@@ -162,6 +162,16 @@ impl Config {
                                     "pipeline '{name}' input '{label}': {msg}"
                                 )));
                             }
+                            if u.max_message_size_bytes == Some(0) {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': max_message_size_bytes cannot be 0"
+                                )));
+                            }
+                            if u.so_rcvbuf == Some(0) {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': so_rcvbuf cannot be 0"
+                                )));
+                            }
                         }
                         InputTypeConfig::Tcp(t) => {
                             if let Err(msg) = validate_bind_addr(&t.listen) {
@@ -173,6 +183,21 @@ impl Config {
                                 // TCP TLS is not yet implemented at runtime.
                                 return Err(ConfigError::Validation(format!(
                                     "pipeline '{name}' input '{label}': TLS is not yet supported for TCP inputs (runtime TLS termination is not implemented)"
+                                )));
+                            }
+                            if t.max_connections == Some(0) {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': max_connections cannot be 0"
+                                )));
+                            }
+                            if t.connection_timeout_ms == Some(0) {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': connection_timeout_ms cannot be 0"
+                                )));
+                            }
+                            if t.read_timeout_ms == Some(0) {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': read_timeout_ms cannot be 0"
                                 )));
                             }
                         }
@@ -448,6 +473,16 @@ impl Config {
                             if input.format.is_some() {
                                 return Err(ConfigError::Validation(format!(
                                     "pipeline '{name}' input '{label}': 'format' is not supported for arrow_ipc inputs"
+                                )));
+                            }
+                            if a.max_connections == Some(0) {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': max_connections cannot be 0"
+                                )));
+                            }
+                            if a.max_message_size_bytes == Some(0) {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': max_message_size_bytes cannot be 0"
                                 )));
                             }
                         }

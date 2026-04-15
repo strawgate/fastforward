@@ -574,6 +574,10 @@ pub struct FileTypeConfig {
 #[serde(deny_unknown_fields)]
 pub struct UdpTypeConfig {
     pub listen: String,
+    #[serde(default)]
+    pub max_message_size_bytes: Option<usize>,
+    #[serde(default)]
+    pub so_rcvbuf: Option<usize>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -582,6 +586,12 @@ pub struct TcpTypeConfig {
     pub listen: String,
     #[serde(default)]
     pub tls: Option<TlsInputConfig>,
+    #[serde(default)]
+    pub max_connections: Option<usize>,
+    #[serde(default)]
+    pub connection_timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub read_timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -629,6 +639,10 @@ pub struct SensorTypeConfig {
 #[serde(deny_unknown_fields)]
 pub struct ArrowIpcTypeConfig {
     pub listen: String,
+    #[serde(default)]
+    pub max_connections: Option<usize>,
+    #[serde(default)]
+    pub max_message_size_bytes: Option<usize>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
