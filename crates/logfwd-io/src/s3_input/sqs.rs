@@ -232,12 +232,16 @@ async fn sqs_post(
          SignedHeaders={signed_headers}, Signature={signature}"
     );
 
-    let resp = client
+    let mut req = client
         .post(queue_url)
         .header("Content-Type", "application/x-www-form-urlencoded")
         .header("x-amz-date", &datetime)
         .header("x-amz-content-sha256", &body_sha256)
-        .header("Authorization", &auth)
+        .header("Authorization", &auth);
+    if let Some(token) = session_token {
+        req = req.header("x-amz-security-token", token);
+    }
+    let resp = req
         .body(body)
         .send()
         .await

@@ -67,7 +67,7 @@ const SQS_HEARTBEAT_SECS: u64 = 60;
 
 /// Runtime settings for `S3Input`, translated from the YAML config by the
 /// runtime crate. Avoids a hard dependency on `logfwd-config` inside `logfwd-io`.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct S3InputSettings {
     /// S3 bucket name.
     pub bucket: String,
@@ -99,6 +99,31 @@ pub struct S3InputSettings {
     pub compression_override: Option<Compression>,
     /// `ListObjectsV2` polling interval in milliseconds.
     pub poll_interval_ms: u64,
+}
+
+impl std::fmt::Debug for S3InputSettings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("S3InputSettings")
+            .field("bucket", &self.bucket)
+            .field("region", &self.region)
+            .field("endpoint", &self.endpoint)
+            .field("prefix", &self.prefix)
+            .field("sqs_queue_url", &self.sqs_queue_url)
+            .field("start_after", &self.start_after)
+            .field("access_key_id", &"<redacted>")
+            .field("secret_access_key", &"<redacted>")
+            .field(
+                "session_token",
+                &self.session_token.as_ref().map(|_| "<redacted>"),
+            )
+            .field("part_size_bytes", &self.part_size_bytes)
+            .field("max_concurrent_fetches", &self.max_concurrent_fetches)
+            .field("max_concurrent_objects", &self.max_concurrent_objects)
+            .field("visibility_timeout_secs", &self.visibility_timeout_secs)
+            .field("compression_override", &self.compression_override)
+            .field("poll_interval_ms", &self.poll_interval_ms)
+            .finish()
+    }
 }
 
 impl S3InputSettings {
@@ -261,16 +286,23 @@ impl S3Input {
 
                     let semaphore = Arc::new(Semaphore::new(max_objects));
 
+                    // Shared set of in-progress SQS receipt handles for heartbeats.
+                    let in_progress: Arc<tokio::sync::Mutex<Vec<String>>> =
+                        Arc::new(tokio::sync::Mutex::new(Vec::new()));
+
                     // Spawn discovery task.
-                    let discovery_handle = if sqs_queue_url_is_set {
+                    let (sqs_for_orch, discovery_handle) = if sqs_queue_url_is_set {
                         let sqs = sqs_client.expect("sqs_client set when queue_url set");
+                        let sqs_orch = Arc::clone(&sqs);
                         let is_running_d = Arc::clone(&is_running_bg);
                         let health_d = Arc::clone(&health_bg);
                         let work_tx_d = work_tx.clone();
                         let name_d = name_bg.clone();
-                        tokio::spawn(async move {
+                        let in_progress_d = Arc::clone(&in_progress);
+                        let handle = tokio::spawn(async move {
                             run_sqs_discovery(
                                 sqs,
+                                in_progress_d,
                                 work_tx_d,
                                 is_running_d,
                                 health_d,
@@ -278,14 +310,15 @@ impl S3Input {
                                 visibility_timeout,
                             )
                             .await;
-                        })
+                        });
+                        (Some(sqs_orch), handle)
                     } else {
                         let s3 = Arc::clone(&s3_client);
                         let is_running_d = Arc::clone(&is_running_bg);
                         let health_d = Arc::clone(&health_bg);
                         let work_tx_d = work_tx.clone();
                         let name_d = name_bg.clone();
-                        tokio::spawn(async move {
+                        let handle = tokio::spawn(async move {
                             run_list_discovery(
                                 s3,
                                 bucket,
@@ -298,13 +331,16 @@ impl S3Input {
                                 poll_interval_ms,
                             )
                             .await;
-                        })
+                        });
+                        (None, handle)
                     };
                     // Drop our copy so the orchestrator exits when discovery stops.
                     drop(work_tx);
 
                     run_orchestrator(
                         s3_client,
+                        sqs_for_orch,
+                        in_progress,
                         work_rx,
                         tx,
                         semaphore,
@@ -374,16 +410,13 @@ impl Drop for S3Input {
 /// SQS-driven discovery: long-polls for `ObjectCreated` events.
 async fn run_sqs_discovery(
     sqs: Arc<SqsClient>,
+    in_progress: Arc<tokio::sync::Mutex<Vec<String>>>,
     work_tx: tokio::sync::mpsc::Sender<ObjectWork>,
     is_running: Arc<AtomicBool>,
     health: Arc<AtomicU8>,
     name: String,
     visibility_timeout: u32,
 ) {
-    // Track in-progress receipt handles for periodic heartbeats.
-    let in_progress: Arc<tokio::sync::Mutex<Vec<String>>> =
-        Arc::new(tokio::sync::Mutex::new(Vec::new()));
-
     // Spawn heartbeat task.
     let sqs_hb = Arc::clone(&sqs);
     let in_progress_hb = Arc::clone(&in_progress);
@@ -441,18 +474,9 @@ async fn run_sqs_discovery(
                 }
             }
 
-            // Delete message after dispatching all its records.
-            // If processing fails downstream, the message will re-appear
-            // after the visibility timeout (not deleted = implicit retry).
-            if let Err(e) = sqs.delete_message(&msg.receipt_handle).await {
-                warn!(name = %name, error = %e, "SQS delete message failed");
-            }
-
-            // Remove from in-progress heartbeat set.
-            {
-                let mut guard = in_progress.lock().await;
-                guard.retain(|h| h != &msg.receipt_handle);
-            }
+            // Do not delete the SQS message here — the orchestrator will
+            // delete it after the object is successfully fetched and dispatched.
+            // If the fetch fails, the message reappears after visibility timeout.
         }
     }
 }
@@ -534,6 +558,8 @@ async fn run_list_discovery(
 #[allow(clippy::too_many_arguments)]
 async fn run_orchestrator(
     s3: Arc<S3Client>,
+    sqs: Option<Arc<SqsClient>>,
+    in_progress: Arc<tokio::sync::Mutex<Vec<String>>>,
     mut work_rx: tokio::sync::mpsc::Receiver<ObjectWork>,
     out_tx: mpsc::SyncSender<ChunkPayload>,
     semaphore: Arc<Semaphore>,
@@ -556,6 +582,8 @@ async fn run_orchestrator(
         };
 
         let s3 = Arc::clone(&s3);
+        let sqs = sqs.clone();
+        let in_progress = Arc::clone(&in_progress);
         let out_tx = out_tx.clone();
         let health = Arc::clone(&health);
         let name = name.clone();
@@ -585,6 +613,19 @@ async fn run_orchestrator(
             } else {
                 // Restore health after a successful fetch.
                 health.store(ComponentHealth::Healthy.as_repr(), Ordering::Relaxed);
+
+                // Delete the SQS message only after successful fetch + dispatch.
+                if let (Some(sqs), Some(receipt)) = (&sqs, &work.receipt_handle) {
+                    if let Err(e) = sqs.delete_message(receipt).await {
+                        warn!(name = %name, error = %e, "SQS delete message failed");
+                    }
+                }
+            }
+
+            // Remove from in-progress heartbeat set regardless of outcome.
+            if let Some(receipt) = &work.receipt_handle {
+                let mut guard = in_progress.lock().await;
+                guard.retain(|h| h != receipt);
             }
         });
     }
