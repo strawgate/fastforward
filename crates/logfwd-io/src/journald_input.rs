@@ -255,8 +255,13 @@ impl Drop for JournaldInput {
             // SAFETY: sending SIGKILL to a child PID we exclusively own via the
             // swap above. The reader thread also uses swap(0) before child.wait(),
             // so only one side ever sends the signal.
+            #[cfg(unix)]
             unsafe {
                 libc::kill(pid as i32, libc::SIGKILL);
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = pid; // Do nothing on Windows since journald is Linux-only.
             }
         }
     }
