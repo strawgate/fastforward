@@ -122,9 +122,6 @@ pub struct ColumnarBatchBuilder {
     /// `StringViewArray` using `new_unchecked`. When false, produces
     /// validated `StringArray` with full UTF-8 checking.
     utf8_trusted: bool,
-    /// Pool of cleared dynamic accumulators from previous batches.
-    /// Retains Vec capacity so re-resolved columns avoid doubling.
-    recycled_columns: Vec<ColumnAccumulator>,
     /// Capacity hint for `string_buf` based on the previous batch's usage.
     /// `finish_batch` takes the Vec (Arrow owns the allocation), so the
     /// next batch starts at capacity 0. This hint avoids the 0→1→2→…→N
@@ -151,7 +148,6 @@ impl ColumnarBatchBuilder {
             string_buf: Vec::new(),
             dedup_enabled: true,
             utf8_trusted: true,
-            recycled_columns: Vec::new(),
             string_buf_hint: 0,
         }
     }
@@ -188,20 +184,9 @@ impl ColumnarBatchBuilder {
     /// re-resolved from scratch each batch), and resets string buffers.
     pub fn begin_batch(&mut self) {
         self.lifecycle.begin_batch();
-        // Recycle dynamic columns: drain columns beyond the planned set,
-        // clear their data but retain Vec capacity for reuse.
-        // Cap the pool to avoid holding memory from one anomalously wide batch.
-        const MAX_RECYCLED: usize = 128;
+        // Drop dynamic columns — they are re-resolved from scratch each batch.
         let num_planned = self.plan.num_planned();
-        for col in self.columns.drain(num_planned..) {
-            if self.recycled_columns.len() < MAX_RECYCLED {
-                self.recycled_columns.push(col);
-            }
-        }
-        // Clear recycled columns so they're ready for reuse.
-        for col in &mut self.recycled_columns {
-            col.clear();
-        }
+        self.columns.truncate(num_planned);
         // Clear planned columns in place (capacity retained).
         for col in &mut self.columns {
             col.clear();
@@ -259,11 +244,7 @@ impl ColumnarBatchBuilder {
         let handle = self.plan.resolve_dynamic(name, kind)?;
         // Ensure storage exists for newly resolved fields.
         while self.columns.len() <= handle.index() {
-            let col = self
-                .recycled_columns
-                .pop()
-                .unwrap_or_else(ColumnAccumulator::dynamic);
-            self.columns.push(col);
+            self.columns.push(ColumnAccumulator::dynamic());
         }
         Ok(handle)
     }
