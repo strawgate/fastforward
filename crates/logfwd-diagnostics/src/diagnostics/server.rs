@@ -449,7 +449,7 @@ fn status_payload(state: &DiagnosticsState) -> StatusSnapshotResponse {
             .max()
             .unwrap_or(0);
         let drop_rate = if lines_in > 0 {
-            1.0 - (lines_out as f64 / lines_in as f64)
+            (1.0 - (lines_out as f64 / lines_in as f64)).clamp(0.0, 1.0)
         } else {
             0.0
         };
