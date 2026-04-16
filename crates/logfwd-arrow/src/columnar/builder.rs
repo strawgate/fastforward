@@ -552,6 +552,16 @@ impl ColumnarBatchBuilder {
         Ok(result)
     }
 
+    /// Discard an in-progress batch, resetting the builder to idle state.
+    ///
+    /// Use when a decode error occurs mid-batch and the builder will be
+    /// reused for a subsequent request. Accepts any state (including mid-row).
+    pub fn discard_batch(&mut self) {
+        self.lifecycle.discard();
+        self.original_buf = Buffer::from(Vec::<u8>::new());
+        self.string_buf.clear();
+    }
+
     /// Core materialization — shared by all finalization paths.
     fn materialize_all(
         &self,

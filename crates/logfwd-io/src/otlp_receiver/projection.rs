@@ -206,7 +206,7 @@ impl ProjectedOtlpDecoder {
         }
 
         let string_storage = StringStorage::InputView;
-        for_each_field(body.as_ref(), |field, value| {
+        let decode_result = for_each_field(body.as_ref(), |field, value| {
             match (field, value) {
                 (
                     spec::export_logs_service_request::RESOURCE_LOGS,
@@ -229,8 +229,14 @@ impl ProjectedOtlpDecoder {
                 _ => {}
             }
             Ok(())
-        })
-        .map_err(|e| InputError::Receiver(e.to_string()))?;
+        });
+
+        if let Err(e) = decode_result {
+            // Reset builder to idle so the next begin_batch succeeds even
+            // if we were mid-row when the error occurred.
+            self.builder.discard_batch();
+            return Err(InputError::Receiver(e.to_string()));
+        }
 
         self.builder
             .finish_batch()
