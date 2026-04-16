@@ -233,6 +233,13 @@ impl ColumnAccumulator {
     // Typed write methods
     // -----------------------------------------------------------------------
 
+    /// Initial capacity for dynamic fact Vecs on first typed push.
+    ///
+    /// Avoids the 0→1→2→4→…→256 doubling chain (~8 reallocations) by jumping
+    /// straight to 256 on the first push of each type. The `capacity() == 0`
+    /// guard is essentially free after the first push (branch-predicted false).
+    const DYNAMIC_INITIAL_CAPACITY: usize = 256;
+
     /// Append an i64 fact.
     ///
     /// Accepted by `Int64` and `Dynamic` accumulators. For other planned
@@ -244,6 +251,9 @@ impl ColumnAccumulator {
             ColumnAccumulator::Dynamic {
                 int_facts, has_int, ..
             } => {
+                if int_facts.capacity() == 0 {
+                    int_facts.reserve(Self::DYNAMIC_INITIAL_CAPACITY);
+                }
                 *has_int = true;
                 int_facts.push((row, value));
             }
@@ -261,6 +271,9 @@ impl ColumnAccumulator {
                 has_float,
                 ..
             } => {
+                if float_facts.capacity() == 0 {
+                    float_facts.reserve(Self::DYNAMIC_INITIAL_CAPACITY);
+                }
                 *has_float = true;
                 float_facts.push((row, value));
             }
@@ -278,6 +291,9 @@ impl ColumnAccumulator {
                 has_bool,
                 ..
             } => {
+                if bool_facts.capacity() == 0 {
+                    bool_facts.reserve(Self::DYNAMIC_INITIAL_CAPACITY);
+                }
                 *has_bool = true;
                 bool_facts.push((row, value));
             }
@@ -293,6 +309,9 @@ impl ColumnAccumulator {
             ColumnAccumulator::Dynamic {
                 str_facts, has_str, ..
             } => {
+                if str_facts.capacity() == 0 {
+                    str_facts.reserve(Self::DYNAMIC_INITIAL_CAPACITY);
+                }
                 *has_str = true;
                 str_facts.push((row, sref));
             }

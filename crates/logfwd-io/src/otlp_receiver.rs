@@ -395,6 +395,15 @@ pub fn decode_protobuf_to_batch_prost_reference(body: &[u8]) -> Result<RecordBat
     decode_otlp_protobuf_with_prost(body, field_names::DEFAULT_RESOURCE_PREFIX)
 }
 
+/// Reusable OTLP projected decoder for benchmarks.
+///
+/// Holds a `ColumnarBatchBuilder` with recycled column capacity across batches.
+/// Use [`ProjectedOtlpDecoder::decode_view_bytes`] in a loop to measure
+/// steady-state allocation behaviour rather than first-batch overhead.
+#[cfg(any(feature = "otlp-research", test))]
+#[doc(hidden)]
+pub use projection::ProjectedOtlpDecoder;
+
 fn drain_receiver_payloads(
     rx: &mpsc::Receiver<ReceiverPayload>,
     max_drained_payloads: usize,

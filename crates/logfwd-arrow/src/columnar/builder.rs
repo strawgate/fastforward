@@ -122,6 +122,9 @@ pub struct ColumnarBatchBuilder {
     /// `StringViewArray` using `new_unchecked`. When false, produces
     /// validated `StringArray` with full UTF-8 checking.
     utf8_trusted: bool,
+    /// Pool of cleared dynamic accumulators from previous batches.
+    /// Retains Vec capacity so re-resolved columns avoid doubling.
+    recycled_columns: Vec<ColumnAccumulator>,
 }
 
 impl ColumnarBatchBuilder {
@@ -143,6 +146,7 @@ impl ColumnarBatchBuilder {
             string_buf: Vec::new(),
             dedup_enabled: true,
             utf8_trusted: true,
+            recycled_columns: Vec::new(),
         }
     }
 
@@ -178,13 +182,21 @@ impl ColumnarBatchBuilder {
     /// re-resolved from scratch each batch), and resets string buffers.
     pub fn begin_batch(&mut self) {
         self.lifecycle.begin_batch();
-        // Reset dynamic fields so the schema doesn't grow unboundedly.
-        // Planned fields are kept; dynamic ones are re-resolved per batch.
-        self.plan.reset_dynamic();
-        self.columns.truncate(self.plan.len());
+        // Recycle dynamic columns: clear data but retain Vec capacity.
+        let num_planned = self.plan.len();
+        for col in self.columns.drain(num_planned..) {
+            self.recycled_columns.push(col);
+        }
+        // Clear recycled columns so they're ready for reuse.
+        for col in &mut self.recycled_columns {
+            col.clear();
+        }
+        // Clear planned columns in place (capacity retained).
         for col in &mut self.columns {
             col.clear();
         }
+        // Reset dynamic field names so the schema doesn't grow unboundedly.
+        self.plan.reset_dynamic();
         self.original_buf = Buffer::from(Vec::<u8>::new());
         self.string_buf.clear();
     }
@@ -232,7 +244,11 @@ impl ColumnarBatchBuilder {
         let handle = self.plan.resolve_dynamic(name, kind)?;
         // Ensure storage exists for newly resolved fields.
         while self.columns.len() <= handle.index() {
-            self.columns.push(ColumnAccumulator::dynamic());
+            let col = self
+                .recycled_columns
+                .pop()
+                .unwrap_or_else(ColumnAccumulator::dynamic);
+            self.columns.push(col);
         }
         Ok(handle)
     }

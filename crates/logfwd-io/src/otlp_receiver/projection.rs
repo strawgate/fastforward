@@ -16,6 +16,8 @@ use logfwd_arrow::columnar::builder::ColumnarBatchBuilder;
 use logfwd_arrow::columnar::plan::{BatchPlan, FieldHandle, FieldKind};
 use logfwd_types::field_names;
 
+use crate::InputError;
+
 #[derive(Debug)]
 pub(super) enum ProjectionError {
     Invalid(&'static str),
@@ -160,6 +162,80 @@ pub(super) fn decode_projected_otlp_logs_view_bytes(
         resource_prefix,
         StringStorage::InputView,
     )
+}
+
+/// Reusable OTLP projected decoder.
+///
+/// Holds the `ColumnarBatchBuilder`, field handles, and scratch buffers so
+/// successive batches reuse allocated capacity instead of re-allocating from
+/// scratch.  This is the production-intended usage pattern: create once,
+/// call [`decode_view_bytes`](Self::decode_view_bytes) per request.
+#[cfg(any(feature = "otlp-research", test))]
+pub struct ProjectedOtlpDecoder {
+    builder: ColumnarBatchBuilder,
+    handles: OtlpFieldHandles,
+    scratch: WireScratch,
+    resource_prefix: String,
+}
+
+#[cfg(any(feature = "otlp-research", test))]
+impl ProjectedOtlpDecoder {
+    /// Create a reusable decoder with the given resource attribute prefix.
+    pub fn new(resource_prefix: &str) -> Self {
+        let (plan, handles) = build_otlp_plan();
+        Self {
+            builder: ColumnarBatchBuilder::new(plan),
+            handles,
+            scratch: WireScratch::default(),
+            resource_prefix: resource_prefix.to_owned(),
+        }
+    }
+
+    /// Decode an OTLP payload using the view-bytes path, reusing builder capacity.
+    pub fn decode_view_bytes(&mut self, body: Bytes) -> Result<RecordBatch, InputError> {
+        let backing = body.clone();
+        self.builder.begin_batch();
+        if !backing.is_empty() {
+            self.builder.set_original_buffer(Buffer::from(backing));
+        }
+
+        // Invalidate cached dynamic handles from the previous batch — they
+        // reference columns that were drained by begin_batch().
+        for entry in &mut self.scratch.attr_field_cache {
+            entry.handle = None;
+        }
+
+        let string_storage = StringStorage::InputView;
+        for_each_field(body.as_ref(), |field, value| {
+            match (field, value) {
+                (
+                    spec::export_logs_service_request::RESOURCE_LOGS,
+                    WireField::Len(resource_logs),
+                ) => {
+                    decode_resource_logs_wire(
+                        &mut self.builder,
+                        &self.handles,
+                        &mut self.scratch,
+                        &self.resource_prefix,
+                        resource_logs,
+                        string_storage,
+                    )?;
+                }
+                (spec::export_logs_service_request::RESOURCE_LOGS, _) => {
+                    return Err(ProjectionError::Invalid(
+                        "invalid wire type for ExportLogsServiceRequest.resource_logs",
+                    ));
+                }
+                _ => {}
+            }
+            Ok(())
+        })
+        .map_err(|e| InputError::Receiver(e.to_string()))?;
+
+        self.builder
+            .finish_batch()
+            .map_err(|e| InputError::Receiver(format!("batch build error: {e}")))
+    }
 }
 
 /// Build a `BatchPlan` with all canonical OTLP log fields declared as planned.

@@ -10,8 +10,8 @@ use arrow::datatypes::{DataType, Field, Schema};
 use bytes::Bytes;
 use logfwd_bench::{generators, make_otlp_sink};
 use logfwd_io::otlp_receiver::{
-    decode_protobuf_bytes_to_batch_projected_only_experimental, decode_protobuf_to_batch,
-    decode_protobuf_to_batch_projected_detached_experimental,
+    ProjectedOtlpDecoder, decode_protobuf_bytes_to_batch_projected_only_experimental,
+    decode_protobuf_to_batch, decode_protobuf_to_batch_projected_detached_experimental,
     decode_protobuf_to_batch_prost_reference,
 };
 use logfwd_output::Compression;
@@ -68,6 +68,7 @@ enum Mode {
     ProductionCurrentToBatch,
     ProjectedDetachedToBatch,
     ProjectedViewToBatch,
+    ProjectedViewReuseToBatch,
     E2eProstReference,
     E2eProductionCurrent,
     E2eProjectedDetached,
@@ -75,11 +76,12 @@ enum Mode {
 }
 
 impl Mode {
-    const ALL: [Mode; 8] = [
+    const ALL: [Mode; 9] = [
         Mode::ProstReferenceToBatch,
         Mode::ProductionCurrentToBatch,
         Mode::ProjectedDetachedToBatch,
         Mode::ProjectedViewToBatch,
+        Mode::ProjectedViewReuseToBatch,
         Mode::E2eProstReference,
         Mode::E2eProductionCurrent,
         Mode::E2eProjectedDetached,
@@ -92,6 +94,7 @@ impl Mode {
             Mode::ProductionCurrentToBatch => "production_current_to_batch",
             Mode::ProjectedDetachedToBatch => "projected_detached_to_batch",
             Mode::ProjectedViewToBatch => "projected_view_to_batch",
+            Mode::ProjectedViewReuseToBatch => "projected_view_reuse_to_batch",
             Mode::E2eProstReference => "e2e_prost_reference",
             Mode::E2eProductionCurrent => "e2e_production_current",
             Mode::E2eProjectedDetached => "e2e_projected_detached",
@@ -106,6 +109,7 @@ impl Mode {
             "production_current_to_batch" => Mode::ProductionCurrentToBatch,
             "projected_detached_to_batch" => Mode::ProjectedDetachedToBatch,
             "projected_view_to_batch" => Mode::ProjectedViewToBatch,
+            "projected_view_reuse_to_batch" => Mode::ProjectedViewReuseToBatch,
             "e2e_prost_reference" => Mode::E2eProstReference,
             "e2e_production_current" => Mode::E2eProductionCurrent,
             "e2e_projected_detached" => Mode::E2eProjectedDetached,
@@ -290,10 +294,24 @@ fn run_profile(fixture: &FixtureData, mode: Mode, iterations: usize) -> ProfileR
             Mode::ProstReferenceToBatch
             | Mode::ProductionCurrentToBatch
             | Mode::ProjectedDetachedToBatch
-            | Mode::ProjectedViewToBatch => unreachable!("decode-only modes are not warmed here"),
+            | Mode::ProjectedViewToBatch
+            | Mode::ProjectedViewReuseToBatch => {
+                unreachable!("decode-only modes are not warmed here")
+            }
         };
         sink.encode_batch(&batch, &metadata);
     }
+
+    // For reuse mode, warm the decoder with one batch before timing starts.
+    let mut reuse_decoder = if matches!(mode, Mode::ProjectedViewReuseToBatch) {
+        let mut dec = ProjectedOtlpDecoder::new("resource.");
+        let _ = dec
+            .decode_view_bytes(fixture.payload_bytes.clone())
+            .expect("warmup reuse decoder");
+        Some(dec)
+    } else {
+        None
+    };
 
     #[cfg(feature = "otlp-profile-alloc")]
     let region = Region::new(&INSTRUMENTED_SYSTEM);
@@ -320,6 +338,13 @@ fn run_profile(fixture: &FixtureData, mode: Mode, iterations: usize) -> ProfileR
                     fixture.payload_bytes.clone(),
                 )
                 .expect("projected view");
+                black_box(batch.num_rows());
+            }
+            Mode::ProjectedViewReuseToBatch => {
+                let dec = reuse_decoder.as_mut().expect("reuse decoder initialized");
+                let batch = dec
+                    .decode_view_bytes(fixture.payload_bytes.clone())
+                    .expect("projected view reuse");
                 black_box(batch.num_rows());
             }
             Mode::E2eProstReference => {
