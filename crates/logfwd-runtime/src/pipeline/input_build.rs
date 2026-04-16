@@ -886,6 +886,10 @@ mod tests {
                     listen: "   ".to_string(),
                     resource_prefix: None,
                     protobuf_decode_mode: None,
+                    max_recv_message_size_bytes: None,
+                    tls: None,
+                    grpc_keepalive_time_ms: None,
+                    grpc_max_concurrent_streams: None,
                 }),
             ),
             (
