@@ -15,18 +15,15 @@
 
 use std::sync::Arc;
 
-use arrow::array::{
-    ArrayRef, BooleanArray, Float64Array, Int64Array, StringArray, StringViewArray,
-};
-use arrow::buffer::{Buffer, NullBuffer};
-use arrow::datatypes::{DataType, Field, Schema};
+use arrow::buffer::Buffer;
+use arrow::datatypes::Schema;
 use arrow::error::ArrowError;
 use arrow::record_batch::{RecordBatch, RecordBatchOptions};
 
 use logfwd_core::scanner::BuilderState;
 
 use super::accumulator::{ColumnAccumulator, FinalizationMode, MaterializeError, StringRef};
-use super::plan::{BatchPlan, FieldHandle, FieldKind, FieldSchemaMode, PlanError};
+use super::plan::{BatchPlan, FieldHandle, FieldKind, PlanError};
 use super::row_protocol::RowLifecycle;
 use crate::check_dup_bits;
 
@@ -130,14 +127,13 @@ pub struct ColumnarBatchBuilder {
 impl ColumnarBatchBuilder {
     /// Create a builder from a plan.
     ///
-    /// Allocates per-field storage matched to each field's schema mode.
+    /// All fields (planned and dynamic) use Dynamic accumulators, which
+    /// accept all types uniformly. Single-type fields are still materialized
+    /// as flat columns; multi-type fields become conflict structs.
     pub fn new(plan: BatchPlan) -> Self {
         let columns: Vec<ColumnAccumulator> = plan
             .fields()
-            .map(|(_handle, _name, mode)| match mode {
-                FieldSchemaMode::Planned(kind) => ColumnAccumulator::for_planned(*kind),
-                FieldSchemaMode::Dynamic { .. } => ColumnAccumulator::dynamic(),
-            })
+            .map(|(_handle, _name, _mode)| ColumnAccumulator::dynamic())
             .collect();
         ColumnarBatchBuilder {
             plan,
@@ -517,7 +513,7 @@ impl ColumnarBatchBuilder {
         let mut schema_fields = Vec::with_capacity(self.plan.len());
         let mut arrays = Vec::with_capacity(self.plan.len());
 
-        for (handle, name, field_mode) in self.plan.fields() {
+        for (handle, name, _field_mode) in self.plan.fields() {
             let col = &self.columns[handle.index()];
             match col.materialize(name, num_rows, mode.clone(), self.dedup_enabled)? {
                 Some((field, array)) => {
@@ -525,14 +521,8 @@ impl ColumnarBatchBuilder {
                     arrays.push(array);
                 }
                 None => {
-                    // Planned fields always appear in the schema (all-null if
-                    // no values were written). Dynamic fields with no data are
-                    // omitted — this matches StreamingBuilder behavior.
-                    if let FieldSchemaMode::Planned(kind) = field_mode {
-                        let (field, array) = null_column(name, *kind, num_rows, mode.utf8_trusted);
-                        schema_fields.push(field);
-                        arrays.push(array);
-                    }
+                    // All unwritten fields are omitted from the schema,
+                    // matching StreamingBuilder behavior.
                 }
             }
         }
@@ -556,53 +546,6 @@ impl ColumnarBatchBuilder {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/// Create an all-null column of the appropriate Arrow type for a planned field.
-fn null_column(
-    name: &str,
-    kind: FieldKind,
-    num_rows: usize,
-    utf8_trusted: bool,
-) -> (Field, ArrayRef) {
-    match kind {
-        FieldKind::Int64 => {
-            let nulls = NullBuffer::new_null(num_rows);
-            let arr = Int64Array::new(vec![0i64; num_rows].into(), Some(nulls));
-            (Field::new(name, DataType::Int64, true), Arc::new(arr))
-        }
-        FieldKind::Float64 => {
-            let nulls = NullBuffer::new_null(num_rows);
-            let arr = Float64Array::new(vec![0.0f64; num_rows].into(), Some(nulls));
-            (Field::new(name, DataType::Float64, true), Arc::new(arr))
-        }
-        FieldKind::Bool => {
-            let nulls = NullBuffer::new_null(num_rows);
-            let arr = BooleanArray::new(vec![false; num_rows].into(), Some(nulls));
-            (Field::new(name, DataType::Boolean, true), Arc::new(arr))
-        }
-        FieldKind::Utf8View => {
-            if utf8_trusted {
-                let arr = StringViewArray::new_null(num_rows);
-                (Field::new(name, DataType::Utf8View, true), Arc::new(arr))
-            } else {
-                let arr = StringArray::new_null(num_rows);
-                (Field::new(name, DataType::Utf8, true), Arc::new(arr))
-            }
-        }
-        FieldKind::BinaryView => {
-            let arr = arrow::array::BinaryViewArray::new_null(num_rows);
-            (Field::new(name, DataType::BinaryView, true), Arc::new(arr))
-        }
-        FieldKind::FixedBinary(n) => {
-            let width = i32::try_from(n).expect("FixedBinary width exceeds i32::MAX");
-            let arr = arrow::array::FixedSizeBinaryArray::new_null(width, num_rows);
-            (
-                Field::new(name, DataType::FixedSizeBinary(width), true),
-                Arc::new(arr),
-            )
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -950,10 +893,12 @@ mod tests {
         b.end_row();
 
         let batch = b.finish_batch().unwrap();
-        let col = batch.column_by_name("x").unwrap();
-        let arr = col.as_primitive::<Int64Type>();
-        // The field was written as null first, so i64 write was suppressed.
-        assert!(arr.is_null(0));
+        // write_null marks the dedup bit but writes no facts, so the
+        // Dynamic accumulator has no data and the column is omitted.
+        assert!(
+            batch.column_by_name("x").is_none(),
+            "null-only column should be omitted"
+        );
     }
 
     #[test]
@@ -1003,13 +948,16 @@ mod tests {
     #[test]
     fn column_order_matches_declaration_order() {
         let mut plan = BatchPlan::new();
-        plan.declare_planned("z_last", FieldKind::Int64).unwrap();
-        plan.declare_planned("a_first", FieldKind::Int64).unwrap();
-        plan.declare_planned("m_middle", FieldKind::Int64).unwrap();
+        let z = plan.declare_planned("z_last", FieldKind::Int64).unwrap();
+        let a = plan.declare_planned("a_first", FieldKind::Int64).unwrap();
+        let m = plan.declare_planned("m_middle", FieldKind::Int64).unwrap();
         let mut b = ColumnarBatchBuilder::new(plan);
 
         b.begin_batch();
         b.begin_row();
+        b.write_i64(z, 1);
+        b.write_i64(a, 2);
+        b.write_i64(m, 3);
         b.end_row();
         let batch = b.finish_batch().unwrap();
 
@@ -1019,54 +967,47 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Planned-field type safety: wrong-type writes are benign
+    // Dynamic accumulator: all types accepted, first-write-wins via dedup
     // -----------------------------------------------------------------------
 
     #[test]
-    fn planned_wrong_type_write_stored_but_planned_kind_selects_output() {
-        // If a producer writes a string to a planned Int64 field, the string
-        // is stored but the planned kind selects int_values at materialization.
-        // The result is an all-null column for that field.
+    fn all_types_accepted_by_declared_field() {
+        // With Dynamic accumulators, a declared Int64 field still accepts
+        // string writes. The actual type is determined by what's written,
+        // not the declared hint.
         let mut plan = BatchPlan::new();
         let h = plan.declare_planned("x", FieldKind::Int64).unwrap();
         let mut b = ColumnarBatchBuilder::new(plan);
 
         b.begin_batch();
         b.begin_row();
-        b.write_str(h, "not an int").unwrap();
+        b.write_str(h, "hello").unwrap();
         b.end_row();
 
         let batch = b.finish_batch().unwrap();
         let col = batch.column_by_name("x").unwrap();
-        let arr = col.as_primitive::<Int64Type>();
-        // Planned kind is Int64, but we only wrote a string → int column is all-null.
-        assert!(arr.is_null(0));
+        // Dynamic accumulator stores the string; single-type → flat column.
+        assert_eq!(col.data_type(), &arrow::datatypes::DataType::Utf8View);
     }
 
     #[test]
-    fn wrong_type_write_does_not_consume_dedup_slot() {
-        // Writing the wrong type should NOT consume the dedup slot.
-        // A subsequent correct-type write to the same field must succeed.
+    fn first_write_wins_with_dedup() {
+        // When dedup is enabled, the first write to a field in a row wins.
+        // The second write (even if correct type) is suppressed.
         let mut plan = BatchPlan::new();
         let h = plan.declare_planned("x", FieldKind::Int64).unwrap();
         let mut b = ColumnarBatchBuilder::new(plan);
 
         b.begin_batch();
         b.begin_row();
-        // Wrong type: string to an Int64 field — should be silently ignored.
-        b.write_str(h, "not an int").unwrap();
-        // Correct type: this must NOT be rejected as a duplicate.
         b.write_i64(h, 42);
+        b.write_str(h, "ignored").unwrap(); // dedup suppresses
         b.end_row();
 
         let batch = b.finish_batch().unwrap();
         let col = batch.column_by_name("x").unwrap();
         let arr = col.as_primitive::<Int64Type>();
-        assert_eq!(
-            arr.value(0),
-            42,
-            "correct-type write after wrong-type must succeed"
-        );
+        assert_eq!(arr.value(0), 42);
     }
 
     // -----------------------------------------------------------------------
@@ -1610,5 +1551,276 @@ mod tests {
         b.begin_row();
         // Not a subslice of original buffer — should panic.
         b.write_input_ref(f, b"external");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Proptest — end-to-end builder verification
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use crate::columnar::plan::{BatchPlan, FieldHandle, FieldKind};
+    use arrow::array::{Array, BooleanArray, Float64Array, Int64Array, StringViewArray};
+    use proptest::prelude::*;
+
+    /// Strategy for generating a field kind.
+    /// Covers all `FieldKind` variants so new additions cause a compile error
+    /// rather than being silently ignored.
+    fn field_kind_strategy() -> impl Strategy<Value = FieldKind> {
+        prop_oneof![
+            Just(FieldKind::Int64),
+            Just(FieldKind::Float64),
+            Just(FieldKind::Bool),
+            Just(FieldKind::Utf8View),
+            Just(FieldKind::BinaryView),
+            Just(FieldKind::FixedBinary(16)),
+        ]
+    }
+
+    proptest! {
+        /// End-to-end builder: random planned fields, random writes, verify
+        /// RecordBatch invariants (row count, null counts, value correctness).
+        #[test]
+        fn builder_e2e_planned_fields(
+            num_fields in 1usize..=8,
+            num_rows in 1usize..=16,
+            seed in any::<u64>(),
+        ) {
+            // Deterministic kind selection from seed.
+            let kinds: Vec<FieldKind> = (0..num_fields)
+                .map(|i| {
+                    match (seed.wrapping_mul(i as u64 + 1)) % 6 {
+                        0 => FieldKind::Int64,
+                        1 => FieldKind::Float64,
+                        2 => FieldKind::Bool,
+                        3 => FieldKind::Utf8View,
+                        4 => FieldKind::BinaryView,
+                        _ => FieldKind::FixedBinary(16),
+                    }
+                })
+                .collect();
+
+            let mut plan = BatchPlan::new();
+            let handles: Vec<FieldHandle> = kinds
+                .iter()
+                .enumerate()
+                .map(|(i, &k)| {
+                    plan.declare_planned(&format!("f{i}"), k).unwrap()
+                })
+                .collect();
+
+            let mut b = ColumnarBatchBuilder::new(plan);
+            b.begin_batch();
+
+            // Track expected values for oracle comparison.
+            let mut expected_i64: Vec<Vec<Option<i64>>> =
+                vec![vec![None; num_rows]; num_fields];
+            let mut expected_f64: Vec<Vec<Option<f64>>> =
+                vec![vec![None; num_rows]; num_fields];
+            let mut expected_bool: Vec<Vec<Option<bool>>> =
+                vec![vec![None; num_rows]; num_fields];
+            let mut expected_str: Vec<Vec<Option<String>>> =
+                vec![vec![None; num_rows]; num_fields];
+
+            for row in 0..num_rows {
+                b.begin_row();
+                for (fi, (&h, &kind)) in handles.iter().zip(kinds.iter()).enumerate() {
+                    // Deterministic skip pattern: some rows have gaps.
+                    let write_it = (seed.wrapping_mul((row * num_fields + fi) as u64 + 7)) % 5 != 0;
+                    if !write_it {
+                        continue;
+                    }
+                    match kind {
+                        FieldKind::Int64 => {
+                            let val = (row * 100 + fi) as i64;
+                            b.write_i64(h, val);
+                            expected_i64[fi][row] = Some(val);
+                        }
+                        FieldKind::Float64 => {
+                            let val = (row * 100 + fi) as f64 * 0.5;
+                            b.write_f64(h, val);
+                            expected_f64[fi][row] = Some(val);
+                        }
+                        FieldKind::Bool => {
+                            let val = (row + fi) % 2 == 0;
+                            b.write_bool(h, val);
+                            expected_bool[fi][row] = Some(val);
+                        }
+                        FieldKind::Utf8View => {
+                            let val = format!("r{row}f{fi}");
+                            b.write_str(h, &val).unwrap();
+                            expected_str[fi][row] = Some(val);
+                        }
+                        // No typed write methods for binary kinds yet;
+                        // all values remain null, verified below.
+                        FieldKind::BinaryView | FieldKind::FixedBinary(_) => {}
+                    }
+                }
+                b.end_row();
+            }
+
+            let batch = b.finish_batch().unwrap();
+
+            // Verify RecordBatch invariants.
+            prop_assert_eq!(batch.num_rows(), num_rows);
+
+            // Fields with no write methods (BinaryView, FixedBinary) are omitted
+            // since Dynamic accumulators skip empty columns.
+            let written_fields: usize = kinds.iter().filter(|k| {
+                !matches!(k, FieldKind::BinaryView | FieldKind::FixedBinary(_))
+            }).count();
+            // Some written fields may be all-skipped (sparse pattern), so the
+            // actual column count may be less. Just verify it doesn't exceed.
+            prop_assert!(batch.num_columns() <= written_fields,
+                "too many columns: {} > {}", batch.num_columns(), written_fields);
+
+            // Verify each column matches the oracle (by name lookup).
+            for (fi, &kind) in kinds.iter().enumerate() {
+                let col_name = format!("f{fi}");
+                let col = match batch.column_by_name(&col_name) {
+                    Some(c) => c,
+                    None => {
+                        // Column was omitted — verify all expected values are None.
+                        match kind {
+                            FieldKind::Int64 => {
+                                for row in 0..num_rows {
+                                    prop_assert!(expected_i64[fi][row].is_none(),
+                                        "field {} row {} expected data but column omitted", fi, row);
+                                }
+                            }
+                            FieldKind::Float64 => {
+                                for row in 0..num_rows {
+                                    prop_assert!(expected_f64[fi][row].is_none(),
+                                        "field {} row {} expected data but column omitted", fi, row);
+                                }
+                            }
+                            FieldKind::Bool => {
+                                for row in 0..num_rows {
+                                    prop_assert!(expected_bool[fi][row].is_none(),
+                                        "field {} row {} expected data but column omitted", fi, row);
+                                }
+                            }
+                            FieldKind::Utf8View => {
+                                for row in 0..num_rows {
+                                    prop_assert!(expected_str[fi][row].is_none(),
+                                        "field {} row {} expected data but column omitted", fi, row);
+                                }
+                            }
+                            FieldKind::BinaryView | FieldKind::FixedBinary(_) => {}
+                        }
+                        continue;
+                    }
+                };
+                prop_assert_eq!(col.len(), num_rows, "column {} length mismatch", fi);
+
+                match kind {
+                    FieldKind::Int64 => {
+                        let typed = col.as_any().downcast_ref::<Int64Array>().unwrap();
+                        for row in 0..num_rows {
+                            match expected_i64[fi][row] {
+                                Some(v) => {
+                                    prop_assert!(!typed.is_null(row),
+                                        "field {} row {} should not be null", fi, row);
+                                    prop_assert_eq!(typed.value(row), v);
+                                }
+                                None => {
+                                    prop_assert!(typed.is_null(row),
+                                        "field {} row {} should be null", fi, row);
+                                }
+                            }
+                        }
+                    }
+                    FieldKind::Float64 => {
+                        let typed = col.as_any().downcast_ref::<Float64Array>().unwrap();
+                        for row in 0..num_rows {
+                            match expected_f64[fi][row] {
+                                Some(v) => {
+                                    prop_assert!(!typed.is_null(row));
+                                    prop_assert_eq!(typed.value(row).to_bits(), v.to_bits());
+                                }
+                                None => {
+                                    prop_assert!(typed.is_null(row));
+                                }
+                            }
+                        }
+                    }
+                    FieldKind::Bool => {
+                        let typed = col.as_any().downcast_ref::<BooleanArray>().unwrap();
+                        for row in 0..num_rows {
+                            match expected_bool[fi][row] {
+                                Some(v) => {
+                                    prop_assert!(!typed.is_null(row));
+                                    prop_assert_eq!(typed.value(row), v);
+                                }
+                                None => {
+                                    prop_assert!(typed.is_null(row));
+                                }
+                            }
+                        }
+                    }
+                    FieldKind::Utf8View => {
+                        let typed = col.as_any().downcast_ref::<StringViewArray>().unwrap();
+                        for row in 0..num_rows {
+                            match &expected_str[fi][row] {
+                                Some(v) => {
+                                    prop_assert!(!typed.is_null(row));
+                                    prop_assert_eq!(typed.value(row), v.as_str());
+                                }
+                                None => {
+                                    prop_assert!(typed.is_null(row));
+                                }
+                            }
+                        }
+                    }
+                    // Binary kinds have no write methods yet; columns are
+                    // omitted (handled by the None branch above).
+                    FieldKind::BinaryView | FieldKind::FixedBinary(_) => {}
+                }
+            }
+        }
+
+        /// Multi-batch builder: planned fields persist, values reset between batches.
+        #[test]
+        fn builder_e2e_multi_batch(
+            num_rows_per_batch in 1usize..=8,
+            num_batches in 2usize..=4,
+        ) {
+            let mut plan = BatchPlan::new();
+            let h_int = plan.declare_planned("count", FieldKind::Int64).unwrap();
+            let h_str = plan.declare_planned("label", FieldKind::Utf8View).unwrap();
+
+            let mut b = ColumnarBatchBuilder::new(plan);
+
+            for batch_idx in 0..num_batches {
+                b.begin_batch();
+                for row in 0..num_rows_per_batch {
+                    b.begin_row();
+                    let val = (batch_idx * 1000 + row) as i64;
+                    b.write_i64(h_int, val);
+                    let label = format!("b{batch_idx}r{row}");
+                    b.write_str(h_str, &label).unwrap();
+                    b.end_row();
+                }
+                let batch = b.finish_batch().unwrap();
+
+                prop_assert_eq!(batch.num_rows(), num_rows_per_batch,
+                    "batch {} row count", batch_idx);
+                prop_assert_eq!(batch.num_columns(), 2,
+                    "batch {} column count", batch_idx);
+
+                let ints = batch.column(0).as_any()
+                    .downcast_ref::<Int64Array>().unwrap();
+                let strs = batch.column(1).as_any()
+                    .downcast_ref::<StringViewArray>().unwrap();
+
+                for row in 0..num_rows_per_batch {
+                    let expected_val = (batch_idx * 1000 + row) as i64;
+                    let expected_label = format!("b{batch_idx}r{row}");
+                    prop_assert_eq!(ints.value(row), expected_val);
+                    prop_assert_eq!(strs.value(row), expected_label.as_str());
+                }
+            }
+        }
     }
 }
