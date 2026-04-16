@@ -36,7 +36,7 @@ jobs:
 
       - name: Upload artifacts
         if: always()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.scenario }}-results
           path: tests/e2e/results/${{ matrix.scenario }}/
