@@ -45,6 +45,9 @@ pub fn detect_compression(
     // Content-Encoding is the most authoritative signal.
     if let Some(ce) = content_encoding {
         let ce = ce.to_ascii_lowercase();
+        if ce == "identity" {
+            return Compression::None;
+        }
         if ce.contains("gzip") {
             return Compression::Gzip;
         }

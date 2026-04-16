@@ -153,7 +153,10 @@ fn bench_s3_download(c: &mut Criterion) {
             let client = Arc::clone(&client);
             let key = *key;
             b.to_async(&rt).iter(|| async {
-                let _ = client.get_object(key).await;
+                client
+                    .get_object(key)
+                    .await
+                    .expect("benchmark single_get download should succeed");
             });
         });
 
@@ -167,14 +170,15 @@ fn bench_s3_download(c: &mut Criterion) {
                 let size = *size;
                 b.to_async(&rt).iter(|| async {
                     let part = 2 * 1024 * 1024u64; // 2 MiB parts
-                    let _ = logfwd_io::s3_input::fetch_parallel_bench(
+                    logfwd_io::s3_input::fetch_parallel_bench(
                         Arc::clone(&client),
                         key,
                         size,
                         part,
                         8,
                     )
-                    .await;
+                    .await
+                    .expect("benchmark parallel_range_get download should succeed");
                 });
             },
         );

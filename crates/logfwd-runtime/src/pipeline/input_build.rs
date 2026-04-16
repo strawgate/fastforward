@@ -558,6 +558,9 @@ pub(super) fn build_input_state(
         InputTypeConfig::S3(s) => {
             let s3_cfg = &s.s3;
 
+            // Validate required fields before feature-gated code.
+            require_non_empty(name, "s3", "bucket", Some(&s3_cfg.bucket))?;
+
             #[cfg(not(feature = "s3"))]
             {
                 let _ = s3_cfg;

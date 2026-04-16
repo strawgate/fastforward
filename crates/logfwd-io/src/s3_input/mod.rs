@@ -534,7 +534,10 @@ async fn run_sqs_discovery(
 
     while is_running.load(Ordering::Relaxed) {
         let messages = match sqs.receive_messages(10, 20, visibility_timeout).await {
-            Ok(msgs) => msgs,
+            Ok(msgs) => {
+                health.store(ComponentHealth::Healthy.as_repr(), Ordering::Relaxed);
+                msgs
+            }
             Err(e) => {
                 warn!(name = %name, error = %e, "SQS receive failed");
                 health.store(ComponentHealth::Degraded.as_repr(), Ordering::Relaxed);
@@ -895,8 +898,8 @@ async fn fetch_object(
                 }
                 (meta.content_encoding, meta.content_type)
             }
-            Err(_) => {
-                // HEAD failed — proceed with defaults.
+            Err(e) => {
+                warn!(key = %key, error = %e, "HEAD failed for compression detection; falling back to key extension");
                 (None, None)
             }
         }

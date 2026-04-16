@@ -504,11 +504,10 @@ fn url_decode(s: &str) -> String {
             i += 3;
             continue;
         }
-        if bytes[i] == b'+' {
-            out.push(b' ');
-        } else {
-            out.push(bytes[i]);
-        }
+        // S3 event notifications use RFC 3986 percent-encoding where `+` is
+        // a literal character (spaces are encoded as `%20`). Do NOT convert
+        // `+` to space — that is `application/x-www-form-urlencoded` behavior.
+        out.push(bytes[i]);
         i += 1;
     }
     // Use lossy UTF-8 — object keys should be valid but be defensive.
@@ -552,7 +551,10 @@ mod tests {
     #[test]
     fn url_decode_encoded_key() {
         assert_eq!(url_decode("path%2Fto%2Ffile.log"), "path/to/file.log");
-        assert_eq!(url_decode("hello+world"), "hello world");
+        // S3 notifications use RFC 3986 encoding — `+` is a literal, not a space.
+        assert_eq!(url_decode("hello+world"), "hello+world");
+        // Spaces are encoded as %20 in S3 notifications.
+        assert_eq!(url_decode("hello%20world"), "hello world");
     }
 
     #[test]

@@ -624,6 +624,7 @@ pub struct JournaldTypeConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct S3TypeConfig {
+    /// S3-specific input settings (bucket, region, credentials, tuning).
     pub s3: S3InputConfig,
 }
 

@@ -549,11 +549,14 @@ impl Config {
                                 )));
                             }
                             if let Some(ref comp) = s3_cfg.compression {
-                                let valid = ["auto", "gzip", "zstd", "snappy", "none"];
+                                let valid = [
+                                    "auto", "gzip", "gz", "zstd", "zst", "snappy", "sz", "none",
+                                    "identity",
+                                ];
                                 if !valid.iter().any(|v| v.eq_ignore_ascii_case(comp)) {
                                     return Err(ConfigError::Validation(format!(
                                         "pipeline '{name}' input '{label}': unknown s3.compression value '{comp}' \
-                                         (valid: auto, gzip, zstd, snappy, none)"
+                                         (valid: auto, gzip, gz, zstd, zst, snappy, sz, none, identity)"
                                     )));
                                 }
                             }

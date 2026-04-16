@@ -479,7 +479,7 @@ impl S3Client {
         let url = if self.path_style {
             format!("{}/{}", self.endpoint_base, self.bucket)
         } else {
-            self.endpoint_base.clone()
+            format!("https://{}.s3.{}.amazonaws.com", self.bucket, self.region)
         };
 
         let resp = self
@@ -742,8 +742,8 @@ mod tests {
         assert_eq!(civil_from_days(0), (1970, 1, 1));
         // 2024-01-01 = 19723 days (leap year detection test)
         assert_eq!(civil_from_days(19723), (2024, 1, 1));
-        // 2024-03-01 = 19784 days
-        assert_eq!(civil_from_days(19784), (2024, 3, 1));
+        // 2024-03-01 = 19783 days (31 Jan + 29 Feb in leap year = 60 days after 19723)
+        assert_eq!(civil_from_days(19783), (2024, 3, 1));
     }
 
     #[test]
