@@ -27,7 +27,9 @@ async fn error_body_preview(resp: reqwest::Response) -> String {
     if body.len() <= ERROR_BODY_PREVIEW_LEN {
         body
     } else {
-        let truncated = &body[..ERROR_BODY_PREVIEW_LEN];
+        // Find a valid UTF-8 char boundary at or before the limit.
+        let end = body.floor_char_boundary(ERROR_BODY_PREVIEW_LEN);
+        let truncated = &body[..end];
         format!("{truncated}... (truncated)")
     }
 }
