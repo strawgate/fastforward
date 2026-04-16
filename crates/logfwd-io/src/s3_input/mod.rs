@@ -41,7 +41,7 @@ use logfwd_types::diagnostics::ComponentHealth;
 use logfwd_types::pipeline::SourceId;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
-use tracing::{error, warn};
+use tracing::{debug, error, warn};
 
 use crate::input::{InputEvent, InputSource};
 use client::S3Client;
@@ -433,6 +433,11 @@ impl S3Input {
 
                     discovery_handle.abort();
                 });
+
+                // Bounded shutdown: abort any lingering fetch tasks (e.g.
+                // stuck on a 300s reqwest timeout) instead of blocking
+                // indefinitely when the runtime drops.
+                rt.shutdown_timeout(std::time::Duration::from_secs(5));
             })
             .map_err(io::Error::other)?;
 
@@ -498,7 +503,23 @@ impl Drop for S3Input {
         // deadlock when we join the worker thread below.
         drop(self.rx.take());
         if let Some(handle) = self.thread_handle.take() {
-            let _ = handle.join();
+            // The background thread runs shutdown_timeout(5s) on its runtime,
+            // so it should exit within ~6s. Use a timed join to avoid blocking
+            // the pipeline shutdown indefinitely.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                if handle.is_finished() {
+                    let _ = handle.join();
+                    break;
+                }
+                if std::time::Instant::now() >= deadline {
+                    // Thread is stuck — leak it rather than block shutdown.
+                    std::mem::forget(handle);
+                    warn!("S3 input background thread did not exit within deadline, leaking");
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
         }
     }
 }
@@ -619,6 +640,9 @@ async fn run_list_discovery(
     name: String,
     poll_interval_ms: u64,
 ) {
+    /// Maximum times a key can fail before being skipped.
+    const MAX_KEY_FAILURES: u32 = 5;
+
     let mut start_after: Option<String> = start_after_init;
     // Track dispatched keys in S3 sort order and completed keys.
     // Cursor only advances past the contiguous prefix of completed keys.
@@ -629,6 +653,10 @@ async fn run_list_discovery(
     // Keys stay in in_flight until the watermark cursor advances past them,
     // preventing re-discovery of completed-but-not-yet-cursored keys.
     let mut in_flight: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Per-key failure counter. Keys exceeding MAX_KEY_FAILURES are promoted
+    // to completed_set so the watermark cursor can advance past them.
+    let mut failure_counts: std::collections::HashMap<String, u32> =
+        std::collections::HashMap::new();
 
     while is_running.load(Ordering::Relaxed) {
         let mut continuation: Option<String> = None;
@@ -685,10 +713,13 @@ async fn run_list_discovery(
                                 if kc.success {
                                     completed_set.insert(kc.key);
                                 } else {
-                                    // Only remove from in_flight so the key can
-                                    // be re-dispatched on the next poll cycle.
-                                    // Keep it in dispatched so the watermark
-                                    // cursor does NOT advance past it.
+                                    let count = failure_counts.entry(kc.key.clone()).or_insert(0);
+                                    *count += 1;
+                                    if *count >= MAX_KEY_FAILURES {
+                                        warn!(name = %name, key = %kc.key, failures = *count,
+                                              "S3 key exceeded max retries, skipping");
+                                        completed_set.insert(kc.key.clone());
+                                    }
                                     in_flight.remove(&kc.key);
                                 }
                             }
@@ -704,6 +735,13 @@ async fn run_list_discovery(
                                     if kc.success {
                                         completed_set.insert(kc.key);
                                     } else {
+                                        let count = failure_counts.entry(kc.key.clone()).or_insert(0);
+                                        *count += 1;
+                                        if *count >= MAX_KEY_FAILURES {
+                                            warn!(name = %name, key = %kc.key, failures = *count,
+                                                  "S3 key exceeded max retries, skipping");
+                                            completed_set.insert(kc.key.clone());
+                                        }
                                         in_flight.remove(&kc.key);
                                     }
                                 }
@@ -722,6 +760,13 @@ async fn run_list_discovery(
                         if kc.success {
                             completed_set.insert(kc.key);
                         } else {
+                            let count = failure_counts.entry(kc.key.clone()).or_insert(0);
+                            *count += 1;
+                            if *count >= MAX_KEY_FAILURES {
+                                warn!(name = %name, key = %kc.key, failures = *count,
+                                      "S3 key exceeded max retries, skipping");
+                                completed_set.insert(kc.key.clone());
+                            }
                             in_flight.remove(&kc.key);
                         }
                     }
@@ -731,12 +776,11 @@ async fn run_list_discovery(
                             completed_set.remove(&key);
                             dispatched_set.remove(&key);
                             in_flight.remove(&key);
+                            failure_counts.remove(&key);
                             start_after = Some(key);
                         } else {
-                            // Stop at the first key that hasn't succeeded.
-                            // Failed keys stay in dispatched so the cursor
-                            // never advances past them, ensuring ListObjectsV2
-                            // re-discovers them on the next poll cycle.
+                            // Stop at the first key that hasn't completed
+                            // (successfully or via max-retry skip).
                             break;
                         }
                     }
@@ -774,6 +818,15 @@ async fn run_orchestrator(
     health: Arc<AtomicU8>,
     name: String,
 ) {
+    /// Maximum fetch attempts per object before giving up.
+    const MAX_FETCH_ATTEMPTS: u32 = 3;
+
+    // Deduplication: prevent concurrent fetches of the same key. SQS
+    // at-least-once delivery can dispatch duplicates; concurrent fetches
+    // share the same SourceId and corrupt FramedInput state.
+    let fetching_keys: Arc<tokio::sync::Mutex<std::collections::HashSet<String>>> =
+        Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new()));
+
     while is_running.load(Ordering::Relaxed) {
         let work = tokio::select! {
             biased;
@@ -793,6 +846,37 @@ async fn run_orchestrator(
             },
         };
 
+        // Skip duplicate keys already being fetched concurrently.
+        let is_duplicate = {
+            let mut guard = fetching_keys.lock().await;
+            !guard.insert(work.key.clone())
+        };
+        if is_duplicate {
+            debug!(name = %name, key = %work.key, "skipping duplicate concurrent fetch");
+            // Decrement the message tracker so the SQS message can still
+            // be deleted when all non-duplicate records complete. Count
+            // the skip as a success since the key IS being processed.
+            if let Some(tracker) = &work.message_tracker {
+                tracker.successes.fetch_add(1, Ordering::AcqRel);
+                let prev = tracker.remaining.fetch_sub(1, Ordering::AcqRel);
+                if prev == 1 {
+                    let should_delete = {
+                        let mut guard = in_progress.lock().await;
+                        guard.retain(|h| h != &tracker.receipt_handle);
+                        let success_count = tracker.successes.load(Ordering::Acquire);
+                        success_count == tracker.total
+                    };
+                    if should_delete
+                        && let Some(sqs) = &sqs
+                        && let Err(e) = sqs.delete_message(&tracker.receipt_handle).await
+                    {
+                        warn!(name = %name, error = %e, "SQS delete message failed");
+                    }
+                }
+            }
+            continue;
+        }
+
         // Acquire semaphore to limit concurrent object fetches.
         let permit = match semaphore.clone().acquire_owned().await {
             Ok(p) => p,
@@ -806,30 +890,49 @@ async fn run_orchestrator(
         let out_tx = out_tx.clone();
         let health = Arc::clone(&health);
         let name = name.clone();
+        let fetching_keys = Arc::clone(&fetching_keys);
 
         tokio::spawn(async move {
             let _permit = permit; // released when task completes
 
-            if let Err(e) = fetch_object(
-                s3,
-                &work.key,
-                work.size,
-                part_size,
-                max_fetches,
-                compression_override,
-                out_tx,
-            )
-            .await
-            {
-                warn!(
-                    name = %name,
-                    key = %work.key,
-                    error = %e,
-                    "S3 fetch object failed"
-                );
+            // Retry with exponential backoff: 1s, 2s, 4s between attempts.
+            let mut last_err = None;
+            for attempt in 0..MAX_FETCH_ATTEMPTS {
+                if attempt > 0 {
+                    let delay_ms = 1000 * (1u64 << (attempt - 1));
+                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                }
+                match fetch_object(
+                    Arc::clone(&s3),
+                    &work.key,
+                    work.size,
+                    part_size,
+                    max_fetches,
+                    compression_override,
+                    out_tx.clone(),
+                )
+                .await
+                {
+                    Ok(()) => {
+                        last_err = None;
+                        break;
+                    }
+                    Err(e) => {
+                        warn!(
+                            name = %name,
+                            key = %work.key,
+                            attempt = attempt + 1,
+                            max_attempts = MAX_FETCH_ATTEMPTS,
+                            error = %e,
+                            "S3 fetch object failed"
+                        );
+                        last_err = Some(e);
+                    }
+                }
+            }
+
+            if last_err.is_some() {
                 health.store(ComponentHealth::Degraded.as_repr(), Ordering::Relaxed);
-                // Don't delete the SQS message — it will become visible again
-                // after the visibility timeout expires (once we stop heartbeating).
 
                 // Report failed key so list-mode can remove it from in_flight
                 // and retry on the next poll cycle.
@@ -887,6 +990,10 @@ async fn run_orchestrator(
                     }
                 }
             }
+
+            // Remove from dedup set so the key can be fetched again if
+            // re-dispatched (e.g. SQS redelivery after failure).
+            fetching_keys.lock().await.remove(&work.key);
         });
     }
 }
@@ -945,7 +1052,6 @@ async fn fetch_object(
 
     let source_id = source_id_from_key(key);
     let mut buf = vec![0u8; OUTPUT_CHUNK_SIZE];
-    let mut total_read: u64 = 0;
     let mut first = true;
     let mut sent_eof = false;
 
@@ -980,13 +1086,14 @@ async fn fetch_object(
             break; // EOF reached — no more data.
         }
 
-        total_read += filled as u64;
         let eof_reached = filled < buf.len();
 
         // Only charge accounted_bytes on the first chunk to avoid inflation.
+        // Use the S3 wire size (from HEAD / SQS notification) rather than
+        // decompressed bytes so bandwidth metrics reflect actual transfer.
         let ab = if first {
             first = false;
-            total_read
+            size
         } else {
             0
         };
@@ -1116,11 +1223,31 @@ async fn fetch_parallel_stream(
             let part_idx = idx;
 
             join_set.spawn(async move {
-                let resp = match s3.get_object_range_stream(&key_owned, start, end).await {
-                    Ok(r) => r,
-                    Err(e) => {
-                        let _ = part_tx.send(Err(e)).await;
-                        return;
+                // Retry the initial range-GET request up to 3 times.
+                // Mid-stream errors are NOT retried since partial data may
+                // have already been sent through part_tx.
+                let resp = {
+                    let mut last_err = None;
+                    let mut resp_ok = None;
+                    for attempt in 0..3u32 {
+                        if attempt > 0 {
+                            let delay_ms = 200 * (1u64 << (attempt - 1));
+                            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                        }
+                        match s3.get_object_range_stream(&key_owned, start, end).await {
+                            Ok(r) => {
+                                resp_ok = Some(r);
+                                break;
+                            }
+                            Err(e) => last_err = Some(e),
+                        }
+                    }
+                    match resp_ok {
+                        Some(r) => r,
+                        None => {
+                            let _ = part_tx.send(Err(last_err.unwrap())).await;
+                            return;
+                        }
                     }
                 };
                 let async_read = decompress::response_to_async_read(resp);
