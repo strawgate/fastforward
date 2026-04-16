@@ -256,6 +256,7 @@ impl Drop for JournaldInput {
             // swap above. The reader thread also uses swap(0) before child.wait(),
             // so only one side ever sends the signal.
             unsafe {
+                #[cfg(not(windows))]
                 libc::kill(pid as i32, libc::SIGKILL);
             }
         }
