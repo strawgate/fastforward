@@ -9,7 +9,7 @@ publish = false
 doctest = false
 
 [package.metadata.cargo-machete]
-ignored = ["turmoil"]
+ignored = ["turmoil", "flate2"]  # flate2 is optional (cpu-profiling feature)
 
 [features]
 default = ["datafusion"]
