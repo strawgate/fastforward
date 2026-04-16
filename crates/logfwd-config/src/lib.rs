@@ -30,7 +30,7 @@ pub use types::{
     JournaldBackendConfig, JournaldInputConfig, JournaldTypeConfig, JsonlEnrichmentConfig,
     K8sPathConfig, OtlpProtobufDecodeModeConfig, OtlpTypeConfig, OutputConfig, OutputType,
     PipelineConfig, S3InputConfig, S3TypeConfig, SensorTypeConfig, ServerConfig,
-    StaticEnrichmentConfig, StorageConfig, TcpTypeConfig, TlsInputConfig, UdpTypeConfig,
+    StaticEnrichmentConfig, StorageConfig, TcpTypeConfig, UdpTypeConfig,
 };
 pub use validate::validate_host_port;
 

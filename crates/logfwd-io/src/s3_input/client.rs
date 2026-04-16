@@ -68,6 +68,11 @@ impl S3Client {
     ) -> io::Result<Self> {
         let (endpoint_base, path_style) = if let Some(ep) = endpoint {
             (ep.trim_end_matches('/').to_string(), true)
+        } else if bucket.contains('.') {
+            // Dotted bucket names (e.g. "logs.prod") break virtual-hosted
+            // style because the wildcard TLS cert *.s3.region.amazonaws.com
+            // does not cover multi-label subdomains. Use path-style instead.
+            (format!("https://s3.{region}.amazonaws.com"), true)
         } else {
             (format!("https://s3.{region}.amazonaws.com"), false)
         };
