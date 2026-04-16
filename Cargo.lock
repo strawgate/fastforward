@@ -1674,6 +1674,7 @@ checksum = "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
 dependencies = [
  "block-buffer",
  "crypto-common",
+ "subtle",
 ]
 
 [[package]]
@@ -2168,6 +2169,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
+name = "hmac"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c49c37c09c17a53d937dfbb742eb3a961d65a994e6bcdcf37e7399d0cc8ab5e"
+dependencies = [
+ "digest",
+]
+
+[[package]]
 name = "http"
 version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2450,7 +2460,7 @@ dependencies = [
  "log",
  "num-format",
  "once_cell",
- "quick-xml",
+ "quick-xml 0.26.0",
  "rgb",
  "str_stack",
 ]
@@ -2900,6 +2910,7 @@ name = "logfwd-io"
 version = "0.1.0"
 dependencies = [
  "arrow",
+ "async-compression",
  "axum",
  "aya",
  "base64",
@@ -2908,7 +2919,10 @@ dependencies = [
  "crossbeam-channel",
  "dhat",
  "flate2",
+ "futures-util",
  "globset",
+ "hex",
+ "hmac",
  "http-body-util",
  "itoa",
  "libc",
@@ -2924,11 +2938,15 @@ dependencies = [
  "proptest",
  "proptest-state-machine",
  "prost 0.14.3",
+ "quick-xml 0.37.5",
+ "reqwest",
  "ryu",
  "sensor-ebpf-common",
  "serde",
  "serde_json",
  "serial_test",
+ "sha2",
+ "snap",
  "socket2",
  "sonic-rs",
  "sysinfo",
@@ -2936,6 +2954,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tiny_http",
  "tokio",
+ "tokio-util",
  "tracing",
  "ureq",
  "walkdir",
@@ -3946,6 +3965,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "quick-xml"
+version = "0.37.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "331e97a1af0bf59823e6eadffe373d7b27f485be8748f71471c662c1f269b7fb"
+dependencies = [
+ "memchr",
+ "serde",
+]
+
+[[package]]
 name = "quinn"
 version = "0.11.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4665,6 +4694,12 @@ name = "smallvec"
 version = "1.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
+
+[[package]]
+name = "snap"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1b6b67fb9a61334225b5b790716f609cd58395f895b3fe8b328786812a40bc3b"
 
 [[package]]
 name = "socket2"

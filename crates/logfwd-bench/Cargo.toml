@@ -27,6 +27,7 @@ logfwd-arrow = { version = "0.1.0", path = "../logfwd-arrow" }
 logfwd-core = { version = "0.1.0", path = "../logfwd-core" }
 logfwd-io = { version = "0.1.0", path = "../logfwd-io", features = [
     "otlp-research",
+    "s3",
 ] }
 logfwd-output = { version = "0.1.0", path = "../logfwd-output" }
 logfwd-transform = { version = "0.1.0", path = "../logfwd-transform" }
@@ -103,6 +104,10 @@ harness = false
 
 [[bench]]
 name = "transform_overhead"
+harness = false
+
+[[bench]]
+name = "s3_input"
 harness = false
 
 [[bin]]
