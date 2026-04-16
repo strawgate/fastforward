@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 import { api } from "./api";
 import type { ChartConfig } from "./components/Chart";
-import { ChartGrid, PipelineLegend, discoverPipelines } from "./components/ChartGrid";
+import { ChartGrid, discoverPipelines, PipelineLegend } from "./components/ChartGrid";
 import { ConfigView } from "./components/ConfigView";
 import { LogViewer } from "./components/LogViewer";
 import { MetricBadges } from "./components/MetricBadges";
@@ -247,9 +247,6 @@ export function App() {
       });
 
   const hasHiddenCharts = !showMoreCharts && visibleExtras.length < EXTRA_CHARTS.length;
-
-  const pipelineCount = status?.pipelines?.length ?? 0;
-  const defaultExpanded = pipelineCount <= 3;
 
   // Discover pipeline names for the legend from chart data.
   const allPipelineCharts = [...PRIMARY_CHARTS, ...EXTRA_CHARTS];

@@ -64,10 +64,7 @@ export function ChartGrid({ store, charts, tick: _tick, hiddenPipelines }: Props
 }
 
 /** Discover pipeline names from the first splitBy chart's frame. */
-export function discoverPipelines(
-  store: TelemetryStore,
-  charts: ChartConfig[]
-): string[] {
+export function discoverPipelines(store: TelemetryStore, charts: ChartConfig[]): string[] {
   const cfg = charts.find((c) => c.splitBy);
   if (!cfg) return [];
   const frame = store.selectTimeSeries({
