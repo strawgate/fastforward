@@ -3,7 +3,7 @@
 // column order: "timestamp", "severity", "body", "trace_id", "span_id", "flags", "attributes"
 
 use arrow::array::Array;
-use super::{BatchColumns, BatchMetadata, encode_attr_array_value, encode_fixed32, encode_tag,
+use super::{BatchColumns, BatchMetadata, encode_col_attr, encode_fixed32, encode_tag,
     encode_varint, numeric_timestamp_ns};
 use logfwd_core::otlp::{self, Severity, bytes_field_size, encode_bytes_field, encode_fixed64,
     encode_varint_field, hex_decode, parse_severity, parse_timestamp_nanos};
@@ -78,8 +78,8 @@ pub(super) fn encode_row_as_log_record_fast_v1(
         encode_bytes_field(buf, otlp::ANY_VALUE_STRING_VALUE, body_bytes);
     }
 
-    for (field_name, attr) in &columns.attribute_cols {
-        encode_attr_array_value(buf, otlp::LOG_RECORD_ATTRIBUTES, field_name, attr, row);
+    for col in &columns.attribute_cols {
+        encode_col_attr(buf, otlp::LOG_RECORD_ATTRIBUTES, col, row);
     }
 
     if let Some((_, arr)) = columns.flags_col
