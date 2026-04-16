@@ -9,6 +9,10 @@
 //! - encoded-payload compression
 //! - in-process decode -> encode.
 
+use std::sync::Arc;
+
+use arrow::compute::cast;
+use arrow::datatypes::{DataType, Field, Schema};
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use logfwd_bench::{generators, make_otlp_sink};
 use logfwd_io::compress::ChunkCompressor;
@@ -241,11 +245,38 @@ fn assert_encode_paths_match(batch: &arrow::record_batch::RecordBatch, fixture_n
     );
 }
 
+/// Normalize a batch by casting Utf8View columns to Utf8 for comparison.
+/// ColumnarBatchBuilder produces Utf8View; prost/StreamingBuilder produces Utf8.
+fn normalize_utf8view(
+    batch: &arrow::record_batch::RecordBatch,
+) -> arrow::record_batch::RecordBatch {
+    let schema = batch.schema();
+    let mut new_fields = Vec::with_capacity(schema.fields().len());
+    let mut new_columns = Vec::with_capacity(batch.num_columns());
+    for (i, field) in schema.fields().iter().enumerate() {
+        let col = batch.column(i);
+        if *field.data_type() == DataType::Utf8View {
+            new_fields.push(Arc::new(Field::new(
+                field.name(),
+                DataType::Utf8,
+                field.is_nullable(),
+            )));
+            new_columns.push(cast(col, &DataType::Utf8).expect("Utf8View→Utf8 cast"));
+        } else {
+            new_fields.push(Arc::clone(field));
+            new_columns.push(Arc::clone(col));
+        }
+    }
+    let new_schema = Arc::new(Schema::new(new_fields));
+    arrow::record_batch::RecordBatch::try_new(new_schema, new_columns).expect("normalized batch")
+}
+
 fn assert_batch_matches(
     expected: &arrow::record_batch::RecordBatch,
     actual: &arrow::record_batch::RecordBatch,
     fixture_name: &str,
 ) {
+    let actual = normalize_utf8view(actual);
     assert_eq!(
         expected.schema(),
         actual.schema(),
@@ -689,7 +720,7 @@ fn make_record_attrs(profile: FixtureProfile, row: usize) -> Vec<KeyValue> {
     attrs.push(kv_string("host", &format!("host-{}", row % 64)));
     attrs.push(kv_i64("status", 200 + (row % 9) as i64));
     attrs.push(kv_f64("duration_ms", (row % 1000) as f64 / 10.0));
-    attrs.push(kv_bool("success", row % 17 != 0));
+    attrs.push(kv_bool("success", !row.is_multiple_of(17)));
 
     for idx in 0..profile.attrs_per_record.saturating_sub(4) {
         let value = if profile.has_complex_any && idx % 5 == 0 {
@@ -732,7 +763,7 @@ fn complex_body_any_value(row: usize) -> AnyValue {
                                     value: Some(Value::StringValue("alpha".to_string())),
                                 },
                                 AnyValue {
-                                    value: Some(Value::BoolValue(row % 2 == 0)),
+                                    value: Some(Value::BoolValue(row.is_multiple_of(2))),
                                 },
                             ],
                         })),
