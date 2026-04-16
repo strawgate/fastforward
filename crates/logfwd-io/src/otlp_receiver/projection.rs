@@ -612,15 +612,6 @@ fn decode_log_record_wire(
         Ok(())
     })?;
 
-    let mut decoded_attrs = Vec::with_capacity(scratch.attr_ranges.len());
-    for attr_idx in 0..scratch.attr_ranges.len() {
-        let (start, len) = scratch.attr_ranges[attr_idx];
-        let attr = &log_record[start..start + len];
-        if let Some((key, value)) = decode_key_value_wire(attr)? {
-            decoded_attrs.push((attr_idx, key, value));
-        }
-    }
-
     builder.begin_row();
 
     let timestamp = if time_unix_nano > 0 {
@@ -667,15 +658,22 @@ fn decode_log_record_wire(
         write_wire_str(builder, fields.scope_version, value, string_storage)?;
     }
 
-    for (attr_idx, key, value) in decoded_attrs {
-        let handle = resolve_record_attr_field(
-            builder,
-            &mut scratch.attr_field_cache,
-            attr_idx,
-            key,
-            &value,
-        )?;
-        write_wire_any(builder, handle, value, scratch, string_storage)?;
+    // Decode and write record attributes inline to avoid a per-row Vec allocation.
+    // `attr_ranges` entries are Copy so the immutable index doesn't conflict with
+    // the mutable scratch borrows needed by resolve/write.
+    for attr_idx in 0..scratch.attr_ranges.len() {
+        let (start, len) = scratch.attr_ranges[attr_idx];
+        let attr = &log_record[start..start + len];
+        if let Some((key, value)) = decode_key_value_wire(attr)? {
+            let handle = resolve_record_attr_field(
+                builder,
+                &mut scratch.attr_field_cache,
+                attr_idx,
+                key,
+                &value,
+            )?;
+            write_wire_any(builder, handle, value, scratch, string_storage)?;
+        }
     }
 
     for &(handle, value) in resource_attrs {

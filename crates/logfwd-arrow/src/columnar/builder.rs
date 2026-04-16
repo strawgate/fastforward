@@ -125,6 +125,11 @@ pub struct ColumnarBatchBuilder {
     /// Pool of cleared dynamic accumulators from previous batches.
     /// Retains Vec capacity so re-resolved columns avoid doubling.
     recycled_columns: Vec<ColumnAccumulator>,
+    /// Capacity hint for `string_buf` based on the previous batch's usage.
+    /// `finish_batch` takes the Vec (Arrow owns the allocation), so the
+    /// next batch starts at capacity 0. This hint avoids the 0→1→2→…→N
+    /// doubling chain on every batch.
+    string_buf_hint: usize,
 }
 
 impl ColumnarBatchBuilder {
@@ -147,6 +152,7 @@ impl ColumnarBatchBuilder {
             dedup_enabled: true,
             utf8_trusted: true,
             recycled_columns: Vec::new(),
+            string_buf_hint: 0,
         }
     }
 
@@ -183,9 +189,13 @@ impl ColumnarBatchBuilder {
     pub fn begin_batch(&mut self) {
         self.lifecycle.begin_batch();
         // Recycle dynamic columns: clear data but retain Vec capacity.
+        // Cap the pool to avoid holding memory from one anomalously wide batch.
+        const MAX_RECYCLED: usize = 128;
         let num_planned = self.plan.len();
         for col in self.columns.drain(num_planned..) {
-            self.recycled_columns.push(col);
+            if self.recycled_columns.len() < MAX_RECYCLED {
+                self.recycled_columns.push(col);
+            }
         }
         // Clear recycled columns so they're ready for reuse.
         for col in &mut self.recycled_columns {
@@ -199,6 +209,10 @@ impl ColumnarBatchBuilder {
         self.plan.reset_dynamic();
         self.original_buf = Buffer::from(Vec::<u8>::new());
         self.string_buf.clear();
+        // Pre-reserve based on previous batch's string usage to avoid doubling.
+        if self.string_buf.capacity() == 0 && self.string_buf_hint > 0 {
+            self.string_buf.reserve(self.string_buf_hint);
+        }
     }
 
     /// Set the original input buffer for zero-copy string references.
@@ -507,6 +521,7 @@ impl ColumnarBatchBuilder {
         // Transfer buffers to Arrow — O(1) for the ref-counted original,
         // O(1) move for the generated Vec.
         let original = std::mem::replace(&mut self.original_buf, Buffer::from(Vec::<u8>::new()));
+        self.string_buf_hint = self.string_buf.len();
         let generated = Buffer::from_vec(std::mem::take(&mut self.string_buf));
 
         let mode = FinalizationMode {
