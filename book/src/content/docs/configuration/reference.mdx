@@ -286,22 +286,12 @@ the build target.
 | `sensor.enabled_families` | array[string] | No | Optional enabled signal families. Omit to use defaults; set `[]` to disable all families. |
 | `sensor.emit_signal_rows` | boolean | No | Emit periodic per-family sample rows. Defaults to `true`. |
 | `sensor.max_rows_per_poll` | integer | No | Upper bound on data rows returned per collection cycle. Defaults to `256`. Set to `0` or omit for the default. |
-| `sensor.scrapers` | array[string] | No | List of scrapers to run. Supported values are: `cpu`, `memory`, `disk`, `network`, `filesystem`. |
-| `sensor.collection_interval_ms` | integer | No | Metrics collection cadence in milliseconds. Defaults to `10000`. |
-| `sensor.disk_include_devices` | array[string] | No | Optional list of disk devices to include in scraping. |
-| `sensor.disk_exclude_devices` | array[string] | No | Optional list of disk devices to exclude from scraping. |
-| `sensor.network_include_interfaces` | array[string] | No | Optional list of network interfaces to include in scraping. |
-| `sensor.network_exclude_interfaces` | array[string] | No | Optional list of network interfaces to exclude from scraping. |
-| `sensor.filesystem_include_mount_points` | array[string] | No | Optional list of filesystem mount points to include in scraping. |
-| `sensor.filesystem_exclude_mount_points` | array[string] | No | Optional list of filesystem mount points to exclude from scraping. |
 
 ```yaml
 input:
   type: host_metrics
   sensor:
     poll_interval_ms: 5000
-    collection_interval_ms: 5000
-    scrapers: ["cpu", "memory"]
 ```
 
 ### `arrow_ipc` input
@@ -563,8 +553,6 @@ SELECT float(duration) AS duration_ms FROM logs
 Enrichment tables are made available as SQL tables that can be joined in the transform
 query. They are declared under the top-level `enrichment` key.
 
-Supported enrichment types: `k8s_path`, `host_info`, `static`, `geo_database`, `csv`, `jsonl`.
-
 ```yaml
 enrichment:
   - type: k8s_path
@@ -595,13 +583,11 @@ Columns exposed by `k8s`:
 
 ### `host_info` enrichment
 
-Exposes information about the machine running logfwd.
+Exposes the hostname of the machine running logfwd.
 
 | Column | Description |
 |--------|-------------|
 | `hostname` | System hostname. |
-| `os_type` | Operating system type (e.g. `linux`, `macos`, `windows`). |
-| `os_arch` | CPU architecture (e.g. `x86_64`, `aarch64`). |
 
 ### `static` enrichment
 
@@ -620,60 +606,6 @@ enrichment:
 ```sql
 SELECT l.*, lbl.environment, lbl.cluster
 FROM logs l CROSS JOIN labels lbl
-```
-
-### `geo_database` enrichment
-
-Looks up geographic metadata from a MaxMind-compatible `.mmdb` database file.
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `format` | string | Database format. Only `mmdb` is supported. |
-| `path` | string | Path to the `.mmdb` file. |
-| `refresh_interval` | integer | Optional interval in seconds to reload the database. |
-
-```yaml
-enrichment:
-  - type: geo_database
-    format: mmdb
-    path: /etc/logfwd/GeoLite2-City.mmdb
-```
-
-### `csv` enrichment
-
-Loads a CSV file as an in-memory lookup table.
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `table_name` | string | SQL table name to use in queries. |
-| `path` | string | Path to the CSV file. The first row must be a header row. |
-
-```yaml
-enrichment:
-  - type: csv
-    table_name: assets
-    path: /etc/logfwd/assets.csv
-```
-
-```sql
-SELECT l.*, a.owner
-FROM logs l JOIN assets a ON l.host = a.hostname
-```
-
-### `jsonl` enrichment
-
-Loads a JSON Lines file as an in-memory lookup table. Each line must be a JSON object.
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `table_name` | string | SQL table name to use in queries. |
-| `path` | string | Path to the `.jsonl` file. |
-
-```yaml
-enrichment:
-  - type: jsonl
-    table_name: ip_owners
-    path: /etc/logfwd/ip_owners.jsonl
 ```
 
 ---
