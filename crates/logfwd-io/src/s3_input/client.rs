@@ -17,6 +17,21 @@ type HmacSha256 = Hmac<Sha256>;
 /// SHA-256 of an empty body — used for GET / HEAD requests.
 const EMPTY_BODY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
+/// Max bytes of a response body to include in error messages.
+const ERROR_BODY_PREVIEW_LEN: usize = 1024;
+
+/// Read the response body text, truncated to [`ERROR_BODY_PREVIEW_LEN`] bytes
+/// to prevent large error responses from exhausting memory in error messages.
+async fn error_body_preview(resp: reqwest::Response) -> String {
+    let body = resp.text().await.unwrap_or_default();
+    if body.len() <= ERROR_BODY_PREVIEW_LEN {
+        body
+    } else {
+        let truncated = &body[..ERROR_BODY_PREVIEW_LEN];
+        format!("{truncated}... (truncated)")
+    }
+}
+
 /// A single object returned by `ListObjectsV2`.
 #[derive(Debug)]
 pub struct S3Object {
@@ -330,7 +345,7 @@ impl S3Client {
             )));
         }
         if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
+            let body = error_body_preview(resp).await;
             return Err(io::Error::other(format!(
                 "S3 GET range {key}: HTTP {status}: {body}"
             )));
@@ -359,7 +374,7 @@ impl S3Client {
 
         let status = resp.status();
         if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
+            let body = error_body_preview(resp).await;
             return Err(io::Error::other(format!(
                 "S3 GET {key}: HTTP {status}: {body}"
             )));
@@ -390,7 +405,7 @@ impl S3Client {
 
         let status = resp.status();
         if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
+            let body = error_body_preview(resp).await;
             return Err(io::Error::other(format!(
                 "S3 GET stream {key}: HTTP {status}: {body}"
             )));
@@ -433,7 +448,7 @@ impl S3Client {
             )));
         }
         if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
+            let body = error_body_preview(resp).await;
             return Err(io::Error::other(format!(
                 "S3 GET range stream {key}: HTTP {status}: {body}"
             )));
@@ -533,7 +548,7 @@ impl S3Client {
 
         let status = resp.status();
         if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
+            let body = error_body_preview(resp).await;
             return Err(io::Error::other(format!(
                 "S3 PUT {key}: HTTP {status}: {body}"
             )));
@@ -572,7 +587,7 @@ impl S3Client {
         let status = resp.status();
         // 200 OK or 409 Conflict (BucketAlreadyOwnedByYou) are both fine.
         if !status.is_success() && status.as_u16() != 409 {
-            let body = resp.text().await.unwrap_or_default();
+            let body = error_body_preview(resp).await;
             return Err(io::Error::other(format!(
                 "S3 create bucket: HTTP {status}: {body}"
             )));
@@ -644,7 +659,7 @@ impl S3Client {
 
         let status = resp.status();
         if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
+            let body = error_body_preview(resp).await;
             return Err(io::Error::other(format!(
                 "S3 ListObjectsV2: HTTP {status}: {body}"
             )));
