@@ -12,21 +12,27 @@ doctest = false
 default = []
 otlp-research = []
 s3 = [
+    "dep:async-compression",
+    "dep:futures-util",
     "dep:reqwest",
     "dep:hmac",
     "dep:sha2",
     "dep:hex",
     "dep:quick-xml",
     "dep:snap",
+    "dep:tokio-util",
     "tokio/rt-multi-thread",
     "tokio/sync",
     "tokio/time",
     "tokio/macros",
+    "tokio/io-util",
 ]
 
 [dependencies]
+async-compression = { version = "0.4", features = ["tokio", "gzip", "zstd"], optional = true }
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
 base64 = { workspace = true }
+futures-util = { version = "0.3", optional = true }
 logfwd-core = { version = "0.1.0", path = "../logfwd-core" }
 logfwd-arrow = { version = "0.1.0", path = "../logfwd-arrow" }
 logfwd-otap-proto = { version = "0.1.0", path = "../logfwd-otap-proto" }
@@ -50,6 +56,7 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 sha2 = { version = "0.10", optional = true }
 snap = { version = "1", optional = true }
 tokio = { workspace = true }
+tokio-util = { version = "0.7", features = ["io"], optional = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 opentelemetry-proto = { version = "0.31", features = ["logs", "gen-tonic-messages"] }

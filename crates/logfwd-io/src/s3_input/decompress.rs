@@ -1,8 +1,10 @@
 //! Compression detection and decompression for S3 objects.
 
 use std::io::{self, Read};
+use std::pin::Pin;
 
 use bytes::Bytes;
+use tokio::io::{AsyncBufRead, BufReader};
 
 /// Compression format for an S3 object.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,11 +90,78 @@ pub fn detect_compression(
     Compression::None
 }
 
-/// Decompress `data` according to `compression`.
+/// Type-erased async reader for streaming decompression.
+pub type AsyncDecompressReader = Pin<Box<dyn tokio::io::AsyncRead + Send>>;
+
+/// Wrap an `AsyncBufRead` source in the appropriate streaming decompressor.
 ///
-/// Reads the full decompressed output into a `Vec<u8>`. For streaming
-/// decoders (gzip, zstd, snappy) this avoids materialising the intermediate
-/// compressed form twice.
+/// For `Compression::None`, returns the reader as-is (no copy).
+/// For gzip/zstd, wraps in `async-compression` streaming decoders.
+/// For snappy, falls back to buffered sync decompression (no async snappy
+/// decoder in `async-compression`).
+pub fn wrap_decompressor<R: AsyncBufRead + Send + 'static>(
+    reader: R,
+    compression: Compression,
+) -> AsyncDecompressReader {
+    match compression {
+        Compression::None => Box::pin(reader),
+        Compression::Gzip => Box::pin(async_compression::tokio::bufread::GzipDecoder::new(reader)),
+        Compression::Zstd => Box::pin(async_compression::tokio::bufread::ZstdDecoder::new(reader)),
+        Compression::Snappy => {
+            // async-compression doesn't support snappy framing format.
+            // Use a pipe: spawn a blocking task that reads compressed bytes
+            // from a channel and writes decompressed bytes to another.
+            let (async_reader, writer) = tokio::io::duplex(256 * 1024);
+            let buf_reader = Box::pin(BufReader::new(reader));
+            tokio::spawn(async move {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut buf_reader = buf_reader;
+                let mut writer = writer;
+                let mut compressed = Vec::new();
+                if let Err(e) = buf_reader.read_to_end(&mut compressed).await {
+                    tracing::warn!(error = %e, "snappy: failed to read compressed data");
+                    return;
+                }
+                let mut decoder = snap::read::FrameDecoder::new(compressed.as_slice());
+                let mut buf = vec![0u8; 256 * 1024];
+                loop {
+                    match decoder.read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            if writer.write_all(&buf[..n]).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "snappy decompress error");
+                            break;
+                        }
+                    }
+                }
+            });
+            Box::pin(async_reader)
+        }
+    }
+}
+
+/// Wrap a reqwest streaming response body into an `AsyncBufRead`.
+///
+/// Converts `bytes_stream()` → `StreamReader` → `BufReader`.
+pub fn response_to_async_read(
+    resp: reqwest::Response,
+) -> BufReader<
+    tokio_util::io::StreamReader<impl futures_util::Stream<Item = Result<Bytes, io::Error>>, Bytes>,
+> {
+    use futures_util::StreamExt;
+    let stream = resp
+        .bytes_stream()
+        .map(|r| r.map_err(|e| io::Error::other(format!("S3 stream read: {e}"))));
+    BufReader::with_capacity(256 * 1024, tokio_util::io::StreamReader::new(stream))
+}
+
+/// Decompress `data` synchronously (used by benchmarks).
+///
+/// Reads the full decompressed output into a `Vec<u8>`.
 pub fn decompress(data: Bytes, compression: Compression) -> io::Result<Vec<u8>> {
     match compression {
         Compression::None => Ok(data.to_vec()),

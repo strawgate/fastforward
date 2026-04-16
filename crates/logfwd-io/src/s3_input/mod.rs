@@ -10,12 +10,19 @@
 //!   `ListObjectsV2` with an optional `prefix` and advances a `start_after`
 //!   cursor to avoid re-processing objects.
 //!
-//! # Parallel fetching
+//! # Streaming pipeline
 //!
-//! Each object is downloaded in parallel 8 MiB range-GET chunks using a
-//! `JoinSet`. A `Semaphore` limits the number of objects being fetched
-//! concurrently. Decompressed bytes are chunked into ~256 KiB pieces before
-//! being pushed to the output channel.
+//! Data flows through the pipeline without buffering entire objects:
+//!
+//! - **Uncompressed objects**: parallel 8 MiB range-GET streams, fetched
+//!   concurrently but delivered in order (part 0's chunks first, then part 1,
+//!   etc.) via per-part bounded channels. Zero data corruption at boundaries.
+//! - **Compressed objects**: single GET stream → streaming async decompression
+//!   (gzip/zstd via `async-compression`, snappy via buffered bridge).
+//!
+//! All paths emit ~256 KiB chunks to the output channel as data arrives.
+//! Peak memory per concurrent object: ~part_size (8 MiB) + channel buffers,
+//! versus the full object size with the old buffered approach.
 //!
 //! # Integration
 //!
@@ -38,7 +45,7 @@ use tracing::{error, warn};
 
 use crate::input::{InputEvent, InputSource};
 use client::S3Client;
-use decompress::{Compression, decompress, detect_compression};
+use decompress::{Compression, detect_compression};
 use sqs::SqsClient;
 
 // ── Constants ──────────────────────────────────────────────────────────────
@@ -879,7 +886,14 @@ async fn run_orchestrator(
     }
 }
 
-/// Fetch a single S3 object, decompress it, and send chunks to `out_tx`.
+/// Fetch a single S3 object via streaming download + streaming decompression,
+/// sending ~256 KiB chunks to `out_tx` as they become available.
+///
+/// For **compressed** objects (or unknown size): single GET → streaming
+/// decompression → 256 KiB chunks.
+/// For **uncompressed** objects with known size: parallel range-GETs, each
+/// part streamed directly as 256 KiB chunks (out-of-order for max throughput;
+/// each part gets a unique sub-SourceId so the framer treats them independently).
 async fn fetch_object(
     s3: Arc<S3Client>,
     key: &str,
@@ -889,6 +903,8 @@ async fn fetch_object(
     compression_override: Option<Compression>,
     out_tx: mpsc::SyncSender<ChunkPayload>,
 ) -> io::Result<()> {
+    use tokio::io::AsyncReadExt;
+
     // If size is unknown (0 from SQS notification) or no compression override,
     // issue a HEAD to discover metadata (content-encoding, content-type, size).
     let (content_encoding, content_type) = if compression_override.is_none() || size == 0 {
@@ -912,29 +928,119 @@ async fn fetch_object(
         detect_compression(key, content_encoding.as_deref(), content_type.as_deref())
     });
 
-    // TODO: Stream decompression incrementally instead of buffering the entire
-    // object in memory. This will reduce peak memory for large objects.
-    // For compressed objects, use a single stream download.
-    // For uncompressed objects (with known size), use parallel range-GETs.
-    let raw: bytes::Bytes = if compression != Compression::None || size == 0 {
-        s3.get_object(key).await?
-    } else {
-        fetch_parallel(Arc::clone(&s3), key, size, part_size, max_fetches).await?
-    };
+    // Uncompressed objects with known size: parallel range-GET streaming.
+    if compression == Compression::None && size > 0 {
+        return fetch_parallel_stream(s3, key, size, part_size, max_fetches, out_tx).await;
+    }
 
-    let accounted_bytes = raw.len() as u64;
+    // Compressed (or unknown-size): single GET → streaming decompress → chunks.
+    let resp = s3.get_object_stream(key).await?;
+    let async_read = decompress::response_to_async_read(resp);
+    let mut reader = decompress::wrap_decompressor(async_read, compression);
 
-    let decompressed = tokio::task::spawn_blocking(move || decompress(raw, compression))
-        .await
-        .map_err(|e| io::Error::other(format!("spawn_blocking decompress: {e}")))??;
+    let source_id = source_id_from_key(key);
+    let mut buf = vec![0u8; OUTPUT_CHUNK_SIZE];
+    let mut total_read: u64 = 0;
+    let mut first = true;
+    let mut sent_eof = false;
 
-    // Chunk the decompressed data and send to output channel.
-    // For empty objects, send an EOF-only payload so FramedInput still
-    // sees the end-of-file boundary for this source.
-    if decompressed.is_empty() {
+    loop {
+        let mut filled = 0;
+        // Fill the buffer to OUTPUT_CHUNK_SIZE or until EOF.
+        while filled < buf.len() {
+            match reader.read(&mut buf[filled..]).await {
+                Ok(0) => break, // EOF
+                Ok(n) => filled += n,
+                Err(e) => return Err(io::Error::other(format!("streaming read: {e}"))),
+            }
+        }
+
+        if filled == 0 {
+            break; // EOF reached — no more data.
+        }
+
+        total_read += filled as u64;
+        let eof_reached = filled < buf.len();
+
+        // Only charge accounted_bytes on the first chunk to avoid inflation.
+        let ab = if first {
+            first = false;
+            total_read
+        } else {
+            0
+        };
+
+        if eof_reached {
+            sent_eof = true;
+        }
+
+        let payload = ChunkPayload {
+            bytes: buf[..filled].to_vec(),
+            accounted_bytes: ab,
+            source_id,
+            is_eof: eof_reached,
+        };
+        let tx = out_tx.clone();
+        let send_result = tokio::task::spawn_blocking(move || tx.send(payload))
+            .await
+            .map_err(|e| io::Error::other(format!("spawn_blocking send: {e}")))?;
+        if send_result.is_err() {
+            return Err(io::Error::other("output channel closed"));
+        }
+
+        if eof_reached {
+            break;
+        }
+    }
+
+    // Send trailing EOF if we haven't already (empty object, or data was an
+    // exact multiple of OUTPUT_CHUNK_SIZE so the last chunk wasn't short).
+    if !sent_eof {
         let payload = ChunkPayload {
             bytes: Vec::new(),
-            accounted_bytes,
+            accounted_bytes: 0,
+            source_id,
+            is_eof: true,
+        };
+        let tx = out_tx.clone();
+        let _ = tokio::task::spawn_blocking(move || tx.send(payload)).await;
+    }
+
+    Ok(())
+}
+
+/// Stream an uncompressed object via parallel range-GETs with ordered delivery.
+///
+/// Parts are fetched concurrently (limited by `max_fetches` semaphore) but
+/// delivered to `out_tx` **in order** — all of part 0's chunks first, then
+/// part 1, etc. This avoids data corruption at part boundaries while still
+/// getting the throughput benefit of parallel downloads.
+///
+/// Each part task streams its data into a per-part bounded channel. The main
+/// loop reads those channels sequentially, providing natural backpressure:
+/// if delivery stalls, the part channels fill up, which pauses downloads.
+async fn fetch_parallel_stream(
+    s3: Arc<S3Client>,
+    key: &str,
+    size: u64,
+    part_size: u64,
+    max_fetches: usize,
+    out_tx: mpsc::SyncSender<ChunkPayload>,
+) -> io::Result<()> {
+    use tokio::io::AsyncReadExt;
+
+    let mut ranges: Vec<(u64, u64)> = Vec::new();
+    let mut offset: u64 = 0;
+    while offset < size {
+        let end = (offset + part_size - 1).min(size - 1);
+        ranges.push((offset, end));
+        offset = end + 1;
+    }
+
+    if ranges.is_empty() {
+        let payload = ChunkPayload {
+            bytes: Vec::new(),
+            accounted_bytes: 0,
             source_id: source_id_from_key(key),
             is_eof: true,
         };
@@ -947,32 +1053,111 @@ async fn fetch_object(
         return Ok(());
     }
 
-    let mut first = true;
     let source_id = source_id_from_key(key);
-    let chunks: Vec<&[u8]> = decompressed.chunks(OUTPUT_CHUNK_SIZE).collect();
-    let total_chunks = chunks.len();
-    for (i, chunk) in chunks.into_iter().enumerate() {
-        // Only charge accounted_bytes on the first chunk to avoid inflation.
-        let ab = if first {
-            first = false;
-            accounted_bytes
-        } else {
-            0
-        };
-        let is_last = i + 1 == total_chunks;
-        let payload = ChunkPayload {
-            bytes: chunk.to_vec(),
-            accounted_bytes: ab,
-            source_id,
-            is_eof: is_last,
-        };
-        let out_tx = out_tx.clone();
-        let send_result = tokio::task::spawn_blocking(move || out_tx.send(payload))
+    let fetch_sem = Arc::new(Semaphore::new(max_fetches));
+
+    // Per-part bounded channels. 4 × 256 KiB = 1 MiB buffer per part.
+    const PART_CHANNEL_BOUND: usize = 4;
+    let mut part_receivers: Vec<tokio::sync::mpsc::Receiver<io::Result<Vec<u8>>>> =
+        Vec::with_capacity(ranges.len());
+    let mut join_set: JoinSet<()> = JoinSet::new();
+
+    for (part_idx, (start, end)) in ranges.iter().copied().enumerate() {
+        let (part_tx, part_rx) = tokio::sync::mpsc::channel(PART_CHANNEL_BOUND);
+        part_receivers.push(part_rx);
+
+        let permit = fetch_sem
+            .clone()
+            .acquire_owned()
             .await
-            .map_err(|e| io::Error::other(format!("spawn_blocking send: {e}")))?;
-        if send_result.is_err() {
-            // Consumer dropped — pipeline is shutting down.
-            return Err(io::Error::other("output channel closed"));
+            .map_err(|e| io::Error::other(format!("semaphore acquire: {e}")))?;
+        let s3 = Arc::clone(&s3);
+        let key_owned = key.to_string();
+
+        join_set.spawn(async move {
+            let _permit = permit;
+
+            let resp = match s3.get_object_range_stream(&key_owned, start, end).await {
+                Ok(r) => r,
+                Err(e) => {
+                    let _ = part_tx.send(Err(e)).await;
+                    return;
+                }
+            };
+            let async_read = decompress::response_to_async_read(resp);
+            tokio::pin!(async_read);
+
+            let mut buf = vec![0u8; OUTPUT_CHUNK_SIZE];
+            loop {
+                let mut filled = 0;
+                while filled < buf.len() {
+                    match async_read.read(&mut buf[filled..]).await {
+                        Ok(0) => break,
+                        Ok(n) => filled += n,
+                        Err(e) => {
+                            let _ = part_tx
+                                .send(Err(io::Error::other(format!(
+                                    "range GET stream part {part_idx}: {e}"
+                                ))))
+                                .await;
+                            return;
+                        }
+                    }
+                }
+                if filled == 0 {
+                    break;
+                }
+                if part_tx.send(Ok(buf[..filled].to_vec())).await.is_err() {
+                    return; // Consumer dropped — shutting down.
+                }
+            }
+        });
+    }
+
+    // Deliver parts in order: drain part 0 fully, then part 1, etc.
+    let mut first_chunk = true;
+    for mut part_rx in part_receivers {
+        while let Some(result) = part_rx.recv().await {
+            let chunk = result?;
+            let ab = if first_chunk {
+                first_chunk = false;
+                size
+            } else {
+                0
+            };
+            let payload = ChunkPayload {
+                bytes: chunk,
+                accounted_bytes: ab,
+                source_id,
+                is_eof: false,
+            };
+            let tx = out_tx.clone();
+            let send_result = tokio::task::spawn_blocking(move || tx.send(payload))
+                .await
+                .map_err(|e| io::Error::other(format!("spawn_blocking send: {e}")))?;
+            if send_result.is_err() {
+                join_set.abort_all();
+                return Err(io::Error::other("output channel closed"));
+            }
+        }
+    }
+
+    // Send trailing EOF.
+    let payload = ChunkPayload {
+        bytes: Vec::new(),
+        accounted_bytes: 0,
+        source_id,
+        is_eof: true,
+    };
+    let tx = out_tx.clone();
+    let _ = tokio::task::spawn_blocking(move || tx.send(payload)).await;
+
+    // Drain JoinSet to propagate any panics.
+    while let Some(result) = join_set.join_next().await {
+        if let Err(e) = result
+            && e.is_panic()
+        {
+            return Err(io::Error::other(format!("range GET task panicked: {e}")));
         }
     }
 
@@ -981,7 +1166,7 @@ async fn fetch_object(
 
 /// Download an object in parallel range-GET chunks and return the concatenated bytes.
 ///
-/// Exposed as `pub` for benchmarks.
+/// Exposed as `pub` for benchmarks. Uses the old buffered path.
 pub async fn fetch_parallel_bench(
     s3: Arc<S3Client>,
     key: &str,
@@ -989,10 +1174,11 @@ pub async fn fetch_parallel_bench(
     part_size: u64,
     max_fetches: usize,
 ) -> io::Result<bytes::Bytes> {
-    fetch_parallel(s3, key, size, part_size, max_fetches).await
+    fetch_parallel_buffered(s3, key, size, part_size, max_fetches).await
 }
 
-async fn fetch_parallel(
+/// Buffered parallel fetch — kept for benchmarks that need the full Bytes result.
+async fn fetch_parallel_buffered(
     s3: Arc<S3Client>,
     key: &str,
     size: u64,

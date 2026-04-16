@@ -369,6 +369,78 @@ impl S3Client {
             .map_err(|e| io::Error::other(format!("S3 GET read {key}: {e}")))
     }
 
+    /// Fetch the full object as a streaming response body.
+    ///
+    /// Returns the `reqwest::Response` after status validation. The caller
+    /// should use `resp.bytes_stream()` to consume the body incrementally.
+    pub async fn get_object_stream(&self, key: &str) -> io::Result<reqwest::Response> {
+        let host = self.host();
+        let signing_path = self.object_signing_path(key);
+        let headers =
+            self.signed_headers("GET", &signing_path, "", &BTreeMap::new(), b"", "s3", &host)?;
+        let url = self.object_url(key);
+
+        let resp = self
+            .client
+            .get(&url)
+            .headers(headers)
+            .send()
+            .await
+            .map_err(|e| io::Error::other(format!("S3 GET stream {key}: {e}")))?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(io::Error::other(format!(
+                "S3 GET stream {key}: HTTP {status}: {body}"
+            )));
+        }
+        Ok(resp)
+    }
+
+    /// Fetch a byte range as a streaming response body.
+    ///
+    /// Returns the `reqwest::Response` after status validation (expects 206).
+    pub async fn get_object_range_stream(
+        &self,
+        key: &str,
+        start: u64,
+        end: u64,
+    ) -> io::Result<reqwest::Response> {
+        let host = self.host();
+        let signing_path = self.object_signing_path(key);
+        let range_str = format!("bytes={start}-{end}");
+        let mut extra: BTreeMap<String, String> = BTreeMap::new();
+        extra.insert("range".to_string(), range_str);
+
+        let headers = self.signed_headers("GET", &signing_path, "", &extra, b"", "s3", &host)?;
+        let url = self.object_url(key);
+
+        let resp = self
+            .client
+            .get(&url)
+            .headers(headers)
+            .send()
+            .await
+            .map_err(|e| {
+                io::Error::other(format!("S3 GET range stream {key} {start}-{end}: {e}"))
+            })?;
+
+        let status = resp.status();
+        if status.as_u16() == 200 {
+            return Err(io::Error::other(format!(
+                "S3 GET range stream {key} {start}-{end}: server returned 200 OK instead of 206 Partial Content"
+            )));
+        }
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(io::Error::other(format!(
+                "S3 GET range stream {key}: HTTP {status}: {body}"
+            )));
+        }
+        Ok(resp)
+    }
+
     /// Issue a `HEAD` request and return the `Content-Length`.
     pub async fn head_object(&self, key: &str) -> io::Result<u64> {
         let meta = self.head_object_metadata(key).await?;

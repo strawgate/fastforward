@@ -2910,6 +2910,7 @@ name = "logfwd-io"
 version = "0.1.0"
 dependencies = [
  "arrow",
+ "async-compression",
  "axum",
  "aya",
  "base64",
@@ -2918,6 +2919,7 @@ dependencies = [
  "crossbeam-channel",
  "dhat",
  "flate2",
+ "futures-util",
  "globset",
  "hex",
  "hmac",
@@ -2952,6 +2954,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tiny_http",
  "tokio",
+ "tokio-util",
  "tracing",
  "ureq",
  "walkdir",
