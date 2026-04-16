@@ -212,46 +212,64 @@ impl OtlpSink {
         let mut records_buf: Vec<u8> =
             Vec::with_capacity(estimate_records_buf_capacity(num_rows, &columns));
         let mut grouped_ranges: Vec<ResourceGroup<'_>> = Vec::new();
-        let mut group_index_by_key: std::collections::HashMap<
-            (ResourceKey<'_>, ScopeKey<'_>),
-            usize,
-        > = std::collections::HashMap::new();
 
-        for row in 0..num_rows {
-            let mut key: ResourceKey<'_> = Vec::with_capacity(columns.resource_cols.len());
-            for (field_name, attr) in &columns.resource_cols {
-                key.push(attr.value_ref(row, field_name));
+        // Fast path: when there are no resource or scope columns every row belongs to
+        // the same single group.  This is the overwhelmingly common case for file / CRI
+        // log forwarding and avoids a per-row HashMap lookup, key Vec allocation, and
+        // scope-column null check.
+        if columns.resource_cols.is_empty()
+            && columns.scope_name_col.is_none()
+            && columns.scope_version_col.is_none()
+        {
+            let mut record_ranges: Vec<(usize, usize)> = Vec::with_capacity(num_rows);
+            for row in 0..num_rows {
+                let start = records_buf.len();
+                encode_row(&columns, row, metadata, &mut records_buf);
+                record_ranges.push((start, records_buf.len()));
             }
-            let scope_name = columns.scope_name_col.as_ref().and_then(|(_, arr)| {
-                if arr.is_null(row) {
-                    None
-                } else {
-                    Some(arr.value(row))
-                }
-            });
-            let scope_version = columns.scope_version_col.as_ref().and_then(|(_, arr)| {
-                if arr.is_null(row) {
-                    None
-                } else {
-                    Some(arr.value(row))
-                }
-            });
-            let scope_key = (scope_name, scope_version);
+            grouped_ranges.push((Vec::new(), (None, None), record_ranges));
+        } else {
+            let mut group_index_by_key: std::collections::HashMap<
+                (ResourceKey<'_>, ScopeKey<'_>),
+                usize,
+            > = std::collections::HashMap::new();
 
-            let group_idx = match group_index_by_key.entry((key, scope_key)) {
-                std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
-                std::collections::hash_map::Entry::Vacant(entry) => {
-                    let idx = grouped_ranges.len();
-                    let (group_key, group_scope) = entry.key();
-                    grouped_ranges.push((group_key.clone(), *group_scope, Vec::new()));
-                    entry.insert(idx);
-                    idx
+            for row in 0..num_rows {
+                let mut key: ResourceKey<'_> = Vec::with_capacity(columns.resource_cols.len());
+                for (field_name, attr) in &columns.resource_cols {
+                    key.push(attr.value_ref(row, field_name));
                 }
-            };
+                let scope_name = columns.scope_name_col.as_ref().and_then(|(_, arr)| {
+                    if arr.is_null(row) {
+                        None
+                    } else {
+                        Some(arr.value(row))
+                    }
+                });
+                let scope_version = columns.scope_version_col.as_ref().and_then(|(_, arr)| {
+                    if arr.is_null(row) {
+                        None
+                    } else {
+                        Some(arr.value(row))
+                    }
+                });
+                let scope_key = (scope_name, scope_version);
 
-            let start = records_buf.len();
-            encode_row(&columns, row, metadata, &mut records_buf);
-            grouped_ranges[group_idx].2.push((start, records_buf.len()));
+                let group_idx = match group_index_by_key.entry((key, scope_key)) {
+                    std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
+                    std::collections::hash_map::Entry::Vacant(entry) => {
+                        let idx = grouped_ranges.len();
+                        let (group_key, group_scope) = entry.key();
+                        grouped_ranges.push((group_key.clone(), *group_scope, Vec::new()));
+                        entry.insert(idx);
+                        idx
+                    }
+                };
+
+                let start = records_buf.len();
+                encode_row(&columns, row, metadata, &mut records_buf);
+                grouped_ranges[group_idx].2.push((start, records_buf.len()));
+            }
         }
 
         // Phase 2: compute sizes bottom-up per resource group.
@@ -799,6 +817,25 @@ impl AttrArray<'_> {
     }
 }
 
+/// Per-column attribute metadata, resolved once per batch.
+///
+/// Carries pre-encoded key bytes alongside the downcast array so the per-row
+/// encoding loop can skip recomputing the key tag + varint + bytes on every
+/// iteration.
+struct ColAttr<'a> {
+    /// Original field name used for error messages and fallback formatting.
+    name: String,
+    /// Pre-encoded `encode_bytes_field(KEY_VALUE_KEY, name_bytes)` — constant
+    /// for every row in the batch.  Written with a single `extend_from_slice`
+    /// instead of three separate encode_tag / encode_varint / extend calls.
+    key_encoding: Vec<u8>,
+    /// `bytes_field_size(KEY_VALUE_KEY, name.len())` — constant per column.
+    /// Used directly when computing outer KV message size on each row.
+    kv_key_cost: usize,
+    /// The downcast Arrow array.
+    array: AttrArray<'a>,
+}
+
 /// Pre-resolved column roles and downcast arrays for one RecordBatch.
 ///
 /// Built once in `encode_batch` before the per-row loop to avoid
@@ -827,8 +864,8 @@ struct BatchColumns<'a> {
     scope_name_col: Option<(usize, OtlpStrCol<'a>)>,
     /// Scope version column.
     scope_version_col: Option<(usize, OtlpStrCol<'a>)>,
-    /// Non-special attribute columns: (field_name, pre-downcast array).
-    attribute_cols: Vec<(String, AttrArray<'a>)>,
+    /// Non-special attribute columns with pre-encoded key bytes.
+    attribute_cols: Vec<ColAttr<'a>>,
     /// Resource attribute columns promoted to OTLP Resource attributes.
     resource_cols: Vec<(String, AttrArray<'a>)>,
 }
@@ -951,7 +988,7 @@ fn resolve_batch_columns<'a>(
     let mut observed_ts_col: Option<(usize, &dyn Array)> = None;
     let mut scope_name_col: Option<(usize, OtlpStrCol<'_>)> = None;
     let mut scope_version_col: Option<(usize, OtlpStrCol<'_>)> = None;
-    let mut attribute_cols: Vec<(String, AttrArray<'_>)> = Vec::new();
+    let mut attribute_cols: Vec<ColAttr<'_>> = Vec::new();
     let mut resource_cols: Vec<(String, AttrArray<'_>)> = Vec::new();
     for (idx, field) in schema.fields().iter().enumerate() {
         if excluded[idx] {
@@ -1094,7 +1131,11 @@ fn resolve_batch_columns<'a>(
                 AttrArray::Str,
             ),
         };
-        attribute_cols.push((field_name.to_string(), attr));
+        let name = field_name.to_string();
+        let mut key_encoding = Vec::with_capacity(2 + name.len());
+        encode_bytes_field(&mut key_encoding, otlp::KEY_VALUE_KEY, name.as_bytes());
+        let kv_key_cost = bytes_field_size(otlp::KEY_VALUE_KEY, name.len());
+        attribute_cols.push(ColAttr { name, key_encoding, kv_key_cost, array: attr });
     }
 
     BatchColumns {
@@ -1279,8 +1320,8 @@ fn encode_row_as_log_record(
     }
 
     // LogRecord.attributes — pre-resolved attribute columns
-    for (field_name, attr) in &columns.attribute_cols {
-        encode_attr_array_value(buf, otlp::LOG_RECORD_ATTRIBUTES, field_name, attr, row);
+    for col in &columns.attribute_cols {
+        encode_col_attr(buf, otlp::LOG_RECORD_ATTRIBUTES, col, row);
     }
 
     // LogRecord.flags (fixed32) — W3C trace flags.
@@ -1368,57 +1409,124 @@ fn encode_key_value_int(buf: &mut Vec<u8>, field_number: u32, key: &[u8], value:
     encode_varint_field(buf, otlp::ANY_VALUE_INT_VALUE, value as u64);
 }
 
-fn encode_attr_array_value(
-    buf: &mut Vec<u8>,
-    field_number: u32,
-    field_name: &str,
-    attr: &AttrArray<'_>,
-    row: usize,
-) {
-    match attr {
+/// Encode one attribute column into `buf` using pre-computed key encoding.
+///
+/// Avoids recomputing the
+/// key tag + varint + key bytes on every row by using `col.key_encoding` and
+/// `col.kv_key_cost` which were computed once in `resolve_batch_columns`.
+#[inline(always)]
+fn encode_col_attr(buf: &mut Vec<u8>, field_number: u32, col: &ColAttr<'_>, row: usize) {
+    match &col.array {
         AttrArray::Int(arr) => {
             if !arr.is_null(row) {
-                encode_key_value_int(buf, field_number, field_name.as_bytes(), arr.value(row));
+                let value = arr.value(row);
+                let anyvalue_inner = 1 + varint_len(value as u64);
+                let kv_inner =
+                    col.kv_key_cost + bytes_field_size(otlp::KEY_VALUE_VALUE, anyvalue_inner);
+                encode_tag(buf, field_number, otlp::WIRE_TYPE_LEN);
+                encode_varint(buf, kv_inner as u64);
+                buf.extend_from_slice(&col.key_encoding);
+                encode_tag(buf, otlp::KEY_VALUE_VALUE, otlp::WIRE_TYPE_LEN);
+                encode_varint(buf, anyvalue_inner as u64);
+                encode_varint_field(buf, otlp::ANY_VALUE_INT_VALUE, value as u64);
             }
         }
         AttrArray::Float(arr) => {
             if !arr.is_null(row) {
-                encode_key_value_double(buf, field_number, field_name.as_bytes(), arr.value(row));
+                let value = arr.value(row);
+                let anyvalue_inner = 1 + 8; // tag(1) + fixed64(8)
+                let kv_inner =
+                    col.kv_key_cost + bytes_field_size(otlp::KEY_VALUE_VALUE, anyvalue_inner);
+                encode_tag(buf, field_number, otlp::WIRE_TYPE_LEN);
+                encode_varint(buf, kv_inner as u64);
+                buf.extend_from_slice(&col.key_encoding);
+                encode_tag(buf, otlp::KEY_VALUE_VALUE, otlp::WIRE_TYPE_LEN);
+                encode_varint(buf, anyvalue_inner as u64);
+                encode_fixed64(buf, otlp::ANY_VALUE_DOUBLE_VALUE, value.to_bits());
             }
         }
         AttrArray::Bool(arr) => {
             if !arr.is_null(row) {
-                encode_key_value_bool(buf, field_number, field_name.as_bytes(), arr.value(row));
+                let value = arr.value(row);
+                let anyvalue_inner = 1 + 1; // tag(1) + varint(bool)
+                let kv_inner =
+                    col.kv_key_cost + bytes_field_size(otlp::KEY_VALUE_VALUE, anyvalue_inner);
+                encode_tag(buf, field_number, otlp::WIRE_TYPE_LEN);
+                encode_varint(buf, kv_inner as u64);
+                buf.extend_from_slice(&col.key_encoding);
+                encode_tag(buf, otlp::KEY_VALUE_VALUE, otlp::WIRE_TYPE_LEN);
+                encode_varint(buf, anyvalue_inner as u64);
+                encode_varint_field(buf, otlp::ANY_VALUE_BOOL_VALUE, u64::from(value));
             }
         }
         AttrArray::Str(arr) => {
             if !arr.is_null(row) {
-                encode_key_value_string(
-                    buf,
-                    field_number,
-                    field_name.as_bytes(),
-                    arr.value(row).as_bytes(),
-                );
+                let value = arr.value(row).as_bytes();
+                let anyvalue_inner = bytes_field_size(otlp::ANY_VALUE_STRING_VALUE, value.len());
+                let kv_inner =
+                    col.kv_key_cost + bytes_field_size(otlp::KEY_VALUE_VALUE, anyvalue_inner);
+                encode_tag(buf, field_number, otlp::WIRE_TYPE_LEN);
+                encode_varint(buf, kv_inner as u64);
+                buf.extend_from_slice(&col.key_encoding);
+                encode_tag(buf, otlp::KEY_VALUE_VALUE, otlp::WIRE_TYPE_LEN);
+                encode_varint(buf, anyvalue_inner as u64);
+                encode_bytes_field(buf, otlp::ANY_VALUE_STRING_VALUE, value);
             }
         }
         AttrArray::PreformattedStr(values) => {
             if let Some(Some(value)) = values.get(row) {
-                encode_key_value_string(buf, field_number, field_name.as_bytes(), value.as_bytes());
+                let value = value.as_bytes();
+                let anyvalue_inner = bytes_field_size(otlp::ANY_VALUE_STRING_VALUE, value.len());
+                let kv_inner =
+                    col.kv_key_cost + bytes_field_size(otlp::KEY_VALUE_VALUE, anyvalue_inner);
+                encode_tag(buf, field_number, otlp::WIRE_TYPE_LEN);
+                encode_varint(buf, kv_inner as u64);
+                buf.extend_from_slice(&col.key_encoding);
+                encode_tag(buf, otlp::KEY_VALUE_VALUE, otlp::WIRE_TYPE_LEN);
+                encode_varint(buf, anyvalue_inner as u64);
+                encode_bytes_field(buf, otlp::ANY_VALUE_STRING_VALUE, value);
             }
         }
         AttrArray::Bytes(arr) => {
             if !arr.is_null(row) {
-                encode_key_value_bytes(buf, field_number, field_name.as_bytes(), arr.value(row));
+                let value = arr.value(row);
+                let anyvalue_inner = bytes_field_size(otlp::ANY_VALUE_BYTES_VALUE, value.len());
+                let kv_inner =
+                    col.kv_key_cost + bytes_field_size(otlp::KEY_VALUE_VALUE, anyvalue_inner);
+                encode_tag(buf, field_number, otlp::WIRE_TYPE_LEN);
+                encode_varint(buf, kv_inner as u64);
+                buf.extend_from_slice(&col.key_encoding);
+                encode_tag(buf, otlp::KEY_VALUE_VALUE, otlp::WIRE_TYPE_LEN);
+                encode_varint(buf, anyvalue_inner as u64);
+                encode_bytes_field(buf, otlp::ANY_VALUE_BYTES_VALUE, value);
             }
         }
         AttrArray::LargeBytes(arr) => {
             if !arr.is_null(row) {
-                encode_key_value_bytes(buf, field_number, field_name.as_bytes(), arr.value(row));
+                let value = arr.value(row);
+                let anyvalue_inner = bytes_field_size(otlp::ANY_VALUE_BYTES_VALUE, value.len());
+                let kv_inner =
+                    col.kv_key_cost + bytes_field_size(otlp::KEY_VALUE_VALUE, anyvalue_inner);
+                encode_tag(buf, field_number, otlp::WIRE_TYPE_LEN);
+                encode_varint(buf, kv_inner as u64);
+                buf.extend_from_slice(&col.key_encoding);
+                encode_tag(buf, otlp::KEY_VALUE_VALUE, otlp::WIRE_TYPE_LEN);
+                encode_varint(buf, anyvalue_inner as u64);
+                encode_bytes_field(buf, otlp::ANY_VALUE_BYTES_VALUE, value);
             }
         }
         AttrArray::OtherStr(arr) => {
-            if let Some(value) = format_non_string_attr_value(*arr, row, field_name) {
-                encode_key_value_string(buf, field_number, field_name.as_bytes(), value.as_bytes());
+            if let Some(value) = format_non_string_attr_value(*arr, row, &col.name) {
+                let value = value.as_bytes();
+                let anyvalue_inner = bytes_field_size(otlp::ANY_VALUE_STRING_VALUE, value.len());
+                let kv_inner =
+                    col.kv_key_cost + bytes_field_size(otlp::KEY_VALUE_VALUE, anyvalue_inner);
+                encode_tag(buf, field_number, otlp::WIRE_TYPE_LEN);
+                encode_varint(buf, kv_inner as u64);
+                buf.extend_from_slice(&col.key_encoding);
+                encode_tag(buf, otlp::KEY_VALUE_VALUE, otlp::WIRE_TYPE_LEN);
+                encode_varint(buf, anyvalue_inner as u64);
+                encode_bytes_field(buf, otlp::ANY_VALUE_STRING_VALUE, value);
             }
         }
     }
