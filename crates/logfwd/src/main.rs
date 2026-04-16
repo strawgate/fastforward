@@ -1393,6 +1393,12 @@ fn validate_pipeline_read_only(
                         .map_err(|e| format!("enrichment '{}': {e}", cfg.table_name))?;
                     enrichment_tables.push(table);
                 }
+                other => {
+                    return Err(format!(
+                        "enrichment type {:?} is not yet supported by this build",
+                        std::mem::discriminant(other)
+                    ));
+                }
             }
         }
 

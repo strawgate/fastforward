@@ -2967,3 +2967,9 @@ pipelines:
         );
     }
 }
+mod tests_generator_unsupported;
+mod tests_otlp_config;
+mod tests_static_labels;
+
+#[cfg(test)]
+mod tests_sensor;
