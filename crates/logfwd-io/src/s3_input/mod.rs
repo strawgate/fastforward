@@ -61,7 +61,6 @@ pub const DEFAULT_POLL_INTERVAL_MS: u64 = 5_000;
 const DEFAULT_REGION: &str = "us-east-1";
 /// Output chunk size: ~256 KiB.
 const OUTPUT_CHUNK_SIZE: usize = 256 * 1024;
-/// SQS heartbeat interval in seconds.
 /// Minimum SQS visibility timeout (seconds) enforced at config validation.
 const MIN_SQS_VISIBILITY_TIMEOUT_SECS: u32 = 30;
 
@@ -194,7 +193,9 @@ impl S3InputSettings {
             access_key_id,
             secret_access_key,
             session_token: session_token.or_else(|| std::env::var("AWS_SESSION_TOKEN").ok()),
-            part_size_bytes: part_size_bytes.unwrap_or(DEFAULT_PART_SIZE).max(1),
+            part_size_bytes: part_size_bytes
+                .unwrap_or(DEFAULT_PART_SIZE)
+                .max(1024 * 1024),
             max_concurrent_fetches: max_concurrent_fetches
                 .unwrap_or(DEFAULT_MAX_CONCURRENT_FETCHES)
                 .max(1),
@@ -947,6 +948,7 @@ async fn fetch_object(
     }
 
     let mut first = true;
+    let source_id = source_id_from_key(key);
     let chunks: Vec<&[u8]> = decompressed.chunks(OUTPUT_CHUNK_SIZE).collect();
     let total_chunks = chunks.len();
     for (i, chunk) in chunks.into_iter().enumerate() {
@@ -961,7 +963,7 @@ async fn fetch_object(
         let payload = ChunkPayload {
             bytes: chunk.to_vec(),
             accounted_bytes: ab,
-            source_id: source_id_from_key(key),
+            source_id,
             is_eof: is_last,
         };
         let out_tx = out_tx.clone();

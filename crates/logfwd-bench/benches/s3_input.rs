@@ -8,7 +8,7 @@
 //!
 //! Run with:
 //! ```
-//! MINIO_ENDPOINT=http://localhost:9000 cargo bench --bench s3_input --features s3
+//! MINIO_ENDPOINT=http://localhost:9000 just bench --bench s3_input --features s3
 //! ```
 
 use std::sync::Arc;

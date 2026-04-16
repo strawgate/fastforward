@@ -541,6 +541,11 @@ impl Config {
                         }
                         InputTypeConfig::S3(s) => {
                             let s3_cfg = &s.s3;
+                            if s3_cfg.bucket.trim().is_empty() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': s3.bucket must not be empty"
+                                )));
+                            }
                             if let Some(interval) = s3_cfg.poll_interval_ms
                                 && interval == 0
                             {

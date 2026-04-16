@@ -409,7 +409,9 @@ impl S3Client {
             .get(reqwest::header::CONTENT_LENGTH)
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(0);
+            .ok_or_else(|| {
+                io::Error::other(format!("S3 HEAD {key}: missing or invalid Content-Length"))
+            })?;
 
         let content_encoding = resp
             .headers()

@@ -659,8 +659,9 @@ pub struct S3InputConfig {
     pub max_concurrent_objects: Option<usize>,
     /// SQS visibility timeout in seconds. Default: 300.
     pub visibility_timeout_secs: Option<u32>,
-    /// Compression override: `"auto"`, `"gzip"`, `"zstd"`, `"snappy"`, or `"none"`.
-    /// Default: `"auto"` (detect from key extension or Content-Type).
+    /// Compression override: `"auto"`, `"gzip"` (or `"gz"`), `"zstd"` (or
+    /// `"zst"`), `"snappy"` (or `"sz"`), `"none"` (or `"identity"`).
+    /// Default: `"auto"` (detect from key extension or Content-Encoding).
     pub compression: Option<String>,
     /// Polling interval for `ListObjectsV2` mode in milliseconds. Default: 5000.
     pub poll_interval_ms: Option<u64>,
