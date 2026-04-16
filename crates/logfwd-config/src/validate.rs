@@ -546,6 +546,19 @@ impl Config {
                                     "pipeline '{name}' input '{label}': s3.bucket must not be empty"
                                 )));
                             }
+                            if let Some(ref endpoint) = s3_cfg.endpoint {
+                                let ep = endpoint.trim();
+                                if ep.is_empty() {
+                                    return Err(ConfigError::Validation(format!(
+                                        "pipeline '{name}' input '{label}': s3.endpoint must not be empty"
+                                    )));
+                                }
+                                if !ep.starts_with("http://") && !ep.starts_with("https://") {
+                                    return Err(ConfigError::Validation(format!(
+                                        "pipeline '{name}' input '{label}': s3.endpoint must start with http:// or https://"
+                                    )));
+                                }
+                            }
                             if let Some(interval) = s3_cfg.poll_interval_ms
                                 && interval == 0
                             {

@@ -188,8 +188,8 @@ impl S3Client {
         body_sha256: &str,
         service: &str,
         host: &str,
-    ) -> (String, String) {
-        let (date, datetime) = utc_datetime_now();
+    ) -> io::Result<(String, String)> {
+        let (date, datetime) = utc_datetime_now()?;
 
         // Build the full set of canonical headers (always sign host,
         // x-amz-content-sha256, x-amz-date, and any extras).
@@ -231,7 +231,7 @@ impl S3Client {
             "AWS4-HMAC-SHA256 Credential={}/{}, SignedHeaders={}, Signature={}",
             self.access_key_id, credential_scope, signed_headers, signature
         );
-        (auth, datetime)
+        Ok((auth, datetime))
     }
 
     /// Assemble a signed `HeaderMap` for an HTTP request.
@@ -260,7 +260,7 @@ impl S3Client {
             &body_sha256,
             service,
             host,
-        );
+        )?;
 
         let mut map = HeaderMap::new();
         map.insert(
@@ -768,12 +768,12 @@ fn nibble_to_hex(n: u8) -> char {
 /// Return `(date_str, datetime_str)` for the current UTC instant.
 ///
 /// `date_str` is `"YYYYMMDD"`, `datetime_str` is `"YYYYMMDDTHHMMSSZcanonical"`.
-fn utc_datetime_now() -> (String, String) {
+fn utc_datetime_now() -> io::Result<(String, String)> {
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
+        .map_err(|e| io::Error::other(format!("system clock before Unix epoch: {e}")))?
         .as_secs();
-    format_sigv4_datetime(secs)
+    Ok(format_sigv4_datetime(secs))
 }
 
 /// Format a Unix timestamp (seconds since epoch) into SigV4 date/datetime strings.
