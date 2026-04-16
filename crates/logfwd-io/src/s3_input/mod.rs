@@ -1078,20 +1078,29 @@ async fn fetch_parallel_stream(
         Vec::with_capacity(ranges.len());
     let mut join_set: JoinSet<()> = JoinSet::new();
 
+    // Spawn all part tasks immediately. Permit acquisition happens inside
+    // each task so the main loop can start reading from `part_receivers`
+    // without waiting. Without this, acquiring permits in the spawn loop
+    // deadlocks when `ranges.len() > max_fetches` because tasks fill their
+    // bounded channels before the main loop starts draining them.
     for (part_idx, (start, end)) in ranges.iter().copied().enumerate() {
         let (part_tx, part_rx) = tokio::sync::mpsc::channel(PART_CHANNEL_BOUND);
         part_receivers.push(part_rx);
 
-        let permit = fetch_sem
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(|e| io::Error::other(format!("semaphore acquire: {e}")))?;
+        let fetch_sem = Arc::clone(&fetch_sem);
         let s3 = Arc::clone(&s3);
         let key_owned = key.to_string();
 
         join_set.spawn(async move {
-            let _permit = permit;
+            let _permit = match fetch_sem.acquire_owned().await {
+                Ok(p) => p,
+                Err(e) => {
+                    let _ = part_tx
+                        .send(Err(io::Error::other(format!("semaphore acquire: {e}"))))
+                        .await;
+                    return;
+                }
+            };
 
             let resp = match s3.get_object_range_stream(&key_owned, start, end).await {
                 Ok(r) => r,
