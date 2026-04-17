@@ -838,7 +838,7 @@ fn decode_any_value_wire(value: &[u8]) -> Result<Option<WireAny<'_>>, Projection
 }
 
 fn require_utf8<'a>(bytes: &'a [u8], context: &'static str) -> Result<&'a [u8], ProjectionError> {
-    if std::str::from_utf8(bytes).is_err() {
+    if simdutf8::basic::from_utf8(bytes).is_err() {
         return Err(ProjectionError::Invalid(context));
     }
     Ok(bytes)
