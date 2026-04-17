@@ -191,6 +191,27 @@ fn bench_s3_download(c: &mut Criterion) {
                 .expect("streaming bench should succeed");
             });
         });
+
+        group.bench_with_input(
+            BenchmarkId::new("stream_prefetch", label),
+            label,
+            |b, _| {
+                let client = Arc::clone(&client);
+                let key = *key;
+                let size = *size;
+                b.to_async(&rt).iter(|| async {
+                    let part = 2 * 1024 * 1024u64;
+                    logfwd_io::s3_input::fetch_parallel_stream_prefetch_bench(
+                        Arc::clone(&client),
+                        key,
+                        size,
+                        part,
+                    )
+                    .await
+                    .expect("prefetch streaming bench should succeed");
+                });
+            },
+        );
     }
 
     group.finish();

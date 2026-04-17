@@ -1298,6 +1298,138 @@ async fn fetch_parallel_stream(
     Ok(())
 }
 
+/// Prefetch depth: number of parts to download ahead of the consumer.
+///
+/// With 8 MiB parts, `PREFETCH_DEPTH = 3` means up to 24 MiB in flight —
+/// enough to keep the pipeline fed without buffering the entire object.
+const PREFETCH_DEPTH: usize = 3;
+
+/// Streaming parallel fetch with body prefetch.
+///
+/// Like [`fetch_parallel_stream`] but pre-loads the full response body inside
+/// each future so that `buffered(PREFETCH_DEPTH)` overlaps download of the
+/// next parts with delivery of the current one. This trades ~24 MiB peak
+/// memory for significantly higher throughput.
+async fn fetch_parallel_stream_prefetch(
+    s3: Arc<S3Client>,
+    key: &str,
+    size: u64,
+    part_size: u64,
+    out_tx: mpsc::SyncSender<ChunkPayload>,
+) -> io::Result<()> {
+    use futures_util::{StreamExt, stream};
+
+    let source_id = source_id_from_key(key);
+
+    // Build range list.
+    let mut ranges: Vec<(u64, u64)> = Vec::new();
+    let mut offset: u64 = 0;
+    while offset < size {
+        let end = (offset + part_size - 1).min(size - 1);
+        ranges.push((offset, end));
+        offset = end + 1;
+    }
+
+    if ranges.is_empty() {
+        let payload = ChunkPayload {
+            bytes: Vec::new(),
+            accounted_bytes: 0,
+            source_id,
+            is_eof: true,
+        };
+        let send_result = tokio::task::spawn_blocking(move || out_tx.send(payload))
+            .await
+            .map_err(|e| io::Error::other(format!("spawn_blocking send: {e}")))?;
+        if send_result.is_err() {
+            return Err(io::Error::other("output channel closed"));
+        }
+        return Ok(());
+    }
+
+    // Each future: fetch range → download entire body → yield Vec<u8>.
+    // `buffered(PREFETCH_DEPTH)` keeps a few parts downloaded ahead.
+    let key_arc: Arc<str> = Arc::from(key);
+    let mut part_stream = stream::iter(ranges)
+        .map(|(start, end)| {
+            let s3 = Arc::clone(&s3);
+            let key = Arc::clone(&key_arc);
+            async move {
+                let mut last_err = None;
+                for attempt in 0..3u32 {
+                    if attempt > 0 {
+                        let delay_ms = 200 * (1u64 << (attempt - 1));
+                        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                    }
+                    match s3.get_object_range(&key, start, end).await {
+                        Ok(data) => return Ok(data),
+                        Err(e) => last_err = Some(e),
+                    }
+                }
+                Err(last_err.expect("last_err is Some when all attempts fail"))
+            }
+        })
+        .buffered(PREFETCH_DEPTH);
+
+    // Deliver pre-loaded parts in order, chunking into OUTPUT_CHUNK_SIZE.
+    let mut first_chunk = true;
+    while let Some(result) = part_stream.next().await {
+        let data = match result {
+            Ok(d) => d,
+            Err(e) => {
+                if !first_chunk {
+                    let eof = ChunkPayload {
+                        bytes: Vec::new(),
+                        accounted_bytes: 0,
+                        source_id,
+                        is_eof: true,
+                    };
+                    let tx = out_tx.clone();
+                    let _ = tokio::task::spawn_blocking(move || tx.send(eof)).await;
+                }
+                return Err(e);
+            }
+        };
+
+        // Chunk the pre-loaded body into OUTPUT_CHUNK_SIZE pieces.
+        let mut pos = 0;
+        while pos < data.len() {
+            let end = (pos + OUTPUT_CHUNK_SIZE).min(data.len());
+            let ab = if first_chunk {
+                first_chunk = false;
+                size
+            } else {
+                0
+            };
+            let payload = ChunkPayload {
+                bytes: data[pos..end].to_vec(),
+                accounted_bytes: ab,
+                source_id,
+                is_eof: false,
+            };
+            let tx = out_tx.clone();
+            let send_result = tokio::task::spawn_blocking(move || tx.send(payload))
+                .await
+                .map_err(|e| io::Error::other(format!("spawn_blocking send: {e}")))?;
+            if send_result.is_err() {
+                return Err(io::Error::other("output channel closed"));
+            }
+            pos = end;
+        }
+    }
+
+    // Send trailing EOF.
+    let payload = ChunkPayload {
+        bytes: Vec::new(),
+        accounted_bytes: 0,
+        source_id,
+        is_eof: true,
+    };
+    let tx = out_tx.clone();
+    let _ = tokio::task::spawn_blocking(move || tx.send(payload)).await;
+
+    Ok(())
+}
+
 /// Download an object in parallel range-GET chunks and return the concatenated bytes.
 ///
 /// Exposed as `pub` for benchmarks. Uses the old buffered path.
@@ -1326,6 +1458,31 @@ pub async fn fetch_parallel_stream_bench(
     let s3c = Arc::clone(&s3);
     let handle = tokio::spawn(async move {
         fetch_parallel_stream(s3c, &key_owned, size, part_size, max_fetches, tx).await
+    });
+    let mut total = 0usize;
+    while let Ok(chunk) = rx.recv() {
+        total += chunk.bytes.len();
+    }
+    handle
+        .await
+        .map_err(|e| io::Error::other(format!("join: {e}")))??;
+    Ok(total)
+}
+
+/// Prefetch streaming parallel fetch benchmark entry point.
+///
+/// Returns the total bytes received. Exposed for benchmarking.
+pub async fn fetch_parallel_stream_prefetch_bench(
+    s3: Arc<S3Client>,
+    key: &str,
+    size: u64,
+    part_size: u64,
+) -> io::Result<usize> {
+    let (tx, rx) = mpsc::sync_channel::<ChunkPayload>(16);
+    let key_owned = key.to_string();
+    let s3c = Arc::clone(&s3);
+    let handle = tokio::spawn(async move {
+        fetch_parallel_stream_prefetch(s3c, &key_owned, size, part_size, tx).await
     });
     let mut total = 0usize;
     while let Ok(chunk) = rx.recv() {
