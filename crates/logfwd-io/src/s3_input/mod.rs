@@ -1250,7 +1250,11 @@ async fn fetch_parallel_stream(
                     match resp_ok {
                         Some(r) => r,
                         None => {
-                            let _ = part_tx.send(Err(last_err.expect("last_err is Some when all attempts fail"))).await;
+                            let _ = part_tx
+                                .send(Err(
+                                    last_err.expect("last_err is Some when all attempts fail")
+                                ))
+                                .await;
                             return;
                         }
                     }
@@ -1350,21 +1354,21 @@ async fn fetch_parallel_stream(
         // part_rx.recv() returns None — but partial/corrupt data may
         // already have been forwarded. Abort immediately.
         while let Some(result) = join_set.try_join_next() {
-            if let Err(e) = result {
-                if e.is_panic() {
-                    join_set.abort_all();
-                    if !first_chunk {
-                        let eof = ChunkPayload {
-                            bytes: Vec::new(),
-                            accounted_bytes: 0,
-                            source_id,
-                            is_eof: true,
-                        };
-                        let tx = out_tx.clone();
-                        let _ = tokio::task::spawn_blocking(move || tx.send(eof)).await;
-                    }
-                    return Err(io::Error::other(format!("range GET task panicked: {e}")));
+            if let Err(e) = result
+                && e.is_panic()
+            {
+                join_set.abort_all();
+                if !first_chunk {
+                    let eof = ChunkPayload {
+                        bytes: Vec::new(),
+                        accounted_bytes: 0,
+                        source_id,
+                        is_eof: true,
+                    };
+                    let tx = out_tx.clone();
+                    let _ = tokio::task::spawn_blocking(move || tx.send(eof)).await;
                 }
+                return Err(io::Error::other(format!("range GET task panicked: {e}")));
             }
         }
         // Spawn the next part now that this one is fully delivered.
@@ -1414,6 +1418,32 @@ pub async fn fetch_parallel_bench(
     max_fetches: usize,
 ) -> io::Result<bytes::Bytes> {
     fetch_parallel_buffered(s3, key, size, part_size, max_fetches).await
+}
+
+/// Streaming parallel fetch benchmark entry point.
+///
+/// Returns the total bytes received. Exposed for benchmarking.
+pub async fn fetch_parallel_stream_bench(
+    s3: Arc<S3Client>,
+    key: &str,
+    size: u64,
+    part_size: u64,
+    max_fetches: usize,
+) -> io::Result<usize> {
+    let (tx, rx) = mpsc::sync_channel::<ChunkPayload>(16);
+    let key_owned = key.to_string();
+    let s3c = Arc::clone(&s3);
+    let handle = tokio::spawn(async move {
+        fetch_parallel_stream(s3c, &key_owned, size, part_size, max_fetches, tx).await
+    });
+    let mut total = 0usize;
+    while let Ok(chunk) = rx.recv() {
+        total += chunk.bytes.len();
+    }
+    handle
+        .await
+        .map_err(|e| io::Error::other(format!("join: {e}")))??;
+    Ok(total)
 }
 
 /// Buffered parallel fetch — kept for benchmarks that need the full Bytes result.
