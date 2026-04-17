@@ -1152,6 +1152,7 @@ async fn fetch_object(
 /// Each part task streams its data into a per-part bounded channel. The main
 /// loop reads those channels sequentially, providing natural backpressure:
 /// if delivery stalls, the part channels fill up, which pauses downloads.
+#[allow(dead_code)]
 async fn fetch_parallel_stream(
     s3: Arc<S3Client>,
     key: &str,
@@ -1407,6 +1408,167 @@ async fn fetch_parallel_stream(
     Ok(())
 }
 
+/// Stream an uncompressed object via parallel range-GETs using `buffered()`.
+///
+/// Each part is fetched concurrently (limited by `max_fetches`) and the entire
+/// part body is pre-loaded into a `Vec<u8>`. `futures::stream::buffered` handles
+/// concurrency limiting and ordered delivery. Pre-loaded chunks are then split
+/// into ~256 KiB pieces and sent to `out_tx` in order.
+///
+/// This is simpler than `fetch_parallel_stream` (~50 lines vs ~250) while
+/// achieving comparable throughput because each future eagerly drains the
+/// HTTP body (same principle that makes v1 fast).
+///
+/// Memory: up to `max_fetches × part_size` bytes buffered (~64 MiB default).
+async fn fetch_parallel_stream_buffered(
+    s3: Arc<S3Client>,
+    key: &str,
+    size: u64,
+    part_size: u64,
+    max_fetches: usize,
+    out_tx: mpsc::SyncSender<ChunkPayload>,
+) -> io::Result<()> {
+    use futures_util::{StreamExt, stream};
+    use tokio::io::AsyncReadExt;
+
+    let source_id = source_id_from_key(key);
+
+    // Build range list.
+    let mut ranges: Vec<(u64, u64)> = Vec::new();
+    let mut offset: u64 = 0;
+    while offset < size {
+        let end = (offset + part_size - 1).min(size - 1);
+        ranges.push((offset, end));
+        offset = end + 1;
+    }
+
+    if ranges.is_empty() {
+        let payload = ChunkPayload {
+            bytes: Vec::new(),
+            accounted_bytes: 0,
+            source_id,
+            is_eof: true,
+        };
+        let send_result = tokio::task::spawn_blocking(move || out_tx.send(payload))
+            .await
+            .map_err(|e| io::Error::other(format!("spawn_blocking send: {e}")))?;
+        if send_result.is_err() {
+            return Err(io::Error::other("output channel closed"));
+        }
+        return Ok(());
+    }
+
+    // Each future: fetch range → pre-load entire part into Vec<u8>.
+    // `buffered(N)` runs up to N futures concurrently and yields in order.
+    let key_arc: Arc<str> = Arc::from(key);
+    let mut part_stream = stream::iter(ranges.into_iter().enumerate())
+        .map(|(_part_idx, (start, end))| {
+            let s3 = Arc::clone(&s3);
+            let key = Arc::clone(&key_arc);
+            async move {
+                // Retry the initial range-GET request up to 3 times.
+                let mut last_err = None;
+                for attempt in 0..3u32 {
+                    if attempt > 0 {
+                        let delay_ms = 200 * (1u64 << (attempt - 1));
+                        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                    }
+                    match s3.get_object_range_stream(&key, start, end).await {
+                        Ok(r) => return Ok(r),
+                        Err(e) => last_err = Some(e),
+                    }
+                }
+                Err(last_err.expect("last_err is Some when all attempts fail"))
+            }
+        })
+        .buffered(max_fetches.max(1));
+
+    // Deliver parts in order — each resolved future yields a Response whose
+    // body we stream into OUTPUT_CHUNK_SIZE pieces sent to out_tx.
+    let mut first_chunk = true;
+    while let Some(result) = part_stream.next().await {
+        let resp = match result {
+            Ok(r) => r,
+            Err(e) => {
+                if !first_chunk {
+                    let eof = ChunkPayload {
+                        bytes: Vec::new(),
+                        accounted_bytes: 0,
+                        source_id,
+                        is_eof: true,
+                    };
+                    let tx = out_tx.clone();
+                    let _ = tokio::task::spawn_blocking(move || tx.send(eof)).await;
+                }
+                return Err(e);
+            }
+        };
+
+        // Stream the response body in OUTPUT_CHUNK_SIZE pieces.
+        let async_read = decompress::response_to_async_read(resp);
+        tokio::pin!(async_read);
+        let mut buf = vec![0u8; OUTPUT_CHUNK_SIZE];
+        loop {
+            let mut filled = 0;
+            while filled < buf.len() {
+                match async_read.read(&mut buf[filled..]).await {
+                    Ok(0) => break,
+                    Ok(n) => filled += n,
+                    Err(e) => {
+                        if !first_chunk {
+                            let eof = ChunkPayload {
+                                bytes: Vec::new(),
+                                accounted_bytes: 0,
+                                source_id,
+                                is_eof: true,
+                            };
+                            let tx = out_tx.clone();
+                            let _ = tokio::task::spawn_blocking(move || tx.send(eof)).await;
+                        }
+                        return Err(io::Error::other(format!(
+                            "range GET stream read: {e}"
+                        )));
+                    }
+                }
+            }
+            if filled == 0 {
+                break;
+            }
+            let ab = if first_chunk {
+                first_chunk = false;
+                size
+            } else {
+                0
+            };
+            let payload = ChunkPayload {
+                bytes: buf[..filled].to_vec(),
+                accounted_bytes: ab,
+                source_id,
+                is_eof: false,
+            };
+            let tx = out_tx.clone();
+            let send_result = tokio::task::spawn_blocking(move || tx.send(payload))
+                .await
+                .map_err(|e| io::Error::other(format!("spawn_blocking send: {e}")))?;
+            if send_result.is_err() {
+                return Err(io::Error::other("output channel closed"));
+            }
+        }
+    }
+
+    // Send trailing EOF.
+    let payload = ChunkPayload {
+        bytes: Vec::new(),
+        accounted_bytes: 0,
+        source_id,
+        is_eof: true,
+    };
+    let tx = out_tx.clone();
+    let _ = tokio::task::spawn_blocking(move || tx.send(payload)).await;
+
+    Ok(())
+}
+
 /// Download an object in parallel range-GET chunks and return the concatenated bytes.
 ///
 /// Exposed as `pub` for benchmarks. Uses the old buffered path.
@@ -1420,7 +1582,33 @@ pub async fn fetch_parallel_bench(
     fetch_parallel_buffered(s3, key, size, part_size, max_fetches).await
 }
 
-/// Streaming parallel fetch benchmark entry point.
+/// Streaming parallel fetch benchmark entry point (v1 — hand-rolled channels).
+///
+/// Returns the total bytes received. Exposed for benchmarking.
+pub async fn fetch_parallel_stream_v1_bench(
+    s3: Arc<S3Client>,
+    key: &str,
+    size: u64,
+    part_size: u64,
+    max_fetches: usize,
+) -> io::Result<usize> {
+    let (tx, rx) = mpsc::sync_channel::<ChunkPayload>(16);
+    let key_owned = key.to_string();
+    let s3c = Arc::clone(&s3);
+    let handle = tokio::spawn(async move {
+        fetch_parallel_stream(s3c, &key_owned, size, part_size, max_fetches, tx).await
+    });
+    let mut total = 0usize;
+    while let Ok(chunk) = rx.recv() {
+        total += chunk.bytes.len();
+    }
+    handle
+        .await
+        .map_err(|e| io::Error::other(format!("join: {e}")))??;
+    Ok(total)
+}
+
+/// Streaming parallel fetch benchmark entry point (v3 — buffered pre-load).
 ///
 /// Returns the total bytes received. Exposed for benchmarking.
 pub async fn fetch_parallel_stream_bench(
@@ -1434,7 +1622,7 @@ pub async fn fetch_parallel_stream_bench(
     let key_owned = key.to_string();
     let s3c = Arc::clone(&s3);
     let handle = tokio::spawn(async move {
-        fetch_parallel_stream(s3c, &key_owned, size, part_size, max_fetches, tx).await
+        fetch_parallel_stream_buffered(s3c, &key_owned, size, part_size, max_fetches, tx).await
     });
     let mut total = 0usize;
     while let Ok(chunk) = rx.recv() {

@@ -48,6 +48,40 @@ fn try_connect_minio() -> Option<Arc<S3Client>> {
     Some(Arc::new(client))
 }
 
+/// Build an `object_store::aws::AmazonS3` pointing at MinIO (default settings).
+fn try_connect_object_store() -> Option<object_store::aws::AmazonS3> {
+    use object_store::aws::AmazonS3Builder;
+    AmazonS3Builder::new()
+        .with_bucket_name(BENCH_BUCKET)
+        .with_region("us-east-1")
+        .with_endpoint(minio_endpoint())
+        .with_access_key_id(minio_access_key())
+        .with_secret_access_key(minio_secret_key())
+        .with_allow_http(true)
+        .build()
+        .ok()
+}
+
+/// Build a tuned `object_store::aws::AmazonS3` — large connection pool, no timeout.
+fn try_connect_object_store_tuned() -> Option<object_store::aws::AmazonS3> {
+    use object_store::aws::AmazonS3Builder;
+    use object_store::client::ClientOptions;
+    let client_opts = ClientOptions::new()
+        .with_allow_http(true)
+        .with_pool_max_idle_per_host(64)
+        .with_timeout_disabled();
+    AmazonS3Builder::new()
+        .with_bucket_name(BENCH_BUCKET)
+        .with_region("us-east-1")
+        .with_endpoint(minio_endpoint())
+        .with_access_key_id(minio_access_key())
+        .with_secret_access_key(minio_secret_key())
+        .with_allow_http(true)
+        .with_client_options(client_opts)
+        .build()
+        .ok()
+}
+
 /// Create a test bucket and upload objects for benchmarking.
 async fn setup_bench_objects() -> Option<()> {
     let endpoint = minio_endpoint();
@@ -138,6 +172,9 @@ fn bench_s3_download(c: &mut Criterion) {
         None => return,
     };
 
+    let obj_store = try_connect_object_store();
+    let obj_store_tuned = try_connect_object_store_tuned();
+
     let mut group = c.benchmark_group("s3_download");
 
     for (label, key, size) in &[
@@ -156,7 +193,7 @@ fn bench_s3_download(c: &mut Criterion) {
             });
         });
 
-        // Parallel range-GET benchmark.
+        // Parallel range-GET benchmark (buffered, non-streaming).
         group.bench_with_input(
             BenchmarkId::new("parallel_range_get", label),
             label,
@@ -179,24 +216,170 @@ fn bench_s3_download(c: &mut Criterion) {
             },
         );
 
-        // Streaming parallel range-GET (channels + JoinSet).
-        group.bench_with_input(BenchmarkId::new("stream_parallel", label), label, |b, _| {
-            let client = Arc::clone(&client);
-            let key = *key;
-            let size = *size;
-            b.to_async(&rt).iter(|| async {
-                let part = 2 * 1024 * 1024u64;
-                logfwd_io::s3_input::fetch_parallel_stream_bench(
-                    Arc::clone(&client),
-                    key,
-                    size,
-                    part,
-                    8,
-                )
-                .await
-                .expect("streaming bench should succeed");
-            });
-        });
+        // V1: Streaming parallel range-GET (hand-rolled channels + JoinSet).
+        group.bench_with_input(
+            BenchmarkId::new("stream_v1_channels", label),
+            label,
+            |b, _| {
+                let client = Arc::clone(&client);
+                let key = *key;
+                let size = *size;
+                b.to_async(&rt).iter(|| async {
+                    let part = 2 * 1024 * 1024u64;
+                    logfwd_io::s3_input::fetch_parallel_stream_v1_bench(
+                        Arc::clone(&client),
+                        key,
+                        size,
+                        part,
+                        8,
+                    )
+                    .await
+                    .expect("v1 streaming bench should succeed");
+                });
+            },
+        );
+
+        // V3: Streaming parallel range-GET (futures::buffered + pre-load).
+        group.bench_with_input(
+            BenchmarkId::new("stream_v3_buffered", label),
+            label,
+            |b, _| {
+                let client = Arc::clone(&client);
+                let key = *key;
+                let size = *size;
+                b.to_async(&rt).iter(|| async {
+                    let part = 2 * 1024 * 1024u64;
+                    logfwd_io::s3_input::fetch_parallel_stream_bench(
+                        Arc::clone(&client),
+                        key,
+                        size,
+                        part,
+                        8,
+                    )
+                    .await
+                    .expect("v3 streaming bench should succeed");
+                });
+            },
+        );
+
+        // object_store crate: get_ranges() parallel fetch.
+        if let Some(ref store) = obj_store {
+            group.bench_with_input(
+                BenchmarkId::new("object_store_get_ranges", label),
+                label,
+                |b, _| {
+                    use object_store::ObjectStore;
+                    let store = store.clone();
+                    let key = *key;
+                    let size = *size;
+                    b.to_async(&rt).iter(|| {
+                        let store = store.clone();
+                        async move {
+                            let path = object_store::path::Path::from(key);
+                            let part_size = 2 * 1024 * 1024u64; // 2 MiB
+                            let mut ranges = Vec::new();
+                            let mut offset = 0u64;
+                            while offset < size {
+                                let end = (offset + part_size).min(size);
+                                ranges.push(offset..end);
+                                offset = end;
+                            }
+                            let _bytes = store
+                                .get_ranges(&path, &ranges)
+                                .await
+                                .expect("object_store get_ranges should succeed");
+                        }
+                    });
+                },
+            );
+
+            // object_store: single get() with streaming.
+            group.bench_with_input(
+                BenchmarkId::new("object_store_get_stream", label),
+                label,
+                |b, _| {
+                    use futures_util::TryStreamExt;
+                    use object_store::ObjectStoreExt;
+                    let store = store.clone();
+                    let key = *key;
+                    b.to_async(&rt).iter(|| {
+                        let store = store.clone();
+                        async move {
+                            let path = object_store::path::Path::from(key);
+                            let result = store
+                                .get(&path)
+                                .await
+                                .expect("object_store get should succeed");
+                            let mut stream = result.into_stream();
+                            let mut total = 0usize;
+                            while let Some(chunk) = stream.try_next().await.unwrap() {
+                                total += chunk.len();
+                            }
+                            assert!(total > 0);
+                        }
+                    });
+                },
+            );
+        }
+
+        // object_store (tuned): unsigned payload, large connection pool, no timeout.
+        if let Some(ref store) = obj_store_tuned {
+            group.bench_with_input(
+                BenchmarkId::new("objstore_tuned_ranges", label),
+                label,
+                |b, _| {
+                    use object_store::ObjectStore;
+                    let store = store.clone();
+                    let key = *key;
+                    let size = *size;
+                    b.to_async(&rt).iter(|| {
+                        let store = store.clone();
+                        async move {
+                            let path = object_store::path::Path::from(key);
+                            let part_size = 2 * 1024 * 1024u64;
+                            let mut ranges = Vec::new();
+                            let mut offset = 0u64;
+                            while offset < size {
+                                let end = (offset + part_size).min(size);
+                                ranges.push(offset..end);
+                                offset = end;
+                            }
+                            let _bytes = store
+                                .get_ranges(&path, &ranges)
+                                .await
+                                .expect("tuned get_ranges should succeed");
+                        }
+                    });
+                },
+            );
+
+            group.bench_with_input(
+                BenchmarkId::new("objstore_tuned_stream", label),
+                label,
+                |b, _| {
+                    use futures_util::TryStreamExt;
+                    use object_store::ObjectStoreExt;
+                    let store = store.clone();
+                    let key = *key;
+                    b.to_async(&rt).iter(|| {
+                        let store = store.clone();
+                        async move {
+                            let path = object_store::path::Path::from(key);
+                            let result = store
+                                .get(&path)
+                                .await
+                                .expect("tuned get should succeed");
+                            let mut stream = result.into_stream();
+                            let mut total = 0usize;
+                            while let Some(chunk) = stream.try_next().await.unwrap() {
+                                total += chunk.len();
+                            }
+                            assert!(total > 0);
+                        }
+                    });
+                },
+            );
+        }
     }
 
     group.finish();

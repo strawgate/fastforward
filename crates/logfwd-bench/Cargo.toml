@@ -29,6 +29,8 @@ logfwd-io = { version = "0.1.0", path = "../logfwd-io", features = [
     "otlp-research",
     "s3",
 ] }
+object_store = { version = "0.13", features = ["aws"] }
+futures-util = "0.3"
 logfwd-output = { version = "0.1.0", path = "../logfwd-output" }
 logfwd-transform = { version = "0.1.0", path = "../logfwd-transform" }
 logfwd-types = { version = "0.1.0", path = "../logfwd-types" }
