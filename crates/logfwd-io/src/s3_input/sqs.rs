@@ -406,26 +406,22 @@ fn parse_receive_messages_response(data: &Bytes) -> io::Result<Vec<SqsMessage>> 
                     capture = None;
                 }
             }
-            Ok(Event::CData(e)) => {
-                if capture == Some("body") {
-                    body = String::from_utf8_lossy(e.into_inner().as_ref()).into_owned();
-                    capture = None;
-                }
+            Ok(Event::CData(e)) if capture == Some("body") => {
+                body = String::from_utf8_lossy(e.into_inner().as_ref()).into_owned();
+                capture = None;
             }
-            Ok(Event::End(e)) => {
-                if e.local_name().as_ref() == b"Message" && in_message {
-                    in_message = false;
-                    let records = parse_s3_event_body(&body);
-                    // Always push the message even when records is empty.
-                    // The discovery loop deletes non-actionable messages
-                    // (test notifications, non-ObjectCreated events) by
-                    // checking `records.is_empty()`.
-                    messages.push(SqsMessage {
-                        receipt_handle: receipt_handle.clone(),
-                        records,
-                    });
-                    capture = None;
-                }
+            Ok(Event::End(e)) if e.local_name().as_ref() == b"Message" && in_message => {
+                in_message = false;
+                let records = parse_s3_event_body(&body);
+                // Always push the message even when records is empty.
+                // The discovery loop deletes non-actionable messages
+                // (test notifications, non-ObjectCreated events) by
+                // checking `records.is_empty()`.
+                messages.push(SqsMessage {
+                    receipt_handle: receipt_handle.clone(),
+                    records,
+                });
+                capture = None;
             }
             Ok(Event::Eof) => break,
             Err(e) => {
