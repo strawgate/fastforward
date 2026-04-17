@@ -343,17 +343,16 @@ fn strip_ansi(s: &str) -> String {
                         }
                     }
                 }
-                Some(c2) => {
+                Some(c2) if !c2.is_ascii_alphabetic() => {
                     // CSI or other sequence: skip until alphabetic terminator.
-                    if !c2.is_ascii_alphabetic() {
-                        for c3 in chars.by_ref() {
-                            if c3.is_ascii_alphabetic() {
-                                break;
-                            }
+                    for c3 in chars.by_ref() {
+                        if c3.is_ascii_alphabetic() {
+                            break;
                         }
                     }
                 }
-                None => {}
+                // Single-char escape (alphabetic) — already consumed, skip.
+                Some(_) | None => {}
             }
         } else {
             out.push(c);
