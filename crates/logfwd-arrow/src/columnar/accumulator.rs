@@ -501,6 +501,24 @@ fn is_dense<T>(facts: &[(u32, T)], num_rows: usize, dedup: bool) -> bool {
         && (num_rows == 0 || facts[num_rows - 1].0 as usize == num_rows - 1)
 }
 
+/// Build a bit-packed NullBuffer from sparse row indices.
+///
+/// Directly produces a bit-packed buffer (1 bit/row) instead of the default
+/// `vec![false; num_rows]` → `NullBuffer::from(Vec<bool>)` path which
+/// allocates 1 byte/row before packing.
+fn sparse_null_buffer<T>(facts: &[(u32, T)], num_rows: usize) -> NullBuffer {
+    let byte_len = num_rows.div_ceil(8);
+    let mut bits = vec![0u8; byte_len];
+    for &(row, _) in facts {
+        let r = row as usize;
+        if r < num_rows {
+            bits[r >> 3] |= 1 << (r & 7);
+        }
+    }
+    let buf = Buffer::from_vec(bits);
+    NullBuffer::new(arrow::buffer::BooleanBuffer::new(buf, 0, num_rows))
+}
+
 fn build_int64(facts: &[(u32, i64)], num_rows: usize, dedup: bool) -> (ArrayRef, DataType) {
     let dense = is_dense(facts, num_rows, dedup);
     let mut values = vec![0i64; num_rows];
@@ -523,14 +541,7 @@ fn build_int64(facts: &[(u32, i64)], num_rows: usize, dedup: bool) -> (ArrayRef,
     let nulls = if dense {
         None
     } else {
-        let mut valid = vec![false; num_rows];
-        for &(row, _) in facts {
-            let r = row as usize;
-            if r < num_rows {
-                valid[r] = true;
-            }
-        }
-        Some(NullBuffer::from(valid))
+        Some(sparse_null_buffer(facts, num_rows))
     };
     (
         Arc::new(Int64Array::new(values.into(), nulls)),
@@ -560,14 +571,7 @@ fn build_float64(facts: &[(u32, f64)], num_rows: usize, dedup: bool) -> (ArrayRe
     let nulls = if dense {
         None
     } else {
-        let mut valid = vec![false; num_rows];
-        for &(row, _) in facts {
-            let r = row as usize;
-            if r < num_rows {
-                valid[r] = true;
-            }
-        }
-        Some(NullBuffer::from(valid))
+        Some(sparse_null_buffer(facts, num_rows))
     };
     (
         Arc::new(Float64Array::new(values.into(), nulls)),
@@ -597,14 +601,7 @@ fn build_bool(facts: &[(u32, bool)], num_rows: usize, dedup: bool) -> (ArrayRef,
     let nulls = if dense {
         None
     } else {
-        let mut valid = vec![false; num_rows];
-        for &(row, _) in facts {
-            let r = row as usize;
-            if r < num_rows {
-                valid[r] = true;
-            }
-        }
-        Some(NullBuffer::from(valid))
+        Some(sparse_null_buffer(facts, num_rows))
     };
     (
         Arc::new(BooleanArray::new(values.into(), nulls)),
@@ -694,7 +691,8 @@ fn build_string_view_trusted(
         }
     } else {
         // Sparse: iterate all facts, assign by row index (last-write-wins for duplicates).
-        let mut valid = vec![false; num_rows];
+        let byte_len = num_rows.div_ceil(8);
+        let mut bits = vec![0u8; byte_len];
         for &(row, sref) in facts {
             let r = row as usize;
             if r < num_rows {
@@ -706,10 +704,13 @@ fn build_string_view_trusted(
                     orig_block,
                     gen_block,
                 )?;
-                valid[r] = true;
+                bits[r >> 3] |= 1 << (r & 7);
             }
         }
-        nulls = Some(NullBuffer::from(valid));
+        let buf = Buffer::from_vec(bits);
+        nulls = Some(NullBuffer::new(arrow::buffer::BooleanBuffer::new(
+            buf, 0, num_rows,
+        )));
     }
 
     debug_assert!(
