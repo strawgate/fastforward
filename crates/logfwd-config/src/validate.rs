@@ -539,6 +539,74 @@ impl Config {
                                 )));
                             }
                         }
+                        InputTypeConfig::S3(s) => {
+                            let s3_cfg = &s.s3;
+                            if s3_cfg.bucket.trim().is_empty() {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': s3.bucket must not be empty"
+                                )));
+                            }
+                            if let Some(ref endpoint) = s3_cfg.endpoint {
+                                let ep = endpoint.trim();
+                                if ep.is_empty() {
+                                    return Err(ConfigError::Validation(format!(
+                                        "pipeline '{name}' input '{label}': s3.endpoint must not be empty"
+                                    )));
+                                }
+                                if !ep.starts_with("http://") && !ep.starts_with("https://") {
+                                    return Err(ConfigError::Validation(format!(
+                                        "pipeline '{name}' input '{label}': s3.endpoint must start with http:// or https://"
+                                    )));
+                                }
+                            }
+                            if let Some(interval) = s3_cfg.poll_interval_ms
+                                && interval == 0
+                            {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': s3.poll_interval_ms must be at least 1"
+                                )));
+                            }
+                            if let Some(ref comp) = s3_cfg.compression {
+                                let valid = [
+                                    "auto", "gzip", "gz", "zstd", "zst", "snappy", "sz", "none",
+                                    "identity",
+                                ];
+                                if !valid.iter().any(|v| v.eq_ignore_ascii_case(comp)) {
+                                    return Err(ConfigError::Validation(format!(
+                                        "pipeline '{name}' input '{label}': unknown s3.compression value '{comp}' \
+                                         (valid: auto, gzip, gz, zstd, zst, snappy, sz, none, identity)"
+                                    )));
+                                }
+                            }
+                            if let Some(ps) = s3_cfg.part_size_bytes
+                                && ps == 0
+                            {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': s3.part_size_bytes must be at least 1"
+                                )));
+                            }
+                            if let Some(f) = s3_cfg.max_concurrent_fetches
+                                && f == 0
+                            {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': s3.max_concurrent_fetches must be at least 1"
+                                )));
+                            }
+                            if let Some(o) = s3_cfg.max_concurrent_objects
+                                && o == 0
+                            {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': s3.max_concurrent_objects must be at least 1"
+                                )));
+                            }
+                            if let Some(vt) = s3_cfg.visibility_timeout_secs
+                                && vt < 30
+                            {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' input '{label}': s3.visibility_timeout_secs must be at least 30"
+                                )));
+                            }
+                        }
                     }
 
                     // Reject input formats that are not yet implemented.
@@ -792,19 +860,15 @@ impl Config {
                     // Validate compression values per output type (#1876).
                     if let Some(c) = output.compression.as_deref() {
                         match output.output_type {
-                            OutputType::Otlp => {
-                                if !matches!(c, "zstd" | "gzip" | "none") {
-                                    return Err(ConfigError::Validation(format!(
-                                        "pipeline '{name}' output '{label}': otlp compression must be 'zstd', 'gzip', or 'none', got '{c}'"
-                                    )));
-                                }
+                            OutputType::Otlp if !matches!(c, "zstd" | "gzip" | "none") => {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' output '{label}': otlp compression must be 'zstd', 'gzip', or 'none', got '{c}'"
+                                )));
                             }
-                            OutputType::Elasticsearch => {
-                                if !matches!(c, "gzip" | "none") {
-                                    return Err(ConfigError::Validation(format!(
-                                        "pipeline '{name}' output '{label}': elasticsearch compression must be 'gzip' or 'none', got '{c}'"
-                                    )));
-                                }
+                            OutputType::Elasticsearch if !matches!(c, "gzip" | "none") => {
+                                return Err(ConfigError::Validation(format!(
+                                    "pipeline '{name}' output '{label}': elasticsearch compression must be 'gzip' or 'none', got '{c}'"
+                                )));
                             }
                             // ArrowIpc allows zstd/none and is validated above.
                             // Other types either reject compression entirely or accept any.

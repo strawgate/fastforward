@@ -11,10 +11,28 @@ doctest = false
 [features]
 default = []
 otlp-research = []
+s3 = [
+    "dep:async-compression",
+    "dep:futures-util",
+    "dep:reqwest",
+    "dep:hmac",
+    "dep:sha2",
+    "dep:hex",
+    "dep:quick-xml",
+    "dep:snap",
+    "dep:tokio-util",
+    "tokio/rt-multi-thread",
+    "tokio/sync",
+    "tokio/time",
+    "tokio/macros",
+    "tokio/io-util",
+]
 
 [dependencies]
+async-compression = { version = "0.4", features = ["tokio", "gzip", "zstd"], optional = true }
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
 base64 = { workspace = true }
+futures-util = { version = "0.3", optional = true }
 logfwd-core = { version = "0.1.0", path = "../logfwd-core" }
 logfwd-arrow = { version = "0.1.0", path = "../logfwd-arrow" }
 logfwd-otap-proto = { version = "0.1.0", path = "../logfwd-otap-proto" }
@@ -24,6 +42,8 @@ bytes = "1"
 crossbeam-channel = "0.5"
 flate2 = "1"
 globset = { workspace = true }
+hex = { version = "0.4", optional = true }
+hmac = { version = "0.12", optional = true }
 http-body-util = "0.1"
 itoa = "1"
 ryu = "1"
@@ -31,7 +51,12 @@ libc = "0.2"
 libloading = "0.8"
 memchr = "2"
 notify = "8"
+quick-xml = { version = "0.37", features = ["serialize"], optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"], optional = true }
+sha2 = { version = "0.10", optional = true }
+snap = { version = "1", optional = true }
 tokio = { workspace = true }
+tokio-util = { version = "0.7", features = ["io"], optional = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 opentelemetry-proto = { version = "0.31", features = ["logs", "gen-tonic-messages"] }
@@ -54,6 +79,7 @@ sensor-ebpf-common = { path = "../logfwd-ebpf-proto/sensor-ebpf/sensor-ebpf-comm
 chrono = { workspace = true }
 dhat = "0.3"
 logfwd-test-utils = { version = "0.1.0", path = "../logfwd-test-utils" }
+mockito = "1.7.2"
 proptest = "1"
 proptest-state-machine = "0.8"
 serial_test = "3"

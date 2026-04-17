@@ -914,19 +914,18 @@ fn resolve_batch_columns<'a>(
                 name,
                 field_names::TIMESTAMP,
                 field_names::TIMESTAMP_VARIANTS,
-            ) =>
+            ) && timestamp_col.is_none()
+                && timestamp_num_col.is_none() =>
             {
-                if timestamp_col.is_none() && timestamp_num_col.is_none() {
-                    if let Some(arr) = resolve_otlp_str_col(batch.column(idx).as_ref()) {
-                        timestamp_col = Some((idx, arr));
-                        excluded[idx] = true;
-                    } else if matches!(
-                        field.data_type(),
-                        DataType::Int64 | DataType::UInt64 | DataType::Timestamp(_, _)
-                    ) {
-                        timestamp_num_col = Some((idx, batch.column(idx).as_ref()));
-                        excluded[idx] = true;
-                    }
+                if let Some(arr) = resolve_otlp_str_col(batch.column(idx).as_ref()) {
+                    timestamp_col = Some((idx, arr));
+                    excluded[idx] = true;
+                } else if matches!(
+                    field.data_type(),
+                    DataType::Int64 | DataType::UInt64 | DataType::Timestamp(_, _)
+                ) {
+                    timestamp_num_col = Some((idx, batch.column(idx).as_ref()));
+                    excluded[idx] = true;
                 }
             }
             name if field_names::matches_any(
@@ -962,12 +961,11 @@ fn resolve_batch_columns<'a>(
                 name,
                 field_names::TRACE_FLAGS,
                 field_names::TRACE_FLAGS_VARIANTS,
-            ) =>
+            ) && flags_col.is_none()
+                && matches!(field.data_type(), DataType::Int64) =>
             {
-                if flags_col.is_none() && matches!(field.data_type(), DataType::Int64) {
-                    flags_col = Some((idx, batch.column(idx).as_primitive::<Int64Type>()));
-                    excluded[idx] = true;
-                }
+                flags_col = Some((idx, batch.column(idx).as_primitive::<Int64Type>()));
+                excluded[idx] = true;
             }
             name if name == message_field
                 || field_names::matches_any(

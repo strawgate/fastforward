@@ -217,8 +217,7 @@ pub async fn run_pipelines(
         let mut server = logfwd_diagnostics::diagnostics::DiagnosticsServer::new(addr);
         server.set_config(options.config_path, options.config_yaml);
         let expose_config = std::env::var("LOGFWD_UNSAFE_EXPOSE_CONFIG")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
+            .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
         server.set_config_endpoint_enabled(expose_config);
         server.set_trace_buffer(trace_buf);
         for p in &pipelines {
@@ -426,6 +425,7 @@ fn input_label(i: &logfwd_config::InputConfig) -> String {
         InputTypeConfig::WindowsEbpfSensor(_) => "windows_ebpf_sensor".to_string(),
         InputTypeConfig::HostMetrics(_) => "host_metrics".to_string(),
         InputTypeConfig::Journald(_) => "journald".to_string(),
+        InputTypeConfig::S3(s) => format!("s3    {}", s.s3.bucket),
     }
 }
 

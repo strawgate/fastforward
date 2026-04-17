@@ -15,7 +15,7 @@ libc = "0.2"
 [dependencies]
 arrow = { workspace = true }
 bytes = "1"
-criterion = { version = "0.7", features = ["html_reports"] }
+criterion = { version = "0.7", features = ["html_reports", "async_tokio"] }
 datafusion = { workspace = true }
 dhat = { version = "0.3", optional = true }
 fastrand = "2"
@@ -27,6 +27,7 @@ logfwd-arrow = { version = "0.1.0", path = "../logfwd-arrow" }
 logfwd-core = { version = "0.1.0", path = "../logfwd-core" }
 logfwd-io = { version = "0.1.0", path = "../logfwd-io", features = [
     "otlp-research",
+    "s3",
 ] }
 logfwd-output = { version = "0.1.0", path = "../logfwd-output" }
 logfwd-transform = { version = "0.1.0", path = "../logfwd-transform" }
@@ -103,6 +104,10 @@ harness = false
 
 [[bench]]
 name = "transform_overhead"
+harness = false
+
+[[bench]]
+name = "s3_input"
 harness = false
 
 [[bin]]
