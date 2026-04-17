@@ -66,10 +66,12 @@ fn run_iterations(batch: &RecordBatch, encoder: &str, iterations: usize) -> Dura
     for _ in 0..2 {
         match encoder {
             "manual" => {
-                black_box(sink.encode_batch(batch, &meta));
+                sink.encode_batch(batch, &meta);
+                black_box(&sink);
             }
             "generated_fast" => {
-                black_box(sink.encode_batch_generated_fast(batch, &meta));
+                sink.encode_batch_generated_fast(batch, &meta);
+                black_box(&sink);
             }
             other => {
                 eprintln!("Unknown encoder '{other}'; expected manual | generated_fast");
@@ -82,10 +84,12 @@ fn run_iterations(batch: &RecordBatch, encoder: &str, iterations: usize) -> Dura
     for _ in 0..iterations {
         match encoder {
             "manual" => {
-                black_box(sink.encode_batch(batch, &meta));
+                sink.encode_batch(batch, &meta);
+                black_box(&sink);
             }
             _ => {
-                black_box(sink.encode_batch_generated_fast(batch, &meta));
+                sink.encode_batch_generated_fast(batch, &meta);
+                black_box(&sink);
             }
         }
     }
