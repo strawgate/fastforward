@@ -178,7 +178,7 @@ fn bench_s3_download(c: &mut Criterion) {
             let key = *key;
             let size = *size;
             b.to_async(&rt).iter(|| async {
-                logfwd_io::s3_input::fetch_parallel_stream_bench(
+                let received = logfwd_io::s3_input::fetch_parallel_stream_bench(
                     Arc::clone(&client),
                     key,
                     size,
@@ -187,6 +187,10 @@ fn bench_s3_download(c: &mut Criterion) {
                 )
                 .await
                 .expect("streaming bench should succeed");
+                assert_eq!(
+                    received, size as usize,
+                    "received bytes should match object size"
+                );
             });
         });
     }
@@ -207,7 +211,7 @@ fn bench_s3_download(c: &mut Criterion) {
             let part_size = *part_size;
             let concurrency = *concurrency;
             b.to_async(&rt).iter(|| async {
-                logfwd_io::s3_input::fetch_parallel_stream_bench(
+                let received = logfwd_io::s3_input::fetch_parallel_stream_bench(
                     Arc::clone(&client),
                     sweep_key,
                     sweep_size,
@@ -216,6 +220,10 @@ fn bench_s3_download(c: &mut Criterion) {
                 )
                 .await
                 .expect("sweep bench should succeed");
+                assert_eq!(
+                    received, sweep_size as usize,
+                    "sweep received bytes should match"
+                );
             });
         });
     }

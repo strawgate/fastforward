@@ -250,25 +250,34 @@ async fn sqs_post(
     if let Some(token) = session_token {
         req = req.header("x-amz-security-token", token);
     }
-    let resp = req
+    let mut resp = req
         .body(body)
         .send()
         .await
         .map_err(|e| io::Error::other(format!("SQS POST: {e}")))?;
 
-    let status = resp.status();
-    let response_bytes = resp
-        .bytes()
-        .await
-        .map_err(|e| io::Error::other(format!("SQS read response: {e}")))?;
-
-    if !status.is_success() {
-        let preview = String::from_utf8_lossy(&response_bytes[..response_bytes.len().min(1024)]);
+    if !resp.status().is_success() {
+        let status = resp.status();
+        // Read a bounded preview for the error message.
+        let mut buf = Vec::with_capacity(1024);
+        while buf.len() < 1024 {
+            match resp.chunk().await {
+                Ok(Some(chunk)) => {
+                    let remaining = 1024 - buf.len();
+                    buf.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+                }
+                _ => break,
+            }
+        }
+        let preview = String::from_utf8_lossy(&buf);
         return Err(io::Error::other(format!(
             "SQS POST HTTP {status}: {preview}"
         )));
     }
-    Ok(response_bytes)
+
+    resp.bytes()
+        .await
+        .map_err(|e| io::Error::other(format!("SQS read response: {e}")))
 }
 
 fn sha256_hex(data: &[u8]) -> String {

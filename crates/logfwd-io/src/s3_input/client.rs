@@ -20,20 +20,36 @@ const EMPTY_BODY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934
 /// Max bytes of a response body to include in error messages.
 const ERROR_BODY_PREVIEW_LEN: usize = 1024;
 
-/// Read the response body text, truncated to [`ERROR_BODY_PREVIEW_LEN`] bytes
-/// to prevent large error responses from exhausting memory in error messages.
+/// Read up to [`ERROR_BODY_PREVIEW_LEN`] bytes from a response body.
+///
+/// Uses chunked reading to avoid buffering arbitrarily large error
+/// responses into memory.
 async fn error_body_preview(resp: reqwest::Response) -> String {
-    let body = resp.text().await.unwrap_or_default();
-    if body.len() <= ERROR_BODY_PREVIEW_LEN {
-        body
-    } else {
-        // Find a valid UTF-8 char boundary at or before the limit.
-        let mut end = ERROR_BODY_PREVIEW_LEN;
-        while end > 0 && !body.is_char_boundary(end) {
-            end -= 1;
+    let mut buf = Vec::with_capacity(ERROR_BODY_PREVIEW_LEN);
+    let mut stream = resp;
+    let mut truncated = false;
+
+    while buf.len() < ERROR_BODY_PREVIEW_LEN {
+        match stream.chunk().await {
+            Ok(Some(chunk)) => {
+                let remaining = ERROR_BODY_PREVIEW_LEN - buf.len();
+                if chunk.len() > remaining {
+                    buf.extend_from_slice(&chunk[..remaining]);
+                    truncated = true;
+                    break;
+                }
+                buf.extend_from_slice(&chunk);
+            }
+            Ok(None) => break,
+            Err(_) => break,
         }
-        let truncated = &body[..end];
-        format!("{truncated}... (truncated)")
+    }
+
+    let text = String::from_utf8_lossy(&buf);
+    if truncated {
+        format!("{text}... (truncated)")
+    } else {
+        text.into_owned()
     }
 }
 
