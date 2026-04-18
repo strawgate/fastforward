@@ -158,7 +158,11 @@ fn expand_env_vars_in_yaml_value(
             for (mut key, mut val) in old {
                 expand_env_vars_in_yaml_value(&mut key, quoted_placeholders)?;
                 expand_env_vars_in_yaml_value(&mut val, quoted_placeholders)?;
-                map.insert(key, val);
+                if map.insert(key, val).is_some() {
+                    return Err(ConfigError::Validation(
+                        "environment variable expansion produced duplicate YAML mapping key".into(),
+                    ));
+                }
             }
         }
         Value::Tagged(tagged) => {
@@ -190,37 +194,25 @@ fn coerce_expanded_yaml_scalar(text: &str) -> Value {
 fn mark_quoted_exact_env_placeholders(yaml: &str) -> (String, HashMap<String, String>) {
     let mut marked = String::with_capacity(yaml.len());
     let mut placeholders = HashMap::new();
-    let mut chars = yaml.chars().peekable();
+    let mut cursor = 0usize;
+    let mut chars = yaml.char_indices().peekable();
 
-    while let Some(ch) = chars.next() {
-        if ch != '\'' && ch != '"' {
-            marked.push(ch);
+    while let Some((start, ch)) = chars.next() {
+        let quote @ ('\'' | '"') = ch else {
+            continue;
+        };
+        if !is_yaml_quoted_scalar_start(yaml, start) {
             continue;
         }
 
-        let quote = ch;
-        let mut text = String::new();
-        let mut raw = String::new();
-        let mut escaped = false;
-        for c in chars.by_ref() {
-            if quote == '"' && escaped {
-                text.push(c);
-                raw.push(c);
-                escaped = false;
-                continue;
-            }
-            if quote == '"' && c == '\\' {
-                raw.push(c);
-                escaped = true;
-                continue;
-            }
-            if c == quote {
-                break;
-            }
-            text.push(c);
-            raw.push(c);
+        let Some((end, text)) = scan_yaml_quoted_scalar(yaml, start, quote) else {
+            continue;
+        };
+        while chars.peek().is_some_and(|(idx, _)| *idx < end) {
+            chars.next();
         }
 
+        marked.push_str(&yaml[cursor..start]);
         if is_exact_env_placeholder(&text) {
             let marker = format!("__LOGFWD_QUOTED_ENV_PLACEHOLDER_{}__", placeholders.len());
             marked.push(quote);
@@ -228,11 +220,52 @@ fn mark_quoted_exact_env_placeholders(yaml: &str) -> (String, HashMap<String, St
             marked.push(quote);
             placeholders.insert(marker, text);
         } else {
-            marked.push(quote);
-            marked.push_str(&raw);
-            marked.push(quote);
+            marked.push_str(&yaml[start..end]);
         }
+        cursor = end;
     }
+    marked.push_str(&yaml[cursor..]);
 
     (marked, placeholders)
+}
+
+fn is_yaml_quoted_scalar_start(yaml: &str, quote_start: usize) -> bool {
+    let line_start = yaml[..quote_start]
+        .rfind('\n')
+        .map_or(0, |idx| idx.saturating_add(1));
+    yaml[line_start..quote_start]
+        .chars()
+        .rev()
+        .find(|ch| !ch.is_whitespace())
+        .is_none_or(|ch| matches!(ch, ':' | '-' | ',' | '[' | '{' | '?'))
+}
+
+fn scan_yaml_quoted_scalar(yaml: &str, quote_start: usize, quote: char) -> Option<(usize, String)> {
+    let mut text = String::new();
+    let body_start = quote_start + quote.len_utf8();
+    let mut chars = yaml[body_start..].char_indices().peekable();
+
+    while let Some((rel_idx, ch)) = chars.next() {
+        let idx = body_start + rel_idx;
+        if quote == '\'' && ch == '\'' {
+            if chars.peek().is_some_and(|(_, next)| *next == '\'') {
+                chars.next();
+                text.push('\'');
+                continue;
+            }
+            return Some((idx + ch.len_utf8(), text));
+        }
+        if quote == '"' && ch == '"' {
+            return Some((idx + ch.len_utf8(), text));
+        }
+        if quote == '"' && ch == '\\' {
+            if let Some((_, escaped)) = chars.next() {
+                text.push(escaped);
+            }
+            continue;
+        }
+        text.push(ch);
+    }
+
+    None
 }

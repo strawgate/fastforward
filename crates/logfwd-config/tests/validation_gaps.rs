@@ -118,6 +118,73 @@ pipelines:
 }
 
 #[test]
+fn issue_1855_plain_scalar_apostrophe_is_not_treated_as_quote_boundary() {
+    let yaml = r#"
+input:
+  type: file
+  path: /var/log/it's.log
+output:
+  type: stdout
+"#;
+
+    let config = Config::load_str(yaml).expect("plain scalar apostrophe should parse");
+    let input = &config.pipelines["default"].inputs[0];
+    let path = match &input.type_config {
+        logfwd_config::InputTypeConfig::File(file) => file.path.as_str(),
+        _ => panic!("expected file input"),
+    };
+
+    assert_eq!(path, "/var/log/it's.log");
+}
+
+#[test]
+fn issue_1855_single_quoted_yaml_escape_survives_placeholder_marking() {
+    let yaml = r#"
+pipelines:
+  test:
+    resource_attrs:
+      note: 'it''s'
+    inputs:
+      - type: generator
+    outputs:
+      - type: stdout
+"#;
+
+    let config = Config::load_str(yaml).expect("single-quoted escape should parse");
+
+    assert_eq!(
+        config.pipelines["test"].resource_attrs.get("note"),
+        Some(&"it's".to_string())
+    );
+}
+
+#[test]
+fn issue_1855_env_expanded_mapping_key_collision_is_rejected() {
+    let _env_lock = env_lock();
+    let _env_a = EnvVarGuard::set("LOGFWD_ISSUE_1855_KEY_A", "prod");
+    let _env_b = EnvVarGuard::set("LOGFWD_ISSUE_1855_KEY_B", "prod");
+
+    let yaml = r#"
+pipelines:
+  test:
+    resource_attrs:
+      ${LOGFWD_ISSUE_1855_KEY_A}: one
+      ${LOGFWD_ISSUE_1855_KEY_B}: two
+    inputs:
+      - type: generator
+    outputs:
+      - type: stdout
+"#;
+
+    let err = Config::load_str(yaml).unwrap_err().to_string();
+
+    assert!(
+        err.contains("duplicate YAML mapping key"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
 fn issue_1855_env_expansion_applies_to_mapping_keys() {
     let _env_lock = env_lock();
     let _env = EnvVarGuard::set("LOGFWD_ISSUE_1855_PIPELINE", "from-env");
