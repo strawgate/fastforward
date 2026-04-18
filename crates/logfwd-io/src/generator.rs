@@ -60,6 +60,7 @@ pub enum GeneratorAttributeValue {
 ///
 /// Controls the base timestamp and per-event step for generated log lines.
 /// Resolved at pipeline build time — `"now"` is converted to an epoch ms value.
+#[derive(Debug, Clone, Copy)]
 pub struct GeneratorTimestamp {
     /// Base timestamp in milliseconds since Unix epoch.
     pub start_epoch_ms: i64,
@@ -209,6 +210,13 @@ impl TimestampParts {
         out[22] = b'0' + (self.ms % 10) as u8;
         out[23] = b'Z';
     }
+
+    /// Append `YYYY-MM-DDTHH:MM:SS.mmmZ` to `buf` (avoids a separate stack buffer).
+    pub fn write_iso8601_into(&self, buf: &mut Vec<u8>) {
+        let mut tmp = [0u8; 24];
+        self.write_iso8601(&mut tmp);
+        buf.extend_from_slice(&tmp);
+    }
 }
 
 /// Extra fields present only in `Complex` events.
@@ -315,65 +323,115 @@ pub(crate) fn write_message_value(buf: &mut Vec<u8>, fields: &LogEventFields<'_>
     if let Some(escaped) = fields.message_template {
         buf.extend_from_slice(escaped);
     } else {
-        let _ = write!(
-            buf,
-            "{} {}/{} {}",
-            fields.method, fields.path, fields.id, fields.status
-        );
+        // Avoid `write!()` formatting overhead — build from parts directly.
+        buf.extend_from_slice(fields.method.as_bytes());
+        buf.push(b' ');
+        buf.extend_from_slice(fields.path.as_bytes());
+        buf.push(b'/');
+        let mut itoa_buf = itoa::Buffer::new();
+        buf.extend_from_slice(itoa_buf.format(fields.id).as_bytes());
+        buf.push(b' ');
+        buf.extend_from_slice(itoa_buf.format(fields.status).as_bytes());
+    }
+}
+
+/// Write a u64 as 16 zero-padded lowercase hex digits into a fixed buffer.
+fn write_hex16(out: &mut [u8; 16], val: u64) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut v = val;
+    // Fill right-to-left for natural zero-padding.
+    let mut i = 15_i32;
+    while i >= 0 {
+        out[i as usize] = HEX[(v & 0xf) as usize];
+        v >>= 4;
+        i -= 1;
     }
 }
 
 /// Serialize a `LogEventFields` as a single JSON object into `buf`.
 fn write_log_fields_json(buf: &mut Vec<u8>, fields: &LogEventFields<'_>) {
     let ts = &fields.timestamp;
-    let level = fields.level;
-    let dur = fields.duration_ms;
-    let rid = fields.request_id;
-    let service = fields.service;
-    let status = fields.status;
 
     // Common prefix: timestamp, level, message
-    let _ = write!(
-        buf,
-        r#"{{"timestamp":"{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z","level":"{level}","#,
-        ts.year, ts.month, ts.day, ts.hour, ts.min, ts.sec, ts.ms,
-    );
-    buf.extend_from_slice(b"\"message\":\"");
+    buf.extend_from_slice(b"{\"timestamp\":\"");
+    ts.write_iso8601_into(buf);
+    buf.extend_from_slice(b"\",\"level\":\"");
+    buf.extend_from_slice(fields.level.as_bytes());
+    buf.extend_from_slice(b"\",\"message\":\"");
     write_message_value(buf, fields);
     buf.push(b'"');
 
+    // Shared numeric/hex helpers
+    let mut itoa_buf = itoa::Buffer::new();
+    let mut hex_buf = [0u8; 16];
+
     match &fields.complexity {
         ComplexityFields::Simple => {
-            let _ = write!(
-                buf,
-                r#","duration_ms":{dur},"request_id":"{rid:016x}","service":"{service}","status":{status}}}"#,
-            );
+            write_simple_suffix(buf, fields, &mut itoa_buf, &mut hex_buf);
         }
         ComplexityFields::Complex {
             bytes_in,
             bytes_out,
             variant,
-        } => match variant {
-            ComplexVariant::WithHeadersAndTags => {
-                let _ = write!(
-                    buf,
-                    r#","duration_ms":{dur},"request_id":"{rid:016x}","service":"{service}","status":{status},"bytes_in":{bytes_in},"bytes_out":{bytes_out},"headers":{{"content-type":"application/json","x-request-id":"{rid:016x}"}},"tags":["web","{service}","{level}"]}}"#,
-                );
+        } => {
+            buf.extend_from_slice(b",\"duration_ms\":");
+            buf.extend_from_slice(itoa_buf.format(fields.duration_ms).as_bytes());
+            buf.extend_from_slice(b",\"request_id\":\"");
+            write_hex16(&mut hex_buf, fields.request_id);
+            buf.extend_from_slice(&hex_buf);
+            buf.extend_from_slice(b"\",\"service\":\"");
+            buf.extend_from_slice(fields.service.as_bytes());
+            buf.extend_from_slice(b"\",\"status\":");
+            buf.extend_from_slice(itoa_buf.format(fields.status).as_bytes());
+            buf.extend_from_slice(b",\"bytes_in\":");
+            buf.extend_from_slice(itoa_buf.format(*bytes_in).as_bytes());
+            buf.extend_from_slice(b",\"bytes_out\":");
+            buf.extend_from_slice(itoa_buf.format(*bytes_out).as_bytes());
+
+            match variant {
+                ComplexVariant::WithHeadersAndTags => {
+                    buf.extend_from_slice(
+                        b",\"headers\":{\"content-type\":\"application/json\",\"x-request-id\":\"",
+                    );
+                    buf.extend_from_slice(&hex_buf);
+                    buf.extend_from_slice(b"\"},\"tags\":[\"web\",\"");
+                    buf.extend_from_slice(fields.service.as_bytes());
+                    buf.extend_from_slice(b"\",\"");
+                    buf.extend_from_slice(fields.level.as_bytes());
+                    buf.extend_from_slice(b"\"]}");
+                }
+                ComplexVariant::WithUpstream { upstream_ms } => {
+                    buf.extend_from_slice(b",\"upstream\":[{\"host\":\"10.0.0.1\",\"latency_ms\":");
+                    buf.extend_from_slice(itoa_buf.format(*upstream_ms).as_bytes());
+                    buf.extend_from_slice(b"},{\"host\":\"10.0.0.2\",\"latency_ms\":");
+                    buf.extend_from_slice(itoa_buf.format(fields.duration_ms).as_bytes());
+                    buf.extend_from_slice(b"}]}");
+                }
+                ComplexVariant::Basic => {
+                    buf.push(b'}');
+                }
             }
-            ComplexVariant::WithUpstream { upstream_ms } => {
-                let _ = write!(
-                    buf,
-                    r#","duration_ms":{dur},"request_id":"{rid:016x}","service":"{service}","status":{status},"bytes_in":{bytes_in},"bytes_out":{bytes_out},"upstream":[{{"host":"10.0.0.1","latency_ms":{upstream_ms}}},{{"host":"10.0.0.2","latency_ms":{dur}}}]}}"#,
-                );
-            }
-            ComplexVariant::Basic => {
-                let _ = write!(
-                    buf,
-                    r#","duration_ms":{dur},"request_id":"{rid:016x}","service":"{service}","status":{status},"bytes_in":{bytes_in},"bytes_out":{bytes_out}}}"#,
-                );
-            }
-        },
+        }
     }
+}
+
+/// Write the Simple suffix: `,"duration_ms":N,"request_id":"...","service":"...","status":N}`
+fn write_simple_suffix(
+    buf: &mut Vec<u8>,
+    fields: &LogEventFields<'_>,
+    itoa_buf: &mut itoa::Buffer,
+    hex_buf: &mut [u8; 16],
+) {
+    buf.extend_from_slice(b",\"duration_ms\":");
+    buf.extend_from_slice(itoa_buf.format(fields.duration_ms).as_bytes());
+    buf.extend_from_slice(b",\"request_id\":\"");
+    write_hex16(hex_buf, fields.request_id);
+    buf.extend_from_slice(hex_buf.as_slice());
+    buf.extend_from_slice(b"\",\"service\":\"");
+    buf.extend_from_slice(fields.service.as_bytes());
+    buf.extend_from_slice(b"\",\"status\":");
+    buf.extend_from_slice(itoa_buf.format(fields.status).as_bytes());
+    buf.push(b'}');
 }
 
 // ---------------------------------------------------------------------------
@@ -831,12 +889,16 @@ use std::sync::Arc;
 /// * `n` — number of rows to generate
 /// * `start_counter` — first event counter value (rows use `start_counter..start_counter+n`)
 /// * `timestamp_config` — timestamp base and step
-/// * `message_template_escaped` — pre-escaped template or `None` for default
+/// * `message_template` — raw (un-escaped) message template, or `None` for
+///   default `"{method} {path}/{id} {status}"`. When the JSON generator uses a
+///   pre-escaped template for embedding in JSON strings, this function expects
+///   the **decoded** form — the value the scanner would extract after
+///   un-escaping the JSON string.
 pub fn generate_arrow_batch(
     n: usize,
     start_counter: u64,
     timestamp_config: &GeneratorTimestamp,
-    message_template_escaped: Option<&[u8]>,
+    message_template: Option<&[u8]>,
 ) -> RecordBatch {
     let mut ts_builder = StringBuilder::with_capacity(n, n * 24);
     let mut level_builder = StringBuilder::with_capacity(n, n * 5);
@@ -847,34 +909,45 @@ pub fn generate_arrow_batch(
     let mut status_builder = Int64Builder::with_capacity(n);
 
     let mut ts_buf = [0u8; 24];
+    let mut hex_buf = [0u8; 16];
     let mut msg_buf = Vec::with_capacity(64);
 
     for i in 0..n {
         let counter = start_counter + i as u64;
-        let Some(fields) = compute_log_fields(
-            counter,
-            timestamp_config,
-            GeneratorComplexity::Simple,
-            message_template_escaped,
-        ) else {
+        // Pass None as template to compute_log_fields so the message is
+        // built via write_message_value's default formatting path. When
+        // the caller provides a raw template, we write it directly.
+        let Some(fields) =
+            compute_log_fields(counter, timestamp_config, GeneratorComplexity::Simple, None)
+        else {
             break;
         };
 
         // Timestamp as ISO 8601 string
         fields.timestamp.write_iso8601(&mut ts_buf);
-        // SAFETY: write_iso8601 produces valid ASCII
-        ts_builder.append_value(std::str::from_utf8(&ts_buf).expect("valid ASCII"));
+        // SAFETY: write_iso8601 produces only ASCII digits, dashes, colons, 'T', '.', 'Z'
+        ts_builder.append_value(unsafe { std::str::from_utf8_unchecked(&ts_buf) });
 
         level_builder.append_value(fields.level);
 
         // Message — reuse buffer
         msg_buf.clear();
-        write_message_value(&mut msg_buf, &fields);
-        message_builder.append_value(std::str::from_utf8(&msg_buf).expect("valid UTF-8"));
+        if let Some(raw_tmpl) = message_template {
+            msg_buf.extend_from_slice(raw_tmpl);
+        } else {
+            write_message_value(&mut msg_buf, &fields);
+        }
+        // SAFETY: write_message_value produces only ASCII (method, path, id, status)
+        message_builder.append_value(unsafe { std::str::from_utf8_unchecked(&msg_buf) });
 
         // Integer fields as Int64 (matching scanner's append_int_by_idx → Int64Array)
         duration_builder.append_value(fields.duration_ms as i64);
-        rid_builder.append_value(format!("{:016x}", fields.request_id));
+
+        // request_id: stack-based hex formatting (avoids format!() heap alloc)
+        write_hex16(&mut hex_buf, fields.request_id);
+        // SAFETY: write_hex16 produces only ASCII hex digits
+        rid_builder.append_value(unsafe { std::str::from_utf8_unchecked(&hex_buf) });
+
         service_builder.append_value(fields.service);
         status_builder.append_value(fields.status as i64);
     }
@@ -915,37 +988,149 @@ mod tests {
     }
 
     /// Prove that the Arrow-direct generator produces identical data to the
-    /// JSON → Scanner path for 1000 events across varying counter offsets.
+    /// JSON → Scanner path across randomized inputs.
+    ///
+    /// Proptest varies counter offset, batch size, timestamp config, and
+    /// message template. For each combination the test:
+    /// 1. Generates N events via `generate_arrow_batch()`
+    /// 2. Generates the same events as JSON via `write_log_fields_json()`
+    /// 3. Scans the JSON through `Scanner::scan_detached()`
+    /// 4. Asserts both RecordBatches are column-for-column identical
+    /// 5. Asserts the JSON batch has no extra columns the Arrow batch lacks
     #[test]
     fn arrow_matches_json_path() {
         use arrow::array::AsArray;
         use logfwd_arrow::Scanner;
         use logfwd_core::scan_config::ScanConfig;
+        use proptest::prelude::*;
 
-        let ts_config = GeneratorTimestamp::default();
-        let message_template: Option<Vec<u8>> = None;
+        fn assert_batches_identical(
+            arrow_batch: &RecordBatch,
+            json_batch: &RecordBatch,
+            label: &str,
+        ) {
+            assert_eq!(
+                arrow_batch.num_rows(),
+                json_batch.num_rows(),
+                "{label}: row count mismatch"
+            );
+            let n = arrow_batch.num_rows();
 
-        // Test multiple counter offsets to cover all LEVEL/PATH/METHOD/SERVICE rotations
-        for start in [0, 1, 5, 20, 100, 999] {
-            let n = 100;
+            // Every column in the Arrow batch must exist and match in the JSON batch.
+            let string_cols = ["timestamp", "level", "message", "request_id", "service"];
+            let int_cols = ["duration_ms", "status"];
 
-            // Path 1: Arrow direct
-            let arrow_batch =
-                generate_arrow_batch(n, start, &ts_config, message_template.as_deref());
+            for col_name in &string_cols {
+                let arrow_col = arrow_batch
+                    .column_by_name(col_name)
+                    .unwrap_or_else(|| panic!("{label}: arrow batch missing {col_name}"));
+                let json_col = json_batch
+                    .column_by_name(col_name)
+                    .unwrap_or_else(|| panic!("{label}: json batch missing {col_name}"));
 
-            // Path 2: JSON → Scanner
+                let arrow_strs = arrow_col.as_string::<i32>();
+                let json_strs = json_col
+                    .as_any()
+                    .downcast_ref::<arrow::array::StringArray>()
+                    .unwrap_or_else(|| panic!("{label}: {col_name} not StringArray"));
+
+                for row in 0..n {
+                    assert_eq!(
+                        arrow_strs.value(row),
+                        json_strs.value(row),
+                        "{label}: row={row} col={col_name}"
+                    );
+                }
+            }
+
+            for col_name in &int_cols {
+                let arrow_col = arrow_batch
+                    .column_by_name(col_name)
+                    .unwrap_or_else(|| panic!("{label}: arrow batch missing {col_name}"));
+                let json_col = json_batch
+                    .column_by_name(col_name)
+                    .unwrap_or_else(|| panic!("{label}: json batch missing {col_name}"));
+
+                let arrow_ints = arrow_col
+                    .as_any()
+                    .downcast_ref::<arrow::array::Int64Array>()
+                    .unwrap_or_else(|| panic!("{label}: {col_name} not Int64Array in arrow"));
+                let json_ints = json_col
+                    .as_any()
+                    .downcast_ref::<arrow::array::Int64Array>()
+                    .unwrap_or_else(|| panic!("{label}: {col_name} not Int64Array in json"));
+
+                for row in 0..n {
+                    assert_eq!(
+                        arrow_ints.value(row),
+                        json_ints.value(row),
+                        "{label}: row={row} col={col_name}"
+                    );
+                }
+            }
+
+            // The JSON batch must not have extra columns beyond what Arrow produces.
+            let arrow_schema = arrow_batch.schema();
+            let arrow_names: std::collections::HashSet<&str> = arrow_schema
+                .fields()
+                .iter()
+                .map(|f| f.name().as_str())
+                .collect();
+            for field in json_batch.schema().fields() {
+                assert!(
+                    arrow_names.contains(field.name().as_str()),
+                    "{label}: json batch has extra column '{}' not in arrow batch",
+                    field.name()
+                );
+            }
+        }
+
+        /// Compare Arrow-direct output against manually-constructed JSON→Scanner output.
+        fn run_comparison(
+            start: u64,
+            n: usize,
+            ts_config: &GeneratorTimestamp,
+            raw_template: Option<&[u8]>,
+            label: &str,
+        ) {
+            // Arrow path: raw (un-escaped) template
+            let arrow_batch = generate_arrow_batch(n, start, ts_config, raw_template);
+
+            // JSON path: needs pre-escaped template for JSON embedding
+            let escaped_template: Option<Vec<u8>> = raw_template.map(|raw| {
+                let mut buf = Vec::with_capacity(raw.len() + 4);
+                write_json_escaped_string_contents(
+                    &mut buf,
+                    std::str::from_utf8(raw).expect("raw template must be valid UTF-8"),
+                );
+                buf
+            });
+            let escaped_slice = escaped_template.as_deref();
+
             let mut json_buf = Vec::with_capacity(n * 256);
+            let mut json_count = 0;
             for i in 0..n {
                 let counter = start + i as u64;
-                let fields = compute_log_fields(
+                let Some(fields) = compute_log_fields(
                     counter,
-                    &ts_config,
+                    ts_config,
                     GeneratorComplexity::Simple,
-                    message_template.as_deref(),
-                )
-                .expect("valid counter");
+                    escaped_slice,
+                ) else {
+                    break;
+                };
                 write_log_fields_json(&mut json_buf, &fields);
                 json_buf.push(b'\n');
+                json_count += 1;
+            }
+
+            if json_count == 0 {
+                assert_eq!(
+                    arrow_batch.num_rows(),
+                    0,
+                    "{label}: expected 0 rows when fields overflow"
+                );
+                return;
             }
 
             let config = ScanConfig {
@@ -957,64 +1142,172 @@ mod tests {
                 .scan_detached(bytes::Bytes::from(json_buf))
                 .expect("valid JSON");
 
+            assert_batches_identical(&arrow_batch, &json_batch, label);
+        }
+
+        // Proptest: randomized counter, timestamp config, and message template.
+        proptest!(ProptestConfig::with_cases(200), |(
+            start in 0u64..1_000_000,
+            n in 1usize..500,
+            start_epoch_ms in 0i64..2_000_000_000_000i64,
+            step_ms in -100i64..100,
+            use_template in proptest::bool::ANY,
+        )| {
+            let ts_config = GeneratorTimestamp { start_epoch_ms, step_ms };
+            let template_bytes: Vec<u8> = b"GET /api/test 200".to_vec();
+            let template = if use_template { Some(template_bytes.as_slice()) } else { None };
+            let label = format!("proptest(start={start},n={n},epoch={start_epoch_ms},step={step_ms},tmpl={use_template})");
+            run_comparison(start, n, &ts_config, template, &label);
+        });
+
+        // Also run deterministic edge cases: counter 0, max rotation coverage,
+        // negative timestamp step, and large offsets.
+        for (start, n, label) in [
+            (0, 420, "all_rotations"), // LCM(4,5,4,3)=60 × 7 = covers all combos
+            (u64::MAX - 10, 5, "near_u64_max"),
+            (999_999, 200, "high_counter"),
+        ] {
+            run_comparison(start, n, &GeneratorTimestamp::default(), None, label);
+        }
+
+        // Negative step timestamp
+        run_comparison(
+            0,
+            100,
+            &GeneratorTimestamp {
+                start_epoch_ms: 1_705_276_800_000,
+                step_ms: -1,
+            },
+            None,
+            "negative_step",
+        );
+
+        // Template with JSON-special characters (quotes, backslashes, newlines)
+        run_comparison(
+            0,
+            50,
+            &GeneratorTimestamp::default(),
+            Some(b"hello \"world\" \n\t\\end" as &[u8]),
+            "special_chars_template",
+        );
+    }
+
+    /// Oracle test: use the real `GeneratorInput::poll()` → `Scanner` pipeline
+    /// as ground truth, and verify `generate_arrow_batch()` matches it exactly.
+    ///
+    /// Unlike `arrow_matches_json_path` which reconstructs JSON via
+    /// `write_log_fields_json()`, this test exercises the actual production
+    /// JSON code path (`GeneratorInput::generate_batch` → `write_logs_event`).
+    #[test]
+    fn arrow_matches_real_generator_oracle() {
+        use arrow::array::AsArray;
+        use logfwd_arrow::Scanner;
+        use logfwd_core::scan_config::ScanConfig;
+
+        for (batch_size, total, label) in [
+            (100, 100, "single_batch"),
+            (50, 200, "multi_batch"),
+            (1, 10, "single_event_batches"),
+            (500, 500, "large_batch"),
+        ] {
+            let ts_config = GeneratorTimestamp::default();
+            let config = GeneratorConfig {
+                batch_size,
+                total_events: total,
+                events_per_sec: 0, // unlimited
+                timestamp: ts_config.clone(),
+                profile: GeneratorProfile::Logs,
+                complexity: GeneratorComplexity::Simple,
+                message_template: None,
+                ..Default::default()
+            };
+            let mut generator = GeneratorInput::new("oracle-test", config);
+
+            // Collect all JSON bytes from the real generator
+            let mut all_json = Vec::new();
+            loop {
+                let events = generator.poll().expect("poll succeeded");
+                if events.is_empty() {
+                    break;
+                }
+                for event in events {
+                    if let InputEvent::Data { bytes, .. } = event {
+                        all_json.extend_from_slice(&bytes);
+                    }
+                }
+            }
+            assert!(!all_json.is_empty(), "{label}: generator produced no bytes");
+
+            // Scan JSON through the real scanner
+            let scan_config = ScanConfig {
+                extract_all: true,
+                ..Default::default()
+            };
+            let mut scanner = Scanner::new(scan_config);
+            let json_batch = scanner
+                .scan_detached(bytes::Bytes::from(all_json))
+                .expect("valid JSON");
+
+            // Generate Arrow-direct batch for the same events
+            let arrow_batch = generate_arrow_batch(total as usize, 0, &ts_config, None);
+
             assert_eq!(
                 arrow_batch.num_rows(),
                 json_batch.num_rows(),
-                "row count mismatch at start={start}"
+                "{label}: row count mismatch (arrow={} json={})",
+                arrow_batch.num_rows(),
+                json_batch.num_rows(),
             );
 
-            // Compare each column by name. The scanner discovers columns in
-            // JSON field order; the arrow generator uses a fixed schema.
-            // We look up by name to be order-independent.
-            let string_cols = ["timestamp", "level", "message", "request_id", "service"];
-            let int_cols = ["duration_ms", "status"];
+            let n = arrow_batch.num_rows();
 
-            for col_name in &string_cols {
+            // Compare all string columns
+            for col_name in &["timestamp", "level", "message", "request_id", "service"] {
                 let arrow_col = arrow_batch
                     .column_by_name(col_name)
-                    .unwrap_or_else(|| panic!("arrow batch missing column {col_name}"));
+                    .unwrap_or_else(|| panic!("{label}: arrow missing {col_name}"));
                 let json_col = json_batch
                     .column_by_name(col_name)
-                    .unwrap_or_else(|| panic!("json batch missing column {col_name}"));
+                    .unwrap_or_else(|| panic!("{label}: json missing {col_name}"));
 
                 let arrow_strs = arrow_col.as_string::<i32>();
-                // scan_detached produces StringArray for string columns
                 let json_strs = json_col
                     .as_any()
                     .downcast_ref::<arrow::array::StringArray>()
-                    .unwrap_or_else(|| panic!("{col_name}: expected StringArray"));
+                    .unwrap_or_else(|| panic!("{label}: {col_name} not StringArray"));
 
                 for row in 0..n {
                     assert_eq!(
                         arrow_strs.value(row),
                         json_strs.value(row),
-                        "mismatch at start={start} row={row} col={col_name}"
+                        "{label}: row={row} col={col_name}"
                     );
                 }
             }
 
-            for col_name in &int_cols {
+            // Compare all int columns
+            for col_name in &["duration_ms", "status"] {
                 let arrow_col = arrow_batch
                     .column_by_name(col_name)
-                    .unwrap_or_else(|| panic!("arrow batch missing column {col_name}"));
+                    .unwrap_or_else(|| panic!("{label}: arrow missing {col_name}"));
                 let json_col = json_batch
                     .column_by_name(col_name)
-                    .unwrap_or_else(|| panic!("json batch missing column {col_name}"));
+                    .unwrap_or_else(|| panic!("{label}: json missing {col_name}"));
 
                 let arrow_ints = arrow_col
                     .as_any()
                     .downcast_ref::<arrow::array::Int64Array>()
-                    .unwrap_or_else(|| panic!("{col_name}: expected Int64Array in arrow"));
+                    .unwrap_or_else(|| panic!("{label}: {col_name} not Int64Array in arrow"));
                 let json_ints = json_col
                     .as_any()
                     .downcast_ref::<arrow::array::Int64Array>()
-                    .unwrap_or_else(|| panic!("{col_name}: expected Int64Array in json"));
+                    .unwrap_or_else(|| panic!("{label}: {col_name} not Int64Array in json"));
 
                 for row in 0..n {
                     assert_eq!(
                         arrow_ints.value(row),
                         json_ints.value(row),
-                        "mismatch at start={start} row={row} col={col_name}"
+                        "{label}: row={row} col={col_name}"
                     );
                 }
             }
