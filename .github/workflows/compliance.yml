@@ -64,7 +64,7 @@ jobs:
           retention-days: 30
 
       - name: Post issue
-        if: always() && (steps.pipeline.outcome != 'success' || steps.file.outcome != 'success' || steps.data.outcome != 'success')
+        if: always()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PIPELINE_OUTCOME: ${{ steps.pipeline.outcome }}
@@ -82,6 +82,17 @@ jobs:
           FILE_ICON=$(status_icon "$FILE_OUTCOME")
           DATA_ICON=$(status_icon "$DATA_OUTCOME")
 
+          ALL_PASS=true
+          if [ "$PIPELINE_OUTCOME" != "success" ] || [ "$FILE_OUTCOME" != "success" ] || [ "$DATA_OUTCOME" != "success" ]; then
+            ALL_PASS=false
+          fi
+
+          if [ "$ALL_PASS" = "true" ]; then
+            OVERALL="✅ All suites passed"
+          else
+            OVERALL="❌ One or more suites failed"
+          fi
+
           # Strip ANSI escape codes from test output.
           for f in compliance_pipeline.txt compliance_file.txt compliance_data.txt; do
             if [ -f "$f" ]; then
@@ -95,7 +106,7 @@ jobs:
             echo ""
             echo "**Commit:** \`${COMMIT}\` on \`main\`"
             echo "**Runner:** \`ubuntu-latest\`"
-            echo "**Overall:** ❌ One or more suites failed"
+            echo "**Overall:** ${OVERALL}"
             echo ""
             echo "| Suite | Status |"
             echo "|-------|--------|"
@@ -138,7 +149,13 @@ jobs:
             gh issue close "$num" --comment "Superseded by new compliance run." 2>/dev/null || true
           done
 
-          gh issue create \
+          ISSUE_URL=$(gh issue create \
             --title "$TITLE" \
             --body "$BODY" \
-            --label compliance
+            --label compliance)
+
+          # Immediately close passing runs so they stay as history without cluttering open issues.
+          if [ "$ALL_PASS" = "true" ]; then
+            ISSUE_NUM=$(echo "$ISSUE_URL" | grep -oE '[0-9]+$')
+            gh issue close "$ISSUE_NUM" --comment "All suites passed — closing automatically." 2>/dev/null || true
+          fi
