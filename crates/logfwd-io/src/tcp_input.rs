@@ -82,7 +82,7 @@ struct Client {
     discard_octet_bytes: usize,
     /// After consuming an octet-counted payload, optionally consume exactly one
     /// delimiter newline if it appears as the immediate next byte.
-    consume_octet_delimiter_newline: bool,
+    should_consume_octet_delimiter_newline: bool,
     /// Whether we are dropping newline-delimited bytes until a newline appears.
     discard_until_newline: bool,
     /// Raw bytes read from the socket that have not yet been charged to an
@@ -169,11 +169,11 @@ fn extract_complete_records(client: &mut Client, out: &mut Vec<u8>) {
             continue;
         }
 
-        if client.consume_octet_delimiter_newline {
+        if client.should_consume_octet_delimiter_newline {
             if pending[0] == b'\n' {
                 consumed += 1;
             }
-            client.consume_octet_delimiter_newline = false;
+            client.should_consume_octet_delimiter_newline = false;
             continue;
         }
 
@@ -203,16 +203,20 @@ fn extract_complete_records(client: &mut Client, out: &mut Vec<u8>) {
 
             if octet_frame_ready && octet_boundary_is_plausible {
                 client.octet_counting_mode = true;
+                let should_consume_octet_delimiter_newline =
+                    pending.len() == needed || matches!(pending.get(needed), Some(b'\n'));
                 if len > MAX_LINE_LENGTH {
                     client.discard_octet_bytes = len;
                     consumed += prefix_len;
-                    client.consume_octet_delimiter_newline = true;
+                    client.should_consume_octet_delimiter_newline =
+                        should_consume_octet_delimiter_newline;
                     continue;
                 }
                 out.extend_from_slice(&pending[prefix_len..needed]);
                 out.push(b'\n');
                 consumed += needed;
-                client.consume_octet_delimiter_newline = true;
+                client.should_consume_octet_delimiter_newline =
+                    should_consume_octet_delimiter_newline;
                 continue;
             }
         }
@@ -408,7 +412,7 @@ impl InputSource for TcpInput {
                         pending: Vec::new(),
                         octet_counting_mode: false,
                         discard_octet_bytes: 0,
-                        consume_octet_delimiter_newline: false,
+                        should_consume_octet_delimiter_newline: false,
                         discard_until_newline: false,
                         unaccounted_bytes: 0,
                     });
@@ -993,17 +997,25 @@ mod tests {
         let mut client = StdTcpStream::connect(addr).unwrap();
         client.write_all(b"5 hello\n").unwrap();
         client.flush().unwrap();
-        std::thread::sleep(Duration::from_millis(50));
 
-        let events = input.poll().unwrap();
-        let joined = events
-            .into_iter()
-            .filter_map(|e| match e {
-                InputEvent::Data { bytes, .. } => Some(bytes),
-                _ => None,
-            })
-            .flatten()
-            .collect::<Vec<u8>>();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut joined = Vec::new();
+        while Instant::now() < deadline {
+            let events = input.poll().unwrap();
+            joined.extend(
+                events
+                    .into_iter()
+                    .filter_map(|e| match e {
+                        InputEvent::Data { bytes, .. } => Some(bytes),
+                        _ => None,
+                    })
+                    .flatten(),
+            );
+            if !joined.is_empty() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
         assert_eq!(joined, b"hello\n");
     }
 
