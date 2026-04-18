@@ -939,6 +939,14 @@ impl Config {
                         )));
                     }
 
+                    if !matches!(output.output_type, OutputType::File)
+                        && output.max_file_size_bytes.is_some()
+                    {
+                        return Err(ConfigError::Validation(format!(
+                            "pipeline '{name}' output '{label}': 'max_file_size_bytes' is only supported for file outputs"
+                        )));
+                    }
+
                     if output.output_type != OutputType::ArrowIpc {
                         if output.host.is_some() {
                             return Err(ConfigError::Validation(format!(

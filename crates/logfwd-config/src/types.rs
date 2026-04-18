@@ -725,6 +725,12 @@ pub struct OutputConfig {
     /// Whether to write the schema immediately upon connection.
     #[serde(default)]
     pub write_schema_on_connect: Option<bool>,
+    /// Write-ahead limit for file outputs. When the output file exceeds this
+    /// size in bytes, the sink yields briefly on each write to create pipeline
+    /// backpressure. Prevents the generator from spinning at 100% CPU when
+    /// the downstream reader is slower than the writer.
+    #[serde(default)]
+    pub max_file_size_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]

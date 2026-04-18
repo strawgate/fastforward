@@ -677,6 +677,27 @@ pipelines:
     }
 
     #[test]
+    fn file_output_accepts_max_file_size_bytes() {
+        let yaml = "input:\n  type: file\n  path: /tmp/x.log\noutput:\n  type: file\n  path: /tmp/out.ndjson\n  max_file_size_bytes: 104857600\n";
+        let cfg = Config::load_str(yaml).unwrap();
+        assert_eq!(
+            cfg.pipelines["default"].outputs[0].max_file_size_bytes,
+            Some(104_857_600)
+        );
+    }
+
+    #[test]
+    fn non_file_output_rejects_max_file_size_bytes() {
+        let yaml = "input:\n  type: file\n  path: /tmp/x.log\noutput:\n  type: stdout\n  max_file_size_bytes: 100\n";
+        let err = Config::load_str(yaml).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("'max_file_size_bytes' is only supported for file outputs"),
+            "unexpected: {msg}"
+        );
+    }
+
+    #[test]
     fn loki_output_rejects_compression() {
         let yaml = "input:\n  type: file\n  path: /tmp/x.log\noutput:\n  type: loki\n  endpoint: http://localhost:3100\n  compression: gzip\n";
         let err = Config::load_str(yaml).unwrap_err();

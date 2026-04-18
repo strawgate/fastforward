@@ -290,6 +290,7 @@ pub fn build_sink_factory(
                 name.to_string(),
                 resolved_path.to_string_lossy().into_owned(),
                 fmt,
+                cfg.max_file_size_bytes,
                 stats,
             )
             .map_err(|e| {

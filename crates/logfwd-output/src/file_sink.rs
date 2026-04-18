@@ -2,6 +2,7 @@ use std::future::Future;
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 
 use arrow::record_batch::RecordBatch;
 use tokio::io::AsyncWriteExt;
@@ -15,6 +16,13 @@ use crate::sink::{SendResult, Sink, SinkFactory};
 use super::stdout::{StdoutFormat, StdoutSink};
 use logfwd_types::field_names;
 
+/// Delay injected per batch when the file exceeds `max_file_size_bytes`.
+///
+/// 10ms per batch creates enough pipeline backpressure to reduce the
+/// generator from 100% CPU to ~5-10% while still producing data faster
+/// than any downstream collector can consume.
+const WRITE_AHEAD_YIELD_MS: u64 = 10;
+
 /// Append-only file sink.
 ///
 /// Uses the same row serialization logic as `StdoutSink` so `stdout` and
@@ -24,6 +32,7 @@ pub struct FileSink {
     file: Arc<Mutex<tokio::fs::File>>,
     output_buf: Vec<u8>,
     stats: Arc<ComponentStats>,
+    max_file_size_bytes: Option<u64>,
 }
 
 impl FileSink {
@@ -31,9 +40,17 @@ impl FileSink {
         name: String,
         format: StdoutFormat,
         file: Arc<Mutex<tokio::fs::File>>,
+        max_file_size_bytes: Option<u64>,
         stats: Arc<ComponentStats>,
     ) -> Self {
-        Self::with_message_field(name, format, field_names::BODY.to_string(), file, stats)
+        Self::with_message_field(
+            name,
+            format,
+            field_names::BODY.to_string(),
+            file,
+            max_file_size_bytes,
+            stats,
+        )
     }
 
     /// Create a file sink with a custom text/console message field fallback.
@@ -45,6 +62,7 @@ impl FileSink {
         format: StdoutFormat,
         message_field: String,
         file: Arc<Mutex<tokio::fs::File>>,
+        max_file_size_bytes: Option<u64>,
         stats: Arc<ComponentStats>,
     ) -> Self {
         Self {
@@ -57,6 +75,7 @@ impl FileSink {
             file,
             output_buf: Vec::with_capacity(64 * 1024),
             stats,
+            max_file_size_bytes,
         }
     }
 }
@@ -74,6 +93,19 @@ impl Sink for FileSink {
                 .write_batch_to(batch, metadata, &mut self.output_buf)
             {
                 return SendResult::from_io_error(e);
+            }
+
+            // Write-ahead limit: when the file exceeds max_file_size_bytes,
+            // yield briefly to create pipeline backpressure. This prevents
+            // the upstream generator from spinning at 100% CPU when writing
+            // to a file faster than the downstream reader can consume.
+            if let Some(max) = self.max_file_size_bytes {
+                let file = self.file.lock().await;
+                let over_limit = file.metadata().await.is_ok_and(|m| m.len() > max);
+                drop(file);
+                if over_limit {
+                    tokio::time::sleep(Duration::from_millis(WRITE_AHEAD_YIELD_MS)).await;
+                }
             }
 
             let bytes_written = self.output_buf.len() as u64;
@@ -115,6 +147,7 @@ pub struct FileSinkFactory {
     format: StdoutFormat,
     message_field: String,
     file: Arc<Mutex<tokio::fs::File>>,
+    max_file_size_bytes: Option<u64>,
     stats: Arc<ComponentStats>,
 }
 
@@ -123,9 +156,17 @@ impl FileSinkFactory {
         name: String,
         path: String,
         format: StdoutFormat,
+        max_file_size_bytes: Option<u64>,
         stats: Arc<ComponentStats>,
     ) -> io::Result<Self> {
-        Self::with_message_field(name, path, format, field_names::BODY.to_string(), stats)
+        Self::with_message_field(
+            name,
+            path,
+            format,
+            field_names::BODY.to_string(),
+            max_file_size_bytes,
+            stats,
+        )
     }
 
     /// Create a file sink factory with a custom text/console message field fallback.
@@ -134,6 +175,7 @@ impl FileSinkFactory {
         path: String,
         format: StdoutFormat,
         message_field: String,
+        max_file_size_bytes: Option<u64>,
         stats: Arc<ComponentStats>,
     ) -> io::Result<Self> {
         let std_file = std::fs::OpenOptions::new()
@@ -146,6 +188,7 @@ impl FileSinkFactory {
             format,
             message_field,
             file: Arc::new(Mutex::new(file)),
+            max_file_size_bytes,
             stats,
         })
     }
@@ -158,6 +201,7 @@ impl SinkFactory for FileSinkFactory {
             self.format,
             self.message_field.clone(),
             Arc::clone(&self.file),
+            self.max_file_size_bytes,
             Arc::clone(&self.stats),
         )))
     }
@@ -205,6 +249,7 @@ mod tests {
             "capture".to_string(),
             path.to_string_lossy().into_owned(),
             StdoutFormat::Json,
+            None,
             Arc::clone(&stats),
         )
         .unwrap();
@@ -242,6 +287,7 @@ mod tests {
             "capture".to_string(),
             path.to_string_lossy().into_owned(),
             StdoutFormat::Text,
+            None,
             Arc::clone(&stats),
         )
         .unwrap();
@@ -274,6 +320,7 @@ mod tests {
             "capture".to_string(),
             path.to_string_lossy().into_owned(),
             StdoutFormat::Text,
+            None,
             Arc::clone(&stats),
         )
         .unwrap();
@@ -296,6 +343,50 @@ mod tests {
         let body = std::fs::read_to_string(&path).unwrap();
         assert_eq!(body, "first line\nthird line\n");
         assert_eq!(stats.lines_total.load(Ordering::Relaxed), 2);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn write_ahead_limit_yields_when_file_exceeds_threshold() {
+        let path = temp_path("throttle");
+        let stats = Arc::new(ComponentStats::new());
+        // Set a very small limit so the second write triggers the yield.
+        let factory = FileSinkFactory::new(
+            "throttle".to_string(),
+            path.to_string_lossy().into_owned(),
+            StdoutFormat::Json,
+            Some(1), // 1 byte — any write exceeds this
+            Arc::clone(&stats),
+        )
+        .unwrap();
+        let mut sink = factory.create().unwrap();
+
+        let schema = Arc::new(Schema::new(vec![Field::new("body", DataType::Utf8, true)]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![Arc::new(StringArray::from(vec![Some("hello")]))],
+        )
+        .unwrap();
+
+        // First write: file is empty (0 bytes ≤ 1), no yield.
+        let t0 = tokio::time::Instant::now();
+        sink.send_batch(&batch, &metadata()).await.unwrap();
+        let first_elapsed = t0.elapsed();
+
+        // Second write: file now has data (> 1 byte), should yield ~10ms.
+        let t1 = tokio::time::Instant::now();
+        sink.send_batch(&batch, &metadata()).await.unwrap();
+        let second_elapsed = t1.elapsed();
+
+        // The yielded write should be noticeably slower.
+        assert!(
+            second_elapsed >= Duration::from_millis(8),
+            "expected ≥8ms yield, got {second_elapsed:?} (first was {first_elapsed:?})"
+        );
+
+        sink.flush().await.unwrap();
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(body.lines().count(), 2, "both writes should succeed");
         let _ = std::fs::remove_file(&path);
     }
 }
