@@ -162,9 +162,7 @@ jobs:
       - uses: ./.github/actions/build-dashboard
 
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
+      - uses: ./.github/actions/setup-rust
 
       - name: Format check
         run: cargo fmt --check
@@ -209,10 +207,6 @@ jobs:
         run: python3 scripts/verify_verification_trigger_contract.py
 
       # --- Expensive steps below — only reached if fast checks pass ---
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install cargo-deny
         run: |
@@ -259,12 +253,8 @@ jobs:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/build-dashboard
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-rust
       - uses: taiki-e/install-action@nextest
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Tests
         run: cargo nextest run --workspace --profile ci
@@ -277,12 +267,8 @@ jobs:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/build-dashboard
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-rust
       - uses: taiki-e/install-action@nextest
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Tests
         run: cargo nextest run --workspace --profile ci
@@ -301,12 +287,8 @@ jobs:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/build-dashboard
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-rust
       - uses: taiki-e/install-action@nextest
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Network integration tests
         run: |
@@ -334,14 +316,9 @@ jobs:
       - uses: ./.github/actions/build-dashboard
 
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-unknown-linux-gnu
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-          key: aarch64
+      - uses: ./.github/actions/setup-rust
+      - run: rustup target add aarch64-unknown-linux-gnu
+        shell: bash
 
       - name: Install cross-compilation toolchain
         run: |
@@ -367,14 +344,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: thumbv6m-none-eabi
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-          key: core-no-std
+      - uses: ./.github/actions/setup-rust
+      - run: rustup target add thumbv6m-none-eabi
+        shell: bash
 
       - name: Build logfwd-core for thumbv6m-none-eabi
         run: cargo build -p logfwd-core --target thumbv6m-none-eabi
@@ -439,14 +411,10 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - uses: ./.github/actions/setup-rust
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: miri, rust-src
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-          key: miri
 
       - name: Set up Miri
         run: cargo +nightly miri setup
@@ -477,10 +445,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: ./.github/actions/setup-rust
       - name: Turmoil simulation tests
         run: cargo test -p logfwd --features turmoil --test turmoil_sim
 
@@ -499,10 +464,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: ./.github/actions/setup-rust
       - name: Loom seam test
         run: cargo test -p logfwd-runtime --lib --features loom-tests worker_pool::pool::tests::loom_worker_removal_vs_late_event_model_never_resurrects_slot -- --exact
 
@@ -657,16 +619,11 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/build-dashboard
-      - uses: mozilla-actions/sccache-action@v0.0.9
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: llvm-tools-preview
+      - uses: ./.github/actions/setup-rust
+      - run: rustup component add llvm-tools-preview
+        shell: bash
       - uses: taiki-e/install-action@cargo-llvm-cov
       - uses: taiki-e/install-action@nextest
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Generate workspace coverage
         run: cargo llvm-cov nextest --workspace --lcov --output-path lcov.info --profile ci

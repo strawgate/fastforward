@@ -40,11 +40,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: mozilla-actions/sccache-action@v0.0.9
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
+      - uses: ./.github/actions/setup-rust
+      - run: rustup target add wasm32-unknown-unknown
+        shell: bash
 
       - name: Install wasm-pack
         uses: taiki-e/install-action@v2

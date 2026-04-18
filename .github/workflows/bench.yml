@@ -62,7 +62,6 @@ jobs:
         if: steps.bin-cache.outputs.cache-hit != 'true'
         with:
           cache-on-failure: true
-
       - name: Build release + bench harness
         if: steps.bin-cache.outputs.cache-hit != 'true'
         env:
@@ -92,12 +91,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: mozilla-actions/sccache-action@v0.0.9
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
-
+      - uses: ./.github/actions/setup-rust
       - name: Build + benchmark PGO variant
         run: |
           RUSTFLAGS="-Ctarget-cpu=x86-64-v3" cargo build --release -p logfwd -p logfwd-competitive-bench
@@ -223,12 +217,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: mozilla-actions/sccache-action@v0.0.9
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
-
+      - uses: ./.github/actions/setup-rust
       - name: Run criterion benchmarks
         env:
           RUSTFLAGS: "-Ctarget-cpu=x86-64-v3"
@@ -312,12 +301,7 @@ jobs:
           path: bin
       - run: chmod +x bin/*
 
-      - uses: mozilla-actions/sccache-action@v0.0.9
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
-
+      - uses: ./.github/actions/setup-rust
       - name: Build logfwd with profiling
         env:
           RUSTFLAGS: "-Ctarget-cpu=x86-64-v3"

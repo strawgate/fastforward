@@ -14,9 +14,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
-      - uses: mozilla-actions/sccache-action@v0.0.9
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/setup-rust
       - name: Run proptests with 100K cases
         run: |
           PROPTEST_CASES=100000 cargo test -p logfwd-core --test it -- proptest
@@ -50,13 +48,11 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
-      - uses: mozilla-actions/sccache-action@v0.0.9
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-rust
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
           go-version-file: scripts/linearizability/go.mod
-      - uses: Swatinem/rust-cache@v2
       - name: Replay-equivalence test lane
         run: |
           cargo test -p logfwd --features turmoil --test turmoil_sim fault_scenario_sim::replay_equivalence_seed_supports_three_identical_replays -- --exact
@@ -73,13 +69,11 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
-      - uses: mozilla-actions/sccache-action@v0.0.9
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-rust
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
           go-version-file: scripts/linearizability/go.mod
-      - uses: Swatinem/rust-cache@v2
       - name: Build turmoil tests once
         run: cargo test -p logfwd --features turmoil --test turmoil_sim --no-run
       - name: Run turmoil tests with shard-assigned seeds
@@ -223,7 +217,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
-      - uses: mozilla-actions/sccache-action@v0.0.9
+      - uses: ./.github/actions/setup-rust
       - uses: dtolnay/rust-toolchain@nightly
       - name: Install cargo-fuzz
         run: cargo +nightly install cargo-fuzz
@@ -243,7 +237,7 @@ jobs:
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@v6
-      - uses: mozilla-actions/sccache-action@v0.0.9
+      - uses: ./.github/actions/setup-rust
       - uses: dtolnay/rust-toolchain@nightly
       - name: Install cargo-fuzz
         run: cargo +nightly install cargo-fuzz
