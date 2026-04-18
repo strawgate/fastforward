@@ -19,6 +19,7 @@ permissions:
 env:
   TAPLO_VERSION: "0.10.0"
   CARGO_DENY_VERSION: "0.19.0"
+  CARGO_MACHETE_VERSION: "0.9.1"
   # CI runners have 4 vCPU — use all of them.
   CARGO_BUILD_JOBS: "4"
   NEXTEST_TEST_THREADS: "4"
@@ -111,6 +112,7 @@ jobs:
       contains(github.event.pull_request.labels.*.name, 'ci:full') ||
       (github.event.pull_request.draft == false && needs.changes.outputs.frontend == 'true')
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: dashboard
@@ -149,18 +151,19 @@ jobs:
   # Lint: fast checks (fmt, TOML, typos, actionlint) then clippy + audits.
   # Combined into one job to save a runner — fast checks fail-fast before
   # the expensive clippy build starts.
+  # Always runs on non-draft PRs (no path filter) — acts as a fast gate.
   # -------------------------------------------------------------------------
   lint:
     name: Lint
     if: github.event_name == 'push' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
       checks: write  # needed by rustsec/audit-check@v2 to create check run annotations
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/build-dashboard
-
 
       - uses: ./.github/actions/setup-rust
 
@@ -226,7 +229,7 @@ jobs:
 
       - name: Install cargo-machete
         run: |
-          curl -fsSL "https://github.com/bnjbvr/cargo-machete/releases/download/v0.9.1/cargo-machete-v0.9.1-x86_64-unknown-linux-musl.tar.gz" \
+          curl -fsSL "https://github.com/bnjbvr/cargo-machete/releases/download/v${CARGO_MACHETE_VERSION}/cargo-machete-v${CARGO_MACHETE_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
             | tar xz -C /tmp && mv /tmp/cargo-machete-*/cargo-machete /usr/local/bin/
 
       - name: Unused dependencies check
@@ -249,6 +252,7 @@ jobs:
       contains(github.event.pull_request.labels.*.name, 'ci:full') ||
       (github.event.pull_request.draft == false && needs.changes.outputs.rust == 'true')
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/build-dashboard
@@ -259,10 +263,12 @@ jobs:
       - name: Tests
         run: cargo nextest run --workspace --profile ci
 
+  # macOS: push + ci:full only (expensive runner, no path filter or draft check).
   test-macos:
     name: Test (macOS)
     if: github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'ci:full')
     runs-on: macos-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/build-dashboard
@@ -276,6 +282,7 @@ jobs:
   # -------------------------------------------------------------------------
   # Network integration tests — #[ignore] tests that bind ports / make
   # HTTP calls.  Runs after the main test job to reuse the build cache.
+  # Non-draft PRs only (no path filter); depends on test-linux for cache.
   # -------------------------------------------------------------------------
   test-network:
     name: Test (network integration)
@@ -310,6 +317,7 @@ jobs:
       contains(github.event.pull_request.labels.*.name, 'ci:full') ||
       (github.event.pull_request.draft == false && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.core_no_std == 'true'))
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/build-dashboard
@@ -344,6 +352,8 @@ jobs:
       (github.event.pull_request.draft == false && needs.changes.outputs.kani_required == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    env:
+      RUSTC_WRAPPER: ""  # Kani manages its own compiler; disable sccache
     steps:
       - uses: actions/checkout@v6
 
@@ -366,15 +376,11 @@ jobs:
             -p logfwd-runtime
             -p logfwd-diagnostics
             -p logfwd
-        env:
-          RUSTC_WRAPPER: ""
 
       - name: Run Kani verification (logfwd-arrow --lib)
         # logfwd-arrow has a binary with required-features that cargo-kani
         # cannot skip, so verify only the library target.
         run: cargo kani -p logfwd-arrow --lib -Z function-contracts -Z mem-predicates -Z stubbing
-        env:
-          RUSTC_WRAPPER: ""
 
   # -------------------------------------------------------------------------
   # Miri — UB-oriented execution for proof-heavy pure crates.
@@ -388,6 +394,8 @@ jobs:
       (github.event.pull_request.draft == false && needs.changes.outputs.miri == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    env:
+      RUSTC_WRAPPER: ""  # Miri uses nightly directly; disable sccache
     steps:
       - uses: actions/checkout@v6
 
@@ -398,15 +406,12 @@ jobs:
 
       - name: Set up Miri
         run: cargo +nightly miri setup
-        env:
-          RUSTC_WRAPPER: ""
 
       - name: Run Miri test suite
         run: |
           cargo +nightly miri test -p logfwd-core --lib
           cargo +nightly miri test -p logfwd-types --lib
         env:
-          RUSTC_WRAPPER: ""
           MIRIFLAGS: "-Zmiri-strict-provenance"
           PROPTEST_DISABLE_FAILURE_PERSISTENCE: "1"
 
@@ -486,7 +491,8 @@ jobs:
         run: java -cp /tmp/tla/tla2tools.jar tlc2.TLC tla/MCPipelineMachine.tla -config tla/PipelineMachine.thorough.cfg -workers auto
 
   # -------------------------------------------------------------------------
-  # Coverage — workspace code coverage via llvm-cov
+  # Coverage — workspace code coverage via llvm-cov.
+  # Informational only (continue-on-error); non-draft PRs, no path filter.
   # -------------------------------------------------------------------------
   coverage:
     name: Code Coverage

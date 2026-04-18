@@ -36,6 +36,7 @@ jobs:
     name: Linux eBPF probe + Linux sensor tests
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
 
@@ -111,6 +112,7 @@ jobs:
     name: macOS EndpointSecurity lane + sensor tests
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: macos-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
 
@@ -206,6 +208,7 @@ jobs:
     name: Windows eBPF for Windows lane + sensor tests
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: windows-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
 
