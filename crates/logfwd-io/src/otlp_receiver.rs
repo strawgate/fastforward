@@ -93,6 +93,8 @@ struct OtlpServerState {
     resource_prefix: String,
     protobuf_decode_mode: OtlpProtobufDecodeMode,
     stats: Option<Arc<ComponentStats>>,
+    /// Maximum request body size. Defaults to `MAX_REQUEST_BODY_SIZE` (10 MiB).
+    max_message_size_bytes: usize,
 }
 
 impl OtlpReceiverInput {
@@ -192,6 +194,27 @@ impl OtlpReceiverInput {
             stats,
             resource_prefix,
             OtlpProtobufDecodeMode::Prost,
+            None,
+        )
+    }
+
+    /// Like [`Self::new_with_stats_and_resource_prefix`], but allows overriding
+    /// the maximum request body size. Pass `None` to keep the 10 MiB default.
+    pub fn new_with_stats_resource_prefix_and_max_size(
+        name: impl Into<String>,
+        addr: &str,
+        stats: Arc<ComponentStats>,
+        resource_prefix: impl Into<String>,
+        max_message_size_bytes: Option<usize>,
+    ) -> io::Result<Self> {
+        Self::new_with_capacity_stats_prefix_and_decode_mode(
+            name,
+            addr,
+            CHANNEL_BOUND,
+            Some(stats),
+            resource_prefix.into(),
+            OtlpProtobufDecodeMode::Prost,
+            max_message_size_bytes,
         )
     }
 
@@ -211,6 +234,7 @@ impl OtlpReceiverInput {
             stats,
             resource_prefix.into(),
             protobuf_decode_mode,
+            None,
         )
     }
 
@@ -221,7 +245,10 @@ impl OtlpReceiverInput {
         stats: Option<Arc<ComponentStats>>,
         resource_prefix: String,
         protobuf_decode_mode: OtlpProtobufDecodeMode,
+        max_message_size_bytes: Option<usize>,
     ) -> io::Result<Self> {
+        use crate::receiver_http::MAX_REQUEST_BODY_SIZE;
+        let max_message_size_bytes = max_message_size_bytes.unwrap_or(MAX_REQUEST_BODY_SIZE);
         let std_listener = std::net::TcpListener::bind(addr)
             .map_err(|e| io::Error::other(format!("OTLP receiver bind {addr}: {e}")))?;
         let bound_addr = std_listener.local_addr()?;
@@ -239,6 +266,7 @@ impl OtlpReceiverInput {
             resource_prefix,
             protobuf_decode_mode,
             stats,
+            max_message_size_bytes,
         });
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let state_for_server = Arc::clone(&state);

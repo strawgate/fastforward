@@ -6,9 +6,10 @@
 //!
 //! Endpoint: POST /v1/arrow
 //!
-//! Content-Type: `application/vnd.apache.arrow.stream` (uncompressed)
-//! or `application/vnd.apache.arrow.stream+zstd` (zstd compressed).
-//! Also supports `Content-Encoding: zstd` header.
+//! Content-Type: `application/vnd.apache.arrow.stream` (uncompressed),
+//! `application/vnd.apache.arrow.stream+zstd` (zstd compressed), or
+//! `application/vnd.apache.arrow.stream+lz4` (lz4 compressed).
+//! Also supports `Content-Encoding: zstd` and `Content-Encoding: lz4` headers.
 
 use std::io;
 use std::io::Read as _;
@@ -269,6 +270,28 @@ fn decompress_zstd(body: &[u8], max_message_size_bytes: usize) -> Result<Vec<u8>
     }
 }
 
+/// Decompress lz4 (size-prepended block format) body with size limit.
+///
+/// `lz4_flex::decompress_size_prepended` reads the first 4 bytes as a LE u32
+/// declared size and pre-allocates that much memory. We validate the declared
+/// size against `max_message_size_bytes` *before* calling it to prevent a
+/// forged prefix from triggering an unbounded allocation (DoS vector).
+fn decompress_lz4(body: &[u8], max_message_size_bytes: usize) -> Result<Vec<u8>, InputError> {
+    if body.len() < 4 {
+        return Err(InputError::Receiver(
+            "lz4 decompression failed: missing size prefix".to_string(),
+        ));
+    }
+    let declared_len = u32::from_le_bytes([body[0], body[1], body[2], body[3]]) as usize;
+    if declared_len > max_message_size_bytes {
+        return Err(InputError::Receiver(
+            "decompressed payload too large".to_string(),
+        ));
+    }
+    lz4_flex::decompress_size_prepended(body)
+        .map_err(|e| InputError::Receiver(format!("lz4 decompression failed: {e}")))
+}
+
 /// Decode an Arrow IPC stream from bytes into RecordBatches.
 fn decode_ipc_stream(body: &[u8]) -> Result<Vec<RecordBatch>, InputError> {
     if body.is_empty() {
@@ -341,9 +364,16 @@ async fn handle_arrow_ipc_request(
     let has_zstd_content_encoding = content_encodings
         .as_ref()
         .is_some_and(|encoding| encoding.has_zstd);
+    let has_lz4_content_encoding = content_encodings
+        .as_ref()
+        .is_some_and(|encoding| encoding.has_lz4);
     let is_zstd = has_zstd_content_encoding
         || content_type.as_ref().is_some_and(|media_type| {
             media_type.eq_ignore_ascii_case("application/vnd.apache.arrow.stream+zstd")
+        });
+    let is_lz4 = has_lz4_content_encoding
+        || content_type.as_ref().is_some_and(|media_type| {
+            media_type.eq_ignore_ascii_case("application/vnd.apache.arrow.stream+lz4")
         });
 
     let body = if is_zstd {
@@ -358,6 +388,16 @@ async fn handle_arrow_ipc_request(
                     "zstd decompression failed: invalid header",
                 )
                     .into_response();
+            }
+        }
+    } else if is_lz4 {
+        match decompress_lz4(&body, state.max_message_size_bytes) {
+            Ok(body) => body,
+            Err(InputError::Receiver(msg)) => {
+                return (StatusCode::BAD_REQUEST, msg).into_response();
+            }
+            Err(_) => {
+                return (StatusCode::BAD_REQUEST, "lz4 decompression failed").into_response();
             }
         }
     } else {
@@ -442,6 +482,7 @@ async fn handle_arrow_ipc_request(
 #[derive(Debug, Default, Eq, PartialEq)]
 struct ContentEncodingFlags {
     has_zstd: bool,
+    has_lz4: bool,
 }
 
 fn parse_content_encoding(headers: &HeaderMap) -> Result<Option<ContentEncodingFlags>, StatusCode> {
@@ -457,12 +498,17 @@ fn parse_content_encoding(headers: &HeaderMap) -> Result<Option<ContentEncodingF
         }
         if token.eq_ignore_ascii_case("zstd") {
             flags.has_zstd = true;
+        } else if token.eq_ignore_ascii_case("lz4") {
+            flags.has_lz4 = true;
         } else if !token.eq_ignore_ascii_case("identity") {
             return Err(StatusCode::BAD_REQUEST);
         }
         has_token = true;
     }
     if !has_token {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    if flags.has_zstd && flags.has_lz4 {
         return Err(StatusCode::BAD_REQUEST);
     }
     Ok(Some(flags))
@@ -1112,5 +1158,116 @@ mod tests {
     fn decode_ipc_stream_invalid_body() {
         let result = decode_ipc_stream(b"not arrow data");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn receiver_accepts_lz4_compressed_arrow_ipc() {
+        let receiver = ArrowIpcReceiver::new_with_capacity(
+            "test-lz4",
+            "127.0.0.1:0",
+            ArrowIpcReceiverOptions::default(),
+            16,
+        )
+        .expect("bind should succeed");
+        let addr = receiver.local_addr();
+
+        let batch = make_test_batch();
+        let ipc_bytes = serialize_batch(&batch);
+        let compressed = lz4_flex::compress_prepend_size(&ipc_bytes);
+
+        let url = format!("http://{addr}/v1/arrow");
+        let response = ureq::post(&url)
+            .header("Content-Type", "application/vnd.apache.arrow.stream")
+            .header("Content-Encoding", "lz4")
+            .send(&compressed)
+            .expect("POST should succeed");
+        assert_eq!(response.status().as_u16(), 200);
+
+        let received = receiver
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("should receive a batch");
+        assert_eq!(received.num_rows(), 2);
+    }
+
+    #[test]
+    fn receiver_accepts_lz4_content_type() {
+        let receiver = ArrowIpcReceiver::new_with_capacity(
+            "test-lz4-ct",
+            "127.0.0.1:0",
+            ArrowIpcReceiverOptions::default(),
+            16,
+        )
+        .expect("bind should succeed");
+        let addr = receiver.local_addr();
+
+        let batch = make_test_batch();
+        let ipc_bytes = serialize_batch(&batch);
+        let compressed = lz4_flex::compress_prepend_size(&ipc_bytes);
+
+        let url = format!("http://{addr}/v1/arrow");
+        let response = ureq::post(&url)
+            .header("Content-Type", "application/vnd.apache.arrow.stream+lz4")
+            .send(&compressed)
+            .expect("POST should succeed");
+        assert_eq!(response.status().as_u16(), 200);
+
+        let received = receiver
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("should receive a batch");
+        assert_eq!(received.num_rows(), 2);
+    }
+
+    #[test]
+    fn decompress_lz4_rejects_oversized_declared_length() {
+        // Forge a 4-byte prefix claiming 1 GB, followed by minimal data.
+        let mut forged = Vec::new();
+        forged.extend_from_slice(&(1_073_741_824_u32).to_le_bytes());
+        forged.extend_from_slice(b"tiny");
+
+        let result = decompress_lz4(&forged, 10 * 1024 * 1024);
+        assert!(result.is_err());
+        let err_msg = format!("{:?}", result.unwrap_err());
+        assert!(
+            err_msg.contains("too large"),
+            "expected 'too large' error, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn decompress_lz4_rejects_missing_prefix() {
+        let result = decompress_lz4(b"abc", 10 * 1024 * 1024);
+        assert!(result.is_err());
+        let err_msg = format!("{:?}", result.unwrap_err());
+        assert!(
+            err_msg.contains("missing size prefix"),
+            "expected 'missing size prefix' error, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn receiver_rejects_conflicting_zstd_and_lz4_content_encoding() {
+        let receiver = ArrowIpcReceiver::new_with_capacity(
+            "test-conflict-encoding",
+            "127.0.0.1:0",
+            ArrowIpcReceiverOptions::default(),
+            16,
+        )
+        .expect("bind should succeed");
+        let addr = receiver.local_addr();
+
+        let batch = make_test_batch();
+        let ipc_bytes = serialize_batch(&batch);
+
+        let url = format!("http://{addr}/v1/arrow");
+        let result = ureq::post(&url)
+            .header("Content-Type", "application/vnd.apache.arrow.stream")
+            .header("Content-Encoding", "zstd, lz4")
+            .send(&ipc_bytes);
+        let status = match result {
+            Ok(resp) => resp.status().as_u16(),
+            Err(ureq::Error::StatusCode(code)) => code,
+            Err(e) => panic!("unexpected error: {e}"),
+        };
+        assert_eq!(status, 400);
     }
 }
