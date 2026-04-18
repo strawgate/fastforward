@@ -1,16 +1,17 @@
 use logfwd_config::Config;
+use std::ffi::OsString;
 use std::sync::{Mutex, MutexGuard};
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 struct EnvVarGuard {
     key: &'static str,
-    previous: Option<String>,
+    previous: Option<OsString>,
 }
 
 impl EnvVarGuard {
     fn set(key: &'static str, value: &str) -> Self {
-        let previous = std::env::var(key).ok();
+        let previous = std::env::var_os(key);
         // SAFETY: tests that mutate process environment hold ENV_LOCK.
         unsafe { std::env::set_var(key, value) };
         Self { key, previous }
