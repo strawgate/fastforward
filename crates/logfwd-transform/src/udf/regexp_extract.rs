@@ -11,7 +11,7 @@
 //! ```
 
 use std::any::Any;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use arrow::array::{Array, AsArray, StringBuilder};
@@ -23,6 +23,57 @@ use datafusion::logical_expr::{
 };
 
 use regex::Regex;
+
+const REGEXP_CACHE_CAPACITY: usize = 128;
+
+#[derive(Debug)]
+struct BoundedRegexCache {
+    entries: HashMap<String, Arc<Regex>>,
+    lru: VecDeque<String>,
+    capacity: usize,
+}
+
+impl BoundedRegexCache {
+    fn new(capacity: usize) -> Self {
+        Self {
+            entries: HashMap::new(),
+            lru: VecDeque::new(),
+            capacity,
+        }
+    }
+
+    fn get_cloned(&mut self, pattern: &str) -> Option<Arc<Regex>> {
+        let value = self.entries.get(pattern).cloned()?;
+        self.touch(pattern);
+        Some(value)
+    }
+
+    fn insert(&mut self, pattern: String, regex: Arc<Regex>) {
+        if self.entries.contains_key(&pattern) {
+            self.entries.insert(pattern.clone(), regex);
+            self.touch(&pattern);
+            return;
+        }
+
+        self.entries.insert(pattern.clone(), regex);
+        self.lru.push_back(pattern);
+
+        while self.entries.len() > self.capacity {
+            if let Some(evicted) = self.lru.pop_front() {
+                self.entries.remove(&evicted);
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn touch(&mut self, pattern: &str) {
+        if let Some(idx) = self.lru.iter().position(|key| key == pattern) {
+            let key = self.lru.remove(idx).expect("lru index must be valid");
+            self.lru.push_back(key);
+        }
+    }
+}
 
 /// UDF: regexp_extract(string, pattern, group_index) -> Utf8
 ///
@@ -37,7 +88,7 @@ pub struct RegexpExtractUdf {
     /// single-slot `OnceLock` would permanently cache the first pattern seen and
     /// silently apply it to all subsequent calls with different patterns.
     /// Keying the cache by pattern string correctly handles multiple patterns.
-    regex_cache: Mutex<HashMap<String, Arc<Regex>>>,
+    regex_cache: Mutex<BoundedRegexCache>,
 }
 
 impl std::fmt::Debug for RegexpExtractUdf {
@@ -107,8 +158,39 @@ impl RegexpExtractUdf {
                 ]),
                 Volatility::Immutable,
             ),
-            regex_cache: Mutex::new(HashMap::new()),
+            regex_cache: Mutex::new(BoundedRegexCache::new(REGEXP_CACHE_CAPACITY)),
         }
+    }
+
+    fn get_or_compile_regex(&self, pattern: &str) -> DfResult<Arc<Regex>> {
+        {
+            let mut cache = self.regex_cache.lock().map_err(|_| {
+                datafusion::error::DataFusionError::Execution(
+                    "regexp_extract() internal cache lock poisoned".to_string(),
+                )
+            })?;
+            if let Some(cached) = cache.get_cloned(pattern) {
+                return Ok(cached);
+            }
+        }
+
+        let compiled = Arc::new(Regex::new(pattern).map_err(|e| {
+            datafusion::error::DataFusionError::Execution(format!(
+                "regexp_extract: invalid pattern '{}': {}",
+                pattern, e
+            ))
+        })?);
+
+        let mut cache = self.regex_cache.lock().map_err(|_| {
+            datafusion::error::DataFusionError::Execution(
+                "regexp_extract() internal cache lock poisoned".to_string(),
+            )
+        })?;
+        if let Some(cached) = cache.get_cloned(pattern) {
+            return Ok(cached);
+        }
+        cache.insert(pattern.to_owned(), Arc::clone(&compiled));
+        Ok(compiled)
     }
 }
 
@@ -169,26 +251,7 @@ impl ScalarUDFImpl for RegexpExtractUdf {
         // pattern gets its own cache entry so that multiple regexp_extract(...)
         // calls with different patterns in the same SQL query each use the
         // correct compiled regex.
-        let re: Arc<Regex> = {
-            let mut cache = self.regex_cache.lock().map_err(|_| {
-                datafusion::error::DataFusionError::Execution(
-                    "regexp_extract() internal cache lock poisoned".to_string(),
-                )
-            })?;
-            if let Some(cached) = cache.get(&pattern_str) {
-                Arc::clone(cached)
-            } else {
-                let compiled = Regex::new(&pattern_str).map_err(|e| {
-                    datafusion::error::DataFusionError::Execution(format!(
-                        "regexp_extract: invalid pattern '{}': {}",
-                        pattern_str, e
-                    ))
-                })?;
-                let arc = Arc::new(compiled);
-                cache.insert(pattern_str, Arc::clone(&arc));
-                arc
-            }
-        };
+        let re = self.get_or_compile_regex(&pattern_str)?;
 
         // Extract group index.
         let idx = match group_idx {
@@ -702,6 +765,52 @@ mod tests {
         assert!(
             msg.contains("group_index argument must be a scalar integer literal"),
             "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_regex_cache_reuses_compiled_pattern() {
+        let udf = RegexpExtractUdf::new();
+        let first = udf
+            .get_or_compile_regex(r"status=(\d+)")
+            .expect("pattern should compile");
+        let second = udf
+            .get_or_compile_regex(r"status=(\d+)")
+            .expect("pattern should be cached");
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "same pattern must reuse compiled regex"
+        );
+    }
+
+    #[test]
+    fn test_regex_cache_evicts_lru_entry() {
+        let udf = RegexpExtractUdf::new();
+        for idx in 0..REGEXP_CACHE_CAPACITY {
+            let pattern = format!("field{idx}=(\\d+)");
+            udf.get_or_compile_regex(&pattern)
+                .expect("pattern should compile");
+        }
+
+        // Touch field0 so field1 becomes LRU.
+        udf.get_or_compile_regex("field0=(\\d+)")
+            .expect("pattern should remain cached");
+        udf.get_or_compile_regex("overflow=(\\d+)")
+            .expect("overflow pattern should compile");
+
+        let cache = udf.regex_cache.lock().expect("cache lock");
+        assert_eq!(
+            cache.entries.len(),
+            REGEXP_CACHE_CAPACITY,
+            "cache should remain bounded"
+        );
+        assert!(
+            cache.entries.contains_key("field0=(\\d+)"),
+            "most recently used entry should stay in cache"
+        );
+        assert!(
+            !cache.entries.contains_key("field1=(\\d+)"),
+            "least recently used entry should be evicted"
         );
     }
 }
