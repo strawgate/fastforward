@@ -115,7 +115,7 @@ would collapse to the same sanitized Loki label key.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `endpoint` | string | Yes | Loki push URL |
+| `endpoint` | string | Yes | Loki base URL |
 | `tenant_id` | string | No | Optional `X-Scope-OrgID` value for multi-tenant Loki |
 | `static_labels` | map[string,string] | No | Static labels attached to every stream |
 | `label_columns` | array[string] | No | Log columns to include as labels |
