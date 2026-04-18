@@ -120,23 +120,23 @@ impl Config {
 
                 let mut seen_input_names: HashSet<&str> = HashSet::new();
                 for (i, input) in pipe.inputs.iter().enumerate() {
-                    if let Some(input_name) = input.name.as_deref() {
-                        if !seen_input_names.insert(input_name) {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' input '#{i}': duplicate input name '{input_name}'"
-                            )));
-                        }
+                    if let Some(input_name) = input.name.as_deref()
+                        && !seen_input_names.insert(input_name)
+                    {
+                        return Err(ConfigError::Validation(format!(
+                            "pipeline '{name}' input '#{i}': duplicate input name '{input_name}'"
+                        )));
                     }
                 }
 
                 let mut seen_output_names: HashSet<&str> = HashSet::new();
                 for (i, output) in pipe.outputs.iter().enumerate() {
-                    if let Some(output_name) = output.name.as_deref() {
-                        if !seen_output_names.insert(output_name) {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' output '#{i}': duplicate output name '{output_name}'"
-                            )));
-                        }
+                    if let Some(output_name) = output.name.as_deref()
+                        && !seen_output_names.insert(output_name)
+                    {
+                        return Err(ConfigError::Validation(format!(
+                            "pipeline '{name}' output '#{i}': duplicate output name '{output_name}'"
+                        )));
                     }
                 }
 
