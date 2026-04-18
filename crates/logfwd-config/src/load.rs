@@ -260,11 +260,25 @@ fn is_yaml_quoted_scalar_start(yaml: &str, quote_start: usize) -> bool {
         return false;
     }
 
-    yaml[line_start..quote_start]
-        .chars()
-        .rev()
-        .find(|ch| !ch.is_whitespace())
-        .is_none_or(|ch| matches!(ch, ':' | '-' | ',' | '[' | '{' | '?'))
+    let mut before_quote = yaml[line_start..quote_start].trim_end();
+    loop {
+        if before_quote
+            .chars()
+            .rev()
+            .find(|ch| !ch.is_whitespace())
+            .is_none_or(|ch| matches!(ch, ':' | '-' | ',' | '[' | '{' | '?'))
+        {
+            return true;
+        }
+
+        let Some((token_start, token)) = trailing_yaml_token(before_quote) else {
+            return false;
+        };
+        if !is_yaml_tag_or_anchor_token(token) {
+            return false;
+        }
+        before_quote = before_quote[..token_start].trim_end();
+    }
 }
 
 /// Returns `true` when `line_start` falls inside a YAML block scalar.
@@ -325,20 +339,38 @@ fn is_inside_block_scalar(yaml: &str, line_start: usize) -> bool {
 
 fn is_block_scalar_indicator(s: &str) -> bool {
     let s = s.trim_end();
-    // Match `|`, `>`, `|+`, `|-`, `>+`, `>-`, `|2`, `>2`, `|+2`, etc.
-    let mut chars = s.chars().rev();
-    // Skip optional trailing digit (explicit indentation indicator).
-    let ch = match chars.next() {
-        Some(c) if c.is_ascii_digit() => chars.next(),
-        Some(c) => Some(c),
-        None => return false,
+    let Some(rest) = s.strip_prefix(['|', '>']) else {
+        return false;
     };
-    // Skip optional chomping indicator.
-    let ch = match ch {
-        Some('+' | '-') => chars.next(),
-        other => other,
-    };
-    matches!(ch, Some('|' | '>'))
+
+    let mut has_indent = false;
+    let mut has_chomp = false;
+    for ch in rest.chars() {
+        match ch {
+            '0'..='9' if !has_indent => has_indent = true,
+            '+' | '-' if !has_chomp => has_chomp = true,
+            _ => return false,
+        }
+    }
+
+    true
+}
+
+fn trailing_yaml_token(s: &str) -> Option<(usize, &str)> {
+    let trimmed = s.trim_end();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let token_start = trimmed
+        .char_indices()
+        .rev()
+        .find_map(|(idx, ch)| ch.is_whitespace().then_some(idx + ch.len_utf8()))
+        .unwrap_or(0);
+    Some((token_start, &trimmed[token_start..]))
+}
+
+fn is_yaml_tag_or_anchor_token(token: &str) -> bool {
+    token.starts_with('!') || (token.starts_with('&') && token.len() > 1)
 }
 
 fn line_indent(yaml: &str, line_start: usize) -> usize {
@@ -405,5 +437,51 @@ mod tests {
 
         assert_eq!(marked, yaml);
         assert!(placeholders.is_empty());
+    }
+
+    #[test]
+    fn tagged_quoted_env_placeholder_is_marked() {
+        let (marked, placeholders) =
+            mark_quoted_exact_env_placeholders(r#"path: !!str "${LOGFWD_TEST_PATH}""#);
+
+        assert_eq!(placeholders.len(), 1);
+        let (marker, original) = placeholders.iter().next().unwrap();
+        assert_eq!(original, "${LOGFWD_TEST_PATH}");
+        let expected = format!(r#"path: !!str "{marker}""#);
+        assert_eq!(marked, expected);
+    }
+
+    #[test]
+    fn non_specific_tagged_quoted_env_placeholder_is_marked() {
+        let (marked, placeholders) =
+            mark_quoted_exact_env_placeholders(r#"path: ! "${LOGFWD_TEST_PATH}""#);
+
+        assert_eq!(placeholders.len(), 1);
+        let (marker, original) = placeholders.iter().next().unwrap();
+        assert_eq!(original, "${LOGFWD_TEST_PATH}");
+        let expected = format!(r#"path: ! "{marker}""#);
+        assert_eq!(marked, expected);
+    }
+
+    #[test]
+    fn anchored_quoted_env_placeholder_is_marked() {
+        let (marked, placeholders) =
+            mark_quoted_exact_env_placeholders(r#"path: &p "${LOGFWD_TEST_PATH}""#);
+
+        assert_eq!(placeholders.len(), 1);
+        let (marker, original) = placeholders.iter().next().unwrap();
+        assert_eq!(original, "${LOGFWD_TEST_PATH}");
+        let expected = format!(r#"path: &p "{marker}""#);
+        assert_eq!(marked, expected);
+    }
+
+    #[test]
+    fn digit_first_block_scalar_indicator_hides_content_quotes() {
+        let yaml = "note: |2+\n  \"${LOGFWD_TEST_PATH}\"\n";
+        let quote_start = yaml
+            .find('"')
+            .expect("fixture should contain a quoted block line");
+
+        assert!(!super::is_yaml_quoted_scalar_start(yaml, quote_start));
     }
 }

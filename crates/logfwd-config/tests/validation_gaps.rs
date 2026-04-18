@@ -97,6 +97,52 @@ output:
 }
 
 #[test]
+fn issue_1855_tagged_quoted_env_expansion_preserves_string_scalars() {
+    let _env_lock = env_lock();
+    let _env = EnvVarGuard::set("LOGFWD_ISSUE_1855_TAGGED_PATH", "true");
+
+    let yaml = r#"
+input:
+  type: file
+  path: !!str "${LOGFWD_ISSUE_1855_TAGGED_PATH}"
+output:
+  type: stdout
+"#;
+
+    let config = Config::load_str(yaml).expect("tagged quoted env-backed string should parse");
+    let input = &config.pipelines["default"].inputs[0];
+    let path = match &input.type_config {
+        logfwd_config::InputTypeConfig::File(file) => file.path.as_str(),
+        _ => panic!("expected file input"),
+    };
+
+    assert_eq!(path, "true");
+}
+
+#[test]
+fn issue_1855_anchored_quoted_env_expansion_preserves_string_scalars() {
+    let _env_lock = env_lock();
+    let _env = EnvVarGuard::set("LOGFWD_ISSUE_1855_ANCHORED_PATH", "true");
+
+    let yaml = r#"
+input:
+  type: file
+  path: &path "${LOGFWD_ISSUE_1855_ANCHORED_PATH}"
+output:
+  type: stdout
+"#;
+
+    let config = Config::load_str(yaml).expect("anchored quoted env-backed string should parse");
+    let input = &config.pipelines["default"].inputs[0];
+    let path = match &input.type_config {
+        logfwd_config::InputTypeConfig::File(file) => file.path.as_str(),
+        _ => panic!("expected file input"),
+    };
+
+    assert_eq!(path, "true");
+}
+
+#[test]
 fn issue_1855_mixed_quoted_and_unquoted_env_uses_node_context() {
     let _env_lock = env_lock();
     let _env = EnvVarGuard::set("LOGFWD_ISSUE_1855_MIXED", "4");
@@ -331,6 +377,30 @@ pipelines:
         .to_string();
     assert!(err.contains("file output path"), "unexpected error: {err}");
     assert!(err.contains("duplicates"), "unexpected error: {err}");
+}
+
+#[test]
+fn issue_1857_reject_relative_glob_input_matching_relative_output() {
+    let base = std::env::current_dir().expect("current dir should be available");
+    let yaml = r#"
+pipelines:
+  test:
+    inputs:
+      - type: file
+        path: logs/*.log
+    outputs:
+      - type: file
+        path: logs/app.log
+"#;
+
+    let err = Config::load_str_with_base_path(yaml, Some(&base))
+        .unwrap_err()
+        .to_string();
+
+    assert!(
+        err.contains("could match file input glob"),
+        "unexpected error: {err}"
+    );
 }
 
 #[test]

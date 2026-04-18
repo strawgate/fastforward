@@ -1261,8 +1261,9 @@ impl Config {
                     }
 
                     // Check if the output path could match any glob input pattern.
+                    let resolved_out_path = out_pb.to_string_lossy();
                     for glob_pattern in &glob_input_patterns {
-                        if is_glob_match_possible(glob_pattern, out_path) {
+                        if is_glob_match_possible(glob_pattern, &resolved_out_path) {
                             return Err(ConfigError::Validation(format!(
                                 "pipeline '{name}' output '{out_label}': output path '{out_path}' \
                              could match file input glob '{glob_pattern}' — this creates an \
