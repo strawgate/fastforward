@@ -1321,10 +1321,16 @@ mod tests {
     /// causing bare values inside arrays to consume the closing bracket.
     #[test]
     fn skip_bare_value_stops_at_close_bracket() {
-        // A number value immediately before `]` must be parsed correctly.
-        // If `]` is missing from the stop set, the trailing `]}` gets consumed
-        // into the value: "12]}" instead of stopping at position 2.
-        let buf = b"{\"x\":12}\n";
+        // Direct call: a number immediately followed by `]` — skip_bare_value
+        // must stop at position 2 (the `]`), not consume it.
+        let buf = b"12]more";
+        let result = skip_bare_value(buf, 0, buf.len());
+        assert_eq!(result, 2, "skip_bare_value must stop at ']'");
+        assert_eq!(buf[result], b']', "stopped byte must be ']'");
+
+        // Integration: an array value inside a JSON object should parse correctly.
+        // The number in `[1,2]` must not swallow the `]`.
+        let input = b"{\"arr\":[1,2]}\n";
         let config = ScanConfig {
             wanted_fields: alloc::vec![],
             extract_all: true,
@@ -1332,17 +1338,8 @@ mod tests {
             validate_utf8: false,
         };
         let mut builder = TestBuilder::new();
-        scan_streaming(buf, &config, &mut builder);
-        assert_eq!(builder.rows.len(), 1);
-        let x_val = builder.rows[0]
-            .iter()
-            .find(|(k, _)| k == "x")
-            .map(|(_, v)| v.clone());
-        assert_eq!(
-            x_val.as_deref(),
-            Some("int:12"),
-            "bare number should be captured exactly"
-        );
+        scan_streaming(input, &config, &mut builder);
+        assert_eq!(builder.rows.len(), 1, "one JSON line should produce one row");
     }
 }
 
