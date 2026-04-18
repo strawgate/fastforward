@@ -110,7 +110,7 @@
   /* Compact slider to the left of the traffic light */
   .hw-light-ctrl {
     position: absolute;
-    right: 14%; top: 8%;
+    right: 22%; top: 6%;
     display: flex; flex-direction: column; align-items: center; gap: 1px;
     pointer-events: auto;
   }
@@ -125,10 +125,11 @@
     margin: 0; padding: 0;
   }
 
-  /* Stats bar */
+  /* Stats bar — overlaid at the bottom of the SVG scene */
   .hw-stats {
     display: flex; justify-content: center; gap: 1.5rem;
-    margin: 0.1rem 0 0.1rem; flex-wrap: wrap;
+    margin: -2.5rem 0 0; position: relative; z-index: 1;
+    flex-wrap: wrap;
   }
   .hw-stat {
     display: flex; flex-direction: column; align-items: center; gap: 0.05rem;
