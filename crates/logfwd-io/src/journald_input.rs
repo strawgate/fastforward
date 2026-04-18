@@ -994,6 +994,10 @@ fn read_export_entries<R: Read>(
                 if reader.read_exact(&mut trailing_newline).is_err() {
                     return false;
                 }
+                if trailing_newline[0] != b'\n' {
+                    tracing::warn!("binary journal field missing trailing newline delimiter");
+                    return false;
+                }
                 // Skip this field but continue parsing the entry.
                 continue;
             }
@@ -1131,6 +1135,7 @@ fn drain_stderr(stderr: std::process::ChildStderr) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Seek, SeekFrom, Write};
 
     // ── fixup_unit ────────────────────────────────────────────────────
 
@@ -1211,7 +1216,12 @@ mod tests {
         export.extend_from_slice(b"MESSAGE=allowed\n");
         export.extend_from_slice(b"_SYSTEMD_UNIT=docker.service\n\n");
 
-        let reader = BufReader::new(io::Cursor::new(export));
+        let mut tmp = tempfile::NamedTempFile::new().expect("temp export file should create");
+        tmp.write_all(&export).expect("export payload should write");
+        tmp.as_file_mut()
+            .seek(SeekFrom::Start(0))
+            .expect("export payload should rewind");
+        let reader = BufReader::new(tmp.reopen().expect("temp export file should reopen"));
         let (tx, rx) = bounded(4);
         let running = Arc::new(AtomicBool::new(true));
 
@@ -1237,7 +1247,12 @@ mod tests {
         export.extend_from_slice(b"BINARY_FIELD\n");
         export.extend_from_slice(&u64::MAX.to_le_bytes());
 
-        let reader = BufReader::new(io::Cursor::new(export));
+        let mut tmp = tempfile::NamedTempFile::new().expect("temp export file should create");
+        tmp.write_all(&export).expect("export payload should write");
+        tmp.as_file_mut()
+            .seek(SeekFrom::Start(0))
+            .expect("export payload should rewind");
+        let reader = BufReader::new(tmp.reopen().expect("temp export file should reopen"));
         let (tx, rx) = bounded(1);
         let running = Arc::new(AtomicBool::new(true));
 
