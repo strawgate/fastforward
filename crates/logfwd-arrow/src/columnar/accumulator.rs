@@ -1488,6 +1488,7 @@ mod verification {
 
     /// Valid original-buffer reference returns correct bytes.
     #[kani::proof]
+    #[kani::unwind(10)]
     fn verify_read_str_bytes_original() {
         let original = [0xAAu8; 8];
         let generated = [0xBBu8; 8];
@@ -1504,10 +1505,14 @@ mod verification {
         for &b in bytes {
             assert_eq!(b, 0xAA);
         }
+
+        kani::cover!(len == 1, "single-byte original ref");
+        kani::cover!(offset == 0, "ref from start of original");
     }
 
     /// Valid generated-buffer reference returns correct bytes.
     #[kani::proof]
+    #[kani::unwind(10)]
     fn verify_read_str_bytes_generated() {
         let original = [0xAAu8; 8];
         let generated = [0xBBu8; 8];
@@ -1527,6 +1532,9 @@ mod verification {
         for &b in bytes {
             assert_eq!(b, 0xBB);
         }
+
+        kani::cover!(len == 1, "single-byte generated ref");
+        kani::cover!(gen_offset == 0, "ref from start of generated");
     }
 
     /// Out-of-bounds StringRef returns error for both buffers.
@@ -1555,6 +1563,9 @@ mod verification {
                 assert!(result.is_err());
             }
         }
+
+        kani::cover!(offset < original.len() as u32, "OOB in original range");
+        kani::cover!(offset >= original.len() as u32, "OOB in generated range");
     }
 
     /// No StringRef can span across the original/generated boundary.
@@ -1572,6 +1583,9 @@ mod verification {
         let sref = StringRef { offset, len };
         let result = read_str_bytes(&original, &generated, original.len(), sref);
         assert!(result.is_err(), "spanning ref must be rejected");
+
+        kani::cover!(len >= 2, "multi-byte spanning ref");
+        kani::cover!(offset == 0, "spanning from start of original");
     }
 
     // ── scatter_values — dense/sparse placement ────────────────────────────
@@ -1595,6 +1609,9 @@ mod verification {
         for (i, &(_, v)) in facts.iter().enumerate() {
             assert_eq!(values[i], v, "dense value must match fact");
         }
+
+        kani::cover!(num_rows == 1, "single row dense");
+        kani::cover!(num_rows == 4, "max rows dense");
     }
 
     /// Sparse scatter: fact rows get their value, gap rows stay default.
@@ -1627,6 +1644,7 @@ mod verification {
         }
 
         kani::cover!(facts.len() == 1, "single fact");
+        kani::cover!(num_rows == 4 && facts.len() == 2, "half-populated");
     }
 
     /// Last-write-wins: when dedup=false (sparse path), later facts overwrite.
@@ -1640,6 +1658,9 @@ mod verification {
         let (values, dense) = scatter_values(&facts, 1, false);
         assert!(!dense, "dedup=false must not be dense");
         assert_eq!(values[0], second, "last write must win");
+
+        kani::cover!(first < second, "increasing overwrite");
+        kani::cover!(first > second, "decreasing overwrite");
     }
 
     // ── validity_bitmap_bits — bit-packed correctness ──────────────────────
@@ -1676,6 +1697,7 @@ mod verification {
 
     /// Out-of-bounds row indices are silently ignored.
     #[kani::proof]
+    #[kani::unwind(6)]
     fn verify_validity_bitmap_bits_oob_ignored() {
         let num_rows: usize = 4;
         let oob_row: u32 = kani::any();
@@ -1689,6 +1711,9 @@ mod verification {
             let bit_set = bits[row >> 3] & (1 << (row & 7)) != 0;
             assert!(!bit_set, "non-fact row must be clear");
         }
+
+        kani::cover!(oob_row == 4, "minimal OOB");
+        kani::cover!(oob_row > 100, "large OOB");
     }
 
     // ── is_dense — classification ──────────────────────────────────────────
@@ -1712,6 +1737,9 @@ mod verification {
             let partial = facts[..num_rows - 1].to_vec();
             assert!(!is_dense(&partial, num_rows, true));
         }
+
+        kani::cover!(num_rows == 1, "single row");
+        kani::cover!(num_rows == 4, "max test rows");
     }
 }
 
