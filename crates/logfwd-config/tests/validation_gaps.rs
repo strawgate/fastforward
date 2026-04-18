@@ -1,9 +1,35 @@
 use logfwd_config::Config;
+use std::sync::{Mutex, MutexGuard};
+
+static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+struct EnvVarGuard {
+    key: &'static str,
+}
+
+impl EnvVarGuard {
+    fn set(key: &'static str, value: &str) -> Self {
+        // SAFETY: tests that mutate process environment hold ENV_LOCK.
+        unsafe { std::env::set_var(key, value) };
+        Self { key }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        // SAFETY: tests that mutate process environment hold ENV_LOCK.
+        unsafe { std::env::remove_var(self.key) };
+    }
+}
+
+fn env_lock() -> MutexGuard<'static, ()> {
+    ENV_LOCK.lock().expect("env lock should not be poisoned")
+}
 
 #[test]
 fn issue_1855_env_expansion_preserves_yaml_hash_content() {
-    // SAFETY: test-only process env mutation.
-    unsafe { std::env::set_var("LOGFWD_ISSUE_1855", "/var/log/my app #1.log") };
+    let _env_lock = env_lock();
+    let _env = EnvVarGuard::set("LOGFWD_ISSUE_1855", "/var/log/my app #1.log");
 
     let yaml = r#"
 input:
@@ -21,13 +47,47 @@ output:
     };
 
     assert_eq!(path, "/var/log/my app #1.log");
-
-    // SAFETY: test-only process env mutation.
-    unsafe { std::env::remove_var("LOGFWD_ISSUE_1855") };
 }
 
 #[test]
-fn issue_1856_reject_duplicate_listen_addresses_across_pipelines() {
+fn issue_1855_env_expansion_preserves_non_string_scalars() {
+    let _env_lock = env_lock();
+    let _env = EnvVarGuard::set("LOGFWD_ISSUE_1855_WORKERS", "4");
+
+    let yaml = r#"
+pipelines:
+  test:
+    workers: ${LOGFWD_ISSUE_1855_WORKERS}
+    inputs:
+      - type: generator
+    outputs:
+      - type: stdout
+"#;
+
+    let config = Config::load_str(yaml).expect("config should parse env-backed numeric scalar");
+    assert_eq!(config.pipelines["test"].workers, Some(4));
+}
+
+#[test]
+fn issue_1855_env_expansion_applies_to_mapping_keys() {
+    let _env_lock = env_lock();
+    let _env = EnvVarGuard::set("LOGFWD_ISSUE_1855_PIPELINE", "from-env");
+
+    let yaml = r#"
+pipelines:
+  ${LOGFWD_ISSUE_1855_PIPELINE}:
+    inputs:
+      - type: generator
+    outputs:
+      - type: stdout
+"#;
+
+    let config = Config::load_str(yaml).expect("config should parse env-backed mapping key");
+    assert!(config.pipelines.contains_key("from-env"));
+}
+
+#[test]
+fn issue_1856_allow_same_listen_address_for_different_transports() {
     let yaml = r#"
 pipelines:
   p1:
@@ -39,6 +99,27 @@ pipelines:
   p2:
     inputs:
       - type: tcp
+        listen: 0.0.0.0:9000
+    outputs:
+      - type: stdout
+"#;
+
+    Config::load_str(yaml).expect("tcp and udp should share an address because transports differ");
+}
+
+#[test]
+fn issue_1856_reject_duplicate_listen_addresses_for_same_transport() {
+    let yaml = r#"
+pipelines:
+  p1:
+    inputs:
+      - type: tcp
+        listen: 0.0.0.0:9000
+    outputs:
+      - type: stdout
+  p2:
+    inputs:
+      - type: http
         listen: 0.0.0.0:9000
     outputs:
       - type: stdout

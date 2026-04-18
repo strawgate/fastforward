@@ -122,7 +122,13 @@ impl Config {
 fn expand_env_vars_in_yaml_value(value: &mut Value) -> Result<(), ConfigError> {
     match value {
         Value::String(text) => {
-            *text = expand_env_vars(text)?;
+            let original = text.clone();
+            let expanded = expand_env_vars(&original)?;
+            if is_exact_env_placeholder(&original) {
+                *value = coerce_expanded_yaml_scalar(&expanded);
+            } else {
+                *text = expanded;
+            }
         }
         Value::Sequence(items) => {
             for item in items {
@@ -130,8 +136,11 @@ fn expand_env_vars_in_yaml_value(value: &mut Value) -> Result<(), ConfigError> {
             }
         }
         Value::Mapping(map) => {
-            for (_key, val) in map {
-                expand_env_vars_in_yaml_value(val)?;
+            let old = std::mem::take(map);
+            for (mut key, mut val) in old {
+                expand_env_vars_in_yaml_value(&mut key)?;
+                expand_env_vars_in_yaml_value(&mut val)?;
+                map.insert(key, val);
             }
         }
         Value::Tagged(tagged) => {
@@ -141,4 +150,21 @@ fn expand_env_vars_in_yaml_value(value: &mut Value) -> Result<(), ConfigError> {
     }
 
     Ok(())
+}
+
+fn is_exact_env_placeholder(text: &str) -> bool {
+    let Some(name) = text
+        .strip_prefix("${")
+        .and_then(|rest| rest.strip_suffix('}'))
+    else {
+        return false;
+    };
+    !name.is_empty() && !name.contains("${") && !name.contains('}')
+}
+
+fn coerce_expanded_yaml_scalar(text: &str) -> Value {
+    match serde_yaml_ng::from_str::<Value>(text) {
+        Ok(value @ (Value::Null | Value::Bool(_) | Value::Number(_))) => value,
+        _ => Value::String(text.to_owned()),
+    }
 }

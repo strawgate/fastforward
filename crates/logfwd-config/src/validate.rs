@@ -200,6 +200,7 @@ impl Config {
 
                             track_listen_addr_uniqueness(
                                 &mut seen_listen_addrs,
+                                "udp",
                                 name,
                                 &label,
                                 &u.listen,
@@ -235,6 +236,7 @@ impl Config {
 
                             track_listen_addr_uniqueness(
                                 &mut seen_listen_addrs,
+                                "tcp",
                                 name,
                                 &label,
                                 &t.listen,
@@ -261,6 +263,7 @@ impl Config {
 
                             track_listen_addr_uniqueness(
                                 &mut seen_listen_addrs,
+                                "tcp",
                                 name,
                                 &label,
                                 &o.listen,
@@ -301,6 +304,7 @@ impl Config {
 
                             track_listen_addr_uniqueness(
                                 &mut seen_listen_addrs,
+                                "tcp",
                                 name,
                                 &label,
                                 &h.listen,
@@ -525,6 +529,7 @@ impl Config {
 
                             track_listen_addr_uniqueness(
                                 &mut seen_listen_addrs,
+                                "tcp",
                                 name,
                                 &label,
                                 &a.listen,
@@ -1208,7 +1213,7 @@ impl Config {
                             glob_input_patterns.push(p.clone());
                         } else {
                             let pb = std::path::PathBuf::from(p);
-                            let norm = normalize_path_for_compare(&pb);
+                            let norm = normalize_path_key_for_compare(&pb);
                             exact_input_paths.push((pb, norm));
                         }
                     }
@@ -1227,7 +1232,7 @@ impl Config {
                         continue;
                     };
                     let out_pb = std::path::PathBuf::from(out_path);
-                    let out_norm = normalize_path_for_compare(&out_pb);
+                    let out_norm = normalize_path_key_for_compare(&out_pb);
 
                     if let Some(prev) = seen_file_output_paths.get(&out_norm) {
                         return Err(ConfigError::Validation(format!(
@@ -1300,6 +1305,18 @@ fn normalize_path_for_compare(path: &Path) -> std::path::PathBuf {
         .unwrap_or_else(|_| normalize_path_lexically(path))
 }
 
+fn normalize_path_key_for_compare(path: &Path) -> std::path::PathBuf {
+    let normalized = normalize_path_for_compare(path);
+    #[cfg(windows)]
+    {
+        std::path::PathBuf::from(normalized.to_string_lossy().to_ascii_lowercase())
+    }
+    #[cfg(not(windows))]
+    {
+        normalized
+    }
+}
+
 fn normalize_path_lexically(path: &Path) -> std::path::PathBuf {
     use std::path::Component;
 
@@ -1343,13 +1360,15 @@ fn normalize_unit_name(name: &str) -> String {
     }
 }
 
+/// Track listen address uniqueness across all pipelines for one transport.
 fn track_listen_addr_uniqueness(
     seen_listen_addrs: &mut HashMap<String, String>,
+    transport: &str,
     pipeline_name: &str,
     input_label: &str,
     listen: &str,
 ) -> Result<(), ConfigError> {
-    let listen_key = listen.to_ascii_lowercase();
+    let listen_key = format!("{transport}:{}", listen.to_ascii_lowercase());
     let current_ref = format!("pipeline '{pipeline_name}' input '{input_label}'");
     if let Some(previous_ref) = seen_listen_addrs.get(&listen_key) {
         return Err(ConfigError::Validation(format!(
