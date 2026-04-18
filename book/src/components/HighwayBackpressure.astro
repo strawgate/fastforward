@@ -198,7 +198,7 @@
   var MIN_FOLLOW = CAR_W + 6;
   var SPEED_MAX = 3.5;
   var TICK_MS = 25;
-  var SPAWN_MS = 280;
+  var SPAWN_MS = 180;
 
   // Cycle timing (ms)
   var CYCLE_TOTAL = 3000;
@@ -287,10 +287,13 @@
       var car = cars[i];
       var target = SPEED_MAX;
 
-      // Traffic light: stop at gate when red
-      if (!lightIsGreen && car.d < GATE_D && car.d > GATE_D - 200) {
-        if (car.d > GATE_D - 5) {
-          target = 0;
+      // Traffic light: hard stop at the line when red
+      if (!lightIsGreen && car.d < GATE_D) {
+        target = 0;
+        // Clamp position so car never overshoots the stop line
+        if (car.d + car.speed > GATE_D) {
+          car.d = GATE_D;
+          car.speed = 0;
         }
       }
 
