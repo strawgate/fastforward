@@ -18,13 +18,13 @@ type HmacSha256 = Hmac<Sha256>;
 const EMPTY_BODY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
 /// Max bytes of a response body to include in error messages.
-const ERROR_BODY_PREVIEW_LEN: usize = 1024;
+pub(super) const ERROR_BODY_PREVIEW_LEN: usize = 1024;
 
 /// Read up to [`ERROR_BODY_PREVIEW_LEN`] bytes from a response body.
 ///
 /// Uses chunked reading to avoid buffering arbitrarily large error
 /// responses into memory.
-async fn error_body_preview(resp: reqwest::Response) -> String {
+pub(super) async fn error_body_preview(resp: reqwest::Response) -> String {
     let mut buf = Vec::with_capacity(ERROR_BODY_PREVIEW_LEN);
     let mut stream = resp;
     let mut truncated = false;
@@ -33,9 +33,9 @@ async fn error_body_preview(resp: reqwest::Response) -> String {
         match stream.chunk().await {
             Ok(Some(chunk)) => {
                 let remaining = ERROR_BODY_PREVIEW_LEN - buf.len();
-                if chunk.len() > remaining {
+                if chunk.len() >= remaining {
                     buf.extend_from_slice(&chunk[..remaining]);
-                    truncated = true;
+                    truncated = chunk.len() > remaining;
                     break;
                 }
                 buf.extend_from_slice(&chunk);
@@ -43,6 +43,14 @@ async fn error_body_preview(resp: reqwest::Response) -> String {
             Ok(None) => break,
             Err(_) => break,
         }
+    }
+
+    // If we filled exactly to the limit, check if more data exists.
+    if !truncated
+        && buf.len() == ERROR_BODY_PREVIEW_LEN
+        && let Ok(Some(_)) = stream.chunk().await
+    {
+        truncated = true;
     }
 
     let text = String::from_utf8_lossy(&buf);

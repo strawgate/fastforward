@@ -12,7 +12,7 @@ use bytes::Bytes;
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 
-use super::client::url_encode;
+use super::client::{error_body_preview, url_encode};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -250,7 +250,7 @@ async fn sqs_post(
     if let Some(token) = session_token {
         req = req.header("x-amz-security-token", token);
     }
-    let mut resp = req
+    let resp = req
         .body(body)
         .send()
         .await
@@ -258,18 +258,7 @@ async fn sqs_post(
 
     if !resp.status().is_success() {
         let status = resp.status();
-        // Read a bounded preview for the error message.
-        let mut buf = Vec::with_capacity(1024);
-        while buf.len() < 1024 {
-            match resp.chunk().await {
-                Ok(Some(chunk)) => {
-                    let remaining = 1024 - buf.len();
-                    buf.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
-                }
-                _ => break,
-            }
-        }
-        let preview = String::from_utf8_lossy(&buf);
+        let preview = error_body_preview(resp).await;
         return Err(io::Error::other(format!(
             "SQS POST HTTP {status}: {preview}"
         )));
