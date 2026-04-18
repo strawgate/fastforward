@@ -1339,7 +1339,11 @@ mod tests {
         };
         let mut builder = TestBuilder::new();
         scan_streaming(input, &config, &mut builder);
-        assert_eq!(builder.rows.len(), 1, "one JSON line should produce one row");
+        assert_eq!(
+            builder.rows.len(),
+            1,
+            "one JSON line should produce one row"
+        );
     }
 }
 
