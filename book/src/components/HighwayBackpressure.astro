@@ -48,7 +48,7 @@
 
       <!-- Labels -->
       <text x="40" y="190" text-anchor="middle" fill="var(--hw-muted)" font-size="10" font-weight="600">LOG SOURCE</text>
-      <text x="400" y="62" text-anchor="middle" fill="var(--hw-muted)" font-size="10" font-weight="600" id="hw-pipeline-label">BOUNDED PIPELINE</text>
+      <text x="400" y="62" text-anchor="middle" fill="var(--hw-muted)" font-size="10" font-weight="600" id="hw-pipeline-label">FLOWING — COLLECTOR KEEPING UP</text>
       <text x="760" y="190" text-anchor="middle" fill="var(--hw-muted)" font-size="10" font-weight="600">DESTINATION</text>
 
       <g id="hw-cars"></g>
@@ -83,7 +83,7 @@
     </div>
   </div>
 
-  <div class="hw-status" id="hw-status" role="status" aria-live="polite" aria-atomic="true">
+  <div class="hw-status" id="hw-status" role="status" aria-live="polite" aria-atomic="true" style="display:none">>
     &#x1F7E2; Flowing &mdash; collector keeping up
   </div>
 </div>
@@ -307,11 +307,13 @@ import { createSimulation } from './highway-sim.mjs';
       sStall.style.color = frame.stats.stallPct > 50 ? 'var(--hw-car-stop)' : frame.stats.stallPct > 20 ? 'var(--hw-car-slow)' : '';
     }
 
-    // Status bar
-    var msg = frame.status.emoji + ' ' + frame.status.msg;
+    // Status — update SVG pipeline label (no emoji)
+    var msg = frame.status.msg;
     if (msg !== lastStatus) {
       statusEl.textContent = msg;
-      statusEl.style.color = frame.status.level === 'blocked' ? 'var(--hw-car-stop)' : frame.status.level === 'congested' ? 'var(--hw-car-slow)' : '';
+      pipelineLabel.textContent = msg.toUpperCase();
+      var fill = frame.status.level === 'blocked' ? 'var(--hw-car-stop)' : frame.status.level === 'congested' ? 'var(--hw-car-slow)' : 'var(--hw-muted)';
+      pipelineLabel.setAttribute('fill', fill);
       lastStatus = msg;
     }
   }
