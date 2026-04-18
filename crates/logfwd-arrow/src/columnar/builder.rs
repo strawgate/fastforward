@@ -1111,6 +1111,27 @@ mod tests {
         );
     }
 
+    /// Regression: write_str_bytes with invalid UTF-8 must fail when
+    /// utf8_trusted is false, even when no original buffer is set.
+    #[test]
+    fn write_str_bytes_invalid_utf8_untrusted_fails() {
+        let mut plan = BatchPlan::new();
+        let msg = plan.declare_planned("msg", FieldKind::Utf8View).unwrap();
+        let mut b = ColumnarBatchBuilder::new(plan);
+        b.set_utf8_trusted(false);
+
+        b.begin_batch();
+        b.begin_row();
+        b.write_str_bytes(msg, &[0xFF, 0xFE]).unwrap();
+        b.end_row();
+
+        let result = b.finish_batch();
+        assert!(
+            result.is_err(),
+            "invalid UTF-8 via write_str_bytes must be caught when utf8_trusted=false"
+        );
+    }
+
     #[test]
     fn zero_copy_original_buffer_round_trip() {
         let input = b"helloworld";
