@@ -287,13 +287,20 @@
       var car = cars[i];
       var target = SPEED_MAX;
 
-      // Traffic light: hard stop at the line when red
-      if (!lightIsGreen && car.d < GATE_D) {
-        target = 0;
-        // Clamp position so car never overshoots the stop line
-        if (car.d + car.speed > GATE_D) {
-          car.d = GATE_D;
-          car.speed = 0;
+      // Traffic light: only the first car at the line stops on red.
+      // All other cars brake naturally via following distance below.
+      if (!lightIsGreen && car.d < GATE_D && car.d > GATE_D - 30) {
+        // Only stop if no other car is already closer to the line ahead of us
+        var someoneCloser = false;
+        if (i > 0 && cars[i - 1].d <= GATE_D && cars[i - 1].d > car.d) {
+          someoneCloser = true;
+        }
+        if (!someoneCloser) {
+          target = 0;
+          if (car.d + car.speed > GATE_D) {
+            car.d = GATE_D;
+            car.speed = 0;
+          }
         }
       }
 
