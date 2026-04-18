@@ -308,10 +308,10 @@ fn is_inside_block_scalar(yaml: &str, line_start: usize) -> bool {
 
         // If this line has lower indentation, it could be the block indicator.
         if prev_indent < current_indent {
-            let trimmed = prev_line.trim_end();
+            let trimmed = strip_yaml_inline_comment(prev_line).trim_end();
             // Check for block scalar indicator at end of line: `|`, `>`,
             // or with chomping/indentation indicators like `|+`, `|-`, `|2`.
-            if let Some(last_segment) = trimmed.rsplit_once(' ').map(|(_, s)| s)
+            if let Some(last_segment) = trimmed.split_whitespace().last()
                 && is_block_scalar_indicator(last_segment)
             {
                 return true;
@@ -335,6 +335,21 @@ fn is_inside_block_scalar(yaml: &str, line_start: usize) -> bool {
     }
 
     false
+}
+
+fn strip_yaml_inline_comment(line: &str) -> &str {
+    for (idx, ch) in line.char_indices() {
+        if ch == '#'
+            && (idx == 0
+                || line[..idx]
+                    .chars()
+                    .next_back()
+                    .is_some_and(char::is_whitespace))
+        {
+            return &line[..idx];
+        }
+    }
+    line
 }
 
 fn is_block_scalar_indicator(s: &str) -> bool {
@@ -478,6 +493,16 @@ mod tests {
     #[test]
     fn digit_first_block_scalar_indicator_hides_content_quotes() {
         let yaml = "note: |2+\n  \"${LOGFWD_TEST_PATH}\"\n";
+        let quote_start = yaml
+            .find('"')
+            .expect("fixture should contain a quoted block line");
+
+        assert!(!super::is_yaml_quoted_scalar_start(yaml, quote_start));
+    }
+
+    #[test]
+    fn commented_block_scalar_indicator_hides_content_quotes() {
+        let yaml = "note: | # keep this readable\n  \"${LOGFWD_TEST_PATH}\"\n";
         let quote_start = yaml
             .find('"')
             .expect("fixture should contain a quoted block line");
