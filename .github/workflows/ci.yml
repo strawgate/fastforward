@@ -409,6 +409,7 @@ jobs:
           args: >-
             --solver kissat
             --jobs 2
+            --output-format terse
             -Z function-contracts
             -Z mem-predicates
             -Z stubbing
@@ -441,6 +442,7 @@ jobs:
           args: >-
             --solver kissat
             --jobs 2
+            --output-format terse
             -Z function-contracts
             -Z mem-predicates
             -Z stubbing
@@ -472,6 +474,7 @@ jobs:
           args: >-
             --solver kissat
             --jobs 2
+            --output-format terse
             -Z function-contracts
             -Z mem-predicates
             -Z stubbing
