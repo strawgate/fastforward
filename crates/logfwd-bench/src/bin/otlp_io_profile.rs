@@ -4,8 +4,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use arrow::array::{Array, StructArray, make_array};
 use arrow::compute::cast;
-use arrow::datatypes::{DataType, Field, Schema};
+use arrow::datatypes::{DataType, Schema};
 
 use bytes::Bytes;
 use logfwd_bench::generators::otlp::{self, OtlpFixtureProfile};
@@ -443,7 +444,44 @@ fn assert_encode_paths_match(batch: &arrow::record_batch::RecordBatch, fixture_n
     );
 }
 
-/// Normalize a batch by casting Utf8View columns to Utf8 for comparison.
+/// Recursively cast Utf8View → Utf8 in an array, including Struct children.
+fn normalize_utf8view_array(arr: &dyn Array) -> Arc<dyn Array> {
+    match arr.data_type() {
+        DataType::Utf8View => cast(arr, &DataType::Utf8).expect("cast Utf8View→Utf8"),
+        DataType::Struct(fields) => {
+            let struct_arr = arr
+                .as_any()
+                .downcast_ref::<StructArray>()
+                .expect("struct downcast");
+            let new_fields: Vec<_> = fields
+                .iter()
+                .enumerate()
+                .map(|(i, f)| {
+                    let child = normalize_utf8view_array(struct_arr.column(i).as_ref());
+                    let new_dt = child.data_type().clone();
+                    let new_field = if &new_dt == f.data_type() {
+                        Arc::clone(f)
+                    } else {
+                        Arc::new(f.as_ref().clone().with_data_type(new_dt))
+                    };
+                    (new_field, child)
+                })
+                .collect();
+            let (new_field_refs, new_arrays): (Vec<_>, Vec<_>) = new_fields.into_iter().unzip();
+            Arc::new(
+                StructArray::try_new(
+                    new_field_refs.into(),
+                    new_arrays,
+                    struct_arr.nulls().cloned(),
+                )
+                .expect("struct rebuild"),
+            )
+        }
+        _ => make_array(arr.to_data()),
+    }
+}
+
+/// Normalize a batch by recursively casting Utf8View columns to Utf8.
 /// ColumnarBatchBuilder produces Utf8View; prost/StreamingBuilder produces Utf8.
 fn normalize_utf8view(
     batch: &arrow::record_batch::RecordBatch,
@@ -453,17 +491,16 @@ fn normalize_utf8view(
     let mut new_columns = Vec::with_capacity(batch.num_columns());
     for (i, field) in schema.fields().iter().enumerate() {
         let col = batch.column(i);
-        if *field.data_type() == DataType::Utf8View {
-            new_fields.push(Arc::new(Field::new(
-                field.name(),
-                DataType::Utf8,
-                field.is_nullable(),
-            )));
-            new_columns.push(cast(col, &DataType::Utf8).expect("Utf8View→Utf8 cast"));
+        let normalized = normalize_utf8view_array(col.as_ref());
+        let new_dt = normalized.data_type().clone();
+        // Preserve field metadata — only change data_type when it differs.
+        let new_field = if &new_dt == field.data_type() {
+            Arc::clone(field)
         } else {
-            new_fields.push(Arc::clone(field));
-            new_columns.push(Arc::clone(col));
-        }
+            Arc::new(field.as_ref().clone().with_data_type(new_dt))
+        };
+        new_fields.push(new_field);
+        new_columns.push(normalized);
     }
     let new_schema = Arc::new(Schema::new(new_fields));
     arrow::record_batch::RecordBatch::try_new(new_schema, new_columns).expect("normalized batch")

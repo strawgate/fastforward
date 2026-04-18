@@ -872,8 +872,10 @@ fn build_string_array_validated(
     let final_off = i32::try_from(values.len()).map_err(|_| MaterializeError::OffsetOverflow)?;
     offsets.push(final_off);
 
-    // Validate UTF-8 for external bytes.
-    if !original_buf.is_empty() && std::str::from_utf8(&values).is_err() {
+    // Validate UTF-8 for all string bytes (covers both original_buf and
+    // write_str_bytes sources). This runs only in the validated path
+    // (utf8_trusted=false), so the cost is acceptable.
+    if std::str::from_utf8(&values).is_err() {
         // Identify which row contains the invalid UTF-8.
         for row in 0..num_rows {
             let start = offsets[row] as usize;
@@ -895,15 +897,11 @@ fn build_string_array_validated(
     let offset_buf = OffsetBuffer::new(ScalarBuffer::from(offsets));
     let values_buf = Buffer::from_vec(values);
 
-    if original_buf.is_empty() {
-        // All data from write_str(&str) — valid UTF-8 by Rust's type system.
-        // SAFETY: offsets built sequentially, source is &str.
-        let array = unsafe { StringArray::new_unchecked(offset_buf, values_buf, nulls) };
-        Ok((Arc::new(array), DataType::Utf8))
-    } else {
-        let array = StringArray::new(offset_buf, values_buf, nulls);
-        Ok((Arc::new(array), DataType::Utf8))
-    }
+    // All bytes validated above — use checked constructor uniformly.
+    // (The prior unsafe shortcut for original_buf.is_empty() was unsound when
+    // write_str_bytes was used with non-&str sources.)
+    let array = StringArray::new(offset_buf, values_buf, nulls);
+    Ok((Arc::new(array), DataType::Utf8))
 }
 
 /// Read string bytes from the 2-buffer system without UTF-8 validation.
@@ -1242,6 +1240,34 @@ mod tests {
         };
         let result = acc.materialize("x", 1, mode, true);
         assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, MaterializeError::InvalidUtf8 { .. }),
+            "expected InvalidUtf8, got {err:?}"
+        );
+    }
+
+    /// Regression test: invalid UTF-8 in generated buffer (write_str_bytes path)
+    /// must be caught even when original_buf is empty. Previously, the validated
+    /// path skipped checking when original_buf was empty, assuming all generated
+    /// data came from write_str(&str).
+    #[test]
+    fn invalid_utf8_in_generated_buffer_returns_error() {
+        let bad_bytes: &[u8] = &[0xFF, 0xFE, 0x80, 0x81];
+        let mut acc = ColumnAccumulator::for_planned(FieldKind::Utf8View);
+        // Offset 0 with empty original_buf → references generated_buf at index 0.
+        acc.push_str(0, StringRef { offset: 0, len: 4 });
+
+        let mode = FinalizationMode {
+            original_buf: Buffer::from(&[] as &[u8]),
+            generated_buf: Buffer::from(bad_bytes),
+            utf8_trusted: false,
+        };
+        let result = acc.materialize("x", 1, mode, true);
+        assert!(
+            result.is_err(),
+            "invalid UTF-8 in generated buffer must be caught"
+        );
         let err = result.unwrap_err();
         assert!(
             matches!(err, MaterializeError::InvalidUtf8 { .. }),
