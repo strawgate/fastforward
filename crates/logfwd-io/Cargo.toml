@@ -70,6 +70,7 @@ zstd = "0.13"
 xxhash-rust = { version = "0.8.15", features = ["xxh32", "xxh64"] }
 sysinfo = { workspace = true }
 walkdir = { workspace = true }
+simdutf8 = "0.1.5"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 aya = { workspace = true }

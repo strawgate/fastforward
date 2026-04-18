@@ -23,6 +23,8 @@ use decode::decode_otlp_protobuf_bytes_with_mode;
 use decode::decode_otlp_protobuf_with_prost;
 #[cfg(test)]
 use decode::*;
+#[cfg(any(feature = "otlp-research", test))]
+use projection::ProjectionError;
 
 use std::io;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
@@ -385,7 +387,7 @@ pub fn decode_protobuf_to_batch_projected_detached_experimental(
     body: &[u8],
 ) -> Result<RecordBatch, InputError> {
     projection::decode_projected_otlp_logs(body, field_names::DEFAULT_RESOURCE_PREFIX)
-        .map_err(|err| InputError::Receiver(err.to_string()))
+        .map_err(ProjectionError::into_input_error)
 }
 
 /// Decode OTLP protobuf bytes through the prost reference path.
@@ -394,6 +396,15 @@ pub fn decode_protobuf_to_batch_projected_detached_experimental(
 pub fn decode_protobuf_to_batch_prost_reference(body: &[u8]) -> Result<RecordBatch, InputError> {
     decode_otlp_protobuf_with_prost(body, field_names::DEFAULT_RESOURCE_PREFIX)
 }
+
+/// Reusable OTLP projected decoder for benchmarks.
+///
+/// Holds a `ColumnarBatchBuilder` with recycled column capacity across batches.
+/// Use [`ProjectedOtlpDecoder::decode_view_bytes`] in a loop to measure
+/// steady-state allocation behaviour rather than first-batch overhead.
+#[cfg(any(feature = "otlp-research", test))]
+#[doc(hidden)]
+pub use projection::ProjectedOtlpDecoder;
 
 fn drain_receiver_payloads(
     rx: &mpsc::Receiver<ReceiverPayload>,

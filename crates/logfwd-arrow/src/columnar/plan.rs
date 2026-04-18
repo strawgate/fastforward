@@ -260,9 +260,10 @@ impl BatchPlan {
 
     /// Resolve a dynamic field by name and observed kind.
     ///
-    /// If the field already exists as dynamic, the observed kind is
-    /// accumulated (for conflict detection).  If it exists as planned,
-    /// returns `Err` — planned fields cannot become dynamic.
+    /// If the field already exists (planned or dynamic), returns its handle.
+    /// For dynamic fields, the observed kind is accumulated (for conflict
+    /// detection). For planned fields, the handle is returned as-is — the
+    /// Dynamic accumulator in the builder handles type mixing uniformly.
     pub fn resolve_dynamic(
         &mut self,
         name: &str,
@@ -273,13 +274,15 @@ impl BatchPlan {
             match &mut entry.mode {
                 FieldSchemaMode::Dynamic { .. } => {
                     entry.mode.observe(kind);
-                    Ok(handle)
                 }
-                FieldSchemaMode::Planned(_) => Err(PlanError::ModeMismatch {
-                    field: name.to_string(),
-                    reason: "field already exists as planned",
-                }),
+                FieldSchemaMode::Planned(_) => {
+                    // Pre-registered fields accept dynamic resolution: the
+                    // underlying Dynamic accumulator handles all types, and
+                    // dedup ensures first-write-wins when canonical and
+                    // attribute names collide.
+                }
             }
+            Ok(handle)
         } else {
             let handle = self.alloc_handle()?;
             let shared_name: Arc<str> = Arc::from(name);
@@ -430,11 +433,11 @@ mod tests {
     }
 
     #[test]
-    fn planned_field_cannot_become_dynamic() {
+    fn planned_field_accepts_dynamic_resolution() {
         let mut plan = BatchPlan::new();
-        plan.declare_planned("ts", FieldKind::Int64).unwrap();
-        let err = plan.resolve_dynamic("ts", FieldKind::Int64).unwrap_err();
-        assert!(matches!(err, PlanError::ModeMismatch { .. }));
+        let h1 = plan.declare_planned("ts", FieldKind::Int64).unwrap();
+        let h2 = plan.resolve_dynamic("ts", FieldKind::Int64).unwrap();
+        assert_eq!(h1, h2, "dynamic resolution returns same handle as planned");
     }
 
     #[test]

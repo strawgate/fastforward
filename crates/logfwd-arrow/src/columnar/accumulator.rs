@@ -233,6 +233,13 @@ impl ColumnAccumulator {
     // Typed write methods
     // -----------------------------------------------------------------------
 
+    /// Initial capacity for dynamic fact Vecs on first typed push.
+    ///
+    /// Starts small (16) to avoid over-allocating for sparse or
+    /// high-cardinality dynamic columns. Vec doubling reaches 256 in
+    /// 4 reallocations for dense columns that need it.
+    const DYNAMIC_INITIAL_CAPACITY: usize = 16;
+
     /// Append an i64 fact.
     ///
     /// Accepted by `Int64` and `Dynamic` accumulators. For other planned
@@ -244,6 +251,9 @@ impl ColumnAccumulator {
             ColumnAccumulator::Dynamic {
                 int_facts, has_int, ..
             } => {
+                if int_facts.capacity() == 0 {
+                    int_facts.reserve(Self::DYNAMIC_INITIAL_CAPACITY);
+                }
                 *has_int = true;
                 int_facts.push((row, value));
             }
@@ -261,6 +271,9 @@ impl ColumnAccumulator {
                 has_float,
                 ..
             } => {
+                if float_facts.capacity() == 0 {
+                    float_facts.reserve(Self::DYNAMIC_INITIAL_CAPACITY);
+                }
                 *has_float = true;
                 float_facts.push((row, value));
             }
@@ -278,6 +291,9 @@ impl ColumnAccumulator {
                 has_bool,
                 ..
             } => {
+                if bool_facts.capacity() == 0 {
+                    bool_facts.reserve(Self::DYNAMIC_INITIAL_CAPACITY);
+                }
                 *has_bool = true;
                 bool_facts.push((row, value));
             }
@@ -293,6 +309,9 @@ impl ColumnAccumulator {
             ColumnAccumulator::Dynamic {
                 str_facts, has_str, ..
             } => {
+                if str_facts.capacity() == 0 {
+                    str_facts.reserve(Self::DYNAMIC_INITIAL_CAPACITY);
+                }
                 *has_str = true;
                 str_facts.push((row, sref));
             }
@@ -482,6 +501,24 @@ fn is_dense<T>(facts: &[(u32, T)], num_rows: usize, dedup: bool) -> bool {
         && (num_rows == 0 || facts[num_rows - 1].0 as usize == num_rows - 1)
 }
 
+/// Build a bit-packed NullBuffer from sparse row indices.
+///
+/// Directly produces a bit-packed buffer (1 bit/row) instead of the default
+/// `vec![false; num_rows]` → `NullBuffer::from(Vec<bool>)` path which
+/// allocates 1 byte/row before packing.
+fn sparse_null_buffer<T>(facts: &[(u32, T)], num_rows: usize) -> NullBuffer {
+    let byte_len = num_rows.div_ceil(8);
+    let mut bits = vec![0u8; byte_len];
+    for &(row, _) in facts {
+        let r = row as usize;
+        if r < num_rows {
+            bits[r >> 3] |= 1 << (r & 7);
+        }
+    }
+    let buf = Buffer::from_vec(bits);
+    NullBuffer::new(arrow::buffer::BooleanBuffer::new(buf, 0, num_rows))
+}
+
 fn build_int64(facts: &[(u32, i64)], num_rows: usize, dedup: bool) -> (ArrayRef, DataType) {
     let dense = is_dense(facts, num_rows, dedup);
     let mut values = vec![0i64; num_rows];
@@ -504,14 +541,7 @@ fn build_int64(facts: &[(u32, i64)], num_rows: usize, dedup: bool) -> (ArrayRef,
     let nulls = if dense {
         None
     } else {
-        let mut valid = vec![false; num_rows];
-        for &(row, _) in facts {
-            let r = row as usize;
-            if r < num_rows {
-                valid[r] = true;
-            }
-        }
-        Some(NullBuffer::from(valid))
+        Some(sparse_null_buffer(facts, num_rows))
     };
     (
         Arc::new(Int64Array::new(values.into(), nulls)),
@@ -541,14 +571,7 @@ fn build_float64(facts: &[(u32, f64)], num_rows: usize, dedup: bool) -> (ArrayRe
     let nulls = if dense {
         None
     } else {
-        let mut valid = vec![false; num_rows];
-        for &(row, _) in facts {
-            let r = row as usize;
-            if r < num_rows {
-                valid[r] = true;
-            }
-        }
-        Some(NullBuffer::from(valid))
+        Some(sparse_null_buffer(facts, num_rows))
     };
     (
         Arc::new(Float64Array::new(values.into(), nulls)),
@@ -578,14 +601,7 @@ fn build_bool(facts: &[(u32, bool)], num_rows: usize, dedup: bool) -> (ArrayRef,
     let nulls = if dense {
         None
     } else {
-        let mut valid = vec![false; num_rows];
-        for &(row, _) in facts {
-            let r = row as usize;
-            if r < num_rows {
-                valid[r] = true;
-            }
-        }
-        Some(NullBuffer::from(valid))
+        Some(sparse_null_buffer(facts, num_rows))
     };
     (
         Arc::new(BooleanArray::new(values.into(), nulls)),
@@ -675,7 +691,8 @@ fn build_string_view_trusted(
         }
     } else {
         // Sparse: iterate all facts, assign by row index (last-write-wins for duplicates).
-        let mut valid = vec![false; num_rows];
+        let byte_len = num_rows.div_ceil(8);
+        let mut bits = vec![0u8; byte_len];
         for &(row, sref) in facts {
             let r = row as usize;
             if r < num_rows {
@@ -687,10 +704,13 @@ fn build_string_view_trusted(
                     orig_block,
                     gen_block,
                 )?;
-                valid[r] = true;
+                bits[r >> 3] |= 1 << (r & 7);
             }
         }
-        nulls = Some(NullBuffer::from(valid));
+        let buf = Buffer::from_vec(bits);
+        nulls = Some(NullBuffer::new(arrow::buffer::BooleanBuffer::new(
+            buf, 0, num_rows,
+        )));
     }
 
     debug_assert!(
