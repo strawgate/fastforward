@@ -48,7 +48,7 @@
 
       <!-- Labels -->
       <text x="40" y="190" text-anchor="middle" fill="var(--hw-muted)" font-size="10" font-weight="600">LOG SOURCE</text>
-      <text x="400" y="62" text-anchor="middle" fill="var(--hw-muted)" font-size="10" font-weight="600">BOUNDED PIPELINE</text>
+      <text x="400" y="62" text-anchor="middle" fill="var(--hw-muted)" font-size="10" font-weight="600" id="hw-pipeline-label">BOUNDED PIPELINE</text>
       <text x="760" y="190" text-anchor="middle" fill="var(--hw-muted)" font-size="10" font-weight="600">DESTINATION</text>
 
       <g id="hw-cars"></g>
@@ -61,7 +61,7 @@
     </div>
   </div>
 
-  <!-- Stats dashboard -->
+  <!-- Stats dashboard — positioned inside scene for overlap -->
   <div class="hw-stats" id="hw-stats">
     <div class="hw-stat">
       <span class="hw-stat-val" id="hw-s-tput">&mdash;</span>
@@ -80,9 +80,10 @@
       <span class="hw-stat-lbl" id="hw-s-light-lbl">GREEN</span>
     </div>
   </div>
+  </div>
 
-  <div class="hw-status" id="hw-status" role="status" aria-live="polite" aria-atomic="true">
-    &#x1F7E2; Flowing &mdash; collector keeping up
+  <div class="hw-status" id="hw-status" role="status" aria-live="polite" aria-atomic="true" style="display:none">
+    Flowing — collector keeping up
   </div>
 </div>
 
@@ -125,11 +126,11 @@
     margin: 0; padding: 0;
   }
 
-  /* Stats bar — overlaid at the bottom of the SVG scene */
+  /* Stats bar — positioned at bottom of scene, overlapping road endpoints */
   .hw-stats {
+    position: absolute; bottom: 2%; left: 0; right: 0;
     display: flex; justify-content: center; gap: 1.5rem;
-    margin: -6rem 0 0; position: relative; z-index: 1;
-    flex-wrap: wrap;
+    flex-wrap: wrap; z-index: 1;
   }
   .hw-stat {
     display: flex; flex-direction: column; align-items: center; gap: 0.05rem;
@@ -158,6 +159,7 @@ import { createSimulation } from './highway-sim.mjs';
 (function() {
   var carsG = document.getElementById('hw-cars');
   var statusEl = document.getElementById('hw-status');
+  var pipelineLabel = document.getElementById('hw-pipeline-label');
   var slider = document.getElementById('hw-green');
   var sliderDetail = document.getElementById('hw-slider-detail');
   var lRed = document.getElementById('hw-l-red');
