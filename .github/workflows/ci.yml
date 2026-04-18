@@ -300,24 +300,22 @@ jobs:
           cargo nextest run --no-tests fail -p logfwd-diagnostics --profile ci --run-ignored all --lib diagnostics::server::tests::
 
   # -------------------------------------------------------------------------
-  # Build check — aarch64 cross-compile only (release check removed:
-  # clippy already does a full debug build that catches the same errors)
+  # Cross-compilation checks — aarch64 workspace + thumbv6m no_std
   # -------------------------------------------------------------------------
-  build-check:
-    name: Build check (aarch64)
+  cross-check:
+    name: Cross-compilation checks
     needs: [changes]
     if: |
       github.event_name == 'push' ||
       contains(github.event.pull_request.labels.*.name, 'ci:full') ||
-      (github.event.pull_request.draft == false && needs.changes.outputs.rust == 'true')
+      (github.event.pull_request.draft == false && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.core_no_std == 'true'))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/build-dashboard
 
-
       - uses: ./.github/actions/setup-rust
-      - run: rustup target add aarch64-unknown-linux-gnu
+      - run: rustup target add aarch64-unknown-linux-gnu thumbv6m-none-eabi
         shell: bash
 
       - name: Install cross-compilation toolchain
@@ -325,30 +323,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross
 
-      - name: Check
+      - name: Check (aarch64)
         run: cargo check --workspace --target aarch64-unknown-linux-gnu
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
 
-  # -------------------------------------------------------------------------
-  # logfwd-core no_std contract
-  # -------------------------------------------------------------------------
-  core-no-std:
-    name: logfwd-core no_std
-    needs: [changes]
-    if: |
-      github.event_name == 'push' ||
-      contains(github.event.pull_request.labels.*.name, 'ci:full') ||
-      (github.event.pull_request.draft == false && needs.changes.outputs.core_no_std == 'true')
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: ./.github/actions/setup-rust
-      - run: rustup target add thumbv6m-none-eabi
-        shell: bash
-
-      - name: Build logfwd-core for thumbv6m-none-eabi
+      - name: Check (logfwd-core no_std)
         run: cargo build -p logfwd-core --target thumbv6m-none-eabi
 
   # -------------------------------------------------------------------------
@@ -431,15 +411,15 @@ jobs:
           PROPTEST_DISABLE_FAILURE_PERSISTENCE: "1"
 
   # -------------------------------------------------------------------------
-  # Turmoil deterministic simulation
+  # Deterministic simulation & concurrency model checks
   # -------------------------------------------------------------------------
-  turmoil:
-    name: Turmoil simulation
+  simulation:
+    name: Simulation (Turmoil + Loom)
     needs: [changes]
     if: |
       github.event_name == 'push' ||
       contains(github.event.pull_request.labels.*.name, 'ci:full') ||
-      (github.event.pull_request.draft == false && needs.changes.outputs.rust == 'true')
+      (github.event.pull_request.draft == false && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.loom == 'true'))
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -448,23 +428,6 @@ jobs:
       - uses: ./.github/actions/setup-rust
       - name: Turmoil simulation tests
         run: cargo test -p logfwd --features turmoil --test turmoil_sim
-
-  # -------------------------------------------------------------------------
-  # Loom deterministic concurrency seam checks
-  # -------------------------------------------------------------------------
-  loom:
-    name: Loom seam checks
-    needs: [changes]
-    if: |
-      github.event_name == 'push' ||
-      contains(github.event.pull_request.labels.*.name, 'ci:full') ||
-      (github.event.pull_request.draft == false && needs.changes.outputs.loom == 'true')
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: ./.github/actions/setup-rust
       - name: Loom seam test
         run: cargo test -p logfwd-runtime --lib --features loom-tests worker_pool::pool::tests::loom_worker_removal_vs_late_event_model_never_resurrects_slot -- --exact
 
@@ -588,12 +551,10 @@ jobs:
       - test-linux
       - test-macos
       - test-network
-      - build-check
-      - core-no-std
+      - cross-check
       - kani
       - miri
-      - turmoil
-      - loom
+      - simulation
       - tlc
     runs-on: ubuntu-latest
     steps:
