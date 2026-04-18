@@ -1170,6 +1170,47 @@ mod tests {
                 "valid deeply nested JSON should preserve sibling fields past MAX_TRACKED_DEPTH"
             );
         }
+
+        /// Proptest: skip_bare_value always stops at the first `]` delimiter.
+        ///
+        /// Generates numeric payloads immediately followed by `]`, with varying
+        /// amounts of prefix padding to probe near 64-byte SIMD block boundaries.
+        /// Invariants checked:
+        ///  - `skip_bare_value` returns the index of the `]` byte
+        ///  - all bytes before the returned index are non-delimiters
+        ///  - `scan_streaming` on the enclosing JSON object produces exactly 1 row
+        #[test]
+        fn skip_bare_value_close_bracket_proptest(
+            num in 0u32..1_000_000,
+            padding in 0usize..90,
+        ) {
+            // Direct: "42]extra" — must stop exactly at position of ']'
+            let value_str = alloc::format!("{num}");
+            let mut direct_buf: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+            direct_buf.extend_from_slice(value_str.as_bytes());
+            direct_buf.push(b']');
+            direct_buf.extend_from_slice(b"extra");
+            let pos = skip_bare_value(&direct_buf, 0, direct_buf.len());
+            prop_assert_eq!(
+                pos, value_str.len(),
+                "skip_bare_value must stop exactly at ']' for input {:?}", direct_buf
+            );
+            prop_assert_eq!(direct_buf[pos], b']', "stopped byte must be ']'");
+            for i in 0..pos {
+                prop_assert!(!is_json_delimiter(direct_buf[i]), "byte at {i} must not be a delimiter");
+            }
+
+            // Integration: {"arr":[<num>]} padded to stress SIMD block edges
+            let spaces = " ".repeat(padding);
+            let json = alloc::format!("{spaces}{{\"arr\":[{num}]}}\n");
+            let config = ScanConfig::default();
+            let mut builder = TestBuilder::new();
+            scan_streaming(json.as_bytes(), &config, &mut builder);
+            prop_assert_eq!(
+                builder.rows.len(), 1,
+                "padded JSON with array value must produce exactly 1 row"
+            );
+        }
     }
 
     /// CRLF line endings must not leak \r into extracted field values or captured line fields.
@@ -1392,6 +1433,13 @@ mod verification {
         let result = skip_bare_value(&buf, start, end);
 
         assert!(result >= start && result <= end);
+        // When we stopped before end, the stop byte MUST be a delimiter.
+        if result < end {
+            assert!(
+                is_json_delimiter(buf[result]),
+                "stop byte must be a JSON delimiter"
+            );
+        }
         let mut i = start;
         while i < result {
             let b = buf[i];
