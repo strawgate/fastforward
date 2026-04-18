@@ -211,24 +211,71 @@ import { createSimulation } from './highway-sim.mjs';
   function createCarEl(car) {
     var w = CAR_W * car.scale;
     var h = CAR_H * car.scale;
+    var s = car.scale;
     var g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
     var body = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
-    body.setAttribute('x', String(-w / 2));
-    body.setAttribute('y', String(-h / 2));
-    body.setAttribute('width', String(w));
-    body.setAttribute('height', String(h));
-    body.setAttribute('rx', String(2 + car.scale));
+
+    // All shapes share a body rect, but differ in proportions and detail
+    if (car.shape === 'truck') {
+      // Wider truck — a big batch
+      w = CAR_W * s * 1.3;
+      body.setAttribute('x', String(-w / 2));
+      body.setAttribute('y', String(-h / 2));
+      body.setAttribute('width', String(w));
+      body.setAttribute('height', String(h));
+      body.setAttribute('rx', String(2 * s));
+    } else if (car.shape === 'compact') {
+      // Smaller, rounder — a small batch
+      w = CAR_W * s * 0.8;
+      h = CAR_H * s * 0.85;
+      body.setAttribute('x', String(-w / 2));
+      body.setAttribute('y', String(-h / 2));
+      body.setAttribute('width', String(w));
+      body.setAttribute('height', String(h));
+      body.setAttribute('rx', String(3.5 * s));
+    } else if (car.shape === 'van') {
+      // Taller, boxy — a batch with metadata
+      h = CAR_H * s * 1.15;
+      body.setAttribute('x', String(-w / 2));
+      body.setAttribute('y', String(-h / 2));
+      body.setAttribute('width', String(w));
+      body.setAttribute('height', String(h));
+      body.setAttribute('rx', String(2.5 * s));
+    } else {
+      // Sedan — default shape
+      body.setAttribute('x', String(-w / 2));
+      body.setAttribute('y', String(-h / 2));
+      body.setAttribute('width', String(w));
+      body.setAttribute('height', String(h));
+      body.setAttribute('rx', String(3 * s));
+    }
+
     body.setAttribute('fill', 'var(--hw-car-flow)');
     g.appendChild(body);
-    // Windshield
-    var ws = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
-    ws.setAttribute('x', String(w / 2 - 4 * car.scale));
-    ws.setAttribute('y', String(-h / 2 + 1.5 * car.scale));
-    ws.setAttribute('width', String(2.5 * car.scale));
-    ws.setAttribute('height', String(h - 3 * car.scale));
-    ws.setAttribute('rx', '1');
-    ws.setAttribute('fill', 'rgba(255,255,255,0.3)');
-    g.appendChild(ws);
+
+    // Accent stripe — gives each car a "data" feel
+    var stripe = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+    var stripeW = car.shape === 'truck' ? 3 * s : 2.5 * s;
+    stripe.setAttribute('x', String(w / 2 - stripeW - 1.5 * s));
+    stripe.setAttribute('y', String(-h / 2 + 1.5 * s));
+    stripe.setAttribute('width', String(stripeW));
+    stripe.setAttribute('height', String(h - 3 * s));
+    stripe.setAttribute('rx', '1');
+    stripe.setAttribute('fill', 'rgba(255,255,255,0.25)');
+    g.appendChild(stripe);
+
+    // Second accent for trucks and vans
+    if (car.shape === 'truck' || car.shape === 'van') {
+      var s2 = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+      s2.setAttribute('x', String(-w / 2 + 2 * s));
+      s2.setAttribute('y', String(-h / 2 + 1.5 * s));
+      s2.setAttribute('width', String(2 * s));
+      s2.setAttribute('height', String(h - 3 * s));
+      s2.setAttribute('rx', '1');
+      s2.setAttribute('fill', 'rgba(255,255,255,0.15)');
+      g.appendChild(s2);
+    }
+
     carsG.appendChild(g);
     carEls[car.id] = { g: g, body: body };
   }

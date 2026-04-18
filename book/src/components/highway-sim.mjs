@@ -88,14 +88,19 @@ export function createSimulation(overrides, scaleFn) {
 
   // ---- public API ----
 
+  // Car shape types — visual variety for the highway
+  var SHAPES = ['sedan', 'truck', 'compact', 'van'];
+
   function makeCar(d, speed, scale) {
     var s = scale != null ? scale : getScale();
+    var shape = SHAPES[nextId % SHAPES.length];
     var car = {
       id: nextId++,
       d: d,
       speed: speed != null ? speed : cfg.speedMax,
       scale: s,
       w: cfg.carW * s,
+      shape: shape,
       color: 'flow',
     };
     car.color = carColor(car);

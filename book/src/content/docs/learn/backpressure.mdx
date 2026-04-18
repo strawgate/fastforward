@@ -4,44 +4,18 @@ description: "Interactive simulation of how logfwd propagates backpressure from 
 ---
 
 import HighwayBackpressure from '../../../components/HighwayBackpressure.astro';
-import BackpressureSim from '../../../components/BackpressureSim.astro';
-import InputBackpressure from '../../../components/InputBackpressure.astro';
 
-Think of a log pipeline like a highway. When traffic flows freely, cars cruise
-from the on-ramp through to the exit. But when the exit slows — a sluggish
-collector, a network blip — cars start queuing on the highway itself. Eventually
-the backup reaches the on-ramp and new cars can't even enter.
+Think of a log pipeline like a highway. When traffic flows freely, batches cruise
+from the source through to the destination. But when the exit slows — a sluggish
+collector, a network blip — batches start queuing on the highway itself. Eventually
+the backup reaches the source and new data can't even enter.
 
 That's backpressure. And it's **exactly what you want**. The alternative —
-letting cars pile onto the highway with no limit — is how you get a 40-car pileup
-and an OOM kill.
+letting batches pile up with no limit — is how you get runaway memory and an OOM kill.
 
-Drag the **Collector Availability** slider to the left and watch traffic back up:
+Drag the slider to control collector availability and watch traffic back up:
 
 <HighwayBackpressure />
-
-logfwd works the same way. Every stage is connected by **bounded channels** — fixed-capacity
-lanes that can only hold so many batches. When a collector goes slow, pressure cascades back
-through the pipeline to the source. Files pause on disk (where they're safe), UDP drops
-packets (because UDP has no brakes), and OTLP senders get 429s and back off.
-
-No unbounded queues. No OOM. No silent data loss.
-
-## See it in the real pipeline
-
-Use the source selector to pick your input type and watch what it *feels* as pressure builds:
-a file falls behind and catches up on recovery, UDP drops packets permanently, OTLP senders
-get 429s and back off.
-
-<BackpressureSim />
-
-## What happens at the source?
-
-Backpressure reaches the input eventually — but the consequences depend on the input type. A file stays on disk and logfwd catches up later. UDP has no flow control and drops packets. OTLP pushes back to the sender with 429s.
-
-Use the sliders below to simulate data arriving faster than the pipeline can process it.
-
-<InputBackpressure />
 
 ## How the cascade works
 
@@ -62,29 +36,26 @@ Each arrow is a bounded channel with a fixed capacity. When the downstream chann
 1. **Output pool full** → workers retry with exponential backoff, their per-worker channels fill
 2. **Pipeline channel full (16)** → CPU worker blocks on `blocking_send`
 3. **I/O–CPU channel full (4)** → I/O worker blocks, `poll()` stops being called
-4. **Input source feels the pressure** → file readers pause polling, UDP buffers overflow, OTLP senders get 429s
+4. **Source feels the pressure** → file readers pause (data is safe on disk), UDP buffers overflow, OTLP senders get 429s
 
-No unbounded queues. No OOM. No silent data loss. When the outage clears, everything drains
+No unbounded queues. No OOM. No silent data loss. When the bottleneck clears, everything drains
 in order — file readers catch up from checkpointed offsets, and OTLP senders retry their held batches.
 
-## Why bounded channels?
+## What happens at each input type
 
-The alternative — unbounded queues — leads to:
+Different sources experience backpressure differently:
 
-- **Memory growth** proportional to outage duration × ingestion rate
-- **Cascading OOM** kills when the OS reclaims memory
-- **Silent data loss** when queues are capped with drop-on-full
+| Input | Under pressure | On recovery |
+|-------|---------------|-------------|
+| **File** | Reader pauses polling — logs stay safe on disk | Catches up from checkpointed offset, no data loss |
+| **UDP/Syslog** | OS socket buffer fills, packets drop | Resumes immediately, but dropped packets are gone |
+| **OTLP** | Returns 429 (Too Many Requests) to senders | Senders retry with backoff, no data loss |
 
-Bounded channels make the trade-off explicit: **throughput degrades gracefully** instead of
-memory growing silently. The file system becomes the buffer — and it's already designed for that.
+File inputs are the safest — the filesystem is an infinite, durable buffer. UDP is inherently lossy
+under pressure. OTLP pushes flow control back to the sender, keeping both sides honest.
 
-## Key parameters
+## The bounded channel trade-off
 
-| Channel | Capacity | Why |
-|---------|----------|-----|
-| I/O → CPU | 4 chunks | Small enough that one slow input doesn't starve others |
-| Pipeline → Pool | 16 batches | Enough to absorb jitter without blocking the CPU path |
-| Per-worker | 1 batch | MRU consolidation: keeps busy workers full, idles stay idle |
-
-These values are tuned for the common case: many small files, one or two outputs.
-The worker pool scales up to `max_workers` when all channels are full before blocking.
+The alternative — unbounded queues — leads to memory growth proportional to outage duration × ingestion rate,
+cascading OOM kills, and silent data loss when queues are eventually capped. Bounded channels make the trade-off
+explicit: **throughput degrades gracefully** instead of memory growing silently.
