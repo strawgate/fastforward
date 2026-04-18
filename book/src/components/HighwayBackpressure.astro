@@ -198,7 +198,7 @@
   var MIN_FOLLOW = CAR_W + 6;
   var SPEED_MAX = 3.5;
   var TICK_MS = 25;
-  var SPAWN_MS = 180;
+  var SPAWN_MS = 450;
 
   // Cycle timing (ms)
   var CYCLE_TOTAL = 3000;
@@ -413,8 +413,8 @@
   });
 
   function seedCars(animated) {
-    for (var s = 0; s < 6; s++) {
-      var d = lenIn + 20 + s * 70;
+    for (var s = 0; s < 4; s++) {
+      var d = lenIn + 30 + s * 100;
       var pt = posAt(d);
       var a = angleAt(d);
       cars.push({ el: makeCar(pt, a), d: d, speed: animated ? SPEED_MAX : 0, id: nextId++ });
