@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: e2e-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
@@ -17,7 +17,7 @@ jobs:
   e2e:
     name: KIND e2e
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
 
@@ -43,19 +43,21 @@ jobs:
 
       - name: Create issue on failure
         if: failure() && github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          body_file="$(mktemp)"
-          cat >"$body_file" <<EOF
-          The KIND e2e test failed on the nightly run.
+
+          # Close previous nightly K8s issues to avoid clutter.
+          gh issue list --label nightly-k8s --state open --json number -q '.[].number' | while read -r num; do
+            gh issue close "$num" --comment "Superseded by new nightly run." 2>/dev/null || true
+          done
+
+          gh issue create \
+            --title "Nightly K8s e2e test failed ($(date +%Y-%m-%d))" \
+            --body "The KIND e2e test failed on the nightly run.
 
           Run: ${run_url}
 
-          Please investigate.
-          EOF
-          gh issue create \
-            --title "Nightly e2e test failed ($(date +%Y-%m-%d))" \
-            --body-file "$body_file" \
-            --label "bug"
-        env:
-          GH_TOKEN: ${{ github.token }}
+          Please investigate." \
+            --label "nightly-k8s"

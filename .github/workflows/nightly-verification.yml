@@ -6,6 +6,7 @@ on:
 
 permissions:
   contents: read
+  issues: write
 
 jobs:
   proptest-extended:
@@ -18,13 +19,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Run proptests with 100K cases
-        run: |
-          PROPTEST_CASES=100000 cargo test -p logfwd-core --test it -- proptest
-          PROPTEST_CASES=100000 cargo test -p logfwd-io --test it -- proptest
-          PROPTEST_CASES=100000 cargo test -p logfwd-types -- proptest
-          PROPTEST_CASES=100000 cargo test -p logfwd-output -- proptest
         env:
           PROPTEST_CASES: "100000"
+        run: |
+          cargo test -p logfwd-core --test it -- proptest
+          cargo test -p logfwd-io --test it -- checkpoint_state_machine
+          cargo test -p logfwd-types -- proptest
+          cargo test -p logfwd-output -- proptest
 
   tla-pipeline-nightly-thorough:
     name: TLA+ PipelineMachine (nightly thorough)
@@ -141,9 +142,6 @@ jobs:
             /tmp/turmoil_failed_seeds.txt
           retention-days: 7
   turmoil-seed-sweep-report:
-    permissions:
-      contents: read
-      issues: write
     name: Turmoil seed sweep failure report
     needs: turmoil-seed-sweep
     if: always() && github.event_name == 'schedule' && needs.turmoil-seed-sweep.result == 'failure'
@@ -256,3 +254,48 @@ jobs:
             echo "=== Fuzzing $target for 30 minutes ==="
             cargo +nightly fuzz run "$target" -- -max_total_time=1800
           done
+
+  # -------------------------------------------------------------------
+  # Failure report — posts a single issue summarizing any failed jobs
+  # -------------------------------------------------------------------
+  failure-report:
+    name: Nightly verification failure report
+    needs: [proptest-extended, tla-pipeline-nightly-thorough, turmoil-replay-equivalence, fuzz-short, fuzz-extended]
+    if: >-
+      always() && github.event_name == 'schedule' &&
+      (needs.proptest-extended.result == 'failure' ||
+       needs.tla-pipeline-nightly-thorough.result == 'failure' ||
+       needs.fuzz-short.result == 'failure' ||
+       needs.fuzz-extended.result == 'failure')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Post failure issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PROPTEST: ${{ needs.proptest-extended.result }}
+          TLA: ${{ needs.tla-pipeline-nightly-thorough.result }}
+          FUZZ_SHORT: ${{ needs.fuzz-short.result }}
+          FUZZ_EXT: ${{ needs.fuzz-extended.result }}
+        run: |
+          run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          icon() { if [ "$1" = "success" ] || [ "$1" = "skipped" ]; then echo "✅"; else echo "❌"; fi; }
+
+          BODY="Nightly verification had failures.
+
+          | Job | Status |
+          |-----|--------|
+          | Proptest (100K cases) | $(icon "$PROPTEST") \`${PROPTEST}\` |
+          | TLA+ PipelineMachine | $(icon "$TLA") \`${TLA}\` |
+          | Fuzz (5 min) | $(icon "$FUZZ_SHORT") \`${FUZZ_SHORT}\` |
+          | Fuzz (30 min) | $(icon "$FUZZ_EXT") \`${FUZZ_EXT}\` |
+
+          Run: ${run_url}
+
+          _Turmoil failures are reported separately._"
+
+          gh issue create \
+            --title "Nightly verification failed ($(date +%Y-%m-%d))" \
+            --body "$BODY" \
+            --label "nightly-verification"

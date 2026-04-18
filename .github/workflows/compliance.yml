@@ -16,6 +16,7 @@ permissions:
 jobs:
   compliance:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
 
@@ -63,7 +64,7 @@ jobs:
           retention-days: 30
 
       - name: Post issue
-        if: always()
+        if: always() && (steps.pipeline.outcome != 'success' || steps.file.outcome != 'success' || steps.data.outcome != 'success')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PIPELINE_OUTCOME: ${{ steps.pipeline.outcome }}
@@ -81,10 +82,12 @@ jobs:
           FILE_ICON=$(status_icon "$FILE_OUTCOME")
           DATA_ICON=$(status_icon "$DATA_OUTCOME")
 
-          OVERALL="✅ All suites passed"
-          if [ "$PIPELINE_OUTCOME" != "success" ] || [ "$FILE_OUTCOME" != "success" ] || [ "$DATA_OUTCOME" != "success" ]; then
-            OVERALL="❌ One or more suites failed"
-          fi
+          # Strip ANSI escape codes from test output.
+          for f in compliance_pipeline.txt compliance_file.txt compliance_data.txt; do
+            if [ -f "$f" ]; then
+              sed -i 's/\x1b\[[0-9;]*m//g' "$f"
+            fi
+          done
 
           TITLE="Compliance results ${DATE} (${COMMIT})"
           {
@@ -92,7 +95,7 @@ jobs:
             echo ""
             echo "**Commit:** \`${COMMIT}\` on \`main\`"
             echo "**Runner:** \`ubuntu-latest\`"
-            echo "**Overall:** ${OVERALL}"
+            echo "**Overall:** ❌ One or more suites failed"
             echo ""
             echo "| Suite | Status |"
             echo "|-------|--------|"
