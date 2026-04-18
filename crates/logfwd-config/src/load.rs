@@ -7,6 +7,17 @@ use serde::Deserialize;
 use serde_yaml_ng::Value;
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::LazyLock;
+
+/// Process-unique seed embedded in placeholder markers so that no static user
+/// string can collide with a marker. Derived from the address of a private
+/// static, which varies per process (ASLR).
+static PLACEHOLDER_SEED: LazyLock<u64> = LazyLock::new(|| {
+    static ANCHOR: u8 = 0;
+    let addr = std::ptr::addr_of!(ANCHOR) as u64;
+    // Mix bits so the value looks opaque rather than a raw address.
+    addr.wrapping_mul(0x517c_c1b7_2722_0a95)
+});
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -214,7 +225,13 @@ fn mark_quoted_exact_env_placeholders(yaml: &str) -> (String, HashMap<String, St
 
         marked.push_str(&yaml[cursor..start]);
         if is_exact_env_placeholder(&text) {
-            let marker = format!("__LOGFWD_QUOTED_ENV_PLACEHOLDER_{}__", placeholders.len());
+            // The marker must not collide with user strings. We embed a
+            // process-unique seed so that no static literal can match.
+            let marker = format!(
+                "__LOGFWD_QEP_{seed}_{n}__",
+                seed = *PLACEHOLDER_SEED,
+                n = placeholders.len(),
+            );
             marked.push(quote);
             marked.push_str(&marker);
             marked.push(quote);
@@ -233,11 +250,103 @@ fn is_yaml_quoted_scalar_start(yaml: &str, quote_start: usize) -> bool {
     let line_start = yaml[..quote_start]
         .rfind('\n')
         .map_or(0, |idx| idx.saturating_add(1));
+
+    // Reject quotes that appear inside a YAML block scalar (| or >).
+    // Block scalar content lines are indented beyond the indicator line.
+    // Walk backwards from the current line to find the nearest non-blank,
+    // non-comment line with lower indentation that might introduce a block
+    // scalar.
+    if is_inside_block_scalar(yaml, line_start) {
+        return false;
+    }
+
     yaml[line_start..quote_start]
         .chars()
         .rev()
         .find(|ch| !ch.is_whitespace())
         .is_none_or(|ch| matches!(ch, ':' | '-' | ',' | '[' | '{' | '?'))
+}
+
+/// Returns `true` when `line_start` falls inside a YAML block scalar.
+///
+/// A block scalar is introduced by `|` or `>` (optionally followed by
+/// chomping/indentation indicators) as the last significant token on a line.
+/// Every subsequent line whose indentation is strictly greater than the
+/// indicator line is part of the scalar body.
+fn is_inside_block_scalar(yaml: &str, line_start: usize) -> bool {
+    let current_indent = line_indent(yaml, line_start);
+
+    // Walk backwards through preceding lines.
+    let mut search_end = line_start.saturating_sub(1);
+    while search_end > 0 {
+        let prev_line_start = yaml[..search_end].rfind('\n').map_or(0, |idx| idx + 1);
+        let prev_line = &yaml[prev_line_start..search_end];
+        let prev_indent = count_leading_spaces(prev_line);
+
+        // Skip blank lines (they can appear inside block scalars).
+        if prev_line.trim().is_empty() {
+            search_end = prev_line_start.saturating_sub(1);
+            if prev_line_start == 0 {
+                break;
+            }
+            continue;
+        }
+
+        // If this line has lower indentation, it could be the block indicator.
+        if prev_indent < current_indent {
+            let trimmed = prev_line.trim_end();
+            // Check for block scalar indicator at end of line: `|`, `>`,
+            // or with chomping/indentation indicators like `|+`, `|-`, `|2`.
+            if let Some(last_segment) = trimmed.rsplit_once(' ').map(|(_, s)| s)
+                && is_block_scalar_indicator(last_segment)
+            {
+                return true;
+            }
+            // Also check if the whole trimmed line ends with the indicator
+            // (handles `key: |` where the last space-separated token is `|`).
+            if is_block_scalar_indicator(trimmed) {
+                return true;
+            }
+            // Found a non-blank line with lower indentation that isn't a
+            // block indicator — we are not inside a block scalar.
+            return false;
+        }
+
+        // Same or higher indentation: this line is a peer or content line,
+        // keep searching upward.
+        search_end = prev_line_start.saturating_sub(1);
+        if prev_line_start == 0 {
+            break;
+        }
+    }
+
+    false
+}
+
+fn is_block_scalar_indicator(s: &str) -> bool {
+    let s = s.trim_end();
+    // Match `|`, `>`, `|+`, `|-`, `>+`, `>-`, `|2`, `>2`, `|+2`, etc.
+    let mut chars = s.chars().rev();
+    // Skip optional trailing digit (explicit indentation indicator).
+    let ch = match chars.next() {
+        Some(c) if c.is_ascii_digit() => chars.next(),
+        Some(c) => Some(c),
+        None => return false,
+    };
+    // Skip optional chomping indicator.
+    let ch = match ch {
+        Some('+' | '-') => chars.next(),
+        other => other,
+    };
+    matches!(ch, Some('|' | '>'))
+}
+
+fn line_indent(yaml: &str, line_start: usize) -> usize {
+    count_leading_spaces(&yaml[line_start..])
+}
+
+fn count_leading_spaces(s: &str) -> usize {
+    s.chars().take_while(|ch| *ch == ' ').count()
 }
 
 fn scan_yaml_quoted_scalar(yaml: &str, quote_start: usize, quote: char) -> Option<(usize, String)> {
@@ -280,11 +389,12 @@ mod tests {
         let (marked, placeholders) =
             mark_quoted_exact_env_placeholders(r#"path: "${LOGFWD_TEST_PATH}""#);
 
-        assert_eq!(marked, r#"path: "__LOGFWD_QUOTED_ENV_PLACEHOLDER_0__""#);
-        assert_eq!(
-            placeholders.get("__LOGFWD_QUOTED_ENV_PLACEHOLDER_0__"),
-            Some(&"${LOGFWD_TEST_PATH}".to_owned())
-        );
+        assert_eq!(placeholders.len(), 1);
+        let (marker, original) = placeholders.iter().next().unwrap();
+        assert_eq!(original, "${LOGFWD_TEST_PATH}");
+        // The marker is embedded in double quotes in the YAML.
+        let expected = format!(r#"path: "{marker}""#);
+        assert_eq!(marked, expected);
     }
 
     #[test]

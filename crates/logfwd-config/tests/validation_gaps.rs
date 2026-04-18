@@ -5,20 +5,25 @@ static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 struct EnvVarGuard {
     key: &'static str,
+    previous: Option<String>,
 }
 
 impl EnvVarGuard {
     fn set(key: &'static str, value: &str) -> Self {
+        let previous = std::env::var(key).ok();
         // SAFETY: tests that mutate process environment hold ENV_LOCK.
         unsafe { std::env::set_var(key, value) };
-        Self { key }
+        Self { key, previous }
     }
 }
 
 impl Drop for EnvVarGuard {
     fn drop(&mut self) {
         // SAFETY: tests that mutate process environment hold ENV_LOCK.
-        unsafe { std::env::remove_var(self.key) };
+        match &self.previous {
+            Some(val) => unsafe { std::env::set_var(self.key, val) },
+            None => unsafe { std::env::remove_var(self.key) },
+        }
     }
 }
 

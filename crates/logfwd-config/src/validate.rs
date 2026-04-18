@@ -1211,7 +1211,10 @@ impl Config {
                     if let InputTypeConfig::File(f) = &input.type_config {
                         let p = &f.path;
                         if p.contains('*') || p.contains('?') || p.contains('[') {
-                            glob_input_patterns.push(p.clone());
+                            // Resolve globs against base_path so relative glob
+                            // patterns compare correctly with resolved output paths.
+                            let resolved = path_for_config_compare(p, base_path);
+                            glob_input_patterns.push(resolved.to_string_lossy().into_owned());
                         } else {
                             let pb = path_for_config_compare(p, base_path);
                             let norm = normalize_path_key_for_compare(&pb);
@@ -1323,7 +1326,14 @@ fn path_for_config_compare(path: &str, base_path: Option<&Path>) -> std::path::P
     if path.is_relative()
         && let Some(base) = base_path
     {
-        return base.join(path);
+        // Resolve base to absolute so lexical normalization produces
+        // comparable paths even when the base itself is relative.
+        let abs_base = if base.is_relative() {
+            std::env::current_dir().map_or_else(|_| base.to_path_buf(), |cwd| cwd.join(base))
+        } else {
+            base.to_path_buf()
+        };
+        return abs_base.join(path);
     }
     path
 }
