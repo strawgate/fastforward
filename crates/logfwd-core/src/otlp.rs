@@ -866,7 +866,7 @@ mod tests {
             month in 1u32..=12,
             day in 1u32..=31,
         ) {
-            use chrono::{NaiveDate, NaiveDateTime};
+            use chrono::NaiveDate;
             let max_day = days_in_month(year, month);
             proptest::prop_assume!(day <= max_day);
 
@@ -878,7 +878,6 @@ mod tests {
                 proptest::prop_assert_eq!(our, chrono_days,
                     "days_from_civil mismatch");
             }
-            let _ = NaiveDateTime::MAX; // suppress unused import warning
         }
 
         /// `parse_timestamp_nanos` must produce the same result as chrono for
