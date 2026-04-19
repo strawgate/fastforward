@@ -697,9 +697,9 @@ fn rewrite_send_config_with_outputs(
     mapping: &mut serde_yaml_ng::Mapping,
     input: serde_yaml_ng::Mapping,
 ) -> Result<(), CliError> {
-    let outputs = mapping.remove(yaml_string("outputs")).ok_or_else(|| {
-        CliError::Config("send destination config is missing top-level `outputs`".to_owned())
-    })?;
+    let outputs = mapping
+        .remove(yaml_string("outputs"))
+        .expect("internal invariant violated: `ff send` rewrite requires top-level `outputs`");
 
     let mut pipeline = serde_yaml_ng::Mapping::new();
     pipeline.insert(
@@ -2322,6 +2322,11 @@ resource_attrs:
   env: prod
 transform: |
   SELECT * FROM logs
+enrichment:
+  - type: static
+    table_name: labels
+    labels:
+      env: dogfood
 outputs:
   - type: stdout
     format: json
@@ -2353,6 +2358,16 @@ outputs:
             Some("prod")
         );
         assert_eq!(pipeline.transform.as_deref(), Some("SELECT * FROM logs\n"));
+        match &pipeline.enrichment[..] {
+            [logfwd_config::EnrichmentConfig::Static(static_cfg)] => {
+                assert_eq!(static_cfg.table_name, "labels");
+                assert_eq!(
+                    static_cfg.labels.get("env").map(String::as_str),
+                    Some("dogfood")
+                );
+            }
+            other => panic!("expected one static enrichment config, got {other:?}"),
+        }
     }
 
     #[test]
