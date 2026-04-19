@@ -232,6 +232,11 @@ impl Config {
                                         "pipeline '{name}' input '{label}': http.max_request_body_size must be at least 1"
                                     )));
                                 }
+                                if http.max_drained_bytes_per_poll == Some(0) {
+                                    return Err(ConfigError::Validation(format!(
+                                        "pipeline '{name}' input '{label}': http.max_drained_bytes_per_poll must be at least 1"
+                                    )));
+                                }
                                 if let Some(code) = http.response_code
                                     && !matches!(code, 200 | 201 | 202 | 204)
                                 {
@@ -2019,6 +2024,28 @@ pipelines:
         assert!(
             err.to_string()
                 .contains("http.response_body is not allowed when http.response_code is 204"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn http_max_drained_bytes_per_poll_zero_is_rejected() {
+        let yaml = r#"
+pipelines:
+  test:
+    inputs:
+      - type: http
+        listen: 127.0.0.1:8081
+        format: json
+        http:
+          max_drained_bytes_per_poll: 0
+    outputs:
+      - type: null
+"#;
+        let err = Config::load_str(yaml).expect_err("zero drain cap must fail validation");
+        assert!(
+            err.to_string()
+                .contains("http.max_drained_bytes_per_poll must be at least 1"),
             "unexpected error: {err}"
         );
     }
