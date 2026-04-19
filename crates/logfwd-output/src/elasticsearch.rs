@@ -420,15 +420,40 @@ impl ElasticsearchSink {
         let mid = n / 2;
         let left = batch.slice(0, mid);
         let right = batch.slice(mid, n - mid);
-        let left_result = self.send_batch_inner(&left, metadata, depth + 1).await?;
+        let left_result =
+            Self::classify_split_result(self.send_batch_inner(&left, metadata, depth + 1).await)?;
         if matches!(
             left_result,
             super::sink::SendResult::IoError(_) | super::sink::SendResult::RetryAfter(_)
         ) {
             return Ok(left_result);
         }
-        let right_result = self.send_batch_inner(&right, metadata, depth + 1).await?;
+        let right_result =
+            Self::classify_split_result(self.send_batch_inner(&right, metadata, depth + 1).await)?;
         Ok(Self::merge_split_send_results(left_result, right_result))
+    }
+
+    /// Convert permanent ES rejections from `Err` to `Ok(Rejected)` so they
+    /// flow through `merge_split_send_results` instead of short-circuiting via
+    /// `?`. `parse_bulk_response` returns `InvalidData` for document-level
+    /// errors (e.g. mapper_parsing_exception) inside an HTTP 200 response.
+    /// These are terminal — retrying is futile — but as `Err` they would skip
+    /// the right half of a split send.
+    fn classify_split_result(
+        result: io::Result<super::sink::SendResult>,
+    ) -> io::Result<super::sink::SendResult> {
+        match result {
+            Ok(result) => Ok(result),
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::InvalidInput | io::ErrorKind::InvalidData
+                ) =>
+            {
+                Ok(super::sink::SendResult::Rejected(e.to_string()))
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// Merge split-half outcomes into the single-result `Sink` contract.
@@ -1928,6 +1953,47 @@ mod tests {
         );
     }
 
+    #[test]
+    fn classify_split_result_converts_invalid_data_to_rejected() {
+        let err = io::Error::new(io::ErrorKind::InvalidData, "mapper_parsing_exception");
+        let result = ElasticsearchSink::classify_split_result(Err(err));
+        match result {
+            Ok(crate::sink::SendResult::Rejected(msg)) => {
+                assert!(msg.contains("mapper_parsing_exception"), "got: {msg}");
+            }
+            other => panic!("expected Ok(Rejected), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_split_result_converts_invalid_input_to_rejected() {
+        let err = io::Error::new(io::ErrorKind::InvalidInput, "413 Payload Too Large");
+        let result = ElasticsearchSink::classify_split_result(Err(err));
+        match result {
+            Ok(crate::sink::SendResult::Rejected(msg)) => {
+                assert!(msg.contains("413 Payload Too Large"), "got: {msg}");
+            }
+            other => panic!("expected Ok(Rejected), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_split_result_preserves_io_errors() {
+        let err = io::Error::new(io::ErrorKind::ConnectionRefused, "connection refused");
+        let result = ElasticsearchSink::classify_split_result(Err(err));
+        assert!(result.is_err(), "expected Err for IO error");
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::ConnectionRefused);
+    }
+
+    #[test]
+    fn classify_split_result_passes_through_ok() {
+        let result = ElasticsearchSink::classify_split_result(Ok(crate::sink::SendResult::Ok));
+        match result {
+            Ok(crate::sink::SendResult::Ok) => {}
+            other => panic!("expected Ok(Ok), got {other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn split_rejection_on_left_still_sends_right_half() {
         use crate::sink::Sink;
@@ -1993,6 +2059,95 @@ mod tests {
             }
             other => panic!("expected left rejection after right half send, got {other:?}"),
         }
+        left_mock.assert_async().await;
+        right_mock.assert_async().await;
+    }
+
+    /// Regression test for the CodeRabbit review on #2267:
+    /// When the left split half returns HTTP 200 with `errors: true` (permanent
+    /// item rejection via `parse_bulk_response` → `InvalidData`), the right
+    /// half must still be attempted.  Before `classify_split_result`, the `?`
+    /// operator propagated the `Err(InvalidData)` and skipped the right half.
+    #[tokio::test]
+    async fn split_bulk_item_error_on_left_still_sends_right_half() {
+        use crate::sink::Sink;
+
+        let mut server = mockito::Server::new_async().await;
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new("msg", DataType::Utf8, false)])),
+            vec![Arc::new(StringArray::from(vec!["left-row", "right-row"]))],
+        )
+        .expect("test batch should be valid");
+        let metadata = zero_metadata();
+
+        // Measure serialized sizes to pick a split_threshold that forces splitting.
+        let mut sizing_sink = ElasticsearchSink::new(
+            "test".to_string(),
+            test_es_config(&server.url(), "logs", usize::MAX),
+            reqwest::Client::new(),
+            Arc::new(ComponentStats::default()),
+        );
+        sizing_sink
+            .serialize_batch(&batch, &metadata)
+            .expect("full batch should serialize");
+        let full_len = sizing_sink.batch_buf.len();
+        sizing_sink
+            .serialize_batch(&batch.slice(0, 1), &metadata)
+            .expect("left half should serialize");
+        let left_len = sizing_sink.batch_buf.len();
+        sizing_sink
+            .serialize_batch(&batch.slice(1, 1), &metadata)
+            .expect("right half should serialize");
+        let right_len = sizing_sink.batch_buf.len();
+        let split_threshold = left_len.max(right_len) + 1;
+        assert!(full_len > split_threshold);
+
+        // Left half: HTTP 200 with errors:true — permanent item rejection.
+        // parse_bulk_response returns Err(InvalidData) for this.
+        let left_mock = server
+            .mock("POST", "/_bulk")
+            .match_query(mockito::Matcher::Any)
+            .match_body(mockito::Matcher::Regex("left-row".to_string()))
+            .with_status(200)
+            .with_body(
+                r#"{"took":1,"errors":true,"items":[{"index":{"error":{"type":"mapper_parsing_exception","reason":"failed to parse field [ts]"},"status":400}}]}"#,
+            )
+            .create_async()
+            .await;
+        // Right half: success.
+        let right_mock = server
+            .mock("POST", "/_bulk")
+            .match_query(mockito::Matcher::Any)
+            .match_body(mockito::Matcher::Regex("right-row".to_string()))
+            .with_status(200)
+            .with_body(r#"{"took":1,"errors":false,"items":[{"index":{"status":201}}]}"#)
+            .create_async()
+            .await;
+
+        let mut sink = ElasticsearchSink::new(
+            "test".to_string(),
+            test_es_config(&server.url(), "logs", split_threshold),
+            reqwest::Client::new(),
+            Arc::new(ComponentStats::default()),
+        );
+
+        let result = sink.send_batch(&batch, &metadata).await;
+        match result {
+            crate::sink::SendResult::Rejected(reason) => {
+                assert!(
+                    reason.contains("left split rejected"),
+                    "expected left split label, got: {reason}"
+                );
+                assert!(
+                    reason.contains("mapper_parsing_exception"),
+                    "expected ES error type, got: {reason}"
+                );
+            }
+            other => panic!(
+                "expected Rejected from left bulk item error after right half send, got {other:?}"
+            ),
+        }
+        // Both mocks must have been hit — the right half was not skipped.
         left_mock.assert_async().await;
         right_mock.assert_async().await;
     }
