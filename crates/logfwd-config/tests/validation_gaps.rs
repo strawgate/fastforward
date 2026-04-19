@@ -439,6 +439,82 @@ output:
 }
 
 #[test]
+fn explicit_string_yaml_tag_preserves_string_field() {
+    let yaml = r#"
+input:
+  type: file
+  path: !!str 123
+output:
+  type: stdout
+"#;
+
+    let config = Config::load_str(yaml).expect("explicit string tag should parse as string");
+    let input = &config.pipelines["default"].inputs[0];
+    let path = match &input.type_config {
+        logfwd_config::InputTypeConfig::File(file) => file.path.as_str(),
+        _ => panic!("expected file input"),
+    };
+
+    assert_eq!(path, "123");
+}
+
+#[test]
+fn non_string_core_yaml_tag_for_string_field_is_rejected() {
+    let yaml = r#"
+input:
+  type: file
+  path: !!int "123"
+output:
+  type: stdout
+"#;
+
+    let err = Config::load_str(yaml).unwrap_err().to_string();
+    assert!(
+        err.contains("config deserialization error"),
+        "error should come from deserialization: {err}"
+    );
+    assert!(
+        err.contains("string"),
+        "error should expect a string: {err}"
+    );
+}
+
+#[test]
+fn custom_yaml_tag_for_string_field_is_rejected() {
+    let yaml = r#"
+input:
+  type: file
+  path: !custom "123"
+output:
+  type: stdout
+"#;
+
+    let err = Config::load_str(yaml).unwrap_err().to_string();
+    assert!(
+        err.contains("unsupported explicit YAML tag"),
+        "error should reject unsupported explicit tags: {err}"
+    );
+}
+
+#[test]
+fn custom_yaml_tag_for_mapping_key_is_rejected() {
+    let yaml = r#"
+input:
+  type: generator
+output:
+  type: stdout
+resource_attrs:
+  !custom key: value
+"#;
+
+    let err = Config::load_str(yaml).unwrap_err().to_string();
+    assert!(
+        err.contains("unsupported explicit YAML tag"),
+        "error should reject unsupported explicit mapping-key tags: {err}"
+    );
+}
+
+#[test]
 fn anchored_quoted_env_expansion_preserves_string_scalars() {
     let _env_lock = env_lock();
     let _env = EnvVarGuard::set("LOGFWD_ISSUE_1855_ANCHORED_PATH", "true");

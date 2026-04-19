@@ -9,6 +9,7 @@ use crate::types::{
 use config as config_rs;
 use serde::Deserialize;
 use serde_yaml_ng::Value;
+use serde_yaml_ng::value::Tag;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -221,7 +222,12 @@ fn yaml_value_to_config_value(value: Value) -> Result<config_rs::Value, ConfigEr
             }
             config_rs::ValueKind::Table(map)
         }
-        Value::Tagged(tagged) => return yaml_value_to_config_value(tagged.value),
+        Value::Tagged(tagged) => {
+            if is_yaml_string_tag(&tagged.tag) {
+                return yaml_value_to_config_value(tagged.value);
+            }
+            return Err(unsupported_yaml_tag_error(&tagged.tag));
+        }
     };
 
     Ok(config_rs::Value::new(None, kind))
@@ -233,7 +239,13 @@ fn yaml_key_to_config_key(key: Value) -> Result<String, ConfigError> {
         Value::Bool(value) => Ok(value.to_string()),
         Value::Number(value) => Ok(value.to_string()),
         Value::String(value) => Ok(value),
-        Value::Tagged(tagged) => yaml_key_to_config_key(tagged.value),
+        Value::Tagged(tagged) => {
+            if is_yaml_string_tag(&tagged.tag) {
+                yaml_key_to_config_key(tagged.value)
+            } else {
+                Err(unsupported_yaml_tag_error(&tagged.tag))
+            }
+        }
         Value::Sequence(_) | Value::Mapping(_) => Err(ConfigError::Validation(
             "YAML mapping keys must be scalar values".into(),
         )),
@@ -263,7 +275,7 @@ fn expand_env_vars_in_yaml_value(value: &mut Value) -> Result<(), ConfigError> {
             }
         }
         Value::Tagged(tagged) => {
-            if tagged.tag == "str" || tagged.tag == "tag:yaml.org,2002:str" {
+            if is_yaml_string_tag(&tagged.tag) {
                 // An explicit string tag (!!str or !str) means the user
                 // wants a string value. Env substitution already produces
                 // string data, so unwrap the tag after expansion.
@@ -279,4 +291,12 @@ fn expand_env_vars_in_yaml_value(value: &mut Value) -> Result<(), ConfigError> {
     }
 
     Ok(())
+}
+
+fn is_yaml_string_tag(tag: &Tag) -> bool {
+    tag == "str" || tag == "tag:yaml.org,2002:str"
+}
+
+fn unsupported_yaml_tag_error(tag: &Tag) -> ConfigError {
+    ConfigError::Validation(format!("unsupported explicit YAML tag in config: {tag}"))
 }
