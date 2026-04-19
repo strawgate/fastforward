@@ -229,9 +229,32 @@
     }
   });
 
+  // Auto-restart after explosion (pause to let user read, then loop)
+  var restartTimer = null;
+  var origTick = tick;
+  tick = function() {
+    origTick();
+    if (phase === 'exploded' && !restartTimer) {
+      restartTimer = setTimeout(function() {
+        restartTimer = null;
+        reset();
+        start();
+      }, 3000);
+    }
+  };
+
+  // Autoplay on load (respect reduced motion)
+  if (!window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    start();
+  } else {
+    status.textContent = 'Animation paused (reduced motion)';
+    btn.textContent = '▶ Start';
+  }
+
   // Cleanup on SPA navigation
   document.addEventListener('astro:before-swap', function() {
     clearInterval(timer);
+    clearTimeout(restartTimer);
   }, { once: true });
 })();
 </script>

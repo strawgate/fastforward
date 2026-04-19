@@ -24,8 +24,6 @@ Without backpressure, there's nothing to stop data from piling up. An unbounded 
 just keeps growing — and growing — until the process runs out of memory and crashes.
 **All queued data is lost.**
 
-Hit start and watch what happens:
-
 <UnboundedQueue />
 
 Bounded channels trade a little throughput for a lot of safety. Instead of an OOM crash,
