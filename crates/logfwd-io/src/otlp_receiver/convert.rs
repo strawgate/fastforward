@@ -56,21 +56,20 @@ pub(super) fn convert_request_to_batch(
 
                 // timestamp: prefer time_unix_nano, fall back to
                 // observed_time_unix_nano when event time is unknown (#1690).
-                let ts_raw = if record.time_unix_nano > 0 {
-                    record.time_unix_nano
+                let (ts_raw, ts_field) = if record.time_unix_nano > 0 {
+                    (record.time_unix_nano, "time_unix_nano")
                 } else {
-                    record.observed_time_unix_nano
+                    (record.observed_time_unix_nano, "observed_time_unix_nano")
                 };
-                if let Ok(ts) = i64::try_from(ts_raw)
-                    && ts > 0
-                {
+                if let Some(ts) = convert_otlp_timestamp(ts_raw, ts_field)? {
                     builder.append_i64_value_by_idx(timestamp_idx, ts);
                 }
 
                 // observed_time_unix_nano — always written separately.
-                if let Ok(obs_ts) = i64::try_from(record.observed_time_unix_nano)
-                    && obs_ts > 0
-                {
+                if let Some(obs_ts) = convert_otlp_timestamp(
+                    record.observed_time_unix_nano,
+                    "observed_time_unix_nano",
+                )? {
                     builder.append_i64_value_by_idx(observed_ts_idx, obs_ts);
                 }
 
@@ -151,6 +150,18 @@ pub(super) fn convert_request_to_batch(
     builder
         .finish_batch_detached()
         .map_err(|e| InputError::Receiver(format!("structured OTLP batch build error: {e}")))
+}
+
+fn convert_otlp_timestamp(raw: u64, field_name: &str) -> Result<Option<i64>, InputError> {
+    if raw == 0 {
+        return Ok(None);
+    }
+    let converted = i64::try_from(raw).map_err(|_| {
+        InputError::Receiver(format!(
+            "invalid OTLP {field_name}: value {raw} exceeds signed 64-bit nanosecond range"
+        ))
+    })?;
+    Ok(Some(converted))
 }
 
 fn append_attribute_value(
