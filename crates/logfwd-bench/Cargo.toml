@@ -119,6 +119,10 @@ name = "memory-profile"
 path = "src/memory_profile.rs"
 
 [[bin]]
+name = "file_output_profile"
+path = "src/file_output_profile.rs"
+
+[[bin]]
 name = "library-eval"
 path = "src/library_eval.rs"
 
