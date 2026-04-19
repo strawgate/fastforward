@@ -22,15 +22,18 @@ pub use shared::{
     TlsServerConfig,
 };
 pub use types::{
-    ArrowIpcTypeConfig, AuthConfig, Config, ConfigError, CsvEnrichmentConfig, EnrichmentConfig,
-    FileTypeConfig, Format, GeneratorAttributeValueConfig, GeneratorComplexityConfig,
-    GeneratorInputConfig, GeneratorProfileConfig, GeneratorSequenceConfig, GeneratorTypeConfig,
-    GeoDatabaseConfig, GeoDatabaseFormat, HostInfoConfig, HostMetricsInputConfig, HttpInputConfig,
-    HttpMethodConfig, HttpTypeConfig, InputConfig, InputType, InputTypeConfig,
+    ArrowIpcOutputConfig, ArrowIpcTypeConfig, AuthConfig, Config, ConfigError, CsvEnrichmentConfig,
+    ElasticsearchOutputConfig, EnrichmentConfig, FileOutputConfig, FileTypeConfig, Format,
+    GeneratorAttributeValueConfig, GeneratorComplexityConfig, GeneratorInputConfig,
+    GeneratorProfileConfig, GeneratorSequenceConfig, GeneratorTypeConfig, GeoDatabaseConfig,
+    GeoDatabaseFormat, HostInfoConfig, HostMetricsInputConfig, HttpInputConfig, HttpMethodConfig,
+    HttpOutputConfig, HttpTypeConfig, InputConfig, InputType, InputTypeConfig,
     JournaldBackendConfig, JournaldInputConfig, JournaldTypeConfig, JsonlEnrichmentConfig,
-    K8sPathConfig, OtlpProtobufDecodeModeConfig, OtlpTypeConfig, OutputConfig, OutputType,
-    PipelineConfig, S3InputConfig, S3TypeConfig, SensorTypeConfig, ServerConfig,
-    StaticEnrichmentConfig, StorageConfig, TcpTypeConfig, UdpTypeConfig,
+    K8sPathConfig, LokiOutputConfig, NullOutputConfig, OtlpOutputConfig,
+    OtlpProtobufDecodeModeConfig, OtlpTypeConfig, OutputConfig, OutputConfigV1, OutputConfigV2,
+    OutputType, ParquetOutputConfig, PipelineConfig, S3InputConfig, S3TypeConfig, SensorTypeConfig,
+    ServerConfig, SocketOutputConfig, StaticEnrichmentConfig, StdoutOutputConfig, StorageConfig,
+    TcpTypeConfig, UdpTypeConfig,
 };
 pub use validate::validate_host_port;
 
@@ -2858,6 +2861,150 @@ pipelines:
         compression: none
 "#;
         Config::load_str(yaml).expect("arrow_ipc output should accept none compression");
+    }
+
+    #[test]
+    fn output_config_v2_rejects_irrelevant_variant_fields() {
+        let yaml = r"
+type: otlp
+endpoint: http://localhost:4318/v1/logs
+format: json
+";
+
+        let err = serde_yaml_ng::from_str::<OutputConfigV2>(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("format"),
+            "strict v2 otlp config should reject format, got: {err}"
+        );
+    }
+
+    #[test]
+    fn output_config_legacy_fallback_preserves_existing_flat_shape() {
+        let yaml = r"
+type: otlp
+endpoint: http://localhost:4318/v1/logs
+format: json
+";
+
+        let output = serde_yaml_ng::from_str::<OutputConfig>(yaml).unwrap();
+        assert_eq!(output.output_type, OutputType::Otlp);
+        assert_eq!(
+            output.endpoint.as_deref(),
+            Some("http://localhost:4318/v1/logs")
+        );
+        assert_eq!(output.format, Some(Format::Json));
+    }
+
+    #[test]
+    fn output_config_v2_variants_normalize_to_output_types() {
+        let cases = [
+            (
+                "type: otlp\nendpoint: http://localhost:4318/v1/logs\n",
+                OutputType::Otlp,
+            ),
+            (
+                "type: http\nendpoint: http://localhost:8080/ingest\n",
+                OutputType::Http,
+            ),
+            (
+                "type: elasticsearch\nendpoint: http://localhost:9200\nindex: logs\n",
+                OutputType::Elasticsearch,
+            ),
+            (
+                "type: loki\nendpoint: http://localhost:3100/loki/api/v1/push\n",
+                OutputType::Loki,
+            ),
+            ("type: stdout\nformat: json\n", OutputType::Stdout),
+            ("type: file\npath: /tmp/ff.log\n", OutputType::File),
+            (
+                "type: parquet\npath: /tmp/ff.parquet\n",
+                OutputType::Parquet,
+            ),
+            ("type: \"null\"\n", OutputType::Null),
+            ("type: tcp\nendpoint: 127.0.0.1:9000\n", OutputType::Tcp),
+            ("type: udp\nendpoint: 127.0.0.1:9001\n", OutputType::Udp),
+            (
+                "type: arrow_ipc\nendpoint: http://localhost:4317\n",
+                OutputType::ArrowIpc,
+            ),
+        ];
+
+        for (yaml, expected_type) in cases {
+            let v2 = serde_yaml_ng::from_str::<OutputConfigV2>(yaml).unwrap();
+            assert_eq!(OutputConfig::from(v2).output_type, expected_type);
+        }
+    }
+
+    #[test]
+    fn example_outputs_parse_as_v2_and_normalize_equivalently() {
+        use serde::Deserialize;
+        use serde_yaml_ng::Value;
+
+        let examples_dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/use-cases");
+        let mut checked = 0usize;
+
+        for entry in fs::read_dir(&examples_dir).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("yaml") {
+                continue;
+            }
+
+            let yaml = fs::read_to_string(&path).unwrap();
+            let value: Value = serde_yaml_ng::from_str(&yaml)
+                .unwrap_or_else(|err| panic!("{} should parse as YAML: {err}", path.display()));
+            for output_value in collect_output_values(&value) {
+                let v2 = OutputConfigV2::deserialize(output_value.clone()).unwrap_or_else(|err| {
+                    panic!("{} output should parse as v2: {err}", path.display())
+                });
+                let compat =
+                    OutputConfig::deserialize(output_value.clone()).unwrap_or_else(|err| {
+                        panic!(
+                            "{} output should parse through compatibility layer: {err}",
+                            path.display()
+                        )
+                    });
+                assert_eq!(OutputConfig::from(v2), compat, "{}", path.display());
+                checked += 1;
+            }
+        }
+
+        assert!(checked > 0, "expected example configs to contain outputs");
+    }
+
+    fn collect_output_values(value: &serde_yaml_ng::Value) -> Vec<serde_yaml_ng::Value> {
+        let Some(root) = value.as_mapping() else {
+            return Vec::new();
+        };
+        let mut outputs = Vec::new();
+
+        if let Some(output) = root.get(serde_yaml_ng::Value::String("output".to_string())) {
+            outputs.push(output.clone());
+        }
+
+        if let Some(pipelines) = root
+            .get(serde_yaml_ng::Value::String("pipelines".to_string()))
+            .and_then(serde_yaml_ng::Value::as_mapping)
+        {
+            for pipeline in pipelines.values() {
+                let Some(pipeline) = pipeline.as_mapping() else {
+                    continue;
+                };
+                if let Some(output_value) =
+                    pipeline.get(serde_yaml_ng::Value::String("outputs".to_string()))
+                {
+                    match output_value {
+                        serde_yaml_ng::Value::Sequence(values) => {
+                            outputs.extend(values.iter().cloned());
+                        }
+                        value => outputs.push(value.clone()),
+                    }
+                }
+            }
+        }
+
+        outputs
     }
 
     #[test]

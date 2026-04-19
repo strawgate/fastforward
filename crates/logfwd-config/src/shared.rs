@@ -16,7 +16,7 @@ use serde::Deserialize;
 ///
 /// Used by HTTP, OTLP, Elasticsearch, Loki, and other output sinks that
 /// establish TLS connections to a remote endpoint.
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct TlsClientConfig {
     /// Path to CA certificate file for server verification.
