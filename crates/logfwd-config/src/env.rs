@@ -1,21 +1,54 @@
 use crate::types::ConfigError;
 use std::collections::HashMap;
+use std::env;
 
 pub(crate) fn expand_env_vars(text: &str) -> Result<String, ConfigError> {
     if !text.contains("${") {
         return Ok(text.to_owned());
     }
 
-    let env_vars: HashMap<String, String> = std::env::vars_os()
-        .filter_map(|(key, value)| Some((key.into_string().ok()?, value.into_string().ok()?)))
-        .collect();
-    let expanded = substitute_or_preserve_unterminated(text, &env_vars)?;
+    expand_env_vars_with(text, lookup_env_var)
+}
 
-    let present_vars: HashMap<String, String> = env_vars
-        .keys()
-        .map(|key| (key.clone(), String::new()))
-        .collect();
-    let masked = substitute_or_preserve_unterminated(text, &present_vars)?;
+fn expand_env_vars_with<F>(text: &str, mut lookup: F) -> Result<String, ConfigError>
+where
+    F: FnMut(&str) -> Result<Option<String>, ConfigError>,
+{
+    match first_unclosed_placeholder_start(text)? {
+        Some(start) => {
+            let expanded_prefix = expand_closed_env_vars(&text[..start], &mut lookup)?;
+            Ok(format!("{expanded_prefix}{}", &text[start..]))
+        }
+        None => expand_closed_env_vars(text, &mut lookup),
+    }
+}
+
+fn lookup_env_var(name: &str) -> Result<Option<String>, ConfigError> {
+    match env::var(name) {
+        Ok(value) => Ok(Some(value)),
+        Err(env::VarError::NotPresent) => Ok(None),
+        Err(env::VarError::NotUnicode(_)) => Err(ConfigError::Validation(format!(
+            "environment variable '{name}' is not valid Unicode"
+        ))),
+    }
+}
+
+fn expand_closed_env_vars<F>(text: &str, lookup: &mut F) -> Result<String, ConfigError>
+where
+    F: FnMut(&str) -> Result<Option<String>, ConfigError>,
+{
+    validate_substitution_syntax(text)?;
+
+    let mut variables: HashMap<&str, String> = HashMap::new();
+    for name in braced_placeholder_names(text) {
+        if let Some(value) = lookup(name)? {
+            variables.entry(name).or_insert(value);
+        }
+    }
+
+    let expanded = substitute_validated(text, &variables)?;
+    let present_vars: HashMap<&str, &str> = variables.keys().map(|key| (*key, "")).collect();
+    let masked = substitute_validated(text, &present_vars)?;
     if let Some(var_name) = first_braced_placeholder(&masked) {
         return Err(ConfigError::Validation(format!(
             "environment variable '{var_name}' is not set"
@@ -25,22 +58,65 @@ pub(crate) fn expand_env_vars(text: &str) -> Result<String, ConfigError> {
     Ok(expanded)
 }
 
-fn substitute_or_preserve_unterminated(
-    text: &str,
-    variables: &HashMap<String, String>,
-) -> Result<String, ConfigError> {
-    varsubst::substitute(text, variables).or_else(|err| match err {
-        varsubst::SubstError::UnclosedBrace { .. } => Ok(text.to_owned()),
-        other @ varsubst::SubstError::InvalidVarName { .. } => Err(ConfigError::Validation(
-            format!("invalid environment variable substitution: {other}"),
+fn validate_substitution_syntax(text: &str) -> Result<(), ConfigError> {
+    let variables: HashMap<&str, &str> = HashMap::new();
+    substitute_validated(text, &variables).map(|_| ())
+}
+
+fn substitute_validated<K, V>(text: &str, variables: &HashMap<K, V>) -> Result<String, ConfigError>
+where
+    K: AsRef<str> + std::hash::Hash + Eq,
+    V: AsRef<str>,
+{
+    varsubst::substitute(text, variables).map_err(|err| match err {
+        varsubst::SubstError::UnclosedBrace { position } => ConfigError::Validation(format!(
+            "unclosed environment variable substitution at character {position}"
         )),
+        varsubst::SubstError::InvalidVarName { .. } => {
+            ConfigError::Validation(format!("invalid environment variable substitution: {err}"))
+        }
     })
 }
 
+fn first_unclosed_placeholder_start(text: &str) -> Result<Option<usize>, ConfigError> {
+    let variables: HashMap<&str, &str> = HashMap::new();
+    match varsubst::substitute(text, &variables) {
+        Ok(_) => Ok(None),
+        Err(varsubst::SubstError::UnclosedBrace { position }) => {
+            Ok(Some(char_position_to_byte_index(text, position)))
+        }
+        Err(err @ varsubst::SubstError::InvalidVarName { .. }) => Err(ConfigError::Validation(
+            format!("invalid environment variable substitution: {err}"),
+        )),
+    }
+}
+
+fn char_position_to_byte_index(text: &str, position: usize) -> usize {
+    text.char_indices()
+        .nth(position)
+        .map_or(text.len(), |(index, _)| index)
+}
+
+fn braced_placeholder_names(text: &str) -> Vec<&str> {
+    let mut names = Vec::new();
+    let mut offset = 0;
+
+    while let Some(start_rel) = text[offset..].find("${") {
+        let name_start = offset + start_rel + 2;
+        if let Some(end_rel) = text[name_start..].find('}') {
+            let name_end = name_start + end_rel;
+            names.push(&text[name_start..name_end]);
+            offset = name_end + 1;
+        } else {
+            break;
+        }
+    }
+
+    names
+}
+
 fn first_braced_placeholder(text: &str) -> Option<&str> {
-    let start = text.find("${")?.saturating_add(2);
-    let end = text[start..].find('}')?;
-    Some(&text[start..start + end])
+    braced_placeholder_names(text).into_iter().next()
 }
 
 #[cfg(test)]
@@ -61,6 +137,13 @@ mod tests {
             let previous = std::env::var_os(key);
             // SAFETY: tests that mutate process environment hold ENV_LOCK.
             unsafe { std::env::set_var(key, value) };
+            Self { key, previous }
+        }
+
+        fn unset(key: &'static str) -> Self {
+            let previous = std::env::var_os(key);
+            // SAFETY: tests that mutate process environment hold ENV_LOCK.
+            unsafe { std::env::remove_var(key) };
             Self { key, previous }
         }
     }
@@ -97,6 +180,9 @@ mod tests {
 
     #[test]
     fn missing_env_var_is_rejected() {
+        let _guard = env_lock();
+        let _var = EnvVarGuard::unset("LOGFWD_ENV_TEST_MISSING");
+
         let err =
             expand_env_vars("${LOGFWD_ENV_TEST_MISSING}").expect_err("missing env should fail");
 
@@ -108,10 +194,22 @@ mod tests {
 
     #[test]
     fn unterminated_env_var_is_preserved() {
+        let _guard = env_lock();
         let expanded = expand_env_vars("value=${LOGFWD_ENV_TEST_UNTERMINATED")
             .expect("unterminated variable should be preserved");
 
         assert_eq!(expanded, "value=${LOGFWD_ENV_TEST_UNTERMINATED");
+    }
+
+    #[test]
+    fn closed_vars_before_unterminated_tail_are_expanded() {
+        let _guard = env_lock();
+        let _var = EnvVarGuard::set("LOGFWD_ENV_TEST_BRACED", "expanded");
+
+        let expanded = expand_env_vars("${LOGFWD_ENV_TEST_BRACED}${LOGFWD_ENV_TEST_UNTERMINATED")
+            .expect("closed variables before an unterminated tail should expand");
+
+        assert_eq!(expanded, "expanded${LOGFWD_ENV_TEST_UNTERMINATED",);
     }
 
     #[test]
@@ -127,6 +225,7 @@ mod tests {
 
     #[test]
     fn default_value_syntax_is_rejected() {
+        let _guard = env_lock();
         let err = expand_env_vars("value=${LOGFWD_ENV_TEST_DEFAULT:fallback}")
             .expect_err("default syntax should be rejected");
 
@@ -139,6 +238,7 @@ mod tests {
 
     #[test]
     fn regex_backslashes_and_end_anchor_without_env_are_literal() {
+        let _guard = env_lock();
         let regex = r"/([^/]+)/[^/]+\\.log$";
 
         let expanded = expand_env_vars(regex).expect("regex should not be treated as env syntax");
