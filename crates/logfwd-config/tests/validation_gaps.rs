@@ -84,7 +84,161 @@ pipelines:
 }
 
 #[test]
-fn issue_1855_env_expansion_preserves_yaml_hash_content() {
+fn raw_yaml_number_for_string_field_is_rejected() {
+    let yaml = r#"
+input:
+  type: file
+  path: 123
+output:
+  type: stdout
+"#;
+
+    let err = Config::load_str(yaml).unwrap_err().to_string();
+    assert!(
+        err.contains("config deserialization error"),
+        "error should come from deserialization: {err}"
+    );
+    assert!(
+        err.contains("string"),
+        "error should expect a string: {err}"
+    );
+}
+
+#[test]
+fn raw_yaml_bool_for_string_field_is_rejected() {
+    let yaml = r#"
+input:
+  type: http
+  listen: 127.0.0.1:8080
+  http:
+    path: true
+output:
+  type: stdout
+"#;
+
+    let err = Config::load_str(yaml).unwrap_err().to_string();
+    assert!(
+        err.contains("config deserialization error"),
+        "error should come from deserialization: {err}"
+    );
+    assert!(
+        err.contains("string"),
+        "error should expect a string: {err}"
+    );
+}
+
+#[test]
+fn raw_yaml_bool_for_numeric_field_is_rejected() {
+    let yaml = r#"
+pipelines:
+  app:
+    workers: true
+    inputs:
+      - type: generator
+    outputs:
+      - type: stdout
+"#;
+
+    let err = Config::load_str(yaml).unwrap_err().to_string();
+    assert!(
+        err.contains("config deserialization error"),
+        "error should come from deserialization: {err}"
+    );
+    assert!(
+        err.contains("unsigned integer"),
+        "error should expect an unsigned integer: {err}"
+    );
+}
+
+#[test]
+fn raw_yaml_float_for_integer_field_is_rejected() {
+    let yaml = r#"
+pipelines:
+  app:
+    workers: 1.5
+    inputs:
+      - type: generator
+    outputs:
+      - type: stdout
+"#;
+
+    let err = Config::load_str(yaml).unwrap_err().to_string();
+    assert!(
+        err.contains("config deserialization error"),
+        "error should come from deserialization: {err}"
+    );
+    assert!(
+        err.contains("unsigned integer"),
+        "error should expect an unsigned integer: {err}"
+    );
+}
+
+#[test]
+fn raw_yaml_number_for_bool_field_is_rejected() {
+    let yaml = r#"
+input:
+  type: http
+  listen: 127.0.0.1:8080
+  http:
+    strict_path: 1
+output:
+  type: stdout
+"#;
+
+    let err = Config::load_str(yaml).unwrap_err().to_string();
+    assert!(
+        err.contains("config deserialization error"),
+        "error should come from deserialization: {err}"
+    );
+    assert!(
+        err.contains("boolean"),
+        "error should expect a boolean: {err}"
+    );
+}
+
+#[test]
+fn generator_attribute_scalar_types_are_preserved() {
+    let yaml = r#"
+input:
+  type: generator
+  generator:
+    profile: record
+    attributes:
+      count: 7
+      enabled: true
+      label: "7"
+output:
+  type: stdout
+"#;
+
+    let config = Config::load_str(yaml).expect("generator attributes should parse");
+    let input = &config.pipelines["default"].inputs[0];
+    let attributes = match &input.type_config {
+        logfwd_config::InputTypeConfig::Generator(generator) => generator
+            .generator
+            .as_ref()
+            .expect("generator config should be present")
+            .attributes
+            .clone(),
+        _ => panic!("expected generator input"),
+    };
+
+    assert!(matches!(
+        attributes["count"],
+        logfwd_config::GeneratorAttributeValueConfig::Integer(7)
+    ));
+    assert!(matches!(
+        attributes["enabled"],
+        logfwd_config::GeneratorAttributeValueConfig::Bool(true)
+    ));
+    assert!(matches!(
+        attributes["label"],
+        logfwd_config::GeneratorAttributeValueConfig::String(ref value) if value == "7"
+    ));
+}
+
+#[test]
+fn env_expansion_preserves_yaml_hash_content() {
     let _env_lock = env_lock();
     let _env = EnvVarGuard::set("LOGFWD_ISSUE_1855", "/var/log/my app #1.log");
 
@@ -107,7 +261,7 @@ output:
 }
 
 #[test]
-fn issue_1855_effective_yaml_preserves_yaml_hash_content() {
+fn effective_yaml_preserves_yaml_hash_content() {
     let _env_lock = env_lock();
     let _env = EnvVarGuard::set("LOGFWD_ISSUE_1855_EFFECTIVE", "/var/log/my app #1.log");
 
@@ -137,7 +291,7 @@ output:
 }
 
 #[test]
-fn issue_1855_env_strings_are_parsed_by_typed_schema() {
+fn env_numeric_string_is_parsed_by_typed_schema() {
     let _env_lock = env_lock();
     let _env = EnvVarGuard::set("LOGFWD_ISSUE_1855_WORKERS", "4");
 
@@ -165,7 +319,7 @@ pipelines:
 }
 
 #[test]
-fn issue_1855_env_strings_are_parsed_as_bools_by_typed_schema() {
+fn env_bool_string_is_parsed_by_typed_schema() {
     let _env_lock = env_lock();
     let _env = EnvVarGuard::set("LOGFWD_ISSUE_1855_STRICT_PATH", "false");
 
@@ -192,7 +346,7 @@ output:
 }
 
 #[test]
-fn issue_1855_quoted_env_expansion_preserves_string_scalars() {
+fn quoted_env_expansion_preserves_string_scalars() {
     let _env_lock = env_lock();
     let _env = EnvVarGuard::set("LOGFWD_ISSUE_1855_QUOTED_PATH", "1234");
 
@@ -215,7 +369,7 @@ output:
 }
 
 #[test]
-fn issue_1855_tagged_quoted_env_expansion_preserves_string_scalars() {
+fn tagged_quoted_env_expansion_preserves_string_scalars() {
     let _env_lock = env_lock();
     let _env = EnvVarGuard::set("LOGFWD_ISSUE_1855_TAGGED_PATH", "true");
 
@@ -238,7 +392,7 @@ output:
 }
 
 #[test]
-fn issue_1855_tagged_unquoted_env_expansion_preserves_string_scalars() {
+fn tagged_unquoted_env_expansion_preserves_string_scalars() {
     let _env_lock = env_lock();
     let _env = EnvVarGuard::set("LOGFWD_ISSUE_1855_TAGGED_UNQUOTED", "123");
 
@@ -263,7 +417,7 @@ output:
 }
 
 #[test]
-fn issue_1855_anchored_quoted_env_expansion_preserves_string_scalars() {
+fn anchored_quoted_env_expansion_preserves_string_scalars() {
     let _env_lock = env_lock();
     let _env = EnvVarGuard::set("LOGFWD_ISSUE_1855_ANCHORED_PATH", "true");
 
@@ -286,7 +440,7 @@ output:
 }
 
 #[test]
-fn issue_1855_mixed_env_uses_schema_for_types_and_strings_for_string_fields() {
+fn mixed_env_uses_schema_for_types_and_strings_for_string_fields() {
     let _env_lock = env_lock();
     let _env = EnvVarGuard::set("LOGFWD_ISSUE_1855_MIXED", "4");
 
@@ -312,7 +466,7 @@ pipelines:
 }
 
 #[test]
-fn issue_1855_plain_scalar_apostrophe_is_not_treated_as_quote_boundary() {
+fn plain_scalar_apostrophe_is_not_treated_as_quote_boundary() {
     let yaml = r#"
 input:
   type: file
@@ -332,7 +486,7 @@ output:
 }
 
 #[test]
-fn issue_1855_block_scalar_mixed_indentation_expands() {
+fn block_scalar_mixed_indentation_expands() {
     let _env_lock = env_lock();
     let _env = EnvVarGuard::set("LOGFWD_ISSUE_1855_BLOCK_FIELD", "message");
 
@@ -362,7 +516,7 @@ pipelines:
 }
 
 #[test]
-fn issue_1855_single_quoted_yaml_escape_survives_env_expansion() {
+fn single_quoted_yaml_escape_survives_env_expansion() {
     let yaml = r#"
 pipelines:
   test:
@@ -383,7 +537,7 @@ pipelines:
 }
 
 #[test]
-fn issue_1855_env_expanded_mapping_key_collision_is_rejected() {
+fn env_expanded_mapping_key_collision_is_rejected() {
     let _env_lock = env_lock();
     let _env_a = EnvVarGuard::set("LOGFWD_ISSUE_1855_KEY_A", "prod");
     let _env_b = EnvVarGuard::set("LOGFWD_ISSUE_1855_KEY_B", "prod");
@@ -409,7 +563,7 @@ pipelines:
 }
 
 #[test]
-fn issue_1855_env_expansion_applies_to_mapping_keys() {
+fn env_expansion_applies_to_mapping_keys() {
     let _env_lock = env_lock();
     let _env = EnvVarGuard::set("LOGFWD_ISSUE_1855_PIPELINE", "from-env");
 

@@ -1,4 +1,7 @@
 use crate::env::expand_env_vars;
+use crate::serde_helpers::{
+    deserialize_option_strict_string, deserialize_string_map_strict_values,
+};
 use crate::types::{
     Config, ConfigError, EnrichmentConfig, InputConfig, OutputConfig, PipelineConfig, ServerConfig,
     StorageConfig,
@@ -13,11 +16,12 @@ use std::path::Path;
 #[serde(deny_unknown_fields)]
 struct RawConfig {
     input: Option<InputConfig>,
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
     transform: Option<String>,
     output: Option<OutputConfig>,
     #[serde(default)]
     enrichment: Vec<EnrichmentConfig>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_map_strict_values")]
     resource_attrs: HashMap<String, String>,
     pipelines: Option<HashMap<String, PipelineConfig>>,
     #[serde(default)]

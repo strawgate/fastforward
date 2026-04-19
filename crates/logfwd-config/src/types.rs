@@ -1,7 +1,9 @@
 use crate::compat;
 use crate::serde_helpers::{
     deserialize_from_string_or_value, deserialize_one_or_many,
-    deserialize_option_from_string_or_value,
+    deserialize_option_from_string_or_value, deserialize_option_strict_string,
+    deserialize_option_string_map_strict_values, deserialize_option_vec_strict_string,
+    deserialize_strict_string, deserialize_string_map_strict_values, deserialize_vec_strict_string,
 };
 use crate::shared::{TlsClientConfig, TlsInputConfig};
 use serde::Deserialize;
@@ -15,8 +17,9 @@ pub(crate) const PIPELINE_WORKERS_MAX: usize = 1024;
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct AuthConfig {
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
     pub bearer_token: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_map_strict_values")]
     pub headers: HashMap<String, String>,
 }
 
@@ -226,7 +229,7 @@ pub enum GeneratorComplexityConfig {
 #[serde(untagged)]
 pub enum GeneratorAttributeValueConfig {
     Null,
-    String(String),
+    String(#[serde(deserialize_with = "deserialize_strict_string")] String),
     Integer(i64),
     Float(f64),
     Bool(bool),
@@ -236,6 +239,7 @@ pub enum GeneratorAttributeValueConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GeneratorSequenceConfig {
+    #[serde(deserialize_with = "deserialize_strict_string")]
     pub field: String,
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
     pub start: Option<u64>,
@@ -250,6 +254,7 @@ pub struct GeneratorSequenceConfig {
 pub struct GeneratorTimestampConfig {
     /// ISO8601 datetime (`YYYY-MM-DDTHH:MM:SSZ`) or `"now"`.
     /// Default: `"2024-01-15T00:00:00Z"`.
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
     pub start: Option<String>,
     /// Milliseconds between events. Negative = backward. Default: 1.
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
@@ -271,6 +276,7 @@ pub enum HttpMethodConfig {
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct HttpInputConfig {
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
     pub path: Option<String>,
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
     pub strict_path: Option<bool>,
@@ -284,6 +290,7 @@ pub struct HttpInputConfig {
     pub response_code: Option<u16>,
     /// Optional static body returned on successful ingest.
     /// Must be omitted when `response_code` is `204`.
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
     pub response_body: Option<String>,
 }
 
@@ -294,7 +301,7 @@ pub struct GeneratorInputConfig {
     pub events_per_second: Option<u64>,
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
     pub num_lines: Option<u64>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
     pub message_template: Option<String>,
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
     pub field_count: Option<usize>,
@@ -310,6 +317,7 @@ pub struct GeneratorInputConfig {
     #[serde(default)]
     pub attributes: HashMap<String, GeneratorAttributeValueConfig>,
     pub sequence: Option<GeneratorSequenceConfig>,
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
     pub event_created_unix_nano_field: Option<String>,
     /// Timestamp configuration for the `logs` profile.
     pub timestamp: Option<GeneratorTimestampConfig>,
@@ -328,6 +336,7 @@ pub struct HostMetricsInputConfig {
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
     pub emit_heartbeat: Option<bool>,
     /// Optional path to a JSON control file for runtime sensor tuning.
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
     pub control_path: Option<String>,
     /// How often to check `control_path` for updates. Defaults to 1_000 when omitted.
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
@@ -335,6 +344,7 @@ pub struct HostMetricsInputConfig {
     /// Optional explicit enabled families for this platform.
     ///
     /// `None` means "use platform defaults". `Some([])` means "disable all".
+    #[serde(default, deserialize_with = "deserialize_option_vec_strict_string")]
     pub enabled_families: Option<Vec<String>>,
     /// Emit periodic per-family sample rows. Defaults to true.
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
@@ -343,48 +353,49 @@ pub struct HostMetricsInputConfig {
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
     pub max_rows_per_poll: Option<usize>,
     /// Path to the compiled eBPF kernel binary (required for `linux_ebpf_sensor`).
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
     pub ebpf_binary_path: Option<String>,
     /// Maximum events to drain per poll cycle (default: 4096).
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
     pub max_events_per_poll: Option<usize>,
     /// Glob patterns for process names to include (e.g., `["nginx*", "python"]`).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_option_vec_strict_string")]
     pub include_process_names: Option<Vec<String>>,
     /// Glob patterns for process names to exclude.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_option_vec_strict_string")]
     pub exclude_process_names: Option<Vec<String>>,
     /// Specific event types to enable (e.g., `["process_exec", "tcp_connect"]`).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_option_vec_strict_string")]
     pub include_event_types: Option<Vec<String>>,
     /// Specific event types to disable.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_option_vec_strict_string")]
     pub exclude_event_types: Option<Vec<String>>,
     /// Ring buffer size in kilobytes.
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
     pub ring_buffer_size_kb: Option<usize>,
     /// Optional list of scrapers to run (e.g. `["cpu", "memory", "disk", "network", "filesystem"]`).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_option_vec_strict_string")]
     pub scrapers: Option<Vec<String>>,
     /// Cadence for metrics collection in milliseconds.
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
     pub collection_interval_ms: Option<u64>,
     /// List of disk devices to include.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_option_vec_strict_string")]
     pub disk_include_devices: Option<Vec<String>>,
     /// List of disk devices to exclude.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_option_vec_strict_string")]
     pub disk_exclude_devices: Option<Vec<String>>,
     /// List of network interfaces to include.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_option_vec_strict_string")]
     pub network_include_interfaces: Option<Vec<String>>,
     /// List of network interfaces to exclude.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_option_vec_strict_string")]
     pub network_exclude_interfaces: Option<Vec<String>>,
     /// List of filesystem mount points to include.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_option_vec_strict_string")]
     pub filesystem_include_mount_points: Option<Vec<String>>,
     /// List of filesystem mount points to exclude.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_option_vec_strict_string")]
     pub filesystem_exclude_mount_points: Option<Vec<String>>,
 }
 
@@ -394,19 +405,19 @@ pub struct HostMetricsInputConfig {
 pub struct JournaldInputConfig {
     /// Systemd units to include. If empty, all units are collected.
     /// Unit names without a `.` are suffixed with `.service` automatically.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_vec_strict_string")]
     pub include_units: Vec<String>,
     /// Systemd units to exclude.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_vec_strict_string")]
     pub exclude_units: Vec<String>,
     /// Syslog identifiers (`SYSLOG_IDENTIFIER=`) to include.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_vec_strict_string")]
     pub identifiers: Vec<String>,
     /// Priority/log levels (e.g. `0`, `3`, `info`, `err`) to include.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_vec_strict_string")]
     pub priorities: Vec<String>,
     /// Path to persist the cursor. Allows resuming after restarts.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
     pub cursor_path: Option<String>,
     /// Include `_BOOT_ID` field in output (default: false).
     #[serde(default, deserialize_with = "deserialize_from_string_or_value")]
@@ -422,10 +433,13 @@ pub struct JournaldInputConfig {
     #[serde(default, deserialize_with = "deserialize_from_string_or_value")]
     pub since_now: bool,
     /// Path to `journalctl` binary. Defaults to `journalctl` (found via PATH).
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
     pub journalctl_path: Option<String>,
     /// Custom journal directory (passed as `--directory=<path>`).
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
     pub journal_directory: Option<String>,
     /// Journal namespace (passed as `--namespace=<ns>`).
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
     pub journal_namespace: Option<String>,
     /// Backend to use for reading the journal.
     ///
@@ -475,8 +489,10 @@ impl Default for JournaldInputConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct InputConfig {
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
     pub name: Option<String>,
     pub format: Option<Format>,
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
     pub sql: Option<String>,
     #[serde(flatten)]
     pub type_config: InputTypeConfig,
@@ -548,6 +564,7 @@ impl InputTypeConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FileTypeConfig {
+    #[serde(deserialize_with = "deserialize_strict_string")]
     pub path: String,
     /// File input poll cadence in milliseconds (default: 50, minimum: 1).
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
@@ -571,6 +588,7 @@ pub struct FileTypeConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UdpTypeConfig {
+    #[serde(deserialize_with = "deserialize_strict_string")]
     pub listen: String,
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
     pub max_message_size_bytes: Option<usize>,
@@ -581,6 +599,7 @@ pub struct UdpTypeConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TcpTypeConfig {
+    #[serde(deserialize_with = "deserialize_strict_string")]
     pub listen: String,
     #[serde(default)]
     pub tls: Option<TlsInputConfig>,
@@ -595,9 +614,11 @@ pub struct TcpTypeConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OtlpTypeConfig {
+    #[serde(deserialize_with = "deserialize_strict_string")]
     pub listen: String,
     /// Prefix applied to OTLP resource attributes when flattening into columns.
     /// Defaults to `resource.attributes.` when omitted.
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
     pub resource_prefix: Option<String>,
     /// Experimental OTLP protobuf decode strategy. Defaults to `prost`.
     pub protobuf_decode_mode: Option<OtlpProtobufDecodeModeConfig>,
@@ -614,6 +635,7 @@ pub struct OtlpTypeConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HttpTypeConfig {
+    #[serde(deserialize_with = "deserialize_strict_string")]
     pub listen: String,
     #[serde(default)]
     pub http: Option<HttpInputConfig>,
@@ -636,6 +658,7 @@ pub struct SensorTypeConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ArrowIpcTypeConfig {
+    #[serde(deserialize_with = "deserialize_strict_string")]
     pub listen: String,
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
     pub max_connections: Option<usize>,
@@ -663,23 +686,32 @@ pub struct S3TypeConfig {
 #[serde(deny_unknown_fields)]
 pub struct S3InputConfig {
     /// S3 bucket name.
+    #[serde(deserialize_with = "deserialize_strict_string")]
     pub bucket: String,
     /// AWS region (e.g. `"us-east-1"`). Defaults to `"us-east-1"`.
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
     pub region: Option<String>,
     /// Override S3 endpoint URL (e.g. `"http://localhost:9000"` for MinIO).
     /// When set, path-style addressing is used automatically.
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
     pub endpoint: Option<String>,
     /// Only process keys with this prefix.
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
     pub prefix: Option<String>,
     /// SQS queue URL for event-driven object discovery.
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
     pub sqs_queue_url: Option<String>,
     /// `ListObjectsV2` `StartAfter` key for resumable prefix scanning.
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
     pub start_after: Option<String>,
     /// AWS access key ID. Falls back to `AWS_ACCESS_KEY_ID` env var.
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
     pub access_key_id: Option<String>,
     /// AWS secret access key. Falls back to `AWS_SECRET_ACCESS_KEY` env var.
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
     pub secret_access_key: Option<String>,
     /// AWS session token for temporary credentials. Falls back to `AWS_SESSION_TOKEN` env var.
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
     pub session_token: Option<String>,
     /// Range-GET part size in bytes. Default: 8 MiB.
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
@@ -696,6 +728,7 @@ pub struct S3InputConfig {
     /// Compression override: `"auto"`, `"gzip"` (or `"gz"`), `"zstd"` (or
     /// `"zst"`), `"snappy"` (or `"sz"`), `"none"` (or `"identity"`).
     /// Default: `"auto"` (detect from key extension or Content-Encoding).
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
     pub compression: Option<String>,
     /// Polling interval for `ListObjectsV2` mode in milliseconds. Default: 5000.
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
@@ -705,27 +738,43 @@ pub struct S3InputConfig {
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct OutputConfig {
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
     pub name: Option<String>,
     #[serde(rename = "type")]
     pub output_type: OutputType,
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
     pub endpoint: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
     pub protocol: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
     pub compression: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
     pub request_mode: Option<String>,
     pub format: Option<Format>,
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
     pub path: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
     pub index: Option<String>,
     #[serde(default)]
     pub auth: Option<AuthConfig>,
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
     pub tenant_id: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_option_string_map_strict_values"
+    )]
     pub static_labels: Option<HashMap<String, String>>,
+    #[serde(default, deserialize_with = "deserialize_option_vec_strict_string")]
     pub label_columns: Option<Vec<String>>,
 
     /// Client TLS configuration for outbound connections.
     #[serde(default)]
     pub tls: Option<TlsClientConfig>,
     /// Custom HTTP headers to include in requests.
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_option_string_map_strict_values"
+    )]
     pub headers: Option<HashMap<String, String>>,
     /// Number of retry attempts for transient errors.
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
@@ -746,7 +795,7 @@ pub struct OutputConfig {
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
     pub batch_timeout_ms: Option<u64>,
     /// Host for socket-based IPC.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
     pub host: Option<String>,
     /// Port for socket-based IPC.
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
@@ -778,6 +827,7 @@ pub enum GeoDatabaseFormat {
 #[serde(deny_unknown_fields)]
 pub struct GeoDatabaseConfig {
     pub format: GeoDatabaseFormat,
+    #[serde(deserialize_with = "deserialize_strict_string")]
     pub path: String,
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
     pub refresh_interval: Option<u64>,
@@ -786,7 +836,9 @@ pub struct GeoDatabaseConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StaticEnrichmentConfig {
+    #[serde(deserialize_with = "deserialize_strict_string")]
     pub table_name: String,
+    #[serde(deserialize_with = "deserialize_string_map_strict_values")]
     pub labels: HashMap<String, String>,
 }
 
@@ -797,7 +849,10 @@ pub struct HostInfoConfig {}
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct K8sPathConfig {
-    #[serde(default = "default_k8s_table_name")]
+    #[serde(
+        default = "default_k8s_table_name",
+        deserialize_with = "deserialize_strict_string"
+    )]
     pub table_name: String,
 }
 
@@ -808,7 +863,9 @@ fn default_k8s_table_name() -> String {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CsvEnrichmentConfig {
+    #[serde(deserialize_with = "deserialize_strict_string")]
     pub table_name: String,
+    #[serde(deserialize_with = "deserialize_strict_string")]
     pub path: String,
     /// Reload the file from disk every N seconds. If absent the file is read
     /// once at startup and never reloaded.
@@ -819,7 +876,9 @@ pub struct CsvEnrichmentConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct JsonlEnrichmentConfig {
+    #[serde(deserialize_with = "deserialize_strict_string")]
     pub table_name: String,
+    #[serde(deserialize_with = "deserialize_strict_string")]
     pub path: String,
     /// Reload the file from disk every N seconds. If absent the file is read
     /// once at startup and never reloaded.
@@ -840,8 +899,10 @@ pub struct JsonlEnrichmentConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EnvVarsEnrichmentConfig {
+    #[serde(deserialize_with = "deserialize_strict_string")]
     pub table_name: String,
     /// Environment variable name prefix to filter on (e.g. `"LOGFWD_META_"`).
+    #[serde(deserialize_with = "deserialize_strict_string")]
     pub prefix: String,
 }
 
@@ -857,7 +918,9 @@ pub struct ProcessInfoConfig {}
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct KvFileEnrichmentConfig {
+    #[serde(deserialize_with = "deserialize_strict_string")]
     pub table_name: String,
+    #[serde(deserialize_with = "deserialize_strict_string")]
     pub path: String,
     /// Reload the file from disk every N seconds (must be >= 1).
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
@@ -907,12 +970,13 @@ pub enum EnrichmentConfig {
 pub struct PipelineConfig {
     #[serde(default, deserialize_with = "deserialize_one_or_many")]
     pub inputs: Vec<InputConfig>,
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
     pub transform: Option<String>,
     #[serde(default, deserialize_with = "deserialize_one_or_many")]
     pub outputs: Vec<OutputConfig>,
     #[serde(default)]
     pub enrichment: Vec<EnrichmentConfig>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_map_strict_values")]
     pub resource_attrs: HashMap<String, String>,
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
     pub workers: Option<usize>,
@@ -927,17 +991,22 @@ pub struct PipelineConfig {
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct ServerConfig {
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
     pub diagnostics: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
     pub log_level: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
     pub metrics_endpoint: Option<String>,
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
     pub metrics_interval_secs: Option<u64>,
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
     pub traces_endpoint: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct StorageConfig {
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
     pub data_dir: Option<String>,
 }
 

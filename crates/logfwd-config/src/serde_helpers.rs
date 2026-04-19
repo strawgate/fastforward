@@ -1,6 +1,8 @@
 use serde::Deserialize;
+use serde::de::{Error as DeError, Unexpected};
 use std::fmt;
-use std::str::FromStr;
+use std::marker::PhantomData;
+use std::{collections::HashMap, hash::Hash};
 
 pub(crate) fn deserialize_one_or_many<'de, T, D>(deserializer: D) -> Result<Vec<T>, D::Error>
 where
@@ -24,43 +26,387 @@ pub(crate) fn deserialize_option_from_string_or_value<'de, T, D>(
     deserializer: D,
 ) -> Result<Option<T>, D::Error>
 where
-    T: Deserialize<'de> + FromStr,
-    T::Err: fmt::Display,
+    T: StrictScalar,
     D: serde::Deserializer<'de>,
 {
-    Option::<StringOrValue<T>>::deserialize(deserializer)?
-        .map(StringOrValue::into_value)
-        .transpose()
+    Ok(Option::<StrictScalarValue<T>>::deserialize(deserializer)?
+        .map(StrictScalarValue::into_inner))
 }
 
 pub(crate) fn deserialize_from_string_or_value<'de, T, D>(deserializer: D) -> Result<T, D::Error>
 where
-    T: Deserialize<'de> + FromStr,
-    T::Err: fmt::Display,
+    T: StrictScalar,
     D: serde::Deserializer<'de>,
 {
-    StringOrValue::<T>::deserialize(deserializer)?.into_value()
+    Ok(StrictScalarValue::<T>::deserialize(deserializer)?.into_inner())
 }
 
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum StringOrValue<T> {
-    Value(T),
-    String(String),
-}
-
-impl<T> StringOrValue<T>
+pub(crate) fn deserialize_strict_string<'de, D>(deserializer: D) -> Result<String, D::Error>
 where
-    T: FromStr,
-    T::Err: fmt::Display,
+    D: serde::Deserializer<'de>,
 {
-    fn into_value<E>(self) -> Result<T, E>
+    StrictString::deserialize(deserializer).map(StrictString::into_inner)
+}
+
+pub(crate) fn deserialize_option_strict_string<'de, D>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<StrictString>::deserialize(deserializer)?.map(StrictString::into_inner))
+}
+
+pub(crate) fn deserialize_vec_strict_string<'de, D>(
+    deserializer: D,
+) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Vec::<StrictString>::deserialize(deserializer).map(strict_strings_into_inner)
+}
+
+pub(crate) fn deserialize_option_vec_strict_string<'de, D>(
+    deserializer: D,
+) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<Vec<StrictString>>::deserialize(deserializer)?.map(strict_strings_into_inner))
+}
+
+pub(crate) fn deserialize_string_map_strict_values<'de, D>(
+    deserializer: D,
+) -> Result<HashMap<String, String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_map_strict_values(deserializer)
+}
+
+pub(crate) fn deserialize_option_string_map_strict_values<'de, D>(
+    deserializer: D,
+) -> Result<Option<HashMap<String, String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(
+        Option::<HashMap<String, StrictString>>::deserialize(deserializer)?
+            .map(strict_string_map_into_inner),
+    )
+}
+
+fn deserialize_map_strict_values<'de, K, D>(deserializer: D) -> Result<HashMap<K, String>, D::Error>
+where
+    K: Deserialize<'de> + Eq + Hash,
+    D: serde::Deserializer<'de>,
+{
+    HashMap::<K, StrictString>::deserialize(deserializer).map(strict_string_map_into_inner)
+}
+
+fn strict_strings_into_inner(values: Vec<StrictString>) -> Vec<String> {
+    values.into_iter().map(StrictString::into_inner).collect()
+}
+
+fn strict_string_map_into_inner<K>(values: HashMap<K, StrictString>) -> HashMap<K, String>
+where
+    K: Eq + Hash,
+{
+    values
+        .into_iter()
+        .map(|(key, value)| (key, value.into_inner()))
+        .collect()
+}
+
+struct StrictScalarValue<T>(T);
+
+impl<T> StrictScalarValue<T> {
+    fn into_inner(self) -> T {
+        self.0
+    }
+}
+
+impl<'de, T> Deserialize<'de> for StrictScalarValue<T>
+where
+    T: StrictScalar,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
-        E: serde::de::Error,
+        D: serde::Deserializer<'de>,
     {
-        match self {
-            Self::Value(value) => Ok(value),
-            Self::String(value) => value.parse().map_err(E::custom),
+        struct StrictScalarVisitor<T> {
+            marker: PhantomData<T>,
         }
+
+        impl<T> serde::de::Visitor<'_> for StrictScalarVisitor<T>
+        where
+            T: StrictScalar,
+        {
+            type Value = StrictScalarValue<T>;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                T::expecting(formatter)
+            }
+
+            fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E>
+            where
+                E: DeError,
+            {
+                T::from_bool(value).map(StrictScalarValue)
+            }
+
+            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+            where
+                E: DeError,
+            {
+                T::from_i64(value).map(StrictScalarValue)
+            }
+
+            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+            where
+                E: DeError,
+            {
+                T::from_u64(value).map(StrictScalarValue)
+            }
+
+            fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E>
+            where
+                E: DeError,
+            {
+                T::from_f64(value).map(StrictScalarValue)
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: DeError,
+            {
+                T::from_string(value).map(StrictScalarValue)
+            }
+
+            fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+            where
+                E: DeError,
+            {
+                self.visit_str(&value)
+            }
+        }
+
+        deserializer.deserialize_any(StrictScalarVisitor {
+            marker: PhantomData,
+        })
+    }
+}
+
+// The `config` crate intentionally coerces between scalar kinds. These visitors
+// keep raw YAML strict while still letting env-expanded strings parse as typed
+// numeric and boolean fields.
+pub(crate) trait StrictScalar: Sized {
+    fn expecting(formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+
+    fn from_string<E>(value: &str) -> Result<Self, E>
+    where
+        E: DeError;
+
+    fn from_bool<E>(value: bool) -> Result<Self, E>
+    where
+        E: DeError,
+    {
+        Err(E::invalid_type(
+            Unexpected::Bool(value),
+            &StrictScalarExpected::<Self>::new(),
+        ))
+    }
+
+    fn from_i64<E>(value: i64) -> Result<Self, E>
+    where
+        E: DeError,
+    {
+        Err(E::invalid_type(
+            Unexpected::Signed(value),
+            &StrictScalarExpected::<Self>::new(),
+        ))
+    }
+
+    fn from_u64<E>(value: u64) -> Result<Self, E>
+    where
+        E: DeError,
+    {
+        Err(E::invalid_type(
+            Unexpected::Unsigned(value),
+            &StrictScalarExpected::<Self>::new(),
+        ))
+    }
+
+    fn from_f64<E>(value: f64) -> Result<Self, E>
+    where
+        E: DeError,
+    {
+        Err(E::invalid_type(
+            Unexpected::Float(value),
+            &StrictScalarExpected::<Self>::new(),
+        ))
+    }
+}
+
+struct StrictScalarExpected<T> {
+    marker: PhantomData<T>,
+}
+
+impl<T> StrictScalarExpected<T> {
+    fn new() -> Self {
+        Self {
+            marker: PhantomData,
+        }
+    }
+}
+
+impl<T> serde::de::Expected for StrictScalarExpected<T>
+where
+    T: StrictScalar,
+{
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        T::expecting(formatter)
+    }
+}
+
+impl StrictScalar for bool {
+    fn expecting(formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a boolean")
+    }
+
+    fn from_string<E>(value: &str) -> Result<Self, E>
+    where
+        E: DeError,
+    {
+        match value.to_ascii_lowercase().as_str() {
+            "1" | "true" | "on" | "yes" => Ok(true),
+            "0" | "false" | "off" | "no" => Ok(false),
+            _ => value.parse().map_err(E::custom),
+        }
+    }
+
+    fn from_bool<E>(value: bool) -> Result<Self, E>
+    where
+        E: DeError,
+    {
+        Ok(value)
+    }
+}
+
+macro_rules! impl_strict_unsigned {
+    ($($ty:ty),* $(,)?) => {
+        $(
+            impl StrictScalar for $ty {
+                fn expecting(formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                    formatter.write_str("an unsigned integer")
+                }
+
+                fn from_string<E>(value: &str) -> Result<Self, E>
+                where
+                    E: DeError,
+                {
+                    value.parse().map_err(E::custom)
+                }
+
+                fn from_i64<E>(value: i64) -> Result<Self, E>
+                where
+                    E: DeError,
+                {
+                    value.try_into().map_err(|_| {
+                        E::invalid_value(Unexpected::Signed(value), &StrictScalarExpected::<Self>::new())
+                    })
+                }
+
+                fn from_u64<E>(value: u64) -> Result<Self, E>
+                where
+                    E: DeError,
+                {
+                    value.try_into().map_err(|_| {
+                        E::invalid_value(Unexpected::Unsigned(value), &StrictScalarExpected::<Self>::new())
+                    })
+                }
+            }
+        )*
+    };
+}
+
+macro_rules! impl_strict_signed {
+    ($($ty:ty),* $(,)?) => {
+        $(
+            impl StrictScalar for $ty {
+                fn expecting(formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                    formatter.write_str("a signed integer")
+                }
+
+                fn from_string<E>(value: &str) -> Result<Self, E>
+                where
+                    E: DeError,
+                {
+                    value.parse().map_err(E::custom)
+                }
+
+                fn from_i64<E>(value: i64) -> Result<Self, E>
+                where
+                    E: DeError,
+                {
+                    value.try_into().map_err(|_| {
+                        E::invalid_value(Unexpected::Signed(value), &StrictScalarExpected::<Self>::new())
+                    })
+                }
+
+                fn from_u64<E>(value: u64) -> Result<Self, E>
+                where
+                    E: DeError,
+                {
+                    value.try_into().map_err(|_| {
+                        E::invalid_value(Unexpected::Unsigned(value), &StrictScalarExpected::<Self>::new())
+                    })
+                }
+            }
+        )*
+    };
+}
+
+impl_strict_unsigned!(u8, u16, u32, u64, usize);
+impl_strict_signed!(i32, i64);
+
+struct StrictString(String);
+
+impl StrictString {
+    fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for StrictString {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct StrictStringVisitor;
+
+        impl serde::de::Visitor<'_> for StrictStringVisitor {
+            type Value = StrictString;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a string")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(StrictString(value.to_owned()))
+            }
+
+            fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(StrictString(value))
+            }
+        }
+
+        deserializer.deserialize_any(StrictStringVisitor)
     }
 }
