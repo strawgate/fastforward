@@ -1260,7 +1260,7 @@ fn validate_transform_probe_read_only(
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
 
-    let scan_config = transform.analyzer().scan_config();
+    let scan_config = transform.scan_config();
     let fields: Vec<Field> = if scan_config.extract_all || scan_config.wanted_fields.is_empty() {
         vec![
             Field::new("body", DataType::Utf8, true),
@@ -1288,39 +1288,39 @@ fn validate_transform_probe_read_only(
         .map_err(|e| e.to_string())
 }
 
+const GENERATOR_LOGS_SIMPLE_COLUMNS: &[&str] = &[
+    "timestamp",
+    "level",
+    "message",
+    "duration_ms",
+    "request_id",
+    "service",
+    "status",
+];
+
 fn known_input_columns_read_only(
     input_cfg: &logfwd_config::InputConfig,
-) -> Option<std::collections::HashSet<&'static str>> {
+) -> Option<&'static [&'static str]> {
     use logfwd_config::{GeneratorComplexityConfig, GeneratorProfileConfig, InputTypeConfig};
 
     match &input_cfg.type_config {
         // Generator logs/simple has a stable built-in schema. Other profiles
         // or complexities are broader or user-defined, so skip strict checks.
         InputTypeConfig::Generator(generator_cfg) => {
-            let profile = generator_cfg
+            let is_logs_profile = generator_cfg
                 .generator
                 .as_ref()
-                .and_then(|cfg| cfg.profile.clone())
-                .unwrap_or(GeneratorProfileConfig::Logs);
-            let complexity = generator_cfg
+                .and_then(|cfg| cfg.profile.as_ref())
+                .is_none_or(|profile| matches!(profile, GeneratorProfileConfig::Logs));
+            let is_simple_complexity = generator_cfg
                 .generator
                 .as_ref()
-                .and_then(|cfg| cfg.complexity.clone())
-                .unwrap_or(GeneratorComplexityConfig::Simple);
-            if !matches!(profile, GeneratorProfileConfig::Logs)
-                || !matches!(complexity, GeneratorComplexityConfig::Simple)
-            {
+                .and_then(|cfg| cfg.complexity.as_ref())
+                .is_none_or(|complexity| matches!(complexity, GeneratorComplexityConfig::Simple));
+            if !is_logs_profile || !is_simple_complexity {
                 None
             } else {
-                Some(std::collections::HashSet::from([
-                    "timestamp",
-                    "level",
-                    "message",
-                    "duration_ms",
-                    "request_id",
-                    "service",
-                    "status",
-                ]))
+                Some(GENERATOR_LOGS_SIMPLE_COLUMNS)
             }
         }
         _ => None,
@@ -1330,26 +1330,27 @@ fn known_input_columns_read_only(
 fn validate_known_columns_read_only(
     input_name: &str,
     transform: &logfwd::transform::SqlTransform,
-    known_columns: Option<&std::collections::HashSet<&'static str>>,
+    known_columns: Option<&'static [&'static str]>,
 ) -> Result<(), String> {
     let Some(known_columns) = known_columns else {
         return Ok(());
     };
 
-    if transform.analyzer().uses_select_star {
+    let scan_config = transform.scan_config();
+    if scan_config.extract_all {
         return Ok(());
     }
 
-    let mut unknown: Vec<String> = transform
-        .analyzer()
-        .referenced_columns
+    let mut unknown: Vec<String> = scan_config
+        .wanted_fields
         .iter()
+        .map(|field| field.name.as_str())
         .filter(|column| {
             !known_columns
                 .iter()
                 .any(|known| known.eq_ignore_ascii_case(column))
         })
-        .cloned()
+        .map(str::to_owned)
         .collect();
     unknown.sort_unstable();
     unknown.dedup();
@@ -1358,7 +1359,7 @@ fn validate_known_columns_read_only(
         return Ok(());
     }
 
-    let mut supported: Vec<&str> = known_columns.iter().copied().collect();
+    let mut supported: Vec<&str> = known_columns.to_vec();
     supported.sort_unstable();
     Err(format!(
         "input '{input_name}': SQL references unknown column(s) {} for this input schema (known: {})",
@@ -1580,8 +1581,12 @@ fn validate_pipeline_read_only(
 
         let input_sql = input_cfg.sql.as_deref().unwrap_or(pipeline_sql);
         let mut transform = SqlTransform::new(input_sql).map_err(|e| e.to_string())?;
-        let known_columns = known_input_columns_read_only(input_cfg);
-        validate_known_columns_read_only(&input_name, &transform, known_columns.as_ref())?;
+        let known_columns = if config.enrichment.is_empty() {
+            known_input_columns_read_only(input_cfg)
+        } else {
+            None
+        };
+        validate_known_columns_read_only(&input_name, &transform, known_columns)?;
         #[cfg(feature = "datafusion")]
         {
             if let Some(ref db) = geo_database {
@@ -2493,9 +2498,42 @@ transform: |
 "#;
         let config = logfwd_config::Config::load_str(yaml).expect("config should parse");
         let runtime = validate_pipelines(&config, true, None);
+        let read_only = validate_pipelines_read_only(&config, None, |_name| {}, |_err| {});
         assert!(
             runtime.is_err(),
             "dry-run validation should reject fields embedded only inside message"
+        );
+        assert!(
+            read_only.is_err(),
+            "read-only validation should reject fields embedded only inside message"
+        );
+    }
+
+    #[test]
+    fn issue_1955_dry_run_skips_strict_check_when_enrichment_tables_are_present() {
+        let yaml = r#"
+input:
+  type: generator
+output:
+  type: null
+enrichment:
+  - type: static
+    table_name: labels
+    labels:
+      environment: production
+transform: |
+  SELECT labels.environment FROM logs CROSS JOIN labels
+"#;
+        let config = logfwd_config::Config::load_str(yaml).expect("config should parse");
+        let runtime = validate_pipelines(&config, true, None);
+        let read_only = validate_pipelines_read_only(&config, None, |_name| {}, |_err| {});
+        assert!(
+            runtime.is_ok(),
+            "dry-run validation should not reject enrichment-only columns"
+        );
+        assert!(
+            read_only.is_ok(),
+            "read-only validation should not reject enrichment-only columns"
         );
     }
 
