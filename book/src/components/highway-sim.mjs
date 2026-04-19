@@ -440,7 +440,11 @@ export function createSimulation(overrides, scaleFn) {
     var spawn = trySpawn(now);
     if (spawn.kind === 'blocked') {
       spawnBlockedTicks++;
-    } else if (spawn.kind === 'spawned') {
+    } else if (spawn.kind !== 'cooldown') {
+      // Reset on 'spawned' (car entered) and 'capped' (at capacity but
+      // entrances not physically blocked).  Only 'cooldown' preserves
+      // the counter — the spawn timer hasn't elapsed so we can't tell
+      // whether the entrance is clear.
       spawnBlockedTicks = 0;
     }
 
