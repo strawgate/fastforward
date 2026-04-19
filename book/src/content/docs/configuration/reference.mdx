@@ -6,6 +6,7 @@ description: "Complete YAML reference for all FastForward settings"
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
 FastForward commands that operate on pipeline config (for example `run`, `validate`, `dry-run`, and `effective-config`) accept a YAML file via `--config <config.yaml>`.
+`ff send` accepts a destination-only config with top-level `output`, injects stdin as the input, drains the output, and exits.
 
 ## Overview
 
@@ -119,6 +120,19 @@ input:
   format: cri
 ```
 
+### `stdin` input
+
+Read data from standard input. This input has no input-specific fields.
+It is primarily used by `ff send` for command-line piping.
+
+```yaml
+input:
+  type: stdin
+  format: auto
+```
+
+Supported formats: `auto`, `cri`, `json`, and `raw`.
+
 ### `generator` input
 
 Emit synthetic records for benchmarks, demos, and pipeline tests.
@@ -173,14 +187,12 @@ Receive OTLP log records from another agent or SDK.
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `listen` | string | Yes | `host:port`, e.g. `0.0.0.0:4318`. |
-| `resource_prefix` | string | No | Prefix used when flattening OTLP resource attributes. Defaults to `resource.attributes.`. Currently only `resource.attributes.` is supported. |
 | `protobuf_decode_mode` | string | No | Experimental protobuf decoder: `prost` (default), `projected_fallback`, or `projected_only`. Projected modes require a build with the `otlp-research` feature. |
 
 ```yaml
 input:
   type: otlp
   listen: 0.0.0.0:4318
-  resource_prefix: resource.attributes.
   protobuf_decode_mode: prost
 ```
 
@@ -334,6 +346,7 @@ Behavior:
 | Value | Status | Description |
 |-------|--------|-------------|
 | `file` | Implemented | Tail files matching a glob pattern. |
+| `stdin` | Implemented | Read piped stdin until EOF, then drain outputs and exit. |
 | `generator` | Implemented | Emit synthetic JSON-like records from an in-process source. |
 | `udp` | Implemented | Receive log lines over UDP. |
 | `tcp` | Implemented | Accept log lines over TCP. |
@@ -494,7 +507,7 @@ Write records to a file.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `path` | string | Yes | Destination file path. |
+| `path` | string | Yes | Destination file path. Parent directory must already exist and be writable. |
 | `format` | string | No | `json` for NDJSON output, or `text` to write raw lines. |
 
 ```yaml
@@ -983,7 +996,11 @@ storage:
 
 ## Environment variable substitution
 
-Any value in the config file can reference an environment variable with `${VAR}`:
+Any value in the config file can reference an environment variable with `${VAR}`.
+Variable names must start with an ASCII letter or `_`, and then contain only
+ASCII letters, digits, or `_`. `$VAR` stays literal, and default expressions
+such as `${VAR:fallback}` are rejected because `:` is not valid in variable
+names.
 
 ```yaml
 output:
@@ -995,9 +1012,13 @@ server:
 ```
 
 If the variable is not set, config loading fails fast with a validation error.
+An unterminated reference such as `${VAR` is preserved literally so existing
+config text is not rewritten accidentally; completed placeholders before that
+literal tail are still expanded.
 
-Exact unquoted placeholders use YAML scalar typing after expansion. This lets numeric
-and boolean fields read values directly from the environment:
+Environment variables are expanded as string data. The typed config schema then
+parses those strings into the field type, so numeric and boolean fields can read
+values directly from the environment without treating the env value as YAML:
 
 ```yaml
 pipelines:
@@ -1005,13 +1026,13 @@ pipelines:
     workers: ${LOGFWD_WORKERS}
 ```
 
-Quote a placeholder, or tag it with `!!str`, when the expanded value should remain
-a string even if it looks like a YAML number, boolean, or null:
+String fields remain strings even when the expanded value looks like a YAML
+number, boolean, or null:
 
 ```yaml
 input:
   type: file
-  path: "${LOG_PATH}"
+  path: ${LOG_PATH}
 ```
 
 Placeholders embedded inside longer strings always remain strings:

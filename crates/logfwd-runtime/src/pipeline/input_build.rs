@@ -10,7 +10,7 @@ use logfwd_config::{
 use logfwd_diagnostics::diagnostics::ComponentStats;
 use logfwd_io::format::FormatDecoder;
 use logfwd_io::framed::FramedInput;
-use logfwd_io::input::{FileInput, InputSource};
+use logfwd_io::input::{FileInput, InputSource, StdinInput};
 use logfwd_io::tail::TailConfig;
 
 use super::InputState;
@@ -64,6 +64,17 @@ fn validate_input_format(name: &str, input_type: InputType, format: &Format) -> 
         InputType::Http if !matches!(format, Format::Json | Format::Raw) => {
             return Err(format!(
                 "input '{name}': format {:?} is not supported for {:?} inputs (expected json or raw)",
+                format, input_type
+            ));
+        }
+        InputType::Stdin
+            if !matches!(
+                format,
+                Format::Cri | Format::Auto | Format::Json | Format::Raw
+            ) =>
+        {
+            return Err(format!(
+                "input '{name}': format {:?} is not supported for {:?} inputs (expected cri, auto, json, or raw)",
                 format, input_type
             ));
         }
@@ -274,10 +285,6 @@ pub(super) fn build_input_state(
         }
         InputTypeConfig::Otlp(o) => {
             let addr = require_non_empty(name, "otlp", "listen", Some(&o.listen))?;
-            let resource_prefix = o
-                .resource_prefix
-                .as_deref()
-                .unwrap_or(logfwd_types::field_names::DEFAULT_RESOURCE_PREFIX);
             let protobuf_decode_mode =
                 resolve_otlp_protobuf_decode_mode(name, o.protobuf_decode_mode)?;
             let format = cfg.format.clone().unwrap_or(Format::Json);
@@ -287,21 +294,18 @@ pub(super) fn build_input_state(
                 name,
                 addr,
                 Some(Arc::clone(&stats)),
-                resource_prefix,
                 protobuf_decode_mode,
                 o.max_recv_message_size_bytes,
             )
             .map_err(|e| format!("input '{name}': failed to start OTLP receiver: {e}"))?;
             #[cfg(not(feature = "otlp-research"))]
-            let source =
-                logfwd_io::otlp_receiver::OtlpReceiverInput::new_with_stats_resource_prefix_and_max_size(
-                    name,
-                    addr,
-                    Arc::clone(&stats),
-                    resource_prefix,
-                    o.max_recv_message_size_bytes,
-                )
-                .map_err(|e| format!("input '{name}': failed to start OTLP receiver: {e}"))?;
+            let source = logfwd_io::otlp_receiver::OtlpReceiverInput::new_with_stats_and_max_size(
+                name,
+                addr,
+                Arc::clone(&stats),
+                o.max_recv_message_size_bytes,
+            )
+            .map_err(|e| format!("input '{name}': failed to start OTLP receiver: {e}"))?;
             #[cfg(not(feature = "otlp-research"))]
             let _ = protobuf_decode_mode;
             (Box::new(source), format, 4 * 1024 * 1024)
@@ -371,6 +375,12 @@ pub(super) fn build_input_state(
             }
             let source = logfwd_io::http_input::HttpInput::new_with_options(name, addr, options)
                 .map_err(|e| format!("input '{name}': failed to start HTTP input: {e}"))?;
+            (Box::new(source), format, 4 * 1024 * 1024)
+        }
+        InputTypeConfig::Stdin(_) => {
+            let format = cfg.format.clone().unwrap_or(Format::Auto);
+            validate_input_format(name, InputType::Stdin, &format)?;
+            let source = StdinInput::new(name);
             (Box::new(source), format, 4 * 1024 * 1024)
         }
         InputTypeConfig::Udp(u) => {
@@ -709,7 +719,8 @@ fn build_host_metrics_config(
 /// Returns whether OTLP input should use structured ingress mode.
 ///
 /// Structured ingress preserves typed OTLP fields but bypasses the scanner.
-/// If scanner line capture is required, use legacy scanner ingress.
+/// If scanner line capture is required, route OTLP payloads through scanner
+/// ingress so the configured line field is populated.
 #[cfg(test)]
 pub(super) fn otlp_uses_structured_ingress(
     scan_config: &logfwd_core::scan_config::ScanConfig,
@@ -724,6 +735,30 @@ mod tests {
     fn http_input_accepts_json_and_raw_formats() {
         assert!(validate_input_format("http", InputType::Http, &Format::Json).is_ok());
         assert!(validate_input_format("http", InputType::Http, &Format::Raw).is_ok());
+    }
+
+    #[test]
+    fn stdin_input_accepts_line_or_raw_formats() {
+        for format in [Format::Auto, Format::Cri, Format::Json, Format::Raw] {
+            assert!(validate_input_format("stdin", InputType::Stdin, &format).is_ok());
+        }
+    }
+
+    #[test]
+    fn stdin_input_rejects_structured_formats() {
+        for format in [
+            Format::Logfmt,
+            Format::Syslog,
+            Format::Text,
+            Format::Console,
+        ] {
+            let err = validate_input_format("stdin", InputType::Stdin, &format)
+                .expect_err("stdin input must reject unsupported format");
+            assert!(
+                err.contains("expected cri, auto, json, or raw"),
+                "unexpected error: {err}"
+            );
+        }
     }
 
     #[test]
@@ -981,7 +1016,6 @@ mod tests {
                 InputType::Otlp,
                 InputTypeConfig::Otlp(logfwd_config::OtlpTypeConfig {
                     listen: "   ".to_string(),
-                    resource_prefix: None,
                     protobuf_decode_mode: None,
                     max_recv_message_size_bytes: None,
                     tls: None,
@@ -1082,7 +1116,7 @@ mod tests {
         scan.line_field_name = Some(logfwd_types::field_names::BODY.to_string());
         assert!(
             !otlp_uses_structured_ingress(&scan),
-            "line capture enabled should force legacy scanner ingress"
+            "line capture enabled should force scanner ingress"
         );
     }
 }
