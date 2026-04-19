@@ -761,6 +761,11 @@ mod verification {
     // for coverage — while avoiding the SAT explosion that u64 causes in
     // BTreeMap reasoning (verify_dropped_ticket_does_not_block took 54 min
     // with u64 vs <1s with u8).
+    //
+    // TLA+ no-impact: PipelineMachine.tla models checkpoints as opaque
+    // values. This cfg(kani)-only alias narrows only the Rust proof input
+    // domain; it does not change lifecycle transitions for batch sequencing,
+    // ACK/reject advance, drain, or checkpoint ordering.
     type Cp = u8;
 
     /// Ordered ACK: after all batches acked, committed checkpoint equals the last batch's.
@@ -774,6 +779,12 @@ mod verification {
         let cp1: Cp = kani::any();
         let cp2: Cp = kani::any();
         let cp3: Cp = kani::any();
+        kani::assume(cp1 <= cp2);
+        kani::assume(cp2 <= cp3);
+        kani::cover!(
+            cp1 < cp2 && cp2 < cp3,
+            "strictly increasing checkpoints covered"
+        );
 
         let t1 = running.create_batch(src, cp1);
         let t2 = running.create_batch(src, cp2);
