@@ -91,15 +91,19 @@ export function createSimulation(overrides, scaleFn) {
   // Car shape types — visual variety for the highway
   var SHAPES = ['sedan', 'truck', 'compact', 'van'];
 
+  // Shape → width multiplier (trucks wider, compacts narrower)
+  var SHAPE_W = { sedan: 1, truck: 1.3, compact: 0.8, van: 1 };
+
   function makeCar(d, speed, scale) {
     var s = scale != null ? scale : getScale();
     var shape = SHAPES[nextId % SHAPES.length];
+    var shapeMul = SHAPE_W[shape] || 1;
     var car = {
       id: nextId++,
       d: d,
       speed: speed != null ? speed : cfg.speedMax,
       scale: s,
-      w: cfg.carW * s,
+      w: cfg.carW * s * shapeMul,
       shape: shape,
       color: 'flow',
     };
@@ -118,7 +122,7 @@ export function createSimulation(overrides, scaleFn) {
     if (cars.length >= cfg.maxCars) return null;
     if (now - lastSpawn < cfg.spawnMs) return null;
     for (var j = 0; j < cars.length; j++) {
-      if (cars[j].d < cfg.minFollowPad + cfg.carW) return null;
+      if (cars[j].d < cfg.minFollowPad + cars[j].w) return null;
     }
     var car = addCar(0);
     lastSpawn = now;

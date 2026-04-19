@@ -291,13 +291,24 @@ describe('car size variety', function () {
     assert.ok(widths.size > 1, 'expected varied widths');
   });
 
-  it('fixedScale produces uniform cars', function () {
+  it('fixedScale produces uniform scale but shape-dependent widths', function () {
     var sim = createSimulation({}, fixedScale(1.0));
+    // Spawn 4 cars to cover all shapes (sedan, truck, compact, van)
     sim.addCar(0);
     sim.addCar(100);
+    sim.addCar(200);
+    sim.addCar(300);
     var cars = sim.getCars();
-    assert.equal(cars[0].w, cars[1].w);
-    assert.equal(cars[0].w, DEFAULTS.carW * 1.0);
+    // All have scale 1.0
+    for (var i = 0; i < cars.length; i++) {
+      assert.equal(cars[i].scale, 1.0);
+    }
+    // sedan (id 0) and van (id 3) have w = carW * 1.0
+    assert.equal(cars[0].w, DEFAULTS.carW * 1.0); // sedan
+    // truck (id 1) has w = carW * 1.3
+    assert.equal(cars[1].w, DEFAULTS.carW * 1.3); // truck
+    // compact (id 2) has w = carW * 0.8
+    assert.equal(cars[2].w, DEFAULTS.carW * 0.8); // compact
   });
 
   it('gap enforcement accounts for different car sizes', function () {

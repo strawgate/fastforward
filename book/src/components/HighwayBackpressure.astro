@@ -83,8 +83,8 @@
     </div>
   </div>
 
-  <div class="hw-status" id="hw-status" role="status" aria-live="polite" aria-atomic="true" style="display:none">>
-    &#x1F7E2; Flowing &mdash; collector keeping up
+  <div class="hw-status" id="hw-status" role="status" aria-live="polite" aria-atomic="true">
+    Flowing — traffic moving freely
   </div>
 </div>
 
@@ -147,9 +147,8 @@
   .hw-stat-light { font-size: 1.2rem; }
 
   .hw-status {
-    text-align: center; font-size: 0.72rem; font-weight: 500;
-    color: var(--sl-color-text); margin: 0.2rem 0 0;
-    min-height: 1.3em; transition: color 0.3s;
+    position: absolute; width: 1px; height: 1px; overflow: hidden;
+    clip: rect(0 0 0 0); white-space: nowrap; border: 0;
   }
 </style>
 
@@ -406,6 +405,18 @@ import { createSimulation } from './highway-sim.mjs';
     slider.disabled = true;
     statusEl.textContent = 'Animation paused (reduced motion)';
   }
+
+  // Pause when tab is hidden, resume when visible
+  document.addEventListener('visibilitychange', function() {
+    if (document.hidden) {
+      clearInterval(timer);
+      timer = null;
+    } else if (!timer && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      sim.setCycleStart(Date.now());
+      sim.setLastSpawn(Date.now());
+      timer = setInterval(tick, TICK_MS);
+    }
+  });
 
   document.addEventListener('astro:before-swap', function() {
     clearInterval(timer);

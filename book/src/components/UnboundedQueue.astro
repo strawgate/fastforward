@@ -92,7 +92,7 @@
   var box = document.getElementById('uq-box');
   var btn = document.getElementById('uq-btn');
   var status = document.getElementById('uq-status');
-  if (!fill || !btn) return;
+  if (!fill || !btn || !mem || !boom || !box || !status) return;
 
   var BOX_TOP = 30;
   var BOX_H = 120;
@@ -201,6 +201,8 @@
   function reset() {
     clearInterval(timer);
     timer = null;
+    clearTimeout(restartTimer);
+    restartTimer = null;
     currentMB = 0;
     phase = 'idle';
     exploded = false;
@@ -218,9 +220,22 @@
   }
 
   btn.addEventListener('click', function() {
-    if (phase === 'idle' || phase === 'exploded') {
+    if (phase === 'exploded') {
+      clearTimeout(restartTimer);
+      restartTimer = null;
       reset();
       start();
+    } else if (phase === 'idle') {
+      // Resume from current level (don't reset to 0)
+      if (currentMB > 0) {
+        phase = 'running';
+        boom.setAttribute('opacity', '0');
+        mem.setAttribute('opacity', '1');
+        btn.textContent = '⏸ Pause';
+        timer = setInterval(tick, TICK_MS);
+      } else {
+        start();
+      }
     } else if (phase === 'running') {
       clearInterval(timer);
       timer = null;
@@ -250,6 +265,18 @@
     status.textContent = 'Animation paused (reduced motion)';
     btn.textContent = '▶ Start';
   }
+
+  // Pause when tab is hidden, resume when visible
+  document.addEventListener('visibilitychange', function() {
+    if (document.hidden) {
+      clearInterval(timer);
+      timer = null;
+      clearTimeout(restartTimer);
+      restartTimer = null;
+    } else if (phase === 'running' && !timer) {
+      timer = setInterval(tick, TICK_MS);
+    }
+  });
 
   // Cleanup on SPA navigation
   document.addEventListener('astro:before-swap', function() {
