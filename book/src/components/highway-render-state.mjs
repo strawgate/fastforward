@@ -64,6 +64,15 @@ export function createRenderState(overrides) {
     });
   }
 
+  function snapTo(id, x, y, angle) {
+    const car = cars[id];
+    if (!car) return;
+    car.waypoints.length = 0; // clear queued waypoints
+    car.x = x;
+    car.y = y;
+    if (angle != null) car.angle = angle;
+  }
+
   function stepCar(car) {
     if (car.waypoints.length === 0) {
       // No target — decelerate to stop
@@ -198,6 +207,7 @@ export function createRenderState(overrides) {
     addCar: addCar,
     removeCar: removeCar,
     pushTarget: pushTarget,
+    snapTo: snapTo,
     step: step,
     getCar: getCar,
     getAllCars: getAllCars,

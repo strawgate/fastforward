@@ -113,6 +113,8 @@ import { createRenderState } from './highway-render-state.mjs';
 
   // ---- SVG element management (DOM only — no interpolation logic) ----
   const carEls = {}; // id → { g, body }
+  const carLastD = {};   // id → last known targetD (for arc-following waypoints)
+  const carLastSeg = {}; // id → last known segment
 
   function createCarEl(car) {
     let w = CAR_W * car.scale;
@@ -192,6 +194,8 @@ import { createRenderState } from './highway-render-state.mjs';
       el.g.parentNode.removeChild(el.g);
       delete carEls[id];
     }
+    delete carLastD[id];
+    delete carLastSeg[id];
     rs.removeCar(id);
   }
 
@@ -233,6 +237,30 @@ import { createRenderState } from './highway-render-state.mjs';
         const car = allCars[c];
         if (!carEls[car.id]) createCarEl(car);
         const tp = posAt(car.segment, car.targetD);
+        const prevSeg = carLastSeg[car.id];
+        const prevD = carLastD[car.id];
+
+        // Segment transition (ramp→highway, highway→exit/cont): snap the
+        // render state to the new position instead of interpolating across
+        // paths, which would cut through other cars.
+        if (prevSeg && prevSeg !== car.segment) {
+          const angle = angleAt(car.segment, car.targetD);
+          rs.snapTo(car.id, tp.x, tp.y, angle);
+        }
+
+        // For curved segments, push intermediate arc-following waypoints
+        // so the render state follows the SVG path instead of cutting corners.
+        if (prevSeg === car.segment && prevD != null && prevD < car.targetD &&
+            (car.segment === 'ramp' || car.segment === 'exit')) {
+          const steps = 3;
+          const dStep = (car.targetD - prevD) / steps;
+          for (let s = 1; s < steps; s++) {
+            const mp = posAt(car.segment, prevD + dStep * s);
+            rs.pushTarget(car.id, mp.x, mp.y, car.opacity != null ? car.opacity : 1, car.color);
+          }
+        }
+        carLastD[car.id] = car.targetD;
+        carLastSeg[car.id] = car.segment;
         rs.pushTarget(car.id, tp.x, tp.y, car.opacity != null ? car.opacity : 1, car.color);
       }
 
@@ -303,10 +331,9 @@ import { createRenderState } from './highway-render-state.mjs';
 
   // ---- Seed initial cars ----
   function seedCars() {
-    sim.addCar('highway', 2);
-    sim.addCar('highway', 6);
-    sim.addCar('highway', 10);
-    sim.addCar('ramp', 2);
+    sim.addCar('highway', 3);
+    sim.addCar('highway', 7);
+    sim.addCar('highway', 11);
   }
 
   // ---- Init ----
