@@ -1347,8 +1347,7 @@ fn validate_known_columns_read_only(
         return Ok(());
     }
 
-    let known: std::collections::HashSet<&str> =
-        known_columns.iter().copied().collect();
+    let known: std::collections::HashSet<&str> = known_columns.iter().copied().collect();
 
     let mut unknown: Vec<String> = scan_config
         .wanted_fields
