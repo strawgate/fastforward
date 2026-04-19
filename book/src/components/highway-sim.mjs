@@ -179,6 +179,15 @@ export function createSimulation(overrides, scaleFn) {
 
   function moveSegment(cars, segLen, opts) {
     cars.sort(function (a, b) { return b.d - a.d; });
+    var phantoms = opts.phantoms || [];
+
+    // Merge phantoms into a sorted list of obstacles (d descending)
+    // so they integrate with the following-distance logic.
+    var obstacles = cars.slice();
+    for (var p = 0; p < phantoms.length; p++) {
+      obstacles.push(phantoms[p]);
+    }
+    obstacles.sort(function (a, b) { return b.d - a.d; });
 
     for (var i = 0; i < cars.length; i++) {
       var car = cars[i];
@@ -205,11 +214,18 @@ export function createSimulation(overrides, scaleFn) {
         if (car.d > segLen) { car.d = segLen; car.speed = 0; }
       }
 
-      // Following distance
-      if (i > 0) {
-        var ahead = cars[i - 1];
-        var gap = ahead.d - car.d;
-        var mg = minGap(car, ahead);
+      // Following distance — find nearest obstacle ahead (real or phantom)
+      var nearestAhead = null;
+      for (var oi = 0; oi < obstacles.length; oi++) {
+        var ob = obstacles[oi];
+        if (ob === car) continue;
+        if (ob.d > car.d && (!nearestAhead || ob.d < nearestAhead.d)) {
+          nearestAhead = ob;
+        }
+      }
+      if (nearestAhead) {
+        var gap = nearestAhead.d - car.d;
+        var mg = (car.w + (nearestAhead.w || cfg.carW)) / 2 + cfg.minFollowPad;
         if (gap < mg + cfg.followZone) {
           target = Math.min(target, Math.max(0, (gap - mg) * cfg.brakeRate));
         }
@@ -220,13 +236,12 @@ export function createSimulation(overrides, scaleFn) {
       if (car.speed < 0.03) car.speed = 0;
       car.d += car.speed;
 
-      // Hard gap
-      if (i > 0) {
-        var ahead2 = cars[i - 1];
-        var mg2 = minGap(car, ahead2);
-        if (ahead2.d - car.d < mg2) {
-          car.d = ahead2.d - mg2;
-          car.speed = Math.min(car.speed, ahead2.speed);
+      // Hard gap — enforce against nearest real or phantom obstacle ahead
+      if (nearestAhead) {
+        var mg2 = (car.w + (nearestAhead.w || cfg.carW)) / 2 + cfg.minFollowPad;
+        if (nearestAhead.d - car.d < mg2) {
+          car.d = nearestAhead.d - mg2;
+          car.speed = Math.min(car.speed, nearestAhead.speed != null ? nearestAhead.speed : 0);
         }
       }
 
@@ -244,6 +259,40 @@ export function createSimulation(overrides, scaleFn) {
 
       car.color = carColor(car);
     }
+  }
+
+  // ---- phantom obstacle builders ----
+  // Project cars from adjacent segments into this segment's coordinate
+  // space so the smooth following/braking physics prevents visual overlap
+  // at merge and fork junctions.
+
+  function hwyPhantoms() {
+    var ph = [];
+    // Exit cars near entry → appear at highway d = lenHwy + exitCar.d
+    for (var e = 0; e < carsExit.length; e++) {
+      if (carsExit[e].d < cfg.exitEntryD + 40) {
+        ph.push({ d: cfg.lenHwy + carsExit[e].d, w: carsExit[e].w, speed: carsExit[e].speed });
+      }
+    }
+    // Cont cars near entry → appear at highway d = lenHwy + contCar.d
+    for (var c = 0; c < carsCont.length; c++) {
+      if (carsCont[c].d < cfg.contEntryD + 40) {
+        ph.push({ d: cfg.lenHwy + carsCont[c].d, w: carsCont[c].w, speed: carsCont[c].speed });
+      }
+    }
+    return ph;
+  }
+
+  function rampPhantoms() {
+    var ph = [];
+    // Highway cars near mergeD → appear at ramp d = lenRamp + (hwyCar.d - mergeD)
+    for (var h = 0; h < carsHwy.length; h++) {
+      var dist = carsHwy[h].d - cfg.mergeD;
+      if (Math.abs(dist) < 50) {
+        ph.push({ d: cfg.lenRamp + dist, w: carsHwy[h].w, speed: carsHwy[h].speed });
+      }
+    }
+    return ph;
   }
 
   // ---- transitions ----
@@ -322,66 +371,6 @@ export function createSimulation(overrides, scaleFn) {
     }
   }
 
-  // ---- cross-segment proximity braking ----
-  // Cars on different segments share SVG space at junctions. Slow them
-  // to avoid visual overlap even though they're in different arrays.
-
-  function crossSegmentBrake() {
-    var pad = cfg.minFollowPad;
-
-    // Merge zone: ramp cars approaching end vs highway cars near mergeD
-    for (var r = 0; r < carsRamp.length; r++) {
-      var rc = carsRamp[r];
-      if (rc.d < cfg.lenRamp - 40) continue;
-      for (var h = 0; h < carsHwy.length; h++) {
-        var hc = carsHwy[h];
-        if (Math.abs(hc.d - cfg.mergeD) > 40) continue;
-        // Virtual distance: how close they are to the merge point
-        var rDist = cfg.lenRamp - rc.d;
-        var hDist = Math.abs(hc.d - cfg.mergeD);
-        var proximity = rDist + hDist;
-        var needed = (rc.w + hc.w) / 2 + pad;
-        if (proximity < needed + 15) {
-          var brake = Math.max(0, (proximity - needed) * 0.15);
-          rc.speed = Math.min(rc.speed, brake);
-        }
-      }
-    }
-
-    // Fork zone: highway cars approaching end vs exit/cont cars near entry
-    for (var hi = 0; hi < carsHwy.length; hi++) {
-      var hwc = carsHwy[hi];
-      if (hwc.d < cfg.lenHwy - 40) continue;
-      var hwyDist = cfg.lenHwy - hwc.d;
-
-      // Check exit cars near entry
-      for (var e = 0; e < carsExit.length; e++) {
-        var ec = carsExit[e];
-        if (ec.d > cfg.exitEntryD + 30) continue;
-        var eDist = ec.d;
-        var prox = hwyDist + eDist;
-        var need = (hwc.w + ec.w) / 2 + pad;
-        if (prox < need + 15) {
-          var br = Math.max(0, (prox - need) * 0.15);
-          hwc.speed = Math.min(hwc.speed, br);
-        }
-      }
-
-      // Check cont cars near entry
-      for (var cc = 0; cc < carsCont.length; cc++) {
-        var co = carsCont[cc];
-        if (co.d > cfg.contEntryD + 30) continue;
-        var cDist = co.d;
-        var prox2 = hwyDist + cDist;
-        var need2 = (hwc.w + co.w) / 2 + pad;
-        if (prox2 < need2 + 15) {
-          var br2 = Math.max(0, (prox2 - need2) * 0.15);
-          hwc.speed = Math.min(hwc.speed, br2);
-        }
-      }
-    }
-  }
-
   // ---- main tick ----
 
   function tick(now) {
@@ -417,7 +406,7 @@ export function createSimulation(overrides, scaleFn) {
 
     // 5. Move highway — block only if BOTH exit and cont are full
     var forkFull = !canEnterExit(cfg.carW) && !canEnterCont(cfg.carW);
-    moveSegment(carsHwy, cfg.lenHwy, { endBlocked: forkFull });
+    moveSegment(carsHwy, cfg.lenHwy, { endBlocked: forkFull, phantoms: hwyPhantoms() });
 
     // 6. Try transition again (car may have moved to end this tick)
     tryHwyToExit();
@@ -425,17 +414,14 @@ export function createSimulation(overrides, scaleFn) {
     // 7. Ramp → highway
     tryRampMerge();
 
-    // 8. Move ramp
+    // 8. Move ramp (with highway phantoms at merge zone)
     var mergeFull = !canMergeAt(cfg.mergeD, cfg.carW);
-    moveSegment(carsRamp, cfg.lenRamp, { endBlocked: mergeFull });
+    moveSegment(carsRamp, cfg.lenRamp, { endBlocked: mergeFull, phantoms: rampPhantoms() });
 
     // 9. Try merge again
     tryRampMerge();
 
-    // 10. Cross-segment proximity braking (prevent visual overlap at junctions)
-    crossSegmentBrake();
-
-    // 11. Spawn
+    // 10. Spawn
     var spawned = trySpawn(now);
     if (!spawned && now - lastSpawn >= cfg.spawnMs) {
       spawnBlockedTicks++;
