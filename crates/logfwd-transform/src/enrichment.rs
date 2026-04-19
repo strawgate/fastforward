@@ -4,12 +4,14 @@
 //! Each provider produces an Arrow RecordBatch representing a lookup table.
 //! The SqlTransform registers these as MemTables so users can JOIN against them.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
-use arrow::array::{ArrayRef, StringArray, new_null_array};
+#[cfg(test)]
+use arrow::array::ArrayRef;
+use arrow::array::{StringArray, new_null_array};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use logfwd_arrow::columnar::builder::ColumnarBatchBuilder;
@@ -382,30 +384,7 @@ impl EnrichmentTable for CsvFileTable {
 fn read_csv_to_batch<R: io::Read>(reader: R) -> Result<RecordBatch, TransformError> {
     let mut csv_reader = csv::ReaderBuilder::new().flexible(true).from_reader(reader);
 
-    let headers: Vec<String> = csv_reader
-        .headers()
-        .map_err(|e| TransformError::Enrichment(format!("CSV header error: {e}")))?
-        .iter()
-        .map(ToString::to_string)
-        .collect();
-
-    if headers.is_empty() {
-        return Err(TransformError::Enrichment("CSV has no columns".to_string()));
-    }
-
-    let mut seen = HashSet::with_capacity(headers.len());
-    for h in &headers {
-        if h.is_empty() {
-            return Err(TransformError::Enrichment(
-                "CSV has an empty header name".to_string(),
-            ));
-        }
-        if !seen.insert(h) {
-            return Err(TransformError::Enrichment(format!(
-                "CSV has duplicate header name: {h}"
-            )));
-        }
-    }
+    let headers = read_csv_headers(&mut csv_reader)?;
 
     let num_cols = headers.len();
     let mut plan = BatchPlan::with_capacity(num_cols);
@@ -433,13 +412,12 @@ fn read_csv_to_batch<R: io::Read>(reader: R) -> Result<RecordBatch, TransformErr
         }
 
         builder.begin_row();
+        // Missing trailing CSV cells are represented by leaving the field unwritten.
         for (idx, handle) in handles.iter().enumerate() {
             if let Some(field) = record.get(idx) {
                 builder
                     .write_str(*handle, field)
                     .map_err(|e| TransformError::Enrichment(format!("CSV builder error: {e}")))?;
-            } else {
-                builder.write_null(*handle);
             }
         }
         builder.end_row();
@@ -455,22 +433,25 @@ fn restore_csv_header_columns(
     headers: &[String],
     batch: RecordBatch,
 ) -> Result<RecordBatch, TransformError> {
+    let schema = batch.schema();
+    let index_by_name: HashMap<&str, usize> = schema
+        .fields()
+        .iter()
+        .enumerate()
+        .map(|(idx, field)| (field.name().as_str(), idx))
+        .collect();
+
     let mut fields = Vec::with_capacity(headers.len());
     let mut arrays = Vec::with_capacity(headers.len());
     for header in headers {
-        match batch
-            .schema()
-            .fields()
-            .iter()
-            .position(|field| field.name() == header)
-        {
+        match index_by_name.get(header.as_str()).copied() {
             Some(idx) => {
-                fields.push(Arc::clone(&batch.schema().fields()[idx]));
+                fields.push(Arc::clone(&schema.fields()[idx]));
                 arrays.push(Arc::clone(batch.column(idx)));
             }
             None => {
                 fields.push(Arc::new(Field::new(header, DataType::Utf8View, true)));
-                arrays.push(new_null_array(&DataType::Utf8View, batch.num_rows()) as ArrayRef);
+                arrays.push(new_null_array(&DataType::Utf8View, batch.num_rows()));
             }
         }
     }
@@ -484,30 +465,7 @@ fn read_csv_to_legacy_batch_for_test<R: io::Read>(
 ) -> Result<RecordBatch, TransformError> {
     let mut csv_reader = csv::ReaderBuilder::new().flexible(true).from_reader(reader);
 
-    let headers: Vec<String> = csv_reader
-        .headers()
-        .map_err(|e| TransformError::Enrichment(format!("CSV header error: {e}")))?
-        .iter()
-        .map(ToString::to_string)
-        .collect();
-
-    if headers.is_empty() {
-        return Err(TransformError::Enrichment("CSV has no columns".to_string()));
-    }
-
-    let mut seen = HashSet::with_capacity(headers.len());
-    for h in &headers {
-        if h.is_empty() {
-            return Err(TransformError::Enrichment(
-                "CSV has an empty header name".to_string(),
-            ));
-        }
-        if !seen.insert(h) {
-            return Err(TransformError::Enrichment(format!(
-                "CSV has duplicate header name: {h}"
-            )));
-        }
-    }
+    let headers = read_csv_headers(&mut csv_reader)?;
 
     let num_cols = headers.len();
     let mut columns: Vec<Vec<Option<String>>> = vec![Vec::new(); num_cols];
@@ -546,6 +504,40 @@ fn read_csv_to_legacy_batch_for_test<R: io::Read>(
         .collect();
 
     RecordBatch::try_new(schema, arrays).map_err(TransformError::Arrow)
+}
+
+fn read_csv_headers<R: io::Read>(
+    csv_reader: &mut csv::Reader<R>,
+) -> Result<Vec<String>, TransformError> {
+    let headers: Vec<String> = csv_reader
+        .headers()
+        .map_err(|e| TransformError::Enrichment(format!("CSV header error: {e}")))?
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    validate_csv_headers(&headers)?;
+    Ok(headers)
+}
+
+fn validate_csv_headers(headers: &[String]) -> Result<(), TransformError> {
+    if headers.is_empty() {
+        return Err(TransformError::Enrichment("CSV has no columns".to_string()));
+    }
+
+    let mut seen = HashSet::with_capacity(headers.len());
+    for h in headers {
+        if h.is_empty() {
+            return Err(TransformError::Enrichment(
+                "CSV has an empty header name".to_string(),
+            ));
+        }
+        if !seen.insert(h) {
+            return Err(TransformError::Enrichment(format!(
+                "CSV has duplicate header name: {h}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
