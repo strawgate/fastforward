@@ -318,10 +318,10 @@ fn decode_with_reusable_projected_decoder(
     body: Bytes,
     state: &OtlpServerState,
 ) -> Result<RecordBatch, ProjectedDecodeError> {
-    let decoder = state.projected_decoder.as_ref().ok_or_else(|| {
-        ProjectedDecodeError::Internal("projected decoder not initialized".to_string())
+    let decoder_pool = state.projected_decoders.as_ref().ok_or_else(|| {
+        ProjectedDecodeError::Internal("projected decoder pool not initialized".to_string())
     })?;
-    let mut decoder = decoder.lock().map_err(|_| {
+    let mut decoder = decoder_pool.next().lock().map_err(|_| {
         ProjectedDecodeError::Internal("projected decoder lock poisoned".to_string())
     })?;
     decoder
@@ -364,7 +364,6 @@ fn parse_content_encoding(headers: &HeaderMap) -> Result<Option<String>, StatusC
 #[cfg(test)]
 mod tests {
     use std::panic::{AssertUnwindSafe, catch_unwind};
-    use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicU8};
 
     use axum::http::Request;
@@ -374,7 +373,7 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
-    use crate::otlp_receiver::ProjectedOtlpDecoder;
+    use crate::otlp_receiver::ProjectedDecoderPool;
 
     fn projected_only_state(max_message_size_bytes: usize) -> Arc<OtlpServerState> {
         let (tx, _rx) = mpsc::sync_channel(1);
@@ -385,24 +384,45 @@ mod tests {
             resource_prefix: field_names::DEFAULT_RESOURCE_PREFIX.to_string(),
             protobuf_decode_mode: OtlpProtobufDecodeMode::ProjectedOnly,
             protobuf_decode_permits: Arc::new(Semaphore::new(1)),
-            projected_decoder: Some(Mutex::new(ProjectedOtlpDecoder::new(
+            projected_decoders: Some(ProjectedDecoderPool::new(
                 field_names::DEFAULT_RESOURCE_PREFIX,
-            ))),
+                1,
+            )),
             stats: None,
             max_message_size_bytes,
         })
     }
 
     fn poison_projected_decoder_lock(state: &OtlpServerState) {
-        let decoder = state
-            .projected_decoder
+        let decoder_pool = state
+            .projected_decoders
             .as_ref()
-            .expect("projected decoder should be initialized");
+            .expect("projected decoder pool should be initialized");
         let poison_result = catch_unwind(AssertUnwindSafe(|| {
-            let _guard = decoder.lock().expect("initial lock should succeed");
+            let _guard = decoder_pool
+                .first()
+                .lock()
+                .expect("initial lock should succeed");
             panic!("poison projected decoder");
         }));
         assert!(poison_result.is_err(), "test must poison the decoder lock");
+    }
+
+    #[test]
+    fn projected_decoder_pool_uses_requested_shards() {
+        let pool = ProjectedDecoderPool::new(field_names::DEFAULT_RESOURCE_PREFIX, 4);
+        assert_eq!(pool.len(), 4);
+    }
+
+    #[test]
+    fn projected_decoder_pool_round_robins_shards() {
+        let pool = ProjectedDecoderPool::new(field_names::DEFAULT_RESOURCE_PREFIX, 2);
+        let first = pool.next();
+        let second = pool.next();
+        let third = pool.next();
+
+        assert!(!std::ptr::eq(first, second));
+        assert!(std::ptr::eq(first, third));
     }
 
     #[test]
@@ -483,6 +503,39 @@ mod tests {
         assert_eq!(
             state.health.load(Ordering::Relaxed),
             ComponentHealth::Healthy.as_repr()
+        );
+    }
+
+    #[test]
+    fn protobuf_decode_permit_exhaustion_returns_429_and_degraded_health() {
+        let state = projected_only_state(1024);
+        let _held_permit = Arc::clone(&state.protobuf_decode_permits)
+            .try_acquire_owned()
+            .expect("test should exhaust the only decode permit");
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime should build");
+
+        let app = axum::Router::new()
+            .route("/v1/logs", post(handle_otlp_request))
+            .with_state(Arc::clone(&state));
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/logs")
+            .header(CONTENT_TYPE, "application/x-protobuf")
+            .body(Body::from(Vec::new()))
+            .expect("test request should build");
+
+        let response = runtime
+            .block_on(app.oneshot(request))
+            .expect("handler should return a response");
+
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            state.health.load(Ordering::Relaxed),
+            ComponentHealth::Degraded.as_repr()
         );
     }
 }

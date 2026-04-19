@@ -544,8 +544,46 @@ fn write_json_any_value_field_from_json(
 #[cfg(test)]
 mod tests {
     use std::borrow::Cow;
+    use std::io::Write as _;
 
     use super::*;
+
+    #[test]
+    fn gzip_decompression_rejects_expansion_past_limit() {
+        let raw = vec![b'a'; 4096];
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder
+            .write_all(&raw)
+            .expect("test gzip encoder should accept payload");
+        let compressed = encoder
+            .finish()
+            .expect("test gzip encoder should flush payload");
+
+        let err = decompress_gzip(&compressed, 128).expect_err("oversized gzip must fail");
+        match err {
+            InputError::Io(io_err) => {
+                assert_eq!(io_err.kind(), io::ErrorKind::InvalidData);
+                assert_eq!(io_err.to_string(), "payload too large");
+            }
+            other => panic!("expected InvalidData payload-too-large error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn zstd_decompression_rejects_expansion_past_limit() {
+        let raw = vec![b'b'; 4096];
+        let compressed = zstd::stream::encode_all(raw.as_slice(), 1)
+            .expect("test zstd encoder should produce payload");
+
+        let err = decompress_zstd(&compressed, 128).expect_err("oversized zstd must fail");
+        match err {
+            InputError::Io(io_err) => {
+                assert_eq!(io_err.kind(), io::ErrorKind::InvalidData);
+                assert_eq!(io_err.to_string(), "payload too large");
+            }
+            other => panic!("expected InvalidData payload-too-large error, got {other:?}"),
+        }
+    }
 
     #[test]
     fn normalize_otlp_hex_id_borrows_lowercase_ids() {
