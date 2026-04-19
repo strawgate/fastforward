@@ -751,7 +751,10 @@ mod tests {
 
         // Distinctness: different addresses yield different ids.
         let id_b = source_id_for_sender(addr_b);
-        assert_ne!(id_a1, id_b, "different IPv6 addresses must produce different ids");
+        assert_ne!(
+            id_a1, id_b,
+            "different IPv6 addresses must produce different ids"
+        );
     }
 }
 
