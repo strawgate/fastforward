@@ -247,6 +247,40 @@ import { createSimulation } from './highway-sim.mjs';
     if (Math.abs(p2.x - p1.x) < 0.01 && Math.abs(p2.y - p1.y) < 0.01) return 0;
     return Math.atan2(p2.y - p1.y, p2.x - p1.x) * 180 / Math.PI;
   }
+  // Find the path-distance on `segment` whose screen point is closest to (px, py)
+  function closestD(segment, px, py) {
+    const path = pathMap[segment];
+    const len = lenMap[segment];
+    let bestD = 0, bestSq = Infinity;
+    // Coarse pass: 60 samples
+    for (let i = 0; i <= 60; i++) {
+      const d = (i / 60) * len;
+      const p = path.getPointAtLength(d);
+      const sq = (p.x - px) * (p.x - px) + (p.y - py) * (p.y - py);
+      if (sq < bestSq) { bestSq = sq; bestD = d; }
+    }
+    // Fine pass: refine around best
+    const step = len / 60;
+    const lo = Math.max(0, bestD - step);
+    const hi = Math.min(len, bestD + step);
+    for (let i = 0; i <= 20; i++) {
+      const d = lo + (i / 20) * (hi - lo);
+      const p = path.getPointAtLength(d);
+      const sq = (p.x - px) * (p.x - px) + (p.y - py) * (p.y - py);
+      if (sq < bestSq) { bestSq = sq; bestD = d; }
+    }
+    return bestD;
+  }
+  // Junction-aware padding: only pad at ends that connect to other segments
+  // highway: pad end (→exit/cont), ramp: pad end (→highway merge)
+  // exit: pad start (highway→), cont: pad start (highway→)
+  function padD(segment, d) {
+    const len = lenMap[segment];
+    if (len <= 0) return d;
+    const padStart = (segment === 'exit' || segment === 'cont') ? JUNCTION_PAD : 0;
+    const padEnd = (segment === 'highway' || segment === 'ramp') ? JUNCTION_PAD : 0;
+    return padStart + (d / len) * (len - padStart - padEnd);
+  }
 
   // ---- Per-car visual state ----
   // Path-space tracking: each car tracks distance `d` along its SVG path
@@ -347,10 +381,13 @@ import { createSimulation } from './highway-sim.mjs';
     const vis = carVis[car.id];
     if (!vis) return;
 
-    // Handle segment transition — paths connect at junctions
+    // Handle segment transition — bridge via screen position
     if (vis.seg !== car.segment) {
+      // Where is the car on screen right now (old segment)?
+      const oldPt = posAt(vis.seg, padD(vis.seg, vis.d));
+      // Find the d on the new path closest to that screen point
+      vis.d = closestD(car.segment, oldPt.x, oldPt.y);
       vis.seg = car.segment;
-      vis.d = car.targetD;
       vis.speed = Math.max(vis.speed, 1); // maintain momentum through junction
     }
 
@@ -382,11 +419,9 @@ import { createSimulation } from './highway-sim.mjs';
     vis.d = Math.max(0, Math.min(vis.d, segLen));
 
     // Convert path d to screen position with junction padding
-    const paddedD = segLen > 0
-      ? JUNCTION_PAD + (vis.d / segLen) * Math.max(0, segLen - 2 * JUNCTION_PAD)
-      : vis.d;
-    const sp = posAt(vis.seg, paddedD);
-    const sa = angleAt(vis.seg, paddedD);
+    const pd = padD(vis.seg, vis.d);
+    const sp = posAt(vis.seg, pd);
+    const sa = angleAt(vis.seg, pd);
 
     // Smooth angle follow (with wraparound)
     let da = sa - vis.angle;
@@ -417,7 +452,7 @@ import { createSimulation } from './highway-sim.mjs';
 
   // ---- Main render loop ----
   // Sim ticks every SIM_FRAMES render frames.
-  // Every render frame: spring-damper physics moves cars in screen space.
+  // Every render frame: path-space velocity chase moves cars along SVG paths.
   let lastStatus = '';
   let timer = null;
   let frameCount = 0;
