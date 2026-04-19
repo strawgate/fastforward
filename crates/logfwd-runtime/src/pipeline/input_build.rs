@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -512,6 +513,8 @@ pub(super) fn build_input_state(
                 return Ok(InputState {
                     source: Box::new(source),
                     buf: BytesMut::with_capacity(64 * 1024),
+                    row_origins: Vec::new(),
+                    source_paths: HashMap::new(),
                     stats,
                 });
             }
@@ -541,6 +544,8 @@ pub(super) fn build_input_state(
             return Ok(InputState {
                 source: Box::new(source),
                 buf: BytesMut::with_capacity(64 * 1024),
+                row_origins: Vec::new(),
+                source_paths: HashMap::new(),
                 stats,
             });
         }
@@ -571,6 +576,8 @@ pub(super) fn build_input_state(
             return Ok(InputState {
                 source: Box::new(source),
                 buf: BytesMut::with_capacity(64 * 1024),
+                row_origins: Vec::new(),
+                source_paths: HashMap::new(),
                 stats,
             });
         }
@@ -635,6 +642,8 @@ pub(super) fn build_input_state(
                 return Ok(InputState {
                     source: Box::new(framed),
                     buf: BytesMut::with_capacity(4 * 1024 * 1024),
+                    row_origins: Vec::new(),
+                    source_paths: HashMap::new(),
                     stats,
                 });
             }
@@ -684,6 +693,8 @@ pub(super) fn build_input_state(
     Ok(InputState {
         source: Box::new(framed),
         buf: BytesMut::with_capacity(buf_cap),
+        row_origins: Vec::new(),
+        source_paths: HashMap::new(),
         stats,
     })
 }
@@ -837,6 +848,7 @@ mod tests {
             name: Some("sensor".to_string()),
             format: Some(Format::Raw),
             sql: None,
+            source_metadata: false,
             type_config: input_type_config,
         };
         let err = match build_input_state("sensor", &cfg, stats) {
@@ -862,6 +874,7 @@ mod tests {
             name: Some("test_in".into()),
             format: None,
             sql: None,
+            source_metadata: false,
             type_config: InputTypeConfig::File(logfwd_config::FileTypeConfig {
                 path: "/tmp/test.log".into(),
                 poll_interval_ms: None,
@@ -891,6 +904,7 @@ mod tests {
             name: Some("test_in".into()),
             format: None,
             sql: None,
+            source_metadata: false,
             type_config: InputTypeConfig::File(logfwd_config::FileTypeConfig {
                 path: "/tmp/test.log".into(),
                 poll_interval_ms: Some(123),
@@ -947,6 +961,7 @@ mod tests {
                     name: Some("in".to_string()),
                     format: Some(format),
                     sql: None,
+                    source_metadata: false,
                     type_config: type_config_fn("127.0.0.1:0"),
                 };
                 let stats = pm.add_input("in", "test");
@@ -994,6 +1009,7 @@ mod tests {
             name: Some("file-in".to_string()),
             format: Some(Format::Json),
             sql: None,
+            source_metadata: false,
             type_config: InputTypeConfig::File(logfwd_config::FileTypeConfig {
                 path: "   ".to_string(),
                 poll_interval_ms: None,
@@ -1063,6 +1079,7 @@ mod tests {
                 name: Some("net-in".to_string()),
                 format: Some(Format::Json),
                 sql: None,
+                source_metadata: false,
                 type_config,
             };
             let stats = pm.add_input("net-in", "net");
@@ -1088,6 +1105,7 @@ mod tests {
             name: Some("http-in".to_string()),
             format: Some(Format::Json),
             sql: None,
+            source_metadata: false,
             type_config: InputTypeConfig::Http(logfwd_config::HttpTypeConfig {
                 listen: "127.0.0.1:0".to_string(),
                 http: Some(logfwd_config::HttpInputConfig {

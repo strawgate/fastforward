@@ -138,6 +138,17 @@ pub trait InputSource: Send {
         vec![]
     }
 
+    /// Return whether [`crate::framed::FramedInput`] may reclaim completed
+    /// per-source decoder state immediately after a data event.
+    ///
+    /// Push-style sources should keep the default so high-cardinality source
+    /// identities, such as UDP senders, do not accumulate idle state. File
+    /// tailers override this to keep reusable buffers and checkpoint trackers
+    /// across steady-state polls.
+    fn should_reclaim_completed_source_state(&self) -> bool {
+        true
+    }
+
     /// Restore a file offset by SourceId (fingerprint). Default: no-op.
     ///
     /// Used for checkpoint restore — the checkpoint stores fingerprint + offset.
@@ -357,6 +368,10 @@ impl InputSource for FileInput {
 
     fn source_paths(&self) -> Vec<(SourceId, PathBuf)> {
         self.tailer.file_paths()
+    }
+
+    fn should_reclaim_completed_source_state(&self) -> bool {
+        false
     }
 
     fn set_offset_by_source(&mut self, source_id: SourceId, offset: u64) {

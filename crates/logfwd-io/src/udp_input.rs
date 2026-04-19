@@ -62,6 +62,21 @@ fn source_id_for_sender(addr: SocketAddr) -> SourceId {
     SourceId(if digest == 0 { 1 } else { digest })
 }
 
+fn flush_current_sender(
+    events: &mut Vec<InputEvent>,
+    current: &mut Option<(SourceId, Vec<u8>, u64)>,
+) {
+    if let Some((source_id, bytes, accounted_bytes)) = current.take()
+        && !bytes.is_empty()
+    {
+        events.push(InputEvent::Data {
+            bytes,
+            source_id: Some(source_id),
+            accounted_bytes,
+        });
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct UdpInputOptions {
     /// Maximum UDP packet payload size in bytes. Defaults to `MAX_UDP_PAYLOAD`.
@@ -178,9 +193,9 @@ impl InputSource for UdpInput {
         let mut under_pressure = false;
         let mut datagrams_read = 0usize;
 
-        // Emit one event per datagram to preserve sender attribution.
-        let mut events: Vec<InputEvent> = Vec::with_capacity(MAX_DATAGRAMS_PER_POLL);
-        let mut emitted_bytes_total = 0usize;
+        let mut events = Vec::with_capacity(MAX_DATAGRAMS_PER_POLL);
+        let mut current: Option<(SourceId, Vec<u8>, u64)> = None;
+        let mut emitted_bytes = 0usize;
 
         // Drain all available datagrams in one poll cycle.
         loop {
@@ -188,22 +203,35 @@ impl InputSource for UdpInput {
                 Ok((n, sender)) => {
                     datagrams_read = datagrams_read.saturating_add(1);
                     if n > 0 {
-                        let mut bytes = Vec::with_capacity(n.saturating_add(1));
+                        let source_id = source_id_for_sender(sender);
                         let data = &self.buf[..n];
-                        bytes.extend_from_slice(data);
+                        let should_append_newline = !data.ends_with(b"\n");
+                        if current
+                            .as_ref()
+                            .is_none_or(|(current_source_id, _, _)| *current_source_id != source_id)
+                        {
+                            flush_current_sender(&mut events, &mut current);
+                            current = Some((
+                                source_id,
+                                Vec::with_capacity(
+                                    n.saturating_add(usize::from(should_append_newline)),
+                                ),
+                                0,
+                            ));
+                        }
+                        let (_, out, accounted_bytes) =
+                            current.as_mut().expect("current sender just initialized");
+                        out.extend_from_slice(data);
                         // Ensure newline termination so the scanner always sees
                         // complete lines, even if the sender omitted a trailing LF.
-                        if !data.ends_with(b"\n") {
-                            bytes.push(b'\n');
+                        if should_append_newline {
+                            out.push(b'\n');
                         }
-                        emitted_bytes_total = emitted_bytes_total.saturating_add(bytes.len());
-                        events.push(InputEvent::Data {
-                            bytes,
-                            source_id: Some(source_id_for_sender(sender)),
-                            accounted_bytes: n as u64,
-                        });
+                        *accounted_bytes = accounted_bytes.saturating_add(n as u64);
+                        emitted_bytes =
+                            emitted_bytes.saturating_add(n + usize::from(should_append_newline));
                     }
-                    if should_stop_udp_drain(datagrams_read, emitted_bytes_total) {
+                    if should_stop_udp_drain(datagrams_read, emitted_bytes) {
                         under_pressure = true;
                         break;
                     }
@@ -241,6 +269,7 @@ impl InputSource for UdpInput {
             },
         );
 
+        flush_current_sender(&mut events, &mut current);
         Ok(events)
     }
 
@@ -277,7 +306,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(50));
 
         let events = input.poll().unwrap();
-        assert_eq!(events.len(), 2);
+        assert!(!events.is_empty());
         let mut text = String::new();
         for event in &events {
             if let InputEvent::Data { bytes, .. } = event {
@@ -340,6 +369,69 @@ mod tests {
         } else {
             panic!("expected InputEvent::Data variant");
         }
+    }
+
+    #[test]
+    fn sender_addresses_produce_distinct_source_ids() {
+        let mut input = UdpInput::new(
+            "test",
+            "127.0.0.1:0",
+            Arc::new(logfwd_types::diagnostics::ComponentStats::new()),
+        )
+        .unwrap();
+        let addr = input.local_addr().unwrap();
+
+        let sender_a = StdSocket::bind("127.0.0.1:0").unwrap();
+        let sender_b = StdSocket::bind("127.0.0.1:0").unwrap();
+        sender_a.send_to(b"from-a\n", addr).unwrap();
+        sender_b.send_to(b"from-b\n", addr).unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        let events = input.poll().unwrap();
+        let source_ids = events
+            .iter()
+            .filter_map(|event| match event {
+                InputEvent::Data { source_id, .. } => *source_id,
+                _ => None,
+            })
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(source_ids.len(), 2, "expected one source id per sender");
+        assert!(source_ids.contains(&source_id_for_sender(sender_a.local_addr().unwrap())));
+        assert!(source_ids.contains(&source_id_for_sender(sender_b.local_addr().unwrap())));
+    }
+
+    #[test]
+    fn ipv6_sender_source_id_ignores_flowinfo_and_distinguishes_ports() {
+        let base = SocketAddr::V6(std::net::SocketAddrV6::new(
+            std::net::Ipv6Addr::LOCALHOST,
+            12_345,
+            0,
+            0,
+        ));
+        let different_flowinfo = SocketAddr::V6(std::net::SocketAddrV6::new(
+            std::net::Ipv6Addr::LOCALHOST,
+            12_345,
+            0x000f_ffff,
+            0,
+        ));
+        let different_port = SocketAddr::V6(std::net::SocketAddrV6::new(
+            std::net::Ipv6Addr::LOCALHOST,
+            54_321,
+            0,
+            0,
+        ));
+
+        assert_eq!(
+            source_id_for_sender(base),
+            source_id_for_sender(different_flowinfo),
+            "IPv6 flowinfo is packet/flow metadata, not sender identity"
+        );
+        assert_ne!(
+            source_id_for_sender(base),
+            source_id_for_sender(different_port),
+            "sender port remains part of UDP source identity"
+        );
     }
 
     #[test]
@@ -598,7 +690,8 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(75));
 
         let first = input.poll().unwrap();
-        assert_eq!(first.len(), MAX_DATAGRAMS_PER_POLL);
+        assert!(!first.is_empty());
+        assert!(first.len() <= MAX_DATAGRAMS_PER_POLL);
         let first_lines = first
             .iter()
             .filter_map(|event| match event {

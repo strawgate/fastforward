@@ -51,6 +51,7 @@ use logfwd_output::SinkFactory;
 use logfwd_output::build_sink_factory;
 use logfwd_output::{BatchMetadata, OnceAsyncFactory};
 use logfwd_types::pipeline::{PipelineMachine, Running, SourceId};
+use logfwd_types::source_metadata::SourceMetadataPlan;
 use tokio_util::sync::CancellationToken;
 
 // ---------------------------------------------------------------------------
@@ -108,6 +109,16 @@ struct InputTransform {
     scanner: Scanner,
     transform: SqlTransform,
     input_name: String,
+    #[cfg_attr(feature = "turmoil", allow(dead_code))]
+    source_metadata_plan: SourceMetadataPlan,
+}
+
+/// Consecutive scanned rows that came from the same input/source metadata.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RowOriginSpan {
+    pub source_id: Option<SourceId>,
+    pub input_name: Arc<str>,
+    pub rows: usize,
 }
 
 struct InputState {
@@ -116,6 +127,12 @@ struct InputState {
     source: Box<dyn InputSource>,
     /// Buffer accumulating scanner-ready bytes for batching.
     buf: BytesMut,
+    /// Row-origin spans for the scanner-ready bytes currently in `buf`.
+    #[cfg_attr(feature = "turmoil", allow(dead_code))]
+    row_origins: Vec<RowOriginSpan>,
+    /// Source path snapshots for source IDs represented in `row_origins`.
+    #[cfg_attr(feature = "turmoil", allow(dead_code))]
+    source_paths: HashMap<SourceId, String>,
     /// Input metrics (used for parse/rotation/truncation observability).
     stats: Arc<ComponentStats>,
 }
@@ -184,6 +201,8 @@ impl Pipeline {
         self.inputs.push(InputState {
             source,
             buf: BytesMut::with_capacity(self.batch_target_bytes),
+            row_origins: Vec::new(),
+            source_paths: HashMap::new(),
             stats,
         });
         // Keep input_transforms in sync: one transform per input.
@@ -195,6 +214,7 @@ impl Pipeline {
                 scanner,
                 transform,
                 input_name: name.to_string(),
+                source_metadata_plan: SourceMetadataPlan::default(),
             });
         }
         self

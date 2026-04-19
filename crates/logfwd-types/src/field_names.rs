@@ -124,12 +124,23 @@ pub const SCOPE_VERSION: &str = "scope.version";
 /// Example: OTLP `service.name` → column `resource.attributes.service.name`.
 pub const DEFAULT_RESOURCE_PREFIX: &str = "resource.attributes.";
 
+/// Legacy resource attribute prefix used before the `resource.attributes.`
+/// convention. Sinks check this as a fallback for backwards compatibility
+/// with older batches and config-level `resource_attrs`.
+pub const LEGACY_RESOURCE_PREFIX: &str = "_resource_";
+
 // ---------------------------------------------------------------------------
 // Internal columns
 // ---------------------------------------------------------------------------
 
-/// Internal raw-line column — excluded from OTLP attributes and star-schema.
-pub const RAW: &str = "_raw";
+/// Stable row-level source identity assigned by the input layer.
+pub const SOURCE_ID: &str = "_source_id";
+
+/// Configured input name for the row source.
+pub const INPUT: &str = "_input";
+
+/// File source path compatibility column.
+pub const SOURCE_PATH: &str = "_source_path";
 
 // ---------------------------------------------------------------------------
 // Type-conflict struct children (Arrow schema)
