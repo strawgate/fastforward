@@ -489,6 +489,7 @@ async fn handle_arrow_ipc_request(
         match state.tx.try_send(payload) {
             Ok(()) => {}
             Err(mpsc::TrySendError::Full(_)) => {
+                record_error(state.stats.as_ref());
                 send_error = Some(StatusCode::TOO_MANY_REQUESTS);
                 break;
             }
@@ -1017,14 +1018,17 @@ mod tests {
 
     #[test]
     fn receiver_reports_degraded_on_backpressure_and_recovers() {
-        let receiver = ArrowIpcReceiver::new_with_capacity(
+        let stats = Arc::new(ComponentStats::new());
+        let receiver = ArrowIpcReceiver::new_with_capacity_and_stats(
             "test-429",
             "127.0.0.1:0",
             ArrowIpcReceiverOptions::default(),
             1,
+            Some(Arc::clone(&stats)),
         )
         .expect("bind should succeed");
         let addr = receiver.local_addr();
+        wait_for_server(addr);
 
         let batch = make_test_batch();
         let ipc_bytes = serialize_batch(&batch);
@@ -1046,6 +1050,7 @@ mod tests {
             Err(e) => panic!("unexpected error: {e}"),
         };
         assert_eq!(status, 429);
+        assert_eq!(stats.errors(), 1);
         assert_eq!(receiver.health(), ComponentHealth::Degraded);
 
         let _ = receiver.try_recv_all();
@@ -1371,6 +1376,7 @@ mod tests {
         )
         .expect("bind should succeed");
         let addr = receiver.local_addr();
+        wait_for_server(addr);
 
         let url = format!("http://{addr}/v1/arrow");
         let result = loopback_http_client()

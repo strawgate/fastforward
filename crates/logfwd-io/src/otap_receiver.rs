@@ -285,6 +285,7 @@ async fn handle_otap_request(
     match parse_content_type(&headers) {
         Ok(Some(content_type)) => {
             if content_type != "application/x-protobuf" {
+                record_error(state.stats.as_ref());
                 return (
                     StatusCode::UNSUPPORTED_MEDIA_TYPE,
                     "unsupported content-type",
@@ -667,6 +668,14 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert!(predicate(), "{failure_message}");
+    }
+
+    fn wait_for_server(addr: std::net::SocketAddr) {
+        wait_until(
+            Duration::from_secs(2),
+            || std::net::TcpStream::connect(addr).is_ok(),
+            "OTAP receiver did not accept connections",
+        );
     }
 
     fn tempfile_payload(bytes: &[u8]) -> std::fs::File {
@@ -1095,9 +1104,16 @@ mod tests {
 
     #[test]
     fn receiver_rejects_unsupported_content_type() {
-        let receiver = OtapReceiver::new_with_capacity("test-415", "127.0.0.1:0", 16)
-            .expect("bind should succeed");
+        let stats = Arc::new(ComponentStats::new());
+        let receiver = OtapReceiver::new_with_capacity_and_stats(
+            "test-415",
+            "127.0.0.1:0",
+            16,
+            Some(Arc::clone(&stats)),
+        )
+        .expect("bind should succeed");
         let addr = receiver.local_addr();
+        wait_for_server(addr);
 
         let url = format!("http://{addr}/v1/arrow_logs");
         let payload = tempfile_payload(b"{}");
@@ -1109,6 +1125,7 @@ mod tests {
             Err(ureq::Error::StatusCode(code)) => assert_eq!(code, 415),
             other => panic!("expected 415, got {other:?}"),
         }
+        assert_eq!(stats.errors(), 1);
     }
 
     #[test]
@@ -1207,6 +1224,7 @@ mod tests {
         )
         .expect("bind should succeed");
         let addr = receiver.local_addr();
+        wait_for_server(addr);
 
         let url = format!("http://{addr}/v1/arrow_logs");
         let result = loopback_http_client()
@@ -1234,6 +1252,7 @@ mod tests {
         )
         .expect("bind should succeed");
         let addr = receiver.local_addr();
+        wait_for_server(addr);
         receiver.rx.take();
 
         let logs_ipc = serialize_batch_to_ipc(&make_logs_batch());

@@ -11,6 +11,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::{cmp::Ordering, collections::BinaryHeap};
 
 use arrow::array::{ArrayRef, BooleanArray, Float32Array, StringArray, UInt32Array, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
@@ -20,6 +21,32 @@ use serde::Deserialize;
 use sysinfo::{Networks, Process, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
 use crate::input::{InputEvent, InputSource};
+
+#[derive(Clone, Copy)]
+struct SelectedProcess<'a> {
+    pid: u32,
+    process: &'a Process,
+}
+
+impl Eq for SelectedProcess<'_> {}
+
+impl PartialEq for SelectedProcess<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.pid == other.pid
+    }
+}
+
+impl Ord for SelectedProcess<'_> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.pid.cmp(&other.pid)
+    }
+}
+
+impl PartialOrd for SelectedProcess<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
 
 /// Platform target for a platform sensor input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -677,15 +704,37 @@ impl HostMetricsCommon {
         limit: usize,
     ) -> usize {
         let limit = limit.min(self.cfg.max_process_rows_per_poll);
-        let mut procs: Vec<(&sysinfo::Pid, &Process)> = self.system.processes().iter().collect();
-        procs.sort_unstable_by_key(|(pid, _)| pid.as_u32());
+        if limit == 0 {
+            return 0;
+        }
+
+        let mut procs = BinaryHeap::with_capacity(limit);
+        for (pid, process) in self.system.processes() {
+            let selected = SelectedProcess {
+                pid: pid.as_u32(),
+                process,
+            };
+            if procs.len() < limit {
+                procs.push(selected);
+            } else if procs
+                .peek()
+                .is_some_and(|largest| selected.pid < largest.pid)
+            {
+                procs.pop();
+                procs.push(selected);
+            }
+        }
+        let mut procs = procs.into_vec();
+        procs.sort_unstable_by_key(|selected| selected.pid);
 
         let mut emitted = 0usize;
-        for (pid, process) in procs.into_iter().take(limit) {
+        for selected in procs {
+            let pid = selected.pid;
+            let process = selected.process;
             let disk_usage = process.disk_usage();
             let mut row = self.base_row(control, "process", "snapshot", "ok", "process snapshot");
             row.signal_family = Some("process".to_string());
-            row.process_pid = Some(pid.as_u32());
+            row.process_pid = Some(pid);
             row.process_parent_pid = process.parent().map(sysinfo::Pid::as_u32);
             row.process_name = Some(os_to_string(process.name()));
             row.process_cmd = Some(os_vec_to_string(process.cmd()));
@@ -709,7 +758,7 @@ impl HostMetricsCommon {
             row.process_run_time_secs = Some(process.run_time());
             row.process_open_files = process.open_files().map(|n| n as u64);
             row.process_thread_count = process.tasks().map(|t| t.len() as u64);
-            row.process_container_id = extract_container_id(pid.as_u32());
+            row.process_container_id = extract_container_id(pid);
             out.push(row);
             emitted += 1;
         }
@@ -2030,6 +2079,10 @@ mod tests {
             .filter(|(_, kind)| kind.as_deref() == Some("snapshot"))
             .filter(|(family, _)| family.as_deref() == Some("process"))
             .count();
+        assert!(
+            snapshot_count > 0,
+            "expected process snapshot rows to be emitted so the cap can be validated"
+        );
         assert!(
             snapshot_count <= 3,
             "max_process_rows_per_poll should cap process rows, got {snapshot_count}"

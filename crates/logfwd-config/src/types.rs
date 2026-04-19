@@ -325,7 +325,9 @@ pub struct HostMetricsInputConfig {
     pub emit_signal_rows: Option<bool>,
     /// Upper bound on data rows emitted per collection cycle. Defaults to 256.
     pub max_rows_per_poll: Option<usize>,
-    /// Upper bound on process rows emitted per collection cycle. Defaults to 1024.
+    /// Upper bound on process rows emitted per collection cycle.
+    ///
+    /// Defaults to 1024. Set to 0 or omit for the default.
     pub max_process_rows_per_poll: Option<usize>,
     /// Path to the compiled eBPF kernel binary (required for `linux_ebpf_sensor`).
     pub ebpf_binary_path: Option<String>,
