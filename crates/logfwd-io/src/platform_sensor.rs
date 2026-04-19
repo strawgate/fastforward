@@ -36,6 +36,9 @@ unsafe impl aya::Pod for PodEbpfConfig {}
 
 use crate::input::{InputEvent, InputSource};
 
+const SCHED_PROCESS_EXIT_TRACEPOINT_FORMAT_PATH: &str =
+    "/sys/kernel/tracing/events/sched/sched_process_exit/format";
+
 // ── Configuration ──────────────────────────────────────────────────────
 
 /// Configuration for the eBPF platform sensor input.
@@ -277,6 +280,11 @@ enum SensorState {
     Poisoned,
 }
 
+struct EbpfConfigStatus {
+    exit_code_supported: bool,
+    group_dead_supported: bool,
+}
+
 impl PlatformSensorInput {
     /// Create a new platform sensor input. eBPF programs are not loaded
     /// until the first `poll()` call.
@@ -320,10 +328,23 @@ impl PlatformSensorInput {
         // Configure runtime parameters via the CONFIG BPF map BEFORE attaching
         // any programs, so events emitted during startup have valid config.
         match Self::configure_ebpf_params(&mut ebpf) {
-            Ok(()) => tracing::debug!("configured eBPF runtime parameters (exit_code offset)"),
+            Ok(status) => {
+                tracing::debug!("configured eBPF runtime parameters (exit_code + group_dead)");
+                if !status.exit_code_supported {
+                    let message = "task_struct.exit_code offset unavailable; using sentinel mode";
+                    tracing::warn!("{message}");
+                    skipped.push(message.to_string());
+                }
+                if !status.group_dead_supported {
+                    let message =
+                        "sched_process_exit group_dead missing; using pid==tgid fallback semantics";
+                    tracing::warn!("{message}");
+                    skipped.push(message.to_string());
+                }
+            }
             Err(e) => {
-                tracing::warn!("eBPF config: exit_code offset unavailable, using sentinel: {e}");
-                skipped.push(format!("exit_code offset unavailable: {e}"));
+                tracing::warn!("eBPF config unavailable; using degraded semantics: {e}");
+                skipped.push(format!("eBPF config unavailable: {e}"));
             }
         }
 
@@ -380,8 +401,11 @@ impl PlatformSensorInput {
     ///
     /// Discovers the byte offset of `task_struct.exit_code` from kernel BTF
     /// so the eBPF program can read real exit codes instead of using a sentinel.
-    fn configure_ebpf_params(ebpf: &mut Ebpf) -> io::Result<()> {
-        let offset = Self::find_exit_code_offset()?;
+    fn configure_ebpf_params(ebpf: &mut Ebpf) -> io::Result<EbpfConfigStatus> {
+        let exit_code_offset = Self::find_exit_code_offset().ok();
+        let group_dead_offset = Self::find_sched_process_exit_group_dead_offset()
+            .ok()
+            .flatten();
 
         let config_map = ebpf
             .map_mut("CONFIG")
@@ -391,15 +415,31 @@ impl PlatformSensorInput {
             .map_err(|e| io::Error::other(format!("CONFIG map type error: {e}")))?;
 
         let cfg = PodEbpfConfig(EbpfConfig {
-            task_exit_code_offset: offset,
+            task_exit_code_offset: exit_code_offset.unwrap_or(0),
+            sched_process_exit_group_dead_offset: group_dead_offset.unwrap_or(0),
+            sched_process_exit_has_group_dead: u32::from(group_dead_offset.is_some()),
             pad: 0,
         });
         array
             .set(0, cfg, 0)
             .map_err(|e| io::Error::other(format!("CONFIG map write: {e}")))?;
 
-        tracing::info!(offset, "set task_struct.exit_code offset from kernel BTF");
-        Ok(())
+        if let Some(exit_code_offset) = exit_code_offset {
+            tracing::info!(
+                exit_code_offset,
+                "set task_struct.exit_code offset from kernel BTF"
+            );
+        }
+        if let Some(group_dead_offset) = group_dead_offset {
+            tracing::info!(
+                group_dead_offset,
+                "set sched_process_exit group_dead offset from tracepoint format"
+            );
+        }
+        Ok(EbpfConfigStatus {
+            exit_code_supported: exit_code_offset.is_some(),
+            group_dead_supported: group_dead_offset.is_some(),
+        })
     }
 
     /// Discover `task_struct.exit_code` offset from `/sys/kernel/btf/vmlinux`.
@@ -444,6 +484,17 @@ impl PlatformSensorInput {
         Err(io::Error::other(
             "exit_code field not found in pahole output",
         ))
+    }
+
+    /// Discover `sched_process_exit.group_dead` offset from tracepoint format.
+    fn find_sched_process_exit_group_dead_offset() -> io::Result<Option<u32>> {
+        let format_text = std::fs::read_to_string(SCHED_PROCESS_EXIT_TRACEPOINT_FORMAT_PATH)
+            .map_err(|e| {
+                io::Error::other(format!(
+                    "failed to read {SCHED_PROCESS_EXIT_TRACEPOINT_FORMAT_PATH}: {e}"
+                ))
+            })?;
+        Ok(parse_tracepoint_field_offset(&format_text, "group_dead"))
     }
 
     /// Drain available events from the ring buffer into an Arrow `RecordBatch`.
@@ -515,6 +566,30 @@ impl PlatformSensorInput {
             accounted_bytes,
         }))
     }
+}
+
+fn parse_tracepoint_field_offset(format_text: &str, field_name: &str) -> Option<u32> {
+    for line in format_text.lines() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with("field:") || !trimmed.contains("offset:") {
+            continue;
+        }
+        let field_decl = trimmed.strip_prefix("field:")?.split(';').next()?.trim();
+        let actual_name = field_decl
+            .split_whitespace()
+            .last()?
+            .split('[')
+            .next()
+            .unwrap_or_default();
+        if actual_name != field_name {
+            continue;
+        }
+        let offset_str = trimmed.split("offset:").nth(1)?.split(';').next()?.trim();
+        if let Ok(offset) = offset_str.parse::<u32>() {
+            return Some(offset);
+        }
+    }
+    None
 }
 
 /// Parse a single ring buffer event into an `EventRow`.
@@ -835,7 +910,7 @@ impl InputSource for PlatformSensorInput {
 
 #[cfg(test)]
 mod tests {
-    use super::format_addr;
+    use super::{format_addr, parse_tracepoint_field_offset};
 
     #[test]
     fn format_addr_renders_network_order_ipv4() {
@@ -847,5 +922,50 @@ mod tests {
     fn format_addr_renders_multibyte_octets() {
         let addr = u32::from_ne_bytes([192, 168, 1, 10]);
         assert_eq!(format_addr(addr), "192.168.1.10");
+    }
+
+    #[test]
+    fn parse_tracepoint_field_offset_extracts_group_dead_offset() {
+        let text = r#"
+name: sched_process_exit
+ID: 68
+format:
+	field:unsigned short common_type;	offset:0;	size:2;	signed:0;
+	field:unsigned char common_flags;	offset:2;	size:1;	signed:0;
+	field:unsigned char common_preempt_count;	offset:3;	size:1;	signed:0;
+	field:int common_pid;	offset:4;	size:4;	signed:1;
+
+	field:char comm[16];	offset:8;	size:16;	signed:1;
+	field:pid_t pid;	offset:24;	size:4;	signed:1;
+	field:int prio;	offset:28;	size:4;	signed:1;
+	field:int group_dead;	offset:32;	size:4;	signed:1;
+"#;
+
+        assert_eq!(parse_tracepoint_field_offset(text, "group_dead"), Some(32));
+    }
+
+    #[test]
+    fn parse_tracepoint_field_offset_returns_none_when_group_dead_absent() {
+        let text = r#"
+name: sched_process_exit
+format:
+	field:unsigned short common_type;	offset:0;	size:2;	signed:0;
+	field:char comm[16];	offset:8;	size:16;	signed:1;
+	field:pid_t pid;	offset:24;	size:4;	signed:1;
+	field:int prio;	offset:28;	size:4;	signed:1;
+"#;
+
+        assert_eq!(parse_tracepoint_field_offset(text, "group_dead"), None);
+    }
+
+    #[test]
+    fn parse_tracepoint_field_offset_requires_exact_field_name() {
+        let text = r#"
+name: sched_process_exit
+format:
+	field:int not_group_dead;	offset:32;	size:4;	signed:1;
+"#;
+
+        assert_eq!(parse_tracepoint_field_offset(text, "group_dead"), None);
     }
 }

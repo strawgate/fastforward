@@ -175,11 +175,21 @@ pub fn sched_process_exit(ctx: TracePointContext) -> u32 {
     }
 }
 
-fn try_process_exit(_ctx: &TracePointContext) -> Result<(), i64> {
+fn try_process_exit(ctx: &TracePointContext) -> Result<(), i64> {
     let pid_tgid = bpf_get_current_pid_tgid();
     let pid = pid_tgid as u32;
     let tgid = (pid_tgid >> 32) as u32;
-    if pid != tgid {
+    let mut should_emit = pid == tgid;
+    if let Some(cfg) = CONFIG.get(0) {
+        if cfg.sched_process_exit_has_group_dead != 0 {
+            let offset = cfg.sched_process_exit_group_dead_offset as usize;
+            // SAFETY: the offset is parsed from the kernel tracepoint format
+            // before programs attach; read failures fall back to filtering.
+            let group_dead: u32 = unsafe { ctx.read_at(offset) }.unwrap_or(0);
+            should_emit = group_dead != 0;
+        }
+    }
+    if !should_emit {
         return Ok(());
     }
 
