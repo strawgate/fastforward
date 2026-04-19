@@ -1,5 +1,6 @@
 pub mod atomic_write;
 pub(crate) mod background_http_task;
+pub(crate) mod blocking_stage;
 pub mod error;
 pub use error::InputError;
 
