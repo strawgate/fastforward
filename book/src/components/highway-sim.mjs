@@ -20,12 +20,12 @@ export var DEFAULTS = {
   mergeD: 170,
   gateD: 130,
   carW: 20,
-  minFollowPad: 26,
+  minFollowPad: 14,
   speedMax: 3.5,
-  spawnMs: 500,
+  spawnMs: 420,
   cycleTotal: 3000,
   greenPct: 80,
-  maxCars: 16,
+  maxCars: 22,
   lerpRate: 0.25,
   brakeRate: 0.3,
   followZone: 18,
@@ -322,6 +322,66 @@ export function createSimulation(overrides, scaleFn) {
     }
   }
 
+  // ---- cross-segment proximity braking ----
+  // Cars on different segments share SVG space at junctions. Slow them
+  // to avoid visual overlap even though they're in different arrays.
+
+  function crossSegmentBrake() {
+    var pad = cfg.minFollowPad;
+
+    // Merge zone: ramp cars approaching end vs highway cars near mergeD
+    for (var r = 0; r < carsRamp.length; r++) {
+      var rc = carsRamp[r];
+      if (rc.d < cfg.lenRamp - 40) continue;
+      for (var h = 0; h < carsHwy.length; h++) {
+        var hc = carsHwy[h];
+        if (Math.abs(hc.d - cfg.mergeD) > 40) continue;
+        // Virtual distance: how close they are to the merge point
+        var rDist = cfg.lenRamp - rc.d;
+        var hDist = Math.abs(hc.d - cfg.mergeD);
+        var proximity = rDist + hDist;
+        var needed = (rc.w + hc.w) / 2 + pad;
+        if (proximity < needed + 15) {
+          var brake = Math.max(0, (proximity - needed) * 0.15);
+          rc.speed = Math.min(rc.speed, brake);
+        }
+      }
+    }
+
+    // Fork zone: highway cars approaching end vs exit/cont cars near entry
+    for (var hi = 0; hi < carsHwy.length; hi++) {
+      var hwc = carsHwy[hi];
+      if (hwc.d < cfg.lenHwy - 40) continue;
+      var hwyDist = cfg.lenHwy - hwc.d;
+
+      // Check exit cars near entry
+      for (var e = 0; e < carsExit.length; e++) {
+        var ec = carsExit[e];
+        if (ec.d > cfg.exitEntryD + 30) continue;
+        var eDist = ec.d;
+        var prox = hwyDist + eDist;
+        var need = (hwc.w + ec.w) / 2 + pad;
+        if (prox < need + 15) {
+          var br = Math.max(0, (prox - need) * 0.15);
+          hwc.speed = Math.min(hwc.speed, br);
+        }
+      }
+
+      // Check cont cars near entry
+      for (var cc = 0; cc < carsCont.length; cc++) {
+        var co = carsCont[cc];
+        if (co.d > cfg.contEntryD + 30) continue;
+        var cDist = co.d;
+        var prox2 = hwyDist + cDist;
+        var need2 = (hwc.w + co.w) / 2 + pad;
+        if (prox2 < need2 + 15) {
+          var br2 = Math.max(0, (prox2 - need2) * 0.15);
+          hwc.speed = Math.min(hwc.speed, br2);
+        }
+      }
+    }
+  }
+
   // ---- main tick ----
 
   function tick(now) {
@@ -372,7 +432,10 @@ export function createSimulation(overrides, scaleFn) {
     // 9. Try merge again
     tryRampMerge();
 
-    // 10. Spawn
+    // 10. Cross-segment proximity braking (prevent visual overlap at junctions)
+    crossSegmentBrake();
+
+    // 11. Spawn
     var spawned = trySpawn(now);
     if (!spawned && now - lastSpawn >= cfg.spawnMs) {
       spawnBlockedTicks++;
