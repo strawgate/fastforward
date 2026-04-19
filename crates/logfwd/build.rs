@@ -96,8 +96,9 @@ fn main() {
 
     // Re-run when git state changes. Compute .git path from CARGO_MANIFEST_DIR
     // so this works regardless of workspace nesting depth.
-    let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
-    if let Some(git_dir) = find_git_dir(&manifest_dir) {
+    if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR")
+        && let Some(git_dir) = find_git_dir(&PathBuf::from(manifest_dir))
+    {
         println!("cargo:rerun-if-changed={}", git_dir.join("HEAD").display());
         println!(
             "cargo:rerun-if-changed={}",

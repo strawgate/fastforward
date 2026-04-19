@@ -436,6 +436,8 @@ pub enum MaterializeError {
     },
     /// Buffer data was not valid UTF-8 at the referenced range.
     InvalidUtf8 { offset: u32, len: u32 },
+    /// Arrow rejected the constructed Utf8View array.
+    InvalidStringView(String),
     /// Concatenated string bytes exceed `i32::MAX`, making Utf8 offsets invalid.
     OffsetOverflow,
 }
@@ -453,6 +455,9 @@ impl std::fmt::Display for MaterializeError {
             ),
             MaterializeError::InvalidUtf8 { offset, len } => {
                 write!(f, "invalid UTF-8 at StringRef(offset={offset}, len={len})")
+            }
+            MaterializeError::InvalidStringView(err) => {
+                write!(f, "invalid Utf8View array: {err}")
             }
             MaterializeError::OffsetOverflow => {
                 write!(
@@ -728,11 +733,8 @@ fn build_string_view_trusted(
          the ingestion boundary (scanner/decoder) has a validation bug"
     );
 
-    // SAFETY: views are constructed from validated offsets into the registered
-    // buffer blocks. UTF-8 validity guaranteed by the ingestion boundary
-    // (scanner/decoder) or Rust's type system (write_str takes &str).
-    let array =
-        unsafe { StringViewArray::new_unchecked(ScalarBuffer::from(views), buffers, nulls) };
+    let array = StringViewArray::try_new(ScalarBuffer::from(views), buffers, nulls)
+        .map_err(|err| MaterializeError::InvalidStringView(err.to_string()))?;
     Ok((Arc::new(array), DataType::Utf8View))
 }
 

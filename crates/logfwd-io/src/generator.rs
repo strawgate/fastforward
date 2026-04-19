@@ -925,8 +925,7 @@ pub fn generate_arrow_batch(
 
         // Timestamp as ISO 8601 string
         fields.timestamp.write_iso8601(&mut ts_buf);
-        // SAFETY: write_iso8601 produces only ASCII digits, dashes, colons, 'T', '.', 'Z'
-        ts_builder.append_value(unsafe { std::str::from_utf8_unchecked(&ts_buf) });
+        append_utf8_or_null(&mut ts_builder, &ts_buf);
 
         level_builder.append_value(fields.level);
 
@@ -937,18 +936,14 @@ pub fn generate_arrow_batch(
         } else {
             write_message_value(&mut msg_buf, &fields);
         }
-        // SAFETY: both paths produce valid UTF-8:
-        // - message_template is `&str`, guaranteed valid UTF-8
-        // - write_message_value writes only ASCII (method, path, id, status)
-        message_builder.append_value(unsafe { std::str::from_utf8_unchecked(&msg_buf) });
+        append_utf8_or_null(&mut message_builder, &msg_buf);
 
         // Integer fields as Int64 (matching scanner's append_int_by_idx → Int64Array)
         duration_builder.append_value(fields.duration_ms as i64);
 
         // request_id: stack-based hex formatting (avoids format!() heap alloc)
         write_hex16(&mut hex_buf, fields.request_id);
-        // SAFETY: write_hex16 produces only ASCII hex digits
-        rid_builder.append_value(unsafe { std::str::from_utf8_unchecked(&hex_buf) });
+        append_utf8_or_null(&mut rid_builder, &hex_buf);
 
         service_builder.append_value(fields.service);
         status_builder.append_value(fields.status as i64);
@@ -977,6 +972,14 @@ pub fn generate_arrow_batch(
         ],
     )
     .expect("schema matches builders")
+}
+
+#[inline]
+fn append_utf8_or_null(builder: &mut StringBuilder, bytes: &[u8]) {
+    match std::str::from_utf8(bytes) {
+        Ok(value) => builder.append_value(value),
+        Err(_) => builder.append_null(),
+    }
 }
 
 #[cfg(test)]
