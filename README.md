@@ -1,11 +1,9 @@
-# FastForward
-
 <div align="center">
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/brand/lockup-dark.svg">
   <source media="(prefers-color-scheme: light)" srcset="assets/brand/lockup-light.svg">
-  <img width="400" alt="FastForward" src="assets/brand/lockup-dark.svg">
+  <img width="200" alt="FastForward" src="assets/brand/lockup-dark.svg">
 </picture>
 
 **a learning-oriented log forwarder built with Rust**
