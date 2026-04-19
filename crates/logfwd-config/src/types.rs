@@ -826,6 +826,96 @@ impl<'de> Deserialize<'de> for OutputConfig {
     }
 }
 
+// Compatibility conversion from the legacy flat shape. It carries the fields
+// each sink factory historically used and preserves previously ignored fields
+// as ignored while callers still pass `OutputConfig`.
+impl From<&OutputConfig> for OutputConfigV2 {
+    fn from(config: &OutputConfig) -> Self {
+        match config.output_type {
+            OutputType::Otlp => OutputConfigV2::Otlp(OtlpOutputConfig {
+                name: config.name.clone(),
+                endpoint: config.endpoint.clone(),
+                protocol: config.protocol.clone(),
+                compression: config.compression.clone(),
+                auth: config.auth.clone(),
+                tls: config.tls.clone(),
+                headers: config.headers.clone(),
+                retry_attempts: config.retry_attempts,
+                retry_initial_backoff_ms: config.retry_initial_backoff_ms,
+                retry_max_backoff_ms: config.retry_max_backoff_ms,
+                request_timeout_ms: config.request_timeout_ms,
+                batch_size: config.batch_size,
+                batch_timeout_ms: config.batch_timeout_ms,
+            }),
+            OutputType::Http => OutputConfigV2::Http(HttpOutputConfig {
+                name: config.name.clone(),
+                endpoint: config.endpoint.clone(),
+                compression: config.compression.clone(),
+                format: config.format.clone(),
+                auth: config.auth.clone(),
+            }),
+            OutputType::Elasticsearch => OutputConfigV2::Elasticsearch(ElasticsearchOutputConfig {
+                name: config.name.clone(),
+                endpoint: config.endpoint.clone(),
+                compression: config.compression.clone(),
+                request_mode: config.request_mode.clone(),
+                index: config.index.clone().or_else(|| config.path.clone()),
+                auth: config.auth.clone(),
+                tls: config.tls.clone(),
+                request_timeout_ms: config.request_timeout_ms,
+            }),
+            OutputType::Loki => OutputConfigV2::Loki(LokiOutputConfig {
+                name: config.name.clone(),
+                endpoint: config.endpoint.clone(),
+                auth: config.auth.clone(),
+                tenant_id: config.tenant_id.clone(),
+                static_labels: config.static_labels.clone(),
+                label_columns: config.label_columns.clone(),
+                tls: config.tls.clone(),
+                request_timeout_ms: config.request_timeout_ms,
+            }),
+            OutputType::Stdout => OutputConfigV2::Stdout(StdoutOutputConfig {
+                name: config.name.clone(),
+                format: config.format.clone(),
+            }),
+            OutputType::File => OutputConfigV2::File(FileOutputConfig {
+                name: config.name.clone(),
+                path: config.path.clone(),
+                format: config.format.clone(),
+            }),
+            OutputType::Parquet => OutputConfigV2::Parquet(ParquetOutputConfig {
+                name: config.name.clone(),
+                path: config.path.clone(),
+                compression: config.compression.clone(),
+                format: config.format.clone(),
+            }),
+            OutputType::Null => OutputConfigV2::Null(NullOutputConfig {
+                name: config.name.clone(),
+            }),
+            OutputType::Tcp => OutputConfigV2::Tcp(SocketOutputConfig {
+                name: config.name.clone(),
+                endpoint: config.endpoint.clone(),
+            }),
+            OutputType::Udp => OutputConfigV2::Udp(SocketOutputConfig {
+                name: config.name.clone(),
+                endpoint: config.endpoint.clone(),
+            }),
+            OutputType::ArrowIpc => OutputConfigV2::ArrowIpc(ArrowIpcOutputConfig {
+                name: config.name.clone(),
+                endpoint: config.endpoint.clone(),
+                compression: config.compression.clone(),
+                auth: config.auth.clone(),
+                host: config.host.clone(),
+                port: config.port,
+                write_legacy_ipc_format: config.write_legacy_ipc_format,
+                buffer_size_bytes: config.buffer_size_bytes,
+                batch_size: config.batch_size,
+                write_schema_on_connect: config.write_schema_on_connect,
+            }),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct OutputConfigV1 {

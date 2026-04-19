@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use logfwd_config::{Format, OutputConfig, OutputType};
+use logfwd_config::{Format, OutputConfig, OutputConfigV2, OutputType, TlsClientConfig};
 use logfwd_types::diagnostics::ComponentStats;
 
 use crate::arrow_ipc_sink::ArrowIpcSinkFactory;
@@ -22,15 +22,14 @@ use crate::udp_sink::UdpSinkFactory;
 
 fn build_http_client_builder(
     name: &str,
-    cfg: &OutputConfig,
+    tls: Option<&TlsClientConfig>,
+    request_timeout_ms: Option<u64>,
 ) -> Result<reqwest::ClientBuilder, OutputError> {
     let mut client_builder = reqwest::Client::builder()
-        .timeout(Duration::from_millis(
-            cfg.request_timeout_ms.unwrap_or(30_000),
-        ))
+        .timeout(Duration::from_millis(request_timeout_ms.unwrap_or(30_000)))
         .pool_max_idle_per_host(64);
 
-    if let Some(tls) = &cfg.tls {
+    if let Some(tls) = tls {
         if tls.insecure_skip_verify {
             client_builder = client_builder.danger_accept_invalid_certs(true);
         }
@@ -92,10 +91,28 @@ pub fn build_sink_factory(
     base_path: Option<&Path>,
     stats: Arc<ComponentStats>,
 ) -> Result<Arc<dyn SinkFactory>, OutputError> {
-    let auth_headers = build_auth_headers(cfg.auth.as_ref());
+    if cfg.output_type == OutputType::File
+        && let Some(compression) = cfg.compression.as_deref()
+    {
+        return Err(OutputError::Construction(format!(
+            "output '{name}': file does not support '{compression}' compression"
+        )));
+    }
 
-    match cfg.output_type {
-        OutputType::Elasticsearch => {
+    let typed = OutputConfigV2::from(cfg);
+    build_sink_factory_v2(name, &typed, base_path, stats)
+}
+
+/// Build an `Arc<dyn SinkFactory>` from a typed output configuration.
+pub fn build_sink_factory_v2(
+    name: &str,
+    cfg: &OutputConfigV2,
+    base_path: Option<&Path>,
+    stats: Arc<ComponentStats>,
+) -> Result<Arc<dyn SinkFactory>, OutputError> {
+    match cfg {
+        OutputConfigV2::Elasticsearch(cfg) => {
+            let auth_headers = build_auth_headers(cfg.auth.as_ref());
             let endpoint = cfg.endpoint.as_ref().ok_or_else(|| {
                 OutputError::Construction(format!(
                     "output '{name}': elasticsearch requires 'endpoint'"
@@ -104,7 +121,6 @@ pub fn build_sink_factory(
             let index = cfg
                 .index
                 .as_ref()
-                .or(cfg.path.as_ref())
                 .map_or("logs", String::as_str)
                 .to_string();
             let compress = match cfg.compression.as_deref() {
@@ -127,7 +143,7 @@ pub fn build_sink_factory(
                 auth_headers,
                 compress,
                 request_mode,
-                build_http_client_builder(name, cfg)?,
+                build_http_client_builder(name, cfg.tls.as_ref(), cfg.request_timeout_ms)?,
                 stats,
             )
             .map_err(|e| {
@@ -135,7 +151,8 @@ pub fn build_sink_factory(
             })?;
             Ok(Arc::new(factory))
         }
-        OutputType::Loki => {
+        OutputConfigV2::Loki(cfg) => {
+            let auth_headers = build_auth_headers(cfg.auth.as_ref());
             let endpoint = cfg.endpoint.as_ref().ok_or_else(|| {
                 OutputError::Construction(format!("output '{name}': loki requires 'endpoint'"))
             })?;
@@ -150,7 +167,7 @@ pub fn build_sink_factory(
                     .collect(),
                 cfg.label_columns.clone().unwrap_or_default(),
                 auth_headers,
-                build_http_client_builder(name, cfg)?,
+                build_http_client_builder(name, cfg.tls.as_ref(), cfg.request_timeout_ms)?,
                 stats,
             )
             .map_err(|e| {
@@ -158,7 +175,8 @@ pub fn build_sink_factory(
             })?;
             Ok(Arc::new(factory))
         }
-        OutputType::ArrowIpc => {
+        OutputConfigV2::ArrowIpc(cfg) => {
+            let auth_headers = build_auth_headers(cfg.auth.as_ref());
             let endpoint = cfg.endpoint.as_ref().ok_or_else(|| {
                 OutputError::Construction(format!("output '{name}': arrow_ipc requires 'endpoint'"))
             })?;
@@ -184,7 +202,8 @@ pub fn build_sink_factory(
             })?;
             Ok(Arc::new(factory))
         }
-        OutputType::Http => {
+        OutputConfigV2::Http(cfg) => {
+            let auth_headers = build_auth_headers(cfg.auth.as_ref());
             let endpoint = cfg.endpoint.as_ref().ok_or_else(|| {
                 OutputError::Construction(format!("output '{name}': http requires 'endpoint'"))
             })?;
@@ -210,14 +229,15 @@ pub fn build_sink_factory(
             })?;
             Ok(Arc::new(factory))
         }
-        OutputType::Udp => {
+        OutputConfigV2::Udp(cfg) => {
             let endpoint = cfg.endpoint.as_ref().ok_or_else(|| {
                 OutputError::Construction(format!("output '{name}': udp requires 'endpoint'"))
             })?;
             let factory = UdpSinkFactory::new(name.to_string(), endpoint.clone(), stats);
             Ok(Arc::new(factory))
         }
-        OutputType::Otlp => {
+        OutputConfigV2::Otlp(cfg) => {
+            let auth_headers = build_auth_headers(cfg.auth.as_ref());
             let endpoint = cfg.endpoint.as_ref().ok_or_else(|| {
                 OutputError::Construction(format!("output '{name}': OTLP requires 'endpoint'"))
             })?;
@@ -241,7 +261,8 @@ pub fn build_sink_factory(
                 }
             };
 
-            let client_builder = build_http_client_builder(name, cfg)?;
+            let client_builder =
+                build_http_client_builder(name, cfg.tls.as_ref(), cfg.request_timeout_ms)?;
 
             let mut all_headers = auth_headers;
             if let Some(cfg_headers) = &cfg.headers {
@@ -283,7 +304,7 @@ pub fn build_sink_factory(
             })?;
             Ok(Arc::new(factory))
         }
-        OutputType::Stdout => {
+        OutputConfigV2::Stdout(cfg) => {
             let fmt = match cfg.format.as_ref() {
                 Some(Format::Json) => StdoutFormat::Json,
                 Some(Format::Console) => StdoutFormat::Console,
@@ -302,15 +323,10 @@ pub fn build_sink_factory(
                 stats,
             )))
         }
-        OutputType::File => {
+        OutputConfigV2::File(cfg) => {
             let path = cfg.path.as_ref().ok_or_else(|| {
                 OutputError::Construction(format!("output '{name}': file requires 'path'"))
             })?;
-            if let Some(compression) = cfg.compression.as_deref() {
-                return Err(OutputError::Construction(format!(
-                    "output '{name}': file does not support '{compression}' compression"
-                )));
-            }
             let mut resolved_path = PathBuf::from(path);
             if resolved_path.is_relative()
                 && let Some(base) = base_path
@@ -337,7 +353,7 @@ pub fn build_sink_factory(
             })?;
             Ok(Arc::new(factory))
         }
-        OutputType::Tcp => {
+        OutputConfigV2::Tcp(cfg) => {
             let endpoint = cfg.endpoint.as_ref().ok_or_else(|| {
                 OutputError::Construction(format!("output '{name}': tcp requires 'endpoint'"))
             })?;
@@ -347,22 +363,24 @@ pub fn build_sink_factory(
                 stats,
             )))
         }
-        OutputType::Null => Ok(Arc::new(NullSinkFactory::new(name.to_string(), stats))),
+        OutputConfigV2::Null(_) => Ok(Arc::new(NullSinkFactory::new(name.to_string(), stats))),
+        OutputConfigV2::Parquet(_) => Err(OutputError::Construction(format!(
+            "output '{name}': type Parquet not yet supported"
+        ))),
         _ => Err(OutputError::Construction(format!(
-            "output '{name}': type {:?} not yet supported",
-            cfg.output_type
+            "output '{name}': unknown output type"
         ))),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::build_sink_factory;
+    use super::{build_sink_factory, build_sink_factory_v2};
     use std::collections::HashMap;
     use std::fs;
     use std::sync::Arc;
 
-    use logfwd_config::{OutputConfig, OutputType};
+    use logfwd_config::{OutputConfig, OutputConfigV2, OutputType, StdoutOutputConfig};
     use logfwd_types::diagnostics::ComponentStats;
 
     #[test]
@@ -378,6 +396,32 @@ mod tests {
         assert!(
             result.is_ok(),
             "arrow_ipc should accept explicit 'none' compression"
+        );
+    }
+
+    #[test]
+    fn build_sink_factory_v2_builds_from_typed_variant() {
+        let cfg = OutputConfigV2::Stdout(StdoutOutputConfig {
+            name: None,
+            format: None,
+        });
+
+        let result = build_sink_factory_v2("stdout", &cfg, None, Arc::new(ComponentStats::new()));
+        assert!(result.is_ok(), "typed stdout config should build a sink");
+    }
+
+    #[test]
+    fn build_sink_factory_preserves_legacy_ignored_fields() {
+        let cfg = OutputConfig {
+            output_type: OutputType::Stdout,
+            endpoint: Some("ignored.example:4318".to_string()),
+            ..Default::default()
+        };
+
+        let result = build_sink_factory("stdout", &cfg, None, Arc::new(ComponentStats::new()));
+        assert!(
+            result.is_ok(),
+            "compatibility wrapper should preserve legacy ignored fields"
         );
     }
 

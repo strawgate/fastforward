@@ -2926,6 +2926,22 @@ format: json
     }
 
     #[test]
+    fn output_config_v2_from_legacy_preserves_elasticsearch_path_alias() {
+        let output = OutputConfig {
+            output_type: OutputType::Elasticsearch,
+            endpoint: Some("http://localhost:9200".to_string()),
+            path: Some("legacy-index".to_string()),
+            ..Default::default()
+        };
+
+        let v2 = OutputConfigV2::from(&output);
+        let OutputConfigV2::Elasticsearch(elasticsearch) = v2 else {
+            panic!("expected elasticsearch v2 output config");
+        };
+        assert_eq!(elasticsearch.index.as_deref(), Some("legacy-index"));
+    }
+
+    #[test]
     fn output_config_v2_variants_normalize_to_output_types() {
         let cases = [
             (
