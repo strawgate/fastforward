@@ -1260,18 +1260,18 @@ fn validate_transform_probe_read_only(
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
 
-    let fields: Vec<Field> = if transform.analyzer().referenced_columns.is_empty() {
+    let scan_config = transform.analyzer().scan_config();
+    let fields: Vec<Field> = if scan_config.extract_all || scan_config.wanted_fields.is_empty() {
         vec![
             Field::new("body", DataType::Utf8, true),
             Field::new("level", DataType::Utf8, true),
             Field::new("msg", DataType::Utf8, true),
         ]
     } else {
-        transform
-            .analyzer()
-            .referenced_columns
+        scan_config
+            .wanted_fields
             .iter()
-            .map(|name| Field::new(name, DataType::Utf8, true))
+            .map(|field| Field::new(field.name.as_str(), DataType::Utf8, true))
             .collect()
     };
 
@@ -1344,7 +1344,11 @@ fn validate_known_columns_read_only(
         .analyzer()
         .referenced_columns
         .iter()
-        .filter(|column| !known_columns.contains(column.as_str()))
+        .filter(|column| {
+            !known_columns
+                .iter()
+                .any(|known| known.eq_ignore_ascii_case(column))
+        })
         .cloned()
         .collect();
     unknown.sort_unstable();
@@ -2451,6 +2455,29 @@ transform: |
         assert!(
             read_only.is_err(),
             "read-only validation should reject unknown columns"
+        );
+    }
+
+    #[test]
+    fn issue_1955_dry_run_accepts_mixed_case_generator_logs_columns() {
+        let yaml = r#"
+input:
+  type: generator
+output:
+  type: null
+transform: |
+  SELECT Level FROM logs
+"#;
+        let config = logfwd_config::Config::load_str(yaml).expect("config should parse");
+        let runtime = validate_pipelines(&config, true, None);
+        let read_only = validate_pipelines_read_only(&config, None, |_name| {}, |_err| {});
+        assert!(
+            runtime.is_ok(),
+            "dry-run validation should accept case-insensitive column references"
+        );
+        assert!(
+            read_only.is_ok(),
+            "read-only validation should accept case-insensitive column references"
         );
     }
 
