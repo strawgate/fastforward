@@ -474,8 +474,7 @@ impl LokiSink {
         for (labels, entries) in stream_map.iter_mut() {
             let retained =
                 sort_and_dedup_timestamps(entries, last_timestamp_by_stream.get(labels).copied());
-            entries.truncate(retained);
-            if entries.is_empty() {
+            if retained == 0 {
                 continue;
             }
             payloads.extend(Self::serialize_stream_chunks(
