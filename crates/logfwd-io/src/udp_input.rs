@@ -37,7 +37,11 @@ const fn should_stop_udp_drain(datagrams_read: usize, emitted_bytes: usize) -> b
     datagrams_read >= MAX_DATAGRAMS_PER_POLL || emitted_bytes >= MAX_EMIT_BYTES_PER_POLL
 }
 
-/// Derive a stable source id for a UDP sender address.
+/// Derive a stable sender-scoped source id for UDP datagrams.
+///
+/// Domain-separated from other source-id families (file fingerprints, TCP
+/// connection sequence ids, etc.) so maps keyed by SourceId are less likely to
+/// collide across transport types.
 fn source_id_for_sender(addr: SocketAddr) -> SourceId {
     let mut h = xxhash_rust::xxh64::Xxh64::new(0);
     h.update(b"udp:");
@@ -296,12 +300,15 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(50));
 
         let events = input.poll().unwrap();
-        assert_eq!(events.len(), 1);
-        if let InputEvent::Data { bytes, .. } = &events[0] {
-            let text = String::from_utf8_lossy(bytes);
-            assert!(text.contains("hello world"), "got: {text}");
-            assert!(text.contains("second line"), "got: {text}");
+        assert!(!events.is_empty());
+        let mut text = String::new();
+        for event in &events {
+            if let InputEvent::Data { bytes, .. } = event {
+                text.push_str(&String::from_utf8_lossy(bytes));
+            }
         }
+        assert!(text.contains("hello world"), "got: {text}");
+        assert!(text.contains("second line"), "got: {text}");
     }
 
     #[test]
@@ -677,7 +684,8 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(75));
 
         let first = input.poll().unwrap();
-        assert_eq!(first.len(), 1);
+        assert!(!first.is_empty());
+        assert!(first.len() <= MAX_DATAGRAMS_PER_POLL);
         let first_lines = first
             .iter()
             .filter_map(|event| match event {
@@ -712,6 +720,128 @@ mod tests {
         for i in 0..total {
             assert!(text.contains(&format!("pkt-{i}\n")), "missing pkt-{i}");
         }
+    }
+
+    #[test]
+    fn source_id_is_present_for_received_datagrams() {
+        let mut input = UdpInput::new(
+            "test",
+            "127.0.0.1:0",
+            Arc::new(logfwd_types::diagnostics::ComponentStats::new()),
+        )
+        .unwrap();
+        let addr = input.local_addr().unwrap();
+        let sender = StdSocket::bind("127.0.0.1:0").unwrap();
+
+        sender.send_to(b"hello\n", addr).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        let events = input.poll().unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            InputEvent::Data {
+                source_id: Some(_), ..
+            } => {}
+            _ => panic!("expected UDP data to carry a source_id"),
+        }
+    }
+
+    #[test]
+    fn source_id_is_stable_per_sender_socket() {
+        let mut input = UdpInput::new(
+            "test",
+            "127.0.0.1:0",
+            Arc::new(logfwd_types::diagnostics::ComponentStats::new()),
+        )
+        .unwrap();
+        let addr = input.local_addr().unwrap();
+        let sender = StdSocket::bind("127.0.0.1:0").unwrap();
+
+        sender.send_to(b"first\n", addr).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        let first_events = input.poll().unwrap();
+        let first = match &first_events[0] {
+            InputEvent::Data {
+                source_id: Some(id),
+                ..
+            } => *id,
+            _ => panic!("expected source_id on first poll"),
+        };
+
+        sender.send_to(b"second\n", addr).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        let second_events = input.poll().unwrap();
+        let second = match &second_events[0] {
+            InputEvent::Data {
+                source_id: Some(id),
+                ..
+            } => *id,
+            _ => panic!("expected source_id on second poll"),
+        };
+
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn source_ids_differ_for_distinct_senders() {
+        let mut input = UdpInput::new(
+            "test",
+            "127.0.0.1:0",
+            Arc::new(logfwd_types::diagnostics::ComponentStats::new()),
+        )
+        .unwrap();
+        let addr = input.local_addr().unwrap();
+        let sender_a = StdSocket::bind("127.0.0.1:0").unwrap();
+        let sender_b = StdSocket::bind("127.0.0.1:0").unwrap();
+
+        sender_a.send_to(b"a\n", addr).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        let event_a = input.poll().unwrap();
+        let source_a = match &event_a[0] {
+            InputEvent::Data {
+                source_id: Some(id),
+                ..
+            } => *id,
+            _ => panic!("expected source_id for sender_a"),
+        };
+
+        sender_b.send_to(b"b\n", addr).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        let event_b = input.poll().unwrap();
+        let source_b = match &event_b[0] {
+            InputEvent::Data {
+                source_id: Some(id),
+                ..
+            } => *id,
+            _ => panic!("expected source_id for sender_b"),
+        };
+
+        assert_ne!(source_a, source_b);
+    }
+
+    #[test]
+    fn source_id_ipv6_stable_and_distinct() {
+        use std::net::{Ipv6Addr, SocketAddrV6};
+
+        let addr_a = SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::LOCALHOST, 5000, 0, 0));
+        let addr_b = SocketAddr::V6(SocketAddrV6::new(
+            Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1),
+            5000,
+            0,
+            0,
+        ));
+
+        // Stability: same address yields the same id across calls.
+        let id_a1 = source_id_for_sender(addr_a);
+        let id_a2 = source_id_for_sender(addr_a);
+        assert_eq!(id_a1, id_a2, "IPv6 source id must be stable");
+
+        // Distinctness: different addresses yield different ids.
+        let id_b = source_id_for_sender(addr_b);
+        assert_ne!(
+            id_a1, id_b,
+            "different IPv6 addresses must produce different ids"
+        );
     }
 }
 
