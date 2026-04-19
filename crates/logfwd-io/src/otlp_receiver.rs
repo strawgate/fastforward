@@ -27,8 +27,6 @@ use decode::*;
 use projection::ProjectionError;
 
 use std::io;
-#[cfg(any(feature = "otlp-research", test))]
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, mpsc};
 
@@ -36,6 +34,8 @@ use arrow::record_batch::RecordBatch;
 use axum::routing::post;
 use logfwd_types::diagnostics::{ComponentHealth, ComponentStats};
 use logfwd_types::field_names;
+#[cfg(any(feature = "otlp-research", test))]
+use tokio::sync::Mutex;
 use tokio::sync::oneshot;
 
 use crate::InputError;

@@ -120,7 +120,7 @@ pub(super) async fn handle_otlp_request(
     let batch = if is_json {
         decode_otlp_json(&body, &state.resource_prefix)
     } else {
-        decode_otlp_protobuf_request(body, &state)
+        decode_otlp_protobuf_request(body, &state).await
     };
     let batch = match batch {
         Ok(batch) => batch,
@@ -177,7 +177,7 @@ pub(super) async fn handle_otlp_request(
     }
 }
 
-fn decode_otlp_protobuf_request(
+async fn decode_otlp_protobuf_request(
     body: Vec<u8>,
     state: &OtlpServerState,
 ) -> Result<arrow::record_batch::RecordBatch, InputError> {
@@ -185,21 +185,21 @@ fn decode_otlp_protobuf_request(
         OtlpProtobufDecodeMode::Prost => decode_otlp_protobuf(&body, &state.resource_prefix),
         #[cfg(any(feature = "otlp-research", test))]
         OtlpProtobufDecodeMode::ProjectedFallback => {
-            decode_otlp_protobuf_projected_fallback(Bytes::from(body), state)
+            decode_otlp_protobuf_projected_fallback(Bytes::from(body), state).await
         }
         #[cfg(any(feature = "otlp-research", test))]
         OtlpProtobufDecodeMode::ProjectedOnly => {
-            decode_otlp_protobuf_projected_only(Bytes::from(body), state)
+            decode_otlp_protobuf_projected_only(Bytes::from(body), state).await
         }
     }
 }
 
 #[cfg(any(feature = "otlp-research", test))]
-fn decode_otlp_protobuf_projected_fallback(
+async fn decode_otlp_protobuf_projected_fallback(
     body: Bytes,
     state: &OtlpServerState,
 ) -> Result<arrow::record_batch::RecordBatch, InputError> {
-    match decode_with_reusable_projected_decoder(body.clone(), state) {
+    match decode_with_reusable_projected_decoder(body.clone(), state).await {
         Ok(batch) => {
             record_projected_success(state.stats.as_ref());
             Ok(batch)
@@ -216,11 +216,11 @@ fn decode_otlp_protobuf_projected_fallback(
 }
 
 #[cfg(any(feature = "otlp-research", test))]
-fn decode_otlp_protobuf_projected_only(
+async fn decode_otlp_protobuf_projected_only(
     body: Bytes,
     state: &OtlpServerState,
 ) -> Result<arrow::record_batch::RecordBatch, InputError> {
-    match decode_with_reusable_projected_decoder(body, state) {
+    match decode_with_reusable_projected_decoder(body, state).await {
         Ok(batch) => {
             record_projected_success(state.stats.as_ref());
             Ok(batch)
@@ -236,7 +236,7 @@ fn decode_otlp_protobuf_projected_only(
 }
 
 #[cfg(any(feature = "otlp-research", test))]
-fn decode_with_reusable_projected_decoder(
+async fn decode_with_reusable_projected_decoder(
     body: Bytes,
     state: &OtlpServerState,
 ) -> Result<arrow::record_batch::RecordBatch, ProjectionError> {
@@ -244,9 +244,7 @@ fn decode_with_reusable_projected_decoder(
         .projected_decoder
         .as_ref()
         .ok_or_else(|| ProjectionError::Batch("projected decoder not initialized".to_string()))?;
-    let mut decoder = decoder
-        .lock()
-        .map_err(|_| ProjectionError::Batch("projected decoder lock poisoned".to_string()))?;
+    let mut decoder = decoder.lock().await;
     decoder.try_decode_view_bytes(body)
 }
 

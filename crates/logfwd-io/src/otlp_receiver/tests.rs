@@ -1212,7 +1212,15 @@ fn experimental_projection_decode_mode_controls_http_protobuf_path() {
         },
         "fallback receiver should emit decoded batch",
     );
-    assert_eq!(events.len(), 2);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| {
+                matches!(event, InputEvent::Batch { batch, .. } if batch.num_rows() == 1)
+            })
+            .count(),
+        2
+    );
 }
 
 #[test]
