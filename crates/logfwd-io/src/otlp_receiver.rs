@@ -34,6 +34,8 @@ use arrow::record_batch::RecordBatch;
 use axum::routing::post;
 use logfwd_types::diagnostics::{ComponentHealth, ComponentStats};
 use logfwd_types::field_names;
+#[cfg(any(feature = "otlp-research", test))]
+use tokio::sync::Mutex;
 use tokio::sync::oneshot;
 
 use crate::InputError;
@@ -92,6 +94,8 @@ struct OtlpServerState {
     health: Arc<AtomicU8>,
     resource_prefix: String,
     protobuf_decode_mode: OtlpProtobufDecodeMode,
+    #[cfg(any(feature = "otlp-research", test))]
+    projected_decoder: Option<Mutex<ProjectedOtlpDecoder>>,
     stats: Option<Arc<ComponentStats>>,
     /// Maximum request body size. Defaults to `MAX_REQUEST_BODY_SIZE` (10 MiB).
     max_message_size_bytes: usize,
@@ -226,6 +230,7 @@ impl OtlpReceiverInput {
         stats: Option<Arc<ComponentStats>>,
         resource_prefix: impl Into<String>,
         protobuf_decode_mode: OtlpProtobufDecodeMode,
+        max_message_size_bytes: Option<usize>,
     ) -> io::Result<Self> {
         Self::new_with_capacity_stats_prefix_and_decode_mode(
             name,
@@ -234,7 +239,7 @@ impl OtlpReceiverInput {
             stats,
             resource_prefix.into(),
             protobuf_decode_mode,
-            None,
+            max_message_size_bytes,
         )
     }
 
@@ -259,12 +264,20 @@ impl OtlpReceiverInput {
         let (tx, rx) = mpsc::sync_channel(capacity);
         let is_running = Arc::new(AtomicBool::new(true));
         let health = Arc::new(AtomicU8::new(ComponentHealth::Healthy.as_repr()));
+        #[cfg(any(feature = "otlp-research", test))]
+        let projected_decoder = if protobuf_decode_mode == OtlpProtobufDecodeMode::Prost {
+            None
+        } else {
+            Some(Mutex::new(ProjectedOtlpDecoder::new(&resource_prefix)))
+        };
         let state = Arc::new(OtlpServerState {
             tx,
             is_running: Arc::clone(&is_running),
             health: Arc::clone(&health),
             resource_prefix,
             protobuf_decode_mode,
+            #[cfg(any(feature = "otlp-research", test))]
+            projected_decoder,
             stats,
             max_message_size_bytes,
         });

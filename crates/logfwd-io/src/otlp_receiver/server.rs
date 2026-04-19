@@ -8,16 +8,16 @@ use axum::extract::State;
 use axum::http::header::{CONTENT_ENCODING, CONTENT_TYPE};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
+#[cfg(any(feature = "otlp-research", test))]
 use bytes::Bytes;
 use logfwd_types::diagnostics::{ComponentHealth, ComponentStats};
 
 use crate::InputError;
 use crate::receiver_http::{parse_content_length, parse_content_type, read_limited_body};
 
-use super::decode::{
-    decode_otlp_json, decode_otlp_protobuf, decode_otlp_protobuf_bytes_with_mode, decompress_gzip,
-    decompress_zstd,
-};
+use super::decode::{decode_otlp_json, decode_otlp_protobuf, decompress_gzip, decompress_zstd};
+#[cfg(any(feature = "otlp-research", test))]
+use super::projection::ProjectionError;
 use super::{OtlpProtobufDecodeMode, OtlpServerState, ReceiverPayload};
 
 pub(super) fn record_error(stats: Option<&Arc<ComponentStats>>) {
@@ -119,14 +119,8 @@ pub(super) async fn handle_otlp_request(
 
     let batch = if is_json {
         decode_otlp_json(&body, &state.resource_prefix)
-    } else if state.protobuf_decode_mode == OtlpProtobufDecodeMode::Prost {
-        decode_otlp_protobuf(&body, &state.resource_prefix)
     } else {
-        decode_otlp_protobuf_bytes_with_mode(
-            Bytes::from(body),
-            &state.resource_prefix,
-            state.protobuf_decode_mode,
-        )
+        decode_otlp_protobuf_request(body, &state).await
     };
     let batch = match batch {
         Ok(batch) => batch,
@@ -180,6 +174,98 @@ pub(super) async fn handle_otlp_request(
             )
                 .into_response()
         }
+    }
+}
+
+async fn decode_otlp_protobuf_request(
+    body: Vec<u8>,
+    state: &OtlpServerState,
+) -> Result<arrow::record_batch::RecordBatch, InputError> {
+    match state.protobuf_decode_mode {
+        OtlpProtobufDecodeMode::Prost => decode_otlp_protobuf(&body, &state.resource_prefix),
+        #[cfg(any(feature = "otlp-research", test))]
+        OtlpProtobufDecodeMode::ProjectedFallback => {
+            decode_otlp_protobuf_projected_fallback(Bytes::from(body), state).await
+        }
+        #[cfg(any(feature = "otlp-research", test))]
+        OtlpProtobufDecodeMode::ProjectedOnly => {
+            decode_otlp_protobuf_projected_only(Bytes::from(body), state).await
+        }
+    }
+}
+
+#[cfg(any(feature = "otlp-research", test))]
+async fn decode_otlp_protobuf_projected_fallback(
+    body: Bytes,
+    state: &OtlpServerState,
+) -> Result<arrow::record_batch::RecordBatch, InputError> {
+    match decode_with_reusable_projected_decoder(body.clone(), state).await {
+        Ok(batch) => {
+            record_projected_success(state.stats.as_ref());
+            Ok(batch)
+        }
+        Err(ProjectionError::Unsupported(_)) => {
+            record_projected_fallback(state.stats.as_ref());
+            decode_otlp_protobuf(&body, &state.resource_prefix)
+        }
+        Err(err) => {
+            record_projection_invalid(state.stats.as_ref());
+            Err(err.into_input_error())
+        }
+    }
+}
+
+#[cfg(any(feature = "otlp-research", test))]
+async fn decode_otlp_protobuf_projected_only(
+    body: Bytes,
+    state: &OtlpServerState,
+) -> Result<arrow::record_batch::RecordBatch, InputError> {
+    match decode_with_reusable_projected_decoder(body, state).await {
+        Ok(batch) => {
+            record_projected_success(state.stats.as_ref());
+            Ok(batch)
+        }
+        Err(ProjectionError::Unsupported(err)) => {
+            Err(ProjectionError::Unsupported(err).into_input_error())
+        }
+        Err(err) => {
+            record_projection_invalid(state.stats.as_ref());
+            Err(err.into_input_error())
+        }
+    }
+}
+
+#[cfg(any(feature = "otlp-research", test))]
+async fn decode_with_reusable_projected_decoder(
+    body: Bytes,
+    state: &OtlpServerState,
+) -> Result<arrow::record_batch::RecordBatch, ProjectionError> {
+    let decoder = state
+        .projected_decoder
+        .as_ref()
+        .ok_or_else(|| ProjectionError::Batch("projected decoder not initialized".to_string()))?;
+    let mut decoder = decoder.lock().await;
+    decoder.try_decode_view_bytes(body)
+}
+
+#[cfg(any(feature = "otlp-research", test))]
+fn record_projected_success(stats: Option<&Arc<ComponentStats>>) {
+    if let Some(stats) = stats {
+        stats.inc_otlp_projected_success();
+    }
+}
+
+#[cfg(any(feature = "otlp-research", test))]
+fn record_projected_fallback(stats: Option<&Arc<ComponentStats>>) {
+    if let Some(stats) = stats {
+        stats.inc_otlp_projected_fallback();
+    }
+}
+
+#[cfg(any(feature = "otlp-research", test))]
+fn record_projection_invalid(stats: Option<&Arc<ComponentStats>>) {
+    if let Some(stats) = stats {
+        stats.inc_otlp_projection_invalid();
     }
 }
 
