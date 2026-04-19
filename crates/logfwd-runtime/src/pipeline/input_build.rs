@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -503,6 +504,7 @@ pub(super) fn build_input_state(
                     source: Box::new(source),
                     buf: BytesMut::with_capacity(64 * 1024),
                     row_origins: Vec::new(),
+                    source_paths: HashMap::new(),
                     stats,
                 });
             }
@@ -533,6 +535,7 @@ pub(super) fn build_input_state(
                 source: Box::new(source),
                 buf: BytesMut::with_capacity(64 * 1024),
                 row_origins: Vec::new(),
+                source_paths: HashMap::new(),
                 stats,
             });
         }
@@ -564,6 +567,7 @@ pub(super) fn build_input_state(
                 source: Box::new(source),
                 buf: BytesMut::with_capacity(64 * 1024),
                 row_origins: Vec::new(),
+                source_paths: HashMap::new(),
                 stats,
             });
         }
@@ -629,6 +633,7 @@ pub(super) fn build_input_state(
                     source: Box::new(framed),
                     buf: BytesMut::with_capacity(4 * 1024 * 1024),
                     row_origins: Vec::new(),
+                    source_paths: HashMap::new(),
                     stats,
                 });
             }
@@ -679,6 +684,7 @@ pub(super) fn build_input_state(
         source: Box::new(framed),
         buf: BytesMut::with_capacity(buf_cap),
         row_origins: Vec::new(),
+        source_paths: HashMap::new(),
         stats,
     })
 }

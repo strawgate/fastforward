@@ -256,6 +256,7 @@ impl InputSource for FramedInput {
                     }
 
                     if key.is_some()
+                        && self.inner.should_reclaim_completed_source_state()
                         && self
                             .sources
                             .get(&key)
@@ -412,6 +413,10 @@ impl InputSource for FramedInput {
 
     fn source_paths(&self) -> Vec<(SourceId, std::path::PathBuf)> {
         self.inner.source_paths()
+    }
+
+    fn should_reclaim_completed_source_state(&self) -> bool {
+        self.inner.should_reclaim_completed_source_state()
     }
 
     fn set_offset_by_source(&mut self, source_id: SourceId, offset: u64) {

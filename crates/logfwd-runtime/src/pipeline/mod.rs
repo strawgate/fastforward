@@ -109,6 +109,7 @@ struct InputTransform {
     scanner: Scanner,
     transform: SqlTransform,
     input_name: String,
+    #[cfg_attr(feature = "turmoil", allow(dead_code))]
     source_metadata_plan: SourceMetadataPlan,
 }
 
@@ -126,7 +127,11 @@ struct InputState {
     /// Buffer accumulating scanner-ready bytes for batching.
     buf: BytesMut,
     /// Row-origin spans for the scanner-ready bytes currently in `buf`.
+    #[cfg_attr(feature = "turmoil", allow(dead_code))]
     row_origins: Vec<RowOriginSpan>,
+    /// Source path snapshots for source IDs represented in `row_origins`.
+    #[cfg_attr(feature = "turmoil", allow(dead_code))]
+    source_paths: HashMap<SourceId, String>,
     /// Input metrics (used for parse/rotation/truncation observability).
     stats: Arc<ComponentStats>,
 }
@@ -196,6 +201,7 @@ impl Pipeline {
             source,
             buf: BytesMut::with_capacity(self.batch_target_bytes),
             row_origins: Vec::new(),
+            source_paths: HashMap::new(),
             stats,
         });
         // Keep input_transforms in sync: one transform per input.

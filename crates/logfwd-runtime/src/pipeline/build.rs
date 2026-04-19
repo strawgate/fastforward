@@ -514,6 +514,7 @@ impl Pipeline {
                 scan_config.line_field_name = Some(field_names::BODY.to_string());
             }
             let scanner = logfwd_arrow::scanner::Scanner::new(scan_config);
+            #[cfg(not(feature = "turmoil"))]
             let requested_source_metadata_plan = transform.analyzer().source_metadata_plan();
             let explicit_source_metadata_plan =
                 transform.analyzer().explicit_source_metadata_plan();
@@ -525,7 +526,18 @@ impl Pipeline {
                 ));
             }
             let source_metadata_plan = if input_cfg.source_metadata {
-                requested_source_metadata_plan
+                #[cfg(feature = "turmoil")]
+                {
+                    return Err(format!(
+                        "pipeline '{name}' input '{input_name}': source_metadata is not \
+                         supported when built with the turmoil feature; the turmoil input path \
+                         does not attach source metadata before SQL"
+                    ));
+                }
+                #[cfg(not(feature = "turmoil"))]
+                {
+                    requested_source_metadata_plan
+                }
             } else {
                 SourceMetadataPlan::default()
             };

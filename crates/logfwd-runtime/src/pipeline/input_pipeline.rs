@@ -22,7 +22,7 @@
 //! ```
 
 #[cfg(not(feature = "turmoil"))]
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 #[cfg(not(feature = "turmoil"))]
 use std::path::PathBuf;
 #[cfg(not(feature = "turmoil"))]
@@ -86,6 +86,7 @@ const IO_CPU_CHANNEL_CAPACITY: usize = 4;
 fn flush_buf(
     buf: &mut bytes::BytesMut,
     row_origins: &mut Vec<RowOriginSpan>,
+    buffered_source_paths: &mut HashMap<SourceId, String>,
     source: &dyn logfwd_io::input::InputSource,
     tx: &mpsc::Sender<IoWorkItem>,
     metrics: &PipelineMetrics,
@@ -95,13 +96,15 @@ fn flush_buf(
 ) -> bool {
     if buf.is_empty() {
         row_origins.clear();
+        buffered_source_paths.clear();
         return true;
     }
     let data = buf.split().freeze();
     let checkpoints = source.checkpoint_data();
     let source_paths = if source_metadata_plan.source_path {
-        source_paths_by_id(source.source_paths())
+        std::mem::take(buffered_source_paths)
     } else {
+        buffered_source_paths.clear();
         HashMap::new()
     };
     let chunk = IoWorkItem::Bytes(IoChunk {
@@ -155,11 +158,40 @@ pub(crate) enum IoWorkItem {
 }
 
 #[cfg(not(feature = "turmoil"))]
-fn source_paths_by_id(paths: Vec<(SourceId, PathBuf)>) -> HashMap<SourceId, String> {
+fn source_paths_by_id(
+    paths: &[(SourceId, PathBuf)],
+    row_origins: &[RowOriginSpan],
+) -> HashMap<SourceId, String> {
+    let wanted: HashSet<SourceId> = row_origins
+        .iter()
+        .filter_map(|origin| origin.source_id)
+        .collect();
+    if wanted.is_empty() {
+        return HashMap::new();
+    }
+
     paths
-        .into_iter()
-        .map(|(sid, path)| (sid, path.to_string_lossy().into_owned()))
+        .iter()
+        .filter(|(sid, _)| wanted.contains(sid))
+        .map(|(sid, path)| (*sid, path.to_string_lossy().into_owned()))
         .collect()
+}
+
+#[cfg(not(feature = "turmoil"))]
+fn capture_source_path(
+    buffered_source_paths: &mut HashMap<SourceId, String>,
+    source_paths: &[(SourceId, PathBuf)],
+    source_id: Option<SourceId>,
+) {
+    let Some(source_id) = source_id else {
+        return;
+    };
+    if buffered_source_paths.contains_key(&source_id) {
+        return;
+    }
+    if let Some((_, path)) = source_paths.iter().find(|(sid, _)| *sid == source_id) {
+        buffered_source_paths.insert(source_id, path.to_string_lossy().into_owned());
+    }
 }
 
 #[cfg(not(feature = "turmoil"))]
@@ -235,7 +267,7 @@ fn source_metadata_for_batch(
         )));
     }
 
-    let mut batch = batch;
+    let mut columns = Vec::with_capacity(3);
     if plan.source_id {
         let mut builder = UInt64Builder::with_capacity(batch.num_rows());
         for span in row_origins {
@@ -246,71 +278,108 @@ fn source_metadata_for_batch(
                 }
             }
         }
-        batch = replace_or_append_column(
-            batch,
-            field_names::SOURCE_ID,
-            DataType::UInt64,
-            Arc::new(builder.finish()) as ArrayRef,
-        )?;
+        columns.push(MetadataColumn {
+            name: field_names::SOURCE_ID,
+            data_type: DataType::UInt64,
+            array: Arc::new(builder.finish()) as ArrayRef,
+        });
     }
 
     if plan.input {
-        let array = string_metadata_array(batch.num_rows(), row_origins, |span| {
-            Some(span.input_name.to_string())
-        })?;
-        batch = replace_or_append_column(batch, field_names::INPUT, DataType::Utf8View, array)?;
+        let array = input_metadata_array(batch.num_rows(), row_origins)?;
+        columns.push(MetadataColumn {
+            name: field_names::INPUT,
+            data_type: DataType::Utf8View,
+            array,
+        });
     }
 
     if plan.source_path {
-        let array = string_metadata_array(batch.num_rows(), row_origins, |span| {
-            span.source_id
-                .and_then(|sid| source_paths.get(&sid).cloned())
-        })?;
-        batch =
-            replace_or_append_column(batch, field_names::SOURCE_PATH, DataType::Utf8View, array)?;
+        let array = source_path_metadata_array(batch.num_rows(), row_origins, source_paths)?;
+        columns.push(MetadataColumn {
+            name: field_names::SOURCE_PATH,
+            data_type: DataType::Utf8View,
+            array,
+        });
     }
 
-    Ok(batch)
+    replace_or_append_columns(batch, columns)
 }
 
 #[cfg(not(feature = "turmoil"))]
-fn string_metadata_array<F>(
+fn input_metadata_array(
     num_rows: usize,
     row_origins: &[RowOriginSpan],
-    value_for_span: F,
-) -> Result<ArrayRef, ArrowError>
-where
-    F: Fn(&RowOriginSpan) -> Option<String>,
-{
+) -> Result<ArrayRef, ArrowError> {
     let mut builder = StringViewBuilder::new();
     let mut blocks: HashMap<String, (u32, u32)> = HashMap::new();
     for span in row_origins {
-        match value_for_span(span) {
-            Some(value) => {
-                let (block, len) = if let Some(&(block, len)) = blocks.get(value.as_str()) {
-                    (block, len)
-                } else {
-                    let len = u32::try_from(value.len()).map_err(|_| {
-                        ArrowError::InvalidArgumentError(
-                            "source metadata string is too large for Utf8View".to_string(),
-                        )
-                    })?;
-                    let block = builder.append_block(Buffer::from(value.as_bytes().to_vec()));
-                    blocks.insert(value, (block, len));
-                    (block, len)
-                };
-                for _ in 0..span.rows {
-                    builder.try_append_view(block, 0, len)?;
-                }
+        append_metadata_views(
+            &mut builder,
+            &mut blocks,
+            Some(span.input_name.as_ref()),
+            span.rows,
+        )?;
+    }
+    finish_string_metadata_array(builder, num_rows)
+}
+
+#[cfg(not(feature = "turmoil"))]
+fn source_path_metadata_array(
+    num_rows: usize,
+    row_origins: &[RowOriginSpan],
+    source_paths: &HashMap<SourceId, String>,
+) -> Result<ArrayRef, ArrowError> {
+    let mut builder = StringViewBuilder::new();
+    let mut blocks: HashMap<String, (u32, u32)> = HashMap::new();
+    for span in row_origins {
+        let value = span
+            .source_id
+            .and_then(|sid| source_paths.get(&sid).map(String::as_str));
+        append_metadata_views(&mut builder, &mut blocks, value, span.rows)?;
+    }
+    finish_string_metadata_array(builder, num_rows)
+}
+
+#[cfg(not(feature = "turmoil"))]
+fn append_metadata_views(
+    builder: &mut StringViewBuilder,
+    blocks: &mut HashMap<String, (u32, u32)>,
+    value: Option<&str>,
+    rows: usize,
+) -> Result<(), ArrowError> {
+    match value {
+        Some(value) => {
+            let (block, len) = if let Some(&(block, len)) = blocks.get(value) {
+                (block, len)
+            } else {
+                let len = u32::try_from(value.len()).map_err(|_| {
+                    ArrowError::InvalidArgumentError(
+                        "source metadata string is too large for Utf8View".to_string(),
+                    )
+                })?;
+                let block = builder.append_block(Buffer::from(value.as_bytes().to_vec()));
+                blocks.insert(value.to_owned(), (block, len));
+                (block, len)
+            };
+            for _ in 0..rows {
+                builder.try_append_view(block, 0, len)?;
             }
-            None => {
-                for _ in 0..span.rows {
-                    builder.append_null();
-                }
+        }
+        None => {
+            for _ in 0..rows {
+                builder.append_null();
             }
         }
     }
+    Ok(())
+}
 
+#[cfg(not(feature = "turmoil"))]
+fn finish_string_metadata_array(
+    mut builder: StringViewBuilder,
+    num_rows: usize,
+) -> Result<ArrayRef, ArrowError> {
     let array = builder.finish();
     if array.len() != num_rows {
         return Err(ArrowError::InvalidArgumentError(format!(
@@ -322,31 +391,45 @@ where
 }
 
 #[cfg(not(feature = "turmoil"))]
-fn replace_or_append_column(
-    batch: RecordBatch,
-    name: &str,
+struct MetadataColumn {
+    name: &'static str,
     data_type: DataType,
     array: ArrayRef,
+}
+
+#[cfg(not(feature = "turmoil"))]
+fn replace_or_append_columns(
+    batch: RecordBatch,
+    columns: Vec<MetadataColumn>,
 ) -> Result<RecordBatch, ArrowError> {
+    if columns.is_empty() {
+        return Ok(batch);
+    }
+
     let schema = batch.schema();
-    let mut fields = Vec::with_capacity(schema.fields().len() + 1);
-    let mut arrays = Vec::with_capacity(batch.num_columns() + 1);
-    let mut replaced = false;
+    let mut fields = Vec::with_capacity(schema.fields().len() + columns.len());
+    let mut arrays = Vec::with_capacity(batch.num_columns() + columns.len());
+    let mut replaced = HashSet::with_capacity(columns.len());
 
     for (idx, field) in schema.fields().iter().enumerate() {
-        if field.name() == name {
-            fields.push(Field::new(name, data_type.clone(), true));
-            arrays.push(Arc::clone(&array));
-            replaced = true;
+        if let Some(column) = columns
+            .iter()
+            .find(|column| field.name().as_str() == column.name)
+        {
+            fields.push(Field::new(column.name, column.data_type.clone(), true));
+            arrays.push(Arc::clone(&column.array));
+            replaced.insert(column.name);
         } else {
             fields.push((**field).clone());
             arrays.push(Arc::clone(batch.column(idx)));
         }
     }
 
-    if !replaced {
-        fields.push(Field::new(name, data_type, true));
-        arrays.push(array);
+    for column in columns {
+        if !replaced.contains(column.name) {
+            fields.push(Field::new(column.name, column.data_type, true));
+            arrays.push(column.array);
+        }
     }
 
     let new_schema = Arc::new(Schema::new_with_metadata(fields, schema.metadata().clone()));
@@ -365,6 +448,7 @@ fn replace_or_append_column(
 #[allow(clippy::too_many_arguments)]
 fn io_worker_loop(
     mut input: InputState,
+    input_name: Arc<str>,
     tx: mpsc::Sender<IoWorkItem>,
     metrics: Arc<PipelineMetrics>,
     shutdown: CancellationToken,
@@ -380,7 +464,6 @@ fn io_worker_loop(
     let mut adaptive_poll =
         AdaptivePollController::new(input.source.get_cadence().adaptive_fast_polls_max);
     let safe_batch_target_bytes = batch_target_bytes.max(1);
-    let input_name: Arc<str> = Arc::from(input.source.name().to_string());
 
     'io_loop: loop {
         if shutdown.is_cancelled() {
@@ -425,12 +508,24 @@ fn io_worker_loop(
                 std::thread::sleep(poll_interval);
             }
         } else {
+            let source_path_snapshot = if source_metadata_plan.source_path {
+                input.source.source_paths()
+            } else {
+                Vec::new()
+            };
             for event in events {
                 match event {
                     InputEvent::Data {
                         bytes, source_id, ..
                     } => {
                         if source_metadata_plan.any() {
+                            if source_metadata_plan.source_path {
+                                capture_source_path(
+                                    &mut input.source_paths,
+                                    &source_path_snapshot,
+                                    source_id,
+                                );
+                            }
                             append_row_origin(
                                 &mut input.row_origins,
                                 source_id,
@@ -447,6 +542,7 @@ fn io_worker_loop(
                             if !flush_buf(
                                 &mut input.buf,
                                 &mut input.row_origins,
+                                &mut input.source_paths,
                                 &*input.source,
                                 &tx,
                                 &metrics,
@@ -465,6 +561,7 @@ fn io_worker_loop(
                         if !flush_buf(
                             &mut input.buf,
                             &mut input.row_origins,
+                            &mut input.source_paths,
                             &*input.source,
                             &tx,
                             &metrics,
@@ -486,7 +583,7 @@ fn io_worker_loop(
                             Vec::new()
                         };
                         let source_paths = if source_metadata_plan.source_path {
-                            source_paths_by_id(input.source.source_paths())
+                            source_paths_by_id(&source_path_snapshot, &row_origins)
                         } else {
                             HashMap::new()
                         };
@@ -548,6 +645,7 @@ fn io_worker_loop(
             if !flush_buf(
                 &mut input.buf,
                 &mut input.row_origins,
+                &mut input.source_paths,
                 &*input.source,
                 &tx,
                 &metrics,
@@ -568,8 +666,9 @@ fn io_worker_loop(
         let data = input.buf.split().freeze();
         let checkpoints = input.source.checkpoint_data();
         let source_paths = if source_metadata_plan.source_path {
-            source_paths_by_id(input.source.source_paths())
+            std::mem::take(&mut input.source_paths)
         } else {
+            input.source_paths.clear();
             HashMap::new()
         };
         let chunk = IoWorkItem::Bytes(IoChunk {
@@ -794,6 +893,7 @@ impl InputPipelineManager {
         for (idx, (input, transform)) in inputs.into_iter().zip(transforms).enumerate() {
             let (io_tx, io_rx) = mpsc::channel::<IoWorkItem>(IO_CPU_CHANNEL_CAPACITY);
             let source_metadata_plan = transform.source_metadata_plan;
+            let input_name: Arc<str> = Arc::from(transform.input_name.as_str());
 
             // Spawn I/O worker.
             let shutdown_io = shutdown.clone();
@@ -801,6 +901,7 @@ impl InputPipelineManager {
             io_handles.push(std::thread::spawn(move || {
                 io_worker_loop(
                     input,
+                    input_name,
                     io_tx,
                     metrics_io,
                     shutdown_io,
@@ -936,6 +1037,131 @@ mod tests {
             3
         );
         assert_eq!(scanner_ready_row_count(b"   \n\t\r\n"), 2);
+    }
+
+    #[test]
+    fn scanner_ready_row_count_matches_scanner_for_crlf_blank_lines() {
+        let mut scanner = Scanner::new(logfwd_core::scan_config::ScanConfig::default());
+        let batch = scanner.scan(Bytes::from_static(b"\r\n")).expect("scan");
+        assert_eq!(batch.num_rows(), scanner_ready_row_count(b"\r\n"));
+
+        let mut config = logfwd_core::scan_config::ScanConfig::default();
+        config.line_field_name = Some(field_names::BODY.to_string());
+        let mut raw_scanner = Scanner::new(config);
+        let raw_batch = raw_scanner
+            .scan(Bytes::from_static(b"\r\n"))
+            .expect("scan raw");
+        assert_eq!(raw_batch.num_rows(), scanner_ready_row_count(b"\r\n"));
+    }
+
+    #[test]
+    fn source_paths_by_id_filters_to_buffered_source_ids() {
+        let row_origins = vec![RowOriginSpan {
+            source_id: Some(SourceId(2)),
+            input_name: Arc::from("file"),
+            rows: 1,
+        }];
+        let paths = vec![
+            (SourceId(1), PathBuf::from("/var/log/one.log")),
+            (SourceId(2), PathBuf::from("/var/log/two.log")),
+        ];
+
+        let filtered = source_paths_by_id(&paths, &row_origins);
+
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(
+            filtered.get(&SourceId(2)).map(String::as_str),
+            Some("/var/log/two.log")
+        );
+    }
+
+    struct SingleDataSource {
+        emitted: bool,
+    }
+
+    impl logfwd_io::input::InputSource for SingleDataSource {
+        fn poll(&mut self) -> std::io::Result<Vec<InputEvent>> {
+            if self.emitted {
+                return Ok(Vec::new());
+            }
+            self.emitted = true;
+            Ok(vec![InputEvent::Data {
+                bytes: b"{\"msg\":\"x\"}\n".to_vec(),
+                source_id: Some(SourceId(7)),
+                accounted_bytes: 12,
+            }])
+        }
+
+        fn name(&self) -> &'static str {
+            "source-implementation-name"
+        }
+
+        fn health(&self) -> logfwd_types::diagnostics::ComponentHealth {
+            logfwd_types::diagnostics::ComponentHealth::Healthy
+        }
+
+        fn source_paths(&self) -> Vec<(SourceId, PathBuf)> {
+            vec![
+                (SourceId(7), PathBuf::from("/var/log/configured.log")),
+                (SourceId(8), PathBuf::from("/var/log/other.log")),
+            ]
+        }
+    }
+
+    #[test]
+    fn io_worker_uses_configured_input_name_for_source_metadata() {
+        let (tx, mut rx) = mpsc::channel(IO_CPU_CHANNEL_CAPACITY);
+        let shutdown = CancellationToken::new();
+        let stats = Arc::new(logfwd_types::diagnostics::ComponentStats::new_with_health(
+            logfwd_types::diagnostics::ComponentHealth::Starting,
+        ));
+        let input = InputState {
+            source: Box::new(SingleDataSource { emitted: false }),
+            buf: bytes::BytesMut::new(),
+            row_origins: Vec::new(),
+            source_paths: HashMap::new(),
+            stats,
+        };
+        let meter = opentelemetry::global::meter("io_worker_configured_input_name");
+        let metrics = Arc::new(PipelineMetrics::new("test", "SELECT * FROM logs", &meter));
+        let worker_shutdown = shutdown.clone();
+
+        let handle = std::thread::spawn(move || {
+            io_worker_loop(
+                input,
+                Arc::from("configured-input"),
+                tx,
+                metrics,
+                worker_shutdown,
+                1,
+                Duration::from_secs(60),
+                Duration::from_millis(1),
+                0,
+                SourceMetadataPlan {
+                    source_id: true,
+                    input: true,
+                    source_path: true,
+                },
+            );
+        });
+
+        let item = rx.blocking_recv().expect("io worker item");
+        shutdown.cancel();
+        drop(rx);
+        handle.join().expect("io worker exits");
+
+        let IoWorkItem::Bytes(chunk) = item else {
+            panic!("expected byte chunk");
+        };
+        assert_eq!(chunk.row_origins.len(), 1);
+        assert_eq!(chunk.row_origins[0].input_name.as_ref(), "configured-input");
+        assert_eq!(chunk.row_origins[0].source_id, Some(SourceId(7)));
+        assert_eq!(chunk.row_origins[0].rows, 1);
+        assert_eq!(
+            chunk.source_paths.get(&SourceId(7)).map(String::as_str),
+            Some("/var/log/configured.log")
+        );
+        assert!(!chunk.source_paths.contains_key(&SourceId(8)));
     }
 
     #[test]
