@@ -239,29 +239,53 @@ import { createRenderState } from './highway-render-state.mjs';
         const tp = posAt(car.segment, car.targetD);
         const prevSeg = carLastSeg[car.id];
         const prevD = carLastD[car.id];
+        const opa = car.opacity != null ? car.opacity : 1;
 
-        // Segment transition (ramp→highway, highway→exit/cont): snap the
-        // render state to the new position instead of interpolating across
-        // paths, which would cut through other cars.
         if (prevSeg && prevSeg !== car.segment) {
-          const angle = angleAt(car.segment, car.targetD);
-          rs.snapTo(car.id, tp.x, tp.y, angle);
-        }
-
-        // For curved segments, push intermediate arc-following waypoints
-        // so the render state follows the SVG path instead of cutting corners.
-        if (prevSeg === car.segment && prevD != null && prevD < car.targetD &&
-            (car.segment === 'ramp' || car.segment === 'exit')) {
-          const steps = 3;
-          const dStep = (car.targetD - prevD) / steps;
-          for (let s = 1; s < steps; s++) {
-            const mp = posAt(car.segment, prevD + dStep * s);
-            rs.pushTarget(car.id, mp.x, mp.y, car.opacity != null ? car.opacity : 1, car.color);
+          // Segment transition (ramp→highway, highway→exit/cont): snap to
+          // prevent interpolation across different SVG paths.
+          rs.snapTo(car.id, tp.x, tp.y, angleAt(car.segment, car.targetD));
+          rs.pushTarget(car.id, tp.x, tp.y, opa, car.color);
+        } else if (prevSeg === car.segment && prevD != null && car.targetD <= prevD) {
+          // Car hasn't advanced — snap to actual slot position to prevent
+          // the render state from overshooting past this slot (which causes
+          // visual overlap with cars at adjacent slots).
+          rs.snapTo(car.id, tp.x, tp.y);
+          rs.pushTarget(car.id, tp.x, tp.y, opa, car.color);
+        } else {
+          // Car advanced (or first tick) — smooth interpolation.
+          // For curved segments, push arc-following intermediate waypoints.
+          if (prevSeg === car.segment && prevD != null && prevD < car.targetD &&
+              (car.segment === 'ramp' || car.segment === 'exit')) {
+            const steps = 3;
+            const dStep = (car.targetD - prevD) / steps;
+            for (let s = 1; s < steps; s++) {
+              const mp = posAt(car.segment, prevD + dStep * s);
+              rs.pushTarget(car.id, mp.x, mp.y, opa, car.color);
+            }
           }
+          rs.pushTarget(car.id, tp.x, tp.y, opa, car.color);
         }
         carLastD[car.id] = car.targetD;
         carLastSeg[car.id] = car.segment;
-        rs.pushTarget(car.id, tp.x, tp.y, car.opacity != null ? car.opacity : 1, car.color);
+      }
+
+      // Post-merge cleanup: if a highway car's render position lags far
+      // behind its sim target (>40 px), snap it forward. This happens when
+      // a car was held behind the merge slot and then advanced past it —
+      // the render interpolation hasn't caught up and the car would
+      // visually overlap with a newly merged ramp car.
+      for (let c = 0; c < allCars.length; c++) {
+        const car = allCars[c];
+        if (car.segment !== 'highway') continue;
+        const rc = rs.getCar(car.id);
+        if (!rc) continue;
+        const tp2 = posAt('highway', car.targetD);
+        if (tp2.x - rc.x > 40) {
+          rs.snapTo(car.id, tp2.x, tp2.y, angleAt('highway', car.targetD));
+          rs.pushTarget(car.id, tp2.x, tp2.y,
+            car.opacity != null ? car.opacity : 1, car.color);
+        }
       }
 
       // Remove delivered cars
