@@ -723,11 +723,15 @@ fn io_worker_loop(
                 metrics.inc_flush_by_timeout();
                 if !flush_buf(
                     &mut input.buf,
+                    &mut input.row_origins,
+                    &mut pending_row_origin,
+                    &mut input.source_paths,
                     &*input.source,
                     &tx,
                     &metrics,
                     &mut last_bp_warn,
                     input_index,
+                    source_metadata_plan,
                 ) {
                     break;
                 }
