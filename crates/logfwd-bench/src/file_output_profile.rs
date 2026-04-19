@@ -10,7 +10,7 @@
 //!     memchr line count, file write_all)
 //!
 //! Run with:
-//!   cargo run -p logfwd-bench --release --bin file_output_profile -- [OPTIONS]
+//!   cargo run -p logfwd-bench --release --bin file_output_profile -- \[OPTIONS\]
 //!
 //! Options:
 //!   --mode cpu|alloc|breakdown  (default: cpu)
