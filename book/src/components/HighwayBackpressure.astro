@@ -229,7 +229,6 @@ import { createSimulation } from './highway-sim.mjs';
   })();
 
   const TICK_MS = 25;
-  const FADE_IN_FRAMES = 12; // fade in over ~300ms (12 frames × 25ms)
 
   // Segment → SVG path mapping
   const pathMap = { ramp: pathRamp, highway: pathHwy, exit: pathExit, cont: pathCont };
@@ -249,10 +248,18 @@ import { createSimulation } from './highway-sim.mjs';
   }
 
   // ---- Per-car visual state ----
-  // Linear interpolation between sim ticks for smooth motion.
-  // prevD/targetD define the interpolation window; fadeAge drives fade-in.
+  // Screen-space spring-damper: each car tracks (x, y, vx, vy, angle)
+  // and springs toward the sim's target position. This gives natural
+  // acceleration, deceleration, and seamless segment transitions.
   const carEls = {};
-  const carVis = {}; // { prevD, targetD, seg, fadeAge }
+  const carVis = {}; // { x, y, vx, vy, angle, fadeAge }
+
+  const SPRING = 0.08;      // stiffness: how fast cars accelerate toward target
+  const DAMP = 0.7;         // damping: prevents overshoot (< 1 = no oscillation)
+  const SNAP_DIST = 0.5;    // snap to target when this close (pixels)
+  const SNAP_VEL = 0.1;     // snap when velocity below this
+  const ANGLE_RATE = 0.15;  // angle follow speed
+  const FADE_IN_FRAMES = 12;
 
   function createCarEl(car) {
     let w = CAR_W * car.scale;
@@ -318,7 +325,9 @@ import { createSimulation } from './highway-sim.mjs';
 
     carsG.appendChild(g);
     carEls[car.id] = { g: g, body: body };
-    carVis[car.id] = { prevD: car.targetD, targetD: car.targetD, seg: car.segment, fadeAge: 0 };
+    const ip = posAt(car.segment, car.targetD);
+    const ia = angleAt(car.segment, car.targetD);
+    carVis[car.id] = { x: ip.x, y: ip.y, vx: 0, vy: 0, angle: ia, fadeAge: 0 };
   }
 
   function removeCarEl(id) {
@@ -330,20 +339,39 @@ import { createSimulation } from './highway-sim.mjs';
     }
   }
 
-  function updateCarEl(car, t) {
+  function updateCarEl(car) {
     const el = carEls[car.id];
     if (!el) return;
     const vis = carVis[car.id];
     if (!vis) return;
-    const seg = car.segment;
-    const len = lenMap[seg];
 
-    // Linear interpolation between prevD and targetD
-    const vd = vis.prevD + (vis.targetD - vis.prevD) * t;
-    const d = Math.min(Math.max(0, vd), len);
-    const p = posAt(seg, d);
-    const a = angleAt(seg, d);
-    el.g.setAttribute('transform', 'translate(' + p.x.toFixed(1) + ',' + p.y.toFixed(1) + ') rotate(' + a.toFixed(1) + ')');
+    // Target position from sim's segment + targetD
+    const seg = car.segment;
+    const d = Math.min(Math.max(0, car.targetD), lenMap[seg]);
+    const tp = posAt(seg, d);
+    const ta = angleAt(seg, d);
+
+    // Spring-damper: stiffness pulls toward target, damping prevents overshoot
+    const dx = tp.x - vis.x;
+    const dy = tp.y - vis.y;
+    vis.vx = (vis.vx + dx * SPRING) * DAMP;
+    vis.vy = (vis.vy + dy * SPRING) * DAMP;
+    vis.x += vis.vx;
+    vis.y += vis.vy;
+
+    // Smooth angle follow (with wraparound)
+    let da = ta - vis.angle;
+    while (da > 180) da -= 360;
+    while (da < -180) da += 360;
+    vis.angle += da * ANGLE_RATE;
+
+    // Snap when very close and nearly stopped
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist < SNAP_DIST && Math.abs(vis.vx) < SNAP_VEL && Math.abs(vis.vy) < SNAP_VEL) {
+      vis.x = tp.x; vis.y = tp.y; vis.vx = 0; vis.vy = 0; vis.angle = ta;
+    }
+
+    el.g.setAttribute('transform', 'translate(' + vis.x.toFixed(1) + ',' + vis.y.toFixed(1) + ') rotate(' + vis.angle.toFixed(1) + ')');
 
     let fill;
     if (car.color === 'stop') fill = 'var(--hw-car-stop)';
@@ -351,19 +379,19 @@ import { createSimulation } from './highway-sim.mjs';
     else fill = 'var(--hw-car-flow)';
     el.body.setAttribute('fill', fill);
 
-    // Fade-in: ramp up from 0 over FADE_IN_FRAMES, then use sim opacity (handles fade-out)
+    // Fade-in then sim opacity (fade-out)
     vis.fadeAge = Math.min(1, (vis.fadeAge || 0) + 1 / FADE_IN_FRAMES);
     const opacity = (car.opacity != null ? car.opacity : 1) * vis.fadeAge;
     el.g.setAttribute('opacity', opacity.toFixed(2));
   }
 
   // ---- Main render loop ----
-  // Sim ticks every SIM_FRAMES render frames to keep car speed natural.
-  // Render frames linearly interpolate positions for smoothness.
+  // Sim ticks every SIM_FRAMES render frames.
+  // Every render frame: spring-damper physics moves cars in screen space.
   let lastStatus = '';
   let timer = null;
   let frameCount = 0;
-  let lastFrame = null; // most recent sim.tick() result
+  let lastFrame = null;
 
   function tick() {
     const now = Date.now();
@@ -377,20 +405,6 @@ import { createSimulation } from './highway-sim.mjs';
       for (let c = 0; c < allCars.length; c++) {
         const car = allCars[c];
         if (!carEls[car.id]) createCarEl(car);
-
-        const vis = carVis[car.id];
-        if (vis) {
-          if (vis.seg !== car.segment) {
-            // Segment transition: snap to new segment (different SVG path)
-            vis.prevD = car.targetD;
-            vis.targetD = car.targetD;
-            vis.seg = car.segment;
-          } else {
-            // Same segment: start new linear interpolation from previous target
-            vis.prevD = vis.targetD;
-            vis.targetD = car.targetD;
-          }
-        }
       }
       for (let r = 0; r < lastFrame.removedIds.length; r++) {
         removeCarEl(lastFrame.removedIds[r]);
@@ -413,7 +427,7 @@ import { createSimulation } from './highway-sim.mjs';
         if (sliderDetail) sliderDetail.textContent = 'Auto \u00B7 Green ' + lastFrame.greenPct + '%';
       }
 
-      // Stats (every sim tick)
+      // Stats
       if (sTput) sTput.textContent = lastFrame.stats.throughput + '/min';
       if (sQueue) sQueue.textContent = String(lastFrame.stats.queued);
       if (sStall) {
@@ -434,11 +448,10 @@ import { createSimulation } from './highway-sim.mjs';
       }
     }
 
-    // Always: update visual positions with linear interpolation every render frame
+    // Every frame: spring-damper updates all car positions in screen space
     if (lastFrame) {
-      const t = Math.min(1, (frameCount % SIM_FRAMES) / SIM_FRAMES);
       for (let u = 0; u < lastFrame.cars.length; u++) {
-        updateCarEl(lastFrame.cars[u], t);
+        updateCarEl(lastFrame.cars[u]);
       }
     }
   }
@@ -471,9 +484,9 @@ import { createSimulation } from './highway-sim.mjs';
     const initial = sim.getCars();
     for (let i = 0; i < initial.length; i++) {
       createCarEl(initial[i]);
-      // Force fade-in complete for seed cars
+      // Seed cars: skip fade-in, snap to position
       if (carVis[initial[i].id]) carVis[initial[i].id].fadeAge = 1;
-      updateCarEl(initial[i], 1);
+      updateCarEl(initial[i]);
     }
     timer = setInterval(tick, TICK_MS);
   } else {
@@ -482,7 +495,7 @@ import { createSimulation } from './highway-sim.mjs';
     for (let j = 0; j < staticCars.length; j++) {
       createCarEl(staticCars[j]);
       if (carVis[staticCars[j].id]) carVis[staticCars[j].id].fadeAge = 1;
-      updateCarEl(staticCars[j], 1);
+      updateCarEl(staticCars[j]);
     }
     slider.disabled = true;
     if (statusEl) statusEl.textContent = 'Animation paused (reduced motion)';
