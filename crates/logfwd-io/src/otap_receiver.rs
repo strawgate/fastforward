@@ -584,6 +584,9 @@ mod tests {
         UInt32Array,
     };
     use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
+    use std::io::Write as _;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
@@ -1025,6 +1028,53 @@ mod tests {
             Err(ureq::Error::StatusCode(code)) => assert_eq!(code, 405),
             other => panic!("expected 405, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn receiver_rejects_unsupported_content_type() {
+        let receiver = OtapReceiver::new_with_capacity("test-415", "127.0.0.1:0", 16)
+            .expect("bind should succeed");
+        let addr = receiver.local_addr();
+
+        let url = format!("http://{addr}/v1/arrow_logs");
+        let result = loopback_http_client()
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .send(b"{}" as &[u8]);
+        match result {
+            Err(ureq::Error::StatusCode(code)) => assert_eq!(code, 415),
+            other => panic!("expected 415, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn receiver_rejects_truncated_gzip_body() {
+        let receiver = OtapReceiver::new_with_capacity("test-gzip-truncated", "127.0.0.1:0", 16)
+            .expect("bind should succeed");
+        let addr = receiver.local_addr();
+
+        let logs_ipc = serialize_batch_to_ipc(&make_logs_batch());
+        let proto = encode_batch_arrow_records(9, &[(PAYLOAD_TYPE_LOGS, &logs_ipc)]);
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder
+            .write_all(&proto)
+            .expect("should write OTAP payload to gzip stream");
+        let mut gzip = encoder.finish().expect("should finish gzip stream");
+        gzip.truncate(gzip.len().saturating_sub(4));
+
+        let url = format!("http://{addr}/v1/arrow_logs");
+        let result = loopback_http_client()
+            .post(&url)
+            .header("Content-Type", "application/x-protobuf")
+            .header("Content-Encoding", "gzip")
+            .send(&gzip);
+
+        let status: u16 = match result {
+            Ok(resp) => resp.status().as_u16(),
+            Err(ureq::Error::StatusCode(code)) => code,
+            Err(err) => panic!("unexpected transport error: {err}"),
+        };
+        assert_eq!(status, 400, "truncated gzip body must be rejected");
     }
 
     #[test]
