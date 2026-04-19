@@ -29,6 +29,8 @@ use projection::ProjectionError;
 use std::io;
 #[cfg(any(feature = "otlp-research", test))]
 use std::sync::Mutex;
+#[cfg(any(feature = "otlp-research", test))]
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, mpsc};
 
@@ -45,6 +47,8 @@ use crate::input::{InputEvent, InputSource};
 
 const CHANNEL_BOUND: usize = 4096;
 const FALLBACK_PROTOBUF_DECODE_TASKS: usize = 4;
+#[cfg(any(feature = "otlp-research", test))]
+const MAX_PROJECTED_DECODER_SHARDS: usize = 16;
 /// Max payloads drained from the internal channel in a single `poll()` call.
 ///
 /// This bounds per-poll work and prevents one call from aggregating an
@@ -90,6 +94,42 @@ struct ReceiverPayload {
     accounted_bytes: u64,
 }
 
+#[cfg(any(feature = "otlp-research", test))]
+struct ProjectedDecoderPool {
+    decoders: Box<[Mutex<ProjectedOtlpDecoder>]>,
+    next_decoder: AtomicUsize,
+}
+
+#[cfg(any(feature = "otlp-research", test))]
+impl ProjectedDecoderPool {
+    fn new(resource_prefix: &str, shard_count: usize) -> Self {
+        let shard_count = shard_count.max(1);
+        let decoders = (0..shard_count)
+            .map(|_| Mutex::new(ProjectedOtlpDecoder::new(resource_prefix)))
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        Self {
+            decoders,
+            next_decoder: AtomicUsize::new(0),
+        }
+    }
+
+    fn next(&self) -> &Mutex<ProjectedOtlpDecoder> {
+        let index = self.next_decoder.fetch_add(1, Ordering::Relaxed) % self.decoders.len();
+        &self.decoders[index]
+    }
+
+    #[cfg(test)]
+    fn first(&self) -> &Mutex<ProjectedOtlpDecoder> {
+        &self.decoders[0]
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.decoders.len()
+    }
+}
+
 struct OtlpServerState {
     tx: mpsc::SyncSender<ReceiverPayload>,
     is_running: Arc<AtomicBool>,
@@ -98,7 +138,7 @@ struct OtlpServerState {
     protobuf_decode_mode: OtlpProtobufDecodeMode,
     protobuf_decode_permits: Arc<Semaphore>,
     #[cfg(any(feature = "otlp-research", test))]
-    projected_decoder: Option<Mutex<ProjectedOtlpDecoder>>,
+    projected_decoders: Option<ProjectedDecoderPool>,
     stats: Option<Arc<ComponentStats>>,
     /// Maximum request body size. Defaults to `MAX_REQUEST_BODY_SIZE` (10 MiB).
     max_message_size_bytes: usize,
@@ -267,11 +307,15 @@ impl OtlpReceiverInput {
         let (tx, rx) = mpsc::sync_channel(capacity);
         let is_running = Arc::new(AtomicBool::new(true));
         let health = Arc::new(AtomicU8::new(ComponentHealth::Healthy.as_repr()));
+        let decode_task_limit = protobuf_decode_task_limit();
         #[cfg(any(feature = "otlp-research", test))]
-        let projected_decoder = if protobuf_decode_mode == OtlpProtobufDecodeMode::Prost {
+        let projected_decoders = if protobuf_decode_mode == OtlpProtobufDecodeMode::Prost {
             None
         } else {
-            Some(Mutex::new(ProjectedOtlpDecoder::new(&resource_prefix)))
+            Some(ProjectedDecoderPool::new(
+                &resource_prefix,
+                projected_decoder_shard_count(decode_task_limit),
+            ))
         };
         let state = Arc::new(OtlpServerState {
             tx,
@@ -279,9 +323,9 @@ impl OtlpReceiverInput {
             health: Arc::clone(&health),
             resource_prefix,
             protobuf_decode_mode,
-            protobuf_decode_permits: Arc::new(Semaphore::new(protobuf_decode_task_limit())),
+            protobuf_decode_permits: Arc::new(Semaphore::new(decode_task_limit)),
             #[cfg(any(feature = "otlp-research", test))]
-            projected_decoder,
+            projected_decoders,
             stats,
             max_message_size_bytes,
         });
@@ -356,6 +400,11 @@ fn protobuf_decode_task_limit() -> usize {
             parallelism.get().saturating_mul(2)
         })
         .max(1)
+}
+
+#[cfg(any(feature = "otlp-research", test))]
+fn projected_decoder_shard_count(decode_task_limit: usize) -> usize {
+    decode_task_limit.clamp(1, MAX_PROJECTED_DECODER_SHARDS)
 }
 
 impl Drop for OtlpReceiverInput {
@@ -558,5 +607,15 @@ mod poll_tests {
             }
             _ => panic!("expected second batch event"),
         }
+    }
+
+    #[test]
+    fn projected_decoder_shard_count_follows_decode_limit_with_bounds() {
+        assert_eq!(projected_decoder_shard_count(0), 1);
+        assert_eq!(projected_decoder_shard_count(3), 3);
+        assert_eq!(
+            projected_decoder_shard_count(MAX_PROJECTED_DECODER_SHARDS + 1),
+            MAX_PROJECTED_DECODER_SHARDS
+        );
     }
 }
