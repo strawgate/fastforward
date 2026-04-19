@@ -129,6 +129,10 @@ pub const DEFAULT_RESOURCE_PREFIX: &str = "resource.attributes.";
 /// with older batches and config-level `resource_attrs`.
 pub const LEGACY_RESOURCE_PREFIX: &str = "_resource_";
 
+// ---------------------------------------------------------------------------
+// Internal columns
+// ---------------------------------------------------------------------------
+
 /// Stable row-level source identity assigned by the input layer.
 pub const SOURCE_ID: &str = "_source_id";
 
@@ -137,18 +141,6 @@ pub const INPUT: &str = "_input";
 
 /// File source path compatibility column.
 pub const SOURCE_PATH: &str = "_source_path";
-
-// ---------------------------------------------------------------------------
-// Arrow field / schema metadata keys
-// ---------------------------------------------------------------------------
-
-/// Arrow field metadata key: stores the original resource attribute key
-/// when using the legacy `_resource_*` prefix, enabling round-trip conversion.
-pub const METADATA_RESOURCE_KEY: &str = "logfwd.resource_key";
-
-/// Arrow schema metadata key: overrides the default resource prefix
-/// detection on a per-batch basis.
-pub const METADATA_RESOURCE_PREFIX: &str = "logfwd.resource_prefix";
 
 // ---------------------------------------------------------------------------
 // Type-conflict struct children (Arrow schema)
