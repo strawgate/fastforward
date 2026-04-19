@@ -1123,13 +1123,15 @@ fn collect_logs_source_metadata_from_query_scoped(
     let cte_names = cte_names_for_query(query);
     let active_cte_names = combined_cte_names(inherited_cte_names, &cte_names);
     if let Some(ref with) = query.with {
+        let mut accumulated_cte_names = inherited_cte_names.clone();
         for cte in &with.cte_tables {
             collect_logs_source_metadata_from_query_scoped(
                 &cte.query,
                 usage,
-                inherited_cte_names,
+                &accumulated_cte_names,
                 outer_scope,
             );
+            accumulated_cte_names.insert(cte.alias.name.value.clone());
         }
     }
 
@@ -2084,6 +2086,24 @@ mod tests {
         let analyzer = QueryAnalyzer::new(
             "WITH logs AS (SELECT 1 AS _source_id) \
              SELECT 1 WHERE EXISTS (SELECT _source_id FROM logs)",
+        )
+        .unwrap();
+        assert_eq!(
+            analyzer.explicit_source_metadata_plan(),
+            SourceMetadataPlan::default()
+        );
+        assert_eq!(
+            analyzer.source_metadata_plan(),
+            SourceMetadataPlan::default()
+        );
+    }
+
+    #[test]
+    fn explicit_source_metadata_plan_preserves_preceding_cte_shadowing() {
+        let analyzer = QueryAnalyzer::new(
+            "WITH logs AS (SELECT 1 AS _source_path), \
+             b AS (SELECT _source_path FROM logs) \
+             SELECT _source_path FROM b",
         )
         .unwrap();
         assert_eq!(
