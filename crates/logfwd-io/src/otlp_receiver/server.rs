@@ -64,23 +64,6 @@ pub(super) async fn handle_otlp_request(
         }
     };
     let is_json = matches!(content_type.as_deref(), Some("application/json"));
-    let protobuf_decode_permit = if is_json {
-        None
-    } else {
-        match Arc::clone(&state.protobuf_decode_permits).try_acquire_owned() {
-            Ok(permit) => Some(permit),
-            Err(_) => {
-                state
-                    .health
-                    .store(ComponentHealth::Degraded.as_repr(), Ordering::Relaxed);
-                return (
-                    StatusCode::TOO_MANY_REQUESTS,
-                    "too many requests: protobuf decode backpressure",
-                )
-                    .into_response();
-            }
-        }
-    };
 
     let mut body = match read_limited_body(body, max_body, content_length).await {
         Ok(body) => body,
@@ -141,13 +124,18 @@ pub(super) async fn handle_otlp_request(
     let batch = if is_json {
         decode_otlp_json(&body, &state.resource_prefix).map_err(OtlpRequestDecodeError::Payload)
     } else {
-        let Some(decode_permit) = protobuf_decode_permit else {
-            record_error(state.stats.as_ref());
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal OTLP decode error",
-            )
-                .into_response();
+        let decode_permit = match Arc::clone(&state.protobuf_decode_permits).try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => {
+                state
+                    .health
+                    .store(ComponentHealth::Degraded.as_repr(), Ordering::Relaxed);
+                return (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "too many requests: protobuf decode backpressure",
+                )
+                    .into_response();
+            }
         };
         decode_otlp_protobuf_request(body, Arc::clone(&state), decode_permit).await
     };
@@ -379,16 +367,18 @@ mod tests {
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicU8};
 
+    use axum::http::Request;
+    use axum::routing::post;
     use logfwd_types::field_names;
     use tokio::sync::Semaphore;
+    use tower::ServiceExt;
 
     use super::*;
     use crate::otlp_receiver::ProjectedOtlpDecoder;
 
-    #[test]
-    fn projected_decoder_poison_is_internal_error() {
+    fn projected_only_state(max_message_size_bytes: usize) -> Arc<OtlpServerState> {
         let (tx, _rx) = mpsc::sync_channel(1);
-        let state = OtlpServerState {
+        Arc::new(OtlpServerState {
             tx,
             is_running: Arc::new(AtomicBool::new(true)),
             health: Arc::new(AtomicU8::new(ComponentHealth::Healthy.as_repr())),
@@ -399,9 +389,11 @@ mod tests {
                 field_names::DEFAULT_RESOURCE_PREFIX,
             ))),
             stats: None,
-            max_message_size_bytes: 1024,
-        };
+            max_message_size_bytes,
+        })
+    }
 
+    fn poison_projected_decoder_lock(state: &OtlpServerState) {
         let decoder = state
             .projected_decoder
             .as_ref()
@@ -411,6 +403,12 @@ mod tests {
             panic!("poison projected decoder");
         }));
         assert!(poison_result.is_err(), "test must poison the decoder lock");
+    }
+
+    #[test]
+    fn projected_decoder_poison_is_internal_error() {
+        let state = projected_only_state(1024);
+        poison_projected_decoder_lock(&state);
 
         match decode_otlp_protobuf_request_blocking(Vec::new(), &state) {
             Err(OtlpRequestDecodeError::Internal(msg)) => {
@@ -421,5 +419,70 @@ mod tests {
             }
             Ok(_) => panic!("poisoned decoder lock must fail"),
         }
+    }
+
+    #[test]
+    fn poisoned_projected_decoder_returns_http_500_and_failed_health() {
+        let state = projected_only_state(1024);
+        poison_projected_decoder_lock(&state);
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime should build");
+
+        let app = axum::Router::new()
+            .route("/v1/logs", post(handle_otlp_request))
+            .with_state(Arc::clone(&state));
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/logs")
+            .header(CONTENT_TYPE, "application/x-protobuf")
+            .body(Body::empty())
+            .expect("test request should build");
+
+        let response = runtime
+            .block_on(app.oneshot(request))
+            .expect("handler should return a response");
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            state.health.load(Ordering::Relaxed),
+            ComponentHealth::Failed.as_repr()
+        );
+    }
+
+    #[test]
+    fn protobuf_decode_permit_exhaustion_does_not_mask_pre_decode_errors() {
+        let state = projected_only_state(1024);
+        let _held_permit = Arc::clone(&state.protobuf_decode_permits)
+            .try_acquire_owned()
+            .expect("test should exhaust the only decode permit");
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime should build");
+
+        let app = axum::Router::new()
+            .route("/v1/logs", post(handle_otlp_request))
+            .with_state(Arc::clone(&state));
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/logs")
+            .header(CONTENT_TYPE, "application/x-protobuf")
+            .header(CONTENT_ENCODING, "unsupported")
+            .body(Body::empty())
+            .expect("test request should build");
+
+        let response = runtime
+            .block_on(app.oneshot(request))
+            .expect("handler should return a response");
+
+        assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(
+            state.health.load(Ordering::Relaxed),
+            ComponentHealth::Healthy.as_repr()
+        );
     }
 }
