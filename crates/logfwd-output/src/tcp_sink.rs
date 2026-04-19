@@ -10,6 +10,7 @@ use std::time::Duration;
 use arrow::record_batch::RecordBatch;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio::time::Instant;
 
 use logfwd_types::diagnostics::ComponentStats;
 
@@ -20,7 +21,7 @@ use crate::{BatchMetadata, build_col_infos, write_row_json};
 /// downstream is unreachable.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Write timeout per socket write operation.
+/// Write timeout for each full write attempt (all partial writes combined).
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct TcpSink {
@@ -102,7 +103,13 @@ where
             match write_remaining_bytes(active_stream, buf, &mut written).await {
                 Ok(()) => return Ok(()),
                 Err(e) => {
-                    written = retry_record_boundary(buf, written);
+                    // Reset to zero so the full buffer is resent after
+                    // reconnect.  `write()` only confirms bytes entered the
+                    // local kernel buffer — after a connection reset those
+                    // bytes may never have reached the peer.  Resending
+                    // produces at-least-once semantics (possible duplicates)
+                    // which is strictly safer than at-most-once (data loss).
+                    written = 0;
                     *stream = None;
                     last_error = Some(e);
                     if attempt == 1 {
@@ -120,8 +127,13 @@ async fn write_remaining_bytes<W>(stream: &mut W, buf: &[u8], written: &mut usiz
 where
     W: AsyncWrite + Unpin,
 {
+    // Single deadline for the entire write attempt.  This bounds total
+    // wall-clock time regardless of how many partial writes occur.
+    let deadline = Instant::now() + WRITE_TIMEOUT;
+
     while *written < buf.len() {
-        let result = tokio::time::timeout(WRITE_TIMEOUT, stream.write(&buf[*written..])).await;
+        let result =
+            tokio::time::timeout_at(deadline, stream.write(&buf[*written..])).await;
         match result {
             Ok(Ok(0)) => {
                 return Err(io::Error::new(
@@ -140,13 +152,6 @@ where
         }
     }
     Ok(())
-}
-
-fn retry_record_boundary(buf: &[u8], written: usize) -> usize {
-    buf[..written.min(buf.len())]
-        .iter()
-        .rposition(|byte| *byte == b'\n')
-        .map_or(0, |index| index + 1)
 }
 
 impl Sink for TcpSink {
@@ -346,7 +351,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn write_with_retry_does_not_replay_completed_records() {
+    async fn write_with_retry_resends_full_buffer_after_partial_write_error() {
+        // After a connection reset the kernel buffer contents may have been
+        // lost, so the retry must resend the *entire* buffer (at-least-once).
         let payload = b"first\nsecond\n";
         let first_seen = Arc::new(Mutex::new(Vec::new()));
         let second_seen = Arc::new(Mutex::new(Vec::new()));
@@ -359,7 +366,10 @@ mod tests {
                 ],
                 Arc::clone(&first_seen),
             ),
-            ScriptedWriter::new(vec![ScriptStep::Write(7)], Arc::clone(&second_seen)),
+            ScriptedWriter::new(
+                vec![ScriptStep::Write(payload.len())],
+                Arc::clone(&second_seen),
+            ),
         ]);
         let mut current = Some(writers.pop_front().expect("first writer missing"));
 
@@ -377,9 +387,10 @@ mod tests {
             &*first_seen.lock().expect("first lock poisoned"),
             b"first\nsec"
         );
+        // Full buffer resent — at-least-once semantics.
         assert_eq!(
             &*second_seen.lock().expect("second lock poisoned"),
-            b"second\n"
+            b"first\nsecond\n"
         );
     }
 
