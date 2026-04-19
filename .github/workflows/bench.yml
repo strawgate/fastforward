@@ -174,7 +174,7 @@ jobs:
             --mode binary \
             --results-file results.jsonl
         env:
-          LOGFWD: ./bin/ff
+          FF: ./bin/ff
 
       - uses: actions/upload-artifact@v7
         if: always()
@@ -205,7 +205,7 @@ jobs:
             --json-file rate-bench-result.json \
             --gh-bench-file rate-gh-bench.json
         env:
-          LOGFWD: ./bin/ff
+          FF: ./bin/ff
 
       - uses: actions/upload-artifact@v7
         with:
@@ -326,7 +326,7 @@ jobs:
             --profile ./profiles \
             --dhat-binary ./bin/ff-dhat
         env:
-          LOGFWD: ./bin/ff-prof
+          FF: ./bin/ff-prof
 
       - uses: actions/upload-artifact@v7
         if: always()
