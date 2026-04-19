@@ -121,7 +121,13 @@ pub struct HttpInput {
     /// Max bytes drained from internal request queue on each `poll()`.
     max_drained_bytes_per_poll: usize,
     /// Deferred request bytes that did not fit in the previous poll budget.
-    deferred_bytes: Option<Vec<u8>>,
+    deferred_bytes: Option<DeferredBytes>,
+}
+
+#[derive(Debug)]
+struct DeferredBytes {
+    bytes: Vec<u8>,
+    offset: usize,
 }
 
 #[derive(Clone)]
@@ -289,14 +295,11 @@ impl InputSource for HttpInput {
         }
 
         let mut all = Vec::new();
-        if let Some(bytes) = self.deferred_bytes.take()
-            && !append_capped(
-                &mut all,
-                bytes,
-                self.max_drained_bytes_per_poll,
-                &mut self.deferred_bytes,
-            )
-        {
+        if !append_deferred_capped(
+            &mut all,
+            self.max_drained_bytes_per_poll,
+            &mut self.deferred_bytes,
+        ) {
             return Ok(vec![InputEvent::Data {
                 accounted_bytes: all.len() as u64,
                 bytes: all,
@@ -308,6 +311,7 @@ impl InputSource for HttpInput {
             if all.len() >= self.max_drained_bytes_per_poll {
                 break;
             }
+
             let recv_result = {
                 let Some(rx) = self.rx.as_ref() else {
                     break;
@@ -359,12 +363,12 @@ impl InputSource for HttpInput {
 
 fn append_capped(
     out: &mut Vec<u8>,
-    mut bytes: Vec<u8>,
+    bytes: Vec<u8>,
     max_drained_bytes_per_poll: usize,
-    deferred_bytes: &mut Option<Vec<u8>>,
+    deferred_bytes: &mut Option<DeferredBytes>,
 ) -> bool {
     if out.len() >= max_drained_bytes_per_poll {
-        *deferred_bytes = Some(bytes);
+        *deferred_bytes = Some(DeferredBytes { bytes, offset: 0 });
         return false;
     }
 
@@ -374,10 +378,39 @@ fn append_capped(
         return true;
     }
 
-    let overflow = bytes.split_off(remaining);
-    out.extend_from_slice(&bytes);
-    *deferred_bytes = Some(overflow);
+    out.extend_from_slice(&bytes[..remaining]);
+    *deferred_bytes = Some(DeferredBytes {
+        bytes,
+        offset: remaining,
+    });
     false
+}
+
+fn append_deferred_capped(
+    out: &mut Vec<u8>,
+    max_drained_bytes_per_poll: usize,
+    deferred_bytes: &mut Option<DeferredBytes>,
+) -> bool {
+    let Some(deferred) = deferred_bytes.as_mut() else {
+        return true;
+    };
+
+    if out.len() >= max_drained_bytes_per_poll {
+        return false;
+    }
+
+    let remaining = max_drained_bytes_per_poll - out.len();
+    let available = deferred.bytes.len().saturating_sub(deferred.offset);
+    let take = available.min(remaining);
+    out.extend_from_slice(&deferred.bytes[deferred.offset..deferred.offset + take]);
+    deferred.offset += take;
+
+    if deferred.offset >= deferred.bytes.len() {
+        *deferred_bytes = None;
+        true
+    } else {
+        false
+    }
 }
 
 async fn handle_request(
