@@ -247,29 +247,15 @@ import { createSimulation } from './highway-sim.mjs';
     if (Math.abs(p2.x - p1.x) < 0.01 && Math.abs(p2.y - p1.y) < 0.01) return 0;
     return Math.atan2(p2.y - p1.y, p2.x - p1.x) * 180 / Math.PI;
   }
-  // Find the path-distance on `segment` whose screen point is closest to (px, py)
-  function closestD(segment, px, py) {
-    const path = pathMap[segment];
-    const len = lenMap[segment];
-    let bestD = 0, bestSq = Infinity;
-    // Coarse pass: 60 samples
-    for (let i = 0; i <= 60; i++) {
-      const d = (i / 60) * len;
-      const p = path.getPointAtLength(d);
-      const sq = (p.x - px) * (p.x - px) + (p.y - py) * (p.y - py);
-      if (sq < bestSq) { bestSq = sq; bestD = d; }
-    }
-    // Fine pass: refine around best
-    const step = len / 60;
-    const lo = Math.max(0, bestD - step);
-    const hi = Math.min(len, bestD + step);
-    for (let i = 0; i <= 20; i++) {
-      const d = lo + (i / 20) * (hi - lo);
-      const p = path.getPointAtLength(d);
-      const sq = (p.x - px) * (p.x - px) + (p.y - py) * (p.y - py);
-      if (sq < bestSq) { bestSq = sq; bestD = d; }
-    }
-    return bestD;
+  // Junction mapping for segment transitions.
+  // When a car moves between segments, its visual `d` jumps to the
+  // correct entry point on the new path so there's no screen-space snap.
+  // ramp end → highway at mergeSlot d, highway end → exit/cont start
+  function junctionD(fromSeg, toSeg) {
+    if (fromSeg === 'ramp' && toSeg === 'highway') return lenMap.highway * (sim.cfg.mergeSlot / (sim.cfg.slotsHwy - 1));
+    if (fromSeg === 'highway' && toSeg === 'exit') return 0;
+    if (fromSeg === 'highway' && toSeg === 'cont') return 0;
+    return 0;
   }
   // Junction-aware padding: only pad at ends that connect to other segments
   // highway: pad end (→exit/cont), ramp: pad end (→highway merge)
@@ -381,12 +367,9 @@ import { createSimulation } from './highway-sim.mjs';
     const vis = carVis[car.id];
     if (!vis) return;
 
-    // Handle segment transition — bridge via screen position
+    // Handle segment transition — use known junction mapping
     if (vis.seg !== car.segment) {
-      // Where is the car on screen right now (old segment)?
-      const oldPt = posAt(vis.seg, padD(vis.seg, vis.d));
-      // Find the d on the new path closest to that screen point
-      vis.d = closestD(car.segment, oldPt.x, oldPt.y);
+      vis.d = junctionD(vis.seg, car.segment);
       vis.seg = car.segment;
       vis.speed = Math.max(vis.speed, 1); // maintain momentum through junction
     }
