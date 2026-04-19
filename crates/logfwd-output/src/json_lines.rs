@@ -53,6 +53,11 @@ fn parse_headers(headers: &[(String, String)]) -> io::Result<HeaderMap> {
 }
 
 impl JsonLinesSink {
+    /// Create a JSON Lines HTTP sink using a shared client.
+    ///
+    /// Factories pass the same `Arc<reqwest::Client>` to every worker sink so
+    /// they share connection pools and DNS cache state while each sink keeps
+    /// its own serialization buffers.
     pub fn new(
         name: String,
         url: String,
@@ -242,23 +247,20 @@ impl JsonLinesSinkFactory {
         headers: Vec<(String, String)>,
         compression: Compression,
         stats: Arc<ComponentStats>,
-    ) -> Self {
+    ) -> io::Result<Self> {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
             .pool_max_idle_per_host(64)
             .build()
-            .unwrap_or_else(|e| {
-                tracing::warn!("reqwest client builder failed: {e}");
-                reqwest::Client::new()
-            });
-        Self {
+            .map_err(io::Error::other)?;
+        Ok(Self {
             name,
             endpoint,
             headers,
             compression,
             client: Arc::new(client),
             stats,
-        }
+        })
     }
 
     fn create_sink(&self) -> io::Result<JsonLinesSink> {
@@ -466,7 +468,8 @@ mod tests {
             vec![("x-test".to_string(), "1".to_string())],
             Compression::None,
             Arc::new(ComponentStats::default()),
-        );
+        )
+        .expect("factory");
 
         let sink1 = factory.create_sink().expect("first sink");
         let sink2 = factory.create_sink().expect("second sink");

@@ -62,6 +62,7 @@ impl UdpSink {
         })
     }
 
+    /// Resolve the target to the first IPv4 address because the socket is IPv4-bound.
     async fn resolve_target(&self) -> io::Result<SocketAddr> {
         tokio::net::lookup_host(&self.target)
             .await?
@@ -87,13 +88,14 @@ impl UdpSink {
     }
 
     async fn send_packet(&mut self, payload: &[u8]) -> io::Result<()> {
-        if self.resolved_target.is_none() {
-            self.resolved_target = Some(self.resolve_target().await?);
-        }
-
-        let cached = self
-            .resolved_target
-            .expect("resolved_target must be set before send");
+        let cached = match self.resolved_target {
+            Some(addr) => addr,
+            None => {
+                let addr = self.resolve_target().await?;
+                self.resolved_target = Some(addr);
+                addr
+            }
+        };
         match self.send_packet_once(payload, cached).await {
             Ok(()) => Ok(()),
             Err(first_send_error) => {
@@ -163,8 +165,10 @@ impl UdpSink {
             // but that is better than silently dropping data.
             if row_len > MAX_DATAGRAM_PAYLOAD {
                 self.flush_dgram().await?;
-                let packet = self.row_buf.clone();
-                self.send_packet(&packet).await?;
+                let packet = std::mem::take(&mut self.row_buf);
+                let result = self.send_packet(&packet).await;
+                self.row_buf = packet;
+                result?;
                 continue;
             }
 
