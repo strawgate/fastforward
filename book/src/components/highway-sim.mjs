@@ -18,12 +18,12 @@ export var DEFAULTS = {
   mergeD: 170,
   gateD: 130,
   carW: 20,
-  minFollowPad: 8,
+  minFollowPad: 14,
   speedMax: 3.5,
   spawnMs: 420,
   cycleTotal: 3000,
   greenPct: 80,
-  maxCars: 35,
+  maxCars: 25,
   lerpRate: 0.25,
   brakeRate: 0.3,
   followZone: 18,
@@ -177,9 +177,12 @@ export function createSimulation(overrides, scaleFn) {
         }
       }
 
-      // End-of-segment blocking
-      if (opts.endBlocked && car.d >= segLen - 8) {
-        target = 0;
+      // End-of-segment blocking — wide braking zone for smooth deceleration
+      if (opts.endBlocked) {
+        if (car.d >= segLen - 30) {
+          var distToEnd = segLen - car.d;
+          target = Math.min(target, Math.max(0, distToEnd * 0.15));
+        }
         if (car.d > segLen) { car.d = segLen; car.speed = 0; }
       }
 
@@ -223,11 +226,15 @@ export function createSimulation(overrides, scaleFn) {
 
   // ---- transitions ----
 
-  function canEnterExit() {
+  function canEnterExit(enterW) {
+    var w = enterW || cfg.carW;
+    var minD = Infinity;
     for (var j = 0; j < carsExit.length; j++) {
-      if (carsExit[j].d < cfg.minFollowPad + carsExit[j].w + cfg.carW) return false;
+      if (carsExit[j].d < minD) minD = carsExit[j].d;
     }
-    return true;
+    // Cars enter exit at d=12, so check from that offset
+    var entryD = 12;
+    return (minD - entryD) > (w + cfg.carW) / 2 + cfg.minFollowPad;
   }
 
   function canMergeAt(d, w) {
@@ -242,16 +249,22 @@ export function createSimulation(overrides, scaleFn) {
   function tryHwyToExit() {
     if (carsHwy.length === 0) return;
     carsHwy.sort(function (a, b) { return b.d - a.d; });
-    var front = carsHwy[0];
-    if (front.d < cfg.lenHwy - 3) return;
-    if (canEnterExit()) {
-      carsHwy.splice(0, 1);
-      front.segment = 'exit';
-      front.d = Math.max(0, front.d - cfg.lenHwy);
-      carsExit.push(front);
-    } else {
-      front.d = cfg.lenHwy;
-      front.speed = 0;
+    while (carsHwy.length > 0) {
+      var front = carsHwy[0];
+      if (front.d < cfg.lenHwy - 5) break;
+      if (canEnterExit(front.w)) {
+        carsHwy.splice(0, 1);
+        front.segment = 'exit';
+        // Start past the fork point so cars don't overlap with blocked highway cars
+        front.d = 12;
+        front.speed = Math.min(front.speed, cfg.speedMax * 0.8);
+        carsExit.push(front);
+      } else {
+        // Block a few px before the absolute end to leave visual room for the fork
+        front.d = cfg.lenHwy - 4;
+        front.speed = 0;
+        break;
+      }
     }
   }
 
@@ -296,7 +309,7 @@ export function createSimulation(overrides, scaleFn) {
     tryHwyToExit();
 
     // 4. Move highway
-    var exitFull = !canEnterExit();
+    var exitFull = !canEnterExit(cfg.carW);
     moveSegment(carsHwy, cfg.lenHwy, { endBlocked: exitFull });
 
     // 5. Try transition again (car may have moved to end this tick)
