@@ -279,12 +279,18 @@ impl OtlpReceiverInput {
     }
 }
 
+/// Maximum CPU decode workers regardless of available parallelism.
+///
+/// Prevents excessive thread spawning on large-core machines where the
+/// decode pool would otherwise grow unboundedly.
+const MAX_REQUEST_CPU_WORKERS: usize = 16;
+
 fn request_cpu_worker_count() -> usize {
     std::thread::available_parallelism()
         .map_or(FALLBACK_REQUEST_CPU_WORKERS, |parallelism| {
             parallelism.get().saturating_mul(2)
         })
-        .max(1)
+        .clamp(1, MAX_REQUEST_CPU_WORKERS)
 }
 
 fn request_cpu_outstanding_limit(worker_count: usize) -> usize {

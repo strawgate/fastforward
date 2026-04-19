@@ -144,16 +144,8 @@ pub(super) async fn handle_otlp_request(
             )
                 .into_response();
         }
-        Err(OtlpRequestDecodeError::Backpressure) => {
-            state
-                .health
-                .store(ComponentHealth::Degraded.as_repr(), Ordering::Relaxed);
-            return (
-                StatusCode::TOO_MANY_REQUESTS,
-                "too many requests: OTLP request CPU backpressure",
-            )
-                .into_response();
-        }
+        // Handled by the first match — early-returns before reaching here.
+        Err(OtlpRequestDecodeError::Backpressure) => unreachable!(),
     };
 
     if batch.num_rows() == 0 {

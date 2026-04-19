@@ -15,8 +15,10 @@ use super::decode::{
 #[cfg(any(feature = "otlp-research", test))]
 use super::projection::{ProjectedOtlpDecoder, ProjectionError};
 
+/// Bounded blocking stage for OTLP request CPU decoding workers.
 pub(super) type OtlpRequestCpuStage = BoundedBlockingStage<OtlpRequestCpuWorker>;
 
+/// A single OTLP decode job submitted to the CPU worker pool.
 pub(super) struct OtlpRequestCpuJob {
     pub(super) body: Vec<u8>,
     pub(super) content: OtlpRequestContent,
@@ -24,11 +26,13 @@ pub(super) struct OtlpRequestCpuJob {
     pub(super) max_body_size: usize,
 }
 
+/// Content type of an incoming OTLP request (JSON or Protobuf).
 pub(super) enum OtlpRequestContent {
     Json,
     Protobuf,
 }
 
+/// Content-Encoding applied to the OTLP request body.
 #[derive(Clone, Copy)]
 pub(super) enum OtlpContentEncoding {
     Identity,
@@ -36,11 +40,13 @@ pub(super) enum OtlpContentEncoding {
     Zstd,
 }
 
+/// Successful output from a CPU decode worker: a record batch and decode outcome.
 pub(super) struct OtlpRequestCpuOutput {
     pub(super) batch: RecordBatch,
     pub(super) outcome: OtlpRequestCpuOutcome,
 }
 
+/// Which decode path produced the output batch.
 pub(super) enum OtlpRequestCpuOutcome {
     Json,
     Prost,
@@ -50,6 +56,7 @@ pub(super) enum OtlpRequestCpuOutcome {
     ProjectedFallback,
 }
 
+/// Error returned by a CPU decode worker.
 #[derive(Debug)]
 pub(super) enum OtlpRequestCpuError {
     Decompression(InputError),
@@ -58,6 +65,7 @@ pub(super) enum OtlpRequestCpuError {
     ProjectionInvalid(InputError),
 }
 
+/// Per-thread OTLP decode worker holding reusable decoder state.
 pub(super) struct OtlpRequestCpuWorker {
     resource_prefix: Arc<str>,
     mode: OtlpProtobufDecodeMode,
