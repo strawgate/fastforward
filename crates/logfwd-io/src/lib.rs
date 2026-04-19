@@ -1,5 +1,7 @@
 pub mod atomic_write;
 pub(crate) mod background_http_task;
+/// Fixed-worker blocking stages for crate-internal CPU work.
+pub(crate) mod blocking_stage;
 pub mod error;
 pub use error::InputError;
 
