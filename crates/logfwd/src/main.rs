@@ -7,6 +7,7 @@ static ALLOC: dhat::Alloc = dhat::Alloc;
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 use std::env;
+use std::ffi::OsString;
 use std::io::{self, IsTerminal, Write};
 use std::sync::Arc;
 use std::time::Duration;
@@ -33,7 +34,7 @@ const LONG_VERSION: &str = concat!(
 const CLI_AFTER_HELP: &str = r"Examples:
   ff run --config config.yaml
   cat app.log | ff
-  kubectl logs pod/app | ff send --format json --service checkout
+  kubectl logs pod/app | ff --format json --service checkout
   ff validate --config config.yaml
   ff dry-run --config config.yaml
   ff effective-config --config config.yaml
@@ -463,7 +464,8 @@ fn main() {
 
 #[tokio::main]
 async fn main_inner() -> i32 {
-    let cli = match Cli::try_parse() {
+    let stdin_is_terminal = io::stdin().is_terminal();
+    let cli = match parse_cli_from(env::args_os(), stdin_is_terminal) {
         Ok(cli) => cli,
         Err(err) => {
             let code = match err.kind() {
@@ -477,7 +479,7 @@ async fn main_inner() -> i32 {
 
     let result = if let Some(command) = cli.command {
         run_command(command).await
-    } else if !io::stdin().is_terminal() {
+    } else if !stdin_is_terminal {
         run_command(Commands::Send(SendArgs::default())).await
     } else {
         if let Some(path) = discover_config() {
@@ -556,6 +558,43 @@ async fn run_command(command: Commands) -> Result<(), CliError> {
     }
 }
 
+fn parse_cli_from<I, T>(args: I, stdin_is_terminal: bool) -> Result<Cli, clap::Error>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString>,
+{
+    let args = args.into_iter().map(Into::into).collect::<Vec<_>>();
+    match Cli::try_parse_from(args.clone()) {
+        Ok(cli) => Ok(cli),
+        Err(err) => {
+            if stdin_is_terminal || !should_retry_parse_as_send(err.kind()) {
+                return Err(err);
+            }
+            Cli::try_parse_from(rewrite_args_as_send(args))
+        }
+    }
+}
+
+fn should_retry_parse_as_send(kind: ErrorKind) -> bool {
+    matches!(
+        kind,
+        ErrorKind::UnknownArgument | ErrorKind::InvalidSubcommand
+    )
+}
+
+fn rewrite_args_as_send(args: Vec<OsString>) -> Vec<OsString> {
+    let mut rewritten = Vec::with_capacity(args.len() + 1);
+    if let Some((program, rest)) = args.split_first() {
+        rewritten.push(program.clone());
+        rewritten.push(OsString::from("send"));
+        rewritten.extend(rest.iter().cloned());
+    } else {
+        rewritten.push(OsString::from("ff"));
+        rewritten.push(OsString::from("send"));
+    }
+    rewritten
+}
+
 // ---------------------------------------------------------------------------
 // Commands
 // ---------------------------------------------------------------------------
@@ -616,13 +655,13 @@ fn build_stdin_send_config_yaml(
     })?;
 
     for unsupported in ["input", "pipelines"] {
-        if mapping.contains_key(&yaml_string(unsupported)) {
+        if mapping.contains_key(yaml_string(unsupported)) {
             return Err(CliError::Config(format!(
                 "`ff send` expects a destination-only config; remove top-level `{unsupported}` or use `ff run`"
             )));
         }
     }
-    if !mapping.contains_key(&yaml_string("output")) {
+    if !mapping.contains_key(yaml_string("output")) {
         return Err(CliError::Config(
             "`ff send` destination config must define top-level `output`".to_owned(),
         ));
@@ -701,7 +740,7 @@ fn resolve_send_config_path(config_path: Option<&str>) -> Result<String, CliErro
             "no destination config file found (use `ff send --config <file>` or set LOGFWD_CONFIG)"
                 .to_owned(),
         ),
-        other => other,
+        CliError::Runtime(e) => CliError::Runtime(e),
     })
 }
 
@@ -2154,6 +2193,41 @@ mod cli_tests {
             }
             other => panic!("expected send command, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn piped_bare_send_with_overrides_parses_successfully() {
+        let cli = parse_cli_from(
+            [
+                "ff",
+                "--config",
+                "dest.yaml",
+                "--format",
+                "raw",
+                "--service",
+                "checkout",
+                "--resource",
+                "deployment=blue",
+            ],
+            false,
+        )
+        .expect("parser should retry piped bare args as send command");
+        match cli.command.expect("command") {
+            Commands::Send(args) => {
+                assert_eq!(args.config.as_deref(), Some("dest.yaml"));
+                assert!(matches!(args.format, Some(SendFormat::Raw)));
+                assert_eq!(args.service.as_deref(), Some("checkout"));
+                assert_eq!(args.resource, ["deployment=blue"]);
+            }
+            other => panic!("expected send command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn interactive_bare_send_overrides_remain_invalid() {
+        let err = parse_cli_from(["ff", "--format", "raw"], true)
+            .expect_err("interactive top-level send args should stay invalid");
+        assert!(matches!(err.kind(), ErrorKind::UnknownArgument));
     }
 
     #[test]
