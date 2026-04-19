@@ -1134,8 +1134,7 @@ mod verification {
     #[kani::unwind(2)]
     fn verify_is_drained_when_empty() {
         // An empty pipeline (never any batches) must be immediately drained.
-        let running: PipelineMachine<Running, Cp> =
-            PipelineMachine::<Starting, Cp>::new().start();
+        let running: PipelineMachine<Running, Cp> = PipelineMachine::<Starting, Cp>::new().start();
         let draining = running.begin_drain();
         assert!(draining.is_drained());
         assert_eq!(draining.in_flight_count(), 0);
