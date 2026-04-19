@@ -470,7 +470,7 @@ build-pgo:
     echo "==> Step 1: build with PGO instrumentation (profile-generate)"
     RUSTFLAGS="-Cprofile-generate=${PGO_DIR}" cargo build --release -p logfwd
     echo "==> Step 2: run training workload to collect profiles"
-    LOGFWD=./target/release/ff cargo run -p logfwd-competitive-bench --release -- \
+    FF=./target/release/ff cargo run -p logfwd-competitive-bench --release -- \
         --lines 500000 --mode binary --cpus 1 --memory 1g \
         --scenarios passthrough,json_parse,filter
     echo "==> Step 3: merge raw profiles"
@@ -508,7 +508,7 @@ bench-docker:
     cargo build --release --features dhat-heap -p logfwd
     cp target/release/ff target/release/ff-dhat
     cargo build --release -p logfwd
-    LOGFWD=./target/release/ff cargo run -p logfwd-competitive-bench --release -- \
+    FF=./target/release/ff cargo run -p logfwd-competitive-bench --release -- \
         --lines 5000000 --docker --cpus 1 --memory 1g --markdown \
         --profile ./profiles --dhat-binary ./target/release/ff-dhat
 
