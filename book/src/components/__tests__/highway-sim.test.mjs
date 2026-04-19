@@ -250,24 +250,28 @@ describe('red light on exit', function () {
   it('backpressure cascades: exit full → highway blocks', function () {
     var sim = createSimulation({
       greenPct: 0, cycleTotal: 100, gateD: 130,
-      lenExit: 210, lenHwy: 530, lenRamp: 180,
+      lenExit: 210, lenHwy: 530, lenRamp: 180, lenCont: 215,
       mergeD: 170, spawnMs: 99999, minFollowPad: 8,
     }, fixedScale(1));
     sim.setCycleStart(0);
     sim.exitAuto();
-    // Fill exit ramp
+    // Fill exit ramp with stopped cars
     for (var i = 0; i < 5; i++) {
-      sim.addCar('exit', 20 + i * 25, 3.5);
+      sim.addCar('exit', 10 + i * 25, 0);
+    }
+    // Fill continuation with stopped cars packed tight
+    for (var j = 0; j < 8; j++) {
+      sim.addCar('cont', j * 25, 0);
     }
     // Car on highway near the fork
     sim.addCar('highway', 525, 3.5);
-    for (var t = 0; t < 100; t++) {
+    // Only a few ticks — before cont cars can accelerate away
+    for (var t = 0; t < 5; t++) {
       sim.tick(t * 25);
     }
     var hwyCars = sim.getCars().filter(function (c) { return c.segment === 'highway'; });
-    if (hwyCars.length > 0) {
-      assert.ok(hwyCars[0].speed < 1, 'highway car should be blocked by full exit');
-    }
+    assert.ok(hwyCars.length > 0, 'car should still be on highway');
+    assert.ok(hwyCars[0].speed < 1, 'highway car should be blocked by full exit+cont');
   });
 });
 
@@ -416,11 +420,12 @@ describe('status', function () {
     assert.equal(frame.status.level, 'flowing');
   });
 
-  it('reports blocked when ramp stalls', function () {
+  it('reports blocked when entrance is blocked', function () {
     var sim = createSimulation({
       greenPct: 0, cycleTotal: 100,
-      lenHwy: 530, lenRamp: 180, lenExit: 210,
-      mergeD: 170, gateD: 130, spawnMs: 99999,
+      lenHwy: 530, lenRamp: 180, lenExit: 210, lenCont: 215,
+      mergeD: 170, gateD: 130, spawnMs: 10,
+      spawnBlockedThreshold: 5,
     }, fixedScale(1));
     sim.setCycleStart(0);
     sim.exitAuto();
@@ -428,14 +433,19 @@ describe('status', function () {
     for (var i = 0; i < 4; i++) {
       sim.addCar('exit', 20 + i * 28, 0);
     }
-    // Fill highway back toward merge
-    for (var j = 0; j < 15; j++) {
-      sim.addCar('highway', 50 + j * 30, 0);
+    // Fill continuation too
+    for (var ic = 0; ic < 3; ic++) {
+      sim.addCar('cont', 5 + ic * 25, 0);
     }
-    // Stuck ramp car
-    sim.addCar('ramp', 175, 0);
+    // Fill highway back toward start — blocks spawn space
+    for (var j = 0; j < 18; j++) {
+      sim.addCar('highway', 10 + j * 28, 0);
+    }
+    // Stuck ramp car — blocks ramp spawn space
+    sim.addCar('ramp', 5, 0);
     var frame;
-    for (var t = 0; t < 20; t++) {
+    // Run enough ticks for spawnBlockedThreshold to trigger
+    for (var t = 0; t < 30; t++) {
       frame = sim.tick(t * 25);
     }
     assert.equal(frame.status.level, 'blocked');

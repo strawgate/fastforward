@@ -12,6 +12,7 @@
         <path id="hw-path-ramp" d="M 30,255 C 30,185 115,100 200,100" fill="none" />
         <path id="hw-path-hwy" d="M 30,100 L 560,100" fill="none" />
         <path id="hw-path-exit" d="M 560,100 C 600,100 730,175 730,255" fill="none" />
+        <path id="hw-path-cont" d="M 560,100 L 775,100" fill="none" />
       </defs>
 
       <!-- Highway road surface -->
@@ -35,11 +36,11 @@
       <path d="M 560,100 C 600,100 730,175 730,255" fill="none" stroke="var(--hw-road)" stroke-width="28" stroke-linecap="round" />
       <path d="M 560,100 C 600,100 730,175 730,255" fill="none" stroke="var(--hw-dash)" stroke-width="1" stroke-dasharray="6,8" />
 
-      <!-- Faded highway continuation past fork -->
-      <rect x="555" y="84" width="220" height="32" fill="var(--hw-road)" opacity="0.2" />
-      <line x1="555" y1="84" x2="775" y2="84" stroke="var(--hw-edge)" stroke-width="1" opacity="0.15" />
-      <line x1="555" y1="116" x2="775" y2="116" stroke="var(--hw-edge)" stroke-width="1" opacity="0.15" />
-      <line x1="560" y1="100" x2="770" y2="100" stroke="var(--hw-dash)" stroke-width="1" stroke-dasharray="14,10" opacity="0.1" />
+      <!-- Highway continuation past fork (through traffic) -->
+      <rect x="555" y="84" width="220" height="32" fill="var(--hw-road)" opacity="0.35" />
+      <line x1="555" y1="84" x2="775" y2="84" stroke="var(--hw-edge)" stroke-width="1" opacity="0.25" />
+      <line x1="555" y1="116" x2="775" y2="116" stroke="var(--hw-edge)" stroke-width="1" opacity="0.25" />
+      <line x1="560" y1="100" x2="770" y2="100" stroke="var(--hw-dash)" stroke-width="1" stroke-dasharray="14,10" opacity="0.15" />
 
       <!-- Merge zone marker -->
       <line x1="200" y1="84" x2="200" y2="116" stroke="var(--hw-dash)" stroke-width="1.5" stroke-dasharray="3,3" opacity="0.35" />
@@ -183,11 +184,13 @@ import { createSimulation } from './highway-sim.mjs';
   var pathRamp = document.getElementById('hw-path-ramp');
   var pathHwy = document.getElementById('hw-path-hwy');
   var pathExit = document.getElementById('hw-path-exit');
-  if (!carsG || !slider || !pathRamp || !pathHwy || !pathExit) return;
+  var pathCont = document.getElementById('hw-path-cont');
+  if (!carsG || !slider || !pathRamp || !pathHwy || !pathExit || !pathCont) return;
 
   var lenRamp = pathRamp.getTotalLength();
   var lenHwy = pathHwy.getTotalLength();
   var lenExit = pathExit.getTotalLength();
+  var lenCont = pathCont.getTotalLength();
 
   // mergeD: where x=200 on the straight highway from x=30 to x=560
   var mergeD = Math.round(lenHwy * 170 / 530);
@@ -224,6 +227,7 @@ import { createSimulation } from './highway-sim.mjs';
     lenRamp: lenRamp,
     lenHwy: lenHwy,
     lenExit: lenExit,
+    lenCont: lenCont,
     mergeD: mergeD,
     gateD: gateD,
     carW: CAR_W,
@@ -232,8 +236,8 @@ import { createSimulation } from './highway-sim.mjs';
   sim.setCycleStart(Date.now());
 
   // Segment → SVG path mapping
-  var pathMap = { ramp: pathRamp, highway: pathHwy, exit: pathExit };
-  var lenMap = { ramp: lenRamp, highway: lenHwy, exit: lenExit };
+  var pathMap = { ramp: pathRamp, highway: pathHwy, exit: pathExit, cont: pathCont };
+  var lenMap = { ramp: lenRamp, highway: lenHwy, exit: lenExit, cont: lenCont };
 
   function posAt(segment, d) {
     var path = pathMap[segment];

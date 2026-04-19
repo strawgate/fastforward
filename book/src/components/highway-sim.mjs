@@ -4,17 +4,19 @@
  * Multi-route model:
  *   highway: cars enter from left, travel right to the fork
  *   ramp:    cars enter from bottom-left, merge into highway at mergeD
- *   exit:    all cars leave highway via exit ramp (has traffic light)
+ *   exit:    cars leave highway via exit ramp (has traffic light)
+ *   cont:    cars continue east past the fork (fade out, always flowing)
  *
- * The highway visually continues right past the fork but all simulated
- * cars take the exit ramp. When the light is red, the exit backs up →
- * highway backs up → on-ramp stalls. Cars fade out past the light.
+ * At the fork, cars prefer the exit ramp. When the exit backs up,
+ * cars that can't exit continue east. Eventually the backup cascades
+ * to block the highway and on-ramp entrances.
  */
 
 export var DEFAULTS = {
   lenRamp: 180,
   lenHwy: 530,
   lenExit: 210,
+  lenCont: 215,
   mergeD: 170,
   gateD: 130,
   carW: 20,
@@ -32,6 +34,7 @@ export var DEFAULTS = {
   autoMax: 100,
   scaleMin: 0.7,
   scaleMax: 1.3,
+  spawnBlockedThreshold: 8,
 };
 
 var SHAPES = ['sedan', 'truck', 'compact', 'van'];
@@ -55,6 +58,7 @@ export function createSimulation(overrides, scaleFn) {
   var carsRamp = [];
   var carsHwy = [];
   var carsExit = [];
+  var carsCont = [];
 
   var lightIsGreen = true;
   var greenPct = cfg.greenPct;
@@ -69,6 +73,7 @@ export function createSimulation(overrides, scaleFn) {
   var deliveries = [];
   var stalledFrames = 0;
   var totalFrames = 0;
+  var spawnBlockedTicks = 0;
 
   // ---- helpers ----
 
@@ -102,7 +107,7 @@ export function createSimulation(overrides, scaleFn) {
   }
 
   function allCars() {
-    return carsRamp.concat(carsHwy, carsExit);
+    return carsRamp.concat(carsHwy, carsExit, carsCont);
   }
 
   // ---- light ----
@@ -213,8 +218,11 @@ export function createSimulation(overrides, scaleFn) {
 
       if (car.d < 0) car.d = 0;
 
-      // Fade past gate on exit
-      if (opts.fade && car.d > cfg.gateD) {
+      // Fade past gate on exit, or full-length fade on continuation
+      if (opts.fade && opts.fadeLen) {
+        var fadeStart = opts.fadeStart || 0;
+        car.opacity = Math.max(0, 1 - (car.d - fadeStart) / opts.fadeLen);
+      } else if (opts.fade && car.d > cfg.gateD) {
         car.opacity = Math.max(0, 1 - (car.d - cfg.gateD) / (segLen - cfg.gateD));
       } else {
         car.opacity = 1;
@@ -246,6 +254,15 @@ export function createSimulation(overrides, scaleFn) {
     return true;
   }
 
+  function canEnterCont(enterW) {
+    var w = enterW || cfg.carW;
+    var minD = Infinity;
+    for (var j = 0; j < carsCont.length; j++) {
+      if (carsCont[j].d < minD) minD = carsCont[j].d;
+    }
+    return minD > (w + cfg.carW) / 2 + cfg.minFollowPad;
+  }
+
   function tryHwyToExit() {
     if (carsHwy.length === 0) return;
     carsHwy.sort(function (a, b) { return b.d - a.d; });
@@ -253,14 +270,21 @@ export function createSimulation(overrides, scaleFn) {
       var front = carsHwy[0];
       if (front.d < cfg.lenHwy - 5) break;
       if (canEnterExit(front.w)) {
+        // Take the exit ramp
         carsHwy.splice(0, 1);
         front.segment = 'exit';
-        // Start past the fork point so cars don't overlap with blocked highway cars
         front.d = 12;
         front.speed = Math.min(front.speed, cfg.speedMax * 0.8);
         carsExit.push(front);
+      } else if (canEnterCont(front.w)) {
+        // Exit full — continue east
+        carsHwy.splice(0, 1);
+        front.segment = 'cont';
+        front.d = 0;
+        front.speed = Math.min(front.speed, cfg.speedMax);
+        carsCont.push(front);
       } else {
-        // Block a few px before the absolute end to leave visual room for the fork
+        // Both paths full — block at the fork
         front.d = cfg.lenHwy - 4;
         front.speed = 0;
         break;
@@ -293,7 +317,7 @@ export function createSimulation(overrides, scaleFn) {
 
     var removedIds = [];
 
-    // 1. Remove delivered
+    // 1. Remove delivered (exit faded, cont off-screen)
     for (var i = carsExit.length - 1; i >= 0; i--) {
       if (carsExit[i].d >= cfg.lenExit || carsExit[i].opacity <= 0.01) {
         removedIds.push(carsExit[i].id);
@@ -301,32 +325,46 @@ export function createSimulation(overrides, scaleFn) {
         carsExit.splice(i, 1);
       }
     }
+    for (var ic = carsCont.length - 1; ic >= 0; ic--) {
+      if (carsCont[ic].d >= cfg.lenCont || carsCont[ic].opacity <= 0.01) {
+        removedIds.push(carsCont[ic].id);
+        carsCont.splice(ic, 1);
+      }
+    }
 
-    // 2. Move exit (downstream first — frees space)
+    // 2. Move continuation (always free-flowing, fade out)
+    moveSegment(carsCont, cfg.lenCont, { fade: true, fadeStart: 0, fadeLen: cfg.lenCont });
+
+    // 3. Move exit (downstream first — frees space)
     moveSegment(carsExit, cfg.lenExit, { hasGate: true, fade: true });
 
-    // 3. Highway → exit
+    // 4. Highway → exit or continuation
     tryHwyToExit();
 
-    // 4. Move highway
-    var exitFull = !canEnterExit(cfg.carW);
-    moveSegment(carsHwy, cfg.lenHwy, { endBlocked: exitFull });
+    // 5. Move highway — block only if BOTH exit and cont are full
+    var forkFull = !canEnterExit(cfg.carW) && !canEnterCont(cfg.carW);
+    moveSegment(carsHwy, cfg.lenHwy, { endBlocked: forkFull });
 
-    // 5. Try transition again (car may have moved to end this tick)
+    // 6. Try transition again (car may have moved to end this tick)
     tryHwyToExit();
 
-    // 6. Ramp → highway
+    // 7. Ramp → highway
     tryRampMerge();
 
-    // 7. Move ramp
+    // 8. Move ramp
     var mergeFull = !canMergeAt(cfg.mergeD, cfg.carW);
     moveSegment(carsRamp, cfg.lenRamp, { endBlocked: mergeFull });
 
-    // 8. Try merge again
+    // 9. Try merge again
     tryRampMerge();
 
-    // 9. Spawn
-    trySpawn(now);
+    // 10. Spawn
+    var spawned = trySpawn(now);
+    if (!spawned && now - lastSpawn >= cfg.spawnMs) {
+      spawnBlockedTicks++;
+    } else if (spawned) {
+      spawnBlockedTicks = 0;
+    }
 
     // Stats
     var cutoff = now - 5000;
@@ -335,22 +373,18 @@ export function createSimulation(overrides, scaleFn) {
 
     var all = allCars();
     var stalledCount = 0;
-    var rampBlocked = false;
     for (var s = 0; s < all.length; s++) {
-      if (all[s].speed < 0.15) {
-        stalledCount++;
-        if (all[s].segment === 'ramp' && all[s].d >= cfg.lenRamp - 5) rampBlocked = true;
-        if (all[s].segment === 'highway' && all[s].d < 10) rampBlocked = true;
-      }
+      if (all[s].speed < 0.15 && all[s].segment !== 'cont') stalledCount++;
     }
     if (stalledCount > 0) stalledFrames++;
 
     var stallPct = totalFrames > 0 ? Math.round(stalledFrames / totalFrames * 100) : 0;
 
+    // Status — only "blocked" when spawn entrance is actually blocked
     var status;
-    if (rampBlocked) {
+    if (spawnBlockedTicks >= cfg.spawnBlockedThreshold) {
       status = { level: 'blocked', msg: 'Traffic backed up to the on-ramp \u2014 no new cars can enter' };
-    } else if (stalledCount > all.length * 0.4) {
+    } else if (stalledCount > 3) {
       status = { level: 'congested', msg: 'Highway congested \u2014 cars queuing behind the light' };
     } else {
       status = { level: 'flowing', msg: 'Flowing \u2014 traffic moving freely' };
@@ -385,6 +419,7 @@ export function createSimulation(overrides, scaleFn) {
       if (segment === 'ramp') carsRamp.push(car);
       else if (segment === 'highway') carsHwy.push(car);
       else if (segment === 'exit') carsExit.push(car);
+      else if (segment === 'cont') carsCont.push(car);
       return car;
     },
     cfg: cfg,
