@@ -2852,6 +2852,7 @@ dependencies = [
  "serde_yaml_ng",
  "thiserror 2.0.18",
  "url",
+ "varsubst",
 ]
 
 [[package]]
@@ -5494,6 +5495,12 @@ name = "valuable"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
+
+[[package]]
+name = "varsubst"
+version = "0.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5cd6209bc6e22b483a4de08947851a172f7a4436fd4d19e96d5752844d4d1c3f"
 
 [[package]]
 name = "version_check"

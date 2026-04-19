@@ -950,7 +950,10 @@ storage:
 
 ## Environment variable substitution
 
-Any value in the config file can reference an environment variable with `${VAR}`:
+Any value in the config file can reference an environment variable with `${VAR}`.
+Variable names must start with an ASCII letter or `_`, and then contain only
+ASCII letters, digits, or `_`. `$VAR` and default expressions such as
+`${VAR:fallback}` are not expanded.
 
 ```yaml
 output:
