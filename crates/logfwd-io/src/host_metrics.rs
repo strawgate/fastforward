@@ -133,6 +133,11 @@ pub struct HostMetricsConfig {
     pub emit_signal_rows: bool,
     /// Upper bound on data rows emitted per collection cycle.
     pub max_rows_per_poll: usize,
+    /// Upper bound on process rows emitted per collection cycle.
+    ///
+    /// This cap is applied after family budgeting to prevent unbounded memory
+    /// growth when hosts expose very large process tables.
+    pub max_process_rows_per_poll: usize,
 }
 
 impl Default for HostMetricsConfig {
@@ -144,6 +149,7 @@ impl Default for HostMetricsConfig {
             enabled_families: None,
             emit_signal_rows: true,
             max_rows_per_poll: 256,
+            max_process_rows_per_poll: 1024,
         }
     }
 }
@@ -670,6 +676,7 @@ impl HostMetricsCommon {
         out: &mut Vec<SensorRow>,
         limit: usize,
     ) -> usize {
+        let limit = limit.min(self.cfg.max_process_rows_per_poll);
         let mut procs: Vec<(&sysinfo::Pid, &Process)> = self.system.processes().iter().collect();
         procs.sort_unstable_by_key(|(pid, _)| pid.as_u32());
 
@@ -1994,6 +2001,38 @@ mod tests {
         assert!(
             snapshot_count <= 3,
             "max_rows_per_poll should cap data rows, got {snapshot_count}"
+        );
+    }
+
+    #[test]
+    fn max_process_rows_per_poll_caps_process_collection() {
+        let mut input = HostMetricsInput::new(
+            "sensor",
+            host_target(),
+            HostMetricsConfig {
+                enabled_families: Some(vec!["process".to_string()]),
+                emit_signal_rows: false,
+                max_rows_per_poll: usize::MAX,
+                max_process_rows_per_poll: 3,
+                ..HostMetricsConfig::default()
+            },
+        )
+        .expect("host metrics input should construct");
+
+        let events = input.poll().expect("poll should succeed");
+        let batch = first_batch(&events);
+
+        let families = string_col(batch, "signal_family");
+        let kinds = string_col(batch, "event_kind");
+        let snapshot_count = families
+            .iter()
+            .zip(kinds.iter())
+            .filter(|(_, kind)| kind.as_deref() == Some("snapshot"))
+            .filter(|(family, _)| family.as_deref() == Some("process"))
+            .count();
+        assert!(
+            snapshot_count <= 3,
+            "max_process_rows_per_poll should cap process rows, got {snapshot_count}"
         );
     }
 
