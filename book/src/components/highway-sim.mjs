@@ -200,6 +200,7 @@ export function createSimulation(overrides, scaleFn) {
           // (placed here manually or reached gate during red) — stop
           car.speed = 0;
           car.targetD = slotDArr[i];
+          car.d = car.targetD;
           car.color = carColor(car);
           continue;
         }
@@ -212,6 +213,7 @@ export function createSimulation(overrides, scaleFn) {
         if (opts.hasGate && !lightIsGreen && !car.pastGate && nextSlot > cfg.gateSlot) {
           car.speed = 0;
           car.targetD = slotDArr[i];
+          car.d = car.targetD;
           car.color = carColor(car);
           continue;
         }
