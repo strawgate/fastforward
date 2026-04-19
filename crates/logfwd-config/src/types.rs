@@ -14,7 +14,7 @@ use std::fmt;
 pub(crate) const PIPELINE_WORKERS_MAX: usize = 1024;
 
 /// Authentication configuration for output HTTP sinks.
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct AuthConfig {
     #[serde(default, deserialize_with = "deserialize_option_strict_string")]
@@ -756,9 +756,73 @@ pub struct S3InputConfig {
     pub poll_interval_ms: Option<u64>,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct OutputConfig {
+    pub name: Option<String>,
+    pub output_type: OutputType,
+    pub endpoint: Option<String>,
+    pub protocol: Option<String>,
+    pub compression: Option<String>,
+    pub request_mode: Option<String>,
+    pub format: Option<Format>,
+    pub path: Option<String>,
+    pub index: Option<String>,
+    pub auth: Option<AuthConfig>,
+    pub tenant_id: Option<String>,
+    pub static_labels: Option<HashMap<String, String>>,
+    pub label_columns: Option<Vec<String>>,
+    /// Client TLS configuration for outbound connections.
+    pub tls: Option<TlsClientConfig>,
+    /// Custom HTTP headers to include in requests.
+    pub headers: Option<HashMap<String, String>>,
+    /// Number of retry attempts for transient errors.
+    pub retry_attempts: Option<u32>,
+    /// Initial backoff delay for retries.
+    pub retry_initial_backoff_ms: Option<u64>,
+    /// Maximum backoff delay for retries.
+    pub retry_max_backoff_ms: Option<u64>,
+    /// Timeout for each HTTP request.
+    pub request_timeout_ms: Option<u64>,
+    /// Maximum number of log records to send per batch.
+    pub batch_size: Option<usize>,
+    /// Maximum time to wait before sending a batch.
+    pub batch_timeout_ms: Option<u64>,
+    /// Host for socket-based IPC.
+    pub host: Option<String>,
+    /// Port for socket-based IPC.
+    pub port: Option<u16>,
+    /// Write the legacy IPC format (default: false).
+    pub write_legacy_ipc_format: Option<bool>,
+    /// Buffer size for the IPC writer in bytes.
+    pub buffer_size_bytes: Option<usize>,
+    /// Whether to write the schema immediately upon connection.
+    pub write_schema_on_connect: Option<bool>,
+}
+
+impl<'de> Deserialize<'de> for OutputConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_yaml_ng::Value::deserialize(deserializer)?;
+        let v2_error = match OutputConfigV2::deserialize(value.clone()) {
+            Ok(v2) => return Ok(v2.into()),
+            Err(error) => error,
+        };
+
+        OutputConfigV1::deserialize(value)
+            .map(OutputConfig::from)
+            .map_err(|v1_error| {
+                serde::de::Error::custom(format!(
+                    "invalid output config; v2 parse error: {v2_error}; legacy parse error: {v1_error}"
+                ))
+            })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct OutputConfigV1 {
     #[serde(default, deserialize_with = "deserialize_option_strict_string")]
     pub name: Option<String>,
     #[serde(rename = "type")]
@@ -830,6 +894,384 @@ pub struct OutputConfig {
     /// Whether to write the schema immediately upon connection.
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
     pub write_schema_on_connect: Option<bool>,
+}
+
+impl From<OutputConfigV1> for OutputConfig {
+    fn from(config: OutputConfigV1) -> Self {
+        OutputConfig {
+            name: config.name,
+            output_type: config.output_type,
+            endpoint: config.endpoint,
+            protocol: config.protocol,
+            compression: config.compression,
+            request_mode: config.request_mode,
+            format: config.format,
+            path: config.path,
+            index: config.index,
+            auth: config.auth,
+            tenant_id: config.tenant_id,
+            static_labels: config.static_labels,
+            label_columns: config.label_columns,
+            tls: config.tls,
+            headers: config.headers,
+            retry_attempts: config.retry_attempts,
+            retry_initial_backoff_ms: config.retry_initial_backoff_ms,
+            retry_max_backoff_ms: config.retry_max_backoff_ms,
+            request_timeout_ms: config.request_timeout_ms,
+            batch_size: config.batch_size,
+            batch_timeout_ms: config.batch_timeout_ms,
+            host: config.host,
+            port: config.port,
+            write_legacy_ipc_format: config.write_legacy_ipc_format,
+            buffer_size_bytes: config.buffer_size_bytes,
+            write_schema_on_connect: config.write_schema_on_connect,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum OutputConfigV2 {
+    Otlp(OtlpOutputConfig),
+    Http(HttpOutputConfig),
+    Elasticsearch(ElasticsearchOutputConfig),
+    Loki(LokiOutputConfig),
+    Stdout(StdoutOutputConfig),
+    File(FileOutputConfig),
+    Parquet(ParquetOutputConfig),
+    Null(NullOutputConfig),
+    Tcp(SocketOutputConfig),
+    Udp(SocketOutputConfig),
+    ArrowIpc(ArrowIpcOutputConfig),
+}
+
+impl From<OutputConfigV2> for OutputConfig {
+    fn from(config: OutputConfigV2) -> Self {
+        match config {
+            OutputConfigV2::Otlp(config) => config.into_output_config(),
+            OutputConfigV2::Http(config) => config.into_output_config(),
+            OutputConfigV2::Elasticsearch(config) => config.into_output_config(),
+            OutputConfigV2::Loki(config) => config.into_output_config(),
+            OutputConfigV2::Stdout(config) => config.into_output_config(),
+            OutputConfigV2::File(config) => config.into_output_config(),
+            OutputConfigV2::Parquet(config) => config.into_output_config(),
+            OutputConfigV2::Null(config) => config.into_output_config(),
+            OutputConfigV2::Tcp(config) => config.into_output_config(OutputType::Tcp),
+            OutputConfigV2::Udp(config) => config.into_output_config(OutputType::Udp),
+            OutputConfigV2::ArrowIpc(config) => config.into_output_config(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct OtlpOutputConfig {
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
+    pub name: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
+    pub endpoint: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
+    pub protocol: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
+    pub compression: Option<String>,
+    #[serde(default)]
+    pub auth: Option<AuthConfig>,
+    #[serde(default)]
+    pub tls: Option<TlsClientConfig>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_option_string_map_strict_values"
+    )]
+    pub headers: Option<HashMap<String, String>>,
+    #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
+    pub retry_attempts: Option<u32>,
+    #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
+    pub retry_initial_backoff_ms: Option<u64>,
+    #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
+    pub retry_max_backoff_ms: Option<u64>,
+    #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
+    pub request_timeout_ms: Option<u64>,
+    #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
+    pub batch_size: Option<usize>,
+    #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
+    pub batch_timeout_ms: Option<u64>,
+}
+
+impl OtlpOutputConfig {
+    fn into_output_config(self) -> OutputConfig {
+        OutputConfig {
+            name: self.name,
+            output_type: OutputType::Otlp,
+            endpoint: self.endpoint,
+            protocol: self.protocol,
+            compression: self.compression,
+            auth: self.auth,
+            tls: self.tls,
+            headers: self.headers,
+            retry_attempts: self.retry_attempts,
+            retry_initial_backoff_ms: self.retry_initial_backoff_ms,
+            retry_max_backoff_ms: self.retry_max_backoff_ms,
+            request_timeout_ms: self.request_timeout_ms,
+            batch_size: self.batch_size,
+            batch_timeout_ms: self.batch_timeout_ms,
+            ..OutputConfig::default()
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct HttpOutputConfig {
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
+    pub name: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
+    pub endpoint: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
+    pub compression: Option<String>,
+    pub format: Option<Format>,
+    #[serde(default)]
+    pub auth: Option<AuthConfig>,
+}
+
+impl HttpOutputConfig {
+    fn into_output_config(self) -> OutputConfig {
+        OutputConfig {
+            name: self.name,
+            output_type: OutputType::Http,
+            endpoint: self.endpoint,
+            compression: self.compression,
+            format: self.format,
+            auth: self.auth,
+            ..OutputConfig::default()
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct ElasticsearchOutputConfig {
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
+    pub name: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
+    pub endpoint: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
+    pub compression: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
+    pub request_mode: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
+    pub index: Option<String>,
+    #[serde(default)]
+    pub auth: Option<AuthConfig>,
+    #[serde(default)]
+    pub tls: Option<TlsClientConfig>,
+    #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
+    pub request_timeout_ms: Option<u64>,
+}
+
+impl ElasticsearchOutputConfig {
+    fn into_output_config(self) -> OutputConfig {
+        OutputConfig {
+            name: self.name,
+            output_type: OutputType::Elasticsearch,
+            endpoint: self.endpoint,
+            compression: self.compression,
+            request_mode: self.request_mode,
+            index: self.index,
+            auth: self.auth,
+            tls: self.tls,
+            request_timeout_ms: self.request_timeout_ms,
+            ..OutputConfig::default()
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct LokiOutputConfig {
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
+    pub name: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
+    pub endpoint: Option<String>,
+    #[serde(default)]
+    pub auth: Option<AuthConfig>,
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
+    pub tenant_id: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_option_string_map_strict_values"
+    )]
+    pub static_labels: Option<HashMap<String, String>>,
+    #[serde(default, deserialize_with = "deserialize_option_vec_strict_string")]
+    pub label_columns: Option<Vec<String>>,
+    #[serde(default)]
+    pub tls: Option<TlsClientConfig>,
+    #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
+    pub request_timeout_ms: Option<u64>,
+}
+
+impl LokiOutputConfig {
+    fn into_output_config(self) -> OutputConfig {
+        OutputConfig {
+            name: self.name,
+            output_type: OutputType::Loki,
+            endpoint: self.endpoint,
+            auth: self.auth,
+            tenant_id: self.tenant_id,
+            static_labels: self.static_labels,
+            label_columns: self.label_columns,
+            tls: self.tls,
+            request_timeout_ms: self.request_timeout_ms,
+            ..OutputConfig::default()
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct StdoutOutputConfig {
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
+    pub name: Option<String>,
+    pub format: Option<Format>,
+}
+
+impl StdoutOutputConfig {
+    fn into_output_config(self) -> OutputConfig {
+        OutputConfig {
+            name: self.name,
+            output_type: OutputType::Stdout,
+            format: self.format,
+            ..OutputConfig::default()
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct FileOutputConfig {
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
+    pub name: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
+    pub path: Option<String>,
+    pub format: Option<Format>,
+}
+
+impl FileOutputConfig {
+    fn into_output_config(self) -> OutputConfig {
+        OutputConfig {
+            name: self.name,
+            output_type: OutputType::File,
+            path: self.path,
+            format: self.format,
+            ..OutputConfig::default()
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct ParquetOutputConfig {
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
+    pub name: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
+    pub path: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
+    pub compression: Option<String>,
+    pub format: Option<Format>,
+}
+
+impl ParquetOutputConfig {
+    fn into_output_config(self) -> OutputConfig {
+        OutputConfig {
+            name: self.name,
+            output_type: OutputType::Parquet,
+            path: self.path,
+            compression: self.compression,
+            format: self.format,
+            ..OutputConfig::default()
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct NullOutputConfig {
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
+    pub name: Option<String>,
+}
+
+impl NullOutputConfig {
+    fn into_output_config(self) -> OutputConfig {
+        OutputConfig {
+            name: self.name,
+            output_type: OutputType::Null,
+            ..OutputConfig::default()
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct SocketOutputConfig {
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
+    pub name: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
+    pub endpoint: Option<String>,
+}
+
+impl SocketOutputConfig {
+    fn into_output_config(self, output_type: OutputType) -> OutputConfig {
+        OutputConfig {
+            name: self.name,
+            output_type,
+            endpoint: self.endpoint,
+            ..OutputConfig::default()
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct ArrowIpcOutputConfig {
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
+    pub name: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
+    pub endpoint: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
+    pub compression: Option<String>,
+    #[serde(default)]
+    pub auth: Option<AuthConfig>,
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
+    pub host: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
+    pub port: Option<u16>,
+    #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
+    pub write_legacy_ipc_format: Option<bool>,
+    #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
+    pub buffer_size_bytes: Option<usize>,
+    #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
+    pub batch_size: Option<usize>,
+    #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
+    pub write_schema_on_connect: Option<bool>,
+}
+
+impl ArrowIpcOutputConfig {
+    fn into_output_config(self) -> OutputConfig {
+        OutputConfig {
+            name: self.name,
+            output_type: OutputType::ArrowIpc,
+            endpoint: self.endpoint,
+            compression: self.compression,
+            auth: self.auth,
+            host: self.host,
+            port: self.port,
+            write_legacy_ipc_format: self.write_legacy_ipc_format,
+            buffer_size_bytes: self.buffer_size_bytes,
+            batch_size: self.batch_size,
+            write_schema_on_connect: self.write_schema_on_connect,
+            ..OutputConfig::default()
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
