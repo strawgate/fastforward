@@ -27,6 +27,8 @@ use decode::*;
 use projection::ProjectionError;
 
 use std::io;
+#[cfg(any(feature = "otlp-research", test))]
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, mpsc};
 
@@ -34,8 +36,7 @@ use arrow::record_batch::RecordBatch;
 use axum::routing::post;
 use logfwd_types::diagnostics::{ComponentHealth, ComponentStats};
 use logfwd_types::field_names;
-#[cfg(any(feature = "otlp-research", test))]
-use tokio::sync::Mutex;
+use tokio::sync::Semaphore;
 use tokio::sync::oneshot;
 
 use crate::InputError;
@@ -43,6 +44,7 @@ use crate::background_http_task::BackgroundHttpTask;
 use crate::input::{InputEvent, InputSource};
 
 const CHANNEL_BOUND: usize = 4096;
+const MAX_CONCURRENT_PROTOBUF_DECODE_TASKS: usize = 4;
 /// Max payloads drained from the internal channel in a single `poll()` call.
 ///
 /// This bounds per-poll work and prevents one call from aggregating an
@@ -94,6 +96,7 @@ struct OtlpServerState {
     health: Arc<AtomicU8>,
     resource_prefix: String,
     protobuf_decode_mode: OtlpProtobufDecodeMode,
+    protobuf_decode_permits: Arc<Semaphore>,
     #[cfg(any(feature = "otlp-research", test))]
     projected_decoder: Option<Mutex<ProjectedOtlpDecoder>>,
     stats: Option<Arc<ComponentStats>>,
@@ -276,6 +279,7 @@ impl OtlpReceiverInput {
             health: Arc::clone(&health),
             resource_prefix,
             protobuf_decode_mode,
+            protobuf_decode_permits: Arc::new(Semaphore::new(MAX_CONCURRENT_PROTOBUF_DECODE_TASKS)),
             #[cfg(any(feature = "otlp-research", test))]
             projected_decoder,
             stats,
