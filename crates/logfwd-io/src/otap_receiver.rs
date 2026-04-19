@@ -586,6 +586,7 @@ mod tests {
     use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
     use flate2::Compression;
     use flate2::write::GzEncoder;
+    use std::io::Seek as _;
     use std::io::Write as _;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
@@ -612,6 +613,14 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert!(predicate(), "{failure_message}");
+    }
+
+    fn tempfile_payload(bytes: &[u8]) -> std::fs::File {
+        let mut file = tempfile::tempfile().expect("create tempfile payload");
+        file.write_all(bytes).expect("write tempfile payload");
+        file.flush().expect("flush tempfile payload");
+        file.rewind().expect("rewind tempfile payload");
+        file
     }
 
     // Regression test for issue #1142: clean shutdown
@@ -1037,10 +1046,11 @@ mod tests {
         let addr = receiver.local_addr();
 
         let url = format!("http://{addr}/v1/arrow_logs");
+        let payload = tempfile_payload(b"{}");
         let result = loopback_http_client()
             .post(&url)
             .header("Content-Type", "application/json")
-            .send(b"{}" as &[u8]);
+            .send(payload);
         match result {
             Err(ureq::Error::StatusCode(code)) => assert_eq!(code, 415),
             other => panic!("expected 415, got {other:?}"),
@@ -1063,11 +1073,12 @@ mod tests {
         gzip.truncate(gzip.len().saturating_sub(4));
 
         let url = format!("http://{addr}/v1/arrow_logs");
+        let payload = tempfile_payload(&gzip);
         let result = loopback_http_client()
             .post(&url)
             .header("Content-Type", "application/x-protobuf")
             .header("Content-Encoding", "gzip")
-            .send(&gzip);
+            .send(payload);
 
         let status: u16 = match result {
             Ok(resp) => resp.status().as_u16(),
