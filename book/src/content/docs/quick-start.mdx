@@ -103,7 +103,7 @@ FastForward exits when it reaches the end of a finite file. In production you'd 
 ### Send piped data
 
 For one-off command-line use, keep a destination-only config and pipe data into `ff`.
-`ff send` reads stdin, drains the configured output, and exits.
+`ff send` reads stdin, drains the configured output or outputs, and exits.
 
 ```yaml
 # destination.yaml

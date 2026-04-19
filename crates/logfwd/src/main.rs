@@ -661,9 +661,17 @@ fn build_stdin_send_config_yaml(
             )));
         }
     }
-    if !mapping.contains_key(yaml_string("output")) {
+    let has_output = mapping.contains_key(yaml_string("output"));
+    let has_outputs = mapping.contains_key(yaml_string("outputs"));
+    if has_output && has_outputs {
         return Err(CliError::Config(
-            "`ff send` destination config must define top-level `output`".to_owned(),
+            "`ff send` destination config must define only one of top-level `output` or `outputs`"
+                .to_owned(),
+        ));
+    }
+    if !has_output && !has_outputs {
+        return Err(CliError::Config(
+            "`ff send` destination config must define top-level `output` or `outputs`".to_owned(),
         ));
     }
 
@@ -673,11 +681,49 @@ fn build_stdin_send_config_yaml(
         let format = format.as_config_format().to_string();
         input.insert(yaml_string("format"), yaml_string(&format));
     }
-    mapping.insert(yaml_string("input"), serde_yaml_ng::Value::Mapping(input));
 
     merge_send_resource_attrs(mapping, service, resources)?;
 
+    if has_outputs {
+        rewrite_send_config_with_outputs(mapping, input)?;
+    } else {
+        mapping.insert(yaml_string("input"), serde_yaml_ng::Value::Mapping(input));
+    }
+
     serde_yaml_ng::to_string(&value).map_err(|e| CliError::Config(e.to_string()))
+}
+
+fn rewrite_send_config_with_outputs(
+    mapping: &mut serde_yaml_ng::Mapping,
+    input: serde_yaml_ng::Mapping,
+) -> Result<(), CliError> {
+    let outputs = mapping.remove(yaml_string("outputs")).ok_or_else(|| {
+        CliError::Config("send destination config is missing top-level `outputs`".to_owned())
+    })?;
+
+    let mut pipeline = serde_yaml_ng::Mapping::new();
+    pipeline.insert(
+        yaml_string("inputs"),
+        serde_yaml_ng::Value::Sequence(vec![serde_yaml_ng::Value::Mapping(input)]),
+    );
+    pipeline.insert(yaml_string("outputs"), outputs);
+
+    for key in ["transform", "enrichment", "resource_attrs"] {
+        if let Some(value) = mapping.remove(yaml_string(key)) {
+            pipeline.insert(yaml_string(key), value);
+        }
+    }
+
+    let mut pipelines = serde_yaml_ng::Mapping::new();
+    pipelines.insert(
+        yaml_string("default"),
+        serde_yaml_ng::Value::Mapping(pipeline),
+    );
+    mapping.insert(
+        yaml_string("pipelines"),
+        serde_yaml_ng::Value::Mapping(pipelines),
+    );
+    Ok(())
 }
 
 fn merge_send_resource_attrs(
@@ -2270,6 +2316,46 @@ output:
     }
 
     #[test]
+    fn stdin_send_config_accepts_plural_outputs() {
+        let yaml = r"
+resource_attrs:
+  env: prod
+transform: |
+  SELECT * FROM logs
+outputs:
+  - type: stdout
+    format: json
+  - type: file
+    path: ./sent.ndjson
+";
+        let generated =
+            build_stdin_send_config_yaml(yaml, Some(SendFormat::Raw), Some("checkout"), &[])
+                .expect("send config should render");
+        let config =
+            logfwd_config::Config::load_str(&generated).expect("generated config should parse");
+        let pipeline = &config.pipelines["default"];
+
+        assert_eq!(
+            pipeline.inputs[0].input_type(),
+            logfwd_config::InputType::Stdin
+        );
+        assert_eq!(pipeline.inputs[0].format, Some(logfwd_config::Format::Raw));
+        assert_eq!(pipeline.outputs.len(), 2);
+        assert_eq!(
+            pipeline
+                .resource_attrs
+                .get("service.name")
+                .map(String::as_str),
+            Some("checkout")
+        );
+        assert_eq!(
+            pipeline.resource_attrs.get("env").map(String::as_str),
+            Some("prod")
+        );
+        assert_eq!(pipeline.transform.as_deref(), Some("SELECT * FROM logs\n"));
+    }
+
+    #[test]
     fn stdin_send_config_rejects_runtime_inputs() {
         for (field, yaml) in [
             (
@@ -2295,7 +2381,25 @@ output:
         let err = build_stdin_send_config_yaml("server: {}\n", None, None, &[])
             .expect_err("send config should require output");
         assert!(
-            err.to_string().contains("must define top-level `output`"),
+            err.to_string()
+                .contains("must define top-level `output` or `outputs`"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn stdin_send_config_rejects_output_and_outputs_together() {
+        let yaml = r"
+output:
+  type: stdout
+outputs:
+  - type: stdout
+";
+        let err = build_stdin_send_config_yaml(yaml, None, None, &[])
+            .expect_err("send config should reject ambiguous destination output shape");
+        assert!(
+            err.to_string()
+                .contains("only one of top-level `output` or `outputs`"),
             "unexpected error: {err}"
         );
     }
