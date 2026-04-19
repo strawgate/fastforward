@@ -111,7 +111,7 @@ if ! k wait -n "$NAMESPACE" deployment/blackhole-receiver \
 fi
 if ! k rollout status -n "$NAMESPACE" daemonset/ff --timeout="$DEPLOY_TIMEOUT"; then
     echo ""
-    fail "LOGFWD_ROLLOUT_TIMEOUT" "logfwd daemonset rollout timed out"
+    fail "FF_ROLLOUT_TIMEOUT" "ff daemonset rollout timed out"
     k get pods -n "$NAMESPACE" -l app=ff -o wide 2>&1 || true
     k describe pods -n "$NAMESPACE" -l app=ff 2>&1 || true
     k logs -n "$NAMESPACE" -l app=ff --tail=80 2>&1 || true
@@ -181,7 +181,7 @@ while [ $SECONDS -lt $DEADLINE ]; do
     elif [ "$LINES" -gt "$MAX_EXPECTED_LINES" ]; then
         echo ""
         fail "TOO_MANY_LINES" "blackhole received $LINES lines (> max expected $MAX_EXPECTED_LINES)"
-        echo "--- logfwd logs ---"
+        echo "--- ff logs ---"
         k logs -n "$NAMESPACE" -l app=ff --tail=40 2>&1 || true
         exit 1
     fi
@@ -194,7 +194,7 @@ done
 echo ""
 fail "VERIFY_TIMEOUT" "timed out after ${TIMEOUT}s — blackhole received $LINES lines, expected ${MIN_EXPECTED_LINES}..${MAX_EXPECTED_LINES}"
 echo ""
-echo "--- logfwd DaemonSet logs ---"
+echo "--- ff DaemonSet logs ---"
 k logs -n "$NAMESPACE" -l app=ff --tail=80 2>&1 || true
 echo ""
 echo "--- blackhole-receiver logs ---"

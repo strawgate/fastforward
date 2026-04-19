@@ -102,7 +102,7 @@ jobs:
           RUSTFLAGS="${BENCH_RUSTFLAGS} -Cprofile-generate=/tmp/pgo-data" \
             cargo build --release -p logfwd
 
-          LOGFWD=./target/release/ff ./target/release/logfwd-competitive-bench \
+          FF=./target/release/ff ./target/release/logfwd-competitive-bench \
             --lines 500000 --agents ff --scenarios passthrough --no-download
 
           PROFDATA=$(find "$(rustc --print sysroot)" -name llvm-profdata -type f | head -1)
@@ -113,7 +113,7 @@ jobs:
             echo "::warning::PGO profile merge failed; using standard release build"
           fi
 
-          LOGFWD=./target/release/ff ./target/release/logfwd-competitive-bench \
+          FF=./target/release/ff ./target/release/logfwd-competitive-bench \
             --lines ${{ env.LINES }} --agents ff \
             --scenarios ${{ env.SCENARIOS }} --iterations ${{ env.ITERATIONS }} \
             --results-file pgo-results.jsonl --no-download
@@ -184,7 +184,7 @@ jobs:
           retention-days: 7
 
   # -------------------------------------------------------------------
-  # Rate-ingest benchmark (logfwd only, measures RSS/CPU at each rate)
+  # Rate-ingest benchmark (ff only, measures RSS/CPU at each rate)
   # -------------------------------------------------------------------
   rate-bench:
     runs-on: ubuntu-latest
@@ -289,7 +289,7 @@ jobs:
           retention-days: 7
 
   # -------------------------------------------------------------------
-  # CPU/memory profiling (logfwd only)
+  # CPU/memory profiling (ff only)
   # -------------------------------------------------------------------
   profile:
     timeout-minutes: 45

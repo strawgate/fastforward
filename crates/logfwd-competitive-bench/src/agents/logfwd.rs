@@ -16,7 +16,7 @@ impl Agent for Logfwd {
     }
 
     fn download_url(&self, _os: &str, _arch: &str) -> Option<String> {
-        // logfwd is built locally; never downloaded.
+        // ff is built locally; never downloaded.
         None
     }
 
