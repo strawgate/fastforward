@@ -230,7 +230,9 @@ fn record_ack_and_advance<C: Clone>(
                 break;
             }
             // Consume this ack — advance checkpoint
-            let cp = pending.remove(&lowest_id).unwrap();
+            let Some(cp) = pending.remove(&lowest_id) else {
+                break;
+            };
             committed.insert(source, cp);
             advanced = true;
         }

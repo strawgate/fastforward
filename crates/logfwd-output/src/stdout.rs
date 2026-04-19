@@ -335,41 +335,49 @@ fn safe_col_to_string(col: &dyn Array, row: usize) -> Cow<'_, str> {
         DataType::Utf8View => Cow::Borrowed(col.as_string_view().value(row)),
         DataType::LargeUtf8 => Cow::Borrowed(col.as_string::<i64>().value(row)),
         DataType::Timestamp(arrow::datatypes::TimeUnit::Nanosecond, _) => {
-            let ns = col
+            let Some(arr) = col
                 .as_any()
                 .downcast_ref::<arrow::array::TimestampNanosecondArray>()
-                .unwrap()
-                .value(row);
+            else {
+                return Cow::Owned(safe_array_value_to_string(col, row));
+            };
+            let ns = arr.value(row);
             let secs = ns.div_euclid(1_000_000_000);
             let nanos = ns.rem_euclid(1_000_000_000) as u32;
             Cow::Owned(logfwd_arrow::star_schema::chrono_timestamp(secs, nanos))
         }
         DataType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, _) => {
-            let us = col
+            let Some(arr) = col
                 .as_any()
                 .downcast_ref::<arrow::array::TimestampMicrosecondArray>()
-                .unwrap()
-                .value(row);
+            else {
+                return Cow::Owned(safe_array_value_to_string(col, row));
+            };
+            let us = arr.value(row);
             let secs = us.div_euclid(1_000_000);
             let nanos = (us.rem_euclid(1_000_000) * 1_000) as u32;
             Cow::Owned(logfwd_arrow::star_schema::chrono_timestamp(secs, nanos))
         }
         DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, _) => {
-            let ms = col
+            let Some(arr) = col
                 .as_any()
                 .downcast_ref::<arrow::array::TimestampMillisecondArray>()
-                .unwrap()
-                .value(row);
+            else {
+                return Cow::Owned(safe_array_value_to_string(col, row));
+            };
+            let ms = arr.value(row);
             let secs = ms.div_euclid(1_000);
             let nanos = (ms.rem_euclid(1_000) * 1_000_000) as u32;
             Cow::Owned(logfwd_arrow::star_schema::chrono_timestamp(secs, nanos))
         }
         DataType::Timestamp(arrow::datatypes::TimeUnit::Second, _) => {
-            let s = col
+            let Some(arr) = col
                 .as_any()
                 .downcast_ref::<arrow::array::TimestampSecondArray>()
-                .unwrap()
-                .value(row);
+            else {
+                return Cow::Owned(safe_array_value_to_string(col, row));
+            };
+            let s = arr.value(row);
             Cow::Owned(logfwd_arrow::star_schema::chrono_timestamp(s, 0))
         }
         _ => Cow::Owned(safe_array_value_to_string(col, row)),

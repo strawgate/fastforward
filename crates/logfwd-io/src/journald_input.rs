@@ -717,9 +717,9 @@ fn json_escape_into(buf: &mut Vec<u8>, input: &[u8]) {
             Err(e) => {
                 // Write the valid prefix.
                 let (valid_bytes, after) = remaining.split_at(e.valid_up_to());
-                if !valid_bytes.is_empty() {
-                    // SAFETY: `from_utf8` confirmed these bytes are valid.
-                    let valid_str = unsafe { std::str::from_utf8_unchecked(valid_bytes) };
+                if !valid_bytes.is_empty()
+                    && let Ok(valid_str) = std::str::from_utf8(valid_bytes)
+                {
                     escape_str_into(buf, valid_str);
                 }
                 // Replace the invalid byte(s) with U+FFFD.
