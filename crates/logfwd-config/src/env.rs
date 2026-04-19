@@ -2,6 +2,11 @@ use crate::types::ConfigError;
 use std::collections::HashMap;
 use std::env;
 
+/// Expands braced `${VAR}` placeholders using the process environment.
+///
+/// Only braced placeholders are expanded. Unbraced `$VAR` text stays literal,
+/// invalid closed placeholders return validation errors, and an unterminated
+/// `${VAR` tail is preserved after expanding any complete placeholders before it.
 pub(crate) fn expand_env_vars(text: &str) -> Result<String, ConfigError> {
     if !text.contains("${") {
         return Ok(text.to_owned());

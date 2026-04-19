@@ -22,6 +22,10 @@ where
     }
 }
 
+/// Deserializes an optional numeric or boolean field from a strict YAML scalar.
+///
+/// Native YAML scalars must have the target kind, while string values are parsed
+/// through `T` so env-expanded values like `${PORT}` can populate typed fields.
 pub(crate) fn deserialize_option_from_string_or_value<'de, T, D>(
     deserializer: D,
 ) -> Result<Option<T>, D::Error>
@@ -33,6 +37,10 @@ where
         .map(StrictScalarValue::into_inner))
 }
 
+/// Deserializes a numeric or boolean field from a strict YAML scalar.
+///
+/// Native YAML scalars must have the target kind, while string values are parsed
+/// through `T` so env-expanded values like `${ENABLED}` can populate typed fields.
 pub(crate) fn deserialize_from_string_or_value<'de, T, D>(deserializer: D) -> Result<T, D::Error>
 where
     T: StrictScalar,
@@ -41,6 +49,7 @@ where
     Ok(StrictScalarValue::<T>::deserialize(deserializer)?.into_inner())
 }
 
+/// Deserializes a string field without accepting non-string YAML scalars.
 pub(crate) fn deserialize_strict_string<'de, D>(deserializer: D) -> Result<String, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -48,6 +57,7 @@ where
     StrictString::deserialize(deserializer).map(StrictString::into_inner)
 }
 
+/// Deserializes an optional string field without accepting non-string YAML scalars.
 pub(crate) fn deserialize_option_strict_string<'de, D>(
     deserializer: D,
 ) -> Result<Option<String>, D::Error>
@@ -57,6 +67,7 @@ where
     Ok(Option::<StrictString>::deserialize(deserializer)?.map(StrictString::into_inner))
 }
 
+/// Deserializes a string list without accepting non-string YAML scalars.
 pub(crate) fn deserialize_vec_strict_string<'de, D>(
     deserializer: D,
 ) -> Result<Vec<String>, D::Error>
@@ -66,6 +77,7 @@ where
     Vec::<StrictString>::deserialize(deserializer).map(strict_strings_into_inner)
 }
 
+/// Deserializes an optional string list without accepting non-string YAML scalars.
 pub(crate) fn deserialize_option_vec_strict_string<'de, D>(
     deserializer: D,
 ) -> Result<Option<Vec<String>>, D::Error>
@@ -75,6 +87,7 @@ where
     Ok(Option::<Vec<StrictString>>::deserialize(deserializer)?.map(strict_strings_into_inner))
 }
 
+/// Deserializes a string map whose values must be YAML strings.
 pub(crate) fn deserialize_string_map_strict_values<'de, D>(
     deserializer: D,
 ) -> Result<HashMap<String, String>, D::Error>
@@ -84,6 +97,7 @@ where
     deserialize_map_strict_values(deserializer)
 }
 
+/// Deserializes an optional string map whose values must be YAML strings.
 pub(crate) fn deserialize_option_string_map_strict_values<'de, D>(
     deserializer: D,
 ) -> Result<Option<HashMap<String, String>>, D::Error>
@@ -197,9 +211,11 @@ where
     }
 }
 
-// The `config` crate intentionally coerces between scalar kinds. These visitors
-// keep raw YAML strict while still letting env-expanded strings parse as typed
-// numeric and boolean fields.
+/// Parses scalar config fields while preserving raw YAML type strictness.
+///
+/// The `config` crate intentionally coerces between scalar kinds. This trait
+/// lets visitors keep raw YAML strict while still allowing env-expanded strings
+/// to parse as typed numeric and boolean fields.
 pub(crate) trait StrictScalar: Sized {
     fn expecting(formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 
