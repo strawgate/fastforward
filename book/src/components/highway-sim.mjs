@@ -35,6 +35,10 @@ export var DEFAULTS = {
   scaleMin: 0.7,
   scaleMax: 1.3,
   spawnBlockedThreshold: 8,
+  exitEntryD: 12,
+  hwyForkThreshold: 5,
+  hwyBlockedOffset: 4,
+  rampMergeThreshold: 3,
 };
 
 var SHAPES = ['sedan', 'truck', 'compact', 'van'];
@@ -96,6 +100,11 @@ export function createSimulation(overrides, scaleFn) {
     return car;
   }
 
+  function nextCarWidth(scale) {
+    var shape = SHAPES[nextId % SHAPES.length];
+    return cfg.carW * scale * (SHAPE_W[shape] || 1);
+  }
+
   function carColor(car) {
     if (car.speed < 0.15) return 'stop';
     if (car.speed < cfg.speedMax * 0.35) return 'slow';
@@ -108,6 +117,10 @@ export function createSimulation(overrides, scaleFn) {
 
   function allCars() {
     return carsRamp.concat(carsHwy, carsExit, carsCont);
+  }
+
+  function totalCars() {
+    return carsRamp.length + carsHwy.length + carsExit.length + carsCont.length;
   }
 
   // ---- light ----
@@ -128,33 +141,33 @@ export function createSimulation(overrides, scaleFn) {
 
   // ---- spawning ----
 
-  function hasSpawnSpace(cars) {
+  function hasSpawnSpace(cars, entrantW) {
     for (var j = 0; j < cars.length; j++) {
-      if (cars[j].d < cfg.minFollowPad + cars[j].w) return false;
+      if (cars[j].d < (entrantW + cars[j].w) / 2 + cfg.minFollowPad) return false;
     }
     return true;
   }
 
+  function trySpawnAt(segment, cars) {
+    var scale = getScale();
+    if (!hasSpawnSpace(cars, nextCarWidth(scale))) return null;
+    var car = makeCar(segment, 0, null, scale);
+    cars.push(car);
+    return car;
+  }
+
   function trySpawn(now) {
-    if (allCars().length >= cfg.maxCars) return null;
+    if (totalCars() >= cfg.maxCars) return null;
     if (now - lastSpawn < cfg.spawnMs) return null;
 
     var src = spawnSrc;
     spawnSrc = 1 - spawnSrc;
     var car = null;
 
-    if (src === 0 && hasSpawnSpace(carsHwy)) {
-      car = makeCar('highway', 0);
-      carsHwy.push(car);
-    } else if (src === 1 && hasSpawnSpace(carsRamp)) {
-      car = makeCar('ramp', 0);
-      carsRamp.push(car);
-    } else if (src === 0 && hasSpawnSpace(carsRamp)) {
-      car = makeCar('ramp', 0);
-      carsRamp.push(car);
-    } else if (src === 1 && hasSpawnSpace(carsHwy)) {
-      car = makeCar('highway', 0);
-      carsHwy.push(car);
+    if (src === 0) {
+      car = trySpawnAt('highway', carsHwy) || trySpawnAt('ramp', carsRamp);
+    } else {
+      car = trySpawnAt('ramp', carsRamp) || trySpawnAt('highway', carsHwy);
     }
 
     if (car) lastSpawn = now;
@@ -236,13 +249,12 @@ export function createSimulation(overrides, scaleFn) {
 
   function canEnterExit(enterW) {
     var w = enterW || cfg.carW;
-    var minD = Infinity;
+    var lead = null;
     for (var j = 0; j < carsExit.length; j++) {
-      if (carsExit[j].d < minD) minD = carsExit[j].d;
+      if (!lead || carsExit[j].d < lead.d) lead = carsExit[j];
     }
-    // Cars enter exit at d=12, so check from that offset
-    var entryD = 12;
-    return (minD - entryD) > (w + cfg.carW) / 2 + cfg.minFollowPad;
+    if (!lead) return true;
+    return (lead.d - cfg.exitEntryD) > (w + lead.w) / 2 + cfg.minFollowPad;
   }
 
   function canMergeAt(d, w) {
@@ -256,11 +268,12 @@ export function createSimulation(overrides, scaleFn) {
 
   function canEnterCont(enterW) {
     var w = enterW || cfg.carW;
-    var minD = Infinity;
+    var lead = null;
     for (var j = 0; j < carsCont.length; j++) {
-      if (carsCont[j].d < minD) minD = carsCont[j].d;
+      if (!lead || carsCont[j].d < lead.d) lead = carsCont[j];
     }
-    return minD > (w + cfg.carW) / 2 + cfg.minFollowPad;
+    if (!lead) return true;
+    return lead.d > (w + lead.w) / 2 + cfg.minFollowPad;
   }
 
   function tryHwyToExit() {
@@ -268,12 +281,12 @@ export function createSimulation(overrides, scaleFn) {
     carsHwy.sort(function (a, b) { return b.d - a.d; });
     while (carsHwy.length > 0) {
       var front = carsHwy[0];
-      if (front.d < cfg.lenHwy - 5) break;
+      if (front.d < cfg.lenHwy - cfg.hwyForkThreshold) break;
       if (canEnterExit(front.w)) {
         // Take the exit ramp
         carsHwy.splice(0, 1);
         front.segment = 'exit';
-        front.d = 12;
+        front.d = cfg.exitEntryD;
         front.speed = Math.min(front.speed, cfg.speedMax * 0.8);
         carsExit.push(front);
       } else if (canEnterCont(front.w)) {
@@ -285,7 +298,7 @@ export function createSimulation(overrides, scaleFn) {
         carsCont.push(front);
       } else {
         // Both paths full — block at the fork
-        front.d = cfg.lenHwy - 4;
+        front.d = cfg.lenHwy - cfg.hwyBlockedOffset;
         front.speed = 0;
         break;
       }
@@ -296,7 +309,7 @@ export function createSimulation(overrides, scaleFn) {
     if (carsRamp.length === 0) return;
     carsRamp.sort(function (a, b) { return b.d - a.d; });
     var front = carsRamp[0];
-    if (front.d < cfg.lenRamp - 3) return;
+    if (front.d < cfg.lenRamp - cfg.rampMergeThreshold) return;
     if (canMergeAt(cfg.mergeD, front.w)) {
       carsRamp.splice(0, 1);
       front.segment = 'highway';
@@ -396,7 +409,7 @@ export function createSimulation(overrides, scaleFn) {
       lightIsGreen: lightIsGreen,
       greenPct: greenPct,
       autoMode: autoMode,
-      stats: { throughput: throughput, queued: carsHwy.length + carsExit.length, stallPct: stallPct },
+      stats: { throughput: throughput, queued: all.length, stallPct: stallPct },
       status: status,
     };
   }
@@ -415,6 +428,9 @@ export function createSimulation(overrides, scaleFn) {
     setCycleStart: function (t) { cycleStart = t; },
     setLastSpawn: function (t) { lastSpawn = t; },
     addCar: function (segment, d, speed, scale) {
+      if (segment !== 'ramp' && segment !== 'highway' && segment !== 'exit' && segment !== 'cont') {
+        throw new Error('unknown highway simulation segment: ' + segment);
+      }
       var car = makeCar(segment, d, speed, scale);
       if (segment === 'ramp') carsRamp.push(car);
       else if (segment === 'highway') carsHwy.push(car);

@@ -241,10 +241,9 @@ describe('red light on exit', function () {
       sim.tick(t * 25);
     }
     var car = sim.getCars().filter(function (c) { return c.segment === 'exit'; })[0];
-    if (car) {
-      assert.ok(car.d <= gateD + 0.01, 'car should stop at or before gateD');
-      assert.ok(car.speed < 0.2, 'car should be stopped');
-    }
+    assert.ok(car, 'car should still be on exit');
+    assert.ok(car.d <= gateD + 0.01, 'car should stop at or before gateD');
+    assert.ok(car.speed < 0.2, 'car should be stopped');
   });
 
   it('backpressure cascades: exit full → highway blocks', function () {
@@ -449,5 +448,19 @@ describe('status', function () {
       frame = sim.tick(t * 25);
     }
     assert.equal(frame.status.level, 'blocked');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Public test helpers
+// ---------------------------------------------------------------------------
+
+describe('test helper controls', function () {
+  it('rejects unknown segment names', function () {
+    var sim = createSimulation({}, fixedScale(1));
+    assert.throws(function () {
+      sim.addCar('unknown', 0, 0);
+    }, /unknown highway simulation segment/);
+    assert.equal(sim.getCars().length, 0);
   });
 });
