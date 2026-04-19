@@ -420,11 +420,47 @@ impl ElasticsearchSink {
         let mid = n / 2;
         let left = batch.slice(0, mid);
         let right = batch.slice(mid, n - mid);
-        let r1 = self.send_batch_inner(&left, metadata, depth + 1).await?;
-        if !matches!(r1, super::sink::SendResult::Ok) {
-            return Ok(r1);
+        let left_result = self.send_batch_inner(&left, metadata, depth + 1).await?;
+        if matches!(
+            left_result,
+            super::sink::SendResult::IoError(_) | super::sink::SendResult::RetryAfter(_)
+        ) {
+            return Ok(left_result);
         }
-        self.send_batch_inner(&right, metadata, depth + 1).await
+        let right_result = self.send_batch_inner(&right, metadata, depth + 1).await?;
+        Ok(Self::merge_split_send_results(left_result, right_result))
+    }
+
+    fn merge_split_send_results(
+        left: super::sink::SendResult,
+        right: super::sink::SendResult,
+    ) -> super::sink::SendResult {
+        match (left, right) {
+            (super::sink::SendResult::Ok, super::sink::SendResult::Ok) => {
+                super::sink::SendResult::Ok
+            }
+            (super::sink::SendResult::Rejected(left), super::sink::SendResult::Rejected(right)) => {
+                super::sink::SendResult::Rejected(format!(
+                    "left split rejected: {left}; right split rejected: {right}"
+                ))
+            }
+            (super::sink::SendResult::Rejected(reason), super::sink::SendResult::Ok)
+            | (super::sink::SendResult::Ok, super::sink::SendResult::Rejected(reason)) => {
+                super::sink::SendResult::Rejected(reason)
+            }
+            (
+                super::sink::SendResult::RetryAfter(left),
+                super::sink::SendResult::RetryAfter(right),
+            ) => super::sink::SendResult::RetryAfter(left.max(right)),
+            (super::sink::SendResult::RetryAfter(delay), _)
+            | (_, super::sink::SendResult::RetryAfter(delay)) => {
+                super::sink::SendResult::RetryAfter(delay)
+            }
+            (super::sink::SendResult::IoError(error), _)
+            | (_, super::sink::SendResult::IoError(error)) => {
+                super::sink::SendResult::IoError(error)
+            }
+        }
     }
 
     async fn do_send(&self, body: Vec<u8>) -> io::Result<super::sink::SendResult> {
@@ -1823,6 +1859,51 @@ mod tests {
             other => {
                 panic!("ES bulk item error must be Rejected, not retried as IoError; got {other:?}")
             }
+        }
+    }
+
+    #[test]
+    fn split_result_preserves_rejection_when_other_half_is_ok() {
+        let result = ElasticsearchSink::merge_split_send_results(
+            crate::sink::SendResult::Rejected("left bad doc".to_string()),
+            crate::sink::SendResult::Ok,
+        );
+
+        match result {
+            crate::sink::SendResult::Rejected(reason) => {
+                assert!(reason.contains("left bad doc"), "got: {reason}");
+            }
+            other => panic!("expected rejected split result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn split_result_combines_two_terminal_rejections() {
+        let result = ElasticsearchSink::merge_split_send_results(
+            crate::sink::SendResult::Rejected("left bad doc".to_string()),
+            crate::sink::SendResult::Rejected("right bad doc".to_string()),
+        );
+
+        match result {
+            crate::sink::SendResult::Rejected(reason) => {
+                assert!(reason.contains("left bad doc"), "got: {reason}");
+                assert!(reason.contains("right bad doc"), "got: {reason}");
+            }
+            other => panic!("expected rejected split result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn split_result_keeps_retryable_result_visible() {
+        let delay = std::time::Duration::from_secs(3);
+        let result = ElasticsearchSink::merge_split_send_results(
+            crate::sink::SendResult::Rejected("left bad doc".to_string()),
+            crate::sink::SendResult::RetryAfter(delay),
+        );
+
+        match result {
+            crate::sink::SendResult::RetryAfter(actual) => assert_eq!(actual, delay),
+            other => panic!("expected retryable split result, got {other:?}"),
         }
     }
 }
