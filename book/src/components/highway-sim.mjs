@@ -222,7 +222,7 @@ export function createSimulation(overrides, scaleFn) {
         slots[i] = null;
         slots[nextSlot] = car;
         car.slot = nextSlot;
-        car.targetD = slotDArr[nextSlot];
+        car.d = car.targetD = slotDArr[nextSlot];
         car.speed = 3.5;
 
         // Mark as past gate when crossing the gate slot
@@ -232,7 +232,7 @@ export function createSimulation(overrides, scaleFn) {
       } else {
         // Can't advance — stopped
         car.speed = 0;
-        car.targetD = slotDArr[i];
+        car.d = car.targetD = slotDArr[i];
       }
 
       // Fade for exit (past gate) and cont (full length)
@@ -263,7 +263,7 @@ export function createSimulation(overrides, scaleFn) {
       hwySlots[lastHwy] = null;
       car.segment = 'exit';
       car.slot = 0;
-      car.targetD = exitSlotD[0];
+      car.d = car.targetD = exitSlotD[0];
       car.pastGate = false;
       exitSlots[0] = car;
       return;
@@ -274,7 +274,7 @@ export function createSimulation(overrides, scaleFn) {
       hwySlots[lastHwy] = null;
       car.segment = 'cont';
       car.slot = 0;
-      car.targetD = contSlotD[0];
+      car.d = car.targetD = contSlotD[0];
       contSlots[0] = car;
       return;
     }
@@ -293,7 +293,7 @@ export function createSimulation(overrides, scaleFn) {
       rampSlots[lastRamp] = null;
       car.segment = 'highway';
       car.slot = cfg.mergeSlot;
-      car.targetD = hwySlotD[cfg.mergeSlot];
+      car.d = car.targetD = hwySlotD[cfg.mergeSlot];
       hwySlots[cfg.mergeSlot] = car;
     } else {
       car.speed = 0;
