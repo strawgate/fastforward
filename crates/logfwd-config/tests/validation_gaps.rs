@@ -238,6 +238,46 @@ output:
 }
 
 #[test]
+fn env_generator_attribute_values_remain_strings() {
+    let _env_lock = env_lock();
+    let _count = EnvVarGuard::set("LOGFWD_ISSUE_1855_GENERATOR_COUNT", "7");
+    let _enabled = EnvVarGuard::set("LOGFWD_ISSUE_1855_GENERATOR_ENABLED", "true");
+
+    let yaml = r#"
+input:
+  type: generator
+  generator:
+    profile: record
+    attributes:
+      count: ${LOGFWD_ISSUE_1855_GENERATOR_COUNT}
+      enabled: ${LOGFWD_ISSUE_1855_GENERATOR_ENABLED}
+output:
+  type: stdout
+"#;
+
+    let config = Config::load_str(yaml).expect("generator attributes should parse");
+    let input = &config.pipelines["default"].inputs[0];
+    let attributes = match &input.type_config {
+        logfwd_config::InputTypeConfig::Generator(generator) => generator
+            .generator
+            .as_ref()
+            .expect("generator config should be present")
+            .attributes
+            .clone(),
+        _ => panic!("expected generator input"),
+    };
+
+    assert!(matches!(
+        attributes["count"],
+        logfwd_config::GeneratorAttributeValueConfig::String(ref value) if value == "7"
+    ));
+    assert!(matches!(
+        attributes["enabled"],
+        logfwd_config::GeneratorAttributeValueConfig::String(ref value) if value == "true"
+    ));
+}
+
+#[test]
 fn env_expansion_preserves_yaml_hash_content() {
     let _env_lock = env_lock();
     let _env = EnvVarGuard::set("LOGFWD_ISSUE_1855", "/var/log/my app #1.log");
