@@ -267,7 +267,7 @@
   }
 
   // Pause when tab is hidden, resume when visible
-  document.addEventListener('visibilitychange', function() {
+  function onUqVisChange() {
     if (document.hidden) {
       clearInterval(timer);
       timer = null;
@@ -275,13 +275,22 @@
       restartTimer = null;
     } else if (phase === 'running' && !timer) {
       timer = setInterval(tick, TICK_MS);
+    } else if (phase === 'exploded' && !restartTimer) {
+      // Re-schedule auto-restart that was cleared when tab was hidden
+      restartTimer = setTimeout(function() {
+        restartTimer = null;
+        reset();
+        start();
+      }, 3000);
     }
-  });
+  }
+  document.addEventListener('visibilitychange', onUqVisChange);
 
   // Cleanup on SPA navigation
   document.addEventListener('astro:before-swap', function() {
     clearInterval(timer);
     clearTimeout(restartTimer);
+    document.removeEventListener('visibilitychange', onUqVisChange);
   }, { once: true });
 })();
 </script>

@@ -407,7 +407,7 @@ import { createSimulation } from './highway-sim.mjs';
   }
 
   // Pause when tab is hidden, resume when visible
-  document.addEventListener('visibilitychange', function() {
+  function onVisChange() {
     if (document.hidden) {
       clearInterval(timer);
       timer = null;
@@ -416,10 +416,12 @@ import { createSimulation } from './highway-sim.mjs';
       sim.setLastSpawn(Date.now());
       timer = setInterval(tick, TICK_MS);
     }
-  });
+  }
+  document.addEventListener('visibilitychange', onVisChange);
 
   document.addEventListener('astro:before-swap', function() {
     clearInterval(timer);
+    document.removeEventListener('visibilitychange', onVisChange);
   }, { once: true });
 })();
 </script>
