@@ -4,9 +4,9 @@
 //! so we can identify where cycles and allocations go.
 //!
 //! Modes:
-//!   - **cpu** (default): pprof flamegraph of `write_batch_to` + file I/O
+//!   - **cpu**: pprof flamegraph of `write_batch_to` + file I/O
 //!   - **alloc**: stats_alloc allocation counts per stage
-//!   - **breakdown**: per-function timing breakdown (build_col_infos, write_row_json,
+//!   - **breakdown** (default): per-function timing breakdown (build_col_infos, write_row_json,
 //!     memchr line count, file write_all)
 //!
 //! Run with:
@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 
 use logfwd_bench::generators;
 use logfwd_output::{
-    BatchMetadata, StdoutFormat, StdoutSink, build_col_infos, resolve_col_infos, write_row_json,
+    BatchMetadata, StdoutFormat, StdoutSink, build_col_infos, resolve_col_infos,
     write_row_json_resolved,
 };
 use logfwd_types::diagnostics::ComponentStats;
@@ -34,6 +34,7 @@ use logfwd_types::diagnostics::ComponentStats;
 // RSS measurement (shared with memory_profile.rs)
 // ---------------------------------------------------------------------------
 
+#[allow(deprecated)] // libc::mach_task_self_ — mach2 migration tracked separately
 fn rss_bytes() -> usize {
     #[cfg(target_os = "linux")]
     {
@@ -54,9 +55,13 @@ fn rss_bytes() -> usize {
     #[cfg(target_os = "macos")]
     {
         use std::mem::{self, size_of};
+        // SAFETY: `mach_task_basic_info_data_t` is a plain C struct of integer
+        // fields; zero-initialization is valid for all of them.
         let mut info: libc::mach_task_basic_info_data_t = unsafe { mem::zeroed() };
         let mut count = (size_of::<libc::mach_task_basic_info_data_t>()
             / size_of::<libc::natural_t>()) as libc::mach_msg_type_number_t;
+        // SAFETY: We pass a correctly-sized buffer (`info`) and matching count
+        // to `task_info`; `mach_task_self_` is always a valid task port.
         let kr = unsafe {
             libc::task_info(
                 libc::mach_task_self_,
@@ -88,8 +93,7 @@ fn parse_flag(args: &[String], flag: &str, default: &str) -> String {
     args.iter()
         .position(|a| a == flag)
         .and_then(|i| args.get(i + 1))
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| default.to_string())
+        .map_or_else(|| default.to_string(), String::clone)
 }
 
 fn parse_usize_flag(args: &[String], flag: &str, default: usize) -> usize {
@@ -292,6 +296,7 @@ fn run_breakdown(
 // Mode: alloc — allocation counting per stage
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "otlp-profile-alloc")]
 fn run_alloc(
     batch: &arrow::record_batch::RecordBatch,
     meta: &BatchMetadata,

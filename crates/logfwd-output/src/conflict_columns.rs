@@ -278,7 +278,8 @@ pub struct ResolvedVariant<'a> {
 impl ResolvedVariant<'_> {
     #[inline]
     pub(crate) fn is_null(&self, row: usize) -> bool {
-        self.parent_nulls.is_some_and(|n| n.is_null(row))
+        matches!(self.typed, TypedArrayRef::Null)
+            || self.parent_nulls.is_some_and(|n| n.is_null(row))
             || self.nulls.is_some_and(|n| n.is_null(row))
     }
 }
@@ -312,7 +313,7 @@ impl ResolvedCol<'_> {
                 typed,
                 nulls,
             } => {
-                if nulls.is_some_and(|n| n.is_null(row)) {
+                if matches!(typed, TypedArrayRef::Null) || nulls.is_some_and(|n| n.is_null(row)) {
                     None
                 } else {
                     Some((key_json, typed))
