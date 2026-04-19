@@ -30,10 +30,10 @@ pub use types::{
     HttpOutputConfig, HttpTypeConfig, InputConfig, InputType, InputTypeConfig,
     JournaldBackendConfig, JournaldInputConfig, JournaldTypeConfig, JsonlEnrichmentConfig,
     K8sPathConfig, LokiOutputConfig, NullOutputConfig, OtlpOutputConfig,
-    OtlpProtobufDecodeModeConfig, OtlpTypeConfig, OutputConfig, OutputConfigV1, OutputConfigV2,
-    OutputType, ParquetOutputConfig, PipelineConfig, S3InputConfig, S3TypeConfig, SensorTypeConfig,
-    ServerConfig, SocketOutputConfig, StaticEnrichmentConfig, StdoutOutputConfig, StorageConfig,
-    TcpTypeConfig, UdpTypeConfig,
+    OtlpProtobufDecodeModeConfig, OtlpTypeConfig, OutputConfig, OutputConfigEntry, OutputConfigV1,
+    OutputConfigV2, OutputType, ParquetOutputConfig, PipelineConfig, S3InputConfig, S3TypeConfig,
+    SensorTypeConfig, ServerConfig, SocketOutputConfig, StaticEnrichmentConfig, StdoutOutputConfig,
+    StorageConfig, TcpTypeConfig, UdpTypeConfig,
 };
 pub use validate::validate_host_port;
 
@@ -80,9 +80,9 @@ storage:
         ));
         assert_eq!(pipe.inputs[0].format, Some(Format::Cri));
         assert!(pipe.transform.as_ref().unwrap().contains("SELECT"));
-        assert_eq!(pipe.outputs[0].output_type, OutputType::Otlp);
+        assert_eq!(pipe.outputs[0].output_type(), OutputType::Otlp);
         assert_eq!(
-            pipe.outputs[0].endpoint.as_deref(),
+            pipe.outputs[0].validation_config().endpoint.as_deref(),
             Some("http://otel-collector:4317")
         );
         assert_eq!(cfg.server.diagnostics.as_deref(), Some("0.0.0.0:9090"));
@@ -130,8 +130,8 @@ server:
             InputTypeConfig::Udp(u) if u.listen == "0.0.0.0:514"
         ));
         assert_eq!(pipe.outputs.len(), 2);
-        assert_eq!(pipe.outputs[0].output_type, OutputType::Otlp);
-        assert_eq!(pipe.outputs[1].output_type, OutputType::Stdout);
+        assert_eq!(pipe.outputs[0].output_type(), OutputType::Otlp);
+        assert_eq!(pipe.outputs[1].output_type(), OutputType::Stdout);
     }
 
     #[test]
@@ -150,7 +150,7 @@ output:
         let cfg = Config::load_str(yaml).expect("env var substitution");
         let pipe = &cfg.pipelines["default"];
         assert_eq!(
-            pipe.outputs[0].endpoint.as_deref(),
+            pipe.outputs[0].validation_config().endpoint.as_deref(),
             Some("http://my-collector:4317")
         );
         // SAFETY: this test is not run concurrently with other tests that
@@ -181,7 +181,7 @@ output:
         assert_eq!(cfg.pipelines.len(), 1);
         let pipe = &cfg.pipelines["default"];
         assert_eq!(pipe.inputs[0].input_type(), InputType::File);
-        assert_eq!(pipe.outputs[0].output_type, OutputType::Stdout);
+        assert_eq!(pipe.outputs[0].output_type(), OutputType::Stdout);
         let _ = fs::remove_file(&path);
     }
 
@@ -596,7 +596,7 @@ pipelines:
         let yaml = "input:\n  type: file\n  path: /tmp/x.log\noutput:\n  type: file\n  path: /tmp/out.ndjson\n";
         let cfg = Config::load_str(yaml).unwrap();
         assert_eq!(
-            cfg.pipelines["default"].outputs[0].output_type,
+            cfg.pipelines["default"].outputs[0].output_type(),
             OutputType::File
         );
     }
@@ -983,7 +983,8 @@ output:
 "#;
         let cfg = Config::load_str(yaml).expect("auth bearer_token");
         let pipe = &cfg.pipelines["default"];
-        let auth = pipe.outputs[0].auth.as_ref().expect("auth present");
+        let output = pipe.outputs[0].validation_config();
+        let auth = output.auth.as_ref().expect("auth present");
         assert_eq!(auth.bearer_token.as_deref(), Some("my-secret-token"));
         assert!(auth.headers.is_empty());
     }
@@ -1004,7 +1005,8 @@ output:
 "#;
         let cfg = Config::load_str(yaml).expect("auth custom headers");
         let pipe = &cfg.pipelines["default"];
-        let auth = pipe.outputs[0].auth.as_ref().expect("auth present");
+        let output = pipe.outputs[0].validation_config();
+        let auth = output.auth.as_ref().expect("auth present");
         assert_eq!(auth.bearer_token, None);
         assert_eq!(
             auth.headers.get("X-API-Key").map(String::as_str),
@@ -1032,7 +1034,8 @@ output:
 "#;
         let cfg = Config::load_str(yaml).expect("auth env var bearer");
         let pipe = &cfg.pipelines["default"];
-        let auth = pipe.outputs[0].auth.as_ref().expect("auth present");
+        let output = pipe.outputs[0].validation_config();
+        let auth = output.auth.as_ref().expect("auth present");
         assert_eq!(auth.bearer_token.as_deref(), Some("env-bearer-token"));
         // SAFETY: this test is not run concurrently with other tests that
         // depend on the same environment variable.
@@ -1051,7 +1054,7 @@ output:
 ";
         let cfg = Config::load_str(yaml).expect("no auth");
         let pipe = &cfg.pipelines["default"];
-        assert!(pipe.outputs[0].auth.is_none());
+        assert!(pipe.outputs[0].validation_config().auth.is_none());
     }
 
     #[test]
@@ -1067,7 +1070,10 @@ output:
 ";
         let cfg = Config::load_str(yaml).expect("streaming request_mode should validate");
         let pipe = &cfg.pipelines["default"];
-        assert_eq!(pipe.outputs[0].request_mode.as_deref(), Some("streaming"));
+        assert_eq!(
+            pipe.outputs[0].validation_config().request_mode.as_deref(),
+            Some("streaming")
+        );
     }
 
     #[test]
@@ -1263,7 +1269,7 @@ output:
         let yaml = "input:\n  type: file\n  path: /tmp/x.log\noutput:\n  type: null\n";
         let cfg = Config::load_str(yaml).expect("type: null simple layout");
         assert_eq!(
-            cfg.pipelines["default"].outputs[0].output_type,
+            cfg.pipelines["default"].outputs[0].output_type(),
             OutputType::Null
         );
     }
@@ -1283,7 +1289,7 @@ pipelines:
 ";
         let cfg = Config::load_str(yaml).expect("type: null in advanced list layout");
         assert_eq!(
-            cfg.pipelines["app"].outputs[0].output_type,
+            cfg.pipelines["app"].outputs[0].output_type(),
             OutputType::Null
         );
     }
@@ -1294,7 +1300,7 @@ pipelines:
         let yaml = "input:\n  type: file\n  path: /tmp/x.log\noutput:\n  type: \"null\"\n";
         let cfg = Config::load_str(yaml).expect("type: \"null\" quoted");
         assert_eq!(
-            cfg.pipelines["default"].outputs[0].output_type,
+            cfg.pipelines["default"].outputs[0].output_type(),
             OutputType::Null
         );
     }

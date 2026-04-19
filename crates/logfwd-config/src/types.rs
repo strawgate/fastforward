@@ -1054,6 +1054,106 @@ impl From<OutputConfigV2> for OutputConfig {
     }
 }
 
+impl OutputConfigV2 {
+    pub fn name(&self) -> Option<&str> {
+        match self {
+            OutputConfigV2::Otlp(config) => config.name.as_deref(),
+            OutputConfigV2::Http(config) => config.name.as_deref(),
+            OutputConfigV2::Elasticsearch(config) => config.name.as_deref(),
+            OutputConfigV2::Loki(config) => config.name.as_deref(),
+            OutputConfigV2::Stdout(config) => config.name.as_deref(),
+            OutputConfigV2::File(config) => config.name.as_deref(),
+            OutputConfigV2::Parquet(config) => config.name.as_deref(),
+            OutputConfigV2::Null(config) => config.name.as_deref(),
+            OutputConfigV2::Tcp(config) => config.name.as_deref(),
+            OutputConfigV2::Udp(config) => config.name.as_deref(),
+            OutputConfigV2::ArrowIpc(config) => config.name.as_deref(),
+        }
+    }
+
+    pub fn output_type(&self) -> OutputType {
+        match self {
+            OutputConfigV2::Otlp(_) => OutputType::Otlp,
+            OutputConfigV2::Http(_) => OutputType::Http,
+            OutputConfigV2::Elasticsearch(_) => OutputType::Elasticsearch,
+            OutputConfigV2::Loki(_) => OutputType::Loki,
+            OutputConfigV2::Stdout(_) => OutputType::Stdout,
+            OutputConfigV2::File(_) => OutputType::File,
+            OutputConfigV2::Parquet(_) => OutputType::Parquet,
+            OutputConfigV2::Null(_) => OutputType::Null,
+            OutputConfigV2::Tcp(_) => OutputType::Tcp,
+            OutputConfigV2::Udp(_) => OutputType::Udp,
+            OutputConfigV2::ArrowIpc(_) => OutputType::ArrowIpc,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutputConfigEntry {
+    config: OutputConfigV2,
+    legacy: Option<OutputConfig>,
+}
+
+impl OutputConfigEntry {
+    pub fn typed(&self) -> &OutputConfigV2 {
+        &self.config
+    }
+
+    pub fn name(&self) -> Option<&str> {
+        self.config.name()
+    }
+
+    pub fn output_type(&self) -> OutputType {
+        self.config.output_type()
+    }
+
+    pub(crate) fn validation_config(&self) -> OutputConfig {
+        self.legacy
+            .clone()
+            .unwrap_or_else(|| OutputConfig::from(self.config.clone()))
+    }
+}
+
+impl From<OutputConfigV2> for OutputConfigEntry {
+    fn from(config: OutputConfigV2) -> Self {
+        Self {
+            config,
+            legacy: None,
+        }
+    }
+}
+
+impl From<OutputConfig> for OutputConfigEntry {
+    fn from(config: OutputConfig) -> Self {
+        Self {
+            config: OutputConfigV2::from(&config),
+            legacy: Some(config),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for OutputConfigEntry {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_yaml_ng::Value::deserialize(deserializer)?;
+        let v2_error = match OutputConfigV2::deserialize(value.clone()) {
+            Ok(config) => return Ok(OutputConfigEntry::from(config)),
+            Err(error) => error,
+        };
+
+        OutputConfigV1::deserialize(value)
+            .map(OutputConfig::from)
+            .map(OutputConfigEntry::from)
+            .map_err(|v1_error| {
+                serde::de::Error::custom(format!(
+                    "invalid output config; v2 parse error: {v2_error}; legacy parse error: {v1_error}"
+                ))
+            })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct OtlpOutputConfig {
@@ -1526,7 +1626,7 @@ pub struct PipelineConfig {
     #[serde(default, deserialize_with = "deserialize_option_strict_string")]
     pub transform: Option<String>,
     #[serde(default, deserialize_with = "deserialize_one_or_many")]
-    pub outputs: Vec<OutputConfig>,
+    pub outputs: Vec<OutputConfigEntry>,
     #[serde(default)]
     pub enrichment: Vec<EnrichmentConfig>,
     #[serde(default, deserialize_with = "deserialize_string_map_strict_values")]

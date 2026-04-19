@@ -11,7 +11,7 @@ use logfwd_diagnostics::diagnostics::PipelineMetrics;
 use logfwd_io::checkpoint::{
     CheckpointStore, FileCheckpointStore, SourceCheckpoint, default_data_dir,
 };
-use logfwd_output::{AsyncFanoutFactory, SinkFactory, build_sink_factory};
+use logfwd_output::{AsyncFanoutFactory, SinkFactory, build_sink_factory_v2};
 use logfwd_types::field_names;
 use logfwd_types::pipeline::{PipelineMachine, SourceId};
 
@@ -535,25 +535,28 @@ impl Pipeline {
         let factory: Arc<dyn SinkFactory> = if config.outputs.len() == 1 {
             let output_cfg = &config.outputs[0];
             let output_name = output_cfg
-                .name
-                .clone()
-                .unwrap_or_else(|| "output_0".to_string());
-            let output_type_str = format!("{:?}", output_cfg.output_type).to_lowercase();
+                .name()
+                .map_or_else(|| "output_0".to_string(), str::to_owned);
+            let output_type_str = output_cfg.output_type().to_string();
             let output_stats = metrics.add_output(&output_name, &output_type_str);
-            build_sink_factory(&output_name, output_cfg, base_path, output_stats)
+            build_sink_factory_v2(&output_name, output_cfg.typed(), base_path, output_stats)
                 .map_err(|e| e.to_string())?
         } else {
             let mut factories: Vec<Arc<dyn SinkFactory>> = Vec::new();
             for (i, output_cfg) in config.outputs.iter().enumerate() {
                 let output_name = output_cfg
-                    .name
-                    .clone()
-                    .unwrap_or_else(|| format!("output_{i}"));
-                let output_type_str = format!("{:?}", output_cfg.output_type).to_lowercase();
+                    .name()
+                    .map_or_else(|| format!("output_{i}"), str::to_owned);
+                let output_type_str = output_cfg.output_type().to_string();
                 let output_stats = metrics.add_output(&output_name, &output_type_str);
                 factories.push(
-                    build_sink_factory(&output_name, output_cfg, base_path, output_stats)
-                        .map_err(|e| e.to_string())?,
+                    build_sink_factory_v2(
+                        &output_name,
+                        output_cfg.typed(),
+                        base_path,
+                        output_stats,
+                    )
+                    .map_err(|e| e.to_string())?,
                 );
             }
             let fanout_name = name.to_string();
@@ -647,7 +650,9 @@ fn should_open_checkpoint_store(checkpoint_dir: &Path, has_explicit_data_dir: bo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use logfwd_config::{InputConfig, InputTypeConfig, OutputConfig, OutputType};
+    use logfwd_config::{
+        InputConfig, InputTypeConfig, OutputConfig, OutputConfigEntry, OutputType,
+    };
 
     fn minimal_input(path: String) -> InputConfig {
         InputConfig {
@@ -666,11 +671,12 @@ mod tests {
         }
     }
 
-    fn minimal_output() -> OutputConfig {
+    fn minimal_output() -> OutputConfigEntry {
         OutputConfig {
             output_type: OutputType::Stdout,
             ..Default::default()
         }
+        .into()
     }
 
     fn minimal_config(path: String) -> PipelineConfig {
