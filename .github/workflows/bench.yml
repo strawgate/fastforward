@@ -205,7 +205,7 @@ jobs:
             --json-file rate-bench-result.json \
             --gh-bench-file rate-gh-bench.json
         env:
-          FF: ./bin/ff
+          LOGFWD: ./bin/ff
 
       - uses: actions/upload-artifact@v7
         with:
