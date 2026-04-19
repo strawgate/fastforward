@@ -3,7 +3,7 @@ import starlight from "@astrojs/starlight";
 
 export default defineConfig({
   site: 'https://strawgate.github.io',
-  base: '/memagent',
+  base: '/fastforward',
   redirects: {
     '/how-it-works/':             '/learn/',
     '/how-it-works/backpressure/': '/learn/backpressure/',
@@ -25,7 +25,7 @@ export default defineConfig({
         },
       ],
       editLink: {
-        baseUrl: "https://github.com/strawgate/memagent/edit/main/book/",
+        baseUrl: "https://github.com/strawgate/fastforward/edit/main/book/",
       },
       lastUpdated: true,
       customCss: ["./src/styles/custom.css"],

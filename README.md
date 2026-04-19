@@ -1,6 +1,6 @@
-<div align="center">
+# FastForward
 
-<!-- omit in toc -->
+<div align="center">
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/brand/lockup-dark.svg">
@@ -8,13 +8,10 @@
   <img width="400" alt="FastForward" src="assets/brand/lockup-dark.svg">
 </picture>
 
-# FastForward
-
 **a learning-oriented log forwarder built with Rust**
 
 [![Docs](https://img.shields.io/badge/docs-fastforward-D85A30)](https://strawgate.github.io/fastforward/)
 [![CI](https://github.com/strawgate/fastforward/actions/workflows/ci.yml/badge.svg)](https://github.com/strawgate/fastforward/actions/workflows/ci.yml)
-[![License](https://img.shields.io/github/license/strawgate/fastforward)](https://github.com/strawgate/fastforward/blob/main/LICENSE)
 
 </div>
 
@@ -29,7 +26,7 @@ The [documentation site](https://strawgate.github.io/fastforward/) has interacti
 ## Try it
 
 ```bash
-# Build from source (Rust 1.85+)
+# Build from source (Rust 1.89+)
 git clone https://github.com/strawgate/fastforward.git && cd fastforward
 cargo build --release -p logfwd
 
