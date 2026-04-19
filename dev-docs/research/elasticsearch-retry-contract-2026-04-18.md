@@ -1,12 +1,14 @@
 # Elasticsearch Retry Contract Notes
 
-Status: research note for #2025, not a final output delivery contract.
+> **Status:** Research note (not a final delivery contract)
+> **Date:** 2026-04-18
+> **Context:** #2025 - Elasticsearch retry and duplication fixes
 
 ## Current Safe Fix
 
 `ElasticsearchSink::send_split_halves` can safely continue from a terminal left-half rejection to the right half. A rejected half does not need retry, and skipping the right half drops records that were never attempted.
 
-This PR-sized fix only covers results already represented as `SendResult::Rejected`, such as non-retryable HTTP status handling or a single-row split rejection.
+This PR-sized fix covers #1888: when the left split half is terminally rejected, the right split half is still attempted instead of being dropped. It only covers results already represented as `SendResult::Rejected`, such as non-retryable HTTP status handling or a single-row split rejection.
 
 ## Remaining Contract Gap
 
@@ -21,7 +23,7 @@ The current sink contract still cannot represent mixed split outcomes precisely.
 
 ## Required Follow-Up
 
-Full closure of #1873, #1880, and #1919 needs a richer output delivery accounting model or Elasticsearch-local retry splitting that tracks the remaining retryable subset. Until that exists, narrow fixes should be explicit about which mixed outcomes they handle and which remain unresolved.
+The #1888 right-half-skipped-after-left-rejection bug is addressed by this PR. Full closure of #1873, #1880, and #1919 remains unresolved and needs a richer output delivery accounting model or Elasticsearch-local retry splitting that tracks the remaining retryable subset. Until that exists, narrow fixes should be explicit about which mixed outcomes they handle and which remain unresolved.
 
 ## PR Guidance
 

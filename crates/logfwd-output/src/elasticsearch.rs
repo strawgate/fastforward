@@ -431,6 +431,11 @@ impl ElasticsearchSink {
         Ok(Self::merge_split_send_results(left_result, right_result))
     }
 
+    /// Merge split-half outcomes into the single-result `Sink` contract.
+    ///
+    /// Precedence is `IoError` > `RetryAfter` > `Rejected` > `Ok`. When both
+    /// halves retry, use the longer delay. The shape intentionally mirrors
+    /// fanout result reduction so mixed outcomes do not hide retryable work.
     fn merge_split_send_results(
         left: super::sink::SendResult,
         right: super::sink::SendResult,
@@ -444,9 +449,11 @@ impl ElasticsearchSink {
                     "left split rejected: {left}; right split rejected: {right}"
                 ))
             }
-            (super::sink::SendResult::Rejected(reason), super::sink::SendResult::Ok)
-            | (super::sink::SendResult::Ok, super::sink::SendResult::Rejected(reason)) => {
-                super::sink::SendResult::Rejected(reason)
+            (super::sink::SendResult::Rejected(reason), super::sink::SendResult::Ok) => {
+                super::sink::SendResult::Rejected(format!("left split rejected: {reason}"))
+            }
+            (super::sink::SendResult::Ok, super::sink::SendResult::Rejected(reason)) => {
+                super::sink::SendResult::Rejected(format!("right split rejected: {reason}"))
             }
             (
                 super::sink::SendResult::RetryAfter(left),
@@ -1871,6 +1878,7 @@ mod tests {
 
         match result {
             crate::sink::SendResult::Rejected(reason) => {
+                assert!(reason.contains("left split rejected"), "got: {reason}");
                 assert!(reason.contains("left bad doc"), "got: {reason}");
             }
             other => panic!("expected rejected split result, got {other:?}"),
@@ -1905,6 +1913,98 @@ mod tests {
             crate::sink::SendResult::RetryAfter(actual) => assert_eq!(actual, delay),
             other => panic!("expected retryable split result, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn split_rejection_on_left_still_sends_right_half() {
+        use crate::sink::Sink;
+
+        let mut server = mockito::Server::new_async().await;
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new("msg", DataType::Utf8, false)])),
+            vec![Arc::new(StringArray::from(vec!["left-row", "right-row"]))],
+        )
+        .expect("test batch should be valid");
+        let metadata = zero_metadata();
+
+        let mut sizing_sink = ElasticsearchSink::new(
+            "test".to_string(),
+            test_es_config(&server.url(), "logs", usize::MAX),
+            reqwest::Client::new(),
+            Arc::new(ComponentStats::default()),
+        );
+        sizing_sink
+            .serialize_batch(&batch, &metadata)
+            .expect("full batch should serialize");
+        let full_len = sizing_sink.batch_buf.len();
+        sizing_sink
+            .serialize_batch(&batch.slice(0, 1), &metadata)
+            .expect("left half should serialize");
+        let left_len = sizing_sink.batch_buf.len();
+        sizing_sink
+            .serialize_batch(&batch.slice(1, 1), &metadata)
+            .expect("right half should serialize");
+        let right_len = sizing_sink.batch_buf.len();
+        let split_threshold = left_len.max(right_len) + 1;
+        assert!(full_len > split_threshold);
+
+        let left_mock = server
+            .mock("POST", "/_bulk")
+            .match_query(mockito::Matcher::Any)
+            .match_body(mockito::Matcher::Regex("left-row".to_string()))
+            .with_status(400)
+            .with_body("left bad doc")
+            .create_async()
+            .await;
+        let right_mock = server
+            .mock("POST", "/_bulk")
+            .match_query(mockito::Matcher::Any)
+            .match_body(mockito::Matcher::Regex("right-row".to_string()))
+            .with_status(200)
+            .with_body(r#"{"took":1,"errors":false,"items":[{"index":{"status":201}}]}"#)
+            .create_async()
+            .await;
+
+        let mut sink = ElasticsearchSink::new(
+            "test".to_string(),
+            test_es_config(&server.url(), "logs", split_threshold),
+            reqwest::Client::new(),
+            Arc::new(ComponentStats::default()),
+        );
+
+        let result = sink.send_batch(&batch, &metadata).await;
+        match result {
+            crate::sink::SendResult::Rejected(reason) => {
+                assert!(reason.contains("left split rejected"), "got: {reason}");
+                assert!(reason.contains("left bad doc"), "got: {reason}");
+            }
+            other => panic!("expected left rejection after right half send, got {other:?}"),
+        }
+        left_mock.assert_async().await;
+        right_mock.assert_async().await;
+    }
+
+    fn test_es_config(
+        endpoint: &str,
+        index: &str,
+        max_bulk_bytes: usize,
+    ) -> Arc<ElasticsearchConfig> {
+        let escaped_index = serde_json::to_string(index).expect("test index should serialize");
+        Arc::new(ElasticsearchConfig {
+            endpoint: endpoint.to_string(),
+            headers: Vec::new(),
+            compress: false,
+            request_mode: ElasticsearchRequestMode::Buffered,
+            max_bulk_bytes,
+            stream_chunk_bytes: 64 * 1024,
+            bulk_url: format!(
+                "{}/_bulk?filter_path=errors,took,items.*.error,items.*.status",
+                endpoint.trim_end_matches('/')
+            ),
+            action_bytes: format!("{{\"index\":{{\"_index\":{escaped_index}}}}}\n")
+                .into_bytes()
+                .into_boxed_slice(),
+        })
     }
 }
 
