@@ -132,8 +132,7 @@ where
     let deadline = Instant::now() + WRITE_TIMEOUT;
 
     while *written < buf.len() {
-        let result =
-            tokio::time::timeout_at(deadline, stream.write(&buf[*written..])).await;
+        let result = tokio::time::timeout_at(deadline, stream.write(&buf[*written..])).await;
         match result {
             Ok(Ok(0)) => {
                 return Err(io::Error::new(
