@@ -26,7 +26,7 @@
 
 ## Failure-class taxonomy and evidence
 
-## 1) Harness race
+### 1) Harness race
 
 **Hypothesis:** nightly/e2e ingest gaps are at least partly driven by orchestration timing races, not only tailer correctness.
 
@@ -42,7 +42,7 @@
   - No deterministic local repro yet of `tests/e2e/run.sh` against real KIND in this environment.
 - Confidence: **High** (for test-harness/interference component), **Medium** (for nightly KIND ingest-gap contribution).
 
-## 2) File-tail state transition
+### 2) File-tail state transition
 
 **Hypothesis:** rotate/truncate/delete-recreate transitions can under/over-deliver around state edges.
 
@@ -55,7 +55,7 @@
   - Focused tailer unit test (`tail::tests::test_tail_truncation`) passed locally.
 - Confidence: **Medium-High**.
 
-## 3) Framing/remainder coupling
+### 3) Framing/remainder coupling
 
 **Hypothesis:** ingest gaps may stem from newline boundary bookkeeping, EOF flush, or partial remainder coupling with checkpoints.
 
@@ -70,7 +70,7 @@
   - Entire `file_boundary_contract` integration target passed locally.
 - Confidence: **Low-Medium** as primary current root cause.
 
-## 4) Source identity / source metadata
+### 4) Source identity / source metadata
 
 **Hypothesis:** source-id instability or collisions cause wrong checkpoint application or cross-file contamination.
 
@@ -82,7 +82,7 @@
   - No direct failing signal in current focused runs.
 - Confidence: **Medium**.
 
-## 5) Checkpoint advancement
+### 5) Checkpoint advancement
 
 **Hypothesis:** checkpoint offset moves ahead/behind durable-safe boundary causing apparent ingest gaps after restarts or transitions.
 
@@ -93,7 +93,7 @@
   - Dedicated `file_boundary_contract` checkpoint assertions passed.
 - Confidence: **Medium** (especially for restart/rotation interactions not fully covered by current compliance tests).
 
-## 6) E2E environment / KIND / collector behavior
+### 6) E2E environment / KIND / collector behavior
 
 **Hypothesis:** environment-level factors (cluster startup, DaemonSet rollout, port-forward stability, collector responsiveness) produce false ingest-gap failures.
 
@@ -105,7 +105,7 @@
   - No fresh full KIND e2e run was executed here (cost/time + environment prerequisites).
 - Confidence: **Medium-High** for contribution to nightly instability.
 
-## 7) Unknown / needs reproduction
+### 7) Unknown / needs reproduction
 
 - Missing direct issue-body mapping for #1559/#1578 in local repo context.
 - Missing deterministic reproducer that isolates one failure class while freezing others.
@@ -156,7 +156,7 @@ done
 
 ## Proposed implementation slices (one bug class per PR)
 
-## Slice A — Harness determinism in `compliance_file` (no tail behavior changes)
+### Slice A — Harness determinism in `compliance_file` (no tail behavior changes)
 
 - Goal: remove inter-test timing interference and turn current timeouts into deterministic signals.
 - Likely file footprint:
@@ -167,7 +167,7 @@ done
   - optional serial annotation for known-interfering tests only.
 - Why low-discretion: directly targets observed aggregate-vs-isolated mismatch.
 
-## Slice B — Rotate/glob startup readiness invariants in file-tail compliance tests
+### Slice B — Rotate/glob startup readiness invariants in file-tail compliance tests
 
 - Goal: enforce explicit “tailer attached + first read observed” preconditions before transition actions.
 - Likely file footprint:
@@ -176,7 +176,7 @@ done
   - refactor wait helpers to report per-phase metric deltas and fail with phase-specific message.
 - Why low-discretion: test-only hardening; avoids production semantics changes.
 
-## Slice C — E2E failure artifact standardization
+### Slice C — E2E failure artifact standardization
 
 - Goal: ensure every `E2E_FAIL_CATEGORY` path captures consistent triage bundle.
 - Likely file footprint:
@@ -186,7 +186,7 @@ done
   - extend `run_smoke_test.sh` stubs to assert artifact/diagnostic commands were called on each failure branch.
 - Why low-discretion: harness observability improvement without changing ingest behavior.
 
-## Slice D — Source/checkpoint transition targeted regression (only if class reproduces)
+### Slice D — Source/checkpoint transition targeted regression (only if class reproduces)
 
 - Goal: if reproduction shows real source-id/checkpoint coupling bug, add minimal failing contract test first.
 - Likely file footprint:
