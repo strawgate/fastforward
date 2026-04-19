@@ -491,8 +491,7 @@ mod verification {
             check_invariants(&tracker);
             i += 1;
         }
-        assert_eq!(i, PROOF_STEPS, "must verify the full six-step sequence");
-        kani::cover!(i == PROOF_STEPS, "executed all six steps");
+        assert_eq!(i, PROOF_STEPS, "must complete all PROOF_STEPS steps");
 
         // Vacuity guards: confirm interesting cases are explored
         kani::cover!(tracker.remainder_len > 0, "has remainder");
@@ -532,8 +531,7 @@ mod verification {
             prev_checkpoint = tracker.checkpoint_offset;
             i += 1;
         }
-        assert_eq!(i, PROOF_STEPS, "must verify the full six-step sequence");
-        kani::cover!(i == PROOF_STEPS, "executed all six steps");
+        assert_eq!(i, PROOF_STEPS, "must complete all PROOF_STEPS steps");
 
         // Vacuity: confirm checkpoint actually advanced in some path
         kani::cover!(
@@ -570,8 +568,7 @@ mod verification {
             }
             i += 1;
         }
-        assert_eq!(i, PROOF_STEPS, "must verify the full six-step sequence");
-        kani::cover!(i == PROOF_STEPS, "executed all six steps");
+        assert_eq!(i, PROOF_STEPS, "must complete all PROOF_STEPS steps");
 
         // Record pre-crash state
         let pre_crash_checkpoint = tracker.checkpoint_offset;
@@ -660,8 +657,7 @@ mod verification {
             }
             i += 1;
         }
-        assert_eq!(i, PROOF_STEPS, "must verify the full six-step sequence");
-        kani::cover!(i == PROOF_STEPS, "executed all six steps");
+        assert_eq!(i, PROOF_STEPS, "must complete all PROOF_STEPS steps");
 
         // Vacuity
         kani::cover!(
@@ -705,8 +701,7 @@ mod verification {
             }
             i += 1;
         }
-        assert_eq!(i, PROOF_STEPS, "must verify the full six-step sequence");
-        kani::cover!(i == PROOF_STEPS, "executed all six steps");
+        assert_eq!(i, PROOF_STEPS, "must complete all PROOF_STEPS steps");
         // Kani automatically asserts no overflow on +, -, etc.
         // If any reachable path overflows, Kani reports failure.
     }
