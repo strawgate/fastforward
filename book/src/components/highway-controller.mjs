@@ -179,10 +179,15 @@ import { createRenderState } from './highway-render-state.mjs';
     carsG.appendChild(g);
     carEls[car.id] = { g: g, body: body };
 
-    // Register in render state at current screen position
+    // Register in render state at current screen position with forward velocity.
+    // Push an ahead-waypoint so the car is already moving during its fade-in
+    // instead of appearing stationary at the screen edge.
     const ip = posAt(car.segment, car.targetD);
     const ia = angleAt(car.segment, car.targetD);
-    rs.addCar(car.id, ip.x, ip.y, ia, 2);
+    rs.addCar(car.id, ip.x, ip.y, ia, 3);
+    const aheadD = Math.min(car.targetD + 30, lenMap[car.segment]);
+    const ap = posAt(car.segment, aheadD);
+    rs.pushTarget(car.id, ap.x, ap.y, 1, 'flow');
   }
 
   function removeCarEl(id) {

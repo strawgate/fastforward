@@ -24,6 +24,7 @@ export const RENDER_DEFAULTS = {
   decelDist: 30,
   snapDist: 0.5,
   angleRate: 0.25,
+  minSep: 14, // minimum screen-space distance between car centers
 };
 
 export function createRenderState(overrides) {
@@ -174,8 +175,30 @@ export function createRenderState(overrides) {
     for (const id in cars) {
       const car = cars[id];
       stepCar(car);
-      // Advance fade
       car.fadeAge = Math.min(1, car.fadeAge + 1 / cfg.fadeInFrames);
+    }
+
+    // Post-step: push apart any cars closer than minSep.
+    // This prevents visual overlap at merge/exit junctions where
+    // independent interpolation can momentarily converge.
+    const ids = Object.keys(cars);
+    for (let i = 0; i < ids.length; i++) {
+      const a = cars[ids[i]];
+      for (let j = i + 1; j < ids.length; j++) {
+        const b = cars[ids[j]];
+        const dx = b.x - a.x;
+        const dy = b.y - a.y;
+        const d = Math.sqrt(dx * dx + dy * dy);
+        if (d > 0.01 && d < cfg.minSep) {
+          const push = (cfg.minSep - d) / 2;
+          const nx = dx / d;
+          const ny = dy / d;
+          a.x -= nx * push;
+          a.y -= ny * push;
+          b.x += nx * push;
+          b.y += ny * push;
+        }
+      }
     }
   }
 
