@@ -1,6 +1,8 @@
 # Config Library POC
 
-Date: 2026-04-19
+> **Status:** Active
+> **Date:** 2026-04-19
+> **Context:** Config-source layering and environment-substitution crate evaluation.
 
 ## Question
 

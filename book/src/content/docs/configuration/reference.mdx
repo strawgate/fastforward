@@ -952,8 +952,9 @@ storage:
 
 Any value in the config file can reference an environment variable with `${VAR}`.
 Variable names must start with an ASCII letter or `_`, and then contain only
-ASCII letters, digits, or `_`. `$VAR` and default expressions such as
-`${VAR:fallback}` are not expanded.
+ASCII letters, digits, or `_`. `$VAR` stays literal, and default expressions
+such as `${VAR:fallback}` are rejected because `:` is not valid in variable
+names.
 
 ```yaml
 output:
