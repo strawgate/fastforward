@@ -1201,7 +1201,12 @@ fn collect_logs_source_metadata_from_select(
     }
 
     for table_with_joins in &select.from {
-        collect_logs_source_metadata_from_table_with_joins(table_with_joins, &scope, usage);
+        collect_logs_source_metadata_from_table_with_joins(
+            table_with_joins,
+            &scope,
+            usage,
+            cte_names,
+        );
     }
 
     for sqlast::NamedWindowDefinition(_, named_expr) in &select.named_window {
@@ -1340,10 +1345,14 @@ fn collect_logs_source_metadata_from_table_with_joins(
     table_with_joins: &sqlast::TableWithJoins,
     scope: &SourceMetadataScope,
     usage: &mut SourceMetadataUsage,
+    cte_names: &HashSet<String>,
 ) {
-    collect_logs_source_metadata_from_table_factor(&table_with_joins.relation, usage);
+    collect_logs_source_metadata_from_table_factor(&table_with_joins.relation, usage, cte_names);
+    let mut accumulated_has_logs =
+        table_factor_exposes_logs_relation(&table_with_joins.relation, cte_names);
     for join in &table_with_joins.joins {
-        collect_logs_source_metadata_from_table_factor(&join.relation, usage);
+        collect_logs_source_metadata_from_table_factor(&join.relation, usage, cte_names);
+        let right_has_logs = table_factor_exposes_logs_relation(&join.relation, cte_names);
         if let sqlast::JoinOperator::AsOf {
             match_condition, ..
         } = &join.join_operator
@@ -1351,14 +1360,21 @@ fn collect_logs_source_metadata_from_table_with_joins(
             collect_logs_source_metadata_from_expr(match_condition, scope, usage);
         }
         if let Some(constraint) = extract_join_constraint(&join.join_operator) {
-            collect_logs_source_metadata_from_join_constraint(constraint, scope, usage);
+            collect_logs_source_metadata_from_join_constraint(
+                constraint,
+                scope,
+                usage,
+                accumulated_has_logs || right_has_logs,
+            );
         }
+        accumulated_has_logs |= right_has_logs;
     }
 }
 
 fn collect_logs_source_metadata_from_table_factor(
     factor: &sqlast::TableFactor,
     usage: &mut SourceMetadataUsage,
+    cte_names: &HashSet<String>,
 ) {
     match factor {
         sqlast::TableFactor::Derived { subquery, .. } => {
@@ -1368,21 +1384,26 @@ fn collect_logs_source_metadata_from_table_factor(
             table_with_joins, ..
         } => {
             let scope = SourceMetadataScope::default();
-            collect_logs_source_metadata_from_table_with_joins(table_with_joins, &scope, usage);
+            collect_logs_source_metadata_from_table_with_joins(
+                table_with_joins,
+                &scope,
+                usage,
+                cte_names,
+            );
         }
         sqlast::TableFactor::Pivot {
             table,
             value_source,
             ..
         } => {
-            collect_logs_source_metadata_from_table_factor(table, usage);
+            collect_logs_source_metadata_from_table_factor(table, usage, cte_names);
             if let sqlast::PivotValueSource::Subquery(query) = value_source {
                 collect_logs_source_metadata_from_query(query, usage);
             }
         }
         sqlast::TableFactor::Unpivot { table, .. }
         | sqlast::TableFactor::MatchRecognize { table, .. } => {
-            collect_logs_source_metadata_from_table_factor(table, usage);
+            collect_logs_source_metadata_from_table_factor(table, usage, cte_names);
         }
         _ => {}
     }
@@ -1392,13 +1413,14 @@ fn collect_logs_source_metadata_from_join_constraint(
     constraint: &sqlast::JoinConstraint,
     scope: &SourceMetadataScope,
     usage: &mut SourceMetadataUsage,
+    is_logs_join: bool,
 ) {
     match constraint {
         sqlast::JoinConstraint::On(expr) => {
             collect_logs_source_metadata_from_expr(expr, scope, usage);
         }
         sqlast::JoinConstraint::Using(cols) => {
-            if scope.has_logs() {
+            if is_logs_join {
                 for obj_name in cols {
                     if let Some(part) = obj_name.0.last()
                         && let Some(ident) = part.as_ident()
@@ -1921,6 +1943,25 @@ mod tests {
 
         let analyzer =
             QueryAnalyzer::new("SELECT d._source_path FROM (SELECT * FROM alerts) d").unwrap();
+        assert_eq!(
+            analyzer.explicit_source_metadata_plan(),
+            SourceMetadataPlan::default()
+        );
+    }
+
+    #[test]
+    fn explicit_source_metadata_plan_tracks_using_join_on_logs() {
+        let analyzer =
+            QueryAnalyzer::new("SELECT msg FROM logs JOIN paths USING (_source_path)").unwrap();
+        assert!(analyzer.explicit_source_metadata_plan().has_source_path);
+    }
+
+    #[test]
+    fn explicit_source_metadata_plan_ignores_using_join_without_logs() {
+        let analyzer = QueryAnalyzer::new(
+            "SELECT logs.msg FROM logs, paths p JOIN k8s k USING (_source_path)",
+        )
+        .unwrap();
         assert_eq!(
             analyzer.explicit_source_metadata_plan(),
             SourceMetadataPlan::default()
