@@ -24,7 +24,7 @@ export const RENDER_DEFAULTS = {
   decelDist: 30,
   snapDist: 0.5,
   angleRate: 0.25,
-  minSep: 14, // minimum screen-space distance between car centers
+  minSep: 18, // minimum screen-space distance between car centers
 };
 
 export function createRenderState(overrides) {
@@ -42,7 +42,6 @@ export function createRenderState(overrides) {
       speed: initSpeed != null ? initSpeed : 0,
       angle: angle || 0,
       fadeAge: 0,
-      // Latest target color/opacity (updated when waypoints are consumed)
       color: 'flow',
       opacity: 1,
     };
@@ -63,41 +62,61 @@ export function createRenderState(overrides) {
     });
   }
 
-  function stepCar(car) {
-    // Determine target: the latest waypoint (skip to newest)
-    // We always chase the LAST pushed waypoint — intermediate ones
-    // serve as path shape (the car moves through them in order).
+  // Compute how far `car` can move toward its first waypoint before
+  // colliding with another car that's roughly ahead of it.
+  // Returns the max movement distance (pixels this frame).
+  function clearanceAhead(car, id) {
+    if (car.waypoints.length === 0) return Infinity;
+    const wp = car.waypoints[0];
+    const dx = wp.x - car.x;
+    const dy = wp.y - car.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist < 0.01) return Infinity;
+
+    const dirX = dx / dist;
+    const dirY = dy / dist;
+
+    let minAhead = Infinity;
+    for (const otherId in cars) {
+      if (otherId === id) continue;
+      const other = cars[otherId];
+      const odx = other.x - car.x;
+      const ody = other.y - car.y;
+      // Project onto our movement direction
+      const ahead = odx * dirX + ody * dirY;
+      if (ahead <= 0) continue; // behind us — ignore
+      // Perpendicular distance — only care if roughly in our lane
+      const perpSq = (odx * odx + ody * ody) - ahead * ahead;
+      if (perpSq > cfg.minSep * cfg.minSep) continue; // different lane
+      if (ahead < minAhead) minAhead = ahead;
+    }
+    // Usable gap = distance to nearest car ahead minus the separation buffer
+    return Math.max(0, minAhead - cfg.minSep);
+  }
+
+  function stepCar(car, maxMove) {
     if (car.waypoints.length === 0) {
-      // No target — decelerate to stop
       car.speed = Math.max(0, car.speed - cfg.accel * 2);
       return;
     }
 
-    // Current target is the first unconsumed waypoint
     const wp = car.waypoints[0];
     const dx = wp.x - car.x;
     const dy = wp.y - car.y;
     const dist = Math.sqrt(dx * dx + dy * dy);
 
     if (dist < cfg.snapDist) {
-      // Consume this waypoint
       car.x = wp.x;
       car.y = wp.y;
       car.color = wp.color;
       car.opacity = wp.opacity;
       car.waypoints.shift();
-
-      // If more waypoints, don't lose momentum — recurse for remaining distance
-      if (car.waypoints.length > 0) {
-        return; // will be picked up next frame
-      }
-      // No more waypoints — hold position
+      if (car.waypoints.length > 0) return;
       car.speed = 0;
       return;
     }
 
-    // Velocity chase toward current waypoint
-    // Look ahead: total remaining path distance through all waypoints
+    // Total remaining path distance through all waypoints
     let totalDist = dist;
     let prevX = wp.x, prevY = wp.y;
     for (let i = 1; i < car.waypoints.length; i++) {
@@ -109,28 +128,30 @@ export function createRenderState(overrides) {
       prevY = nxt.y;
     }
 
-    // Desired speed: decelerate when total remaining distance is small
-    const desired = Math.min(
+    // Desired speed — decelerate for both path end AND clearance
+    const pathDesired = Math.min(
       cfg.maxSpeed,
       (totalDist / cfg.decelDist) * cfg.maxSpeed,
     );
+    // Also decelerate to respect clearance ahead
+    const clearDesired = maxMove < Infinity
+      ? Math.min(cfg.maxSpeed, (maxMove / cfg.decelDist) * cfg.maxSpeed)
+      : cfg.maxSpeed;
+    const desired = Math.min(pathDesired, clearDesired);
 
-    // Accelerate or brake
     if (car.speed < desired) {
       car.speed = Math.min(car.speed + cfg.accel, desired);
     } else {
       car.speed = Math.max(car.speed - cfg.accel * 2, desired);
     }
-
-    // Ensure speed is non-negative
     car.speed = Math.max(0, car.speed);
 
-    // Move toward current waypoint
+    // Hard cap: never move more than available clearance
+    let moveD = Math.min(car.speed, maxMove);
+
     const dirX = dx / dist;
     const dirY = dy / dist;
-    let moveD = car.speed;
 
-    // Don't overshoot current waypoint — consume and continue to next
     if (moveD >= dist) {
       car.x = wp.x;
       car.y = wp.y;
@@ -138,7 +159,6 @@ export function createRenderState(overrides) {
       car.opacity = wp.opacity;
       car.waypoints.shift();
       const remaining = moveD - dist;
-      // Continue moving toward next waypoint with leftover distance
       if (remaining > 0 && car.waypoints.length > 0) {
         const nxt = car.waypoints[0];
         const ndx = nxt.x - car.x;
@@ -155,15 +175,9 @@ export function createRenderState(overrides) {
       car.y += dirY * moveD;
     }
 
-    // Update color/opacity from latest consumed or nearest waypoint
-    // (color stays from last consumed waypoint, already updated above on consume)
-
     // Angle follows movement direction
-    if (car.speed > 0.1) {
-      const moveAngle = Math.atan2(
-        car.y - (car.y - dirY * moveD),
-        car.x - (car.x - dirX * moveD),
-      ) * 180 / Math.PI;
+    if (moveD > 0.1) {
+      const moveAngle = Math.atan2(dirY, dirX) * 180 / Math.PI;
       let da = moveAngle - car.angle;
       while (da > 180) da -= 360;
       while (da < -180) da += 360;
@@ -172,33 +186,13 @@ export function createRenderState(overrides) {
   }
 
   function step() {
-    for (const id in cars) {
-      const car = cars[id];
-      stepCar(car);
-      car.fadeAge = Math.min(1, car.fadeAge + 1 / cfg.fadeInFrames);
-    }
-
-    // Post-step: push apart any cars closer than minSep.
-    // This prevents visual overlap at merge/exit junctions where
-    // independent interpolation can momentarily converge.
     const ids = Object.keys(cars);
     for (let i = 0; i < ids.length; i++) {
-      const a = cars[ids[i]];
-      for (let j = i + 1; j < ids.length; j++) {
-        const b = cars[ids[j]];
-        const dx = b.x - a.x;
-        const dy = b.y - a.y;
-        const d = Math.sqrt(dx * dx + dy * dy);
-        if (d > 0.01 && d < cfg.minSep) {
-          const push = (cfg.minSep - d) / 2;
-          const nx = dx / d;
-          const ny = dy / d;
-          a.x -= nx * push;
-          a.y -= ny * push;
-          b.x += nx * push;
-          b.y += ny * push;
-        }
-      }
+      const id = ids[i];
+      const car = cars[id];
+      const maxMove = clearanceAhead(car, id);
+      stepCar(car, maxMove);
+      car.fadeAge = Math.min(1, car.fadeAge + 1 / cfg.fadeInFrames);
     }
   }
 
@@ -206,10 +200,7 @@ export function createRenderState(overrides) {
     const car = cars[id];
     if (!car) return null;
 
-    // During fade-in, force flow color
     const color = car.fadeAge < 1 ? 'flow' : car.color;
-
-    // Composite opacity = fade × sim opacity
     const opacity = car.fadeAge * car.opacity;
 
     return {
