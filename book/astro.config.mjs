@@ -16,12 +16,12 @@ export default defineConfig({
   integrations: [
     starlight({
       title: "FastForward",
-      description: "a blazing-fast log, metric & trace forwarder — built with rust",
+      description: "a learning-oriented log forwarder built with Rust",
       social: [
         {
           icon: "github",
           label: "GitHub",
-          href: "https://github.com/strawgate/memagent",
+          href: "https://github.com/strawgate/fastforward",
         },
       ],
       editLink: {
