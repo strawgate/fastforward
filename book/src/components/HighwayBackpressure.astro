@@ -229,7 +229,7 @@ import { createSimulation } from './highway-sim.mjs';
   })();
 
   const TICK_MS = 25;
-  const LERP_RATE = 0.25; // visual interpolation speed per frame
+  const FADE_IN_FRAMES = 12; // fade in over ~300ms (12 frames × 25ms)
 
   // Segment → SVG path mapping
   const pathMap = { ramp: pathRamp, highway: pathHwy, exit: pathExit, cont: pathCont };
@@ -248,9 +248,11 @@ import { createSimulation } from './highway-sim.mjs';
     return Math.atan2(p2.y - p1.y, p2.x - p1.x) * 180 / Math.PI;
   }
 
-  // ---- DOM car management ----
+  // ---- Per-car visual state ----
+  // Linear interpolation between sim ticks for smooth motion.
+  // prevD/targetD define the interpolation window; fadeAge drives fade-in.
   const carEls = {};
-  const visualD = {}; // per-car visual interpolation state
+  const carVis = {}; // { prevD, targetD, seg, fadeAge }
 
   function createCarEl(car) {
     let w = CAR_W * car.scale;
@@ -316,7 +318,7 @@ import { createSimulation } from './highway-sim.mjs';
 
     carsG.appendChild(g);
     carEls[car.id] = { g: g, body: body };
-    visualD[car.id] = car.targetD; // start at target position
+    carVis[car.id] = { prevD: car.targetD, targetD: car.targetD, seg: car.segment, fadeAge: 0 };
   }
 
   function removeCarEl(id) {
@@ -324,25 +326,20 @@ import { createSimulation } from './highway-sim.mjs';
     if (el && el.g.parentNode) {
       el.g.parentNode.removeChild(el.g);
       delete carEls[id];
-      delete visualD[id];
-      delete lastSegment[id];
+      delete carVis[id];
     }
   }
 
-  function updateCarEl(car) {
+  function updateCarEl(car, t) {
     const el = carEls[car.id];
     if (!el) return;
+    const vis = carVis[car.id];
+    if (!vis) return;
     const seg = car.segment;
     const len = lenMap[seg];
 
-    // Lerp visualD toward car.targetD for smooth motion
-    let vd = visualD[car.id];
-    if (vd == null) vd = car.targetD;
-    vd += (car.targetD - vd) * LERP_RATE;
-    // Snap when very close to avoid endless micro-drifting
-    if (Math.abs(car.targetD - vd) < 0.5) vd = car.targetD;
-    visualD[car.id] = vd;
-
+    // Linear interpolation between prevD and targetD
+    const vd = vis.prevD + (vis.targetD - vis.prevD) * t;
     const d = Math.min(Math.max(0, vd), len);
     const p = posAt(seg, d);
     const a = angleAt(seg, d);
@@ -354,19 +351,19 @@ import { createSimulation } from './highway-sim.mjs';
     else fill = 'var(--hw-car-flow)';
     el.body.setAttribute('fill', fill);
 
-    el.g.setAttribute('opacity', String(car.opacity != null ? car.opacity.toFixed(2) : '1'));
+    // Fade-in: ramp up from 0 over FADE_IN_FRAMES, then use sim opacity (handles fade-out)
+    vis.fadeAge = Math.min(1, (vis.fadeAge || 0) + 1 / FADE_IN_FRAMES);
+    const opacity = (car.opacity != null ? car.opacity : 1) * vis.fadeAge;
+    el.g.setAttribute('opacity', opacity.toFixed(2));
   }
 
   // ---- Main render loop ----
   // Sim ticks every SIM_FRAMES render frames to keep car speed natural.
-  // Render frames interpolate visual positions for smoothness.
+  // Render frames linearly interpolate positions for smoothness.
   let lastStatus = '';
   let timer = null;
   let frameCount = 0;
   let lastFrame = null; // most recent sim.tick() result
-
-  // Track which segment each car was on last frame (for transition detection)
-  const lastSegment = {};
 
   function tick() {
     const now = Date.now();
@@ -380,11 +377,20 @@ import { createSimulation } from './highway-sim.mjs';
       for (let c = 0; c < allCars.length; c++) {
         const car = allCars[c];
         if (!carEls[car.id]) createCarEl(car);
-        // Reset visualD on segment transition
-        if (lastSegment[car.id] && lastSegment[car.id] !== car.segment) {
-          visualD[car.id] = car.targetD;
+
+        const vis = carVis[car.id];
+        if (vis) {
+          if (vis.seg !== car.segment) {
+            // Segment transition: snap to new segment (different SVG path)
+            vis.prevD = car.targetD;
+            vis.targetD = car.targetD;
+            vis.seg = car.segment;
+          } else {
+            // Same segment: start new linear interpolation from previous target
+            vis.prevD = vis.targetD;
+            vis.targetD = car.targetD;
+          }
         }
-        lastSegment[car.id] = car.segment;
       }
       for (let r = 0; r < lastFrame.removedIds.length; r++) {
         removeCarEl(lastFrame.removedIds[r]);
@@ -428,10 +434,11 @@ import { createSimulation } from './highway-sim.mjs';
       }
     }
 
-    // Always: update visual positions (smooth interpolation every render frame)
+    // Always: update visual positions with linear interpolation every render frame
     if (lastFrame) {
+      const t = Math.min(1, (frameCount % SIM_FRAMES) / SIM_FRAMES);
       for (let u = 0; u < lastFrame.cars.length; u++) {
-        updateCarEl(lastFrame.cars[u]);
+        updateCarEl(lastFrame.cars[u], t);
       }
     }
   }
@@ -464,7 +471,9 @@ import { createSimulation } from './highway-sim.mjs';
     const initial = sim.getCars();
     for (let i = 0; i < initial.length; i++) {
       createCarEl(initial[i]);
-      updateCarEl(initial[i]);
+      // Force fade-in complete for seed cars
+      if (carVis[initial[i].id]) carVis[initial[i].id].fadeAge = 1;
+      updateCarEl(initial[i], 1);
     }
     timer = setInterval(tick, TICK_MS);
   } else {
@@ -472,7 +481,8 @@ import { createSimulation } from './highway-sim.mjs';
     const staticCars = sim.getCars();
     for (let j = 0; j < staticCars.length; j++) {
       createCarEl(staticCars[j]);
-      updateCarEl(staticCars[j]);
+      if (carVis[staticCars[j].id]) carVis[staticCars[j].id].fadeAge = 1;
+      updateCarEl(staticCars[j], 1);
     }
     slider.disabled = true;
     if (statusEl) statusEl.textContent = 'Animation paused (reduced motion)';
