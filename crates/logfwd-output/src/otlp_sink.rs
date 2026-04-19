@@ -40,6 +40,8 @@ mod generated {
 const SCOPE_NAME: &[u8] = b"logfwd";
 /// Version emitted in the OTLP `InstrumentationScope.version` field (from Cargo.toml).
 const SCOPE_VERSION: &[u8] = env!("CARGO_PKG_VERSION").as_bytes();
+/// Default gRPC outbound message size guardrail.
+const DEFAULT_GRPC_MAX_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // OtlpSink
@@ -78,7 +80,7 @@ enum ResourceValueRef<'a> {
     Bool(bool),
 }
 
-/// Per-row resource key: one optional borrowed/scalar value per `_resource_*` column.
+/// Per-row resource key: one optional borrowed/scalar value per resource column.
 type ResourceKey<'a> = Vec<Option<ResourceValueRef<'a>>>;
 
 /// Per-group scope key (name, version).
@@ -205,8 +207,7 @@ impl OtlpSink {
         };
 
         // Resolve column roles and downcast arrays once for the whole batch.
-        let resource_prefix = resource_prefix_from_batch(batch);
-        let columns = resolve_batch_columns(batch, self.message_field.as_str(), &resource_prefix);
+        let columns = resolve_batch_columns(batch, self.message_field.as_str());
 
         // Phase 1: encode all LogRecords and assign each row to a resource group.
         let mut records_buf: Vec<u8> =
@@ -454,8 +455,7 @@ impl OtlpSink {
             batch
         };
 
-        let resource_prefix = resource_prefix_from_batch(batch);
-        let columns = resolve_batch_columns(batch, self.message_field.as_str(), &resource_prefix);
+        let columns = resolve_batch_columns(batch, self.message_field.as_str());
         self.encoder_buf.reserve(num_rows * 128);
 
         for row in 0..num_rows {
@@ -540,6 +540,16 @@ impl OtlpSink {
             Compression::None => false,
         };
         let payload: &[u8] = if self.protocol == OtlpProtocol::Grpc {
+            if payload.len() > DEFAULT_GRPC_MAX_MESSAGE_BYTES {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "OTLP gRPC payload too large: {} bytes exceeds max {} bytes",
+                        payload.len(),
+                        DEFAULT_GRPC_MAX_MESSAGE_BYTES
+                    ),
+                ));
+            }
             write_grpc_frame(&mut self.grpc_buf, payload, payload_is_compressed)?;
             &self.grpc_buf
         } else {
@@ -783,6 +793,7 @@ enum AttrArray<'a> {
     Bytes(&'a BinaryArray),
     LargeBytes(&'a LargeBinaryArray),
     Int(&'a PrimitiveArray<Int64Type>),
+    UInt(&'a PrimitiveArray<UInt64Type>),
     Float(&'a PrimitiveArray<Float64Type>),
     Bool(&'a arrow::array::BooleanArray),
 }
@@ -813,6 +824,24 @@ impl AttrArray<'_> {
                 (!arr.is_null(row)).then(|| ResourceValueRef::Bytes(arr.value(row)))
             }
             Self::Int(arr) => (!arr.is_null(row)).then(|| ResourceValueRef::Int(arr.value(row))),
+            Self::UInt(arr) => {
+                if arr.is_null(row) {
+                    return None;
+                }
+                let value = arr.value(row);
+                match i64::try_from(value) {
+                    Ok(value) => Some(ResourceValueRef::Int(value)),
+                    Err(_) => {
+                        tracing::warn!(
+                            column = field_name,
+                            row,
+                            value,
+                            "skipping OTLP resource attribute: UInt64 value exceeds AnyValue.int_value range"
+                        );
+                        None
+                    }
+                }
+            }
             Self::Float(arr) => {
                 (!arr.is_null(row)).then(|| ResourceValueRef::Float(arr.value(row).to_bits()))
             }
@@ -894,11 +923,7 @@ fn resolve_otlp_str_col(col: &dyn Array) -> Option<OtlpStrCol<'_>> {
 }
 
 /// Scan the batch schema once and resolve column roles and downcast arrays.
-fn resolve_batch_columns<'a>(
-    batch: &'a RecordBatch,
-    message_field: &str,
-    resource_prefix: &str,
-) -> BatchColumns<'a> {
+fn resolve_batch_columns<'a>(batch: &'a RecordBatch, message_field: &str) -> BatchColumns<'a> {
     let schema = batch.schema();
     let mut timestamp_col: Option<(usize, OtlpStrCol<'_>)> = None;
     let mut timestamp_num_col: Option<(usize, &dyn Array)> = None;
@@ -1044,24 +1069,19 @@ fn resolve_batch_columns<'a>(
             }
         }
 
-        // Resource attributes — check configured prefix and legacy `_resource_` prefix.
-        let resource_key = field_name
-            .strip_prefix(resource_prefix)
-            .map(str::to_string)
-            .or_else(|| {
-                field_name
-                    .strip_prefix(field_names::LEGACY_RESOURCE_PREFIX)
-                    .map(|stripped| {
-                        field
-                            .metadata()
-                            .get(field_names::METADATA_RESOURCE_KEY)
-                            .cloned()
-                            .unwrap_or_else(|| stripped.to_string())
-                    })
-            });
-        if let Some(original_key) = resource_key {
+        let stripped_resource_key = field_name.strip_prefix(field_names::DEFAULT_RESOURCE_PREFIX);
+        if matches!(stripped_resource_key, Some("")) {
+            tracing::warn!(
+                column = field_name,
+                resource_prefix = field_names::DEFAULT_RESOURCE_PREFIX,
+                "dropping resource column with empty OTLP key after prefix stripping"
+            );
+            continue;
+        }
+        if let Some(resource_key) = stripped_resource_key.map(str::to_string) {
             let resource_attr = match field.data_type() {
                 DataType::Int64 => AttrArray::Int(batch.column(idx).as_primitive::<Int64Type>()),
+                DataType::UInt64 => AttrArray::UInt(batch.column(idx).as_primitive::<UInt64Type>()),
                 DataType::Float64 => {
                     AttrArray::Float(batch.column(idx).as_primitive::<Float64Type>())
                 }
@@ -1086,7 +1106,7 @@ fn resolve_batch_columns<'a>(
                     tracing::warn!(
                         column = field_name,
                         data_type = ?field.data_type(),
-                        "dropping struct _resource_ column; OTLP Resource attributes only support scalar values"
+                        "dropping struct resource column; OTLP Resource attributes only support scalar values"
                     );
                     continue;
                 }
@@ -1100,7 +1120,7 @@ fn resolve_batch_columns<'a>(
                     AttrArray::Str,
                 ),
             };
-            resource_cols.push((original_key, resource_attr));
+            resource_cols.push((resource_key, resource_attr));
             continue;
         }
         // Dispatch on the actual Arrow DataType, not the column name suffix.
@@ -1109,6 +1129,7 @@ fn resolve_batch_columns<'a>(
         // `field.data_type()` avoids an `as_primitive` panic in that case.
         let attr = match field.data_type() {
             DataType::Int64 => AttrArray::Int(batch.column(idx).as_primitive::<Int64Type>()),
+            DataType::UInt64 => AttrArray::UInt(batch.column(idx).as_primitive::<UInt64Type>()),
             DataType::Float64 => AttrArray::Float(batch.column(idx).as_primitive::<Float64Type>()),
             DataType::Boolean => AttrArray::Bool(batch.column(idx).as_boolean()),
             DataType::Binary => {
@@ -1174,35 +1195,6 @@ fn resolve_batch_columns<'a>(
         attribute_cols,
         resource_cols,
     }
-}
-
-fn resource_prefix_from_batch(batch: &RecordBatch) -> String {
-    let schema = batch.schema();
-
-    if let Some(prefix) = schema.metadata().get(field_names::METADATA_RESOURCE_PREFIX)
-        && !prefix.is_empty()
-    {
-        return prefix.clone();
-    }
-
-    if schema
-        .fields()
-        .iter()
-        .any(|f| f.name().starts_with(field_names::DEFAULT_RESOURCE_PREFIX))
-    {
-        return field_names::DEFAULT_RESOURCE_PREFIX.to_string();
-    }
-
-    for field in schema.fields() {
-        if let Some(resource_key) = field.metadata().get(field_names::METADATA_RESOURCE_KEY)
-            && let Some(prefix) = field.name().strip_suffix(resource_key)
-            && !prefix.is_empty()
-        {
-            return prefix.to_string();
-        }
-    }
-
-    field_names::DEFAULT_RESOURCE_PREFIX.to_string()
 }
 
 fn numeric_timestamp_ns(arr: &dyn Array, row: usize) -> Option<u64> {
@@ -1483,6 +1475,30 @@ fn encode_col_attr(buf: &mut Vec<u8>, field_number: u32, col: &ColAttr<'_>, row:
             encode_varint(buf, anyvalue_inner as u64);
             encode_varint_field(buf, otlp::ANY_VALUE_INT_VALUE, value as u64);
         }
+        AttrArray::UInt(arr) => {
+            if col.has_nulls && arr.is_null(row) {
+                return;
+            }
+            let value = arr.value(row);
+            let Ok(value) = i64::try_from(value) else {
+                tracing::warn!(
+                    column = col.name.as_str(),
+                    row,
+                    value,
+                    "skipping OTLP attribute: UInt64 value exceeds AnyValue.int_value range"
+                );
+                return;
+            };
+            let anyvalue_inner = 1 + varint_len(value as u64);
+            let kv_inner =
+                col.kv_key_cost + bytes_field_size(otlp::KEY_VALUE_VALUE, anyvalue_inner);
+            encode_tag(buf, field_number, otlp::WIRE_TYPE_LEN);
+            encode_varint(buf, kv_inner as u64);
+            buf.extend_from_slice(&col.key_encoding);
+            encode_tag(buf, otlp::KEY_VALUE_VALUE, otlp::WIRE_TYPE_LEN);
+            encode_varint(buf, anyvalue_inner as u64);
+            encode_varint_field(buf, otlp::ANY_VALUE_INT_VALUE, value as u64);
+        }
         AttrArray::Float(arr) => {
             if col.has_nulls && arr.is_null(row) {
                 return;
@@ -1736,6 +1752,28 @@ mod tests {
             }
             _ => panic!("Expected RetryAfter on 503 response, got: {:?}", result),
         }
+    }
+
+    #[tokio::test]
+    async fn grpc_oversized_payload_is_rejected_before_send() {
+        let mut sink = OtlpSink::new(
+            "test".into(),
+            "http://localhost:4317".into(),
+            OtlpProtocol::Grpc,
+            Compression::None,
+            vec![],
+            reqwest::Client::new(),
+            Arc::new(ComponentStats::new()),
+        )
+        .expect("sink must construct");
+
+        sink.encoder_buf = vec![0u8; DEFAULT_GRPC_MAX_MESSAGE_BYTES + 1];
+        let err = sink
+            .send_payload(1)
+            .await
+            .expect_err("oversized gRPC payload must return InvalidInput");
+
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
     }
 
     #[test]
@@ -2519,7 +2557,11 @@ mod tests {
         let schema = Arc::new(Schema::new(vec![
             Field::new("body", DataType::Utf8, true),
             Field::new("log_payload", DataType::Binary, true),
-            Field::new("_resource_resource_payload", DataType::Binary, true),
+            Field::new(
+                "resource.attributes.resource_payload",
+                DataType::Binary,
+                true,
+            ),
         ]));
         let batch = RecordBatch::try_new(
             schema,
@@ -2917,23 +2959,10 @@ mod tests {
         use opentelemetry_proto::tonic::common::v1::any_value::Value;
         use prost::Message;
 
-        // Build fields with `logfwd.resource_key` metadata — the same way
-        // `StreamingBuilder` produces them — so that the original OTLP keys
-        // (containing dots) survive the round-trip through Arrow column names.
-        let svc_field = Field::new("resource.attributes.service.name", DataType::Utf8, true)
-            .with_metadata(std::collections::HashMap::from([(
-                field_names::METADATA_RESOURCE_KEY.to_string(),
-                "service.name".to_string(),
-            )]));
-        let ns_field = Field::new("resource.attributes.k8s.namespace", DataType::Utf8, true)
-            .with_metadata(std::collections::HashMap::from([(
-                field_names::METADATA_RESOURCE_KEY.to_string(),
-                "k8s.namespace".to_string(),
-            )]));
         let schema = Arc::new(Schema::new(vec![
             Field::new("message", DataType::Utf8, true),
-            svc_field,
-            ns_field,
+            Field::new("resource.attributes.service.name", DataType::Utf8, true),
+            Field::new("resource.attributes.k8s.namespace", DataType::Utf8, true),
         ]));
         let batch = RecordBatch::try_new(
             schema,
@@ -3075,29 +3104,57 @@ mod tests {
     }
 
     #[test]
+    fn empty_resource_attribute_key_is_dropped() {
+        use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
+        use prost::Message;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("message", DataType::Utf8, true),
+            Field::new("resource.attributes.", DataType::Utf8, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec![Some("hello")])),
+                Arc::new(StringArray::from(vec![Some("bad-empty-key")])),
+            ],
+        )
+        .expect("valid batch");
+
+        let mut sink = make_sink();
+        sink.encode_batch(&batch, &make_metadata());
+
+        let request =
+            ExportLogsServiceRequest::decode(sink.encoder_buf.as_slice()).expect("decode request");
+        if let Some(resource) = request.resource_logs[0].resource.as_ref() {
+            assert!(
+                resource.attributes.iter().all(|kv| !kv.key.is_empty()),
+                "empty resource keys must not be emitted"
+            );
+        }
+        let lr = &request.resource_logs[0].scope_logs[0].log_records[0];
+        assert!(
+            lr.attributes
+                .iter()
+                .all(|kv| kv.key != "resource.attributes."),
+            "malformed resource prefix column should not fall through to log attributes"
+        );
+    }
+
+    #[test]
     fn typed_resource_columns_group_rows_and_encode_typed_attrs() {
         use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
         use opentelemetry_proto::tonic::common::v1::any_value::Value;
         use prost::Message;
 
-        let shard_field = Field::new("resource.attributes.service.shard", DataType::Int64, true)
-            .with_metadata(std::collections::HashMap::from([(
-                field_names::METADATA_RESOURCE_KEY.to_string(),
-                "service.shard".to_string(),
-            )]));
-        let enabled_field = Field::new(
-            "resource.attributes.service.enabled",
-            DataType::Boolean,
-            true,
-        )
-        .with_metadata(std::collections::HashMap::from([(
-            field_names::METADATA_RESOURCE_KEY.to_string(),
-            "service.enabled".to_string(),
-        )]));
         let schema = Arc::new(Schema::new(vec![
             Field::new("message", DataType::Utf8, true),
-            shard_field,
-            enabled_field,
+            Field::new("resource.attributes.service.shard", DataType::Int64, true),
+            Field::new(
+                "resource.attributes.service.enabled",
+                DataType::Boolean,
+                true,
+            ),
         ]));
         let batch = RecordBatch::try_new(
             schema,
@@ -3187,21 +3244,10 @@ mod tests {
         use opentelemetry_proto::tonic::common::v1::any_value::Value;
         use prost::Message;
 
-        let svc_field = Field::new("resource.attributes.service.name", DataType::Utf8, true)
-            .with_metadata(std::collections::HashMap::from([(
-                field_names::METADATA_RESOURCE_KEY.to_string(),
-                "service.name".to_string(),
-            )]));
-        let shard_field = Field::new("resource.attributes.service.shard", DataType::Int64, true)
-            .with_metadata(std::collections::HashMap::from([(
-                field_names::METADATA_RESOURCE_KEY.to_string(),
-                "service.shard".to_string(),
-            )]));
-
         let schema = Arc::new(Schema::new(vec![
             Field::new("message", DataType::Utf8, true),
-            svc_field,
-            shard_field,
+            Field::new("resource.attributes.service.name", DataType::Utf8, true),
+            Field::new("resource.attributes.service.shard", DataType::Int64, true),
         ]));
         let batch = RecordBatch::try_new(
             schema,
@@ -3554,6 +3600,53 @@ mod tests {
         assert_eq!(
             lr.time_unix_nano, EXPECTED_NS,
             "UInt64 time_unix_nano column must be encoded as LogRecord.time_unix_nano"
+        );
+    }
+
+    #[test]
+    fn uint64_attribute_encodes_or_drops_by_int64_range() {
+        use arrow::array::UInt64Array;
+        use opentelemetry_proto::tonic::{
+            collector::logs::v1::ExportLogsServiceRequest, common::v1::any_value::Value,
+        };
+        use prost::Message;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("body", DataType::Utf8, true),
+            Field::new("count_u64", DataType::UInt64, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec![Some("ok"), Some("too-big")])),
+                Arc::new(UInt64Array::from(vec![Some(42u64), Some(u64::MAX)])),
+            ],
+        )
+        .expect("valid batch");
+
+        let mut sink = make_sink();
+        sink.encode_batch(&batch, &make_metadata());
+
+        let request = ExportLogsServiceRequest::decode(sink.encoder_buf.as_slice())
+            .expect("prost must decode UInt64 attribute batch");
+        let records = &request.resource_logs[0].scope_logs[0].log_records;
+        let first = records[0]
+            .attributes
+            .iter()
+            .find(|kv| kv.key == "count_u64")
+            .expect("count_u64 attribute must be present");
+
+        assert_eq!(
+            first.value.as_ref().and_then(|v| match v.value.as_ref() {
+                Some(Value::IntValue(v)) => Some(*v),
+                _ => None,
+            }),
+            Some(42),
+            "representable UInt64 must encode as AnyValue.int_value"
+        );
+        assert!(
+            records[1].attributes.iter().all(|kv| kv.key != "count_u64"),
+            "out-of-range UInt64 must not be stringified or wrapped into int_value"
         );
     }
 

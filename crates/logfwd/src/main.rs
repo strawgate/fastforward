@@ -7,6 +7,7 @@ static ALLOC: dhat::Alloc = dhat::Alloc;
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 use std::env;
+use std::ffi::OsString;
 use std::io::{self, IsTerminal, Write};
 use std::sync::Arc;
 use std::time::Duration;
@@ -31,16 +32,18 @@ const LONG_VERSION: &str = concat!(
     ")"
 );
 const CLI_AFTER_HELP: &str = r"Examples:
-  logfwd run --config config.yaml
-  logfwd validate --config config.yaml
-  logfwd dry-run --config config.yaml
-  logfwd effective-config --config config.yaml
-  logfwd blackhole
-  logfwd blast --destination otlp --endpoint http://127.0.0.1:4318/v1/logs
-  logfwd devour --mode otlp --listen 127.0.0.1:4318
-  logfwd generate-json 10000 test.json
-  logfwd wizard
-  logfwd completions bash
+  ff run --config config.yaml
+  cat app.log | ff
+  kubectl logs pod/app | ff --format json --service checkout
+  ff validate --config config.yaml
+  ff dry-run --config config.yaml
+  ff effective-config --config config.yaml
+  ff blackhole
+  ff blast --destination otlp --endpoint http://127.0.0.1:4318/v1/logs
+  ff devour --mode otlp --listen 127.0.0.1:4318
+  ff generate-json 10000 test.json
+  ff wizard
+  ff completions bash
 
 Environment:
   LOGFWD_CONFIG    Config file path (auto-discovered if not set)
@@ -314,9 +317,51 @@ struct DevourArgs {
     diagnostics_addr: String,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum SendFormat {
+    Auto,
+    Cri,
+    Json,
+    Raw,
+}
+
+impl SendFormat {
+    fn as_config_format(self) -> logfwd_config::Format {
+        match self {
+            Self::Auto => logfwd_config::Format::Auto,
+            Self::Cri => logfwd_config::Format::Cri,
+            Self::Json => logfwd_config::Format::Json,
+            Self::Raw => logfwd_config::Format::Raw,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Args, Default)]
+struct SendArgs {
+    #[arg(
+        short = 'c',
+        long = "config",
+        value_name = "FILE",
+        help = "Destination YAML config file"
+    )]
+    config: Option<String>,
+
+    /// Input format for stdin.
+    #[arg(long, value_enum)]
+    format: Option<SendFormat>,
+
+    /// Set `service.name` on emitted records.
+    #[arg(long)]
+    service: Option<String>,
+
+    /// Add or override a resource attribute, repeatable: --resource key=value.
+    #[arg(long, value_name = "KEY=VALUE")]
+    resource: Vec<String>,
+}
+
 #[derive(Debug, Parser)]
 #[command(
-    name = "logfwd",
+    name = "ff",
     about = "Fast log forwarder with SQL transforms",
     long_about = "Fast log forwarder with SQL transforms",
     version = VERSION,
@@ -361,6 +406,8 @@ enum Commands {
         )]
         config: Option<String>,
     },
+    /// Read stdin, send it to the configured destination, drain, and exit.
+    Send(SendArgs),
     /// Blast generated data into a destination sink via the normal runtime pipeline.
     Blast(BlastArgs),
     /// Run a blackhole receiver via the normal runtime pipeline.
@@ -417,7 +464,8 @@ fn main() {
 
 #[tokio::main]
 async fn main_inner() -> i32 {
-    let cli = match Cli::try_parse() {
+    let stdin_is_terminal = io::stdin().is_terminal();
+    let cli = match parse_cli_from(env::args_os(), stdin_is_terminal) {
         Ok(cli) => cli,
         Err(err) => {
             let code = match err.kind() {
@@ -431,6 +479,8 @@ async fn main_inner() -> i32 {
 
     let result = if let Some(command) = cli.command {
         run_command(command).await
+    } else if !stdin_is_terminal {
+        run_command(Commands::Send(SendArgs::default())).await
     } else {
         if let Some(path) = discover_config() {
             eprintln!(
@@ -442,7 +492,7 @@ async fn main_inner() -> i32 {
                 reset(),
             );
             eprintln!(
-                "{}      run {}logfwd run --config {}{}",
+                "{}      run {}ff run --config {}{}",
                 dim(),
                 bold(),
                 path.display(),
@@ -451,7 +501,7 @@ async fn main_inner() -> i32 {
             eprintln!();
         } else {
             eprintln!(
-                "{}hint{}: no config found — try {}logfwd init{} or {}logfwd wizard{} to get started",
+                "{}hint{}: no config found — try {}ff init{} or {}ff wizard{} to get started",
                 dim(),
                 reset(),
                 bold(),
@@ -490,6 +540,7 @@ async fn run_command(command: Commands) -> Result<(), CliError> {
             let config_path = resolve_config_path(config.as_deref())?;
             cmd_run(&config_path, false, true).await
         }
+        Commands::Send(args) => cmd_send(args).await,
         Commands::Blast(args) => cmd_blast(args).await,
         Commands::Devour(args) => cmd_devour(args).await,
         Commands::Blackhole { bind_addr } => cmd_blackhole(bind_addr.as_deref()).await,
@@ -507,6 +558,43 @@ async fn run_command(command: Commands) -> Result<(), CliError> {
     }
 }
 
+fn parse_cli_from<I, T>(args: I, stdin_is_terminal: bool) -> Result<Cli, clap::Error>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString>,
+{
+    let args = args.into_iter().map(Into::into).collect::<Vec<_>>();
+    match Cli::try_parse_from(args.clone()) {
+        Ok(cli) => Ok(cli),
+        Err(err) => {
+            if stdin_is_terminal || !should_retry_parse_as_send(err.kind()) {
+                return Err(err);
+            }
+            Cli::try_parse_from(rewrite_args_as_send(args))
+        }
+    }
+}
+
+fn should_retry_parse_as_send(kind: ErrorKind) -> bool {
+    matches!(
+        kind,
+        ErrorKind::UnknownArgument | ErrorKind::InvalidSubcommand
+    )
+}
+
+fn rewrite_args_as_send(args: Vec<OsString>) -> Vec<OsString> {
+    let mut rewritten = Vec::with_capacity(args.len() + 1);
+    if let Some((program, rest)) = args.split_first() {
+        rewritten.push(program.clone());
+        rewritten.push(OsString::from("send"));
+        rewritten.extend(rest.iter().cloned());
+    } else {
+        rewritten.push(OsString::from("ff"));
+        rewritten.push(OsString::from("send"));
+    }
+    rewritten
+}
+
 // ---------------------------------------------------------------------------
 // Commands
 // ---------------------------------------------------------------------------
@@ -514,14 +602,13 @@ async fn run_command(command: Commands) -> Result<(), CliError> {
 async fn cmd_run(config_path: &str, validate_only: bool, dry_run: bool) -> Result<(), CliError> {
     let config_yaml = std::fs::read_to_string(config_path)
         .map_err(|e| CliError::Config(format!("cannot read {config_path}: {e}")))?;
-    let config = match logfwd_config::Config::load_str(&config_yaml) {
+    let base_path = std::path::Path::new(config_path).parent();
+    let config = match logfwd_config::Config::load_str_with_base_path(&config_yaml, base_path) {
         Ok(c) => c,
         Err(e) => {
             return Err(CliError::Config(e.to_string()));
         }
     };
-
-    let base_path = std::path::Path::new(config_path).parent();
 
     if validate_only || dry_run {
         // Both `validate` and `dry-run` build pipelines to catch SQL/wiring errors.
@@ -529,6 +616,132 @@ async fn cmd_run(config_path: &str, validate_only: bool, dry_run: bool) -> Resul
     }
 
     run_pipelines(config, base_path, config_path, &config_yaml, None).await
+}
+
+async fn cmd_send(args: SendArgs) -> Result<(), CliError> {
+    if io::stdin().is_terminal() {
+        return Err(CliError::Config(
+            "stdin is interactive; pipe data into `ff` or use `ff run --config <file>` for daemon mode"
+                .to_owned(),
+        ));
+    }
+
+    let config_path = resolve_send_config_path(args.config.as_deref())?;
+    let config_yaml = std::fs::read_to_string(&config_path)
+        .map_err(|e| CliError::Config(format!("cannot read {config_path}: {e}")))?;
+    let runnable_yaml = build_stdin_send_config_yaml(
+        &config_yaml,
+        args.format,
+        args.service.as_deref(),
+        &args.resource,
+    )?;
+    let base_path = std::path::Path::new(&config_path).parent();
+    let config = logfwd_config::Config::load_str_with_base_path(&runnable_yaml, base_path)
+        .map_err(|e| CliError::Config(e.to_string()))?;
+
+    run_pipelines(config, base_path, &config_path, &runnable_yaml, None).await
+}
+
+fn build_stdin_send_config_yaml(
+    config_yaml: &str,
+    format: Option<SendFormat>,
+    service: Option<&str>,
+    resources: &[String],
+) -> Result<String, CliError> {
+    let mut value: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(config_yaml).map_err(|e| CliError::Config(e.to_string()))?;
+    let mapping = value.as_mapping_mut().ok_or_else(|| {
+        CliError::Config("send destination config must be a YAML mapping".to_owned())
+    })?;
+
+    for unsupported in ["input", "pipelines"] {
+        if mapping.contains_key(yaml_string(unsupported)) {
+            return Err(CliError::Config(format!(
+                "`ff send` expects a destination-only config; remove top-level `{unsupported}` or use `ff run`"
+            )));
+        }
+    }
+    if !mapping.contains_key(yaml_string("output")) {
+        return Err(CliError::Config(
+            "`ff send` destination config must define top-level `output`".to_owned(),
+        ));
+    }
+
+    let mut input = serde_yaml_ng::Mapping::new();
+    input.insert(yaml_string("type"), yaml_string("stdin"));
+    if let Some(format) = format {
+        let format = format.as_config_format().to_string();
+        input.insert(yaml_string("format"), yaml_string(&format));
+    }
+    mapping.insert(yaml_string("input"), serde_yaml_ng::Value::Mapping(input));
+
+    merge_send_resource_attrs(mapping, service, resources)?;
+
+    serde_yaml_ng::to_string(&value).map_err(|e| CliError::Config(e.to_string()))
+}
+
+fn merge_send_resource_attrs(
+    mapping: &mut serde_yaml_ng::Mapping,
+    service: Option<&str>,
+    resources: &[String],
+) -> Result<(), CliError> {
+    if service.is_none() && resources.is_empty() {
+        return Ok(());
+    }
+
+    let key = yaml_string("resource_attrs");
+    if !mapping.contains_key(&key) {
+        mapping.insert(
+            key.clone(),
+            serde_yaml_ng::Value::Mapping(serde_yaml_ng::Mapping::new()),
+        );
+    }
+    let attrs = mapping
+        .get_mut(&key)
+        .and_then(serde_yaml_ng::Value::as_mapping_mut)
+        .ok_or_else(|| {
+            CliError::Config(
+                "top-level `resource_attrs` must be a mapping when using send overrides".to_owned(),
+            )
+        })?;
+
+    if let Some(service) = service {
+        attrs.insert(yaml_string("service.name"), yaml_string(service));
+    }
+    for raw in resources {
+        let (name, value) = parse_key_value(raw, "--resource")?;
+        attrs.insert(yaml_string(name), yaml_string(value));
+    }
+
+    Ok(())
+}
+
+fn parse_key_value<'a>(raw: &'a str, flag: &str) -> Result<(&'a str, &'a str), CliError> {
+    let (name, value) = raw.split_once('=').ok_or_else(|| {
+        CliError::Config(format!("{flag} must be in KEY=VALUE form, got `{raw}`"))
+    })?;
+    let name = name.trim();
+    let value = value.trim();
+    if name.is_empty() {
+        return Err(CliError::Config(format!(
+            "{flag} key must not be empty, got `{raw}`"
+        )));
+    }
+    Ok((name, value))
+}
+
+fn yaml_string(value: &str) -> serde_yaml_ng::Value {
+    serde_yaml_ng::Value::String(value.to_owned())
+}
+
+fn resolve_send_config_path(config_path: Option<&str>) -> Result<String, CliError> {
+    resolve_config_path(config_path).map_err(|err| match err {
+        CliError::Config(_) => CliError::Config(
+            "no destination config file found (use `ff send --config <file>` or set LOGFWD_CONFIG)"
+                .to_owned(),
+        ),
+        CliError::Runtime(e) => CliError::Runtime(e),
+    })
 }
 
 async fn cmd_blast(mut args: BlastArgs) -> Result<(), CliError> {
@@ -746,15 +959,15 @@ fn cmd_effective_config(config_path: Option<&str>) -> Result<(), CliError> {
 
     let config_yaml = std::fs::read_to_string(&config_path)
         .map_err(|e| CliError::Config(format!("cannot read {config_path}: {e}")))?;
-    let effective_yaml = logfwd_config::Config::expand_env_str(&config_yaml)
+    let effective_yaml = logfwd_config::Config::expand_env_yaml_str(&config_yaml)
         .map_err(|e| CliError::Config(e.to_string()))?;
 
     // Read-only validation for inspection flows: reject configs that would
     // fail format or SQL-plan checks without constructing runtime inputs that
     // bind sockets or touch long-lived resources.
-    let config = logfwd_config::Config::load_str(&config_yaml)
-        .map_err(|e| CliError::Config(e.to_string()))?;
     let base_path = std::path::Path::new(&config_path).parent();
+    let config = logfwd_config::Config::load_str_with_base_path(&config_yaml, base_path)
+        .map_err(|e| CliError::Config(e.to_string()))?;
     validate_pipelines_read_only(
         &config,
         base_path,
@@ -771,17 +984,17 @@ fn cmd_effective_config(config_path: Option<&str>) -> Result<(), CliError> {
 fn cmd_init() -> Result<(), CliError> {
     let path = std::path::Path::new("logfwd.yaml");
 
-    let template = r#"# logfwd configuration
+    let template = r#"# ff configuration
 # Docs: https://github.com/strawgate/memagent
 
 # ── Quick start ─────────────────────────────────────────────
-# 1. Generate sample data:  logfwd generate-json 10000 sample.json
-# 2. Validate this config:  logfwd validate --config logfwd.yaml
-# 3. Run the pipeline:      logfwd run --config logfwd.yaml
+# 1. Generate sample data:  ff generate-json 10000 sample.json
+# 2. Validate this config:  ff validate --config logfwd.yaml
+# 3. Run the pipeline:      ff run --config logfwd.yaml
 #
 # For production, change the input path and output to your real
 # source/destination — see the examples at https://github.com/strawgate/memagent/tree/main/examples/use-cases/
-# Or run `logfwd wizard` for an interactive setup.
+# Or run `ff wizard` for an interactive setup.
 
 # Tail a JSON log file and stream new lines as they appear.
 input:
@@ -823,12 +1036,12 @@ output:
     eprintln!();
     eprintln!("{}Try it now:{}", bold(), reset());
     eprintln!(
-        "  logfwd generate-json 10000 sample.json   {}# create sample data{}",
+        "  ff generate-json 10000 sample.json   {}# create sample data{}",
         dim(),
         reset()
     );
     eprintln!(
-        "  logfwd run --config logfwd.yaml           {}# run the pipeline{}",
+        "  ff run --config logfwd.yaml           {}# run the pipeline{}",
         dim(),
         reset()
     );
@@ -845,7 +1058,7 @@ fn cmd_wizard() -> Result<(), CliError> {
             "wizard requires an interactive terminal on stdin and stdout".to_owned(),
         ));
     }
-    println!("{}logfwd config wizard{}", bold(), reset());
+    println!("{}ff config wizard{}", bold(), reset());
     println!();
 
     // Step 1: Choose between a use-case preset or custom input/output.
@@ -928,7 +1141,7 @@ fn cmd_wizard() -> Result<(), CliError> {
 
     eprintln!("{}created{} {}", green(), reset(), path.as_path().display());
     eprintln!(
-        "{}next{}: run {}logfwd validate --config {}{}",
+        "{}next{}: run {}ff validate --config {}{}",
         dim(),
         reset(),
         bold(),
@@ -942,9 +1155,9 @@ fn validate_generated_config_read_only(
     config_yaml: &str,
     output_path: &std::path::Path,
 ) -> Result<(), CliError> {
-    let config = logfwd_config::Config::load_str(config_yaml)
-        .map_err(|e| CliError::Config(e.to_string()))?;
     let base_path = output_path.parent();
+    let config = logfwd_config::Config::load_str_with_base_path(config_yaml, base_path)
+        .map_err(|e| CliError::Config(e.to_string()))?;
     let mut validation_errors = Vec::new();
     let result = validate_pipelines_read_only(
         &config,
@@ -1068,37 +1281,27 @@ fn cmd_completions(shell: CompletionShell) {
 
     match shell {
         CompletionShell::Bash => {
-            clap_complete::generate(clap_complete::Shell::Bash, &mut cmd, "logfwd", &mut stdout);
+            clap_complete::generate(clap_complete::Shell::Bash, &mut cmd, "ff", &mut stdout);
         }
         CompletionShell::Elvish => {
-            clap_complete::generate(
-                clap_complete::Shell::Elvish,
-                &mut cmd,
-                "logfwd",
-                &mut stdout,
-            );
+            clap_complete::generate(clap_complete::Shell::Elvish, &mut cmd, "ff", &mut stdout);
         }
         CompletionShell::Fish => {
-            clap_complete::generate(clap_complete::Shell::Fish, &mut cmd, "logfwd", &mut stdout);
+            clap_complete::generate(clap_complete::Shell::Fish, &mut cmd, "ff", &mut stdout);
         }
         CompletionShell::PowerShell => {
             clap_complete::generate(
                 clap_complete::Shell::PowerShell,
                 &mut cmd,
-                "logfwd",
+                "ff",
                 &mut stdout,
             );
         }
         CompletionShell::Zsh => {
-            clap_complete::generate(clap_complete::Shell::Zsh, &mut cmd, "logfwd", &mut stdout);
+            clap_complete::generate(clap_complete::Shell::Zsh, &mut cmd, "ff", &mut stdout);
         }
         CompletionShell::Nushell => {
-            clap_complete::generate(
-                clap_complete_nushell::Nushell,
-                &mut cmd,
-                "logfwd",
-                &mut stdout,
-            );
+            clap_complete::generate(clap_complete_nushell::Nushell, &mut cmd, "ff", &mut stdout);
         }
     }
 }
@@ -1190,6 +1393,12 @@ where
 
     let mut errors = 0;
     for (name, pipe_cfg) in &config.pipelines {
+        if let Err(err) = validate_pipeline_read_only(pipe_cfg, base_path) {
+            on_error(format!("pipeline '{name}': {err}"));
+            errors += 1;
+            continue;
+        }
+
         match Pipeline::from_config(name, pipe_cfg, &meter, base_path) {
             Ok(mut pipeline) => {
                 // Execute a probe batch through the SQL plan to catch planning
@@ -1255,18 +1464,18 @@ fn validate_transform_probe_read_only(
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
 
-    let fields: Vec<Field> = if transform.analyzer().referenced_columns.is_empty() {
+    let scan_config = transform.scan_config();
+    let fields: Vec<Field> = if scan_config.extract_all || scan_config.wanted_fields.is_empty() {
         vec![
             Field::new("body", DataType::Utf8, true),
             Field::new("level", DataType::Utf8, true),
             Field::new("msg", DataType::Utf8, true),
         ]
     } else {
-        transform
-            .analyzer()
-            .referenced_columns
+        scan_config
+            .wanted_fields
             .iter()
-            .map(|name| Field::new(name, DataType::Utf8, true))
+            .map(|field| Field::new(field.name.as_str(), DataType::Utf8, true))
             .collect()
     };
 
@@ -1281,6 +1490,98 @@ fn validate_transform_probe_read_only(
         .execute_blocking(batch)
         .map(|_| ())
         .map_err(|e| e.to_string())
+}
+
+const GENERATOR_LOGS_SIMPLE_COLUMNS: &[&str] = &[
+    "timestamp",
+    "level",
+    "message",
+    "duration_ms",
+    "request_id",
+    "service",
+    "status",
+];
+
+fn known_input_columns_read_only(
+    input_cfg: &logfwd_config::InputConfig,
+) -> Option<&'static [&'static str]> {
+    use logfwd_config::{GeneratorComplexityConfig, GeneratorProfileConfig, InputTypeConfig};
+
+    match &input_cfg.type_config {
+        // Generator logs/simple has a stable built-in schema. Other profiles
+        // or complexities are broader or user-defined, so skip strict checks.
+        InputTypeConfig::Generator(generator_cfg) => {
+            let is_logs_profile = generator_cfg
+                .generator
+                .as_ref()
+                .and_then(|cfg| cfg.profile.as_ref())
+                .is_none_or(|profile| matches!(profile, GeneratorProfileConfig::Logs));
+            let is_simple_complexity = generator_cfg
+                .generator
+                .as_ref()
+                .and_then(|cfg| cfg.complexity.as_ref())
+                .is_none_or(|complexity| matches!(complexity, GeneratorComplexityConfig::Simple));
+            if !is_logs_profile || !is_simple_complexity {
+                None
+            } else {
+                Some(GENERATOR_LOGS_SIMPLE_COLUMNS)
+            }
+        }
+        _ => None,
+    }
+}
+
+fn validate_known_columns_read_only(
+    input_name: &str,
+    transform: &logfwd::transform::SqlTransform,
+    known_columns: Option<&'static [&'static str]>,
+) -> Result<(), String> {
+    let Some(known_columns) = known_columns else {
+        return Ok(());
+    };
+
+    // SELECT * expands to whatever the engine provides — skip validation.
+    let analyzer = transform.analyzer();
+    if analyzer.uses_select_star {
+        return Ok(());
+    }
+
+    let scan_config = transform.scan_config();
+    if scan_config.extract_all {
+        return Ok(());
+    }
+
+    let known: std::collections::HashSet<&str> = known_columns.iter().copied().collect();
+
+    let mut unknown: Vec<String> = scan_config
+        .wanted_fields
+        .iter()
+        .map(|field| field.name.as_str())
+        .filter(|column| {
+            // Strip table qualifier (e.g. "logs.level" -> "level").
+            let bare = match column.rfind('.') {
+                Some(pos) => &column[pos + 1..],
+                None => column,
+            };
+            // Lowercase before lookup — known_columns is all-lowercase.
+            !known.contains(bare.to_lowercase().as_str())
+        })
+        .map(str::to_owned)
+        .collect();
+    unknown.sort_unstable();
+    unknown.dedup();
+
+    if unknown.is_empty() {
+        return Ok(());
+    }
+
+    let mut supported: Vec<&str> = known_columns.to_vec();
+    supported.sort_unstable();
+    Err(format!(
+        "input '{input_name}': SQL references unknown column(s) {} for this input schema (known: {})",
+        unknown.join(", "),
+        supported.join(", ")
+    ))
 }
 
 fn validate_pipeline_read_only(
@@ -1488,7 +1789,7 @@ fn validate_pipeline_read_only(
                 .format
                 .clone()
                 .unwrap_or(match input_cfg.type_config {
-                    InputTypeConfig::File(_) => Format::Auto,
+                    InputTypeConfig::File(_) | InputTypeConfig::Stdin(_) => Format::Auto,
                     _ => Format::Json,
                 });
             validate_input_format_read_only(&input_name, input_cfg.input_type(), &format)?;
@@ -1496,6 +1797,12 @@ fn validate_pipeline_read_only(
 
         let input_sql = input_cfg.sql.as_deref().unwrap_or(pipeline_sql);
         let mut transform = SqlTransform::new(input_sql).map_err(|e| e.to_string())?;
+        let known_columns = if config.enrichment.is_empty() {
+            known_input_columns_read_only(input_cfg)
+        } else {
+            None
+        };
+        validate_known_columns_read_only(&input_name, &transform, known_columns)?;
         #[cfg(feature = "datafusion")]
         {
             if let Some(ref db) = geo_database {
@@ -1526,6 +1833,7 @@ fn validate_input_format_read_only(
             format,
             Format::Cri | Format::Auto | Format::Json | Format::Raw
         ),
+        InputType::Stdin => format.is_stdin_compatible(),
         InputType::Generator | InputType::Otlp => matches!(format, Format::Json),
         InputType::Http => matches!(format, Format::Json | Format::Raw),
         InputType::Udp | InputType::Tcp => matches!(format, Format::Json | Format::Raw),
@@ -1826,7 +2134,7 @@ mod cli_tests {
 
     #[test]
     fn clap_parses_validate_subcommand() {
-        let cli = Cli::try_parse_from(["logfwd", "validate", "--config", "foo.yaml"])
+        let cli = Cli::try_parse_from(["ff", "validate", "--config", "foo.yaml"])
             .expect("parser should accept validate subcommand");
         match cli.command.expect("command") {
             Commands::Validate { config } => assert_eq!(config.as_deref(), Some("foo.yaml")),
@@ -1836,14 +2144,14 @@ mod cli_tests {
 
     #[test]
     fn clap_parses_effective_config_with_optional_config_flag() {
-        let with_path = Cli::try_parse_from(["logfwd", "effective-config", "--config", "foo.yaml"])
+        let with_path = Cli::try_parse_from(["ff", "effective-config", "--config", "foo.yaml"])
             .expect("parser should accept effective-config with path");
         match with_path.command.expect("command") {
             Commands::EffectiveConfig { config } => assert_eq!(config.as_deref(), Some("foo.yaml")),
             other => panic!("expected effective-config command, got {other:?}"),
         }
 
-        let without_path = Cli::try_parse_from(["logfwd", "effective-config"])
+        let without_path = Cli::try_parse_from(["ff", "effective-config"])
             .expect("parser should accept effective-config without path");
         match without_path.command.expect("command") {
             Commands::EffectiveConfig { config } => assert!(config.is_none()),
@@ -1853,7 +2161,7 @@ mod cli_tests {
 
     #[test]
     fn clap_parses_blackhole_default_form() {
-        let cli = Cli::try_parse_from(["logfwd", "blackhole"])
+        let cli = Cli::try_parse_from(["ff", "blackhole"])
             .expect("parser should accept blackhole without addr");
         match cli.command.expect("command") {
             Commands::Blackhole { bind_addr } => assert!(bind_addr.is_none()),
@@ -1862,16 +2170,172 @@ mod cli_tests {
     }
 
     #[test]
+    fn send_command_with_overrides_parses_successfully() {
+        let cli = Cli::try_parse_from([
+            "ff",
+            "send",
+            "--config",
+            "dest.yaml",
+            "--format",
+            "json",
+            "--service",
+            "checkout",
+            "--resource",
+            "deployment=blue",
+        ])
+        .expect("parser should accept send command");
+        match cli.command.expect("command") {
+            Commands::Send(args) => {
+                assert_eq!(args.config.as_deref(), Some("dest.yaml"));
+                assert!(matches!(args.format, Some(SendFormat::Json)));
+                assert_eq!(args.service.as_deref(), Some("checkout"));
+                assert_eq!(args.resource, ["deployment=blue"]);
+            }
+            other => panic!("expected send command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn piped_bare_send_with_overrides_parses_successfully() {
+        let cli = parse_cli_from(
+            [
+                "ff",
+                "--config",
+                "dest.yaml",
+                "--format",
+                "raw",
+                "--service",
+                "checkout",
+                "--resource",
+                "deployment=blue",
+            ],
+            false,
+        )
+        .expect("parser should retry piped bare args as send command");
+        match cli.command.expect("command") {
+            Commands::Send(args) => {
+                assert_eq!(args.config.as_deref(), Some("dest.yaml"));
+                assert!(matches!(args.format, Some(SendFormat::Raw)));
+                assert_eq!(args.service.as_deref(), Some("checkout"));
+                assert_eq!(args.resource, ["deployment=blue"]);
+            }
+            other => panic!("expected send command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn interactive_bare_send_overrides_remain_invalid() {
+        let err = parse_cli_from(["ff", "--format", "raw"], true)
+            .expect_err("interactive top-level send args should stay invalid");
+        assert!(matches!(err.kind(), ErrorKind::UnknownArgument));
+    }
+
+    #[test]
+    fn stdin_send_config_injects_input_and_merges_resources() {
+        let yaml = r"
+resource_attrs:
+  env: prod
+output:
+  type: stdout
+";
+        let resource = vec![" deployment = blue ".to_owned()];
+        let generated =
+            build_stdin_send_config_yaml(yaml, Some(SendFormat::Json), Some("checkout"), &resource)
+                .expect("send config should render");
+        let config =
+            logfwd_config::Config::load_str(&generated).expect("generated config should parse");
+        let pipeline = &config.pipelines["default"];
+        let input = &pipeline.inputs[0];
+
+        assert_eq!(input.input_type(), logfwd_config::InputType::Stdin);
+        assert_eq!(input.format, Some(logfwd_config::Format::Json));
+        assert_eq!(
+            pipeline
+                .resource_attrs
+                .get("service.name")
+                .map(String::as_str),
+            Some("checkout")
+        );
+        assert_eq!(
+            pipeline
+                .resource_attrs
+                .get("deployment")
+                .map(String::as_str),
+            Some("blue")
+        );
+        assert_eq!(
+            pipeline.resource_attrs.get("env").map(String::as_str),
+            Some("prod")
+        );
+    }
+
+    #[test]
+    fn stdin_send_config_rejects_runtime_inputs() {
+        for (field, yaml) in [
+            (
+                "input",
+                "input:\n  type: file\n  path: /tmp/app.log\noutput:\n  type: stdout\n",
+            ),
+            (
+                "pipelines",
+                "pipelines:\n  default:\n    input:\n      type: file\n      path: /tmp/app.log\n    output:\n      type: stdout\n",
+            ),
+        ] {
+            let err = build_stdin_send_config_yaml(yaml, None, None, &[])
+                .expect_err("send config should reject runtime input shape");
+            assert!(
+                err.to_string().contains(field),
+                "error should mention {field}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn stdin_send_config_requires_destination_output() {
+        let err = build_stdin_send_config_yaml("server: {}\n", None, None, &[])
+            .expect_err("send config should require output");
+        assert!(
+            err.to_string().contains("must define top-level `output`"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn stdin_send_config_rejects_malformed_resource_override() {
+        let err = build_stdin_send_config_yaml(
+            "output:\n  type: stdout\n",
+            None,
+            None,
+            &["deployment".to_owned()],
+        )
+        .expect_err("send config should reject malformed resource override");
+        assert!(
+            err.to_string().contains("--resource"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_input_format_read_only_accepts_stdin_auto() {
+        validate_input_format_read_only(
+            "stdin",
+            logfwd_config::InputType::Stdin,
+            &logfwd_config::Format::Auto,
+        )
+        .expect("stdin should accept auto format");
+    }
+
+    #[test]
     fn clap_completions_supports_nushell_and_powershell_alias() {
-        let nu = Cli::try_parse_from(["logfwd", "completions", "nushell"])
-            .expect("nushell should parse");
+        let nu =
+            Cli::try_parse_from(["ff", "completions", "nushell"]).expect("nushell should parse");
         match nu.command.expect("command") {
             Commands::Completions { shell } => assert!(matches!(shell, CompletionShell::Nushell)),
             other => panic!("expected completions command, got {other:?}"),
         }
 
-        let pwsh = Cli::try_parse_from(["logfwd", "completions", "pwsh"])
-            .expect("pwsh alias should parse");
+        let pwsh =
+            Cli::try_parse_from(["ff", "completions", "pwsh"]).expect("pwsh alias should parse");
         match pwsh.command.expect("command") {
             Commands::Completions { shell } => {
                 assert!(matches!(shell, CompletionShell::PowerShell))
@@ -1882,7 +2346,7 @@ mod cli_tests {
 
     #[test]
     fn clap_parses_generate_json_subcommand() {
-        let cli = Cli::try_parse_from(["logfwd", "generate-json", "5", "out.json"])
+        let cli = Cli::try_parse_from(["ff", "generate-json", "5", "out.json"])
             .expect("generate-json should parse");
         match cli.command.expect("command") {
             Commands::GenerateJson {
@@ -1898,7 +2362,7 @@ mod cli_tests {
 
     #[test]
     fn clap_supports_help_subcommand() {
-        let err = Cli::try_parse_from(["logfwd", "help"])
+        let err = Cli::try_parse_from(["ff", "help"])
             .expect_err("help subcommand should trigger help display");
         assert_eq!(err.kind(), ErrorKind::DisplayHelp);
     }
@@ -1906,7 +2370,7 @@ mod cli_tests {
     #[test]
     fn clap_parses_blast_and_devour_aliases() {
         let blast = Cli::try_parse_from([
-            "logfwd",
+            "ff",
             "blast",
             "--destination",
             "elasticsearch_otlp",
@@ -1922,7 +2386,7 @@ mod cli_tests {
         }
 
         let blast_arrow = Cli::try_parse_from([
-            "logfwd",
+            "ff",
             "blast",
             "--destination",
             "arrow_ipc",
@@ -1937,7 +2401,7 @@ mod cli_tests {
             other => panic!("expected blast command, got {other:?}"),
         }
 
-        let devour = Cli::try_parse_from(["logfwd", "devour", "--mode", "elasticsearch"])
+        let devour = Cli::try_parse_from(["ff", "devour", "--mode", "elasticsearch"])
             .expect("devour elasticsearch alias should parse");
         match devour.command.expect("command") {
             Commands::Devour(args) => assert!(matches!(args.mode, DevourMode::ElasticsearchBulk)),
@@ -1947,7 +2411,7 @@ mod cli_tests {
 
     #[test]
     fn clap_parses_devour_defaults() {
-        let cli = Cli::try_parse_from(["logfwd", "devour"]).expect("devour should parse");
+        let cli = Cli::try_parse_from(["ff", "devour"]).expect("devour should parse");
         match cli.command.expect("command") {
             Commands::Devour(args) => {
                 assert!(matches!(args.mode, DevourMode::Otlp));
@@ -2007,7 +2471,7 @@ mod cli_tests {
     #[test]
     fn blast_destination_http_is_rejected_by_cli_parser() {
         let err = Cli::try_parse_from([
-            "logfwd",
+            "ff",
             "blast",
             "--destination",
             "http",
@@ -2021,7 +2485,7 @@ mod cli_tests {
     #[test]
     fn blast_duration_defaults_to_none() {
         let cli = Cli::try_parse_from([
-            "logfwd",
+            "ff",
             "blast",
             "--destination",
             "otlp",
@@ -2346,6 +2810,123 @@ transform: |
         assert!(
             read_only.is_err(),
             "effective-config validation should reject duplicate aliases"
+        );
+    }
+
+    #[test]
+    fn issue_1955_dry_run_rejects_unknown_generator_logs_column() {
+        let yaml = r#"
+input:
+  type: generator
+output:
+  type: null
+transform: |
+  SELECT missing_column FROM logs
+"#;
+        let config = logfwd_config::Config::load_str(yaml).expect("config should parse");
+        let runtime = validate_pipelines(&config, true, None);
+        let read_only = validate_pipelines_read_only(&config, None, |_name| {}, |_err| {});
+        assert!(
+            runtime.is_err(),
+            "dry-run validation should reject unknown columns"
+        );
+        assert!(
+            read_only.is_err(),
+            "read-only validation should reject unknown columns"
+        );
+    }
+
+    #[test]
+    fn issue_1955_dry_run_accepts_mixed_case_generator_logs_columns() {
+        let yaml = r#"
+input:
+  type: generator
+output:
+  type: null
+transform: |
+  SELECT Level FROM logs
+"#;
+        let config = logfwd_config::Config::load_str(yaml).expect("config should parse");
+        let runtime = validate_pipelines(&config, true, None);
+        let read_only = validate_pipelines_read_only(&config, None, |_name| {}, |_err| {});
+        assert!(
+            runtime.is_ok(),
+            "dry-run validation should accept case-insensitive column references"
+        );
+        assert!(
+            read_only.is_ok(),
+            "read-only validation should accept case-insensitive column references"
+        );
+    }
+
+    #[test]
+    fn issue_1955_dry_run_rejects_generator_message_source_parts() {
+        let yaml = r#"
+input:
+  type: generator
+output:
+  type: null
+transform: |
+  SELECT method FROM logs
+"#;
+        let config = logfwd_config::Config::load_str(yaml).expect("config should parse");
+        let runtime = validate_pipelines(&config, true, None);
+        let read_only = validate_pipelines_read_only(&config, None, |_name| {}, |_err| {});
+        assert!(
+            runtime.is_err(),
+            "dry-run validation should reject fields embedded only inside message"
+        );
+        assert!(
+            read_only.is_err(),
+            "read-only validation should reject fields embedded only inside message"
+        );
+    }
+
+    #[test]
+    fn issue_1955_dry_run_skips_strict_check_when_enrichment_tables_are_present() {
+        let yaml = r#"
+input:
+  type: generator
+output:
+  type: null
+enrichment:
+  - type: static
+    table_name: labels
+    labels:
+      environment: production
+transform: |
+  SELECT labels.environment FROM logs CROSS JOIN labels
+"#;
+        let config = logfwd_config::Config::load_str(yaml).expect("config should parse");
+        let runtime = validate_pipelines(&config, true, None);
+        let read_only = validate_pipelines_read_only(&config, None, |_name| {}, |_err| {});
+        assert!(
+            runtime.is_ok(),
+            "dry-run validation should not reject enrichment-only columns"
+        );
+        assert!(
+            read_only.is_ok(),
+            "read-only validation should not reject enrichment-only columns"
+        );
+    }
+
+    #[test]
+    fn issue_1955_dry_run_skips_strict_check_for_complex_generator_logs() {
+        let yaml = r#"
+input:
+  type: generator
+  generator:
+    complexity: complex
+output:
+  type: null
+transform: |
+  SELECT bytes_in FROM logs
+"#;
+        let config = logfwd_config::Config::load_str(yaml).expect("config should parse");
+        let read_only = validate_pipelines_read_only(&config, None, |_name| {}, |_err| {});
+        assert!(
+            read_only.is_ok(),
+            "complex generator profile has additional fields and should not use simple schema checks"
         );
     }
 

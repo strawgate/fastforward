@@ -28,6 +28,24 @@ input:
 - `per_file_read_budget_bytes` (default: 262144): The maximum bytes to read from a single file during one polling iteration before yielding to other files.
 - `adaptive_fast_polls_max` (default: 8): Immediate repoll budget after a read-budget hit; set to `0` to disable adaptive fast repolls.
 
+## Stdin
+
+Read data from standard input, drain outputs, and exit when stdin closes.
+This input is intended for `ff send` and piped shell workflows.
+
+```yaml
+input:
+  type: stdin
+  format: auto     # auto | cri | json | raw
+```
+
+```bash
+cat app.log | ff send --config destination.yaml --format json
+kubectl logs pod/app | LOGFWD_CONFIG=destination.yaml ff --format cri
+```
+
+Use `file` input for daemon-style tailing. `stdin` is finite command input; it does not watch paths or discover rotated files.
+
 ## Generator
 
 Emit synthetic JSON log lines for benchmarking and pipeline testing. No external
@@ -59,7 +77,7 @@ data source is required.
 | `narrow` | Narrow JSON logs with 5 fields | JSON | ~120B |
 | `cloud_trail` | CloudTrail-like AWS audit events | JSON | ~1400B |
 
-> **Note:** The `cri_k8s` profile produces CRI-format output. logfwd auto-defaults `format: cri` when this profile is selected, so you do not need to set it explicitly.
+> **Note:** The `cri_k8s` profile produces CRI-format output. FastForward auto-defaults `format: cri` when this profile is selected, so you do not need to set it explicitly.
 >
 > **Note:** The `generator.timestamp` configuration only applies to the `logs` profile.
 

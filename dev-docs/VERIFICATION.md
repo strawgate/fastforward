@@ -331,17 +331,17 @@ logfwd-core is the proven kernel. All rules are CI-enforced.
 
 | Module | What it does | Verification |
 |--------|-------------|-------------|
-| `structural.rs` | Escape detection, quote classification, SIMD structural detection | Kani exhaustive (12 proofs) + proptest (SIMD ≡ scalar) |
-| `structural_iter.rs` | Streaming structural position iterator | Kani exhaustive (3 proofs) |
+| `structural.rs` | Escape detection, quote classification, SIMD structural detection | Kani exhaustive (9 proofs) + proptest (SIMD ≡ scalar) |
+| `structural_iter.rs` | Streaming structural position iterator, including space-only `next_non_space` semantics where tab/CR remain non-space | Kani exhaustive (3 proofs) |
 | `framer.rs` | Newline framing, line boundary detection | Kani exhaustive + oracle (4 proofs) |
 | `reassembler.rs` | CRI partial line reassembly (P/F merging) | Kani exhaustive (8 proofs) |
 | `byte_search.rs` | Proven byte search (find_byte, rfind_byte) | Kani exhaustive + oracle (3 proofs) |
-| `scanner.rs` | JSON field extraction (ScanBuilder trait) | Kani bounded (1 proof) + proptest oracle |
-| `json_scanner.rs` | Streaming JSON field scanner via bitmask iteration | Kani bounded (5 proofs) + proptest oracle |
+| `scanner.rs` | Scanner-to-builder protocol (`ScanBuilder`, `BuilderState`) | Kani bounded (4 proofs) + property-based protocol coverage |
+| `json_scanner.rs` | Streaming JSON field scanner via bitmask iteration, including escaped key/value decoding, CRLF normalization, and JSON whitespace boundary regressions | Kani bounded (5 proofs) + proptest oracle + compliance regressions |
 | `scan_config.rs` | `parse_int_fast`, `parse_float_fast`, `ScanConfig` | Kani exhaustive (2 proofs) |
 | `cri.rs` | CRI log parsing + partial line reassembly | Kani exhaustive (8 proofs) |
 | `otlp.rs` | Protobuf wire format + OTLP encoding + timestamp parsing | Kani mixed exhaustive + bounded (30 proofs incl. 3 contract verifications) |
-| `pipeline/lifecycle.rs` | Pipeline state machine (ordered ACK, drain, shutdown) | Kani exhaustive (6 proofs) + proptest + **TLA+** |
+| `pipeline/lifecycle.rs` | Pipeline state machine (ordered ACK, drain, shutdown) | Kani exhaustive (16 proofs) + proptest + **TLA+** |
 | `logfwd-runtime/pipeline/health.rs` | Pipeline component-health transition reducer (`observed`, bounded startup poll failure escalation, shutdown) | Kani exhaustive (6 proofs) + unit tests + proptest sequence checks |
 | `pipeline/batch.rs` | BatchTicket typestate (ack/nack/fail/reject) | Kani exhaustive (5 proofs) + compile-time |
 | `logfwd-types/diagnostics/health.rs` | `ComponentHealth` lattice (`combine`, readiness, storage repr) | Kani exhaustive (4 proofs) + unit tests |
@@ -354,11 +354,12 @@ logfwd-core is the proven kernel. All rules are CI-enforced.
 | `logfwd-diagnostics/diagnostics/policy.rs` | Control-plane readiness/status policy mapping (`health_reason`, `readiness_impact`, readiness snapshot consistency) | Kani exhaustive (4 proofs) + unit tests + proptest mapping checks |
 | `logfwd-io/otlp_receiver/convert.rs` | OTLP proto→JSON/Arrow conversion helpers extracted from the runtime shell | Kani recommended (1 proof: hex encoding) + unit tests + proptest oracle checks (writer helpers and request→NDJSON fast-vs-simple equivalence) + ignored release microbench guardrails |
 | `logfwd-io/otlp_receiver/projection.rs` | Experimental OTLP wire projection into Arrow (bypasses prost object graph) | 56 tests: prost-reference oracle parity (primitive, multi-resource/scope, randomized), malformed wire rejection (truncated varint/fixed64/fixed32/len, invalid UTF-8 in key/value/body, group mismatch, group depth, field zero, oversized field, wrong wire type), nested unknown-field interleavings, intentionally ignored metadata fields, high-cardinality dynamic attributes, unsupported-but-valid AnyValue fallback (array/kvlist in body/attrs, mixed primitive+unsupported), unsupported+malformed fallback rejection, ProjectedFallback mode parity. Proptest: 128-case arbitrary-byte ProjectedFallback-vs-prost classification, 64-case single-container randomized parity, and 32-case multi-container randomized parity. Projected decode remains non-default pending production-path benchmark gates. |
-| `logfwd-io/otlp_receiver.rs` | Receiver channel-drain boundedness and batch event ordering/accounting | Unit tests (`drain_receiver_payloads` limit, queue carry-over, event order + `accounted_bytes` preservation) |
+| `logfwd-io/otlp_receiver.rs` | Receiver channel-drain boundedness, projected decoder pool sharding, HTTP decode backpressure, and decompression expansion limits | Unit tests (`drain_receiver_payloads` limit, queue carry-over, event order + `accounted_bytes` preservation, projected decoder shard/round-robin behavior, 429 on protobuf decode permit exhaustion, gzip/zstd expansion-limit rejection) |
 | `logfwd-io/tcp_input.rs` | TCP per-client bounded-read predicate (`should_stop_client_read`) and noisy-neighbor progress envelope | Kani (3 proofs: zero counters, independent caps, predicate equivalence) + unit tests + proptest predicate equivalence + noisy-vs-quiet bounded-progress regression |
 | `logfwd-io/udp_input.rs` | UDP bounded-drain predicate (`should_stop_udp_drain`) and per-poll datagram work cap | Kani (3 proofs: zero counters, independent caps, predicate equivalence) + unit tests + proptest predicate equivalence + bounded-drain/recovery regression |
 | `logfwd-output/elasticsearch.rs` | Elasticsearch bulk NDJSON serialization + timestamp suffix writer | Unit tests + proptest oracle checks (serialize_batch and timestamp suffix fast-vs-simple equivalence) + ignored release microbench guardrails |
 | `logfwd-output/otlp_sink.rs` | OTLP sink row encoder and generated-fast encoder parity | Unit tests + proptest oracle check (generated-fast vs handwritten encoder equivalence on random UTF-8 rows) |
+| `logfwd-transform/enrichment.rs` | CSV enrichment parsing, header validation, nullable `Utf8View` batch production, and DataFusion join integration | Unit tests for CSV edge cases and legacy-value/null parity + integration test for `Utf8View` join output. Kani is not required because this path is heap-heavy CSV/DataFusion integration rather than a bounded pure seam. |
 | `logfwd-io/polling_input_health.rs` | Polling-input source health reducer for tail/TCP/UDP (`healthy`, backpressure, error-backoff) | Kani exhaustive (3 proofs) + unit tests + proptest sequence checks |
 | `logfwd-io/receiver_health.rs` | Standalone receiver health reducer (`noop`, backpressure, fatal, shutdown) | Kani exhaustive (6 proofs) + unit tests + proptest sequence checks |
 | `logfwd-io/format.rs` | CRI metadata injection, Auto-mode fallthrough to passthrough | Kani (4 proofs: inject_cri_metadata output structure, JSON vs plain-text path dispatch) |

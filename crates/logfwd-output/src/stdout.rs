@@ -336,41 +336,49 @@ fn safe_col_to_string(col: &dyn Array, row: usize) -> Cow<'_, str> {
         DataType::Utf8View => Cow::Borrowed(col.as_string_view().value(row)),
         DataType::LargeUtf8 => Cow::Borrowed(col.as_string::<i64>().value(row)),
         DataType::Timestamp(arrow::datatypes::TimeUnit::Nanosecond, _) => {
-            let ns = col
+            let Some(arr) = col
                 .as_any()
                 .downcast_ref::<arrow::array::TimestampNanosecondArray>()
-                .unwrap()
-                .value(row);
+            else {
+                return Cow::Owned(safe_array_value_to_string(col, row));
+            };
+            let ns = arr.value(row);
             let secs = ns.div_euclid(1_000_000_000);
             let nanos = ns.rem_euclid(1_000_000_000) as u32;
             Cow::Owned(logfwd_arrow::star_schema::chrono_timestamp(secs, nanos))
         }
         DataType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, _) => {
-            let us = col
+            let Some(arr) = col
                 .as_any()
                 .downcast_ref::<arrow::array::TimestampMicrosecondArray>()
-                .unwrap()
-                .value(row);
+            else {
+                return Cow::Owned(safe_array_value_to_string(col, row));
+            };
+            let us = arr.value(row);
             let secs = us.div_euclid(1_000_000);
             let nanos = (us.rem_euclid(1_000_000) * 1_000) as u32;
             Cow::Owned(logfwd_arrow::star_schema::chrono_timestamp(secs, nanos))
         }
         DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, _) => {
-            let ms = col
+            let Some(arr) = col
                 .as_any()
                 .downcast_ref::<arrow::array::TimestampMillisecondArray>()
-                .unwrap()
-                .value(row);
+            else {
+                return Cow::Owned(safe_array_value_to_string(col, row));
+            };
+            let ms = arr.value(row);
             let secs = ms.div_euclid(1_000);
             let nanos = (ms.rem_euclid(1_000) * 1_000_000) as u32;
             Cow::Owned(logfwd_arrow::star_schema::chrono_timestamp(secs, nanos))
         }
         DataType::Timestamp(arrow::datatypes::TimeUnit::Second, _) => {
-            let s = col
+            let Some(arr) = col
                 .as_any()
                 .downcast_ref::<arrow::array::TimestampSecondArray>()
-                .unwrap()
-                .value(row);
+            else {
+                return Cow::Owned(safe_array_value_to_string(col, row));
+            };
+            let s = arr.value(row);
             Cow::Owned(logfwd_arrow::star_schema::chrono_timestamp(s, 0))
         }
         _ => Cow::Owned(safe_array_value_to_string(col, row)),
@@ -472,6 +480,13 @@ fn safe_array_value_to_string(col: &dyn Array, row: usize) -> String {
     }
 }
 
+fn map_stdout_io_error(error: io::Error) -> SendResult {
+    if error.kind() == io::ErrorKind::BrokenPipe {
+        return SendResult::Rejected("stdout pipe closed (BrokenPipe)".to_string());
+    }
+    SendResult::IoError(error)
+}
+
 // ---------------------------------------------------------------------------
 // Async Sink implementation
 // ---------------------------------------------------------------------------
@@ -494,10 +509,10 @@ impl Sink for StdoutSink {
             // Write the pre-rendered buffer to async stdout in one shot.
             let mut stdout = tokio::io::stdout();
             if let Err(e) = stdout.write_all(&self.output_buf).await {
-                return SendResult::IoError(e);
+                return map_stdout_io_error(e);
             }
             if let Err(e) = stdout.flush().await {
-                return SendResult::IoError(e);
+                return map_stdout_io_error(e);
             }
 
             let lines_written = memchr_iter(b'\n', &self.output_buf).count() as u64;
@@ -998,6 +1013,15 @@ mod tests {
             stats.lines_total.load(Ordering::Relaxed),
             expected_lines,
             "lines_total should reflect emitted lines, not raw row count"
+        );
+    }
+
+    #[test]
+    fn broken_pipe_maps_to_terminal_rejected() {
+        let result = map_stdout_io_error(io::Error::new(io::ErrorKind::BrokenPipe, "epipe"));
+        assert!(
+            matches!(result, SendResult::Rejected(_)),
+            "BrokenPipe must map to terminal non-retryable outcome"
         );
     }
 }

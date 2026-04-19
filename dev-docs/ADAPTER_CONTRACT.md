@@ -123,13 +123,14 @@ The Arrow IPC receiver accepts `POST /v1/arrow` and forwards decoded
 ### Delivery rules
 
 - If every non-empty batch in the request is accepted, return `200`.
-- If the channel becomes full after some prefix of batches has already been
-  accepted, return `429` for the whole request (never `200`).
-- A `429` on this path means **partial acceptance is possible**: a prefix may
-  already be delivered, so client retries are required to avoid loss of the
-  unsent suffix and may duplicate already-accepted prefix batches.
-- Downstream processing for Arrow IPC ingress is therefore at-least-once under
-  backpressure unless request-level deduplication is introduced externally.
+- If the remaining channel capacity cannot fit every non-empty batch in the
+  request, return `429` before enqueueing any request batch.
+- A `429` on this path means zero batches from that request were accepted, so
+  the client can retry the same request without duplicating an accepted prefix.
+- A `500` means the receiver detected an internal channel-accounting invariant
+  violation after reserving capacity. The request outcome is unknown and may be
+  partially processed; clients must not automatically resend the same request
+  unless they have application-level deduplication.
 - A disconnected pipeline channel returns `503`.
 
 ## OTLP Sink Contract
@@ -177,6 +178,10 @@ The file path is:
 - Remainders, CRI aggregation state, and checkpoint math are keyed by source.
 - Bytes from one source must never complete or corrupt a partial line from a
   different source.
+- UDP datagrams must preserve sender-scoped source identity at the input-event
+  boundary (`recv_from` sender -> `InputEvent::Data.source_id`) so framing
+  state is isolated by sender instead of co-mingling all datagrams under
+  `None`.
 
 ### Newline-boundary checkpoint rules
 
@@ -195,10 +200,10 @@ The file path is:
   `inject_source_path_metadata` for compatibility with current file JSON/CRI
   paths. Treat this as transitional technical debt until #1615 lands; do not
   add new `_source_*` raw injection helpers.
-- Canonical pattern for new metadata: scanner-attached `_resource_*` columns
-  (the same resource-column model used by OTLP/OTAP paths), attached at
-  scan/build time in the RecordBatch schema and accessible via SQL without raw
-  payload mutation.
+- Canonical pattern for new metadata: scanner-attached
+  `resource.attributes.*` columns (the same resource-column model used by
+  OTLP/OTAP paths), attached at scan/build time in the RecordBatch schema and
+  accessible via SQL without raw payload mutation.
 - Rationale: raw injection mutates user data, causes format-specific edge
   cases (invalid JSON for empty objects), and is 30x slower than post-scan
   column attachment (PR #1370 prototype measurements).

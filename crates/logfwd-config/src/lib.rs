@@ -316,26 +316,6 @@ output:
     }
 
     #[test]
-    fn otlp_input_accepts_resource_prefix() {
-        let yaml = r#"
-input:
-  type: otlp
-  listen: 127.0.0.1:4318
-  resource_prefix: resource.attributes.
-output:
-  type: stdout
-"#;
-        let cfg = Config::load_str(yaml).expect("otlp input with resource_prefix should parse");
-        let pipe = &cfg.pipelines["default"];
-        assert_eq!(pipe.inputs.len(), 1);
-        assert_eq!(pipe.inputs[0].input_type(), InputType::Otlp);
-        assert!(matches!(
-            &pipe.inputs[0].type_config,
-            InputTypeConfig::Otlp(o) if o.resource_prefix.as_deref() == Some("resource.attributes.")
-        ));
-    }
-
-    #[test]
     fn otlp_input_accepts_experimental_protobuf_decode_mode() {
         let yaml = r#"
 input:
@@ -356,6 +336,24 @@ output:
     }
 
     #[test]
+    fn otlp_input_rejects_resource_prefix() {
+        let yaml = r#"
+input:
+  type: otlp
+  listen: 127.0.0.1:4318
+  resource_prefix: resource.attributes.
+output:
+  type: stdout
+"#;
+        let err = Config::load_str(yaml).expect_err("resource_prefix is no longer supported");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("resource_prefix") || msg.contains("unknown field"),
+            "expected serde rejection of resource_prefix, got: {msg}"
+        );
+    }
+
+    #[test]
     fn non_otlp_input_rejects_protobuf_decode_mode() {
         let yaml = r#"
 input:
@@ -370,45 +368,6 @@ output:
         assert!(
             msg.contains("protobuf_decode_mode") || msg.contains("unknown field"),
             "expected serde rejection of protobuf_decode_mode for file input, got: {msg}"
-        );
-    }
-
-    #[test]
-    fn otlp_input_rejects_non_default_resource_prefix() {
-        let yaml = r#"
-input:
-  type: otlp
-  listen: 127.0.0.1:4318
-  resource_prefix: otel.resource.
-output:
-  type: stdout
-"#;
-        let err = Config::load_str(yaml)
-            .expect_err("non-default otlp resource_prefix should be rejected for now");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("unsupported otlp resource_prefix"),
-            "expected unsupported resource_prefix validation error, got: {msg}"
-        );
-    }
-
-    #[test]
-    fn non_otlp_input_rejects_resource_prefix() {
-        // With the tagged-enum refactor, `resource_prefix` is only valid inside
-        // the `otlp` variant.  Serde rejects it at parse time for other types.
-        let yaml = r#"
-input:
-  type: file
-  path: /var/log/app.log
-  resource_prefix: bad.prefix.
-output:
-  type: stdout
-"#;
-        let err = Config::load_str(yaml).expect_err("resource_prefix must be otlp-only");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("resource_prefix") || msg.contains("unknown field"),
-            "expected serde rejection of resource_prefix for file input, got: {msg}"
         );
     }
 
@@ -721,6 +680,7 @@ pipelines:
             ("otlp", "listen: 0.0.0.0:4317"),
             ("arrow_ipc", "listen: 0.0.0.0:4319"),
             ("http", "listen: 0.0.0.0:8080"),
+            ("stdin", ""),
             ("generator", ""),
             ("linux_ebpf_sensor", ""),
             ("macos_es_sensor", ""),
@@ -730,6 +690,51 @@ pipelines:
             let yaml = format!("input:\n  type: {itype}\n  {extra}\noutput:\n  type: stdout\n");
             Config::load_str(&yaml).unwrap_or_else(|e| panic!("failed for {itype}: {e}"));
         }
+    }
+
+    #[test]
+    fn stdin_input_accepts_supported_formats() {
+        for format in ["auto", "cri", "json", "raw"] {
+            let yaml =
+                format!("input:\n  type: stdin\n  format: {format}\noutput:\n  type: stdout\n");
+            let cfg = Config::load_str(&yaml)
+                .unwrap_or_else(|e| panic!("failed for stdin format {format}: {e}"));
+            let input = &cfg.pipelines["default"].inputs[0];
+            assert_eq!(input.input_type(), InputType::Stdin);
+        }
+    }
+
+    #[test]
+    fn stdin_input_rejects_unsupported_format() {
+        let yaml = r"
+input:
+  type: stdin
+  format: logfmt
+output:
+  type: stdout
+";
+        let err = Config::load_str(yaml).expect_err("stdin should reject unsupported format");
+        assert!(
+            err.to_string()
+                .contains("stdin input only supports format auto, cri, json, or raw"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn stdin_input_rejects_file_only_fields() {
+        let yaml = r"
+input:
+  type: stdin
+  path: /tmp/app.log
+output:
+  type: stdout
+";
+        let err = Config::load_str(yaml).expect_err("stdin should reject path");
+        assert!(
+            err.to_string().contains("unknown field `path`"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -2686,8 +2691,8 @@ pipelines:
             "expected 'workers' in error: {msg}"
         );
         assert!(
-            msg.contains("must be greater than 0"),
-            "expected 'must be greater than 0' in error: {msg}"
+            msg.contains("must be in range 1..=1024"),
+            "expected range-bounded workers message in error: {msg}"
         );
     }
 

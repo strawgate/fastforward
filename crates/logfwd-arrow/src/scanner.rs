@@ -86,7 +86,7 @@ impl Scanner {
         }
     }
 
-    /// Create a scanner that injects constant `_resource_*` columns per row.
+    /// Create a scanner that injects constant resource attribute columns per row.
     pub fn with_resource_attrs(config: ScanConfig, resource_attrs: Vec<(String, String)>) -> Self {
         Scanner {
             builder: StreamingBuilder::new(config.line_field_name.clone()),
@@ -140,7 +140,6 @@ mod tests {
     use arrow::array::{Array, BooleanArray, Int64Array, StringArray};
     use bytes::Bytes;
     use logfwd_core::scan_config::{FieldSpec, ScanConfig};
-    use logfwd_types::field_names;
 
     fn default_scanner(_rows: usize) -> Scanner {
         Scanner::new(ScanConfig::default())
@@ -174,14 +173,14 @@ mod tests {
                 .value(1),
             404
         );
-        // Legacy single-underscore suffixed columns must NOT be emitted.
+        // Single-type fields use bare names; type suffixes are only for conflicts.
         assert!(
             batch.column_by_name("host_str").is_none(),
-            "single-type string fields must not emit legacy suffixed columns"
+            "single-type string fields must not emit suffixed columns"
         );
         assert!(
             batch.column_by_name("status_int").is_none(),
-            "single-type int fields must not emit legacy suffixed columns"
+            "single-type int fields must not emit suffixed columns"
         );
     }
     #[test]
@@ -271,6 +270,38 @@ mod tests {
         assert!(batch.column_by_name("a").is_some());
         assert!(batch.column_by_name("b").is_none());
     }
+
+    #[test]
+    fn test_pushdown_case_insensitive_wanted_field() {
+        let config = ScanConfig {
+            wanted_fields: vec![FieldSpec {
+                // Mirrors SQL analyzer output when a query references `Level`.
+                name: "Level".into(),
+                aliases: vec![],
+            }],
+            extract_all: false,
+            line_field_name: None,
+            validate_utf8: false,
+        };
+        let batch = Scanner::new(config)
+            .scan_detached(Bytes::from(
+                br#"{"level":"info","msg":"ok"}
+"#
+                .to_vec(),
+            ))
+            .expect("scan should succeed");
+
+        // Regression (#2044): case mismatch must not silently drop the field.
+        let level = batch
+            .column_by_name("level")
+            .expect("level column should be extracted");
+        let level = level
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("level must be string");
+        assert_eq!(level.value(0), "info");
+        assert!(batch.column_by_name("msg").is_none());
+    }
     #[test]
     fn test_line_capture() {
         let config = ScanConfig {
@@ -356,18 +387,14 @@ mod tests {
         assert_eq!(ns.value(0), "prod");
         assert_eq!(ns.value(1), "prod");
 
-        // Verify that the original dotted key is stored in field metadata.
-        let schema = batch.schema();
-        let svc_field = schema
-            .field_with_name("resource.attributes.service.name")
-            .expect("field exists");
-        assert_eq!(
-            svc_field
+        // The canonical column name preserves the dotted resource key directly.
+        assert!(
+            batch
+                .schema()
+                .field_with_name("resource.attributes.service.name")
+                .expect("field exists")
                 .metadata()
-                .get(field_names::METADATA_RESOURCE_KEY)
-                .map(String::as_str),
-            Some("service.name"),
-            "field metadata must preserve original dotted key"
+                .is_empty()
         );
     }
 

@@ -153,6 +153,14 @@ impl ProjectedOtlpDecoder {
 
     /// Decode an OTLP payload using the view-bytes path, reusing builder capacity.
     pub fn decode_view_bytes(&mut self, body: Bytes) -> Result<RecordBatch, InputError> {
+        self.try_decode_view_bytes(body)
+            .map_err(ProjectionError::into_input_error)
+    }
+
+    pub(super) fn try_decode_view_bytes(
+        &mut self,
+        body: Bytes,
+    ) -> Result<RecordBatch, ProjectionError> {
         let backing = body.clone();
         self.builder.begin_batch();
         if !backing.is_empty() {
@@ -192,12 +200,12 @@ impl ProjectedOtlpDecoder {
             // Reset builder to idle so the next begin_batch succeeds even
             // if we were mid-row when the error occurred.
             self.builder.discard_batch();
-            return Err(e.into_input_error());
+            return Err(e);
         }
 
         self.builder
             .finish_batch()
-            .map_err(|e| InputError::Receiver(format!("batch build error: {e}")))
+            .map_err(|e| ProjectionError::Batch(format!("batch build error: {e}")))
     }
 }
 
@@ -1161,7 +1169,7 @@ mod tests {
                             kv_string("body", "attr-body-shadow"),
                             kv_string("trace_id", "attr-trace-shadow"),
                             kv_string("flags", "attr-flags-shadow"),
-                            kv_string("_resource_service.name", "attr-resource-shadow"),
+                            kv_string("resource_shadow.service.name", "attr-resource-shadow"),
                         ],
                         ..Default::default()
                     }],
