@@ -399,11 +399,14 @@ jobs:
       - name: Run Kani verification (logfwd-arrow --lib)
         # logfwd-arrow has a binary with required-features that cargo-kani
         # cannot skip, so verify only the library target.
+        # --jobs 4: arrow proofs are the heaviest per-proof (up to ~90s each
+        # on the make_string_view/scatter families) so saturating all 4
+        # vCPUs here gives more wall-clock return than on the other shards.
         uses: model-checking/kani-github-action@v1
         with:
           args: >-
             --solver kissat
-            --jobs 3
+            --jobs 4
             --output-format terse
             -Z function-contracts
             -Z mem-predicates
