@@ -153,6 +153,7 @@ print_stderr = "warn"
 let_underscore_future = "deny"
 await_holding_lock = "warn"
 await_holding_refcell_ref = "warn"
+large_futures = "warn"
 
 [workspace.lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = [
