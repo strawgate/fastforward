@@ -17,7 +17,7 @@ When you add, rename, or remove config fields:
 Output YAML deserializes straight into `OutputConfigV2` — the typed
 `#[serde(tag = "type", rename_all = "snake_case")]` enum in
 `crates/logfwd-config/src/types.rs`. The flat `OutputConfig` struct and
-its `From<V2>` / `From<&OutputConfig>` bridges were removed; nothing
+its `From<OutputConfigV2> for OutputConfig` / `From<&OutputConfig> for OutputConfigV2` bridges were removed; nothing
 else in the workspace carries a second shape. If your PR introduces a
 new output type, add it as one more variant:
 
