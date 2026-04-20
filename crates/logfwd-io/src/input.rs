@@ -4,6 +4,7 @@ use std::sync::mpsc;
 use std::thread;
 
 use arrow::record_batch::RecordBatch;
+use bytes::Bytes;
 use logfwd_types::diagnostics::ComponentHealth;
 use logfwd_types::pipeline::SourceId;
 
@@ -327,7 +328,7 @@ pub enum InputEvent {
     /// usually `bytes.len()`. Wrappers like `FramedInput` may consume this for
     /// accounting and forward downstream data with `accounted_bytes = 0`.
     Data {
-        bytes: Vec<u8>,
+        bytes: Bytes,
         source_id: Option<SourceId>,
         accounted_bytes: u64,
         cri_metadata: Option<CriMetadata>,
@@ -608,7 +609,7 @@ impl StdinInput {
                 Ok(StdinMessage::Data(bytes)) => {
                     let accounted_bytes = bytes.len() as u64;
                     events.push(InputEvent::Data {
-                        bytes,
+                        bytes: Bytes::from(bytes),
                         source_id: None,
                         accounted_bytes,
                         cri_metadata: None,
@@ -645,7 +646,7 @@ impl StdinInput {
                 Ok(StdinMessage::Data(bytes)) => {
                     let accounted_bytes = bytes.len() as u64;
                     events.push(InputEvent::Data {
-                        bytes,
+                        bytes: Bytes::from(bytes),
                         source_id: None,
                         accounted_bytes,
                         cri_metadata: None,
@@ -681,7 +682,7 @@ impl StdinInput {
             Ok(StdinMessage::Data(bytes)) => {
                 let accounted_bytes = bytes.len() as u64;
                 events.push(InputEvent::Data {
-                    bytes,
+                    bytes: Bytes::from(bytes),
                     source_id: None,
                     accounted_bytes,
                     cri_metadata: None,
@@ -718,7 +719,7 @@ impl StdinInput {
             Ok(StdinMessage::Data(bytes)) => {
                 let accounted_bytes = bytes.len() as u64;
                 events.push(InputEvent::Data {
-                    bytes,
+                    bytes: Bytes::from(bytes),
                     source_id: None,
                     accounted_bytes,
                     cri_metadata: None,
@@ -833,7 +834,7 @@ fn tail_events_to_input_events(tail_events: Vec<TailEvent>) -> Vec<InputEvent> {
             } => {
                 let accounted_bytes = bytes.len() as u64;
                 events.push(InputEvent::Data {
-                    bytes,
+                    bytes: Bytes::from(bytes),
                     source_id,
                     accounted_bytes,
                     cri_metadata: None,

@@ -15,6 +15,7 @@ use axum::http::header::{ALLOW, CONTENT_ENCODING, RETRY_AFTER};
 use axum::http::{HeaderMap, Method, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
+use bytes::Bytes;
 use flate2::read::GzDecoder;
 use logfwd_types::diagnostics::ComponentHealth;
 use tokio::sync::oneshot;
@@ -295,7 +296,7 @@ impl InputSource for HttpInput {
         ) {
             return Ok(vec![InputEvent::Data {
                 accounted_bytes: all.len() as u64,
-                bytes: all,
+                bytes: Bytes::from(all),
                 source_id: None,
                 cri_metadata: None,
             }]);
@@ -330,7 +331,7 @@ impl InputSource for HttpInput {
         }
         let accounted_bytes = all.len() as u64;
         Ok(vec![InputEvent::Data {
-            bytes: all,
+            bytes: Bytes::from(all),
             source_id: None,
             accounted_bytes,
             cri_metadata: None,
