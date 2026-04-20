@@ -881,6 +881,7 @@ impl From<&OutputConfig> for OutputConfigV2 {
             OutputType::File => OutputConfigV2::File(FileOutputConfig {
                 name: config.name.clone(),
                 path: config.path.clone(),
+                compression: config.compression.clone(),
                 format: config.format.clone(),
             }),
             OutputType::Parquet => OutputConfigV2::Parquet(ParquetOutputConfig {
@@ -1371,6 +1372,10 @@ pub struct FileOutputConfig {
     pub name: Option<String>,
     #[serde(default, deserialize_with = "deserialize_option_strict_string")]
     pub path: Option<String>,
+    /// Optional compression setting. File output does not currently support
+    /// compression; this field exists for legacy config compatibility.
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
+    pub compression: Option<String>,
     pub format: Option<Format>,
 }
 
@@ -1380,6 +1385,7 @@ impl FileOutputConfig {
             name: self.name,
             output_type: OutputType::File,
             path: self.path,
+            compression: self.compression,
             format: self.format,
             ..OutputConfig::default()
         }
