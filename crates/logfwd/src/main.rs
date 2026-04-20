@@ -1,3 +1,6 @@
+#![allow(clippy::print_stdout, clippy::print_stderr)]
+// Binary crate: user-facing CLI output is intentional.
+
 #[cfg(feature = "dhat-heap")]
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;
@@ -587,7 +590,7 @@ fn rewrite_args_as_send(args: Vec<OsString>) -> Vec<OsString> {
     if let Some((program, rest)) = args.split_first() {
         rewritten.push(program.clone());
         rewritten.push(OsString::from("send"));
-        rewritten.extend(rest.iter().cloned());
+        rewritten.extend_from_slice(rest);
     } else {
         rewritten.push(OsString::from("ff"));
         rewritten.push(OsString::from("send"));
@@ -1547,10 +1550,28 @@ const GENERATOR_LOGS_SIMPLE_COLUMNS: &[&str] = &[
     "status",
 ];
 
+/// Internal columns injected by the CRI format decoder (`_timestamp`,
+/// `_stream`) plus the plain-text fallback field (`body`).
+const CRI_INTERNAL_COLUMNS: &[&str] = &["_timestamp", "_stream", "body"];
+
+/// Describes how strictly column validation should be applied.
+enum KnownColumnsMode {
+    /// All columns in the input are known — any column not in the list is
+    /// rejected. Used for inputs with a fixed schema (e.g. generator/logs/simple).
+    Strict(&'static [&'static str]),
+    /// Only internal/framework columns (typically `_`-prefixed) are known.
+    /// Columns starting with `_` that are not in the list are rejected;
+    /// other column names are assumed to be user-defined data fields and
+    /// allowed. Used for inputs that parse dynamic JSON content (CRI, JSON).
+    InternalOnly(&'static [&'static str]),
+}
+
 fn known_input_columns_read_only(
     input_cfg: &logfwd_config::InputConfig,
-) -> Option<&'static [&'static str]> {
-    use logfwd_config::{GeneratorComplexityConfig, GeneratorProfileConfig, InputTypeConfig};
+) -> Option<KnownColumnsMode> {
+    use logfwd_config::{
+        Format, GeneratorComplexityConfig, GeneratorProfileConfig, InputTypeConfig,
+    };
 
     match &input_cfg.type_config {
         // Generator logs/simple has a stable built-in schema. Other profiles
@@ -1569,7 +1590,18 @@ fn known_input_columns_read_only(
             if !is_logs_profile || !is_simple_complexity {
                 None
             } else {
-                Some(GENERATOR_LOGS_SIMPLE_COLUMNS)
+                Some(KnownColumnsMode::Strict(GENERATOR_LOGS_SIMPLE_COLUMNS))
+            }
+        }
+        // File/stdin inputs with an explicit CRI format have known internal
+        // columns injected by the format decoder. JSON body keys are dynamic,
+        // so we only validate `_`-prefixed names.
+        InputTypeConfig::File(_) | InputTypeConfig::Stdin(_) => {
+            match input_cfg.format.as_ref() {
+                Some(Format::Cri) => Some(KnownColumnsMode::InternalOnly(CRI_INTERNAL_COLUMNS)),
+                // JSON and raw formats have fully dynamic schemas — no
+                // internal columns to validate.
+                _ => None,
             }
         }
         _ => None,
@@ -1579,9 +1611,9 @@ fn known_input_columns_read_only(
 fn validate_known_columns_read_only(
     input_name: &str,
     transform: &logfwd::transform::SqlTransform,
-    known_columns: Option<&'static [&'static str]>,
+    mode: Option<KnownColumnsMode>,
 ) -> Result<(), String> {
-    let Some(known_columns) = known_columns else {
+    let Some(mode) = mode else {
         return Ok(());
     };
 
@@ -1596,6 +1628,11 @@ fn validate_known_columns_read_only(
         return Ok(());
     }
 
+    let (known_columns, internal_only) = match &mode {
+        KnownColumnsMode::Strict(cols) => (*cols, false),
+        KnownColumnsMode::InternalOnly(cols) => (*cols, true),
+    };
+
     let known: std::collections::HashSet<&str> = known_columns.iter().copied().collect();
 
     let mut unknown: Vec<String> = scan_config
@@ -1608,8 +1645,15 @@ fn validate_known_columns_read_only(
                 Some(pos) => &column[pos + 1..],
                 None => column,
             };
-            // Lowercase before lookup — known_columns is all-lowercase.
-            !known.contains(bare.to_lowercase().as_str())
+            let lower = bare.to_lowercase();
+
+            // In internal-only mode, allow columns that don't start with `_`
+            // because they could be user-defined JSON keys.
+            if internal_only && !lower.starts_with('_') {
+                return false;
+            }
+
+            !known.contains(lower.as_str())
         })
         .map(str::to_owned)
         .collect();
@@ -1622,11 +1666,22 @@ fn validate_known_columns_read_only(
 
     let mut supported: Vec<&str> = known_columns.to_vec();
     supported.sort_unstable();
-    Err(format!(
-        "input '{input_name}': SQL references unknown column(s) {} for this input schema (known: {})",
-        unknown.join(", "),
-        supported.join(", ")
-    ))
+
+    if internal_only {
+        Err(format!(
+            "input '{input_name}': SQL references unknown internal column(s) {unknown} \
+             for this input format (known internal columns: {supported}; \
+             non-underscore-prefixed columns are assumed to be user-defined JSON keys)",
+            unknown = unknown.join(", "),
+            supported = supported.join(", "),
+        ))
+    } else {
+        Err(format!(
+            "input '{input_name}': SQL references unknown column(s) {} for this input schema (known: {})",
+            unknown.join(", "),
+            supported.join(", ")
+        ))
+    }
 }
 
 fn validate_pipeline_read_only(
@@ -2797,7 +2852,7 @@ input:
   listen: 127.0.0.1:4318
   format: raw
 output:
-  type: null
+  type: "null"
 "#;
         let config = logfwd_config::Config::load_str(yaml).expect("config should parse");
         let result = validate_pipelines_read_only(&config, None, |_name| {}, |_err| {});
@@ -2811,7 +2866,7 @@ input:
   type: linux_ebpf_sensor
   format: raw
 output:
-  type: null
+  type: "null"
 "#;
         let err = logfwd_config::Config::load_str(yaml)
             .expect_err("sensor format should fail config validation");
@@ -2830,7 +2885,7 @@ input:
   sensor:
     poll_interval_ms: 1000
 output:
-  type: null
+  type: "null"
 "#;
         let config = logfwd_config::Config::load_str(yaml).expect("config should parse");
         validate_pipelines_read_only(&config, None, |_name| {}, |_err| {})
@@ -2858,7 +2913,7 @@ output:
   type: otlp
   listen: 127.0.0.1:{port}
 output:
-  type: null
+  type: "null"
 "#
         )
         .expect("write config");
@@ -2894,7 +2949,7 @@ input:
   type: otlp
   listen: 127.0.0.1:4318
 output:
-  type: null
+  type: "null"
 transform: |
   SELECT level AS x, msg AS x FROM logs
 "#;
@@ -2914,7 +2969,7 @@ input:
   type: otlp
   listen: 127.0.0.1:4318
 output:
-  type: null
+  type: "null"
 transform: |
   SELECT level AS x, msg AS x FROM logs
 "#;
@@ -2937,7 +2992,7 @@ transform: |
 input:
   type: generator
 output:
-  type: null
+  type: "null"
 transform: |
   SELECT missing_column FROM logs
 "#;
@@ -2960,7 +3015,7 @@ transform: |
 input:
   type: generator
 output:
-  type: null
+  type: "null"
 transform: |
   SELECT Level FROM logs
 "#;
@@ -2983,7 +3038,7 @@ transform: |
 input:
   type: generator
 output:
-  type: null
+  type: "null"
 transform: |
   SELECT method FROM logs
 "#;
@@ -3006,7 +3061,7 @@ transform: |
 input:
   type: generator
 output:
-  type: null
+  type: "null"
 enrichment:
   - type: static
     table_name: labels
@@ -3036,7 +3091,7 @@ input:
   generator:
     complexity: complex
 output:
-  type: null
+  type: "null"
 transform: |
   SELECT bytes_in FROM logs
 "#;
@@ -3045,6 +3100,130 @@ transform: |
         assert!(
             read_only.is_ok(),
             "complex generator profile has additional fields and should not use simple schema checks"
+        );
+    }
+
+    #[test]
+    fn issue_1955_dry_run_rejects_unknown_cri_internal_column() {
+        let yaml = r#"
+input:
+  type: file
+  path: /var/log/*.log
+  format: cri
+output:
+  type: null
+transform: |
+  SELECT _timestampp FROM logs
+"#;
+        let config = logfwd_config::Config::load_str(yaml).expect("config should parse");
+        let read_only = validate_pipelines_read_only(&config, None, |_name| {}, |_err| {});
+        assert!(
+            read_only.is_err(),
+            "CRI format should reject misspelled internal columns like _timestampp"
+        );
+    }
+
+    #[test]
+    fn issue_1955_dry_run_accepts_valid_cri_columns() {
+        let yaml = r#"
+input:
+  type: file
+  path: /var/log/*.log
+  format: cri
+output:
+  type: null
+transform: |
+  SELECT _timestamp, _stream, body FROM logs
+"#;
+        let config = logfwd_config::Config::load_str(yaml).expect("config should parse");
+        let read_only = validate_pipelines_read_only(&config, None, |_name| {}, |_err| {});
+        assert!(
+            read_only.is_ok(),
+            "CRI format should accept known internal columns: {read_only:?}"
+        );
+    }
+
+    #[test]
+    fn issue_1955_dry_run_accepts_cri_user_json_columns() {
+        let yaml = r#"
+input:
+  type: file
+  path: /var/log/*.log
+  format: cri
+output:
+  type: null
+transform: |
+  SELECT level, msg, custom_field FROM logs
+"#;
+        let config = logfwd_config::Config::load_str(yaml).expect("config should parse");
+        let read_only = validate_pipelines_read_only(&config, None, |_name| {}, |_err| {});
+        assert!(
+            read_only.is_ok(),
+            "CRI format should allow non-underscore-prefixed columns (user JSON keys): {read_only:?}"
+        );
+    }
+
+    #[test]
+    fn issue_1955_dry_run_allows_json_format_any_columns() {
+        let yaml = r#"
+input:
+  type: file
+  path: /var/log/*.log
+  format: json
+output:
+  type: null
+transform: |
+  SELECT custom_field FROM logs
+"#;
+        let config = logfwd_config::Config::load_str(yaml).expect("config should parse");
+        let read_only = validate_pipelines_read_only(&config, None, |_name| {}, |_err| {});
+        assert!(
+            read_only.is_ok(),
+            "JSON format has fully dynamic schema — should allow any columns: {read_only:?}"
+        );
+    }
+
+    #[test]
+    fn issue_1955_dry_run_skips_cri_check_when_enrichment_present() {
+        let yaml = r#"
+input:
+  type: file
+  path: /var/log/*.log
+  format: cri
+output:
+  type: null
+enrichment:
+  - type: static
+    table_name: labels
+    labels:
+      environment: production
+transform: |
+  SELECT _unknown_col FROM logs CROSS JOIN labels
+"#;
+        let config = logfwd_config::Config::load_str(yaml).expect("config should parse");
+        let read_only = validate_pipelines_read_only(&config, None, |_name| {}, |_err| {});
+        assert!(
+            read_only.is_ok(),
+            "enrichment tables may add columns — skip strict internal column checks: {read_only:?}"
+        );
+    }
+
+    #[test]
+    fn issue_1955_dry_run_skips_cri_check_for_auto_format() {
+        let yaml = r#"
+input:
+  type: file
+  path: /var/log/*.log
+output:
+  type: null
+transform: |
+  SELECT _unknown_col FROM logs
+"#;
+        let config = logfwd_config::Config::load_str(yaml).expect("config should parse");
+        let read_only = validate_pipelines_read_only(&config, None, |_name| {}, |_err| {});
+        assert!(
+            read_only.is_ok(),
+            "auto format (default for file) can't be validated statically: {read_only:?}"
         );
     }
 
