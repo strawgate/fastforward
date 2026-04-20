@@ -13,6 +13,8 @@
 use std::io::{self, BufRead, BufReader, Read};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
+
+use bytes::Bytes;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 use std::time::Duration;
 
@@ -266,7 +268,7 @@ impl InputSource for JournaldInput {
                     // Note: do NOT call stats.inc_bytes() here — the downstream
                     // FramedInput already charges `accounted_bytes` to stats.
                     events.push(InputEvent::Data {
-                        bytes: line,
+                        bytes: Bytes::from(line),
                         source_id: None,
                         accounted_bytes: len as u64,
                         cri_metadata: None,

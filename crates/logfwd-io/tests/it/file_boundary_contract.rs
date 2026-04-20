@@ -83,7 +83,7 @@ fn poll_until_data(
                 bytes, source_id, ..
             } = event
             {
-                collected.push((source_id, bytes));
+                collected.push((source_id, bytes.to_vec()));
             }
         }
 

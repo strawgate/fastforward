@@ -352,7 +352,7 @@ impl MockSource {
             .iter()
             .map(|chunk| {
                 vec![InputEvent::Data {
-                    bytes: chunk.clone(),
+                    bytes: Bytes::from(chunk.clone()),
                     source_id,
                     accounted_bytes: chunk.len() as u64,
                     cri_metadata: None,

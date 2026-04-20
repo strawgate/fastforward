@@ -46,6 +46,8 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tracing::{debug, error, warn};
 
+use bytes::Bytes;
+
 use crate::input::{InputEvent, InputSource};
 use client::S3Client;
 use decompress::{Compression, detect_compression};
@@ -519,7 +521,7 @@ impl InputSource for S3Input {
             // tracker to panic on `n_bytes == 0`.
             if !payload.bytes.is_empty() {
                 events.push(InputEvent::Data {
-                    bytes: payload.bytes,
+                    bytes: Bytes::from(payload.bytes),
                     source_id: Some(payload.source_id),
                     accounted_bytes: payload.accounted_bytes,
                     cri_metadata: None,
@@ -1355,7 +1357,7 @@ pub async fn fetch_parallel_bench(
     size: u64,
     part_size: u64,
     max_fetches: usize,
-) -> io::Result<bytes::Bytes> {
+) -> io::Result<Bytes> {
     fetch_parallel_buffered(s3, key, size, part_size, max_fetches).await
 }
 
@@ -1399,7 +1401,7 @@ async fn fetch_parallel_buffered(
     size: u64,
     part_size: u64,
     max_fetches: usize,
-) -> io::Result<bytes::Bytes> {
+) -> io::Result<Bytes> {
     // Build range list.
     let mut ranges: Vec<(usize, u64, u64)> = Vec::new();
     let mut offset: u64 = 0;
@@ -1412,11 +1414,11 @@ async fn fetch_parallel_buffered(
     }
 
     if ranges.is_empty() {
-        return Ok(bytes::Bytes::new());
+        return Ok(Bytes::new());
     }
 
     let fetch_sem = Arc::new(Semaphore::new(max_fetches));
-    let mut join_set: JoinSet<io::Result<(usize, bytes::Bytes)>> = JoinSet::new();
+    let mut join_set: JoinSet<io::Result<(usize, Bytes)>> = JoinSet::new();
 
     for (range_idx, start, end) in ranges {
         let permit = fetch_sem
@@ -1434,7 +1436,7 @@ async fn fetch_parallel_buffered(
     }
 
     // Collect results in order.
-    let mut parts: Vec<(usize, bytes::Bytes)> = Vec::new();
+    let mut parts: Vec<(usize, Bytes)> = Vec::new();
     while let Some(result) = join_set.join_next().await {
         match result {
             Ok(Ok(part)) => parts.push(part),
