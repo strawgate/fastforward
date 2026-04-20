@@ -16,9 +16,10 @@ When you add, rename, or remove config fields:
 
 `OutputConfig` (the flat struct) is the in-memory view used by the runtime,
 but YAML deserialization goes through `OutputConfigV2` (the typed
-`#[serde(tag = "type")]` enum) exclusively. There is no legacy flat-shape
-deserializer — if your PR introduces a new output type, it lives entirely
-as a new `OutputConfigV2` variant with its own typed struct:
+`#[serde(tag = "type", rename_all = "snake_case")]` enum) exclusively.
+There is no legacy flat-shape fallback deserializer — if your PR introduces
+a new output type, it lives entirely as a new `OutputConfigV2` variant
+with its own typed struct:
 
 - Add the variant struct (`FooOutputConfig`) alongside the existing typed
   configs in `crates/logfwd-config/src/types.rs`, with

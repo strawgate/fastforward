@@ -275,7 +275,7 @@ in-memory normalized view; it is not a deserialization target any more.
 - **New output types are new V2 variants**, not new fields on the flat
   struct. Add the variant struct, extend the V2 enum, extend the two
   `From` matches, and the runtime picks it up through `build_sink_factory`.
-- **No V1 fallback path.** There used to be a legacy-flat-shape replay
+- **No V1 fallback path.** There used to be a legacy flat-shape fallback
   deserializer; it is gone. If a new YAML shape has to be supported,
   extend V2 directly.
 - **Avoid cross-output validators in `validate.rs`.** They ran before the
