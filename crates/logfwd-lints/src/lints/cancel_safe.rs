@@ -147,7 +147,8 @@ struct AwaitLockVisitor<'a, 'tcx> {
 }
 
 impl<'a, 'tcx> AwaitLockVisitor<'a, 'tcx> {
-    fn first_active_lock(&self) -> Option<&str> {
+    /// Return the name of the innermost lock guard still in scope, if any.
+    fn innermost_active_lock(&self) -> Option<&str> {
         self.lock_bindings.last().map(|(_, name)| name.as_str())
     }
 }
@@ -161,13 +162,20 @@ impl<'a, 'tcx> Visitor<'tcx> for AwaitLockVisitor<'a, 'tcx> {
             if let StmtKind::Let(let_stmt) = &stmt.kind
                 && let Some(init) = let_stmt.init
             {
+                // Walk the statement FIRST so that any `.await` in the
+                // initializer (e.g. `mutex.lock().await`) is visited
+                // before the guard binding is tracked. Otherwise the
+                // guard appears in scope during its own initializer,
+                // causing false positives.
+                rustc_hir::intravisit::walk_stmt(self, stmt);
                 let ty = self.cx.typeck_results().expr_ty(init);
                 if let Some(name) = lock_guard_type_name(self.cx, ty) {
                     let binding_hir_id = let_stmt.hir_id;
                     self.lock_bindings.push((binding_hir_id, name));
                 }
+            } else {
+                rustc_hir::intravisit::walk_stmt(self, stmt);
             }
-            rustc_hir::intravisit::walk_stmt(self, stmt);
         }
         if let Some(expr) = block.expr {
             self.visit_expr(expr);
@@ -180,7 +188,7 @@ impl<'a, 'tcx> Visitor<'tcx> for AwaitLockVisitor<'a, 'tcx> {
 
     fn visit_expr(&mut self, expr: &'tcx Expr<'tcx>) {
         if matches!(expr.kind, ExprKind::Yield(_, rustc_hir::YieldSource::Await { .. }))
-            && let Some(name) = self.first_active_lock()
+            && let Some(name) = self.innermost_active_lock()
         {
             self.hits.push((expr.span, name.to_string()));
         }

@@ -23,11 +23,9 @@ pub(crate) fn has_doc_marker(cx: &LateContext<'_>, hir_id: HirId, marker: &str) 
     false
 }
 
-/// Returns true when the item's immediately enclosing `fn`/`impl`
-/// body starts a `LateLintPass::check_fn` invocation. Tests upstream
-/// whether a nested closure or block lives inside the tagged function;
-/// for our purposes we rely on `check_fn` firing on the enclosing
-/// function definition, so the helper is a simple attribute lookup.
+/// Returns true when `actual` (a def-path as `&[Symbol]`) matches
+/// `expected` segment-by-segment. Used to identify known types by
+/// their fully-qualified crate path.
 #[inline]
 pub(crate) fn path_matches(actual: &[Symbol], expected: &[&str]) -> bool {
     actual.len() == expected.len()
