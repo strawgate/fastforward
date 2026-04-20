@@ -175,8 +175,11 @@ impl<'de> Deserialize<'de> for OutputType {
 #[serde(rename_all = "lowercase")]
 #[non_exhaustive]
 pub enum CompressionFormat {
+    /// Do not compress request bodies.
     None,
+    /// Compress request bodies with gzip.
     Gzip,
+    /// Compress request bodies with zstd.
     Zstd,
 }
 
@@ -195,7 +198,9 @@ impl fmt::Display for CompressionFormat {
 #[serde(rename_all = "lowercase")]
 #[non_exhaustive]
 pub enum OtlpProtocol {
+    /// Send OTLP data over HTTP.
     Http,
+    /// Send OTLP data over gRPC.
     Grpc,
 }
 
@@ -213,7 +218,9 @@ impl fmt::Display for OtlpProtocol {
 #[serde(rename_all = "lowercase")]
 #[non_exhaustive]
 pub enum ElasticsearchRequestMode {
+    /// Build the Elasticsearch bulk request body in memory before sending.
     Buffered,
+    /// Stream Elasticsearch bulk request body chunks while sending.
     Streaming,
 }
 
