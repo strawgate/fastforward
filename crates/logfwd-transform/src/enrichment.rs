@@ -2167,7 +2167,11 @@ mod tests {
             .unwrap();
         assert_eq!(cluster.value(0), "prod");
 
-        // SAFETY: this removes only the unique test variables set above.
+        // SAFETY: `remove_var` is unsafe because it mutates process-global
+        // state and is unsound under concurrent access. This is safe here
+        // because `cargo nextest` runs each test in its own process, and
+        // these variables use a unique `LOGFWD_TEST_` prefix not read by
+        // any other test.
         unsafe {
             std::env::remove_var("LOGFWD_TEST_CLUSTER");
             std::env::remove_var("LOGFWD_TEST_REGION");

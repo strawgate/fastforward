@@ -65,9 +65,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     loop {
         while let Some(item) = ring.next() {
             // SAFETY: the EVENTS ring buffer is written only with PipeEvent-sized
-            // records by the paired eBPF program, and RingBuf items remain valid
-            // for the duration of this loop iteration.
-            let ev = unsafe { &*(item.as_ptr() as *const PipeEvent) };
+            // records by the paired eBPF program. We use `read_unaligned`
+            // because ring buffer items may not satisfy PipeEvent's alignment.
+            let ev = unsafe { std::ptr::read_unaligned(item.as_ptr() as *const PipeEvent) };
             events += 1;
             bytes += ev.captured as u64;
             let _ = out.write_all(&ev.data[..ev.captured as usize]);

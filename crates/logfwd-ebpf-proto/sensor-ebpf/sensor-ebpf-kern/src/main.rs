@@ -522,6 +522,16 @@ fn try_tcp_v4_connect(ctx: &ProbeContext) -> Result<(), i64> {
 
 // ── TCP state transition (inet_sock_set_state) ──────────────────────────
 
+/// inet_sock_set_state tracepoint field offsets (from
+/// /sys/kernel/debug/tracing/events/sock/inet_sock_set_state/format).
+const SOCK_STATE_SKADDR_OFFSET: usize = 8;
+const SOCK_STATE_OLDSTATE_OFFSET: usize = 16;
+const SOCK_STATE_NEWSTATE_OFFSET: usize = 20;
+const SOCK_STATE_SPORT_OFFSET: usize = 24;
+const SOCK_STATE_DPORT_OFFSET: usize = 26;
+const SOCK_STATE_SADDR_OFFSET: usize = 32;
+const SOCK_STATE_DADDR_OFFSET: usize = 36;
+
 /// inet_sock_set_state tracepoint:
 ///   skaddr at offset 8, oldstate at 16, newstate at 20,
 ///   sport at 24, dport at 26, saddr[4] at 32, daddr[4] at 36
@@ -533,15 +543,15 @@ pub fn inet_sock_set_state(ctx: TracePointContext) -> u32 {
 }
 
 fn try_sock_state(ctx: &TracePointContext) -> Result<(), i64> {
-    // SAFETY: oldstate is at fixed offset 16 in the inet_sock_set_state payload.
-    let oldstate: i32 = unsafe { ctx.read_at(16)? };
-    // SAFETY: newstate is at fixed offset 20 in the inet_sock_set_state payload.
-    let newstate: i32 = unsafe { ctx.read_at(20)? };
+    // SAFETY: oldstate is at fixed offset in the inet_sock_set_state payload.
+    let oldstate: i32 = unsafe { ctx.read_at(SOCK_STATE_OLDSTATE_OFFSET)? };
+    // SAFETY: newstate is at fixed offset in the inet_sock_set_state payload.
+    let newstate: i32 = unsafe { ctx.read_at(SOCK_STATE_NEWSTATE_OFFSET)? };
 
     // Outbound connect: SYN_SENT → ESTABLISHED
     if oldstate == TCP_SYN_SENT && newstate == TCP_ESTABLISHED {
-        // SAFETY: skaddr is at fixed offset 8 in the inet_sock_set_state payload.
-        let skaddr: u64 = unsafe { ctx.read_at(8)? };
+        // SAFETY: skaddr is at fixed offset in the inet_sock_set_state payload.
+        let skaddr: u64 = unsafe { ctx.read_at(SOCK_STATE_SKADDR_OFFSET)? };
 
         let mut entry = match EVENTS.reserve::<TcpConnectEvent>(0) {
             Some(e) => e,
@@ -571,8 +581,8 @@ fn try_sock_state(ctx: &TracePointContext) -> Result<(), i64> {
         && newstate != TCP_ESTABLISHED
         && newstate != TCP_SYN_RECV
     {
-        // SAFETY: skaddr is at fixed offset 8 in the inet_sock_set_state payload.
-        let skaddr: u64 = unsafe { ctx.read_at(8)? };
+        // SAFETY: skaddr is at fixed offset in the inet_sock_set_state payload.
+        let skaddr: u64 = unsafe { ctx.read_at(SOCK_STATE_SKADDR_OFFSET)? };
         SOCK_OWNERS.remove(&skaddr).ok();
     }
 
@@ -581,8 +591,8 @@ fn try_sock_state(ctx: &TracePointContext) -> Result<(), i64> {
     // Only fires for sockets that passed through tcp_v4_connect (kprobe),
     // so the hashmap lookup is bounded by the connect rate.
     if newstate == TCP_CLOSE && oldstate != TCP_SYN_SENT {
-        // SAFETY: skaddr is at fixed offset 8 in the inet_sock_set_state payload.
-        let skaddr: u64 = unsafe { ctx.read_at(8)? };
+        // SAFETY: skaddr is at fixed offset in the inet_sock_set_state payload.
+        let skaddr: u64 = unsafe { ctx.read_at(SOCK_STATE_SKADDR_OFFSET)? };
         SOCK_OWNERS.remove(&skaddr).ok();
     }
 
@@ -611,7 +621,7 @@ fn try_sock_state(ctx: &TracePointContext) -> Result<(), i64> {
 ///
 /// # Safety
 /// The caller must ensure `ctx` points to a valid inet_sock_set_state tracepoint
-/// payload with sport at offset 24, dport at 26, saddr at 32, daddr at 36.
+/// payload with the standard field layout (see `SOCK_STATE_*` constants).
 #[inline(always)]
 unsafe fn read_sock_addrs(
     ctx: &TracePointContext,
@@ -622,10 +632,10 @@ unsafe fn read_sock_addrs(
 ) {
     // The inet_sock_set_state tracepoint stores ports in host byte order
     // (the kernel's trace_inet_sock_set_state does ntohs() internally).
-    *sport = ctx.read_at(24).unwrap_or(0);
-    *dport = ctx.read_at(26).unwrap_or(0);
-    *saddr = ctx.read_at(32).unwrap_or(0);
-    *daddr = ctx.read_at(36).unwrap_or(0);
+    *sport = ctx.read_at(SOCK_STATE_SPORT_OFFSET).unwrap_or(0);
+    *dport = ctx.read_at(SOCK_STATE_DPORT_OFFSET).unwrap_or(0);
+    *saddr = ctx.read_at(SOCK_STATE_SADDR_OFFSET).unwrap_or(0);
+    *daddr = ctx.read_at(SOCK_STATE_DADDR_OFFSET).unwrap_or(0);
 }
 
 // ═══════════════════════════════════════════════════════════════════════
