@@ -181,8 +181,6 @@ export function createHighwayEngine(overrides) {
           const remaining = stopS - car.s;
           if (!mergeAllowed()) {
             desired = Math.min(desired, stopSpeed(remaining, cfg.brake));
-          } else if (remaining < 60) {
-            desired = Math.min(desired, Math.max(30, stopSpeed(remaining, cfg.brake)));
           }
         } else if (segment === 'exit' && !lightIsGreen && car.s < EXIT_GATE_S) {
           const remaining = EXIT_GATE_S - car.s - 15;
