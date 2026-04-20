@@ -344,7 +344,7 @@ fn poll_shutdown_skips_global_eof_for_unknown_file_source_id() {
 
     let config = TailConfig {
         start_from_end: false,
-        poll_interval_ms: 60_000,
+        poll_interval_ms: 0,
         ..Default::default()
     };
     let mut tailer =

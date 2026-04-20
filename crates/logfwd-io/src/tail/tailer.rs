@@ -277,6 +277,7 @@ impl FileTailer {
 
         had_error |= self.discovery.detect_changes(&mut self.reader, &mut events);
         had_error |= self.reader.read_all(&mut events);
+        suppress_source_less_shutdown_eof(&mut events);
         let (cleanup_had_error, mut eof_targets) = self
             .discovery
             .cleanup_deleted_for_shutdown(&mut self.reader, &mut events);
@@ -404,6 +405,18 @@ impl FileTailer {
     pub fn file_paths(&self) -> Vec<(SourceId, PathBuf)> {
         self.reader.file_paths()
     }
+}
+
+fn suppress_source_less_shutdown_eof(events: &mut Vec<TailEvent>) {
+    events.retain(|event| {
+        !matches!(
+            event,
+            TailEvent::EndOfFile {
+                source_id: None,
+                ..
+            }
+        )
+    });
 }
 
 fn nonzero_source_id(source_id: SourceId) -> Option<SourceId> {
