@@ -13,7 +13,7 @@ const DEFAULTS = {
   autoMin: 5,
   autoMax: 100,
   minGap: 36,
-  mergeGap: 50,
+  mergeGap: 36,
   accel: 180,
   brake: 280,
   spawnSpeed: 78,
@@ -54,8 +54,9 @@ export function createHighwayEngine(overrides) {
   let nextId = 0;
   let lastNow = null;
   let cycleStart = 0;
-  let lastSpawnAt = -Infinity;
-  let nextSpawnSource = 'highway';
+  let lastSpawnHwy = -Infinity;
+  let lastSpawnRamp = -Infinity;
+  let spawnOffset = false; // first tick initializes ramp offset
   let autoMode = true;
   let autoVal = cfg.greenPct;
   let autoDir = -1;
@@ -104,15 +105,14 @@ export function createHighwayEngine(overrides) {
   }
 
   function mergeAllowed() {
-    let ahead = Infinity;
     let behind = Infinity;
     for (let i = 0; i < cars.length; i++) {
       const car = cars[i];
       if (car.segment !== 'highway') continue;
-      if (car.s >= MERGE_S) ahead = Math.min(ahead, car.s - MERGE_S);
-      else behind = Math.min(behind, MERGE_S - car.s);
+      const dist = Math.abs(car.s - MERGE_S);
+      if (dist < behind) behind = dist;
     }
-    return ahead > cfg.mergeGap && behind > cfg.mergeGap;
+    return behind > cfg.mergeGap;
   }
 
   function tickAuto(dtS) {
@@ -177,29 +177,18 @@ export function createHighwayEngine(overrides) {
         }
 
         if (segment === 'ramp') {
-          const remaining = LENGTHS.ramp - car.s - 60;
+          const stopS = LENGTHS.ramp - 5;
+          const remaining = stopS - car.s;
           if (!mergeAllowed()) {
             desired = Math.min(desired, stopSpeed(remaining, cfg.brake));
-          } else if (car.s > LENGTHS.ramp - 80) {
-            // Near-merge zone: check world-space proximity to highway cars
-            const rp = pointAt('ramp', car.s);
-            const PROX = 26;
-            for (let j = 0; j < perSeg.highway.length; j++) {
-              const hc = perSeg.highway[j];
-              const hp = pointAt('highway', hc.s);
-              const dx = rp.x - hp.x;
-              const dy = rp.y - hp.y;
-              if (dx * dx + dy * dy < PROX * PROX) {
-                desired = Math.min(desired, stopSpeed(remaining, cfg.brake));
-                break;
-              }
-            }
+          } else if (remaining < 60) {
+            desired = Math.min(desired, Math.max(30, stopSpeed(remaining, cfg.brake)));
           }
         } else if (segment === 'exit' && !lightIsGreen && car.s < EXIT_GATE_S) {
           const remaining = EXIT_GATE_S - car.s - 15;
           desired = Math.min(desired, stopSpeed(remaining, cfg.brake));
         } else if (segment === 'highway') {
-          const remaining = LENGTHS.highway - car.s - 30;
+          const remaining = LENGTHS.highway - car.s - 5;
           if (car.route === 'exit' && !branchClear('exit')) desired = Math.min(desired, stopSpeed(remaining, cfg.brake));
           if (car.route === 'cont' && !branchClear('cont')) desired = Math.min(desired, stopSpeed(remaining, cfg.brake));
         }
@@ -213,46 +202,26 @@ export function createHighwayEngine(overrides) {
           const maxS = leader.s - cfg.minGap;
           if (car.s > maxS) { car.s = maxS; car.speed = Math.min(car.speed, leader.speed); }
         }
-
-        // Cross-segment clamp: ramp cars near merge must not overlap highway cars
-        if (segment === 'ramp' && car.s > LENGTHS.ramp - 80) {
-          const rp = pointAt('ramp', car.s);
-          const SAFE = 20;
-          for (let j = 0; j < perSeg.highway.length; j++) {
-            const hc = perSeg.highway[j];
-            const hp = pointAt('highway', hc.s);
-            const dx = rp.x - hp.x;
-            const dy = rp.y - hp.y;
-            if (dx * dx + dy * dy < SAFE * SAFE) {
-              car.s = LENGTHS.ramp - 60;
-              car.speed = 0;
-              break;
-            }
-          }
-        }
       }
     }
 
+    const RAMP_STOP_S = LENGTHS.ramp - 5;
+    const HWY_STOP_S = LENGTHS.highway - 5;
+
     for (let i = 0; i < cars.length; i++) {
       const car = cars[i];
-      if (car.segment === 'ramp' && car.s >= LENGTHS.ramp) {
+      if (car.segment === 'ramp' && car.s >= RAMP_STOP_S) {
         if (mergeAllowed()) {
+          const overflow = car.s - RAMP_STOP_S;
           car.segment = 'highway';
-          car.s = MERGE_S + (car.s - LENGTHS.ramp);
+          car.s = MERGE_S + overflow;
           car.speed = cfg.laneSpeed.highway;
         } else {
-          // Snap back, but stay behind any ramp car that's near the stop zone
-          let safeS = LENGTHS.ramp - 60;
-          for (let j = 0; j < cars.length; j++) {
-            if (j !== i && cars[j].segment === 'ramp' && cars[j].s > safeS) {
-              safeS = Math.min(safeS, cars[j].s - cfg.minGap);
-            }
-          }
-          car.s = Math.max(0, safeS);
+          car.s = RAMP_STOP_S;
           car.speed = 0;
         }
-      } else if (car.segment === 'highway' && car.s >= LENGTHS.highway) {
-        const overflow = car.s - LENGTHS.highway;
+      } else if (car.segment === 'highway' && car.s >= HWY_STOP_S) {
+        const overflow = car.s - HWY_STOP_S;
         if (car.route === 'exit' && branchClear('exit')) {
           car.segment = 'exit';
           car.s = overflow;
@@ -262,13 +231,7 @@ export function createHighwayEngine(overrides) {
           car.s = overflow;
           car.speed = cfg.laneSpeed.cont;
         } else {
-          let safeS = LENGTHS.highway - 30;
-          for (let j = 0; j < cars.length; j++) {
-            if (j !== i && cars[j].segment === 'highway') {
-              safeS = Math.min(safeS, cars[j].s - cfg.minGap);
-            }
-          }
-          car.s = Math.max(0, safeS);
+          car.s = HWY_STOP_S;
           car.speed = 0;
         }
       } else if ((car.segment === 'exit' && car.s >= LENGTHS.exit) || (car.segment === 'cont' && car.s >= LENGTHS.cont)) {
@@ -282,19 +245,21 @@ export function createHighwayEngine(overrides) {
       cars = cars.filter(car => !removed.has(car.id));
     }
 
-    if (cars.length < cfg.maxCars && now - lastSpawnAt >= cfg.spawnMs) {
-      const preferred = nextSpawnSource;
-      const fallback = preferred === 'highway' ? 'ramp' : 'highway';
-      const source = branchClear(preferred) ? preferred : (branchClear(fallback) ? fallback : null);
-      if (source) {
-        cars.push(makeCar(source, 0));
-        lastSpawnAt = now;
-        nextSpawnSource = source === 'highway' ? 'ramp' : 'highway';
-        spawnBlockedTicks = 0;
-      } else {
-        spawnBlockedTicks++;
-      }
+    // Spawn highway and ramp independently, offset by half a period
+    const spawnPeriod = cfg.spawnMs * 2; // each source spawns at 2× the base rate
+    let anySpawned = false;
+    if (cars.length < cfg.maxCars && now - lastSpawnHwy >= spawnPeriod && branchClear('highway')) {
+      cars.push(makeCar('highway', 0));
+      lastSpawnHwy = now;
+      anySpawned = true;
     }
+    if (cars.length < cfg.maxCars && now - lastSpawnRamp >= spawnPeriod && branchClear('ramp')) {
+      cars.push(makeCar('ramp', 0));
+      lastSpawnRamp = now;
+      anySpawned = true;
+    }
+    if (anySpawned) spawnBlockedTicks = 0;
+    else spawnBlockedTicks++;
 
     const stalledCount = cars.filter(car => car.speed < 12 && car.segment !== 'cont').length;
     if (stalledCount > 0) stalledFrames++;
@@ -347,7 +312,8 @@ export function createHighwayEngine(overrides) {
       if (lastNow == null) {
         lastNow = now;
         cycleStart = now;
-        lastSpawnAt = now;
+        lastSpawnHwy = now;
+        lastSpawnRamp = now - cfg.spawnMs; // offset: ramp spawns one base period earlier
         tickLight(now);
         return snapshot(now);
       }
@@ -382,7 +348,8 @@ export function createHighwayEngine(overrides) {
       cycleStart = t;
     },
     setLastSpawn(t) {
-      lastSpawnAt = t;
+      lastSpawnHwy = t;
+      lastSpawnRamp = t - cfg.spawnMs;
     },
     resetClock() {
       lastNow = null;
