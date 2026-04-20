@@ -12,8 +12,8 @@ const DEFAULTS = {
   autoSpeed: 6, // pct per second
   autoMin: 5,
   autoMax: 100,
-  minGap: 44,
-  mergeGap: 80,
+  minGap: 36,
+  mergeGap: 50,
   accel: 180,
   brake: 280,
   spawnSpeed: 78,
@@ -177,13 +177,13 @@ export function createHighwayEngine(overrides) {
         }
 
         if (segment === 'ramp') {
-          const remaining = LENGTHS.ramp - car.s - 90;
+          const remaining = LENGTHS.ramp - car.s - 60;
           if (!mergeAllowed()) {
             desired = Math.min(desired, stopSpeed(remaining, cfg.brake));
-          } else if (car.s > LENGTHS.ramp - 120) {
+          } else if (car.s > LENGTHS.ramp - 80) {
             // Near-merge zone: check world-space proximity to highway cars
             const rp = pointAt('ramp', car.s);
-            const PROX = 30; // world-space safety radius
+            const PROX = 26;
             for (let j = 0; j < perSeg.highway.length; j++) {
               const hc = perSeg.highway[j];
               const hp = pointAt('highway', hc.s);
@@ -215,16 +215,16 @@ export function createHighwayEngine(overrides) {
         }
 
         // Cross-segment clamp: ramp cars near merge must not overlap highway cars
-        if (segment === 'ramp' && car.s > LENGTHS.ramp - 120) {
+        if (segment === 'ramp' && car.s > LENGTHS.ramp - 80) {
           const rp = pointAt('ramp', car.s);
-          const SAFE = 22;
+          const SAFE = 20;
           for (let j = 0; j < perSeg.highway.length; j++) {
             const hc = perSeg.highway[j];
             const hp = pointAt('highway', hc.s);
             const dx = rp.x - hp.x;
             const dy = rp.y - hp.y;
             if (dx * dx + dy * dy < SAFE * SAFE) {
-              car.s = LENGTHS.ramp - 90;
+              car.s = LENGTHS.ramp - 60;
               car.speed = 0;
               break;
             }
@@ -242,7 +242,7 @@ export function createHighwayEngine(overrides) {
           car.speed = cfg.laneSpeed.highway;
         } else {
           // Snap back, but stay behind any ramp car that's near the stop zone
-          let safeS = LENGTHS.ramp - 90;
+          let safeS = LENGTHS.ramp - 60;
           for (let j = 0; j < cars.length; j++) {
             if (j !== i && cars[j].segment === 'ramp' && cars[j].s > safeS) {
               safeS = Math.min(safeS, cars[j].s - cfg.minGap);

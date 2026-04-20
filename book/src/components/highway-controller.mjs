@@ -18,8 +18,8 @@ import { angleAt, EXIT_GATE_S, pointAt } from './highway-graph.mjs';
 
   if (!carsG || !slider || !lightG || !lightHousing || !stopLine) return;
 
-  const CAR_W = 26;
-  const CAR_H = 13;
+  const CAR_W = 22;
+  const CAR_H = 11;
   const carEls = {};
 
   const engine = createHighwayEngine({
