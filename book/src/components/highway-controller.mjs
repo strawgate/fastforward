@@ -241,12 +241,6 @@ import { createRenderState } from './highway-render-state.mjs';
         const prevD = carLastD[car.id];
         const opa = car.opacity != null ? car.opacity : 1;
 
-        if (prevSeg && prevSeg !== car.segment) {
-          // Segment transition (ramp→highway, highway→exit/cont): snap to
-          // prevent interpolation across different SVG paths.
-          rs.snapTo(car.id, tp.x, tp.y, angleAt(car.segment, car.targetD));
-        }
-
         // For curved segments, push arc-following intermediate waypoints
         // so the render state follows the SVG path instead of cutting corners.
         if (prevSeg === car.segment && prevD != null && prevD < car.targetD &&

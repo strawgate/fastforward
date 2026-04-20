@@ -14,7 +14,7 @@
 
 export const DEFAULTS = {
   slotsHwy: 15,
-  slotsRamp: 4,
+  slotsRamp: 8,
   slotsExit: 6,
   slotsCont: 6,
   mergeSlot: 5,       // highway slot where ramp merges in
