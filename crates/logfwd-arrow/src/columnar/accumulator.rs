@@ -1368,15 +1368,25 @@ mod verification {
             kani::assume((len as usize) <= 20);
             let block_idx: u32 = kani::any();
             kani::assume(block_idx <= 4);
+            let local_offset: u32 = kani::any();
+            kani::assume(local_offset <= 8);
+            kani::assume((local_offset as usize) + (len as usize) <= 32);
 
-            let buf_len = len as usize;
-            let sref = StringRef { offset: 0, len };
+            let buf_len = local_offset as usize + len as usize;
+            let sref = StringRef {
+                offset: local_offset,
+                len,
+            };
             let view =
                 make_string_view(sref, &buf[..buf_len], &[], buf_len, block_idx, None).unwrap();
 
-            let expected_prefix = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
-            let expected_view =
-                (len as u128) | ((expected_prefix as u128) << 32) | ((block_idx as u128) << 64);
+            let start = local_offset as usize;
+            let expected_prefix =
+                u32::from_le_bytes([buf[start], buf[start + 1], buf[start + 2], buf[start + 3]]);
+            let expected_view = (len as u128)
+                | ((expected_prefix as u128) << 32)
+                | ((block_idx as u128) << 64)
+                | ((local_offset as u128) << 96);
             assert_eq!(view, expected_view, "view must match oracle computation");
         }
 
