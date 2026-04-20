@@ -167,7 +167,7 @@ pub(super) fn build_input_state(
                 ..Default::default()
             };
             if let Some(interval) = f.glob_rescan_interval_ms {
-                tail_config.glob_rescan_interval_ms = interval.get();
+                tail_config.glob_rescan_interval_ms = interval;
             }
             if let Some(max) = f.adaptive_fast_polls_max {
                 tail_config.adaptive_fast_polls_max = max;

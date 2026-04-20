@@ -660,7 +660,7 @@ pub struct FileTypeConfig {
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
     pub max_open_files: Option<usize>,
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
-    pub glob_rescan_interval_ms: Option<PositiveMillis>,
+    pub glob_rescan_interval_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
