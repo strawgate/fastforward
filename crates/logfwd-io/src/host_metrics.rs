@@ -1998,7 +1998,7 @@ mod tests {
         let batch = first_batch(&events);
         let pids = u32_col_optional(batch, "process_pid");
         assert!(
-            pids.iter().any(std::option::Option::is_some),
+            pids.iter().any(Option::is_some),
             "process snapshot rows should have process_pid set"
         );
         let kinds = string_col(batch, "event_kind");
@@ -2010,17 +2010,8 @@ mod tests {
 
     #[test]
     fn first_poll_emits_network_data() {
-        // Skip only when the exact precondition the sensor relies on isn't
-        // met: `sysinfo::Networks` has to enumerate at least one interface,
-        // because that's the source the sensor reads. An earlier revision
-        // also gated on `UdpSocket::connect("192.0.2.1:1")`, but that
-        // over-skips — network-isolated containers with usable loopback
-        // interfaces fail the route probe even though sysinfo would still
-        // populate `network_interface`, quietly bypassing the assertion
-        // exactly where this portability test matters most.
-        //
-        // Silent skip — `print_stderr` is a workspace-level warn and the
-        // other portability skips in this PR stay silent too.
+        // Skip when `sysinfo::Networks` cannot enumerate any interface —
+        // that is the exact precondition the sensor relies on.
         let mut iface_probe = sysinfo::Networks::new_with_refreshed_list();
         iface_probe.refresh(true);
         if iface_probe.iter().next().is_none() {
@@ -2043,16 +2034,13 @@ mod tests {
         std::thread::sleep(Duration::from_millis(2));
 
         let events = input.poll().expect("second poll with data");
-        // Some CI environments may have no network interfaces, so just check
-        // we get at least an empty successful poll.
-        if !events.is_empty() {
-            let batch = first_batch(&events);
-            let ifaces = string_col(batch, "network_interface");
-            assert!(
-                ifaces.iter().any(std::option::Option::is_some),
-                "network snapshot rows should have network_interface set"
-            );
-        }
+        assert!(!events.is_empty(), "network poll should produce a batch");
+        let batch = first_batch(&events);
+        let ifaces = string_col(batch, "network_interface");
+        assert!(
+            ifaces.iter().any(Option::is_some),
+            "network snapshot rows should have network_interface set"
+        );
     }
 
     #[test]
