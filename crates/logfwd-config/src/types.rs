@@ -156,14 +156,6 @@ impl<'de> Deserialize<'de> for OutputType {
                     E::unknown_variant(v, compat::supported_output_type_names_for_errors())
                 })
             }
-
-            fn visit_unit<E: serde::de::Error>(self) -> Result<OutputType, E> {
-                Ok(OutputType::Null)
-            }
-
-            fn visit_none<E: serde::de::Error>(self) -> Result<OutputType, E> {
-                Ok(OutputType::Null)
-            }
         }
 
         d.deserialize_any(V)

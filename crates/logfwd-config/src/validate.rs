@@ -2308,7 +2308,7 @@ pipelines:
           response_code: 204
           response_body: '{"ok":true}'
     outputs:
-      - type: null
+      - type: "null"
 "#;
         let err = Config::load_str(yaml).expect_err("204 + response_body must fail validation");
         assert!(
@@ -2330,7 +2330,7 @@ pipelines:
         http:
           max_drained_bytes_per_poll: 0
     outputs:
-      - type: null
+      - type: "null"
 "#;
         let err = Config::load_str(yaml).expect_err("zero drain cap must fail validation");
         assert!(
