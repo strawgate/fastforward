@@ -6,10 +6,11 @@ from __future__ import annotations
 import argparse
 import copy
 import difflib
-import re
 import subprocess
 import sys
 from pathlib import Path
+
+from otlp_proto import parse_proto_fields
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -40,25 +41,6 @@ ACTION_TO_VARIANT = {
 ANY_VALUE_UNSUPPORTED_REASONS = {
     "array_value": "AnyValue::ArrayValue",
     "kvlist_value": "AnyValue::KvListValue",
-}
-
-PROTO_TYPE_TO_WIRE = {
-    "bool": "varint",
-    "int32": "varint",
-    "int64": "varint",
-    "uint32": "varint",
-    "uint64": "varint",
-    "sint32": "varint",
-    "sint64": "varint",
-    "fixed32": "fixed32",
-    "sfixed32": "fixed32",
-    "fixed64": "fixed64",
-    "sfixed64": "fixed64",
-    "float": "fixed32",
-    "double": "fixed64",
-    "string": "len",
-    "bytes": "len",
-    "SeverityNumber": "varint",
 }
 
 PROTO_TYPE_TO_ANY_KIND = {
@@ -165,74 +147,8 @@ PROJECTION_SPEC = {
     ],
 }
 
-FIELD_RE = re.compile(
-    r"^\s*(?:(repeated)\s+)?([.\w]+)\s+([A-Za-z_]\w*)\s*=\s*(\d+)\s*(?:\[[^\]]*\])?\s*;"
-)
-MESSAGE_RE = re.compile(r"^\s*message\s+([A-Za-z_]\w*)\s*\{")
-ONEOF_RE = re.compile(r"^\s*oneof\s+([A-Za-z_]\w*)\s*\{")
-
-
-def short_proto_type(proto_type: str) -> str:
-    return proto_type.rsplit(".", 1)[-1]
-
-
-def proto_wire_for(proto_type: str) -> str:
-    short_type = short_proto_type(proto_type)
-    if short_type in PROTO_TYPE_TO_WIRE:
-        return PROTO_TYPE_TO_WIRE[short_type]
-    return "len"
-
-
-def parse_proto_fields() -> dict[str, dict[str, dict]]:
-    messages: dict[str, dict[str, dict]] = {}
-    for path in PROTO_FILES:
-        if not path.exists():
-            raise FileNotFoundError(f"vendored OTLP proto file missing: {path}")
-
-        current_message: str | None = None
-        in_oneof: str | None = None
-        for raw_line in path.read_text().splitlines():
-            line = raw_line.split("//", 1)[0].strip()
-            if not line:
-                continue
-
-            if current_message is None:
-                message_match = MESSAGE_RE.match(line)
-                if message_match:
-                    current_message = message_match.group(1)
-                    messages.setdefault(current_message, {})
-                    continue
-                continue
-
-            oneof_match = ONEOF_RE.match(line)
-            if oneof_match:
-                in_oneof = oneof_match.group(1)
-                continue
-
-            field_match = FIELD_RE.match(line)
-            if field_match:
-                repeated, proto_type, field_name, number = field_match.groups()
-                messages[current_message][field_name] = {
-                    "name": field_name,
-                    "number": int(number),
-                    "wire": proto_wire_for(proto_type),
-                    "proto_type": short_proto_type(proto_type),
-                    "repeated": repeated is not None,
-                    "oneof": in_oneof,
-                }
-                continue
-
-            if "}" in line:
-                if in_oneof is not None:
-                    in_oneof = None
-                else:
-                    current_message = None
-
-    return messages
-
-
 def enrich_spec_from_proto(spec: dict) -> dict:
-    proto_messages = parse_proto_fields()
+    proto_messages = parse_proto_fields(PROTO_FILES)
     enriched = copy.deepcopy(spec)
     for message in enriched["messages"]:
         name = message["name"]
@@ -329,7 +245,7 @@ def validate_spec(spec: dict) -> None:
     if any_value.get("oneof") != "value":
         raise ValueError("AnyValue policy must document the value oneof")
 
-    proto_messages = parse_proto_fields()
+    proto_messages = parse_proto_fields(PROTO_FILES)
     any_value_fields = proto_messages.get("AnyValue", {})
     policy_any_value_fields = {field["name"] for field in any_value["fields"]}
     for field_name, field in any_value_fields.items():
