@@ -1,6 +1,6 @@
 use crate::compat;
 use crate::serde_helpers::{
-    deserialize_from_string_or_value, deserialize_one_or_many,
+    PositiveMillis, PositiveSecs, deserialize_from_string_or_value, deserialize_one_or_many,
     deserialize_option_from_string_or_value, deserialize_option_strict_string,
     deserialize_option_string_map_strict_values, deserialize_option_vec_strict_string,
     deserialize_strict_string, deserialize_string_map_strict_values, deserialize_vec_strict_string,
@@ -372,7 +372,7 @@ pub struct GeneratorInputConfig {
 pub struct HostMetricsInputConfig {
     /// Sensor sample cadence. Defaults to 10_000 when omitted.
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
-    pub poll_interval_ms: Option<u64>,
+    pub poll_interval_ms: Option<PositiveMillis>,
     /// Deprecated no-op retained for backward compatibility.
     ///
     /// Sensor inputs are Arrow-native and do not emit heartbeat rows.
@@ -383,7 +383,7 @@ pub struct HostMetricsInputConfig {
     pub control_path: Option<String>,
     /// How often to check `control_path` for updates. Defaults to 1_000 when omitted.
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
-    pub control_reload_interval_ms: Option<u64>,
+    pub control_reload_interval_ms: Option<PositiveMillis>,
     /// Optional explicit enabled families for this platform.
     ///
     /// `None` means "use platform defaults". `Some([])` means "disable all".
@@ -425,7 +425,7 @@ pub struct HostMetricsInputConfig {
     pub scrapers: Option<Vec<String>>,
     /// Cadence for metrics collection in milliseconds.
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
-    pub collection_interval_ms: Option<u64>,
+    pub collection_interval_ms: Option<PositiveMillis>,
     /// List of disk devices to include.
     #[serde(default, deserialize_with = "deserialize_option_vec_strict_string")]
     pub disk_include_devices: Option<Vec<String>>,
@@ -625,7 +625,7 @@ pub struct FileTypeConfig {
     pub path: String,
     /// File input poll cadence in milliseconds (default: 50, minimum: 1).
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
-    pub poll_interval_ms: Option<u64>,
+    pub poll_interval_ms: Option<PositiveMillis>,
     /// File tail read buffer in bytes (default: 262_144, minimum: 1, maximum: 4_194_304).
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
     pub read_buf_size: Option<usize>,
@@ -639,7 +639,7 @@ pub struct FileTypeConfig {
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
     pub max_open_files: Option<usize>,
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
-    pub glob_rescan_interval_ms: Option<u64>,
+    pub glob_rescan_interval_ms: Option<PositiveMillis>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -663,9 +663,9 @@ pub struct TcpTypeConfig {
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
     pub max_connections: Option<usize>,
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
-    pub connection_timeout_ms: Option<u64>,
+    pub connection_timeout_ms: Option<PositiveMillis>,
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
-    pub read_timeout_ms: Option<u64>,
+    pub read_timeout_ms: Option<PositiveMillis>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -680,7 +680,7 @@ pub struct OtlpTypeConfig {
     #[serde(default)]
     pub tls: Option<TlsInputConfig>,
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
-    pub grpc_keepalive_time_ms: Option<u64>,
+    pub grpc_keepalive_time_ms: Option<PositiveMillis>,
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
     pub grpc_max_concurrent_streams: Option<u32>,
 }
@@ -793,7 +793,7 @@ pub struct S3InputConfig {
     pub compression: Option<String>,
     /// Polling interval for `ListObjectsV2` mode in milliseconds. Default: 5000.
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
-    pub poll_interval_ms: Option<u64>,
+    pub poll_interval_ms: Option<PositiveMillis>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -818,15 +818,15 @@ pub struct OutputConfig {
     /// Number of retry attempts for transient errors.
     pub retry_attempts: Option<u32>,
     /// Initial backoff delay for retries.
-    pub retry_initial_backoff_ms: Option<u64>,
+    pub retry_initial_backoff_ms: Option<PositiveMillis>,
     /// Maximum backoff delay for retries.
-    pub retry_max_backoff_ms: Option<u64>,
+    pub retry_max_backoff_ms: Option<PositiveMillis>,
     /// Timeout for each HTTP request.
-    pub request_timeout_ms: Option<u64>,
+    pub request_timeout_ms: Option<PositiveMillis>,
     /// Maximum number of log records to send per batch.
     pub batch_size: Option<usize>,
     /// Maximum time to wait before sending a batch.
-    pub batch_timeout_ms: Option<u64>,
+    pub batch_timeout_ms: Option<PositiveMillis>,
     /// Host for socket-based IPC.
     pub host: Option<String>,
     /// Port for socket-based IPC.
@@ -996,19 +996,19 @@ pub struct OutputConfigV1 {
     pub retry_attempts: Option<u32>,
     /// Initial backoff delay for retries.
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
-    pub retry_initial_backoff_ms: Option<u64>,
+    pub retry_initial_backoff_ms: Option<PositiveMillis>,
     /// Maximum backoff delay for retries.
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
-    pub retry_max_backoff_ms: Option<u64>,
+    pub retry_max_backoff_ms: Option<PositiveMillis>,
     /// Timeout for each HTTP request.
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
-    pub request_timeout_ms: Option<u64>,
+    pub request_timeout_ms: Option<PositiveMillis>,
     /// Maximum number of log records to send per batch.
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
     pub batch_size: Option<usize>,
     /// Maximum time to wait before sending a batch.
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
-    pub batch_timeout_ms: Option<u64>,
+    pub batch_timeout_ms: Option<PositiveMillis>,
     /// Host for socket-based IPC.
     #[serde(default, deserialize_with = "deserialize_option_strict_string")]
     pub host: Option<String>,
@@ -1234,15 +1234,15 @@ pub struct OtlpOutputConfig {
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
     pub retry_attempts: Option<u32>,
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
-    pub retry_initial_backoff_ms: Option<u64>,
+    pub retry_initial_backoff_ms: Option<PositiveMillis>,
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
-    pub retry_max_backoff_ms: Option<u64>,
+    pub retry_max_backoff_ms: Option<PositiveMillis>,
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
-    pub request_timeout_ms: Option<u64>,
+    pub request_timeout_ms: Option<PositiveMillis>,
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
     pub batch_size: Option<usize>,
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
-    pub batch_timeout_ms: Option<u64>,
+    pub batch_timeout_ms: Option<PositiveMillis>,
 }
 
 impl OtlpOutputConfig {
@@ -1313,7 +1313,7 @@ pub struct ElasticsearchOutputConfig {
     #[serde(default)]
     pub tls: Option<TlsClientConfig>,
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
-    pub request_timeout_ms: Option<u64>,
+    pub request_timeout_ms: Option<PositiveMillis>,
 }
 
 impl ElasticsearchOutputConfig {
@@ -1354,7 +1354,7 @@ pub struct LokiOutputConfig {
     #[serde(default)]
     pub tls: Option<TlsClientConfig>,
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
-    pub request_timeout_ms: Option<u64>,
+    pub request_timeout_ms: Option<PositiveMillis>,
 }
 
 impl LokiOutputConfig {
@@ -1545,7 +1545,7 @@ pub struct GeoDatabaseConfig {
     #[serde(deserialize_with = "deserialize_strict_string")]
     pub path: String,
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
-    pub refresh_interval: Option<u64>,
+    pub refresh_interval: Option<PositiveSecs>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1585,7 +1585,7 @@ pub struct CsvEnrichmentConfig {
     /// Reload the file from disk every N seconds. If absent the file is read
     /// once at startup and never reloaded.
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
-    pub refresh_interval: Option<u64>,
+    pub refresh_interval: Option<PositiveSecs>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1598,7 +1598,7 @@ pub struct JsonlEnrichmentConfig {
     /// Reload the file from disk every N seconds. If absent the file is read
     /// once at startup and never reloaded.
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
-    pub refresh_interval: Option<u64>,
+    pub refresh_interval: Option<PositiveSecs>,
 }
 
 /// Enriches logs with a single-row table populated from environment variables
@@ -1639,7 +1639,7 @@ pub struct KvFileEnrichmentConfig {
     pub path: String,
     /// Reload the file from disk every N seconds (must be >= 1).
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
-    pub refresh_interval: Option<u64>,
+    pub refresh_interval: Option<PositiveSecs>,
 }
 
 /// Network interface metadata: `hostname`, `primary_ipv4`, `primary_ipv6`.
@@ -1699,9 +1699,9 @@ pub struct PipelineConfig {
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
     pub batch_target_bytes: Option<usize>,
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
-    pub batch_timeout_ms: Option<u64>,
+    pub batch_timeout_ms: Option<PositiveMillis>,
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
-    pub poll_interval_ms: Option<u64>,
+    pub poll_interval_ms: Option<PositiveMillis>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -1714,7 +1714,7 @@ pub struct ServerConfig {
     #[serde(default, deserialize_with = "deserialize_option_strict_string")]
     pub metrics_endpoint: Option<String>,
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
-    pub metrics_interval_secs: Option<u64>,
+    pub metrics_interval_secs: Option<PositiveSecs>,
     #[serde(default, deserialize_with = "deserialize_option_strict_string")]
     pub traces_endpoint: Option<String>,
 }
