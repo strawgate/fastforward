@@ -289,10 +289,16 @@ impl ElasticsearchSink {
         let items = v
             .get("items")
             .and_then(serde_json::Value::as_array)
-            .ok_or_else(|| io::Error::other("ES bulk response missing 'items' array"))?;
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "ES bulk response missing 'items' array",
+                )
+            })?;
 
         if items.is_empty() {
-            return Err(io::Error::other(
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
                 "ES bulk response indicated errors but 'items' array is empty",
             ));
         }
@@ -303,52 +309,59 @@ impl ElasticsearchSink {
         };
 
         for (idx, item) in items.iter().enumerate() {
-            let action = item
+            let action_obj = item
                 .as_object()
                 .and_then(|obj| obj.values().next())
-                .and_then(serde_json::Value::as_object);
-            if let Some(action_obj) = action {
-                let status = action_obj
-                    .get("status")
-                    .and_then(serde_json::Value::as_u64)
-                    .ok_or_else(|| {
-                        io::Error::other("ES bulk response item missing numeric status field")
-                    })?;
+                .and_then(serde_json::Value::as_object)
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("ES bulk response item {idx} missing action payload"),
+                    )
+                })?;
+            let status = action_obj
+                .get("status")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("ES bulk response item {idx} missing numeric status field"),
+                    )
+                })?;
 
-                if let Some(error) = action_obj.get("error") {
-                    let error_type = error
-                        .get("type")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or("unknown");
-                    let reason = error
-                        .get("reason")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or("no reason provided");
-                    if status == 429 || (500..600).contains(&status) {
-                        result.retry_items.push(idx);
-                        continue;
-                    }
-                    result.permanent_errors.push(format!(
-                        "item {idx}: ES bulk error (status {status}): {error_type}: {reason}"
-                    ));
-                    continue;
-                }
-
-                // Some ES responses include only `status` for failed items. Preserve
-                // retry semantics for retryable status-only failures.
+            if let Some(error) = action_obj.get("error") {
+                let error_type = error
+                    .get("type")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("unknown");
+                let reason = error
+                    .get("reason")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("no reason provided");
                 if status == 429 || (500..600).contains(&status) {
                     result.retry_items.push(idx);
                     continue;
                 }
-                if status >= 400 {
-                    result.permanent_errors.push(format!(
-                        "item {idx}: ES bulk error (status {status}): missing item error details"
-                    ));
-                } else if status >= 300 {
-                    result.permanent_errors.push(format!(
-                        "item {idx}: unexpected ES bulk item status {status}"
-                    ));
-                }
+                result.permanent_errors.push(format!(
+                    "item {idx}: ES bulk error (status {status}): {error_type}: {reason}"
+                ));
+                continue;
+            }
+
+            // Some ES responses include only `status` for failed items. Preserve
+            // retry semantics for retryable status-only failures.
+            if status == 429 || (500..600).contains(&status) {
+                result.retry_items.push(idx);
+                continue;
+            }
+            if status >= 400 {
+                result.permanent_errors.push(format!(
+                    "item {idx}: ES bulk error (status {status}): missing item error details"
+                ));
+            } else if status >= 300 {
+                result.permanent_errors.push(format!(
+                    "item {idx}: unexpected ES bulk item status {status}"
+                ));
             }
         }
 
@@ -699,12 +712,10 @@ impl ElasticsearchSink {
 
     /// Split a batch in half and send each half sequentially.
     ///
-    /// **Duplication safety (#1873):** Both halves are always attempted
-    /// regardless of individual outcomes. When one half succeeds but the
-    /// other fails with a transient error, the failed half is retried
-    /// internally (up to `SPLIT_INTERNAL_RETRIES` times) rather than
-    /// propagating a retryable result to the worker pool — which would
-    /// retry the entire original batch and duplicate the successful half.
+    /// **Duplication safety (#1873):** Both halves are attempted sequentially.
+    /// Retryable failures are returned with the original row IDs that still
+    /// need delivery, so worker-level retry can send only the undelivered
+    /// subset instead of replaying a full batch that may contain accepted rows.
     async fn send_split_halves(
         &mut self,
         batch: &RecordBatch,
@@ -2370,6 +2381,30 @@ mod tests {
             err.to_string()
                 .contains("unexpected ES bulk item status 307"),
             "error should mention unexpected 3xx status: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_bulk_response_missing_action_payload_is_invalid_data() {
+        let response = br#"{"took":5,"errors":true,"items":[{}]}"#;
+        let err = ElasticsearchSink::parse_bulk_response(response)
+            .expect_err("missing item action payload must be rejected");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(
+            err.to_string().contains("missing action payload"),
+            "error should mention malformed item action: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_bulk_response_missing_status_is_invalid_data() {
+        let response = br#"{"took":5,"errors":true,"items":[{"index":{"_id":"1"}}]}"#;
+        let err = ElasticsearchSink::parse_bulk_response(response)
+            .expect_err("missing item status must be rejected");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(
+            err.to_string().contains("missing numeric status"),
+            "error should mention malformed item status: {err}"
         );
     }
 
