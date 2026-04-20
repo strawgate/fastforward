@@ -21,13 +21,24 @@ pub struct InputCadence {
 }
 
 /// CRI output stream for metadata sidecar rows.
+///
+/// `CriStream` is intentionally limited to the two stream tokens accepted by
+/// the CRI log format. It is stored once per CRI metadata span and materialized
+/// later as `_stream`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CriStream {
+    /// CRI stdout stream.
     Stdout,
+    /// CRI stderr stream.
     Stderr,
 }
 
 impl CriStream {
+    /// Parse a CRI stream token.
+    ///
+    /// `from_bytes` returns `Some(CriStream)` only for the exact byte strings
+    /// `b"stdout"` and `b"stderr"`. Other values are rejected so callers can
+    /// keep sidecar row counts aligned explicitly.
     pub fn from_bytes(stream: &[u8]) -> Option<Self> {
         match stream {
             b"stdout" => Some(Self::Stdout),
@@ -36,6 +47,9 @@ impl CriStream {
         }
     }
 
+    /// Return the canonical CRI stream token for this `CriStream`.
+    ///
+    /// `as_str` always returns either `"stdout"` or `"stderr"`.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Stdout => "stdout",
@@ -44,34 +58,63 @@ impl CriStream {
     }
 }
 
+/// Value payload for one non-null CRI metadata span.
+///
+/// `timestamp_start` and `timestamp_len` are byte offsets into
+/// [`CriMetadata::timestamp_bytes`], not row offsets. The referenced byte range
+/// must stay within that buffer and should contain valid UTF-8 when metadata is
+/// materialized as Arrow `Utf8View`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CriMetadataValues {
+    /// Byte offset of this span's timestamp inside
+    /// [`CriMetadata::timestamp_bytes`].
     pub timestamp_start: usize,
+    /// Byte length of this span's timestamp inside
+    /// [`CriMetadata::timestamp_bytes`].
     pub timestamp_len: usize,
+    /// CRI stream for every row in this span.
     pub stream: CriStream,
 }
 
 /// Consecutive scanner rows that share the same optional CRI metadata.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CriMetadataSpan {
+    /// Number of scanner rows covered by this span.
     pub rows: usize,
+    /// Shared CRI metadata for those rows, or `None` when the rows should have
+    /// null `_timestamp` / `_stream` sidecar values.
     pub values: Option<CriMetadataValues>,
 }
 
 /// Row-aligned CRI metadata extracted without rewriting the source JSON.
+///
+/// `CriMetadata` is a compact run-length encoded sidecar. `rows` must equal
+/// the number of scanner rows represented by `spans`; every emitted data row
+/// from CRI or Auto processing must append either one value row or one null
+/// row. `has_values` is true when at least one span carries non-null
+/// `CriMetadataValues`; it is not a row-count predicate, because all-null
+/// sidecars are still meaningful when SQL references `_timestamp` or
+/// `_stream`.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CriMetadata {
+    /// Run-length encoded row spans. The sum of `spans[*].rows` must equal
+    /// `rows`.
     pub spans: Vec<CriMetadataSpan>,
+    /// Packed CRI timestamp bytes referenced by `CriMetadataValues` offsets.
     pub timestamp_bytes: Vec<u8>,
+    /// Total scanner rows represented by this sidecar.
     pub rows: usize,
+    /// True when at least one row has non-null CRI metadata.
     pub has_values: bool,
 }
 
 impl CriMetadata {
+    /// Return true when this sidecar has no represented rows.
     pub fn is_empty(&self) -> bool {
         self.rows == 0
     }
 
+    /// Remove all represented rows while preserving allocated capacity.
     pub fn clear(&mut self) {
         self.spans.clear();
         self.timestamp_bytes.clear();
@@ -79,11 +122,18 @@ impl CriMetadata {
         self.has_values = false;
     }
 
+    /// Resolve the timestamp bytes for a `CriMetadataValues` descriptor.
+    ///
+    /// The descriptor must have come from this `CriMetadata`; otherwise the
+    /// byte range may be out of bounds and this method will panic.
     pub fn timestamp(&self, values: &CriMetadataValues) -> &[u8] {
         let end = values.timestamp_start + values.timestamp_len;
         &self.timestamp_bytes[values.timestamp_start..end]
     }
 
+    /// Append `rows` null CRI metadata rows.
+    ///
+    /// Adjacent null spans are coalesced. `has_values` is unchanged.
     pub fn append_null_rows(&mut self, rows: usize) {
         if rows == 0 {
             return;
@@ -99,10 +149,21 @@ impl CriMetadata {
         self.rows += rows;
     }
 
-    pub fn append_value(&mut self, timestamp: &[u8], stream: &[u8]) {
+    /// Append one CRI metadata row.
+    ///
+    /// Returns `true` when a non-null value was appended. If `stream` is not a
+    /// valid [`CriStream`] token or `timestamp` is not valid UTF-8, this method
+    /// appends one null row and returns `false` so the caller can preserve row
+    /// alignment without dropping the batch.
+    pub fn append_value(&mut self, timestamp: &[u8], stream: &[u8]) -> bool {
         let Some(stream) = CriStream::from_bytes(stream) else {
-            return;
+            self.append_null_rows(1);
+            return false;
         };
+        if std::str::from_utf8(timestamp).is_err() {
+            self.append_null_rows(1);
+            return false;
+        }
         if let Some(last) = self.spans.last()
             && let Some(values) = &last.values
             && values.stream == stream
@@ -111,7 +172,7 @@ impl CriMetadata {
             let last = self.spans.last_mut().expect("last span exists");
             last.rows += 1;
             self.rows += 1;
-            return;
+            return true;
         }
         let timestamp_start = self.timestamp_bytes.len();
         self.timestamp_bytes.extend_from_slice(timestamp);
@@ -125,8 +186,13 @@ impl CriMetadata {
         });
         self.rows += 1;
         self.has_values = true;
+        true
     }
 
+    /// Append another row-aligned sidecar to this one.
+    ///
+    /// Adjacent spans with equal values are coalesced. Timestamp offsets from
+    /// `other` are rebased into this sidecar's `timestamp_bytes` buffer.
     pub fn append(&mut self, mut other: Self) {
         if other.is_empty() {
             return;
@@ -156,10 +222,17 @@ impl CriMetadata {
             }
         }
         if merge_first {
-            let first_rows = other.spans.first().expect("first span exists").rows;
+            let mut other_spans = other.spans.into_iter();
+            let first_rows = other_spans
+                .next()
+                .expect("first span exists for metadata merge")
+                .rows;
             let last = self.spans.last_mut().expect("last span exists");
             last.rows += first_rows;
-            other.spans.remove(0);
+            self.rows += other.rows;
+            self.has_values |= other.has_values;
+            self.spans.extend(other_spans);
+            return;
         }
         self.rows += other.rows;
         self.has_values |= other.has_values;
@@ -182,6 +255,43 @@ fn metadata_values_equal(
                 == right_timestamps[right.timestamp_start..right_end]
         }
         _ => false,
+    }
+}
+
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    #[kani::proof]
+    fn verify_cri_metadata_append_null_rows_preserves_alignment() {
+        let rows: u8 = kani::any();
+        let mut metadata = CriMetadata::default();
+
+        metadata.append_null_rows(rows as usize);
+
+        assert!(metadata.rows == rows as usize);
+        assert!(metadata.spans.len() <= 1);
+        assert!(!metadata.has_values);
+        kani::cover!(rows == 0, "empty null append");
+        kani::cover!(rows > 0, "non-empty null append");
+    }
+
+    #[kani::proof]
+    fn verify_cri_metadata_append_value_always_counts_one_row() {
+        let valid_stream: bool = kani::any();
+        let stream = if valid_stream {
+            b"stdout".as_slice()
+        } else {
+            b"invalid".as_slice()
+        };
+        let mut metadata = CriMetadata::default();
+
+        let appended_value = metadata.append_value(b"2024-01-15T10:30:00Z", stream);
+
+        assert!(metadata.rows == 1);
+        assert!(appended_value == valid_stream);
+        kani::cover!(appended_value, "valid CRI stream appends value");
+        kani::cover!(!appended_value, "invalid CRI stream appends null row");
     }
 }
 
@@ -725,6 +835,18 @@ fn tail_events_to_input_events(tail_events: Vec<TailEvent>) -> Vec<InputEvent> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cri_metadata_invalid_stream_appends_null_row() {
+        let mut metadata = CriMetadata::default();
+
+        assert!(!metadata.append_value(b"2024-01-15T10:30:00Z", b"bad"));
+
+        assert_eq!(metadata.rows, 1);
+        assert!(!metadata.has_values);
+        assert_eq!(metadata.spans.len(), 1);
+        assert!(metadata.spans[0].values.is_none());
+    }
 
     fn stdin_from_messages(messages: Vec<StdinMessage>) -> StdinInput {
         let (tx, rx) = mpsc::sync_channel(messages.len().max(1));

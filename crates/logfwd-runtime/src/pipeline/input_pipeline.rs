@@ -31,7 +31,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 #[cfg(not(feature = "turmoil"))]
-use arrow::array::{Array, ArrayRef, StringViewBuilder, UInt64Builder};
+use arrow::array::{
+    Array, ArrayRef, LargeStringArray, StringArray, StringViewArray, StringViewBuilder,
+    UInt64Builder,
+};
 #[cfg(not(feature = "turmoil"))]
 use arrow::buffer::Buffer;
 #[cfg(not(feature = "turmoil"))]
@@ -52,7 +55,7 @@ use tokio_util::sync::CancellationToken;
 #[cfg(not(feature = "turmoil"))]
 use logfwd_diagnostics::diagnostics::PipelineMetrics;
 #[cfg(not(feature = "turmoil"))]
-use logfwd_io::input::{CriMetadata, CriStream, InputEvent};
+use logfwd_io::input::{CriMetadata, InputEvent};
 #[cfg(not(feature = "turmoil"))]
 use logfwd_io::poll_cadence::AdaptivePollController;
 #[cfg(not(feature = "turmoil"))]
@@ -158,11 +161,11 @@ fn flush_buf(
         *pending_row_origin = None;
     }
     let data = buf.split().freeze();
-    let cri_metadata = if cri_metadata.has_values {
-        Some(std::mem::take(cri_metadata))
-    } else {
+    let cri_metadata = if cri_metadata.is_empty() {
         cri_metadata.clear();
         None
+    } else {
+        Some(take_cri_metadata_preserving_capacity(cri_metadata))
     };
     let checkpoints = source.checkpoint_data();
     let source_paths = if source_metadata_plan.has_source_path() {
@@ -461,6 +464,17 @@ fn append_cri_metadata_for_data(
 }
 
 #[cfg(not(feature = "turmoil"))]
+fn take_cri_metadata_preserving_capacity(metadata: &mut CriMetadata) -> CriMetadata {
+    let replacement = CriMetadata {
+        spans: Vec::with_capacity(metadata.spans.capacity()),
+        timestamp_bytes: Vec::with_capacity(metadata.timestamp_bytes.capacity()),
+        rows: 0,
+        has_values: false,
+    };
+    std::mem::replace(metadata, replacement)
+}
+
+#[cfg(not(feature = "turmoil"))]
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct PendingRowOrigin {
     source_id: Option<SourceId>,
@@ -626,33 +640,141 @@ fn cri_metadata_for_batch(
     let Some(cri_metadata) = cri_metadata else {
         return Ok(batch);
     };
-    if !cri_metadata.has_values {
-        return Ok(batch);
-    }
     if cri_metadata.rows != batch.num_rows() {
         return Err(ArrowError::InvalidArgumentError(format!(
-            "CRI metadata sidecar row count mismatch: spans={}, batch={}",
+            "CRI metadata sidecar row count mismatch: rows={}, batch={}",
             cri_metadata.rows,
             batch.num_rows()
         )));
     }
 
+    let has_values = cri_metadata.has_values;
+    let schema = batch.schema();
+    let needs_timestamp = has_values || schema.index_of(field_names::TIMESTAMP_UNDERSCORE).is_err();
+    let needs_stream = has_values || schema.index_of(field_names::CRI_STREAM).is_err();
+    if !needs_timestamp && !needs_stream {
+        return Ok(batch);
+    }
+
     let (timestamp, stream) = cri_metadata_arrays(batch.num_rows(), cri_metadata)?;
-    replace_or_append_columns(
-        batch,
-        vec![
-            MetadataColumn {
-                name: field_names::TIMESTAMP_UNDERSCORE,
-                data_type: DataType::Utf8View,
-                array: timestamp,
-            },
-            MetadataColumn {
-                name: field_names::CRI_STREAM,
-                data_type: DataType::Utf8View,
-                array: stream,
-            },
-        ],
-    )
+    let columns = [
+        needs_timestamp
+            .then(|| cri_metadata_column(&batch, field_names::TIMESTAMP_UNDERSCORE, timestamp))
+            .transpose()?,
+        needs_stream
+            .then(|| cri_metadata_column(&batch, field_names::CRI_STREAM, stream))
+            .transpose()?,
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    replace_or_append_columns(batch, columns)
+}
+
+#[cfg(not(feature = "turmoil"))]
+fn cri_metadata_column(
+    batch: &RecordBatch,
+    name: &'static str,
+    sidecar: ArrayRef,
+) -> Result<MetadataColumn, ArrowError> {
+    let array = overlay_existing_string_values(batch, name, sidecar)?;
+    Ok(MetadataColumn {
+        name,
+        data_type: DataType::Utf8View,
+        array,
+    })
+}
+
+#[cfg(not(feature = "turmoil"))]
+fn overlay_existing_string_values(
+    batch: &RecordBatch,
+    name: &str,
+    sidecar: ArrayRef,
+) -> Result<ArrayRef, ArrowError> {
+    let Ok(existing_index) = batch.schema().index_of(name) else {
+        return Ok(sidecar);
+    };
+    if sidecar.null_count() == 0 {
+        return Ok(sidecar);
+    }
+    let sidecar = sidecar
+        .as_any()
+        .downcast_ref::<StringViewArray>()
+        .ok_or_else(|| {
+            ArrowError::InvalidArgumentError(format!(
+                "CRI metadata column {name} should be Utf8View"
+            ))
+        })?;
+    let existing = batch.column(existing_index);
+    let existing = string_view_array(existing)?;
+    let mut builder = StringViewBuilder::new();
+    for row in 0..batch.num_rows() {
+        if !sidecar.is_null(row) {
+            builder.append_value(sidecar.value(row));
+        } else if let Some(existing) = &existing {
+            if existing.is_null(row) {
+                builder.append_null();
+            } else {
+                builder.append_value(existing.value(row));
+            }
+        } else {
+            builder.append_null();
+        }
+    }
+    Ok(Arc::new(builder.finish()) as ArrayRef)
+}
+
+#[cfg(not(feature = "turmoil"))]
+fn string_view_array(array: &ArrayRef) -> Result<Option<StringViewArray>, ArrowError> {
+    match array.data_type() {
+        DataType::Utf8View => array
+            .as_any()
+            .downcast_ref::<StringViewArray>()
+            .cloned()
+            .map(Some)
+            .ok_or_else(|| {
+                ArrowError::InvalidArgumentError(
+                    "Utf8View column is not a StringViewArray".to_string(),
+                )
+            }),
+        DataType::Utf8 => {
+            let array = array
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .ok_or_else(|| {
+                    ArrowError::InvalidArgumentError("Utf8 column is not a StringArray".to_string())
+                })?;
+            let mut builder = StringViewBuilder::new();
+            for row in 0..array.len() {
+                if array.is_null(row) {
+                    builder.append_null();
+                } else {
+                    builder.append_value(array.value(row));
+                }
+            }
+            Ok(Some(builder.finish()))
+        }
+        DataType::LargeUtf8 => {
+            let array = array
+                .as_any()
+                .downcast_ref::<LargeStringArray>()
+                .ok_or_else(|| {
+                    ArrowError::InvalidArgumentError(
+                        "LargeUtf8 column is not a LargeStringArray".to_string(),
+                    )
+                })?;
+            let mut builder = StringViewBuilder::new();
+            for row in 0..array.len() {
+                if array.is_null(row) {
+                    builder.append_null();
+                } else {
+                    builder.append_value(array.value(row));
+                }
+            }
+            Ok(Some(builder.finish()))
+        }
+        _ => Ok(None),
+    }
 }
 
 #[cfg(not(feature = "turmoil"))]
@@ -662,22 +784,30 @@ fn cri_metadata_arrays(
 ) -> Result<(ArrayRef, ArrayRef), ArrowError> {
     let mut timestamp = StringViewBuilder::new();
     let mut stream = StringViewBuilder::new();
-    let timestamp_bytes = cri_metadata.timestamp_bytes;
-    std::str::from_utf8(&timestamp_bytes).map_err(|_| {
-        ArrowError::InvalidArgumentError("CRI timestamp is not valid UTF-8".to_string())
-    })?;
-    let timestamp_block = (!timestamp_bytes.is_empty())
-        .then(|| timestamp.append_block(Buffer::from(timestamp_bytes)));
-    let stdout_block =
-        stream.append_block(Buffer::from(CriStream::Stdout.as_str().as_bytes().to_vec()));
-    let stderr_block =
-        stream.append_block(Buffer::from(CriStream::Stderr.as_str().as_bytes().to_vec()));
+    let timestamp_buffer = Buffer::from(cri_metadata.timestamp_bytes);
+    let timestamp_block =
+        (!timestamp_buffer.is_empty()).then(|| timestamp.append_block(timestamp_buffer.clone()));
     for span in cri_metadata.spans {
         let Some(values) = span.values else {
             append_null_metadata_views(&mut timestamp, span.rows);
             append_null_metadata_views(&mut stream, span.rows);
             continue;
         };
+        let timestamp_start = values.timestamp_start;
+        let timestamp_end = timestamp_start.saturating_add(values.timestamp_len);
+        let timestamp_value = timestamp_buffer
+            .get(timestamp_start..timestamp_end)
+            .and_then(|bytes| std::str::from_utf8(bytes).ok());
+        let Some(timestamp_value) = timestamp_value else {
+            append_null_metadata_views(&mut timestamp, span.rows);
+            append_null_metadata_views(&mut stream, span.rows);
+            continue;
+        };
+        if values.timestamp_len <= 12 {
+            append_inline_metadata_values(&mut timestamp, timestamp_value, span.rows);
+            append_inline_metadata_values(&mut stream, values.stream.as_str(), span.rows);
+            continue;
+        }
         let timestamp_offset = u32::try_from(values.timestamp_start).map_err(|_| {
             ArrowError::InvalidArgumentError(
                 "CRI timestamp string offset is too large for Utf8View".to_string(),
@@ -702,16 +832,7 @@ fn cri_metadata_arrays(
         )?;
 
         let stream_value = values.stream.as_str();
-        let stream_len = u32::try_from(stream_value.len()).map_err(|_| {
-            ArrowError::InvalidArgumentError(
-                "CRI stream string is too large for Utf8View".to_string(),
-            )
-        })?;
-        let stream_block = match values.stream {
-            CriStream::Stdout => stdout_block,
-            CriStream::Stderr => stderr_block,
-        };
-        append_block_metadata_views(&mut stream, stream_block, 0, stream_len, span.rows)?;
+        append_inline_metadata_values(&mut stream, stream_value, span.rows);
     }
     Ok((
         finish_string_metadata_array(timestamp, num_rows)?,
@@ -765,6 +886,13 @@ fn append_block_metadata_views(
         builder.try_append_view(block, offset, len)?;
     }
     Ok(())
+}
+
+#[cfg(not(feature = "turmoil"))]
+fn append_inline_metadata_values(builder: &mut StringViewBuilder, value: &str, rows: usize) {
+    for _ in 0..rows {
+        builder.append_value(value);
+    }
 }
 
 #[cfg(not(feature = "turmoil"))]
@@ -1042,11 +1170,13 @@ fn io_worker_loop(
             let _ = pending_row_origin.take();
         }
         let data = input.buf.split().freeze();
-        let cri_metadata = if input.cri_metadata.has_values {
-            Some(std::mem::take(&mut input.cri_metadata))
-        } else {
+        let cri_metadata = if input.cri_metadata.is_empty() {
             input.cri_metadata.clear();
             None
+        } else {
+            Some(take_cri_metadata_preserving_capacity(
+                &mut input.cri_metadata,
+            ))
         };
         let checkpoints = input.source.checkpoint_data();
         let source_paths = if source_metadata_plan.has_source_path() {
@@ -1540,6 +1670,111 @@ mod tests {
         assert!(stream.is_null(0));
         assert_eq!(stream.value(1), "stdout");
         assert_eq!(stream.value(2), "stderr");
+    }
+
+    #[test]
+    fn cri_metadata_overlay_preserves_payload_values_for_null_sidecar_rows() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("msg", DataType::Utf8, true),
+            Field::new(field_names::TIMESTAMP_UNDERSCORE, DataType::Utf8, true),
+            Field::new(field_names::CRI_STREAM, DataType::Utf8, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["plain", "cri", "plain2"])),
+                Arc::new(StringArray::from(vec![
+                    "payload-0",
+                    "payload-1",
+                    "payload-2",
+                ])),
+                Arc::new(StringArray::from(vec![
+                    "payload-stream-0",
+                    "payload-stream-1",
+                    "payload-stream-2",
+                ])),
+            ],
+        )
+        .expect("batch");
+        let mut metadata = CriMetadata::default();
+        metadata.append_null_rows(1);
+        metadata.append_value(b"2024-01-15T10:30:00Z", b"stdout");
+        metadata.append_null_rows(1);
+
+        let out = cri_metadata_for_batch(batch, Some(metadata)).expect("CRI metadata attach");
+
+        let timestamp = out
+            .column_by_name(field_names::TIMESTAMP_UNDERSCORE)
+            .expect("timestamp column")
+            .as_any()
+            .downcast_ref::<StringViewArray>()
+            .expect("timestamp type");
+        assert_eq!(timestamp.value(0), "payload-0");
+        assert_eq!(timestamp.value(1), "2024-01-15T10:30:00Z");
+        assert_eq!(timestamp.value(2), "payload-2");
+
+        let stream = out
+            .column_by_name(field_names::CRI_STREAM)
+            .expect("stream column")
+            .as_any()
+            .downcast_ref::<StringViewArray>()
+            .expect("stream type");
+        assert_eq!(stream.value(0), "payload-stream-0");
+        assert_eq!(stream.value(1), "stdout");
+        assert_eq!(stream.value(2), "payload-stream-2");
+    }
+
+    #[test]
+    fn cri_metadata_all_null_sidecar_materializes_null_columns_when_absent() {
+        let schema = Arc::new(Schema::new(vec![Field::new("msg", DataType::Utf8, true)]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(StringArray::from(vec!["plain", "plain2"]))],
+        )
+        .expect("batch");
+        let mut metadata = CriMetadata::default();
+        metadata.append_null_rows(2);
+
+        let out = cri_metadata_for_batch(batch, Some(metadata)).expect("CRI metadata attach");
+
+        let timestamp = out
+            .column_by_name(field_names::TIMESTAMP_UNDERSCORE)
+            .expect("timestamp column")
+            .as_any()
+            .downcast_ref::<StringViewArray>()
+            .expect("timestamp type");
+        assert!(timestamp.is_null(0));
+        assert!(timestamp.is_null(1));
+
+        let stream = out
+            .column_by_name(field_names::CRI_STREAM)
+            .expect("stream column")
+            .as_any()
+            .downcast_ref::<StringViewArray>()
+            .expect("stream type");
+        assert!(stream.is_null(0));
+        assert!(stream.is_null(1));
+    }
+
+    #[test]
+    fn append_cri_metadata_for_data_pads_prior_and_later_rows() {
+        let mut buffered = CriMetadata::default();
+        let mut event_metadata = CriMetadata::default();
+        event_metadata.append_value(b"2024-01-15T10:30:00Z", b"stdout");
+
+        append_cri_metadata_for_data(
+            &mut buffered,
+            Some(event_metadata),
+            b"{\"msg\":\"plain\"}\n",
+            b"{\"msg\":\"cri\"}\n",
+        );
+        append_cri_metadata_for_data(&mut buffered, None, b"", b"{\"msg\":\"plain2\"}\n");
+
+        assert_eq!(buffered.rows, 3);
+        assert_eq!(buffered.spans.len(), 3);
+        assert!(buffered.spans[0].values.is_none());
+        assert!(buffered.spans[1].values.is_some());
+        assert!(buffered.spans[2].values.is_none());
     }
 
     #[test]

@@ -100,7 +100,13 @@ impl FramedInput {
         if self.cri_metadata_buf.is_empty() {
             return None;
         }
-        let metadata = std::mem::take(&mut self.cri_metadata_buf);
+        let replacement = CriMetadata {
+            spans: Vec::with_capacity(self.cri_metadata_buf.spans.capacity()),
+            timestamp_bytes: Vec::with_capacity(self.cri_metadata_buf.timestamp_bytes.capacity()),
+            rows: 0,
+            has_values: false,
+        };
+        let metadata = std::mem::replace(&mut self.cri_metadata_buf, replacement);
         Some(metadata)
     }
 

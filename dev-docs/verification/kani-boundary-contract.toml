@@ -91,6 +91,11 @@ reason = "Module shell gates tail-specific verification under #[cfg(kani)] and s
 issue = 1314
 
 [[seams]]
+path = "crates/logfwd-io/src/input.rs"
+status = "recommended"
+reason = "CRI metadata sidecar row-alignment helpers are bounded local state transitions inside the input abstraction."
+
+[[seams]]
 path = "crates/logfwd-io/src/tcp_input.rs"
 status = "recommended"
 reason = "Per-client bounded-read stop policy is extracted as a local pure seam inside the TCP shell."

@@ -174,7 +174,7 @@ impl FormatDecoder {
         &mut self,
         chunk: &[u8],
         out: &mut Vec<u8>,
-        mut cri_metadata: Option<&mut CriMetadata>,
+        cri_metadata: Option<&mut CriMetadata>,
     ) {
         match self {
             Self::Passthrough { .. } => {
@@ -192,7 +192,7 @@ impl FormatDecoder {
                 extract_cri_messages(
                     chunk,
                     out,
-                    cri_metadata.as_deref_mut(),
+                    cri_metadata,
                     aggregators,
                     plain_text_field_name,
                     stats,
@@ -207,7 +207,7 @@ impl FormatDecoder {
                 extract_cri_messages(
                     chunk,
                     out,
-                    cri_metadata.as_deref_mut(),
+                    cri_metadata,
                     aggregators,
                     plain_text_field_name,
                     stats,
@@ -289,8 +289,10 @@ fn extract_cri_messages(
             match aggregator.feed(cri.message, cri.is_full) {
                 AggregateResult::Complete(msg) => {
                     write_cri_message(msg, plain_text_field_name, out);
-                    if let Some(metadata) = cri_metadata.as_deref_mut() {
-                        metadata.append_value(cri.timestamp, cri.stream);
+                    if let Some(metadata) = &mut cri_metadata
+                        && !metadata.append_value(cri.timestamp, cri.stream)
+                    {
+                        stats.inc_parse_errors(1);
                     }
                     aggregator.reset();
                 }
@@ -306,8 +308,10 @@ fn extract_cri_messages(
                     );
                     stats.inc_parse_errors(1);
                     write_cri_message(msg, plain_text_field_name, out);
-                    if let Some(metadata) = cri_metadata.as_deref_mut() {
-                        metadata.append_value(cri.timestamp, cri.stream);
+                    if let Some(metadata) = &mut cri_metadata
+                        && !metadata.append_value(cri.timestamp, cri.stream)
+                    {
+                        stats.inc_parse_errors(1);
                     }
                     aggregator.reset();
                 }
@@ -320,12 +324,12 @@ fn extract_cri_messages(
                 if starts_with_json_object(line) {
                     out.extend_from_slice(line);
                     out.push(b'\n');
-                    if let Some(metadata) = cri_metadata.as_deref_mut() {
+                    if let Some(metadata) = &mut cri_metadata {
                         metadata.append_null_rows(1);
                     }
                 } else if let Some(line) = normalize_plain_text_fallback(line) {
                     write_plain_text_fallback(line, plain_text_field_name, out);
-                    if let Some(metadata) = cri_metadata.as_deref_mut() {
+                    if let Some(metadata) = &mut cri_metadata {
                         metadata.append_null_rows(1);
                     }
                 }
