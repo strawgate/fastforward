@@ -134,6 +134,13 @@ test:
 test-all:
     LOGFWD_DISABLE_DEFAULT_CHECKPOINTS=1 cargo nextest run --workspace --profile ci
 
+# Run semantic lints via dylint (hot_path_no_alloc, and any future
+# semantic lints defined in crates/logfwd-lints/).
+# Requires: cargo install --locked cargo-dylint dylint-link
+#           rustup toolchain install nightly-2025-09-18 --component llvm-tools-preview --component rustc-dev
+dylint:
+    cargo dylint --path crates/logfwd-lints -- --workspace
+
 # Run required Kani formal verification proofs for production crates
 # Requires: cargo install --locked kani-verifier && cargo kani setup
 kani:
@@ -234,10 +241,10 @@ tlc-tail:
     just tlc MCTailLifecycle.tla TailLifecycle.cfg
 
 # Lint — fast (default-members, skips datafusion)
-lint: fmt-check otlp-codegen-check workspace-inheritance-guard clippy toml-check
+lint: fmt-check otlp-codegen-check workspace-inheritance-guard public-api-error-guard production-panic-guard clippy toml-check
 
 # Lint — full workspace (CI uses this)
-lint-all: fmt-check verification-guardrail otlp-codegen-check workspace-inheritance-guard clippy-all toml-check deny
+lint-all: fmt-check verification-guardrail otlp-codegen-check workspace-inheritance-guard public-api-error-guard production-panic-guard clippy-all toml-check deny
 
 # Quick CI — fast lint + test (default-members, no datafusion)
 ci: lint test
@@ -260,6 +267,14 @@ otlp-codegen-check:
 # Guardrail: inherited dependencies must not override default-features locally.
 workspace-inheritance-guard:
     python3 scripts/check_workspace_inherited_default_features.py
+
+# Guardrail: no Box<dyn Error> in public library signatures.
+public-api-error-guard:
+    python3 scripts/check_no_box_dyn_error.py
+
+# Guardrail: no panic!/todo!/unimplemented! in production runtime/output paths.
+production-panic-guard:
+    python3 scripts/check_no_panic_in_production.py
 
 # Format TOML files
 toml-fmt:
@@ -286,6 +301,23 @@ test-extended:
 # Run turmoil simulation including Porcupine linearizability checker integration.
 test-linearizability:
     cargo test -p logfwd --features turmoil --test turmoil_sim linearizability::porcupine_checker_accepts_runtime_history
+
+# ---------------------------------------------------------------------------
+# Mutation testing (cargo-mutants)
+# ---------------------------------------------------------------------------
+
+# Run mutation testing on a single crate (default: logfwd-core).
+# Requires: cargo install cargo-mutants cargo-nextest
+# Config:   .cargo/mutants.toml (exclusions, timeout, nextest)
+mutants crate="logfwd-core":
+    cargo mutants -p {{crate}}
+
+# Run mutation testing only on code changed vs origin/main (fast, CI-friendly).
+mutants-diff crate="logfwd-core":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    git rev-parse --verify origin/main >/dev/null
+    git diff origin/main...HEAD | cargo mutants -p {{crate}} --in-diff -
 
 # Build release binary (full package, includes DataFusion SQL)
 build:
@@ -578,6 +610,14 @@ bench-otlp-io *ARGS:
 # Run OTLP I/O benchmarks with fast local iteration settings.
 bench-otlp-io-fast *ARGS:
     cargo bench -p logfwd-bench --bench otlp_io -- --warm-up-time 1 --measurement-time 2 --sample-size 10 {{ARGS}}
+
+# Run source metadata attachment benchmarks.
+bench-source-metadata *ARGS:
+    cargo bench -p logfwd-bench --bench source_metadata -- {{ARGS}}
+
+# Run source metadata attachment benchmarks with fast local iteration settings.
+bench-source-metadata-fast *ARGS:
+    cargo bench -p logfwd-bench --bench source_metadata -- --warm-up-time 1 --measurement-time 2 --sample-size 10 {{ARGS}}
 
 # Profile OTLP decode/encode CPU with the normal allocator (flamegraph, per-mode timings).
 profile-otlp-io *ARGS:

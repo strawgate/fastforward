@@ -43,6 +43,10 @@ now stays focused on startup/CLI/bootstrap concerns.
 HTTP endpoints, readiness/status shaping, stderr/span buffering, and the
 generated `dashboard.html` asset served by diagnostics).
 
+`logfwd-bench` is not in the production data path. It owns Criterion benchmarks
+and profiling binaries used to measure scanner, pipeline, output, and source
+metadata behavior under representative cardinality and allocation pressure.
+
 ## Data flow
 
 ### 1. Reading: bytes enter the system
@@ -80,7 +84,8 @@ with per-source remainder tracking. It handles three formats:
   partial lines across reads via per-source remainder buffers.
 - **Cri**: Kubernetes container log format. Parses timestamp,
   stream, flags, message. Reassembles P (partial) lines into complete
-  messages. Injects `_timestamp` and `_stream` as JSON fields.
+  messages. Emits `_timestamp` and `_stream` as sidecar metadata for
+  post-scan Arrow column attachment; the payload JSON is not rewritten.
 - **Text/Raw**: Passes lines through verbatim. Line capture into `body` is
   controlled by scanner `line_field_name`.
 
@@ -88,7 +93,7 @@ with per-source remainder tracking. It handles three formats:
 output (4096 lines, 64KB stack), no heap, Kani-proven. It returns byte
 ranges into the input buffer — zero-copy.
 
-**CriReassembler** (`logfwd-core/src/aggregator.rs`):
+**CriReassembler** (`logfwd-core/src/reassembler.rs`):
 zero-copy for F-only lines (99% of traffic), copies only for P+F
 reassembly. Kani-proven.
 
@@ -180,11 +185,18 @@ Implements `ScanBuilder`. Stores `(offset, len)` views into the input
 - `Scanner::scan_detached(Bytes) → RecordBatch` — self-contained
   `StringArray`, buffer can be freed. For persistence/compression.
 
-### 6. Transform: RecordBatch → RecordBatch
+### 6. Metadata attach and transform: RecordBatch → RecordBatch
 
 ```
-RecordBatch → SqlTransform::execute_blocking() → RecordBatch
+RecordBatch → sidecar attach/replace → SqlTransform::execute_blocking() → RecordBatch
 ```
+
+Before SQL execution, the runtime attaches sidecar metadata as Arrow columns on
+the scanned `RecordBatch`. Source metadata is appended/replaced according to
+the configured source metadata style. CRI `_timestamp` and `_stream` are
+appended or replaced from the CRI sidecar; rows without CRI values preserve any
+existing payload columns and otherwise materialize as nulls. This stage is the
+only place CRI metadata becomes columns.
 
 **SqlTransform** (`logfwd-transform/src/lib.rs`) runs user SQL via
 DataFusion. Each batch is registered as a `"logs"` MemTable, the SQL
@@ -273,6 +285,7 @@ loop {
 
 fn flush_batch(buf):
     batch = scanner.scan(buf)        // classify + scan + build
+    batch = attach_sidecars(batch)   // source metadata + CRI columns
     batch = transform.execute(batch) // SQL
     output.send_batch(batch)         // serialize + send
 ```
@@ -305,12 +318,80 @@ Target (zero-copy for 99% passthrough path — #608):
   tailer reads → BytesMut → freeze() → Bytes             (no copy)
   FramedInput: Bytes::slice() for line ranges             (no copy)
   Passthrough format: emit Bytes slice directly           (no copy)
-  CRI format: metadata injection requires rewrite         [COPY 1: unavoidable]
+  CRI format: sidecar metadata, message JSON not rewritten
   pipeline: scan_buf.extend_from_slice(&bytes)            [COPY 2: SIMD contiguity]
   Scanner receives Bytes directly                 (no copy)
   StreamingBuilder stores views → RecordBatch             (zero-copy)
+  sidecar attach/replace appends Arrow columns before SQL
   Bytes dropped when RecordBatch is consumed
 ```
+
+## Data-Oriented Design
+
+The pipeline is structured for the CPU, not for object-oriented
+convenience. This is not a stylistic choice — it is a load-bearing
+architectural commitment.
+
+- **Struct-of-Arrays (SoA) is the default representation.** Arrow
+  `RecordBatch` is literally SoA. The scanner, builders, SQL transform,
+  and OTLP encoder all operate on contiguous per-column buffers, not
+  row objects. When adding a new per-record piece of data (a parsed
+  timestamp, a source tag, a flag), the default answer is "another
+  column," not "another field on a row struct."
+- **Hot fields stay contiguous; cold fields go to a side table.**
+  Per-source metadata that is not used in the scan/transform loop
+  (source paths, file handles, receiver identity) lives in sidecar
+  tables keyed by `SourceId`, not inline with payload bytes.
+- **No `LinkedList`, no per-record boxing in hot paths.** Cache locality
+  dominates runtime at our throughputs. `Vec<T>` with explicit capacity
+  hints, `SmallVec` for small bounded collections, `Bytes` slices for
+  shared byte views. `Box<[T]>` instead of `Vec<T>` when the length is
+  fixed after construction.
+- **Arena allocation at boundaries where it helps.** Short-lived
+  per-batch object graphs (parse nodes, intermediate Arrow builders)
+  that currently allocate per-record are candidates for arena or bump
+  allocation. See `logfwd-arrow/src/columnar/` for the existing pattern.
+- **No raw payload injection (see `CRATE_RULES.md` → `logfwd-io`).** The
+  no-raw-injection rule is a data-layout rule: source metadata travels
+  in a sidecar, not in the payload buffer. This is the architectural
+  manifestation of SoA.
+
+## Compile time as a quality attribute
+
+Build time is a first-class quality attribute, not an aesthetic
+concern. Long compile cycles degrade every iteration of every
+contributor and agent, compound across CI, and actively harm code
+quality because they discourage small-step verification. The
+`default-members` / `--workspace` split (`~30s` vs `~3min`) is the
+explicit recognition of this — it is load-bearing for iteration speed.
+
+Practical rules:
+
+- **Prefer `&dyn Trait` at crate seams where monomorphization cost is
+  real.** At internal call sites generics are usually the right default
+  (static dispatch, inlining). Across crate boundaries where the callee
+  is instantiated for many distinct caller types, `dyn Trait` can be
+  the right trade. Default to generics, reach for `dyn` when the
+  compile-time cost is observable.
+- **Gate heavy dependencies behind Cargo features.** DataFusion,
+  reqwest, large proc-macro crates. The `datafusion` feature on
+  `logfwd-runtime` and the `logfwd-transform` default-members exclusion
+  exist for this reason — replicate the pattern for future heavy
+  dependencies.
+- **Split crates along natural seams.** Parallel compilation is cheap;
+  monolithic crates are not. When a crate grows to the point where
+  touching one module forces the whole thing to rebuild, split it.
+- **Avoid `build.rs` unless genuinely required.** `build.rs` serializes
+  compilation and invalidates caches aggressively.
+- **Reserve proc macros for cases `macro_rules!` cannot handle.** Proc
+  macros pull in syn/quote and extend compile time per crate that uses
+  them.
+- **Use `cargo --timings` when investigating slow builds.** Find the
+  actual long pole before refactoring.
+
+The WASM build target (`logfwd-config-wasm`) makes this discipline
+non-optional: heavy dependencies leak across the boundary and inflate
+the WASM artifact.
 
 ## Verification strategy
 

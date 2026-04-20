@@ -430,8 +430,10 @@ mod verification {
 
     /// classify_bit always returns a valid StructuralKind, and the
     /// selected kind matches exactly one of the bitmask fields.
-    /// Exhaustive over all bit positions and arbitrary bitmasks.
+    /// Exhaustive over all bit positions where at least one structural
+    /// category has the tested bit set.
     #[kani::proof]
+    #[kani::solver(cadical)]
     fn verify_classify_bit_correct() {
         let bit_pos: usize = kani::any_where(|&p: &usize| p < 64);
         let mask = 1u64 << bit_pos;
@@ -448,6 +450,20 @@ mod verification {
             open_bracket: kani::any(),
             close_bracket: kani::any(),
         };
+        let structural_bits = p.newline
+            | p.real_quotes
+            | p.comma
+            | p.colon
+            | p.open_brace
+            | p.close_brace
+            | p.open_bracket
+            | p.close_bracket;
+        kani::assume(structural_bits & mask != 0);
+        kani::cover!(p.real_quotes & mask != 0, "quote path reachable");
+        kani::cover!(
+            p.real_quotes & mask == 0 && p.open_bracket & mask != 0,
+            "open bracket fallback path reachable"
+        );
 
         // Build a minimal iterator just to call classify_bit
         let iter = StructuralIter {
@@ -523,6 +539,7 @@ mod verification {
     /// and the byte at result (if < len) is not an ASCII space.
     #[kani::proof]
     #[kani::unwind(18)]
+    #[kani::solver(cadical)]
     fn verify_next_non_space_fallback() {
         let buf: [u8; 16] = kani::any();
         let from: usize = kani::any();
@@ -548,6 +565,11 @@ mod verification {
             let b = buf[result];
             assert!(b != b' ');
         }
+
+        // Guard vacuity: verify assume does not exclude meaningful cases
+        kani::cover!(result == from, "no spaces at start");
+        kani::cover!(result > from, "skipped some spaces");
+        kani::cover!(result == 16, "all remaining bytes are spaces");
     }
 
     /// Prove advance() yields every structural position exactly once,

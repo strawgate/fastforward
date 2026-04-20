@@ -5,7 +5,7 @@ use crate::serde_helpers::{
     deserialize_option_string_map_strict_values, deserialize_option_vec_strict_string,
     deserialize_strict_string, deserialize_string_map_strict_values, deserialize_vec_strict_string,
 };
-use crate::shared::{TlsClientConfig, TlsInputConfig};
+use crate::shared::{TlsClientConfig, TlsServerConfig};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::fmt;
@@ -92,6 +92,41 @@ impl fmt::Display for InputType {
     }
 }
 
+/// Controls which source metadata columns are attached to scanned records.
+///
+/// `none` is the default and disables attachment. `fastforward` emits the
+/// internal `__source_id` handle. `ecs` emits ECS/Beats `file.path` and accepts
+/// the serde alias `beats`. `otel` emits `log.file.path`. `vector` emits
+/// `file`. Values serialize and parse as `snake_case`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceMetadataStyle {
+    /// Do not attach source metadata columns.
+    #[default]
+    None,
+    /// Attach FastForward internal metadata (`__source_id`).
+    Fastforward,
+    /// Attach ECS/Beats-style public metadata columns.
+    #[serde(alias = "beats")]
+    Ecs,
+    /// Attach OpenTelemetry-style public metadata columns.
+    Otel,
+    /// Attach Vector-style public metadata columns.
+    Vector,
+}
+
+impl fmt::Display for SourceMetadataStyle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::None => f.write_str("none"),
+            Self::Fastforward => f.write_str("fastforward"),
+            Self::Ecs => f.write_str("ecs"),
+            Self::Otel => f.write_str("otel"),
+            Self::Vector => f.write_str("vector"),
+        }
+    }
+}
+
 /// OTLP protobuf decode strategy for OTLP inputs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -121,6 +156,44 @@ pub enum OutputType {
     Tcp,
     Udp,
     ArrowIpc,
+}
+
+impl OutputType {
+    /// Return whether this output type requires an explicit `endpoint`.
+    ///
+    /// ```
+    /// use logfwd_config::OutputType;
+    ///
+    /// assert!(OutputType::Otlp.is_endpoint_required());
+    /// assert!(!OutputType::Stdout.is_endpoint_required());
+    /// ```
+    pub fn is_endpoint_required(&self) -> bool {
+        matches!(
+            self,
+            Self::Otlp
+                | Self::Http
+                | Self::Elasticsearch
+                | Self::Loki
+                | Self::ArrowIpc
+                | Self::Tcp
+                | Self::Udp
+        )
+    }
+
+    /// Return whether this output type supports HTTP-style `auth`.
+    ///
+    /// ```
+    /// use logfwd_config::OutputType;
+    ///
+    /// assert!(OutputType::Loki.is_auth_supported());
+    /// assert!(!OutputType::Tcp.is_auth_supported());
+    /// ```
+    pub fn is_auth_supported(&self) -> bool {
+        matches!(
+            self,
+            Self::Otlp | Self::Http | Self::Elasticsearch | Self::Loki | Self::ArrowIpc
+        )
+    }
 }
 
 impl fmt::Display for OutputType {
@@ -156,17 +229,72 @@ impl<'de> Deserialize<'de> for OutputType {
                     E::unknown_variant(v, compat::supported_output_type_names_for_errors())
                 })
             }
-
-            fn visit_unit<E: serde::de::Error>(self) -> Result<OutputType, E> {
-                Ok(OutputType::Null)
-            }
-
-            fn visit_none<E: serde::de::Error>(self) -> Result<OutputType, E> {
-                Ok(OutputType::Null)
-            }
         }
 
         d.deserialize_any(V)
+    }
+}
+
+/// Request-body compression configured for output sinks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+#[non_exhaustive]
+pub enum CompressionFormat {
+    /// Do not compress request bodies.
+    None,
+    /// Compress request bodies with gzip.
+    Gzip,
+    /// Compress request bodies with zstd.
+    Zstd,
+}
+
+impl fmt::Display for CompressionFormat {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CompressionFormat::None => f.write_str("none"),
+            CompressionFormat::Gzip => f.write_str("gzip"),
+            CompressionFormat::Zstd => f.write_str("zstd"),
+        }
+    }
+}
+
+/// OTLP transport protocol configured for OTLP outputs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+#[non_exhaustive]
+pub enum OtlpProtocol {
+    /// Send OTLP data over HTTP.
+    Http,
+    /// Send OTLP data over gRPC.
+    Grpc,
+}
+
+impl fmt::Display for OtlpProtocol {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            OtlpProtocol::Http => f.write_str("http"),
+            OtlpProtocol::Grpc => f.write_str("grpc"),
+        }
+    }
+}
+
+/// Elasticsearch bulk request construction mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+#[non_exhaustive]
+pub enum ElasticsearchRequestMode {
+    /// Build the Elasticsearch bulk request body in memory before sending.
+    Buffered,
+    /// Stream Elasticsearch bulk request body chunks while sending.
+    Streaming,
+}
+
+impl fmt::Display for ElasticsearchRequestMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ElasticsearchRequestMode::Buffered => f.write_str("buffered"),
+            ElasticsearchRequestMode::Streaming => f.write_str("streaming"),
+        }
     }
 }
 
@@ -340,11 +468,6 @@ pub struct HostMetricsInputConfig {
     /// Sensor sample cadence. Defaults to 10_000 when omitted.
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
     pub poll_interval_ms: Option<PositiveMillis>,
-    /// Deprecated no-op retained for backward compatibility.
-    ///
-    /// Sensor inputs are Arrow-native and do not emit heartbeat rows.
-    #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
-    pub emit_heartbeat: Option<bool>,
     /// Optional path to a JSON control file for runtime sensor tuning.
     #[serde(default, deserialize_with = "deserialize_option_strict_string")]
     pub control_path: Option<String>,
@@ -378,10 +501,10 @@ pub struct HostMetricsInputConfig {
     /// Glob patterns for process names to exclude.
     #[serde(default, deserialize_with = "deserialize_option_vec_strict_string")]
     pub exclude_process_names: Option<Vec<String>>,
-    /// Specific event types to enable (e.g., `["process_exec", "tcp_connect"]`).
+    /// Event types to enable for `linux_ebpf_sensor` inputs (e.g., `["exec", "tcp_connect"]`).
     #[serde(default, deserialize_with = "deserialize_option_vec_strict_string")]
     pub include_event_types: Option<Vec<String>>,
-    /// Specific event types to disable.
+    /// Event types to disable for `linux_ebpf_sensor` inputs. Excludes take precedence over includes.
     #[serde(default, deserialize_with = "deserialize_option_vec_strict_string")]
     pub exclude_event_types: Option<Vec<String>>,
     /// Ring buffer size in kilobytes.
@@ -508,12 +631,13 @@ pub struct InputConfig {
     pub format: Option<Format>,
     #[serde(default, deserialize_with = "deserialize_option_strict_string")]
     pub sql: Option<String>,
-    /// Attach source metadata columns (`_source_id`, `_input`, `_source_path`) when SQL requests them.
+    /// Source metadata attachment style.
     ///
-    /// Disabled by default because source metadata requires per-row origin
-    /// tracking and may materialize high-cardinality strings such as paths.
+    /// `none` is the default. `fastforward` attaches only the internal
+    /// `__source_id` handle. Public styles attach normal source metadata
+    /// columns using that schema's naming convention.
     #[serde(default)]
-    pub source_metadata: bool,
+    pub source_metadata: SourceMetadataStyle,
     #[serde(flatten)]
     pub type_config: InputTypeConfig,
 }
@@ -605,7 +729,7 @@ pub struct FileTypeConfig {
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
     pub max_open_files: Option<usize>,
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
-    pub glob_rescan_interval_ms: Option<PositiveMillis>,
+    pub glob_rescan_interval_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -625,7 +749,7 @@ pub struct TcpTypeConfig {
     #[serde(deserialize_with = "deserialize_strict_string")]
     pub listen: String,
     #[serde(default)]
-    pub tls: Option<TlsInputConfig>,
+    pub tls: Option<TlsServerConfig>,
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
     pub max_connections: Option<usize>,
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
@@ -644,7 +768,7 @@ pub struct OtlpTypeConfig {
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
     pub max_recv_message_size_bytes: Option<usize>,
     #[serde(default)]
-    pub tls: Option<TlsInputConfig>,
+    pub tls: Option<TlsServerConfig>,
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
     pub grpc_keepalive_time_ms: Option<PositiveMillis>,
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
@@ -762,269 +886,6 @@ pub struct S3InputConfig {
     pub poll_interval_ms: Option<PositiveMillis>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct OutputConfig {
-    pub name: Option<String>,
-    pub output_type: OutputType,
-    pub endpoint: Option<String>,
-    pub protocol: Option<String>,
-    pub compression: Option<String>,
-    pub request_mode: Option<String>,
-    pub format: Option<Format>,
-    pub path: Option<String>,
-    pub index: Option<String>,
-    pub auth: Option<AuthConfig>,
-    pub tenant_id: Option<String>,
-    pub static_labels: Option<HashMap<String, String>>,
-    pub label_columns: Option<Vec<String>>,
-    /// Client TLS configuration for outbound connections.
-    pub tls: Option<TlsClientConfig>,
-    /// Custom HTTP headers to include in requests.
-    pub headers: Option<HashMap<String, String>>,
-    /// Number of retry attempts for transient errors.
-    pub retry_attempts: Option<u32>,
-    /// Initial backoff delay for retries.
-    pub retry_initial_backoff_ms: Option<PositiveMillis>,
-    /// Maximum backoff delay for retries.
-    pub retry_max_backoff_ms: Option<PositiveMillis>,
-    /// Timeout for each HTTP request.
-    pub request_timeout_ms: Option<PositiveMillis>,
-    /// Maximum number of log records to send per batch.
-    pub batch_size: Option<usize>,
-    /// Maximum time to wait before sending a batch.
-    pub batch_timeout_ms: Option<PositiveMillis>,
-    /// Host for socket-based IPC.
-    pub host: Option<String>,
-    /// Port for socket-based IPC.
-    pub port: Option<u16>,
-    /// Write the legacy IPC format (default: false).
-    pub write_legacy_ipc_format: Option<bool>,
-    /// Buffer size for the IPC writer in bytes.
-    pub buffer_size_bytes: Option<usize>,
-    /// Whether to write the schema immediately upon connection.
-    pub write_schema_on_connect: Option<bool>,
-}
-
-impl<'de> Deserialize<'de> for OutputConfig {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let value = serde_yaml_ng::Value::deserialize(deserializer)?;
-        let v2_error = match OutputConfigV2::deserialize(value.clone()) {
-            Ok(v2) => return Ok(v2.into()),
-            Err(error) => error,
-        };
-
-        OutputConfigV1::deserialize(value)
-            .map(OutputConfig::from)
-            .map_err(|v1_error| {
-                serde::de::Error::custom(format!(
-                    "invalid output config; v2 parse error: {v2_error}; legacy parse error: {v1_error}"
-                ))
-            })
-    }
-}
-
-// Compatibility conversion from the legacy flat shape. It carries the fields
-// each sink factory historically used and preserves previously ignored fields
-// as ignored while callers still pass `OutputConfig`.
-impl From<&OutputConfig> for OutputConfigV2 {
-    fn from(config: &OutputConfig) -> Self {
-        match config.output_type {
-            OutputType::Otlp => OutputConfigV2::Otlp(OtlpOutputConfig {
-                name: config.name.clone(),
-                endpoint: config.endpoint.clone(),
-                protocol: config.protocol.clone(),
-                compression: config.compression.clone(),
-                auth: config.auth.clone(),
-                tls: config.tls.clone(),
-                headers: config.headers.clone(),
-                retry_attempts: config.retry_attempts,
-                retry_initial_backoff_ms: config.retry_initial_backoff_ms,
-                retry_max_backoff_ms: config.retry_max_backoff_ms,
-                request_timeout_ms: config.request_timeout_ms,
-                batch_size: config.batch_size,
-                batch_timeout_ms: config.batch_timeout_ms,
-            }),
-            OutputType::Http => OutputConfigV2::Http(HttpOutputConfig {
-                name: config.name.clone(),
-                endpoint: config.endpoint.clone(),
-                compression: config.compression.clone(),
-                format: config.format.clone(),
-                auth: config.auth.clone(),
-            }),
-            OutputType::Elasticsearch => OutputConfigV2::Elasticsearch(ElasticsearchOutputConfig {
-                name: config.name.clone(),
-                endpoint: config.endpoint.clone(),
-                compression: config.compression.clone(),
-                request_mode: config.request_mode.clone(),
-                index: config.index.clone().or_else(|| config.path.clone()),
-                auth: config.auth.clone(),
-                tls: config.tls.clone(),
-                request_timeout_ms: config.request_timeout_ms,
-            }),
-            OutputType::Loki => OutputConfigV2::Loki(LokiOutputConfig {
-                name: config.name.clone(),
-                endpoint: config.endpoint.clone(),
-                auth: config.auth.clone(),
-                tenant_id: config.tenant_id.clone(),
-                static_labels: config.static_labels.clone(),
-                label_columns: config.label_columns.clone(),
-                tls: config.tls.clone(),
-                request_timeout_ms: config.request_timeout_ms,
-            }),
-            OutputType::Stdout => OutputConfigV2::Stdout(StdoutOutputConfig {
-                name: config.name.clone(),
-                format: config.format.clone(),
-            }),
-            OutputType::File => OutputConfigV2::File(FileOutputConfig {
-                name: config.name.clone(),
-                path: config.path.clone(),
-                format: config.format.clone(),
-            }),
-            OutputType::Parquet => OutputConfigV2::Parquet(ParquetOutputConfig {
-                name: config.name.clone(),
-                path: config.path.clone(),
-                compression: config.compression.clone(),
-                format: config.format.clone(),
-            }),
-            OutputType::Null => OutputConfigV2::Null(NullOutputConfig {
-                name: config.name.clone(),
-            }),
-            OutputType::Tcp => OutputConfigV2::Tcp(SocketOutputConfig {
-                name: config.name.clone(),
-                endpoint: config.endpoint.clone(),
-            }),
-            OutputType::Udp => OutputConfigV2::Udp(SocketOutputConfig {
-                name: config.name.clone(),
-                endpoint: config.endpoint.clone(),
-            }),
-            OutputType::ArrowIpc => OutputConfigV2::ArrowIpc(ArrowIpcOutputConfig {
-                name: config.name.clone(),
-                endpoint: config.endpoint.clone(),
-                compression: config.compression.clone(),
-                auth: config.auth.clone(),
-                host: config.host.clone(),
-                port: config.port,
-                write_legacy_ipc_format: config.write_legacy_ipc_format,
-                buffer_size_bytes: config.buffer_size_bytes,
-                batch_size: config.batch_size,
-                write_schema_on_connect: config.write_schema_on_connect,
-            }),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-pub struct OutputConfigV1 {
-    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
-    pub name: Option<String>,
-    #[serde(rename = "type")]
-    pub output_type: OutputType,
-    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
-    pub endpoint: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
-    pub protocol: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
-    pub compression: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
-    pub request_mode: Option<String>,
-    pub format: Option<Format>,
-    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
-    pub path: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
-    pub index: Option<String>,
-    #[serde(default)]
-    pub auth: Option<AuthConfig>,
-    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
-    pub tenant_id: Option<String>,
-    #[serde(
-        default,
-        deserialize_with = "deserialize_option_string_map_strict_values"
-    )]
-    pub static_labels: Option<HashMap<String, String>>,
-    #[serde(default, deserialize_with = "deserialize_option_vec_strict_string")]
-    pub label_columns: Option<Vec<String>>,
-
-    /// Client TLS configuration for outbound connections.
-    #[serde(default)]
-    pub tls: Option<TlsClientConfig>,
-    /// Custom HTTP headers to include in requests.
-    #[serde(
-        default,
-        deserialize_with = "deserialize_option_string_map_strict_values"
-    )]
-    pub headers: Option<HashMap<String, String>>,
-    /// Number of retry attempts for transient errors.
-    #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
-    pub retry_attempts: Option<u32>,
-    /// Initial backoff delay for retries.
-    #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
-    pub retry_initial_backoff_ms: Option<PositiveMillis>,
-    /// Maximum backoff delay for retries.
-    #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
-    pub retry_max_backoff_ms: Option<PositiveMillis>,
-    /// Timeout for each HTTP request.
-    #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
-    pub request_timeout_ms: Option<PositiveMillis>,
-    /// Maximum number of log records to send per batch.
-    #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
-    pub batch_size: Option<usize>,
-    /// Maximum time to wait before sending a batch.
-    #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
-    pub batch_timeout_ms: Option<PositiveMillis>,
-    /// Host for socket-based IPC.
-    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
-    pub host: Option<String>,
-    /// Port for socket-based IPC.
-    #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
-    pub port: Option<u16>,
-    /// Write the legacy IPC format (default: false).
-    #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
-    pub write_legacy_ipc_format: Option<bool>,
-    /// Buffer size for the IPC writer in bytes.
-    #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
-    pub buffer_size_bytes: Option<usize>,
-    /// Whether to write the schema immediately upon connection.
-    #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
-    pub write_schema_on_connect: Option<bool>,
-}
-
-impl From<OutputConfigV1> for OutputConfig {
-    fn from(config: OutputConfigV1) -> Self {
-        OutputConfig {
-            name: config.name,
-            output_type: config.output_type,
-            endpoint: config.endpoint,
-            protocol: config.protocol,
-            compression: config.compression,
-            request_mode: config.request_mode,
-            format: config.format,
-            path: config.path,
-            index: config.index,
-            auth: config.auth,
-            tenant_id: config.tenant_id,
-            static_labels: config.static_labels,
-            label_columns: config.label_columns,
-            tls: config.tls,
-            headers: config.headers,
-            retry_attempts: config.retry_attempts,
-            retry_initial_backoff_ms: config.retry_initial_backoff_ms,
-            retry_max_backoff_ms: config.retry_max_backoff_ms,
-            request_timeout_ms: config.request_timeout_ms,
-            batch_size: config.batch_size,
-            batch_timeout_ms: config.batch_timeout_ms,
-            host: config.host,
-            port: config.port,
-            write_legacy_ipc_format: config.write_legacy_ipc_format,
-            buffer_size_bytes: config.buffer_size_bytes,
-            write_schema_on_connect: config.write_schema_on_connect,
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[non_exhaustive]
@@ -1042,24 +903,6 @@ pub enum OutputConfigV2 {
     ArrowIpc(ArrowIpcOutputConfig),
 }
 
-impl From<OutputConfigV2> for OutputConfig {
-    fn from(config: OutputConfigV2) -> Self {
-        match config {
-            OutputConfigV2::Otlp(config) => config.into_output_config(),
-            OutputConfigV2::Http(config) => config.into_output_config(),
-            OutputConfigV2::Elasticsearch(config) => config.into_output_config(),
-            OutputConfigV2::Loki(config) => config.into_output_config(),
-            OutputConfigV2::Stdout(config) => config.into_output_config(),
-            OutputConfigV2::File(config) => config.into_output_config(),
-            OutputConfigV2::Parquet(config) => config.into_output_config(),
-            OutputConfigV2::Null(config) => config.into_output_config(),
-            OutputConfigV2::Tcp(config) => config.into_output_config(OutputType::Tcp),
-            OutputConfigV2::Udp(config) => config.into_output_config(OutputType::Udp),
-            OutputConfigV2::ArrowIpc(config) => config.into_output_config(),
-        }
-    }
-}
-
 impl OutputConfigV2 {
     /// Return the optional user-provided output name for this typed output.
     pub fn name(&self) -> Option<&str> {
@@ -1075,6 +918,72 @@ impl OutputConfigV2 {
             OutputConfigV2::Tcp(config) => config.name.as_deref(),
             OutputConfigV2::Udp(config) => config.name.as_deref(),
             OutputConfigV2::ArrowIpc(config) => config.name.as_deref(),
+        }
+    }
+
+    /// Return the endpoint for output variants that connect to a destination.
+    ///
+    /// ```
+    /// use logfwd_config::{OutputConfigV2, SocketOutputConfig, StdoutOutputConfig};
+    ///
+    /// let tcp = OutputConfigV2::Tcp(SocketOutputConfig {
+    ///     endpoint: Some("127.0.0.1:15140".to_owned()),
+    ///     ..Default::default()
+    /// });
+    /// assert_eq!(tcp.endpoint(), Some("127.0.0.1:15140"));
+    ///
+    /// let stdout = OutputConfigV2::Stdout(StdoutOutputConfig::default());
+    /// assert_eq!(stdout.endpoint(), None);
+    /// ```
+    pub fn endpoint(&self) -> Option<&str> {
+        match self {
+            OutputConfigV2::Otlp(config) => config.endpoint.as_deref(),
+            OutputConfigV2::Http(config) => config.endpoint.as_deref(),
+            OutputConfigV2::Elasticsearch(config) => config.endpoint.as_deref(),
+            OutputConfigV2::Loki(config) => config.endpoint.as_deref(),
+            OutputConfigV2::Tcp(config) => config.endpoint.as_deref(),
+            OutputConfigV2::Udp(config) => config.endpoint.as_deref(),
+            OutputConfigV2::ArrowIpc(config) => config.endpoint.as_deref(),
+            OutputConfigV2::Stdout(_)
+            | OutputConfigV2::File(_)
+            | OutputConfigV2::Parquet(_)
+            | OutputConfigV2::Null(_) => None,
+        }
+    }
+
+    /// Return authentication settings for output variants that support them.
+    ///
+    /// ```
+    /// use logfwd_config::{AuthConfig, OtlpOutputConfig, OutputConfigV2, SocketOutputConfig};
+    ///
+    /// let otlp = OutputConfigV2::Otlp(OtlpOutputConfig {
+    ///     auth: Some(AuthConfig {
+    ///         bearer_token: Some("token".to_owned()),
+    ///         ..Default::default()
+    ///     }),
+    ///     ..Default::default()
+    /// });
+    /// assert_eq!(
+    ///     otlp.auth().and_then(|auth| auth.bearer_token.as_deref()),
+    ///     Some("token")
+    /// );
+    ///
+    /// let tcp = OutputConfigV2::Tcp(SocketOutputConfig::default());
+    /// assert!(tcp.auth().is_none());
+    /// ```
+    pub fn auth(&self) -> Option<&AuthConfig> {
+        match self {
+            OutputConfigV2::Otlp(config) => config.auth.as_ref(),
+            OutputConfigV2::Http(config) => config.auth.as_ref(),
+            OutputConfigV2::Elasticsearch(config) => config.auth.as_ref(),
+            OutputConfigV2::Loki(config) => config.auth.as_ref(),
+            OutputConfigV2::ArrowIpc(config) => config.auth.as_ref(),
+            OutputConfigV2::Stdout(_)
+            | OutputConfigV2::File(_)
+            | OutputConfigV2::Parquet(_)
+            | OutputConfigV2::Null(_)
+            | OutputConfigV2::Tcp(_)
+            | OutputConfigV2::Udp(_) => None,
         }
     }
 
@@ -1096,87 +1005,6 @@ impl OutputConfigV2 {
     }
 }
 
-/// Pipeline output entry stored in the config model.
-///
-/// New YAML is represented as a typed `OutputConfigV2`. Legacy flat output
-/// YAML is accepted at the deserialization edge. A flat compatibility view is
-/// retained so existing callers that access `PipelineConfig.outputs` fields can
-/// continue reading the normalized `OutputConfig` shape while new runtime code
-/// uses the typed variant.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OutputConfigEntry {
-    config: OutputConfigV2,
-    flat: OutputConfig,
-}
-
-impl OutputConfigEntry {
-    /// Return the typed output configuration used by new internal consumers.
-    pub fn typed(&self) -> &OutputConfigV2 {
-        &self.config
-    }
-
-    /// Return the optional user-provided output name from the typed config.
-    pub fn name(&self) -> Option<&str> {
-        self.config.name()
-    }
-
-    /// Return the flat output type tag for diagnostics and compatibility code.
-    pub fn output_type(&self) -> OutputType {
-        self.config.output_type()
-    }
-
-    /// Return a flat validation view, preserving legacy fields when present.
-    pub(crate) fn validation_config(&self) -> OutputConfig {
-        self.flat.clone()
-    }
-}
-
-impl From<OutputConfigV2> for OutputConfigEntry {
-    fn from(config: OutputConfigV2) -> Self {
-        let flat = OutputConfig::from(config.clone());
-        Self { config, flat }
-    }
-}
-
-impl From<OutputConfig> for OutputConfigEntry {
-    fn from(config: OutputConfig) -> Self {
-        Self {
-            config: OutputConfigV2::from(&config),
-            flat: config,
-        }
-    }
-}
-
-impl std::ops::Deref for OutputConfigEntry {
-    type Target = OutputConfig;
-
-    fn deref(&self) -> &Self::Target {
-        &self.flat
-    }
-}
-
-impl<'de> Deserialize<'de> for OutputConfigEntry {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let value = serde_yaml_ng::Value::deserialize(deserializer)?;
-        let v2_error = match OutputConfigV2::deserialize(value.clone()) {
-            Ok(config) => return Ok(OutputConfigEntry::from(config)),
-            Err(error) => error,
-        };
-
-        OutputConfigV1::deserialize(value)
-            .map(OutputConfig::from)
-            .map(OutputConfigEntry::from)
-            .map_err(|v1_error| {
-                serde::de::Error::custom(format!(
-                    "invalid output config; v2 parse error: {v2_error}; legacy parse error: {v1_error}"
-                ))
-            })
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct OtlpOutputConfig {
@@ -1184,10 +1012,10 @@ pub struct OtlpOutputConfig {
     pub name: Option<String>,
     #[serde(default, deserialize_with = "deserialize_option_strict_string")]
     pub endpoint: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
-    pub protocol: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
-    pub compression: Option<String>,
+    #[serde(default)]
+    pub protocol: Option<OtlpProtocol>,
+    #[serde(default)]
+    pub compression: Option<CompressionFormat>,
     #[serde(default)]
     pub auth: Option<AuthConfig>,
     #[serde(default)]
@@ -1211,28 +1039,6 @@ pub struct OtlpOutputConfig {
     pub batch_timeout_ms: Option<PositiveMillis>,
 }
 
-impl OtlpOutputConfig {
-    fn into_output_config(self) -> OutputConfig {
-        OutputConfig {
-            name: self.name,
-            output_type: OutputType::Otlp,
-            endpoint: self.endpoint,
-            protocol: self.protocol,
-            compression: self.compression,
-            auth: self.auth,
-            tls: self.tls,
-            headers: self.headers,
-            retry_attempts: self.retry_attempts,
-            retry_initial_backoff_ms: self.retry_initial_backoff_ms,
-            retry_max_backoff_ms: self.retry_max_backoff_ms,
-            request_timeout_ms: self.request_timeout_ms,
-            batch_size: self.batch_size,
-            batch_timeout_ms: self.batch_timeout_ms,
-            ..OutputConfig::default()
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct HttpOutputConfig {
@@ -1240,25 +1046,11 @@ pub struct HttpOutputConfig {
     pub name: Option<String>,
     #[serde(default, deserialize_with = "deserialize_option_strict_string")]
     pub endpoint: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
-    pub compression: Option<String>,
+    #[serde(default)]
+    pub compression: Option<CompressionFormat>,
     pub format: Option<Format>,
     #[serde(default)]
     pub auth: Option<AuthConfig>,
-}
-
-impl HttpOutputConfig {
-    fn into_output_config(self) -> OutputConfig {
-        OutputConfig {
-            name: self.name,
-            output_type: OutputType::Http,
-            endpoint: self.endpoint,
-            compression: self.compression,
-            format: self.format,
-            auth: self.auth,
-            ..OutputConfig::default()
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
@@ -1268,10 +1060,10 @@ pub struct ElasticsearchOutputConfig {
     pub name: Option<String>,
     #[serde(default, deserialize_with = "deserialize_option_strict_string")]
     pub endpoint: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
-    pub compression: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
-    pub request_mode: Option<String>,
+    #[serde(default)]
+    pub compression: Option<CompressionFormat>,
+    #[serde(default)]
+    pub request_mode: Option<ElasticsearchRequestMode>,
     #[serde(default, deserialize_with = "deserialize_option_strict_string")]
     pub index: Option<String>,
     #[serde(default)]
@@ -1280,23 +1072,6 @@ pub struct ElasticsearchOutputConfig {
     pub tls: Option<TlsClientConfig>,
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
     pub request_timeout_ms: Option<PositiveMillis>,
-}
-
-impl ElasticsearchOutputConfig {
-    fn into_output_config(self) -> OutputConfig {
-        OutputConfig {
-            name: self.name,
-            output_type: OutputType::Elasticsearch,
-            endpoint: self.endpoint,
-            compression: self.compression,
-            request_mode: self.request_mode,
-            index: self.index,
-            auth: self.auth,
-            tls: self.tls,
-            request_timeout_ms: self.request_timeout_ms,
-            ..OutputConfig::default()
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
@@ -1323,23 +1098,6 @@ pub struct LokiOutputConfig {
     pub request_timeout_ms: Option<PositiveMillis>,
 }
 
-impl LokiOutputConfig {
-    fn into_output_config(self) -> OutputConfig {
-        OutputConfig {
-            name: self.name,
-            output_type: OutputType::Loki,
-            endpoint: self.endpoint,
-            auth: self.auth,
-            tenant_id: self.tenant_id,
-            static_labels: self.static_labels,
-            label_columns: self.label_columns,
-            tls: self.tls,
-            request_timeout_ms: self.request_timeout_ms,
-            ..OutputConfig::default()
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct StdoutOutputConfig {
@@ -1348,42 +1106,36 @@ pub struct StdoutOutputConfig {
     pub format: Option<Format>,
 }
 
-impl StdoutOutputConfig {
-    fn into_output_config(self) -> OutputConfig {
-        OutputConfig {
-            name: self.name,
-            output_type: OutputType::Stdout,
-            format: self.format,
-            ..OutputConfig::default()
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 /// File output configuration for the typed V2 schema.
 ///
-/// File compression is intentionally not part of the typed schema. Legacy flat
-/// configs may still carry `compression`; compatibility code preserves that
-/// field in the flat view so it can reject the unsupported option explicitly.
+/// File compression is intentionally not part of the typed schema; unknown
+/// fields are rejected during deserialization.
+///
+/// ```
+/// use logfwd_config::{Config, OutputConfigV2};
+///
+/// let cfg = Config::load_str(r#"
+/// input:
+///   type: generator
+/// output:
+///   type: file
+///   path: ./out.ndjson
+/// "#)
+/// .expect("file output should parse");
+///
+/// assert!(matches!(
+///     &cfg.pipelines["default"].outputs[0],
+///     OutputConfigV2::File(_)
+/// ));
+/// ```
 pub struct FileOutputConfig {
     #[serde(default, deserialize_with = "deserialize_option_strict_string")]
     pub name: Option<String>,
     #[serde(default, deserialize_with = "deserialize_option_strict_string")]
     pub path: Option<String>,
     pub format: Option<Format>,
-}
-
-impl FileOutputConfig {
-    fn into_output_config(self) -> OutputConfig {
-        OutputConfig {
-            name: self.name,
-            output_type: OutputType::File,
-            path: self.path,
-            format: self.format,
-            ..OutputConfig::default()
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
@@ -1393,22 +1145,9 @@ pub struct ParquetOutputConfig {
     pub name: Option<String>,
     #[serde(default, deserialize_with = "deserialize_option_strict_string")]
     pub path: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
-    pub compression: Option<String>,
+    #[serde(default)]
+    pub compression: Option<CompressionFormat>,
     pub format: Option<Format>,
-}
-
-impl ParquetOutputConfig {
-    fn into_output_config(self) -> OutputConfig {
-        OutputConfig {
-            name: self.name,
-            output_type: OutputType::Parquet,
-            path: self.path,
-            compression: self.compression,
-            format: self.format,
-            ..OutputConfig::default()
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
@@ -1416,16 +1155,6 @@ impl ParquetOutputConfig {
 pub struct NullOutputConfig {
     #[serde(default, deserialize_with = "deserialize_option_strict_string")]
     pub name: Option<String>,
-}
-
-impl NullOutputConfig {
-    fn into_output_config(self) -> OutputConfig {
-        OutputConfig {
-            name: self.name,
-            output_type: OutputType::Null,
-            ..OutputConfig::default()
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
@@ -1437,17 +1166,6 @@ pub struct SocketOutputConfig {
     pub endpoint: Option<String>,
 }
 
-impl SocketOutputConfig {
-    fn into_output_config(self, output_type: OutputType) -> OutputConfig {
-        OutputConfig {
-            name: self.name,
-            output_type,
-            endpoint: self.endpoint,
-            ..OutputConfig::default()
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct ArrowIpcOutputConfig {
@@ -1455,8 +1173,8 @@ pub struct ArrowIpcOutputConfig {
     pub name: Option<String>,
     #[serde(default, deserialize_with = "deserialize_option_strict_string")]
     pub endpoint: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
-    pub compression: Option<String>,
+    #[serde(default)]
+    pub compression: Option<CompressionFormat>,
     #[serde(default)]
     pub auth: Option<AuthConfig>,
     #[serde(default, deserialize_with = "deserialize_option_strict_string")]
@@ -1464,32 +1182,11 @@ pub struct ArrowIpcOutputConfig {
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
     pub port: Option<u16>,
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
-    pub write_legacy_ipc_format: Option<bool>,
-    #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
     pub buffer_size_bytes: Option<usize>,
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
     pub batch_size: Option<usize>,
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
     pub write_schema_on_connect: Option<bool>,
-}
-
-impl ArrowIpcOutputConfig {
-    fn into_output_config(self) -> OutputConfig {
-        OutputConfig {
-            name: self.name,
-            output_type: OutputType::ArrowIpc,
-            endpoint: self.endpoint,
-            compression: self.compression,
-            auth: self.auth,
-            host: self.host,
-            port: self.port,
-            write_legacy_ipc_format: self.write_legacy_ipc_format,
-            buffer_size_bytes: self.buffer_size_bytes,
-            batch_size: self.batch_size,
-            write_schema_on_connect: self.write_schema_on_connect,
-            ..OutputConfig::default()
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -1653,9 +1350,50 @@ pub struct PipelineConfig {
     pub inputs: Vec<InputConfig>,
     #[serde(default, deserialize_with = "deserialize_option_strict_string")]
     pub transform: Option<String>,
-    /// Typed output configurations accepted from V2 or legacy output YAML.
+    /// Output sinks for this pipeline.
+    ///
+    /// YAML accepts either one output mapping or a list because this field uses
+    /// `deserialize_one_or_many`. Each item is parsed as an `OutputConfigV2`
+    /// tagged enum variant, so fields are strict for the selected output type
+    /// and unknown or variant-inapplicable fields are rejected during
+    /// deserialization.
+    ///
+    /// ```
+    /// use logfwd_config::{Config, OutputConfigV2};
+    ///
+    /// let single = Config::load_str(r#"
+    /// pipelines:
+    ///   app:
+    ///     inputs:
+    ///       - type: stdin
+    ///     outputs:
+    ///       type: stdout
+    /// "#).expect("single output form should parse");
+    /// assert!(matches!(
+    ///     &single.pipelines["app"].outputs[0],
+    ///     OutputConfigV2::Stdout(_)
+    /// ));
+    ///
+    /// let list = Config::load_str(r#"
+    /// pipelines:
+    ///   app:
+    ///     inputs:
+    ///       - type: stdin
+    ///     outputs:
+    ///       - type: stdout
+    ///       - type: "null"
+    /// "#).expect("list output form should parse");
+    /// assert!(matches!(
+    ///     &list.pipelines["app"].outputs[0],
+    ///     OutputConfigV2::Stdout(_)
+    /// ));
+    /// assert!(matches!(
+    ///     &list.pipelines["app"].outputs[1],
+    ///     OutputConfigV2::Null(_)
+    /// ));
+    /// ```
     #[serde(default, deserialize_with = "deserialize_one_or_many")]
-    pub outputs: Vec<OutputConfigEntry>,
+    pub outputs: Vec<OutputConfigV2>,
     #[serde(default)]
     pub enrichment: Vec<EnrichmentConfig>,
     #[serde(default, deserialize_with = "deserialize_string_map_strict_values")]

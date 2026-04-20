@@ -1,3 +1,7 @@
+//! CLI bootstrap: user-facing stderr output (banners, version info, SIGHUP
+//! warnings) is intentional and intentionally not routed through `tracing`.
+#![allow(clippy::print_stdout, clippy::print_stderr)]
+
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -278,7 +282,7 @@ pub async fn run_pipelines(
                 "     {}out{}  {}",
                 dim(use_color),
                 reset(use_color),
-                output_label(output.typed())
+                output_label(output)
             );
         }
     }
@@ -587,8 +591,7 @@ fn build_meter_provider(
         let interval_secs = config
             .server
             .metrics_interval_secs
-            .map(|v| v.get())
-            .unwrap_or(60);
+            .map_or(60, logfwd_config::PositiveSecs::get);
 
         let otlp_exporter = opentelemetry_otlp::MetricExporter::builder()
             .with_http()

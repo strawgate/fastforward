@@ -11,7 +11,7 @@
 
 use crate::filter_hints::FilterHints;
 use crate::format::FormatDecoder;
-use crate::input::{InputCadence, InputEvent, InputSource};
+use crate::input::{CriMetadata, InputCadence, InputEvent, InputSource};
 #[cfg(test)]
 use crate::poll_cadence::PollCadenceSignal;
 use crate::tail::ByteOffset;
@@ -70,10 +70,12 @@ pub struct FramedInput {
     /// Per-source state: remainder, format processor, checkpoint tracker.
     sources: HashMap<Option<SourceId>, SourceState>,
     out_buf: Vec<u8>,
+    cri_metadata_buf: CriMetadata,
     /// Spare buffer swapped in when out_buf is emitted, preserving capacity
     /// across polls without allocating.
     spare_buf: Vec<u8>,
     stats: Arc<ComponentStats>,
+    last_raw_had_payload: bool,
 }
 
 impl FramedInput {
@@ -87,17 +89,33 @@ impl FramedInput {
             format_template: format,
             sources: HashMap::new(),
             out_buf: Vec::with_capacity(64 * 1024),
+            cri_metadata_buf: CriMetadata::default(),
             spare_buf: Vec::with_capacity(64 * 1024),
             stats,
+            last_raw_had_payload: false,
         }
     }
-}
 
-impl InputSource for FramedInput {
-    fn poll(&mut self) -> io::Result<Vec<InputEvent>> {
-        let raw_events = self.inner.poll()?;
+    fn cri_metadata_for_emitted_data(&mut self) -> Option<CriMetadata> {
+        if self.cri_metadata_buf.is_empty() {
+            return None;
+        }
+        let replacement = CriMetadata {
+            spans: Vec::with_capacity(self.cri_metadata_buf.spans.capacity()),
+            timestamp_bytes: Vec::with_capacity(self.cri_metadata_buf.timestamp_bytes.capacity()),
+            rows: 0,
+            has_values: false,
+        };
+        let metadata = std::mem::replace(&mut self.cri_metadata_buf, replacement);
+        Some(metadata)
+    }
+
+    fn process_raw_events(&mut self, raw_events: Vec<InputEvent>) -> Vec<InputEvent> {
+        self.last_raw_had_payload = raw_events
+            .iter()
+            .any(|event| matches!(event, InputEvent::Data { .. } | InputEvent::Batch { .. }));
         if raw_events.is_empty() {
-            return Ok(vec![]);
+            return vec![];
         }
 
         let mut result_events: Vec<InputEvent> = Vec::new();
@@ -108,6 +126,7 @@ impl InputSource for FramedInput {
                     bytes,
                     source_id,
                     accounted_bytes,
+                    ..
                 } => {
                     self.stats.inc_bytes(accounted_bytes);
 
@@ -223,6 +242,7 @@ impl InputSource for FramedInput {
 
                     // Process complete lines through per-source format handler.
                     self.out_buf.clear();
+                    self.cri_metadata_buf.clear();
                     let state = self.sources.get_mut(&key).expect("just inserted");
                     let mut process_start = 0usize;
                     if tainted_on_entry {
@@ -235,9 +255,11 @@ impl InputSource for FramedInput {
                         }
                     }
                     if process_start < chunk.len() {
-                        state
-                            .format
-                            .process_lines(&chunk[process_start..], &mut self.out_buf);
+                        state.format.process_lines_with_metadata(
+                            &chunk[process_start..],
+                            &mut self.out_buf,
+                            Some(&mut self.cri_metadata_buf),
+                        );
                     }
                     let line_count = memchr::memchr_iter(b'\n', &chunk[process_start..]).count();
                     self.stats.inc_lines(line_count as u64);
@@ -247,11 +269,13 @@ impl InputSource for FramedInput {
                         // for next iteration. No allocation — the 64KB bounces
                         // between the two buffers.
                         let data = std::mem::take(&mut self.out_buf);
+                        let cri_metadata = self.cri_metadata_for_emitted_data();
                         std::mem::swap(&mut self.out_buf, &mut self.spare_buf);
                         result_events.push(InputEvent::Data {
                             bytes: data,
                             source_id,
                             accounted_bytes: 0,
+                            cri_metadata,
                         });
                     }
 
@@ -324,11 +348,14 @@ impl InputSource for FramedInput {
                             }
 
                             self.out_buf.clear();
+                            self.cri_metadata_buf.clear();
                             let state = self.sources.get_mut(&key).expect("just checked existence");
                             if process_start < remainder.len() {
-                                state
-                                    .format
-                                    .process_lines(&remainder[process_start..], &mut self.out_buf);
+                                state.format.process_lines_with_metadata(
+                                    &remainder[process_start..],
+                                    &mut self.out_buf,
+                                    Some(&mut self.cri_metadata_buf),
+                                );
                             }
                             let emitted_line_count =
                                 memchr::memchr_iter(b'\n', &remainder[process_start..]).count();
@@ -342,11 +369,13 @@ impl InputSource for FramedInput {
 
                             if !self.out_buf.is_empty() {
                                 let data = std::mem::take(&mut self.out_buf);
+                                let cri_metadata = self.cri_metadata_for_emitted_data();
                                 std::mem::swap(&mut self.out_buf, &mut self.spare_buf);
                                 result_events.push(InputEvent::Data {
                                     bytes: data,
                                     source_id: key,
                                     accounted_bytes: 0,
+                                    cri_metadata,
                                 });
                             }
                         }
@@ -366,7 +395,19 @@ impl InputSource for FramedInput {
             }
         }
 
-        Ok(result_events)
+        result_events
+    }
+}
+
+impl InputSource for FramedInput {
+    fn poll(&mut self) -> io::Result<Vec<InputEvent>> {
+        let raw_events = self.inner.poll()?;
+        Ok(self.process_raw_events(raw_events))
+    }
+
+    fn poll_shutdown(&mut self) -> io::Result<Vec<InputEvent>> {
+        let raw_events = self.inner.poll_shutdown()?;
+        Ok(self.process_raw_events(raw_events))
     }
 
     fn name(&self) -> &str {
@@ -386,7 +427,9 @@ impl InputSource for FramedInput {
     }
 
     fn get_cadence(&self) -> InputCadence {
-        self.inner.get_cadence()
+        let mut cadence = self.inner.get_cadence();
+        cadence.signal.had_data |= self.last_raw_had_payload;
+        cadence
     }
 
     /// Return checkpoint offsets from the Kani-proven CheckpointTracker.
@@ -442,6 +485,7 @@ mod tests {
     struct MockSource {
         name: String,
         events: VecDeque<Vec<InputEvent>>,
+        shutdown_events: VecDeque<Vec<InputEvent>>,
         offsets: Vec<(SourceId, ByteOffset)>,
         source_paths: Vec<(SourceId, std::path::PathBuf)>,
         health: ComponentHealth,
@@ -454,6 +498,7 @@ mod tests {
             Self {
                 name: "mock".to_string(),
                 events: batches.into(),
+                shutdown_events: VecDeque::new(),
                 offsets: vec![],
                 source_paths: vec![],
                 health: ComponentHealth::Healthy,
@@ -471,6 +516,7 @@ mod tests {
                             bytes: c.to_vec(),
                             source_id: None,
                             accounted_bytes: c.len() as u64,
+                            cri_metadata: None,
                         }]
                     })
                     .collect(),
@@ -490,6 +536,7 @@ mod tests {
                             bytes: c.to_vec(),
                             source_id: Some(sid),
                             accounted_bytes: c.len() as u64,
+                            cri_metadata: None,
                         }]
                     })
                     .collect(),
@@ -498,6 +545,11 @@ mod tests {
 
         fn with_offsets(mut self, offsets: Vec<(SourceId, ByteOffset)>) -> Self {
             self.offsets = offsets;
+            self
+        }
+
+        fn with_shutdown_events(mut self, events: Vec<Vec<InputEvent>>) -> Self {
+            self.shutdown_events = events.into();
             self
         }
 
@@ -521,6 +573,10 @@ mod tests {
     impl InputSource for MockSource {
         fn poll(&mut self) -> io::Result<Vec<InputEvent>> {
             Ok(self.events.pop_front().unwrap_or_default())
+        }
+
+        fn poll_shutdown(&mut self) -> io::Result<Vec<InputEvent>> {
+            Ok(self.shutdown_events.pop_front().unwrap_or_default())
         }
 
         fn name(&self) -> &str {
@@ -628,6 +684,28 @@ mod tests {
     }
 
     #[test]
+    fn framed_input_reports_raw_shutdown_payload_when_output_is_empty() {
+        let stats = make_stats();
+        let source = MockSource::new(vec![]).with_shutdown_events(vec![vec![InputEvent::Data {
+            bytes: b"partial".to_vec(),
+            source_id: Some(SourceId(1)),
+            accounted_bytes: 7,
+            cri_metadata: None,
+        }]]);
+        let mut framed = FramedInput::new(
+            Box::new(source),
+            FormatDecoder::passthrough(Arc::clone(&stats)),
+            stats,
+        );
+
+        let events = framed
+            .poll_shutdown()
+            .expect("shutdown poll should succeed");
+        assert!(events.is_empty());
+        assert!(framed.get_cadence().signal.had_data);
+    }
+
+    #[test]
     fn remainder_across_polls() {
         let stats = make_stats();
         let source = MockSource::from_chunks(vec![b"hello\nwor", b"ld\n"]);
@@ -696,6 +774,7 @@ mod tests {
             bytes: b"line\n".to_vec(),
             source_id: None,
             accounted_bytes: 99,
+            cri_metadata: None,
         }]]);
         let mut framed = FramedInput::new(
             Box::new(source),
@@ -823,11 +902,13 @@ mod tests {
                 bytes: big,
                 source_id: Some(sid),
                 accounted_bytes: 0,
+                cri_metadata: None,
             }],
             vec![InputEvent::Data {
                 bytes: second_bytes.to_vec(),
                 source_id: Some(sid),
                 accounted_bytes: 0,
+                cri_metadata: None,
             }],
         ])
         .with_offsets(vec![(sid, ByteOffset(total))]);
@@ -949,12 +1030,14 @@ mod tests {
                 bytes: b"partial".to_vec(),
                 source_id: None,
                 accounted_bytes: 7,
+                cri_metadata: None,
             }],
             vec![InputEvent::Rotated { source_id: None }],
             vec![InputEvent::Data {
                 bytes: b"fresh\n".to_vec(),
                 source_id: None,
                 accounted_bytes: 6,
+                cri_metadata: None,
             }],
         ]);
         let mut framed = FramedInput::new(
@@ -991,10 +1074,34 @@ mod tests {
         );
 
         let events = framed.poll().unwrap();
-        assert_eq!(
-            collect_data(events),
-            b"{\"_timestamp\":\"2024-01-15T10:30:00Z\",\"_stream\":\"stdout\",\"msg\":\"hello\"}\n"
+        assert_eq!(collect_data(events), b"{\"msg\":\"hello\"}\n");
+    }
+
+    #[test]
+    fn cri_format_emits_metadata_sidecar() {
+        let stats = make_stats();
+        let input = b"2024-01-15T10:30:00Z stdout F {\"msg\":\"hello\"}\n";
+        let source = MockSource::from_chunks(vec![input.as_slice()]);
+        let mut framed = FramedInput::new(
+            Box::new(source),
+            FormatDecoder::cri(2 * 1024 * 1024, Arc::clone(&stats)),
+            stats,
         );
+
+        let events = framed.poll().unwrap();
+        let InputEvent::Data {
+            bytes,
+            cri_metadata: Some(metadata),
+            ..
+        } = &events[0]
+        else {
+            panic!("expected data event with CRI metadata");
+        };
+        assert_eq!(bytes, b"{\"msg\":\"hello\"}\n");
+        assert_eq!(metadata.rows, 1);
+        let values = metadata.spans[0].values.as_ref().expect("metadata values");
+        assert_eq!(metadata.timestamp(values), b"2024-01-15T10:30:00Z");
+        assert_eq!(values.stream.as_str(), "stdout");
     }
 
     #[test]
@@ -1044,6 +1151,7 @@ mod tests {
                 bytes: b"no-newline".to_vec(),
                 source_id: None,
                 accounted_bytes: 10,
+                cri_metadata: None,
             }],
             vec![InputEvent::EndOfFile { source_id: None }],
         ]);
@@ -1062,6 +1170,32 @@ mod tests {
         assert_eq!(collect_data(events2), b"no-newline\n");
     }
 
+    /// Runtime shutdown is a terminal lifecycle event: when the wrapped source
+    /// emits EOF from `poll_shutdown`, `FramedInput` must flush bytes that were
+    /// already held in its per-source remainder buffer.
+    #[test]
+    fn poll_shutdown_flushes_existing_remainder() {
+        let stats = make_stats();
+        let source = MockSource::new(vec![vec![InputEvent::Data {
+            bytes: b"no-newline".to_vec(),
+            source_id: None,
+            accounted_bytes: 10,
+            cri_metadata: None,
+        }]])
+        .with_shutdown_events(vec![vec![InputEvent::EndOfFile { source_id: None }]]);
+        let mut framed = FramedInput::new(
+            Box::new(source),
+            FormatDecoder::passthrough(stats.clone()),
+            stats,
+        );
+
+        let events1 = framed.poll().unwrap();
+        assert!(collect_data(events1).is_empty());
+
+        let events2 = framed.poll_shutdown().unwrap();
+        assert_eq!(collect_data(events2), b"no-newline\n");
+    }
+
     /// Multiple records in a file where only the last one lacks a newline:
     /// all records must be emitted.
     #[test]
@@ -1072,6 +1206,7 @@ mod tests {
                 bytes: b"complete\npartial".to_vec(),
                 source_id: None,
                 accounted_bytes: 16,
+                cri_metadata: None,
             }],
             vec![InputEvent::EndOfFile { source_id: None }],
         ]);
@@ -1099,6 +1234,7 @@ mod tests {
                 bytes: b"line\n".to_vec(),
                 source_id: None,
                 accounted_bytes: 5,
+                cri_metadata: None,
             }],
             vec![InputEvent::EndOfFile { source_id: None }],
         ]);
@@ -1125,6 +1261,7 @@ mod tests {
                 bytes: chunk.to_vec(),
                 source_id: Some(sid),
                 accounted_bytes: chunk.len() as u64,
+                cri_metadata: None,
             }],
             vec![InputEvent::EndOfFile {
                 source_id: Some(sid),
@@ -1163,11 +1300,13 @@ mod tests {
                     bytes: b"alpha".to_vec(),
                     source_id: Some(sid_a),
                     accounted_bytes: 5,
+                    cri_metadata: None,
                 },
                 InputEvent::Data {
                     bytes: b"beta".to_vec(),
                     source_id: Some(sid_b),
                     accounted_bytes: 4,
+                    cri_metadata: None,
                 },
             ],
             vec![InputEvent::EndOfFile {
@@ -1211,11 +1350,13 @@ mod tests {
                     bytes: b"hello-from-A".to_vec(),
                     source_id: Some(sid_a),
                     accounted_bytes: 12,
+                    cri_metadata: None,
                 },
                 InputEvent::Data {
                     bytes: b"hello-from-B".to_vec(),
                     source_id: Some(sid_b),
                     accounted_bytes: 12,
+                    cri_metadata: None,
                 },
             ],
             // Poll 2: complete the lines from each source
@@ -1224,11 +1365,13 @@ mod tests {
                     bytes: b"-done\n".to_vec(),
                     source_id: Some(sid_a),
                     accounted_bytes: 6,
+                    cri_metadata: None,
                 },
                 InputEvent::Data {
                     bytes: b"-done\n".to_vec(),
                     source_id: Some(sid_b),
                     accounted_bytes: 6,
+                    cri_metadata: None,
                 },
             ],
         ]);
@@ -1277,11 +1420,13 @@ mod tests {
                     bytes: b"partial-A".to_vec(),
                     source_id: Some(sid_a),
                     accounted_bytes: 9,
+                    cri_metadata: None,
                 },
                 InputEvent::Data {
                     bytes: b"partial-B".to_vec(),
                     source_id: Some(sid_b),
                     accounted_bytes: 9,
+                    cri_metadata: None,
                 },
             ],
             // Truncation
@@ -1291,6 +1436,7 @@ mod tests {
                 bytes: b"fresh-A\n".to_vec(),
                 source_id: Some(sid_a),
                 accounted_bytes: 8,
+                cri_metadata: None,
             }],
         ]);
 
@@ -1322,6 +1468,7 @@ mod tests {
             bytes: b"hello\nwor".to_vec(),
             source_id: Some(sid),
             accounted_bytes: 9,
+            cri_metadata: None,
         }]])
         .with_offsets(vec![(sid, ByteOffset(1000))]);
 
@@ -1351,6 +1498,7 @@ mod tests {
             bytes: b"complete\n".to_vec(),
             source_id: Some(sid),
             accounted_bytes: 9,
+            cri_metadata: None,
         }]])
         .with_offsets(vec![(sid, ByteOffset(500))]);
 
@@ -1388,18 +1536,21 @@ mod tests {
                 bytes: b"2024-01-15T10:30:00Z stdout P hello \n".to_vec(),
                 source_id: Some(sid_a),
                 accounted_bytes: 38,
+                cri_metadata: None,
             }],
             // Source B: CRI full line (must NOT merge with A's partial)
             vec![InputEvent::Data {
                 bytes: b"2024-01-15T10:30:01Z stderr F {\"msg\":\"world\"}\n".to_vec(),
                 source_id: Some(sid_b),
                 accounted_bytes: 50,
+                cri_metadata: None,
             }],
             // Source A: CRI full line (completes A's partial)
             vec![InputEvent::Data {
                 bytes: b"2024-01-15T10:30:02Z stdout F from-A\n".to_vec(),
                 source_id: Some(sid_a),
                 accounted_bytes: 39,
+                cri_metadata: None,
             }],
         ]);
 
@@ -1416,10 +1567,7 @@ mod tests {
         // Poll 2: B's full line — emitted as standalone
         let events2 = framed.poll().unwrap();
         let data2 = collect_data(events2);
-        assert!(
-            data2.starts_with(b"{\"_timestamp\":\"2024-01-15T10:30:01Z\""),
-            "B's line should be emitted independently"
-        );
+        assert_eq!(data2, b"{\"msg\":\"world\"}\n");
         assert!(
             !data2.windows(5).any(|w| w == b"hello"),
             "B's output must NOT contain A's partial"
@@ -1446,12 +1594,14 @@ mod tests {
                 bytes: b"hello\nwor".to_vec(),
                 source_id: Some(sid),
                 accounted_bytes: 9,
+                cri_metadata: None,
             }],
             // Second read: 3 bytes, newline at position 1 (the 'd\n')
             vec![InputEvent::Data {
                 bytes: b"ld\n".to_vec(),
                 source_id: Some(sid),
                 accounted_bytes: 3,
+                cri_metadata: None,
             }],
         ])
         .with_offsets(vec![(sid, ByteOffset(12))]);
@@ -1488,6 +1638,7 @@ mod tests {
             bytes: b"{\"msg\":\"hello\"}\n".to_vec(),
             source_id: Some(sid),
             accounted_bytes: 0,
+            cri_metadata: None,
         }]])
         .with_source_paths(vec![(sid, "/var/log/pods/ns_pod_uid/c/main.log".into())]);
 
@@ -1509,6 +1660,7 @@ mod tests {
             bytes: b"{\"msg\":\"hello\"}\n".to_vec(),
             source_id: Some(sid),
             accounted_bytes: 0,
+            cri_metadata: None,
         }]])
         .with_source_paths(vec![(sid, "/var/log/pods/ns_pod_uid/c/main.log".into())]);
 
@@ -1541,6 +1693,7 @@ mod tests {
             bytes: b"2024-01-15T10:30:00Z stdout F {\"msg\":\"hello\"}\n".to_vec(),
             source_id: Some(sid),
             accounted_bytes: 0,
+            cri_metadata: None,
         }]])
         .with_source_paths(vec![(sid, "/var/log/pods/ns_pod_uid/c/0.log".into())]);
 
@@ -1551,10 +1704,7 @@ mod tests {
         );
 
         let out = collect_data(framed.poll().unwrap());
-        assert_eq!(
-            out,
-            b"{\"_timestamp\":\"2024-01-15T10:30:00Z\",\"_stream\":\"stdout\",\"msg\":\"hello\"}\n"
-        );
+        assert_eq!(out, b"{\"msg\":\"hello\"}\n");
     }
 
     #[test]
@@ -1565,6 +1715,7 @@ mod tests {
             bytes: b"  \t{\"msg\":\"hello\"}\n".to_vec(),
             source_id: Some(sid),
             accounted_bytes: 0,
+            cri_metadata: None,
         }]])
         .with_source_paths(vec![(sid, "/var/log/pods/ns_pod_uid/c/1.log".into())]);
 
@@ -1586,6 +1737,7 @@ mod tests {
             bytes: b"{}\n".to_vec(),
             source_id: Some(sid),
             accounted_bytes: 0,
+            cri_metadata: None,
         }]])
         .with_source_paths(vec![(sid, "/var/log/pods/ns_pod_uid/c/2.log".into())]);
 
@@ -1607,6 +1759,7 @@ mod tests {
             bytes: b"{\"msg\":\"hello\"}\n".to_vec(),
             source_id: Some(sid),
             accounted_bytes: 0,
+            cri_metadata: None,
         }]])
         .with_source_paths(vec![(sid, "/var/log/pods/ns_pod_uid/c/raw.log".into())]);
 
@@ -1631,6 +1784,7 @@ mod tests {
                 bytes: b"hello\npartial".to_vec(),
                 source_id: Some(sid),
                 accounted_bytes: 13,
+                cri_metadata: None,
             }],
             vec![InputEvent::EndOfFile {
                 source_id: Some(sid),
@@ -1640,6 +1794,7 @@ mod tests {
                 bytes: b"world\n".to_vec(),
                 source_id: Some(sid),
                 accounted_bytes: 6,
+                cri_metadata: None,
             }],
         ]);
         let mut framed = FramedInput::new(
@@ -1674,6 +1829,7 @@ mod tests {
             bytes: b"{\"msg\":\"done\"}\n".to_vec(),
             source_id: Some(sid),
             accounted_bytes: 15,
+            cri_metadata: None,
         }]]);
         let mut framed = FramedInput::new(
             Box::new(source),
@@ -1699,11 +1855,13 @@ mod tests {
                 bytes: b"2024-01-01T00:00:00.000000000Z stdout P {\"msg\":\"part".to_vec(),
                 source_id: Some(sid),
                 accounted_bytes: 57,
+                cri_metadata: None,
             }],
             vec![InputEvent::Data {
                 bytes: b"ial\"}\n2024-01-01T00:00:00.000000000Z stdout F \n".to_vec(),
                 source_id: Some(sid),
                 accounted_bytes: 54,
+                cri_metadata: None,
             }],
         ]);
         let mut framed = FramedInput::new(
@@ -1741,6 +1899,7 @@ mod tests {
                 bytes: b"2024-01-01T00:00:00.000000000Z stdout P {\"msg\":\"part\n".to_vec(),
                 source_id: Some(sid),
                 accounted_bytes: 58,
+                cri_metadata: None,
             }],
             vec![InputEvent::EndOfFile {
                 source_id: Some(sid),
@@ -1749,6 +1908,7 @@ mod tests {
                 bytes: b"2024-01-01T00:00:00.000000000Z stdout F ial\"}\n".to_vec(),
                 source_id: Some(sid),
                 accounted_bytes: 53,
+                cri_metadata: None,
             }],
         ]);
         let mut framed = FramedInput::new(

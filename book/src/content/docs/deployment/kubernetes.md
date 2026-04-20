@@ -29,9 +29,10 @@ A ready-to-use manifest is provided at `deploy/daemonset.yml`.
 :::note[CRI field requirement]
 In the file-input example below, `_stream` is only present when the input is
 parsed as CRI (`format: cri`). The `_timestamp` column is present here because
-CRI parsing injects it for this example, but `_timestamp` may also be provided
-by other inputs or formats. If you switch to a different input format and these
-columns are not available, remove them or update the query accordingly.
+CRI parsing attaches it as sidecar metadata for this example, but `_timestamp`
+may also be provided by other inputs or formats. If you switch to a different
+input format and these columns are not available, remove them or update the
+query accordingly.
 :::
 
 ### Minimal DaemonSet
@@ -183,7 +184,7 @@ input:
   type: file
   path: /var/log/pods/**/*.log
   format: cri
-  source_metadata: true
+  source_metadata: ecs
 
 enrichment:
   - type: k8s_path
@@ -197,7 +198,7 @@ transform: |
     k.pod_name,
     k.container_name
   FROM logs l
-  LEFT JOIN k8s k ON l._source_path = k.log_path_prefix
+  LEFT JOIN k8s k ON l."file.path" = k.log_path_prefix
 ```
 
 ### Namespace filtering
@@ -209,12 +210,12 @@ input:
   type: file
   path: /var/log/pods/**/*.log
   format: cri
-  source_metadata: true
+  source_metadata: ecs
 
 transform: |
   SELECT l.*, k.namespace, k.pod_name, k.container_name
   FROM logs l
-  LEFT JOIN k8s k ON l._source_path = k.log_path_prefix
+  LEFT JOIN k8s k ON l."file.path" = k.log_path_prefix
   WHERE k.namespace IN ('production', 'staging')
 ```
 

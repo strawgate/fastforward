@@ -19,6 +19,7 @@ pub(crate) mod http_classify;
 mod conflict_columns;
 mod elasticsearch;
 mod factory;
+mod internal_columns;
 mod metadata;
 mod row_json;
 
@@ -27,9 +28,10 @@ mod loki;
 pub use arrow_ipc_sink::{ArrowIpcSinkFactory, deserialize_ipc, serialize_ipc};
 pub use elasticsearch::{ElasticsearchRequestMode, ElasticsearchSink, ElasticsearchSinkFactory};
 pub use error::OutputError;
-pub use factory::build_sink_factory_v2;
+pub use factory::build_sink_factory;
 pub use file_sink::{FileSink, FileSinkFactory};
 pub use json_lines::{JsonLinesSink, JsonLinesSinkFactory};
+pub use logfwd_config::OtlpProtocol;
 pub use loki::{LokiSink, LokiSinkFactory};
 pub use metadata::{BatchMetadata, Compression};
 pub use null::{NullSink, NullSinkFactory};
@@ -39,7 +41,7 @@ pub use otap_sink::{
     decode_batch_status_generated_fast, encode_batch_arrow_records,
     encode_batch_arrow_records_generated_fast,
 };
-pub use otlp_sink::{OtlpProtocol, OtlpSink, OtlpSinkFactory};
+pub use otlp_sink::{OtlpSink, OtlpSinkFactory};
 pub use sink::{
     AsyncFanoutFactory, AsyncFanoutSink, OnceAsyncFactory, SendResult, Sink, SinkFactory,
 };

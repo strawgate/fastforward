@@ -17,6 +17,7 @@ use arrow::buffer::{Buffer, NullBuffer};
 use arrow::datatypes::{DataType, Field, Fields, Schema};
 use arrow::error::ArrowError;
 use arrow::record_batch::{RecordBatch, RecordBatchOptions};
+use logfwd_lint_attrs::hot_path;
 
 use logfwd_core::scan_config::{parse_float_fast, parse_int_fast};
 use logfwd_core::scanner::BuilderState;
@@ -245,11 +246,13 @@ impl StreamingBuilder {
         self.line_views.clear();
     }
 
+    #[hot_path]
     #[inline(always)]
     pub fn begin_row(&mut self) {
         self.lifecycle.begin_row();
     }
 
+    #[hot_path]
     #[inline(always)]
     pub fn end_row(&mut self) {
         self.lifecycle.end_row();
@@ -622,7 +625,7 @@ impl StreamingBuilder {
         // StringView offsets use original-buffer offsets for unescaped strings
         // and offsets >= original_buf_len for decoded strings. Keep those as two
         // Arrow blocks so decoding one field never copies the full input buffer.
-        let original_buf_len = u32::try_from(self.buf.len()).map_err(|_| {
+        let original_buf_len = u32::try_from(self.buf.len()).map_err(|_e| {
             ArrowError::InvalidArgumentError("input buffer exceeds StringView offset range".into())
         })?;
         let arrow_buf = Buffer::from(self.buf.clone());
@@ -1736,7 +1739,7 @@ mod tests {
     fn test_read_str_out_of_bounds() {
         let buf = bytes::Bytes::from_static(b"abcd");
         let mut b = StreamingBuilder::new(None);
-        b.begin_batch(buf.clone());
+        b.begin_batch(buf);
 
         let res = b.read_str(0, 10, false); // Out of bounds length
         assert_eq!(res, None); // Handled safely
@@ -2477,7 +2480,7 @@ mod tests {
         let json = b"hello world padding";
         let buf = bytes::Bytes::from(json.to_vec());
         let mut b = StreamingBuilder::new(None);
-        b.begin_batch(buf.clone());
+        b.begin_batch(buf);
         let idx = b.resolve_field(b"msg");
         b.begin_row();
         // Decoded string goes into decoded_buf, not the original buffer

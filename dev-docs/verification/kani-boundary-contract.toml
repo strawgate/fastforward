@@ -39,7 +39,7 @@ issue = 1437
 [[seams]]
 path = "crates/logfwd-io/src/format.rs"
 status = "required"
-reason = "Local CRI metadata injection and mode dispatch helpers are already Kani-targeted."
+reason = "Local CRI message extraction, sidecar metadata, and mode dispatch helpers are already Kani-targeted."
 issue = 1314
 
 [[seams]]
@@ -91,6 +91,11 @@ reason = "Module shell gates tail-specific verification under #[cfg(kani)] and s
 issue = 1314
 
 [[seams]]
+path = "crates/logfwd-io/src/input.rs"
+status = "recommended"
+reason = "CRI metadata sidecar row-alignment helpers are bounded local state transitions inside the input abstraction."
+
+[[seams]]
 path = "crates/logfwd-io/src/tcp_input.rs"
 status = "recommended"
 reason = "Per-client bounded-read stop policy is extracted as a local pure seam inside the TCP shell."
@@ -100,6 +105,12 @@ issue = 1314
 path = "crates/logfwd-io/src/udp_input.rs"
 status = "recommended"
 reason = "Per-poll UDP bounded-drain stop policy is an isolated pure seam in an otherwise IO-heavy module."
+issue = 1314
+
+[[seams]]
+path = "crates/logfwd-io/src/s3_input/mod.rs"
+status = "exempt"
+reason = "S3 input is an async/network orchestration shell; source metadata snapshot behavior is stateful IO glue covered by unit and integration tests rather than a bounded pure Kani seam."
 issue = 1314
 
 [[seams]]

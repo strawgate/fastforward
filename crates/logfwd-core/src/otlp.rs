@@ -246,7 +246,7 @@ pub fn skip_field(buf: &[u8], wire_type: u8, pos: usize) -> Result<usize, &'stat
         2 => {
             // Length-delimited.
             let (len, new_pos) = decode_varint(buf, pos)?;
-            let len_usize = usize::try_from(len).map_err(|_| "skip: length overflow")?;
+            let len_usize = usize::try_from(len).map_err(|_e| "skip: length overflow")?;
             let end = new_pos
                 .checked_add(len_usize)
                 .ok_or("skip: length-delimited overflow")?;
@@ -1180,6 +1180,14 @@ mod verification {
     use super::*;
     use alloc::{vec, vec::Vec};
 
+    // NOTE: encode_varint and encode_tag take `&mut Vec<u8>` and return `()`.
+    // In our current Kani version/configuration used in CI, the contract system
+    // (requires/ensures/modifies) requires the modified type to implement
+    // `kani::Arbitrary` for stub_verified, but `Vec<u8>` does not in that setup.
+    // Function contracts for these wire format helpers are therefore deferred for
+    // now, and the correctness of these functions is instead proven
+    // exhaustively by the verify_varint_* and verify_encode_tag proofs below.
+
     /// Prove varint_len matches encode_varint output length for ALL u64 values.
     ///
     /// This is the foundational wire format proof — if these disagree,
@@ -1290,9 +1298,13 @@ mod verification {
         kani::cover!(field_number == 0x1FFFFFFF && wire_type == 5);
     }
 
-    /// Prove days_from_civil never panics and produces reasonable values
     /// Oracle proof: days_from_civil matches a naive year/month
-    /// iteration for all valid dates in [1970, 2100].
+    /// iteration for bounded date components with year in [1970, 2100].
+    ///
+    /// Note: this proof range includes potentially non-calendar-valid
+    /// day-of-month combinations (e.g. Feb 31); it does not claim to
+    /// admit only valid civil dates. The oracle and the implementation
+    /// agree on all such inputs regardless.
     ///
     /// Uses a completely different algorithm (cumulative day counting)
     /// from the Hinnant formula. Kani can't use chrono, so this naive
@@ -1585,7 +1597,13 @@ mod verification {
     }
 
     /// Prove parse_timestamp_nanos never panics for any 32-byte input.
+    ///
+    /// Uses stub_verified for proven sub-functions to avoid re-verifying
+    /// digit parsing and calendar arithmetic inline.
     #[kani::proof]
+    #[kani::stub_verified(parse_4digits)]
+    #[kani::stub_verified(parse_2digits)]
+    #[kani::stub_verified(days_from_civil)]
     #[kani::unwind(14)] // fractional while loop: up to 12 iters (len=32, frac_start=20) + 2 margin
     #[kani::solver(kissat)]
     fn verify_parse_timestamp_no_panic() {
@@ -1889,5 +1907,137 @@ mod verification {
 
         kani::cover!(WIRE_TYPE_VARINT == 0, "varint is 0");
         kani::cover!(WIRE_TYPE_FIXED32 == 5, "fixed32 is 5");
+    }
+
+    // -----------------------------------------------------------------------
+    // Manual encode_varint stub for compositional proofs
+    //
+    // encode_varint takes `&mut Vec<u8>` which doesn't implement
+    // `kani::Arbitrary`, so standard `#[kani::ensures]` contracts can't be
+    // used with `stub_verified`. Instead we use a manual `#[kani::stub]`
+    // that models encode_varint's proven behavior: appends 1-10 bytes.
+    // The ground-truth correctness is already established by the
+    // verify_varint_* proofs above; these compositional variants focus on
+    // the *caller's* logic with encode_varint abstracted away.
+    // -----------------------------------------------------------------------
+
+    /// Manual stub modelling `encode_varint`'s proven output contract:
+    /// appends between 1 and 10 arbitrary bytes to `buf`.
+    fn encode_varint_stub(buf: &mut Vec<u8>, _value: u64) {
+        let len: usize = kani::any();
+        kani::assume(len >= 1 && len <= 10);
+        let mut i = 0;
+        while i < len {
+            buf.push(kani::any());
+            i += 1;
+        }
+    }
+
+    /// Compositional proof: encode_tag with encode_varint stubbed out.
+    ///
+    /// encode_tag computes `(field_number << 3) | wire_type` and passes it
+    /// to encode_varint. With the stub, we verify the caller logic produces
+    /// a buffer of 1-10 bytes (the tag varint) for any valid inputs.
+    #[kani::proof]
+    #[kani::stub(encode_varint, encode_varint_stub)]
+    #[kani::unwind(12)]
+    fn verify_encode_tag_compositional() {
+        let field_number: u32 = kani::any();
+        let wire_type: u8 = kani::any();
+        kani::assume(field_number > 0);
+        kani::assume(field_number <= 0x1FFFFFFF);
+        kani::assume(wire_type <= 5);
+
+        let mut buf = Vec::new();
+        encode_tag(&mut buf, field_number, wire_type);
+
+        // encode_tag calls encode_varint once, so output is 1-10 bytes
+        assert!(buf.len() >= 1 && buf.len() <= 10);
+
+        kani::cover!(buf.len() == 1, "single-byte tag");
+        kani::cover!(buf.len() > 1, "multi-byte tag");
+    }
+
+    /// Compositional proof: encode_fixed64 with encode_varint stubbed out.
+    ///
+    /// encode_fixed64 calls encode_tag (which calls encode_varint) then
+    /// appends 8 LE bytes. With the stub, we verify the total output is
+    /// tag (1-10 bytes) + 8 fixed bytes = 9-18 bytes.
+    #[kani::proof]
+    #[kani::stub(encode_varint, encode_varint_stub)]
+    #[kani::unwind(12)]
+    fn verify_encode_fixed64_compositional() {
+        let field_number: u32 = kani::any();
+        let value: u64 = kani::any();
+        kani::assume(field_number > 0 && field_number <= 1000);
+
+        let mut buf = Vec::new();
+        encode_fixed64(&mut buf, field_number, value);
+
+        // Tag (1-10 bytes via stub) + 8 fixed bytes
+        assert!(buf.len() >= 9 && buf.len() <= 18);
+
+        // Last 8 bytes are the value in little-endian
+        let tail = &buf[buf.len() - 8..];
+        let decoded = u64::from_le_bytes(tail.try_into().unwrap());
+        assert!(decoded == value, "fixed64 value mismatch");
+
+        kani::cover!(buf.len() == 9, "single-byte tag + 8 value bytes");
+    }
+
+    /// Compositional proof: encode_varint_field with encode_varint stubbed.
+    ///
+    /// encode_varint_field calls encode_tag (1 encode_varint for the tag)
+    /// then encode_varint again for the value. With the stub, each call
+    /// appends 1-10 bytes, so total is 2-20 bytes.
+    #[kani::proof]
+    #[kani::stub(encode_varint, encode_varint_stub)]
+    #[kani::unwind(12)]
+    fn verify_encode_varint_field_compositional() {
+        let field_number: u32 = kani::any();
+        let value: u64 = kani::any();
+        kani::assume(field_number > 0 && field_number <= 1000);
+
+        let mut buf = Vec::new();
+        encode_varint_field(&mut buf, field_number, value);
+
+        // Two encode_varint calls: tag (1-10) + value (1-10)
+        assert!(buf.len() >= 2 && buf.len() <= 20);
+
+        kani::cover!(buf.len() == 2, "minimal encoding");
+        kani::cover!(buf.len() > 10, "large encoding");
+    }
+
+    /// Compositional proof: encode_bytes_field with encode_varint stubbed.
+    ///
+    /// encode_bytes_field calls encode_tag (1 encode_varint for the tag),
+    /// then encode_varint for the length, then extends with the data slice.
+    /// With the stub, tag and length each append 1-10 bytes, plus data_len
+    /// bytes of payload.
+    #[kani::proof]
+    #[kani::stub(encode_varint, encode_varint_stub)]
+    #[kani::unwind(12)]
+    fn verify_encode_bytes_field_content_compositional() {
+        let field_number: u32 = kani::any();
+        kani::assume(field_number > 0 && field_number <= 100);
+        let data_len: usize = kani::any_where(|&l: &usize| l <= 8);
+        let data: [u8; 8] = kani::any();
+
+        let mut buf = Vec::new();
+        encode_bytes_field(&mut buf, field_number, &data[..data_len]);
+
+        // Tag (1-10) + length varint (1-10) + data (0-8) = 2-28 bytes
+        assert!(buf.len() >= 2 + data_len && buf.len() <= 20 + data_len);
+
+        // Last data_len bytes must be the exact input data
+        let payload = &buf[buf.len() - data_len..];
+        let mut i = 0;
+        while i < data_len {
+            assert!(payload[i] == data[i], "data mismatch at byte");
+            i += 1;
+        }
+
+        kani::cover!(data_len == 0, "empty payload");
+        kani::cover!(data_len > 0, "non-empty payload");
     }
 }

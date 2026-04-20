@@ -109,6 +109,56 @@ just fuzz scanner 300        # fuzz a target for 300s (nightly)
 > subsequent CI runs (for example, after pushing a commit or rerunning CI):
 > `miri`, macOS tests, and the deeper TLA/TLC sweeps.
 
+## Test filtering and proptest regressions
+
+Common loops when iterating on a single test or investigating a
+proptest failure:
+
+```bash
+# Run one test by pattern (matches test name substring).
+cargo nextest run -p logfwd-core --lib scanner::handles_empty_line
+
+# Run all tests in a module.
+cargo nextest run -p logfwd-arrow --lib scanner::
+
+# Raise proptest case count for a suspected edge case. The default
+# is 256; use 10_000+ when you think a rare shape is being missed.
+PROPTEST_CASES=10000 cargo nextest run -p logfwd-arrow --lib
+
+# Re-run a minimized regression that was pinned into a regression file.
+# `crates/*/proptest-regressions/` holds previously-shrunk failing seeds;
+# proptest reads them automatically when the matching test runs.
+cargo nextest run -p logfwd-arrow --lib scanner::round_trip
+```
+
+Turmoil tests use deterministic seeds: set `TURMOIL_SEED=<N>` to
+reproduce a scenario from a failing CI run.
+
+## Reading criterion benchmark output
+
+`just bench` writes HTML + JSON under `target/criterion/`. A quick
+cheat sheet for the files you'll actually care about:
+
+| File | Purpose |
+|---|---|
+| `target/criterion/report/index.html` | Top-level summary across all benchmarks in the run. |
+| `target/criterion/<bench>/<param>/report/index.html` | Per-case detail: median, confidence interval, violin plot, raw iterations. |
+| `target/criterion/<bench>/<param>/change/estimates.json` | Change vs previous run — `mean.point_estimate` is the percent delta. |
+| `target/criterion/<bench>/<param>/new/sample.json` | Raw sample timings for the current run. Load this if you want to compute a custom statistic. |
+
+Rules of thumb when reading results:
+
+- **Ignore single-run noise under ~2%.** Criterion's noise floor on
+  typical workstation hardware is 1–3 %; changes within that band are
+  usually scheduler jitter, not regressions.
+- **Check the confidence interval** (p5–p95 band on the violin plot).
+  A wide band means high variance — re-run with `--warm-up-time 5
+  --measurement-time 10` for more stable numbers.
+- **For perf PRs**, quote `mean.point_estimate` from
+  `change/estimates.json` in the PR body, plus the 95 % CI. Don't
+  paste the HTML into the PR — link the relevant section of the
+  markdown report (`just bench` generates one alongside the HTML).
+
 ## DataFusion in Dev vs Release
 
 `logfwd` now has a feature-gated SQL engine:
@@ -218,6 +268,46 @@ Caveats:
 
 ---
 
+## Performance change workflow
+
+When a change is motivated by performance — or unintentionally affects
+the hot path — the following loop is the repo standard. No perf claim
+lands in a PR or commit message without a corresponding `criterion`
+artifact to back it.
+
+1. **Baseline.** Before touching code, run the relevant `criterion`
+   bench on `main` and save the report. `just bench` runs the Tier 1
+   suite (`pipeline`, `output_encode`, `full_chain`). For more
+   targeted runs, invoke the specific bench binary directly (see
+   `crates/logfwd-bench/src/bin/`).
+2. **Profile to find the actual hotspot.** On macOS: `just profile-otlp-local`
+   produces a flamegraph. For FramedInput-specific work:
+   `just bench-framed-input -- --flamegraph /tmp/framed-input.svg`.
+   Optimize what the profile shows, not what you *think* is slow.
+3. **Measure allocations separately.** `just bench-framed-input-alloc`
+   and the `cpu-profiling` feature cover allocation-sensitive paths.
+   Heap churn and wall-clock are different axes — changes that trade
+   one for the other should say so explicitly.
+4. **Change the code.** Prefer the smallest change that moves the
+   measured bottleneck. Avoid micro-optimizations outside the hotspot.
+5. **Re-benchmark and compare.** Run the same bench on the change.
+   Include the before/after numbers (and percent delta) in the PR body.
+6. **Check for regressions elsewhere.** A win in the scanner can lose
+   in the encoder. `just bench` covers the Tier 1 suite quickly;
+   use it as a regression net before merge.
+7. **Update `dev-docs/` if the change alters a documented perf
+   characteristic.** Buffer lifecycle, hot-path rules, the ZERO_COPY_PIPELINE
+   notes. See `dev-docs/CHANGE_MAP.md` for co-change requirements.
+
+If the change touches `unsafe` SIMD in `logfwd-arrow`, verify it
+against the scalar fallback with proptest (`cargo test -p logfwd-arrow`
+exercises the equivalence proptests). Miri does not cover `logfwd-arrow`
+— `just miri` runs only the `logfwd-core` and `logfwd-types` suites.
+For SIMD invariants enforced at the type level, `just kani-boundary`
+verifies the scanner contract.
+
+---
+
 ## Things that will bite you
 
 Hard-won lessons from building the scanner and builder pipeline.
@@ -267,6 +357,14 @@ charge bytes from the original source payload, not the normalized buffer. Two
 easy ways to get this wrong are synthetic newline insertion and compressed
 request decoding. Capture source bytes at the receiver boundary first, then
 carry them explicitly through `InputEvent::Data` or `InputEvent::Batch`.
+
+### TLS client CA settings must not silently downgrade mTLS
+
+For server-side inputs, `client_ca_file` is meaningful only when
+`require_client_auth` is true. Accepting a client CA while leaving client auth
+disabled looks like mTLS is configured but still accepts unauthenticated clients.
+Reject that combination during startup, and normalize optional certificate paths
+once before validation and file loading.
 
 ### Arrow IPC compression is just a flag
 

@@ -16,6 +16,7 @@ use flate2::Compression as GzipLevel;
 use flate2::write::GzEncoder;
 
 use logfwd_arrow::conflict_schema::normalize_conflict_columns;
+use logfwd_config::OtlpProtocol;
 use logfwd_core::otlp::{
     self, Severity, bytes_field_size, encode_bytes_field, encode_fixed32, encode_fixed64,
     encode_tag, encode_varint, encode_varint_field, hex_decode, parse_severity,
@@ -46,14 +47,6 @@ const DEFAULT_GRPC_MAX_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
 // ---------------------------------------------------------------------------
 // OtlpSink
 // ---------------------------------------------------------------------------
-
-/// OTLP transport protocol.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum OtlpProtocol {
-    Grpc,
-    Http,
-}
 
 /// Sends OTLP protobuf LogRecords over gRPC or HTTP.
 pub struct OtlpSink {
@@ -160,6 +153,7 @@ impl OtlpSink {
     /// The default is the canonical `body` field. Use this builder when a
     /// pipeline stores the primary log message under a different string column.
     #[inline]
+    #[must_use]
     pub fn with_message_field(mut self, message_field: String) -> Self {
         self.message_field = message_field;
         self
@@ -547,6 +541,12 @@ impl OtlpSink {
         let content_type = match self.protocol {
             OtlpProtocol::Grpc => "application/grpc",
             OtlpProtocol::Http => "application/x-protobuf",
+            other => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("unsupported OTLP protocol '{other}'"),
+                ));
+            }
         };
 
         // For gRPC, prepend the 5-byte length-prefixed frame header required by the
@@ -959,6 +959,10 @@ fn resolve_batch_columns<'a>(batch: &'a RecordBatch, message_field: &str) -> Bat
 
     for (idx, field) in schema.fields().iter().enumerate() {
         let col_name = field.name().as_str();
+        if field_names::is_internal_column(col_name) {
+            excluded[idx] = true;
+            continue;
+        }
         let field_name = col_name;
         match field_name {
             name if field_names::matches_any(
@@ -1661,7 +1665,7 @@ fn encode_key_value_bool(buf: &mut Vec<u8>, field_number: u32, key: &[u8], value
 /// [N bytes: protobuf message]
 /// ```
 fn write_grpc_frame(buf: &mut Vec<u8>, payload: &[u8], compressed: bool) -> io::Result<()> {
-    let len = u32::try_from(payload.len()).map_err(|_| {
+    let len = u32::try_from(payload.len()).map_err(|_e| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
             "gRPC message payload must be < 4 GiB",

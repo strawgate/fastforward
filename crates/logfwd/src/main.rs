@@ -1,3 +1,6 @@
+#![allow(clippy::print_stdout, clippy::print_stderr)]
+// Binary crate: user-facing CLI output is intentional.
+
 #[cfg(feature = "dhat-heap")]
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;
@@ -587,7 +590,7 @@ fn rewrite_args_as_send(args: Vec<OsString>) -> Vec<OsString> {
     if let Some((program, rest)) = args.split_first() {
         rewritten.push(program.clone());
         rewritten.push(OsString::from("send"));
-        rewritten.extend(rest.iter().cloned());
+        rewritten.extend_from_slice(rest);
     } else {
         rewritten.push(OsString::from("ff"));
         rewritten.push(OsString::from("send"));
@@ -830,7 +833,7 @@ async fn cmd_blast(mut args: BlastArgs) -> Result<(), CliError> {
         args.batch_lines
     );
     match args.duration_secs {
-        Some(duration) => println!("duration={}s", duration),
+        Some(duration) => println!("duration={duration}s"),
         None => println!("duration=until-stopped (Ctrl-C)"),
     }
     if let Some(endpoint) = &args.endpoint {
@@ -875,7 +878,7 @@ async fn cmd_devour(args: DevourArgs) -> Result<(), CliError> {
     println!("dropping all received data (blackhole mode)");
     println!("diagnostics={}", args.diagnostics_addr);
     if let Some(duration) = args.duration_secs {
-        println!("duration={}s", duration);
+        println!("duration={duration}s");
     }
 
     let generated = logfwd_runtime::generated_cli::build_devour_generated_config(
@@ -944,10 +947,10 @@ fn maybe_prompt_blast_setup(args: &mut BlastArgs) -> Result<(), CliError> {
 
     args.workers = prompt_text("Workers", &args.workers.to_string())?
         .parse::<usize>()
-        .map_err(|_| CliError::Config("Workers must be a positive integer".to_owned()))?;
+        .map_err(|_e| CliError::Config("Workers must be a positive integer".to_owned()))?;
     args.batch_lines = prompt_text("Batch lines", &args.batch_lines.to_string())?
         .parse::<usize>()
-        .map_err(|_| CliError::Config("Batch lines must be a positive integer".to_owned()))?;
+        .map_err(|_e| CliError::Config("Batch lines must be a positive integer".to_owned()))?;
     let duration_default = args
         .duration_secs
         .map(|v| v.to_string())
@@ -959,7 +962,7 @@ fn maybe_prompt_blast_setup(args: &mut BlastArgs) -> Result<(), CliError> {
     args.duration_secs = if duration_raw.trim().is_empty() {
         None
     } else {
-        Some(duration_raw.parse::<u64>().map_err(|_| {
+        Some(duration_raw.parse::<u64>().map_err(|_e| {
             CliError::Config("Duration seconds must be a positive integer".to_owned())
         })?)
     };
@@ -968,7 +971,9 @@ fn maybe_prompt_blast_setup(args: &mut BlastArgs) -> Result<(), CliError> {
 }
 
 #[cfg(test)]
-fn resolve_blast_output_config(args: &BlastArgs) -> Result<logfwd_config::OutputConfig, CliError> {
+fn resolve_blast_output_config(
+    args: &BlastArgs,
+) -> Result<logfwd_config::OutputConfigV2, CliError> {
     let destination = args
         .destination
         .ok_or_else(|| CliError::Config("blast requires --destination".to_owned()))?;
@@ -1123,7 +1128,6 @@ fn cmd_wizard() -> Result<(), CliError> {
         let uc = &USE_CASE_TEMPLATES[uc_idx];
         println!("{}selected{}: {}", green(), reset(), uc.title);
         println!();
-        // TODO: support multiline SQL input (currently single-line via read_line)
         let sql = prompt_text(
             "SQL transform (blank = keep the preset default)",
             uc.transform,
@@ -1148,7 +1152,6 @@ fn cmd_wizard() -> Result<(), CliError> {
             &output_descs,
         )?;
 
-        // TODO: support multiline SQL input (currently single-line via read_line)
         let sql = prompt_text(
             "Optional SQL transform (blank = SELECT * FROM logs)",
             "SELECT * FROM logs",
@@ -1547,10 +1550,28 @@ const GENERATOR_LOGS_SIMPLE_COLUMNS: &[&str] = &[
     "status",
 ];
 
+/// Internal columns attached from CRI sidecar metadata (`_timestamp`,
+/// `_stream`) plus the plain-text fallback field (`body`).
+const CRI_INTERNAL_COLUMNS: &[&str] = &["_timestamp", "_stream", "body"];
+
+/// Describes how strictly column validation should be applied.
+enum KnownColumnsMode {
+    /// All columns in the input are known — any column not in the list is
+    /// rejected. Used for inputs with a fixed schema (e.g. generator/logs/simple).
+    Strict(&'static [&'static str]),
+    /// Only internal/framework columns (typically `_`-prefixed) are known.
+    /// Columns starting with `_` that are not in the list are rejected;
+    /// other column names are assumed to be user-defined data fields and
+    /// allowed. Used for inputs that parse dynamic JSON content (CRI, JSON).
+    InternalOnly(&'static [&'static str]),
+}
+
 fn known_input_columns_read_only(
     input_cfg: &logfwd_config::InputConfig,
-) -> Option<&'static [&'static str]> {
-    use logfwd_config::{GeneratorComplexityConfig, GeneratorProfileConfig, InputTypeConfig};
+) -> Option<KnownColumnsMode> {
+    use logfwd_config::{
+        Format, GeneratorComplexityConfig, GeneratorProfileConfig, InputTypeConfig,
+    };
 
     match &input_cfg.type_config {
         // Generator logs/simple has a stable built-in schema. Other profiles
@@ -1569,7 +1590,18 @@ fn known_input_columns_read_only(
             if !is_logs_profile || !is_simple_complexity {
                 None
             } else {
-                Some(GENERATOR_LOGS_SIMPLE_COLUMNS)
+                Some(KnownColumnsMode::Strict(GENERATOR_LOGS_SIMPLE_COLUMNS))
+            }
+        }
+        // File/stdin inputs with an explicit CRI format have known internal
+        // columns attached from the CRI sidecar. JSON body keys are dynamic,
+        // so we only validate `_`-prefixed names.
+        InputTypeConfig::File(_) | InputTypeConfig::Stdin(_) => {
+            match input_cfg.format.as_ref() {
+                Some(Format::Cri) => Some(KnownColumnsMode::InternalOnly(CRI_INTERNAL_COLUMNS)),
+                // JSON and raw formats have fully dynamic schemas — no
+                // internal columns to validate.
+                _ => None,
             }
         }
         _ => None,
@@ -1579,9 +1611,9 @@ fn known_input_columns_read_only(
 fn validate_known_columns_read_only(
     input_name: &str,
     transform: &logfwd::transform::SqlTransform,
-    known_columns: Option<&'static [&'static str]>,
+    mode: Option<KnownColumnsMode>,
 ) -> Result<(), String> {
-    let Some(known_columns) = known_columns else {
+    let Some(mode) = mode else {
         return Ok(());
     };
 
@@ -1596,6 +1628,11 @@ fn validate_known_columns_read_only(
         return Ok(());
     }
 
+    let (known_columns, internal_only) = match &mode {
+        KnownColumnsMode::Strict(cols) => (*cols, false),
+        KnownColumnsMode::InternalOnly(cols) => (*cols, true),
+    };
+
     let known: std::collections::HashSet<&str> = known_columns.iter().copied().collect();
 
     let mut unknown: Vec<String> = scan_config
@@ -1608,8 +1645,15 @@ fn validate_known_columns_read_only(
                 Some(pos) => &column[pos + 1..],
                 None => column,
             };
-            // Lowercase before lookup — known_columns is all-lowercase.
-            !known.contains(bare.to_lowercase().as_str())
+            let lower = bare.to_lowercase();
+
+            // In internal-only mode, allow columns that don't start with `_`
+            // because they could be user-defined JSON keys.
+            if internal_only && !lower.starts_with('_') {
+                return false;
+            }
+
+            !known.contains(lower.as_str())
         })
         .map(str::to_owned)
         .collect();
@@ -1622,11 +1666,22 @@ fn validate_known_columns_read_only(
 
     let mut supported: Vec<&str> = known_columns.to_vec();
     supported.sort_unstable();
-    Err(format!(
-        "input '{input_name}': SQL references unknown column(s) {} for this input schema (known: {})",
-        unknown.join(", "),
-        supported.join(", ")
-    ))
+
+    if internal_only {
+        Err(format!(
+            "input '{input_name}': SQL references unknown internal column(s) {unknown} \
+             for this input format (known internal columns: {supported}; \
+             non-underscore-prefixed columns are assumed to be user-defined JSON keys)",
+            unknown = unknown.join(", "),
+            supported = supported.join(", "),
+        ))
+    } else {
+        Err(format!(
+            "input '{input_name}': SQL references unknown column(s) {} for this input schema (known: {})",
+            unknown.join(", "),
+            supported.join(", ")
+        ))
+    }
 }
 
 fn validate_pipeline_read_only(
@@ -1856,11 +1911,11 @@ fn validate_pipeline_read_only(
             for table in &enrichment_tables {
                 transform
                     .add_enrichment_table(Arc::clone(table))
-                    .map_err(|e| format!("input '{}': enrichment error: {e}", input_name))?;
+                    .map_err(|e| format!("input '{input_name}': enrichment error: {e}"))?;
             }
         }
         validate_transform_probe_read_only(&mut transform)
-            .map_err(|e| format!("input '{}': {e}", input_name))?;
+            .map_err(|e| format!("input '{input_name}': {e}"))?;
     }
 
     Ok(())
@@ -1889,8 +1944,7 @@ fn validate_input_format_read_only(
                 "validate_input_format_read_only: unhandled input type {other:?} for input {name}"
             );
             return Err(format!(
-                "input '{name}': type {:?} is not yet supported in read-only validation",
-                other
+                "input '{name}': type {other:?} is not yet supported in read-only validation"
             ));
         }
     };
@@ -1900,8 +1954,7 @@ fn validate_input_format_read_only(
     }
 
     Err(format!(
-        "input '{name}': format {:?} is not supported for {:?} inputs",
-        format, input_type
+        "input '{name}': format {format:?} is not supported for {input_type:?} inputs"
     ))
 }
 
@@ -2677,6 +2730,9 @@ outputs:
 
         let output_cfg =
             resolve_blast_output_config(&args).expect("tcp destination should preserve endpoint");
+        let logfwd_config::OutputConfigV2::Tcp(output_cfg) = output_cfg else {
+            panic!("expected tcp output config");
+        };
         assert_eq!(output_cfg.endpoint.as_deref(), Some("127.0.0.1:15140"));
     }
 
@@ -2797,7 +2853,7 @@ input:
   listen: 127.0.0.1:4318
   format: raw
 output:
-  type: null
+  type: "null"
 "#;
         let config = logfwd_config::Config::load_str(yaml).expect("config should parse");
         let result = validate_pipelines_read_only(&config, None, |_name| {}, |_err| {});
@@ -2811,7 +2867,7 @@ input:
   type: linux_ebpf_sensor
   format: raw
 output:
-  type: null
+  type: "null"
 "#;
         let err = logfwd_config::Config::load_str(yaml)
             .expect_err("sensor format should fail config validation");
@@ -2830,7 +2886,7 @@ input:
   sensor:
     poll_interval_ms: 1000
 output:
-  type: null
+  type: "null"
 "#;
         let config = logfwd_config::Config::load_str(yaml).expect("config should parse");
         validate_pipelines_read_only(&config, None, |_name| {}, |_err| {})
@@ -2858,7 +2914,7 @@ output:
   type: otlp
   listen: 127.0.0.1:{port}
 output:
-  type: null
+  type: "null"
 "#
         )
         .expect("write config");
@@ -2894,7 +2950,7 @@ input:
   type: otlp
   listen: 127.0.0.1:4318
 output:
-  type: null
+  type: "null"
 transform: |
   SELECT level AS x, msg AS x FROM logs
 "#;
@@ -2914,7 +2970,7 @@ input:
   type: otlp
   listen: 127.0.0.1:4318
 output:
-  type: null
+  type: "null"
 transform: |
   SELECT level AS x, msg AS x FROM logs
 "#;
@@ -2937,7 +2993,7 @@ transform: |
 input:
   type: generator
 output:
-  type: null
+  type: "null"
 transform: |
   SELECT missing_column FROM logs
 "#;
@@ -2960,7 +3016,7 @@ transform: |
 input:
   type: generator
 output:
-  type: null
+  type: "null"
 transform: |
   SELECT Level FROM logs
 "#;
@@ -2983,7 +3039,7 @@ transform: |
 input:
   type: generator
 output:
-  type: null
+  type: "null"
 transform: |
   SELECT method FROM logs
 "#;
@@ -3006,7 +3062,7 @@ transform: |
 input:
   type: generator
 output:
-  type: null
+  type: "null"
 enrichment:
   - type: static
     table_name: labels
@@ -3036,7 +3092,7 @@ input:
   generator:
     complexity: complex
 output:
-  type: null
+  type: "null"
 transform: |
   SELECT bytes_in FROM logs
 "#;
@@ -3045,6 +3101,130 @@ transform: |
         assert!(
             read_only.is_ok(),
             "complex generator profile has additional fields and should not use simple schema checks"
+        );
+    }
+
+    #[test]
+    fn issue_1955_dry_run_rejects_unknown_cri_internal_column() {
+        let yaml = r#"
+input:
+  type: file
+  path: /var/log/*.log
+  format: cri
+output:
+  type: "null"
+transform: |
+  SELECT _timestampp FROM logs
+"#;
+        let config = logfwd_config::Config::load_str(yaml).expect("config should parse");
+        let read_only = validate_pipelines_read_only(&config, None, |_name| {}, |_err| {});
+        assert!(
+            read_only.is_err(),
+            "CRI format should reject misspelled internal columns like _timestampp"
+        );
+    }
+
+    #[test]
+    fn issue_1955_dry_run_accepts_valid_cri_columns() {
+        let yaml = r#"
+input:
+  type: file
+  path: /var/log/*.log
+  format: cri
+output:
+  type: "null"
+transform: |
+  SELECT _timestamp, _stream, body FROM logs
+"#;
+        let config = logfwd_config::Config::load_str(yaml).expect("config should parse");
+        let read_only = validate_pipelines_read_only(&config, None, |_name| {}, |_err| {});
+        assert!(
+            read_only.is_ok(),
+            "CRI format should accept known internal columns: {read_only:?}"
+        );
+    }
+
+    #[test]
+    fn issue_1955_dry_run_accepts_cri_user_json_columns() {
+        let yaml = r#"
+input:
+  type: file
+  path: /var/log/*.log
+  format: cri
+output:
+  type: "null"
+transform: |
+  SELECT level, msg, custom_field FROM logs
+"#;
+        let config = logfwd_config::Config::load_str(yaml).expect("config should parse");
+        let read_only = validate_pipelines_read_only(&config, None, |_name| {}, |_err| {});
+        assert!(
+            read_only.is_ok(),
+            "CRI format should allow non-underscore-prefixed columns (user JSON keys): {read_only:?}"
+        );
+    }
+
+    #[test]
+    fn issue_1955_dry_run_allows_json_format_any_columns() {
+        let yaml = r#"
+input:
+  type: file
+  path: /var/log/*.log
+  format: json
+output:
+  type: "null"
+transform: |
+  SELECT custom_field FROM logs
+"#;
+        let config = logfwd_config::Config::load_str(yaml).expect("config should parse");
+        let read_only = validate_pipelines_read_only(&config, None, |_name| {}, |_err| {});
+        assert!(
+            read_only.is_ok(),
+            "JSON format has fully dynamic schema — should allow any columns: {read_only:?}"
+        );
+    }
+
+    #[test]
+    fn issue_1955_dry_run_skips_cri_check_when_enrichment_present() {
+        let yaml = r#"
+input:
+  type: file
+  path: /var/log/*.log
+  format: cri
+output:
+  type: "null"
+enrichment:
+  - type: static
+    table_name: labels
+    labels:
+      environment: production
+transform: |
+  SELECT _unknown_col FROM logs CROSS JOIN labels
+"#;
+        let config = logfwd_config::Config::load_str(yaml).expect("config should parse");
+        let read_only = validate_pipelines_read_only(&config, None, |_name| {}, |_err| {});
+        assert!(
+            read_only.is_ok(),
+            "enrichment tables may add columns — skip strict internal column checks: {read_only:?}"
+        );
+    }
+
+    #[test]
+    fn issue_1955_dry_run_skips_cri_check_for_auto_format() {
+        let yaml = r#"
+input:
+  type: file
+  path: /var/log/*.log
+output:
+  type: "null"
+transform: |
+  SELECT _unknown_col FROM logs
+"#;
+        let config = logfwd_config::Config::load_str(yaml).expect("config should parse");
+        let read_only = validate_pipelines_read_only(&config, None, |_name| {}, |_err| {});
+        assert!(
+            read_only.is_ok(),
+            "auto format (default for file) can't be validated statically: {read_only:?}"
         );
     }
 

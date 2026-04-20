@@ -67,6 +67,8 @@ jobs:
               - 'crates/logfwd-runtime/src/pipeline/**'
               - 'crates/logfwd-io/src/tail/**'
               - 'crates/logfwd-runtime/src/worker_pool/**'
+              - 'crates/logfwd-output/src/sink.rs'
+              - 'crates/logfwd-output/src/sink/**'
               - 'scripts/verify_tla_coverage.py'
               - '.github/actions/run-tlc/**'
               - '.github/workflows/ci.yml'
@@ -359,12 +361,14 @@ jobs:
       (github.event.pull_request.draft == false && needs.changes.outputs.kani_required == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    env:
+      RUSTC_WRAPPER: ""
     steps:
       - uses: actions/checkout@v6
 
       - uses: Swatinem/rust-cache@v2
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.event_name == 'push' || !github.event.pull_request.draft }}
           key: kani-core
 
       - name: Run Kani verification (logfwd-core)
@@ -388,12 +392,14 @@ jobs:
       (github.event.pull_request.draft == false && needs.changes.outputs.kani_required == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    env:
+      RUSTC_WRAPPER: ""
     steps:
       - uses: actions/checkout@v6
 
       - uses: Swatinem/rust-cache@v2
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.event_name == 'push' || !github.event.pull_request.draft }}
           key: kani-arrow
 
       - name: Run Kani verification (logfwd-arrow --lib)
@@ -639,6 +645,36 @@ jobs:
         with:
           tla-file: tla/MCTailLifecycle.tla
           config: tla/TailLifecycle.cfg
+      - name: "TLC: DeliveryRetry — safety"
+        uses: ./.github/actions/run-tlc
+        with:
+          tla-file: tla/MCDeliveryRetry.tla
+          config: tla/DeliveryRetry.cfg
+      - name: "TLC: DeliveryRetry — liveness"
+        uses: ./.github/actions/run-tlc
+        with:
+          tla-file: tla/MCDeliveryRetry.tla
+          config: tla/DeliveryRetry.liveness.cfg
+      - name: "TLC: WorkerPoolDispatch — safety"
+        uses: ./.github/actions/run-tlc
+        with:
+          tla-file: tla/MCWorkerPoolDispatch.tla
+          config: tla/WorkerPoolDispatch.cfg
+      - name: "TLC: WorkerPoolDispatch — liveness"
+        uses: ./.github/actions/run-tlc
+        with:
+          tla-file: tla/MCWorkerPoolDispatch.tla
+          config: tla/WorkerPoolDispatch.liveness.cfg
+      - name: "TLC: FanoutSink — safety"
+        uses: ./.github/actions/run-tlc
+        with:
+          tla-file: tla/MCFanoutSink.tla
+          config: tla/FanoutSink.cfg
+      - name: "TLC: FanoutSink — liveness"
+        uses: ./.github/actions/run-tlc
+        with:
+          tla-file: tla/MCFanoutSink.tla
+          config: tla/FanoutSink.liveness.cfg
 
   tlc-liveness-coverage:
     name: "TLA+ model checking (liveness + coverage)"
@@ -684,6 +720,31 @@ jobs:
           tla-file: tla/MCPipelineBatch.tla
           config: tla/PipelineBatch.coverage.cfg
           mode: coverage
+      - name: "TLC coverage: DeliveryRetry"
+        uses: ./.github/actions/run-tlc
+        with:
+          tla-file: tla/MCDeliveryRetry.tla
+          config: tla/DeliveryRetry.coverage.cfg
+          mode: coverage
+      - name: "TLC coverage: WorkerPoolDispatch"
+        uses: ./.github/actions/run-tlc
+        with:
+          tla-file: tla/MCWorkerPoolDispatch.tla
+          config: tla/WorkerPoolDispatch.coverage.cfg
+          mode: coverage
+      - name: "TLC coverage: FanoutSink"
+        uses: ./.github/actions/run-tlc
+        with:
+          tla-file: tla/MCFanoutSink.tla
+          config: tla/FanoutSink.coverage.cfg
+          mode: coverage
+
+      # --- Thorough ---
+      - name: "TLC: PipelineMachine — thorough"
+        uses: ./.github/actions/run-tlc
+        with:
+          tla-file: tla/MCPipelineMachine.tla
+          config: tla/PipelineMachine.thorough.cfg
 
   # -------------------------------------------------------------------------
   # Coverage — workspace code coverage via llvm-cov.
