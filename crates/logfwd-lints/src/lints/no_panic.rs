@@ -116,6 +116,12 @@ impl<'a, 'tcx> Visitor<'tcx> for PanicVisitor<'a, 'tcx> {
             // Use the user-visible call site, not whatever internal
             // macro-body position the expression span points at.
             self.hits.push((expr.span.source_callsite(), reason));
+            // Don't recurse into macro expansions — the macro itself
+            // is the panic source we want to report. Walking into the
+            // expanded HIR would match intrinsics like
+            // `core::panicking::panic_display`, double-counting the
+            // same source location.
+            return;
         }
         walk_expr(self, expr);
     }

@@ -111,6 +111,7 @@ pub fn owned_by_actor(_attr: TokenStream, item: TokenStream) -> TokenStream {
     prepend_marker("__logfwd_owned_by_actor__", item)
 }
 
+
 fn prepend_marker(marker: &str, item: TokenStream) -> TokenStream {
     let attr: TokenStream = format!("#[doc = \"{marker}\"]")
         .parse()

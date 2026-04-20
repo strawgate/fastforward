@@ -1,21 +1,15 @@
-// UI test: every ~should_fire~ function should trigger
+// UI test: every `should_fire` function should trigger
 // `hot_path_no_alloc`. Functions without the attribute, or without an
 // allocation, must stay silent.
 
-// Re-export the attribute under its expected path. The UI harness
-// compiles this file standalone against a stub `logfwd_lint_attrs` crate
-// that `dylint_testing` auto-stubs via `#[allow]` when not present. To
-// keep the test hermetic we declare the attribute locally as an external
-// attribute namespace.
-
-#![feature(register_tool)]
-#![register_tool(logfwd_lint_attrs)]
-
-// A no-op attribute reimplemented locally so the UI test does not
-// depend on the real `logfwd_lint_attrs` crate compiling against the
-// dylint nightly toolchain.
+// A local macro that replicates what the real `logfwd_lint_attrs::hot_path`
+// proc-macro does: prepend a `#[doc = "__logfwd_hot_path__"]` marker so
+// the lint can detect annotated functions.
 macro_rules! hot_path {
-    ($($t:tt)*) => { $($t)* };
+    ($(#[$m:meta])* $vis:vis fn $name:ident $($rest:tt)*) => {
+        #[doc = "__logfwd_hot_path__"]
+        $(#[$m])* $vis fn $name $($rest)*
+    };
 }
 
 fn main() {}
@@ -30,15 +24,52 @@ fn untagged_string() -> String {
     "hello".to_string()
 }
 
-// Should fire: tagged and allocates.
-#[logfwd_lint_attrs::hot_path]
+// Should fire: tagged and allocates via Vec::with_capacity.
+hot_path! {
 fn tagged_alloc() -> usize {
     let v: Vec<u8> = Vec::with_capacity(16);
     v.len()
 }
+}
 
 // Should fire: tagged, .to_string() on a &str.
-#[logfwd_lint_attrs::hot_path]
+hot_path! {
 fn tagged_to_string(s: &str) -> usize {
     s.to_string().len()
+}
+}
+
+// Should fire: tagged, format!() allocates.
+hot_path! {
+fn tagged_format(x: u32) -> String {
+    format!("value: {x}")
+}
+}
+
+// Should NOT fire: tagged but Arc::clone is just a refcount bump.
+hot_path! {
+fn tagged_arc_clone(a: &std::sync::Arc<String>) -> std::sync::Arc<String> {
+    std::sync::Arc::clone(a)
+}
+}
+
+// Should NOT fire: tagged but no allocations.
+hot_path! {
+fn tagged_no_alloc(buf: &[u8]) -> usize {
+    buf.len()
+}
+}
+
+// Should fire: tagged, .clone() on String allocates.
+hot_path! {
+fn tagged_clone_string(s: &String) -> String {
+    s.clone()
+}
+}
+
+// Should fire: tagged, .collect() into Vec.
+hot_path! {
+fn tagged_collect(s: &[u8]) -> Vec<u8> {
+    s.iter().copied().collect()
+}
 }
