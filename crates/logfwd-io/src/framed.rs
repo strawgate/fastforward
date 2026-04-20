@@ -1099,7 +1099,7 @@ mod tests {
         else {
             panic!("expected data event with CRI metadata");
         };
-        assert_eq!(bytes, b"{\"msg\":\"hello\"}\n");
+        assert_eq!(bytes.as_ref(), b"{\"msg\":\"hello\"}\n");
         assert_eq!(metadata.rows, 1);
         let values = metadata.spans[0].values.as_ref().expect("metadata values");
         assert_eq!(metadata.timestamp(values), b"2024-01-15T10:30:00Z");

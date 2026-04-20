@@ -268,10 +268,12 @@ fn glob_sources_eof_flush_remainders_and_advance_checkpoints_independently() {
         emitted_by_source.insert(source_id, bytes);
     }
 
-    let expected_values: HashSet<Bytes> =
-        [Bytes::from_static(b"tail-A\n"), Bytes::from_static(b"tail-B\n")]
-            .into_iter()
-            .collect();
+    let expected_values: HashSet<Bytes> = [
+        Bytes::from_static(b"tail-A\n"),
+        Bytes::from_static(b"tail-B\n"),
+    ]
+    .into_iter()
+    .collect();
     let actual_values: HashSet<Bytes> = emitted_by_source.values().cloned().collect();
     assert_eq!(
         actual_values, expected_values,
@@ -357,7 +359,8 @@ fn checkpoint_restore_keeps_complete_and_partial_sources_isolated() {
         "the already-checkpointed source must not replay on restart"
     );
     assert_eq!(
-        &resumed[0].1[..], &b"bravo-long\n"[..],
+        &resumed[0].1[..],
+        &b"bravo-long\n"[..],
         "the partial source should resume from its last checkpoint boundary"
     );
 
