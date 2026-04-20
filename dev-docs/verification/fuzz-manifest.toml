@@ -1,5 +1,5 @@
 # Fuzz target inventory for trust-boundary verification enforcement.
-# Cargo-fuzz target names are listed exactly as invokable via:
+# Cargo-fuzz target names are listed exactly as invocable via:
 #   cargo +nightly fuzz run <target>
 
 [tooling]
