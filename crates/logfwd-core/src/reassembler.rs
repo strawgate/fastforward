@@ -441,6 +441,9 @@ mod proptests {
             match agg.feed(&f_chunk, true) {
                 AggregateResult::Complete(out) | AggregateResult::Truncated(out) => {
                     prop_assert_eq!(out.len(), expected_len);
+                    // Guard: zip truncates to the shorter slice, so assert out
+                    // is no longer than f_chunk to ensure every byte is checked.
+                    prop_assert!(out.len() <= f_chunk.len(), "output longer than input");
                     for (i, (&actual, &expected)) in out.iter().zip(f_chunk.iter()).enumerate() {
                         prop_assert_eq!(actual, expected, "byte {} mismatch after reset", i);
                     }
