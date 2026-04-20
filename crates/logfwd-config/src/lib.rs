@@ -2255,6 +2255,25 @@ pipelines:
     }
 
     #[test]
+    fn tcp_mtls_accepts_required_client_ca() {
+        let yaml = r#"
+pipelines:
+  test:
+    inputs:
+      - type: tcp
+        listen: 0.0.0.0:514
+        tls:
+          cert_file: /tmp/server.pem
+          key_file: /tmp/server.key
+          client_ca_file: /tmp/ca.pem
+          require_client_auth: true
+    outputs:
+      - type: "null"
+"#;
+        Config::load_str(yaml).expect("tcp mTLS with client CA should validate");
+    }
+
+    #[test]
     fn tcp_mtls_requires_client_ca() {
         let yaml = r#"
 pipelines:
@@ -2272,8 +2291,31 @@ pipelines:
         let err = Config::load_str(yaml).unwrap_err();
         assert!(
             err.to_string()
-                .contains("client authentication is not supported"),
-            "expected TCP mTLS validation failure: {err}"
+                .contains("require_client_auth requires tls.client_ca_file"),
+            "expected TCP mTLS client CA validation failure: {err}"
+        );
+    }
+
+    #[test]
+    fn tcp_client_ca_requires_mtls_enabled() {
+        let yaml = r#"
+pipelines:
+  test:
+    inputs:
+      - type: tcp
+        listen: 0.0.0.0:514
+        tls:
+          cert_file: /tmp/server.pem
+          key_file: /tmp/server.key
+          client_ca_file: /tmp/ca.pem
+    outputs:
+      - type: "null"
+"#;
+        let err = Config::load_str(yaml).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("client_ca_file requires tls.require_client_auth: true"),
+            "expected TCP client CA without mTLS validation failure: {err}"
         );
     }
 
