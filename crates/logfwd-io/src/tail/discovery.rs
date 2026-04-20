@@ -691,11 +691,11 @@ mod tests {
 
         // Root bypasses UNIX permission checks, so the open would succeed and
         // this test could not observe an error. Skip when we'd be masked out.
+        // (Deliberately silent: this module's source is substring-scanned by
+        // `test_tail_uses_tracing_not_eprintln`, which forbids `eprintln!`
+        // anywhere — including test bodies — so a diagnostic here would fail
+        // the convention check in CI.)
         if fs::read(&path).is_ok() {
-            eprintln!(
-                "skipping rescan_globs_reports_open_file_error_for_unreadable_file: \
-                 running as root (or equivalent) so `chmod 000` does not deny the open"
-            );
             return;
         }
 
