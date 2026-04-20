@@ -77,7 +77,7 @@ use super::{InputState, InputTransform, RowOriginSpan};
 const IO_CPU_CHANNEL_CAPACITY: usize = 4;
 
 #[cfg(not(feature = "turmoil"))]
-const MAX_SHUTDOWN_POLL_ROUNDS: usize = 64;
+const SHUTDOWN_DRAIN_PROGRESS_LOG_INTERVAL_ROUNDS: usize = 64;
 
 #[cfg(not(feature = "turmoil"))]
 fn should_repoll_shutdown(events: &[InputEvent], is_finished: bool) -> bool {
@@ -719,7 +719,8 @@ fn io_worker_loop(
                 input.stats.health(),
                 HealthTransitionEvent::ShutdownRequested,
             ));
-            for _ in 0..MAX_SHUTDOWN_POLL_ROUNDS {
+            let mut shutdown_poll_rounds = 0usize;
+            loop {
                 match input.source.poll_shutdown() {
                     Ok(events) => {
                         let should_repoll =
@@ -741,6 +742,16 @@ fn io_worker_loop(
                         }
                         if !should_repoll {
                             break;
+                        }
+                        shutdown_poll_rounds = shutdown_poll_rounds.saturating_add(1);
+                        if shutdown_poll_rounds
+                            .is_multiple_of(SHUTDOWN_DRAIN_PROGRESS_LOG_INTERVAL_ROUNDS)
+                        {
+                            tracing::warn!(
+                                input = input.source.name(),
+                                rounds = shutdown_poll_rounds,
+                                "input.shutdown_drain_still_active"
+                            );
                         }
                     }
                     Err(e) => {
@@ -1494,6 +1505,7 @@ mod tests {
 
     struct MultiShutdownPollSource {
         remaining: usize,
+        emitted: usize,
         finished: bool,
     }
 
@@ -1513,9 +1525,9 @@ mod tests {
                 }]);
             }
 
-            let index = 3 - self.remaining;
+            self.emitted += 1;
             self.remaining -= 1;
-            let bytes = format!("{{\"msg\":\"shutdown-{index}\"}}\n").into_bytes();
+            let bytes = format!("{{\"msg\":\"shutdown-{}\"}}\n", self.emitted).into_bytes();
             let accounted_bytes = bytes.len() as u64;
             Ok(vec![InputEvent::Data {
                 bytes,
@@ -1781,7 +1793,8 @@ mod tests {
         ));
         let input = InputState {
             source: Box::new(MultiShutdownPollSource {
-                remaining: 2,
+                remaining: SHUTDOWN_DRAIN_PROGRESS_LOG_INTERVAL_ROUNDS + 2,
+                emitted: 0,
                 finished: false,
             }),
             buf: bytes::BytesMut::new(),
@@ -1821,13 +1834,16 @@ mod tests {
         let IoWorkItem::Bytes(chunk) = item else {
             panic!("expected byte chunk");
         };
-        assert_eq!(
-            chunk.bytes.as_ref(),
-            b"{\"msg\":\"shutdown-1\"}\n{\"msg\":\"shutdown-2\"}\n"
-        );
+        let expected = (1..=SHUTDOWN_DRAIN_PROGRESS_LOG_INTERVAL_ROUNDS + 2)
+            .map(|index| format!("{{\"msg\":\"shutdown-{index}\"}}\n"))
+            .collect::<String>();
+        assert_eq!(chunk.bytes.as_ref(), expected.as_bytes());
         assert_eq!(chunk.row_origins.len(), 1);
         assert_eq!(chunk.row_origins[0].source_id, Some(SourceId(14)));
-        assert_eq!(chunk.row_origins[0].rows, 2);
+        assert_eq!(
+            chunk.row_origins[0].rows,
+            SHUTDOWN_DRAIN_PROGRESS_LOG_INTERVAL_ROUNDS + 2
+        );
         assert_eq!(
             chunk.source_paths.get(&SourceId(14)).map(String::as_str),
             Some("/var/log/shutdown.log")

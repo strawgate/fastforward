@@ -22,7 +22,7 @@ use super::submit::{scan_and_transform_for_send, transform_direct_batch_for_send
 use super::{ChannelMsg, InputState, InputTransform};
 
 #[cfg(feature = "turmoil")]
-const MAX_SHUTDOWN_POLL_ROUNDS: usize = 64;
+const SHUTDOWN_DRAIN_PROGRESS_LOG_INTERVAL_ROUNDS: usize = 64;
 
 #[cfg(feature = "turmoil")]
 fn should_repoll_shutdown(events: &[InputEvent], is_finished: bool) -> bool {
@@ -143,7 +143,8 @@ pub(super) async fn async_input_poll_loop(
                 input.stats.health(),
                 HealthTransitionEvent::ShutdownRequested,
             ));
-            for _ in 0..MAX_SHUTDOWN_POLL_ROUNDS {
+            let mut shutdown_poll_rounds = 0usize;
+            loop {
                 match input.source.poll_shutdown() {
                     Ok(events) => {
                         let should_repoll =
@@ -163,6 +164,16 @@ pub(super) async fn async_input_poll_loop(
                         }
                         if !should_repoll {
                             break;
+                        }
+                        shutdown_poll_rounds = shutdown_poll_rounds.saturating_add(1);
+                        if shutdown_poll_rounds
+                            .is_multiple_of(SHUTDOWN_DRAIN_PROGRESS_LOG_INTERVAL_ROUNDS)
+                        {
+                            tracing::warn!(
+                                input = input.source.name(),
+                                rounds = shutdown_poll_rounds,
+                                "input.shutdown_drain_still_active"
+                            );
                         }
                     }
                     Err(e) => {

@@ -87,6 +87,12 @@ pub trait InputSource: Send {
     /// make any source-internal buffered data observable to downstream framing
     /// before the runtime stops polling. The default is a no-op so ordinary
     /// inputs do not perform opportunistic reads during shutdown.
+    ///
+    /// If an implementation returns payload without EOF, the runtime will keep
+    /// polling shutdown until the source emits EOF, reports finished, returns no
+    /// events, or errors. Implementations that can observe unbounded live data
+    /// should snapshot their terminal drain boundary internally rather than
+    /// returning payload forever.
     fn poll_shutdown(&mut self) -> io::Result<Vec<InputEvent>> {
         Ok(Vec::new())
     }
