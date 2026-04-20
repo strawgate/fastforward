@@ -460,6 +460,7 @@ impl Pipeline {
     ///   HTTP sends, flush_interval can't fire on this worker. Goes away
     ///   when ureq is replaced with an async HTTP client.
     /// - self.inputs.drain(..) makes this method non-reentrant.
+    #[logfwd_lint_attrs::cancel_safe]
     pub async fn run_async(&mut self, shutdown: &CancellationToken) -> io::Result<()> {
         self.validate_batch_settings()?;
         assert_eq!(
