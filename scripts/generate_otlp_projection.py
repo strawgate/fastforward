@@ -745,6 +745,14 @@ def render_wire_any_json_writer(spec: dict) -> str:
             f"expected={sorted(expected_kinds)} got={sorted(kinds)}"
         )
 
+    array_value_fields = {field["name"]: field for field in message_fields(spec, "ArrayValue")}
+    kvlist_value_fields = {field["name"]: field for field in message_fields(spec, "KeyValueList")}
+    key_value_fields = {field["name"]: field for field in message_fields(spec, "KeyValue")}
+    array_values_number = array_value_fields["values"]["number"]
+    kvlist_values_number = kvlist_value_fields["values"]["number"]
+    key_number = key_value_fields["key"]["number"]
+    value_number = key_value_fields["value"]["number"]
+
     return """pub(super) fn write_wire_any_json(
     value: WireAny<'_>,
     out: &mut Vec<u8>,
@@ -780,12 +788,116 @@ def render_wire_any_json_writer(spec: dict) -> str:
             super::write_hex_to_buf(out, value);
             out.push(b'\"');
         }
-        WireAny::ArrayRaw(value) => super::write_array_value_json(value, out, scratch)?,
-        WireAny::KvListRaw(value) => super::write_kvlist_value_json(value, out, scratch)?,
+        WireAny::ArrayRaw(value) => write_array_value_json(value, out, scratch)?,
+        WireAny::KvListRaw(value) => write_kvlist_value_json(value, out, scratch)?,
     }
     Ok(())
 }
-"""
+
+pub(super) fn write_array_value_json(
+    array_value: &[u8],
+    out: &mut Vec<u8>,
+    scratch: &mut WireScratch,
+) -> Result<(), ProjectionError> {
+    out.push(b'[');
+    let mut first = true;
+    super::for_each_field(array_value, |field, field_value| {
+        if field != __ARRAY_VALUES_FIELD__ {
+            return Ok(());
+        }
+        let WireField::Len(any_value) = field_value else {
+            return Err(ProjectionError::Invalid(
+                "invalid wire type for ArrayValue.values",
+            ));
+        };
+        if !first {
+            out.push(b',');
+        }
+        first = false;
+        if let Some(value) = decode_any_value_wire(any_value)? {
+            write_wire_any_json(value, out, scratch)?;
+        } else {
+            out.extend_from_slice(b"null");
+        }
+        Ok(())
+    })?;
+    out.push(b']');
+    Ok(())
+}
+
+pub(super) fn write_kvlist_value_json(
+    kvlist_value: &[u8],
+    out: &mut Vec<u8>,
+    scratch: &mut WireScratch,
+) -> Result<(), ProjectionError> {
+    out.push(b'[');
+    let mut first = true;
+    super::for_each_field(kvlist_value, |field, field_value| {
+        if field != __KVLIST_VALUES_FIELD__ {
+            return Ok(());
+        }
+        let WireField::Len(kv) = field_value else {
+            return Err(ProjectionError::Invalid(
+                "invalid wire type for KeyValueList.values",
+            ));
+        };
+        if !first {
+            out.push(b',');
+        }
+        first = false;
+        write_key_value_json(kv, out, scratch)?;
+        Ok(())
+    })?;
+    out.push(b']');
+    Ok(())
+}
+
+pub(super) fn write_key_value_json(
+    kv: &[u8],
+    out: &mut Vec<u8>,
+    scratch: &mut WireScratch,
+) -> Result<(), ProjectionError> {
+    let mut key = &[][..];
+    let mut value = None;
+    super::for_each_field(kv, |field, field_value| {
+        match (field, field_value) {
+            (__KEY_VALUE_KEY_FIELD__, WireField::Len(bytes)) => {
+                key = super::require_utf8(bytes, "invalid UTF-8 attribute key")?;
+            }
+            (__KEY_VALUE_KEY_FIELD__, _) => {
+                return Err(ProjectionError::Invalid(
+                    "invalid wire type for KeyValue.key",
+                ));
+            }
+            (__KEY_VALUE_VALUE_FIELD__, WireField::Len(bytes)) => {
+                value = decode_any_value_wire(bytes)?;
+            }
+            (__KEY_VALUE_VALUE_FIELD__, _) => {
+                return Err(ProjectionError::Invalid(
+                    "invalid wire type for KeyValue.value",
+                ));
+            }
+            _ => {}
+        }
+        Ok(())
+    })?;
+
+    out.extend_from_slice(b"{\\"k\\":\\"");
+    super::write_json_escaped_bytes(out, key);
+    out.extend_from_slice(b"\\",\\"v\\":");
+    if let Some(value) = value {
+        write_wire_any_json(value, out, scratch)?;
+    } else {
+        out.extend_from_slice(b"null");
+    }
+    out.push(b'}');
+    Ok(())
+}
+""".replace("__ARRAY_VALUES_FIELD__", str(array_values_number)).replace(
+        "__KVLIST_VALUES_FIELD__", str(kvlist_values_number)
+    ).replace("__KEY_VALUE_KEY_FIELD__", str(key_number)).replace(
+        "__KEY_VALUE_VALUE_FIELD__", str(value_number)
+    )
 
 
 def render(spec: dict) -> str:
@@ -1088,6 +1200,40 @@ mod generated_tests {{
                 .expect("generated JSON writer should handle projected variant");
             assert_eq!(out, expected);
         }}
+    }}
+
+    #[test]
+    fn generated_complex_json_writers_handle_nested_messages() {{
+        let mut scratch = WireScratch::default();
+        let any_string = [10, 1, b'x'];
+        let array = [10, 3, 10, 1, b'x'];
+        let kv = [10, 1, b'k', 18, 3, 10, 1, b'v'];
+        let kvlist = [10, 8, 10, 1, b'k', 18, 3, 10, 1, b'v'];
+
+        let mut out = Vec::new();
+        write_array_value_json(&array, &mut out, &mut scratch)
+            .expect("generated array JSON writer should decode repeated AnyValue");
+        assert_eq!(out, br#"["x"]"#);
+
+        out.clear();
+        write_key_value_json(&kv, &mut out, &mut scratch)
+            .expect("generated key value JSON writer should decode KeyValue");
+        assert_eq!(out, br#"{{"k":"k","v":"v"}}"#);
+
+        out.clear();
+        write_kvlist_value_json(&kvlist, &mut out, &mut scratch)
+            .expect("generated kvlist JSON writer should decode repeated KeyValue");
+        assert_eq!(out, br#"[{{"k":"k","v":"v"}}]"#);
+
+        out.clear();
+        write_wire_any_json(WireAny::ArrayRaw(&array), &mut out, &mut scratch)
+            .expect("generated AnyValue JSON writer should dispatch arrays");
+        assert_eq!(out, br#"["x"]"#);
+
+        out.clear();
+        write_wire_any_json(WireAny::String(&any_string[2..]), &mut out, &mut scratch)
+            .expect("generated AnyValue JSON writer should keep scalar dispatch");
+        assert_eq!(out, br#""x""#);
     }}
 
     #[test]
