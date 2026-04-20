@@ -377,7 +377,7 @@ fn source_metadata_for_batch(
         });
     }
 
-    if let Some(source_path_column) = plan.source_path.name() {
+    if let Some(source_path_column) = plan.source_path.to_column_name() {
         let array = source_path_metadata_array(batch.num_rows(), row_origins, source_paths)?;
         columns.push(MetadataColumn {
             name: source_path_column,

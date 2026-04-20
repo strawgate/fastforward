@@ -19,7 +19,7 @@ use logfwd_types::diagnostics::ComponentStats;
 use super::sink::{SendResult, Sink, SinkFactory};
 use super::{BatchMetadata, Compression};
 use crate::http_classify::{DEFAULT_RETRY_AFTER_SECS, parse_retry_after};
-use crate::internal_columns::external_batch_view;
+use crate::internal_columns::project_external_batch;
 
 /// Content-Type for uncompressed Arrow IPC stream.
 const CONTENT_TYPE_ARROW: &str = "application/vnd.apache.arrow.stream";
@@ -77,7 +77,7 @@ impl ArrowIpcSink {
             return Ok(());
         }
 
-        let external_batch = external_batch_view(batch).map_err(|e| {
+        let external_batch = project_external_batch(batch).map_err(|e| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("Arrow IPC internal column projection failed: {e}"),

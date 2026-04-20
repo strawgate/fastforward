@@ -35,6 +35,25 @@ pub(crate) const DEFAULT_CHECKPOINT_FLUSH_INTERVAL: Duration = Duration::from_se
 /// Default maximum time to wait for worker-pool drain before cancellation.
 pub(crate) const DEFAULT_POOL_DRAIN_TIMEOUT: Duration = Duration::from_secs(60);
 
+fn source_metadata_style_source_path(style: SourceMetadataStyle) -> SourcePathColumn {
+    match style {
+        SourceMetadataStyle::Ecs => SourcePathColumn::Ecs,
+        SourceMetadataStyle::Otel => SourcePathColumn::Otel,
+        SourceMetadataStyle::Vector => SourcePathColumn::Vector,
+        SourceMetadataStyle::None | SourceMetadataStyle::Fastforward => SourcePathColumn::None,
+    }
+}
+
+fn source_metadata_style_needs_source_paths(style: SourceMetadataStyle) -> bool {
+    source_metadata_style_source_path(style)
+        .to_column_name()
+        .is_some()
+}
+
+fn input_type_exposes_source_paths(type_config: &InputTypeConfig) -> bool {
+    matches!(type_config, InputTypeConfig::File(_))
+}
+
 impl Pipeline {
     /// Construct a pipeline from parsed YAML config.
     pub fn from_config(
@@ -114,7 +133,10 @@ impl Pipeline {
                                 }
                             };
 
-                        if let Some(interval_secs) = geo_cfg.refresh_interval.map(|s| s.get()) {
+                        if let Some(interval_secs) = geo_cfg
+                            .refresh_interval
+                            .map(logfwd_config::PositiveSecs::get)
+                        {
                             let reloadable = Arc::new(
                                 crate::transform::enrichment::ReloadableGeoDb::new(initial_db),
                             );
@@ -221,7 +243,9 @@ impl Pipeline {
                         table
                             .reload()
                             .map_err(|e| format!("enrichment '{}': {e}", cfg.table_name))?;
-                        if let Some(interval_secs) = cfg.refresh_interval.map(|s| s.get()) {
+                        if let Some(interval_secs) =
+                            cfg.refresh_interval.map(logfwd_config::PositiveSecs::get)
+                        {
                             let t = Arc::clone(&table);
                             let name = cfg.table_name.clone();
                             if let Ok(handle) = tokio::runtime::Handle::try_current() {
@@ -273,7 +297,9 @@ impl Pipeline {
                         table
                             .reload()
                             .map_err(|e| format!("enrichment '{}': {e}", cfg.table_name))?;
-                        if let Some(interval_secs) = cfg.refresh_interval.map(|s| s.get()) {
+                        if let Some(interval_secs) =
+                            cfg.refresh_interval.map(logfwd_config::PositiveSecs::get)
+                        {
                             let t = Arc::clone(&table);
                             let name = cfg.table_name.clone();
                             if let Ok(handle) = tokio::runtime::Handle::try_current() {
@@ -338,7 +364,9 @@ impl Pipeline {
                         table
                             .reload()
                             .map_err(|e| format!("enrichment '{}': {e}", cfg.table_name))?;
-                        if let Some(interval_secs) = cfg.refresh_interval.map(|s| s.get()) {
+                        if let Some(interval_secs) =
+                            cfg.refresh_interval.map(logfwd_config::PositiveSecs::get)
+                        {
                             let t = Arc::clone(&table);
                             let name = cfg.table_name.clone();
                             if let Ok(handle) = tokio::runtime::Handle::try_current() {
@@ -526,6 +554,17 @@ impl Pipeline {
                     input_cfg.source_metadata
                 ));
             }
+            if source_metadata_style_needs_source_paths(input_cfg.source_metadata)
+                && !input_type_exposes_source_paths(&input_cfg.type_config)
+            {
+                return Err(format!(
+                    "pipeline '{name}' input '{input_name}': source_metadata style {} requires \
+                     source paths, but input type {} does not expose source paths; currently only \
+                     file inputs support public source path metadata styles",
+                    input_cfg.source_metadata,
+                    input_cfg.input_type()
+                ));
+            }
             #[cfg(feature = "turmoil")]
             let source_metadata_plan = {
                 if input_cfg.source_metadata != SourceMetadataStyle::None {
@@ -538,25 +577,18 @@ impl Pipeline {
                 SourceMetadataPlan::default()
             };
             #[cfg(not(feature = "turmoil"))]
-            let source_metadata_plan = match input_cfg.source_metadata {
-                SourceMetadataStyle::None => SourceMetadataPlan::default(),
-                SourceMetadataStyle::Fastforward => SourceMetadataPlan {
-                    has_source_id: true,
-                    source_path: SourcePathColumn::None,
-                },
-                SourceMetadataStyle::Ecs => SourceMetadataPlan {
-                    has_source_id: false,
-                    source_path: SourcePathColumn::Ecs,
-                },
-                SourceMetadataStyle::Otel => SourceMetadataPlan {
-                    has_source_id: false,
-                    source_path: SourcePathColumn::Otel,
-                },
-                SourceMetadataStyle::Vector => SourceMetadataPlan {
-                    has_source_id: false,
-                    source_path: SourcePathColumn::Vector,
-                },
-            };
+            let source_metadata_plan =
+                if input_cfg.source_metadata == SourceMetadataStyle::Fastforward {
+                    SourceMetadataPlan {
+                        has_source_id: true,
+                        source_path: source_metadata_style_source_path(input_cfg.source_metadata),
+                    }
+                } else {
+                    SourceMetadataPlan {
+                        has_source_id: false,
+                        source_path: source_metadata_style_source_path(input_cfg.source_metadata),
+                    }
+                };
 
             input_transforms.push(InputTransform {
                 scanner,
@@ -906,6 +938,43 @@ mod tests {
             err.contains("source_metadata is configured as ecs"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn public_source_path_style_rejects_inputs_without_source_paths() {
+        let mut config = PipelineConfig {
+            inputs: vec![InputConfig {
+                name: Some("udp-in".to_string()),
+                format: Some(Format::Json),
+                sql: None,
+                source_metadata: SourceMetadataStyle::Ecs,
+                type_config: InputTypeConfig::Udp(logfwd_config::UdpTypeConfig {
+                    listen: "127.0.0.1:0".to_string(),
+                    max_message_size_bytes: None,
+                    so_rcvbuf: None,
+                }),
+            }],
+            transform: None,
+            outputs: vec![minimal_output().into()],
+            enrichment: Vec::new(),
+            resource_attrs: Default::default(),
+            workers: None,
+            batch_target_bytes: None,
+            batch_timeout_ms: None,
+            poll_interval_ms: None,
+        };
+
+        let err = Pipeline::from_config("default", &config, &logfwd_test_utils::test_meter(), None)
+            .err()
+            .expect("public source path style should require path-capable input");
+        assert!(
+            err.contains("does not expose source paths"),
+            "unexpected error: {err}"
+        );
+
+        config.inputs[0].source_metadata = SourceMetadataStyle::Fastforward;
+        Pipeline::from_config("default", &config, &logfwd_test_utils::test_meter(), None)
+            .expect("fastforward source id style does not require source paths");
     }
 
     #[test]

@@ -92,10 +92,12 @@ impl fmt::Display for InputType {
     }
 }
 
-/// Controls how input source metadata is attached to scanned records.
+/// Controls which source metadata columns are attached to scanned records.
 ///
-/// `none` disables attachment, `fastforward` emits internal `__source_id`,
-/// and public styles emit schema-specific source path columns.
+/// `none` is the default and disables attachment. `fastforward` emits the
+/// internal `__source_id` handle. `ecs` emits ECS/Beats `file.path` and accepts
+/// the serde alias `beats`. `otel` emits `log.file.path`. `vector` emits
+/// `file`. Values serialize and parse as `snake_case`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SourceMetadataStyle {

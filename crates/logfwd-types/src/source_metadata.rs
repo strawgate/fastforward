@@ -18,7 +18,7 @@ pub enum SourcePathColumn {
 
 impl SourcePathColumn {
     /// Return the Arrow column name for this source path style.
-    pub fn name(self) -> Option<&'static str> {
+    pub fn to_column_name(self) -> Option<&'static str> {
         match self {
             Self::None => None,
             Self::Ecs => Some(field_names::ECS_FILE_PATH),
@@ -45,6 +45,6 @@ impl SourceMetadataPlan {
 
     /// Return true when any source path column is required.
     pub fn has_source_path(self) -> bool {
-        self.source_path.name().is_some()
+        self.source_path.to_column_name().is_some()
     }
 }

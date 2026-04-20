@@ -1,6 +1,6 @@
 # Source Metadata Zero-Copy Plan
 
-> **Status:** Superseded
+> **Status:** Historical
 > **Date:** 2026-04-19
 > **Context:** Source metadata zero-copy migration plan after fan-out research and profiling.
 > The active contract now lives in

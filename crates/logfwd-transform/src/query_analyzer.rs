@@ -1854,12 +1854,7 @@ fn is_source_metadata_name(name: &str) -> bool {
 }
 
 fn source_metadata_plan_for_names(names: &HashSet<String>) -> SourceMetadataPlan {
-    let references = |target: &str| {
-        names
-            .iter()
-            .map(|name| strip_type_suffix(name))
-            .any(|name| name.eq_ignore_ascii_case(target))
-    };
+    let references = |target: &str| names.iter().any(|name| name.eq_ignore_ascii_case(target));
 
     SourceMetadataPlan {
         has_source_id: references(field_names::SOURCE_ID),

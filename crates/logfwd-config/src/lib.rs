@@ -136,6 +136,34 @@ output:
         let cfg = Config::load_str(beats_yaml).expect("beats alias should parse");
         let pipe = &cfg.pipelines["default"];
         assert_eq!(pipe.inputs[0].source_metadata, SourceMetadataStyle::Ecs);
+
+        let otel_yaml = r"
+input:
+  type: file
+  path: /var/log/pods/**/*.log
+  format: cri
+  source_metadata: otel
+
+output:
+  type: null
+";
+        let cfg = Config::load_str(otel_yaml).expect("otel style should parse");
+        let pipe = &cfg.pipelines["default"];
+        assert_eq!(pipe.inputs[0].source_metadata, SourceMetadataStyle::Otel);
+
+        let vector_yaml = r"
+input:
+  type: file
+  path: /var/log/pods/**/*.log
+  format: cri
+  source_metadata: vector
+
+output:
+  type: null
+";
+        let cfg = Config::load_str(vector_yaml).expect("vector style should parse");
+        let pipe = &cfg.pipelines["default"];
+        assert_eq!(pipe.inputs[0].source_metadata, SourceMetadataStyle::Vector);
     }
 
     #[test]
