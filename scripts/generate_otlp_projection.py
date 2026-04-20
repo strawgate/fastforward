@@ -10,13 +10,14 @@ import subprocess
 import sys
 from pathlib import Path
 
-from otlp_proto import parse_proto_fields
+from otlp_proto import parse_proto_fields, vendored_proto_root
 
 
 REPO = Path(__file__).resolve().parents[1]
 OUT = REPO / "crates" / "logfwd-io" / "src" / "otlp_receiver" / "projection" / "generated.rs"
-PROTO_VERSION = "v1.8.0"
-PROTO_ROOT = REPO / "crates" / "logfwd-io" / "codegen" / "opentelemetry-proto" / PROTO_VERSION
+PROTO_BASE = REPO / "crates" / "logfwd-io" / "codegen" / "opentelemetry-proto"
+PROTO_ROOT = vendored_proto_root(PROTO_BASE)
+PROTO_VERSION = PROTO_ROOT.name
 PROTO_FILES = [
     PROTO_ROOT / "opentelemetry" / "proto" / "collector" / "logs" / "v1" / "logs_service.proto",
     PROTO_ROOT / "opentelemetry" / "proto" / "logs" / "v1" / "logs.proto",

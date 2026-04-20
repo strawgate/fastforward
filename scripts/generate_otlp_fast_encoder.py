@@ -14,15 +14,17 @@ import difflib
 import sys
 from pathlib import Path
 
-from otlp_proto import parse_proto_fields
+from otlp_proto import parse_proto_fields, vendored_proto_root
 
 
 REPO = Path(__file__).resolve().parents[1]
 OUT = REPO / "crates" / "logfwd-output" / "src" / "generated" / "otlp_log_record_fast_v1.rs"
-PROTO_VERSION = "v1.8.0"
-PROTO_ROOT = REPO / "crates" / "logfwd-io" / "codegen" / "opentelemetry-proto" / PROTO_VERSION
+PROTO_BASE = REPO / "crates" / "logfwd-io" / "codegen" / "opentelemetry-proto"
+PROTO_ROOT = vendored_proto_root(PROTO_BASE)
+PROTO_VERSION = PROTO_ROOT.name
 PROTO_FILES = [
     PROTO_ROOT / "opentelemetry" / "proto" / "logs" / "v1" / "logs.proto",
+    PROTO_ROOT / "opentelemetry" / "proto" / "resource" / "v1" / "resource.proto",
     PROTO_ROOT / "opentelemetry" / "proto" / "common" / "v1" / "common.proto",
 ]
 
