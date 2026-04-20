@@ -441,8 +441,8 @@ mod proptests {
             match agg.feed(&f_chunk, true) {
                 AggregateResult::Complete(out) | AggregateResult::Truncated(out) => {
                     prop_assert_eq!(out.len(), expected_len);
-                    for i in 0..out.len() {
-                        prop_assert_eq!(out[i], f_chunk[i], "byte {} mismatch after reset", i);
+                    for (i, (&actual, &expected)) in out.iter().zip(f_chunk.iter()).enumerate() {
+                        prop_assert_eq!(actual, expected, "byte {} mismatch after reset", i);
                     }
                 }
                 AggregateResult::Pending => prop_assert!(false, "F should produce Complete"),
