@@ -1322,7 +1322,7 @@ fn encode_row_as_log_record(
         if arr.is_null(row) {
             severity_num as u64
         } else {
-            u64::try_from(arr.value(row)).unwrap_or(0)
+            u64::try_from(arr.value(row)).unwrap_or(0) // SEVERITY_NUMBER_UNSPECIFIED
         }
     } else {
         severity_num as u64

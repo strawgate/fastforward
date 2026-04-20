@@ -307,9 +307,10 @@ fn decode_otlp_logs_json(body: &[u8], resource_prefix: &str) -> Result<Vec<u8>, 
                         InputError::Receiver("invalid OTLP JSON flags: not a valid int64".into())
                     })?;
                     if parsed_flags < 0 || parsed_flags > i64::from(u32::MAX) {
-                        return Err(InputError::Receiver(
-                            "invalid OTLP JSON flags: must be a uint32".into(),
-                        ));
+                        return Err(InputError::Receiver(format!(
+                            "invalid OTLP JSON flags: got {parsed_flags}, expected 0..={}",
+                            u32::MAX
+                        )));
                     }
                     if parsed_flags > 0 {
                         write_json_key(&mut out, field_names::FLAGS);
