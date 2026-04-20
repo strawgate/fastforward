@@ -92,7 +92,8 @@ pub trait InputSource: Send {
     /// polling shutdown until the source emits EOF, reports finished, returns no
     /// events, or errors. Implementations that can observe unbounded live data
     /// should snapshot their terminal drain boundary internally rather than
-    /// returning payload forever.
+    /// returning payload forever; the runtime only keeps an emergency hard cap
+    /// to avoid hanging process shutdown on a misbehaving source.
     fn poll_shutdown(&mut self) -> io::Result<Vec<InputEvent>> {
         Ok(Vec::new())
     }

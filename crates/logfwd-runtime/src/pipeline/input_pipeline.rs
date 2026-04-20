@@ -78,6 +78,8 @@ const IO_CPU_CHANNEL_CAPACITY: usize = 4;
 
 #[cfg(not(feature = "turmoil"))]
 const SHUTDOWN_DRAIN_PROGRESS_LOG_INTERVAL_ROUNDS: usize = 64;
+#[cfg(not(feature = "turmoil"))]
+const MAX_SHUTDOWN_POLL_ROUNDS: usize = 4096;
 
 #[cfg(not(feature = "turmoil"))]
 fn should_repoll_shutdown(events: &[InputEvent], is_finished: bool) -> bool {
@@ -752,6 +754,14 @@ fn io_worker_loop(
                                 rounds = shutdown_poll_rounds,
                                 "input.shutdown_drain_still_active"
                             );
+                        }
+                        if shutdown_poll_rounds >= MAX_SHUTDOWN_POLL_ROUNDS {
+                            tracing::error!(
+                                input = input.source.name(),
+                                rounds = shutdown_poll_rounds,
+                                "input.shutdown_drain_aborted_hard_limit"
+                            );
+                            break;
                         }
                     }
                     Err(e) => {

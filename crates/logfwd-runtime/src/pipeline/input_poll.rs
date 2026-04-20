@@ -23,6 +23,8 @@ use super::{ChannelMsg, InputState, InputTransform};
 
 #[cfg(feature = "turmoil")]
 const SHUTDOWN_DRAIN_PROGRESS_LOG_INTERVAL_ROUNDS: usize = 64;
+#[cfg(feature = "turmoil")]
+const MAX_SHUTDOWN_POLL_ROUNDS: usize = 4096;
 
 #[cfg(feature = "turmoil")]
 fn should_repoll_shutdown(events: &[InputEvent], is_finished: bool) -> bool {
@@ -174,6 +176,14 @@ pub(super) async fn async_input_poll_loop(
                                 rounds = shutdown_poll_rounds,
                                 "input.shutdown_drain_still_active"
                             );
+                        }
+                        if shutdown_poll_rounds >= MAX_SHUTDOWN_POLL_ROUNDS {
+                            tracing::error!(
+                                input = input.source.name(),
+                                rounds = shutdown_poll_rounds,
+                                "input.shutdown_drain_aborted_hard_limit"
+                            );
+                            break;
                         }
                     }
                     Err(e) => {
