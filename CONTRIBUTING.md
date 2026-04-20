@@ -99,8 +99,12 @@ If your PR touches `unsafe` or SIMD code in `logfwd-arrow`:
 
 - [ ] Every new `unsafe` block carries a `// SAFETY:` comment naming
       the upheld invariants (`clippy::undocumented_unsafe_blocks = deny`).
-- [ ] `just miri` run locally on the affected crate.
 - [ ] proptest SIMD-equivalence coverage extended to cover the new path.
+      This is the primary correctness guard for `logfwd-arrow` SIMD —
+      Miri does not cover it (`just miri` only runs on `logfwd-core` and
+      `logfwd-types`).
+- [ ] For `unsafe` in `logfwd-core` or `logfwd-types`, run `just miri`
+      locally before pushing.
 
 ## Code Style
 

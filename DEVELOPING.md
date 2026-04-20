@@ -249,9 +249,12 @@ artifact to back it.
    characteristic.** Buffer lifecycle, hot-path rules, the ZERO_COPY_PIPELINE
    notes. See `dev-docs/CHANGE_MAP.md` for co-change requirements.
 
-If the change touches `unsafe` SIMD in `logfwd-arrow`, the workflow
-also requires `just miri` locally — Miri catches UB that benchmarks
-will happily run past.
+If the change touches `unsafe` SIMD in `logfwd-arrow`, verify it
+against the scalar fallback with proptest (`cargo test -p logfwd-arrow`
+exercises the equivalence proptests). Miri does not cover `logfwd-arrow`
+— `just miri` runs only the `logfwd-core` and `logfwd-types` suites.
+For SIMD invariants enforced at the type level, `just kani-boundary`
+verifies the scanner contract.
 
 ---
 
