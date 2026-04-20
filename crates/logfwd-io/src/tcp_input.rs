@@ -5,20 +5,29 @@
 //! monotonic counter so that `FramedInput`'s per-source remainder tracking
 //! can distinguish data from different peers.
 
-use std::fs::File;
-use std::io::{self, BufReader, Read};
+use std::io::{self, Read};
 use std::net::{TcpListener, TcpStream};
 use std::sync::Once;
 use std::time::{Duration, Instant};
 
 use logfwd_types::diagnostics::ComponentHealth;
 use logfwd_types::pipeline::SourceId;
+use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::{ServerConfig, ServerConnection, StreamOwned};
 use socket2::SockRef;
 
 use crate::input::{InputEvent, InputSource};
 use crate::polling_input_health::{PollingInputHealthEvent, reduce_polling_input_health};
+
+/// Extract the `io::ErrorKind` from a `rustls_pki_types::pem::Error`,
+/// preserving the underlying I/O kind when available.
+fn pem_error_kind(e: &rustls::pki_types::pem::Error) -> io::ErrorKind {
+    match e {
+        rustls::pki_types::pem::Error::Io(io_err) => io_err.kind(),
+        _ => io::ErrorKind::InvalidData,
+    }
+}
 
 /// Maximum number of concurrent TCP client connections.
 const MAX_CLIENTS: usize = 1024;
@@ -294,9 +303,15 @@ impl Default for TcpInputOptions {
     }
 }
 
+/// TLS configuration for the TCP input listener.
+///
+/// When present, the listener requires clients to connect via TLS.
+/// Both `cert_file` and `key_file` must point to valid PEM-encoded files.
 #[derive(Debug, Clone)]
 pub struct TcpInputTlsOptions {
+    /// Path to a PEM-encoded certificate chain file for the server identity.
     pub cert_file: String,
+    /// Path to a PEM-encoded private key file matching `cert_file`.
     pub key_file: String,
 }
 
@@ -333,55 +348,46 @@ impl TcpInput {
         opts: &TcpInputTlsOptions,
     ) -> io::Result<std::sync::Arc<ServerConfig>> {
         Self::ensure_tls_provider_installed();
-        fn load_certs(path: &str) -> io::Result<Vec<CertificateDer<'static>>> {
-            let file = File::open(path).map_err(|e| {
+
+        let certs = CertificateDer::pem_file_iter(&opts.cert_file)
+            .map_err(|e| {
                 io::Error::new(
-                    e.kind(),
-                    format!("tcp.tls.cert_file '{path}' could not be opened: {e}"),
+                    pem_error_kind(&e),
+                    format!(
+                        "tcp.tls.cert_file '{}' could not be opened or parsed as PEM: {e}",
+                        opts.cert_file
+                    ),
+                )
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "tcp.tls.cert_file '{}' could not be parsed as PEM: {e}",
+                        opts.cert_file
+                    ),
                 )
             })?;
-            let mut reader = BufReader::new(file);
-            let certs = rustls_pemfile::certs(&mut reader)
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|e| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("tcp.tls.cert_file '{path}' could not be parsed as PEM: {e}"),
-                    )
-                })?;
-            if certs.is_empty() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("tcp.tls.cert_file '{path}' contained no certificates"),
-                ));
-            }
-            Ok(certs)
+        if certs.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "tcp.tls.cert_file '{}' contained no certificates",
+                    opts.cert_file
+                ),
+            ));
         }
 
-        fn load_key(path: &str) -> io::Result<PrivateKeyDer<'static>> {
-            let file = File::open(path).map_err(|e| {
-                io::Error::new(
-                    e.kind(),
-                    format!("tcp.tls.key_file '{path}' could not be opened: {e}"),
-                )
-            })?;
-            let mut reader = BufReader::new(file);
-            let key = rustls_pemfile::private_key(&mut reader).map_err(|e| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("tcp.tls.key_file '{path}' could not be parsed as PEM: {e}"),
-                )
-            })?;
-            key.ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("tcp.tls.key_file '{path}' contained no private key"),
-                )
-            })
-        }
-
-        let certs = load_certs(&opts.cert_file)?;
-        let key = load_key(&opts.key_file)?;
+        let key = PrivateKeyDer::from_pem_file(&opts.key_file).map_err(|e| {
+            io::Error::new(
+                pem_error_kind(&e),
+                format!(
+                    "tcp.tls.key_file '{}' could not be opened or parsed as PEM: {e}",
+                    opts.key_file
+                ),
+            )
+        })?;
         let cfg = ServerConfig::builder()
             .with_no_client_auth()
             .with_single_cert(certs, key)
@@ -514,13 +520,17 @@ impl InputSource for TcpInput {
                     let transport = match &self.listener_mode {
                         ListenerMode::Plain => ClientTransport::Plain(stream),
                         ListenerMode::Tls(cfg) => {
-                            let conn =
-                                ServerConnection::new(std::sync::Arc::clone(cfg)).map_err(|e| {
-                                    io::Error::other(format!(
-                                        "failed to initialize tcp tls server connection: {e}"
-                                    ))
-                                })?;
-                            ClientTransport::Tls(Box::new(StreamOwned::new(conn, stream)))
+                            match ServerConnection::new(std::sync::Arc::clone(cfg)) {
+                                Ok(conn) => {
+                                    ClientTransport::Tls(Box::new(StreamOwned::new(conn, stream)))
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "tcp tls handshake initialization failed, dropping connection: {e}"
+                                    );
+                                    continue;
+                                }
+                            }
                         }
                     };
                     let sid = source_id_for_connection(self.next_connection_seq);

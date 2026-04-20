@@ -230,25 +230,15 @@ impl Config {
                                     .map(str::trim)
                                     .filter(|v| !v.is_empty());
 
-                                if cert_file.is_none()
-                                    && key_file.is_none()
-                                    && client_ca_file.is_none()
-                                    && !tls.require_client_auth
-                                {
+                                if client_ca_file.is_some() || tls.require_client_auth {
                                     return Err(ConfigError::Validation(format!(
-                                        "pipeline '{name}' input '{label}': tcp tls requires both tls.cert_file and tls.key_file"
+                                        "pipeline '{name}' input '{label}': tcp tls client authentication is not supported (tls.client_ca_file and tls.require_client_auth are reserved for #2332)"
                                     )));
                                 }
 
                                 if cert_file.is_none() || key_file.is_none() {
                                     return Err(ConfigError::Validation(format!(
                                         "pipeline '{name}' input '{label}': tcp tls requires both tls.cert_file and tls.key_file"
-                                    )));
-                                }
-
-                                if client_ca_file.is_some() || tls.require_client_auth {
-                                    return Err(ConfigError::Validation(format!(
-                                        "pipeline '{name}' input '{label}': tcp tls client authentication is not supported (tls.client_ca_file and tls.require_client_auth are reserved for #2332)"
                                     )));
                                 }
                             }

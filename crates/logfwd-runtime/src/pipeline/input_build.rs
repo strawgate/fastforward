@@ -427,7 +427,12 @@ pub(super) fn build_input_state(
                 options.read_timeout_ms = Some(v);
             }
             if let Some(tls) = &t.tls {
-                if tls.client_ca_file.is_some() || tls.require_client_auth {
+                let has_client_ca = tls
+                    .client_ca_file
+                    .as_deref()
+                    .map(str::trim)
+                    .is_some_and(|v| !v.is_empty());
+                if has_client_ca || tls.require_client_auth {
                     return Err(format!(
                         "input '{name}': tcp.tls.client_ca_file and tcp.tls.require_client_auth are not supported for TCP inputs yet (tracked by #2332)"
                     ));
