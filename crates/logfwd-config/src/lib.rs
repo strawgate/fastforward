@@ -1532,7 +1532,11 @@ output:
         let err = Config::load_str(yaml).unwrap_err();
         let msg = err.to_string();
         assert!(
-            msg.contains("null output does not support 'endpoint'"),
+            msg.contains("pipeline 'default' output '#0'"),
+            "error should include pipeline/output context: {msg}"
+        );
+        assert!(
+            msg.contains("null output does not support") && msg.contains("endpoint"),
             "explicit null output with endpoint must be rejected: {msg}"
         );
     }
@@ -1564,7 +1568,12 @@ output:
             let err = Config::load_str(&yaml).unwrap_err();
             let msg = err.to_string();
             assert!(
-                msg.contains(&format!("null output does not support '{field}'")),
+                msg.contains("pipeline 'default' output '#0'"),
+                "error should include pipeline/output context: {msg}"
+            );
+            let expected = format!("null output does not support '{field}'");
+            assert!(
+                msg.contains(&expected),
                 "explicit null output with {field} must be rejected: {msg}"
             );
         }
