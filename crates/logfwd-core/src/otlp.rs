@@ -1181,12 +1181,12 @@ mod verification {
     use alloc::{vec, vec::Vec};
 
     // NOTE: encode_varint and encode_tag take `&mut Vec<u8>` and return `()`.
-    // Kani's contract system (requires/ensures/modifies) requires the modified
-    // type to implement `kani::Arbitrary` for stub_verified, but `Vec<u8>` does
-    // not. Function contracts for these wire format helpers are deferred until
-    // Kani supports Arbitrary for Vec or provides an alternative mechanism.
-    // The correctness of these functions is proven exhaustively by the
-    // verify_varint_* and verify_encode_tag proofs below.
+    // In our current Kani version/configuration used in CI, the contract system
+    // (requires/ensures/modifies) requires the modified type to implement
+    // `kani::Arbitrary` for stub_verified, but `Vec<u8>` does not in that setup.
+    // Function contracts for these wire format helpers are therefore deferred for
+    // now, and the correctness of these functions is instead proven
+    // exhaustively by the verify_varint_* and verify_encode_tag proofs below.
 
     /// Prove varint_len matches encode_varint output length for ALL u64 values.
     ///
@@ -1299,34 +1299,34 @@ mod verification {
     }
 
     /// Oracle proof: days_from_civil matches a naive year/month
-    /// iteration for valid dates in [2000, 2030].
+    /// iteration for bounded date components with year in [1970, 2100].
+    ///
+    /// Note: this proof range includes potentially non-calendar-valid
+    /// day-of-month combinations (e.g. Feb 31); it does not claim to
+    /// admit only valid civil dates. The oracle and the implementation
+    /// agree on all such inputs regardless.
     ///
     /// Uses a completely different algorithm (cumulative day counting)
     /// from the Hinnant formula. Kani can't use chrono, so this naive
     /// oracle serves as the Kani-compatible reference. A chrono-based
     /// oracle test below covers the same property in test mode.
-    ///
-    /// The contract proof (verify_days_from_civil_contract) already covers the
-    /// full [1, 2553] range. This oracle proof validates against naive iteration
-    /// for a representative sample. Narrowed from [1970, 2100] to [2000, 2030]
-    /// to reduce solver time (unwind 142 -> 73).
     #[kani::proof]
-    #[kani::unwind(73)] // naive_days_from_epoch loops from 1970: max 60 year iters + 11 month iters + 2
+    #[kani::unwind(142)] // naive_days_from_epoch: up to 130 year-loop + 11 month-loop iterations + 1
     #[kani::solver(kissat)]
     fn verify_days_from_civil_oracle() {
         let year: i64 = kani::any();
         let month: u32 = kani::any();
         let day: u32 = kani::any();
 
-        kani::assume(year >= 2000 && year <= 2030);
+        kani::assume(year >= 1970 && year <= 2100);
         kani::assume(month >= 1 && month <= 12);
         kani::assume(day >= 1 && day <= 31);
 
         // Cover checks ensure the assume region is actually exercised (non-vacuous proof).
-        kani::cover!(year == 2000 && month == 1 && day == 1, "range start");
-        kani::cover!(year == 2030 && month == 12 && day == 31, "upper boundary");
-        kani::cover!(month == 2 && day == 29, "leap day covered");
-        kani::cover!(year == 2015 && month == 6 && day == 15, "typical mid-range");
+        kani::cover!(year == 1970 && month == 1 && day == 1, "epoch start");
+        kani::cover!(year == 2100 && month == 12 && day == 31, "upper boundary");
+        kani::cover!(year == 2000 && month == 2 && day == 29, "leap-year Feb 29");
+        kani::cover!(year == 1971 && month == 6 && day == 15, "typical mid-range");
 
         let result = days_from_civil(year, month, day);
 
