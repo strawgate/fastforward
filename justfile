@@ -134,6 +134,13 @@ test:
 test-all:
     LOGFWD_DISABLE_DEFAULT_CHECKPOINTS=1 cargo nextest run --workspace --profile ci
 
+# Run semantic lints via dylint (hot_path_no_alloc, and any future
+# semantic lints defined in crates/logfwd-lints/).
+# Requires: cargo install --locked cargo-dylint dylint-link
+#           rustup toolchain install nightly-2025-09-18 --component llvm-tools-preview --component rustc-dev
+dylint:
+    cargo dylint --path crates/logfwd-lints -- --workspace
+
 # Run required Kani formal verification proofs for production crates
 # Requires: cargo install --locked kani-verifier && cargo kani setup
 kani:
@@ -294,6 +301,23 @@ test-extended:
 # Run turmoil simulation including Porcupine linearizability checker integration.
 test-linearizability:
     cargo test -p logfwd --features turmoil --test turmoil_sim linearizability::porcupine_checker_accepts_runtime_history
+
+# ---------------------------------------------------------------------------
+# Mutation testing (cargo-mutants)
+# ---------------------------------------------------------------------------
+
+# Run mutation testing on a single crate (default: logfwd-core).
+# Requires: cargo install cargo-mutants cargo-nextest
+# Config:   .cargo/mutants.toml (exclusions, timeout, nextest)
+mutants crate="logfwd-core":
+    cargo mutants -p {{crate}}
+
+# Run mutation testing only on code changed vs origin/main (fast, CI-friendly).
+mutants-diff crate="logfwd-core":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    git rev-parse --verify origin/main >/dev/null
+    git diff origin/main...HEAD | cargo mutants -p {{crate}} --in-diff -
 
 # Build release binary (full package, includes DataFusion SQL)
 build:

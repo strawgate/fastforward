@@ -971,7 +971,9 @@ fn maybe_prompt_blast_setup(args: &mut BlastArgs) -> Result<(), CliError> {
 }
 
 #[cfg(test)]
-fn resolve_blast_output_config(args: &BlastArgs) -> Result<logfwd_config::OutputConfig, CliError> {
+fn resolve_blast_output_config(
+    args: &BlastArgs,
+) -> Result<logfwd_config::OutputConfigV2, CliError> {
     let destination = args
         .destination
         .ok_or_else(|| CliError::Config("blast requires --destination".to_owned()))?;
@@ -1126,7 +1128,6 @@ fn cmd_wizard() -> Result<(), CliError> {
         let uc = &USE_CASE_TEMPLATES[uc_idx];
         println!("{}selected{}: {}", green(), reset(), uc.title);
         println!();
-        // TODO: support multiline SQL input (currently single-line via read_line)
         let sql = prompt_text(
             "SQL transform (blank = keep the preset default)",
             uc.transform,
@@ -1151,7 +1152,6 @@ fn cmd_wizard() -> Result<(), CliError> {
             &output_descs,
         )?;
 
-        // TODO: support multiline SQL input (currently single-line via read_line)
         let sql = prompt_text(
             "Optional SQL transform (blank = SELECT * FROM logs)",
             "SELECT * FROM logs",
@@ -2732,6 +2732,9 @@ outputs:
 
         let output_cfg =
             resolve_blast_output_config(&args).expect("tcp destination should preserve endpoint");
+        let logfwd_config::OutputConfigV2::Tcp(output_cfg) = output_cfg else {
+            panic!("expected tcp output config");
+        };
         assert_eq!(output_cfg.endpoint.as_deref(), Some("127.0.0.1:15140"));
     }
 
@@ -3111,7 +3114,7 @@ input:
   path: /var/log/*.log
   format: cri
 output:
-  type: null
+  type: "null"
 transform: |
   SELECT _timestampp FROM logs
 "#;
@@ -3131,7 +3134,7 @@ input:
   path: /var/log/*.log
   format: cri
 output:
-  type: null
+  type: "null"
 transform: |
   SELECT _timestamp, _stream, body FROM logs
 "#;
@@ -3151,7 +3154,7 @@ input:
   path: /var/log/*.log
   format: cri
 output:
-  type: null
+  type: "null"
 transform: |
   SELECT level, msg, custom_field FROM logs
 "#;
@@ -3171,7 +3174,7 @@ input:
   path: /var/log/*.log
   format: json
 output:
-  type: null
+  type: "null"
 transform: |
   SELECT custom_field FROM logs
 "#;
@@ -3191,7 +3194,7 @@ input:
   path: /var/log/*.log
   format: cri
 output:
-  type: null
+  type: "null"
 enrichment:
   - type: static
     table_name: labels
@@ -3215,7 +3218,7 @@ input:
   type: file
   path: /var/log/*.log
 output:
-  type: null
+  type: "null"
 transform: |
   SELECT _unknown_col FROM logs
 "#;

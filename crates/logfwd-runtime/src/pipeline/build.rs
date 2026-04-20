@@ -4,16 +4,14 @@ use std::time::Duration;
 
 use opentelemetry::metrics::Meter;
 
-use logfwd_config::{
-    CompressionFormat, Format, InputTypeConfig, OutputConfigV2, PipelineConfig, SourceMetadataStyle,
-};
 #[cfg(feature = "datafusion")]
 use logfwd_config::{EnrichmentConfig, GeoDatabaseFormat};
+use logfwd_config::{Format, InputTypeConfig, OutputConfigV2, PipelineConfig, SourceMetadataStyle};
 use logfwd_diagnostics::diagnostics::PipelineMetrics;
 use logfwd_io::checkpoint::{
     CheckpointStore, FileCheckpointStore, SourceCheckpoint, default_data_dir,
 };
-use logfwd_output::{AsyncFanoutFactory, SinkFactory, build_sink_factory_v2};
+use logfwd_output::{AsyncFanoutFactory, SinkFactory, build_sink_factory};
 use logfwd_types::field_names;
 use logfwd_types::pipeline::{PipelineMachine, SourceId};
 use logfwd_types::source_metadata::SourceMetadataPlan;
@@ -571,18 +569,10 @@ impl Pipeline {
                 SourceMetadataPlan::default()
             };
             #[cfg(not(feature = "turmoil"))]
-            let source_metadata_plan =
-                if input_cfg.source_metadata == SourceMetadataStyle::Fastforward {
-                    SourceMetadataPlan {
-                        has_source_id: true,
-                        source_path: source_metadata_style_source_path(input_cfg.source_metadata),
-                    }
-                } else {
-                    SourceMetadataPlan {
-                        has_source_id: false,
-                        source_path: source_metadata_style_source_path(input_cfg.source_metadata),
-                    }
-                };
+            let source_metadata_plan = SourceMetadataPlan {
+                has_source_id: input_cfg.source_metadata == SourceMetadataStyle::Fastforward,
+                source_path: source_metadata_style_source_path(input_cfg.source_metadata),
+            };
 
             input_transforms.push(InputTransform {
                 scanner,
@@ -605,20 +595,13 @@ impl Pipeline {
         // Build output sink factory → pool.
         let factory: Arc<dyn SinkFactory> = if config.outputs.len() == 1 {
             let output_cfg = &config.outputs[0];
-            build_output_factory_from_config(
-                0,
-                output_cfg.typed(),
-                output_cfg.compression,
-                base_path,
-                &mut metrics,
-            )?
+            build_output_factory_from_config(0, output_cfg, base_path, &mut metrics)?
         } else {
             let mut factories: Vec<Arc<dyn SinkFactory>> = Vec::new();
             for (i, output_cfg) in config.outputs.iter().enumerate() {
                 factories.push(build_output_factory_from_config(
                     i,
-                    output_cfg.typed(),
-                    output_cfg.compression,
+                    output_cfg,
                     base_path,
                     &mut metrics,
                 )?);
@@ -691,7 +674,6 @@ impl Pipeline {
 fn build_output_factory_from_config(
     index: usize,
     output_cfg: &OutputConfigV2,
-    legacy_file_compression: Option<CompressionFormat>,
     base_path: Option<&Path>,
     metrics: &mut PipelineMetrics,
 ) -> Result<Arc<dyn SinkFactory>, String> {
@@ -701,16 +683,7 @@ fn build_output_factory_from_config(
     let output_type_str = output_cfg.output_type().to_string();
     let output_stats = metrics.add_output(&output_name, &output_type_str);
 
-    if matches!(output_cfg, OutputConfigV2::File(_))
-        && let Some(compression) = legacy_file_compression
-    {
-        return Err(format!(
-            "output '{output_name}': file does not support '{compression}' compression"
-        ));
-    }
-
-    build_sink_factory_v2(&output_name, output_cfg, base_path, output_stats)
-        .map_err(|e| e.to_string())
+    build_sink_factory(&output_name, output_cfg, base_path, output_stats).map_err(|e| e.to_string())
 }
 
 fn should_open_checkpoint_store(checkpoint_dir: &Path, has_explicit_data_dir: bool) -> bool {
@@ -732,10 +705,7 @@ fn should_open_checkpoint_store(checkpoint_dir: &Path, has_explicit_data_dir: bo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use logfwd_config::{
-        CompressionFormat, InputConfig, InputTypeConfig, OutputConfig, OutputConfigV2, OutputType,
-        StdoutOutputConfig,
-    };
+    use logfwd_config::{InputConfig, InputTypeConfig, OutputConfigV2, StdoutOutputConfig};
     use logfwd_types::source_metadata::SourcePathColumn;
 
     fn minimal_input(path: String) -> InputConfig {
@@ -756,17 +726,14 @@ mod tests {
         }
     }
 
-    fn minimal_output() -> OutputConfig {
-        OutputConfig {
-            output_type: OutputType::Stdout,
-            ..Default::default()
-        }
+    fn minimal_output() -> OutputConfigV2 {
+        OutputConfigV2::Stdout(StdoutOutputConfig::default())
     }
 
     fn minimal_config(path: String) -> PipelineConfig {
         PipelineConfig {
             inputs: vec![minimal_input(path)],
-            outputs: vec![minimal_output().into()],
+            outputs: vec![minimal_output()],
             transform: None,
             enrichment: vec![],
             resource_attrs: std::collections::HashMap::new(),
@@ -784,42 +751,13 @@ mod tests {
         std::fs::write(&log_path, b"{\"msg\":\"hello\"}\n").unwrap();
 
         let mut config = minimal_config(log_path.display().to_string());
-        config.outputs = vec![
-            OutputConfigV2::Stdout(StdoutOutputConfig {
-                name: Some("typed_stdout".to_string()),
-                format: None,
-            })
-            .into(),
-        ];
+        config.outputs = vec![OutputConfigV2::Stdout(StdoutOutputConfig {
+            name: Some("typed_stdout".to_string()),
+            format: None,
+        })];
 
         Pipeline::from_config("default", &config, &logfwd_test_utils::test_meter(), None)
             .expect("native typed output entry should build");
-    }
-
-    #[test]
-    fn from_config_preserves_legacy_output_factory_rejections() {
-        let dir = tempfile::tempdir().unwrap();
-        let log_path = dir.path().join("test.log");
-        std::fs::write(&log_path, b"{\"msg\":\"hello\"}\n").unwrap();
-
-        let mut config = minimal_config(log_path.display().to_string());
-        config.outputs = vec![
-            OutputConfig {
-                output_type: OutputType::File,
-                path: Some(dir.path().join("out.log").display().to_string()),
-                compression: Some(CompressionFormat::Gzip),
-                ..Default::default()
-            }
-            .into(),
-        ];
-
-        let err = Pipeline::from_config("default", &config, &logfwd_test_utils::test_meter(), None)
-            .err()
-            .expect("legacy file compression should still be rejected");
-        assert!(
-            err.contains("file does not support 'gzip' compression"),
-            "unexpected error: {err}"
-        );
     }
 
     #[test]
@@ -831,7 +769,7 @@ mod tests {
         let cfg = PipelineConfig {
             inputs: vec![minimal_input(log_path.to_string_lossy().into_owned())],
             transform: None,
-            outputs: vec![minimal_output().into()],
+            outputs: vec![minimal_output()],
             enrichment: Vec::new(),
             resource_attrs: Default::default(),
             workers: None,
@@ -951,7 +889,7 @@ mod tests {
                 }),
             }],
             transform: None,
-            outputs: vec![minimal_output().into()],
+            outputs: vec![minimal_output()],
             enrichment: Vec::new(),
             resource_attrs: Default::default(),
             workers: None,
@@ -1002,7 +940,7 @@ mod tests {
                 }),
             }],
             transform: None,
-            outputs: vec![minimal_output().into()],
+            outputs: vec![minimal_output()],
             enrichment: Vec::new(),
             resource_attrs: Default::default(),
             workers: None,
