@@ -39,10 +39,12 @@ runs:
     - name: Download tla2tools.jar
       if: steps.tla-jar-cache.outputs.cache-hit != 'true'
       shell: bash
+      env:
+        VERSION: ${{ inputs.tla-tools-version }}
       run: |
         mkdir -p /tmp/tla
         curl -fsSL \
-          "https://github.com/tlaplus/tlaplus/releases/download/${{ inputs.tla-tools-version }}/tla2tools.jar" \
+          "https://github.com/tlaplus/tlaplus/releases/download/${VERSION}/tla2tools.jar" \
           -o /tmp/tla/tla2tools.jar
 
     - name: Set up Python (coverage mode only)
