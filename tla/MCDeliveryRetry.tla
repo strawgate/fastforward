@@ -27,9 +27,4 @@ MCInitialBackoffMs == 100
 MCMaxBackoffMs     == 1600
 MCMaxRetries       == 5
 
-\* --- Liveness model constants (smaller for tractable temporal checking) ---
-MCInitialBackoffMsLiveness == 100
-MCMaxBackoffMsLiveness     == 800
-MCMaxRetriesLiveness       == 3
-
 ======================================================================

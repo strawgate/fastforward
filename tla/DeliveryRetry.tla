@@ -316,7 +316,7 @@ TerminalReachable == <>(state = "Terminal")
 \* If the sink is permanently healthy, delivery eventually succeeds.
 \* This is the happy-path liveness guarantee.
 HealthySinkDelivers ==
-    [](sinkState = "Healthy") => <>(outcome = "Ok")
+    ([](sinkState = "Healthy") /\ []~cancelled) => <>(outcome = "Ok")
 
 \* Cancel always reaches terminal state.
 \* This proves that shutdown is never stuck — the cancellation token
