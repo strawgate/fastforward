@@ -1,34 +1,203 @@
 #!/usr/bin/env python3
-"""Generate the v1 OTLP fast-row encoder from a small checked-in spec.
+"""Generate the v1 OTLP fast-row encoder from vendored OTLP protos.
 
 This generator is intentionally narrow. It emits only the row-level OTLP
-projection code and relies on handwritten/shared envelope + wire helpers.
+projection code and relies on handwritten/shared envelope + wire helpers. The
+OTLP field metadata is read from the checked-in OpenTelemetry proto files; the
+only repo-local policy here is how Arrow input columns map onto LogRecord roles.
 """
 
 from __future__ import annotations
 
 import argparse
 import difflib
-import json
+import re
 import sys
 from pathlib import Path
 
 
 REPO = Path(__file__).resolve().parents[1]
-SPEC = REPO / "crates" / "logfwd-output" / "codegen" / "otlp_log_record_fast_v1.schema.json"
 OUT = REPO / "crates" / "logfwd-output" / "src" / "generated" / "otlp_log_record_fast_v1.rs"
+PROTO_VERSION = "v1.8.0"
+PROTO_ROOT = REPO / "crates" / "logfwd-io" / "codegen" / "opentelemetry-proto" / PROTO_VERSION
+PROTO_FILES = [
+    PROTO_ROOT / "opentelemetry" / "proto" / "logs" / "v1" / "logs.proto",
+    PROTO_ROOT / "opentelemetry" / "proto" / "common" / "v1" / "common.proto",
+]
+
+ROLE_ALIASES = [
+    {"name": "timestamp", "fields": ["time_unix_nano"], "sources": ["timestamp", "time"]},
+    {
+        "name": "severity",
+        "fields": ["severity_number", "severity_text"],
+        "sources": ["level", "severity_text"],
+    },
+    {"name": "body", "fields": ["body"], "sources": ["body", "message"]},
+    {"name": "trace_id", "fields": ["trace_id"], "sources": ["trace_id"]},
+    {"name": "span_id", "fields": ["span_id"], "sources": ["span_id"]},
+    {"name": "flags", "fields": ["flags"], "sources": ["flags", "trace_flags"]},
+    {"name": "attributes", "fields": ["attributes"], "sources": ["*"]},
+]
+
+LOG_RECORD_FIELD_EXPECTATIONS = {
+    "time_unix_nano": {"proto_type": "fixed64", "wire": "fixed64", "repeated": False},
+    "observed_time_unix_nano": {"proto_type": "fixed64", "wire": "fixed64", "repeated": False},
+    "severity_number": {"proto_type": "SeverityNumber", "wire": "varint", "repeated": False},
+    "severity_text": {"proto_type": "string", "wire": "len", "repeated": False},
+    "body": {"proto_type": "AnyValue", "wire": "len", "repeated": False},
+    "attributes": {"proto_type": "KeyValue", "wire": "len", "repeated": True},
+    "flags": {"proto_type": "fixed32", "wire": "fixed32", "repeated": False},
+    "trace_id": {"proto_type": "bytes", "wire": "len", "repeated": False},
+    "span_id": {"proto_type": "bytes", "wire": "len", "repeated": False},
+}
+
+FIELD_RE = re.compile(
+    r"^\s*(?:(repeated)\s+)?([.\w]+)\s+([A-Za-z_]\w*)\s*=\s*(\d+)\s*(?:\[[^\]]*\])?\s*;"
+)
+MESSAGE_RE = re.compile(r"^\s*message\s+([A-Za-z_]\w*)\s*\{")
+ONEOF_RE = re.compile(r"^\s*oneof\s+([A-Za-z_]\w*)\s*\{")
+
+PROTO_TYPE_TO_WIRE = {
+    "bool": "varint",
+    "int32": "varint",
+    "int64": "varint",
+    "uint32": "varint",
+    "uint64": "varint",
+    "sint32": "varint",
+    "sint64": "varint",
+    "fixed32": "fixed32",
+    "sfixed32": "fixed32",
+    "fixed64": "fixed64",
+    "sfixed64": "fixed64",
+    "float": "fixed32",
+    "double": "fixed64",
+    "string": "len",
+    "bytes": "len",
+    "SeverityNumber": "varint",
+}
+
+
+def short_proto_type(proto_type: str) -> str:
+    return proto_type.rsplit(".", 1)[-1]
+
+
+def proto_wire_for(proto_type: str) -> str:
+    short_type = short_proto_type(proto_type)
+    if short_type in PROTO_TYPE_TO_WIRE:
+        return PROTO_TYPE_TO_WIRE[short_type]
+    return "len"
+
+
+def parse_proto_fields() -> dict:
+    messages = {}
+    for path in PROTO_FILES:
+        if not path.exists():
+            raise FileNotFoundError(f"vendored OTLP proto file missing: {path}")
+
+        current_message = None
+        in_oneof = None
+        for raw_line in path.read_text().splitlines():
+            line = raw_line.split("//", 1)[0].strip()
+            if not line:
+                continue
+
+            if current_message is None:
+                message_match = MESSAGE_RE.match(line)
+                if message_match:
+                    current_message = message_match.group(1)
+                    messages.setdefault(current_message, {})
+                continue
+
+            oneof_match = ONEOF_RE.match(line)
+            if oneof_match:
+                in_oneof = oneof_match.group(1)
+                continue
+
+            field_match = FIELD_RE.match(line)
+            if field_match:
+                repeated, proto_type, field_name, number = field_match.groups()
+                messages[current_message][field_name] = {
+                    "name": field_name,
+                    "number": int(number),
+                    "wire": proto_wire_for(proto_type),
+                    "proto_type": short_proto_type(proto_type),
+                    "repeated": repeated is not None,
+                    "oneof": in_oneof,
+                }
+                continue
+
+            if "}" in line:
+                if in_oneof is not None:
+                    in_oneof = None
+                else:
+                    current_message = None
+
+    return messages
 
 
 def load_spec() -> dict:
-    return json.loads(SPEC.read_text())
+    messages = parse_proto_fields()
+    log_record_fields = messages.get("LogRecord")
+    any_value_fields = messages.get("AnyValue")
+    if log_record_fields is None:
+        raise ValueError("LogRecord missing from vendored OTLP proto files")
+    if any_value_fields is None:
+        raise ValueError("AnyValue missing from vendored OTLP proto files")
+
+    for field_name, expectations in LOG_RECORD_FIELD_EXPECTATIONS.items():
+        field = log_record_fields.get(field_name)
+        if field is None:
+            raise ValueError(f"LogRecord.{field_name} missing from vendored OTLP proto files")
+        for key, expected in expectations.items():
+            actual = field[key]
+            if actual != expected:
+                raise ValueError(
+                    f"LogRecord.{field_name} {key} changed: "
+                    f"expected={expected} proto={actual}"
+                )
+
+    for role in ROLE_ALIASES:
+        for field_name in role["fields"]:
+            if field_name not in log_record_fields:
+                raise ValueError(f"LogRecord.{field_name} missing from vendored OTLP proto files")
+
+    supported_any_values = {
+        "string_value": "string",
+        "bool_value": "bool",
+        "int_value": "int64",
+        "double_value": "double",
+        "bytes_value": "bytes",
+    }
+    for field_name, proto_type in supported_any_values.items():
+        field = any_value_fields.get(field_name)
+        if field is None:
+            raise ValueError(f"AnyValue.{field_name} missing from vendored OTLP proto files")
+        if field["proto_type"] != proto_type:
+            raise ValueError(
+                f"AnyValue.{field_name} type changed: expected={proto_type} "
+                f"proto={field['proto_type']}"
+            )
+
+    return {
+        "name": "otlp_log_record_fast",
+        "version": 1,
+        "proto_version": PROTO_VERSION,
+        "roles": ROLE_ALIASES,
+        "log_record_fields": log_record_fields,
+    }
 
 
 def render(spec: dict) -> str:
     roles = spec["roles"]
-    order = ", ".join(f'"{role["name"]}"' for role in roles)
+    role_order = ", ".join(f'"{role["name"]}"' for role in roles)
+    proto_fields = ", ".join(
+        f'{field["name"]}={field["number"]}:{field["wire"]}'
+        for field in sorted(spec["log_record_fields"].values(), key=lambda field: field["number"])
+    )
     return f"""// @generated by scripts/generate_otlp_fast_encoder.py; DO NOT EDIT.
-// spec: {spec["name"]} v{spec["version"]}
-// column order: {order}
+// spec: {spec["name"]} v{spec["version"]}; opentelemetry-proto {spec["proto_version"]}
+// role order: {role_order}
+// LogRecord proto fields: {proto_fields}
 
 use arrow::array::Array;
 use super::{{BatchColumns, BatchMetadata, encode_col_attr, encode_fixed32, encode_tag,
