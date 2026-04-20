@@ -902,5 +902,26 @@ mod verification {
             p.comma != 0 && p.in_string != 0,
             "comma and in_string both non-zero (retired #7)"
         );
+
+        // In-string masking: verify that raw structural bits inside strings
+        // were actually filtered out (not just that in_string is non-zero).
+        // These cover guards prove masking is effective by witnessing cases
+        // where the raw input had structural chars at in-string positions.
+        kani::cover!(
+            raw.comma & p.in_string != 0 && p.comma & p.in_string == 0,
+            "raw commas inside strings were masked out"
+        );
+        kani::cover!(
+            raw.colon & p.in_string != 0 && p.colon & p.in_string == 0,
+            "raw colons inside strings were masked out"
+        );
+        kani::cover!(
+            raw.open_brace & p.in_string != 0 && p.open_brace & p.in_string == 0,
+            "raw open braces inside strings were masked out"
+        );
+        kani::cover!(
+            raw.close_brace & p.in_string != 0 && p.close_brace & p.in_string == 0,
+            "raw close braces inside strings were masked out"
+        );
     }
 }

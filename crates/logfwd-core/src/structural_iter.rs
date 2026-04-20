@@ -550,6 +550,11 @@ mod verification {
             let b = buf[result];
             assert!(b != b' ');
         }
+
+        // Guard vacuity: verify assume does not exclude meaningful cases
+        kani::cover!(result == from, "no spaces at start");
+        kani::cover!(result > from, "skipped some spaces");
+        kani::cover!(result == 16, "all remaining bytes are spaces");
     }
 
     /// Prove advance() yields every structural position exactly once,
