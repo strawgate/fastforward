@@ -15,6 +15,8 @@ java -cp /path/to/tla2tools.jar tlc2.TLC tla/MCShutdownProtocol.tla -config tla/
 java -cp /path/to/tla2tools.jar tlc2.TLC tla/MCShutdownProtocol.tla -config tla/ShutdownProtocol.liveness.cfg
 java -cp /path/to/tla2tools.jar tlc2.TLC tla/MCPipelineBatch.tla -config tla/PipelineBatch.cfg
 java -cp /path/to/tla2tools.jar tlc2.TLC tla/MCPipelineBatch.tla -config tla/PipelineBatch.liveness.cfg
+java -cp /path/to/tla2tools.jar tlc2.TLC tla/MCFanoutSink.tla -config tla/FanoutSink.cfg
+java -cp /path/to/tla2tools.jar tlc2.TLC tla/MCFanoutSink.tla -config tla/FanoutSink.liveness.cfg
 ```
 
 ## PipelineMachine.tla
@@ -94,6 +96,13 @@ tla/
   PipelineBatch.cfg             — safety model
   PipelineBatch.liveness.cfg    — liveness model
   PipelineBatch.coverage.cfg    — reachability guards
+
+  # Fanout sink delivery (per-child tracking, no-duplicate-on-retry)
+  FanoutSink.tla                — fanout delivery + retry + partial success
+  MCFanoutSink.tla              — TLC config
+  FanoutSink.cfg                — safety model
+  FanoutSink.liveness.cfg       — liveness model
+  FanoutSink.coverage.cfg       — reachability guards
 
   README.md                     — this file
 ```
@@ -296,6 +305,83 @@ Models the pure tail reducer behavior extracted in `crates/logfwd-io/src/tail/st
 ```bash
 just tlc-tail
 ```
+
+---
+
+## FanoutSink.tla
+
+Models the `AsyncFanoutSink` delivery protocol from
+`crates/logfwd-output/src/sink.rs`. The fanout sends every batch to N child
+sinks, tracks per-child completion state, and prevents duplicate delivery when
+the worker pool retries a partially-failed batch.
+
+This is the class of bug that caused ES duplication issues (#1873, #1880) —
+when a retry re-sent data to children that had already accepted it.
+
+### Model parameters
+
+| Config | NumChildren | MaxRetries | MaxBatches |
+|--------|-------------|------------|------------|
+| Safety | 3 | 2 | 2 |
+| Liveness | 2 | 2 | 2 |
+| Coverage | 3 | 2 | 2 |
+
+### What it proves
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `PartialSuccessIsOk` | Safety | mixed Ok+Rejected (not all rejected) yields Ok result |
+| `AllRejectedIsRejected` | Safety | all children rejected yields Rejected result |
+| `BatchPhaseConsistency` | Safety | fanoutResult and batchPhase are always consistent |
+| `RetryCountBound` | Safety | retryCount never exceeds MaxRetries |
+| `DeliveryCountConsistency` | Safety | totalDelivered count is non-negative |
+| `OkChildNeverRevertsTemporal` | Safety (temporal) | once Ok in a batch, stays Ok until next BeginBatch |
+| `RejectedChildNeverRevertsTemporal` | Safety (temporal) | once Rejected in a batch, stays Rejected until next BeginBatch |
+| `NoDuplicateDeliveryTemporal` | Safety (temporal) | Ok children only transition via BeginBatch reset |
+| `BatchEventuallyFinalizes` | Liveness | every started batch eventually reaches Finalized |
+| `FinalizedEventuallyIdle` | Liveness | every finalized batch eventually returns to Idle |
+| `AllBatchesComplete` | Liveness | all modeled batches eventually complete |
+| `RetryEventuallyResolves` | Liveness | RetryNeeded state eventually resolves |
+| `DeliveringReachable` | Reachability | Delivering phase is reachable |
+| `FinalizedReachable` | Reachability | Finalized phase is reachable |
+| `ChildOkOccurs` | Reachability | at least one child succeeds |
+| `ChildRejectedOccurs` | Reachability | at least one child rejects |
+| `PartialSuccessReachable` | Reachability | mixed Ok+Rejected with Ok result is reachable |
+| `AllRejectedReachable` | Reachability | all-rejected result is reachable |
+| `AllOkReachable` | Reachability | all-ok result is reachable |
+| `RetryNeededReachable` | Reachability | RetryNeeded result is reachable |
+| `RetryOccurs` | Reachability | retry actually fires |
+| `ExhaustRetriesReachable` | Reachability | exhausted retries is reachable |
+| `MultipleBatchesReachable` | Reachability | multiple batches complete |
+| `TransientThenOkReachable` | Reachability | child transitions from transient to Ok across retries |
+
+### Run
+
+```bash
+java -cp /path/to/tla2tools.jar tlc2.TLC tla/MCFanoutSink.tla -config tla/FanoutSink.cfg
+java -cp /path/to/tla2tools.jar tlc2.TLC tla/MCFanoutSink.tla -config tla/FanoutSink.liveness.cfg
+python3 scripts/verify_tla_coverage.py --jar /path/to/tla2tools.jar --tla-file tla/MCFanoutSink.tla --config tla/FanoutSink.coverage.cfg
+```
+
+### Key design: per-child state tracking across retries
+
+The fanout tracks each child sink's state (`Pending`, `Ok`, `Rejected`) across
+retry attempts within the same logical batch. When the worker pool retries a
+batch (because one child had a transient failure), the fanout skips children
+that already returned `Ok` or `Rejected`. This prevents duplicate delivery —
+the exact bug class that caused ES duplication (#1873, #1880).
+
+`begin_batch()` resets all children to `Pending` for each new logical batch.
+The worker pool MUST call `begin_batch()` before the first `send_batch()` of
+each batch. Without this call, children retain terminal states from the
+previous batch and would be skipped.
+
+### Key design: partial success semantics
+
+When some children succeed and others reject, the fanout returns `Ok` (not
+`Rejected`). Only when ALL children reject does the fanout return `Rejected`.
+This matches the principle that successfully-delivered data should not be
+discarded because one output destination rejected it.
 
 ---
 
