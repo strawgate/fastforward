@@ -225,8 +225,9 @@ jobs:
           pattern: turmoil-failures-shard-*-${{ github.run_id }}
           path: /tmp/turmoil-artifacts
           merge-multiple: false
-      - name: Create aggregated issue on turmoil seed sweep failure
+      - name: Create or update aggregated issue on turmoil seed sweep failure
         run: |
+          set -euo pipefail
           run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           summary_file="$(mktemp)"
           failed_shards=0
@@ -266,22 +267,50 @@ jobs:
             exit 0
           fi
 
+          # Dedup against a stable title so persistent regressions append
+          # comments instead of opening a new issue every night.  Matches the
+          # pattern used by tla-pipeline-nightly-thorough-report above.
+          issue_title="Nightly turmoil seed sweep failing"
+          date_iso="$(date -u +%Y-%m-%d)"
+          existing="$(gh issue list \
+            --state open \
+            --label bug \
+            --search "in:title \"$issue_title\"" \
+            --json number,title \
+            --jq ".[] | select(.title == \"$issue_title\") | .number" \
+            | head -n1)"
+
           body_file="$(mktemp)"
-          cat >"$body_file" <<EOF
-          Nightly turmoil seed sweep failed.
+          if [ -n "$existing" ]; then
+            cat >"$body_file" <<EOF
+          Recurrence on ${date_iso}: ${run_url}
 
           - Failed shards: ${failed_shards}
           - Total failed seeds: ${total_fail_count}
-          - Run: ${run_url}
+
+          $(cat "$summary_file")
+          EOF
+            gh issue comment "$existing" --body-file "$body_file"
+          else
+            cat >"$body_file" <<EOF
+          Nightly turmoil seed sweep failed.
+
+          - First observed: ${date_iso}
+          - First run: ${run_url}
+          - Failed shards: ${failed_shards}
+          - Total failed seeds: ${total_fail_count}
 
           $(cat "$summary_file")
 
-          Please investigate and convert any reproductions into deterministic tests.
+          Please investigate and convert any reproductions into deterministic
+          tests.  Subsequent failures while this issue stays open will be
+          appended as comments rather than spawning new issues.
           EOF
-          gh issue create \
-            --title "Nightly turmoil seed sweep failed ($(date +%Y-%m-%d))" \
-            --body-file "$body_file" \
-            --label "bug"
+            gh issue create \
+              --title "$issue_title" \
+              --body-file "$body_file" \
+              --label "bug"
+          fi
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}

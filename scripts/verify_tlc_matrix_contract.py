@@ -67,7 +67,10 @@ def _iter_job_blocks(workflow_text: str) -> Iterator[tuple[str, list[str]]]:
                 yield job_name, lines[job_start:idx]
             return
 
-        # A job header is a mapping key one level inside jobs:.
+        # A job header is a mapping key exactly one level inside `jobs:`.
+        # The workflow uses 2-space YAML indentation throughout (enforced by
+        # our actionlint/format conventions); widening this to also accept
+        # 4-space would pick up step-level keys as spurious jobs.
         if stripped.endswith(":") and indent == jobs_indent + 2:
             if job_name is not None and job_start is not None:
                 yield job_name, lines[job_start:idx]
