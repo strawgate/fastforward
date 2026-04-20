@@ -139,6 +139,7 @@ cloned_instead_of_copied = "warn"
 needless_pass_by_ref_mut = "warn"
 undocumented_unsafe_blocks = "deny"
 dbg_macro = "deny"
+large_enum_variant = "warn"
 
 [workspace.lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = [
