@@ -10,6 +10,7 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::Once;
 use std::time::{Duration, Instant};
 
+use bytes::Bytes;
 use logfwd_types::diagnostics::ComponentHealth;
 use logfwd_types::pipeline::SourceId;
 use rustls::RootCertStore;
@@ -772,7 +773,7 @@ impl InputSource for TcpInput {
                 // unaccounted_bytes is persistent on the Client struct.
                 let accounted_bytes = std::mem::take(&mut self.clients[i].unaccounted_bytes);
                 InputEvent::Data {
-                    bytes,
+                    bytes: Bytes::from(bytes),
                     source_id: Some(self.clients[i].source_id),
                     accounted_bytes,
                     cri_metadata: None,
@@ -814,7 +815,7 @@ impl InputSource for TcpInput {
                     // for this client.
                     let accounted_bytes = std::mem::replace(&mut client.unaccounted_bytes, 0);
                     events.push(InputEvent::Data {
-                        bytes: tail,
+                        bytes: Bytes::from(tail),
                         source_id: Some(client.source_id),
                         accounted_bytes,
                         cri_metadata: None,
@@ -1017,7 +1018,7 @@ mod tests {
             let events = input.poll().expect("tcp poll should succeed");
             for event in events {
                 if let InputEvent::Data { bytes, .. } = event {
-                    records.push(bytes);
+                    records.push(bytes.to_vec());
                 }
             }
             std::thread::sleep(Duration::from_millis(10));

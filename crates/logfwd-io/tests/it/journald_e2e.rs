@@ -96,7 +96,7 @@ fn poll_until_lines(
     let text = String::from_utf8_lossy(&raw);
     text.lines()
         .filter(|l| !l.is_empty())
-        .map(std::string::ToString::to_string)
+        .map(ToString::to_string)
         .collect()
 }
 
@@ -125,7 +125,7 @@ fn poll_until_match(input: &mut dyn InputSource, needle: &str, timeout: Duration
             return text
                 .lines()
                 .filter(|l| !l.is_empty())
-                .map(std::string::ToString::to_string)
+                .map(ToString::to_string)
                 .collect();
         }
         std::thread::sleep(Duration::from_millis(100));
@@ -133,7 +133,7 @@ fn poll_until_match(input: &mut dyn InputSource, needle: &str, timeout: Duration
     let text = String::from_utf8_lossy(&all_bytes);
     text.lines()
         .filter(|l| !l.is_empty())
-        .map(std::string::ToString::to_string)
+        .map(ToString::to_string)
         .collect()
 }
 

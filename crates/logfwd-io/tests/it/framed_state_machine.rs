@@ -23,6 +23,7 @@ use std::sync::Arc;
 use proptest::prelude::*;
 use proptest_state_machine::{ReferenceStateMachine, StateMachineTest, prop_state_machine};
 
+use bytes::Bytes;
 use logfwd_io::format::FormatDecoder;
 use logfwd_io::input::{InputEvent, InputSource};
 use logfwd_types::diagnostics::{ComponentHealth, ComponentStats};
@@ -309,7 +310,7 @@ impl StateMachineTest for FramedTest {
                 }
 
                 let events = sut.push_and_poll(InputEvent::Data {
-                    bytes,
+                    bytes: Bytes::from(bytes),
                     source_id: Some(source),
                     accounted_bytes: n as u64,
                     cri_metadata: None,

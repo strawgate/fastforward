@@ -6,6 +6,7 @@ use std::net::{SocketAddr, UdpSocket};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use bytes::Bytes;
 use logfwd_types::diagnostics::ComponentHealth;
 use logfwd_types::pipeline::SourceId;
 use socket2::{Domain, Protocol, Socket, Type};
@@ -70,7 +71,7 @@ fn flush_current_sender(
         && !bytes.is_empty()
     {
         events.push(InputEvent::Data {
-            bytes,
+            bytes: Bytes::from(bytes),
             source_id: Some(source_id),
             accounted_bytes,
             cri_metadata: None,
