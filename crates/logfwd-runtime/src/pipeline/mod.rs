@@ -203,6 +203,7 @@ impl Pipeline {
     /// Replace the output sink with an async sink implementation.
     ///
     /// Wraps the sink in a single-worker pool via [`OnceAsyncFactory`].
+    #[must_use]
     pub fn with_sink(mut self, sink: Box<dyn logfwd_output::Sink>) -> Self {
         let name = self.name.clone();
         let factory = Arc::new(OnceAsyncFactory::new(name, sink));
@@ -214,6 +215,7 @@ impl Pipeline {
     ///
     /// Each new input gets its own passthrough `Scanner + SqlTransform` pair
     /// (`SELECT * FROM logs`) to keep `input_transforms` in sync with `inputs`.
+    #[must_use]
     pub fn with_input(mut self, name: &str, source: Box<dyn InputSource>) -> Self {
         let stats = Arc::new(ComponentStats::new_with_health(ComponentHealth::Starting));
         self.inputs.push(InputState {
@@ -239,6 +241,7 @@ impl Pipeline {
     }
 
     /// Replace the checkpoint store. Useful for injecting an in-memory store in tests.
+    #[must_use]
     pub fn with_checkpoint_store(mut self, store: Box<dyn CheckpointStore>) -> Self {
         self.checkpoint_store = Some(store);
         self
@@ -251,6 +254,7 @@ impl Pipeline {
     /// Panics if `processor.is_stateful()` returns `true`. Stateful processors
     /// require deferred-ACK checkpointing support that is not yet implemented
     /// (tracked in #1404). Register only stateless processors until then.
+    #[must_use]
     pub fn with_processor(mut self, processor: Box<dyn Processor>) -> Self {
         assert!(
             !processor.is_stateful(),
@@ -269,6 +273,7 @@ impl Pipeline {
     ///
     /// Panics if any processor in `processors` returns `is_stateful() == true`.
     /// See [`with_processor`](Self::with_processor) for details.
+    #[must_use]
     pub fn with_processors(mut self, processors: Vec<Box<dyn Processor>>) -> Self {
         for p in &processors {
             assert!(
