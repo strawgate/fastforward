@@ -114,7 +114,7 @@ impl Pipeline {
                                 }
                             };
 
-                        if let Some(interval_secs) = geo_cfg.refresh_interval.map(|s| s.get()) {
+                        if let Some(interval_secs) = geo_cfg.refresh_interval.map(logfwd_config::PositiveSecs::get) {
                             let reloadable = Arc::new(
                                 crate::transform::enrichment::ReloadableGeoDb::new(initial_db),
                             );
@@ -221,7 +221,7 @@ impl Pipeline {
                         table
                             .reload()
                             .map_err(|e| format!("enrichment '{}': {e}", cfg.table_name))?;
-                        if let Some(interval_secs) = cfg.refresh_interval.map(|s| s.get()) {
+                        if let Some(interval_secs) = cfg.refresh_interval.map(logfwd_config::PositiveSecs::get) {
                             let t = Arc::clone(&table);
                             let name = cfg.table_name.clone();
                             if let Ok(handle) = tokio::runtime::Handle::try_current() {
@@ -273,7 +273,7 @@ impl Pipeline {
                         table
                             .reload()
                             .map_err(|e| format!("enrichment '{}': {e}", cfg.table_name))?;
-                        if let Some(interval_secs) = cfg.refresh_interval.map(|s| s.get()) {
+                        if let Some(interval_secs) = cfg.refresh_interval.map(logfwd_config::PositiveSecs::get) {
                             let t = Arc::clone(&table);
                             let name = cfg.table_name.clone();
                             if let Ok(handle) = tokio::runtime::Handle::try_current() {
@@ -338,7 +338,7 @@ impl Pipeline {
                         table
                             .reload()
                             .map_err(|e| format!("enrichment '{}': {e}", cfg.table_name))?;
-                        if let Some(interval_secs) = cfg.refresh_interval.map(|s| s.get()) {
+                        if let Some(interval_secs) = cfg.refresh_interval.map(logfwd_config::PositiveSecs::get) {
                             let t = Arc::clone(&table);
                             let name = cfg.table_name.clone();
                             if let Ok(handle) = tokio::runtime::Handle::try_current() {
