@@ -182,7 +182,15 @@ def find_violations_in_file(path: Path, is_all_test: bool) -> list[str]:
 
         if pending_test_attr and opens_scope:
             test_scope_stack.append(depth)
-        pending_test_attr = False
+
+        # A test attribute can sit above a signature that rustfmt wraps
+        # across multiple lines (e.g., `#[tokio::test]\nasync fn foo(\n
+        # args,\n) -> Result<…> {`). Keep the pending flag alive across
+        # continuation lines and only clear it when the declaration
+        # terminates (`{` opens the scope, or `;` ends a non-scope item
+        # such as a trait-method signature or an extern `mod foo;`).
+        if pending_test_attr and ("{" in stripped_line or ";" in stripped_line):
+            pending_test_attr = False
 
         depth += opens
 
