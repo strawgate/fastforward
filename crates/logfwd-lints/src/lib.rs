@@ -5,12 +5,13 @@
 //! - `hot_path_no_alloc` — flags heap allocations inside functions marked
 //!   with `#[logfwd_lint_attrs::hot_path]`. Catches `Box::new`,
 //!   `Vec::new`/`with_capacity`, `String::from`/`new`, `.to_string()`,
-//!   `.to_vec()`, `.to_owned()`, `.clone()` on common heap types,
+//!   `.to_vec()`, `.to_owned()`, `.clone()` on heap types (excluding
+//!   `Arc`/`Rc` whose clone is a refcount bump),
 //!   `.collect::<Vec<_>>()`/`.collect::<String>()`, `format!`, `vec![]`,
 //!   `Arc::new`, `Rc::new`.
 //!
-//! Invoked via `cargo dylint --all` once the workspace registers this
-//! library (see `just dylint`).
+//! Invoke via `just dylint` (which runs
+//! `cargo dylint --path crates/logfwd-lints -- --workspace`).
 //!
 //! Implementation lives at the HIR level so macro expansions (`format!`,
 //! `vec![]`) and method calls that resolve to heap types are caught.
@@ -86,6 +87,8 @@ const ALLOC_FN_PATHS: &[&[&str]] = &[
     &["std", "collections", "hash", "map", "HashMap", "with_capacity"],
     &["std", "collections", "hash", "set", "HashSet", "new"],
     &["std", "collections", "hash", "set", "HashSet", "with_capacity"],
+    &["alloc", "fmt", "format"],
+    &["core", "fmt", "format"],
 ];
 
 /// Method-name allocation tells: any receiver plus one of these method
@@ -176,17 +179,18 @@ impl<'a, 'tcx> Visitor<'tcx> for AllocVisitor<'a, 'tcx> {
 fn describe_alloc<'tcx>(cx: &LateContext<'tcx>, expr: &Expr<'tcx>) -> Option<String> {
     match &expr.kind {
         ExprKind::Call(callee, _) => resolved_path_matches_alloc(cx, callee),
-        ExprKind::MethodCall(path, _receiver, _args, _span) => {
+        ExprKind::MethodCall(path, receiver, _args, _span) => {
             let name = path.ident.name.as_str();
             if ALLOC_METHOD_NAMES.contains(&name) {
                 return Some(format!("method `.{name}()`"));
             }
             if name == "clone" {
                 // .clone() is only an allocation when the receiver type is
-                // actually heap-backed. We conservatively report for String,
-                // Vec, Box, Arc, Rc, and types containing them.
-                let receiver_ty = cx.typeck_results().expr_ty(expr);
-                if type_is_heap(cx, receiver_ty) {
+                // actually heap-backed. We check the receiver (not the
+                // return type) and exclude Arc/Rc since their clone is a
+                // cheap refcount bump, not a heap allocation.
+                let receiver_ty = cx.typeck_results().expr_ty(receiver);
+                if type_is_heap_cloneable(cx, receiver_ty) {
                     return Some(format!(
                         "`.clone()` on heap type `{}`",
                         receiver_ty
@@ -238,6 +242,9 @@ fn path_matches(actual: &[Symbol], expected: &[&str]) -> bool {
 
 /// Conservative heap-type classifier: returns true for `String`, `Vec<_>`,
 /// `Box<_>`, `Arc<_>`, `Rc<_>`, and `HashMap<_,_>` / `HashSet<_>`.
+///
+/// Note: this checks the outermost type only, not nested fields. A
+/// wrapper struct containing a `Vec` will not be detected.
 fn type_is_heap<'tcx>(cx: &LateContext<'tcx>, ty: Ty<'tcx>) -> bool {
     use rustc_middle::ty::TyKind;
     match ty.kind() {
@@ -259,11 +266,35 @@ fn type_is_heap<'tcx>(cx: &LateContext<'tcx>, ty: Ty<'tcx>) -> bool {
     }
 }
 
-// UI tests are set up in `ui/hot_path_no_alloc.rs`. To enable them, add
-// expected-output `ui/hot_path_no_alloc.stderr` via:
-//   BLESS=1 cargo test --manifest-path crates/logfwd-lints/Cargo.toml
-// and uncomment the `ui` test below. Left disabled for now so the crate
-// builds hermetically in CI without requiring a blessed fixture.
+/// Like [`type_is_heap`] but excludes `Arc` and `Rc` — their `clone()`
+/// is a cheap refcount increment, not a heap allocation.
+fn type_is_heap_cloneable<'tcx>(cx: &LateContext<'tcx>, ty: Ty<'tcx>) -> bool {
+    use rustc_middle::ty::TyKind;
+    match ty.kind() {
+        TyKind::Adt(adt, _) => {
+            let path = cx.get_def_path(adt.did());
+            let lang = path.iter().map(Symbol::as_str).collect::<Vec<_>>();
+            matches!(
+                lang.as_slice(),
+                ["alloc", "string", "String"]
+                    | ["alloc", "vec", "Vec"]
+                    | ["alloc", "boxed", "Box"]
+                    | ["std", "collections", "hash", "map", "HashMap"]
+                    | ["std", "collections", "hash", "set", "HashSet"]
+            )
+        }
+        _ => false,
+    }
+}
+
+// UI tests are set up in `ui/hot_path_no_alloc.rs`. To enable them:
+// 1. Bless the expected-output fixture:
+//      cd crates/logfwd-lints && BLESS=1 cargo test
+// 2. Check in the resulting `ui/hot_path_no_alloc.stderr`.
+// 3. Uncomment the `ui` test below.
+//
+// Left disabled until the blessed fixture is committed — running
+// `dylint_testing::ui_test` without it fails immediately.
 //
 // #[test]
 // fn ui() {

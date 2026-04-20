@@ -1,9 +1,10 @@
 //! Attribute macros that tag functions for semantic lints.
 //!
-//! Each attribute is a compile-time no-op: it returns its input token
-//! stream unchanged. The dylint lint library (`crates/logfwd-lints/`)
-//! inspects the attributes post-expansion to enforce the invariant they
-//! assert.
+//! Each attribute is a compile-time marker for the dylint lint library
+//! (`crates/logfwd-lints/`). The macros may attach hidden metadata so
+//! the lint can find annotated items after macro expansion, but they
+//! have no runtime or codegen effect and do not change function
+//! behavior.
 //!
 //! # Available attributes
 //!
@@ -29,10 +30,11 @@ use proc_macro::TokenStream;
 /// The `hot_path_no_alloc` dylint lint flags any heap allocation inside
 /// a function carrying this attribute. See crate-level docs.
 ///
-/// The macro prepends a hidden doc attribute
-/// `#[doc = "__logfwd_hot_path__"]` so the lint can find the function
-/// after macro expansion. At runtime the function behaves identically
-/// to the un-annotated version; the doc attribute has no codegen effect.
+/// The macro prepends a `#[doc = "__logfwd_hot_path__"]` marker so the
+/// lint can find the function after macro expansion. At runtime the
+/// function behaves identically to the un-annotated version; the doc
+/// attribute has no codegen effect. Note: the marker string may appear
+/// in rustdoc output for public items.
 #[proc_macro_attribute]
 pub fn hot_path(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let marker: TokenStream = "#[doc = \"__logfwd_hot_path__\"]"
