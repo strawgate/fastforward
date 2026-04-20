@@ -20,8 +20,7 @@ pub use serde_helpers::{PositiveMillis, PositiveSecs};
 #[cfg(test)]
 pub(crate) use env::expand_env_vars;
 pub use shared::{
-    BatchConfig, Compression, NetworkConfig, RetryConfig, TlsClientConfig, TlsInputConfig,
-    TlsServerConfig,
+    BatchConfig, Compression, NetworkConfig, RetryConfig, TlsClientConfig, TlsServerConfig,
 };
 pub use types::{
     ArrowIpcOutputConfig, ArrowIpcTypeConfig, AuthConfig, CompressionFormat, Config, ConfigError,
@@ -33,7 +32,7 @@ pub use types::{
     HttpTypeConfig, InputConfig, InputType, InputTypeConfig, JournaldBackendConfig,
     JournaldInputConfig, JournaldTypeConfig, JsonlEnrichmentConfig, K8sPathConfig,
     LokiOutputConfig, NullOutputConfig, OtlpOutputConfig, OtlpProtobufDecodeModeConfig,
-    OtlpProtocol, OtlpTypeConfig, OutputConfig, OutputConfigV1, OutputConfigV2, OutputType,
+    OtlpProtocol, OtlpTypeConfig, OutputConfig, OutputConfigV2, OutputType,
     ParquetOutputConfig, PipelineConfig, S3InputConfig, S3TypeConfig, SensorTypeConfig,
     ServerConfig, SocketOutputConfig, SourceMetadataStyle, StaticEnrichmentConfig,
     StdoutOutputConfig, StorageConfig, TcpTypeConfig, UdpTypeConfig,
@@ -521,9 +520,9 @@ output:
     fn validation_unimplemented_output_type() {
         // Each placeholder type should be caught by Config::validate() before
         // pipeline construction, not silently accepted.
-        for otype in ["parquet", "http"] {
+        for (otype, extra) in [("parquet", "path: /tmp/x"), ("http", "endpoint: http://x")] {
             let yaml = format!(
-                "input:\n  type: file\n  path: /tmp/x.log\noutput:\n  type: {otype}\n  endpoint: http://x\n  path: /tmp/x\n"
+                "input:\n  type: file\n  path: /tmp/x.log\noutput:\n  type: {otype}\n  {extra}\n"
             );
             let result = Config::load_str(&yaml);
             assert!(
@@ -595,9 +594,9 @@ output:
         }
 
         // Placeholder output types must be rejected at validation time.
-        for otype in ["parquet", "http"] {
+        for (otype, extra) in [("parquet", "path: /tmp/x"), ("http", "endpoint: http://x")] {
             let yaml = format!(
-                "input:\n  type: file\n  path: /tmp/x.log\noutput:\n  type: {otype}\n  endpoint: http://x\n  path: /tmp/x\n"
+                "input:\n  type: file\n  path: /tmp/x.log\noutput:\n  type: {otype}\n  {extra}\n"
             );
             let result = Config::load_str(&yaml);
             assert!(
@@ -713,7 +712,10 @@ pipelines:
         let yaml = "input:\n  type: file\n  path: /tmp/x.log\noutput:\n  type: file\n  path: /tmp/out.ndjson\n  compression: zstd\n";
         let err = Config::load_str(yaml).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("'compression' is not supported"));
+        assert!(
+            msg.contains("unknown field `compression`"),
+            "file output should reject compression at parse time: {msg}"
+        );
     }
 
     #[test]
@@ -722,8 +724,8 @@ pipelines:
         let err = Config::load_str(yaml).unwrap_err();
         let msg = err.to_string();
         assert!(
-            msg.contains("'compression' is not supported for loki outputs"),
-            "unexpected: {msg}"
+            msg.contains("unknown field `compression`"),
+            "loki output should reject compression at parse time: {msg}"
         );
     }
 
@@ -1317,7 +1319,10 @@ output:
   request_mode: streaming
 ";
         let err = Config::load_str(yaml).expect_err("request_mode should be es-only");
-        assert!(err.to_string().contains("only supported for elasticsearch"));
+        assert!(
+            err.to_string().contains("unknown field `request_mode`"),
+            "otlp output should reject request_mode at parse time: {err}"
+        );
     }
 
     #[test]
@@ -1536,7 +1541,7 @@ pipelines:
         let err = Config::load_str(yaml).unwrap_err();
         let msg = err.to_string();
         assert!(
-            msg.contains("invalid output config") && msg.contains("missing field `type`"),
+            msg.contains("invalid output config") && msg.contains(r#""type""#),
             "missing output type must fail clearly: {msg}"
         );
     }
@@ -2924,12 +2929,8 @@ pipelines:
 "#;
         let err = Config::load_str(yaml).unwrap_err();
         assert!(
-            err.to_string().contains("tenant_id"),
-            "expected tenant_id rejection: {err}"
-        );
-        assert!(
-            err.to_string().contains("only supported for loki"),
-            "expected loki-only message: {err}"
+            err.to_string().contains("unknown field `tenant_id`"),
+            "stdout output should reject tenant_id at parse time: {err}"
         );
     }
 
@@ -2948,12 +2949,8 @@ pipelines:
 "#;
         let err = Config::load_str(yaml).unwrap_err();
         assert!(
-            err.to_string().contains("static_labels"),
-            "expected static_labels rejection: {err}"
-        );
-        assert!(
-            err.to_string().contains("only supported for loki"),
-            "expected loki-only message: {err}"
+            err.to_string().contains("unknown field `static_labels`"),
+            "stdout output should reject static_labels at parse time: {err}"
         );
     }
 
@@ -3016,12 +3013,8 @@ pipelines:
 "#;
         let err = Config::load_str(yaml).unwrap_err();
         assert!(
-            err.to_string().contains("label_columns"),
-            "expected label_columns rejection: {err}"
-        );
-        assert!(
-            err.to_string().contains("only supported for loki"),
-            "expected loki-only message: {err}"
+            err.to_string().contains("unknown field `label_columns`"),
+            "stdout output should reject label_columns at parse time: {err}"
         );
     }
 
@@ -3194,39 +3187,6 @@ format: json
     }
 
     #[test]
-    fn output_config_legacy_fallback_preserves_existing_flat_shape() {
-        let yaml = r"
-type: otlp
-endpoint: http://localhost:4318/v1/logs
-format: json
-";
-
-        let output = serde_yaml_ng::from_str::<OutputConfig>(yaml).unwrap();
-        assert_eq!(output.output_type, OutputType::Otlp);
-        assert_eq!(
-            output.endpoint.as_deref(),
-            Some("http://localhost:4318/v1/logs")
-        );
-        assert_eq!(output.format, Some(Format::Json));
-    }
-
-    #[test]
-    fn output_config_v2_from_legacy_preserves_elasticsearch_path_alias() {
-        let output = OutputConfig {
-            output_type: OutputType::Elasticsearch,
-            endpoint: Some("http://localhost:9200".to_string()),
-            path: Some("legacy-index".to_string()),
-            ..Default::default()
-        };
-
-        let v2 = OutputConfigV2::from(&output);
-        let OutputConfigV2::Elasticsearch(elasticsearch) = v2 else {
-            panic!("expected elasticsearch v2 output config");
-        };
-        assert_eq!(elasticsearch.index.as_deref(), Some("legacy-index"));
-    }
-
-    #[test]
     fn output_config_v2_variants_normalize_to_output_types() {
         let cases = [
             (
@@ -3289,14 +3249,10 @@ format: json
                 let v2 = OutputConfigV2::deserialize(output_value.clone()).unwrap_or_else(|err| {
                     panic!("{} output should parse as v2: {err}", path.display())
                 });
-                let compat =
-                    OutputConfig::deserialize(output_value.clone()).unwrap_or_else(|err| {
-                        panic!(
-                            "{} output should parse through compatibility layer: {err}",
-                            path.display()
-                        )
-                    });
-                assert_eq!(OutputConfig::from(v2), compat, "{}", path.display());
+                let flat = OutputConfig::deserialize(output_value.clone()).unwrap_or_else(|err| {
+                    panic!("{} output should normalize to flat shape: {err}", path.display())
+                });
+                assert_eq!(OutputConfig::from(v2), flat, "{}", path.display());
                 checked += 1;
             }
         }

@@ -2693,7 +2693,10 @@ pipelines:
         retry_attempts: 3
 "#;
         let err = Config::load_str(yaml).unwrap_err().to_string();
-        assert!(err.contains("'retry_attempts' is only supported for otlp outputs"));
+        assert!(
+            err.contains("unknown field `retry_attempts`"),
+            "stdout output should reject retry_attempts at parse time: {err}"
+        );
     }
 
     #[test]
