@@ -1,5 +1,4 @@
 use super::*;
-use crate::factory::build_sink_factory;
 use arrow::array::{Float64Array, Int64Array, StringArray};
 use arrow::datatypes::DataType;
 use arrow::datatypes::{Field, Schema};

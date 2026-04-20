@@ -2,9 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-#[cfg(test)]
-use logfwd_config::OutputConfig;
-use logfwd_config::{Format, OutputConfigV2, TlsClientConfig};
+use logfwd_config::{Format, OutputConfig, OutputConfigV2, OutputType, TlsClientConfig};
 use logfwd_types::diagnostics::ComponentStats;
 
 use crate::arrow_ipc_sink::ArrowIpcSinkFactory;
@@ -28,7 +26,7 @@ fn build_http_client_builder(
     request_timeout_ms: Option<logfwd_config::PositiveMillis>,
 ) -> Result<reqwest::ClientBuilder, OutputError> {
     let mut client_builder = reqwest::Client::builder()
-        .timeout(request_timeout_ms.map_or(Duration::from_secs(30), Into::into))
+        .timeout(request_timeout_ms.map_or(Duration::from_millis(30_000), Into::into))
         .pool_max_idle_per_host(64);
 
     if let Some(tls) = tls {
@@ -87,14 +85,13 @@ fn read_tls_file(name: &str, field: &str, path: &str) -> Result<Vec<u8>, OutputE
 ///
 /// Returns a factory that creates a fresh sink per worker. Most sink types
 /// support multiple workers; the factory can be called repeatedly.
-#[cfg(test)]
-pub(crate) fn build_sink_factory(
+pub fn build_sink_factory(
     name: &str,
     cfg: &OutputConfig,
     base_path: Option<&Path>,
     stats: Arc<ComponentStats>,
 ) -> Result<Arc<dyn SinkFactory>, OutputError> {
-    if cfg.output_type == logfwd_config::OutputType::File
+    if cfg.output_type == OutputType::File
         && let Some(compression) = cfg.compression.as_deref()
     {
         return Err(OutputError::Construction(format!(
