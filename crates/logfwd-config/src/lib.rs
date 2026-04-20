@@ -1050,21 +1050,35 @@ output:
     }
 
     #[test]
-    fn linux_sensor_rejects_whitespace_event_type_filter() {
+    fn linux_sensor_trims_whitespace_padded_event_types() {
         let yaml = r#"
 input:
   type: linux_ebpf_sensor
   sensor:
-    include_event_types: [" exec"]
+    include_event_types: [" exec ", "  tcp_connect"]
+    exclude_event_types: ["exit  "]
 output:
   type: stdout
 "#;
-        let err = Config::load_str(yaml).unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("has leading or trailing whitespace"),
-            "unexpected error: {err}"
-        );
+        let cfg = Config::load_str(yaml).expect("padded event types should validate");
+        let pipeline = cfg.pipelines.values().next().unwrap();
+        let input = &pipeline.inputs[0];
+        match &input.type_config {
+            crate::InputTypeConfig::LinuxEbpfSensor(s) => {
+                let sensor = s.sensor.as_ref().unwrap();
+                assert_eq!(
+                    sensor.include_event_types.as_ref().unwrap(),
+                    &["exec", "tcp_connect"],
+                    "include_event_types should be trimmed"
+                );
+                assert_eq!(
+                    sensor.exclude_event_types.as_ref().unwrap(),
+                    &["exit"],
+                    "exclude_event_types should be trimmed"
+                );
+            }
+            _ => panic!("expected LinuxEbpfSensor variant"),
+        }
     }
 
     #[test]
