@@ -279,7 +279,9 @@ mod tests {
         type Error = &'static str;
 
         fn process(&mut self, job: Self::Job) -> Result<Self::Output, Self::Error> {
-            assert!(job != usize::MAX, "forced panic");
+            if job == usize::MAX {
+                panic!("forced panic");
+            }
             if job == usize::MAX - 1 {
                 return Err("forced worker error");
             }
