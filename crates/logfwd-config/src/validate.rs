@@ -122,7 +122,7 @@ impl Config {
 
                 let mut seen_output_names: HashSet<&str> = HashSet::new();
                 for (i, output) in pipe.outputs.iter().enumerate() {
-                    if let Some(output_name) = output.name.as_deref()
+                    if let Some(output_name) = output.name()
                         && !seen_output_names.insert(output_name)
                     {
                         return Err(ConfigError::Validation(format!(
@@ -660,6 +660,7 @@ impl Config {
                 }
 
                 for (i, output) in pipe.outputs.iter().enumerate() {
+                    let output = output.validation_config();
                     let label = output
                         .name
                         .as_deref()
@@ -1152,6 +1153,7 @@ impl Config {
                 }
 
                 for (j, output) in pipe.outputs.iter().enumerate() {
+                    let output = output.validation_config();
                     let out_label = output
                         .name
                         .as_deref()
