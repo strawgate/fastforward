@@ -883,8 +883,6 @@ pub struct OutputConfig {
     pub host: Option<String>,
     /// Port for socket-based IPC.
     pub port: Option<u16>,
-    /// Write the legacy IPC format (default: false).
-    pub write_legacy_ipc_format: Option<bool>,
     /// Buffer size for the IPC writer in bytes.
     pub buffer_size_bytes: Option<usize>,
     /// Whether to write the schema immediately upon connection.
@@ -982,7 +980,6 @@ impl From<&OutputConfig> for OutputConfigV2 {
                 auth: config.auth.clone(),
                 host: config.host.clone(),
                 port: config.port,
-                write_legacy_ipc_format: config.write_legacy_ipc_format,
                 buffer_size_bytes: config.buffer_size_bytes,
                 batch_size: config.batch_size,
                 write_schema_on_connect: config.write_schema_on_connect,
@@ -1417,8 +1414,6 @@ pub struct ArrowIpcOutputConfig {
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
     pub port: Option<u16>,
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
-    pub write_legacy_ipc_format: Option<bool>,
-    #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
     pub buffer_size_bytes: Option<usize>,
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
     pub batch_size: Option<usize>,
@@ -1436,7 +1431,6 @@ impl ArrowIpcOutputConfig {
             auth: self.auth,
             host: self.host,
             port: self.port,
-            write_legacy_ipc_format: self.write_legacy_ipc_format,
             buffer_size_bytes: self.buffer_size_bytes,
             batch_size: self.batch_size,
             write_schema_on_connect: self.write_schema_on_connect,

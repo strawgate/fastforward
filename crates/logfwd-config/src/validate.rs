@@ -1117,11 +1117,6 @@ impl Config {
                                 "pipeline '{name}' output '{label}': 'port' is only supported for arrow_ipc outputs"
                             )));
                         }
-                        if output.write_legacy_ipc_format.is_some() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{name}' output '{label}': 'write_legacy_ipc_format' is only supported for arrow_ipc outputs"
-                            )));
-                        }
                         if output.buffer_size_bytes.is_some() {
                             return Err(ConfigError::Validation(format!(
                                 "pipeline '{name}' output '{label}': 'buffer_size_bytes' is only supported for arrow_ipc outputs"
