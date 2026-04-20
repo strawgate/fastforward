@@ -467,7 +467,7 @@ impl ElasticsearchSink {
     /// Base delay between internal split-half retries (doubles each attempt).
     const SPLIT_RETRY_BASE_DELAY: Duration = Duration::from_millis(250);
 
-    /// Retry a failed split half internally up to [`SPLIT_INTERNAL_RETRIES`]
+    /// Retry a failed split half internally up to `SPLIT_INTERNAL_RETRIES`
     /// times with exponential backoff. Used when the other half already
     /// succeeded, so we cannot let the worker pool retry the full batch.
     async fn retry_split_half(
@@ -503,7 +503,7 @@ impl ElasticsearchSink {
     /// **Duplication safety (#1873):** Both halves are always attempted
     /// regardless of individual outcomes. When one half succeeds but the
     /// other fails with a transient error, the failed half is retried
-    /// internally (up to [`SPLIT_INTERNAL_RETRIES`] times) rather than
+    /// internally (up to `SPLIT_INTERNAL_RETRIES` times) rather than
     /// propagating a retryable result to the worker pool — which would
     /// retry the entire original batch and duplicate the successful half.
     async fn send_split_halves(
