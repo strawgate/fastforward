@@ -24,16 +24,17 @@ pub use shared::{
     TlsServerConfig,
 };
 pub use types::{
-    ArrowIpcOutputConfig, ArrowIpcTypeConfig, AuthConfig, Config, ConfigError, CsvEnrichmentConfig,
-    ElasticsearchOutputConfig, EnrichmentConfig, FileOutputConfig, FileTypeConfig, Format,
-    GeneratorAttributeValueConfig, GeneratorComplexityConfig, GeneratorInputConfig,
-    GeneratorProfileConfig, GeneratorSequenceConfig, GeneratorTypeConfig, GeoDatabaseConfig,
-    GeoDatabaseFormat, HostInfoConfig, HostMetricsInputConfig, HttpInputConfig, HttpMethodConfig,
-    HttpOutputConfig, HttpTypeConfig, InputConfig, InputType, InputTypeConfig,
-    JournaldBackendConfig, JournaldInputConfig, JournaldTypeConfig, JsonlEnrichmentConfig,
-    K8sPathConfig, LokiOutputConfig, NullOutputConfig, OtlpOutputConfig,
-    OtlpProtobufDecodeModeConfig, OtlpTypeConfig, OutputConfig, OutputConfigV1, OutputConfigV2,
-    OutputType, ParquetOutputConfig, PipelineConfig, S3InputConfig, S3TypeConfig, SensorTypeConfig,
+    ArrowIpcOutputConfig, ArrowIpcTypeConfig, AuthConfig, CompressionFormat, Config, ConfigError,
+    CsvEnrichmentConfig, ElasticsearchOutputConfig, ElasticsearchRequestMode, EnrichmentConfig,
+    FileOutputConfig, FileTypeConfig, Format, GeneratorAttributeValueConfig,
+    GeneratorComplexityConfig, GeneratorInputConfig, GeneratorProfileConfig,
+    GeneratorSequenceConfig, GeneratorTypeConfig, GeoDatabaseConfig, GeoDatabaseFormat,
+    HostInfoConfig, HostMetricsInputConfig, HttpInputConfig, HttpMethodConfig, HttpOutputConfig,
+    HttpTypeConfig, InputConfig, InputType, InputTypeConfig, JournaldBackendConfig,
+    JournaldInputConfig, JournaldTypeConfig, JsonlEnrichmentConfig, K8sPathConfig,
+    LokiOutputConfig, NullOutputConfig, OtlpOutputConfig, OtlpProtobufDecodeModeConfig,
+    OtlpProtocol, OtlpTypeConfig, OutputConfig, OutputConfigV1, OutputConfigV2, OutputType,
+    ParquetOutputConfig, PipelineConfig, S3InputConfig, S3TypeConfig, SensorTypeConfig,
     ServerConfig, SocketOutputConfig, StaticEnrichmentConfig, StdoutOutputConfig, StorageConfig,
     TcpTypeConfig, UdpTypeConfig,
 };
@@ -1017,6 +1018,107 @@ output:
     }
 
     #[test]
+    fn linux_sensor_accepts_event_type_filters() {
+        let yaml = r"
+input:
+  type: linux_ebpf_sensor
+  sensor:
+    include_event_types: [exec, tcp_connect]
+    exclude_event_types: [tcp_accept]
+output:
+  type: stdout
+";
+        Config::load_str(yaml).expect("known linux sensor event types should validate");
+    }
+
+    #[test]
+    fn linux_sensor_rejects_unknown_event_type_filter() {
+        let yaml = r"
+input:
+  type: linux_ebpf_sensor
+  sensor:
+    include_event_types: [process_exec]
+output:
+  type: stdout
+";
+        let err = Config::load_str(yaml).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("unknown sensor event type 'process_exec'"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn linux_sensor_rejects_blank_event_type_filter() {
+        let yaml = r#"
+input:
+  type: linux_ebpf_sensor
+  sensor:
+    exclude_event_types: ["  "]
+output:
+  type: stdout
+"#;
+        let err = Config::load_str(yaml).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("sensor.exclude_event_types entries must not be empty"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn linux_sensor_trims_whitespace_padded_event_types() {
+        let yaml = r#"
+input:
+  type: linux_ebpf_sensor
+  sensor:
+    include_event_types: [" exec ", "  tcp_connect"]
+    exclude_event_types: ["exit  "]
+output:
+  type: stdout
+"#;
+        let cfg = Config::load_str(yaml).expect("padded event types should validate");
+        let pipeline = cfg.pipelines.values().next().unwrap();
+        let input = &pipeline.inputs[0];
+        match &input.type_config {
+            crate::InputTypeConfig::LinuxEbpfSensor(s) => {
+                let sensor = s.sensor.as_ref().unwrap();
+                assert_eq!(
+                    sensor.include_event_types.as_ref().unwrap(),
+                    &["exec", "tcp_connect"],
+                    "include_event_types should be trimmed"
+                );
+                assert_eq!(
+                    sensor.exclude_event_types.as_ref().unwrap(),
+                    &["exit"],
+                    "exclude_event_types should be trimmed"
+                );
+            }
+            _ => panic!("expected LinuxEbpfSensor variant"),
+        }
+    }
+
+    #[test]
+    fn host_metrics_rejects_event_type_filters() {
+        let yaml = r"
+input:
+  type: host_metrics
+  sensor:
+    include_event_types: [exec]
+output:
+  type: stdout
+";
+        let err = Config::load_str(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains(
+                "sensor.include_event_types and sensor.exclude_event_types are only supported for linux_ebpf_sensor inputs"
+            ),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
     fn auth_bearer_token() {
         let yaml = r#"
 input:
@@ -1118,8 +1220,8 @@ output:
         let cfg = Config::load_str(yaml).expect("streaming request_mode should validate");
         let pipe = &cfg.pipelines["default"];
         assert_eq!(
-            pipe.outputs[0].validation_config().request_mode.as_deref(),
-            Some("streaming")
+            pipe.outputs[0].validation_config().request_mode,
+            Some(ElasticsearchRequestMode::Streaming)
         );
     }
 
@@ -1135,7 +1237,11 @@ output:
   request_mode: fancy
 ";
         let err = Config::load_str(yaml).expect_err("invalid request_mode should fail");
-        assert!(err.to_string().contains("request_mode"));
+        let msg = err.to_string();
+        assert!(
+            msg.contains("fancy") && msg.contains("buffered") && msg.contains("streaming"),
+            "expected request_mode enum rejection: {msg}"
+        );
     }
 
     #[test]
@@ -2988,6 +3094,39 @@ format: json
             err.to_string().contains("format"),
             "strict v2 otlp config should reject format, got: {err}"
         );
+    }
+
+    #[test]
+    fn output_config_v2_rejects_invalid_enum_values_at_parse_time() {
+        let cases = [
+            (
+                "type: otlp\nendpoint: http://localhost:4318/v1/logs\nprotocol: websocket\n",
+                "websocket",
+                &["http", "grpc"][..],
+            ),
+            (
+                "type: otlp\nendpoint: http://localhost:4318/v1/logs\ncompression: lz4\n",
+                "lz4",
+                &["gzip", "zstd", "none"][..],
+            ),
+            (
+                "type: elasticsearch\nendpoint: http://localhost:9200\nrequest_mode: fancy\n",
+                "fancy",
+                &["buffered", "streaming"][..],
+            ),
+        ];
+
+        for (yaml, bad_value, expected_variants) in cases {
+            let err = serde_yaml_ng::from_str::<OutputConfigV2>(yaml).unwrap_err();
+            let msg = err.to_string();
+            assert!(
+                msg.contains(bad_value)
+                    && expected_variants
+                        .iter()
+                        .all(|variant| msg.contains(variant)),
+                "expected enum parse rejection mentioning {bad_value} and valid variants {expected_variants:?}: {msg}"
+            );
+        }
     }
 
     #[test]

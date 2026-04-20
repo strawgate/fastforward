@@ -1,7 +1,7 @@
 use crate::types::{
-    Config, ConfigError, EnrichmentConfig, Format, GeneratorAttributeValueConfig,
-    GeneratorProfileConfig, InputType, InputTypeConfig, JournaldBackendConfig, OutputType,
-    PIPELINE_WORKERS_MAX,
+    CompressionFormat, Config, ConfigError, ElasticsearchRequestMode, EnrichmentConfig, Format,
+    GeneratorAttributeValueConfig, GeneratorProfileConfig, InputType, InputTypeConfig,
+    JournaldBackendConfig, OutputType, PIPELINE_WORKERS_MAX,
 };
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
@@ -441,6 +441,15 @@ impl Config {
                                     }
                                 }
                             }
+                            if let Some(sensor) = s.sensor.as_ref() {
+                                validate_sensor_event_type_filters(
+                                    &input_type,
+                                    name,
+                                    &label,
+                                    sensor.include_event_types.as_deref(),
+                                    sensor.exclude_event_types.as_deref(),
+                                )?;
+                            }
                             // NOTE: ebpf_binary_path for linux_ebpf_sensor is validated
                             // at runtime when the sensor loads, not here — the path may
                             // be auto-discovered or provided via environment variable.
@@ -713,15 +722,10 @@ impl Config {
                                         "pipeline '{name}' output '{label}': elasticsearch index '{idx}' {reason}"
                                     )));
                                 }
-                                if let Some(mode) = output.request_mode.as_deref()
-                                    && !matches!(mode, "buffered" | "streaming")
-                                {
-                                    return Err(ConfigError::Validation(format!(
-                                        "pipeline '{name}' output '{label}': elasticsearch request_mode must be 'buffered' or 'streaming'"
-                                    )));
-                                }
-                                if output.request_mode.as_deref() == Some("streaming")
-                                    && output.compression.as_deref() == Some("gzip")
+                                if matches!(
+                                    output.request_mode,
+                                    Some(ElasticsearchRequestMode::Streaming)
+                                ) && matches!(output.compression, Some(CompressionFormat::Gzip))
                                 {
                                     return Err(ConfigError::Validation(format!(
                                         "pipeline '{name}' output '{label}': elasticsearch request_mode 'streaming' does not support gzip compression yet"
@@ -805,8 +809,8 @@ impl Config {
                         )));
                     }
                     if output.output_type == OutputType::ArrowIpc
-                        && let Some(c) = output.compression.as_deref()
-                        && !matches!(c, "zstd" | "none")
+                        && let Some(c) = output.compression
+                        && !matches!(c, CompressionFormat::Zstd | CompressionFormat::None)
                     {
                         return Err(ConfigError::Validation(format!(
                             "pipeline '{name}' output '{label}': arrow_ipc output only supports 'zstd' or 'none' compression, not '{c}'"
@@ -875,28 +879,20 @@ impl Config {
                             "pipeline '{name}' output '{label}': 'protocol' is only supported for otlp outputs"
                         )));
                     }
-                    // Validate OTLP protocol value (#1876).
-                    if output.output_type == OutputType::Otlp
-                        && let Some(p) = output.protocol.as_deref()
-                        && !matches!(p, "http" | "grpc")
-                    {
-                        return Err(ConfigError::Validation(format!(
-                            "pipeline '{name}' output '{label}': otlp protocol must be 'http' or 'grpc', got '{p}'"
-                        )));
-                    }
-                    // Validate compression values per output type (#1876).
-                    if let Some(c) = output.compression.as_deref() {
+                    // Validate compression values per output type.
+                    if let Some(c) = output.compression {
                         match output.output_type {
-                            OutputType::Otlp if !matches!(c, "zstd" | "gzip" | "none") => {
-                                return Err(ConfigError::Validation(format!(
-                                    "pipeline '{name}' output '{label}': otlp compression must be 'zstd', 'gzip', or 'none', got '{c}'"
-                                )));
-                            }
-                            OutputType::Elasticsearch if !matches!(c, "gzip" | "none") => {
+                            OutputType::Elasticsearch
+                                if !matches!(
+                                    c,
+                                    CompressionFormat::Gzip | CompressionFormat::None
+                                ) =>
+                            {
                                 return Err(ConfigError::Validation(format!(
                                     "pipeline '{name}' output '{label}': elasticsearch compression must be 'gzip' or 'none', got '{c}'"
                                 )));
                             }
+                            // OTLP accepts every `CompressionFormat` variant.
                             // ArrowIpc allows zstd/none and is validated above.
                             // Other types either reject compression entirely or accept any.
                             _ => {}
@@ -1492,6 +1488,88 @@ fn sensor_supported_families_csv(input_type: &InputType) -> &'static str {
 
 fn is_sensor_family_supported(input_type: &InputType, name: &str) -> bool {
     sensor_supported_families(input_type).contains(&name)
+}
+
+const PLATFORM_SENSOR_EVENT_TYPES: &[&str] = &[
+    "exec",
+    "exit",
+    "tcp_connect",
+    "tcp_accept",
+    "file_open",
+    "file_delete",
+    "file_rename",
+    "setuid",
+    "setgid",
+    "module_load",
+    "ptrace",
+    "memfd_create",
+    "dns_query",
+];
+
+const PLATFORM_SENSOR_EVENT_TYPES_CSV: &str = "exec,exit,tcp_connect,tcp_accept,file_open,file_delete,file_rename,setuid,setgid,module_load,ptrace,memfd_create,dns_query";
+
+fn validate_sensor_event_type_filters(
+    input_type: &InputType,
+    pipeline_name: &str,
+    input_label: &str,
+    include_event_types: Option<&[String]>,
+    exclude_event_types: Option<&[String]>,
+) -> Result<(), ConfigError> {
+    if include_event_types.is_none() && exclude_event_types.is_none() {
+        return Ok(());
+    }
+
+    if *input_type != InputType::LinuxEbpfSensor {
+        return Err(ConfigError::Validation(format!(
+            "pipeline '{pipeline_name}' input '{input_label}': sensor.include_event_types and sensor.exclude_event_types are only supported for linux_ebpf_sensor inputs"
+        )));
+    }
+
+    validate_sensor_event_type_list(
+        pipeline_name,
+        input_label,
+        "include_event_types",
+        include_event_types,
+    )?;
+    validate_sensor_event_type_list(
+        pipeline_name,
+        input_label,
+        "exclude_event_types",
+        exclude_event_types,
+    )?;
+    Ok(())
+}
+
+fn validate_sensor_event_type_list(
+    pipeline_name: &str,
+    input_label: &str,
+    field: &str,
+    event_types: Option<&[String]>,
+) -> Result<(), ConfigError> {
+    let Some(event_types) = event_types else {
+        return Ok(());
+    };
+
+    for event_type in event_types {
+        let normalized = event_type.trim();
+        if normalized.is_empty() {
+            return Err(ConfigError::Validation(format!(
+                "pipeline '{pipeline_name}' input '{input_label}': sensor.{field} entries must not be empty"
+            )));
+        }
+        if event_type != normalized {
+            return Err(ConfigError::Validation(format!(
+                "pipeline '{pipeline_name}' input '{input_label}': sensor.{field} entry '{event_type}' has leading or trailing whitespace"
+            )));
+        }
+        if !PLATFORM_SENSOR_EVENT_TYPES.contains(&normalized) {
+            return Err(ConfigError::Validation(format!(
+                "pipeline '{pipeline_name}' input '{input_label}': unknown sensor event type '{normalized}' for linux_ebpf_sensor input (supported: {PLATFORM_SENSOR_EVENT_TYPES_CSV})"
+            )));
+        }
+    }
+
+    Ok(())
 }
 
 /// Validate that a bind address is a parseable `host:port` socket address.
@@ -2340,7 +2418,7 @@ mod validate_otlp_protocol_compression_tests {
         let err = Config::load_str(yaml).unwrap_err();
         let msg = err.to_string();
         assert!(
-            msg.contains("protocol") && msg.contains("websocket"),
+            msg.contains("websocket") && msg.contains("http") && msg.contains("grpc"),
             "expected protocol rejection for 'websocket': {msg}"
         );
     }
@@ -2363,7 +2441,7 @@ mod validate_otlp_protocol_compression_tests {
         let err = Config::load_str(yaml).unwrap_err();
         let msg = err.to_string();
         assert!(
-            msg.contains("compression") && msg.contains("lz4"),
+            msg.contains("lz4") && msg.contains("zstd") && msg.contains("gzip"),
             "expected compression rejection for 'lz4': {msg}"
         );
     }
