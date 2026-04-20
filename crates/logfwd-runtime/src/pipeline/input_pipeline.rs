@@ -86,15 +86,23 @@ fn should_repoll_shutdown(events: &[InputEvent], is_finished: bool) -> bool {
     if is_finished || events.is_empty() {
         return false;
     }
-    // Keep repolling as long as data was produced and the source has not
-    // reported finished.  A batch may contain both data and EOF for
-    // different sub-sources (e.g., one caught-up file emitting EOF while
-    // another still has a budget-limited backlog), so the presence of EOF
-    // alone is not a reason to stop — the source's `is_finished` flag is
-    // the authoritative termination signal.
-    events
-        .iter()
-        .any(|event| matches!(event, InputEvent::Data { .. } | InputEvent::Batch { .. }))
+    events.iter().any(|event| {
+        let payload_source_id = match event {
+            InputEvent::Data { source_id, .. } | InputEvent::Batch { source_id, .. } => *source_id,
+            InputEvent::Rotated { .. }
+            | InputEvent::Truncated { .. }
+            | InputEvent::EndOfFile { .. } => {
+                return false;
+            }
+        };
+        !events.iter().any(|event| {
+            matches!(
+                event,
+                InputEvent::EndOfFile { source_id }
+                    if source_id.is_none() || *source_id == payload_source_id
+            )
+        })
+    })
 }
 
 /// Flush `buf` to the channel as an `IoWorkItem::Bytes` chunk.
@@ -1186,6 +1194,52 @@ mod tests {
     // --- InputPipelineManager integration tests ---
     // These test the full split pipeline via from_config + run, so they
     // don't need direct access to private types.
+
+    #[test]
+    fn shutdown_repoll_continues_for_payload_without_matching_eof() {
+        let events = vec![
+            InputEvent::Data {
+                bytes: b"a\n".to_vec(),
+                source_id: Some(SourceId(1)),
+                accounted_bytes: 2,
+            },
+            InputEvent::EndOfFile {
+                source_id: Some(SourceId(2)),
+            },
+        ];
+
+        assert!(should_repoll_shutdown(&events, false));
+    }
+
+    #[test]
+    fn shutdown_repoll_stops_when_payload_source_reaches_eof() {
+        let events = vec![
+            InputEvent::Data {
+                bytes: b"a\n".to_vec(),
+                source_id: Some(SourceId(1)),
+                accounted_bytes: 2,
+            },
+            InputEvent::EndOfFile {
+                source_id: Some(SourceId(1)),
+            },
+        ];
+
+        assert!(!should_repoll_shutdown(&events, false));
+    }
+
+    #[test]
+    fn shutdown_repoll_stops_on_global_eof() {
+        let events = vec![
+            InputEvent::Data {
+                bytes: b"a\n".to_vec(),
+                source_id: Some(SourceId(1)),
+                accounted_bytes: 2,
+            },
+            InputEvent::EndOfFile { source_id: None },
+        ];
+
+        assert!(!should_repoll_shutdown(&events, false));
+    }
 
     #[test]
     fn source_metadata_attach_adds_row_columns_after_scan() {

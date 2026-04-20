@@ -31,15 +31,23 @@ fn should_repoll_shutdown(events: &[InputEvent], is_finished: bool) -> bool {
     if is_finished || events.is_empty() {
         return false;
     }
-    // Keep repolling as long as data was produced and the source has not
-    // reported finished.  A batch may contain both data and EOF for
-    // different sub-sources (e.g., one caught-up file emitting EOF while
-    // another still has a budget-limited backlog), so the presence of EOF
-    // alone is not a reason to stop — the source's `is_finished` flag is
-    // the authoritative termination signal.
-    events
-        .iter()
-        .any(|event| matches!(event, InputEvent::Data { .. } | InputEvent::Batch { .. }))
+    events.iter().any(|event| {
+        let payload_source_id = match event {
+            InputEvent::Data { source_id, .. } | InputEvent::Batch { source_id, .. } => *source_id,
+            InputEvent::Rotated { .. }
+            | InputEvent::Truncated { .. }
+            | InputEvent::EndOfFile { .. } => {
+                return false;
+            }
+        };
+        !events.iter().any(|event| {
+            matches!(
+                event,
+                InputEvent::EndOfFile { source_id }
+                    if source_id.is_none() || *source_id == payload_source_id
+            )
+        })
+    })
 }
 
 #[inline]
