@@ -68,14 +68,19 @@ struct BulkItemResult {
 
 enum SendAttempt {
     Ok,
-    Rejected(Vec<String>),
+    Rejected {
+        rejections: Vec<String>,
+        accepted_rows: usize,
+    },
     RetryAfter {
         pending_rows: Vec<u32>,
         rejections: Vec<String>,
+        accepted_rows: usize,
         delay: Duration,
     },
     IoError {
         pending_rows: Vec<u32>,
+        rejections: Vec<String>,
         error: io::Error,
     },
 }
@@ -385,6 +390,28 @@ impl ElasticsearchSink {
         self.stats.inc_bytes(payload_len as u64);
     }
 
+    fn record_accepted_partial_rows(
+        &self,
+        accepted_rows: usize,
+        total_rows: usize,
+        payload_len: usize,
+    ) {
+        if accepted_rows == 0 || total_rows == 0 {
+            return;
+        }
+        let accepted_bytes = payload_len.saturating_mul(accepted_rows) / total_rows;
+        self.record_accepted_rows(accepted_rows, accepted_bytes);
+    }
+
+    fn accepted_item_rows(row_count: usize, result: &BulkItemResult) -> usize {
+        row_count.saturating_sub(
+            result
+                .retry_items
+                .len()
+                .saturating_add(result.permanent_errors.len()),
+        )
+    }
+
     fn finish_success_or_reject(rejections: Vec<String>) -> super::sink::SendResult {
         if rejections.is_empty() {
             super::sink::SendResult::Ok
@@ -428,16 +455,19 @@ impl ElasticsearchSink {
 
             if let Err(error) = self.serialize_batch(batch, metadata) {
                 return match super::sink::SendResult::from_io_error(error) {
-                    super::sink::SendResult::Rejected(reason) => {
-                        SendAttempt::Rejected(vec![reason])
-                    }
+                    super::sink::SendResult::Rejected(reason) => SendAttempt::Rejected {
+                        rejections: vec![reason],
+                        accepted_rows: 0,
+                    },
                     super::sink::SendResult::IoError(error) => SendAttempt::IoError {
                         pending_rows: row_ids,
+                        rejections: Vec::new(),
                         error,
                     },
                     super::sink::SendResult::RetryAfter(delay) => SendAttempt::RetryAfter {
                         pending_rows: row_ids,
                         rejections: Vec::new(),
+                        accepted_rows: 0,
                         delay,
                     },
                     super::sink::SendResult::Ok => SendAttempt::Ok,
@@ -463,10 +493,13 @@ impl ElasticsearchSink {
                         .await;
                 }
                 // Row is too large to fit in a single bulk request even on its own.
-                return SendAttempt::Rejected(vec![format!(
-                    "single-row batch ({} bytes) exceeds max_bulk_bytes ({})",
-                    payload_len, max_bytes
-                )]);
+                return SendAttempt::Rejected {
+                    rejections: vec![format!(
+                        "single-row batch ({} bytes) exceeds max_bulk_bytes ({})",
+                        payload_len, max_bytes
+                    )],
+                    accepted_rows: 0,
+                };
             }
 
             // Move the serialized payload out of batch_buf so we can pass it to
@@ -482,7 +515,11 @@ impl ElasticsearchSink {
                     self.record_accepted_rows(n, payload_len);
                     SendAttempt::Ok
                 }
-                SendAttempt::RetryAfter { .. } | SendAttempt::Rejected(_) => attempt,
+                attempt @ SendAttempt::RetryAfter { accepted_rows, .. }
+                | attempt @ SendAttempt::Rejected { accepted_rows, .. } => {
+                    self.record_accepted_partial_rows(accepted_rows, n, payload_len);
+                    attempt
+                }
                 // Reactive split on 413 — server limit lower than our max_bulk_bytes.
                 SendAttempt::IoError { error, .. }
                     if error.kind() == io::ErrorKind::InvalidInput
@@ -494,9 +531,11 @@ impl ElasticsearchSink {
                 }
                 SendAttempt::IoError {
                     pending_rows,
+                    rejections,
                     error,
                 } => SendAttempt::IoError {
                     pending_rows,
+                    rejections,
                     error,
                 },
             }
@@ -523,37 +562,44 @@ impl ElasticsearchSink {
             .await;
         match left_result {
             SendAttempt::Ok => {}
-            SendAttempt::Rejected(left_rejections) => {
+            SendAttempt::Rejected {
+                rejections: left_rejections,
+                accepted_rows,
+            } => {
                 let right_result = self
                     .send_batch_inner(&right, metadata, right_rows, depth + 1)
                     .await;
                 return Self::merge_split_attempts(
-                    SendAttempt::Rejected(Self::prefix_rejections(
-                        "left split rejected",
-                        left_rejections,
-                    )),
+                    SendAttempt::Rejected {
+                        rejections: Self::prefix_rejections("left split rejected", left_rejections),
+                        accepted_rows,
+                    },
                     Self::label_attempt_rejections("right split rejected", right_result),
                 );
             }
             SendAttempt::RetryAfter {
                 mut pending_rows,
                 rejections,
+                accepted_rows,
                 delay,
             } => {
                 pending_rows.extend(right_rows);
                 return SendAttempt::RetryAfter {
                     pending_rows,
                     rejections,
+                    accepted_rows,
                     delay,
                 };
             }
             SendAttempt::IoError {
                 mut pending_rows,
+                rejections,
                 error,
             } => {
                 pending_rows.extend(right_rows);
                 return SendAttempt::IoError {
                     pending_rows,
+                    rejections,
                     error,
                 };
             }
@@ -577,46 +623,79 @@ impl ElasticsearchSink {
 
     fn label_attempt_rejections(prefix: &str, attempt: SendAttempt) -> SendAttempt {
         match attempt {
-            SendAttempt::Rejected(rejections) => {
-                SendAttempt::Rejected(Self::prefix_rejections(prefix, rejections))
-            }
+            SendAttempt::Rejected {
+                rejections,
+                accepted_rows,
+            } => SendAttempt::Rejected {
+                rejections: Self::prefix_rejections(prefix, rejections),
+                accepted_rows,
+            },
             SendAttempt::RetryAfter {
                 pending_rows,
                 rejections,
+                accepted_rows,
                 delay,
             } => SendAttempt::RetryAfter {
                 pending_rows,
                 rejections: Self::prefix_rejections(prefix, rejections),
+                accepted_rows,
                 delay,
             },
-            other => other,
+            SendAttempt::IoError {
+                pending_rows,
+                rejections,
+                error,
+            } => SendAttempt::IoError {
+                pending_rows,
+                rejections: Self::prefix_rejections(prefix, rejections),
+                error,
+            },
+            ok @ SendAttempt::Ok => ok,
         }
     }
 
     fn merge_split_attempts(left: SendAttempt, right: SendAttempt) -> SendAttempt {
         match (left, right) {
             (SendAttempt::Ok, SendAttempt::Ok) => SendAttempt::Ok,
-            (SendAttempt::Rejected(mut left), SendAttempt::Rejected(right)) => {
+            (
+                SendAttempt::Rejected {
+                    rejections: mut left,
+                    accepted_rows,
+                },
+                SendAttempt::Rejected {
+                    rejections: right,
+                    accepted_rows: right_accepted,
+                },
+            ) => {
                 left.extend(right);
-                SendAttempt::Rejected(left)
+                SendAttempt::Rejected {
+                    rejections: left,
+                    accepted_rows: accepted_rows.saturating_add(right_accepted),
+                }
             }
-            (SendAttempt::Rejected(rejections), SendAttempt::Ok)
-            | (SendAttempt::Ok, SendAttempt::Rejected(rejections)) => {
-                SendAttempt::Rejected(rejections)
-            }
+            (attempt @ SendAttempt::Rejected { .. }, SendAttempt::Ok)
+            | (SendAttempt::Ok, attempt @ SendAttempt::Rejected { .. }) => attempt,
             (
                 SendAttempt::RetryAfter {
                     pending_rows,
                     mut rejections,
+                    accepted_rows,
                     delay,
                 },
-                SendAttempt::Rejected(right_rejections),
+                SendAttempt::Rejected {
+                    rejections: right_rejections,
+                    accepted_rows: right_accepted,
+                },
             )
             | (
-                SendAttempt::Rejected(right_rejections),
+                SendAttempt::Rejected {
+                    rejections: right_rejections,
+                    accepted_rows: right_accepted,
+                },
                 SendAttempt::RetryAfter {
                     pending_rows,
                     mut rejections,
+                    accepted_rows,
                     delay,
                 },
             ) => {
@@ -624,6 +703,7 @@ impl ElasticsearchSink {
                 SendAttempt::RetryAfter {
                     pending_rows,
                     rejections,
+                    accepted_rows: accepted_rows.saturating_add(right_accepted),
                     delay,
                 }
             }
@@ -631,11 +711,13 @@ impl ElasticsearchSink {
                 SendAttempt::RetryAfter {
                     mut pending_rows,
                     mut rejections,
+                    accepted_rows,
                     delay,
                 },
                 SendAttempt::RetryAfter {
                     pending_rows: right_rows,
                     rejections: right_rejections,
+                    accepted_rows: right_accepted,
                     delay: right_delay,
                 },
             ) => {
@@ -644,30 +726,98 @@ impl ElasticsearchSink {
                 SendAttempt::RetryAfter {
                     pending_rows,
                     rejections,
+                    accepted_rows: accepted_rows.saturating_add(right_accepted),
                     delay: delay.max(right_delay),
                 }
             }
             (
                 SendAttempt::IoError {
-                    pending_rows,
+                    mut pending_rows,
+                    mut rejections,
                     error,
                 },
-                _,
-            )
-            | (
-                _,
+                SendAttempt::IoError {
+                    pending_rows: right_rows,
+                    rejections: right_rejections,
+                    ..
+                },
+            ) => {
+                pending_rows.extend(right_rows);
+                rejections.extend(right_rejections);
                 SendAttempt::IoError {
                     pending_rows,
+                    rejections,
+                    error,
+                }
+            }
+            (
+                SendAttempt::IoError {
+                    mut pending_rows,
+                    mut rejections,
                     error,
                 },
-            ) => SendAttempt::IoError {
-                pending_rows,
-                error,
-            },
+                SendAttempt::RetryAfter {
+                    pending_rows: right_rows,
+                    rejections: right_rejections,
+                    ..
+                },
+            )
+            | (
+                SendAttempt::RetryAfter {
+                    pending_rows: right_rows,
+                    rejections: right_rejections,
+                    ..
+                },
+                SendAttempt::IoError {
+                    mut pending_rows,
+                    mut rejections,
+                    error,
+                },
+            ) => {
+                pending_rows.extend(right_rows);
+                rejections.extend(right_rejections);
+                SendAttempt::IoError {
+                    pending_rows,
+                    rejections,
+                    error,
+                }
+            }
+            (
+                SendAttempt::IoError {
+                    pending_rows,
+                    mut rejections,
+                    error,
+                },
+                SendAttempt::Rejected {
+                    rejections: right_rejections,
+                    ..
+                },
+            )
+            | (
+                SendAttempt::Rejected {
+                    rejections: right_rejections,
+                    ..
+                },
+                SendAttempt::IoError {
+                    pending_rows,
+                    mut rejections,
+                    error,
+                },
+            ) => {
+                rejections.extend(right_rejections);
+                SendAttempt::IoError {
+                    pending_rows,
+                    rejections,
+                    error,
+                }
+            }
+            (attempt @ SendAttempt::IoError { .. }, SendAttempt::Ok)
+            | (SendAttempt::Ok, attempt @ SendAttempt::IoError { .. }) => attempt,
             (
                 SendAttempt::RetryAfter {
                     pending_rows,
                     rejections,
+                    accepted_rows,
                     delay,
                 },
                 SendAttempt::Ok,
@@ -677,11 +827,13 @@ impl ElasticsearchSink {
                 SendAttempt::RetryAfter {
                     pending_rows,
                     rejections,
+                    accepted_rows,
                     delay,
                 },
             ) => SendAttempt::RetryAfter {
                 pending_rows,
                 rejections,
+                accepted_rows,
                 delay,
             },
         }
@@ -771,6 +923,7 @@ impl ElasticsearchSink {
             if let Err(error) = enc.write_all(&body) {
                 return SendAttempt::IoError {
                     pending_rows: row_ids,
+                    rejections: Vec::new(),
                     error: io::Error::other(error),
                 };
             }
@@ -779,6 +932,7 @@ impl ElasticsearchSink {
                 Err(error) => {
                     return SendAttempt::IoError {
                         pending_rows: row_ids,
+                        rejections: Vec::new(),
                         error: io::Error::other(error),
                     };
                 }
@@ -795,6 +949,7 @@ impl ElasticsearchSink {
             Err(error) => {
                 return SendAttempt::IoError {
                     pending_rows: row_ids,
+                    rejections: Vec::new(),
                     error: io::Error::other(error),
                 };
             }
@@ -813,6 +968,7 @@ impl ElasticsearchSink {
             tracing::Span::current().record("resp_bytes", detail.len() as u64);
             return SendAttempt::IoError {
                 pending_rows: row_ids,
+                rejections: Vec::new(),
                 error: io::Error::new(
                     io::ErrorKind::InvalidInput,
                     format!("ES returned 413 Payload Too Large (body {body_len} bytes): {detail}"),
@@ -838,21 +994,25 @@ impl ElasticsearchSink {
                     super::sink::SendResult::RetryAfter(delay) => SendAttempt::RetryAfter {
                         pending_rows: row_ids,
                         rejections: Vec::new(),
+                        accepted_rows: 0,
                         delay,
                     },
                     super::sink::SendResult::IoError(error) => SendAttempt::IoError {
                         pending_rows: row_ids,
+                        rejections: Vec::new(),
                         error,
                     },
-                    super::sink::SendResult::Rejected(reason) => {
-                        SendAttempt::Rejected(vec![reason])
-                    }
+                    super::sink::SendResult::Rejected(reason) => SendAttempt::Rejected {
+                        rejections: vec![reason],
+                        accepted_rows: 0,
+                    },
                     super::sink::SendResult::Ok => SendAttempt::Ok,
                 };
             }
             // classify_http_status handles all non-2xx; unreachable in practice.
             return SendAttempt::IoError {
                 pending_rows: row_ids,
+                rejections: Vec::new(),
                 error: io::Error::other(format!("ES: HTTP {status}: {detail}")),
             };
         }
@@ -862,6 +1022,7 @@ impl ElasticsearchSink {
             Err(error) => {
                 return SendAttempt::IoError {
                     pending_rows: row_ids,
+                    rejections: Vec::new(),
                     error: io::Error::other(error),
                 };
             }
@@ -876,10 +1037,12 @@ impl ElasticsearchSink {
             Ok(result) if result.retry_items.is_empty() && result.permanent_errors.is_empty() => {
                 SendAttempt::Ok
             }
-            Ok(result) if result.retry_items.is_empty() => {
-                SendAttempt::Rejected(result.permanent_errors)
-            }
+            Ok(result) if result.retry_items.is_empty() => SendAttempt::Rejected {
+                accepted_rows: Self::accepted_item_rows(row_ids.len(), &result),
+                rejections: result.permanent_errors,
+            },
             Ok(result) => {
+                let accepted_rows = Self::accepted_item_rows(row_ids.len(), &result);
                 let pending_rows = result
                     .retry_items
                     .into_iter()
@@ -888,11 +1051,13 @@ impl ElasticsearchSink {
                 SendAttempt::RetryAfter {
                     pending_rows,
                     rejections: result.permanent_errors,
+                    accepted_rows,
                     delay: Self::ITEM_RETRY_DELAY,
                 }
             }
             Err(error) => SendAttempt::IoError {
                 pending_rows: row_ids,
+                rejections: Vec::new(),
                 error,
             },
         }
@@ -1012,6 +1177,7 @@ impl ElasticsearchSink {
             Err(error) => {
                 return SendAttempt::IoError {
                     pending_rows: row_ids,
+                    rejections: Vec::new(),
                     error: io::Error::other(error),
                 };
             }
@@ -1033,6 +1199,7 @@ impl ElasticsearchSink {
             tracing::Span::current().record("resp_bytes", detail.len() as u64);
             return SendAttempt::IoError {
                 pending_rows: row_ids,
+                rejections: Vec::new(),
                 error: io::Error::new(
                     io::ErrorKind::InvalidInput,
                     format!(
@@ -1060,21 +1227,25 @@ impl ElasticsearchSink {
                     super::sink::SendResult::RetryAfter(delay) => SendAttempt::RetryAfter {
                         pending_rows: row_ids,
                         rejections: Vec::new(),
+                        accepted_rows: 0,
                         delay,
                     },
                     super::sink::SendResult::IoError(error) => SendAttempt::IoError {
                         pending_rows: row_ids,
+                        rejections: Vec::new(),
                         error,
                     },
-                    super::sink::SendResult::Rejected(reason) => {
-                        SendAttempt::Rejected(vec![reason])
-                    }
+                    super::sink::SendResult::Rejected(reason) => SendAttempt::Rejected {
+                        rejections: vec![reason],
+                        accepted_rows: 0,
+                    },
                     super::sink::SendResult::Ok => SendAttempt::Ok,
                 };
             }
             // classify_http_status handles all non-2xx; unreachable in practice.
             return SendAttempt::IoError {
                 pending_rows: row_ids,
+                rejections: Vec::new(),
                 error: io::Error::other(format!("ES: HTTP {status}: {detail}")),
             };
         }
@@ -1084,6 +1255,7 @@ impl ElasticsearchSink {
             Err(error) => {
                 return SendAttempt::IoError {
                     pending_rows: row_ids,
+                    rejections: Vec::new(),
                     error: io::Error::other(error),
                 };
             }
@@ -1100,9 +1272,16 @@ impl ElasticsearchSink {
                 SendAttempt::Ok
             }
             Ok(result) if result.retry_items.is_empty() => {
-                SendAttempt::Rejected(result.permanent_errors)
+                let accepted_rows = Self::accepted_item_rows(row_count, &result);
+                self.record_accepted_partial_rows(accepted_rows, row_count, payload_len);
+                SendAttempt::Rejected {
+                    rejections: result.permanent_errors,
+                    accepted_rows,
+                }
             }
             Ok(result) => {
+                let accepted_rows = Self::accepted_item_rows(row_count, &result);
+                self.record_accepted_partial_rows(accepted_rows, row_count, payload_len);
                 let pending_rows = result
                     .retry_items
                     .into_iter()
@@ -1111,11 +1290,13 @@ impl ElasticsearchSink {
                 SendAttempt::RetryAfter {
                     pending_rows,
                     rejections: result.permanent_errors,
+                    accepted_rows,
                     delay: Self::ITEM_RETRY_DELAY,
                 }
             }
             Err(error) => SendAttempt::IoError {
                 pending_rows: row_ids,
+                rejections: Vec::new(),
                 error,
             },
         };
@@ -1133,16 +1314,18 @@ impl ElasticsearchSink {
         match (response_attempt, producer_result) {
             (SendAttempt::Ok, _) => SendAttempt::Ok,
             (attempt @ SendAttempt::RetryAfter { .. }, _)
-            | (attempt @ SendAttempt::Rejected(_), _)
+            | (attempt @ SendAttempt::Rejected { .. }, _)
             | (attempt @ SendAttempt::IoError { .. }, Ok(Ok(()))) => attempt,
             (
                 SendAttempt::IoError {
                     pending_rows,
+                    rejections,
                     error: response_error,
                 },
                 Ok(Err(producer_error)),
             ) => SendAttempt::IoError {
                 pending_rows,
+                rejections,
                 error: io::Error::other(format!(
                     "{response_error}; producer error: {producer_error}"
                 )),
@@ -1150,11 +1333,13 @@ impl ElasticsearchSink {
             (
                 SendAttempt::IoError {
                     pending_rows,
+                    rejections,
                     error: response_error,
                 },
                 Err(join_error),
             ) => SendAttempt::IoError {
                 pending_rows,
+                rejections,
                 error: io::Error::other(format!(
                     "{response_error}; producer join error: {join_error}"
                 )),
@@ -1194,7 +1379,10 @@ impl super::sink::Sink for ElasticsearchSink {
                 .await
             {
                 SendAttempt::Ok => Self::finish_success_or_reject(rejections),
-                SendAttempt::Rejected(new_rejections) => {
+                SendAttempt::Rejected {
+                    rejections: new_rejections,
+                    ..
+                } => {
                     rejections.extend(new_rejections);
                     Self::finish_success_or_reject(rejections)
                 }
@@ -1202,6 +1390,7 @@ impl super::sink::Sink for ElasticsearchSink {
                     pending_rows,
                     rejections: new_rejections,
                     delay,
+                    ..
                 } => {
                     rejections.extend(new_rejections);
                     self.pending_retry_rows = Some(pending_rows);
@@ -1210,8 +1399,10 @@ impl super::sink::Sink for ElasticsearchSink {
                 }
                 SendAttempt::IoError {
                     pending_rows,
+                    rejections: new_rejections,
                     error,
                 } => {
+                    rejections.extend(new_rejections);
                     self.pending_retry_rows = Some(pending_rows);
                     self.pending_rejections = rejections;
                     super::sink::SendResult::IoError(error)
@@ -2433,6 +2624,76 @@ mod tests {
     }
 
     #[test]
+    fn merge_split_attempts_preserves_rejection_when_io_error_wins() {
+        let result = ElasticsearchSink::merge_split_attempts(
+            SendAttempt::Rejected {
+                rejections: vec!["left bad doc".to_string()],
+                accepted_rows: 0,
+            },
+            SendAttempt::IoError {
+                pending_rows: vec![2],
+                rejections: Vec::new(),
+                error: io::Error::other("network"),
+            },
+        );
+
+        match result {
+            SendAttempt::IoError {
+                pending_rows,
+                rejections,
+                error,
+            } => {
+                assert_eq!(pending_rows, vec![2]);
+                assert_eq!(error.to_string(), "network");
+                assert!(
+                    rejections
+                        .iter()
+                        .any(|reason| reason.contains("left bad doc")),
+                    "expected left rejection to be preserved, got {rejections:?}"
+                );
+            }
+            _ => panic!("expected io error with preserved rejection"),
+        }
+    }
+
+    #[test]
+    fn merge_split_attempts_combines_pending_rows_for_two_io_errors() {
+        let result = ElasticsearchSink::merge_split_attempts(
+            SendAttempt::IoError {
+                pending_rows: vec![0],
+                rejections: vec!["left rejected before io".to_string()],
+                error: io::Error::other("left network"),
+            },
+            SendAttempt::IoError {
+                pending_rows: vec![1],
+                rejections: vec!["right rejected before io".to_string()],
+                error: io::Error::other("right network"),
+            },
+        );
+
+        match result {
+            SendAttempt::IoError {
+                pending_rows,
+                rejections,
+                error,
+            } => {
+                assert_eq!(pending_rows, vec![0, 1]);
+                assert_eq!(error.to_string(), "left network");
+                assert!(
+                    rejections
+                        .iter()
+                        .any(|reason| reason.contains("left rejected"))
+                        && rejections
+                            .iter()
+                            .any(|reason| reason.contains("right rejected")),
+                    "expected both rejection lists to be preserved, got {rejections:?}"
+                );
+            }
+            _ => panic!("expected merged io error"),
+        }
+    }
+
+    #[test]
     fn classify_split_result_converts_invalid_data_to_rejected() {
         let err = io::Error::new(io::ErrorKind::InvalidData, "mapper_parsing_exception");
         let result = ElasticsearchSink::classify_split_result(Err(err));
@@ -2760,17 +3021,19 @@ mod tests {
             .create_async()
             .await;
 
+        let stats = Arc::new(ComponentStats::default());
         let mut sink = ElasticsearchSink::new(
             "test".to_string(),
             test_es_config(&server.url(), "logs", usize::MAX),
             reqwest::Client::new(),
-            Arc::new(ComponentStats::default()),
+            Arc::clone(&stats),
         );
 
         let first = sink.send_batch(&batch, &metadata).await;
         assert!(matches!(first, crate::sink::SendResult::RetryAfter(_)));
         let second = sink.send_batch(&batch, &metadata).await;
         assert!(matches!(second, crate::sink::SendResult::Ok));
+        assert_eq!(stats.lines(), 3);
 
         full_retry.assert_async().await;
         retry_subset.assert_async().await;
@@ -2824,11 +3087,12 @@ mod tests {
             .create_async()
             .await;
 
+        let stats = Arc::new(ComponentStats::default());
         let mut sink = ElasticsearchSink::new(
             "test".to_string(),
             test_es_config(&server.url(), "logs", usize::MAX),
             reqwest::Client::new(),
-            Arc::new(ComponentStats::default()),
+            Arc::clone(&stats),
         );
 
         let first = sink.send_batch(&batch, &metadata).await;
@@ -2840,6 +3104,7 @@ mod tests {
             }
             other => panic!("expected permanent rejection after retry success, got {other:?}"),
         }
+        assert_eq!(stats.lines(), 2);
 
         mixed.assert_async().await;
         retry_ok.assert_async().await;
