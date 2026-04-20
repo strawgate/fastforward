@@ -1,6 +1,7 @@
 //! Pure platform-sensor event-type filtering helpers.
 
 /// Event type names emitted in the `event_kind` Arrow column.
+#[cfg(test)]
 pub(crate) const SUPPORTED_EVENT_TYPES: &[&str] = &[
     "exec",
     "exit",
