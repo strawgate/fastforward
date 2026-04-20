@@ -331,8 +331,7 @@ impl ElasticsearchSink {
                     result
                         .permanent_errors
                         .first()
-                        .map(String::as_str)
-                        .unwrap_or("retryable item failure")
+                        .map_or("retryable item failure", String::as_str)
                 ),
             ));
         }
