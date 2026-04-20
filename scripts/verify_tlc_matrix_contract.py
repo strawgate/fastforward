@@ -89,9 +89,11 @@ def _extract_action_entries(block: list[str]) -> list[TlcEntry]:
       - `- uses: ./.github/actions/run-tlc` (list-item-inline)
       - `- name: ...` on one line and `  uses: ...` on the next.
 
-    For each match we walk backward to locate the step's list-item marker,
-    then scan forward until the next list item at that same indent.  This
-    is more robust than guessing an offset from the `uses:` line alone.
+    For each match we walk backward to locate the step's list-item marker
+    (its start index and indent) and forward until the next sibling list
+    item at that same indent (its end index).  We then scan the *entire*
+    step block for `tla-file:` and `config:` inputs — YAML mappings don't
+    constrain key order, so `with:` may legitimately precede `uses:`.
     """
     entries: list[TlcEntry] = []
     for start_idx, line in enumerate(block):
@@ -99,27 +101,36 @@ def _extract_action_entries(block: list[str]) -> list[TlcEntry]:
             continue
 
         # Walk backward until we find the list-item marker ("- ") that
-        # introduces this step; that line's indent is the step's base.
+        # introduces this step; that line is the step's start.
+        step_start: int | None = None
         step_indent: int | None = None
         for back in range(start_idx, -1, -1):
             candidate = block[back]
             stripped_candidate = candidate.lstrip(" ")
             if stripped_candidate.startswith("- "):
+                step_start = back
                 step_indent = len(candidate) - len(stripped_candidate)
                 break
-        if step_indent is None:
+        if step_start is None or step_indent is None:
             # `uses:` wasn't part of a list step — malformed, skip.
             continue
 
-        tla_file: str | None = None
-        config: str | None = None
+        # Walk forward from the uses: line until the next sibling list item.
+        step_end = len(block)
         for look in range(start_idx + 1, len(block)):
             nxt = block[look]
             nxt_stripped = nxt.lstrip(" ")
             nxt_indent = len(nxt) - len(nxt_stripped)
-            # Stop at the next sibling list item (same indent as our step).
             if nxt_stripped.startswith("- ") and nxt_indent <= step_indent:
+                step_end = look
                 break
+
+        # Now scan the full step block (which may place `with:` before
+        # `uses:`) for the two inputs we care about.
+        tla_file: str | None = None
+        config: str | None = None
+        for look in range(step_start, step_end):
+            nxt = block[look]
             m_tla = _TLA_FILE_RE.match(nxt)
             m_cfg = _CONFIG_RE.match(nxt)
             if m_tla:
