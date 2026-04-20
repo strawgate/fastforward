@@ -65,6 +65,24 @@ overrides — adjust the workspace config instead.
   crates (`logfwd-core`, `logfwd-types`). `logfwd-config` has ~280
   pre-existing schema-field gaps and is not yet gated on this; new
   public items must still carry doc comments by review.
+- **`#[must_use]` discipline.** `clippy::let_underscore_future = deny`
+  (silently dropping a future is always a bug).
+  `clippy::return_self_not_must_use = warn` (builder-chain methods
+  that return `Self` without `#[must_use]` are almost always wrong —
+  the caller built a value and threw it away). Mark the following
+  with `#[must_use]` explicitly:
+  - Every builder method that returns `Self`.
+  - Constructors that return a guard or permit (`_Handle`, `_Permit`,
+    `_Guard`).
+  - `Result`-returning functions where ignoring `Ok(())` means the
+    operation did not actually happen — `flush`, `shutdown`,
+    `commit_checkpoint`, and similar. `Result` already carries
+    `#[must_use]` at the type level, but an explicit annotation on
+    the function makes the intent clear.
+  We deliberately do **not** enable `clippy::let_underscore_must_use`
+  or `clippy::must_use_candidate` — both flag the canonical
+  `let _ = write!(buf, ...)` and `let _ = sender.send(...)` patterns,
+  and would force stylistic churn with negligible correctness gain.
 - **overflow-checks** are enabled in release builds.
 
 All lint levels live at the workspace root or as file-level

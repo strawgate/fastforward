@@ -2,6 +2,7 @@
 //!
 //! Run:
 //! `cargo run -p logfwd-bench --release --bin source_metadata_profile -- --rows 50000 --sources 300 --iterations 200`
+#![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use std::alloc::System;
 use std::collections::HashMap;

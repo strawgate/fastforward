@@ -153,6 +153,7 @@ impl OtlpSink {
     /// The default is the canonical `body` field. Use this builder when a
     /// pipeline stores the primary log message under a different string column.
     #[inline]
+    #[must_use]
     pub fn with_message_field(mut self, message_field: String) -> Self {
         self.message_field = message_field;
         self

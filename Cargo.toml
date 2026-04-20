@@ -121,7 +121,7 @@ cast_precision_loss = "allow"
 cast_lossless = "allow"
 inline_always = "allow"
 needless_pass_by_value = "allow"
-return_self_not_must_use = "allow"
+return_self_not_must_use = "warn"
 struct_excessive_bools = "allow"
 wildcard_imports = "allow"
 unnested_or_patterns = "allow"
@@ -145,6 +145,7 @@ dbg_macro = "deny"
 large_enum_variant = "warn"
 print_stdout = "warn"
 print_stderr = "warn"
+let_underscore_future = "deny"
 
 [workspace.lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = [
