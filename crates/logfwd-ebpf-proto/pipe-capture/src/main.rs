@@ -64,6 +64,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     loop {
         while let Some(item) = ring.next() {
+            // SAFETY: the EVENTS ring buffer is written only with PipeEvent-sized
+            // records by the paired eBPF program, and RingBuf items remain valid
+            // for the duration of this loop iteration.
             let ev = unsafe { &*(item.as_ptr() as *const PipeEvent) };
             events += 1;
             bytes += ev.captured as u64;

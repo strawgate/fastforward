@@ -2167,6 +2167,7 @@ mod tests {
             .unwrap();
         assert_eq!(cluster.value(0), "prod");
 
+        // SAFETY: this removes only the unique test variables set above.
         unsafe {
             std::env::remove_var("LOGFWD_TEST_CLUSTER");
             std::env::remove_var("LOGFWD_TEST_REGION");
@@ -2192,6 +2193,7 @@ mod tests {
         }
         let result = EnvTable::from_prefix("dup_test", "LOGFWD_DUPTEST_");
         // Clean up before asserting.
+        // SAFETY: this removes only the unique test variables set above.
         unsafe {
             std::env::remove_var("LOGFWD_DUPTEST_FOO");
             std::env::remove_var("LOGFWD_DUPTEST_foo");

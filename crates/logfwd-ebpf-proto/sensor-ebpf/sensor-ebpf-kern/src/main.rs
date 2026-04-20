@@ -511,7 +511,8 @@ fn try_tcp_v4_connect(ctx: &ProbeContext) -> Result<(), i64> {
         pid: pid_tgid as u32,
         uid: uid_gid as u32,
         gid: (uid_gid >> 32) as u32,
-        cgroup_id: unsafe { bpf_get_current_cgroup_id() }, // SAFETY: always valid in BPF ctx
+        // SAFETY: bpf_get_current_cgroup_id is valid in BPF program context.
+        cgroup_id: unsafe { bpf_get_current_cgroup_id() },
         comm: bpf_get_current_comm().unwrap_or([0u8; COMM_SIZE]),
     };
 
@@ -532,12 +533,14 @@ pub fn inet_sock_set_state(ctx: TracePointContext) -> u32 {
 }
 
 fn try_sock_state(ctx: &TracePointContext) -> Result<(), i64> {
-    // SAFETY: tracepoint field reads at fixed kernel ABI offsets.
+    // SAFETY: oldstate is at fixed offset 16 in the inet_sock_set_state payload.
     let oldstate: i32 = unsafe { ctx.read_at(16)? };
+    // SAFETY: newstate is at fixed offset 20 in the inet_sock_set_state payload.
     let newstate: i32 = unsafe { ctx.read_at(20)? };
 
     // Outbound connect: SYN_SENT → ESTABLISHED
     if oldstate == TCP_SYN_SENT && newstate == TCP_ESTABLISHED {
+        // SAFETY: skaddr is at fixed offset 8 in the inet_sock_set_state payload.
         let skaddr: u64 = unsafe { ctx.read_at(8)? };
 
         let mut entry = match EVENTS.reserve::<TcpConnectEvent>(0) {
@@ -568,6 +571,7 @@ fn try_sock_state(ctx: &TracePointContext) -> Result<(), i64> {
         && newstate != TCP_ESTABLISHED
         && newstate != TCP_SYN_RECV
     {
+        // SAFETY: skaddr is at fixed offset 8 in the inet_sock_set_state payload.
         let skaddr: u64 = unsafe { ctx.read_at(8)? };
         SOCK_OWNERS.remove(&skaddr).ok();
     }
@@ -577,6 +581,7 @@ fn try_sock_state(ctx: &TracePointContext) -> Result<(), i64> {
     // Only fires for sockets that passed through tcp_v4_connect (kprobe),
     // so the hashmap lookup is bounded by the connect rate.
     if newstate == TCP_CLOSE && oldstate != TCP_SYN_SENT {
+        // SAFETY: skaddr is at fixed offset 8 in the inet_sock_set_state payload.
         let skaddr: u64 = unsafe { ctx.read_at(8)? };
         SOCK_OWNERS.remove(&skaddr).ok();
     }
@@ -689,8 +694,9 @@ fn try_dns_query(ctx: &TracePointContext) -> Result<(), i64> {
     };
 
     // Read the UDP payload (DNS message).
-    // SAFETY: tracepoint field reads at fixed kernel ABI offsets.
+    // SAFETY: buf is at fixed offset 24 in the sys_enter_sendto payload.
     let buf_ptr: u64 = unsafe { ctx.read_at(24)? };
+    // SAFETY: len is at fixed offset 32 in the sys_enter_sendto payload.
     let buf_len: u64 = unsafe { ctx.read_at(32)? };
     if buf_ptr == 0 || (buf_len as usize) < DNS_HEADER_SIZE {
         return Ok(());
