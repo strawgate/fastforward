@@ -1264,9 +1264,9 @@ impl OutputConfigEntry {
         self.config.output_type()
     }
 
-    /// Return a flat validation view, preserving legacy fields when present.
-    pub(crate) fn validation_config(&self) -> OutputConfig {
-        self.flat.clone()
+    /// Return a flat compatibility view, preserving legacy fields when present.
+    pub(crate) fn validation_config(&self) -> &OutputConfig {
+        &self.flat
     }
 }
 
