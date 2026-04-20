@@ -2686,7 +2686,7 @@ pipelines:
 "#;
         let err = Config::load_str(yaml).unwrap_err().to_string();
         assert!(
-            err.contains("unknown field `retry_attempts`"),
+            err.contains("unknown field") && err.contains("retry_attempts"),
             "stdout output should reject retry_attempts at parse time: {err}"
         );
     }

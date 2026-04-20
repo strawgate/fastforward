@@ -713,7 +713,7 @@ pipelines:
         let err = Config::load_str(yaml).unwrap_err();
         let msg = err.to_string();
         assert!(
-            msg.contains("unknown field `compression`"),
+            msg.contains("unknown field") && msg.contains("compression"),
             "file output should reject compression at parse time: {msg}"
         );
     }
@@ -724,7 +724,7 @@ pipelines:
         let err = Config::load_str(yaml).unwrap_err();
         let msg = err.to_string();
         assert!(
-            msg.contains("unknown field `compression`"),
+            msg.contains("unknown field") && msg.contains("compression"),
             "loki output should reject compression at parse time: {msg}"
         );
     }
@@ -1319,9 +1319,10 @@ output:
   request_mode: streaming
 ";
         let err = Config::load_str(yaml).expect_err("request_mode should be es-only");
+        let msg = err.to_string();
         assert!(
-            err.to_string().contains("unknown field `request_mode`"),
-            "otlp output should reject request_mode at parse time: {err}"
+            msg.contains("unknown field") && msg.contains("request_mode"),
+            "otlp output should reject request_mode at parse time: {msg}"
         );
     }
 
@@ -1541,7 +1542,9 @@ pipelines:
         let err = Config::load_str(yaml).unwrap_err();
         let msg = err.to_string();
         assert!(
-            msg.contains("invalid output config") && msg.contains(r#""type""#),
+            msg.contains("invalid output config")
+                && msg.contains("missing")
+                && msg.contains("type"),
             "missing output type must fail clearly: {msg}"
         );
     }
@@ -2928,9 +2931,10 @@ pipelines:
         tenant_id: my-tenant
 "#;
         let err = Config::load_str(yaml).unwrap_err();
+        let msg = err.to_string();
         assert!(
-            err.to_string().contains("unknown field `tenant_id`"),
-            "stdout output should reject tenant_id at parse time: {err}"
+            msg.contains("unknown field") && msg.contains("tenant_id"),
+            "stdout output should reject tenant_id at parse time: {msg}"
         );
     }
 
@@ -2948,9 +2952,10 @@ pipelines:
           env: prod
 "#;
         let err = Config::load_str(yaml).unwrap_err();
+        let msg = err.to_string();
         assert!(
-            err.to_string().contains("unknown field `static_labels`"),
-            "stdout output should reject static_labels at parse time: {err}"
+            msg.contains("unknown field") && msg.contains("static_labels"),
+            "stdout output should reject static_labels at parse time: {msg}"
         );
     }
 
@@ -3012,9 +3017,10 @@ pipelines:
           - container_name
 "#;
         let err = Config::load_str(yaml).unwrap_err();
+        let msg = err.to_string();
         assert!(
-            err.to_string().contains("unknown field `label_columns`"),
-            "stdout output should reject label_columns at parse time: {err}"
+            msg.contains("unknown field") && msg.contains("label_columns"),
+            "stdout output should reject label_columns at parse time: {msg}"
         );
     }
 

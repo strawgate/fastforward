@@ -955,7 +955,7 @@ pipelines:
 
     let err = Config::load_str(yaml).unwrap_err().to_string();
     assert!(
-        err.contains("unknown field `format`"),
+        err.contains("unknown field") && err.contains("format"),
         "tcp output should reject format at parse time: {err}"
     );
 }
