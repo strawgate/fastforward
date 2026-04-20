@@ -1517,7 +1517,7 @@ mod tests {
     fn shutdown_repoll_continues_for_payload_without_matching_eof() {
         let events = vec![
             InputEvent::Data {
-                bytes: Bytes::from(b"a\n".to_vec()),
+                bytes: Bytes::from_static(b"a\n"),
                 source_id: Some(SourceId(1)),
                 accounted_bytes: 2,
                 cri_metadata: None,
@@ -1534,7 +1534,7 @@ mod tests {
     fn shutdown_repoll_stops_when_payload_source_reaches_eof() {
         let events = vec![
             InputEvent::Data {
-                bytes: Bytes::from(b"a\n".to_vec()),
+                bytes: Bytes::from_static(b"a\n"),
                 source_id: Some(SourceId(1)),
                 accounted_bytes: 2,
                 cri_metadata: None,
@@ -1551,7 +1551,7 @@ mod tests {
     fn shutdown_repoll_stops_on_global_eof() {
         let events = vec![
             InputEvent::Data {
-                bytes: Bytes::from(b"a\n".to_vec()),
+                bytes: Bytes::from_static(b"a\n"),
                 source_id: Some(SourceId(1)),
                 accounted_bytes: 2,
                 cri_metadata: None,
@@ -1952,7 +1952,7 @@ mod tests {
             }
             self.emitted = true;
             Ok(vec![InputEvent::Data {
-                bytes: Bytes::from(b"{\"msg\":\"x\"}\n".to_vec()),
+                bytes: Bytes::from_static(b"{\"msg\":\"x\"}\n"),
                 source_id: Some(SourceId(7)),
                 accounted_bytes: 12,
                 cri_metadata: None,
@@ -1987,13 +1987,13 @@ mod tests {
             self.emitted = true;
             Ok(vec![
                 InputEvent::Data {
-                    bytes: Bytes::from(b"{\"msg\":\"hel".to_vec()),
+                    bytes: Bytes::from_static(b"{\"msg\":\"hel"),
                     source_id: Some(SourceId(7)),
                     accounted_bytes: 11,
                     cri_metadata: None,
                 },
                 InputEvent::Data {
-                    bytes: Bytes::from(b"lo\"}\n{\"msg\":\"next\"}\n".to_vec()),
+                    bytes: Bytes::from_static(b"lo\"}\n{\"msg\":\"next\"}\n"),
                     source_id: Some(SourceId(7)),
                     accounted_bytes: 21,
                     cri_metadata: None,
@@ -2059,7 +2059,7 @@ mod tests {
             }
             self.emitted = true;
             Ok(vec![InputEvent::Data {
-                bytes: Bytes::from(b"{\"msg\":\"drain\"}\n".to_vec()),
+                bytes: Bytes::from_static(b"{\"msg\":\"drain\"}\n"),
                 source_id: Some(SourceId(13)),
                 accounted_bytes: 16,
                 cri_metadata: None,
