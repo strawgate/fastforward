@@ -65,6 +65,11 @@ overrides — adjust the workspace config instead.
   crates (`logfwd-core`, `logfwd-types`). `logfwd-config` has ~280
   pre-existing schema-field gaps and is not yet gated on this; new
   public items must still carry doc comments by review.
+- **`clippy::await_holding_lock` and `clippy::await_holding_refcell_ref`**
+  are warn workspace-wide. A `MutexGuard` (or `RefCell` borrow) held
+  across `.await` leaks when the future is dropped. The dylint lint
+  `cancel_safe_no_lock_across_await` provides a scoped, author-asserted
+  version for functions marked `#[cancel_safe]`.
 - **`#[must_use]` discipline.** `clippy::let_underscore_future = deny`
   (silently dropping a future is always a bug).
   `clippy::return_self_not_must_use = warn` (builder-chain methods
