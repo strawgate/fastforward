@@ -593,6 +593,51 @@ pub(super) fn write_wire_any_as_string(
     Ok(())
 }
 
+pub(super) fn write_wire_any_json(
+    value: WireAny<'_>,
+    out: &mut Vec<u8>,
+    scratch: &mut WireScratch,
+) -> Result<(), ProjectionError> {
+    match value {
+        WireAny::String(value) => {
+            out.push(b'"');
+            super::write_json_escaped_bytes(out, value);
+            out.push(b'"');
+        }
+        WireAny::Bool(value) => out.extend_from_slice(if value { b"true" } else { b"false" }),
+        WireAny::Int(value) => {
+            scratch.decimal.clear();
+            let mut buf = itoa::Buffer::new();
+            scratch
+                .decimal
+                .extend_from_slice(buf.format(value).as_bytes());
+            out.extend_from_slice(&scratch.decimal);
+        }
+        WireAny::Double(value) => {
+            if value.is_finite() {
+                scratch.decimal.clear();
+                let mut buf = ryu::Buffer::new();
+                scratch
+                    .decimal
+                    .extend_from_slice(buf.format(value).as_bytes());
+                out.extend_from_slice(&scratch.decimal);
+            } else {
+                out.push(b'"');
+                super::write_json_escaped_bytes(out, value.to_string().as_bytes());
+                out.push(b'"');
+            }
+        }
+        WireAny::Bytes(value) => {
+            out.push(b'"');
+            super::write_hex_to_buf(out, value);
+            out.push(b'"');
+        }
+        WireAny::ArrayRaw(value) => super::write_array_value_json(value, out, scratch)?,
+        WireAny::KvListRaw(value) => super::write_kvlist_value_json(value, out, scratch)?,
+    }
+    Ok(())
+}
+
 fn scan_message(input: &[u8], message: MessageKind) -> Result<(), ProjectionError> {
     if message == MessageKind::AnyValue {
         return scan_any_value(input);
@@ -1014,6 +1059,27 @@ mod generated_tests {
             wire_any_field_kind(&WireAny::KvListRaw(&[])),
             FieldKind::Utf8View
         );
+    }
+
+    #[test]
+    fn generated_wire_any_json_handles_scalar_and_complex_variants() {
+        let mut scratch = WireScratch::default();
+        let cases: &[(WireAny<'_>, &[u8])] = &[
+            (WireAny::String(br#"a"b"#), br#""a\"b""#),
+            (WireAny::Bool(true), b"true"),
+            (WireAny::Int(-42), b"-42"),
+            (WireAny::Double(12.5), b"12.5"),
+            (WireAny::Bytes(&[0xde, 0xad]), br#""dead""#),
+            (WireAny::ArrayRaw(&[]), b"[]"),
+            (WireAny::KvListRaw(&[]), b"[]"),
+        ];
+
+        for &(value, expected) in cases {
+            let mut out = Vec::new();
+            write_wire_any_json(value, &mut out, &mut scratch)
+                .expect("generated JSON writer should handle projected variant");
+            assert_eq!(out, expected);
+        }
     }
 
     #[test]

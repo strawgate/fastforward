@@ -687,56 +687,11 @@ fn write_wire_any_complex_json(
 ) -> Result<(), ProjectionError> {
     let mut json = std::mem::take(&mut scratch.json);
     json.clear();
-    write_wire_any_json(value, &mut json, scratch)?;
+    generated::write_wire_any_json(value, &mut json, scratch)?;
     builder
         .write_str_bytes(handle, &json)
         .map_err(|e| ProjectionError::Batch(e.to_string()))?;
     scratch.json = json;
-    Ok(())
-}
-
-fn write_wire_any_json(
-    value: WireAny<'_>,
-    out: &mut Vec<u8>,
-    scratch: &mut WireScratch,
-) -> Result<(), ProjectionError> {
-    match value {
-        WireAny::String(value) => {
-            out.push(b'"');
-            write_json_escaped_bytes(out, value);
-            out.push(b'"');
-        }
-        WireAny::Bool(value) => out.extend_from_slice(if value { b"true" } else { b"false" }),
-        WireAny::Int(value) => {
-            scratch.decimal.clear();
-            let mut buf = itoa::Buffer::new();
-            scratch
-                .decimal
-                .extend_from_slice(buf.format(value).as_bytes());
-            out.extend_from_slice(&scratch.decimal);
-        }
-        WireAny::Double(value) => {
-            if value.is_finite() {
-                scratch.decimal.clear();
-                let mut buf = ryu::Buffer::new();
-                scratch
-                    .decimal
-                    .extend_from_slice(buf.format(value).as_bytes());
-                out.extend_from_slice(&scratch.decimal);
-            } else {
-                out.push(b'"');
-                write_json_escaped_bytes(out, value.to_string().as_bytes());
-                out.push(b'"');
-            }
-        }
-        WireAny::Bytes(value) => {
-            out.push(b'"');
-            write_hex_to_buf(out, value);
-            out.push(b'"');
-        }
-        WireAny::ArrayRaw(value) => write_array_value_json(value, out, scratch)?,
-        WireAny::KvListRaw(value) => write_kvlist_value_json(value, out, scratch)?,
-    }
     Ok(())
 }
 
@@ -761,7 +716,7 @@ fn write_array_value_json(
         }
         first = false;
         if let Some(value) = decode_any_value_wire(any_value)? {
-            write_wire_any_json(value, out, scratch)?;
+            generated::write_wire_any_json(value, out, scratch)?;
         } else {
             out.extend_from_slice(b"null");
         }
@@ -832,7 +787,7 @@ fn write_key_value_json(
     write_json_escaped_bytes(out, key);
     out.extend_from_slice(b"\",\"v\":");
     if let Some(value) = value {
-        write_wire_any_json(value, out, scratch)?;
+        generated::write_wire_any_json(value, out, scratch)?;
     } else {
         out.extend_from_slice(b"null");
     }
