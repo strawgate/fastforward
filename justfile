@@ -252,9 +252,10 @@ ci-all: lint-all test-all tlc-tail
 toml-check:
     taplo check
 
-# Check generated OTLP fast-row encoder drift.
+# Check generated OTLP code drift.
 otlp-codegen-check:
     python3 scripts/generate_otlp_fast_encoder.py --check
+    python3 scripts/generate_otlp_projection.py --check
 
 # Guardrail: inherited dependencies must not override default-features locally.
 workspace-inheritance-guard:
@@ -607,6 +608,19 @@ bench-rate *ARGS:
 # Use --quick (30s) for CI or --medium (120s) for quick checks.
 bench-memory *ARGS:
     cargo run -p logfwd-bench --release --bin memory-profile -- {{ARGS}}
+
+# Profile file output (JSON lines serialization + file I/O) CPU, memory, or per-stage breakdown.
+# Modes: breakdown (default), cpu (flamegraph), alloc (allocation counts).
+# Examples:
+#   just profile-file-output                              # breakdown, narrow schema
+#   just profile-file-output --schema wide                # breakdown, wide schema
+#   just profile-file-output --mode cpu --schema wide     # CPU flamegraph, wide
+profile-file-output *ARGS:
+    cargo run -p logfwd-bench --release --bin file_output_profile -- {{ARGS}}
+
+# Profile file output allocation counts (requires stats_alloc instrumented allocator).
+profile-file-output-alloc *ARGS:
+    cargo run -p logfwd-bench --release --features otlp-profile-alloc --bin file_output_profile -- --mode alloc {{ARGS}}
 
 # Start a local OTLP blackhole receiver using main CLI devour wrapper.
 bench-devour-otlp listen="127.0.0.1:4318":

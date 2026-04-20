@@ -9,7 +9,7 @@ use arrow::array::{
     Array, AsArray, BinaryArray, LargeBinaryArray, LargeStringArray, PrimitiveArray, StringArray,
     StringViewArray,
 };
-use arrow::datatypes::{DataType, Float64Type, Int64Type, UInt64Type};
+use arrow::datatypes::{DataType, Float64Type, Int64Type, UInt32Type, UInt64Type};
 use arrow::record_batch::RecordBatch;
 use arrow::util::display::array_value_to_string;
 use flate2::Compression as GzipLevel;
@@ -80,7 +80,7 @@ enum ResourceValueRef<'a> {
     Bool(bool),
 }
 
-/// Per-row resource key: one optional borrowed/scalar value per `_resource_*` column.
+/// Per-row resource key: one optional borrowed/scalar value per resource column.
 type ResourceKey<'a> = Vec<Option<ResourceValueRef<'a>>>;
 
 /// Per-group scope key (name, version).
@@ -88,6 +88,28 @@ type ScopeKey<'a> = (Option<&'a str>, Option<&'a str>);
 
 /// Per-group state: resource key + scope key + byte-range spans of encoded log records.
 type ResourceGroup<'a> = (ResourceKey<'a>, ScopeKey<'a>, Vec<(usize, usize)>);
+
+#[derive(Clone, Copy)]
+enum FlagsArray<'a> {
+    Int64(&'a PrimitiveArray<Int64Type>),
+    UInt32(&'a PrimitiveArray<UInt32Type>),
+    UInt64(&'a PrimitiveArray<UInt64Type>),
+}
+
+impl FlagsArray<'_> {
+    #[inline]
+    fn value_u32(self, row: usize) -> Option<u32> {
+        match self {
+            FlagsArray::Int64(arr) => (!arr.is_null(row))
+                .then(|| arr.value(row))
+                .and_then(|raw| u32::try_from(raw).ok()),
+            FlagsArray::UInt32(arr) => (!arr.is_null(row)).then(|| arr.value(row)),
+            FlagsArray::UInt64(arr) => (!arr.is_null(row))
+                .then(|| arr.value(row))
+                .and_then(|raw| u32::try_from(raw).ok()),
+        }
+    }
+}
 
 impl OtlpSink {
     #[allow(clippy::too_many_arguments)]
@@ -207,8 +229,7 @@ impl OtlpSink {
         };
 
         // Resolve column roles and downcast arrays once for the whole batch.
-        let resource_prefix = resource_prefix_from_batch(batch);
-        let columns = resolve_batch_columns(batch, self.message_field.as_str(), &resource_prefix);
+        let columns = resolve_batch_columns(batch, self.message_field.as_str());
 
         // Phase 1: encode all LogRecords and assign each row to a resource group.
         let mut records_buf: Vec<u8> =
@@ -456,8 +477,7 @@ impl OtlpSink {
             batch
         };
 
-        let resource_prefix = resource_prefix_from_batch(batch);
-        let columns = resolve_batch_columns(batch, self.message_field.as_str(), &resource_prefix);
+        let columns = resolve_batch_columns(batch, self.message_field.as_str());
         self.encoder_buf.reserve(num_rows * 128);
 
         for row in 0..num_rows {
@@ -590,48 +610,10 @@ impl OtlpSink {
                 let status = response.status();
 
                 if status.is_success() {
-                    // For gRPC, check grpc-status header — HTTP 200 can carry a
-                    // gRPC error in headers (trailers-only responses). (#1097)
-                    //
-                    // Note: reqwest does not surface HTTP/2 trailers from the
-                    // trailers frame, only from the initial HEADERS frame. This
-                    // catches trailers-only responses (the common error path for
-                    // OTLP collectors) but not normal headers→data→trailers flow.
                     if self.protocol == OtlpProtocol::Grpc
-                        && let Some(grpc_status) = response.headers().get("grpc-status")
+                        && let Some(send_result) = classify_grpc_status_headers(response.headers())
                     {
-                        let code = grpc_status
-                            .to_str()
-                            .unwrap_or("unknown")
-                            .trim()
-                            .parse::<u32>()
-                            .unwrap_or(2); // default to UNKNOWN
-                        if code != 0 {
-                            let msg = response
-                                .headers()
-                                .get("grpc-message")
-                                .and_then(|v| v.to_str().ok())
-                                .unwrap_or("")
-                                .to_string();
-                            // Classify gRPC status codes per gRPC spec:
-                            // Retryable: CANCELLED(1), DEADLINE_EXCEEDED(4),
-                            //   RESOURCE_EXHAUSTED(8), ABORTED(10), UNAVAILABLE(14)
-                            // Permanent: all others (INVALID_ARGUMENT, NOT_FOUND, etc.)
-                            return Ok(match code {
-                                1 | 4 | 10 | 14 => super::sink::SendResult::IoError(
-                                    io::Error::other(format!("gRPC error {code}: {msg}")),
-                                ),
-                                8 => {
-                                    // RESOURCE_EXHAUSTED → treat like 429
-                                    super::sink::SendResult::RetryAfter(Duration::from_secs(
-                                        DEFAULT_RETRY_AFTER_SECS,
-                                    ))
-                                }
-                                _ => super::sink::SendResult::Rejected(format!(
-                                    "gRPC error {code}: {msg}"
-                                )),
-                            });
-                        }
+                        return Ok(send_result);
                     }
                     self.stats.inc_lines(batch_rows);
                     self.stats.inc_bytes(self.encoder_buf.len() as u64);
@@ -663,6 +645,44 @@ impl OtlpSink {
             Err(e) => Err(io::Error::other(e.to_string())),
         }
     }
+}
+
+/// Classify gRPC application status from response headers.
+///
+/// OTLP/gRPC uses HTTP 200 for transport-level success and reports application errors
+/// in `grpc-status`/`grpc-message`.
+///
+/// Behavior:
+/// - Header-only or trailers-only responses where `grpc-status` is exposed in the initial
+///   header map are classified and returned.
+/// - Normal responses that send `grpc-status` only in the trailing headers are currently
+///   treated as transport success because reqwest does not expose HTTP/2 trailing headers
+///   via the response header map used here.
+fn classify_grpc_status_headers(
+    headers: &reqwest::header::HeaderMap,
+) -> Option<super::sink::SendResult> {
+    let grpc_status = headers.get("grpc-status")?;
+    let code = grpc_status
+        .to_str()
+        .unwrap_or("unknown")
+        .trim()
+        .parse::<u32>()
+        .unwrap_or(2); // default to UNKNOWN
+    if code == 0 {
+        return None;
+    }
+    let msg = headers
+        .get("grpc-message")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    Some(match code {
+        1 | 4 | 10 | 14 => {
+            super::sink::SendResult::IoError(io::Error::other(format!("gRPC error {code}: {msg}")))
+        }
+        8 => super::sink::SendResult::RetryAfter(Duration::from_secs(DEFAULT_RETRY_AFTER_SECS)),
+        _ => super::sink::SendResult::Rejected(format!("gRPC error {code}: {msg}")),
+    })
 }
 
 impl super::sink::Sink for OtlpSink {
@@ -900,7 +920,7 @@ struct BatchColumns<'a> {
     /// Downcast array for the `span_id` column (16 hex chars → 8-byte OTLP field 10).
     span_id_col: Option<(usize, OtlpStrCol<'a>)>,
     /// Downcast array for the `flags` / `trace_flags` column (uint32, OTLP field 8).
-    flags_col: Option<(usize, &'a PrimitiveArray<Int64Type>)>,
+    flags_col: Option<(usize, FlagsArray<'a>)>,
     /// Severity number column (Int64, OTLP severity_number).
     severity_num_col: Option<(usize, &'a PrimitiveArray<Int64Type>)>,
     /// Observed timestamp column (Int64, nanoseconds).
@@ -925,11 +945,7 @@ fn resolve_otlp_str_col(col: &dyn Array) -> Option<OtlpStrCol<'_>> {
 }
 
 /// Scan the batch schema once and resolve column roles and downcast arrays.
-fn resolve_batch_columns<'a>(
-    batch: &'a RecordBatch,
-    message_field: &str,
-    resource_prefix: &str,
-) -> BatchColumns<'a> {
+fn resolve_batch_columns<'a>(batch: &'a RecordBatch, message_field: &str) -> BatchColumns<'a> {
     let schema = batch.schema();
     let mut timestamp_col: Option<(usize, OtlpStrCol<'_>)> = None;
     let mut timestamp_num_col: Option<(usize, &dyn Array)> = None;
@@ -937,7 +953,7 @@ fn resolve_batch_columns<'a>(
     let mut body_col: Option<(usize, OtlpStrCol<'_>)> = None;
     let mut trace_id_col: Option<(usize, OtlpStrCol<'_>)> = None;
     let mut span_id_col: Option<(usize, OtlpStrCol<'_>)> = None;
-    let mut flags_col: Option<(usize, &PrimitiveArray<Int64Type>)> = None;
+    let mut flags_col: Option<(usize, FlagsArray<'_>)> = None;
     // Column indices to exclude from attributes.
     let mut excluded = vec![false; schema.fields().len()];
 
@@ -996,11 +1012,19 @@ fn resolve_batch_columns<'a>(
                 name,
                 field_names::TRACE_FLAGS,
                 field_names::TRACE_FLAGS_VARIANTS,
-            ) && flags_col.is_none()
-                && matches!(field.data_type(), DataType::Int64) =>
+            ) && flags_col.is_none() =>
             {
-                flags_col = Some((idx, batch.column(idx).as_primitive::<Int64Type>()));
-                excluded[idx] = true;
+                let col = batch.column(idx);
+                let resolved = match field.data_type() {
+                    DataType::Int64 => Some(FlagsArray::Int64(col.as_primitive::<Int64Type>())),
+                    DataType::UInt32 => Some(FlagsArray::UInt32(col.as_primitive::<UInt32Type>())),
+                    DataType::UInt64 => Some(FlagsArray::UInt64(col.as_primitive::<UInt64Type>())),
+                    _ => None,
+                };
+                if let Some(flags_arr) = resolved {
+                    flags_col = Some((idx, flags_arr));
+                    excluded[idx] = true;
+                }
             }
             name if name == message_field
                 || field_names::matches_any(
@@ -1015,9 +1039,6 @@ fn resolve_batch_columns<'a>(
                         body_col = Some((idx, arr));
                     }
                 }
-            }
-            field_names::RAW => {
-                excluded[idx] = true;
             }
             _ => {}
         }
@@ -1075,22 +1096,16 @@ fn resolve_batch_columns<'a>(
             }
         }
 
-        // Resource attributes — check configured prefix and legacy `_resource_` prefix.
-        let resource_key = field_name
-            .strip_prefix(resource_prefix)
-            .map(str::to_string)
-            .or_else(|| {
-                field_name
-                    .strip_prefix(field_names::LEGACY_RESOURCE_PREFIX)
-                    .map(|stripped| {
-                        field
-                            .metadata()
-                            .get(field_names::METADATA_RESOURCE_KEY)
-                            .cloned()
-                            .unwrap_or_else(|| stripped.to_string())
-                    })
-            });
-        if let Some(original_key) = resource_key {
+        let stripped_resource_key = field_name.strip_prefix(field_names::DEFAULT_RESOURCE_PREFIX);
+        if matches!(stripped_resource_key, Some("")) {
+            tracing::warn!(
+                column = field_name,
+                resource_prefix = field_names::DEFAULT_RESOURCE_PREFIX,
+                "dropping resource column with empty OTLP key after prefix stripping"
+            );
+            continue;
+        }
+        if let Some(resource_key) = stripped_resource_key.map(str::to_string) {
             let resource_attr = match field.data_type() {
                 DataType::Int64 => AttrArray::Int(batch.column(idx).as_primitive::<Int64Type>()),
                 DataType::UInt64 => AttrArray::UInt(batch.column(idx).as_primitive::<UInt64Type>()),
@@ -1118,7 +1133,7 @@ fn resolve_batch_columns<'a>(
                     tracing::warn!(
                         column = field_name,
                         data_type = ?field.data_type(),
-                        "dropping struct _resource_ column; OTLP Resource attributes only support scalar values"
+                        "dropping struct resource column; OTLP Resource attributes only support scalar values"
                     );
                     continue;
                 }
@@ -1132,7 +1147,7 @@ fn resolve_batch_columns<'a>(
                     AttrArray::Str,
                 ),
             };
-            resource_cols.push((original_key, resource_attr));
+            resource_cols.push((resource_key, resource_attr));
             continue;
         }
         // Dispatch on the actual Arrow DataType, not the column name suffix.
@@ -1207,35 +1222,6 @@ fn resolve_batch_columns<'a>(
         attribute_cols,
         resource_cols,
     }
-}
-
-fn resource_prefix_from_batch(batch: &RecordBatch) -> String {
-    let schema = batch.schema();
-
-    if let Some(prefix) = schema.metadata().get(field_names::METADATA_RESOURCE_PREFIX)
-        && !prefix.is_empty()
-    {
-        return prefix.clone();
-    }
-
-    if schema
-        .fields()
-        .iter()
-        .any(|f| f.name().starts_with(field_names::DEFAULT_RESOURCE_PREFIX))
-    {
-        return field_names::DEFAULT_RESOURCE_PREFIX.to_string();
-    }
-
-    for field in schema.fields() {
-        if let Some(resource_key) = field.metadata().get(field_names::METADATA_RESOURCE_KEY)
-            && let Some(prefix) = field.name().strip_suffix(resource_key)
-            && !prefix.is_empty()
-        {
-            return prefix.to_string();
-        }
-    }
-
-    field_names::DEFAULT_RESOURCE_PREFIX.to_string()
 }
 
 fn numeric_timestamp_ns(arr: &dyn Array, row: usize) -> Option<u64> {
@@ -1336,7 +1322,7 @@ fn encode_row_as_log_record(
         if arr.is_null(row) {
             severity_num as u64
         } else {
-            u64::try_from(arr.value(row)).unwrap_or(severity_num as u64)
+            u64::try_from(arr.value(row)).unwrap_or(0)
         }
     } else {
         severity_num as u64
@@ -1379,15 +1365,12 @@ fn encode_row_as_log_record(
     }
 
     // LogRecord.flags (fixed32) — W3C trace flags.
-    // Clamp to u32 range: negative or >u32::MAX values are invalid per the
+    // Filter to u32 range: negative or >u32::MAX values are invalid per the
     // W3C Trace Context spec (only 8 bits are defined). (#1121)
     if let Some((_, arr)) = columns.flags_col
-        && !arr.is_null(row)
+        && let Some(flags) = arr.value_u32(row)
     {
-        let raw = arr.value(row);
-        if let Ok(flags) = u32::try_from(raw) {
-            encode_fixed32(buf, otlp::LOG_RECORD_FLAGS, flags);
-        }
+        encode_fixed32(buf, otlp::LOG_RECORD_FLAGS, flags);
     }
 
     // LogRecord.trace_id (bytes, 16 bytes) — hex-decoded from 32-char string column
@@ -1690,6 +1673,9 @@ fn write_grpc_frame(buf: &mut Vec<u8>, payload: &[u8], compressed: bool) -> io::
     buf.extend_from_slice(payload);
     Ok(())
 }
+
+#[cfg(test)]
+mod otlp_sink_correctness_tests;
 
 #[cfg(test)]
 mod tests {
@@ -2598,7 +2584,11 @@ mod tests {
         let schema = Arc::new(Schema::new(vec![
             Field::new("body", DataType::Utf8, true),
             Field::new("log_payload", DataType::Binary, true),
-            Field::new("_resource_resource_payload", DataType::Binary, true),
+            Field::new(
+                "resource.attributes.resource_payload",
+                DataType::Binary,
+                true,
+            ),
         ]));
         let batch = RecordBatch::try_new(
             schema,
@@ -2717,6 +2707,39 @@ mod tests {
             lr.severity_number, 17,
             "null severity_number column must fall back to parsed level"
         );
+    }
+
+    #[test]
+    fn negative_severity_number_encodes_unspecified() {
+        use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
+        use prost::Message;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("level", DataType::Utf8, true),
+            Field::new(field_names::SEVERITY_NUMBER, DataType::Int64, true),
+            Field::new("message", DataType::Utf8, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec![Some("ERROR")])),
+                Arc::new(Int64Array::from(vec![Some(-1)])),
+                Arc::new(StringArray::from(vec![Some("broken")])),
+            ],
+        )
+        .expect("valid batch");
+
+        let mut sink = make_sink();
+        sink.encode_batch(&batch, &make_metadata());
+
+        let request = ExportLogsServiceRequest::decode(sink.encoder_buf.as_slice())
+            .expect("prost must decode output");
+        let lr = &request.resource_logs[0].scope_logs[0].log_records[0];
+        assert_eq!(
+            lr.severity_number, 0,
+            "negative severity_number must not wrap or inherit level severity"
+        );
+        assert_eq!(lr.severity_text, "ERROR");
     }
 
     #[test]
@@ -2920,36 +2943,6 @@ mod tests {
         assert_eq!(generated_bodies, vec!["raw-first", "raw-fallback"]);
     }
 
-    #[test]
-    fn otlp_encoder_excludes_internal_raw_attribute() {
-        use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
-        use prost::Message;
-
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("body", DataType::Utf8, true),
-            Field::new(field_names::RAW, DataType::Utf8, true),
-        ]));
-        let batch = RecordBatch::try_new(
-            schema,
-            vec![
-                Arc::new(StringArray::from(vec![Some("hello")])),
-                Arc::new(StringArray::from(vec![Some("wire-only")])),
-            ],
-        )
-        .expect("valid batch");
-
-        let mut sink = make_sink();
-        sink.encode_batch(&batch, &make_metadata());
-        let request = ExportLogsServiceRequest::decode(sink.encoder_buf.as_slice())
-            .expect("prost must decode output");
-        let attrs = &request.resource_logs[0].scope_logs[0].log_records[0].attributes;
-
-        assert!(
-            attrs.iter().all(|kv| kv.key != field_names::RAW),
-            "_raw should remain internal-only"
-        );
-    }
-
     /// Roundtrip with multiple rows to verify repeated LogRecord encoding.
     #[test]
     fn roundtrip_multiple_rows() {
@@ -2996,23 +2989,10 @@ mod tests {
         use opentelemetry_proto::tonic::common::v1::any_value::Value;
         use prost::Message;
 
-        // Build fields with `logfwd.resource_key` metadata — the same way
-        // `StreamingBuilder` produces them — so that the original OTLP keys
-        // (containing dots) survive the round-trip through Arrow column names.
-        let svc_field = Field::new("resource.attributes.service.name", DataType::Utf8, true)
-            .with_metadata(std::collections::HashMap::from([(
-                field_names::METADATA_RESOURCE_KEY.to_string(),
-                "service.name".to_string(),
-            )]));
-        let ns_field = Field::new("resource.attributes.k8s.namespace", DataType::Utf8, true)
-            .with_metadata(std::collections::HashMap::from([(
-                field_names::METADATA_RESOURCE_KEY.to_string(),
-                "k8s.namespace".to_string(),
-            )]));
         let schema = Arc::new(Schema::new(vec![
             Field::new("message", DataType::Utf8, true),
-            svc_field,
-            ns_field,
+            Field::new("resource.attributes.service.name", DataType::Utf8, true),
+            Field::new("resource.attributes.k8s.namespace", DataType::Utf8, true),
         ]));
         let batch = RecordBatch::try_new(
             schema,
@@ -3154,29 +3134,57 @@ mod tests {
     }
 
     #[test]
+    fn empty_resource_attribute_key_is_dropped() {
+        use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
+        use prost::Message;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("message", DataType::Utf8, true),
+            Field::new("resource.attributes.", DataType::Utf8, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec![Some("hello")])),
+                Arc::new(StringArray::from(vec![Some("bad-empty-key")])),
+            ],
+        )
+        .expect("valid batch");
+
+        let mut sink = make_sink();
+        sink.encode_batch(&batch, &make_metadata());
+
+        let request =
+            ExportLogsServiceRequest::decode(sink.encoder_buf.as_slice()).expect("decode request");
+        if let Some(resource) = request.resource_logs[0].resource.as_ref() {
+            assert!(
+                resource.attributes.iter().all(|kv| !kv.key.is_empty()),
+                "empty resource keys must not be emitted"
+            );
+        }
+        let lr = &request.resource_logs[0].scope_logs[0].log_records[0];
+        assert!(
+            lr.attributes
+                .iter()
+                .all(|kv| kv.key != "resource.attributes."),
+            "malformed resource prefix column should not fall through to log attributes"
+        );
+    }
+
+    #[test]
     fn typed_resource_columns_group_rows_and_encode_typed_attrs() {
         use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
         use opentelemetry_proto::tonic::common::v1::any_value::Value;
         use prost::Message;
 
-        let shard_field = Field::new("resource.attributes.service.shard", DataType::Int64, true)
-            .with_metadata(std::collections::HashMap::from([(
-                field_names::METADATA_RESOURCE_KEY.to_string(),
-                "service.shard".to_string(),
-            )]));
-        let enabled_field = Field::new(
-            "resource.attributes.service.enabled",
-            DataType::Boolean,
-            true,
-        )
-        .with_metadata(std::collections::HashMap::from([(
-            field_names::METADATA_RESOURCE_KEY.to_string(),
-            "service.enabled".to_string(),
-        )]));
         let schema = Arc::new(Schema::new(vec![
             Field::new("message", DataType::Utf8, true),
-            shard_field,
-            enabled_field,
+            Field::new("resource.attributes.service.shard", DataType::Int64, true),
+            Field::new(
+                "resource.attributes.service.enabled",
+                DataType::Boolean,
+                true,
+            ),
         ]));
         let batch = RecordBatch::try_new(
             schema,
@@ -3266,21 +3274,10 @@ mod tests {
         use opentelemetry_proto::tonic::common::v1::any_value::Value;
         use prost::Message;
 
-        let svc_field = Field::new("resource.attributes.service.name", DataType::Utf8, true)
-            .with_metadata(std::collections::HashMap::from([(
-                field_names::METADATA_RESOURCE_KEY.to_string(),
-                "service.name".to_string(),
-            )]));
-        let shard_field = Field::new("resource.attributes.service.shard", DataType::Int64, true)
-            .with_metadata(std::collections::HashMap::from([(
-                field_names::METADATA_RESOURCE_KEY.to_string(),
-                "service.shard".to_string(),
-            )]));
-
         let schema = Arc::new(Schema::new(vec![
             Field::new("message", DataType::Utf8, true),
-            svc_field,
-            shard_field,
+            Field::new("resource.attributes.service.name", DataType::Utf8, true),
+            Field::new("resource.attributes.service.shard", DataType::Int64, true),
         ]));
         let batch = RecordBatch::try_new(
             schema,

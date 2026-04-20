@@ -22,6 +22,7 @@ mod passthrough {
 
     use arrow::record_batch::RecordBatch;
     use logfwd_core::scan_config::ScanConfig;
+    use logfwd_types::source_metadata::SourceMetadataPlan;
 
     /// Error returned when passthrough transform construction or execution fails.
     #[derive(Debug, Clone)]
@@ -98,6 +99,34 @@ mod passthrough {
 
         pub fn validate_plan(&mut self) -> Result<(), TransformError> {
             Ok(())
+        }
+    }
+
+    impl QueryAnalyzer {
+        /// Return the metadata columns the passthrough transform needs.
+        ///
+        /// Without DataFusion, `SELECT *` compatibility requires only the
+        /// legacy `_source_path` column; newer metadata columns remain
+        /// explicit opt-ins in the DataFusion-backed analyzer.
+        pub fn source_metadata_plan(&self) -> SourceMetadataPlan {
+            SourceMetadataPlan {
+                has_source_id: false,
+                has_input: false,
+                has_source_path: true,
+            }
+        }
+
+        /// Return metadata columns explicitly referenced by SQL.
+        ///
+        /// The passthrough analyzer has no SQL expression tree, so it reports
+        /// no explicit metadata references.
+        pub fn explicit_source_metadata_plan(&self) -> SourceMetadataPlan {
+            SourceMetadataPlan::default()
+        }
+
+        /// Return whether the transform needs source paths attached.
+        pub fn source_path_required(&self) -> bool {
+            self.source_metadata_plan().has_source_path
         }
     }
 

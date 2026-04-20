@@ -6,6 +6,7 @@ description: "Complete YAML reference for all FastForward settings"
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
 FastForward commands that operate on pipeline config (for example `run`, `validate`, `dry-run`, and `effective-config`) accept a YAML file via `--config <config.yaml>`.
+`ff send` accepts a destination-only config with top-level `output`, injects stdin as the input, drains the output, and exits.
 
 ## Overview
 
@@ -99,6 +100,7 @@ YAML sequence for multiple inputs.
 | `type` | string | Yes | Input type. See [Input types](#input-types). |
 | `name` | string | No | Friendly name shown in diagnostics. |
 | `format` | string | No | Log format. See [Formats](#formats). Defaults to `auto`. |
+| `source_metadata` | boolean | No | Attach source metadata columns (`_source_id`, `_input`, `_source_path`) when SQL requests them. Defaults to `false`; set `true` before referencing those columns or using `k8s_path` joins. |
 
 ### `file` input
 
@@ -118,6 +120,19 @@ input:
   path: /var/log/pods/**/*.log
   format: cri
 ```
+
+### `stdin` input
+
+Read data from standard input. This input has no input-specific fields.
+It is primarily used by `ff send` for command-line piping.
+
+```yaml
+input:
+  type: stdin
+  format: auto
+```
+
+Supported formats: `auto`, `cri`, `json`, and `raw`.
 
 ### `generator` input
 
@@ -173,14 +188,12 @@ Receive OTLP log records from another agent or SDK.
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `listen` | string | Yes | `host:port`, e.g. `0.0.0.0:4318`. |
-| `resource_prefix` | string | No | Prefix used when flattening OTLP resource attributes. Defaults to `resource.attributes.`. Currently only `resource.attributes.` is supported. |
 | `protobuf_decode_mode` | string | No | Experimental protobuf decoder: `prost` (default), `projected_fallback`, or `projected_only`. Projected modes require a build with the `otlp-research` feature. |
 
 ```yaml
 input:
   type: otlp
   listen: 0.0.0.0:4318
-  resource_prefix: resource.attributes.
   protobuf_decode_mode: prost
 ```
 
@@ -334,6 +347,7 @@ Behavior:
 | Value | Status | Description |
 |-------|--------|-------------|
 | `file` | Implemented | Tail files matching a glob pattern. |
+| `stdin` | Implemented | Read piped stdin until EOF, then drain outputs and exit. |
 | `generator` | Implemented | Emit synthetic JSON-like records from an in-process source. |
 | `udp` | Implemented | Receive log lines over UDP. |
 | `tcp` | Implemented | Accept log lines over TCP. |
@@ -494,7 +508,7 @@ Write records to a file.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `path` | string | Yes | Destination file path. |
+| `path` | string | Yes | Destination file path. Parent directory must already exist and be writable. |
 | `format` | string | No | `json` for NDJSON output, or `text` to write raw lines. |
 
 ```yaml
@@ -594,14 +608,22 @@ When a field contains mixed types across rows, the scanner emits a single
 type (e.g., a `status` Struct with `int` and `str` children). Legacy
 single-underscore suffixed columns (`status_int`, `level_str`) are not emitted.
 
-Special columns added by the scanner / input format layer:
+Special columns attached by the runtime after scan, plus format-derived columns:
 
 | Column | Type | Description |
 |--------|------|-------------|
 | `body` | string | Original input line (when input line capture is enabled, e.g. `line_field: body`, or when a non-JSON CRI line is wrapped for scanner safety). |
-| `_source_path` | string | Absolute path of the source file (file-backed inputs only). Used as a join key for `k8s_path` enrichment. |
+| `_source_id` | uint64 | Stable row-level source identity when an input can identify a sender/source. File inputs use file identity; UDP uses sender address identity. |
+| `_input` | string | Configured input name for the row source. |
+| `_source_path` | string | Source file path (file-backed inputs only). Used as a join key for `k8s_path` enrichment. |
 | `_timestamp` | string | Timestamp from the CRI header as an RFC 3339 string (CRI inputs only). |
 | `_stream` | string | CRI stream name (`stdout` / `stderr`). |
+
+Source metadata is never written into raw input bytes. It is carried beside
+scanner-ready chunks and, when `source_metadata: true` is set on the input,
+materialized as table columns before SQL runs. For compatibility, `SELECT *`
+includes `_source_path` for opted-in inputs. New metadata columns such as
+`_source_id` and `_input` are included only when SQL references them explicitly.
 
 ### Built-in UDFs
 
@@ -766,8 +788,9 @@ FROM logs l CROSS JOIN k8s_cluster_info k
 
 Parses Kubernetes pod log paths (e.g.
 `/var/log/pods/<namespace>_<pod>_<uid>/<container>/`) to extract metadata.
-The source-path metadata is automatically injected into the `logs` table as
-`_source_path` for file-backed inputs.
+Queries that join `logs._source_path` to this table must set
+`source_metadata: true` on the file input. Source paths are never written into
+raw log bytes.
 
 Columns exposed by the enrichment table (named `k8s_pods` by default; set `table_name: k8s` in config to use the `k8s` alias shown in the examples below):
 
@@ -983,7 +1006,11 @@ storage:
 
 ## Environment variable substitution
 
-Any value in the config file can reference an environment variable with `${VAR}`:
+Any value in the config file can reference an environment variable with `${VAR}`.
+Variable names must start with an ASCII letter or `_`, and then contain only
+ASCII letters, digits, or `_`. `$VAR` stays literal, and default expressions
+such as `${VAR:fallback}` are rejected because `:` is not valid in variable
+names.
 
 ```yaml
 output:
@@ -995,9 +1022,13 @@ server:
 ```
 
 If the variable is not set, config loading fails fast with a validation error.
+An unterminated reference such as `${VAR` is preserved literally so existing
+config text is not rewritten accidentally; completed placeholders before that
+literal tail are still expanded.
 
-Exact unquoted placeholders use YAML scalar typing after expansion. This lets numeric
-and boolean fields read values directly from the environment:
+Environment variables are expanded as string data. The typed config schema then
+parses those strings into the field type, so numeric and boolean fields can read
+values directly from the environment without treating the env value as YAML:
 
 ```yaml
 pipelines:
@@ -1005,13 +1036,13 @@ pipelines:
     workers: ${LOGFWD_WORKERS}
 ```
 
-Quote a placeholder, or tag it with `!!str`, when the expanded value should remain
-a string even if it looks like a YAML number, boolean, or null:
+String fields remain strings even when the expanded value looks like a YAML
+number, boolean, or null:
 
 ```yaml
 input:
   type: file
-  path: "${LOG_PATH}"
+  path: ${LOG_PATH}
 ```
 
 Placeholders embedded inside longer strings always remain strings:

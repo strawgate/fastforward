@@ -99,9 +99,6 @@ fn is_well_known_flags(name: &str) -> bool {
 /// Canonical resource attribute prefix shared across receivers/sinks.
 const RESOURCE_PREFIX: &str = field_names::DEFAULT_RESOURCE_PREFIX;
 
-/// Legacy prefix for backwards compatibility with older batches.
-const LEGACY_RESOURCE_PREFIX: &str = field_names::LEGACY_RESOURCE_PREFIX;
-
 // ---------------------------------------------------------------------------
 // Attribute type tags (stored in the `type` column of attrs tables)
 // ---------------------------------------------------------------------------
@@ -204,19 +201,7 @@ pub fn flat_to_star(batch: &RecordBatch) -> Result<StarSchema, ArrowError> {
     for (idx, field) in schema.fields().iter().enumerate() {
         let name = field.name().as_str();
 
-        // Check both current and legacy resource attribute prefixes.
-        let resource_key = name
-            .strip_prefix(RESOURCE_PREFIX)
-            .map(str::to_string)
-            .or_else(|| {
-                name.strip_prefix(LEGACY_RESOURCE_PREFIX).map(|stripped| {
-                    field
-                        .metadata()
-                        .get(field_names::METADATA_RESOURCE_KEY)
-                        .cloned()
-                        .unwrap_or_else(|| stripped.to_string())
-                })
-            });
+        let resource_key = name.strip_prefix(RESOURCE_PREFIX).map(str::to_string);
         if let Some(resource_key) = resource_key {
             resource_cols.push((resource_key, idx));
             continue;
@@ -246,9 +231,6 @@ pub fn flat_to_star(batch: &RecordBatch) -> Result<StarSchema, ArrowError> {
                 }
                 Some(_) => {}
             }
-        }
-        if name == field_names::RAW {
-            continue;
         }
         if trace_id_col.is_none() && is_well_known_trace_id(name) {
             trace_id_col = Some(idx);
@@ -2271,7 +2253,6 @@ mod tests {
         assert_eq!(scope_name_arr.value(1), "logfwd");
         assert_eq!(scope_name_arr.value(2), "logfwd");
 
-        // _resource_service_name
         let rs_idx = rt_schema
             .index_of("resource.attributes.service_name")
             .expect("resource_service_name col");
@@ -2284,7 +2265,6 @@ mod tests {
         assert_eq!(rs_arr.value(1), "api-server");
         assert_eq!(rs_arr.value(2), "worker");
 
-        // _resource_k8s_pod
         let rp_idx = rt_schema
             .index_of("resource.attributes.k8s_pod")
             .expect("resource_k8s_pod col");
@@ -2599,33 +2579,6 @@ mod tests {
     }
 
     #[test]
-    fn flat_to_star_excludes_internal_raw_attribute() {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("body", DataType::Utf8, true),
-            Field::new(field_names::RAW, DataType::Utf8, true),
-        ]));
-        let columns: Vec<ArrayRef> = vec![
-            Arc::new(StringArray::from(vec!["canonical-value"])),
-            Arc::new(StringArray::from(vec!["wire-only"])),
-        ];
-        let batch = RecordBatch::try_new(schema, columns).expect("valid");
-
-        let star = flat_to_star(&batch).expect("flat_to_star");
-        let key_idx = star.log_attrs.schema().index_of("key").expect("key");
-        let keys = star
-            .log_attrs
-            .column(key_idx)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .expect("key should be Utf8");
-
-        assert!(
-            !keys.iter().flatten().any(|key| key == field_names::RAW),
-            "_raw should remain internal-only"
-        );
-    }
-
-    #[test]
     fn flat_to_star_keeps_unselected_body_alias_as_attribute() {
         let schema = Arc::new(Schema::new(vec![
             Field::new("message", DataType::Utf8, true),
@@ -2664,7 +2617,7 @@ mod tests {
     fn batch_with_only_resource_columns() {
         let schema = Arc::new(Schema::new(vec![
             Field::new("resource.attributes.service", DataType::Utf8, true),
-            Field::new("_resource_env", DataType::Utf8, true),
+            Field::new("resource.attributes.env", DataType::Utf8, true),
         ]));
 
         let columns: Vec<ArrayRef> = vec![
@@ -2696,35 +2649,31 @@ mod tests {
     }
 
     #[test]
-    fn legacy_resource_column_uses_metadata_key_for_roundtrip() {
-        let legacy_field = Field::new("_resource_service_name", DataType::Utf8, true)
-            .with_metadata(HashMap::from([(
-                field_names::METADATA_RESOURCE_KEY.to_string(),
-                "service.name".to_string(),
-            )]));
-        let schema = Arc::new(Schema::new(vec![legacy_field]));
-        let columns: Vec<ArrayRef> = vec![Arc::new(StringArray::from(vec!["api", "worker"]))];
-        let batch = RecordBatch::try_new(schema, columns).expect("valid");
+    fn legacy_resource_prefix_is_regular_log_attribute() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("message", DataType::Utf8, true),
+            Field::new("_resource_service", DataType::Utf8, true),
+        ]));
 
+        let columns: Vec<ArrayRef> = vec![
+            Arc::new(StringArray::from(vec!["hello"])),
+            Arc::new(StringArray::from(vec!["api"])),
+        ];
+
+        let batch = RecordBatch::try_new(schema, columns).expect("valid");
         let star = flat_to_star(&batch).expect("flat_to_star");
-        let roundtrip = star_to_flat(&star).expect("star_to_flat");
-        let rt_schema = roundtrip.schema();
-        assert!(
-            rt_schema
-                .index_of("resource.attributes.service_name")
-                .is_err(),
-            "legacy stripped key must not override explicit metadata key"
-        );
-        let idx = rt_schema
-            .index_of("resource.attributes.service.name")
-            .expect("resource key from metadata");
-        let arr = roundtrip
-            .column(idx)
+
+        assert_eq!(star.resource_attrs.num_rows(), 0);
+        assert_eq!(star.log_attrs.num_rows(), 1);
+
+        let key_idx = star.log_attrs.schema().index_of("key").expect("key");
+        let keys = star
+            .log_attrs
+            .column(key_idx)
             .as_any()
             .downcast_ref::<StringArray>()
-            .expect("str");
-        assert_eq!(arr.value(0), "api");
-        assert_eq!(arr.value(1), "worker");
+            .expect("key strings");
+        assert_eq!(keys.value(0), "_resource_service");
     }
 
     #[test]
@@ -2783,7 +2732,7 @@ mod tests {
     fn resource_deduplication() {
         // Rows 0 and 1 share the same resource attrs, row 2 differs.
         let schema = Arc::new(Schema::new(vec![
-            Field::new("_resource_svc", DataType::Utf8, true),
+            Field::new("resource.attributes.svc", DataType::Utf8, true),
             Field::new("message", DataType::Utf8, true),
         ]));
 
@@ -2812,7 +2761,7 @@ mod tests {
     #[test]
     fn resource_dedup_distinguishes_null_and_empty_values() {
         let schema = Arc::new(Schema::new(vec![
-            Field::new("_resource_svc", DataType::Utf8, true),
+            Field::new("resource.attributes.svc", DataType::Utf8, true),
             Field::new("message", DataType::Utf8, true),
         ]));
         let columns: Vec<ArrayRef> = vec![
@@ -3107,7 +3056,7 @@ mod tests {
     fn binary_resource_attrs_roundtrip_as_binary() {
         let schema = Arc::new(Schema::new(vec![
             Field::new("message", DataType::Utf8, true),
-            Field::new("_resource_payload", DataType::Binary, true),
+            Field::new("resource.attributes.payload", DataType::Binary, true),
         ]));
 
         let columns: Vec<ArrayRef> = vec![
@@ -3145,7 +3094,7 @@ mod tests {
     #[test]
     fn typed_resource_attrs_scatter_for_duplicate_resource_ids() {
         let schema = Arc::new(Schema::new(vec![
-            Field::new("_resource_retry_count", DataType::Int64, true),
+            Field::new("resource.attributes.retry_count", DataType::Int64, true),
             Field::new("message", DataType::Utf8, true),
         ]));
         let columns: Vec<ArrayRef> = vec![
@@ -3493,36 +3442,34 @@ mod tests {
             .downcast_ref::<StringArray>()
             .unwrap();
 
-        let mut found_200 = false;
-        let mut found_not_found = false;
-        for i in 0..log_attrs.num_rows() {
-            if key_arr.value(i) == "status" {
-                let val = if str_arr.is_null(i) {
+        let status_values: Vec<_> = (0..log_attrs.num_rows())
+            .filter(|&i| key_arr.value(i) == "status")
+            .map(|i| {
+                if str_arr.is_null(i) {
                     None
                 } else {
                     Some(str_arr.value(i))
-                };
-                match val {
-                    Some("200") => found_200 = true,
-                    Some("NOT_FOUND") => found_not_found = true,
-                    other => panic!("unexpected status value in log_attrs: {:?}", other),
                 }
+            })
+            .collect();
+        for value in &status_values {
+            match value {
+                Some("200" | "NOT_FOUND") => {}
+                other => panic!("unexpected status value in log_attrs: {:?}", other),
             }
         }
         assert!(
-            found_200,
+            status_values.iter().any(|value| *value == Some("200")),
             "status=200 (from int child) must appear in log_attrs, got: {:?}",
-            (0..log_attrs.num_rows())
-                .filter(|&i| key_arr.value(i) == "status")
-                .map(|i| if str_arr.is_null(i) {
-                    "NULL".to_string()
-                } else {
-                    str_arr.value(i).to_string()
-                })
+            status_values
+                .iter()
+                .map(|value| value.map_or_else(|| "NULL".to_string(), str::to_string))
                 .collect::<Vec<_>>()
         );
         assert!(
-            found_not_found,
+            status_values
+                .iter()
+                .any(|value| *value == Some("NOT_FOUND")),
             "status=NOT_FOUND (from str child) must appear in log_attrs"
         );
     }

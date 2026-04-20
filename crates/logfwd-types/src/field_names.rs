@@ -133,20 +133,14 @@ pub const LEGACY_RESOURCE_PREFIX: &str = "_resource_";
 // Internal columns
 // ---------------------------------------------------------------------------
 
-/// Internal raw-line column — excluded from OTLP attributes and star-schema.
-pub const RAW: &str = "_raw";
+/// Stable row-level source identity assigned by the input layer.
+pub const SOURCE_ID: &str = "_source_id";
 
-// ---------------------------------------------------------------------------
-// Arrow field / schema metadata keys
-// ---------------------------------------------------------------------------
+/// Configured input name for the row source.
+pub const INPUT: &str = "_input";
 
-/// Arrow field metadata key: stores the original resource attribute key
-/// when using the legacy `_resource_*` prefix, enabling round-trip conversion.
-pub const METADATA_RESOURCE_KEY: &str = "logfwd.resource_key";
-
-/// Arrow schema metadata key: overrides the default resource prefix
-/// detection on a per-batch basis.
-pub const METADATA_RESOURCE_PREFIX: &str = "logfwd.resource_prefix";
+/// File source path compatibility column.
+pub const SOURCE_PATH: &str = "_source_path";
 
 // ---------------------------------------------------------------------------
 // Type-conflict struct children (Arrow schema)

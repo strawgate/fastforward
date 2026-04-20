@@ -6,14 +6,15 @@ use opentelemetry::metrics::Meter;
 
 #[cfg(feature = "datafusion")]
 use logfwd_config::{EnrichmentConfig, GeoDatabaseFormat};
-use logfwd_config::{Format, InputTypeConfig, PipelineConfig};
+use logfwd_config::{Format, InputTypeConfig, OutputConfigV2, PipelineConfig};
 use logfwd_diagnostics::diagnostics::PipelineMetrics;
 use logfwd_io::checkpoint::{
     CheckpointStore, FileCheckpointStore, SourceCheckpoint, default_data_dir,
 };
-use logfwd_output::{AsyncFanoutFactory, SinkFactory, build_sink_factory};
+use logfwd_output::{AsyncFanoutFactory, SinkFactory, build_sink_factory_v2};
 use logfwd_types::field_names;
 use logfwd_types::pipeline::{PipelineMachine, SourceId};
+use logfwd_types::source_metadata::SourceMetadataPlan;
 
 use super::input_build::build_input_state;
 use super::{InputTransform, Pipeline};
@@ -65,12 +66,6 @@ impl Pipeline {
         if config.batch_target_bytes == Some(0) {
             return Err("batch_target_bytes must be > 0".to_string());
         }
-        if config.batch_timeout_ms == Some(0) {
-            return Err("batch_timeout_ms must be > 0".to_string());
-        }
-        if config.poll_interval_ms == Some(0) {
-            return Err("poll_interval_ms must be > 0".to_string());
-        }
 
         // Collect enrichment sources once — they are shared across all
         // per-input transforms.
@@ -119,7 +114,10 @@ impl Pipeline {
                                 }
                             };
 
-                        if let Some(interval_secs) = geo_cfg.refresh_interval {
+                        if let Some(interval_secs) = geo_cfg
+                            .refresh_interval
+                            .map(logfwd_config::PositiveSecs::get)
+                        {
                             let reloadable = Arc::new(
                                 crate::transform::enrichment::ReloadableGeoDb::new(initial_db),
                             );
@@ -130,7 +128,7 @@ impl Pipeline {
                             if let Ok(handle) = tokio::runtime::Handle::try_current() {
                                 handle.spawn(async move {
                                 let mut ticker = tokio::time::interval(Duration::from_secs(
-                                    interval_secs.max(1),
+                                    interval_secs,
                                 ));
                                 ticker.tick().await;
                                 loop {
@@ -226,14 +224,15 @@ impl Pipeline {
                         table
                             .reload()
                             .map_err(|e| format!("enrichment '{}': {e}", cfg.table_name))?;
-                        if let Some(interval_secs) = cfg.refresh_interval {
+                        if let Some(interval_secs) =
+                            cfg.refresh_interval.map(logfwd_config::PositiveSecs::get)
+                        {
                             let t = Arc::clone(&table);
                             let name = cfg.table_name.clone();
                             if let Ok(handle) = tokio::runtime::Handle::try_current() {
                                 handle.spawn(async move {
-                                    let mut ticker = tokio::time::interval(Duration::from_secs(
-                                        interval_secs.max(1),
-                                    ));
+                                    let mut ticker =
+                                        tokio::time::interval(Duration::from_secs(interval_secs));
                                     ticker.tick().await;
                                     loop {
                                         ticker.tick().await;
@@ -279,14 +278,15 @@ impl Pipeline {
                         table
                             .reload()
                             .map_err(|e| format!("enrichment '{}': {e}", cfg.table_name))?;
-                        if let Some(interval_secs) = cfg.refresh_interval {
+                        if let Some(interval_secs) =
+                            cfg.refresh_interval.map(logfwd_config::PositiveSecs::get)
+                        {
                             let t = Arc::clone(&table);
                             let name = cfg.table_name.clone();
                             if let Ok(handle) = tokio::runtime::Handle::try_current() {
                                 handle.spawn(async move {
-                                    let mut ticker = tokio::time::interval(Duration::from_secs(
-                                        interval_secs.max(1),
-                                    ));
+                                    let mut ticker =
+                                        tokio::time::interval(Duration::from_secs(interval_secs));
                                     ticker.tick().await;
                                     loop {
                                         ticker.tick().await;
@@ -345,14 +345,15 @@ impl Pipeline {
                         table
                             .reload()
                             .map_err(|e| format!("enrichment '{}': {e}", cfg.table_name))?;
-                        if let Some(interval_secs) = cfg.refresh_interval {
+                        if let Some(interval_secs) =
+                            cfg.refresh_interval.map(logfwd_config::PositiveSecs::get)
+                        {
                             let t = Arc::clone(&table);
                             let name = cfg.table_name.clone();
                             if let Ok(handle) = tokio::runtime::Handle::try_current() {
                                 handle.spawn(async move {
-                                    let mut ticker = tokio::time::interval(Duration::from_secs(
-                                        interval_secs.max(1),
-                                    ));
+                                    let mut ticker =
+                                        tokio::time::interval(Duration::from_secs(interval_secs));
                                     ticker.tick().await;
                                     loop {
                                         ticker.tick().await;
@@ -513,11 +514,39 @@ impl Pipeline {
                 scan_config.line_field_name = Some(field_names::BODY.to_string());
             }
             let scanner = logfwd_arrow::scanner::Scanner::new(scan_config);
+            #[cfg(not(feature = "turmoil"))]
+            let requested_source_metadata_plan = transform.analyzer().source_metadata_plan();
+            let explicit_source_metadata_plan =
+                transform.analyzer().explicit_source_metadata_plan();
+            if explicit_source_metadata_plan.has_any() && !input_cfg.source_metadata {
+                return Err(format!(
+                    "pipeline '{name}' input '{input_name}': SQL references source metadata \
+                     columns (_source_id, _input, or _source_path), but source_metadata is disabled; \
+                     set source_metadata: true on this input"
+                ));
+            }
+            let source_metadata_plan = if input_cfg.source_metadata {
+                #[cfg(feature = "turmoil")]
+                {
+                    return Err(format!(
+                        "pipeline '{name}' input '{input_name}': source_metadata is not \
+                         supported when built with the turmoil feature; the turmoil input path \
+                         does not attach source metadata before SQL"
+                    ));
+                }
+                #[cfg(not(feature = "turmoil"))]
+                {
+                    requested_source_metadata_plan
+                }
+            } else {
+                SourceMetadataPlan::default()
+            };
 
             input_transforms.push(InputTransform {
                 scanner,
                 transform,
                 input_name: input_name.clone(),
+                source_metadata_plan,
             });
 
             inputs.push(build_input_state(&input_name, &resolved_cfg, input_stats)?);
@@ -534,27 +563,23 @@ impl Pipeline {
         // Build output sink factory → pool.
         let factory: Arc<dyn SinkFactory> = if config.outputs.len() == 1 {
             let output_cfg = &config.outputs[0];
-            let output_name = output_cfg
-                .name
-                .clone()
-                .unwrap_or_else(|| "output_0".to_string());
-            let output_type_str = format!("{:?}", output_cfg.output_type).to_lowercase();
-            let output_stats = metrics.add_output(&output_name, &output_type_str);
-            build_sink_factory(&output_name, output_cfg, base_path, output_stats)
-                .map_err(|e| e.to_string())?
+            build_output_factory_from_config(
+                0,
+                output_cfg.typed(),
+                output_cfg.compression.as_deref(),
+                base_path,
+                &mut metrics,
+            )?
         } else {
             let mut factories: Vec<Arc<dyn SinkFactory>> = Vec::new();
             for (i, output_cfg) in config.outputs.iter().enumerate() {
-                let output_name = output_cfg
-                    .name
-                    .clone()
-                    .unwrap_or_else(|| format!("output_{i}"));
-                let output_type_str = format!("{:?}", output_cfg.output_type).to_lowercase();
-                let output_stats = metrics.add_output(&output_name, &output_type_str);
-                factories.push(
-                    build_sink_factory(&output_name, output_cfg, base_path, output_stats)
-                        .map_err(|e| e.to_string())?,
-                );
+                factories.push(build_output_factory_from_config(
+                    i,
+                    output_cfg.typed(),
+                    output_cfg.compression.as_deref(),
+                    base_path,
+                    &mut metrics,
+                )?);
             }
             let fanout_name = name.to_string();
             Arc::new(AsyncFanoutFactory::new(fanout_name, factories))
@@ -594,13 +619,6 @@ impl Pipeline {
             "inputs and input_transforms must have the same length"
         );
 
-        if config.batch_timeout_ms == Some(0) {
-            return Err("batch_timeout_ms must be > 0".to_string());
-        }
-        if config.poll_interval_ms == Some(0) {
-            return Err("poll_interval_ms must be > 0".to_string());
-        }
-
         Ok(Pipeline {
             name: name.to_string(),
             inputs,
@@ -613,10 +631,10 @@ impl Pipeline {
                 .unwrap_or(DEFAULT_BATCH_TARGET_BYTES),
             batch_timeout: config
                 .batch_timeout_ms
-                .map_or(DEFAULT_BATCH_TIMEOUT, Duration::from_millis),
+                .map_or(DEFAULT_BATCH_TIMEOUT, Into::into),
             poll_interval: config
                 .poll_interval_ms
-                .map_or(DEFAULT_POLL_INTERVAL, Duration::from_millis),
+                .map_or(DEFAULT_POLL_INTERVAL, Into::into),
             resource_attrs: Arc::new(resource_attrs),
             machine: Some(PipelineMachine::new().start()),
             checkpoint_store,
@@ -626,6 +644,31 @@ impl Pipeline {
             pool_drain_timeout: DEFAULT_POOL_DRAIN_TIMEOUT,
         })
     }
+}
+
+fn build_output_factory_from_config(
+    index: usize,
+    output_cfg: &OutputConfigV2,
+    legacy_file_compression: Option<&str>,
+    base_path: Option<&Path>,
+    metrics: &mut PipelineMetrics,
+) -> Result<Arc<dyn SinkFactory>, String> {
+    let output_name = output_cfg
+        .name()
+        .map_or_else(|| format!("output_{index}"), str::to_owned);
+    let output_type_str = output_cfg.output_type().to_string();
+    let output_stats = metrics.add_output(&output_name, &output_type_str);
+
+    if matches!(output_cfg, OutputConfigV2::File(_))
+        && let Some(compression) = legacy_file_compression
+    {
+        return Err(format!(
+            "output '{output_name}': file does not support '{compression}' compression"
+        ));
+    }
+
+    build_sink_factory_v2(&output_name, output_cfg, base_path, output_stats)
+        .map_err(|e| e.to_string())
 }
 
 fn should_open_checkpoint_store(checkpoint_dir: &Path, has_explicit_data_dir: bool) -> bool {
@@ -647,13 +690,16 @@ fn should_open_checkpoint_store(checkpoint_dir: &Path, has_explicit_data_dir: bo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use logfwd_config::{InputConfig, InputTypeConfig, OutputConfig, OutputType};
+    use logfwd_config::{
+        InputConfig, InputTypeConfig, OutputConfig, OutputConfigV2, OutputType, StdoutOutputConfig,
+    };
 
     fn minimal_input(path: String) -> InputConfig {
         InputConfig {
             name: Some("input".to_string()),
             format: Some(Format::Json),
             sql: None,
+            source_metadata: false,
             type_config: InputTypeConfig::File(logfwd_config::FileTypeConfig {
                 path,
                 poll_interval_ms: None,
@@ -676,7 +722,7 @@ mod tests {
     fn minimal_config(path: String) -> PipelineConfig {
         PipelineConfig {
             inputs: vec![minimal_input(path)],
-            outputs: vec![minimal_output()],
+            outputs: vec![minimal_output().into()],
             transform: None,
             enrichment: vec![],
             resource_attrs: std::collections::HashMap::new(),
@@ -688,6 +734,51 @@ mod tests {
     }
 
     #[test]
+    fn from_config_accepts_native_typed_output_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("test.log");
+        std::fs::write(&log_path, b"{\"msg\":\"hello\"}\n").unwrap();
+
+        let mut config = minimal_config(log_path.display().to_string());
+        config.outputs = vec![
+            OutputConfigV2::Stdout(StdoutOutputConfig {
+                name: Some("typed_stdout".to_string()),
+                format: None,
+            })
+            .into(),
+        ];
+
+        Pipeline::from_config("default", &config, &logfwd_test_utils::test_meter(), None)
+            .expect("native typed output entry should build");
+    }
+
+    #[test]
+    fn from_config_preserves_legacy_output_factory_rejections() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("test.log");
+        std::fs::write(&log_path, b"{\"msg\":\"hello\"}\n").unwrap();
+
+        let mut config = minimal_config(log_path.display().to_string());
+        config.outputs = vec![
+            OutputConfig {
+                output_type: OutputType::File,
+                path: Some(dir.path().join("out.log").display().to_string()),
+                compression: Some("gzip".to_string()),
+                ..Default::default()
+            }
+            .into(),
+        ];
+
+        let err = Pipeline::from_config("default", &config, &logfwd_test_utils::test_meter(), None)
+            .err()
+            .expect("legacy file compression should still be rejected");
+        assert!(
+            err.contains("file does not support 'gzip' compression"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
     fn from_config_uses_explicit_data_dir_for_checkpoint_store() {
         let dir = tempfile::tempdir().expect("tempdir");
         let log_path = dir.path().join("in.log");
@@ -696,7 +787,7 @@ mod tests {
         let cfg = PipelineConfig {
             inputs: vec![minimal_input(log_path.to_string_lossy().into_owned())],
             transform: None,
-            outputs: vec![minimal_output()],
+            outputs: vec![minimal_output().into()],
             enrichment: Vec::new(),
             resource_attrs: Default::default(),
             workers: None,
@@ -724,33 +815,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn from_config_rejects_zero_batch_and_poll_timeouts() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let log_path = dir.path().join("in.log");
-        std::fs::write(&log_path, b"{\"level\":\"INFO\"}\n").expect("write input");
-        let cfg = PipelineConfig {
-            inputs: vec![minimal_input(log_path.to_string_lossy().into_owned())],
-            transform: None,
-            outputs: vec![minimal_output()],
-            enrichment: Vec::new(),
-            resource_attrs: Default::default(),
-            workers: None,
-            batch_target_bytes: None,
-            batch_timeout_ms: Some(0),
-            poll_interval_ms: None,
-        };
-
-        let batch_err =
-            match Pipeline::from_config("p", &cfg, &logfwd_test_utils::test_meter(), None) {
-                Ok(_) => panic!("zero batch timeout must be rejected"),
-                Err(err) => err,
-            };
-        assert!(
-            batch_err.contains("batch_timeout_ms must be > 0"),
-            "unexpected error: {batch_err}"
-        );
-    }
+    // Zero batch_timeout_ms and poll_interval_ms are now rejected at parse
+    // time by the PositiveMillis newtype, so there is no runtime test needed.
 
     #[test]
     fn workers_zero_returns_error() {
@@ -766,6 +832,84 @@ mod tests {
         assert!(
             err.contains("workers must be >= 1"),
             "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn source_metadata_disabled_rejects_explicit_source_column() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("test.log");
+        std::fs::write(&log_path, b"{\"msg\":\"hello\"}\n").unwrap();
+
+        let mut config = minimal_config(log_path.display().to_string());
+        config.transform = Some("SELECT _source_path FROM logs".to_string());
+
+        let err = Pipeline::from_config("default", &config, &logfwd_test_utils::test_meter(), None)
+            .err()
+            .expect("explicit source metadata should require opt-in");
+        assert!(
+            err.contains("source_metadata is disabled"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn source_metadata_enabled_allows_explicit_source_column() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("test.log");
+        std::fs::write(&log_path, b"{\"msg\":\"hello\"}\n").unwrap();
+
+        let mut config = minimal_config(log_path.display().to_string());
+        config.inputs[0].source_metadata = true;
+        config.transform = Some("SELECT _source_path FROM logs".to_string());
+
+        let pipeline =
+            Pipeline::from_config("default", &config, &logfwd_test_utils::test_meter(), None)
+                .expect("source metadata opt-in should allow source columns");
+        assert!(
+            pipeline.input_transforms[0]
+                .source_metadata_plan
+                .has_source_path
+        );
+    }
+
+    #[test]
+    fn source_metadata_enabled_select_star_preserves_legacy_source_path_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("test.log");
+        std::fs::write(&log_path, b"{\"msg\":\"hello\"}\n").unwrap();
+
+        let mut config = minimal_config(log_path.display().to_string());
+        config.inputs[0].source_metadata = true;
+
+        let pipeline =
+            Pipeline::from_config("default", &config, &logfwd_test_utils::test_meter(), None)
+                .expect("SELECT * should preserve legacy source path compatibility");
+
+        assert_eq!(
+            pipeline.input_transforms[0].source_metadata_plan,
+            SourceMetadataPlan {
+                has_source_id: false,
+                has_input: false,
+                has_source_path: true,
+            }
+        );
+    }
+
+    #[test]
+    fn source_metadata_disabled_keeps_select_star_narrow() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("test.log");
+        std::fs::write(&log_path, b"{\"msg\":\"hello\"}\n").unwrap();
+
+        let config = minimal_config(log_path.display().to_string());
+        let pipeline =
+            Pipeline::from_config("default", &config, &logfwd_test_utils::test_meter(), None)
+                .expect("SELECT * should build without source metadata");
+
+        assert_eq!(
+            pipeline.input_transforms[0].source_metadata_plan,
+            SourceMetadataPlan::default()
         );
     }
 }

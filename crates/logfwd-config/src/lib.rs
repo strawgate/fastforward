@@ -15,6 +15,8 @@ mod shared;
 mod types;
 mod validate;
 
+pub use serde_helpers::{PositiveMillis, PositiveSecs};
+
 #[cfg(test)]
 pub(crate) use env::expand_env_vars;
 pub use shared::{
@@ -22,15 +24,18 @@ pub use shared::{
     TlsServerConfig,
 };
 pub use types::{
-    ArrowIpcTypeConfig, AuthConfig, Config, ConfigError, CsvEnrichmentConfig, EnrichmentConfig,
-    FileTypeConfig, Format, GeneratorAttributeValueConfig, GeneratorComplexityConfig,
-    GeneratorInputConfig, GeneratorProfileConfig, GeneratorSequenceConfig, GeneratorTypeConfig,
-    GeoDatabaseConfig, GeoDatabaseFormat, HostInfoConfig, HostMetricsInputConfig, HttpInputConfig,
-    HttpMethodConfig, HttpTypeConfig, InputConfig, InputType, InputTypeConfig,
+    ArrowIpcOutputConfig, ArrowIpcTypeConfig, AuthConfig, Config, ConfigError, CsvEnrichmentConfig,
+    ElasticsearchOutputConfig, EnrichmentConfig, FileOutputConfig, FileTypeConfig, Format,
+    GeneratorAttributeValueConfig, GeneratorComplexityConfig, GeneratorInputConfig,
+    GeneratorProfileConfig, GeneratorSequenceConfig, GeneratorTypeConfig, GeoDatabaseConfig,
+    GeoDatabaseFormat, HostInfoConfig, HostMetricsInputConfig, HttpInputConfig, HttpMethodConfig,
+    HttpOutputConfig, HttpTypeConfig, InputConfig, InputType, InputTypeConfig,
     JournaldBackendConfig, JournaldInputConfig, JournaldTypeConfig, JsonlEnrichmentConfig,
-    K8sPathConfig, OtlpProtobufDecodeModeConfig, OtlpTypeConfig, OutputConfig, OutputType,
-    PipelineConfig, S3InputConfig, S3TypeConfig, SensorTypeConfig, ServerConfig,
-    StaticEnrichmentConfig, StorageConfig, TcpTypeConfig, UdpTypeConfig,
+    K8sPathConfig, LokiOutputConfig, NullOutputConfig, OtlpOutputConfig,
+    OtlpProtobufDecodeModeConfig, OtlpTypeConfig, OutputConfig, OutputConfigV1, OutputConfigV2,
+    OutputType, ParquetOutputConfig, PipelineConfig, S3InputConfig, S3TypeConfig, SensorTypeConfig,
+    ServerConfig, SocketOutputConfig, StaticEnrichmentConfig, StdoutOutputConfig, StorageConfig,
+    TcpTypeConfig, UdpTypeConfig,
 };
 pub use validate::validate_host_port;
 
@@ -77,13 +82,43 @@ storage:
         ));
         assert_eq!(pipe.inputs[0].format, Some(Format::Cri));
         assert!(pipe.transform.as_ref().unwrap().contains("SELECT"));
-        assert_eq!(pipe.outputs[0].output_type, OutputType::Otlp);
+        assert_eq!(pipe.outputs[0].output_type(), OutputType::Otlp);
         assert_eq!(
-            pipe.outputs[0].endpoint.as_deref(),
+            pipe.outputs[0].validation_config().endpoint.as_deref(),
             Some("http://otel-collector:4317")
         );
         assert_eq!(cfg.server.diagnostics.as_deref(), Some("0.0.0.0:9090"));
         assert_eq!(cfg.storage.data_dir.as_deref(), Some("/var/lib/logfwd"));
+    }
+
+    #[test]
+    fn input_source_metadata_flag_defaults_false_and_parses_true() {
+        let default_yaml = r"
+input:
+  type: file
+  path: /var/log/pods/**/*.log
+  format: cri
+
+output:
+  type: null
+";
+        let cfg = Config::load_str(default_yaml).expect("default source_metadata should parse");
+        let pipe = &cfg.pipelines["default"];
+        assert!(!pipe.inputs[0].source_metadata);
+
+        let enabled_yaml = r"
+input:
+  type: file
+  path: /var/log/pods/**/*.log
+  format: cri
+  source_metadata: true
+
+output:
+  type: null
+";
+        let cfg = Config::load_str(enabled_yaml).expect("source_metadata true should parse");
+        let pipe = &cfg.pipelines["default"];
+        assert!(pipe.inputs[0].source_metadata);
     }
 
     #[test]
@@ -127,8 +162,8 @@ server:
             InputTypeConfig::Udp(u) if u.listen == "0.0.0.0:514"
         ));
         assert_eq!(pipe.outputs.len(), 2);
-        assert_eq!(pipe.outputs[0].output_type, OutputType::Otlp);
-        assert_eq!(pipe.outputs[1].output_type, OutputType::Stdout);
+        assert_eq!(pipe.outputs[0].output_type(), OutputType::Otlp);
+        assert_eq!(pipe.outputs[1].output_type(), OutputType::Stdout);
     }
 
     #[test]
@@ -147,7 +182,7 @@ output:
         let cfg = Config::load_str(yaml).expect("env var substitution");
         let pipe = &cfg.pipelines["default"];
         assert_eq!(
-            pipe.outputs[0].endpoint.as_deref(),
+            pipe.outputs[0].validation_config().endpoint.as_deref(),
             Some("http://my-collector:4317")
         );
         // SAFETY: this test is not run concurrently with other tests that
@@ -178,7 +213,7 @@ output:
         assert_eq!(cfg.pipelines.len(), 1);
         let pipe = &cfg.pipelines["default"];
         assert_eq!(pipe.inputs[0].input_type(), InputType::File);
-        assert_eq!(pipe.outputs[0].output_type, OutputType::Stdout);
+        assert_eq!(pipe.outputs[0].output_type(), OutputType::Stdout);
         let _ = fs::remove_file(&path);
     }
 
@@ -316,26 +351,6 @@ output:
     }
 
     #[test]
-    fn otlp_input_accepts_resource_prefix() {
-        let yaml = r#"
-input:
-  type: otlp
-  listen: 127.0.0.1:4318
-  resource_prefix: resource.attributes.
-output:
-  type: stdout
-"#;
-        let cfg = Config::load_str(yaml).expect("otlp input with resource_prefix should parse");
-        let pipe = &cfg.pipelines["default"];
-        assert_eq!(pipe.inputs.len(), 1);
-        assert_eq!(pipe.inputs[0].input_type(), InputType::Otlp);
-        assert!(matches!(
-            &pipe.inputs[0].type_config,
-            InputTypeConfig::Otlp(o) if o.resource_prefix.as_deref() == Some("resource.attributes.")
-        ));
-    }
-
-    #[test]
     fn otlp_input_accepts_experimental_protobuf_decode_mode() {
         let yaml = r#"
 input:
@@ -356,6 +371,24 @@ output:
     }
 
     #[test]
+    fn otlp_input_rejects_resource_prefix() {
+        let yaml = r#"
+input:
+  type: otlp
+  listen: 127.0.0.1:4318
+  resource_prefix: resource.attributes.
+output:
+  type: stdout
+"#;
+        let err = Config::load_str(yaml).expect_err("resource_prefix is no longer supported");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("resource_prefix") || msg.contains("unknown field"),
+            "expected serde rejection of resource_prefix, got: {msg}"
+        );
+    }
+
+    #[test]
     fn non_otlp_input_rejects_protobuf_decode_mode() {
         let yaml = r#"
 input:
@@ -370,45 +403,6 @@ output:
         assert!(
             msg.contains("protobuf_decode_mode") || msg.contains("unknown field"),
             "expected serde rejection of protobuf_decode_mode for file input, got: {msg}"
-        );
-    }
-
-    #[test]
-    fn otlp_input_rejects_non_default_resource_prefix() {
-        let yaml = r#"
-input:
-  type: otlp
-  listen: 127.0.0.1:4318
-  resource_prefix: otel.resource.
-output:
-  type: stdout
-"#;
-        let err = Config::load_str(yaml)
-            .expect_err("non-default otlp resource_prefix should be rejected for now");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("unsupported otlp resource_prefix"),
-            "expected unsupported resource_prefix validation error, got: {msg}"
-        );
-    }
-
-    #[test]
-    fn non_otlp_input_rejects_resource_prefix() {
-        // With the tagged-enum refactor, `resource_prefix` is only valid inside
-        // the `otlp` variant.  Serde rejects it at parse time for other types.
-        let yaml = r#"
-input:
-  type: file
-  path: /var/log/app.log
-  resource_prefix: bad.prefix.
-output:
-  type: stdout
-"#;
-        let err = Config::load_str(yaml).expect_err("resource_prefix must be otlp-only");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("resource_prefix") || msg.contains("unknown field"),
-            "expected serde rejection of resource_prefix for file input, got: {msg}"
         );
     }
 
@@ -634,7 +628,7 @@ pipelines:
         let yaml = "input:\n  type: file\n  path: /tmp/x.log\noutput:\n  type: file\n  path: /tmp/out.ndjson\n";
         let cfg = Config::load_str(yaml).unwrap();
         assert_eq!(
-            cfg.pipelines["default"].outputs[0].output_type,
+            cfg.pipelines["default"].outputs[0].output_type(),
             OutputType::File
         );
     }
@@ -721,6 +715,7 @@ pipelines:
             ("otlp", "listen: 0.0.0.0:4317"),
             ("arrow_ipc", "listen: 0.0.0.0:4319"),
             ("http", "listen: 0.0.0.0:8080"),
+            ("stdin", ""),
             ("generator", ""),
             ("linux_ebpf_sensor", ""),
             ("macos_es_sensor", ""),
@@ -730,6 +725,51 @@ pipelines:
             let yaml = format!("input:\n  type: {itype}\n  {extra}\noutput:\n  type: stdout\n");
             Config::load_str(&yaml).unwrap_or_else(|e| panic!("failed for {itype}: {e}"));
         }
+    }
+
+    #[test]
+    fn stdin_input_accepts_supported_formats() {
+        for format in ["auto", "cri", "json", "raw"] {
+            let yaml =
+                format!("input:\n  type: stdin\n  format: {format}\noutput:\n  type: stdout\n");
+            let cfg = Config::load_str(&yaml)
+                .unwrap_or_else(|e| panic!("failed for stdin format {format}: {e}"));
+            let input = &cfg.pipelines["default"].inputs[0];
+            assert_eq!(input.input_type(), InputType::Stdin);
+        }
+    }
+
+    #[test]
+    fn stdin_input_rejects_unsupported_format() {
+        let yaml = r"
+input:
+  type: stdin
+  format: logfmt
+output:
+  type: stdout
+";
+        let err = Config::load_str(yaml).expect_err("stdin should reject unsupported format");
+        assert!(
+            err.to_string()
+                .contains("stdin input only supports format auto, cri, json, or raw"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn stdin_input_rejects_file_only_fields() {
+        let yaml = r"
+input:
+  type: stdin
+  path: /tmp/app.log
+output:
+  type: stdout
+";
+        let err = Config::load_str(yaml).expect_err("stdin should reject path");
+        assert!(
+            err.to_string().contains("unknown field `path`"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -767,20 +807,16 @@ output:
             InputTypeConfig::File(f) => f,
             _ => panic!("expected File type_config"),
         };
-        assert_eq!(f.poll_interval_ms, Some(100));
+        assert_eq!(f.poll_interval_ms, PositiveMillis::new(100));
         assert_eq!(f.read_buf_size, Some(1048576));
         assert_eq!(f.per_file_read_budget_bytes, Some(2097152));
     }
 
     #[test]
     fn file_input_rejects_zero_tuning_knobs() {
-        let cases = [
-            ("poll_interval_ms", 0),
-            ("read_buf_size", 0),
-            ("per_file_read_budget_bytes", 0),
-        ];
-
-        for (field, value) in cases {
+        // Non-duration fields still rejected by validation.
+        let validation_cases = [("read_buf_size", 0), ("per_file_read_budget_bytes", 0)];
+        for (field, value) in validation_cases {
             let yaml = format!(
                 r#"
 input:
@@ -797,6 +833,21 @@ output:
                 "expected error about positive {field}, got: {err}"
             );
         }
+
+        // Duration field (poll_interval_ms) is rejected at parse time via PositiveMillis.
+        let yaml = r#"
+input:
+  type: file
+  path: /tmp/test.log
+  poll_interval_ms: 0
+output:
+  type: stdout
+"#;
+        let err = Config::load_str(yaml).unwrap_err().to_string();
+        assert!(
+            err.contains("invalid value") || err.contains("positive"),
+            "expected zero-rejection error for poll_interval_ms, got: {err}"
+        );
     }
 
     #[test]
@@ -904,9 +955,11 @@ output:
   type: stdout
 ";
         let err = Config::load_str(yaml).unwrap_err();
+        // Now rejected at parse time via PositiveMillis.
+        let msg = err.to_string();
         assert!(
-            err.to_string()
-                .contains("sensor.poll_interval_ms must be at least 1")
+            msg.contains("invalid value") || msg.contains("positive"),
+            "expected zero-rejection error for poll_interval_ms, got: {msg}"
         );
     }
 
@@ -921,9 +974,11 @@ output:
   type: stdout
 ";
         let err = Config::load_str(yaml).unwrap_err();
+        // Now rejected at parse time via PositiveMillis.
+        let msg = err.to_string();
         assert!(
-            err.to_string()
-                .contains("sensor.control_reload_interval_ms must be at least 1")
+            msg.contains("invalid value") || msg.contains("positive"),
+            "expected zero-rejection error for control_reload_interval_ms, got: {msg}"
         );
     }
 
@@ -975,7 +1030,8 @@ output:
 "#;
         let cfg = Config::load_str(yaml).expect("auth bearer_token");
         let pipe = &cfg.pipelines["default"];
-        let auth = pipe.outputs[0].auth.as_ref().expect("auth present");
+        let output = pipe.outputs[0].validation_config();
+        let auth = output.auth.as_ref().expect("auth present");
         assert_eq!(auth.bearer_token.as_deref(), Some("my-secret-token"));
         assert!(auth.headers.is_empty());
     }
@@ -996,7 +1052,8 @@ output:
 "#;
         let cfg = Config::load_str(yaml).expect("auth custom headers");
         let pipe = &cfg.pipelines["default"];
-        let auth = pipe.outputs[0].auth.as_ref().expect("auth present");
+        let output = pipe.outputs[0].validation_config();
+        let auth = output.auth.as_ref().expect("auth present");
         assert_eq!(auth.bearer_token, None);
         assert_eq!(
             auth.headers.get("X-API-Key").map(String::as_str),
@@ -1024,7 +1081,8 @@ output:
 "#;
         let cfg = Config::load_str(yaml).expect("auth env var bearer");
         let pipe = &cfg.pipelines["default"];
-        let auth = pipe.outputs[0].auth.as_ref().expect("auth present");
+        let output = pipe.outputs[0].validation_config();
+        let auth = output.auth.as_ref().expect("auth present");
         assert_eq!(auth.bearer_token.as_deref(), Some("env-bearer-token"));
         // SAFETY: this test is not run concurrently with other tests that
         // depend on the same environment variable.
@@ -1043,7 +1101,7 @@ output:
 ";
         let cfg = Config::load_str(yaml).expect("no auth");
         let pipe = &cfg.pipelines["default"];
-        assert!(pipe.outputs[0].auth.is_none());
+        assert!(pipe.outputs[0].validation_config().auth.is_none());
     }
 
     #[test]
@@ -1059,7 +1117,10 @@ output:
 ";
         let cfg = Config::load_str(yaml).expect("streaming request_mode should validate");
         let pipe = &cfg.pipelines["default"];
-        assert_eq!(pipe.outputs[0].request_mode.as_deref(), Some("streaming"));
+        assert_eq!(
+            pipe.outputs[0].validation_config().request_mode.as_deref(),
+            Some("streaming")
+        );
     }
 
     #[test]
@@ -1255,7 +1316,7 @@ output:
         let yaml = "input:\n  type: file\n  path: /tmp/x.log\noutput:\n  type: null\n";
         let cfg = Config::load_str(yaml).expect("type: null simple layout");
         assert_eq!(
-            cfg.pipelines["default"].outputs[0].output_type,
+            cfg.pipelines["default"].outputs[0].output_type(),
             OutputType::Null
         );
     }
@@ -1275,7 +1336,7 @@ pipelines:
 ";
         let cfg = Config::load_str(yaml).expect("type: null in advanced list layout");
         assert_eq!(
-            cfg.pipelines["app"].outputs[0].output_type,
+            cfg.pipelines["app"].outputs[0].output_type(),
             OutputType::Null
         );
     }
@@ -1286,8 +1347,66 @@ pipelines:
         let yaml = "input:\n  type: file\n  path: /tmp/x.log\noutput:\n  type: \"null\"\n";
         let cfg = Config::load_str(yaml).expect("type: \"null\" quoted");
         assert_eq!(
-            cfg.pipelines["default"].outputs[0].output_type,
+            cfg.pipelines["default"].outputs[0].output_type(),
             OutputType::Null
+        );
+    }
+
+    #[test]
+    fn whole_output_null_is_rejected() {
+        let yaml = "input:\n  type: file\n  path: /tmp/x.log\noutput: null\n";
+        let err = Config::load_str(yaml).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("output is required when input is specified"),
+            "whole output null must not be treated as the null sink: {msg}"
+        );
+    }
+
+    #[test]
+    fn missing_output_type_is_rejected() {
+        let yaml = "input:\n  type: file\n  path: /tmp/x.log\noutput: {}\n";
+        let err = Config::load_str(yaml).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("invalid output config") && msg.contains("missing field `type`"),
+            "missing output type must fail clearly: {msg}"
+        );
+    }
+
+    #[test]
+    fn empty_string_output_type_is_rejected() {
+        let yaml = "input:\n  type: file\n  path: /tmp/x.log\noutput:\n  type: \"\"\n";
+        let err = Config::load_str(yaml).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("invalid output config") && msg.contains("unknown variant ``"),
+            "empty-string output type must fail clearly: {msg}"
+        );
+    }
+
+    #[test]
+    fn duplicate_pipeline_mapping_key_is_rejected() {
+        let yaml = r"
+pipelines:
+  app:
+    inputs:
+      - type: file
+        path: /tmp/a.log
+    outputs:
+      - type: stdout
+  app:
+    inputs:
+      - type: file
+        path: /tmp/b.log
+    outputs:
+      - type: stdout
+";
+        let err = Config::load_str(yaml).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("duplicate entry with key \"app\""),
+            "duplicate pipeline names must be rejected before validation: {msg}"
         );
     }
 
@@ -1584,8 +1703,9 @@ pipelines:
 ";
         let err = Config::load_str(yaml).unwrap_err();
         let msg = err.to_string();
+        // Now rejected at parse time via PositiveMillis.
         assert!(
-            msg.contains("poll_interval_ms must be greater than 0"),
+            msg.contains("invalid value") || msg.contains("positive"),
             "got: {msg}"
         );
     }
@@ -2853,6 +2973,164 @@ pipelines:
         compression: none
 "#;
         Config::load_str(yaml).expect("arrow_ipc output should accept none compression");
+    }
+
+    #[test]
+    fn output_config_v2_rejects_irrelevant_variant_fields() {
+        let yaml = r"
+type: otlp
+endpoint: http://localhost:4318/v1/logs
+format: json
+";
+
+        let err = serde_yaml_ng::from_str::<OutputConfigV2>(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("format"),
+            "strict v2 otlp config should reject format, got: {err}"
+        );
+    }
+
+    #[test]
+    fn output_config_legacy_fallback_preserves_existing_flat_shape() {
+        let yaml = r"
+type: otlp
+endpoint: http://localhost:4318/v1/logs
+format: json
+";
+
+        let output = serde_yaml_ng::from_str::<OutputConfig>(yaml).unwrap();
+        assert_eq!(output.output_type, OutputType::Otlp);
+        assert_eq!(
+            output.endpoint.as_deref(),
+            Some("http://localhost:4318/v1/logs")
+        );
+        assert_eq!(output.format, Some(Format::Json));
+    }
+
+    #[test]
+    fn output_config_v2_from_legacy_preserves_elasticsearch_path_alias() {
+        let output = OutputConfig {
+            output_type: OutputType::Elasticsearch,
+            endpoint: Some("http://localhost:9200".to_string()),
+            path: Some("legacy-index".to_string()),
+            ..Default::default()
+        };
+
+        let v2 = OutputConfigV2::from(&output);
+        let OutputConfigV2::Elasticsearch(elasticsearch) = v2 else {
+            panic!("expected elasticsearch v2 output config");
+        };
+        assert_eq!(elasticsearch.index.as_deref(), Some("legacy-index"));
+    }
+
+    #[test]
+    fn output_config_v2_variants_normalize_to_output_types() {
+        let cases = [
+            (
+                "type: otlp\nendpoint: http://localhost:4318/v1/logs\n",
+                OutputType::Otlp,
+            ),
+            (
+                "type: http\nendpoint: http://localhost:8080/ingest\n",
+                OutputType::Http,
+            ),
+            (
+                "type: elasticsearch\nendpoint: http://localhost:9200\nindex: logs\n",
+                OutputType::Elasticsearch,
+            ),
+            (
+                "type: loki\nendpoint: http://localhost:3100/loki/api/v1/push\n",
+                OutputType::Loki,
+            ),
+            ("type: stdout\nformat: json\n", OutputType::Stdout),
+            ("type: file\npath: /tmp/ff.log\n", OutputType::File),
+            (
+                "type: parquet\npath: /tmp/ff.parquet\n",
+                OutputType::Parquet,
+            ),
+            ("type: \"null\"\n", OutputType::Null),
+            ("type: tcp\nendpoint: 127.0.0.1:9000\n", OutputType::Tcp),
+            ("type: udp\nendpoint: 127.0.0.1:9001\n", OutputType::Udp),
+            (
+                "type: arrow_ipc\nendpoint: http://localhost:4317\n",
+                OutputType::ArrowIpc,
+            ),
+        ];
+
+        for (yaml, expected_type) in cases {
+            let v2 = serde_yaml_ng::from_str::<OutputConfigV2>(yaml).unwrap();
+            assert_eq!(OutputConfig::from(v2).output_type, expected_type);
+        }
+    }
+
+    #[test]
+    fn example_outputs_parse_as_v2_and_normalize_equivalently() {
+        use serde::Deserialize;
+        use serde_yaml_ng::Value;
+
+        let examples_dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/use-cases");
+        let mut checked = 0usize;
+
+        for entry in fs::read_dir(&examples_dir).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("yaml") {
+                continue;
+            }
+
+            let yaml = fs::read_to_string(&path).unwrap();
+            let value: Value = serde_yaml_ng::from_str(&yaml)
+                .unwrap_or_else(|err| panic!("{} should parse as YAML: {err}", path.display()));
+            for output_value in collect_output_values(&value) {
+                let v2 = OutputConfigV2::deserialize(output_value.clone()).unwrap_or_else(|err| {
+                    panic!("{} output should parse as v2: {err}", path.display())
+                });
+                let compat =
+                    OutputConfig::deserialize(output_value.clone()).unwrap_or_else(|err| {
+                        panic!(
+                            "{} output should parse through compatibility layer: {err}",
+                            path.display()
+                        )
+                    });
+                assert_eq!(OutputConfig::from(v2), compat, "{}", path.display());
+                checked += 1;
+            }
+        }
+
+        assert!(checked > 0, "expected example configs to contain outputs");
+    }
+
+    fn collect_output_values(value: &serde_yaml_ng::Value) -> Vec<serde_yaml_ng::Value> {
+        let Some(root) = value.as_mapping() else {
+            return Vec::new();
+        };
+        let mut outputs = Vec::new();
+
+        if let Some(output) = root.get(serde_yaml_ng::Value::String("output".to_string())) {
+            outputs.push(output.clone());
+        }
+
+        if let Some(pipelines) = root
+            .get(serde_yaml_ng::Value::String("pipelines".to_string()))
+            .and_then(serde_yaml_ng::Value::as_mapping)
+        {
+            for pipeline in pipelines.values() {
+                let Some(pipeline) = pipeline.as_mapping() else {
+                    continue;
+                };
+                if let Some(output_value) =
+                    pipeline.get(serde_yaml_ng::Value::String("outputs".to_string()))
+                {
+                    match output_value {
+                        serde_yaml_ng::Value::Sequence(values) => outputs.extend_from_slice(values),
+                        value => outputs.push(value.clone()),
+                    }
+                }
+            }
+        }
+
+        outputs
     }
 
     #[test]
