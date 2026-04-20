@@ -2017,14 +2017,13 @@ mod tests {
         // socket to the wildcard address succeeds only when the kernel has
         // a usable network stack; connecting to a routable address further
         // proves a non-loopback interface exists.
+        //
+        // Silent skip — `print_stderr` is a workspace-level warn and the
+        // other portability skips in this PR stay silent too.
         let has_net_iface = std::net::UdpSocket::bind("0.0.0.0:0")
             .and_then(|s| s.connect("192.0.2.1:1"))
             .is_ok();
         if !has_net_iface {
-            eprintln!(
-                "skipping first_poll_emits_network_data: OS reports no \
-                 non-loopback network interface"
-            );
             return;
         }
 

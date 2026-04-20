@@ -33,14 +33,10 @@ fn filesystem_tracks_nlink_after_unlink() -> bool {
         fs::write(&path, b"x").expect("write probe");
         let file = File::open(&path).expect("open probe");
         fs::remove_file(&path).expect("unlink probe");
-        let tracks = file.metadata().map(|m| m.nlink() == 0).unwrap_or(false);
-        if !tracks {
-            eprintln!(
-                "filesystem_tracks_nlink_after_unlink: platform keeps nlink>0 \
-                 after unlink; deletion-dependent tail tests will skip"
-            );
-        }
-        tracks
+        // `print_stderr` is a workspace-level warn and the tail-source scan
+        // (`test_tail_uses_tracing_not_eprintln`) forbids `eprintln!` in this
+        // module outright, so skips stay silent.
+        file.metadata().map(|m| m.nlink() == 0).unwrap_or(false)
     })
 }
 
