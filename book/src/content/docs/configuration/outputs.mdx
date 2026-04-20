@@ -34,7 +34,7 @@ POST newline-delimited JSON to any HTTP endpoint. Each Arrow RecordBatch is seri
 output:
   type: http
   endpoint: https://logging-service:9200
-  compression: zstd    # zstd | none
+  compression: zstd    # zstd | gzip | none
   auth:
     headers:
       X-API-Key: "${API_KEY}"
