@@ -44,8 +44,9 @@ import { createRenderState } from './highway-render-state.mjs';
   const lenCont = pathCont.getTotalLength();
 
   // ---- Constants ----
-  const SIM_FRAMES = 10; // sim advances every 10 render frames (250ms at 25ms/frame)
-  const TICK_MS = 25;    // render frame interval (40 fps)
+  const TICK_MS = 16;    // render frame interval (~60 fps)
+  const SIM_MS = 250;    // sim advances every ~250ms
+  const FRAME_SCALE = TICK_MS / 25;
   const CAR_W = 20;
   const CAR_H = 10;
 
@@ -58,7 +59,7 @@ import { createRenderState } from './highway-render-state.mjs';
     carW: CAR_W,
     greenPct: 80,
     slotsExit: 9,
-    autoSpeed: 0.15 * SIM_FRAMES,
+    autoSpeed: 1.5,
   });
   sim.setCycleStart(Date.now());
 
@@ -93,6 +94,16 @@ import { createRenderState } from './highway-render-state.mjs';
     return path.getPointAtLength(Math.min(Math.max(0, d), len));
   }
 
+  function pushPathPoints(id, segment, fromD, toD, steps, opacity, color) {
+    if (fromD == null || toD == null || steps <= 1) return;
+    const delta = toD - fromD;
+    if (Math.abs(delta) < 0.01) return;
+    for (let s = 1; s < steps; s++) {
+      const p = posAt(segment, fromD + (delta * s / steps));
+      rs.pushTarget(id, p.x, p.y, opacity, color);
+    }
+  }
+
   function angleAt(segment, d) {
     const len = lenMap[segment];
     const p1 = posAt(segment, d);
@@ -104,8 +115,8 @@ import { createRenderState } from './highway-render-state.mjs';
   // ---- Render state (pure logic — handles all interpolation) ----
   const rs = createRenderState({
     fadeInFrames: 12,
-    maxSpeed: 4,
-    accel: 0.5,
+    maxSpeed: 4 * FRAME_SCALE,
+    accel: 0.5 * FRAME_SCALE,
     decelDist: 30,
     snapDist: 0.5,
     angleRate: 0.25,
@@ -220,16 +231,16 @@ import { createRenderState } from './highway-render-state.mjs';
   // ---- Main render loop ----
   let lastStatus = '';
   let timer = null;
-  let frameCount = 0;
   let lastFrame = null;
+  let lastSimAt = 0;
 
   function tick() {
     const now = Date.now();
-    frameCount++;
 
-    // Advance simulation every SIM_FRAMES render frames
-    if (frameCount % SIM_FRAMES === 0 || !lastFrame) {
+    // Advance simulation on a fixed wall-clock cadence independent of render fps.
+    if (!lastFrame || now - lastSimAt >= SIM_MS) {
       lastFrame = sim.tick(now);
+      lastSimAt = now;
 
       // Create new car elements, push waypoints for all cars
       const allCars = lastFrame.cars;
@@ -241,15 +252,24 @@ import { createRenderState } from './highway-render-state.mjs';
         const prevD = carLastD[car.id];
         const opa = car.opacity != null ? car.opacity : 1;
 
-        // For curved segments, push arc-following intermediate waypoints
-        // so the render state follows the SVG path instead of cutting corners.
+        // Curved segments and segment transitions need denser waypoint chains
+        // so cars follow the road shape instead of cutting or stuttering.
         if (prevSeg === car.segment && prevD != null && prevD < car.targetD &&
             (car.segment === 'ramp' || car.segment === 'exit')) {
-          const steps = 3;
-          const dStep = (car.targetD - prevD) / steps;
-          for (let s = 1; s < steps; s++) {
-            const mp = posAt(car.segment, prevD + dStep * s);
-            rs.pushTarget(car.id, mp.x, mp.y, opa, car.color);
+          pushPathPoints(car.id, car.segment, prevD, car.targetD, 6, opa, car.color);
+        } else if (prevSeg && prevSeg !== car.segment && prevD != null) {
+          if (prevSeg === 'ramp' && car.segment === 'highway') {
+            pushPathPoints(car.id, 'ramp', prevD, lenRamp, 5, opa, car.color);
+            rs.pushTarget(car.id, pathRamp.getPointAtLength(lenRamp).x, pathRamp.getPointAtLength(lenRamp).y, opa, car.color);
+          } else if (prevSeg === 'highway' && (car.segment === 'exit' || car.segment === 'cont')) {
+            pushPathPoints(car.id, 'highway', prevD, lenHwy, 4, opa, car.color);
+            const branchStart = posAt(car.segment, 0);
+            rs.pushTarget(car.id, branchStart.x, branchStart.y, opa, car.color);
+            if (car.segment === 'exit') {
+              pushPathPoints(car.id, 'exit', 0, car.targetD, 5, opa, car.color);
+            }
+          } else if (prevSeg === 'ramp' || prevSeg === 'exit') {
+            pushPathPoints(car.id, prevSeg, prevD, lenMap[prevSeg], 4, opa, car.color);
           }
         }
         rs.pushTarget(car.id, tp.x, tp.y, opa, car.color);
