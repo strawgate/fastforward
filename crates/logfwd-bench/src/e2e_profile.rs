@@ -1,6 +1,6 @@
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 //! Profile each stage of the full pipeline: read → scan → transform → encode → "send"
-//! Run with: cargo run -p logfwd-bench --release --bin e2e-profile
+//! Run with: cargo run -p logfwd-bench --release --features bench-tools --bin e2e_profile
 
 use std::io::Write;
 use std::sync::Arc;
@@ -65,34 +65,41 @@ fn main() {
     } else {
         0
     };
+    let pct = |stage_ms: u128| {
+        if total_ms > 0 {
+            stage_ms as f64 / total_ms as f64 * 100.0
+        } else {
+            0.0
+        }
+    };
 
     println!(
         "  {:<25} {:>6}ms  {:>6.1} MB output  {:>5.1}%",
         "1. Scan (JSON→Arrow)",
         scan_ms,
         raw_mb,
-        scan_ms as f64 / total_ms as f64 * 100.0
+        pct(scan_ms)
     );
     println!(
         "  {:<25} {:>6}ms  {:>6.1} MB output  {:>5.1}%",
         "2. Transform (SQL)",
         transform_ms,
         0.0,
-        transform_ms as f64 / total_ms as f64 * 100.0
+        pct(transform_ms)
     );
     println!(
         "  {:<25} {:>6}ms  {:>6.1} MB output  {:>5.1}%",
         "3. OTLP protobuf encode",
         otlp_ms,
         otlp_mb,
-        otlp_ms as f64 / total_ms as f64 * 100.0
+        pct(otlp_ms)
     );
     println!(
         "  {:<25} {:>6}ms  {:>6.1} MB output  {:>5.1}%",
         "4. zstd compress",
         zstd_ms,
         zstd_mb,
-        zstd_ms as f64 / total_ms as f64 * 100.0
+        pct(zstd_ms)
     );
     println!("  {:<25} {:>6}ms", "───────────────────────", 0);
     println!(
