@@ -535,8 +535,7 @@ fn status_payload(state: &DiagnosticsState) -> StatusSnapshotResponse {
             (
                 "input",
                 format!(
-                    "backpressure stalls at {:.1}/sec — input faster than pipeline can drain",
-                    stalls_per_sec
+                    "backpressure stalls at {stalls_per_sec:.1}/sec — input faster than pipeline can drain"
                 ),
             )
         } else if transform_ratio > 0.3 {
@@ -650,8 +649,7 @@ fn build_stats_body(state: &DiagnosticsState) -> String {
     let uptime_s = state.start_time.elapsed().as_secs_f64();
     let process_json = match process_metrics() {
         Some((rss_bytes, cpu_user_ms, cpu_sys_ms)) => format!(
-            r#","rss_bytes":{},"cpu_user_ms":{},"cpu_sys_ms":{}"#,
-            rss_bytes, cpu_user_ms, cpu_sys_ms
+            r#","rss_bytes":{rss_bytes},"cpu_user_ms":{cpu_user_ms},"cpu_sys_ms":{cpu_sys_ms}"#
         ),
         None => String::from(r#","rss_bytes":null,"cpu_user_ms":null,"cpu_sys_ms":null"#),
     };

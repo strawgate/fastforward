@@ -781,7 +781,7 @@ fn for_each_field<'a>(
             }
             2 => {
                 let len = usize::try_from(read_varint(&mut input)?)
-                    .map_err(|_| ProjectionError::Invalid("protobuf length exceeds usize"))?;
+                    .map_err(|_e| ProjectionError::Invalid("protobuf length exceeds usize"))?;
                 if input.len() < len {
                     return Err(ProjectionError::Invalid("truncated length-delimited field"));
                 }
@@ -822,7 +822,7 @@ fn decode_field_number(key: u64) -> Result<u32, ProjectionError> {
             "protobuf field number out of range",
         ));
     }
-    u32::try_from(field).map_err(|_| ProjectionError::Invalid("protobuf field number overflow"))
+    u32::try_from(field).map_err(|_e| ProjectionError::Invalid("protobuf field number overflow"))
 }
 
 const PROTOBUF_MAX_GROUP_DEPTH: usize = 64;
@@ -848,7 +848,7 @@ fn skip_group(input: &mut &[u8], start_field: u32) -> Result<(), ProjectionError
             }
             2 => {
                 let len = usize::try_from(read_varint(input)?)
-                    .map_err(|_| ProjectionError::Invalid("protobuf length exceeds usize"))?;
+                    .map_err(|_e| ProjectionError::Invalid("protobuf length exceeds usize"))?;
                 if input.len() < len {
                     return Err(ProjectionError::Invalid("truncated length-delimited field"));
                 }

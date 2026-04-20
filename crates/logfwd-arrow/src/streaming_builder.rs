@@ -625,7 +625,7 @@ impl StreamingBuilder {
         // StringView offsets use original-buffer offsets for unescaped strings
         // and offsets >= original_buf_len for decoded strings. Keep those as two
         // Arrow blocks so decoding one field never copies the full input buffer.
-        let original_buf_len = u32::try_from(self.buf.len()).map_err(|_| {
+        let original_buf_len = u32::try_from(self.buf.len()).map_err(|_e| {
             ArrowError::InvalidArgumentError("input buffer exceeds StringView offset range".into())
         })?;
         let arrow_buf = Buffer::from(self.buf.clone());

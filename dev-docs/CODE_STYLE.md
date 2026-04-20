@@ -88,6 +88,20 @@ overrides — adjust the workspace config instead.
   or `clippy::must_use_candidate` — both flag the canonical
   `let _ = write!(buf, ...)` and `let _ = sender.send(...)` patterns,
   and would force stylistic churn with negligible correctness gain.
+- **Modernization + easy-win lints** (all warn workspace-wide):
+  - `uninlined_format_args`, `redundant_else`,
+    `semicolon_if_nothing_returned` — modernize syntax. Auto-apply
+    via `cargo clippy --fix --workspace --allow-dirty`, then verify
+    with `just lint`.
+  - `map_err_ignore` — flags `.map_err(|_| …)` which drops the
+    original error. Use `.map_err(|_e| …)` if the drop is intentional,
+    or preserve the source via `thiserror #[source]`.
+  - `implicit_clone` — prefer `.clone()` over `.to_owned()` on
+    `Clone` types for clarity.
+  - `needless_for_each` — prefer `for x in …` over `.for_each(|x| …)`.
+  - `or_fun_call` — `.unwrap_or(expensive())` → `.unwrap_or_else(|| …)`.
+  - `checked_conversions` — nudges `i32::try_from(x)` over `x as i32`
+    at fallible boundaries.
 - **overflow-checks** are enabled in release builds.
 
 All lint levels live at the workspace root or as file-level
@@ -197,12 +211,54 @@ for installation and the roadmap for additional lints
   ability to recover.
 - **Public APIs:** return `Result`, never `panic!` or `assert!` on user input
 - **Internal invariants:** `debug_assert!` for programmer errors, not `assert!`
-- **Error messages:** include context — `"failed to open {path}: {err}"` not `"IO error"`
+- **Error messages** follow a fixed shape so they read consistently in
+  logs and diagnostics output:
+  - Lowercase first word, no trailing period.
+  - Verb phrase naming the operation that failed, then a colon, then
+    the source: `"failed to open {path}: {err}"`, not `"IO error"` or
+    `"Cannot open file."`.
+  - Include every piece of context a reader needs to identify the
+    failing resource without grepping other fields: path, index,
+    component name, configured field name. `"input '{name}': format
+    {format:?} is not supported for {input_type:?} inputs"` is the
+    style — noun-phrase quoting around user-supplied names, `{:?}`
+    for type tags, fully-qualified in the message.
+  - If you use `map_err(|_| ...)` and discard the source, clippy
+    (`map_err_ignore`) will flag it. Either preserve the source
+    (`.map_err(|e| MyError::Kind { source: e })`) or rename the closure
+    argument to `|_e|` to signal "yes, we intentionally dropped it."
 - **No `unwrap()` in production paths.** Use `?` or `.expect("reason")`.
   Every surviving `expect` must name the invariant that makes it safe
   (`"config schema guarantees at least one input"`), not just restate the
   call.
 - **Sentinel values:** use `Option` instead of magic values (0, -1, empty string)
+
+## Match Ergonomics
+
+Rust 2024 gives us three forms for the same pattern-matching idea.
+Pick the one that reads straightest for the specific control flow:
+
+- **`let … else { diverging }`** — when the happy path is the body of
+  the function and the alternative diverges (`return`, `break`,
+  `continue`, `panic!`, `std::process::exit`). Prefer this over
+  `match` when the failure case is a one-liner.
+  ```rust
+  let Some(value) = parse(input) else { return Err(ParseError::Missing) };
+  ```
+- **`if let Some(v) = opt { … }`** — when only the `Some`/`Ok` arm
+  needs action and the `None`/`Err` arm is a no-op. Avoids the noise
+  of a match with an empty arm.
+- **`match`** — when both arms have non-trivial logic, or when you
+  need to match on more than two discriminants. Keep match arms short;
+  pull long arms into named helper functions.
+
+Auto-fix hint: `clippy::manual_let_else` fires on the "old" idiom
+`let x = match … { Some(v) => v, None => return };`. Apply via
+`cargo clippy --fix --workspace --allow-dirty`, then verify with
+`just lint`. (This lint is currently allowed workspace-wide because
+some call sites use `Err(e)` bindings that don't translate cleanly,
+and because the auto-fix does not apply inside `logfwd-core` where
+changes must be re-verified through the Kani proof pipeline.)
 
 ## Unsafe Code
 
