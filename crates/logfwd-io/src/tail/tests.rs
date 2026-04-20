@@ -473,6 +473,61 @@ fn poll_shutdown_emits_eof_when_deleted_cleanup_catches_up() {
 
 #[cfg(unix)]
 #[test]
+fn poll_shutdown_keeps_deleted_file_until_cleanup_catches_up() {
+    let dir = tempfile::tempdir().unwrap();
+    let log_path = dir.path().join("shutdown-deleted-backlog.log");
+    fs::write(&log_path, b"abcdefghijkl").unwrap();
+
+    let config = TailConfig {
+        start_from_end: false,
+        poll_interval_ms: 60_000,
+        read_buf_size: 4,
+        per_file_read_budget_bytes: 4,
+        ..Default::default()
+    };
+    let mut tailer =
+        FileTailer::new(std::slice::from_ref(&log_path), config, create_test_stats()).unwrap();
+
+    fs::remove_file(&log_path).unwrap();
+
+    let first = tailer.poll_shutdown().unwrap();
+    let first_data_len: usize = first
+        .iter()
+        .filter_map(|event| match event {
+            TailEvent::Data { bytes, .. } => Some(bytes.len()),
+            _ => None,
+        })
+        .sum();
+    assert_eq!(first_data_len, 8);
+    assert!(
+        !first
+            .iter()
+            .any(|event| matches!(event, TailEvent::EndOfFile { .. })),
+        "deleted file should stay tracked while unread bytes remain"
+    );
+
+    let second = tailer.poll_shutdown().unwrap();
+    let second_data_len: usize = second
+        .iter()
+        .filter_map(|event| match event {
+            TailEvent::Data { bytes, .. } => Some(bytes.len()),
+            _ => None,
+        })
+        .sum();
+    assert_eq!(second_data_len, 4);
+    assert!(
+        second.iter().any(|event| {
+            matches!(
+                event,
+                TailEvent::EndOfFile { path, .. } if path == &log_path
+            )
+        }),
+        "deleted file should emit EOF once shutdown repoll catches up"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn poll_shutdown_deleted_cleanup_uses_post_drain_source_id_for_eof() {
     let dir = tempfile::tempdir().unwrap();
     let log_path = dir.path().join("shutdown-deleted-source.log");

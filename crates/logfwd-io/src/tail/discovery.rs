@@ -200,23 +200,35 @@ impl FileDiscovery {
         let mut had_error = false;
         let mut eof_targets = Vec::new();
         let deleted = deleted_paths(reader);
+        let mut drained_deleted = Vec::new();
 
         for path in &deleted {
             let pre_drain_source_id = reader.source_id_for_path(path);
             had_error |= reader.drain_file(path, pre_drain_source_id, events);
             let post_drain_source_id = reader.source_id_for_path(path);
-            if let Some(tailed) = reader.files.get(path)
-                && let Ok(file_size) = tailed.file.metadata().map(|meta| meta.len())
-                && post_drain_source_id.is_some()
-                && !tailed.eof_state.has_emitted()
-                && shutdown_should_emit_eof(tailed.offset, file_size)
-            {
-                eof_targets.push((path.clone(), post_drain_source_id));
+            let should_remove = match reader.files.get(path) {
+                Some(tailed) => match tailed.file.metadata().map(|meta| meta.len()) {
+                    Ok(file_size) => {
+                        let is_caught_up = shutdown_should_emit_eof(tailed.offset, file_size);
+                        if is_caught_up
+                            && post_drain_source_id.is_some()
+                            && !tailed.eof_state.has_emitted()
+                        {
+                            eof_targets.push((path.clone(), post_drain_source_id));
+                        }
+                        is_caught_up
+                    }
+                    Err(_) => true,
+                },
+                None => true,
+            };
+            if should_remove {
+                drained_deleted.push(path.clone());
+                reader.files.remove(path);
+                reader.evicted_offsets.remove(path);
             }
-            reader.files.remove(path);
-            reader.evicted_offsets.remove(path);
         }
-        self.forget_deleted_watch_paths(&deleted);
+        self.forget_deleted_watch_paths(&drained_deleted);
 
         (had_error, eof_targets)
     }
