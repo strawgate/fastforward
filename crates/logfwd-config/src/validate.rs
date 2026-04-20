@@ -198,11 +198,34 @@ impl Config {
                                     "pipeline '{name}' input '{label}': {msg}"
                                 )));
                             }
-                            if t.tls.is_some() {
-                                // TCP TLS is not yet implemented at runtime.
-                                return Err(ConfigError::Validation(format!(
-                                    "pipeline '{name}' input '{label}': TLS is not yet supported for TCP inputs (runtime TLS termination is not implemented)"
-                                )));
+                            if let Some(tls) = &t.tls {
+                                let cert_file = tls
+                                    .cert_file
+                                    .as_deref()
+                                    .map(str::trim)
+                                    .filter(|v| !v.is_empty());
+                                let key_file = tls
+                                    .key_file
+                                    .as_deref()
+                                    .map(str::trim)
+                                    .filter(|v| !v.is_empty());
+                                let client_ca_file = tls
+                                    .client_ca_file
+                                    .as_deref()
+                                    .map(str::trim)
+                                    .filter(|v| !v.is_empty());
+
+                                if client_ca_file.is_some() || tls.require_client_auth {
+                                    return Err(ConfigError::Validation(format!(
+                                        "pipeline '{name}' input '{label}': tcp tls client authentication is not supported (tls.client_ca_file and tls.require_client_auth are reserved for #2332)"
+                                    )));
+                                }
+
+                                if cert_file.is_none() || key_file.is_none() {
+                                    return Err(ConfigError::Validation(format!(
+                                        "pipeline '{name}' input '{label}': tcp tls requires both tls.cert_file and tls.key_file"
+                                    )));
+                                }
                             }
                             if t.max_connections == Some(0) {
                                 return Err(ConfigError::Validation(format!(
@@ -2703,5 +2726,61 @@ pipelines:
         batch_size: 512
 "#;
         Config::load_str(yaml).expect("arrow_ipc should accept batch_size");
+    }
+
+    #[test]
+    fn tcp_tls_accepts_cert_and_key() {
+        let yaml = r#"
+pipelines:
+  test:
+    inputs:
+      - type: tcp
+        listen: 127.0.0.1:5514
+        tls:
+          cert_file: /tmp/server.crt
+          key_file: /tmp/server.key
+    outputs:
+      - type: null
+"#;
+        Config::load_str(yaml).expect("tcp tls cert+key should validate");
+    }
+
+    #[test]
+    fn tcp_tls_rejects_partial_or_mtls_fields() {
+        let partial = r#"
+pipelines:
+  test:
+    inputs:
+      - type: tcp
+        listen: 127.0.0.1:5514
+        tls:
+          cert_file: /tmp/server.crt
+    outputs:
+      - type: null
+"#;
+        let err = Config::load_str(partial).unwrap_err().to_string();
+        assert!(
+            err.contains("tls.cert_file") && err.contains("tls.key_file"),
+            "expected cert/key pairing validation error, got: {err}"
+        );
+
+        let mtls = r#"
+pipelines:
+  test:
+    inputs:
+      - type: tcp
+        listen: 127.0.0.1:5514
+        tls:
+          cert_file: /tmp/server.crt
+          key_file: /tmp/server.key
+          client_ca_file: /tmp/ca.crt
+    outputs:
+      - type: null
+"#;
+        let err = Config::load_str(mtls).unwrap_err().to_string();
+        assert!(
+            err.contains("client authentication is not supported"),
+            "expected mTLS rejection, got: {err}"
+        );
     }
 }

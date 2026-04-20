@@ -2143,9 +2143,7 @@ pipelines:
     }
 
     #[test]
-    fn tcp_rejects_tls_block() {
-        // TCP inputs do not have runtime TLS termination wired up; any tls:
-        // block must be rejected to avoid a false sense of security.
+    fn tcp_accepts_tls_cert_and_key() {
         let yaml = r#"
 pipelines:
   test:
@@ -2158,18 +2156,11 @@ pipelines:
     outputs:
       - type: null
 "#;
-        let err = Config::load_str(yaml).unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("TLS is not yet supported for TCP inputs"),
-            "expected TCP TLS rejection: {err}"
-        );
+        Config::load_str(yaml).expect("tcp tls with cert+key should validate");
     }
 
     #[test]
     fn tcp_tls_requires_cert_and_key_together() {
-        // This test validates cert/key pairing logic; update expected message
-        // because TCP now rejects TLS entirely before reaching that check.
         let yaml = r#"
 pipelines:
   test:
@@ -2184,14 +2175,13 @@ pipelines:
         let err = Config::load_str(yaml).unwrap_err();
         assert!(
             err.to_string()
-                .contains("TLS is not yet supported for TCP inputs"),
-            "expected TCP TLS rejection (cert/key pairing check superseded): {err}"
+                .contains("requires both tls.cert_file and tls.key_file"),
+            "expected TCP cert/key pairing validation: {err}"
         );
     }
 
     #[test]
     fn tcp_mtls_requires_client_ca() {
-        // mTLS config is now rejected at the TCP-not-supported boundary.
         let yaml = r#"
 pipelines:
   test:
@@ -2208,8 +2198,8 @@ pipelines:
         let err = Config::load_str(yaml).unwrap_err();
         assert!(
             err.to_string()
-                .contains("TLS is not yet supported for TCP inputs"),
-            "expected TCP TLS rejection (mTLS check superseded): {err}"
+                .contains("client authentication is not supported"),
+            "expected TCP mTLS validation failure: {err}"
         );
     }
 
