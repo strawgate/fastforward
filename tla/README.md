@@ -17,6 +17,8 @@ java -cp /path/to/tla2tools.jar tlc2.TLC tla/MCPipelineBatch.tla -config tla/Pip
 java -cp /path/to/tla2tools.jar tlc2.TLC tla/MCPipelineBatch.tla -config tla/PipelineBatch.liveness.cfg
 java -cp /path/to/tla2tools.jar tlc2.TLC tla/MCDeliveryRetry.tla -config tla/DeliveryRetry.cfg
 java -cp /path/to/tla2tools.jar tlc2.TLC tla/MCDeliveryRetry.tla -config tla/DeliveryRetry.liveness.cfg
+java -cp /path/to/tla2tools.jar tlc2.TLC tla/MCWorkerPoolDispatch.tla -config tla/WorkerPoolDispatch.cfg
+java -cp /path/to/tla2tools.jar tlc2.TLC tla/MCWorkerPoolDispatch.tla -config tla/WorkerPoolDispatch.liveness.cfg
 ```
 
 ## PipelineMachine.tla
@@ -103,6 +105,13 @@ tla/
   DeliveryRetry.cfg             — safety model (backoff invariants)
   DeliveryRetry.liveness.cfg    — liveness model (terminal reachable under fairness)
   DeliveryRetry.coverage.cfg    — reachability guards
+
+  # Worker pool dispatch (MRU dispatch, spawn-or-wait, 3-phase drain)
+  WorkerPoolDispatch.tla        — dispatch algorithm + worker lifecycle + drain
+  MCWorkerPoolDispatch.tla      — TLC config
+  WorkerPoolDispatch.cfg        — safety model
+  WorkerPoolDispatch.liveness.cfg — liveness model
+  WorkerPoolDispatch.coverage.cfg — reachability guards
 
   README.md                     — this file
 ```
@@ -387,6 +396,74 @@ Models the pure tail reducer behavior extracted in `crates/logfwd-io/src/tail/st
 ```bash
 just tlc-tail
 ```
+
+---
+
+## WorkerPoolDispatch.tla
+
+Models the MRU worker dispatch algorithm from
+`crates/logfwd-runtime/src/worker_pool/pool.rs`.
+
+### Model parameters
+
+| Config | MaxWorkers | NumItems |
+|--------|-----------|----------|
+| Safety | 2 | 3 |
+| Liveness | 2 | 2 |
+| Coverage | 2 | 3 |
+
+Production uses MaxWorkers up to 64 and unbounded item streams. The dispatch
+algorithm is worker-count-independent so small values suffice.
+
+### What it proves
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `NoDoubleAccounting` | Safety | no item appears in two categories (pending/inFlight/delivered/rejected) simultaneously |
+| `DispatchNeverDrops` | Safety | every submitted item is either pending, in-flight, delivered, or rejected — never silently lost |
+| `StoppedImpliesNoInFlight` | Safety | stopped state has no in-flight items |
+| `StoppedImpliesNoPending` | Safety | stopped state has no pending items |
+| `WorkerCountBound` | Safety | active workers never exceed MaxWorkers |
+| `BusyImpliesActive` | Safety | busy workers are in the active set |
+| `InFlightHasWorker` | Safety | every in-flight item is assigned to a busy worker |
+| `NoSubmitAfterDrain` | Safety (temporal) | no new items enter pending after drain begins |
+| `FailureIsStickyTemporal` | Safety (temporal) | once a worker health is Failed, it stays Failed or Stopped |
+| `ForceAbortAccountsForAll` | Safety (temporal) | force-abort clears all in-flight and pending items |
+| `ShutdownReachable` | Liveness | drain eventually reaches Stopped |
+| `StoppedIsStable` | Liveness | once Stopped, stays Stopped |
+| `AllItemsEventuallyResolved` | Liveness | every submitted item eventually reaches delivered or rejected |
+| `DrainingReachable` | Reachability | Draining state is reachable |
+| `StoppedReachable` | Reachability | Stopped state is reachable |
+| `DeliveryOccurs` | Reachability | at least one item is delivered |
+| `RejectionOccurs` | Reachability | at least one item is rejected |
+| `WorkerSpawnOccurs` | Reachability | a worker is spawned |
+| `WorkerFailOccurs` | Reachability | a worker failure occurs |
+| `ForceAbortReachable` | Reachability | force-abort path is reachable |
+| `IdleTimeoutReachable` | Reachability | idle timeout path is reachable |
+| `MultipleWorkersReachable` | Reachability | multiple workers active simultaneously |
+| `BackpressureReachable` | Reachability | all workers busy with pending work |
+| `AllDeliveredReachable` | Reachability | full success (all items delivered) is reachable |
+| `SubmitAfterDrainReachable` | Reachability | submit-after-drain rejection is reachable |
+
+### Run
+
+```bash
+java -cp /path/to/tla2tools.jar tlc2.TLC tla/MCWorkerPoolDispatch.tla -config tla/WorkerPoolDispatch.cfg
+java -cp /path/to/tla2tools.jar tlc2.TLC tla/MCWorkerPoolDispatch.tla -config tla/WorkerPoolDispatch.liveness.cfg
+python3 scripts/verify_tla_coverage.py --jar /path/to/tla2tools.jar --tla-file tla/MCWorkerPoolDispatch.tla --config tla/WorkerPoolDispatch.coverage.cfg
+```
+
+### Key design: MRU dispatch with spawn-or-wait
+
+The dispatch algorithm tries workers front-to-back (MRU first). If no idle
+worker is available and the pool is under capacity, a new worker is spawned.
+If at capacity with all workers busy, the pool async-waits on the front worker.
+This consolidates work onto fewer workers, letting cold workers hit idle timeout
+and self-terminate — freeing their HTTP connections.
+
+The 3-phase drain protocol (signal -> join with timeout -> force-abort) ensures
+that shutdown always terminates: either all workers finish gracefully, or
+remaining in-flight items are force-rejected after the timeout.
 
 ---
 
