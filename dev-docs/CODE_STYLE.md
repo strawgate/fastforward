@@ -50,7 +50,34 @@ overrides — adjust the workspace config instead.
   a build failure.
 - **unsafe_code** is `forbid` in logfwd-core. Other crates allow it sparingly.
   Every `unsafe` block must have a `// SAFETY:` comment.
+  `clippy::undocumented_unsafe_blocks` is `deny` — the SAFETY comment is
+  enforced, not encouraged.
+- **`dbg!` is forbidden.** `clippy::dbg_macro = deny` workspace-wide.
+- **`large_enum_variant`** is warn workspace-wide. New enum variants
+  whose stack size dwarfs the others should be boxed or refactored.
 - **overflow-checks** are enabled in release builds.
+
+### Per-crate lint additions
+
+Stable-surface crates carry additional crate-root lints beyond the
+workspace defaults:
+
+| Crate | Extra lints | Purpose |
+|---|---|---|
+| `logfwd-core` | `#![warn(missing_docs)]`, `#![warn(clippy::print_stdout, clippy::print_stderr)]` | Stable proven kernel; observability via return values, not stdout. |
+| `logfwd-types` | `#![warn(missing_docs)]`, `#![warn(clippy::print_stdout, clippy::print_stderr)]` | Stable cross-crate types. |
+| `logfwd-config` | `#![warn(clippy::print_stdout, clippy::print_stderr)]` | Config parsing should never write to stdout/stderr. (`missing_docs` deferred — see CRATE_RULES.md.) |
+
+### Boundary guards (CI scripts)
+
+Beyond clippy lints, the following Python guards run as part of
+`just lint` and `just lint-all`:
+
+| Guard | What it enforces |
+|---|---|
+| `scripts/check_no_box_dyn_error.py` | No `Box<dyn Error>` in any public signature outside the binary crate (`logfwd`) and bench/test/example paths. Library crates must expose `thiserror` enums. |
+| `scripts/check_no_panic_in_production.py` | No `panic!`/`todo!`/`unimplemented!` in production paths of `logfwd-runtime` and `logfwd-output`. Test modules and `#[test]` functions are exempt; genuinely unreachable invariants can use `// ALLOW-PANIC: <reason>`. |
+| `scripts/check_no_raw_payload_injection.py` | No source-metadata injection into raw payload bytes (see `CRATE_RULES.md` → `logfwd-io`). |
 
 ## Ownership and Types
 
@@ -91,7 +118,11 @@ overrides — adjust the workspace config instead.
 - **`TryFrom`/`TryInto` for fallible integer conversions.** Raw `as`
   truncates silently. Use `u32::try_from(x)?` at boundaries where the
   conversion can fail. `as` is acceptable for infallible casts (widening,
-  byte-level reinterpretation under `#[allow]` with a comment).
+  byte-level reinterpretation under `#[allow]` with a comment). We
+  deliberately do not enable `clippy::as_conversions` workspace-wide
+  because the SIMD and Arrow paths legitimately use `as` for byte-level
+  reinterpretation and contiguous-buffer indexing; the rule is enforced
+  by review on new code in non-SIMD paths.
 
 ## Naming
 
