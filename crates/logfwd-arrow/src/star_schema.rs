@@ -1827,8 +1827,7 @@ fn unpivot_attrs_to_flat(
             ATTR_TYPE_STR => {}
             _ => {
                 return Err(ArrowError::SchemaError(format!(
-                    "unsupported column type: {}",
-                    type_tag
+                    "unsupported column type: {type_tag}"
                 )));
             }
         }

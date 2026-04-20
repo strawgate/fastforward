@@ -494,7 +494,7 @@ impl LokiSink {
         let mut timestamp_state = self
             .last_timestamp_by_stream
             .lock()
-            .map_err(|_| io::Error::other("Loki timestamp state lock poisoned"))?;
+            .map_err(|_e| io::Error::other("Loki timestamp state lock poisoned"))?;
         let payloads = Self::prepare_payloads(stream_map, &timestamp_state, LOKI_MAX_PAYLOAD_BYTES);
         // Reserve before awaiting network IO so concurrent workers cannot prepare
         // overlapping timestamp ranges for the same Loki stream. A failed send may

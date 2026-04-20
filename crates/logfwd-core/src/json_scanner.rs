@@ -177,9 +177,8 @@ fn scan_line<B: ScanBuilder>(
 
         // Scan key string using quote bitmask
         let key_start = pos + 1;
-        let key_end = match next_quote(pos + 1, end, blocks) {
-            Some(p) => p,
-            None => break,
+        let Some(key_end) = next_quote(pos + 1, end, blocks) else {
+            break;
         };
         let raw_key = &buf[key_start..key_end];
         let key = if memchr::memchr(b'\\', raw_key).is_some() {
@@ -208,9 +207,8 @@ fn scan_line<B: ScanBuilder>(
             b'"' => {
                 // String value — decode JSON escape sequences (#410)
                 let val_start = pos + 1;
-                let val_end = match next_quote(pos + 1, end, blocks) {
-                    Some(p) => p,
-                    None => break,
+                let Some(val_end) = next_quote(pos + 1, end, blocks) else {
+                    break;
                 };
                 if wanted {
                     let idx = builder.resolve_field(key);
@@ -527,12 +525,9 @@ fn decode_unicode_escape(input: &[u8], pos: usize, out: &mut alloc::vec::Vec<u8>
         out.push(b'\\');
         return pos + 1;
     }
-    let cp = match parse_hex4(&input[pos + 2..pos + 6]) {
-        Some(v) => v,
-        None => {
-            out.push(b'\\');
-            return pos + 1;
-        }
+    let Some(cp) = parse_hex4(&input[pos + 2..pos + 6]) else {
+        out.push(b'\\');
+        return pos + 1;
     };
 
     // High surrogate — expect a following \uXXXX low surrogate

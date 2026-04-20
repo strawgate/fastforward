@@ -1645,7 +1645,7 @@ fn canonical_listen_addr_key(transport: &str, listen: &str) -> Result<Option<Str
     };
     let port = port_str
         .parse::<u16>()
-        .map_err(|_| validation_error(format!("'{listen}' has an invalid port '{port_str}'")))?;
+        .map_err(|_e| validation_error(format!("'{listen}' has an invalid port '{port_str}'")))?;
     if port == 0 {
         return Ok(None);
     }
@@ -1838,7 +1838,7 @@ pub fn validate_host_port(addr: &str) -> Result<(), ConfigError> {
                 "'{addr}' has an empty IPv6 address inside brackets"
             )));
         }
-        inner.parse::<std::net::Ipv6Addr>().map_err(|_| {
+        inner.parse::<std::net::Ipv6Addr>().map_err(|_e| {
             validation_error(format!(
                 "'{addr}' contains a non-IPv6 value inside brackets"
             ))
@@ -1890,7 +1890,7 @@ pub fn validate_host_port(addr: &str) -> Result<(), ConfigError> {
 
     port_str
         .parse::<u16>()
-        .map_err(|_| validation_error(format!("'{addr}' has an invalid port '{port_str}'")))?;
+        .map_err(|_e| validation_error(format!("'{addr}' has an invalid port '{port_str}'")))?;
     Ok(())
 }
 
@@ -2064,7 +2064,7 @@ fn validate_endpoint_url(endpoint: &str) -> Result<(), ConfigError> {
     let safe = redact_url(endpoint);
 
     let parsed = Url::parse(endpoint)
-        .map_err(|_| validation_error(format!("endpoint '{safe}' is not a valid URL")))?;
+        .map_err(|_e| validation_error(format!("endpoint '{safe}' is not a valid URL")))?;
 
     if !parsed.username().is_empty() || parsed.password().is_some() {
         return Err(validation_error(format!(
