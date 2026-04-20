@@ -2797,7 +2797,7 @@ input:
   listen: 127.0.0.1:4318
   format: raw
 output:
-  type: null
+  type: "null"
 "#;
         let config = logfwd_config::Config::load_str(yaml).expect("config should parse");
         let result = validate_pipelines_read_only(&config, None, |_name| {}, |_err| {});
@@ -2811,7 +2811,7 @@ input:
   type: linux_ebpf_sensor
   format: raw
 output:
-  type: null
+  type: "null"
 "#;
         let err = logfwd_config::Config::load_str(yaml)
             .expect_err("sensor format should fail config validation");
@@ -2830,7 +2830,7 @@ input:
   sensor:
     poll_interval_ms: 1000
 output:
-  type: null
+  type: "null"
 "#;
         let config = logfwd_config::Config::load_str(yaml).expect("config should parse");
         validate_pipelines_read_only(&config, None, |_name| {}, |_err| {})
@@ -2858,7 +2858,7 @@ output:
   type: otlp
   listen: 127.0.0.1:{port}
 output:
-  type: null
+  type: "null"
 "#
         )
         .expect("write config");
@@ -2894,7 +2894,7 @@ input:
   type: otlp
   listen: 127.0.0.1:4318
 output:
-  type: null
+  type: "null"
 transform: |
   SELECT level AS x, msg AS x FROM logs
 "#;
@@ -2914,7 +2914,7 @@ input:
   type: otlp
   listen: 127.0.0.1:4318
 output:
-  type: null
+  type: "null"
 transform: |
   SELECT level AS x, msg AS x FROM logs
 "#;
@@ -2937,7 +2937,7 @@ transform: |
 input:
   type: generator
 output:
-  type: null
+  type: "null"
 transform: |
   SELECT missing_column FROM logs
 "#;
@@ -2960,7 +2960,7 @@ transform: |
 input:
   type: generator
 output:
-  type: null
+  type: "null"
 transform: |
   SELECT Level FROM logs
 "#;
@@ -2983,7 +2983,7 @@ transform: |
 input:
   type: generator
 output:
-  type: null
+  type: "null"
 transform: |
   SELECT method FROM logs
 "#;
@@ -3006,7 +3006,7 @@ transform: |
 input:
   type: generator
 output:
-  type: null
+  type: "null"
 enrichment:
   - type: static
     table_name: labels
@@ -3036,7 +3036,7 @@ input:
   generator:
     complexity: complex
 output:
-  type: null
+  type: "null"
 transform: |
   SELECT bytes_in FROM logs
 "#;
