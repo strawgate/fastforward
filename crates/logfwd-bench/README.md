@@ -132,7 +132,7 @@ allocation counting begins after warmup completes.
 | File | Binary | What it does |
 |------|--------|-------------|
 | `main.rs` | `logfwd-bench` | Reads Criterion JSON, emits markdown tables |
-| `e2e_profile.rs` | *(lib)* | Per-stage timing breakdown (scan → transform → encode → compress) |
+| `e2e_profile.rs` | `e2e_profile` | Per-stage timing breakdown (scan → transform → encode → compress) |
 | `bin/cloudtrail_profile.rs` | `cloudtrail_profile` | CloudTrail-like generator profile (NDJSON vs direct RecordBatch generation, cardinality, compression) |
 | `es_throughput.rs` | `es-throughput` | Elasticsearch output throughput with worker scaling |
 | `bin/framed_input_profile.rs` | `framed_input_profile` | FramedInput stage timings, RSS, optional flamegraph, optional dhat allocation report |
