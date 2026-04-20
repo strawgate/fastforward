@@ -613,6 +613,125 @@ pub(super) fn build_otlp_plan() -> (BatchPlan, OtlpFieldHandles) {{
 """
 
 
+def render_wire_any_field_kind(spec: dict) -> str:
+    kind_to_field_kind = {
+        "string": "FieldKind::Utf8View",
+        "bool": "FieldKind::Bool",
+        "int": "FieldKind::Int64",
+        "double": "FieldKind::Float64",
+        "bytes": "FieldKind::Utf8View",
+        "array": "FieldKind::Utf8View",
+        "kvlist": "FieldKind::Utf8View",
+    }
+    variant_by_kind = {
+        "string": "String",
+        "bool": "Bool",
+        "int": "Int",
+        "double": "Double",
+        "bytes": "Bytes",
+        "array": "ArrayRaw",
+        "kvlist": "KvListRaw",
+    }
+    arms = []
+    for field in any_value_fields(spec):
+        if field["action"] != "project":
+            continue
+        kind = field["kind"]
+        variant = variant_by_kind[kind]
+        field_kind = kind_to_field_kind[kind]
+        arms.append(f"        WireAny::{variant}(_) => {field_kind},")
+    return f"""pub(super) fn wire_any_field_kind(value: &WireAny<'_>) -> FieldKind {{
+    match value {{
+{chr(10).join(arms)}
+    }}
+}}
+"""
+
+
+def render_wire_any_appenders(spec: dict) -> str:
+    kinds = {
+        field["kind"]
+        for field in any_value_fields(spec)
+        if field["action"] == "project"
+    }
+    expected_kinds = {"string", "bool", "int", "double", "bytes", "array", "kvlist"}
+    if kinds != expected_kinds:
+        raise ValueError(
+            "AnyValue projection kinds drifted; update generated appender mapping: "
+            f"expected={sorted(expected_kinds)} got={sorted(kinds)}"
+        )
+
+    return """pub(super) fn write_wire_any(
+    builder: &mut ColumnarBatchBuilder,
+    handle: FieldHandle,
+    value: WireAny<'_>,
+    scratch: &mut WireScratch,
+    string_storage: StringStorage,
+) -> Result<(), ProjectionError> {
+    match value {
+        WireAny::String(value) => super::write_wire_str(builder, handle, value, string_storage)?,
+        WireAny::Bool(value) => builder.write_bool(handle, value),
+        WireAny::Int(value) => builder.write_i64(handle, value),
+        WireAny::Double(value) => builder.write_f64(handle, value),
+        WireAny::Bytes(value) => super::write_hex_field(builder, handle, value, &mut scratch.hex)?,
+        WireAny::ArrayRaw(value) => {
+            super::write_wire_any_complex_json(builder, handle, WireAny::ArrayRaw(value), scratch)?;
+        }
+        WireAny::KvListRaw(value) => {
+            super::write_wire_any_complex_json(builder, handle, WireAny::KvListRaw(value), scratch)?;
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn write_wire_any_as_string(
+    builder: &mut ColumnarBatchBuilder,
+    handle: FieldHandle,
+    value: WireAny<'_>,
+    scratch: &mut WireScratch,
+    string_storage: StringStorage,
+) -> Result<(), ProjectionError> {
+    match value {
+        WireAny::String(value) => super::write_wire_str(builder, handle, value, string_storage)?,
+        WireAny::Bool(true) => {
+            builder
+                .write_str_bytes(handle, b\"true\")
+                .map_err(|e| ProjectionError::Batch(e.to_string()))?;
+        }
+        WireAny::Bool(false) => {
+            builder
+                .write_str_bytes(handle, b\"false\")
+                .map_err(|e| ProjectionError::Batch(e.to_string()))?;
+        }
+        WireAny::Int(value) => {
+            scratch.decimal.clear();
+            let mut buf = itoa::Buffer::new();
+            scratch.decimal.extend_from_slice(buf.format(value).as_bytes());
+            builder
+                .write_str_bytes(handle, &scratch.decimal)
+                .map_err(|e| ProjectionError::Batch(e.to_string()))?;
+        }
+        WireAny::Double(value) => {
+            scratch.decimal.clear();
+            let mut buf = ryu::Buffer::new();
+            scratch.decimal.extend_from_slice(buf.format(value).as_bytes());
+            builder
+                .write_str_bytes(handle, &scratch.decimal)
+                .map_err(|e| ProjectionError::Batch(e.to_string()))?;
+        }
+        WireAny::Bytes(value) => super::write_hex_field(builder, handle, value, &mut scratch.hex)?,
+        WireAny::ArrayRaw(value) => {
+            super::write_wire_any_complex_json(builder, handle, WireAny::ArrayRaw(value), scratch)?;
+        }
+        WireAny::KvListRaw(value) => {
+            super::write_wire_any_complex_json(builder, handle, WireAny::KvListRaw(value), scratch)?;
+        }
+    }
+    Ok(())
+}
+"""
+
+
 def render(spec: dict) -> str:
     tables = render_field_tables(spec)
     any_value_decoder = render_any_value_decoder(spec)
@@ -621,6 +740,8 @@ def render(spec: dict) -> str:
     core_constant_drift_tests = render_core_constant_drift_tests(spec)
     generated_test_vectors = render_generated_test_vectors(spec)
     planned_handle_builder = render_planned_handle_builder()
+    wire_any_field_kind = render_wire_any_field_kind(spec)
+    wire_any_appenders = render_wire_any_appenders(spec)
     message_variants = "\n    ".join(message["name"] + "," for message in spec["messages"])
     fields_for_arms = "\n        ".join(
         f"MessageKind::{message['name']} => {rust_ident(message['name'])}_FIELDS,"
@@ -629,7 +750,8 @@ def render(spec: dict) -> str:
     return f"""// @generated by scripts/generate_otlp_projection.py; DO NOT EDIT.
 // spec: {spec["name"]} v{spec["version"]}; opentelemetry-proto {spec["proto_version"]}
 
-use super::{{ProjectionError, WireAny, WireField}};
+use super::{{ProjectionError, StringStorage, WireAny, WireField, WireScratch}};
+use logfwd_arrow::columnar::builder::ColumnarBatchBuilder;
 use logfwd_arrow::columnar::plan::{{BatchPlan, FieldHandle, FieldKind}};
 use logfwd_types::field_names;
 
@@ -683,6 +805,8 @@ pub(super) fn classify_projection_support(input: &[u8]) -> Result<(), Projection
 {planned_handle_builder}
 {any_value_decoder}
 {key_value_decoder}
+{wire_any_field_kind}
+{wire_any_appenders}
 fn scan_message(input: &[u8], message: MessageKind) -> Result<(), ProjectionError> {{
     if message == MessageKind::AnyValue {{
         return scan_any_value(input);
@@ -874,6 +998,17 @@ mod generated_tests {{
         assert!(fields.iter().any(|f| f.name == "array_value" && f.action == ProjectionAction::Project));
         assert!(fields.iter().any(|f| f.name == "kvlist_value" && f.action == ProjectionAction::Project));
         assert!(fields.iter().any(|f| f.name == "bytes_value" && f.action == ProjectionAction::Project));
+    }}
+
+    #[test]
+    fn generated_wire_any_field_kind_matches_variant_policy() {{
+        assert_eq!(wire_any_field_kind(&WireAny::String(b"s")), FieldKind::Utf8View);
+        assert_eq!(wire_any_field_kind(&WireAny::Bool(true)), FieldKind::Bool);
+        assert_eq!(wire_any_field_kind(&WireAny::Int(42)), FieldKind::Int64);
+        assert_eq!(wire_any_field_kind(&WireAny::Double(42.5)), FieldKind::Float64);
+        assert_eq!(wire_any_field_kind(&WireAny::Bytes(b"b")), FieldKind::Utf8View);
+        assert_eq!(wire_any_field_kind(&WireAny::ArrayRaw(&[])), FieldKind::Utf8View);
+        assert_eq!(wire_any_field_kind(&WireAny::KvListRaw(&[])), FieldKind::Utf8View);
     }}
 
     #[test]

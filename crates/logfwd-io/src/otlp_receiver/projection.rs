@@ -12,7 +12,7 @@ use arrow::buffer::Buffer;
 use arrow::record_batch::RecordBatch;
 use bytes::Bytes;
 use logfwd_arrow::columnar::builder::ColumnarBatchBuilder;
-use logfwd_arrow::columnar::plan::{FieldHandle, FieldKind};
+use logfwd_arrow::columnar::plan::FieldHandle;
 use logfwd_core::otlp;
 
 use crate::InputError;
@@ -346,7 +346,7 @@ fn collect_resource_attrs<'a>(
                     let key_str = std::str::from_utf8(&scratch.resource_key)
                         .expect("resource prefix + validated UTF-8 key must be valid UTF-8");
                     let handle = builder
-                        .resolve_dynamic(key_str, wire_any_field_kind(&value))
+                        .resolve_dynamic(key_str, generated::wire_any_field_kind(&value))
                         .map_err(|e| {
                             ProjectionError::Batch(format!("resolve resource attr: {e}"))
                         })?;
@@ -568,7 +568,7 @@ fn decode_log_record_wire(
         builder.write_i64(fields.severity_number, severity_number);
     }
     if let Some(value) = body {
-        write_wire_any_as_string(builder, fields.body, value, scratch, string_storage)?;
+        generated::write_wire_any_as_string(builder, fields.body, value, scratch, string_storage)?;
     }
     if let Some(value) = trace_id {
         write_hex_field(builder, fields.trace_id, value, &mut scratch.hex)?;
@@ -604,12 +604,12 @@ fn decode_log_record_wire(
                 key,
                 &value,
             )?;
-            write_wire_any(builder, handle, value, scratch, string_storage)?;
+            generated::write_wire_any(builder, handle, value, scratch, string_storage)?;
         }
     }
 
     for &(handle, value) in resource_attrs {
-        write_wire_any(builder, handle, value, scratch, string_storage)?;
+        generated::write_wire_any(builder, handle, value, scratch, string_storage)?;
     }
 
     builder.end_row();
@@ -636,7 +636,7 @@ fn resolve_record_attr_field(
 
     let key_str = std::str::from_utf8(key).expect("attribute key already validated as UTF-8");
     let handle = builder
-        .resolve_dynamic(key_str, wire_any_field_kind(value))
+        .resolve_dynamic(key_str, generated::wire_any_field_kind(value))
         .map_err(|e| ProjectionError::Batch(format!("resolve attr field: {e}")))?;
     if let Some(cached) = cache.get_mut(position) {
         cached.key.clear();
@@ -649,18 +649,6 @@ fn resolve_record_attr_field(
         });
     }
     Ok(handle)
-}
-
-/// Map a `WireAny` variant to a `FieldKind` for dynamic field resolution.
-fn wire_any_field_kind(value: &WireAny<'_>) -> FieldKind {
-    match value {
-        WireAny::String(_) | WireAny::Bytes(_) | WireAny::ArrayRaw(_) | WireAny::KvListRaw(_) => {
-            FieldKind::Utf8View
-        }
-        WireAny::Bool(_) => FieldKind::Bool,
-        WireAny::Int(_) => FieldKind::Int64,
-        WireAny::Double(_) => FieldKind::Float64,
-    }
 }
 
 fn decode_any_value_wire(value: &[u8]) -> Result<Option<WireAny<'_>>, ProjectionError> {
@@ -689,79 +677,6 @@ fn subslice_range(parent: &[u8], child: &[u8]) -> Result<(usize, usize), Project
         ));
     }
     Ok((child_start - parent_start, child.len()))
-}
-
-fn write_wire_any(
-    builder: &mut ColumnarBatchBuilder,
-    handle: FieldHandle,
-    value: WireAny<'_>,
-    scratch: &mut WireScratch,
-    string_storage: StringStorage,
-) -> Result<(), ProjectionError> {
-    match value {
-        WireAny::String(value) => write_wire_str(builder, handle, value, string_storage)?,
-        WireAny::Bool(value) => builder.write_bool(handle, value),
-        WireAny::Int(value) => builder.write_i64(handle, value),
-        WireAny::Double(value) => builder.write_f64(handle, value),
-        WireAny::Bytes(value) => write_hex_field(builder, handle, value, &mut scratch.hex)?,
-        WireAny::ArrayRaw(value) => {
-            write_wire_any_complex_json(builder, handle, WireAny::ArrayRaw(value), scratch)?;
-        }
-        WireAny::KvListRaw(value) => {
-            write_wire_any_complex_json(builder, handle, WireAny::KvListRaw(value), scratch)?;
-        }
-    }
-    Ok(())
-}
-
-fn write_wire_any_as_string(
-    builder: &mut ColumnarBatchBuilder,
-    handle: FieldHandle,
-    value: WireAny<'_>,
-    scratch: &mut WireScratch,
-    string_storage: StringStorage,
-) -> Result<(), ProjectionError> {
-    match value {
-        WireAny::String(value) => write_wire_str(builder, handle, value, string_storage)?,
-        WireAny::Bool(true) => {
-            builder
-                .write_str_bytes(handle, b"true")
-                .map_err(|e| ProjectionError::Batch(e.to_string()))?;
-        }
-        WireAny::Bool(false) => {
-            builder
-                .write_str_bytes(handle, b"false")
-                .map_err(|e| ProjectionError::Batch(e.to_string()))?;
-        }
-        WireAny::Int(value) => {
-            scratch.decimal.clear();
-            let mut buf = itoa::Buffer::new();
-            scratch
-                .decimal
-                .extend_from_slice(buf.format(value).as_bytes());
-            builder
-                .write_str_bytes(handle, &scratch.decimal)
-                .map_err(|e| ProjectionError::Batch(e.to_string()))?;
-        }
-        WireAny::Double(value) => {
-            scratch.decimal.clear();
-            let mut buf = ryu::Buffer::new();
-            scratch
-                .decimal
-                .extend_from_slice(buf.format(value).as_bytes());
-            builder
-                .write_str_bytes(handle, &scratch.decimal)
-                .map_err(|e| ProjectionError::Batch(e.to_string()))?;
-        }
-        WireAny::Bytes(value) => write_hex_field(builder, handle, value, &mut scratch.hex)?,
-        WireAny::ArrayRaw(value) => {
-            write_wire_any_complex_json(builder, handle, WireAny::ArrayRaw(value), scratch)?;
-        }
-        WireAny::KvListRaw(value) => {
-            write_wire_any_complex_json(builder, handle, WireAny::KvListRaw(value), scratch)?;
-        }
-    }
-    Ok(())
 }
 
 fn write_wire_any_complex_json(
