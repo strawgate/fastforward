@@ -571,18 +571,10 @@ impl Pipeline {
                 SourceMetadataPlan::default()
             };
             #[cfg(not(feature = "turmoil"))]
-            let source_metadata_plan =
-                if input_cfg.source_metadata == SourceMetadataStyle::Fastforward {
-                    SourceMetadataPlan {
-                        has_source_id: true,
-                        source_path: source_metadata_style_source_path(input_cfg.source_metadata),
-                    }
-                } else {
-                    SourceMetadataPlan {
-                        has_source_id: false,
-                        source_path: source_metadata_style_source_path(input_cfg.source_metadata),
-                    }
-                };
+            let source_metadata_plan = SourceMetadataPlan {
+                has_source_id: input_cfg.source_metadata == SourceMetadataStyle::Fastforward,
+                source_path: source_metadata_style_source_path(input_cfg.source_metadata),
+            };
 
             input_transforms.push(InputTransform {
                 scanner,
