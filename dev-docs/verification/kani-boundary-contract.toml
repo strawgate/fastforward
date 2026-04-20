@@ -49,6 +49,12 @@ reason = "Pure escaping helpers are already Kani-targeted here."
 issue = 1314
 
 [[seams]]
+path = "crates/logfwd-lint-attrs/src/lib.rs"
+status = "recommended"
+reason = "Proc-macro support crate emits cfg(kani) proof-linkage assertions but does not itself host bounded runtime proof harnesses."
+issue = 2457
+
+[[seams]]
 path = "crates/logfwd-io/src/receiver_health.rs"
 status = "required"
 reason = "Standalone receiver lifecycle reduction is now an isolated pure seam and should stay Kani-covered."
