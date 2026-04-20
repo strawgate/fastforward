@@ -879,15 +879,16 @@ mod tests {
     }
 
     #[test]
-    fn json_escape_control_chars_hex_a_through_f() {
+    fn json_escape_all_control_characters() {
         // These control chars produce \u00XX where XX has hex digits a-f.
         // Bytes 0x0A through 0x1F have low nibble >= 10 (some hit the
         // `b'a' + (nibble - 10)` branch in json_escape_bytes).
         // Note: 0x08 (\b), 0x09 (\t), 0x0A (\n), 0x0C (\f), 0x0D (\r) use
         // named escapes, so we check the generic \u00XX path for the rest.
+        let mut buf = Vec::new();
         for byte in 0x00u8..=0x1F {
+            buf.clear();
             let input = [byte];
-            let mut buf = Vec::new();
             json_escape_bytes(&input, &mut buf);
             let escaped = core::str::from_utf8(&buf).unwrap();
             match byte {
@@ -903,7 +904,7 @@ mod tests {
             }
         }
         // Also verify 0x7F (DEL) uses the generic escape path.
-        let mut buf = Vec::new();
+        buf.clear();
         json_escape_bytes(&[0x7F], &mut buf);
         assert_eq!(
             core::str::from_utf8(&buf).unwrap(),
