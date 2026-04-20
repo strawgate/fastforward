@@ -49,6 +49,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      # The upstream job's result is 'failure' for any non-zero exit in the
+      # run-tlc composite action, which includes real TLC counterexamples
+      # AND infra failures (JDK setup, jar download, cache restore).  We
+      # can't distinguish without parsing artifacts, so the title/body stay
+      # neutral about the cause — first triage step is to open the run URL
+      # and see which step in run-tlc turned red.
       - name: File aggregated issue on failure
         env:
           GH_TOKEN: ${{ github.token }}
@@ -57,20 +63,26 @@ jobs:
           run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           body_file="$(mktemp)"
           cat >"$body_file" <<EOF
-          Nightly TLA+ thorough model check failed.
+          Nightly TLA+ thorough job failed.
 
           - Spec: tla/MCPipelineMachine.tla
           - Config: tla/PipelineMachine.nightly.thorough.cfg
           - Run: ${run_url}
 
-          Reproduce locally:
+          The upstream job failed — open the run URL to determine whether
+          this is a real TLC counterexample or an infrastructure issue
+          (JDK setup, jar download, cache miss).
+
+          If TLC itself failed, reproduce locally:
             just tlc MCPipelineMachine.tla PipelineMachine.nightly.thorough.cfg
 
-          Investigate the counterexample in the run log (TLC prints the
-          violated invariant / liveness property and the state trace).
+          TLC prints the violated invariant / liveness property and the
+          state trace just before exiting.  If the run step never reached
+          the \`tlc2.TLC\` invocation, the issue is infrastructure — close
+          this issue once the underlying transient resolves.
           EOF
           gh issue create \
-            --title "Nightly TLA+ thorough model check failed ($(date +%Y-%m-%d))" \
+            --title "Nightly TLA+ thorough job failed ($(date +%Y-%m-%d))" \
             --body-file "$body_file" \
             --label "bug"
 
