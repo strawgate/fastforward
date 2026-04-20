@@ -178,7 +178,7 @@ export function createHighwayEngine(overrides) {
 
         if (segment === 'ramp') {
           // Stop-sign merge: always brake to a stop before the merge point
-          const stopS = LENGTHS.ramp - 5;
+          const stopS = LENGTHS.ramp - 30;
           const remaining = stopS - car.s;
           desired = Math.min(desired, stopSpeed(remaining, cfg.brake));
         } else if (segment === 'exit' && !lightIsGreen && car.s < EXIT_GATE_S) {
@@ -202,7 +202,7 @@ export function createHighwayEngine(overrides) {
       }
     }
 
-    const RAMP_STOP_S = LENGTHS.ramp - 5;
+    const RAMP_STOP_S = LENGTHS.ramp - 30;
     const HWY_STOP_S = LENGTHS.highway - 5;
 
     for (let i = 0; i < cars.length; i++) {
