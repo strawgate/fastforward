@@ -53,10 +53,11 @@ fn source_metadata_style_needs_source_paths(style: SourceMetadataStyle) -> bool 
 }
 
 fn input_type_exposes_public_source_paths(type_config: &InputTypeConfig) -> bool {
-    // Keep this list tied to InputSource::source_paths() implementations. S3
-    // derives SourceId from object keys, but does not yet expose key/path
-    // snapshots for public path metadata columns.
-    matches!(type_config, InputTypeConfig::File(_))
+    // Keep this list tied to InputSource::source_paths() implementations.
+    matches!(
+        type_config,
+        InputTypeConfig::File(_) | InputTypeConfig::S3(_)
+    )
 }
 
 impl Pipeline {
@@ -984,8 +985,8 @@ mod tests {
     }
 
     #[test]
-    fn public_source_path_style_rejects_s3_until_keys_are_exposed() {
-        let mut config = PipelineConfig {
+    fn public_source_path_style_allows_s3_key_snapshots() {
+        let config = PipelineConfig {
             inputs: vec![InputConfig {
                 name: Some("s3-in".to_string()),
                 format: Some(Format::Json),
@@ -1023,18 +1024,10 @@ mod tests {
 
         let err = Pipeline::from_config("default", &config, &logfwd_test_utils::test_meter(), None)
             .err()
-            .expect("S3 does not yet expose public source path snapshots");
-        assert!(
-            err.contains("does not expose public source path snapshots"),
-            "unexpected error: {err}"
-        );
-
-        config.inputs[0].source_metadata = SourceMetadataStyle::Fastforward;
-        let err = Pipeline::from_config("default", &config, &logfwd_test_utils::test_meter(), None)
-            .err()
-            .expect("non-public S3 source identity should reach S3 build validation");
+            .expect("S3 public source path style should reach S3 build validation");
         assert!(
             err.contains("S3 input requires the 's3' feature")
+                || err.contains("s3.access_key_id is required")
                 || err.contains("failed to create S3 input"),
             "unexpected error: {err}"
         );

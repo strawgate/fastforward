@@ -100,7 +100,7 @@ YAML sequence for multiple inputs.
 | `type` | string | Yes | Input type. See [Input types](#input-types). |
 | `name` | string | No | Friendly name shown in diagnostics. |
 | `format` | string | No | Log format. See [Formats](#formats). Defaults to `auto`. |
-| `source_metadata` | string | No | Source metadata style. Defaults to `none`. Use `fastforward` for internal `__source_id`, `ecs`/`beats` for public ECS columns such as `file.path`, `otel` for public OpenTelemetry columns such as `log.file.path`, or `vector` for public Vector-style columns such as `file`. Public source path styles currently require file inputs because other inputs do not expose public source path snapshots. |
+| `source_metadata` | string | No | Source metadata style. Defaults to `none`. Use `fastforward` for internal `__source_id`, `ecs`/`beats` for public ECS columns such as `file.path`, `otel` for public OpenTelemetry columns such as `log.file.path`, or `vector` for public Vector-style columns such as `file`. Public source path styles require inputs that expose source path snapshots. File inputs expose filesystem paths; S3 inputs expose object keys. |
 
 ### `file` input
 
@@ -639,9 +639,9 @@ returns the columns that exist in the table. User-facing sinks drop known
 FastForward internal columns such as `__source_id` by default; alias an
 internal column to a public name when it should be emitted. User payload fields
 that happen to start with `__` are not treated as internal. Public source path
-styles currently require file inputs; use `fastforward` for source identity on
-non-file inputs, including S3, until those inputs expose explicit public source
-descriptors.
+styles currently require inputs that expose source path snapshots. File inputs
+use filesystem paths; S3 inputs use object keys. Use `fastforward` for source
+identity on inputs that do not expose public source descriptors.
 
 ### Built-in UDFs
 
