@@ -30,17 +30,49 @@ jobs:
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v6
-      - name: Set up Java
-        uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: '21'
-      - name: Download tla2tools.jar
-        run: |
-          mkdir -p /tmp/tla
-          curl -sL https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar -o /tmp/tla/tla2tools.jar
       - name: TLC PipelineMachine nightly thorough model
-        run: java -cp /tmp/tla/tla2tools.jar tlc2.TLC tla/MCPipelineMachine.tla -config tla/PipelineMachine.thorough.cfg -workers auto
+        uses: ./.github/actions/run-tlc
+        with:
+          tla-file: tla/MCPipelineMachine.tla
+          config: tla/PipelineMachine.nightly.thorough.cfg
+
+  tla-pipeline-nightly-thorough-report:
+    permissions:
+      contents: read
+      issues: write
+    name: TLA+ nightly thorough failure report
+    needs: tla-pipeline-nightly-thorough
+    if: |
+      always() &&
+      github.event_name == 'schedule' &&
+      needs.tla-pipeline-nightly-thorough.result == 'failure'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: File aggregated issue on failure
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          body_file="$(mktemp)"
+          cat >"$body_file" <<EOF
+          Nightly TLA+ thorough model check failed.
+
+          - Spec: tla/MCPipelineMachine.tla
+          - Config: tla/PipelineMachine.nightly.thorough.cfg
+          - Run: ${run_url}
+
+          Reproduce locally:
+            just tlc MCPipelineMachine.tla PipelineMachine.nightly.thorough.cfg
+
+          Investigate the counterexample in the run log (TLC prints the
+          violated invariant / liveness property and the state trace).
+          EOF
+          gh issue create \
+            --title "Nightly TLA+ thorough model check failed ($(date +%Y-%m-%d))" \
+            --body-file "$body_file" \
+            --label "bug"
 
   turmoil-replay-equivalence:
     name: Turmoil replay-equivalence
