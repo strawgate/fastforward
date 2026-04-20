@@ -39,9 +39,11 @@ PR #2317 landed the sidecar spine:
 - Public styles materialize source paths as normal columns: `file.path` for
   ECS/Beats, `log.file.path` for OTel, and `file` for Vector.
 - Public source path styles are currently accepted only for file inputs because
-  only file tailing exposes a source path snapshot. This avoids replacing a
-  payload `file.path` column with null metadata for UDP/TCP/stdin/structured
-  inputs that do not yet provide public source descriptors.
+  only file tailing exposes a source path snapshot. S3 hashes object keys into
+  `SourceId`, but it does not yet expose key/path snapshots. This guard avoids
+  replacing a payload `file.path` column with null metadata for
+  UDP/TCP/stdin/S3/structured inputs that do not yet provide public source
+  descriptors.
 - SQL no longer prunes metadata after execution. Internal visibility is handled
   by known internal-column output filtering, not by SQL-stage magic.
 - Output boundaries drop known internal columns such as `__source_id` across

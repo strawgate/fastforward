@@ -50,7 +50,10 @@ fn source_metadata_style_needs_source_paths(style: SourceMetadataStyle) -> bool 
         .is_some()
 }
 
-fn input_type_exposes_source_paths(type_config: &InputTypeConfig) -> bool {
+fn input_type_exposes_public_source_paths(type_config: &InputTypeConfig) -> bool {
+    // Keep this list tied to InputSource::source_paths() implementations. S3
+    // derives SourceId from object keys, but does not yet expose key/path
+    // snapshots for public path metadata columns.
     matches!(type_config, InputTypeConfig::File(_))
 }
 
@@ -555,12 +558,12 @@ impl Pipeline {
                 ));
             }
             if source_metadata_style_needs_source_paths(input_cfg.source_metadata)
-                && !input_type_exposes_source_paths(&input_cfg.type_config)
+                && !input_type_exposes_public_source_paths(&input_cfg.type_config)
             {
                 return Err(format!(
                     "pipeline '{name}' input '{input_name}': source_metadata style {} requires \
-                     source paths, but input type {} does not expose source paths; currently only \
-                     file inputs support public source path metadata styles",
+                     source paths, but input type {} does not expose public source path snapshots; \
+                     currently only file inputs support public source path metadata styles",
                     input_cfg.source_metadata,
                     input_cfg.input_type()
                 ));
@@ -968,13 +971,70 @@ mod tests {
             .err()
             .expect("public source path style should require path-capable input");
         assert!(
-            err.contains("does not expose source paths"),
+            err.contains("does not expose public source path snapshots"),
             "unexpected error: {err}"
         );
 
         config.inputs[0].source_metadata = SourceMetadataStyle::Fastforward;
         Pipeline::from_config("default", &config, &logfwd_test_utils::test_meter(), None)
             .expect("fastforward source id style does not require source paths");
+    }
+
+    #[test]
+    fn public_source_path_style_rejects_s3_until_keys_are_exposed() {
+        let mut config = PipelineConfig {
+            inputs: vec![InputConfig {
+                name: Some("s3-in".to_string()),
+                format: Some(Format::Json),
+                sql: None,
+                source_metadata: SourceMetadataStyle::Ecs,
+                type_config: InputTypeConfig::S3(logfwd_config::S3TypeConfig {
+                    s3: logfwd_config::S3InputConfig {
+                        bucket: "logs".to_string(),
+                        region: None,
+                        endpoint: None,
+                        prefix: None,
+                        sqs_queue_url: None,
+                        start_after: None,
+                        access_key_id: None,
+                        secret_access_key: None,
+                        session_token: None,
+                        part_size_bytes: None,
+                        max_concurrent_fetches: None,
+                        max_concurrent_objects: None,
+                        visibility_timeout_secs: None,
+                        compression: None,
+                        poll_interval_ms: None,
+                    },
+                }),
+            }],
+            transform: None,
+            outputs: vec![minimal_output().into()],
+            enrichment: Vec::new(),
+            resource_attrs: Default::default(),
+            workers: None,
+            batch_target_bytes: None,
+            batch_timeout_ms: None,
+            poll_interval_ms: None,
+        };
+
+        let err = Pipeline::from_config("default", &config, &logfwd_test_utils::test_meter(), None)
+            .err()
+            .expect("S3 does not yet expose public source path snapshots");
+        assert!(
+            err.contains("does not expose public source path snapshots"),
+            "unexpected error: {err}"
+        );
+
+        config.inputs[0].source_metadata = SourceMetadataStyle::Fastforward;
+        let err = Pipeline::from_config("default", &config, &logfwd_test_utils::test_meter(), None)
+            .err()
+            .expect("non-public S3 source identity should reach S3 build validation");
+        assert!(
+            err.contains("S3 input requires the 's3' feature")
+                || err.contains("failed to create S3 input"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
