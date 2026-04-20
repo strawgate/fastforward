@@ -52,7 +52,7 @@ use tokio_util::sync::CancellationToken;
 #[cfg(not(feature = "turmoil"))]
 use logfwd_diagnostics::diagnostics::PipelineMetrics;
 #[cfg(not(feature = "turmoil"))]
-use logfwd_io::input::InputEvent;
+use logfwd_io::input::{CriMetadata, CriStream, InputEvent};
 #[cfg(not(feature = "turmoil"))]
 use logfwd_io::poll_cadence::AdaptivePollController;
 #[cfg(not(feature = "turmoil"))]
@@ -137,6 +137,7 @@ fn flush_buf(
     row_origins: &mut Vec<RowOriginSpan>,
     pending_row_origin: &mut Option<PendingRowOrigin>,
     buffered_source_paths: &mut HashMap<SourceId, String>,
+    cri_metadata: &mut CriMetadata,
     source: &dyn logfwd_io::input::InputSource,
     tx: &mpsc::Sender<IoWorkItem>,
     metrics: &PipelineMetrics,
@@ -148,6 +149,7 @@ fn flush_buf(
         row_origins.clear();
         *pending_row_origin = None;
         buffered_source_paths.clear();
+        cri_metadata.clear();
         return true;
     }
     if source_metadata_plan.has_any() {
@@ -156,6 +158,12 @@ fn flush_buf(
         *pending_row_origin = None;
     }
     let data = buf.split().freeze();
+    let cri_metadata = if cri_metadata.has_values {
+        Some(std::mem::take(cri_metadata))
+    } else {
+        cri_metadata.clear();
+        None
+    };
     let checkpoints = source.checkpoint_data();
     let source_paths = if source_metadata_plan.has_source_path() {
         std::mem::take(buffered_source_paths)
@@ -168,6 +176,7 @@ fn flush_buf(
         checkpoints,
         row_origins: std::mem::take(row_origins),
         source_paths,
+        cri_metadata,
         queued_at: tokio::time::Instant::now(),
         input_index,
     });
@@ -209,7 +218,10 @@ fn process_io_events(
     for event in events {
         match event {
             InputEvent::Data {
-                bytes, source_id, ..
+                bytes,
+                source_id,
+                cri_metadata,
+                ..
             } => {
                 if source_metadata_plan.has_any() {
                     if source_metadata_plan.has_source_path() {
@@ -227,6 +239,12 @@ fn process_io_events(
                         &bytes,
                     );
                 }
+                append_cri_metadata_for_data(
+                    &mut input.cri_metadata,
+                    cri_metadata,
+                    &input.buf,
+                    &bytes,
+                );
                 input.buf.extend_from_slice(&bytes);
                 // Flush eagerly when the buffer reaches the target so
                 // that a single poll returning many Data events cannot
@@ -238,6 +256,7 @@ fn process_io_events(
                         &mut input.row_origins,
                         pending_row_origin,
                         &mut input.source_paths,
+                        &mut input.cri_metadata,
                         &*input.source,
                         tx,
                         metrics,
@@ -258,6 +277,7 @@ fn process_io_events(
                     &mut input.row_origins,
                     pending_row_origin,
                     &mut input.source_paths,
+                    &mut input.cri_metadata,
                     &*input.source,
                     tx,
                     metrics,
@@ -334,6 +354,7 @@ pub(crate) struct IoChunk {
     pub checkpoints: Vec<(SourceId, ByteOffset)>,
     pub row_origins: Vec<RowOriginSpan>,
     pub source_paths: HashMap<SourceId, String>,
+    pub cri_metadata: Option<CriMetadata>,
     pub queued_at: tokio::time::Instant,
     pub input_index: usize,
 }
@@ -388,7 +409,7 @@ fn capture_source_path(
     }
 }
 
-#[cfg(all(test, not(feature = "turmoil")))]
+#[cfg(not(feature = "turmoil"))]
 fn scanner_ready_row_count(bytes: &[u8]) -> usize {
     let mut rows = 0usize;
     let mut line_start = 0usize;
@@ -416,6 +437,27 @@ fn scanner_ready_row_count(bytes: &[u8]) -> usize {
     }
 
     rows
+}
+
+#[cfg(not(feature = "turmoil"))]
+fn append_cri_metadata_for_data(
+    buffered_metadata: &mut CriMetadata,
+    event_metadata: Option<CriMetadata>,
+    buffered_bytes: &[u8],
+    event_bytes: &[u8],
+) {
+    match event_metadata {
+        Some(metadata) => {
+            if buffered_metadata.is_empty() && !buffered_bytes.is_empty() {
+                buffered_metadata.append_null_rows(scanner_ready_row_count(buffered_bytes));
+            }
+            buffered_metadata.append(metadata);
+        }
+        None if !buffered_metadata.is_empty() => {
+            buffered_metadata.append_null_rows(scanner_ready_row_count(event_bytes));
+        }
+        None => {}
+    }
 }
 
 #[cfg(not(feature = "turmoil"))]
@@ -577,6 +619,107 @@ fn source_metadata_for_batch(
 }
 
 #[cfg(not(feature = "turmoil"))]
+fn cri_metadata_for_batch(
+    batch: RecordBatch,
+    cri_metadata: Option<CriMetadata>,
+) -> Result<RecordBatch, ArrowError> {
+    let Some(cri_metadata) = cri_metadata else {
+        return Ok(batch);
+    };
+    if !cri_metadata.has_values {
+        return Ok(batch);
+    }
+    if cri_metadata.rows != batch.num_rows() {
+        return Err(ArrowError::InvalidArgumentError(format!(
+            "CRI metadata sidecar row count mismatch: spans={}, batch={}",
+            cri_metadata.rows,
+            batch.num_rows()
+        )));
+    }
+
+    let (timestamp, stream) = cri_metadata_arrays(batch.num_rows(), cri_metadata)?;
+    replace_or_append_columns(
+        batch,
+        vec![
+            MetadataColumn {
+                name: field_names::TIMESTAMP_UNDERSCORE,
+                data_type: DataType::Utf8View,
+                array: timestamp,
+            },
+            MetadataColumn {
+                name: field_names::CRI_STREAM,
+                data_type: DataType::Utf8View,
+                array: stream,
+            },
+        ],
+    )
+}
+
+#[cfg(not(feature = "turmoil"))]
+fn cri_metadata_arrays(
+    num_rows: usize,
+    cri_metadata: CriMetadata,
+) -> Result<(ArrayRef, ArrayRef), ArrowError> {
+    let mut timestamp = StringViewBuilder::new();
+    let mut stream = StringViewBuilder::new();
+    let timestamp_bytes = cri_metadata.timestamp_bytes;
+    std::str::from_utf8(&timestamp_bytes).map_err(|_| {
+        ArrowError::InvalidArgumentError("CRI timestamp is not valid UTF-8".to_string())
+    })?;
+    let timestamp_block = (!timestamp_bytes.is_empty())
+        .then(|| timestamp.append_block(Buffer::from(timestamp_bytes)));
+    let stdout_block =
+        stream.append_block(Buffer::from(CriStream::Stdout.as_str().as_bytes().to_vec()));
+    let stderr_block =
+        stream.append_block(Buffer::from(CriStream::Stderr.as_str().as_bytes().to_vec()));
+    for span in cri_metadata.spans {
+        let Some(values) = span.values else {
+            append_null_metadata_views(&mut timestamp, span.rows);
+            append_null_metadata_views(&mut stream, span.rows);
+            continue;
+        };
+        let timestamp_offset = u32::try_from(values.timestamp_start).map_err(|_| {
+            ArrowError::InvalidArgumentError(
+                "CRI timestamp string offset is too large for Utf8View".to_string(),
+            )
+        })?;
+        let timestamp_len = u32::try_from(values.timestamp_len).map_err(|_| {
+            ArrowError::InvalidArgumentError(
+                "CRI timestamp string is too large for Utf8View".to_string(),
+            )
+        })?;
+        let Some(timestamp_block) = timestamp_block else {
+            return Err(ArrowError::InvalidArgumentError(
+                "CRI metadata span references an empty timestamp buffer".to_string(),
+            ));
+        };
+        append_block_metadata_views(
+            &mut timestamp,
+            timestamp_block,
+            timestamp_offset,
+            timestamp_len,
+            span.rows,
+        )?;
+
+        let stream_value = values.stream.as_str();
+        let stream_len = u32::try_from(stream_value.len()).map_err(|_| {
+            ArrowError::InvalidArgumentError(
+                "CRI stream string is too large for Utf8View".to_string(),
+            )
+        })?;
+        let stream_block = match values.stream {
+            CriStream::Stdout => stdout_block,
+            CriStream::Stderr => stderr_block,
+        };
+        append_block_metadata_views(&mut stream, stream_block, 0, stream_len, span.rows)?;
+    }
+    Ok((
+        finish_string_metadata_array(timestamp, num_rows)?,
+        finish_string_metadata_array(stream, num_rows)?,
+    ))
+}
+
+#[cfg(not(feature = "turmoil"))]
 fn source_path_metadata_array(
     num_rows: usize,
     row_origins: &[RowOriginSpan],
@@ -605,7 +748,7 @@ fn source_path_metadata_array(
             blocks.insert(source_id, (block, len));
             (block, len)
         };
-        append_block_metadata_views(&mut builder, block, len, span.rows)?;
+        append_block_metadata_views(&mut builder, block, 0, len, span.rows)?;
     }
     finish_string_metadata_array(builder, num_rows)
 }
@@ -614,11 +757,12 @@ fn source_path_metadata_array(
 fn append_block_metadata_views(
     builder: &mut StringViewBuilder,
     block: u32,
+    offset: u32,
     len: u32,
     rows: usize,
 ) -> Result<(), ArrowError> {
     for _ in 0..rows {
-        builder.try_append_view(block, 0, len)?;
+        builder.try_append_view(block, offset, len)?;
     }
     Ok(())
 }
@@ -844,6 +988,7 @@ fn io_worker_loop(
                     &mut input.row_origins,
                     &mut pending_row_origin,
                     &mut input.source_paths,
+                    &mut input.cri_metadata,
                     &*input.source,
                     &tx,
                     &metrics,
@@ -873,6 +1018,7 @@ fn io_worker_loop(
                 &mut input.row_origins,
                 &mut pending_row_origin,
                 &mut input.source_paths,
+                &mut input.cri_metadata,
                 &*input.source,
                 &tx,
                 &metrics,
@@ -896,6 +1042,12 @@ fn io_worker_loop(
             let _ = pending_row_origin.take();
         }
         let data = input.buf.split().freeze();
+        let cri_metadata = if input.cri_metadata.has_values {
+            Some(std::mem::take(&mut input.cri_metadata))
+        } else {
+            input.cri_metadata.clear();
+            None
+        };
         let checkpoints = input.source.checkpoint_data();
         let source_paths = if source_metadata_plan.has_source_path() {
             std::mem::take(&mut input.source_paths)
@@ -908,6 +1060,7 @@ fn io_worker_loop(
             checkpoints,
             row_origins: std::mem::take(&mut input.row_origins),
             source_paths,
+            cri_metadata,
             queued_at: tokio::time::Instant::now(),
             input_index,
         });
@@ -998,6 +1151,19 @@ fn cpu_worker_loop(
                             input = transform.input_name.as_str(),
                             error = %e,
                             "cpu_worker: source metadata attach error (batch dropped)"
+                        );
+                        continue;
+                    }
+                };
+                let batch = match cri_metadata_for_batch(batch, chunk.cri_metadata) {
+                    Ok(batch) => batch,
+                    Err(e) => {
+                        metrics.inc_transform_error();
+                        metrics.inc_dropped_batch();
+                        tracing::warn!(
+                            input = transform.input_name.as_str(),
+                            error = %e,
+                            "cpu_worker: CRI metadata attach error (batch dropped)"
                         );
                         continue;
                     }
@@ -1224,6 +1390,7 @@ mod tests {
                 bytes: b"a\n".to_vec(),
                 source_id: Some(SourceId(1)),
                 accounted_bytes: 2,
+                cri_metadata: None,
             },
             InputEvent::EndOfFile {
                 source_id: Some(SourceId(2)),
@@ -1240,6 +1407,7 @@ mod tests {
                 bytes: b"a\n".to_vec(),
                 source_id: Some(SourceId(1)),
                 accounted_bytes: 2,
+                cri_metadata: None,
             },
             InputEvent::EndOfFile {
                 source_id: Some(SourceId(1)),
@@ -1256,6 +1424,7 @@ mod tests {
                 bytes: b"a\n".to_vec(),
                 source_id: Some(SourceId(1)),
                 accounted_bytes: 2,
+                cri_metadata: None,
             },
             InputEvent::EndOfFile { source_id: None },
         ];
@@ -1333,6 +1502,82 @@ mod tests {
         assert_eq!(source_path.value(0), "/var/log/pods/ns_pod_uid/c/0.log");
         assert_eq!(source_path.value(1), "/var/log/pods/ns_pod_uid/c/0.log");
         assert_eq!(source_path.value(2), "/var/log/pods/ns_pod_uid/c/1.log");
+    }
+
+    #[test]
+    fn cri_metadata_attach_adds_row_columns_after_scan() {
+        let schema = Arc::new(Schema::new(vec![Field::new("msg", DataType::Utf8, true)]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(StringArray::from(vec![
+                "plain", "cri-out", "cri-err",
+            ]))],
+        )
+        .expect("batch");
+        let mut metadata = CriMetadata::default();
+        metadata.append_null_rows(1);
+        metadata.append_value(b"2024-01-15T10:30:00Z", b"stdout");
+        metadata.append_value(b"2024-01-15T10:30:01Z", b"stderr");
+
+        let out = cri_metadata_for_batch(batch, Some(metadata)).expect("CRI metadata attach");
+
+        let timestamp = out
+            .column_by_name(field_names::TIMESTAMP_UNDERSCORE)
+            .expect("timestamp column")
+            .as_any()
+            .downcast_ref::<StringViewArray>()
+            .expect("timestamp type");
+        assert!(timestamp.is_null(0));
+        assert_eq!(timestamp.value(1), "2024-01-15T10:30:00Z");
+        assert_eq!(timestamp.value(2), "2024-01-15T10:30:01Z");
+
+        let stream = out
+            .column_by_name(field_names::CRI_STREAM)
+            .expect("stream column")
+            .as_any()
+            .downcast_ref::<StringViewArray>()
+            .expect("stream type");
+        assert!(stream.is_null(0));
+        assert_eq!(stream.value(1), "stdout");
+        assert_eq!(stream.value(2), "stderr");
+    }
+
+    #[test]
+    fn cri_metadata_columns_are_queryable_before_sql() {
+        let mut transform =
+            crate::transform::SqlTransform::new("SELECT _timestamp, _stream, msg FROM logs")
+                .expect("sql");
+        let mut scanner = Scanner::new(transform.scan_config());
+        let scanned = scanner
+            .scan(Bytes::from_static(b"{\"msg\":\"hello\"}\n"))
+            .expect("scan");
+        let mut metadata = CriMetadata::default();
+        metadata.append_value(b"2024-01-15T10:30:00Z", b"stdout");
+        let attached = cri_metadata_for_batch(scanned, Some(metadata)).expect("attach");
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let result = rt
+            .block_on(transform.execute(attached))
+            .expect("transform should see CRI metadata");
+
+        let timestamp = result
+            .column_by_name(field_names::TIMESTAMP_UNDERSCORE)
+            .expect("timestamp column")
+            .as_any()
+            .downcast_ref::<StringViewArray>()
+            .expect("timestamp type");
+        assert_eq!(timestamp.value(0), "2024-01-15T10:30:00Z");
+
+        let stream = result
+            .column_by_name(field_names::CRI_STREAM)
+            .expect("stream column")
+            .as_any()
+            .downcast_ref::<StringViewArray>()
+            .expect("stream type");
+        assert_eq!(stream.value(0), "stdout");
     }
 
     #[test]
@@ -1475,6 +1720,7 @@ mod tests {
                 bytes: b"{\"msg\":\"x\"}\n".to_vec(),
                 source_id: Some(SourceId(7)),
                 accounted_bytes: 12,
+                cri_metadata: None,
             }])
         }
 
@@ -1509,11 +1755,13 @@ mod tests {
                     bytes: b"{\"msg\":\"hel".to_vec(),
                     source_id: Some(SourceId(7)),
                     accounted_bytes: 11,
+                    cri_metadata: None,
                 },
                 InputEvent::Data {
                     bytes: b"lo\"}\n{\"msg\":\"next\"}\n".to_vec(),
                     source_id: Some(SourceId(7)),
                     accounted_bytes: 21,
+                    cri_metadata: None,
                 },
             ])
         }
@@ -1579,6 +1827,7 @@ mod tests {
                 bytes: b"{\"msg\":\"drain\"}\n".to_vec(),
                 source_id: Some(SourceId(13)),
                 accounted_bytes: 16,
+                cri_metadata: None,
             }])
         }
 
@@ -1625,6 +1874,7 @@ mod tests {
                 bytes,
                 source_id: Some(SourceId(14)),
                 accounted_bytes,
+                cri_metadata: None,
             }])
         }
 
@@ -1657,6 +1907,7 @@ mod tests {
             buf: bytes::BytesMut::new(),
             row_origins: Vec::new(),
             source_paths: HashMap::new(),
+            cri_metadata: CriMetadata::default(),
             stats,
         };
         let meter = opentelemetry::global::meter("io_worker_configured_input_name");
@@ -1712,6 +1963,7 @@ mod tests {
             buf: bytes::BytesMut::new(),
             row_origins: Vec::new(),
             source_paths: HashMap::new(),
+            cri_metadata: CriMetadata::default(),
             stats,
         };
         let meter = opentelemetry::global::meter("io_worker_split_line_origin");
@@ -1769,6 +2021,7 @@ mod tests {
             buf: bytes::BytesMut::new(),
             row_origins: Vec::new(),
             source_paths: HashMap::new(),
+            cri_metadata: CriMetadata::default(),
             stats,
         };
         let meter = opentelemetry::global::meter("io_worker_batch_source_metadata");
@@ -1829,6 +2082,7 @@ mod tests {
             buf: bytes::BytesMut::new(),
             row_origins: Vec::new(),
             source_paths: HashMap::new(),
+            cri_metadata: CriMetadata::default(),
             stats,
         };
         let meter = opentelemetry::global::meter("io_worker_shutdown_drain");
@@ -1888,6 +2142,7 @@ mod tests {
             buf: bytes::BytesMut::new(),
             row_origins: Vec::new(),
             source_paths: HashMap::new(),
+            cri_metadata: CriMetadata::default(),
             stats,
         };
         let meter = opentelemetry::global::meter("io_worker_shutdown_repolls");

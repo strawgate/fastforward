@@ -20,6 +20,171 @@ pub struct InputCadence {
     pub adaptive_fast_polls_max: u8,
 }
 
+/// CRI output stream for metadata sidecar rows.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CriStream {
+    Stdout,
+    Stderr,
+}
+
+impl CriStream {
+    pub fn from_bytes(stream: &[u8]) -> Option<Self> {
+        match stream {
+            b"stdout" => Some(Self::Stdout),
+            b"stderr" => Some(Self::Stderr),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Stdout => "stdout",
+            Self::Stderr => "stderr",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CriMetadataValues {
+    pub timestamp_start: usize,
+    pub timestamp_len: usize,
+    pub stream: CriStream,
+}
+
+/// Consecutive scanner rows that share the same optional CRI metadata.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CriMetadataSpan {
+    pub rows: usize,
+    pub values: Option<CriMetadataValues>,
+}
+
+/// Row-aligned CRI metadata extracted without rewriting the source JSON.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct CriMetadata {
+    pub spans: Vec<CriMetadataSpan>,
+    pub timestamp_bytes: Vec<u8>,
+    pub rows: usize,
+    pub has_values: bool,
+}
+
+impl CriMetadata {
+    pub fn is_empty(&self) -> bool {
+        self.rows == 0
+    }
+
+    pub fn clear(&mut self) {
+        self.spans.clear();
+        self.timestamp_bytes.clear();
+        self.rows = 0;
+        self.has_values = false;
+    }
+
+    pub fn timestamp(&self, values: &CriMetadataValues) -> &[u8] {
+        let end = values.timestamp_start + values.timestamp_len;
+        &self.timestamp_bytes[values.timestamp_start..end]
+    }
+
+    pub fn append_null_rows(&mut self, rows: usize) {
+        if rows == 0 {
+            return;
+        }
+        if let Some(last) = self.spans.last_mut()
+            && last.values.is_none()
+        {
+            last.rows += rows;
+            self.rows += rows;
+            return;
+        }
+        self.spans.push(CriMetadataSpan { rows, values: None });
+        self.rows += rows;
+    }
+
+    pub fn append_value(&mut self, timestamp: &[u8], stream: &[u8]) {
+        let Some(stream) = CriStream::from_bytes(stream) else {
+            return;
+        };
+        if let Some(last) = self.spans.last()
+            && let Some(values) = &last.values
+            && values.stream == stream
+            && self.timestamp(values) == timestamp
+        {
+            let last = self.spans.last_mut().expect("last span exists");
+            last.rows += 1;
+            self.rows += 1;
+            return;
+        }
+        let timestamp_start = self.timestamp_bytes.len();
+        self.timestamp_bytes.extend_from_slice(timestamp);
+        self.spans.push(CriMetadataSpan {
+            rows: 1,
+            values: Some(CriMetadataValues {
+                timestamp_start,
+                timestamp_len: timestamp.len(),
+                stream,
+            }),
+        });
+        self.rows += 1;
+        self.has_values = true;
+    }
+
+    pub fn append(&mut self, mut other: Self) {
+        if other.is_empty() {
+            return;
+        }
+        if self.spans.is_empty() {
+            *self = other;
+            return;
+        }
+        let offset = self.timestamp_bytes.len();
+        let merge_first =
+            self.spans
+                .last()
+                .zip(other.spans.first())
+                .is_some_and(|(last, first)| {
+                    metadata_values_equal(
+                        last.values.as_ref(),
+                        &self.timestamp_bytes,
+                        first.values.as_ref(),
+                        &other.timestamp_bytes,
+                    )
+                });
+        self.timestamp_bytes
+            .extend_from_slice(&other.timestamp_bytes);
+        for span in &mut other.spans {
+            if let Some(values) = &mut span.values {
+                values.timestamp_start += offset;
+            }
+        }
+        if merge_first {
+            let first_rows = other.spans.first().expect("first span exists").rows;
+            let last = self.spans.last_mut().expect("last span exists");
+            last.rows += first_rows;
+            other.spans.remove(0);
+        }
+        self.rows += other.rows;
+        self.has_values |= other.has_values;
+        self.spans.extend(other.spans);
+    }
+}
+
+fn metadata_values_equal(
+    left: Option<&CriMetadataValues>,
+    left_timestamps: &[u8],
+    right: Option<&CriMetadataValues>,
+    right_timestamps: &[u8],
+) -> bool {
+    match (left, right) {
+        (None, None) => true,
+        (Some(left), Some(right)) if left.stream == right.stream => {
+            let left_end = left.timestamp_start + left.timestamp_len;
+            let right_end = right.timestamp_start + right.timestamp_len;
+            left_timestamps[left.timestamp_start..left_end]
+                == right_timestamps[right.timestamp_start..right_end]
+        }
+        _ => false,
+    }
+}
+
 /// Events produced by an input source.
 pub enum InputEvent {
     /// New data read from the source.
@@ -34,6 +199,7 @@ pub enum InputEvent {
         bytes: Vec<u8>,
         source_id: Option<SourceId>,
         accounted_bytes: u64,
+        cri_metadata: Option<CriMetadata>,
     },
     /// New structured rows produced directly by the source.
     ///
@@ -314,6 +480,7 @@ impl StdinInput {
                         bytes,
                         source_id: None,
                         accounted_bytes,
+                        cri_metadata: None,
                     });
                 }
                 Ok(StdinMessage::EndOfFile) => {
@@ -350,6 +517,7 @@ impl StdinInput {
                         bytes,
                         source_id: None,
                         accounted_bytes,
+                        cri_metadata: None,
                     });
                     if should_probe_after_limit_data {
                         is_drained = self.probe_stdin_terminal_after_data(&mut events);
@@ -385,6 +553,7 @@ impl StdinInput {
                     bytes,
                     source_id: None,
                     accounted_bytes,
+                    cri_metadata: None,
                 });
                 // After consuming probe data, check once more whether the
                 // channel is terminal so we don't suppress EOF when this was
@@ -421,6 +590,7 @@ impl StdinInput {
                     bytes,
                     source_id: None,
                     accounted_bytes,
+                    cri_metadata: None,
                 });
                 false
             }
@@ -535,6 +705,7 @@ fn tail_events_to_input_events(tail_events: Vec<TailEvent>) -> Vec<InputEvent> {
                     bytes,
                     source_id,
                     accounted_bytes,
+                    cri_metadata: None,
                 });
             }
             TailEvent::Rotated { source_id, .. } => {

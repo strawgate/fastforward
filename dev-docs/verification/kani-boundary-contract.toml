@@ -39,7 +39,7 @@ issue = 1437
 [[seams]]
 path = "crates/logfwd-io/src/format.rs"
 status = "required"
-reason = "Local CRI metadata injection and mode dispatch helpers are already Kani-targeted."
+reason = "Local CRI message extraction, sidecar metadata, and mode dispatch helpers are already Kani-targeted."
 issue = 1314
 
 [[seams]]

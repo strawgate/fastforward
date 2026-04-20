@@ -84,7 +84,8 @@ with per-source remainder tracking. It handles three formats:
   partial lines across reads via per-source remainder buffers.
 - **Cri**: Kubernetes container log format. Parses timestamp,
   stream, flags, message. Reassembles P (partial) lines into complete
-  messages. Injects `_timestamp` and `_stream` as JSON fields.
+  messages. Emits `_timestamp` and `_stream` as sidecar metadata for
+  post-scan Arrow column attachment.
 - **Text/Raw**: Passes lines through verbatim. Line capture into `body` is
   controlled by scanner `line_field_name`.
 
@@ -309,7 +310,7 @@ Target (zero-copy for 99% passthrough path — #608):
   tailer reads → BytesMut → freeze() → Bytes             (no copy)
   FramedInput: Bytes::slice() for line ranges             (no copy)
   Passthrough format: emit Bytes slice directly           (no copy)
-  CRI format: metadata injection requires rewrite         [COPY 1: unavoidable]
+  CRI format: sidecar metadata, message JSON not rewritten
   pipeline: scan_buf.extend_from_slice(&bytes)            [COPY 2: SIMD contiguity]
   Scanner receives Bytes directly                 (no copy)
   StreamingBuilder stores views → RecordBatch             (zero-copy)
