@@ -127,7 +127,7 @@ impl StdoutSink {
                     }
                     num_rows
                 } else {
-                    let mut count = 0usize;
+                    let start_len = dest.len();
                     for row in 0..num_rows {
                         if let Some(col) = msg_indices
                             .iter()
@@ -138,10 +138,11 @@ impl StdoutSink {
                                 safe_array_value_to_string(col.as_ref(), row).as_bytes(),
                             );
                             dest.push(b'\n');
-                            count += 1;
                         }
                     }
-                    count
+                    // Count actual newlines written, not rows — field values
+                    // may contain embedded newlines (e.g. stack traces).
+                    memchr_iter(b'\n', &dest[start_len..]).count()
                 }
             }
             StdoutFormat::Json => {
