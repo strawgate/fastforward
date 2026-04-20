@@ -1739,7 +1739,7 @@ mod tests {
     fn test_read_str_out_of_bounds() {
         let buf = bytes::Bytes::from_static(b"abcd");
         let mut b = StreamingBuilder::new(None);
-        b.begin_batch(buf.clone());
+        b.begin_batch(buf);
 
         let res = b.read_str(0, 10, false); // Out of bounds length
         assert_eq!(res, None); // Handled safely
@@ -2480,7 +2480,7 @@ mod tests {
         let json = b"hello world padding";
         let buf = bytes::Bytes::from(json.to_vec());
         let mut b = StreamingBuilder::new(None);
-        b.begin_batch(buf.clone());
+        b.begin_batch(buf);
         let idx = b.resolve_field(b"msg");
         b.begin_row();
         // Decoded string goes into decoded_buf, not the original buffer

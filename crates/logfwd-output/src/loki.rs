@@ -925,7 +925,7 @@ mod tests {
         let retained: u64 = payloads.iter().map(|p| p.row_count).sum();
         let payload = &payloads[0].payload;
         let parsed: serde_json::Value =
-            serde_json::from_str(&payload).expect("payload must be valid JSON");
+            serde_json::from_str(payload).expect("payload must be valid JSON");
         let stream = &parsed["streams"][0]["stream"];
 
         assert_eq!(retained, 1);
@@ -939,7 +939,7 @@ mod tests {
         let labels: StreamLabels = vec![("app".to_string(), "logfwd".to_string())];
         let mut stream_map = StreamMap::new();
         stream_map.insert(
-            labels.clone(),
+            labels,
             vec![
                 (1, "{\"message\":\"aaaaaaaaaaaaaaaaaaaaaaaa\"}".to_string()),
                 (2, "{\"message\":\"bbbbbbbbbbbbbbbbbbbbbbbb\"}".to_string()),
@@ -956,7 +956,10 @@ mod tests {
         for payload in &payloads {
             let parsed: serde_json::Value =
                 serde_json::from_str(&payload.payload).expect("chunk must be valid JSON");
-            assert_eq!(parsed["streams"].as_array().map_or(0, |a| a.len()), 1);
+            assert_eq!(
+                parsed["streams"].as_array().map_or(0, std::vec::Vec::len),
+                1
+            );
         }
     }
 

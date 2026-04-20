@@ -204,9 +204,10 @@ impl BlockingWorker for OtlpRequestCpuWorker {
     fn process(&mut self, job: Self::Job) -> Result<Self::Output, Self::Error> {
         #[cfg(test)]
         {
-            if job.body == b"__panic_worker__" {
-                panic!("otlp decode worker panic requested by test");
-            }
+            assert!(
+                job.body != b"__panic_worker__",
+                "otlp decode worker panic requested by test"
+            );
             if job.body == b"__sleep_worker__" {
                 std::thread::sleep(std::time::Duration::from_millis(200));
                 return self.decode_prost(&[]);

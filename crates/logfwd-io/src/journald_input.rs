@@ -1380,7 +1380,7 @@ mod tests {
     fn json_escape_control_chars() {
         let mut buf = Vec::new();
         json_escape_into(&mut buf, &[0x00, 0x1f]);
-        assert_eq!(String::from_utf8(buf).unwrap(), r#"\u0000\u001f"#);
+        assert_eq!(String::from_utf8(buf).unwrap(), r"\u0000\u001f");
     }
 
     // ── backend selection ─────────────────────────────────────────────
