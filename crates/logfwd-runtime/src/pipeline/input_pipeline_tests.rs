@@ -621,7 +621,8 @@ impl InputSource for MultiShutdownPollSource {
 
         self.emitted += 1;
         self.remaining -= 1;
-        let bytes = format!("{{\"msg\":\"shutdown-{}\"}}\n", self.emitted).into_bytes();
+        let bytes =
+            Bytes::from(format!("{{\"msg\":\"shutdown-{}\"}}\n", self.emitted).into_bytes());
         let accounted_bytes = bytes.len() as u64;
         Ok(vec![InputEvent::Data {
             bytes,
