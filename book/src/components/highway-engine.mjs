@@ -314,7 +314,7 @@ export function createHighwayEngine(overrides) {
     let status;
     if (spawnBlockedTicks >= 60) {
       status = { level: 'blocked', msg: 'Heavy Traffic Expected — backed up to the on-ramp' };
-    } else if (stallPct > 20) {
+    } else if (stallPct > 40) {
       status = { level: 'congested', msg: 'Heavy Traffic Expected — cars queuing behind the light' };
     } else {
       status = { level: 'flowing', msg: 'Flowing — traffic moving freely' };
