@@ -1,9 +1,9 @@
 const ROUTE_DEFS = {
   ramp: {
     type: 'cubic',
-    p0: { x: 30, y: 220 },
-    p1: { x: 30, y: 200 },
-    p2: { x: 180, y: 100 },
+    p0: { x: 30, y: 230 },
+    p1: { x: 50, y: 180 },
+    p2: { x: 160, y: 108 },
     p3: { x: 220, y: 100 },
   },
   highway: {
@@ -14,9 +14,9 @@ const ROUTE_DEFS = {
   exit: {
     type: 'cubic',
     p0: { x: 560, y: 100 },
-    p1: { x: 600, y: 100 },
-    p2: { x: 730, y: 170 },
-    p3: { x: 730, y: 220 },
+    p1: { x: 620, y: 108 },
+    p2: { x: 710, y: 180 },
+    p3: { x: 730, y: 230 },
   },
   cont: {
     type: 'line',
