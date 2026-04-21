@@ -140,6 +140,10 @@ pub struct ComponentStatus {
     pub parse_errors: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub transport: Option<TransportStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub send_ns_total: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub send_count: Option<u64>,
 }
 
 /// Transport-specific status details for a component.

@@ -4,7 +4,7 @@ use std::future::Future;
 use std::io;
 use std::io::Write as _;
 use std::pin::Pin;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use arrow::record_batch::RecordBatch;
 use flate2::Compression as GzipLevel;
@@ -122,8 +122,10 @@ impl OtlpSink {
         }
 
         let compressed_len = payload.len();
+        let start = Instant::now();
         match req.body(payload.to_vec()).send().await {
             Ok(response) => {
+                self.stats.inc_send(start.elapsed().as_nanos() as u64);
                 let status = response.status();
 
                 if status.is_success() {
@@ -159,7 +161,10 @@ impl OtlpSink {
                     "OTLP request failed with status {status}: {detail}"
                 )))
             }
-            Err(e) => Err(io::Error::other(e.to_string())),
+            Err(e) => {
+                self.stats.inc_send(start.elapsed().as_nanos() as u64);
+                Err(io::Error::other(e.to_string()))
+            }
         }
     }
 }
