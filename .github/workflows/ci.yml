@@ -27,6 +27,8 @@ env:
   LOGFWD_DISABLE_DEFAULT_CHECKPOINTS: "1"
   TOKIO_WORKER_THREADS: "4"
   RAYON_NUM_THREADS: "4"
+  # Disable sccache in CI — config.toml enables it for local dev builds.
+  RUSTC_WRAPPER: ""
 
 jobs:
   # -------------------------------------------------------------------------
@@ -393,8 +395,6 @@ jobs:
       (github.event.pull_request.draft == false && needs.changes.outputs.kani_required == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 90
-    env:
-      RUSTC_WRAPPER: ""
     steps:
       - uses: actions/checkout@v6
 
@@ -424,8 +424,6 @@ jobs:
       (github.event.pull_request.draft == false && needs.changes.outputs.kani_required == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 90
-    env:
-      RUSTC_WRAPPER: ""
     steps:
       - uses: actions/checkout@v6
 
