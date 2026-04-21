@@ -8,7 +8,11 @@ use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use prost::Message;
 use reqwest::header::{HeaderMap, HeaderValue};
 
-use super::*;
+use super::send::classify_grpc_status_headers;
+use super::types::OtlpSink;
+use crate::{BatchMetadata, Compression};
+use logfwd_config::OtlpProtocol;
+use logfwd_types::diagnostics::ComponentStats;
 
 fn make_sink() -> OtlpSink {
     OtlpSink::new(
