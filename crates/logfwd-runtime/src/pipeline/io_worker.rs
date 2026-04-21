@@ -214,12 +214,7 @@ pub(super) fn append_cri_metadata_for_data(
 
 #[cfg(not(feature = "turmoil"))]
 pub(super) fn take_cri_metadata_preserving_capacity(metadata: &mut CriMetadata) -> CriMetadata {
-    let replacement = CriMetadata {
-        spans: Vec::with_capacity(metadata.spans.capacity()),
-        timestamp_bytes: Vec::with_capacity(metadata.timestamp_bytes.capacity()),
-        rows: 0,
-        has_values: false,
-    };
+    let replacement = metadata.empty_with_preserved_capacity();
     std::mem::replace(metadata, replacement)
 }
 
