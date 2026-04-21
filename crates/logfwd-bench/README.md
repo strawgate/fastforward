@@ -12,7 +12,7 @@ just bench
 just bench-framed-input -- --lines 200000 --iterations 5 --flamegraph /tmp/framed-input.svg
 
 # Run the CloudTrail realism profile (nested structure + cardinality + compression)
-cargo run -p logfwd-bench --release --bin cloudtrail_profile -- --lines 20000
+cargo run -p logfwd-bench --release --features bench-tools --bin cloudtrail_profile -- --lines 20000
 
 # Run the allocation-only FramedInput report (dhat-backed, slower)
 just bench-framed-input-alloc -- --lines 200000
@@ -34,7 +34,7 @@ just profile-otlp-io -- --case attrs-heavy --mode projected_view_decode --iterat
 just profile-otlp-io-alloc -- --case attrs-heavy --iterations 100
 
 # Profile source metadata attachment CPU and allocation counts
-cargo run -p logfwd-bench --release --bin source_metadata_profile -- --rows 50000 --sources 300 --iterations 200
+cargo run -p logfwd-bench --release --features bench-tools --bin source_metadata_profile -- --rows 50000 --sources 300 --iterations 200
 
 # Run all Criterion benchmarks (Tier 1 + 2, includes file_io, batch_formation)
 just bench-full
@@ -132,7 +132,7 @@ allocation counting begins after warmup completes.
 | File | Binary | What it does |
 |------|--------|-------------|
 | `main.rs` | `logfwd-bench` | Reads Criterion JSON, emits markdown tables |
-| `e2e_profile.rs` | *(lib)* | Per-stage timing breakdown (scan → transform → encode → compress) |
+| `e2e_profile.rs` | `e2e_profile` | Per-stage timing breakdown (scan → transform → encode → compress) |
 | `bin/cloudtrail_profile.rs` | `cloudtrail_profile` | CloudTrail-like generator profile (NDJSON vs direct RecordBatch generation, cardinality, compression) |
 | `es_throughput.rs` | `es-throughput` | Elasticsearch output throughput with worker scaling |
 | `bin/framed_input_profile.rs` | `framed_input_profile` | FramedInput stage timings, RSS, optional flamegraph, optional dhat allocation report |

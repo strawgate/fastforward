@@ -278,8 +278,11 @@ artifact to back it.
 1. **Baseline.** Before touching code, run the relevant `criterion`
    bench on `main` and save the report. `just bench` runs the Tier 1
    suite (`pipeline`, `output_encode`, `full_chain`). For more
-   targeted runs, invoke the specific bench binary directly (see
-   `crates/logfwd-bench/src/bin/`).
+   targeted Criterion runs, invoke the specific `--bench` target directly.
+   Helper and profiling binaries in `logfwd-bench` are gated behind
+   `--features bench-tools`; prefer the `just profile-*` recipes, or pass
+   that feature explicitly for direct `cargo run -p logfwd-bench --bin ...`
+   commands.
 2. **Profile to find the actual hotspot.** On macOS: `just profile-otlp-local`
    produces a flamegraph. For FramedInput-specific work:
    `just bench-framed-input -- --flamegraph /tmp/framed-input.svg`.
