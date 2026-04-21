@@ -54,8 +54,6 @@ pub struct ComponentStats {
     otel_otlp_projected_success: Counter<u64>,
     otel_otlp_projected_fallback: Counter<u64>,
     otel_otlp_projection_invalid: Counter<u64>,
-    otel_send_ns: Counter<u64>,
-    otel_send_count: Counter<u64>,
     otel_attrs: Vec<KeyValue>,
 }
 
@@ -98,8 +96,6 @@ impl ComponentStats {
             otel_otlp_projection_invalid: meter
                 .u64_counter(format!("{prefix}_otlp_projection_invalid"))
                 .build(),
-            otel_send_ns: meter.u64_counter(format!("{prefix}_send_ns")).build(),
-            otel_send_count: meter.u64_counter(format!("{prefix}_send_count")).build(),
             otel_attrs: attrs,
         }
     }
@@ -174,8 +170,6 @@ impl ComponentStats {
     pub fn inc_send(&self, ns: u64) {
         self.send_ns_total.fetch_add(ns, Ordering::Relaxed);
         self.send_count.fetch_add(1, Ordering::Relaxed);
-        self.otel_send_ns.add(ns, &self.otel_attrs);
-        self.otel_send_count.add(1, &self.otel_attrs);
     }
 
     /// Current line count (relaxed load).
