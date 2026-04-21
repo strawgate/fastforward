@@ -28,7 +28,7 @@ export function MetricBadges({ stats }: Props) {
     badges.push({
       label: "Queue",
       value: `${stats.channel_depth}/${stats.channel_capacity}`,
-      colorStyle
+      colorStyle,
     });
   }
 
@@ -39,7 +39,9 @@ export function MetricBadges({ stats }: Props) {
       {badges.map((b) => (
         <div class="mbadge" key={b.label}>
           <span class="mbadge-label">{b.label}</span>
-          <span class="mbadge-val" style={b.colorStyle}>{b.value}</span>
+          <span class="mbadge-val" style={b.colorStyle}>
+            {b.value}
+          </span>
           {b.limit && <span class="mbadge-lim">{b.limit}</span>}
         </div>
       ))}
