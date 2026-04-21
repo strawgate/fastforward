@@ -1,7 +1,5 @@
 //! OTLP protobuf encoding: batch-level and row-level encoding logic.
 
-
-
 use arrow::datatypes::DataType;
 use arrow::record_batch::RecordBatch;
 
@@ -13,8 +11,11 @@ use logfwd_core::otlp::{
 };
 // These are also re-exported as `pub(super)` so the generated encoder
 // (included via `mod generated { include!(...) }`) can reach them through `super::`.
+pub(crate) use crate::otlp_wire::{
+    encode_key_value_bool, encode_key_value_bytes, encode_key_value_double, encode_key_value_int,
+    encode_key_value_string, write_grpc_frame,
+};
 pub(super) use logfwd_core::otlp::{encode_fixed32, encode_tag, encode_varint};
-pub(crate) use crate::otlp_wire::{encode_key_value_bool, encode_key_value_bytes, encode_key_value_double, encode_key_value_int, encode_key_value_string, write_grpc_frame};
 
 use super::columns::{
     AttrArray, BatchColumns, ColAttr, format_non_string_attr_value, numeric_timestamp_ns,
@@ -646,4 +647,3 @@ pub(super) fn encode_col_attr(buf: &mut Vec<u8>, field_number: u32, col: &ColAtt
         }
     }
 }
-
