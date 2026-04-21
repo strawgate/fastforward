@@ -150,6 +150,7 @@ impl Pipeline {
 
                 msg = rx.recv() => {
                     if let Some(msg) = msg {
+                        self.metrics.dec_channel_depth();
                         if self.submit_batch(msg, shutdown).await {
                             // Terminal processor/checkpoint paths stop accepting
                             // additional channel messages.
@@ -203,6 +204,7 @@ impl Pipeline {
             // This prevents deadlock during shutdown if a producer is blocked in
             // `blocking_send` while the bounded channel is full.
             while let Some(msg) = rx.recv().await {
+                self.metrics.dec_channel_depth();
                 if self.submit_batch(msg, shutdown).await {
                     break;
                 }
