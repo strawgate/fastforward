@@ -64,7 +64,10 @@ clap_complete = "4.5"
 clap_complete_nushell = "4.6"
 config = { version = "0.15.22", default-features = false }
 arrow-json = "58"
-parquet = { version = "58", features = ["zstd"] }
+parquet = { version = "58", default-features = false, features = [
+    "arrow",
+    "zstd",
+] }
 datafusion = { version = "53", default-features = false, features = [
     "sql",
     "string_expressions",
@@ -75,8 +78,15 @@ datafusion = { version = "53", default-features = false, features = [
 fail = "0.5"
 futures-util = "0.3"
 globset = "0.4"
-opentelemetry = "0.31"
-opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"] }
+opentelemetry = { version = "0.31", default-features = false, features = [
+    "trace",
+    "metrics",
+] }
+opentelemetry_sdk = { version = "0.31", default-features = false, features = [
+    "trace",
+    "metrics",
+    "rt-tokio",
+] }
 opentelemetry-otlp = { version = "0.31", default-features = false, features = [
     "http-proto",
     "reqwest-client",
