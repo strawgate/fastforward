@@ -452,7 +452,7 @@ bench-e2e seconds="10":
 
 [private]
 bench-pipelines seconds="10":
-    @echo "logfwd pipeline benchmarks ({{seconds}}s each)"
+    @echo "ff pipeline benchmarks ({{seconds}}s each)"
     @echo "================================================"
     cargo build --release -p logfwd
     just bench-self {{seconds}}
@@ -518,7 +518,7 @@ bench-docker:
 profile-otlp-local lines="500000" seconds="6":
     #!/usr/bin/env bash
     set -euo pipefail
-    ROOT=$(mktemp -d /tmp/logfwd-pprof.XXXXXX)
+    ROOT=$(mktemp -d /tmp/ff-pprof.XXXXXX)
     PORT=$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')
 
     echo "==> Build cpu-profiling binary"
@@ -598,10 +598,10 @@ bench-framed-input *ARGS:
 bench-framed-input-alloc *ARGS:
     cargo run -p logfwd-bench --release --features dhat-heap --bin framed_input_profile -- --alloc-only {{ARGS}}
 
-# Run low-and-slow rate-ingest benchmark (logfwd only, measures memory and CPU at each eps)
+# Run low-and-slow rate-ingest benchmark (ff only, measures memory and CPU at each eps)
 bench-rate *ARGS:
     cargo build --release -p logfwd
-    LOGFWD=./target/release/ff cargo run -p logfwd-competitive-bench --release -- --rate-bench {{ARGS}}
+    FF=./target/release/ff cargo run -p logfwd-competitive-bench --release -- --rate-bench {{ARGS}}
 
 # Run sustained-load memory profiler (generator → SQL → null, default 5 minutes).
 # Use --quick (30s) for CI or --medium (120s) for quick checks.
