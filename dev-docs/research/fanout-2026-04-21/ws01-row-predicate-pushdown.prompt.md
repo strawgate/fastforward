@@ -1,5 +1,10 @@
 # Research: Row Predicate Pushdown Design (Issue #1257)
 
+> **Status:** Active
+> **Date:** 2026-04-21
+> **Context:** Codex research fanout — codebase audit follow-up
+
+
 ## Context
 
 logfwd already has **field-level pushdown** — the scanner skips fields not in `ScanConfig::wanted_fields`. But there is no **row-level predicate pushdown** — every row is fully scanned and built into a RecordBatch even if a SQL WHERE clause will discard it immediately.

@@ -1,5 +1,10 @@
 # Research: Pipeline Topology Compiler Design (Issue #1363)
 
+> **Status:** Active
+> **Date:** 2026-04-21
+> **Context:** Codex research fanout — codebase audit follow-up
+
+
 ## Context
 
 The logfwd pipeline currently uses imperative wiring: `input_pipeline.rs` creates an I/O worker and CPU worker, connects them with channels, and runs them. The I/O/compute split is done (`io_worker.rs`, `cpu_worker.rs`). But there is no declarative topology — the pipeline shape is hardcoded.

@@ -1,5 +1,10 @@
 # Research: Kafka Source Contract (Issue #1475)
 
+> **Status:** Active
+> **Date:** 2026-04-21
+> **Context:** Codex research fanout — codebase audit follow-up
+
+
 ## Context
 
 logfwd has an example config (`examples/use-cases/kafka-to-otlp.yaml`) and config type stubs for Kafka input, but zero implementation. This research designs the Kafka source contract.

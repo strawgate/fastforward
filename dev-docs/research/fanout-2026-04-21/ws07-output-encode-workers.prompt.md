@@ -1,5 +1,10 @@
 # Research: Output Encode/Compress Worker Separation (Issue #1408)
 
+> **Status:** Active
+> **Date:** 2026-04-21
+> **Context:** Codex research fanout — codebase audit follow-up
+
+
 ## Context
 
 The input side of logfwd has I/O/compute separation: `io_worker.rs` handles blocking file reads on an OS thread, `cpu_worker.rs` handles scanning/transforms on another. But the output side encodes and compresses inline within each output worker — there is no separate encode/compress worker pool.

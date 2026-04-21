@@ -1,5 +1,10 @@
 # Research: Windows Event Log Feasibility (Issue #1476)
 
+> **Status:** Active
+> **Date:** 2026-04-21
+> **Context:** Codex research fanout — codebase audit follow-up
+
+
 ## Context
 
 logfwd has no Windows-native input. The Windows Event Log (via EvtSubscribe API) is the primary structured logging mechanism on Windows. This research evaluates feasibility.

@@ -1,5 +1,10 @@
 # Research: InputConfig V2 Tagged Enum Migration (Issue #1101)
 
+> **Status:** Active
+> **Date:** 2026-04-21
+> **Context:** Codex research fanout — codebase audit follow-up
+
+
 ## Context
 
 The output config was successfully migrated to `OutputConfigV2` — a `#[serde(tag = "type")]` tagged enum with per-output-type structs. The input config (`InputConfig`) is still a flat struct with ~15 `Option<>` fields where only one is set at a time. This is the remaining half of #1101.

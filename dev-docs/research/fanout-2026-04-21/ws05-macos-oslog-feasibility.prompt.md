@@ -1,5 +1,10 @@
 # Research: macOS OSLog/Unified Logging Feasibility (Issue #1478)
 
+> **Status:** Active
+> **Date:** 2026-04-21
+> **Context:** Codex research fanout — codebase audit follow-up
+
+
 ## Context
 
 logfwd has Linux file tailing, journald, and eBPF inputs but no macOS-native log source. Apple's Unified Logging system (OSLog) is the primary logging mechanism on macOS. This research evaluates feasibility.

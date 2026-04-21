@@ -1,5 +1,10 @@
 # Research: OTLP JSON Path Optimization (Issue #823)
 
+> **Status:** Active
+> **Date:** 2026-04-21
+> **Context:** Codex research fanout — codebase audit follow-up
+
+
 ## Context
 
 The OTLP receiver has two content-type paths:
