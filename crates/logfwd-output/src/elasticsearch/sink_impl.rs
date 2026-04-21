@@ -1,4 +1,4 @@
-//! [`Sink`](super::crate::sink::Sink) trait implementation for [`ElasticsearchSink`].
+//! [`Sink`](crate::sink::Sink) trait implementation for [`ElasticsearchSink`].
 
 use std::future::Future;
 use std::io;
