@@ -165,8 +165,10 @@ import { PATHS } from './highway-graph.mjs';
     position: absolute; width: 1px; height: 1px; overflow: hidden;
     clip: rect(0 0 0 0); white-space: nowrap; border: 0;
   }
+</style>
 
-  /* Pulsing congestion header */
+<!-- Pulse animation — separate style tag so Astro doesn't tree-shake the dynamically-applied class -->
+<style is:inline>
   @keyframes hw-pulse-anim {
     0%, 100% { opacity: 1; }
     50% { opacity: 0.45; }
