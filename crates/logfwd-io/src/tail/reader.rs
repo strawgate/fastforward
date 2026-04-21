@@ -479,7 +479,6 @@ mod tests {
     use super::*;
 
     #[test]
-    #[allow(dead_code)]
     fn classify_empty_read_result_matches_truncation_flag() {
         assert!(matches!(
             classify_empty_read_result(true),
