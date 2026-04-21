@@ -3,7 +3,7 @@
 // Two sources feed a highway; all cars exit via a ramp with a traffic light.
 // When the exit backs up, it cascades: exit → highway → on-ramp.
 // Logic lives in graph/engine modules; this file is UI/rendering only.
-import { PATHS } from './highway-graph.mjs';
+import { MERGE_POINT, PATHS } from './highway-graph.mjs';
 ---
 
 <div class="hw" id="highway-bp">
@@ -42,7 +42,7 @@ import { PATHS } from './highway-graph.mjs';
       <line x1="560" y1="82" x2="560" y2="118" stroke="var(--hw-dash)" stroke-width="1.5" stroke-dasharray="3,3" opacity="0.35" />
 
       <!-- Merge zone marker -->
-      <line x1="200" y1="82" x2="200" y2="118" stroke="var(--hw-dash)" stroke-width="1.5" stroke-dasharray="3,3" opacity="0.35" />
+      <line x1={MERGE_POINT.x} y1="82" x2={MERGE_POINT.x} y2="118" stroke="var(--hw-dash)" stroke-width="1.5" stroke-dasharray="3,3" opacity="0.35" />
 
       <!-- Stop line on ramp at merge approach -->
       <line x1="151.1" y1="138.4" x2="139.7" y2="117.2" stroke="#dc2626" stroke-width="2.5" opacity="0.7" />
@@ -66,7 +66,7 @@ import { PATHS } from './highway-graph.mjs';
       <text x="30" y="70" text-anchor="start" fill="var(--hw-muted)" font-size="9" font-weight="600">LOG SOURCE</text>
       <text x="30" y="252" text-anchor="start" fill="var(--hw-muted)" font-size="9" font-weight="600">LOG SOURCE</text>
       <text x="730" y="252" text-anchor="middle" fill="var(--hw-muted)" font-size="9" font-weight="600">DESTINATION</text>
-      <text x="200" y="134" text-anchor="middle" fill="var(--hw-muted)" font-size="8" opacity="0.45">MERGE</text>
+      <text x={MERGE_POINT.x} y="134" text-anchor="middle" fill="var(--hw-muted)" font-size="8" opacity="0.45">MERGE</text>
       <text x="560" y="134" text-anchor="middle" fill="var(--hw-muted)" font-size="8" opacity="0.45">EXIT</text>
 
       <g id="hw-cars"></g>

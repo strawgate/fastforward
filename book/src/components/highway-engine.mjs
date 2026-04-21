@@ -7,7 +7,7 @@ const SHAPES = ['sedan', 'truck', 'compact', 'van'];
 const DEFAULTS = {
   spawnMs: 700,
   maxCars: 18,
-  greenPct: 80,
+  greenPct: 75,
   cycleTotal: 3000,
   autoSpeed: 4, // pct per second — slow enough for congestion to visibly build
   autoMin: 0,
@@ -38,6 +38,8 @@ function stopSpeed(remaining, brake) {
 function lerp(a, b, t) {
   return a + (b - a) * t;
 }
+
+const RAMP_STOP_OFFSET = 80;
 
 export function createHighwayEngine(overrides) {
   const cfg = {
@@ -199,6 +201,7 @@ export function createHighwayEngine(overrides) {
         const car = list[i];
         const leader = i === 0 ? null : list[i - 1];
         let desired = cfg.laneSpeed[segment];
+        const prevS = car.s;
 
         if (leader) {
           const gap = leader.s - car.s - cfg.minGap;
@@ -207,7 +210,7 @@ export function createHighwayEngine(overrides) {
 
         if (segment === 'ramp') {
           // Two-phase merge: stop at the stop line, then drive remaining ramp after clearance
-          const stopS = LENGTHS.ramp - 80;
+          const stopS = LENGTHS.ramp - RAMP_STOP_OFFSET;
           if (!car.mergeCleared) {
             const remaining = stopS - car.s;
             desired = Math.min(desired, stopSpeed(remaining, cfg.brake));
@@ -218,13 +221,21 @@ export function createHighwayEngine(overrides) {
             const remaining = EXIT_GATE_S - car.s - 15;
             desired = Math.min(desired, stopSpeed(remaining, cfg.brake));
           }
-        } else if (segment === 'exit' && !lightIsGreen && car.s >= EXIT_GATE_S && !car._countedPass) {
+        } else if (
+          segment === 'exit' &&
+          !lightIsGreen &&
+          prevS < EXIT_GATE_S &&
+          car.s >= EXIT_GATE_S &&
+          !car._countedPass
+        ) {
           car._countedPass = true;
           redPassCount++;
         } else if (segment === 'highway') {
           const remaining = LENGTHS.highway - car.s - 5;
           if (car.route === 'exit' && !branchClear('exit')) desired = Math.min(desired, stopSpeed(remaining, cfg.brake));
-          if (car.route === 'cont' && !branchClear('cont')) desired = Math.min(desired, stopSpeed(remaining, cfg.brake));
+          if ((car.route === 'cont' && !lightIsGreen) || (car.route === 'cont' && !branchClear('cont'))) {
+            desired = Math.min(desired, stopSpeed(remaining, cfg.brake));
+          }
         }
 
         if (car.speed < desired) car.speed = Math.min(desired, car.speed + cfg.accel * STEP_S);
@@ -239,7 +250,7 @@ export function createHighwayEngine(overrides) {
       }
     }
 
-    const RAMP_STOP_S = LENGTHS.ramp - 80;
+    const RAMP_STOP_S = LENGTHS.ramp - RAMP_STOP_OFFSET;
     const RAMP_END_S = LENGTHS.ramp - 5;
     const HWY_STOP_S = LENGTHS.highway - 5;
 
@@ -255,17 +266,22 @@ export function createHighwayEngine(overrides) {
           car.speed = Math.max(0, car.speed - cfg.brake * STEP_S);
         }
       } else if (car.segment === 'ramp' && car.s >= RAMP_END_S) {
-        // Phase 2: reached ramp end → transition to highway (tiny teleport)
-        car.segment = 'highway';
-        car.s = MERGE_S + (car.s - RAMP_END_S);
-        car.speed = Math.min(car.speed, cfg.laneSpeed.highway);
+        // Phase 2: re-check the actual insertion point before joining the highway
+        if (mergeAllowed()) {
+          car.segment = 'highway';
+          car.s = MERGE_S + (car.s - RAMP_END_S);
+          car.speed = Math.min(car.speed, cfg.laneSpeed.highway);
+        } else {
+          car.s = RAMP_END_S;
+          car.speed = 0;
+        }
       } else if (car.segment === 'highway' && car.s >= HWY_STOP_S) {
         const overflow = car.s - HWY_STOP_S;
         if (car.route === 'exit' && branchClear('exit')) {
           car.segment = 'exit';
           car.s = overflow;
           car.speed = cfg.laneSpeed.exit;
-        } else if (car.route === 'cont' && branchClear('cont')) {
+        } else if (car.route === 'cont' && lightIsGreen && branchClear('cont')) {
           car.segment = 'cont';
           car.s = overflow;
           car.speed = cfg.laneSpeed.cont;
@@ -383,7 +399,7 @@ export function createHighwayEngine(overrides) {
       return snapshot(lastNow != null ? lastNow : Date.now()).cars;
     },
     setGreenPct(v) {
-      greenPct = clamp(v, 0, 75);
+      greenPct = clamp(v, cfg.autoMin, cfg.autoMax);
       autoMode = false;
     },
     exitAuto() {

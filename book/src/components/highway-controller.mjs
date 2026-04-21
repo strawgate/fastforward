@@ -126,7 +126,7 @@ import { angleAt, EXIT_GATE_S, pointAt } from './highway-graph.mjs';
       applyCar(car);
     }
 
-    for (const id in carEls) {
+    for (const id of Object.keys(carEls)) {
       if (!seen[id]) removeCarEl(id);
     }
 
@@ -192,7 +192,7 @@ import { angleAt, EXIT_GATE_S, pointAt } from './highway-graph.mjs';
     rafId = requestAnimationFrame(animate);
   }
 
-  document.addEventListener('visibilitychange', function () {
+  function onVisibilityChange() {
     if (document.hidden) {
       cancelAnimationFrame(rafId);
       rafId = 0;
@@ -200,7 +200,8 @@ import { angleAt, EXIT_GATE_S, pointAt } from './highway-graph.mjs';
       engine.resetClock();
       rafId = requestAnimationFrame(animate);
     }
-  });
+  }
+  document.addEventListener('visibilitychange', onVisibilityChange);
 
   // Teardown on Astro page swap to prevent leaked rAF and listeners
   document.addEventListener('astro:before-swap', function teardown() {
@@ -210,6 +211,7 @@ import { angleAt, EXIT_GATE_S, pointAt } from './highway-graph.mjs';
     slider.removeEventListener('pointerdown', exitAuto);
     slider.removeEventListener('mousedown', exitAuto);
     slider.removeEventListener('touchstart', exitAuto);
+    document.removeEventListener('visibilitychange', onVisibilityChange);
     document.removeEventListener('astro:before-swap', teardown);
   });
 })();
