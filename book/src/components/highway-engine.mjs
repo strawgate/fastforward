@@ -40,6 +40,7 @@ function lerp(a, b, t) {
 }
 
 const RAMP_STOP_OFFSET = 80;
+const STALL_WINDOW_FRAMES = 300;
 
 export function createHighwayEngine(overrides) {
   const cfg = {
@@ -68,8 +69,7 @@ export function createHighwayEngine(overrides) {
   let accumulatorMs = 0;
   let deliveries = [];
   let spawnBlockedTicks = 0;
-  let totalFrames = 0;
-  let stalledFrames = 0;
+  let stallSamples = [];
   let removedIds = [];
 
   // Pre-populate: place a few cars so the scene starts with traffic
@@ -183,7 +183,6 @@ export function createHighwayEngine(overrides) {
   }
 
   function fixedStep(now) {
-    totalFrames++;
     removedIds = [];
     tickAuto(STEP_S);
     tickLight(now);
@@ -326,7 +325,8 @@ export function createHighwayEngine(overrides) {
     else if (anySpawned) spawnBlockedTicks = 0;
 
     const stalledCount = cars.filter(car => car.speed < 12 && car.segment === 'highway').length;
-    if (stalledCount > 0) stalledFrames++;
+    stallSamples.push(stalledCount > 0 ? 1 : 0);
+    if (stallSamples.length > STALL_WINDOW_FRAMES) stallSamples.shift();
     updateCarColors();
   }
 
@@ -334,7 +334,8 @@ export function createHighwayEngine(overrides) {
     const cutoff = now - 5000;
     deliveries = deliveries.filter(t => t >= cutoff);
     const throughput = Math.round(deliveries.length * 12);
-    const stallPct = totalFrames > 0 ? Math.round(stalledFrames / totalFrames * 100) : 0;
+    const stalledFrames = stallSamples.reduce((sum, sample) => sum + sample, 0);
+    const stallPct = stallSamples.length > 0 ? Math.round(stalledFrames / stallSamples.length * 100) : 0;
 
     let status;
     if (spawnBlockedTicks >= 60) {
