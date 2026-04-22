@@ -518,9 +518,15 @@ pub(super) fn process_io_events(
                 );
 
                 // Fast path: when the accumulation buffer is empty and this
-                // single chunk already meets the batch target, send it
-                // directly to the scanner without copying into BytesMut.
-                if input.buf.is_empty() && bytes.len() >= safe_batch_target_bytes {
+                // single chunk is large enough for efficient scanning, send
+                // it directly without copying into BytesMut.
+                //
+                // Benchmark data (batch_size_sweep): per-scan overhead is
+                // negligible above 64KB, so we flush directly any chunk that
+                // exceeds this threshold. This makes the common case of a
+                // 256KB file read zero-copy end-to-end.
+                const MIN_DIRECT_FLUSH_BYTES: usize = 64 * 1024;
+                if input.buf.is_empty() && bytes.len() >= MIN_DIRECT_FLUSH_BYTES {
                     metrics.inc_flush_by_size();
                     if !flush_bytes_direct(
                         bytes,
