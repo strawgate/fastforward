@@ -117,6 +117,7 @@ async fn process_input_events(
                         if send_channel_msg(tx, msg).await.is_err() {
                             return false;
                         }
+                        metrics.inc_channel_depth();
                     }
                     *buffered_since = None;
                 }
@@ -128,6 +129,7 @@ async fn process_input_events(
                     if send_channel_msg(tx, msg).await.is_err() {
                         return false;
                     }
+                    metrics.inc_channel_depth();
                 }
             }
             InputEvent::Rotated { .. } => {
@@ -286,11 +288,10 @@ pub(super) async fn async_input_poll_loop(
                     scan_and_transform_for_send(&mut input, &mut transform, &metrics, input_index)
                         .await
                 {
-                    metrics.inc_channel_depth();
                     if tx.send(msg).await.is_err() {
-                        metrics.dec_channel_depth();
                         break;
                     }
+                    metrics.inc_channel_depth();
                 }
             }
             break;
@@ -302,11 +303,10 @@ pub(super) async fn async_input_poll_loop(
             if let Some(msg) =
                 scan_and_transform_for_send(&mut input, &mut transform, &metrics, input_index).await
             {
-                metrics.inc_channel_depth();
                 if tx.send(msg).await.is_err() {
-                    metrics.dec_channel_depth();
                     break;
                 }
+                metrics.inc_channel_depth();
             }
             buffered_since = None;
         }
@@ -317,14 +317,14 @@ pub(super) async fn async_input_poll_loop(
         if let Some(msg) =
             scan_and_transform_for_send(&mut input, &mut transform, &metrics, input_index).await
         {
-            metrics.inc_channel_depth();
             if let Err(e) = tx.send(msg).await {
-                metrics.dec_channel_depth();
                 tracing::warn!(
                     input = input.source.name(),
                     error = %e,
                     "input.channel_closed_on_shutdown_drain"
                 );
+            } else {
+                metrics.inc_channel_depth();
             }
         }
     }

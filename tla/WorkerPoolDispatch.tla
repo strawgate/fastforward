@@ -180,7 +180,7 @@ SpawnAndDispatch ==
         /\ LET item == Head(pending) IN
            /\ workers'      = workers \cup {w}
            /\ workerState'  = [workerState EXCEPT ![w] = "Busy"]
-           /\ workerHealth' = [workerHealth EXCEPT ![w] = (IF workerHealth[w] = "Failed" THEN "Failed" ELSE "Healthy")]
+           /\ workerHealth' = [workerHealth EXCEPT ![w] = "Healthy"]
            /\ pending'      = Tail(pending)
            /\ inFlight'     = inFlight \cup {item}
            /\ assignment'   = [assignment EXCEPT ![item] = w]
@@ -389,10 +389,12 @@ NoSubmitAfterDrain ==
  * Temporal safety properties (action-level)
  * ----------------------------------------------------------------------- *)
 
-\* FailureIsSticky as a temporal property: once Failed, stays Failed.
+\* FailureIsSticky as a temporal property: once Failed, stays Failed
+\* UNLESS the worker is re-spawned (added back to the workers set).
 FailureIsStickyTemporal ==
     \A w \in WorkerIds :
-        [][workerHealth[w] = "Failed" => workerHealth'[w] = "Failed"]_workerHealth
+        [][workerHealth[w] = "Failed" =>
+           (workerHealth'[w] = "Failed" \/ (w \notin workers /\ w \in workers'))]_vars
 
 \* ForceAbort accounts for all unfinished work.
 ForceAbortAccountsForAll ==

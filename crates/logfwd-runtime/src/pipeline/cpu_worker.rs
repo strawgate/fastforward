@@ -199,10 +199,9 @@ pub(super) fn cpu_worker_loop(
         // Use blocking_send (not shutdown-aware) so we deliver all
         // remaining batches during shutdown drain. The CPU worker exits
         // when the I/O worker drops its sender (rx returns None).
-        metrics.inc_channel_depth();
         if tx.blocking_send(msg).is_err() {
-            metrics.dec_channel_depth();
             break;
         }
+        metrics.inc_channel_depth();
     }
 }

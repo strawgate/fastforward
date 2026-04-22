@@ -314,12 +314,18 @@ impl PipelineMetrics {
         self.otel_parse_errors.add(1, &self.otel_attrs);
     }
 
+    pub fn set_channel_capacity(&self, capacity: u64) {
+        self.channel_capacity.store(capacity, Ordering::Relaxed);
+    }
+
     pub fn inc_channel_depth(&self) {
         self.channel_depth.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn dec_channel_depth(&self) {
-        self.channel_depth.fetch_sub(1, Ordering::Relaxed);
+        let _ = self
+            .channel_depth
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| v.checked_sub(1));
     }
 
     pub fn alloc_batch_id(&self) -> u64 {
