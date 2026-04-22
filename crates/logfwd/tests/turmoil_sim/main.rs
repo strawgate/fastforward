@@ -15,6 +15,7 @@ mod pipeline_sim;
 mod tcp_server;
 mod trace_bridge;
 mod trace_validation;
+mod validators;
 mod turmoil_tcp_sink;
 
 use std::time::Duration;
