@@ -221,6 +221,7 @@ impl FileReader {
         let was_truncated = current_size < tailed.offset;
         if was_truncated {
             tailed.offset = 0;
+            tailed.read_buf.clear();
             tailed.eof_state.on_data();
             tailed.file.seek(SeekFrom::Start(0))?;
             tailed.identity.fingerprint = compute_fingerprint(&mut tailed.file, fingerprint_bytes)?;
@@ -245,6 +246,9 @@ impl FileReader {
             .per_file_read_budget_bytes
             .clamp(1, Self::MAX_READ_PER_POLL);
 
+        let start_offset = tailed.offset;
+        let start_buf_len = tailed.read_buf.len();
+
         let mut bytes_read_in_poll = 0;
         loop {
             let remaining = per_file_budget.saturating_sub(bytes_read_in_poll);
@@ -262,10 +266,17 @@ impl FileReader {
 
             tailed.read_buf.resize(buf_len + read_len, 0);
 
-            let n = match tailed.file.read(&mut tailed.read_buf[buf_len..buf_len + read_len]) {
+            let n = match tailed
+                .file
+                .read(&mut tailed.read_buf[buf_len..buf_len + read_len])
+            {
                 Ok(n) => n,
                 Err(e) => {
-                    tailed.read_buf.truncate(buf_len);
+                    // Restore offset and buffer to pre-loop state so the
+                    // caller can retry without data corruption.
+                    tailed.read_buf.truncate(start_buf_len);
+                    tailed.offset = start_offset;
+                    let _ = tailed.file.seek(SeekFrom::Start(start_offset));
                     return Err(e);
                 }
             };

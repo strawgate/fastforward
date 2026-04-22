@@ -143,15 +143,11 @@ where
 }
 
 /// Process CRI data and write extracted messages directly into an output buffer.
-/// Each message is written as: optional JSON prefix + message bytes + newline.
+/// Each message is written as: message bytes + newline.
 ///
 /// For the common case (full lines, no partials), the message bytes come straight
 /// from the input chunk — zero per-line allocation. Only partial line reassembly
 /// copies into the reassembler's internal buffer.
-///
-/// `json_prefix`: if Some, injected after the opening `{` of each JSON message.
-///   Example: `Some(b"\"kubernetes.pod_name\":\"my-pod\",")` turns
-///   `{"msg":"hi"}` into `{"kubernetes.pod_name":"my-pod","msg":"hi"}`
 ///
 /// Returns `(lines_ok, parse_errors)` where `parse_errors` is the number of
 /// non-empty lines that could not be parsed as valid CRI format **plus** the
@@ -186,20 +182,12 @@ pub fn process_cri_to_buf_with_plain_text_field(
             match parse_cri_line(line) {
                 Some(cri) => match reassembler.feed(cri.message, cri.is_full) {
                     AggregateResult::Complete(msg) => {
-                        write_json_line_for_plain_text_field(
-                            msg,
-                            plain_text_field_name,
-                            out,
-                        );
+                        write_json_line_for_plain_text_field(msg, plain_text_field_name, out);
                         reassembler.reset();
                         (1, 0)
                     }
                     AggregateResult::Truncated(msg) => {
-                        write_json_line_for_plain_text_field(
-                            msg,
-                            plain_text_field_name,
-                            out,
-                        );
+                        write_json_line_for_plain_text_field(msg, plain_text_field_name, out);
                         reassembler.reset();
                         (1, 1)
                     }
@@ -302,13 +290,12 @@ pub fn json_escape_bytes(src: &[u8], dst: &mut Vec<u8>) {
     }
 }
 
-/// Write a single message into the output buffer with optional JSON prefix injection.
+/// Write a single message into the output buffer.
 ///
-/// If `msg` starts with `{` it is treated as a JSON object and the optional
-/// `json_prefix` is injected after the opening brace.  Otherwise `msg` is
-/// plain text and is written as
-/// `{"<plain_text_field_name>":"<json-escaped msg>"}` so that no
-/// content is silently lost when the downstream scanner processes the line.
+/// If `msg` starts with `{` it is treated as a JSON object and written
+/// verbatim.  Otherwise `msg` is plain text and is written as
+/// `{"body":"<json-escaped msg>"}` so that no content is silently lost
+/// when the downstream scanner processes the line.
 #[inline]
 #[allow(dead_code)] // called by process_cri_to_buf
 fn write_json_line(msg: &[u8], out: &mut Vec<u8>) {
@@ -584,8 +571,6 @@ mod tests {
         assert!(lines.is_empty());
         assert!(reassembler.has_line_fragment());
     }
-
-
 
     #[test]
     fn test_write_json_line_plain_text_wrapped_as_body() {
@@ -919,21 +904,12 @@ mod verification {
         let chunk: [u8; 48] = kani::any();
         let mut out = Vec::new();
         let mut reassembler = CriReassembler::new(64);
-        let _ = process_cri_to_buf_with_plain_text_field(
-            &chunk,
-            &mut reassembler,
-            "body",
-            &mut out,
-        );
+        let _ =
+            process_cri_to_buf_with_plain_text_field(&chunk, &mut reassembler, "body", &mut out);
 
         out.clear();
         reassembler.reset();
-        let _ = process_cri_to_buf_with_plain_text_field(
-            &chunk,
-            &mut reassembler,
-            "msg",
-            &mut out,
-        );
+        let _ = process_cri_to_buf_with_plain_text_field(&chunk, &mut reassembler, "msg", &mut out);
     }
 
     /// Prove a valid CRI line split across chunks is equivalent to the same
@@ -950,14 +926,12 @@ mod verification {
         let first_counts = process_cri_to_buf_with_plain_text_field(
             first,
             &mut split_reassembler,
-            None,
             SHORT_FIELD_NAME,
             &mut split_out,
         );
         let second_counts = process_cri_to_buf_with_plain_text_field(
             second,
             &mut split_reassembler,
-            None,
             SHORT_FIELD_NAME,
             &mut split_out,
         );
@@ -967,7 +941,6 @@ mod verification {
         let unsplit_counts = process_cri_to_buf_with_plain_text_field(
             whole,
             &mut unsplit_reassembler,
-            None,
             SHORT_FIELD_NAME,
             &mut unsplit_out,
         );
