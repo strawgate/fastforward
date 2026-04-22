@@ -30,13 +30,19 @@ impl EventValidator for PoolStoppedImpliesNoInFlightValidator {
         for entry in &trace.entries {
             match entry.kind {
                 "batch_begin" => {
-                    if let Some(id) = entry.attributes.get("batch_id").and_then(|s| s.parse().ok())
+                    if let Some(id) = entry
+                        .attributes
+                        .get("batch_id")
+                        .and_then(|s| s.parse().ok())
                     {
                         began.insert(id);
                     }
                 }
                 "batch_terminal" => {
-                    if let Some(id) = entry.attributes.get("batch_id").and_then(|s| s.parse().ok())
+                    if let Some(id) = entry
+                        .attributes
+                        .get("batch_id")
+                        .and_then(|s| s.parse().ok())
                     {
                         terminalized.insert(id);
                     }
@@ -83,24 +89,25 @@ impl EventValidator for ForceAbortAccountsForAllValidator {
         for entry in &trace.entries {
             match entry.kind {
                 "batch_begin" => {
-                    if let Some(id) = entry.attributes.get("batch_id").and_then(|s| s.parse().ok())
+                    if let Some(id) = entry
+                        .attributes
+                        .get("batch_id")
+                        .and_then(|s| s.parse().ok())
                     {
                         began.insert(id);
                     }
                 }
                 "batch_terminal" => {
-                    if let Some(id) = entry.attributes.get("batch_id").and_then(|s| s.parse().ok())
+                    if let Some(id) = entry
+                        .attributes
+                        .get("batch_id")
+                        .and_then(|s| s.parse().ok())
                     {
                         terminalized.insert(id);
                     }
                 }
                 "pool_drain_complete" => {
-                    if entry
-                        .attributes
-                        .get("forced_abort")
-                        .map(String::as_str)
-                        == Some("true")
-                    {
+                    if entry.attributes.get("forced_abort").map(String::as_str) == Some("true") {
                         forced_abort = true;
                     }
                 }
@@ -207,7 +214,11 @@ mod tests {
     fn pool_stopped_passes_when_all_batches_terminalized() {
         let t = trace(vec![
             entry(0, "batch_begin", &[("batch_id", "1")]),
-            entry(1, "batch_terminal", &[("batch_id", "1"), ("terminal", "acked")]),
+            entry(
+                1,
+                "batch_terminal",
+                &[("batch_id", "1"), ("terminal", "acked")],
+            ),
             entry(2, "pool_drain_complete", &[("forced_abort", "false")]),
         ]);
         PoolStoppedImpliesNoInFlightValidator.validate(&t).unwrap();
@@ -245,17 +256,23 @@ mod tests {
             entry(0, "batch_begin", &[("batch_id", "1")]),
             entry(1, "pool_drain_complete", &[("forced_abort", "true")]),
         ]);
-        let err = ForceAbortAccountsForAllValidator
-            .validate(&t)
-            .unwrap_err();
+        let err = ForceAbortAccountsForAllValidator.validate(&t).unwrap_err();
         assert!(err.contains("ForceAbortAccountsForAll"), "{err}");
     }
 
     #[test]
     fn failure_sticky_passes_when_no_ok_after_failed() {
         let t = trace(vec![
-            entry(0, "sink_result", &[("worker_id", "1"), ("outcome", "ok"), ("rows", "10")]),
-            entry(1, "sink_result", &[("worker_id", "1"), ("outcome", "rejected"), ("rows", "10")]),
+            entry(
+                0,
+                "sink_result",
+                &[("worker_id", "1"), ("outcome", "ok"), ("rows", "10")],
+            ),
+            entry(
+                1,
+                "sink_result",
+                &[("worker_id", "1"), ("outcome", "rejected"), ("rows", "10")],
+            ),
             // Worker 1 is now Failed — no more Ok events for worker 1
         ]);
         FailureIsStickyValidator.validate(&t).unwrap();
@@ -264,8 +281,16 @@ mod tests {
     #[test]
     fn failure_sticky_fails_when_ok_after_rejected() {
         let t = trace(vec![
-            entry(0, "sink_result", &[("worker_id", "1"), ("outcome", "rejected"), ("rows", "10")]),
-            entry(1, "sink_result", &[("worker_id", "1"), ("outcome", "ok"), ("rows", "10")]),
+            entry(
+                0,
+                "sink_result",
+                &[("worker_id", "1"), ("outcome", "rejected"), ("rows", "10")],
+            ),
+            entry(
+                1,
+                "sink_result",
+                &[("worker_id", "1"), ("outcome", "ok"), ("rows", "10")],
+            ),
         ]);
         let err = FailureIsStickyValidator.validate(&t).unwrap_err();
         assert!(err.contains("FailureIsStickyTemporal"), "{err}");
@@ -274,9 +299,17 @@ mod tests {
     #[test]
     fn failure_sticky_allows_different_worker_ok_after_other_failed() {
         let t = trace(vec![
-            entry(0, "sink_result", &[("worker_id", "1"), ("outcome", "rejected"), ("rows", "10")]),
+            entry(
+                0,
+                "sink_result",
+                &[("worker_id", "1"), ("outcome", "rejected"), ("rows", "10")],
+            ),
             // Worker 2 is independent — can still deliver Ok
-            entry(1, "sink_result", &[("worker_id", "2"), ("outcome", "ok"), ("rows", "10")]),
+            entry(
+                1,
+                "sink_result",
+                &[("worker_id", "2"), ("outcome", "ok"), ("rows", "10")],
+            ),
         ]);
         FailureIsStickyValidator.validate(&t).unwrap();
     }
@@ -285,8 +318,16 @@ mod tests {
     fn failure_sticky_ignores_worker_id_zero() {
         // worker_id=0 means InstrumentedSink self-report — not barrier-sourced
         let t = trace(vec![
-            entry(0, "sink_result", &[("worker_id", "0"), ("outcome", "rejected"), ("rows", "10")]),
-            entry(1, "sink_result", &[("worker_id", "0"), ("outcome", "ok"), ("rows", "10")]),
+            entry(
+                0,
+                "sink_result",
+                &[("worker_id", "0"), ("outcome", "rejected"), ("rows", "10")],
+            ),
+            entry(
+                1,
+                "sink_result",
+                &[("worker_id", "0"), ("outcome", "ok"), ("rows", "10")],
+            ),
         ]);
         FailureIsStickyValidator.validate(&t).unwrap();
     }

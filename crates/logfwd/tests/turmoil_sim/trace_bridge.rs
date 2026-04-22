@@ -413,10 +413,7 @@ impl TraceEvent {
                 let Some(rows) = v.get("rows").and_then(Value::as_u64) else {
                     return Err("sink_result missing u64 field: rows".to_string());
                 };
-                let worker_id = v
-                    .get("worker_id")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0) as usize;
+                let worker_id = v.get("worker_id").and_then(Value::as_u64).unwrap_or(0) as usize;
                 Ok(Self::SinkResult {
                     worker_id,
                     outcome,
@@ -510,9 +507,7 @@ impl TraceEvent {
             "pool_drain_begin" => Ok(Self::PoolDrainBegin),
             "pool_drain_complete" => {
                 let Some(forced_abort) = v.get("forced_abort").and_then(Value::as_bool) else {
-                    return Err(
-                        "pool_drain_complete missing bool field: forced_abort".to_string(),
-                    );
+                    return Err("pool_drain_complete missing bool field: forced_abort".to_string());
                 };
                 Ok(Self::PoolDrainComplete { forced_abort })
             }
@@ -605,7 +600,10 @@ pub fn normalized_contract_trace(events: &[TraceEvent]) -> Vec<String> {
                 batch_id,
                 source_id,
                 terminal,
-            } => format!("batch_terminal:{batch_id}:{source_id}:{}", terminal.as_str()),
+            } => format!(
+                "batch_terminal:{batch_id}:{source_id}:{}",
+                terminal.as_str()
+            ),
             TraceEvent::BatchHold {
                 batch_id,
                 source_id,

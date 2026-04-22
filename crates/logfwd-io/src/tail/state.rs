@@ -252,8 +252,12 @@ mod tests {
             0 => {
                 // DataStep
                 let (next, _) = eof_model_transition(
-                    EofModelState { emitted: s.eof_emitted, idle_polls: s.idle_polls },
-                    true, false,
+                    EofModelState {
+                        emitted: s.eof_emitted,
+                        idle_polls: s.idle_polls,
+                    },
+                    true,
+                    false,
                 );
                 s.eof_emitted = next.emitted;
                 s.idle_polls = next.idle_polls;
@@ -261,7 +265,10 @@ mod tests {
             }
             1 => {
                 // NoDataEmit — only valid if !emitted and threshold crossed
-                let model = EofModelState { emitted: s.eof_emitted, idle_polls: s.idle_polls };
+                let model = EofModelState {
+                    emitted: s.eof_emitted,
+                    idle_polls: s.idle_polls,
+                };
                 let (next, emit) = eof_model_transition(model, false, true);
                 if emit {
                     s.eof_emitted = next.emitted;
@@ -276,7 +283,10 @@ mod tests {
             }
             2 => {
                 // NoDataNoEmit (idle_window not elapsed)
-                let model = EofModelState { emitted: s.eof_emitted, idle_polls: s.idle_polls };
+                let model = EofModelState {
+                    emitted: s.eof_emitted,
+                    idle_polls: s.idle_polls,
+                };
                 let (next, _) = eof_model_transition(model, false, false);
                 s.eof_emitted = next.emitted;
                 s.idle_polls = next.idle_polls;
@@ -322,34 +332,65 @@ mod tests {
     fn assert_tla_invariants(s: &TlaState) -> Result<(), proptest::test_runner::TestCaseError> {
         // EofEmissionRequiresThreshold
         if s.last_action == "NoDataEmit" {
-            prop_assert!(s.eof_emitted, "EofEmissionRequiresThreshold: eof must be emitted");
-            prop_assert!(s.idle_polls >= EOF_IDLE_POLLS_BEFORE_EMIT,
-                "EofEmissionRequiresThreshold: idle_polls {} < threshold {}", s.idle_polls, EOF_IDLE_POLLS_BEFORE_EMIT);
+            prop_assert!(
+                s.eof_emitted,
+                "EofEmissionRequiresThreshold: eof must be emitted"
+            );
+            prop_assert!(
+                s.idle_polls >= EOF_IDLE_POLLS_BEFORE_EMIT,
+                "EofEmissionRequiresThreshold: idle_polls {} < threshold {}",
+                s.idle_polls,
+                EOF_IDLE_POLLS_BEFORE_EMIT
+            );
         }
         // DataResetsEofState
         if s.last_action == "Data" {
-            prop_assert!(!s.eof_emitted, "DataResetsEofState: eof must be false after data");
+            prop_assert!(
+                !s.eof_emitted,
+                "DataResetsEofState: eof must be false after data"
+            );
             prop_assert_eq!(s.idle_polls, 0, "DataResetsEofState: idle_polls must be 0");
         }
         // ShutdownEofRequiresCaughtUp
         if s.last_action == "ShutdownEmit" {
-            prop_assert!(s.eof_emitted, "ShutdownEofRequiresCaughtUp: eof must be emitted");
-            prop_assert!(s.file_offset >= s.file_size,
-                "ShutdownEofRequiresCaughtUp: offset {} < size {}", s.file_offset, s.file_size);
+            prop_assert!(
+                s.eof_emitted,
+                "ShutdownEofRequiresCaughtUp: eof must be emitted"
+            );
+            prop_assert!(
+                s.file_offset >= s.file_size,
+                "ShutdownEofRequiresCaughtUp: offset {} < size {}",
+                s.file_offset,
+                s.file_size
+            );
         }
         // ShutdownBehindSuppressesEof
         if s.last_action == "ShutdownNoEmit" {
-            prop_assert!(s.file_offset < s.file_size,
-                "ShutdownBehindSuppressesEof: offset {} >= size {}", s.file_offset, s.file_size);
+            prop_assert!(
+                s.file_offset < s.file_size,
+                "ShutdownBehindSuppressesEof: offset {} >= size {}",
+                s.file_offset,
+                s.file_size
+            );
         }
         // BackoffZeroIffNoErrors
-        prop_assert_eq!(s.consecutive_errors == 0, s.backoff_ms == 0,
-            "BackoffZeroIffNoErrors: errors={} backoff={}ms", s.consecutive_errors, s.backoff_ms);
+        prop_assert_eq!(
+            s.consecutive_errors == 0,
+            s.backoff_ms == 0,
+            "BackoffZeroIffNoErrors: errors={} backoff={}ms",
+            s.consecutive_errors,
+            s.backoff_ms
+        );
         // BackoffDelayConsistent
         if s.consecutive_errors > 0 {
-            prop_assert_eq!(s.backoff_ms, backoff_delay_ms(s.consecutive_errors),
+            prop_assert_eq!(
+                s.backoff_ms,
+                backoff_delay_ms(s.consecutive_errors),
                 "BackoffDelayConsistent: errors={} expected={}ms got={}ms",
-                s.consecutive_errors, backoff_delay_ms(s.consecutive_errors), s.backoff_ms);
+                s.consecutive_errors,
+                backoff_delay_ms(s.consecutive_errors),
+                s.backoff_ms
+            );
         }
         Ok(())
     }

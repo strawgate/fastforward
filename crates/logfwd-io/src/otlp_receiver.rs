@@ -550,8 +550,12 @@ mod poll_tests {
 
     #[test]
     fn request_cpu_outstanding_limit_follows_worker_count_floor() {
-        assert_eq!(request_cpu_outstanding_limit(0), 1);
-        assert_eq!(request_cpu_outstanding_limit(3), 3);
+        // Floor of 32 prevents spurious 429s on low-core machines.
+        assert_eq!(request_cpu_outstanding_limit(0), 32);
+        assert_eq!(request_cpu_outstanding_limit(3), 32);
+        assert_eq!(request_cpu_outstanding_limit(16), 32);
+        // Scales above floor at high worker counts.
+        assert_eq!(request_cpu_outstanding_limit(20), 40);
     }
 
     #[test]

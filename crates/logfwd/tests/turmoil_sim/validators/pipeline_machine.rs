@@ -183,22 +183,41 @@ impl EventValidator for CheckpointOrderingValidator {
             match entry.kind {
                 "batch_begin" => {
                     if let (Some(bid), Some(sid), Some(ckpt)) = (
-                        entry.attributes.get("batch_id").and_then(|s| s.parse::<u64>().ok()),
-                        entry.attributes.get("source_id").and_then(|s| s.parse::<u64>().ok()),
-                        entry.attributes.get("checkpoint").and_then(|s| s.parse::<u64>().ok()),
+                        entry
+                            .attributes
+                            .get("batch_id")
+                            .and_then(|s| s.parse::<u64>().ok()),
+                        entry
+                            .attributes
+                            .get("source_id")
+                            .and_then(|s| s.parse::<u64>().ok()),
+                        entry
+                            .attributes
+                            .get("checkpoint")
+                            .and_then(|s| s.parse::<u64>().ok()),
                     ) {
                         source_batches.entry(sid).or_default().push((bid, ckpt));
                     }
                 }
                 "batch_terminal" => {
-                    if let Some(bid) = entry.attributes.get("batch_id").and_then(|s| s.parse::<u64>().ok()) {
+                    if let Some(bid) = entry
+                        .attributes
+                        .get("batch_id")
+                        .and_then(|s| s.parse::<u64>().ok())
+                    {
                         terminalized.insert(bid);
                     }
                 }
                 "checkpoint_update" => {
                     if let (Some(sid), Some(offset)) = (
-                        entry.attributes.get("source_id").and_then(|s| s.parse::<u64>().ok()),
-                        entry.attributes.get("offset").and_then(|s| s.parse::<u64>().ok()),
+                        entry
+                            .attributes
+                            .get("source_id")
+                            .and_then(|s| s.parse::<u64>().ok()),
+                        entry
+                            .attributes
+                            .get("offset")
+                            .and_then(|s| s.parse::<u64>().ok()),
                     ) {
                         committed.insert(sid, offset);
 
@@ -244,8 +263,14 @@ impl EventValidator for CommittedMonotonicValidator {
                 continue;
             }
             if let (Some(sid), Some(offset)) = (
-                entry.attributes.get("source_id").and_then(|s| s.parse::<u64>().ok()),
-                entry.attributes.get("offset").and_then(|s| s.parse::<u64>().ok()),
+                entry
+                    .attributes
+                    .get("source_id")
+                    .and_then(|s| s.parse::<u64>().ok()),
+                entry
+                    .attributes
+                    .get("offset")
+                    .and_then(|s| s.parse::<u64>().ok()),
             ) {
                 let prev = last.get(&sid).copied().unwrap_or(0);
                 if offset < prev {
@@ -267,9 +292,17 @@ mod tests {
     use super::*;
     use crate::trace_bridge::NormalizedTraceEvent;
 
-    fn entry(index: usize, kind: &'static str, attrs: &[(&'static str, &str)]) -> NormalizedTraceEvent {
+    fn entry(
+        index: usize,
+        kind: &'static str,
+        attrs: &[(&'static str, &str)],
+    ) -> NormalizedTraceEvent {
         let attributes = attrs.iter().map(|(k, v)| (*k, v.to_string())).collect();
-        NormalizedTraceEvent { index, kind, attributes }
+        NormalizedTraceEvent {
+            index,
+            kind,
+            attributes,
+        }
     }
 
     fn trace(entries: Vec<NormalizedTraceEvent>) -> NormalizedTrace {
@@ -280,8 +313,16 @@ mod tests {
     fn no_double_complete_passes_on_unique_terminals() {
         let t = trace(vec![
             entry(0, "phase", &[("phase", "running")]),
-            entry(1, "batch_begin", &[("batch_id", "1"), ("source_id", "0"), ("checkpoint", "10")]),
-            entry(2, "batch_terminal", &[("batch_id", "1"), ("terminal", "acked")]),
+            entry(
+                1,
+                "batch_begin",
+                &[("batch_id", "1"), ("source_id", "0"), ("checkpoint", "10")],
+            ),
+            entry(
+                2,
+                "batch_terminal",
+                &[("batch_id", "1"), ("terminal", "acked")],
+            ),
             entry(3, "phase", &[("phase", "draining")]),
             entry(4, "phase", &[("phase", "stopped")]),
         ]);
@@ -291,8 +332,16 @@ mod tests {
     #[test]
     fn no_double_complete_rejects_conflicting_terminals() {
         let t = trace(vec![
-            entry(0, "batch_terminal", &[("batch_id", "1"), ("terminal", "acked")]),
-            entry(1, "batch_terminal", &[("batch_id", "1"), ("terminal", "rejected")]),
+            entry(
+                0,
+                "batch_terminal",
+                &[("batch_id", "1"), ("terminal", "acked")],
+            ),
+            entry(
+                1,
+                "batch_terminal",
+                &[("batch_id", "1"), ("terminal", "rejected")],
+            ),
         ]);
         let err = NoDoubleCompleteValidator.validate(&t).unwrap_err();
         assert!(err.contains("NoDoubleComplete"), "{err}");
@@ -302,8 +351,16 @@ mod tests {
     fn drain_completeness_passes_when_all_batches_terminalized() {
         let t = trace(vec![
             entry(0, "phase", &[("phase", "running")]),
-            entry(1, "batch_begin", &[("batch_id", "1"), ("source_id", "0"), ("checkpoint", "10")]),
-            entry(2, "batch_terminal", &[("batch_id", "1"), ("terminal", "acked")]),
+            entry(
+                1,
+                "batch_begin",
+                &[("batch_id", "1"), ("source_id", "0"), ("checkpoint", "10")],
+            ),
+            entry(
+                2,
+                "batch_terminal",
+                &[("batch_id", "1"), ("terminal", "acked")],
+            ),
             entry(3, "phase", &[("phase", "draining")]),
             entry(4, "phase", &[("phase", "stopped")]),
         ]);
@@ -314,7 +371,11 @@ mod tests {
     fn drain_completeness_fails_when_batch_not_terminalized() {
         let t = trace(vec![
             entry(0, "phase", &[("phase", "running")]),
-            entry(1, "batch_begin", &[("batch_id", "1"), ("source_id", "0"), ("checkpoint", "10")]),
+            entry(
+                1,
+                "batch_begin",
+                &[("batch_id", "1"), ("source_id", "0"), ("checkpoint", "10")],
+            ),
             entry(2, "phase", &[("phase", "draining")]),
             entry(3, "phase", &[("phase", "stopped")]),
         ]);
@@ -326,7 +387,11 @@ mod tests {
     fn no_create_after_drain_passes_when_no_batch_after_draining() {
         let t = trace(vec![
             entry(0, "phase", &[("phase", "running")]),
-            entry(1, "batch_begin", &[("batch_id", "1"), ("source_id", "0"), ("checkpoint", "10")]),
+            entry(
+                1,
+                "batch_begin",
+                &[("batch_id", "1"), ("source_id", "0"), ("checkpoint", "10")],
+            ),
             entry(2, "phase", &[("phase", "draining")]),
             entry(3, "phase", &[("phase", "stopped")]),
         ]);
@@ -338,7 +403,11 @@ mod tests {
         let t = trace(vec![
             entry(0, "phase", &[("phase", "running")]),
             entry(1, "phase", &[("phase", "draining")]),
-            entry(2, "batch_begin", &[("batch_id", "1"), ("source_id", "0"), ("checkpoint", "10")]),
+            entry(
+                2,
+                "batch_begin",
+                &[("batch_id", "1"), ("source_id", "0"), ("checkpoint", "10")],
+            ),
         ]);
         let err = NoCreateAfterDrainValidator.validate(&t).unwrap_err();
         assert!(err.contains("NoCreateAfterDrain"), "{err}");
@@ -347,9 +416,21 @@ mod tests {
     #[test]
     fn checkpoint_ordering_passes_when_all_prior_batches_terminalized() {
         let t = trace(vec![
-            entry(0, "batch_begin", &[("batch_id", "1"), ("source_id", "0"), ("checkpoint", "10")]),
-            entry(1, "batch_terminal", &[("batch_id", "1"), ("terminal", "acked")]),
-            entry(2, "checkpoint_update", &[("source_id", "0"), ("offset", "10")]),
+            entry(
+                0,
+                "batch_begin",
+                &[("batch_id", "1"), ("source_id", "0"), ("checkpoint", "10")],
+            ),
+            entry(
+                1,
+                "batch_terminal",
+                &[("batch_id", "1"), ("terminal", "acked")],
+            ),
+            entry(
+                2,
+                "checkpoint_update",
+                &[("source_id", "0"), ("offset", "10")],
+            ),
         ]);
         CheckpointOrderingValidator.validate(&t).unwrap();
     }
@@ -357,9 +438,17 @@ mod tests {
     #[test]
     fn checkpoint_ordering_fails_when_prior_batch_not_terminalized() {
         let t = trace(vec![
-            entry(0, "batch_begin", &[("batch_id", "1"), ("source_id", "0"), ("checkpoint", "10")]),
+            entry(
+                0,
+                "batch_begin",
+                &[("batch_id", "1"), ("source_id", "0"), ("checkpoint", "10")],
+            ),
             // batch 1 NOT terminalized
-            entry(1, "checkpoint_update", &[("source_id", "0"), ("offset", "10")]),
+            entry(
+                1,
+                "checkpoint_update",
+                &[("source_id", "0"), ("offset", "10")],
+            ),
         ]);
         let err = CheckpointOrderingValidator.validate(&t).unwrap_err();
         assert!(err.contains("CheckpointOrderingInvariant"), "{err}");
@@ -368,8 +457,16 @@ mod tests {
     #[test]
     fn committed_monotonic_passes_on_increasing_offsets() {
         let t = trace(vec![
-            entry(0, "checkpoint_update", &[("source_id", "0"), ("offset", "10")]),
-            entry(1, "checkpoint_update", &[("source_id", "0"), ("offset", "20")]),
+            entry(
+                0,
+                "checkpoint_update",
+                &[("source_id", "0"), ("offset", "10")],
+            ),
+            entry(
+                1,
+                "checkpoint_update",
+                &[("source_id", "0"), ("offset", "20")],
+            ),
         ]);
         CommittedMonotonicValidator.validate(&t).unwrap();
     }
@@ -377,8 +474,16 @@ mod tests {
     #[test]
     fn committed_monotonic_rejects_regression() {
         let t = trace(vec![
-            entry(0, "checkpoint_update", &[("source_id", "0"), ("offset", "20")]),
-            entry(1, "checkpoint_update", &[("source_id", "0"), ("offset", "10")]),
+            entry(
+                0,
+                "checkpoint_update",
+                &[("source_id", "0"), ("offset", "20")],
+            ),
+            entry(
+                1,
+                "checkpoint_update",
+                &[("source_id", "0"), ("offset", "10")],
+            ),
         ]);
         let err = CommittedMonotonicValidator.validate(&t).unwrap_err();
         assert!(err.contains("CommittedMonotonic"), "{err}");

@@ -997,11 +997,11 @@ mod tests {
 
         #[derive(Clone, Debug)]
         struct FanoutTlaState {
-            batch_phase: &'static str,  // "Idle" | "Delivering" | "Finalized"
-            child_state: Vec<&'static str>,  // "Pending" | "Ok" | "Rejected"
+            batch_phase: &'static str,      // "Idle" | "Delivering" | "Finalized"
+            child_state: Vec<&'static str>, // "Pending" | "Ok" | "Rejected"
             sink_behavior: Vec<ChildBehavior>,
             retry_count: usize,
-            fanout_result: &'static str,  // "None" | "Ok" | "Rejected" | "RetryNeeded"
+            fanout_result: &'static str, // "None" | "Ok" | "Rejected" | "RetryNeeded"
             num_children: usize,
         }
 
@@ -1018,7 +1018,9 @@ mod tests {
             }
 
             fn all_children_terminal(&self) -> bool {
-                self.child_state.iter().all(|s| *s == "Ok" || *s == "Rejected")
+                self.child_state
+                    .iter()
+                    .all(|s| *s == "Ok" || *s == "Rejected")
             }
 
             fn any_child_pending(&self) -> bool {
@@ -1055,9 +1057,7 @@ mod tests {
                     if s.batch_phase == "Delivering" && s.child_state[child] == "Pending" {
                         let result = match &s.sink_behavior[child] {
                             ChildBehavior::WillOk => SendResult::Ok,
-                            ChildBehavior::WillReject => {
-                                SendResult::Rejected("test".to_string())
-                            }
+                            ChildBehavior::WillReject => SendResult::Rejected("test".to_string()),
                             ChildBehavior::WillTransient => {
                                 SendResult::RetryAfter(Duration::from_millis(100))
                             }

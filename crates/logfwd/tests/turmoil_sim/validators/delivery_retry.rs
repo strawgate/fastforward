@@ -193,8 +193,16 @@ mod tests {
     #[test]
     fn backoff_cap_passes_within_bounds() {
         let t = trace(vec![
-            entry(0, "retry_attempt", &[("backoff_ms", "100"), ("reason", "io_error")]),
-            entry(1, "retry_attempt", &[("backoff_ms", "200"), ("reason", "io_error")]),
+            entry(
+                0,
+                "retry_attempt",
+                &[("backoff_ms", "100"), ("reason", "io_error")],
+            ),
+            entry(
+                1,
+                "retry_attempt",
+                &[("backoff_ms", "200"), ("reason", "io_error")],
+            ),
         ]);
         BackoffCapValidator.validate(&t).unwrap();
     }
@@ -216,12 +224,22 @@ mod tests {
             entry(
                 0,
                 "retry_attempt",
-                &[("worker_id", "1"), ("batch_id", "1"), ("backoff_ms", "100"), ("reason", "io_error")],
+                &[
+                    ("worker_id", "1"),
+                    ("batch_id", "1"),
+                    ("backoff_ms", "100"),
+                    ("reason", "io_error"),
+                ],
             ),
             entry(
                 1,
                 "retry_attempt",
-                &[("worker_id", "1"), ("batch_id", "1"), ("backoff_ms", "200"), ("reason", "io_error")],
+                &[
+                    ("worker_id", "1"),
+                    ("batch_id", "1"),
+                    ("backoff_ms", "200"),
+                    ("reason", "io_error"),
+                ],
             ),
         ]);
         BackoffMonotonicValidator.validate(&t).unwrap();
@@ -233,12 +251,22 @@ mod tests {
             entry(
                 0,
                 "retry_attempt",
-                &[("worker_id", "1"), ("batch_id", "1"), ("backoff_ms", "1000"), ("reason", "io_error")],
+                &[
+                    ("worker_id", "1"),
+                    ("batch_id", "1"),
+                    ("backoff_ms", "1000"),
+                    ("reason", "io_error"),
+                ],
             ),
             entry(
                 1,
                 "retry_attempt",
-                &[("worker_id", "1"), ("batch_id", "1"), ("backoff_ms", "100"), ("reason", "io_error")],
+                &[
+                    ("worker_id", "1"),
+                    ("batch_id", "1"),
+                    ("backoff_ms", "100"),
+                    ("reason", "io_error"),
+                ],
             ),
         ]);
         let err = BackoffMonotonicValidator.validate(&t).unwrap_err();
@@ -252,12 +280,22 @@ mod tests {
             entry(
                 0,
                 "retry_attempt",
-                &[("worker_id", "1"), ("batch_id", "1"), ("backoff_ms", "5000"), ("reason", "retry_after")],
+                &[
+                    ("worker_id", "1"),
+                    ("batch_id", "1"),
+                    ("backoff_ms", "5000"),
+                    ("reason", "retry_after"),
+                ],
             ),
             entry(
                 1,
                 "retry_attempt",
-                &[("worker_id", "1"), ("batch_id", "1"), ("backoff_ms", "100"), ("reason", "retry_after")],
+                &[
+                    ("worker_id", "1"),
+                    ("batch_id", "1"),
+                    ("backoff_ms", "100"),
+                    ("reason", "retry_after"),
+                ],
             ),
         ]);
         BackoffMonotonicValidator.validate(&t).unwrap();

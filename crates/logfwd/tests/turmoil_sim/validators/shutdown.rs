@@ -55,9 +55,12 @@ impl EventValidator for ShutdownOrderingValidator {
         }
 
         // All four events must be present for a complete shutdown.
-        let (Some(d), Some(pdb), Some(pdc), Some(s)) =
-            (draining_idx, pool_drain_begin_idx, pool_drain_complete_idx, stopped_idx)
-        else {
+        let (Some(d), Some(pdb), Some(pdc), Some(s)) = (
+            draining_idx,
+            pool_drain_begin_idx,
+            pool_drain_complete_idx,
+            stopped_idx,
+        ) else {
             // Incomplete shutdown — skip (other validators catch missing phases).
             return Ok(());
         };
@@ -107,13 +110,19 @@ impl EventValidator for ConservationValidator {
         for entry in &trace.entries {
             match entry.kind {
                 "batch_begin" => {
-                    if let Some(id) = entry.attributes.get("batch_id").and_then(|s| s.parse().ok())
+                    if let Some(id) = entry
+                        .attributes
+                        .get("batch_id")
+                        .and_then(|s| s.parse().ok())
                     {
                         began.insert(id);
                     }
                 }
                 "batch_terminal" => {
-                    if let Some(id) = entry.attributes.get("batch_id").and_then(|s| s.parse().ok())
+                    if let Some(id) = entry
+                        .attributes
+                        .get("batch_id")
+                        .and_then(|s| s.parse().ok())
                     {
                         terminalized.insert(id);
                     }
