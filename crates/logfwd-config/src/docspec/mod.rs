@@ -507,16 +507,23 @@ pub const OUTPUT_TYPE_DOCS: &[ComponentTypeDoc] = &[
 ];
 
 /// Look up an input starter template by its stable template identifier.
+///
+/// Returns `None` when `id` is not registered in [`INPUT_TEMPLATES`].
 pub fn input_template(id: &str) -> Option<&'static TemplateDoc> {
     INPUT_TEMPLATES.iter().find(|template| template.id == id)
 }
 
 /// Look up an output starter template by its stable template identifier.
+///
+/// Returns `None` when `id` is not registered in [`OUTPUT_TEMPLATES`].
 pub fn output_template(id: &str) -> Option<&'static TemplateDoc> {
     OUTPUT_TEMPLATES.iter().find(|template| template.id == id)
 }
 
 /// Render a Markdown support table for public component types.
+///
+/// Hidden entries are omitted. Public support levels are rendered as
+/// human-facing status labels such as `Implemented` and `Not yet supported`.
 pub fn render_component_type_table(entries: &[ComponentTypeDoc]) -> String {
     let mut out =
         String::from("| Value | Status | Description |\n|-------|--------|-------------|\n");
