@@ -178,7 +178,10 @@ impl ScanPredicate {
                     ExtractedValue::Str(bytes) => bytes
                         .get(..prefix.len())
                         .is_some_and(|slice| slice == prefix.as_bytes()),
-                    _ => false,
+                    // Non-string values can't be evaluated here — keep the row
+                    // and let DataFusion handle coercion. Returning false would
+                    // silently drop rows (e.g., integer 500 with LIKE '5%').
+                    _ => true,
                 }
             }
             ScanPredicate::Contains { field, substring } => {
@@ -187,7 +190,10 @@ impl ScanPredicate {
                     ExtractedValue::Str(bytes) => {
                         memchr::memmem::find(bytes, substring.as_bytes()).is_some()
                     }
-                    _ => false,
+                    // Non-string values can't be evaluated here — keep the row
+                    // and let DataFusion handle coercion. Returning false would
+                    // silently drop rows (e.g., integer 500 with LIKE '%00%').
+                    _ => true,
                 }
             }
             ScanPredicate::And(preds) => preds.iter().all(|p| p.evaluate(lookup)),
@@ -714,7 +720,9 @@ mod tests {
     }
 
     #[test]
-    fn evaluate_contains_on_non_string_is_false() {
+    fn evaluate_contains_on_non_string_keeps_row() {
+        // Non-string values should return true (keep row) so DataFusion
+        // can handle coercion. Returning false would silently drop rows.
         let pred = ScanPredicate::Contains {
             field: "status".to_string(),
             substring: "500".to_string(),
@@ -726,7 +734,25 @@ mod tests {
                 ExtractedValue::Missing
             }
         };
-        assert!(!pred.evaluate(&lookup));
+        assert!(pred.evaluate(&lookup));
+    }
+
+    #[test]
+    fn evaluate_starts_with_on_non_string_keeps_row() {
+        // Non-string values should return true (keep row) so DataFusion
+        // can handle coercion. Returning false would silently drop rows.
+        let pred = ScanPredicate::StartsWith {
+            field: "status".to_string(),
+            prefix: "5".to_string(),
+        };
+        let lookup = |name: &str| -> ExtractedValue<'_> {
+            if name == "status" {
+                ExtractedValue::Int(500)
+            } else {
+                ExtractedValue::Missing
+            }
+        };
+        assert!(pred.evaluate(&lookup));
     }
 
     #[test]
