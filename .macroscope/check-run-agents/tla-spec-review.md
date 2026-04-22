@@ -8,7 +8,6 @@ tools:
   - browse_code
   - git_tools
   - github_api_read_only
-  - modify_pr
 include:
   - "tla/**/*.tla"
   - "tla/**/*.cfg"

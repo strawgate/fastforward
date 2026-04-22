@@ -8,7 +8,6 @@ tools:
   - browse_code
   - git_tools
   - github_api_read_only
-  - modify_pr
 include:
   - "crates/logfwd-arrow/src/**/*.rs"
   - "crates/logfwd-core/src/**/*.rs"

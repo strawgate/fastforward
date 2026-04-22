@@ -8,14 +8,8 @@ tools:
   - browse_code
   - git_tools
   - github_api_read_only
-  - modify_pr
 include:
   - "crates/**/src/**/*.rs"
-exclude:
-  - "crates/**/tests/**"
-  - "crates/logfwd-bench/**"
-  - "crates/logfwd-competitive-bench/**"
-  - "crates/logfwd-test-utils/**"
 conclusion: neutral
 ---
 
@@ -44,24 +38,29 @@ If no Kani-relevant changes exist in this PR, report "No Kani-relevant changes" 
 For every proof harness added or modified in this PR, check ALL of these:
 
 ### Structure
+
 - Harness is inside `#[cfg(kani)] mod verification { }`, NOT `#[cfg(test)]`
 - Named `verify_<function>_<property>`
 - Has `#[kani::proof]` attribute
 
 ### Unwind bounds
+
 - Every loop in the harness (and in called functions within bounded scope) has `#[kani::unwind(N)]`
 - The bound N is correct: N = max_iterations + 1 (one extra for the termination check)
 
 ### Vacuity guards
+
 - If `kani::assume()` is used, there are at least 2 `kani::cover!()` statements
 - Cover statements exercise interesting paths (both positive and negative/empty cases)
 - If any cover could be UNSATISFIABLE given the assumes, flag vacuity risk
 
 ### Oracle independence
+
 - If an oracle (reference implementation) is present, it does NOT call the function under test or reuse its internal logic
 - The oracle must be an independent reimplementation
 
 ### Input sizing
+
 - Parser proofs: 8-32 byte symbolic inputs
 - Bitmask/bitfield proofs: full-range u64
 - State machine proofs: cover all state-event pairs
@@ -81,7 +80,7 @@ For every proof harness added or modified in this PR, check ALL of these:
 
 ## Step 4 — Check coverage obligations
 
-- For new `pub fn` or `pub(crate) fn` in `crates/logfwd-core/src/`: a corresponding `verify_*` harness must exist (exempt: async fns, trivial getters/setters with no logic)
+- For new `pub fn` in `crates/logfwd-core/src/`: a corresponding `verify_*` harness must exist (exempt: async fns, trivial getters/setters with no logic)
 - For files in `kani-boundary-contract.toml` with status `required`: verify `#[kani::proof]` markers are present
 
 ## Step 5 — Report

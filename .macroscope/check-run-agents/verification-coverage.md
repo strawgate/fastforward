@@ -8,7 +8,6 @@ tools:
   - browse_code
   - git_tools
   - github_api_read_only
-  - modify_pr
 include:
   - "crates/logfwd-core/src/**/*.rs"
   - "crates/logfwd-types/src/**/*.rs"
@@ -41,7 +40,7 @@ Read these files first:
 
 For changes to `crates/logfwd-core/src/**/*.rs`:
 
-- Every new `pub fn` or `pub(crate) fn` in a file that already has proofs: does a corresponding `verify_*` harness exist in the same file's `#[cfg(kani)] mod verification`?
+- Every new `pub fn` in a file that already has proofs: does a corresponding `verify_*` harness exist in the same file's `#[cfg(kani)] mod verification`?
 - If a function signature changed: are existing proofs still testing the current signature? (stale argument count/types)
 - Exempt from proof requirement: async fns, heap-heavy Vec/HashMap-proportional code, trivial getters/setters with no logic
 
