@@ -115,6 +115,31 @@ pub enum ExtractedValue<'a> {
 }
 
 impl ScanPredicate {
+    /// Remove any conjuncts that reference the given field name.
+    ///
+    /// Returns `None` if the entire predicate references the field.
+    /// For AND chains, strips only the matching conjuncts and returns
+    /// the remainder (or None if all stripped).
+    pub fn strip_field(self, field_name: &str) -> Option<Self> {
+        if !self.references_field(field_name.as_bytes()) {
+            return Some(self);
+        }
+        match self {
+            ScanPredicate::And(preds) => {
+                let remaining: Vec<_> = preds
+                    .into_iter()
+                    .filter_map(|p| p.strip_field(field_name))
+                    .collect();
+                match remaining.len() {
+                    0 => None,
+                    1 => Some(remaining.into_iter().next().expect("len checked")),
+                    _ => Some(ScanPredicate::And(remaining)),
+                }
+            }
+            _ => None,
+        }
+    }
+
     /// Returns true if this predicate references the given field name
     /// (case-insensitive ASCII comparison).
     pub fn references_field(&self, key: &[u8]) -> bool {

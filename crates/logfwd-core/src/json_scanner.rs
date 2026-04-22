@@ -462,6 +462,18 @@ fn scan_line_with_predicate<B: ScanBuilder>(
     pred_scratch.clear();
     let deferred = &mut line_scratch.deferred;
     deferred.clear();
+
+    // If the predicate references the line-capture field, store the line
+    // content in the predicate scratch so IS NOT NULL and string comparisons
+    // on the synthetic line column work correctly.
+    if let Some(ref line_name) = config.line_field_name {
+        if predicate.references_field(line_name.as_bytes()) {
+            pred_scratch.insert(
+                line_name.as_bytes(),
+                PredicateFieldValue::Str(buf[start..end].to_vec()),
+            );
+        }
+    }
     let has_line_capture = config.captures_line();
 
     // Find the opening '{'
@@ -2409,6 +2421,33 @@ mod tests {
             builder.rows.len(),
             2,
             "both ERROR-prefixed messages should pass"
+        );
+    }
+
+    #[test]
+    fn predicate_on_line_capture_field() {
+        use crate::scan_predicate::ScanPredicate;
+
+        // When line_field_name is set and predicate references it,
+        // the line content should be available for predicate evaluation.
+        let input = b"{\"level\":\"error\"}\n{\"level\":\"info\"}\n";
+        let config = ScanConfig {
+            wanted_fields: vec![],
+            extract_all: true,
+            line_field_name: Some("body".into()),
+            validate_utf8: false,
+            row_predicate: Some(ScanPredicate::IsNull {
+                field: "body".into(),
+                negated: true, // IS NOT NULL
+            }),
+        };
+        let mut builder = TestBuilder::new();
+        scan_streaming(input, &config, &mut builder);
+        // Both rows have line content → IS NOT NULL should pass both.
+        assert_eq!(
+            builder.rows.len(),
+            2,
+            "line capture field should be non-null"
         );
     }
 }
