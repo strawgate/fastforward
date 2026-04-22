@@ -161,11 +161,7 @@ impl HttpEnrichProcessor {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         cache.get(key).and_then(|entry| {
-            if entry.inserted_at.elapsed() <= self.config.ttl {
-                Some(entry.result.clone())
-            } else {
-                None
-            }
+            (entry.inserted_at.elapsed() <= self.config.ttl).then(|| entry.result.clone())
         })
     }
 

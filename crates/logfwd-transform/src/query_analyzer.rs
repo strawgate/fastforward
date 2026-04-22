@@ -989,11 +989,9 @@ fn walk_table_factor(
             partition_by,
             order_by,
             measures,
-            rows_per_match: _,
-            after_match_skip: _,
             pattern,
             symbols,
-            alias: _,
+            ..
         } => {
             walk_table_factor(table, referenced_columns, uses_select_star, except_fields);
             for expr in partition_by {
