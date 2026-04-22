@@ -25,6 +25,7 @@ pub enum TraceEvent {
         checkpoint: u64,
     },
     SinkResult {
+        worker_id: usize,
         outcome: SinkOutcome,
         rows: u64,
     },
@@ -106,8 +107,15 @@ impl TraceEvent {
             } => {
                 format!("batch_begin batch={batch_id} source={source_id} checkpoint={checkpoint}")
             }
-            Self::SinkResult { outcome, rows } => {
-                format!("sink_result outcome={} rows={rows}", outcome.as_str())
+            Self::SinkResult {
+                worker_id,
+                outcome,
+                rows,
+            } => {
+                format!(
+                    "sink_result worker={worker_id} outcome={} rows={rows}",
+                    outcome.as_str()
+                )
             }
             Self::CheckpointUpdate { source_id, offset } => {
                 format!("checkpoint_update source_id={source_id} offset={offset}")
@@ -148,7 +156,10 @@ pub fn trace_event_from_runtime_barrier(event: &RuntimeBarrierEvent) -> Vec<Trac
             vec![TraceEvent::Phase { phase }]
         }
         RuntimeBarrierEvent::BeforeWorkerAckSend {
-            outcome, num_rows, ..
+            worker_id,
+            outcome,
+            num_rows,
+            ..
         } => {
             let outcome = match outcome {
                 DeliveryOutcome::Delivered => SinkOutcome::Ok,
@@ -161,6 +172,7 @@ pub fn trace_event_from_runtime_barrier(event: &RuntimeBarrierEvent) -> Vec<Trac
                 | DeliveryOutcome::NoWorkersAvailable => SinkOutcome::IoError,
             };
             vec![TraceEvent::SinkResult {
+                worker_id: *worker_id,
                 outcome,
                 rows: *num_rows,
             }]
@@ -289,8 +301,12 @@ impl TraceEvent {
             } => {
                 json!({"event": "batch_begin", "batch_id": batch_id, "source_id": source_id, "checkpoint": checkpoint})
             }
-            TraceEvent::SinkResult { outcome, rows } => {
-                json!({"event": "sink_result", "outcome": outcome.as_str(), "rows": rows})
+            TraceEvent::SinkResult {
+                worker_id,
+                outcome,
+                rows,
+            } => {
+                json!({"event": "sink_result", "worker_id": worker_id, "outcome": outcome.as_str(), "rows": rows})
             }
             TraceEvent::CheckpointUpdate { source_id, offset } => {
                 json!({"event": "checkpoint_update", "source_id": source_id, "offset": offset})
@@ -345,7 +361,15 @@ impl TraceEvent {
                 let Some(rows) = v.get("rows").and_then(Value::as_u64) else {
                     return Err("sink_result missing u64 field: rows".to_string());
                 };
-                Ok(Self::SinkResult { outcome, rows })
+                let worker_id = v
+                    .get("worker_id")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0) as usize;
+                Ok(Self::SinkResult {
+                    worker_id,
+                    outcome,
+                    rows,
+                })
             }
             "batch_begin" => {
                 let Some(batch_id) = v.get("batch_id").and_then(Value::as_u64) else {
@@ -492,8 +516,12 @@ pub fn normalized_contract_trace(events: &[TraceEvent]) -> Vec<String> {
                 source_id,
                 checkpoint,
             } => format!("batch_begin:{batch_id}:{source_id}:{checkpoint}"),
-            TraceEvent::SinkResult { outcome, rows } => {
-                format!("sink:{}:{rows}", outcome.as_str())
+            TraceEvent::SinkResult {
+                worker_id,
+                outcome,
+                rows,
+            } => {
+                format!("sink:{worker_id}:{}:{rows}", outcome.as_str())
             }
             TraceEvent::CheckpointUpdate { source_id, offset } => {
                 format!("ckpt_update:{source_id}:{offset}")
@@ -682,7 +710,12 @@ impl NormalizedTrace {
                         attributes.insert("source_id", source_id.to_string());
                         attributes.insert("checkpoint", checkpoint.to_string());
                     }
-                    TraceEvent::SinkResult { outcome, rows } => {
+                    TraceEvent::SinkResult {
+                        worker_id,
+                        outcome,
+                        rows,
+                    } => {
+                        attributes.insert("worker_id", worker_id.to_string());
                         attributes.insert("outcome", outcome.as_str().to_string());
                         attributes.insert("rows", rows.to_string());
                     }
@@ -952,6 +985,7 @@ mod tests {
                 phase: TracePhase::Running,
             },
             TraceEvent::SinkResult {
+                worker_id: 0,
                 outcome: SinkOutcome::Ok,
                 rows: 2,
             },
