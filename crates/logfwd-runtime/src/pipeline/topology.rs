@@ -165,4 +165,23 @@ mod tests {
         assert_eq!(compiled.transform_count, 1);
         assert_eq!(compiled.output_count, 2);
     }
+
+    #[test]
+    fn compile_topology_counts_zero_transforms_when_transform_is_absent() {
+        let config = build_pipeline_config(
+            vec![build_generator_input(), build_generator_input()],
+            vec![build_stdout_output(), build_stdout_output()],
+            None,
+        );
+        let spec = PipelineSpec {
+            name: "main",
+            config: &config,
+        };
+
+        let compiled = compile_topology(&spec).expect("valid topology compiles");
+        assert_eq!(compiled.name, "main");
+        assert_eq!(compiled.input_count, 2);
+        assert_eq!(compiled.transform_count, 0);
+        assert_eq!(compiled.output_count, 2);
+    }
 }
