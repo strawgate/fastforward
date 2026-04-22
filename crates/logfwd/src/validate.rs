@@ -89,16 +89,7 @@ where
     for (name, pipe_cfg) in &config.pipelines {
         match validate_pipeline_read_only(pipe_cfg, base_path) {
             Ok(()) => {
-                let spec = PipelineSpec {
-                    name,
-                    config: pipe_cfg,
-                };
-                if let Err(e) = compile_topology(&spec) {
-                    on_error(format!("pipeline '{name}' topology compilation: {e}"));
-                    errors += 1;
-                } else {
-                    on_ready(name);
-                }
+                on_ready(name);
             }
             Err(err) => {
                 on_error(format!("pipeline '{name}': {err}"));

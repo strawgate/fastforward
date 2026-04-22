@@ -328,7 +328,7 @@ The pipeline topology compiler transforms a parsed configuration into a typed, v
 **Phase 1: Dry-run scaffold**
 - Introduce `PipelineSpec` and `CompiledTopology` models.
 - Provide `compile_topology(config)` that builds the static DAG.
-- Integrate into `ff validate --dry-run` to execute this compiler, ensuring SQL plans and I/O shapes are correct statically.
+- Integrate into `ff dry-run` to execute this compiler, ensuring SQL plans and I/O shapes are correct statically.
 
 **Future Phases (Not in Phase 1):**
 - Translating the compiled topology into runtime Tokio tasks.
