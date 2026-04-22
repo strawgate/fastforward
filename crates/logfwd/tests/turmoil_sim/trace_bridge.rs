@@ -9,7 +9,7 @@ use std::io::{self, BufRead, BufReader, Write};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use logfwd_runtime::turmoil_barriers::{PipelinePhase, RuntimeBarrierEvent};
+use logfwd_runtime::turmoil_barriers::{BatchTerminalState, PipelinePhase, RuntimeBarrierEvent};
 use logfwd_runtime::worker_pool::DeliveryOutcome;
 use serde_json::{Value, json};
 
@@ -35,6 +35,44 @@ pub enum TraceEvent {
     CheckpointFlush {
         success: bool,
     },
+    /// Per-batch terminal state (acked, rejected, or abandoned).
+    BatchTerminal {
+        batch_id: u64,
+        source_id: u64,
+        terminal: BatchTerminal,
+    },
+    /// Batch was held (non-terminal failure, will retry or abandon).
+    BatchHold {
+        batch_id: u64,
+        source_id: u64,
+    },
+}
+
+/// Terminal disposition of a batch as observed in the trace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatchTerminal {
+    Acked,
+    Rejected,
+    Abandoned,
+}
+
+impl BatchTerminal {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Acked => "acked",
+            Self::Rejected => "rejected",
+            Self::Abandoned => "abandoned",
+        }
+    }
+
+    fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "acked" => Some(Self::Acked),
+            "rejected" => Some(Self::Rejected),
+            "abandoned" => Some(Self::Abandoned),
+            _ => None,
+        }
+    }
 }
 
 impl TraceEvent {
@@ -45,6 +83,8 @@ impl TraceEvent {
             Self::SinkResult { .. } => "sink_result",
             Self::CheckpointUpdate { .. } => "checkpoint_update",
             Self::CheckpointFlush { .. } => "checkpoint_flush",
+            Self::BatchTerminal { .. } => "batch_terminal",
+            Self::BatchHold { .. } => "batch_hold",
         }
     }
 
@@ -65,6 +105,20 @@ impl TraceEvent {
                 format!("checkpoint_update source_id={source_id} offset={offset}")
             }
             Self::CheckpointFlush { success } => format!("checkpoint_flush success={success}"),
+            Self::BatchTerminal {
+                batch_id,
+                source_id,
+                terminal,
+            } => {
+                format!(
+                    "batch_terminal batch={batch_id} source={source_id} terminal={}",
+                    terminal.as_str()
+                )
+            }
+            Self::BatchHold {
+                batch_id,
+                source_id,
+            } => format!("batch_hold batch={batch_id} source={source_id}"),
         }
     }
 }
@@ -123,6 +177,29 @@ pub fn trace_event_from_runtime_barrier(event: &RuntimeBarrierEvent) -> Vec<Trac
                 checkpoint: *offset,
             })
             .collect(),
+        RuntimeBarrierEvent::BatchTerminalized {
+            batch_id,
+            source_id,
+            terminal_state,
+        } => {
+            let terminal = match terminal_state {
+                BatchTerminalState::Acked => BatchTerminal::Acked,
+                BatchTerminalState::Rejected => BatchTerminal::Rejected,
+                BatchTerminalState::Abandoned => BatchTerminal::Abandoned,
+            };
+            vec![TraceEvent::BatchTerminal {
+                batch_id: *batch_id,
+                source_id: *source_id,
+                terminal,
+            }]
+        }
+        RuntimeBarrierEvent::BatchHeld {
+            batch_id,
+            source_id,
+        } => vec![TraceEvent::BatchHold {
+            batch_id: *batch_id,
+            source_id: *source_id,
+        }],
         RuntimeBarrierEvent::BeforeCheckpointFlushAttempt { .. } => Vec::new(),
     }
 }
@@ -207,6 +284,19 @@ impl TraceEvent {
             TraceEvent::CheckpointFlush { success } => {
                 json!({"event": "checkpoint_flush", "success": success})
             }
+            TraceEvent::BatchTerminal {
+                batch_id,
+                source_id,
+                terminal,
+            } => {
+                json!({"event": "batch_terminal", "batch_id": batch_id, "source_id": source_id, "terminal": terminal.as_str()})
+            }
+            TraceEvent::BatchHold {
+                batch_id,
+                source_id,
+            } => {
+                json!({"event": "batch_hold", "batch_id": batch_id, "source_id": source_id})
+            }
         }
     }
 
@@ -267,6 +357,37 @@ impl TraceEvent {
                     return Err("checkpoint_flush missing bool field: success".to_string());
                 };
                 Ok(Self::CheckpointFlush { success })
+            }
+            "batch_terminal" => {
+                let Some(batch_id) = v.get("batch_id").and_then(Value::as_u64) else {
+                    return Err("batch_terminal missing u64 field: batch_id".to_string());
+                };
+                let Some(source_id) = v.get("source_id").and_then(Value::as_u64) else {
+                    return Err("batch_terminal missing u64 field: source_id".to_string());
+                };
+                let Some(raw_terminal) = v.get("terminal").and_then(Value::as_str) else {
+                    return Err("batch_terminal missing string field: terminal".to_string());
+                };
+                let Some(terminal) = BatchTerminal::from_str(raw_terminal) else {
+                    return Err(format!("unknown batch terminal '{raw_terminal}'"));
+                };
+                Ok(Self::BatchTerminal {
+                    batch_id,
+                    source_id,
+                    terminal,
+                })
+            }
+            "batch_hold" => {
+                let Some(batch_id) = v.get("batch_id").and_then(Value::as_u64) else {
+                    return Err("batch_hold missing u64 field: batch_id".to_string());
+                };
+                let Some(source_id) = v.get("source_id").and_then(Value::as_u64) else {
+                    return Err("batch_hold missing u64 field: source_id".to_string());
+                };
+                Ok(Self::BatchHold {
+                    batch_id,
+                    source_id,
+                })
             }
             other => Err(format!("unknown event kind '{other}'")),
         }
@@ -349,6 +470,15 @@ pub fn normalized_contract_trace(events: &[TraceEvent]) -> Vec<String> {
                 format!("ckpt_update:{source_id}:{offset}")
             }
             TraceEvent::CheckpointFlush { success } => format!("ckpt_flush:{success}"),
+            TraceEvent::BatchTerminal {
+                batch_id,
+                source_id,
+                terminal,
+            } => format!("batch_terminal:{batch_id}:{source_id}:{}", terminal.as_str()),
+            TraceEvent::BatchHold {
+                batch_id,
+                source_id,
+            } => format!("batch_hold:{batch_id}:{source_id}"),
         })
         .collect()
 }
@@ -529,6 +659,22 @@ impl NormalizedTrace {
                     }
                     TraceEvent::CheckpointFlush { success } => {
                         attributes.insert("success", success.to_string());
+                    }
+                    TraceEvent::BatchTerminal {
+                        batch_id,
+                        source_id,
+                        terminal,
+                    } => {
+                        attributes.insert("batch_id", batch_id.to_string());
+                        attributes.insert("source_id", source_id.to_string());
+                        attributes.insert("terminal", terminal.as_str().to_string());
+                    }
+                    TraceEvent::BatchHold {
+                        batch_id,
+                        source_id,
+                    } => {
+                        attributes.insert("batch_id", batch_id.to_string());
+                        attributes.insert("source_id", source_id.to_string());
                     }
                 }
                 NormalizedTraceEvent {
@@ -722,6 +868,10 @@ impl TransitionValidator {
                         ));
                     }
                 }
+                // Batch terminal and hold events are valid in any non-stopped phase.
+                // Detailed validation of terminal state consistency is handled by
+                // pluggable EventValidator implementations (NoDoubleComplete, etc.).
+                TraceEvent::BatchTerminal { .. } | TraceEvent::BatchHold { .. } => {}
             }
         }
 

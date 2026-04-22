@@ -14,6 +14,17 @@ pub enum PipelinePhase {
     Stopped,
 }
 
+/// Terminal state a batch can reach.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum BatchTerminalState {
+    /// Batch was successfully delivered and acknowledged.
+    Acked,
+    /// Batch was permanently rejected by the sink.
+    Rejected,
+    /// Batch was abandoned (force-stop or unrecoverable failure).
+    Abandoned,
+}
+
 /// Barrier events emitted by runtime seam hooks.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum RuntimeBarrierEvent {
@@ -38,6 +49,14 @@ pub enum RuntimeBarrierEvent {
         outcome: DeliveryOutcome,
         checkpoint_advances: Vec<(u64, u64)>,
     },
+    /// Emitted when a batch ticket reaches a terminal disposition.
+    BatchTerminalized {
+        batch_id: u64,
+        source_id: u64,
+        terminal_state: BatchTerminalState,
+    },
+    /// Emitted when a batch ticket is held (non-terminal failure).
+    BatchHeld { batch_id: u64, source_id: u64 },
     /// Emitted by checkpoint I/O immediately before each flush attempt.
     BeforeCheckpointFlushAttempt { attempt: u32 },
     /// Emitted by checkpoint I/O after a flush attempt resolves.
