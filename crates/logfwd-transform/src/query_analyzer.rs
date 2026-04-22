@@ -635,12 +635,14 @@ fn extract_scan_predicate_from_expr(expr: &SqlExpr) -> Option<ScanPredicate> {
         }
 
         // LIKE: only push prefix ('foo%') and contains ('%foo%') patterns.
+        // Custom ESCAPE clauses change wildcard interpretation — don't push.
         SqlExpr::Like {
             expr,
             pattern,
             negated,
+            escape_char,
             ..
-        } if !negated => {
+        } if !negated && escape_char.is_none() => {
             let col = expr_as_bare_column(expr)?;
             let pat = expr_as_string_literal(pattern)?;
             if let Some(prefix) = pat.strip_suffix('%') {
@@ -2546,8 +2548,11 @@ mod tests {
 
     #[test]
     fn and_with_unpushable_conjunct_pushes_partial() {
-        let pred = predicate_for("SELECT * FROM logs WHERE level = 'error' AND msg LIKE '%fail%'");
-        // LIKE is not pushable, but level = 'error' is.
+        // Use UPPER(msg), a function call that is truly unpushable, instead of
+        // LIKE '%fail%' which is correctly pushed as Contains.
+        let pred =
+            predicate_for("SELECT * FROM logs WHERE level = 'error' AND UPPER(msg) = 'FAIL'");
+        // UPPER() is not pushable, but level = 'error' is.
         assert!(pred.is_some());
         match pred.unwrap() {
             ScanPredicate::Compare { field, .. } => {

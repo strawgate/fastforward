@@ -225,6 +225,8 @@ fn compare_values(extracted: &ExtractedValue<'_>, op: CmpOp, literal: &ScalarVal
             apply_cmp_op(ord, op)
         }
         // Cross-type: string vs number — attempt coercion.
+        // If coercion fails, return true (keep the row) and let DataFusion
+        // handle the comparison with its full coercion rules.
         (ExtractedValue::Str(bytes), ScalarValue::Int(b)) => {
             if let Ok(s) = core::str::from_utf8(bytes)
                 && let Ok(a) = s.parse::<i64>()
@@ -232,7 +234,7 @@ fn compare_values(extracted: &ExtractedValue<'_>, op: CmpOp, literal: &ScalarVal
                 let ord = a.cmp(b);
                 apply_cmp_op(ord, op)
             } else {
-                false
+                true
             }
         }
         (ExtractedValue::Int(a), ScalarValue::Str(s)) => {
@@ -240,7 +242,7 @@ fn compare_values(extracted: &ExtractedValue<'_>, op: CmpOp, literal: &ScalarVal
                 let ord = a.cmp(&b);
                 apply_cmp_op(ord, op)
             } else {
-                false
+                true
             }
         }
         (ExtractedValue::Str(bytes), ScalarValue::Float(b)) => {
@@ -249,18 +251,19 @@ fn compare_values(extracted: &ExtractedValue<'_>, op: CmpOp, literal: &ScalarVal
             {
                 compare_floats(a, *b, op)
             } else {
-                false
+                true
             }
         }
         (ExtractedValue::Float(a), ScalarValue::Str(s)) => {
             if let Ok(b) = s.parse::<f64>() {
                 compare_floats(*a, b, op)
             } else {
-                false
+                true
             }
         }
-        // Mismatched types: always false (conservative — let DataFusion handle).
-        _ => false,
+        // Mismatched types: return true (keep the row) — let DataFusion handle
+        // coercion. Returning false here would silently drop rows.
+        _ => true,
     }
 }
 

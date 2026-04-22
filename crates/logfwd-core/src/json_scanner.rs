@@ -533,6 +533,8 @@ fn scan_line_with_predicate<B: ScanBuilder>(
                     let raw = &buf[val_start..val_end];
                     if memchr::memchr(b'\\', raw).is_some() {
                         decode_json_escapes(raw, &mut scratch.value);
+                        // Clone once; move to deferred, clone for predicate only
+                        // when both paths need it (avoids the prior double-clone).
                         let decoded = scratch.value.clone();
                         if is_pred_field {
                             pred_scratch.insert(key, PredicateFieldValue::Str(decoded.clone()));
