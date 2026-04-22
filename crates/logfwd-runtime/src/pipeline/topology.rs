@@ -72,7 +72,7 @@ mod tests {
         StdoutOutputConfig,
     };
 
-    fn pipeline_config(
+    fn build_pipeline_config(
         inputs: Vec<InputConfig>,
         outputs: Vec<OutputConfigV2>,
         transform: Option<String>,
@@ -90,7 +90,7 @@ mod tests {
         }
     }
 
-    fn stdin_input() -> InputConfig {
+    fn build_generator_input() -> InputConfig {
         InputConfig {
             name: Some("in".to_string()),
             format: None,
@@ -100,7 +100,7 @@ mod tests {
         }
     }
 
-    fn stdout_output() -> OutputConfigV2 {
+    fn build_stdout_output() -> OutputConfigV2 {
         OutputConfigV2::Stdout(StdoutOutputConfig {
             name: Some("out".to_string()),
             format: None,
@@ -109,7 +109,11 @@ mod tests {
 
     #[test]
     fn compile_topology_rejects_empty_pipeline_name() {
-        let config = pipeline_config(vec![stdin_input()], vec![stdout_output()], None);
+        let config = build_pipeline_config(
+            vec![build_generator_input()],
+            vec![build_stdout_output()],
+            None,
+        );
         let spec = PipelineSpec {
             name: "",
             config: &config,
@@ -121,7 +125,7 @@ mod tests {
 
     #[test]
     fn compile_topology_rejects_missing_inputs() {
-        let config = pipeline_config(Vec::new(), vec![stdout_output()], None);
+        let config = build_pipeline_config(Vec::new(), vec![build_stdout_output()], None);
         let spec = PipelineSpec {
             name: "main",
             config: &config,
@@ -133,7 +137,7 @@ mod tests {
 
     #[test]
     fn compile_topology_rejects_missing_outputs() {
-        let config = pipeline_config(vec![stdin_input()], Vec::new(), None);
+        let config = build_pipeline_config(vec![build_generator_input()], Vec::new(), None);
         let spec = PipelineSpec {
             name: "main",
             config: &config,
@@ -145,9 +149,9 @@ mod tests {
 
     #[test]
     fn compile_topology_counts_nodes_with_optional_transform() {
-        let config = pipeline_config(
-            vec![stdin_input(), stdin_input()],
-            vec![stdout_output(), stdout_output()],
+        let config = build_pipeline_config(
+            vec![build_generator_input(), build_generator_input()],
+            vec![build_stdout_output(), build_stdout_output()],
             Some("SELECT * FROM logs".to_string()),
         );
         let spec = PipelineSpec {
