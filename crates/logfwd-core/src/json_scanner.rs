@@ -2270,6 +2270,30 @@ mod tests {
     }
 
     #[test]
+    fn predicate_duplicate_keys_different_types() {
+        use crate::scan_predicate::{CmpOp, ScalarValue, ScanPredicate};
+
+        // Same key appears as string then int — scanner creates conflict columns.
+        // Predicate evaluates against the first occurrence (string "200").
+        let input = b"{\"status\":\"200\",\"status\":503}\n";
+        let config = ScanConfig {
+            wanted_fields: vec![],
+            extract_all: true,
+            line_field_name: None,
+            validate_utf8: false,
+            row_predicate: Some(ScanPredicate::Compare {
+                field: "status".into(),
+                op: CmpOp::Eq,
+                value: ScalarValue::Str("200".into()),
+            }),
+        };
+        let mut builder = TestBuilder::new();
+        scan_streaming(input, &config, &mut builder);
+        // First "status" is string "200" → predicate matches.
+        assert_eq!(builder.rows.len(), 1);
+    }
+
+    #[test]
     fn predicate_nested_json_is_not_null() {
         use crate::scan_predicate::ScanPredicate;
 
