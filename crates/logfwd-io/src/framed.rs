@@ -9,11 +9,11 @@
 //! interleaved data from multiple files (or TCP connections) never
 //! cross-contaminates partial lines or CRI P/F aggregation state.
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 
 use crate::filter_hints::FilterHints;
 use crate::format::FormatDecoder;
-use crate::input::{CriMetadata, InputCadence, InputEvent, InputSource};
+use crate::input::{CriMetadata, InputCadence, InputEvent, InputSource, ReadSegment};
 #[cfg(test)]
 use crate::poll_cadence::PollCadenceSignal;
 use crate::tail::ByteOffset;
@@ -113,6 +113,77 @@ impl FramedInput {
         let replacement = self.cri_metadata_buf.empty_with_preserved_capacity();
         let metadata = std::mem::replace(&mut self.cri_metadata_buf, replacement);
         Some(metadata)
+    }
+
+    /// Read framed data directly into the caller's buffer.
+    ///
+    /// This dispatches to one of two internal paths:
+    /// - **Direct mode** (zero-copy): when the inner source supports
+    ///   [`InputSource::read_into`], data is read directly into `buf` and
+    ///   the returned [`ReadSegment`] descriptors are augmented with stats.
+    /// - **Event mode**: falls back to [`InputSource::poll`] and copies each
+    ///   event's bytes into `buf`, applying the existing framing logic.
+    pub fn read_framed(&mut self, buf: &mut BytesMut) -> io::Result<Vec<ReadSegment>> {
+        if self.inner.supports_read_into() {
+            self.read_framed_direct(buf)
+        } else {
+            self.read_framed_from_events(buf)
+        }
+    }
+
+    /// Zero-copy path: inner source writes directly into `buf`.
+    fn read_framed_direct(&mut self, buf: &mut BytesMut) -> io::Result<Vec<ReadSegment>> {
+        let segments = self.inner.read_into(buf)?;
+
+        // Update stats for each segment.
+        for seg in &segments {
+            self.stats.inc_bytes(seg.accounted_bytes);
+            self.stats.inc_lines(seg.line_count as u64);
+        }
+
+        // Track whether raw had payload for cadence reporting.
+        self.last_raw_had_payload = segments.iter().any(|s| s.len > 0);
+
+        Ok(segments)
+    }
+
+    /// Event-based fallback: poll inner source, copy event bytes into `buf`.
+    fn read_framed_from_events(&mut self, buf: &mut BytesMut) -> io::Result<Vec<ReadSegment>> {
+        let raw_events = self.inner.poll()?;
+        let processed = self.process_raw_events(raw_events);
+        let mut segments = Vec::new();
+
+        for event in processed {
+            match event {
+                InputEvent::Data {
+                    bytes,
+                    source_id,
+                    cri_metadata,
+                    ..
+                } => {
+                    let line_count = memchr::memchr_iter(b'\n', &bytes).count();
+                    let len = bytes.len();
+                    buf.extend_from_slice(&bytes);
+                    segments.push(ReadSegment {
+                        len,
+                        source_id,
+                        line_count,
+                        cri_metadata,
+                        accounted_bytes: 0, // Already accounted by process_raw_events
+                    });
+                }
+                InputEvent::Batch { .. } => {
+                    // Batch events are not handled by read_framed — they
+                    // need separate treatment. For now, skip them; the IO
+                    // worker will handle batches through the poll() path.
+                }
+                // Rotation/truncation/EOF are already handled by
+                // process_raw_events internally.
+                _ => {}
+            }
+        }
+
+        Ok(segments)
     }
 
     fn process_raw_events(&mut self, raw_events: Vec<InputEvent>) -> Vec<InputEvent> {
@@ -567,6 +638,14 @@ impl InputSource for FramedInput {
 
     fn set_offset_by_source(&mut self, source_id: SourceId, offset: u64) {
         self.inner.set_offset_by_source(source_id, offset);
+    }
+
+    fn supports_read_into(&self) -> bool {
+        self.inner.supports_read_into()
+    }
+
+    fn read_framed(&mut self, buf: &mut BytesMut) -> io::Result<Vec<ReadSegment>> {
+        FramedInput::read_framed(self, buf)
     }
 }
 

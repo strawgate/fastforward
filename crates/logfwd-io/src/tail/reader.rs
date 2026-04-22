@@ -6,6 +6,8 @@ use std::time::{Duration, Instant};
 
 use logfwd_types::pipeline::SourceId;
 
+use crate::input::ReadSegment;
+
 use super::identity::{ByteOffset, FileIdentity, compute_fingerprint, identify_open_file};
 use super::state::{EOF_IDLE_POLLS_BEFORE_EMIT, EofState};
 use super::tailer::{TailConfig, TailEvent};
@@ -328,6 +330,84 @@ impl FileReader {
                 }
                 Err(e) => {
                     tracing::error!(path = %path.display(), error = %e, "tail.read_error");
+                    had_error = true;
+                }
+            }
+        }
+        self.scratch_paths = paths;
+        had_error
+    }
+
+    /// Read all files directly into the caller's buffer (zero-copy path).
+    ///
+    /// This mirrors [`read_all`](Self::read_all) but uses
+    /// [`Active::read_new_data_into`] so bytes are written directly into `buf`
+    /// instead of into per-file `BytesMut` buffers. Each file's data becomes a
+    /// [`ReadSegment`] descriptor pushed to `segments`.
+    ///
+    /// Truncation and EOF side-effects update internal tailer state the same
+    /// way `read_all` does, but rotation/truncation/EOF events are not returned
+    /// — the caller only receives data segments.
+    pub(super) fn read_all_into(
+        &mut self,
+        buf: &mut bytes::BytesMut,
+        segments: &mut Vec<ReadSegment>,
+    ) -> bool {
+        let mut had_error = false;
+        self.last_read_had_data = false;
+        self.last_read_hit_budget = false;
+        let mut paths = std::mem::take(&mut self.scratch_paths);
+        paths.clear();
+        paths.extend(self.files.keys().cloned());
+        let eof_min_idle = self.eof_min_idle_duration();
+        let fingerprint_bytes = self.config.fingerprint_bytes;
+        let per_file_budget = self
+            .config
+            .per_file_read_budget_bytes
+            .clamp(1, Self::MAX_READ_PER_POLL);
+
+        for path in &paths {
+            let Some(tailed) = self.files.get_mut(path) else {
+                continue;
+            };
+
+            match tailed.read_new_data_into(buf, per_file_budget, fingerprint_bytes) {
+                Ok(result) => {
+                    if result.was_truncated
+                        && let Some(tailed) = self.files.get_mut(path)
+                    {
+                        tailed.eof_state.on_data();
+                    }
+
+                    if result.segment_len > 0 {
+                        self.last_read_had_data = true;
+                        self.last_read_hit_budget |= result.hit_budget;
+                        if let Some(tailed) = self.files.get_mut(path) {
+                            tailed.eof_state.on_data();
+                        }
+                        let source_id = self.source_id_for_path(path);
+                        segments.push(ReadSegment {
+                            len: result.segment_len,
+                            source_id,
+                            line_count: result.line_count,
+                            cri_metadata: None,
+                            accounted_bytes: result.bytes_read,
+                        });
+                    } else if result.bytes_read == 0 && !result.was_truncated {
+                        // No data, no truncation — check for EOF.
+                        let mut emit_eof = false;
+                        if let Some(tailed) = self.files.get_mut(path) {
+                            emit_eof = tailed.eof_state.on_no_data(Instant::now(), eof_min_idle);
+                        }
+                        // EOF events are handled internally — the tailer
+                        // state is updated but we don't surface them to the
+                        // read_into caller. The FramedInput handles EOF
+                        // flush via the event path (poll/poll_shutdown).
+                        let _ = emit_eof;
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(path = %path.display(), error = %e, "tail.read_into_error");
                     had_error = true;
                 }
             }

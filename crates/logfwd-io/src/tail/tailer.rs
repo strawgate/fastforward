@@ -7,6 +7,7 @@ use logfwd_types::diagnostics::ComponentHealth;
 use logfwd_types::diagnostics::ComponentStats;
 use logfwd_types::pipeline::SourceId;
 
+use crate::input::ReadSegment;
 use crate::poll_cadence::{AdaptivePollController, PollCadenceSignal};
 use crate::polling_input_health::{PollingInputHealthEvent, reduce_polling_input_health};
 
@@ -257,6 +258,78 @@ impl FileTailer {
         self.update_error_backoff(had_error);
 
         Ok(events)
+    }
+
+    /// Read new data directly into the caller's buffer (zero-copy path).
+    ///
+    /// This mirrors [`poll`](Self::poll) for lifecycle management (drain events,
+    /// error backoff, glob rescan, detect changes, cleanup, adaptive polling,
+    /// LRU eviction) but delegates the actual read to
+    /// [`FileReader::read_all_into`] which appends bytes directly into `buf`.
+    ///
+    /// Rotation, truncation, and EOF events are handled internally — they
+    /// modify tailer state but are not returned. Only data segments are
+    /// returned as [`ReadSegment`] descriptors.
+    pub fn read_into(&mut self, buf: &mut bytes::BytesMut) -> io::Result<Vec<ReadSegment>> {
+        let mut tail_events = Vec::new();
+        let (something_changed, mut had_error) = self.discovery.drain_events();
+
+        if let Some(until) = self.error_backoff_until
+            && Instant::now() < until
+        {
+            self.last_poll_signal = PollCadenceSignal::default();
+            if had_error {
+                self.update_error_backoff(true);
+            }
+            return Ok(Vec::new());
+        }
+
+        let poll_interval = Duration::from_millis(self.config.poll_interval_ms);
+        let glob_rescan_due = self.config.glob_rescan_interval_ms > 0
+            && self.discovery.last_glob_rescan.elapsed()
+                >= Duration::from_millis(self.config.glob_rescan_interval_ms);
+        let adaptive_fast_poll = self.adaptive_poll.should_fast_poll();
+        let should_poll = something_changed
+            || self.last_poll.elapsed() >= poll_interval
+            || glob_rescan_due
+            || adaptive_fast_poll;
+
+        if !should_poll {
+            self.last_poll_signal = PollCadenceSignal::default();
+            if had_error {
+                self.update_error_backoff(true);
+            }
+            return Ok(Vec::new());
+        }
+        self.last_poll = Instant::now();
+
+        if glob_rescan_due {
+            had_error |= self.discovery.rescan_globs(&mut self.reader);
+            self.discovery.last_glob_rescan = Instant::now();
+        }
+
+        // detect_changes and cleanup_deleted produce TailEvents for rotations,
+        // truncations, and EOF — these are handled internally by the tailer and
+        // not forwarded to the caller.
+        had_error |= self
+            .discovery
+            .detect_changes(&mut self.reader, &mut tail_events);
+        let mut segments = Vec::new();
+        had_error |= self.reader.read_all_into(buf, &mut segments);
+        had_error |= self
+            .discovery
+            .cleanup_deleted(&mut self.reader, &mut tail_events);
+
+        self.last_poll_signal = PollCadenceSignal {
+            had_data: self.reader.last_read_had_data,
+            hit_read_budget: self.reader.last_read_hit_budget,
+        };
+        self.adaptive_poll.observe_signal(self.last_poll_signal);
+
+        self.reader.evict_lru(self.config.max_open_files);
+        self.update_error_backoff(had_error);
+
+        Ok(segments)
     }
 
     /// Perform a terminal poll during runtime shutdown.

@@ -4,7 +4,7 @@ use std::sync::mpsc;
 use std::thread;
 
 use arrow::record_batch::RecordBatch;
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use logfwd_types::diagnostics::ComponentHealth;
 use logfwd_types::pipeline::SourceId;
 
@@ -317,6 +317,26 @@ mod verification {
     }
 }
 
+/// Describes one contiguous segment of scanner-ready bytes appended to a
+/// shared `BytesMut` buffer by [`InputSource::read_into`].
+///
+/// Unlike [`InputEvent::Data`], which owns its bytes, a `ReadSegment` is a
+/// *descriptor* for bytes that already live in the caller's buffer. The
+/// caller slices `buf[offset..offset + len]` to access the data.
+#[derive(Debug)]
+pub struct ReadSegment {
+    /// Number of scanner-ready bytes in this segment.
+    pub len: usize,
+    /// Logical source that produced these bytes (e.g., which tailed file).
+    pub source_id: Option<SourceId>,
+    /// Number of newline-delimited lines in this segment.
+    pub line_count: usize,
+    /// CRI metadata sidecar for this segment, if the source produces CRI data.
+    pub cri_metadata: Option<CriMetadata>,
+    /// Source-side byte count for diagnostics accounting.
+    pub accounted_bytes: u64,
+}
+
 /// Events produced by an input source.
 pub enum InputEvent {
     /// New data read from the source.
@@ -470,6 +490,57 @@ pub trait InputSource: Send {
     /// Used for checkpoint restore — the checkpoint stores fingerprint + offset.
     /// The input source finds the matching file by fingerprint, not path.
     fn set_offset_by_source(&mut self, _source_id: SourceId, _offset: u64) {}
+
+    /// Whether this source supports zero-copy [`read_into`](Self::read_into).
+    ///
+    /// Sources that can write directly into a caller-provided `BytesMut`
+    /// (e.g., file tailers) return `true`. Push sources and structured
+    /// receivers keep the default `false` and use the event-based path.
+    fn supports_read_into(&self) -> bool {
+        false
+    }
+
+    /// Read new data directly into the provided buffer.
+    ///
+    /// Sources that return `true` from [`supports_read_into`](Self::supports_read_into)
+    /// implement this to append newline-framed bytes directly into `buf`,
+    /// returning a [`ReadSegment`] descriptor for each contiguous chunk.
+    /// The default implementation returns an empty vec.
+    fn read_into(&mut self, _buf: &mut BytesMut) -> io::Result<Vec<ReadSegment>> {
+        Ok(Vec::new())
+    }
+
+    /// Read framed, scanner-ready data into the caller's buffer.
+    ///
+    /// The default implementation calls [`poll`](Self::poll) and copies each
+    /// `Data` event's bytes into `buf`, returning a [`ReadSegment`] for each.
+    /// Sources wrapped in [`crate::framed::FramedInput`] override this to
+    /// dispatch to the zero-copy direct path when available.
+    fn read_framed(&mut self, buf: &mut BytesMut) -> io::Result<Vec<ReadSegment>> {
+        let events = self.poll()?;
+        let mut segments = Vec::new();
+        for event in events {
+            if let InputEvent::Data {
+                bytes,
+                source_id,
+                accounted_bytes,
+                cri_metadata,
+            } = event
+            {
+                let line_count = memchr::memchr_iter(b'\n', &bytes).count();
+                let len = bytes.len();
+                buf.extend_from_slice(&bytes);
+                segments.push(ReadSegment {
+                    len,
+                    source_id,
+                    line_count,
+                    cri_metadata,
+                    accounted_bytes,
+                });
+            }
+        }
+        Ok(segments)
+    }
 }
 
 enum StdinMessage {
@@ -819,6 +890,14 @@ impl InputSource for FileInput {
 
     fn get_adaptive_fast_polls_max(&self) -> u8 {
         self.tailer.get_adaptive_fast_polls_max()
+    }
+
+    fn supports_read_into(&self) -> bool {
+        true
+    }
+
+    fn read_into(&mut self, buf: &mut BytesMut) -> io::Result<Vec<ReadSegment>> {
+        self.tailer.read_into(buf)
     }
 }
 
