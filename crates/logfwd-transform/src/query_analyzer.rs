@@ -2671,7 +2671,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn qualified_column_not_pushed() {
         // Qualified column reference (e.g., from a join) should NOT be pushed.
         let pred = predicate_for(

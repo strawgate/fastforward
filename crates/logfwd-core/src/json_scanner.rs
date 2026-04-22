@@ -580,9 +580,13 @@ fn scan_line_with_predicate<B: ScanBuilder>(
                     });
                 }
                 if is_pred_field {
-                    // Nested values are non-null but not comparable — store as
-                    // Str so IS NOT NULL works correctly.
-                    pred_scratch.insert(key, PredicateFieldValue::Str(b"[nested]".to_vec()));
+                    // Store the actual nested JSON bytes so predicates like
+                    // `payload LIKE '%"a":1%'` see the real slice. This also
+                    // makes IS NOT NULL work correctly (field is present).
+                    pred_scratch.insert(
+                        key,
+                        PredicateFieldValue::Str(buf[nested_start..pos].to_vec()),
+                    );
                 }
             }
             b't' => {
