@@ -750,7 +750,11 @@ pub struct TcpTypeConfig {
     pub listen: String,
     #[serde(default)]
     pub tls: Option<TlsServerConfig>,
-    #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
+    #[serde(
+        default,
+        alias = "max_connections",
+        deserialize_with = "deserialize_option_from_string_or_value"
+    )]
     pub max_clients: Option<usize>,
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
     pub connection_timeout_ms: Option<PositiveMillis>,

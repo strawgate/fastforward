@@ -561,18 +561,6 @@ impl InputSource for TcpInput {
         // Accept new connections up to the limit.
         loop {
             if self.clients.len() >= self.max_clients {
-                if self
-                    .last_max_clients_warning
-                    .is_none_or(|t| t.elapsed() > Duration::from_secs(60))
-                {
-                    tracing::warn!(
-                        "TCP input '{}' reached max_clients limit ({}), dropping incoming connections",
-                        self.name,
-                        self.max_clients
-                    );
-                    self.last_max_clients_warning = Some(Instant::now());
-                }
-
                 // Drain (and drop) any pending connections beyond the limit so
                 // the kernel accept queue does not fill up and stall.
                 match self.listener.accept() {
@@ -582,6 +570,17 @@ impl InputSource for TcpInput {
                             self.connections_accepted,
                             std::sync::atomic::Ordering::Relaxed,
                         );
+                        if self
+                            .last_max_clients_warning
+                            .is_none_or(|t| t.elapsed() > Duration::from_secs(60))
+                        {
+                            tracing::warn!(
+                                "TCP input '{}' reached max_clients limit ({}), dropping incoming connections",
+                                self.name,
+                                self.max_clients
+                            );
+                            self.last_max_clients_warning = Some(Instant::now());
+                        }
                         under_pressure = true;
                         continue; // dropped immediately
                     }
@@ -1758,9 +1757,19 @@ mod tests {
         // The first poll should accept 2 connections, log a warning, and drop the other 2.
         let _events = input.poll().unwrap();
 
-        assert_eq!(input.clients.len(), 2, "Should only accept max_clients clients");
-        assert!(input.last_max_clients_warning.is_some(), "Should have logged a warning");
-        assert_eq!(input.connections_accepted, 4, "Should have accepted and immediately dropped the excess connections");
+        assert_eq!(
+            input.clients.len(),
+            2,
+            "Should only accept max_clients clients"
+        );
+        assert!(
+            input.last_max_clients_warning.is_some(),
+            "Should have logged a warning"
+        );
+        assert_eq!(
+            input.connections_accepted, 4,
+            "Should have accepted and immediately dropped the excess connections"
+        );
 
         // Let's also check a second poll does not blow up
         let _events2 = input.poll().unwrap();
