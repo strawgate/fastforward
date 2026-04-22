@@ -151,6 +151,11 @@ impl StdoutSink {
             }
             StdoutFormat::Console => {
                 self.write_console(batch, dest)?;
+                // Console output emits exactly one `\n` per row (even when field
+                // values contain embedded newlines), so `num_rows` is the correct
+                // line count. Prior code used `memchr_iter` to count newlines in
+                // the output buffer, but that over-counted when field values
+                // contained literal `\n` characters.
                 num_rows
             }
         };
@@ -341,14 +346,18 @@ impl StdoutSink {
 /// Unlike `str_value` (which panics on non-string types), this handles all
 /// Arrow data types via `array_value_to_string` for non-Utf8 columns.
 fn safe_col_to_string(col: &dyn Array, row: usize) -> Cow<'_, str> {
-    // SAFETY: row is bounded by 0..batch.num_rows() which is the length of all columns in the batch
+    debug_assert!(
+        row < col.len(),
+        "safe_col_to_string: row {row} out of bounds for col.len() {}",
+        col.len()
+    );
     match col.data_type() {
-        // SAFETY: row is bounded by 0..batch.num_rows() which is the length of all columns in the batch
+        // SAFETY: row < col.len() is guaranteed by the caller and asserted above in debug builds
         DataType::Utf8 => Cow::Borrowed(unsafe { col.as_string::<i32>().value_unchecked(row) }),
-        // SAFETY: row is bounded by 0..batch.num_rows() which is the length of all columns in the batch
+        // SAFETY: row < col.len() is guaranteed by the caller and asserted above in debug builds
         DataType::Utf8View => Cow::Borrowed(unsafe { col.as_string_view().value_unchecked(row) }),
         DataType::LargeUtf8 => {
-            // SAFETY: row is bounded by 0..batch.num_rows() which is the length of all columns in the batch
+            // SAFETY: row < col.len() is guaranteed by the caller and asserted above in debug builds
             Cow::Borrowed(unsafe { col.as_string::<i64>().value_unchecked(row) })
         }
         DataType::Timestamp(arrow::datatypes::TimeUnit::Nanosecond, _) => {
@@ -358,7 +367,7 @@ fn safe_col_to_string(col: &dyn Array, row: usize) -> Cow<'_, str> {
             else {
                 return Cow::Owned(safe_array_value_to_string(col, row));
             };
-            // SAFETY: row is bounded by 0..batch.num_rows() which is the length of all columns in the batch
+            // SAFETY: row < col.len() == arr.len() is guaranteed by the caller
             let ns = unsafe { arr.value_unchecked(row) };
             let secs = ns.div_euclid(1_000_000_000);
             let nanos = ns.rem_euclid(1_000_000_000) as u32;
@@ -371,7 +380,7 @@ fn safe_col_to_string(col: &dyn Array, row: usize) -> Cow<'_, str> {
             else {
                 return Cow::Owned(safe_array_value_to_string(col, row));
             };
-            // SAFETY: row is bounded by 0..batch.num_rows() which is the length of all columns in the batch
+            // SAFETY: row < col.len() == arr.len() is guaranteed by the caller
             let us = unsafe { arr.value_unchecked(row) };
             let secs = us.div_euclid(1_000_000);
             let nanos = (us.rem_euclid(1_000_000) * 1_000) as u32;
@@ -384,7 +393,7 @@ fn safe_col_to_string(col: &dyn Array, row: usize) -> Cow<'_, str> {
             else {
                 return Cow::Owned(safe_array_value_to_string(col, row));
             };
-            // SAFETY: row is bounded by 0..batch.num_rows() which is the length of all columns in the batch
+            // SAFETY: row < col.len() == arr.len() is guaranteed by the caller
             let ms = unsafe { arr.value_unchecked(row) };
             let secs = ms.div_euclid(1_000);
             let nanos = (ms.rem_euclid(1_000) * 1_000_000) as u32;
@@ -397,7 +406,7 @@ fn safe_col_to_string(col: &dyn Array, row: usize) -> Cow<'_, str> {
             else {
                 return Cow::Owned(safe_array_value_to_string(col, row));
             };
-            // SAFETY: row is bounded by 0..batch.num_rows() which is the length of all columns in the batch
+            // SAFETY: row < col.len() == arr.len() is guaranteed by the caller
             let secs = unsafe { arr.value_unchecked(row) };
             Cow::Owned(logfwd_arrow::star_schema::chrono_timestamp(secs, 0))
         }

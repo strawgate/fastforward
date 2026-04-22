@@ -21,7 +21,7 @@ pub(crate) fn coalesce_as_str(batch: &RecordBatch, row: usize, col: &ColInfo) ->
     let arr = get_array(batch, variant)?;
     let s = match arr.data_type() {
         DataType::Int64 => {
-            // SAFETY: row is bounded by 0..batch.num_rows() which is the length of all columns in the batch
+            // SAFETY: arr is a column of batch, so arr.len() == batch.num_rows(); row < batch.num_rows() is the caller's invariant
             let v = unsafe {
                 arr.as_primitive::<arrow::datatypes::Int64Type>()
                     .value_unchecked(row)
@@ -29,7 +29,7 @@ pub(crate) fn coalesce_as_str(batch: &RecordBatch, row: usize, col: &ColInfo) ->
             itoa::Buffer::new().format(v).to_string()
         }
         DataType::Float64 => {
-            // SAFETY: row is bounded by 0..batch.num_rows() which is the length of all columns in the batch
+            // SAFETY: arr is a column of batch, so arr.len() == batch.num_rows(); row < batch.num_rows() is the caller's invariant
             let v = unsafe {
                 arr.as_primitive::<arrow::datatypes::Float64Type>()
                     .value_unchecked(row)
@@ -41,7 +41,7 @@ pub(crate) fn coalesce_as_str(batch: &RecordBatch, row: usize, col: &ColInfo) ->
             }
         }
         DataType::Boolean => {
-            // SAFETY: row is bounded by 0..batch.num_rows() which is the length of all columns in the batch
+            // SAFETY: arr is a column of batch, so arr.len() == batch.num_rows(); row < batch.num_rows() is the caller's invariant
             if unsafe { arr.as_boolean().value_unchecked(row) } {
                 "true".to_string()
             } else {
@@ -69,8 +69,7 @@ const NEEDS_ESCAPE: [bool; 256] = {
 /// or `bytes.len()` if there are none.
 ///
 /// Uses a 256-byte lookup table to quickly find `"` or `\` or control
-/// characters (< 0x20) in a single pass. This avoids the setup overhead of
-/// `memchr2`.
+/// characters (< 0x20) in a single pass.
 #[inline]
 fn first_escape_pos(bytes: &[u8]) -> usize {
     for (i, &b) in bytes.iter().enumerate() {
@@ -86,7 +85,7 @@ fn first_escape_pos(bytes: &[u8]) -> usize {
 /// **Hot path optimization**: most log field values (timestamps, service names,
 /// HTTP paths, hex IDs, etc.) contain zero bytes requiring JSON escaping.  This
 /// implementation uses [`first_escape_pos`] to find the first special byte with
-/// a SIMD-accelerated scan, then falls through to a bulk `extend_from_slice`
+/// a 256-byte lookup table scan, then falls through to a bulk `extend_from_slice`
 /// for the safe prefix (one optimized `memcpy` instead of N individual byte
 /// pushes).  Only when an escape byte is actually found does the slow per-byte
 /// path run for that single byte.
@@ -148,7 +147,17 @@ fn write_json_hex_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
 /// non-finite), Null → JSON null, Boolean → true/false/null, everything else →
 /// quoted string. This preserves JSON type fidelity on roundtrip without
 /// relying on column name suffixes.
+///
+/// # Safety contract
+///
+/// Callers must ensure `row < arr.len()`. In debug builds an assertion fires;
+/// in release builds out-of-bounds access is undefined behaviour.
 pub(crate) fn write_json_value(arr: &dyn Array, row: usize, out: &mut Vec<u8>) -> io::Result<()> {
+    debug_assert!(
+        row < arr.len(),
+        "write_json_value: row {row} out of bounds for arr.len() {}",
+        arr.len()
+    );
     if arr.is_null(row) {
         out.extend_from_slice(b"null");
         return Ok(());
@@ -159,7 +168,7 @@ pub(crate) fn write_json_value(arr: &dyn Array, row: usize, out: &mut Vec<u8>) -
             out.extend_from_slice(b"null");
         }
         DataType::Int8 => {
-            // SAFETY: row is bounded by 0..batch.num_rows() which is the length of all columns in the batch
+            // SAFETY: row < arr.len() is asserted at function entry (debug) / guaranteed by caller
             let v = unsafe {
                 arr.as_primitive::<arrow::datatypes::Int8Type>()
                     .value_unchecked(row)
@@ -167,7 +176,7 @@ pub(crate) fn write_json_value(arr: &dyn Array, row: usize, out: &mut Vec<u8>) -
             out.extend_from_slice(itoa::Buffer::new().format(v).as_bytes());
         }
         DataType::Int16 => {
-            // SAFETY: row is bounded by 0..batch.num_rows() which is the length of all columns in the batch
+            // SAFETY: row < arr.len() is asserted at function entry (debug) / guaranteed by caller
             let v = unsafe {
                 arr.as_primitive::<arrow::datatypes::Int16Type>()
                     .value_unchecked(row)
@@ -175,7 +184,7 @@ pub(crate) fn write_json_value(arr: &dyn Array, row: usize, out: &mut Vec<u8>) -
             out.extend_from_slice(itoa::Buffer::new().format(v).as_bytes());
         }
         DataType::Int32 => {
-            // SAFETY: row is bounded by 0..batch.num_rows() which is the length of all columns in the batch
+            // SAFETY: row < arr.len() is asserted at function entry (debug) / guaranteed by caller
             let v = unsafe {
                 arr.as_primitive::<arrow::datatypes::Int32Type>()
                     .value_unchecked(row)
@@ -183,7 +192,7 @@ pub(crate) fn write_json_value(arr: &dyn Array, row: usize, out: &mut Vec<u8>) -
             out.extend_from_slice(itoa::Buffer::new().format(v).as_bytes());
         }
         DataType::Int64 => {
-            // SAFETY: row is bounded by 0..batch.num_rows() which is the length of all columns in the batch
+            // SAFETY: row < arr.len() is asserted at function entry (debug) / guaranteed by caller
             let v = unsafe {
                 arr.as_primitive::<arrow::datatypes::Int64Type>()
                     .value_unchecked(row)
@@ -191,7 +200,7 @@ pub(crate) fn write_json_value(arr: &dyn Array, row: usize, out: &mut Vec<u8>) -
             out.extend_from_slice(itoa::Buffer::new().format(v).as_bytes());
         }
         DataType::UInt8 => {
-            // SAFETY: row is bounded by 0..batch.num_rows() which is the length of all columns in the batch
+            // SAFETY: row < arr.len() is asserted at function entry (debug) / guaranteed by caller
             let v = unsafe {
                 arr.as_primitive::<arrow::datatypes::UInt8Type>()
                     .value_unchecked(row)
@@ -199,7 +208,7 @@ pub(crate) fn write_json_value(arr: &dyn Array, row: usize, out: &mut Vec<u8>) -
             out.extend_from_slice(itoa::Buffer::new().format(v).as_bytes());
         }
         DataType::UInt16 => {
-            // SAFETY: row is bounded by 0..batch.num_rows() which is the length of all columns in the batch
+            // SAFETY: row < arr.len() is asserted at function entry (debug) / guaranteed by caller
             let v = unsafe {
                 arr.as_primitive::<arrow::datatypes::UInt16Type>()
                     .value_unchecked(row)
@@ -207,7 +216,7 @@ pub(crate) fn write_json_value(arr: &dyn Array, row: usize, out: &mut Vec<u8>) -
             out.extend_from_slice(itoa::Buffer::new().format(v).as_bytes());
         }
         DataType::UInt32 => {
-            // SAFETY: row is bounded by 0..batch.num_rows() which is the length of all columns in the batch
+            // SAFETY: row < arr.len() is asserted at function entry (debug) / guaranteed by caller
             let v = unsafe {
                 arr.as_primitive::<arrow::datatypes::UInt32Type>()
                     .value_unchecked(row)
@@ -215,7 +224,7 @@ pub(crate) fn write_json_value(arr: &dyn Array, row: usize, out: &mut Vec<u8>) -
             out.extend_from_slice(itoa::Buffer::new().format(v).as_bytes());
         }
         DataType::UInt64 => {
-            // SAFETY: row is bounded by 0..batch.num_rows() which is the length of all columns in the batch
+            // SAFETY: row < arr.len() is asserted at function entry (debug) / guaranteed by caller
             let v = unsafe {
                 arr.as_primitive::<arrow::datatypes::UInt64Type>()
                     .value_unchecked(row)
@@ -223,7 +232,7 @@ pub(crate) fn write_json_value(arr: &dyn Array, row: usize, out: &mut Vec<u8>) -
             out.extend_from_slice(itoa::Buffer::new().format(v).as_bytes());
         }
         DataType::Float32 => {
-            // SAFETY: row is bounded by 0..batch.num_rows() which is the length of all columns in the batch
+            // SAFETY: row < arr.len() is asserted at function entry (debug) / guaranteed by caller
             let v = unsafe {
                 arr.as_primitive::<arrow::datatypes::Float32Type>()
                     .value_unchecked(row)
@@ -235,7 +244,7 @@ pub(crate) fn write_json_value(arr: &dyn Array, row: usize, out: &mut Vec<u8>) -
             }
         }
         DataType::Float64 => {
-            // SAFETY: row is bounded by 0..batch.num_rows() which is the length of all columns in the batch
+            // SAFETY: row < arr.len() is asserted at function entry (debug) / guaranteed by caller
             let v = unsafe {
                 arr.as_primitive::<arrow::datatypes::Float64Type>()
                     .value_unchecked(row)
@@ -247,11 +256,11 @@ pub(crate) fn write_json_value(arr: &dyn Array, row: usize, out: &mut Vec<u8>) -
             }
         }
         DataType::Boolean => {
-            // SAFETY: row is bounded by 0..batch.num_rows() which is the length of all columns in the batch
+            // SAFETY: row < arr.len() is asserted at function entry (debug) / guaranteed by caller
             let v = unsafe { arr.as_boolean().value_unchecked(row) };
             out.extend_from_slice(if v { b"true" } else { b"false" });
         }
-        // String types: use write_json_string (memchr2 SIMD fast-path) instead of
+        // String types: use write_json_string (lookup-table fast-path) instead of
         // the fallback `array_value_to_string` which heap-allocates per call.
         // StreamingBuilder uses Utf8View; these three arms cover all common cases.
         DataType::Utf8 => {
@@ -261,7 +270,7 @@ pub(crate) fn write_json_value(arr: &dyn Array, row: usize, out: &mut Vec<u8>) -
                     "DataType::Utf8 did not downcast to StringArray",
                 ));
             };
-            // SAFETY: row is bounded by 0..batch.num_rows() which is the length of all columns in the batch
+            // SAFETY: row < arr.len() is asserted at function entry (debug) / guaranteed by caller
             write_json_string(out, unsafe { str_arr.value_unchecked(row) })?;
         }
         DataType::LargeUtf8 => {
@@ -271,7 +280,7 @@ pub(crate) fn write_json_value(arr: &dyn Array, row: usize, out: &mut Vec<u8>) -
                     "DataType::LargeUtf8 did not downcast to LargeStringArray",
                 ));
             };
-            // SAFETY: row is bounded by 0..batch.num_rows() which is the length of all columns in the batch
+            // SAFETY: row < arr.len() is asserted at function entry (debug) / guaranteed by caller
             write_json_string(out, unsafe { str_arr.value_unchecked(row) })?;
         }
         DataType::Utf8View => {
@@ -281,7 +290,7 @@ pub(crate) fn write_json_value(arr: &dyn Array, row: usize, out: &mut Vec<u8>) -
                     "DataType::Utf8View did not downcast to StringViewArray",
                 ));
             };
-            // SAFETY: row is bounded by 0..batch.num_rows() which is the length of all columns in the batch
+            // SAFETY: row < arr.len() is asserted at function entry (debug) / guaranteed by caller
             write_json_string(out, unsafe { str_arr.value_unchecked(row) })?;
         }
         DataType::Struct(schema_fields) => {
@@ -318,7 +327,7 @@ pub(crate) fn write_json_value(arr: &dyn Array, row: usize, out: &mut Vec<u8>) -
                     "DataType::Binary did not downcast to BinaryArray",
                 ));
             };
-            // SAFETY: row is bounded by 0..batch.num_rows() which is the length of all columns in the batch
+            // SAFETY: row < arr.len() is asserted at function entry (debug) / guaranteed by caller
             let bytes = unsafe { bin_arr.value_unchecked(row) };
             write_json_hex_bytes(out, bytes);
         }
@@ -329,7 +338,7 @@ pub(crate) fn write_json_value(arr: &dyn Array, row: usize, out: &mut Vec<u8>) -
                     "DataType::LargeBinary did not downcast to LargeBinaryArray",
                 ));
             };
-            // SAFETY: row is bounded by 0..batch.num_rows() which is the length of all columns in the batch
+            // SAFETY: row < arr.len() is asserted at function entry (debug) / guaranteed by caller
             let bytes = unsafe { large_bin_arr.value_unchecked(row) };
             write_json_hex_bytes(out, bytes);
         }
@@ -340,7 +349,7 @@ pub(crate) fn write_json_value(arr: &dyn Array, row: usize, out: &mut Vec<u8>) -
                     "DataType::FixedSizeBinary did not downcast to FixedSizeBinaryArray",
                 ));
             };
-            // SAFETY: row is bounded by 0..batch.num_rows() which is the length of all columns in the batch
+            // SAFETY: row < arr.len() is asserted at function entry (debug) / guaranteed by caller
             let bytes = unsafe { fixed_bin_arr.value_unchecked(row) };
             write_json_hex_bytes(out, bytes);
         }
@@ -367,49 +376,49 @@ pub(crate) fn write_typed_json_value(
         TypedArrayRef::Null => {
             out.extend_from_slice(b"null");
         }
-        // SAFETY for all typed arrays: row is bounded by 0..batch.num_rows() which is the length of all columns in the batch
+        // SAFETY for all typed arms below: row < a.len() is guaranteed by the caller
         TypedArrayRef::Int8(a) => {
-            // SAFETY: row is bounded by 0..batch.num_rows() which is the length of all columns in the batch
+            // SAFETY: row < a.len() is guaranteed by the caller (see block comment above)
             let v = unsafe { a.value_unchecked(row) };
             out.extend_from_slice(itoa::Buffer::new().format(v).as_bytes());
         }
         TypedArrayRef::Int16(a) => {
-            // SAFETY: row is bounded by 0..batch.num_rows() which is the length of all columns in the batch
+            // SAFETY: row < a.len() is guaranteed by the caller (see block comment above)
             let v = unsafe { a.value_unchecked(row) };
             out.extend_from_slice(itoa::Buffer::new().format(v).as_bytes());
         }
         TypedArrayRef::Int32(a) => {
-            // SAFETY: row is bounded by 0..batch.num_rows() which is the length of all columns in the batch
+            // SAFETY: row < a.len() is guaranteed by the caller (see block comment above)
             let v = unsafe { a.value_unchecked(row) };
             out.extend_from_slice(itoa::Buffer::new().format(v).as_bytes());
         }
         TypedArrayRef::Int64(a) => {
-            // SAFETY: row is bounded by 0..batch.num_rows() which is the length of all columns in the batch
+            // SAFETY: row < a.len() is guaranteed by the caller (see block comment above)
             let v = unsafe { a.value_unchecked(row) };
             out.extend_from_slice(itoa::Buffer::new().format(v).as_bytes());
         }
         TypedArrayRef::UInt8(a) => {
-            // SAFETY: row is bounded by 0..batch.num_rows() which is the length of all columns in the batch
+            // SAFETY: row < a.len() is guaranteed by the caller (see block comment above)
             let v = unsafe { a.value_unchecked(row) };
             out.extend_from_slice(itoa::Buffer::new().format(v).as_bytes());
         }
         TypedArrayRef::UInt16(a) => {
-            // SAFETY: row is bounded by 0..batch.num_rows() which is the length of all columns in the batch
+            // SAFETY: row < a.len() is guaranteed by the caller (see block comment above)
             let v = unsafe { a.value_unchecked(row) };
             out.extend_from_slice(itoa::Buffer::new().format(v).as_bytes());
         }
         TypedArrayRef::UInt32(a) => {
-            // SAFETY: row is bounded by 0..batch.num_rows() which is the length of all columns in the batch
+            // SAFETY: row < a.len() is guaranteed by the caller (see block comment above)
             let v = unsafe { a.value_unchecked(row) };
             out.extend_from_slice(itoa::Buffer::new().format(v).as_bytes());
         }
         TypedArrayRef::UInt64(a) => {
-            // SAFETY: row is bounded by 0..batch.num_rows() which is the length of all columns in the batch
+            // SAFETY: row < a.len() is guaranteed by the caller (see block comment above)
             let v = unsafe { a.value_unchecked(row) };
             out.extend_from_slice(itoa::Buffer::new().format(v).as_bytes());
         }
         TypedArrayRef::Float32(a) => {
-            // SAFETY: row is bounded by 0..batch.num_rows() which is the length of all columns in the batch
+            // SAFETY: row < a.len() is guaranteed by the caller (see block comment above)
             let v = unsafe { a.value_unchecked(row) };
             if v.is_finite() {
                 out.extend_from_slice(ryu::Buffer::new().format_finite(v).as_bytes());
@@ -418,7 +427,7 @@ pub(crate) fn write_typed_json_value(
             }
         }
         TypedArrayRef::Float64(a) => {
-            // SAFETY: row is bounded by 0..batch.num_rows() which is the length of all columns in the batch
+            // SAFETY: row < a.len() is guaranteed by the caller (see block comment above)
             let v = unsafe { a.value_unchecked(row) };
             if v.is_finite() {
                 out.extend_from_slice(ryu::Buffer::new().format_finite(v).as_bytes());
@@ -427,20 +436,20 @@ pub(crate) fn write_typed_json_value(
             }
         }
         TypedArrayRef::Boolean(a) => {
-            // SAFETY: row is bounded by 0..batch.num_rows() which is the length of all columns in the batch
+            // SAFETY: row < a.len() is guaranteed by the caller (see block comment above)
             let v = unsafe { a.value_unchecked(row) };
             out.extend_from_slice(if v { b"true" } else { b"false" });
         }
         TypedArrayRef::Utf8(a) => {
-            // SAFETY: row is bounded by 0..batch.num_rows() which is the length of all columns in the batch
+            // SAFETY: row < a.len() is guaranteed by the caller (see block comment above)
             write_json_string(out, unsafe { a.value_unchecked(row) })?;
         }
         TypedArrayRef::LargeUtf8(a) => {
-            // SAFETY: row is bounded by 0..batch.num_rows() which is the length of all columns in the batch
+            // SAFETY: row < a.len() is guaranteed by the caller (see block comment above)
             write_json_string(out, unsafe { a.value_unchecked(row) })?;
         }
         TypedArrayRef::Utf8View(a) => {
-            // SAFETY: row is bounded by 0..batch.num_rows() which is the length of all columns in the batch
+            // SAFETY: row < a.len() is guaranteed by the caller (see block comment above)
             write_json_string(out, unsafe { a.value_unchecked(row) })?;
         }
         TypedArrayRef::Struct(a) => {
@@ -464,15 +473,15 @@ pub(crate) fn write_typed_json_value(
             out.push(b'}');
         }
         TypedArrayRef::Binary(a) => {
-            // SAFETY: row is bounded by 0..batch.num_rows() which is the length of all columns in the batch
+            // SAFETY: row < a.len() is guaranteed by the caller (see block comment above)
             write_json_hex_bytes(out, unsafe { a.value_unchecked(row) });
         }
         TypedArrayRef::LargeBinary(a) => {
-            // SAFETY: row is bounded by 0..batch.num_rows() which is the length of all columns in the batch
+            // SAFETY: row < a.len() is guaranteed by the caller (see block comment above)
             write_json_hex_bytes(out, unsafe { a.value_unchecked(row) });
         }
         TypedArrayRef::FixedSizeBinary(a) => {
-            // SAFETY: row is bounded by 0..batch.num_rows() which is the length of all columns in the batch
+            // SAFETY: row < a.len() is guaranteed by the caller (see block comment above)
             write_json_hex_bytes(out, unsafe { a.value_unchecked(row) });
         }
         TypedArrayRef::Other(arr) => {
@@ -532,6 +541,11 @@ pub fn write_row_json(
     out: &mut Vec<u8>,
     newline: bool,
 ) -> io::Result<()> {
+    debug_assert!(
+        row < batch.num_rows(),
+        "write_row_json: row {row} out of bounds for batch.num_rows() {}",
+        batch.num_rows()
+    );
     out.push(b'{');
     let mut sep_skip = 1usize;
     for col in cols {
