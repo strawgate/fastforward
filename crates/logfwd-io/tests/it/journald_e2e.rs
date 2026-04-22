@@ -456,6 +456,10 @@ fn native_health_becomes_healthy() {
         eprintln!("SKIP: journald not available");
         return;
     }
+    if !journal_ffi::is_native_available() {
+        eprintln!("SKIP: libsystemd.so.0 not available");
+        return;
+    }
 
     let config = JournaldConfig {
         backend: JournaldBackendPref::Native,
@@ -484,6 +488,10 @@ fn native_health_becomes_healthy() {
 fn native_exclude_units_filters() {
     if !journald_available() {
         eprintln!("SKIP: journald not available");
+        return;
+    }
+    if !journal_ffi::is_native_available() {
+        eprintln!("SKIP: libsystemd.so.0 not available");
         return;
     }
 

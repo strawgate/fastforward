@@ -22,7 +22,7 @@ use crossbeam_channel::{Receiver, TrySendError, bounded};
 use logfwd_types::diagnostics::{ComponentHealth, ComponentStats};
 
 use crate::input::{InputEvent, InputSource};
-use crate::journal_ffi::{self, SD_JOURNAL_INVALIDATE};
+use crate::journal_ffi::{self, SD_JOURNAL_APPEND, SD_JOURNAL_INVALIDATE};
 
 /// Channel capacity between the reader thread and `poll()`.
 const CHANNEL_CAPACITY: usize = 4096;
@@ -469,7 +469,7 @@ fn native_reader_loop(
 
 fn update_native_wait_health(wait_result: &io::Result<i32>, health: &Arc<AtomicU8>) {
     match wait_result {
-        Ok(journal_ffi::SD_JOURNAL_APPEND) | Ok(SD_JOURNAL_INVALIDATE) => {
+        Ok(SD_JOURNAL_APPEND) | Ok(SD_JOURNAL_INVALIDATE) => {
             health.store(HEALTH_OK, Ordering::Release);
         }
         Ok(_) => {}
@@ -896,6 +896,9 @@ fn read_export_entries<R: Read>(
     running: &Arc<AtomicBool>,
     exclude_units: &[String],
 ) -> bool {
+    // Pre-normalize exclude units once to avoid per-entry allocations.
+    let exclude_units: Vec<String> = exclude_units.iter().map(|u| fixup_unit(u)).collect();
+
     // Accumulate fields for the current entry.
     let mut fields: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(32);
     let mut line_buf = Vec::with_capacity(1024);
@@ -940,7 +943,7 @@ fn read_export_entries<R: Read>(
             // Blank line = end of entry.
             if !fields.is_empty() {
                 // Check exclude filter before serializing.
-                if should_emit_export_entry(&fields, exclude_units) {
+                if should_emit_export_entry(&fields, &exclude_units) {
                     let json = export_fields_to_json(&mut fields);
                     match tx.try_send(json) {
                         Ok(()) => {}
@@ -1025,6 +1028,9 @@ fn read_export_entries<R: Read>(
 
 /// Check whether an export-format entry should be emitted, based on exclude
 /// filters. Looks at the `_SYSTEMD_UNIT` field.
+///
+/// `exclude_units` must already be normalized via [`fixup_unit`] to avoid
+/// per-entry allocations on the hot path.
 fn should_emit_export_entry(fields: &[(Vec<u8>, Vec<u8>)], exclude_units: &[String]) -> bool {
     if exclude_units.is_empty() {
         return true;
@@ -1034,10 +1040,8 @@ fn should_emit_export_entry(fields: &[(Vec<u8>, Vec<u8>)], exclude_units: &[Stri
             && let Ok(unit) = std::str::from_utf8(value)
         {
             let normalized = fixup_unit(unit);
-            for excluded in exclude_units {
-                if fixup_unit(excluded) == normalized {
-                    return false;
-                }
+            if exclude_units.contains(&normalized) {
+                return false;
             }
         }
     }
@@ -1198,7 +1202,7 @@ mod tests {
             (b"MESSAGE".to_vec(), b"hello".to_vec()),
             (b"_SYSTEMD_UNIT".to_vec(), b"sshd.service".to_vec()),
         ];
-        assert!(!should_emit_export_entry(&fields, &["sshd".to_string()]));
+        assert!(!should_emit_export_entry(&fields, &[fixup_unit("sshd")]));
     }
 
     #[test]
@@ -1207,7 +1211,7 @@ mod tests {
             (b"MESSAGE".to_vec(), b"hello".to_vec()),
             (b"_SYSTEMD_UNIT".to_vec(), b"sshd.service".to_vec()),
         ];
-        assert!(should_emit_export_entry(&fields, &["docker".to_string()]));
+        assert!(should_emit_export_entry(&fields, &[fixup_unit("docker")]));
     }
 
     #[test]
@@ -1216,7 +1220,7 @@ mod tests {
             (b"_SYSTEMD_UNIT".to_vec(), b"session-1.scope".to_vec()),
             (b"_SYSTEMD_UNIT".to_vec(), b"sshd.service".to_vec()),
         ];
-        assert!(!should_emit_export_entry(&fields, &["sshd".to_string()]));
+        assert!(!should_emit_export_entry(&fields, &[fixup_unit("sshd")]));
     }
 
     #[test]
@@ -1291,8 +1295,14 @@ mod tests {
         update_native_wait_health(&nop_timeout, &health);
         assert_eq!(health.load(Ordering::Acquire), HEALTH_DEGRADED);
 
-        let recovered = Ok(journal_ffi::SD_JOURNAL_APPEND);
+        let recovered = Ok(SD_JOURNAL_APPEND);
         update_native_wait_health(&recovered, &health);
+        assert_eq!(health.load(Ordering::Acquire), HEALTH_OK);
+
+        // Verify INVALIDATE also recovers health.
+        health.store(HEALTH_DEGRADED, Ordering::Release);
+        let invalidate_recovery = Ok(SD_JOURNAL_INVALIDATE);
+        update_native_wait_health(&invalidate_recovery, &health);
         assert_eq!(health.load(Ordering::Acquire), HEALTH_OK);
     }
 
