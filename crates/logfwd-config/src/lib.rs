@@ -1,13 +1,9 @@
 //! YAML configuration parser for logfwd.
 //!
-//! Supports two layout styles:
-//!
-//! - **Simple** (single pipeline): top-level `input`, `transform`, `output`.
-//! - **Advanced** (multiple pipelines): top-level `pipelines` map.
+//! First-party examples and generated configs use a top-level `pipelines` map.
 //!
 //! Environment variables in values are expanded using `${VAR}` syntax.
 
-mod compat;
 /// Shared metadata for config starter templates and generated reference tables.
 ///
 /// # Examples
@@ -30,10 +26,7 @@ pub use serde_helpers::{PositiveMillis, PositiveSecs};
 
 #[cfg(test)]
 pub(crate) use env::expand_env_vars;
-pub use shared::{
-    BatchConfig, MultilineConfig, NetworkConfig, RetryConfig, RotationConfig, TlsClientConfig,
-    TlsServerConfig,
-};
+pub use shared::{TlsClientConfig, TlsServerConfig};
 pub use types::{
     ArrowIpcOutputConfig, ArrowIpcTypeConfig, AuthConfig, CompressionFormat, Config, ConfigError,
     CsvEnrichmentConfig, ElasticsearchOutputConfig, ElasticsearchRequestMode, EnrichmentConfig,
@@ -44,10 +37,9 @@ pub use types::{
     HttpTypeConfig, InputConfig, InputType, InputTypeConfig, JournaldBackendConfig,
     JournaldInputConfig, JournaldTypeConfig, JsonlEnrichmentConfig, K8sPathConfig,
     LokiOutputConfig, NullOutputConfig, OtlpOutputConfig, OtlpProtobufDecodeModeConfig,
-    OtlpProtocol, OtlpTypeConfig, OutputConfigV2, OutputType, ParquetOutputConfig, PipelineConfig,
-    S3InputConfig, S3TypeConfig, SensorTypeConfig, ServerConfig, SourceMetadataStyle,
-    StaticEnrichmentConfig, StdoutOutputConfig, StorageConfig, TcpOutputConfig, TcpTypeConfig,
-    UdpOutputConfig, UdpTypeConfig,
+    OtlpProtocol, OtlpTypeConfig, OutputConfigV2, OutputType, PipelineConfig, S3InputConfig,
+    S3TypeConfig, SensorTypeConfig, ServerConfig, SocketOutputConfig, SourceMetadataStyle,
+    StaticEnrichmentConfig, StdoutOutputConfig, StorageConfig, TcpTypeConfig, UdpTypeConfig,
 };
 pub use validate::validate_host_port;
 
@@ -55,6 +47,8 @@ pub use validate::validate_host_port;
 // Tests
 // ---------------------------------------------------------------------------
 
+#[cfg(test)]
+mod test_yaml;
 #[cfg(test)]
 mod tests_config_parsing;
 #[cfg(test)]
