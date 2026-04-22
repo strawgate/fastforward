@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io::{self, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -11,29 +11,10 @@ use super::state::{EOF_IDLE_POLLS_BEFORE_EMIT, EofState};
 use super::tailer::{TailConfig, TailEvent};
 
 /// State tracked per tailed file.
-pub(super) struct TailedFile {
-    /// Stable identity used to derive the source id.
-    pub(super) identity: FileIdentity,
-    /// Fingerprint used for rotation and eviction comparisons; promoted as the file grows.
-    pub(super) comparison_fingerprint: u64,
-    pub(super) fingerprint_len: u64,
-    pub(super) file: File,
-    pub(super) offset: u64,
-    pub(super) read_buf: bytes::BytesMut,
-    pub(super) last_read: Instant,
-    pub(super) eof_state: EofState,
-}
+pub(super) use super::lifecycle::Active as TailedFile;
 
 /// Saved state for a file evicted from the open-file LRU cache.
-pub(super) struct EvictedFile {
-    pub(super) identity: FileIdentity,
-    pub(super) comparison_fingerprint: u64,
-    pub(super) fingerprint_len: u64,
-    pub(super) eof_state: EofState,
-    pub(super) offset: u64,
-    pub(super) path: PathBuf,
-    pub(super) source_id: SourceId,
-}
+pub(super) use super::lifecycle::EvictedClosedCached as EvictedFile;
 
 /// Internal result from read_new_data — distinguishes truncation from no-data.
 pub(super) enum ReadResult {
@@ -43,7 +24,7 @@ pub(super) enum ReadResult {
     NoData,
 }
 
-fn classify_empty_read_result(was_truncated: bool) -> ReadResult {
+pub(super) fn classify_empty_read_result(was_truncated: bool) -> ReadResult {
     if was_truncated {
         ReadResult::Truncated
     } else {
@@ -209,116 +190,18 @@ impl FileReader {
     }
 
     pub(super) fn read_new_data(&mut self, path: &Path) -> io::Result<ReadResult> {
-        let tailed = match self.files.get_mut(path) {
-            Some(t) => t,
-            None => return Ok(ReadResult::NoData),
-        };
-
         let fingerprint_bytes = self.config.fingerprint_bytes;
-        let meta = tailed.file.metadata()?;
-        let current_size = meta.len();
-
-        let was_truncated = current_size < tailed.offset;
-        if was_truncated {
-            tailed.offset = 0;
-            tailed.read_buf.clear();
-            tailed.eof_state.on_data();
-            tailed.file.seek(SeekFrom::Start(0))?;
-            tailed.identity.fingerprint = compute_fingerprint(&mut tailed.file, fingerprint_bytes)?;
-            tailed.comparison_fingerprint = tailed.identity.fingerprint;
-            tailed.fingerprint_len = observed_fingerprint_len(
-                tailed.identity.fingerprint,
-                current_size,
-                fingerprint_bytes,
-            );
-        }
-
-        if current_size <= tailed.offset {
-            return Ok(if was_truncated {
-                ReadResult::Truncated
-            } else {
-                ReadResult::NoData
-            });
-        }
-
         let per_file_budget = self
             .config
             .per_file_read_budget_bytes
             .clamp(1, Self::MAX_READ_PER_POLL);
 
-        let start_offset = tailed.offset;
-        let start_buf_len = tailed.read_buf.len();
+        let tailed = match self.files.get_mut(path) {
+            Some(t) => t,
+            None => return Ok(ReadResult::NoData),
+        };
 
-        let mut bytes_read_in_poll = 0;
-        loop {
-            let remaining = per_file_budget.saturating_sub(bytes_read_in_poll);
-            if remaining == 0 {
-                break;
-            }
-
-            if tailed.read_buf.capacity() - tailed.read_buf.len() < 8192 {
-                tailed.read_buf.reserve(self.config.read_buf_size);
-            }
-
-            let buf_len = tailed.read_buf.len();
-            let buf_cap = tailed.read_buf.capacity();
-            let read_len = remaining.min(buf_cap - buf_len);
-
-            tailed.read_buf.resize(buf_len + read_len, 0);
-
-            let n = match tailed
-                .file
-                .read(&mut tailed.read_buf[buf_len..buf_len + read_len])
-            {
-                Ok(n) => n,
-                Err(e) => {
-                    // Restore offset and buffer to pre-loop state so the
-                    // caller can retry without data corruption.
-                    tailed.read_buf.truncate(start_buf_len);
-                    tailed.offset = start_offset;
-                    let _ = tailed.file.seek(SeekFrom::Start(start_offset));
-                    return Err(e);
-                }
-            };
-
-            tailed.read_buf.truncate(buf_len + n);
-
-            if n == 0 {
-                break;
-            }
-
-            bytes_read_in_poll += n;
-            tailed.offset += n as u64;
-        }
-
-        if bytes_read_in_poll == 0 {
-            return Ok(classify_empty_read_result(was_truncated));
-        }
-
-        let result = tailed.read_buf.split();
-
-        tailed.last_read = Instant::now();
-
-        if fingerprint_bytes > 0
-            && tailed.fingerprint_len < fingerprint_bytes as u64
-            && current_size > tailed.fingerprint_len
-        {
-            let new_fp = compute_fingerprint(&mut tailed.file, fingerprint_bytes)?;
-            if new_fp != 0 {
-                if tailed.identity.fingerprint == 0 {
-                    tailed.identity.fingerprint = new_fp;
-                }
-                tailed.comparison_fingerprint = new_fp;
-                tailed.fingerprint_len =
-                    observed_fingerprint_len(new_fp, current_size, fingerprint_bytes);
-            }
-        }
-
-        Ok(if was_truncated {
-            ReadResult::TruncatedThenData(result)
-        } else {
-            ReadResult::Data(result)
-        })
+        tailed.read_new_data(per_file_budget, fingerprint_bytes)
     }
 
     pub(super) fn drain_file(
