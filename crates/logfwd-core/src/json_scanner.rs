@@ -719,6 +719,7 @@ mod tests {
             extract_all: false,
             line_field_name: None,
             validate_utf8: false,
+            row_predicate: None,
         };
         let mut builder = TestBuilder::new();
         scan_streaming(&buf, &config, &mut builder);
@@ -744,6 +745,7 @@ mod tests {
             extract_all: false,
             line_field_name: None,
             validate_utf8: false,
+            row_predicate: None,
         };
         let mut builder = TestBuilder::new();
         scan_streaming(input.as_bytes(), &config, &mut builder);
@@ -1423,6 +1425,7 @@ mod tests {
             extract_all: true,
             line_field_name: Some("body".to_string()),
             validate_utf8: false,
+            row_predicate: None,
         };
 
         let mut builder = TestBuilder::new();
@@ -1481,6 +1484,7 @@ mod tests {
             extract_all: true,
             line_field_name: None,
             validate_utf8: false,
+            row_predicate: None,
         };
         let mut builder = TestBuilder::new();
         scan_streaming(buf, &config, &mut builder);
@@ -1502,6 +1506,7 @@ mod tests {
             extract_all: true,
             line_field_name: Some("body".to_string()),
             validate_utf8: false,
+            row_predicate: None,
         };
         let mut builder = TestBuilder::new();
         scan_streaming(buf, &config, &mut builder);
@@ -1520,6 +1525,7 @@ mod tests {
             extract_all: true,
             line_field_name: Some("body".to_string()),
             validate_utf8: false,
+            row_predicate: None,
         };
         let mut builder = TestBuilder::new();
         scan_streaming(buf, &config, &mut builder);
@@ -1537,6 +1543,7 @@ mod tests {
             extract_all: true,
             line_field_name: Some("body".to_string()),
             validate_utf8: false,
+            row_predicate: None,
         };
         let mut builder = TestBuilder::new();
         scan_streaming(buf, &config, &mut builder);
@@ -1570,6 +1577,7 @@ mod tests {
             extract_all: true,
             line_field_name: None,
             validate_utf8: false,
+            row_predicate: None,
         };
         let mut builder = TestBuilder::new();
         scan_streaming(input, &config, &mut builder);
