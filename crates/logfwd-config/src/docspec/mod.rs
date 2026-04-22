@@ -3,8 +3,18 @@ use std::fmt::Write as _;
 use serde::Serialize;
 
 /// Public support level for a documented config surface.
+///
+/// # Examples
+///
+/// ```
+/// use logfwd_config::docspec::SupportLevel;
+///
+/// let level = SupportLevel::Stable;
+/// assert!(matches!(level, SupportLevel::Stable));
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum SupportLevel {
     /// Supported and intended for production use.
     Stable,
@@ -19,6 +29,21 @@ pub enum SupportLevel {
 }
 
 /// A single editable field in a starter template.
+///
+/// # Examples
+///
+/// ```
+/// use logfwd_config::docspec::BuilderFieldDoc;
+///
+/// let field = BuilderFieldDoc {
+///     key: "path",
+///     label: "Path",
+///     default_value: "/var/log/app.log",
+///     placeholder: "/var/log/app.log",
+///     options: &[],
+/// };
+/// assert_eq!(field.key, "path");
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct BuilderFieldDoc {
     /// Stable field identifier used by builder clients.
@@ -35,6 +60,31 @@ pub struct BuilderFieldDoc {
 }
 
 /// A documented starter template for an input or output.
+///
+/// # Examples
+///
+/// ```
+/// use logfwd_config::docspec::{BuilderFieldDoc, SupportLevel, TemplateDoc};
+///
+/// let fields = [BuilderFieldDoc {
+///     key: "listen",
+///     label: "Listen",
+///     default_value: "0.0.0.0:9000",
+///     placeholder: "0.0.0.0:9000",
+///     options: &[],
+/// }];
+/// let template = TemplateDoc {
+///     id: "tcp_json",
+///     type_tag: "tcp",
+///     aliases: &[],
+///     label: "TCP listener (JSON)",
+///     description: "Accept newline-delimited JSON logs over TCP.",
+///     support: SupportLevel::Stable,
+///     snippet: "input:\\n  type: tcp\\n  listen: 0.0.0.0:9000\\n",
+///     fields: &fields,
+/// };
+/// assert_eq!(template.type_tag, "tcp");
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct TemplateDoc {
     /// Stable template identifier used by the docs builder and CLI wizard.
@@ -56,6 +106,19 @@ pub struct TemplateDoc {
 }
 
 /// A documented config component type for support/inventory tables.
+///
+/// # Examples
+///
+/// ```
+/// use logfwd_config::docspec::{ComponentTypeDoc, SupportLevel};
+///
+/// let component = ComponentTypeDoc {
+///     type_tag: "stdout",
+///     support: SupportLevel::Stable,
+///     description: "Print to stdout.",
+/// };
+/// assert_eq!(component.type_tag, "stdout");
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ComponentTypeDoc {
     /// The config `type:` value used in YAML.
@@ -67,6 +130,14 @@ pub struct ComponentTypeDoc {
 }
 
 /// Starter templates exposed for documented input configurations.
+///
+/// # Examples
+///
+/// ```
+/// use logfwd_config::docspec::INPUT_TEMPLATES;
+///
+/// assert!(INPUT_TEMPLATES.iter().any(|template| template.id == "file_json"));
+/// ```
 pub const INPUT_TEMPLATES: &[TemplateDoc] = &[
     TemplateDoc {
         id: "file_json",
@@ -254,6 +325,14 @@ pub const INPUT_TEMPLATES: &[TemplateDoc] = &[
 ];
 
 /// Starter templates exposed for documented output configurations.
+///
+/// # Examples
+///
+/// ```
+/// use logfwd_config::docspec::OUTPUT_TEMPLATES;
+///
+/// assert!(OUTPUT_TEMPLATES.iter().any(|template| template.id == "stdout"));
+/// ```
 pub const OUTPUT_TEMPLATES: &[TemplateDoc] = &[
     TemplateDoc {
         id: "otlp",
@@ -376,6 +455,14 @@ pub const OUTPUT_TEMPLATES: &[TemplateDoc] = &[
 ];
 
 /// Input component inventory used for generated support tables.
+///
+/// # Examples
+///
+/// ```
+/// use logfwd_config::docspec::INPUT_TYPE_DOCS;
+///
+/// assert!(INPUT_TYPE_DOCS.iter().any(|entry| entry.type_tag == "file"));
+/// ```
 pub const INPUT_TYPE_DOCS: &[ComponentTypeDoc] = &[
     ComponentTypeDoc {
         type_tag: "file",
@@ -450,6 +537,14 @@ pub const INPUT_TYPE_DOCS: &[ComponentTypeDoc] = &[
 ];
 
 /// Output component inventory used for generated support tables.
+///
+/// # Examples
+///
+/// ```
+/// use logfwd_config::docspec::OUTPUT_TYPE_DOCS;
+///
+/// assert!(OUTPUT_TYPE_DOCS.iter().any(|entry| entry.type_tag == "stdout"));
+/// ```
 pub const OUTPUT_TYPE_DOCS: &[ComponentTypeDoc] = &[
     ComponentTypeDoc {
         type_tag: "otlp",
@@ -511,6 +606,15 @@ pub const OUTPUT_TYPE_DOCS: &[ComponentTypeDoc] = &[
 /// Look up an input starter template by its stable template identifier.
 ///
 /// Returns `None` when `id` is not registered in [`INPUT_TEMPLATES`].
+///
+/// # Examples
+///
+/// ```
+/// use logfwd_config::docspec::input_template;
+///
+/// assert_eq!(input_template("file_json").map(|template| template.type_tag), Some("file"));
+/// assert!(input_template("missing").is_none());
+/// ```
 pub fn input_template(id: &str) -> Option<&'static TemplateDoc> {
     INPUT_TEMPLATES.iter().find(|template| template.id == id)
 }
@@ -518,6 +622,15 @@ pub fn input_template(id: &str) -> Option<&'static TemplateDoc> {
 /// Look up an output starter template by its stable template identifier.
 ///
 /// Returns `None` when `id` is not registered in [`OUTPUT_TEMPLATES`].
+///
+/// # Examples
+///
+/// ```
+/// use logfwd_config::docspec::output_template;
+///
+/// assert_eq!(output_template("stdout").map(|template| template.type_tag), Some("stdout"));
+/// assert!(output_template("missing").is_none());
+/// ```
 pub fn output_template(id: &str) -> Option<&'static TemplateDoc> {
     OUTPUT_TEMPLATES.iter().find(|template| template.id == id)
 }
@@ -526,6 +639,20 @@ pub fn output_template(id: &str) -> Option<&'static TemplateDoc> {
 ///
 /// Hidden entries are omitted. Public support levels are rendered as
 /// human-facing status labels such as `Implemented` and `Not yet supported`.
+///
+/// # Examples
+///
+/// ```
+/// use logfwd_config::docspec::{render_component_type_table, ComponentTypeDoc, SupportLevel};
+///
+/// let docs = [ComponentTypeDoc {
+///     type_tag: "stdout",
+///     support: SupportLevel::Stable,
+///     description: "Print to stdout.",
+/// }];
+/// let table = render_component_type_table(&docs);
+/// assert!(table.contains("| `stdout` | Implemented | Print to stdout. |"));
+/// ```
 pub fn render_component_type_table(entries: &[ComponentTypeDoc]) -> String {
     let mut out =
         String::from("| Value | Status | Description |\n|-------|--------|-------------|\n");
