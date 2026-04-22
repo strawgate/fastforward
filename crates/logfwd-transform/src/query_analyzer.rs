@@ -159,7 +159,7 @@ impl QueryAnalyzer {
     /// Only simple predicates are extracted (equality, comparison, IS NULL,
     /// AND chains). Complex expressions (OR at top level, functions, LIKE,
     /// subqueries) are left to DataFusion as residual filters.
-    fn extract_scan_predicate(&self) -> Option<logfwd_core::scan_predicate::ScanPredicate> {
+    fn extract_scan_predicate(&self) -> Option<ScanPredicate> {
         let where_expr = self.where_clause.as_ref()?;
         extract_scan_predicate_from_expr(where_expr)
     }
@@ -490,10 +490,29 @@ fn tighten_facilities(slot: &mut Option<Vec<u8>>, candidate: Vec<u8>) {
 }
 
 /// Extract column name from an identifier expression.
+///
+/// For general column-reference collection, qualified identifiers like
+/// `logs.level` are accepted (the last part is the column name).
 fn expr_as_column(expr: &SqlExpr) -> Option<String> {
     match expr {
         SqlExpr::Identifier(ident) => Some(ident.value.clone()),
         SqlExpr::CompoundIdentifier(parts) => parts.last().map(|ident| ident.value.clone()),
+        _ => None,
+    }
+}
+
+/// Extract column name from a bare (unqualified) identifier only.
+///
+/// Used by scan-predicate extraction to avoid pushing predicates for
+/// qualified columns (e.g. `env.level`) from joins. Conservative: won't
+/// push `logs.level = 'error'` either, but the residual SQL filter handles
+/// it correctly.
+fn expr_as_bare_column(expr: &SqlExpr) -> Option<String> {
+    match expr {
+        SqlExpr::Identifier(ident) => Some(ident.value.clone()),
+        // Qualified identifiers (table.column) are not pushed — they may
+        // reference a joined relation rather than the scanned `logs` table.
+        SqlExpr::CompoundIdentifier(_) => None,
         _ => None,
     }
 }
@@ -556,7 +575,8 @@ fn extract_scan_predicate_from_expr(expr: &SqlExpr) -> Option<ScanPredicate> {
         // column op literal
         SqlExpr::BinaryOp { left, op, right } => {
             // Try column on left, literal on right.
-            if let (Some(col), Some(val)) = (expr_as_column(left), expr_as_scalar_value(right)) {
+            if let (Some(col), Some(val)) = (expr_as_bare_column(left), expr_as_scalar_value(right))
+            {
                 if let Some(cmp_op) = sql_op_to_cmp_op(op) {
                     return Some(ScanPredicate::Compare {
                         field: col.to_ascii_lowercase(),
@@ -566,7 +586,8 @@ fn extract_scan_predicate_from_expr(expr: &SqlExpr) -> Option<ScanPredicate> {
                 }
             }
             // Try literal on left, column on right (reversed operand order).
-            if let (Some(val), Some(col)) = (expr_as_scalar_value(left), expr_as_column(right)) {
+            if let (Some(val), Some(col)) = (expr_as_scalar_value(left), expr_as_bare_column(right))
+            {
                 if let Some(cmp_op) = sql_op_to_cmp_op_reversed(op) {
                     return Some(ScanPredicate::Compare {
                         field: col.to_ascii_lowercase(),
@@ -580,14 +601,14 @@ fn extract_scan_predicate_from_expr(expr: &SqlExpr) -> Option<ScanPredicate> {
 
         // IS NULL / IS NOT NULL
         SqlExpr::IsNull(inner) => {
-            let col = expr_as_column(inner)?;
+            let col = expr_as_bare_column(inner)?;
             Some(ScanPredicate::IsNull {
                 field: col.to_ascii_lowercase(),
                 negated: false,
             })
         }
         SqlExpr::IsNotNull(inner) => {
-            let col = expr_as_column(inner)?;
+            let col = expr_as_bare_column(inner)?;
             Some(ScanPredicate::IsNull {
                 field: col.to_ascii_lowercase(),
                 negated: true,
@@ -600,7 +621,7 @@ fn extract_scan_predicate_from_expr(expr: &SqlExpr) -> Option<ScanPredicate> {
             list,
             negated,
         } => {
-            let col = expr_as_column(expr)?;
+            let col = expr_as_bare_column(expr)?;
             let values: Vec<ScalarValue> = list.iter().filter_map(expr_as_scalar_value).collect();
             // Only push if all list elements are literal scalars.
             if values.len() != list.len() || values.is_empty() {
@@ -620,7 +641,7 @@ fn extract_scan_predicate_from_expr(expr: &SqlExpr) -> Option<ScanPredicate> {
             negated,
             ..
         } if !negated => {
-            let col = expr_as_column(expr)?;
+            let col = expr_as_bare_column(expr)?;
             let pat = expr_as_string_literal(pattern)?;
             if let Some(prefix) = pat.strip_suffix('%') {
                 if !prefix.contains('%') && !prefix.contains('_') {

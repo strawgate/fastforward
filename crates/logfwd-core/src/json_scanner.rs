@@ -28,6 +28,14 @@ struct DecodeScratch {
     value: alloc::vec::Vec<u8>,
 }
 
+/// Reusable scratch buffers for per-line scanning (decode + predicate).
+/// Allocated once in `scan_streaming` and reused across lines.
+struct LineScratch {
+    decode: DecodeScratch,
+    pred: Option<PredicateScratch>,
+    deferred: alloc::vec::Vec<DeferredField>,
+}
+
 /// Scan an NDJSON buffer using streaming structural iteration.
 ///
 /// Zero heap allocation for bitmask storage. Line boundaries and
@@ -130,16 +138,32 @@ pub fn scan_streaming<B: ScanBuilder>(buf: &[u8], config: &ScanConfig, builder: 
         close_bracket: &close_bracket,
     };
 
-    // Scratch buffers for decoding JSON escape sequences. Allocated once and
-    // reused across lines via clear() so escaped strings avoid per-line allocs.
-    let mut scratch = DecodeScratch {
-        key: alloc::vec::Vec::new(),
-        value: alloc::vec::Vec::new(),
+    // Scratch buffers allocated once and reused across lines to avoid per-line
+    // heap allocations. Predicate scratch is only allocated when needed.
+    let mut line_scratch = LineScratch {
+        decode: DecodeScratch {
+            key: alloc::vec::Vec::new(),
+            value: alloc::vec::Vec::new(),
+        },
+        pred: if config.row_predicate.is_some() {
+            Some(PredicateScratch::new())
+        } else {
+            None
+        },
+        deferred: alloc::vec::Vec::new(),
     };
 
     // Phase 2: Scan each line using stored bitmasks for quote/nested lookups.
     for (start, end) in line_ranges {
-        scan_line(buf, start, end, &bitmasks, config, builder, &mut scratch);
+        scan_line(
+            buf,
+            start,
+            end,
+            &bitmasks,
+            config,
+            builder,
+            &mut line_scratch,
+        );
     }
 }
 
@@ -151,12 +175,13 @@ fn scan_line<B: ScanBuilder>(
     blocks: &StoredBitmasks<'_>,
     config: &ScanConfig,
     builder: &mut B,
-    scratch: &mut DecodeScratch,
+    line_scratch: &mut LineScratch,
 ) {
     if config.row_predicate.is_some() {
-        scan_line_with_predicate(buf, start, end, blocks, config, builder, scratch);
+        scan_line_with_predicate(buf, start, end, blocks, config, builder, line_scratch);
         return;
     }
+    let scratch = &mut line_scratch.decode;
     builder.begin_row();
     if config.captures_line() {
         builder.append_line(&buf[start..end]);
@@ -380,7 +405,6 @@ impl PredicateScratch {
         }
     }
 
-    #[allow(dead_code)] // Will be used when scratch is reused across lines.
     fn clear(&mut self) {
         self.fields.clear();
     }
@@ -418,7 +442,7 @@ fn scan_line_with_predicate<B: ScanBuilder>(
     blocks: &StoredBitmasks<'_>,
     config: &ScanConfig,
     builder: &mut B,
-    scratch: &mut DecodeScratch,
+    line_scratch: &mut LineScratch,
 ) {
     let predicate = match config.row_predicate.as_ref() {
         Some(p) => p,
@@ -433,8 +457,11 @@ fn scan_line_with_predicate<B: ScanBuilder>(
         }
     };
 
-    let mut deferred: alloc::vec::Vec<DeferredField> = alloc::vec::Vec::new();
-    let mut pred_scratch = PredicateScratch::new();
+    let scratch = &mut line_scratch.decode;
+    let pred_scratch = line_scratch.pred.get_or_insert_with(PredicateScratch::new);
+    pred_scratch.clear();
+    let deferred = &mut line_scratch.deferred;
+    deferred.clear();
     let has_line_capture = config.captures_line();
 
     // Find the opening '{'
@@ -506,13 +533,13 @@ fn scan_line_with_predicate<B: ScanBuilder>(
                     let raw = &buf[val_start..val_end];
                     if memchr::memchr(b'\\', raw).is_some() {
                         decode_json_escapes(raw, &mut scratch.value);
+                        let decoded = scratch.value.clone();
                         if is_pred_field {
-                            pred_scratch
-                                .insert(key, PredicateFieldValue::Str(scratch.value.clone()));
+                            pred_scratch.insert(key, PredicateFieldValue::Str(decoded.clone()));
                         }
                         deferred.push(DeferredField {
                             idx,
-                            kind: DeferredValue::DecodedStr(scratch.value.clone()),
+                            kind: DeferredValue::DecodedStr(decoded),
                         });
                     } else {
                         if is_pred_field {
@@ -550,7 +577,11 @@ fn scan_line_with_predicate<B: ScanBuilder>(
                         },
                     });
                 }
-                // Nested values are not useful for predicate evaluation.
+                if is_pred_field {
+                    // Nested values are non-null but not comparable — store as
+                    // Str so IS NOT NULL works correctly.
+                    pred_scratch.insert(key, PredicateFieldValue::Str(b"[nested]".to_vec()));
+                }
             }
             b't' => {
                 if pos + 4 <= end
@@ -687,22 +718,22 @@ fn scan_line_with_predicate<B: ScanBuilder>(
     if has_line_capture {
         builder.append_line(&buf[start..end]);
     }
-    for field in &deferred {
+    for field in deferred.iter() {
         match &field.kind {
-            DeferredValue::Str { start, end } => {
-                builder.append_str_by_idx(field.idx, &buf[*start..*end]);
+            DeferredValue::Str { start: s, end: e } => {
+                builder.append_str_by_idx(field.idx, &buf[*s..*e]);
             }
             DeferredValue::DecodedStr(bytes) => {
-                builder.append_decoded_str_by_idx(field.idx, bytes);
+                builder.append_decoded_str_by_idx(field.idx, bytes.as_slice());
             }
-            DeferredValue::Nested { start, end } => {
-                builder.append_str_by_idx(field.idx, &buf[*start..*end]);
+            DeferredValue::Nested { start: s, end: e } => {
+                builder.append_str_by_idx(field.idx, &buf[*s..*e]);
             }
-            DeferredValue::Int { start, end } => {
-                builder.append_int_by_idx(field.idx, &buf[*start..*end]);
+            DeferredValue::Int { start: s, end: e } => {
+                builder.append_int_by_idx(field.idx, &buf[*s..*e]);
             }
-            DeferredValue::Float { start, end } => {
-                builder.append_float_by_idx(field.idx, &buf[*start..*end]);
+            DeferredValue::Float { start: s, end: e } => {
+                builder.append_float_by_idx(field.idx, &buf[*s..*e]);
             }
             DeferredValue::Bool(b) => {
                 builder.append_bool_by_idx(field.idx, *b);

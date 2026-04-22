@@ -224,7 +224,42 @@ fn compare_values(extracted: &ExtractedValue<'_>, op: CmpOp, literal: &ScalarVal
             let ord = a.cmp(b);
             apply_cmp_op(ord, op)
         }
-        // Mismatched types: always false.
+        // Cross-type: string vs number — attempt coercion.
+        (ExtractedValue::Str(bytes), ScalarValue::Int(b)) => {
+            if let Ok(s) = core::str::from_utf8(bytes)
+                && let Ok(a) = s.parse::<i64>()
+            {
+                let ord = a.cmp(b);
+                apply_cmp_op(ord, op)
+            } else {
+                false
+            }
+        }
+        (ExtractedValue::Int(a), ScalarValue::Str(s)) => {
+            if let Ok(b) = s.parse::<i64>() {
+                let ord = a.cmp(&b);
+                apply_cmp_op(ord, op)
+            } else {
+                false
+            }
+        }
+        (ExtractedValue::Str(bytes), ScalarValue::Float(b)) => {
+            if let Ok(s) = core::str::from_utf8(bytes)
+                && let Ok(a) = s.parse::<f64>()
+            {
+                compare_floats(a, *b, op)
+            } else {
+                false
+            }
+        }
+        (ExtractedValue::Float(a), ScalarValue::Str(s)) => {
+            if let Ok(b) = s.parse::<f64>() {
+                compare_floats(*a, b, op)
+            } else {
+                false
+            }
+        }
+        // Mismatched types: always false (conservative — let DataFusion handle).
         _ => false,
     }
 }
@@ -242,16 +277,24 @@ fn apply_cmp_op(ord: core::cmp::Ordering, op: CmpOp) -> bool {
     }
 }
 
-/// Compare two f64 values. NaN comparisons return false.
+/// Compare two f64 values with correct NaN handling.
 ///
-/// Uses `partial_cmp` to get proper NaN handling and avoids direct
-/// `==`/`!=` which triggers `clippy::float_cmp`.
+/// For `Eq`/`Ne`, uses IEEE 754 semantics directly: `NaN == x` is false,
+/// `NaN != x` is true. For ordering ops (`Lt`, `Le`, `Gt`, `Ge`), uses
+/// `partial_cmp` so NaN comparisons return false.
 #[inline]
+#[allow(clippy::float_cmp)]
 fn compare_floats(a: f64, b: f64, op: CmpOp) -> bool {
-    match a.partial_cmp(&b) {
-        Some(ord) => apply_cmp_op(ord, op),
-        // NaN: all comparisons return false (SQL semantics).
-        None => false,
+    match op {
+        // IEEE 754: NaN == anything is false.
+        CmpOp::Eq => a == b,
+        // IEEE 754: NaN != anything is true.
+        CmpOp::Ne => a != b,
+        // Ordering: NaN comparisons return false via partial_cmp.
+        _ => match a.partial_cmp(&b) {
+            Some(ord) => apply_cmp_op(ord, op),
+            None => false,
+        },
     }
 }
 
@@ -394,6 +437,47 @@ mod tests {
         };
         let lookup = |_name: &str| -> ExtractedValue<'_> { ExtractedValue::Null };
         assert!(!pred.evaluate(&lookup));
+    }
+
+    #[test]
+    fn evaluate_ne_nan_is_true() {
+        let pred = ScanPredicate::Compare {
+            field: "x".to_string(),
+            op: CmpOp::Ne,
+            value: ScalarValue::Float(f64::NAN),
+        };
+        let lookup = |name: &str| -> ExtractedValue<'_> {
+            if name == "x" {
+                ExtractedValue::Float(42.0)
+            } else {
+                ExtractedValue::Missing
+            }
+        };
+        // NaN != 42.0 should be true (IEEE 754 semantics).
+        assert!(pred.evaluate(&lookup));
+
+        // Also: 42.0 != NaN should be true.
+        let pred2 = ScanPredicate::Compare {
+            field: "x".to_string(),
+            op: CmpOp::Ne,
+            value: ScalarValue::Float(42.0),
+        };
+        let nan_lookup = |name: &str| -> ExtractedValue<'_> {
+            if name == "x" {
+                ExtractedValue::Float(f64::NAN)
+            } else {
+                ExtractedValue::Missing
+            }
+        };
+        assert!(pred2.evaluate(&nan_lookup));
+
+        // NaN == anything should be false.
+        let eq_pred = ScanPredicate::Compare {
+            field: "x".to_string(),
+            op: CmpOp::Eq,
+            value: ScalarValue::Float(f64::NAN),
+        };
+        assert!(!eq_pred.evaluate(&lookup));
     }
 
     #[test]
