@@ -405,6 +405,78 @@ impl FileTailer {
     pub fn file_paths(&self) -> Vec<(SourceId, PathBuf)> {
         self.reader.file_paths()
     }
+
+    /// Zero-copy read path: sources write directly into a shared buffer.
+    ///
+    /// Mirrors [`poll`](Self::poll) for discovery, glob rescan, change
+    /// detection, adaptive polling, eviction, and error backoff — but
+    /// replaces `read_all` with `read_all_into`, which appends data
+    /// directly into `buf` and returns segment descriptors.
+    pub fn read_into(
+        &mut self,
+        buf: &mut bytes::BytesMut,
+    ) -> io::Result<crate::input::ReadIntoResult> {
+        let mut result = crate::input::ReadIntoResult::default();
+
+        let (something_changed, mut had_error) = self.discovery.drain_events();
+
+        if let Some(until) = self.error_backoff_until
+            && Instant::now() < until
+        {
+            self.last_poll_signal = PollCadenceSignal::default();
+            if had_error {
+                self.update_error_backoff(true);
+            }
+            return Ok(result);
+        }
+
+        let poll_interval = Duration::from_millis(self.config.poll_interval_ms);
+        let glob_rescan_due = self.config.glob_rescan_interval_ms > 0
+            && self.discovery.last_glob_rescan.elapsed()
+                >= Duration::from_millis(self.config.glob_rescan_interval_ms);
+        let adaptive_fast_poll = self.adaptive_poll.should_fast_poll();
+        let should_poll = something_changed
+            || self.last_poll.elapsed() >= poll_interval
+            || glob_rescan_due
+            || adaptive_fast_poll;
+
+        if !should_poll {
+            self.last_poll_signal = PollCadenceSignal::default();
+            if had_error {
+                self.update_error_backoff(true);
+            }
+            return Ok(result);
+        }
+        self.last_poll = Instant::now();
+
+        if glob_rescan_due {
+            had_error |= self.discovery.rescan_globs(&mut self.reader);
+            self.discovery.last_glob_rescan = Instant::now();
+        }
+
+        // detect_changes and cleanup_deleted still use the TailEvent path
+        // internally — they modify reader state (rotations, deletions) but
+        // the data read itself goes through read_all_into below.
+        let mut scratch_events = Vec::new();
+        had_error |= self
+            .discovery
+            .detect_changes(&mut self.reader, &mut scratch_events);
+        had_error |= self.reader.read_all_into(buf, &mut result.segments);
+        had_error |= self
+            .discovery
+            .cleanup_deleted(&mut self.reader, &mut scratch_events);
+
+        self.last_poll_signal = PollCadenceSignal {
+            had_data: self.reader.last_read_had_data,
+            hit_read_budget: self.reader.last_read_hit_budget,
+        };
+        self.adaptive_poll.observe_signal(self.last_poll_signal);
+
+        self.reader.evict_lru(self.config.max_open_files);
+        self.update_error_backoff(had_error);
+
+        Ok(result)
+    }
 }
 
 fn suppress_source_less_shutdown_eof(events: &mut Vec<TailEvent>) {

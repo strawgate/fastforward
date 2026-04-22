@@ -317,6 +317,32 @@ mod verification {
     }
 }
 
+/// A segment of data written by a source into a shared buffer via
+/// [`InputSource::read_into`].
+#[derive(Debug)]
+pub struct ReadSegment {
+    /// Number of bytes this segment occupies in the shared buffer.
+    pub len: usize,
+    /// Source identity for this segment (e.g., which tailed file).
+    pub source_id: Option<SourceId>,
+    /// Number of complete newline-terminated lines in this segment.
+    pub line_count: usize,
+    /// CRI metadata for this segment, if any.
+    pub cri_metadata: Option<CriMetadata>,
+    /// Source-side byte count for input diagnostics.
+    pub accounted_bytes: u64,
+}
+
+/// Result of [`InputSource::read_into`]: segments written and whether the
+/// source has finished producing data.
+#[derive(Debug, Default)]
+pub struct ReadIntoResult {
+    /// Segments written into the shared buffer during this call.
+    pub segments: Vec<ReadSegment>,
+    /// True when the source has reached a terminal end-of-input state.
+    pub finished: bool,
+}
+
 /// Events produced by an input source.
 pub enum InputEvent {
     /// New data read from the source.
@@ -378,6 +404,22 @@ pub struct TlsInputConfig {
 pub trait InputSource: Send {
     /// Poll for new events. Returns empty vec if no new data.
     fn poll(&mut self) -> io::Result<Vec<InputEvent>>;
+
+    /// Write new data directly into a shared buffer, returning segment
+    /// descriptors for what was written.
+    ///
+    /// Sources that support this path avoid the intermediate per-event
+    /// `Bytes` allocation and `extend_from_slice` copy in the I/O worker.
+    /// The default implementation returns an empty result; callers must
+    /// check [`supports_read_into`](Self::supports_read_into) first.
+    fn read_into(&mut self, _buf: &mut bytes::BytesMut) -> io::Result<ReadIntoResult> {
+        Ok(ReadIntoResult::default())
+    }
+
+    /// Whether this source implements the zero-copy [`read_into`](Self::read_into) path.
+    fn supports_read_into(&self) -> bool {
+        false
+    }
 
     /// Poll during runtime shutdown before buffered input is drained.
     ///
@@ -785,6 +827,14 @@ impl InputSource for FileInput {
 
     fn poll_shutdown(&mut self) -> io::Result<Vec<InputEvent>> {
         Ok(tail_events_to_input_events(self.tailer.poll_shutdown()?))
+    }
+
+    fn supports_read_into(&self) -> bool {
+        true
+    }
+
+    fn read_into(&mut self, buf: &mut bytes::BytesMut) -> io::Result<ReadIntoResult> {
+        self.tailer.read_into(buf)
     }
 
     fn name(&self) -> &str {

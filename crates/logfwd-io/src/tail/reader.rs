@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{self, Seek, SeekFrom};
+use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -332,6 +332,218 @@ impl FileReader {
                 }
             }
         }
+        self.scratch_paths = paths;
+        had_error
+    }
+
+    /// Zero-copy read path: for each active file, read new data directly
+    /// into the shared `buf` and record a [`ReadSegment`] per file.
+    ///
+    /// Handles truncation, per-file remainder prepend, and partial-line
+    /// splitting identically to [`read_all`], but avoids allocating a
+    /// per-file `BytesMut` that later gets copied into the IO worker buffer.
+    pub(super) fn read_all_into(
+        &mut self,
+        buf: &mut bytes::BytesMut,
+        segments: &mut Vec<crate::input::ReadSegment>,
+    ) -> bool {
+        let mut had_error = false;
+        self.last_read_had_data = false;
+        self.last_read_hit_budget = false;
+
+        let mut paths = std::mem::take(&mut self.scratch_paths);
+        paths.clear();
+        paths.extend(self.files.keys().cloned());
+
+        let per_file_budget = self
+            .config
+            .per_file_read_budget_bytes
+            .clamp(1, Self::MAX_READ_PER_POLL);
+        let fingerprint_bytes = self.config.fingerprint_bytes;
+
+        for path in &paths {
+            let Some(tailed) = self.files.get_mut(path) else {
+                continue;
+            };
+
+            // --- stat & truncation detection ---
+            let meta = match tailed.file.metadata() {
+                Ok(m) => m,
+                Err(e) => {
+                    tracing::error!(path = %path.display(), error = %e, "tail.read_into_stat_error");
+                    had_error = true;
+                    continue;
+                }
+            };
+            let current_size = meta.len();
+
+            let was_truncated = current_size < tailed.offset;
+            if was_truncated {
+                tailed.offset = 0;
+                tailed.read_buf.clear();
+                tailed.eof_state.on_data();
+                if let Err(e) = tailed.file.seek(SeekFrom::Start(0)) {
+                    tracing::error!(path = %path.display(), error = %e, "tail.read_into_seek_error");
+                    had_error = true;
+                    continue;
+                }
+                match compute_fingerprint(&mut tailed.file, fingerprint_bytes) {
+                    Ok(fp) => {
+                        tailed.identity.fingerprint = fp;
+                        tailed.comparison_fingerprint = fp;
+                        tailed.fingerprint_len =
+                            observed_fingerprint_len(fp, current_size, fingerprint_bytes);
+                    }
+                    Err(e) => {
+                        tracing::error!(path = %path.display(), error = %e, "tail.read_into_fingerprint_error");
+                        had_error = true;
+                        continue;
+                    }
+                }
+            }
+
+            if current_size <= tailed.offset {
+                continue;
+            }
+
+            // --- segment start in shared buf ---
+            let segment_start = buf.len();
+            let remainder_len = tailed.read_buf.len();
+
+            // Prepend per-file remainder (partial line from previous read).
+            if remainder_len > 0 {
+                buf.extend_from_slice(&tailed.read_buf);
+                tailed.read_buf.clear();
+            }
+
+            // --- kernel read directly into shared buf ---
+            let start_offset = tailed.offset;
+            let mut bytes_read: usize = 0;
+            let mut read_error = false;
+
+            loop {
+                let remaining = per_file_budget.saturating_sub(bytes_read);
+                if remaining == 0 {
+                    break;
+                }
+
+                let buf_len = buf.len();
+                if buf.capacity() - buf_len < 8192 {
+                    buf.reserve(64 * 1024);
+                }
+                let buf_cap = buf.capacity();
+                let read_len = remaining.min(buf_cap - buf_len);
+
+                buf.resize(buf_len + read_len, 0);
+                match tailed.file.read(&mut buf[buf_len..buf_len + read_len]) {
+                    Ok(0) => {
+                        buf.truncate(buf_len);
+                        break;
+                    }
+                    Ok(n) => {
+                        buf.truncate(buf_len + n);
+                        bytes_read += n;
+                        tailed.offset += n as u64;
+                    }
+                    Err(e) => {
+                        buf.truncate(buf_len);
+                        tracing::error!(path = %path.display(), error = %e, "tail.read_into_read_error");
+                        // Restore offset and put everything back into read_buf.
+                        tailed.offset = start_offset;
+                        let _ = tailed.file.seek(SeekFrom::Start(start_offset));
+                        let written = buf.split_off(segment_start);
+                        tailed.read_buf = written;
+                        had_error = true;
+                        read_error = true;
+                        break;
+                    }
+                }
+            }
+
+            if read_error {
+                continue;
+            }
+
+            let total_segment_len = buf.len() - segment_start;
+
+            if total_segment_len == 0 {
+                // Nothing was read (and no remainder was prepended).
+                continue;
+            }
+
+            // --- find last newline to split complete vs partial lines ---
+            let segment_data = &buf[segment_start..];
+            let last_nl = memchr::memrchr(b'\n', segment_data);
+
+            match last_nl {
+                Some(nl_pos) => {
+                    // Complete lines end at nl_pos (inclusive).
+                    let complete_end = segment_start + nl_pos + 1;
+                    let partial_start = complete_end;
+                    let partial_len = buf.len() - partial_start;
+
+                    // Move partial tail to per-file read_buf.
+                    if partial_len > 0 {
+                        tailed.read_buf.extend_from_slice(&buf[partial_start..]);
+                        buf.truncate(complete_end);
+                    }
+
+                    let seg_len = complete_end - segment_start;
+                    let line_count =
+                        memchr::memchr_iter(b'\n', &buf[segment_start..complete_end]).count();
+
+                    self.last_read_had_data = true;
+                    self.last_read_hit_budget |= bytes_read >= per_file_budget;
+                    tailed.eof_state.on_data();
+                    tailed.last_read = Instant::now();
+
+                    let source_id = {
+                        let sid = tailed.identity.source_id();
+                        if sid == SourceId(0) { None } else { Some(sid) }
+                    };
+
+                    segments.push(crate::input::ReadSegment {
+                        len: seg_len,
+                        source_id,
+                        line_count,
+                        cri_metadata: None,
+                        accounted_bytes: bytes_read as u64,
+                    });
+                }
+                None => {
+                    // No newline in entire segment — it's one long partial line.
+                    // Move everything to read_buf.
+                    tailed.read_buf.extend_from_slice(&buf[segment_start..]);
+                    buf.truncate(segment_start);
+                }
+            }
+
+            // --- fingerprint promotion (mirrors lifecycle.rs) ---
+            if fingerprint_bytes > 0
+                && tailed.fingerprint_len < fingerprint_bytes as u64
+                && current_size > tailed.fingerprint_len
+            {
+                match compute_fingerprint(&mut tailed.file, fingerprint_bytes) {
+                    Ok(new_fp) if new_fp != 0 => {
+                        if tailed.identity.fingerprint == 0 {
+                            tailed.identity.fingerprint = new_fp;
+                        }
+                        tailed.comparison_fingerprint = new_fp;
+                        tailed.fingerprint_len =
+                            observed_fingerprint_len(new_fp, current_size, fingerprint_bytes);
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!(
+                            path = %path.display(),
+                            error = %e,
+                            "tail.read_into_fingerprint_promotion_error"
+                        );
+                    }
+                }
+            }
+        }
+
         self.scratch_paths = paths;
         had_error
     }

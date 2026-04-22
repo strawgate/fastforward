@@ -741,53 +741,150 @@ pub(super) fn io_worker_loop(
             break;
         }
 
-        let events = match input.source.poll() {
-            Ok(e) => e,
-            Err(e) => {
-                adaptive_poll.reset_fast_polls();
-                input.stats.inc_errors();
-                consecutive_poll_failures = consecutive_poll_failures.saturating_add(1);
-                input
-                    .stats
-                    .set_health(reduce_component_health_after_poll_failure(
+        // Zero-copy path: sources that support read_into write directly
+        // into the IO worker's buffer, avoiding per-event Bytes allocation
+        // and the extend_from_slice copy.
+        if input.source.supports_read_into() {
+            match input.source.read_into(&mut input.buf) {
+                Ok(result) => {
+                    consecutive_poll_failures = 0;
+                    input.stats.set_health(reduce_component_health(
                         input.stats.health(),
-                        consecutive_poll_failures,
+                        HealthTransitionEvent::Observed(input.source.health()),
                     ));
-                tracing::warn!(input = input.source.name(), error = %e, "input.poll_error");
-                std::thread::sleep(Duration::from_millis(100));
-                continue;
-            }
-        };
-        consecutive_poll_failures = 0;
+                    let cadence = input.source.get_cadence();
+                    adaptive_poll.observe_signal(cadence.signal);
 
-        input.stats.set_health(reduce_component_health(
-            input.stats.health(),
-            HealthTransitionEvent::Observed(input.source.health()),
-        ));
-        let cadence = input.source.get_cadence();
-        adaptive_poll.observe_signal(cadence.signal);
+                    if result.segments.is_empty() {
+                        if adaptive_poll.should_fast_poll() {
+                            metrics.inc_cadence_fast_repoll();
+                        } else {
+                            metrics.inc_cadence_idle_sleep();
+                            std::thread::sleep(poll_interval);
+                        }
+                    } else {
+                        let source_path_snapshot = if source_metadata_plan.has_source_path() {
+                            input.source.source_paths()
+                        } else {
+                            Vec::new()
+                        };
 
-        if events.is_empty() {
-            if adaptive_poll.should_fast_poll() {
-                metrics.inc_cadence_fast_repoll();
-            } else {
-                metrics.inc_cadence_idle_sleep();
-                std::thread::sleep(poll_interval);
+                        for segment in &result.segments {
+                            if source_metadata_plan.has_any() {
+                                if source_metadata_plan.has_source_path() {
+                                    capture_source_path(
+                                        &mut input.source_paths,
+                                        &source_path_snapshot,
+                                        segment.source_id,
+                                    );
+                                }
+                                append_row_origin(
+                                    &mut input.row_origins,
+                                    segment.source_id,
+                                    &input_name,
+                                    segment.line_count,
+                                );
+                            }
+                            if let Some(ref cri_md) = segment.cri_metadata {
+                                append_cri_metadata_for_data(
+                                    &mut input.cri_metadata,
+                                    Some(cri_md.clone()),
+                                    &input.buf,
+                                    &[], // data already in buf
+                                );
+                            }
+                        }
+
+                        if buffered_since.is_none() && !input.buf.is_empty() {
+                            buffered_since = Some(Instant::now());
+                        }
+
+                        if input.buf.len() >= safe_batch_target_bytes {
+                            metrics.inc_flush_by_size();
+                            if !flush_buf(
+                                &mut input.buf,
+                                &mut input.row_origins,
+                                &mut pending_row_origin,
+                                &mut input.source_paths,
+                                &mut input.cri_metadata,
+                                &*input.source,
+                                &tx,
+                                &metrics,
+                                &mut last_bp_warn,
+                                input_index,
+                                source_metadata_plan,
+                            ) {
+                                break 'io_loop;
+                            }
+                            buffered_since = None;
+                        }
+                    }
+                }
+                Err(e) => {
+                    adaptive_poll.reset_fast_polls();
+                    input.stats.inc_errors();
+                    consecutive_poll_failures = consecutive_poll_failures.saturating_add(1);
+                    input
+                        .stats
+                        .set_health(reduce_component_health_after_poll_failure(
+                            input.stats.health(),
+                            consecutive_poll_failures,
+                        ));
+                    tracing::warn!(input = input.source.name(), error = %e, "input.read_into_error");
+                    std::thread::sleep(Duration::from_millis(100));
+                    continue;
+                }
             }
-        } else if !process_io_events(
-            &mut input,
-            &input_name,
-            events,
-            &tx,
-            &metrics,
-            &mut last_bp_warn,
-            input_index,
-            safe_batch_target_bytes,
-            &mut buffered_since,
-            &mut pending_row_origin,
-            source_metadata_plan,
-        ) {
-            break 'io_loop;
+        } else {
+            // Existing poll() path for sources that don't support read_into.
+            let events = match input.source.poll() {
+                Ok(e) => e,
+                Err(e) => {
+                    adaptive_poll.reset_fast_polls();
+                    input.stats.inc_errors();
+                    consecutive_poll_failures = consecutive_poll_failures.saturating_add(1);
+                    input
+                        .stats
+                        .set_health(reduce_component_health_after_poll_failure(
+                            input.stats.health(),
+                            consecutive_poll_failures,
+                        ));
+                    tracing::warn!(input = input.source.name(), error = %e, "input.poll_error");
+                    std::thread::sleep(Duration::from_millis(100));
+                    continue;
+                }
+            };
+            consecutive_poll_failures = 0;
+
+            input.stats.set_health(reduce_component_health(
+                input.stats.health(),
+                HealthTransitionEvent::Observed(input.source.health()),
+            ));
+            let cadence = input.source.get_cadence();
+            adaptive_poll.observe_signal(cadence.signal);
+
+            if events.is_empty() {
+                if adaptive_poll.should_fast_poll() {
+                    metrics.inc_cadence_fast_repoll();
+                } else {
+                    metrics.inc_cadence_idle_sleep();
+                    std::thread::sleep(poll_interval);
+                }
+            } else if !process_io_events(
+                &mut input,
+                &input_name,
+                events,
+                &tx,
+                &metrics,
+                &mut last_bp_warn,
+                input_index,
+                safe_batch_target_bytes,
+                &mut buffered_since,
+                &mut pending_row_origin,
+                source_metadata_plan,
+            ) {
+                break 'io_loop;
+            }
         }
 
         if input.source.is_finished() {
