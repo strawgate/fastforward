@@ -194,7 +194,7 @@ pub(super) async fn worker_task(
 pub(super) struct ProcessItemContext<'a> {
     /// Worker slot id used for metrics, tracing, and health events.
     pub(super) worker_id: usize,
-    /// Owned sink instance that receives the batch.
+    /// Mutable borrowed sink reference that receives the batch.
     pub(super) sink: &'a mut dyn Sink,
     /// Shared output health tracker for readiness and failure transitions.
     pub(super) output_health: &'a OutputHealthTracker,
