@@ -3,7 +3,10 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use std::{cmp::Ordering, collections::BinaryHeap};
+use std::{
+    cmp::Ordering,
+    collections::{BinaryHeap, HashMap},
+};
 
 use arrow::array::{ArrayRef, BooleanArray, Float32Array, StringArray, UInt32Array, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
@@ -202,6 +205,11 @@ struct HostMetricsCommon {
     schema: Arc<Schema>,
     system: System,
     networks: Networks,
+    /// Cached container IDs discovered from `/proc/<pid>/cgroup`, keyed by PID.
+    ///
+    /// Linux process snapshots can emit hundreds of rows per poll; caching
+    /// avoids rereading procfs for the same process on every cycle.
+    process_container_ids: HashMap<u32, Option<String>>,
     /// Wrapping counter used to rotate the budget remainder
     /// across families so no single family is permanently starved (#1935).
     poll_count: usize,

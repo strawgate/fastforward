@@ -239,7 +239,7 @@ impl HostMetricsCommon {
     }
 
     fn emit_process_rows(
-        &self,
+        &mut self,
         control: &ControlState,
         out: &mut Vec<SensorRow>,
         limit: usize,
@@ -268,6 +268,11 @@ impl HostMetricsCommon {
         }
         let mut procs = procs.into_vec();
         procs.sort_unstable_by_key(|selected| selected.pid);
+
+        let active_pids: std::collections::HashSet<u32> =
+            procs.iter().map(|selected| selected.pid).collect();
+        self.process_container_ids
+            .retain(|pid, _| active_pids.contains(pid));
 
         let mut emitted = 0usize;
         for selected in procs {
@@ -300,7 +305,11 @@ impl HostMetricsCommon {
             row.process_run_time_secs = Some(process.run_time());
             row.process_open_files = process.open_files().map(|n| n as u64);
             row.process_thread_count = process.tasks().map(|t| t.len() as u64);
-            row.process_container_id = extract_container_id(pid);
+            row.process_container_id = self
+                .process_container_ids
+                .entry(pid)
+                .or_insert_with(|| extract_container_id(pid))
+                .clone();
             out.push(row);
             emitted += 1;
         }
