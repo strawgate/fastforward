@@ -72,14 +72,12 @@ Even docs-only PRs should update all canonical locations for that fact.
 Do not duplicate the same reference data in multiple pages.
 Link to canonical docs instead.
 
-For ingest-path docs, keep the architectural vocabulary stable:
-
-- docs use **Source / Framing / Normalization / Batching / Parsing /
-  Materialization / Enrichment / Transform / Sink**
-- user-facing config still uses `inputs` / `outputs`
-- implementation-local names (`InputEvent`, `FramedInput`, worker module names)
-  should not leak into architecture diagrams unless the code name itself is the
-  point of the explanation
+For ingest-path docs, keep the architectural vocabulary stable by treating the
+[Ingest Glossary](ARCHITECTURE.md#ingest-glossary) as canonical. User-facing
+config still uses `inputs` / `outputs`, and implementation-local names
+(`InputEvent`, `FramedInput`, worker module names) should not leak into
+architecture diagrams unless the code name itself is the point of the
+explanation.
 
 ## Quick pre-PR checklist
 

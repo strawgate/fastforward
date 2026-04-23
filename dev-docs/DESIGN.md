@@ -6,21 +6,10 @@ receivers, processors, and exporters. OTel semantics are optional adapters at th
 **RecordBatch in, RecordBatch out.** The pipeline doesn't care whether the data is logs,
 metrics, traces, or CSV files.
 
-For ingest discussions, this document uses the same canonical layer names as
-`ARCHITECTURE.md`:
-
-- Source
-- Framing
-- Normalization
-- Batching
-- Parsing
-- Materialization
-- Enrichment
-- Transform
-- Sink
-
-Those names describe responsibilities. They intentionally do not mirror every
-current type or module name in the codebase.
+For ingest discussions, this document uses the canonical layer names defined in
+the [Ingest Glossary](ARCHITECTURE.md#ingest-glossary). Those names describe
+responsibilities. They intentionally do not mirror every current type or
+module name in the codebase.
 
 ## Target architecture
 
