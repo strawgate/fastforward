@@ -425,6 +425,15 @@ fn normalize_plain_text_fallback(line: &[u8]) -> Option<&[u8]> {
     (!line.is_empty()).then_some(line)
 }
 
+#[inline]
+fn append_json_byte_escape<O: ScannerReadyOutput>(byte: u8, dst: &mut O) {
+    dst.extend_from_slice(b"\\u00");
+    let hi = (byte >> 4) & 0x0F;
+    let lo = byte & 0x0F;
+    dst.push_byte(if hi < 10 { b'0' + hi } else { b'a' + hi - 10 });
+    dst.push_byte(if lo < 10 { b'0' + lo } else { b'a' + lo - 10 });
+}
+
 fn append_json_escaped<O: ScannerReadyOutput>(src: &[u8], dst: &mut O) {
     for &b in src {
         match b {
@@ -435,13 +444,7 @@ fn append_json_escaped<O: ScannerReadyOutput>(src: &[u8], dst: &mut O) {
             b'\n' => dst.extend_from_slice(b"\\n"),
             0x0C => dst.extend_from_slice(b"\\f"),
             b'\r' => dst.extend_from_slice(b"\\r"),
-            0x00..=0x1F | 0x7F => {
-                dst.extend_from_slice(b"\\u00");
-                let hi = (b >> 4) & 0x0F;
-                let lo = b & 0x0F;
-                dst.push_byte(if hi < 10 { b'0' + hi } else { b'a' + hi - 10 });
-                dst.push_byte(if lo < 10 { b'0' + lo } else { b'a' + lo - 10 });
-            }
+            0x00..=0x1F | 0x7F..=0xFF => append_json_byte_escape(b, dst),
             _ => dst.push_byte(b),
         }
     }
@@ -485,6 +488,7 @@ mod tests {
     use crate::input::{FileInput, InputEvent, InputSource};
     use crate::tail::TailConfig;
     use bytes::BytesMut;
+    use proptest::prelude::*;
     use std::time::{Duration, Instant};
 
     fn make_stats() -> Arc<ComponentStats> {
@@ -923,6 +927,34 @@ mod tests {
                 value.get("msg").is_none(),
                 "non-JSON whitespace byte {prefix:#04x} must not be treated as JSON: {trimmed:?}"
             );
+        }
+    }
+
+    #[test]
+    fn plain_text_fallback_escapes_non_utf8_bytes_as_json_hex() {
+        let mut out = Vec::new();
+        write_plain_text_fallback(b"\x80\xff", "body", &mut out);
+        let text = std::str::from_utf8(&out).expect("fallback output must be ASCII JSON");
+        let parsed: serde_json::Value =
+            serde_json::from_str(text.trim_end()).expect("fallback output must parse as JSON");
+        assert_eq!(
+            parsed.get("body").and_then(serde_json::Value::as_str),
+            Some("\u{80}\u{ff}")
+        );
+    }
+
+    proptest! {
+        #[test]
+        fn plain_text_fallback_always_emits_valid_json(
+            field_name in "[ -~]{1,8}",
+            bytes in prop::collection::vec(any::<u8>(), 0..64),
+        ) {
+            let mut out = Vec::new();
+            write_plain_text_fallback(&bytes, &field_name, &mut out);
+            let text = std::str::from_utf8(&out).expect("fallback output must remain ASCII JSON");
+            let parsed: serde_json::Value =
+                serde_json::from_str(text.trim_end()).expect("fallback output must remain valid JSON");
+            prop_assert!(parsed.get(field_name.as_str()).is_some());
         }
     }
 

@@ -3,6 +3,8 @@
 //! This isolates the buffered shutdown/flush decision surface from the async
 //! I/O shell so it can be covered with Kani and proptest.
 
+pub(super) const LARGE_SINGLE_CHUNK_DIRECT_FLUSH_BYTES: usize = 64 * 1024;
+
 /// Continue shutdown repolling when the shared-buffer path might still emit
 /// scanner-ready payload on a later poll.
 #[must_use]
@@ -33,16 +35,18 @@ pub(super) const fn should_flush_large_single_shared_buffer_chunk(
     first_event_starts_at_zero: bool,
     first_event_len: usize,
 ) -> bool {
-    const MIN_DIRECT_FLUSH_BYTES: usize = 64 * 1024;
     buffer_was_empty_at_poll
         && event_count == 1
         && first_event_starts_at_zero
-        && first_event_len >= MIN_DIRECT_FLUSH_BYTES
+        && first_event_len >= LARGE_SINGLE_CHUNK_DIRECT_FLUSH_BYTES
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{should_flush_large_single_shared_buffer_chunk, should_repoll_buffered_shutdown};
+    use super::{
+        LARGE_SINGLE_CHUNK_DIRECT_FLUSH_BYTES, should_flush_large_single_shared_buffer_chunk,
+        should_repoll_buffered_shutdown,
+    };
     use proptest::prelude::*;
 
     #[test]
@@ -62,31 +66,31 @@ mod tests {
             true,
             1,
             true,
-            64 * 1024
+            LARGE_SINGLE_CHUNK_DIRECT_FLUSH_BYTES
         ));
         assert!(!should_flush_large_single_shared_buffer_chunk(
             false,
             1,
             true,
-            64 * 1024
+            LARGE_SINGLE_CHUNK_DIRECT_FLUSH_BYTES
         ));
         assert!(!should_flush_large_single_shared_buffer_chunk(
             true,
             2,
             true,
-            64 * 1024
+            LARGE_SINGLE_CHUNK_DIRECT_FLUSH_BYTES
         ));
         assert!(!should_flush_large_single_shared_buffer_chunk(
             true,
             1,
             false,
-            64 * 1024
+            LARGE_SINGLE_CHUNK_DIRECT_FLUSH_BYTES
         ));
         assert!(!should_flush_large_single_shared_buffer_chunk(
             true,
             1,
             true,
-            (64 * 1024) - 1
+            LARGE_SINGLE_CHUNK_DIRECT_FLUSH_BYTES - 1
         ));
     }
 
@@ -129,7 +133,7 @@ mod tests {
             let expected = buffer_was_empty_at_poll
                 && event_count == 1
                 && first_event_starts_at_zero
-                && first_event_len >= 64 * 1024;
+                && first_event_len >= LARGE_SINGLE_CHUNK_DIRECT_FLUSH_BYTES;
 
             prop_assert_eq!(
                 should_flush_large_single_shared_buffer_chunk(
@@ -146,7 +150,10 @@ mod tests {
 
 #[cfg(kani)]
 mod verification {
-    use super::{should_flush_large_single_shared_buffer_chunk, should_repoll_buffered_shutdown};
+    use super::{
+        LARGE_SINGLE_CHUNK_DIRECT_FLUSH_BYTES, should_flush_large_single_shared_buffer_chunk,
+        should_repoll_buffered_shutdown,
+    };
 
     #[kani::proof]
     fn verify_buffered_shutdown_repoll_matches_reference_formula() {
@@ -195,7 +202,7 @@ mod verification {
         let expected = buffer_was_empty_at_poll
             && event_count == 1
             && first_event_starts_at_zero
-            && first_event_len >= 64 * 1024;
+            && first_event_len >= LARGE_SINGLE_CHUNK_DIRECT_FLUSH_BYTES;
 
         assert_eq!(
             should_flush_large_single_shared_buffer_chunk(
@@ -208,7 +215,12 @@ mod verification {
         );
 
         kani::cover!(
-            should_flush_large_single_shared_buffer_chunk(true, 1, true, 64 * 1024),
+            should_flush_large_single_shared_buffer_chunk(
+                true,
+                1,
+                true,
+                LARGE_SINGLE_CHUNK_DIRECT_FLUSH_BYTES,
+            ),
             "direct flush threshold path reachable"
         );
         kani::cover!(

@@ -70,7 +70,7 @@ Ownership boundaries cut across those semantic layers:
 
 ### 1. Reading: bytes enter the system
 
-```
+```text
 Disk → FileReader (`BytesMut`) → InputEvent::Data { bytes: Bytes }
 ```
 
@@ -93,7 +93,7 @@ channel.
 
 ### 2. Framing: input bytes → complete lines
 
-```
+```text
 Bytes → FramedInput::poll() → scanner-ready `InputEvent::Data { bytes: Bytes }`
 ```
 
@@ -295,7 +295,7 @@ snapshot types consumed by runtime/bootstrap wiring.
 
 The runtime path is split into three stages:
 
-```
+```text
 1. Input-side worker thread (`io_worker.rs`)
    - polls `InputSource`
    - receives `InputEvent`s from `FramedInput`
@@ -326,7 +326,7 @@ This separation matters for batching work:
 
 Understanding who owns what and when copies happen:
 
-```
+```text
 Current on `main`:
   tailer reads → per-file BytesMut                       [kernel → userspace]
   tailer emits InputEvent::Data { bytes: Bytes }         (ownership transfer)

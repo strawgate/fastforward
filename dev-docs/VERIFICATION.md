@@ -161,6 +161,13 @@ do not stop at patching the shell. Extract the transition policy into a local pu
 reducer or state module when feasible, then add Kani proofs for single-step invariants
 and proptest sequence coverage for multi-step behavior.
 
+For shared-buffer input work specifically, treat the runtime consumer of
+`BufferedInputEvent` as a separate state machine from `FramedInput` itself.
+`poll()` vs `poll_into()` equivalence tests are necessary but not sufficient:
+add a reducer-level sequence test that mixes `Data`, `Batch`, and control
+events and checks emitted `IoWorkItem` ordering against a reference model.
+That is the seam where shared byte ranges meet flush boundaries.
+
 ### Running proofs
 
 ```bash

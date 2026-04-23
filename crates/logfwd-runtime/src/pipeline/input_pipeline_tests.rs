@@ -743,6 +743,72 @@ const IO_CPU_CHANNEL_CAPACITY: usize = 4;
 /// Constant for shutdown drain log interval (mirrors the production constant).
 const SHUTDOWN_DRAIN_PROGRESS_LOG_INTERVAL_ROUNDS: usize = 64;
 
+#[derive(Clone, Debug)]
+enum BufferedSequenceOp {
+    Data(u8),
+    Batch(u8),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum BufferedSequenceOutput {
+    Bytes(Vec<u8>),
+    Batch(usize),
+}
+
+fn make_test_batch(rows: usize, tag: &str) -> RecordBatch {
+    let schema = Arc::new(Schema::new(vec![Field::new("msg", DataType::Utf8, true)]));
+    let values = (0..rows)
+        .map(|row| format!("{tag}-{row}"))
+        .collect::<Vec<_>>();
+    RecordBatch::try_new(schema, vec![Arc::new(StringArray::from(values))]).expect("batch")
+}
+
+fn buffered_data_payload(id: u8) -> Vec<u8> {
+    format!("{{\"msg\":\"data-{id}\"}}\n").into_bytes()
+}
+
+fn expected_buffered_outputs(ops: &[BufferedSequenceOp]) -> Vec<BufferedSequenceOutput> {
+    let mut outputs = Vec::new();
+    let mut pending_bytes = Vec::new();
+
+    for op in ops {
+        match *op {
+            BufferedSequenceOp::Data(id) => {
+                pending_bytes.extend_from_slice(&buffered_data_payload(id))
+            }
+            BufferedSequenceOp::Batch(rows) => {
+                if !pending_bytes.is_empty() {
+                    outputs.push(BufferedSequenceOutput::Bytes(std::mem::take(
+                        &mut pending_bytes,
+                    )));
+                }
+                outputs.push(BufferedSequenceOutput::Batch((rows as usize % 3) + 1));
+            }
+        }
+    }
+
+    if !pending_bytes.is_empty() {
+        outputs.push(BufferedSequenceOutput::Bytes(pending_bytes));
+    }
+
+    outputs
+}
+
+fn drain_io_work_items(rx: &mut mpsc::Receiver<IoWorkItem>) -> Vec<BufferedSequenceOutput> {
+    let mut outputs = Vec::new();
+    while let Ok(item) = rx.try_recv() {
+        match item {
+            IoWorkItem::Bytes(chunk) => {
+                outputs.push(BufferedSequenceOutput::Bytes(chunk.bytes.to_vec()))
+            }
+            IoWorkItem::Batch { batch, .. } => {
+                outputs.push(BufferedSequenceOutput::Batch(batch.num_rows()))
+            }
+        }
+    }
+    outputs
+}
+
 #[test]
 fn io_worker_uses_configured_input_name_for_source_metadata() {
     let (tx, mut rx) = mpsc::channel(IO_CPU_CHANNEL_CAPACITY);
@@ -1166,6 +1232,143 @@ fn io_worker_flushes_large_shared_buffer_chunk_without_waiting_for_timeout() {
     };
     assert_eq!(chunk.bytes.len(), 80 * 1024);
     assert!(chunk.bytes.iter().all(|byte| *byte == b'x'));
+}
+
+#[test]
+fn process_buffered_events_preserves_later_data_after_interleaved_batch() {
+    let (tx, mut rx) = mpsc::channel(IO_CPU_CHANNEL_CAPACITY);
+    let stats = Arc::new(ComponentStats::new_with_health(ComponentHealth::Starting));
+    let mut input = InputState {
+        source: Box::new(SingleDataSource { emitted: false }),
+        buf: BytesMut::from(
+            &[
+                buffered_data_payload(1).as_slice(),
+                buffered_data_payload(2).as_slice(),
+            ]
+            .concat()[..],
+        ),
+        row_origins: Vec::new(),
+        source_paths: HashMap::new(),
+        cri_metadata: CriMetadata::default(),
+        stats,
+    };
+    let meter = opentelemetry::global::meter("process_buffered_events_interleaved_batch");
+    let metrics = PipelineMetrics::new("test", "SELECT * FROM logs", &meter);
+    let mut last_bp_warn = None;
+    let mut buffered_since = None;
+    let mut pending_row_origin = None;
+    let first_len = buffered_data_payload(1).len();
+    let second_len = buffered_data_payload(2).len();
+
+    let ok = process_buffered_events(
+        &mut input,
+        &Arc::from("configured-input"),
+        vec![
+            BufferedInputEvent::Data {
+                range: 0..first_len,
+                source_id: None,
+                cri_metadata: None,
+            },
+            BufferedInputEvent::Batch {
+                batch: make_test_batch(2, "batch"),
+                source_id: None,
+            },
+            BufferedInputEvent::Data {
+                range: first_len..(first_len + second_len),
+                source_id: None,
+                cri_metadata: None,
+            },
+        ],
+        &tx,
+        &metrics,
+        &mut last_bp_warn,
+        0,
+        1,
+        &mut buffered_since,
+        &mut pending_row_origin,
+        true,
+        SourceMetadataPlan::default(),
+    );
+
+    assert!(ok);
+    assert!(input.buf.is_empty());
+    assert_eq!(
+        drain_io_work_items(&mut rx),
+        vec![
+            BufferedSequenceOutput::Bytes(buffered_data_payload(1)),
+            BufferedSequenceOutput::Batch(2),
+            BufferedSequenceOutput::Bytes(buffered_data_payload(2)),
+        ]
+    );
+}
+
+proptest! {
+    #[test]
+    fn process_buffered_events_matches_reference_order_for_generated_sequences(
+        ops in prop::collection::vec(
+            prop_oneof![
+                any::<u8>().prop_map(BufferedSequenceOp::Data),
+                any::<u8>().prop_map(BufferedSequenceOp::Batch),
+            ],
+            1..16,
+        )
+    ) {
+        let (tx, mut rx) = mpsc::channel(64);
+        let stats = Arc::new(ComponentStats::new_with_health(ComponentHealth::Starting));
+        let mut input = InputState {
+            source: Box::new(SingleDataSource { emitted: false }),
+            buf: BytesMut::new(),
+            row_origins: Vec::new(),
+            source_paths: HashMap::new(),
+            cri_metadata: CriMetadata::default(),
+            stats,
+        };
+        let input_name: Arc<str> = Arc::from("configured-input");
+        let meter = opentelemetry::global::meter("process_buffered_events_proptest");
+        let metrics = PipelineMetrics::new("test", "SELECT * FROM logs", &meter);
+        let mut last_bp_warn = None;
+        let mut buffered_since = None;
+        let mut pending_row_origin = None;
+        let mut events = Vec::new();
+
+        for op in &ops {
+            match *op {
+                BufferedSequenceOp::Data(id) => {
+                    let payload = buffered_data_payload(id);
+                    let start = input.buf.len();
+                    input.buf.extend_from_slice(&payload);
+                    events.push(BufferedInputEvent::Data {
+                        range: start..input.buf.len(),
+                        source_id: None,
+                        cri_metadata: None,
+                    });
+                }
+                BufferedSequenceOp::Batch(rows) => events.push(BufferedInputEvent::Batch {
+                    batch: make_test_batch((rows as usize % 3) + 1, "batch"),
+                    source_id: None,
+                }),
+            }
+        }
+
+        let ok = process_buffered_events(
+            &mut input,
+            &input_name,
+            events,
+            &tx,
+            &metrics,
+            &mut last_bp_warn,
+            0,
+            1,
+            &mut buffered_since,
+            &mut pending_row_origin,
+            true,
+            SourceMetadataPlan::default(),
+        );
+
+        prop_assert!(ok);
+        prop_assert!(input.buf.is_empty());
+        prop_assert_eq!(drain_io_work_items(&mut rx), expected_buffered_outputs(&ops));
+    }
 }
 
 #[test]

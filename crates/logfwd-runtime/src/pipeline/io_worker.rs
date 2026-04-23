@@ -122,6 +122,35 @@ fn is_large_single_buffered_data_event(
 }
 
 #[cfg(not(feature = "turmoil"))]
+fn next_buffered_data_start(events: &[BufferedInputEvent], from_index: usize) -> Option<usize> {
+    events
+        .iter()
+        .skip(from_index + 1)
+        .filter_map(|event| match event {
+            BufferedInputEvent::Data { range, .. } => Some(range.start),
+            BufferedInputEvent::Batch { .. }
+            | BufferedInputEvent::Rotated { .. }
+            | BufferedInputEvent::Truncated { .. } => None,
+        })
+        .min()
+}
+
+#[cfg(not(feature = "turmoil"))]
+fn rebase_future_buffered_data_ranges(
+    events: &mut [BufferedInputEvent],
+    from_index: usize,
+    offset: usize,
+) {
+    for event in events.iter_mut().skip(from_index) {
+        if let BufferedInputEvent::Data { range, .. } = event {
+            debug_assert!(range.start >= offset);
+            debug_assert!(range.end >= offset);
+            *range = (range.start - offset)..(range.end - offset);
+        }
+    }
+}
+
+#[cfg(not(feature = "turmoil"))]
 pub(crate) fn should_repoll_shutdown_buffered(
     events: &[BufferedInputEvent],
     is_finished: bool,
@@ -691,7 +720,7 @@ pub(super) fn process_io_events(
 
 #[cfg(not(feature = "turmoil"))]
 #[allow(clippy::too_many_arguments)]
-fn process_buffered_events(
+pub(super) fn process_buffered_events(
     input: &mut InputState,
     input_name: &Arc<str>,
     events: Vec<BufferedInputEvent>,
@@ -705,6 +734,7 @@ fn process_buffered_events(
     buffer_was_empty_at_poll: bool,
     source_metadata_plan: SourceMetadataPlan,
 ) -> bool {
+    let mut events = events;
     let source_path_snapshot = if source_metadata_plan.has_source_path() {
         input.source.source_paths()
     } else {
@@ -713,7 +743,12 @@ fn process_buffered_events(
     let should_flush_large_single_chunk =
         is_large_single_buffered_data_event(&events, buffer_was_empty_at_poll);
 
-    for event in events {
+    let mut index = 0usize;
+    while index < events.len() {
+        let event = std::mem::replace(
+            &mut events[index],
+            BufferedInputEvent::Rotated { source_id: None },
+        );
         match event {
             BufferedInputEvent::Data {
                 range,
@@ -744,6 +779,11 @@ fn process_buffered_events(
                 );
             }
             BufferedInputEvent::Batch { batch, source_id } => {
+                let future_data_start = next_buffered_data_start(&events, index);
+                let future_bytes = future_data_start.map(|start| input.buf.split_off(start));
+                if let Some(start) = future_data_start {
+                    rebase_future_buffered_data_ranges(&mut events, index + 1, start);
+                }
                 if !flush_buf(
                     &mut input.buf,
                     &mut input.row_origins,
@@ -797,6 +837,9 @@ fn process_buffered_events(
                     }
                     Err(mpsc::error::TrySendError::Closed(_)) => return false,
                 }
+                if let Some(future_bytes) = future_bytes {
+                    input.buf = future_bytes;
+                }
             }
             BufferedInputEvent::Rotated { .. } => {
                 input.stats.inc_rotations();
@@ -807,6 +850,7 @@ fn process_buffered_events(
                 tracing::info!(input = input.source.name(), "input.file_truncated");
             }
         }
+        index += 1;
     }
     let flush_by_size = input.buf.len() >= safe_batch_target_bytes;
     if flush_by_size || should_flush_large_single_chunk {

@@ -330,6 +330,7 @@ impl FramedInput {
                         let line_count = memchr::memchr_iter(b'\n', chunk).count();
                         self.stats.inc_lines(line_count as u64);
                         let start = dst.len();
+                        self.cri_metadata_buf.clear();
                         state.format.process_lines_with_metadata_into(
                             chunk,
                             dst,
@@ -1195,6 +1196,74 @@ mod tests {
             .expect("non-null span values");
         assert_eq!(metadata.timestamp(values), b"2024-01-15T10:30:00Z");
         assert_eq!(values.stream.as_str(), "stdout");
+    }
+
+    #[test]
+    fn cri_poll_into_clears_metadata_between_complete_messages() {
+        let stats = make_stats();
+        let source = MockSource::new(vec![
+            vec![InputEvent::Data {
+                bytes: Bytes::from_static(b"2024-01-15T10:30:00Z stdout F first\n"),
+                source_id: None,
+                accounted_bytes: 37,
+                cri_metadata: None,
+            }],
+            vec![InputEvent::Data {
+                bytes: Bytes::from_static(b"2024-01-15T10:30:01Z stderr F second\n"),
+                source_id: None,
+                accounted_bytes: 38,
+                cri_metadata: None,
+            }],
+        ]);
+        let mut framed = FramedInput::new(
+            Box::new(source),
+            FormatDecoder::cri(2 * 1024 * 1024, Arc::clone(&stats)),
+            stats,
+        );
+        let mut dst = BytesMut::new();
+
+        let first = framed
+            .poll_into(&mut dst)
+            .expect("first poll_into")
+            .expect("buffered path available");
+        let second = framed
+            .poll_into(&mut dst)
+            .expect("second poll_into")
+            .expect("buffered path available");
+
+        let BufferedInputEvent::Data {
+            cri_metadata: first_metadata,
+            ..
+        } = &first[0]
+        else {
+            panic!("expected first data event");
+        };
+        let BufferedInputEvent::Data {
+            cri_metadata: second_metadata,
+            ..
+        } = &second[0]
+        else {
+            panic!("expected second data event");
+        };
+
+        let first_metadata = first_metadata.as_ref().expect("first CRI metadata");
+        let second_metadata = second_metadata.as_ref().expect("second CRI metadata");
+        assert_eq!(first_metadata.rows, 1);
+        assert_eq!(second_metadata.rows, 1);
+        let first_values = first_metadata.spans[0]
+            .values
+            .as_ref()
+            .expect("first non-null metadata");
+        let second_values = second_metadata.spans[0]
+            .values
+            .as_ref()
+            .expect("second non-null metadata");
+        assert_eq!(first_values.stream.as_str(), "stdout");
+        assert_eq!(second_values.stream.as_str(), "stderr");
+        assert_eq!(
+            second_metadata.timestamp(second_values),
+            b"2024-01-15T10:30:01Z"
+        );
     }
 
     #[test]

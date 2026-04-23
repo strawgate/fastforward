@@ -239,9 +239,8 @@ Current implication: the remaining hot-path copy on `main` is not “tailer to
 event” anymore. It is the runtime reassembly step that appends scanner-ready
 `Bytes` into `InputState.buf` before scan on the legacy event route. The next
 architecture slice should widen the shared-buffer path so more polls append
-directly into that final batch buffer before scan.
-therefore target that seam directly rather than reintroducing divergent
-source-side batching paths.
+directly into that final batch buffer before scan, targeting that seam
+directly rather than reintroducing divergent source-side batching paths.
 
 ### Verification strategy
 

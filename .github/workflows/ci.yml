@@ -888,6 +888,7 @@ jobs:
       - kani-io-output
       - miri-core
       - miri-types
+      - miri-io-buffered
       - simulation-turmoil
       - simulation-loom
       - tlc-safety
