@@ -430,6 +430,7 @@ impl FramedInput {
                             self.sources.remove(&key);
                         }
                     }
+                    result_events.push(InputEvent::EndOfFile { source_id });
                 }
             }
         }

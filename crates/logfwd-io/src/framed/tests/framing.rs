@@ -276,7 +276,14 @@
 
         // Second poll: EndOfFile flushes the remainder as a complete line.
         let events2 = framed.poll().unwrap();
+        let saw_eof = events2
+            .iter()
+            .any(|event| matches!(event, InputEvent::EndOfFile { source_id: None }));
         assert_eq!(collect_data(events2), b"no-newline\n");
+        assert!(
+            saw_eof,
+            "framed input must forward EOF markers after flushing remainders"
+        );
     }
 
     /// Runtime shutdown is a terminal lifecycle event: when the wrapped source
@@ -302,7 +309,14 @@
         assert!(collect_data(events1).is_empty());
 
         let events2 = framed.poll_shutdown().unwrap();
+        let saw_eof = events2
+            .iter()
+            .any(|event| matches!(event, InputEvent::EndOfFile { source_id: None }));
         assert_eq!(collect_data(events2), b"no-newline\n");
+        assert!(
+            saw_eof,
+            "shutdown EOF must propagate after flushing buffered bytes"
+        );
     }
 
     /// Multiple records in a file where only the last one lacks a newline:

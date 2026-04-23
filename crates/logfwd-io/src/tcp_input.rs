@@ -10,6 +10,11 @@ include!("tcp_input/options.rs");
 include!("tcp_input/listener.rs");
 include!("tcp_input/input_source.rs");
 
+#[cfg(kani)]
+mod verification {
+    include!("tcp_input/verification.rs");
+}
+
 #[cfg(test)]
 mod tests {
     include!("tcp_input/tests/tls.rs");
