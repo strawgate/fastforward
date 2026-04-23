@@ -4,8 +4,13 @@
 ///
 /// Parses an optional leading `-` followed by ASCII digits. Returns `None`
 /// for empty input, non-digit bytes, lone `-`, or values outside `i64` range.
+///
+/// Input length is capped at 20 bytes (max `i64` digit count + sign) to
+/// prevent `i128` accumulator overflow.
 pub fn parse_int_oracle(bytes: &[u8]) -> Option<i64> {
-    if bytes.is_empty() {
+    // i64::MIN is "-9223372036854775808" = 20 chars.
+    // Beyond 20 digits the i128 accumulator could silently wrap.
+    if bytes.is_empty() || bytes.len() > 20 {
         return None;
     }
     let (neg, start) = if bytes[0] == b'-' {

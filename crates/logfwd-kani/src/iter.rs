@@ -189,6 +189,22 @@ mod verification {
 
     #[kani::proof]
     #[kani::unwind(9)]
+    fn verify_skip_space() {
+        let buf: [u8; 8] = kani::any();
+        let from: usize = kani::any();
+        kani::assume(from <= 8);
+        let pos = skip_space(&buf, from, 8);
+        assert!(pos >= from);
+        assert!(pos <= 8);
+        if pos < 8 {
+            assert!(buf[pos] != b' ');
+        }
+        kani::cover!(pos == 8, "skip to end");
+        kani::cover!(pos < 8 && pos > from, "partial skip");
+    }
+
+    #[kani::proof]
+    #[kani::unwind(9)]
     fn verify_skip_until() {
         let buf: [u8; 8] = kani::any();
         let from: usize = kani::any();

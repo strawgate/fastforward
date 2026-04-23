@@ -116,7 +116,7 @@ mod tests {
     fn eq_ignore_case_ascii() {
         assert!(eq_ignore_case_match(b"Hello", b"hello"));
         assert!(eq_ignore_case_match(b"INFO", b"info"));
-        assert!(!eq_ignore_case_match(b"abc", b"abd"));
+        assert!(!eq_ignore_case_match(b"abc", b"abz"));
         assert!(!eq_ignore_case_match(b"ab", b"abc"));
     }
 
