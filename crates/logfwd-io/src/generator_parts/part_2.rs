@@ -162,18 +162,26 @@ fn epoch_ms_to_parts(epoch_ms: i64) -> (i32, u32, u32, u32, u32, u32, u32) {
     (year, month, day, hour, min, sec, ms)
 }
 
-/// Parse `YYYY-MM-DDTHH:MM:SSZ` to epoch milliseconds.
+/// Parse `YYYY-MM-DDTHH:MM:SSZ` or `YYYY-MM-DDTHH:MM:SS.mmmZ` to epoch
+/// milliseconds.
 pub fn parse_iso8601_to_epoch_ms(s: &str) -> Result<i64, String> {
     let b = s.as_bytes();
-    if b.len() != 20
+    let has_millis = b.len() == 24;
+    if (b.len() != 20 && !has_millis)
         || b[4] != b'-'
         || b[7] != b'-'
         || b[10] != b'T'
         || b[13] != b':'
         || b[16] != b':'
-        || b[19] != b'Z'
+        || if has_millis {
+            b[19] != b'.' || b[23] != b'Z'
+        } else {
+            b[19] != b'Z'
+        }
     {
-        return Err(format!("expected YYYY-MM-DDTHH:MM:SSZ format, got {s:?}"));
+        return Err(format!(
+            "expected YYYY-MM-DDTHH:MM:SSZ or YYYY-MM-DDTHH:MM:SS.mmmZ format, got {s:?}"
+        ));
     }
     let year = parse_digits(b, 0, 4).ok_or("invalid year")? as i32;
     let month = parse_digits(b, 5, 2).ok_or("invalid month")? as u32;
@@ -181,6 +189,11 @@ pub fn parse_iso8601_to_epoch_ms(s: &str) -> Result<i64, String> {
     let hour = parse_digits(b, 11, 2).ok_or("invalid hour")? as u32;
     let min = parse_digits(b, 14, 2).ok_or("invalid minute")? as u32;
     let sec = parse_digits(b, 17, 2).ok_or("invalid second")? as u32;
+    let millis = if has_millis {
+        parse_digits(b, 20, 3).ok_or("invalid millisecond")? as i64
+    } else {
+        0
+    };
 
     if !(1..=12).contains(&month) || day < 1 || hour > 23 || min > 59 || sec > 59 {
         return Err(format!("date/time component out of range in {s:?}"));
@@ -193,7 +206,11 @@ pub fn parse_iso8601_to_epoch_ms(s: &str) -> Result<i64, String> {
     }
 
     let days = days_from_civil(year, month, day);
-    let ms = days * 86_400_000 + hour as i64 * 3_600_000 + min as i64 * 60_000 + sec as i64 * 1000;
+    let ms = days * 86_400_000
+        + hour as i64 * 3_600_000
+        + min as i64 * 60_000
+        + sec as i64 * 1000
+        + millis;
     Ok(ms)
 }
 

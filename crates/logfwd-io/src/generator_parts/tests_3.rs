@@ -244,11 +244,12 @@
             h in 0_u32..=23,
             mi in 0_u32..=59,
             s in 0_u32..=59,
+            ms in 0_u32..=999,
         )| {
-            let input = format!("{y:04}-{m:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z");
-            let ms = parse_iso8601_to_epoch_ms(&input).unwrap();
-            let (y2, m2, d2, h2, mi2, s2, ms2) = epoch_ms_to_parts(ms);
-            prop_assert_eq!((y, m, d, h, mi, s, 0_u32), (y2, m2, d2, h2, mi2, s2, ms2));
+            let input = format!("{y:04}-{m:02}-{d:02}T{h:02}:{mi:02}:{s:02}.{ms:03}Z");
+            let epoch_ms = parse_iso8601_to_epoch_ms(&input).unwrap();
+            let (y2, m2, d2, h2, mi2, s2, ms2) = epoch_ms_to_parts(epoch_ms);
+            prop_assert_eq!((y, m, d, h, mi, s, ms), (y2, m2, d2, h2, mi2, s2, ms2));
         });
     }
 

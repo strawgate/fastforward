@@ -165,8 +165,8 @@ impl InputSource for GeneratorInput {
             self.last_refill = now;
             self.rate_credit_events += elapsed_sec * self.config.events_per_sec as f64;
 
-            // Bound carried credits to one poll burst window so scheduler stalls
-            // do not turn into an arbitrarily large catch-up burst.
+            // Maintain the invariant `rate_credit_events <= burst_cap` so
+            // scheduler stalls cannot create an unbounded catch-up burst.
             let burst_cap = self.config.events_per_sec.max(batch_size);
             self.rate_credit_events = self.rate_credit_events.min(burst_cap as f64);
             let available = self.rate_credit_events.floor() as u64;
@@ -188,8 +188,8 @@ impl InputSource for GeneratorInput {
                     return Ok(vec![]);
                 }
             } else {
-                // Preserve the legacy "full batches only" behavior in rate-limited
-                // mode while still allowing multiple batches per poll at high EPS.
+                // Preserve full-batch cadence in rate-limited mode while still
+                // allowing multiple batches per poll at high EPS.
                 let max_full_batches = burst_cap / batch_size;
                 events_to_emit = full_batches_available.min(max_full_batches) * batch_size;
             }

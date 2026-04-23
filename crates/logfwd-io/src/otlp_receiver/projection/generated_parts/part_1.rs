@@ -330,14 +330,14 @@ pub(super) const ANYVALUE_FIELDS: &[FieldRule] = &[
         name: "array_value",
         expected_wire: WireKind::Len,
         action: ProjectionAction::Project,
-        child: None,
+        child: Some(MessageKind::ArrayValue),
     },
     FieldRule {
         number: 6,
         name: "kvlist_value",
         expected_wire: WireKind::Len,
         action: ProjectionAction::Project,
-        child: None,
+        child: Some(MessageKind::KeyValueList),
     },
     FieldRule {
         number: 7,

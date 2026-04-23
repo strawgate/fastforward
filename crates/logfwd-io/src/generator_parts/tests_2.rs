@@ -269,6 +269,9 @@
         let ms = parse_iso8601_to_epoch_ms("2024-01-15T00:00:00Z").unwrap();
         assert_eq!(ms, 1_705_276_800_000);
 
+        let ms = parse_iso8601_to_epoch_ms("2024-01-15T00:00:00.123Z").unwrap();
+        assert_eq!(ms, 1_705_276_800_123);
+
         let ms = parse_iso8601_to_epoch_ms("1970-01-01T00:00:00Z").unwrap();
         assert_eq!(ms, 0);
 
@@ -277,6 +280,8 @@
         assert!(parse_iso8601_to_epoch_ms("2024-02-31T00:00:00Z").is_err());
         assert!(parse_iso8601_to_epoch_ms("2023-02-29T00:00:00Z").is_err());
         assert!(parse_iso8601_to_epoch_ms("2024-02-29T00:00:00Z").is_ok());
+        assert!(parse_iso8601_to_epoch_ms("2024-02-29T00:00:00.999Z").is_ok());
+        assert!(parse_iso8601_to_epoch_ms("2024-02-29T00:00:00.Z").is_err());
     }
 
     #[test]

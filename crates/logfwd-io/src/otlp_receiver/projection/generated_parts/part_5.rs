@@ -52,13 +52,19 @@ fn scan_any_value(input: &[u8]) -> Result<(), ProjectionError> {
         let key = read_varint(&mut input)?;
         let field = decode_field_number(key)?;
         let wire = decode_wire_kind((key & 0x07) as u8)?;
+        let rule = lookup_field(MessageKind::AnyValue, field);
         match wire {
             WireKind::Varint => {
                 let _ = read_varint(&mut input)?;
             }
             WireKind::Fixed64 => consume_fixed(&mut input, 8, "truncated fixed64 field")?,
             WireKind::Len => {
-                let _ = consume_len(&mut input)?;
+                let bytes = consume_len(&mut input)?;
+                if let Some(rule) = rule
+                    && let Some(child) = rule.child
+                {
+                    scan_message(bytes, child)?;
+                }
             }
             WireKind::StartGroup => skip_group(&mut input, field)?,
             WireKind::EndGroup => {
@@ -67,7 +73,7 @@ fn scan_any_value(input: &[u8]) -> Result<(), ProjectionError> {
             WireKind::Fixed32 => consume_fixed(&mut input, 4, "truncated fixed32 field")?,
         }
 
-        if let Some(rule) = lookup_field(MessageKind::AnyValue, field) {
+        if let Some(rule) = rule {
             if wire != rule.expected_wire {
                 return Err(ProjectionError::Invalid(
                     "invalid wire type for AnyValue field",

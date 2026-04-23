@@ -44,6 +44,7 @@ preserving the public API:
 ## Proposed split skeletons
 
 ### `json_scanner`
+
 - `json_scanner.rs` wrapper or `json_scanner/mod.rs`
 - `json_scanner/tokenize.rs`
 - `json_scanner/parse.rs`
@@ -52,6 +53,7 @@ preserving the public API:
 - `json_scanner/tests.rs`
 
 ### `validate`
+
 - `validate.rs` wrapper or `validate/mod.rs`
 - `validate/schema.rs`
 - `validate/rules.rs`
@@ -60,6 +62,7 @@ preserving the public API:
 - `validate/tests.rs`
 
 ### `query_analyzer`
+
 - `query_analyzer.rs` wrapper or `query_analyzer/mod.rs`
 - `query_analyzer/ast.rs`
 - `query_analyzer/rewrite.rs`
@@ -68,6 +71,7 @@ preserving the public API:
 - `query_analyzer/tests.rs`
 
 ### `diagnostics/server`
+
 - `diagnostics/server.rs` wrapper or `diagnostics/server/mod.rs`
 - `diagnostics/server/router.rs`
 - `diagnostics/server/handlers.rs`
@@ -76,6 +80,7 @@ preserving the public API:
 - `diagnostics/server/tests.rs`
 
 ### `enrichment`
+
 - `enrichment.rs` wrapper or `enrichment/mod.rs`
 - `enrichment/catalog.rs`
 - `enrichment/lookup.rs`
@@ -84,6 +89,7 @@ preserving the public API:
 - `enrichment/tests.rs`
 
 ### `host_metrics`
+
 - `host_metrics.rs` wrapper or `host_metrics/mod.rs`
 - `host_metrics/cpu.rs`
 - `host_metrics/memory.rs`
@@ -92,20 +98,24 @@ preserving the public API:
 - `host_metrics/tests.rs`
 
 ### `generator`
+
 - `generator.rs` wrapper
 - `generator_parts/part_*.rs`
 - `generator_parts/tests_*.rs`
 
 ### `projection/tests`
+
 - `projection/tests.rs` wrapper
 - `projection/tests_parts/part_*.rs`
 
 ### `tcp_input`
+
 - `tcp_input.rs` wrapper
 - `tcp_input_parts/part_*.rs`
 - `tcp_input_parts/tests_*.rs`
 
 ### `projection/generated`
+
 - keep generated origin path unchanged if required by codegen, but emit segmented shards behind the wrapper:
   - `projection/generated.rs` (wrapper + shard declarations)
   - `projection/generated_parts/part_1.rs`

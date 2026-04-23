@@ -314,8 +314,28 @@
 
     #[test]
     fn generated_anyvalue_complex_shapes_are_projected() {
+        fn valid_complex_anyvalue_payload(field_number: u32) -> Vec<u8> {
+            let mut payload = Vec::new();
+            match field_number {
+                otlp::ANY_VALUE_ARRAY_VALUE => {
+                    let nested_any = [10, 1, b'x'];
+                    let mut array = Vec::new();
+                    push_len_field(&mut array, 1, &nested_any);
+                    push_len_field(&mut payload, field_number, &array);
+                }
+                otlp::ANY_VALUE_KVLIST_VALUE => {
+                    let key_value = [10, 1, b'k', 18, 3, 10, 1, b'v'];
+                    let mut kvlist = Vec::new();
+                    push_len_field(&mut kvlist, 1, &key_value);
+                    push_len_field(&mut payload, field_number, &kvlist);
+                }
+                _ => panic!("unexpected complex AnyValue field number"),
+            }
+            payload
+        }
+
         for &field_number in complex_anyvalue_field_numbers() {
-            let payload = sample_field_for_wire(field_number, WireKind::Len);
+            let payload = valid_complex_anyvalue_payload(field_number);
             scan_message(&payload, MessageKind::AnyValue)
                 .expect("complex AnyValue shape should classify for projection");
             let value = decode_any_value_wire(&payload).expect("complex AnyValue should decode");
@@ -327,10 +347,52 @@
     }
 
     #[test]
+    fn generated_anyvalue_rejects_malformed_nested_array_payloads() {
+        let mut payload = Vec::new();
+        push_len_field(&mut payload, otlp::ANY_VALUE_ARRAY_VALUE, &[0x0a, 0x02, 0x01]);
+        let err = scan_message(&payload, MessageKind::AnyValue)
+            .expect_err("malformed nested ArrayValue payload must be rejected");
+        assert!(matches!(err, ProjectionError::Invalid(_)));
+    }
+
+    #[test]
+    fn generated_anyvalue_rejects_malformed_nested_kvlist_payloads() {
+        let mut payload = Vec::new();
+        push_len_field(
+            &mut payload,
+            otlp::ANY_VALUE_KVLIST_VALUE,
+            &[0x0a, 0x03, 0x0a, 0x02, 0x01],
+        );
+        let err = scan_message(&payload, MessageKind::AnyValue)
+            .expect_err("malformed nested KeyValueList payload must be rejected");
+        assert!(matches!(err, ProjectionError::Invalid(_)));
+    }
+
+    #[test]
     fn generated_anyvalue_oneof_last_value_wins_for_complex_and_primitive() {
+        fn valid_complex_anyvalue_payload(field_number: u32) -> Vec<u8> {
+            let mut payload = Vec::new();
+            match field_number {
+                otlp::ANY_VALUE_ARRAY_VALUE => {
+                    let nested_any = [10, 1, b'x'];
+                    let mut array = Vec::new();
+                    push_len_field(&mut array, 1, &nested_any);
+                    push_len_field(&mut payload, field_number, &array);
+                }
+                otlp::ANY_VALUE_KVLIST_VALUE => {
+                    let key_value = [10, 1, b'k', 18, 3, 10, 1, b'v'];
+                    let mut kvlist = Vec::new();
+                    push_len_field(&mut kvlist, 1, &key_value);
+                    push_len_field(&mut payload, field_number, &kvlist);
+                }
+                _ => panic!("unexpected complex AnyValue field number"),
+            }
+            payload
+        }
+
         let projected = sample_field_for_wire(otlp::ANY_VALUE_STRING_VALUE, WireKind::Len);
         for &field_number in complex_anyvalue_field_numbers() {
-            let complex = sample_field_for_wire(field_number, WireKind::Len);
+            let complex = valid_complex_anyvalue_payload(field_number);
 
             let mut complex_then_projected = complex.clone();
             complex_then_projected.extend_from_slice(&projected);

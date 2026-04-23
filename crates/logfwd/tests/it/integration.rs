@@ -91,7 +91,9 @@ output:
     let pipe_cfg = &config.pipelines["default"];
     let pipeline = Pipeline::from_config("default", pipe_cfg, &test_meter(), None).unwrap();
 
-    let pipeline = run_until_lines(pipeline, 10);
+    // Simple `WHERE` clauses are now pushed into the scanner, so only matching
+    // rows reach `transform_in`.
+    let pipeline = run_until_lines(pipeline, 5);
 
     let lines_in = pipeline
         .metrics()
@@ -210,8 +212,8 @@ output:
         .unwrap_or(0);
 
     assert_eq!(
-        lines_in, 10,
-        "expected 10 rows into transform, got {lines_in}"
+        lines_in, 5,
+        "expected 5 rows into transform after scanner pushdown, got {lines_in}"
     );
     assert_eq!(
         lines_out, 5,

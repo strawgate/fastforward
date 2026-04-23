@@ -286,9 +286,9 @@ pub(crate) fn compute_log_fields<'a>(
         GeneratorComplexity::Complex => {
             let bytes_in = 128 + seq.wrapping_mul(17) % 8192;
             let bytes_out = 64 + seq.wrapping_mul(31) % 4096;
-            let variant = if seq.is_multiple_of(5) {
+            let variant = if seq % 5 == 0 {
                 ComplexVariant::WithHeadersAndTags
-            } else if seq.is_multiple_of(7) {
+            } else if seq % 7 == 0 {
                 ComplexVariant::WithUpstream {
                     upstream_ms: 1 + seq.wrapping_mul(19) % 200,
                 }
