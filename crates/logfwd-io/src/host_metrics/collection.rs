@@ -9,6 +9,9 @@ impl HostMetricsCommon {
     ) -> SensorRow {
         SensorRow {
             timestamp_unix_nano: now_unix_nano(),
+            sensor_name: self.name.clone(),
+            sensor_target_platform: self.target.as_str().to_string(),
+            sensor_host_platform: self.host_platform.to_string(),
             event_family: event_family.to_string(),
             event_kind: event_kind.to_string(),
             signal_family: None,

@@ -126,6 +126,12 @@ reason = "Per-client bounded-read stop policy is extracted as a local pure seam 
 issue = 1314
 
 [[seams]]
+path = "crates/logfwd-io/src/tcp_input/verification.rs"
+status = "required"
+reason = "Per-client bounded-read stop policy proofs now live in the split TCP verification module."
+issue = 1314
+
+[[seams]]
 path = "crates/logfwd-io/src/udp_input.rs"
 status = "recommended"
 reason = "Per-poll UDP bounded-drain stop policy is an isolated pure seam in an otherwise IO-heavy module."

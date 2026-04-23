@@ -1,72 +1,15 @@
-#[derive(Debug)]
-struct SensorRow {
-    timestamp_unix_nano: u64,
-    event_family: String,
-    event_kind: String,
-    signal_family: Option<String>,
-    signal_status: String,
-    control_generation: u64,
-    control_source: String,
-    control_path: Option<String>,
-    enabled_families: Option<String>,
-    effective_emit_signal_rows: Option<bool>,
-    message: String,
-
-    // Process fields
-    process_pid: Option<u32>,
-    process_parent_pid: Option<u32>,
-    process_name: Option<String>,
-    process_cmd: Option<String>,
-    process_exe: Option<String>,
-    process_status: Option<String>,
-    process_cpu_usage: Option<f32>,
-    process_memory_bytes: Option<u64>,
-    process_virtual_memory_bytes: Option<u64>,
-    process_start_time_unix_sec: Option<u64>,
-    process_disk_read_delta_bytes: Option<u64>,
-    process_disk_write_delta_bytes: Option<u64>,
-    process_user_id: Option<u32>,
-    process_effective_user_id: Option<u32>,
-    process_group_id: Option<u32>,
-    process_effective_group_id: Option<u32>,
-    process_cwd: Option<String>,
-    process_session_id: Option<u32>,
-    process_run_time_secs: Option<u64>,
-    process_open_files: Option<u64>,
-    process_thread_count: Option<u64>,
-    process_container_id: Option<String>,
-
-    // Network fields
-    network_interface: Option<String>,
-    network_received_delta_bytes: Option<u64>,
-    network_transmitted_delta_bytes: Option<u64>,
-    network_received_total_bytes: Option<u64>,
-    network_transmitted_total_bytes: Option<u64>,
-    network_packets_received_delta: Option<u64>,
-    network_packets_transmitted_delta: Option<u64>,
-    network_errors_received_delta: Option<u64>,
-    network_errors_transmitted_delta: Option<u64>,
-    network_mac_address: Option<String>,
-    network_ip_addresses: Option<String>,
-    network_mtu: Option<u64>,
-
-    // System-level fields
-    system_total_memory_bytes: Option<u64>,
-    system_used_memory_bytes: Option<u64>,
-    system_available_memory_bytes: Option<u64>,
-    system_total_swap_bytes: Option<u64>,
-    system_used_swap_bytes: Option<u64>,
-    system_cpu_usage_percent: Option<f32>,
-    system_uptime_secs: Option<u64>,
-    system_cgroup_memory_limit: Option<u64>,
-    system_cgroup_memory_current: Option<u64>,
-
-    // Disk I/O fields
-    disk_io_read_delta_bytes: Option<u64>,
-    disk_io_write_delta_bytes: Option<u64>,
-    disk_io_read_total_bytes: Option<u64>,
-    disk_io_write_total_bytes: Option<u64>,
+macro_rules! define_sensor_row {
+    ($(($field:ident, $ty:ty, $array:ident, $data_type:expr, $nullable:expr))+) => {
+        #[derive(Debug)]
+        struct SensorRow {
+            $(
+                $field: $ty,
+            )+
+        }
+    };
 }
+
+sensor_row_columns!(define_sensor_row);
 
 // Control files are operator-tunable runtime state, not a fixed schema. Tolerate
 // unknown fields so operators can stage new knobs or leave stale ones behind
