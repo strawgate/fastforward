@@ -5,14 +5,14 @@
 //! monotonic counter so that `FramedInput`'s per-source remainder tracking
 //! can distinguish data from different peers.
 
-include!("tcp_input_parts/part_1.rs");
-include!("tcp_input_parts/part_2.rs");
-include!("tcp_input_parts/part_3.rs");
-include!("tcp_input_parts/part_4.rs");
+include!("tcp_input/transport.rs");
+include!("tcp_input/options.rs");
+include!("tcp_input/listener.rs");
+include!("tcp_input/input_source.rs");
 
 #[cfg(test)]
 mod tests {
-    include!("tcp_input_parts/tests_1.rs");
-    include!("tcp_input_parts/tests_2.rs");
-    include!("tcp_input_parts/tests_3.rs");
+    include!("tcp_input/tests/tls.rs");
+    include!("tcp_input/tests/basic.rs");
+    include!("tcp_input/tests/bounds.rs");
 }

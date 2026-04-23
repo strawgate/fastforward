@@ -1,5 +1,5 @@
-include!("tests_parts/part_1.rs");
-include!("tests_parts/part_2.rs");
-include!("tests_parts/part_3.rs");
-include!("tests_parts/part_4.rs");
-include!("tests_parts/part_5.rs");
+include!("tests/serialize.rs");
+include!("tests/timestamp.rs");
+include!("tests/retry_splitting.rs");
+include!("tests/bulk_retry.rs");
+include!("tests/snapshots.rs");

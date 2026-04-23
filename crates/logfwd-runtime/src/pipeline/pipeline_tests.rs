@@ -1,5 +1,5 @@
-include!("pipeline_tests_parts/part_1.rs");
-include!("pipeline_tests_parts/part_2.rs");
-include!("pipeline_tests_parts/part_3.rs");
-include!("pipeline_tests_parts/part_4.rs");
-include!("pipeline_tests_parts/part_5.rs");
+include!("pipeline_tests/config_and_factory.rs");
+include!("pipeline_tests/processing.rs");
+include!("pipeline_tests/shutdown.rs");
+include!("pipeline_tests/machine.rs");
+include!("pipeline_tests/failpoints.rs");

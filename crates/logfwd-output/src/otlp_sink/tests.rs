@@ -1,6 +1,6 @@
-include!("tests_parts/part_1.rs");
-include!("tests_parts/part_2.rs");
-include!("tests_parts/part_3.rs");
-include!("tests_parts/part_4.rs");
-include!("tests_parts/part_5.rs");
-include!("tests_parts/part_6.rs");
+include!("tests/transport.rs");
+include!("tests/attributes.rs");
+include!("tests/roundtrip.rs");
+include!("tests/resources.rs");
+include!("tests/generated.rs");
+include!("tests/timestamps.rs");

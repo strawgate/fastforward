@@ -1,4 +1,4 @@
-//! Unit and property-based tests for the OTLP sink encoder and transport.
+// Unit and property-based tests for the OTLP sink encoder and transport.
 use std::io;
 use std::sync::{Arc, OnceLock};
 

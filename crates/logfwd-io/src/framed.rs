@@ -9,14 +9,14 @@
 //! interleaved data from multiple files (or TCP connections) never
 //! cross-contaminates partial lines or CRI P/F aggregation state.
 
-include!("framed_parts/part_1.rs");
-include!("framed_parts/part_2.rs");
-include!("framed_parts/part_3.rs");
-include!("framed_parts/part_4.rs");
+include!("framed/state.rs");
+include!("framed/input.rs");
+include!("framed/processing.rs");
+include!("framed/source.rs");
 
 #[cfg(test)]
 mod tests {
-    include!("framed_parts/tests_1.rs");
-    include!("framed_parts/tests_2.rs");
-    include!("framed_parts/tests_3.rs");
+    include!("framed/tests/basic.rs");
+    include!("framed/tests/framing.rs");
+    include!("framed/tests/source_state.rs");
 }

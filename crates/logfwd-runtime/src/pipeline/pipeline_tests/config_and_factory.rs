@@ -1,4 +1,4 @@
-//! Tests for pipeline construction, run, shutdown, checkpoint, and machine integration.
+// Tests for pipeline construction, run, shutdown, checkpoint, and machine integration.
 
 use super::*;
 use std::future::Future;

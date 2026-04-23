@@ -6,15 +6,15 @@
 //! per-platform signal families so we can iterate toward production metrics
 //! without routing synthetic JSON through text decoders.
 
-include!("host_metrics_parts/part_1.rs");
-include!("host_metrics_parts/part_2.rs");
-include!("host_metrics_parts/part_3.rs");
-include!("host_metrics_parts/part_4.rs");
-include!("host_metrics_parts/part_5.rs");
-include!("host_metrics_parts/part_6.rs");
+include!("host_metrics/types.rs");
+include!("host_metrics/control.rs");
+include!("host_metrics/collection.rs");
+include!("host_metrics/batch.rs");
+include!("host_metrics/input.rs");
+include!("host_metrics/schema.rs");
 
 #[cfg(test)]
 mod tests {
-    include!("host_metrics_parts/tests_1.rs");
-    include!("host_metrics_parts/tests_2.rs");
+    include!("host_metrics/tests/control.rs");
+    include!("host_metrics/tests/collection.rs");
 }

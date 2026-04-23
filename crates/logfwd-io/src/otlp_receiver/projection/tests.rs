@@ -1,7 +1,7 @@
 //! Tests for the OTLP projection decoder.
 
-include!("tests_parts/part_1.rs");
-include!("tests_parts/part_2.rs");
-include!("tests_parts/part_3.rs");
-include!("tests_parts/part_4.rs");
-include!("tests_parts/part_5.rs");
+include!("tests/decode.rs");
+include!("tests/fallback.rs");
+include!("tests/randomized.rs");
+include!("tests/malformed.rs");
+include!("tests/body_and_attrs.rs");

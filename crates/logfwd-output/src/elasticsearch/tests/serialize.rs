@@ -1,4 +1,4 @@
-//! Unit, property-based, and snapshot tests for the Elasticsearch sink.
+// Unit, property-based, and snapshot tests for the Elasticsearch sink.
 
 use std::io;
 use std::sync::atomic::AtomicU64;

@@ -3,14 +3,14 @@
 //! Produces JSON log lines at a configurable rate. Used for benchmarking
 //! and testing pipelines without external data sources.
 
-include!("generator_parts/part_1.rs");
-include!("generator_parts/part_2.rs");
-include!("generator_parts/part_3.rs");
-include!("generator_parts/part_4.rs");
+include!("generator/types.rs");
+include!("generator/logs.rs");
+include!("generator/input.rs");
+include!("generator/encoding.rs");
 
 #[cfg(test)]
 mod tests {
-    include!("generator_parts/tests_1.rs");
-    include!("generator_parts/tests_2.rs");
-    include!("generator_parts/tests_3.rs");
+    include!("generator/tests/basic.rs");
+    include!("generator/tests/timestamps.rs");
+    include!("generator/tests/record_profile.rs");
 }
