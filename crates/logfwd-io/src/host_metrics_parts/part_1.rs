@@ -41,10 +41,14 @@ impl PartialOrd for SelectedProcess<'_> {
 }
 
 /// Platform target for a platform sensor input.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostMetricsTarget {
+    /// Linux sensor collection.
     Linux,
+    /// macOS sensor collection.
     Macos,
+    /// Windows sensor collection.
     Windows,
 }
 
@@ -231,7 +235,7 @@ struct ControlState {
 type InitStartOk = (HostMetricsState<RunningState>, Vec<InputEvent>);
 type InitStartErr = Box<(HostMetricsState<InitState>, io::Error)>;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ControlSource {
     StaticConfig,
     ControlFile,

@@ -397,6 +397,16 @@
             events.is_empty(),
             "unchanged control file should not emit reload-applied rows"
         );
+
+        let running = match input.machine.as_ref() {
+            Some(HostMetricsMachine::Running(state)) => state,
+            _ => panic!("input should remain in running state after no-op reload"),
+        };
+        assert_eq!(
+            running.state.control.source,
+            ControlSource::ControlFile,
+            "no-op reload should still record that control came from the file"
+        );
     }
 
     #[test]

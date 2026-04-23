@@ -184,6 +184,7 @@ impl HostMetricsState<RunningState> {
                     || generation_changed;
 
                 if !changed {
+                    self.state.control.source = next.source;
                     self.state.health = ComponentHealth::Healthy;
                     return None;
                 }

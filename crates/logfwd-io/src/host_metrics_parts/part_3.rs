@@ -190,30 +190,49 @@ impl HostMetricsCommon {
 
         // Split budget evenly across active families, rotating the remainder
         // so no single family is permanently starved (#1935).
-        let per_family_budget = self.cfg.max_rows_per_poll / active_count;
-        let remainder = self.cfg.max_rows_per_poll % active_count;
-        let start_idx = self.poll_count % active_count;
+        let poll_count = self.poll_count;
         self.poll_count = self.poll_count.wrapping_add(1);
 
         let mut emitted = 0usize;
         let mut family_idx = 0usize;
 
         if enabled.contains(&SignalFamily::Process) {
-            let extra =
-                usize::from((family_idx + active_count - start_idx) % active_count < remainder);
-            emitted += self.emit_process_rows(control, out, per_family_budget + extra);
+            emitted += self.emit_process_rows(
+                control,
+                out,
+                rotated_family_budget(
+                    self.cfg.max_rows_per_poll,
+                    active_count,
+                    poll_count,
+                    family_idx,
+                ),
+            );
             family_idx += 1;
         }
         if enabled.contains(&SignalFamily::Network) {
-            let extra =
-                usize::from((family_idx + active_count - start_idx) % active_count < remainder);
-            emitted += self.emit_network_rows(control, out, per_family_budget + extra);
+            emitted += self.emit_network_rows(
+                control,
+                out,
+                rotated_family_budget(
+                    self.cfg.max_rows_per_poll,
+                    active_count,
+                    poll_count,
+                    family_idx,
+                ),
+            );
             family_idx += 1;
         }
         if enabled.contains(&SignalFamily::File) {
-            let extra =
-                usize::from((family_idx + active_count - start_idx) % active_count < remainder);
-            emitted += self.emit_disk_io_rows(control, out, per_family_budget + extra);
+            emitted += self.emit_disk_io_rows(
+                control,
+                out,
+                rotated_family_budget(
+                    self.cfg.max_rows_per_poll,
+                    active_count,
+                    poll_count,
+                    family_idx,
+                ),
+            );
         }
 
         emitted
@@ -289,4 +308,17 @@ impl HostMetricsCommon {
         emitted
     }
 
+}
+
+fn rotated_family_budget(
+    max_rows_per_poll: usize,
+    active_count: usize,
+    poll_count: usize,
+    family_idx: usize,
+) -> usize {
+    let per_family_budget = max_rows_per_poll / active_count;
+    let remainder = max_rows_per_poll % active_count;
+    let start_idx = poll_count % active_count;
+    let extra = usize::from((family_idx + active_count - start_idx) % active_count < remainder);
+    per_family_budget + extra
 }

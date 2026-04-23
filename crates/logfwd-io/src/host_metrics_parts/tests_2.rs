@@ -507,46 +507,29 @@
 
     #[test]
     fn budget_rotation_distributes_remainder_fairly() {
-        // Simulate the rotation logic with 3 families and budget=2
-        // per_family_budget = 2/3 = 0, remainder = 2
-        // Over 3 polls, each family should get the extra budget twice.
         let active_count = 3usize;
-        let max_rows = 2usize;
-        let per_family_budget = max_rows / active_count; // 0
-        let remainder = max_rows % active_count; // 2
 
-        // Track how many extra rows each family position gets over 3 cycles.
         let mut extras = [0usize; 3];
+        let max_rows = 2usize;
         for poll_count in 0..active_count {
-            let start_idx = poll_count % active_count;
             for family_idx in 0..active_count {
-                let extra =
-                    usize::from((family_idx + active_count - start_idx) % active_count < remainder);
-                extras[family_idx] += extra;
+                extras[family_idx] +=
+                    rotated_family_budget(max_rows, active_count, poll_count, family_idx);
             }
         }
 
-        // Each family should get exactly 2 extras over 3 polls (fair distribution).
         assert_eq!(
             extras,
             [2, 2, 2],
             "each family must get equal remainder share over a full rotation"
         );
-        assert_eq!(
-            per_family_budget, 0,
-            "base budget is zero with budget=2, families=3"
-        );
 
-        // Also verify single cycle: with budget=1 and 3 families, only one family gets 1 per cycle.
         let max_rows = 1usize;
-        let remainder = max_rows % active_count; // 1
         let mut totals = [0usize; 3];
         for poll_count in 0..active_count {
-            let start_idx = poll_count % active_count;
             for family_idx in 0..active_count {
-                let extra =
-                    usize::from((family_idx + active_count - start_idx) % active_count < remainder);
-                totals[family_idx] += extra;
+                totals[family_idx] +=
+                    rotated_family_budget(max_rows, active_count, poll_count, family_idx);
             }
         }
         assert_eq!(
