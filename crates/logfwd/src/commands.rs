@@ -988,6 +988,18 @@ mod tests {
     }
 
     #[test]
+    fn wizard_use_case_renders_pipelines_only() {
+        use crate::config_templates;
+        let use_case = &config_templates::USE_CASE_TEMPLATES[0];
+        let cfg = config_templates::render_use_case(use_case, use_case.transform);
+        assert!(cfg.contains("pipelines:"));
+        assert!(cfg.contains("inputs:"));
+        assert!(cfg.contains("outputs:"));
+        assert!(!cfg.contains("\ninput:\n"));
+        assert!(!cfg.contains("\noutput:\n"));
+    }
+
+    #[test]
     fn format_duration_seconds() {
         assert_eq!(format_duration(Duration::from_secs(42)), "42s");
     }
