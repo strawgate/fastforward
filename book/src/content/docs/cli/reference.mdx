@@ -32,9 +32,9 @@ ff blast --destination otlp --endpoint http://127.0.0.1:4318/v1/logs
 |--------|-------------|
 | `--destination` | The sink type (e.g., `otlp`, `elasticsearch_otlp`, `arrow_ipc`, `null`) |
 | `--endpoint` | Destination endpoint URL (required for network destinations) |
-| `--workers` | Number of worker threads (default: 4) |
-| `--batch-lines` | Lines generated per batch (default: 8192) |
-| `--duration` | Optional duration in seconds before stopping automatically |
+| `--workers` | Number of worker threads (default: 2) |
+| `--batch-lines` | Lines generated per batch (default: 5000) |
+| `--duration-secs` | Optional duration in seconds before stopping automatically |
 
 ## ff devour
 
@@ -48,7 +48,7 @@ ff devour --mode otlp --listen 127.0.0.1:4318
 |--------|-------------|
 | `--mode` | The receiver type (e.g., `otlp`, `elasticsearch`) (default: `otlp`) |
 | `--listen` | Bind address (default: `127.0.0.1:4318` for OTLP) |
-| `--duration` | Optional duration in seconds before stopping automatically |
+| `--duration-secs` | Optional duration in seconds before stopping automatically |
 
 ## ff validate
 
@@ -73,3 +73,8 @@ Reads from standard input until EOF, processes it through the configured pipelin
 ```bash
 cat app.log | ff send --config destination.yaml --format json
 ```
+
+| Option | Description |
+|--------|-------------|
+| `--format` | The log format (e.g., json, cri) |
+| `--service` | The service name to attach to logs |
