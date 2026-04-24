@@ -448,7 +448,11 @@ pub struct GeneratorInputConfig {
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
     pub field_count: Option<usize>,
 
-    #[serde(default, alias = "events_per_second", deserialize_with = "deserialize_option_from_string_or_value")]
+    #[serde(
+        default,
+        alias = "events_per_second",
+        deserialize_with = "deserialize_option_from_string_or_value"
+    )]
     pub events_per_sec: Option<u64>,
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
     pub batch_size: Option<usize>,
