@@ -583,10 +583,7 @@ impl super::sink::Sink for LokiSink {
             while let Some(prepared) = all_payloads.next() {
                 let labels_for_rollback = prepared.stream_labels.clone();
                 let timestamp_for_rollback = prepared.last_timestamp_ns;
-                match self
-                    .do_send(prepared.payload, prepared.row_count)
-                    .await
-                {
+                match self.do_send(prepared.payload, prepared.row_count).await {
                     Ok(super::sink::SendResult::Ok) => {}
                     outcome => {
                         // Rollback reserved timestamps if we failed, so that
@@ -912,7 +909,8 @@ mod tests {
     fn send_failure_rolls_back_timestamp_reservation() {
         use crate::sink::{SendResult, Sink};
         let mut server = mockito::Server::new();
-        let mock = server.mock("POST", "/loki/api/v1/push")
+        let mock = server
+            .mock("POST", "/loki/api/v1/push")
             .with_status(500)
             .create();
 
@@ -939,7 +937,8 @@ mod tests {
                 Arc::new(arrow::array::Int64Array::from(vec![100i64])),
                 Arc::new(arrow::array::StringArray::from(vec!["hello"])),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let metadata = BatchMetadata {
             resource_attrs: Arc::from([]),
             observed_time_ns: 99_999,
@@ -955,11 +954,16 @@ mod tests {
         let labels: StreamLabels = vec![("app".to_string(), "logfwd".to_string())];
         {
             let state = sink.last_timestamp_by_stream.lock().unwrap();
-            assert_eq!(state.get(&labels), None, "timestamp reservation should be rolled back on failure");
+            assert_eq!(
+                state.get(&labels),
+                None,
+                "timestamp reservation should be rolled back on failure"
+            );
         }
 
         // Fix server to succeed
-        let mock_success = server.mock("POST", "/loki/api/v1/push")
+        let mock_success = server
+            .mock("POST", "/loki/api/v1/push")
             .with_status(204)
             .create();
 
@@ -971,7 +975,11 @@ mod tests {
         // State should now have 100
         {
             let state = sink.last_timestamp_by_stream.lock().unwrap();
-            assert_eq!(state.get(&labels), Some(&100), "successful send should keep timestamp");
+            assert_eq!(
+                state.get(&labels),
+                Some(&100),
+                "successful send should keep timestamp"
+            );
         }
     }
 

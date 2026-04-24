@@ -1146,25 +1146,25 @@ mod tests {
         fn assert_invariants(
             s: &FanoutTlaState,
         ) -> Result<(), proptest::test_runner::TestCaseError> {
-            // Any rejection -> overall Rejected
+            // AnyRejectionIsRejected
             if s.batch_phase == "Finalized"
                 && s.all_children_terminal()
                 && s.child_state.iter().any(|st| *st == "Rejected")
             {
                 prop_assert!(
                     s.fanout_result == "Rejected",
-                    "Any rejection must result in overall Rejected: result={}",
+                    "AnyRejectionIsRejected violated: result={}",
                     s.fanout_result
                 );
             }
-            // Only Ok if ALL Ok
+            // AllOkIsOk
             if s.batch_phase == "Finalized"
                 && s.all_children_terminal()
                 && !s.child_state.iter().any(|st| *st == "Rejected")
             {
                 prop_assert!(
                     s.fanout_result == "Ok",
-                    "All Ok must result in Ok: result={}",
+                    "AllOkIsOk violated: result={}",
                     s.fanout_result
                 );
             }
