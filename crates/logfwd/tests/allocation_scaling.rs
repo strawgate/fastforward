@@ -21,21 +21,22 @@ fn test_meter() -> opentelemetry::metrics::Meter {
     opentelemetry::global::meter("test")
 }
 
+fn single_pipeline_yaml(input_body: &str, output_body: &str) -> String {
+    format!(
+        "pipelines:\n  default:\n    inputs:\n      - {}\n    outputs:\n      - {}\n",
+        input_body.replace('\n', "\n        "),
+        output_body.replace('\n', "\n        "),
+    )
+}
+
 fn measure_pipeline(row_count: usize) -> (u64, usize, usize) {
     let dir = tempfile::tempdir().unwrap();
     let log_path = dir.path().join("test.log");
     logfwd_test_utils::generate_json_lines(&log_path, row_count, "scale-test");
 
-    let yaml = format!(
-        r#"
-input:
-  type: file
-  path: {}
-  format: json
-output:
-  type: "null"
-"#,
-        log_path.display()
+    let yaml = single_pipeline_yaml(
+        &format!("type: file\npath: {}\nformat: json", log_path.display()),
+        "type: \"null\"",
     );
 
     let config = Config::load_str(&yaml).unwrap();

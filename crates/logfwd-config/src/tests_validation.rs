@@ -3,32 +3,22 @@
 
 #[cfg(test)]
 mod tests {
+    use crate::test_yaml::{append_root_sections, single_pipeline_yaml};
     use crate::*;
     use std::fs;
 
     #[test]
     fn validation_missing_input_path() {
-        let yaml = r"
-input:
-  type: file
-output:
-  type: stdout
-";
-        let err = Config::load_str(yaml).unwrap_err();
+        let yaml = single_pipeline_yaml("type: file", "type: stdout");
+        let err = Config::load_str(&yaml).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("path"), "expected 'path' in error: {msg}");
     }
 
     #[test]
     fn validation_missing_output_endpoint() {
-        let yaml = r"
-input:
-  type: file
-  path: /var/log/test.log
-output:
-  type: otlp
-";
-        let err = Config::load_str(yaml).unwrap_err();
+        let yaml = single_pipeline_yaml("type: file\npath: /var/log/test.log", "type: otlp");
+        let err = Config::load_str(&yaml).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("endpoint"),
@@ -38,16 +28,11 @@ output:
 
     #[test]
     fn validation_otlp_gzip_is_allowed() {
-        let yaml = r"
-input:
-  type: file
-  path: /var/log/test.log
-output:
-  type: otlp
-  endpoint: http://collector:4318
-  compression: gzip
-";
-        Config::load_str(yaml).expect("gzip OTLP compression should validate");
+        let yaml = single_pipeline_yaml(
+            "type: file\npath: /var/log/test.log",
+            "type: otlp\nendpoint: http://collector:4318\ncompression: gzip",
+        );
+        Config::load_str(&yaml).expect("gzip OTLP compression should validate");
     }
 
     #[test]
@@ -62,17 +47,9 @@ output:
         ));
         fs::write(&path, b"not-a-directory").expect("write temp file");
 
-        let yaml = format!(
-            r"
-input:
-  type: file
-  path: /var/log/test.log
-output:
-  type: stdout
-storage:
-  data_dir: {}
-",
-            path.display()
+        let yaml = append_root_sections(
+            single_pipeline_yaml("type: file\npath: /var/log/test.log", "type: stdout"),
+            &format!("storage:\n  data_dir: {}\n", path.display()),
         );
 
         let err = Config::load_str(&yaml).expect_err("non-directory storage.data_dir must fail");
@@ -85,39 +62,24 @@ storage:
 
     #[test]
     fn validation_udp_requires_listen() {
-        let yaml = r"
-input:
-  type: udp
-output:
-  type: stdout
-";
-        let err = Config::load_str(yaml).unwrap_err();
+        let yaml = single_pipeline_yaml("type: udp", "type: stdout");
+        let err = Config::load_str(&yaml).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("listen"), "expected 'listen' in error: {msg}");
     }
 
     #[test]
     fn validation_otlp_requires_listen() {
-        let yaml = r"
-input:
-  type: otlp
-output:
-  type: stdout
-";
-        let err = Config::load_str(yaml).unwrap_err();
+        let yaml = single_pipeline_yaml("type: otlp", "type: stdout");
+        let err = Config::load_str(&yaml).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("listen"), "expected 'listen' in error: {msg}");
     }
 
     #[test]
     fn validation_arrow_ipc_requires_listen() {
-        let yaml = r"
-input:
-  type: arrow_ipc
-output:
-  type: stdout
-";
-        let err = Config::load_str(yaml).unwrap_err();
+        let yaml = single_pipeline_yaml("type: arrow_ipc", "type: stdout");
+        let err = Config::load_str(&yaml).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("listen"), "expected 'listen' in error: {msg}");
     }
@@ -138,9 +100,12 @@ pipelines:
     outputs:
       - type: stdout
 ";
-        let err = Config::load_str(yaml).unwrap_err();
+        let err = Config::load_str(&yaml).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("mix"), "expected 'mix' in error: {msg}");
+        assert!(
+            msg.contains("unknown field `input`") || msg.contains("unknown field `output`"),
+            "expected top-level single-pipeline keys to be rejected: {msg}"
+        );
     }
 
     #[test]
@@ -149,7 +114,7 @@ pipelines:
 server:
   log_level: info
 ";
-        let err = Config::load_str(yaml).unwrap_err();
+        let err = Config::load_str(&yaml).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("must define"),
@@ -159,9 +124,11 @@ server:
 
     #[test]
     fn removed_output_type_is_rejected_at_parse_time() {
-        let yaml =
-            "input:\n  type: file\n  path: /tmp/x.log\noutput:\n  type: parquet\n  path: /tmp/x\n";
-        let err = Config::load_str(yaml).expect_err("removed output type should fail to parse");
+        let yaml = single_pipeline_yaml(
+            "type: file\npath: /tmp/x.log",
+            "type: parquet\npath: /tmp/x",
+        );
+        let err = Config::load_str(&yaml).expect_err("removed output type should fail to parse");
         let msg = err.to_string();
         assert!(
             msg.contains("parquet")
@@ -176,8 +143,9 @@ server:
         // Unimplemented input formats must be rejected at config validation time,
         // not silently treated as JSON which would corrupt data.
         for format in ["logfmt", "syslog"] {
-            let yaml = format!(
-                "input:\n  type: file\n  path: /tmp/x.log\n  format: {format}\noutput:\n  type: stdout\n"
+            let yaml = single_pipeline_yaml(
+                &format!("type: file\npath: /tmp/x.log\nformat: {format}"),
+                "type: stdout",
             );
             let result = Config::load_str(&yaml);
             assert!(
@@ -204,11 +172,10 @@ pipelines:
     outputs:
       - type: stdout
 ";
-        let err = Config::load_str(yaml).expect_err("top-level transform must be rejected");
+        let err = Config::load_str(&yaml).expect_err("top-level transform must be rejected");
         assert!(
-            err.to_string()
-                .contains("top-level `transform` cannot be used with `pipelines:`"),
-            "unexpected validation error: {err}"
+            err.to_string().contains("unknown field `transform`"),
+            "unexpected parse error: {err}"
         );
     }
 
@@ -216,8 +183,9 @@ pipelines:
     fn validation_endpoint_missing_scheme() {
         // Scheme-less endpoints must be rejected for supported URL-based outputs.
         for otype in ["otlp", "elasticsearch"] {
-            let yaml = format!(
-                "input:\n  type: file\n  path: /tmp/x.log\noutput:\n  type: {otype}\n  endpoint: collector:4317\n"
+            let yaml = single_pipeline_yaml(
+                "type: file\npath: /tmp/x.log",
+                &format!("type: {otype}\nendpoint: collector:4317"),
             );
             let result = Config::load_str(&yaml);
             assert!(
@@ -241,8 +209,9 @@ pipelines:
             ("elasticsearch", "http://"),
             ("elasticsearch", "https://"),
         ] {
-            let yaml = format!(
-                "input:\n  type: file\n  path: /tmp/x.log\noutput:\n  type: {otype}\n  endpoint: {scheme}collector:4317\n"
+            let yaml = single_pipeline_yaml(
+                "type: file\npath: /tmp/x.log",
+                &format!("type: {otype}\nendpoint: {scheme}collector:4317"),
             );
             Config::load_str(&yaml)
                 .unwrap_or_else(|e| panic!("scheme '{scheme}' should be valid for '{otype}': {e}"));
@@ -253,15 +222,11 @@ pipelines:
     fn validation_endpoint_unset_env_var_rejected() {
         // An endpoint referencing an unset env var must fail at config load
         // time with a clear error message naming the variable.
-        let yaml = r"
-input:
-  type: file
-  path: /var/log/test.log
-output:
-  type: otlp
-  endpoint: ${LOGFWD_NONEXISTENT_ENDPOINT_VAR}
-";
-        let err = Config::load_str(yaml).unwrap_err();
+        let yaml = single_pipeline_yaml(
+            "type: file\npath: /var/log/test.log",
+            "type: otlp\nendpoint: ${LOGFWD_NONEXISTENT_ENDPOINT_VAR}",
+        );
+        let err = Config::load_str(&yaml).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("LOGFWD_NONEXISTENT_ENDPOINT_VAR"),
@@ -307,16 +272,9 @@ pipelines:
 resource_attrs:
   service.name: my-service
 ";
-        let err = Config::load_str(yaml).unwrap_err();
+        let err = Config::load_str(&yaml).unwrap_err();
         let msg = err.to_string();
-        assert!(
-            msg.contains("top-level `resource_attrs`"),
-            "error should mention top-level resource_attrs: {msg}"
-        );
-        assert!(
-            msg.contains("pipelines"),
-            "error should mention pipelines: {msg}"
-        );
+        assert!(msg.contains("unknown field `resource_attrs`"), "got: {msg}");
     }
 
     #[test]
@@ -334,16 +292,9 @@ enrichment:
     format: mmdb
     path: /tmp/geo.mmdb
 ";
-        let err = Config::load_str(yaml).unwrap_err();
+        let err = Config::load_str(&yaml).unwrap_err();
         let msg = err.to_string();
-        assert!(
-            msg.contains("top-level `enrichment`"),
-            "error should mention top-level enrichment: {msg}"
-        );
-        assert!(
-            msg.contains("pipelines"),
-            "error should mention pipelines form: {msg}"
-        );
+        assert!(msg.contains("unknown field `enrichment`"), "got: {msg}");
     }
 
     #[test]
@@ -358,7 +309,7 @@ pipelines:
       - type: stdout
     workers: 0
 ";
-        let err = Config::load_str(yaml).unwrap_err();
+        let err = Config::load_str(&yaml).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("workers"),
@@ -382,7 +333,7 @@ pipelines:
       - type: stdout
     batch_target_bytes: 0
 ";
-        let err = Config::load_str(yaml).unwrap_err();
+        let err = Config::load_str(&yaml).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("batch_target_bytes"),
@@ -402,7 +353,7 @@ pipelines:
       - type: stdout
     poll_interval_ms: 0
 ";
-        let err = Config::load_str(yaml).unwrap_err();
+        let err = Config::load_str(&yaml).unwrap_err();
         let msg = err.to_string();
         // Now rejected at parse time via PositiveMillis.
         assert!(

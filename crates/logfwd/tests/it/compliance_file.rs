@@ -44,12 +44,14 @@ fn build_pipeline(yaml: &str) -> Pipeline {
 fn file_pipeline_yaml(log_path: &std::path::Path) -> String {
     format!(
         r#"
-input:
-  type: file
-  path: {}
-  format: json
-output:
-  type: "null"
+pipelines:
+  default:
+    inputs:
+      - type: file
+        path: {}
+        format: json
+    outputs:
+      - type: "null"
 "#,
         log_path.display()
     )
@@ -135,13 +137,15 @@ fn wait_for_ready_lines(
 fn glob_pipeline_yaml(pattern: &str) -> String {
     format!(
         r#"
-input:
-  type: file
-  path: "{}"
-  format: json
-  glob_rescan_interval_ms: 50
-output:
-  type: "null"
+pipelines:
+  default:
+    inputs:
+      - type: file
+        path: "{}"
+        format: json
+        glob_rescan_interval_ms: 50
+    outputs:
+      - type: "null"
 "#,
         pattern
     )

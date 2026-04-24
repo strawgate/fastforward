@@ -45,22 +45,34 @@ pub(crate) fn build_stdin_send_config_yaml(
 
     merge_send_resource_attrs(mapping, service, resources)?;
 
-    if has_outputs {
-        rewrite_send_config_with_outputs(mapping, input);
-    } else {
-        mapping.insert(yaml_string("input"), serde_yaml_ng::Value::Mapping(input));
-    }
+    rewrite_send_config_as_pipeline(mapping, input)?;
 
     serde_yaml_ng::to_string(&value).map_err(|e| CliError::Config(e.to_string()))
 }
 
-fn rewrite_send_config_with_outputs(
+fn rewrite_send_config_as_pipeline(
     mapping: &mut serde_yaml_ng::Mapping,
     input: serde_yaml_ng::Mapping,
-) {
-    let outputs = mapping
-        .remove(yaml_string("outputs"))
-        .expect("internal invariant violated: `ff send` rewrite requires top-level `outputs`");
+) -> Result<(), CliError> {
+    let outputs = match (
+        mapping.remove(yaml_string("output")),
+        mapping.remove(yaml_string("outputs")),
+    ) {
+        (Some(output), None) => serde_yaml_ng::Value::Sequence(vec![output]),
+        (None, Some(outputs)) => outputs,
+        (Some(_), Some(_)) => {
+            return Err(CliError::Config(
+                "`ff send` destination config must define only one of top-level `output` or `outputs`"
+                    .to_owned(),
+            ));
+        }
+        (None, None) => {
+            return Err(CliError::Config(
+                "`ff send` destination config must define top-level `output` or `outputs`"
+                    .to_owned(),
+            ));
+        }
+    };
 
     let mut pipeline = serde_yaml_ng::Mapping::new();
     pipeline.insert(
@@ -84,6 +96,7 @@ fn rewrite_send_config_with_outputs(
         yaml_string("pipelines"),
         serde_yaml_ng::Value::Mapping(pipelines),
     );
+    Ok(())
 }
 
 fn merge_send_resource_attrs(
