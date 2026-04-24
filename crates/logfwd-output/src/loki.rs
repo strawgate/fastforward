@@ -490,19 +490,27 @@ impl LokiSink {
     fn prepare_and_reserve_payloads(
         &self,
         stream_map: &mut StreamMap,
-    ) -> io::Result<Vec<PreparedPayload>> {
+    ) -> io::Result<(Vec<PreparedPayload>, HashMap<StreamLabels, u64>)> {
         let mut timestamp_state = self
             .last_timestamp_by_stream
             .lock()
             .map_err(|_e| io::Error::other("Loki timestamp state lock poisoned"))?;
         let payloads = Self::prepare_payloads(stream_map, &timestamp_state, LOKI_MAX_PAYLOAD_BYTES);
+
+        // Save the previous timestamps so we can roll back if the send fails.
+        let mut previous_timestamps = HashMap::new();
+        for prepared in &payloads {
+            if let Some(&prev) = timestamp_state.get(&prepared.stream_labels) {
+                previous_timestamps.insert(prepared.stream_labels.clone(), prev);
+            }
+        }
+
         // Reserve before awaiting network IO so concurrent workers cannot prepare
-        // overlapping timestamp ranges for the same Loki stream. A failed send may
-        // leave timestamp gaps, which Loki accepts; going backwards is rejected.
+        // overlapping timestamp ranges for the same Loki stream.
         for prepared in &payloads {
             timestamp_state.insert(prepared.stream_labels.clone(), prepared.last_timestamp_ns);
         }
-        Ok(payloads)
+        Ok((payloads, previous_timestamps))
     }
 
     async fn do_send(
@@ -566,15 +574,37 @@ impl super::sink::Sink for LokiSink {
                 Ok(m) => m,
                 Err(e) => return super::sink::SendResult::from_io_error(e),
             };
-            let payloads = match self.prepare_and_reserve_payloads(&mut stream_map) {
-                Ok(payloads) => payloads,
-                Err(e) => return super::sink::SendResult::from_io_error(e),
-            };
-            for prepared in payloads {
-                match self.do_send(prepared.payload, prepared.row_count).await {
-                    Ok(super::sink::SendResult::Ok) => {}
-                    Ok(other) => return other,
+            let (payloads, previous_timestamps) =
+                match self.prepare_and_reserve_payloads(&mut stream_map) {
+                    Ok(result) => result,
                     Err(e) => return super::sink::SendResult::from_io_error(e),
+                };
+            for prepared in &payloads {
+                match self
+                    .do_send(prepared.payload.clone(), prepared.row_count)
+                    .await
+                {
+                    Ok(super::sink::SendResult::Ok) => {}
+                    outcome => {
+                        // Rollback reserved timestamps if we failed, so that
+                        // retries don't cause timestamp drift. Only revert if
+                        // the state is still exactly what we set it to.
+                        if let Ok(mut state) = self.last_timestamp_by_stream.lock() {
+                            for p in &payloads {
+                                if state.get(&p.stream_labels) == Some(&p.last_timestamp_ns) {
+                                    if let Some(prev) = previous_timestamps.get(&p.stream_labels) {
+                                        state.insert(p.stream_labels.clone(), *prev);
+                                    } else {
+                                        state.remove(&p.stream_labels);
+                                    }
+                                }
+                            }
+                        }
+                        return match outcome {
+                            Ok(other) => other,
+                            Err(e) => super::sink::SendResult::from_io_error(e),
+                        };
+                    }
                 }
             }
             super::sink::SendResult::Ok
@@ -888,14 +918,14 @@ mod tests {
             labels.clone(),
             vec![(100, "{\"message\":\"a\"}".to_string())],
         );
-        let first_payloads = sink1
+        let (first_payloads, _) = sink1
             .prepare_and_reserve_payloads(&mut first_stream_map)
             .expect("first payloads");
         assert_eq!(first_payloads[0].last_timestamp_ns, 100);
 
         let mut second_stream_map = StreamMap::new();
         second_stream_map.insert(labels, vec![(50, "{\"message\":\"b\"}".to_string())]);
-        let second_payloads = sink2
+        let (second_payloads, _) = sink2
             .prepare_and_reserve_payloads(&mut second_stream_map)
             .expect("second payloads");
         let parsed: serde_json::Value =
