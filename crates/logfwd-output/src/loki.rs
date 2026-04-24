@@ -574,23 +574,34 @@ impl super::sink::Sink for LokiSink {
                 Ok(m) => m,
                 Err(e) => return super::sink::SendResult::from_io_error(e),
             };
-            let (payloads, previous_timestamps) =
+            let (mut payloads, previous_timestamps) =
                 match self.prepare_and_reserve_payloads(&mut stream_map) {
                     Ok(result) => result,
                     Err(e) => return super::sink::SendResult::from_io_error(e),
                 };
-            for prepared in &payloads {
+            let mut all_payloads = std::mem::take(&mut payloads).into_iter();
+            while let Some(prepared) = all_payloads.next() {
+                let labels_for_rollback = prepared.stream_labels.clone();
+                let timestamp_for_rollback = prepared.last_timestamp_ns;
                 match self
-                    .do_send(prepared.payload.clone(), prepared.row_count)
+                    .do_send(prepared.payload, prepared.row_count)
                     .await
                 {
                     Ok(super::sink::SendResult::Ok) => {}
                     outcome => {
                         // Rollback reserved timestamps if we failed, so that
                         // retries don't cause timestamp drift. Only revert if
-                        // the state is still exactly what we set it to.
+                        // the state is still exactly what we set it to. We revert
+                        // the failed payload and all remaining unsent payloads.
                         if let Ok(mut state) = self.last_timestamp_by_stream.lock() {
-                            for p in &payloads {
+                            if state.get(&labels_for_rollback) == Some(&timestamp_for_rollback) {
+                                if let Some(prev) = previous_timestamps.get(&labels_for_rollback) {
+                                    state.insert(labels_for_rollback.clone(), *prev);
+                                } else {
+                                    state.remove(&labels_for_rollback);
+                                }
+                            }
+                            for p in all_payloads {
                                 if state.get(&p.stream_labels) == Some(&p.last_timestamp_ns) {
                                     if let Some(prev) = previous_timestamps.get(&p.stream_labels) {
                                         state.insert(p.stream_labels.clone(), *prev);
@@ -895,6 +906,73 @@ mod tests {
         sort_and_dedup_timestamps(&mut second_batch, Some(101));
         assert_eq!(second_batch[0].0, 102);
         assert_eq!(second_batch[1].0, 103);
+    }
+
+    #[test]
+    fn send_failure_rolls_back_timestamp_reservation() {
+        use crate::sink::{SendResult, Sink};
+        let mut server = mockito::Server::new();
+        let mock = server.mock("POST", "/loki/api/v1/push")
+            .with_status(500)
+            .create();
+
+        let factory = LokiSinkFactory::new(
+            "loki".to_string(),
+            server.url(),
+            None,
+            vec![("app".to_string(), "logfwd".to_string())],
+            vec![],
+            vec![],
+            Arc::new(ComponentStats::new()),
+        )
+        .expect("factory");
+        let mut sink = factory.create_sink();
+
+        // Create a batch with timestamp 100
+        let schema = Arc::new(arrow::datatypes::Schema::new(vec![
+            arrow::datatypes::Field::new(field_names::TIMESTAMP_UNDERSCORE, DataType::Int64, true),
+            arrow::datatypes::Field::new("message", DataType::Utf8, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(arrow::array::Int64Array::from(vec![100i64])),
+                Arc::new(arrow::array::StringArray::from(vec!["hello"])),
+            ],
+        ).unwrap();
+        let metadata = BatchMetadata {
+            resource_attrs: Arc::from([]),
+            observed_time_ns: 99_999,
+        };
+
+        // First attempt (fails with 500)
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(sink.send_batch(&batch, &metadata));
+        assert!(matches!(result, SendResult::IoError(_)));
+        mock.assert();
+
+        // Check state - timestamp should have been rolled back to None
+        let labels: StreamLabels = vec![("app".to_string(), "logfwd".to_string())];
+        {
+            let state = sink.last_timestamp_by_stream.lock().unwrap();
+            assert_eq!(state.get(&labels), None, "timestamp reservation should be rolled back on failure");
+        }
+
+        // Fix server to succeed
+        let mock_success = server.mock("POST", "/loki/api/v1/push")
+            .with_status(204)
+            .create();
+
+        // Retry same batch
+        let result2 = rt.block_on(sink.send_batch(&batch, &metadata));
+        assert!(matches!(result2, SendResult::Ok));
+        mock_success.assert();
+
+        // State should now have 100
+        {
+            let state = sink.last_timestamp_by_stream.lock().unwrap();
+            assert_eq!(state.get(&labels), Some(&100), "successful send should keep timestamp");
+        }
     }
 
     #[test]
