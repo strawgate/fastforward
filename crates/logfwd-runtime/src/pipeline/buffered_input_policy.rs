@@ -11,6 +11,7 @@ pub(super) const LARGE_SINGLE_CHUNK_DIRECT_FLUSH_BYTES: usize = 64 * 1024;
 /// Continue shutdown repolling when the shared-buffer path might still emit
 /// scanner-ready payload on a later poll.
 #[must_use]
+#[allow(clippy::fn_params_excessive_bools)]
 pub(super) const fn should_repoll_buffered_shutdown(
     is_finished: bool,
     had_source_payload: bool,
@@ -32,6 +33,7 @@ pub(super) const fn should_repoll_buffered_shutdown(
 /// Preserve the old "large first chunk flushes immediately" behavior on the
 /// shared-buffer path.
 #[must_use]
+#[allow(clippy::fn_params_excessive_bools)]
 pub(super) const fn should_flush_large_single_shared_buffer_chunk(
     buffer_was_empty_at_poll: bool,
     event_count: usize,
