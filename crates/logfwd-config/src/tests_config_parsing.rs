@@ -5,30 +5,64 @@ mod tests {
     use crate::*;
     use std::fs;
 
+    fn single_pipeline_yaml(
+        input_body: &str,
+        transform: Option<&str>,
+        output_body: &str,
+    ) -> String {
+        let mut yaml = String::from("pipelines:\n  default:\n    inputs:\n");
+        for (idx, line) in input_body
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .enumerate()
+        {
+            if idx == 0 {
+                yaml.push_str("      - ");
+                yaml.push_str(line.trim_start());
+                yaml.push('\n');
+            } else {
+                yaml.push_str("        ");
+                yaml.push_str(line.trim_start());
+                yaml.push('\n');
+            }
+        }
+        if let Some(transform) = transform {
+            yaml.push_str("    transform: |\n");
+            for line in transform.lines() {
+                yaml.push_str("      ");
+                yaml.push_str(line);
+                yaml.push('\n');
+            }
+        }
+        yaml.push_str("    outputs:\n");
+        for (idx, line) in output_body
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .enumerate()
+        {
+            if idx == 0 {
+                yaml.push_str("      - ");
+                yaml.push_str(line.trim_start());
+                yaml.push('\n');
+            } else {
+                yaml.push_str("        ");
+                yaml.push_str(line.trim_start());
+                yaml.push('\n');
+            }
+        }
+        yaml
+    }
+
     #[test]
-    fn simple_config() {
-        let yaml = r"
-input:
-  type: file
-  path: /var/log/pods/**/*.log
-  format: cri
-
-transform: |
-  SELECT * FROM logs WHERE level != 'DEBUG'
-
-output:
-  type: otlp
-  endpoint: http://otel-collector:4317
-  compression: zstd
-
-server:
-  diagnostics: 0.0.0.0:9090
-  log_level: info
-
-storage:
-  data_dir: /var/lib/logfwd
-";
-        let cfg = Config::load_str(yaml).expect("should parse simple config");
+    fn config_with_one_pipeline() {
+        let mut yaml = single_pipeline_yaml(
+            "type: file\npath: /var/log/pods/**/*.log\nformat: cri",
+            Some("SELECT * FROM logs WHERE level != 'DEBUG'"),
+            "type: otlp\nendpoint: http://otel-collector:4317\ncompression: zstd",
+        );
+        yaml.push_str("\nserver:\n  diagnostics: 0.0.0.0:9090\n  log_level: info\n");
+        yaml.push_str("\nstorage:\n  data_dir: /var/lib/logfwd\n");
+        let cfg = Config::load_str(&yaml).expect("should parse simple config");
         assert_eq!(cfg.pipelines.len(), 1);
         let pipe = &cfg.pipelines["default"];
         assert_eq!(pipe.inputs.len(), 1);
@@ -50,77 +84,70 @@ storage:
 
     #[test]
     fn input_source_metadata_style_defaults_none_and_parses_styles() {
-        let default_yaml = r#"
-input:
-  type: file
-  path: /var/log/pods/**/*.log
-  format: cri
-
-output:
-  type: "null"
-"#;
-        let cfg = Config::load_str(default_yaml).expect("default source_metadata should parse");
+        let default_yaml = single_pipeline_yaml(
+            "type: file\npath: /var/log/pods/**/*.log\nformat: cri",
+            None,
+            "type: \"null\"",
+        );
+        let cfg = Config::load_str(&default_yaml).expect("default source_metadata should parse");
         let pipe = &cfg.pipelines["default"];
         assert_eq!(pipe.inputs[0].source_metadata, SourceMetadataStyle::None);
 
-        let enabled_yaml = r#"
-input:
-  type: file
-  path: /var/log/pods/**/*.log
-  format: cri
-  source_metadata: fastforward
-
-output:
-  type: "null"
-"#;
-        let cfg = Config::load_str(enabled_yaml).expect("source_metadata style should parse");
+        let enabled_yaml = single_pipeline_yaml(
+            "type: file\npath: /var/log/pods/**/*.log\nformat: cri\nsource_metadata: fastforward",
+            None,
+            "type: \"null\"",
+        );
+        let cfg = Config::load_str(&enabled_yaml).expect("source_metadata style should parse");
         let pipe = &cfg.pipelines["default"];
         assert_eq!(
             pipe.inputs[0].source_metadata,
             SourceMetadataStyle::Fastforward
         );
 
-        let beats_yaml = r#"
-input:
-  type: file
-  path: /var/log/pods/**/*.log
-  format: cri
-  source_metadata: beats
-
-output:
-  type: "null"
-"#;
-        let cfg = Config::load_str(beats_yaml).expect("beats alias should parse");
+        let ecs_yaml = single_pipeline_yaml(
+            "type: file\npath: /var/log/pods/**/*.log\nformat: cri\nsource_metadata: ecs",
+            None,
+            "type: \"null\"",
+        );
+        let cfg = Config::load_str(&ecs_yaml).expect("ecs style should parse");
         let pipe = &cfg.pipelines["default"];
         assert_eq!(pipe.inputs[0].source_metadata, SourceMetadataStyle::Ecs);
 
-        let otel_yaml = r#"
-input:
-  type: file
-  path: /var/log/pods/**/*.log
-  format: cri
-  source_metadata: otel
-
-output:
-  type: "null"
-"#;
-        let cfg = Config::load_str(otel_yaml).expect("otel style should parse");
+        let otel_yaml = single_pipeline_yaml(
+            "type: file\npath: /var/log/pods/**/*.log\nformat: cri\nsource_metadata: otel",
+            None,
+            "type: \"null\"",
+        );
+        let cfg = Config::load_str(&otel_yaml).expect("otel style should parse");
         let pipe = &cfg.pipelines["default"];
         assert_eq!(pipe.inputs[0].source_metadata, SourceMetadataStyle::Otel);
 
-        let vector_yaml = r#"
-input:
-  type: file
-  path: /var/log/pods/**/*.log
-  format: cri
-  source_metadata: vector
-
-output:
-  type: "null"
-"#;
-        let cfg = Config::load_str(vector_yaml).expect("vector style should parse");
+        let vector_yaml = single_pipeline_yaml(
+            "type: file\npath: /var/log/pods/**/*.log\nformat: cri\nsource_metadata: vector",
+            None,
+            "type: \"null\"",
+        );
+        let cfg = Config::load_str(&vector_yaml).expect("vector style should parse");
         let pipe = &cfg.pipelines["default"];
         assert_eq!(pipe.inputs[0].source_metadata, SourceMetadataStyle::Vector);
+    }
+
+    #[test]
+    fn input_source_metadata_beats_alias_is_rejected() {
+        let yaml = single_pipeline_yaml(
+            "type: file\npath: /var/log/pods/**/*.log\nformat: cri\nsource_metadata: beats",
+            None,
+            "type: \"null\"",
+        );
+        let err = Config::load_str(&yaml).expect_err("beats alias should no longer parse");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("beats")
+                && (msg.contains("unknown variant")
+                    || msg.contains("does not have variant constructor")),
+            "expected enum parse rejection for beats alias: {msg}"
+        );
     }
 
     #[test]
@@ -173,15 +200,12 @@ server:
         // SAFETY: this test is not run concurrently with other tests that
         // depend on the same environment variable.
         unsafe { std::env::set_var("LOGFWD_TEST_ENDPOINT", "http://my-collector:4317") };
-        let yaml = r"
-input:
-  type: file
-  path: /var/log/test.log
-output:
-  type: otlp
-  endpoint: ${LOGFWD_TEST_ENDPOINT}
-";
-        let cfg = Config::load_str(yaml).expect("env var substitution");
+        let yaml = single_pipeline_yaml(
+            "type: file\npath: /var/log/test.log",
+            None,
+            "type: otlp\nendpoint: ${LOGFWD_TEST_ENDPOINT}",
+        );
+        let cfg = Config::load_str(&yaml).expect("env var substitution");
         let pipe = &cfg.pipelines["default"];
         assert_eq!(pipe.outputs[0].endpoint(), Some("http://my-collector:4317"));
         // SAFETY: this test is not run concurrently with other tests that
@@ -199,13 +223,8 @@ output:
             "logfwd-config-load-{}-{unique}.yaml",
             std::process::id()
         ));
-        let yaml = r"
-input:
-  type: file
-  path: /var/log/test.log
-output:
-  type: stdout
-";
+        let yaml =
+            single_pipeline_yaml("type: file\npath: /var/log/test.log", None, "type: stdout");
         fs::write(&path, yaml).expect("write config");
 
         let cfg = Config::load(&path).expect("Config::load should parse file");
@@ -218,15 +237,12 @@ output:
 
     #[test]
     fn unset_env_var_rejected() {
-        let yaml = r"
-input:
-  type: file
-  path: /var/log/test.log
-output:
-  type: otlp
-  endpoint: ${LOGFWD_NONEXISTENT_VAR_12345}
-";
-        let err = Config::load_str(yaml).unwrap_err();
+        let yaml = single_pipeline_yaml(
+            "type: file\npath: /var/log/test.log",
+            None,
+            "type: otlp\nendpoint: ${LOGFWD_NONEXISTENT_VAR_12345}",
+        );
+        let err = Config::load_str(&yaml).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("LOGFWD_NONEXISTENT_VAR_12345"),
@@ -274,18 +290,18 @@ pipelines:
     #[test]
     fn resource_attrs_simple_form() {
         let yaml = r#"
-input:
-  type: file
-  path: /var/log/app.log
-
-output:
-  type: otlp
-  endpoint: http://otel-collector:4317
-
-resource_attrs:
-  service.name: my-service
-  service.version: "1.2.3"
-  deployment.environment: production
+pipelines:
+  default:
+    resource_attrs:
+      service.name: my-service
+      service.version: "1.2.3"
+      deployment.environment: production
+    inputs:
+      - type: file
+        path: /var/log/app.log
+    outputs:
+      - type: otlp
+        endpoint: http://otel-collector:4317
 "#;
         let cfg = Config::load_str(yaml).expect("should parse simple config with resource_attrs");
         let pipe = &cfg.pipelines["default"];
@@ -338,15 +354,12 @@ pipelines:
 
     #[test]
     fn resource_attrs_absent_is_empty() {
-        let yaml = r"
-input:
-  type: file
-  path: /var/log/app.log
-output:
-  type: otlp
-  endpoint: http://otel-collector:4317
-";
-        let cfg = Config::load_str(yaml).expect("should parse config without resource_attrs");
+        let yaml = single_pipeline_yaml(
+            "type: file\npath: /var/log/app.log",
+            None,
+            "type: otlp\nendpoint: http://otel-collector:4317",
+        );
+        let cfg = Config::load_str(&yaml).expect("should parse config without resource_attrs");
         let pipe = &cfg.pipelines["default"];
         assert!(pipe.resource_attrs.is_empty());
     }
@@ -362,15 +375,12 @@ output:
 
     #[test]
     fn format_text_alias_accepted() {
-        let yaml = r"
-input:
-  type: file
-  path: /tmp/x.log
-  format: text
-output:
-  type: stdout
-";
-        let cfg = Config::load_str(yaml).expect("format: text should be accepted");
+        let yaml = single_pipeline_yaml(
+            "type: file\npath: /tmp/x.log\nformat: text",
+            None,
+            "type: stdout",
+        );
+        let cfg = Config::load_str(&yaml).expect("format: text should be accepted");
         let pipe = &cfg.pipelines["default"];
         assert_eq!(pipe.inputs[0].format, Some(Format::Text));
     }

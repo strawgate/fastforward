@@ -19,7 +19,7 @@ The default rule remains:
 - keep SQL unsurprising: SQL sees ordinary Arrow columns and `SELECT *`
   returns the table schema as-is;
 - use `source_metadata: fastforward` for the cheap internal `__source_id`
-  handle, and use public styles (`ecs`/`beats`, `otel`, `vector`) when metadata
+  handle, and use public styles (`ecs`, `otel`, `vector`) when metadata
   should be materialized as normal columns;
 - drop known FastForward internal fields such as `__source_id` at user-facing
   output boundaries unless SQL aliases them to public names.
