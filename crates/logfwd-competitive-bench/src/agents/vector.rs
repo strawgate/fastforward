@@ -91,8 +91,10 @@ sources:
       method: newline_delimited
     method: post
     batch:
-      max_bytes: 1048576
+      max_bytes: 4194304
       timeout_secs: 1
+    request:
+      concurrency: 10
 "#,
             data_dir = data_dir.display(),
             data_file = ctx.data_file.display(),
