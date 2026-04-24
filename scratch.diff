@@ -1,0 +1,15 @@
+<<<<<<< SEARCH
+        let mut real_quotes = alloc::vec::Vec::with_capacity(num_blocks);
+        let mut open_brace = alloc::vec::Vec::with_capacity(num_blocks);
+        let mut close_brace = alloc::vec::Vec::with_capacity(num_blocks);
+        let mut open_bracket = alloc::vec::Vec::with_capacity(num_blocks);
+        let mut close_bracket = alloc::vec::Vec::with_capacity(num_blocks);
+        let mut line_ranges = alloc::vec::Vec::new();
+=======
+        scratch.real_quotes.clear();
+        scratch.open_brace.clear();
+        scratch.close_brace.clear();
+        scratch.open_bracket.clear();
+        scratch.close_bracket.clear();
+        scratch.line_ranges.clear();
+>>>>>>> REPLACE

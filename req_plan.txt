@@ -1,0 +1,275 @@
+1. We will add a `ScanScratch` struct in `logfwd-core::scanner` to hold `real_quotes`, `open_brace`, `close_brace`, `open_bracket`, `close_bracket` and `line_ranges`. Wait, we can actually just define it in `logfwd-core::json_scanner`. Since `scan_streaming` signature doesn't require a builder-owned scratch, we can require a caller to provide `&mut ScanScratch`.
+Wait, `scan_streaming` is used in many places. Changing its signature requires updating tests.
+Alternatively, `ScanBuilder` could expose a method to get scratch, but that complicates the trait.
+Actually, if we look at `Scanner` in `logfwd-arrow/src/scanner.rs`, we can add `scratch: logfwd_core::json_scanner::ScanScratch` there, and pass it to `scan_streaming`.
+2. In `logfwd-core/src/json_scanner.rs`, `ScanScratch` will have `real_quotes: Vec<u64>`, etc. `line_ranges: Vec<(usize, usize)>`. `scan_streaming` will be `pub fn scan_streaming<B: ScanBuilder>(buf: &[u8], config: &ScanConfig, builder: &mut B, scratch: &mut ScanScratch)`.
+Wait, inside `scan_streaming`, `line_ranges` isn't currently sized well, but now it will keep capacity. We will `clear()` them.
+3. In `logfwd-arrow/src/streaming_builder/mod.rs`, `StreamingBuilder` can have `values_i64: Vec<i64>`, `values_f64: Vec<f64>`, `valid_bools: Vec<bool>` etc. as scratch to avoid `vec![...]` per column. Wait, `vec![0i64; num_rows]` creates a new vector initialized to zero. Arrow's `Int64Array::new` takes a `ScalarBuffer<i64>` which takes a `Vec<i64>`. BUT if we use `Int64Builder`, we can reuse its capacity! Wait! `arrow::array::Int64Builder` allows building and returning `Int64Array`. We can use `arrow::array::PrimitiveBuilder<Int64Type>`? No, `StreamingBuilder`'s `finish_batch` can just use `Vec::with_capacity(num_rows)` and do `.resize(num_rows, 0)` but that still allocates if we give it to Arrow. However, wait! Can we use `Int64Builder::with_capacity`? Still allocates per column per batch. If we want to reuse, we must keep `Vec<i64>` across columns or batches? Wait, if we keep `Vec<i64>` across columns, how can we give it to Arrow? Arrow needs to own the buffer. So we can't avoid allocating the Arrow buffer. BUT we CAN avoid allocating a vector for *each column* if we use `arrow::buffer::BufferBuilder`.
+Wait! "Reusable scratch buffers in StreamingBuilder". `vec![0i64; num_rows]` per column per batch - use caller-held scratch buffers. If we use `let mut values = std::mem::take(&mut self.scratch_i64); values.clear(); values.resize(num_rows, 0);` and then give it to Arrow? Wait, if we give it to Arrow, we *lose* the buffer. Arrow consumes the `Vec` into a `Buffer`. So we can't reuse the buffer for the next column unless Arrow drops it. But Arrow keeps it!
+Wait! Arrow `Int64Array` takes a `ScalarBuffer<i64>`. `ScalarBuffer` can be created from `Vec` but consumes it. Is there a way to avoid `vec![...]` allocating per column? If we use `arrow::buffer::MutableBuffer`, it also consumes. What does the issue mean by "Reusable scratch buffers in StreamingBuilder"?
+Wait... `Int64Builder` handles nulls and values in separate buffers. Maybe we can populate values directly into Arrow's `MutableBuffer` or `BufferBuilder` which manages its own allocation but we can't reuse it across batches... BUT we can reuse `valid_bools`! No, `NullBuffer::from` takes `Vec<bool>` or `BooleanBuffer`.
+Actually, if we iterate and use `builder.append_value()` / `builder.append_null()` on an `Int64Builder`, it will build the array directly.
+Wait, if we use a builder, we still allocate per column.
+Wait! `StreamingBuilder` has `FieldColumns`. Does it have `vec![0i64; num_rows]`? Yes, in `finish.rs` line 185: `let mut values = vec![0i64; num_rows]; let mut valid = vec![false; num_rows];`
+Can we just use `Vec::with_capacity` to prevent 0-initialization overhead? But `num_rows` might be 0, so `vec![0i64; num_rows]` allocates exactly `num_rows`. If we reuse a scratch buffer, maybe we can't give it to Arrow? Wait, we CAN'T reuse a buffer that is given to Arrow.
+But maybe we don't have to give `valid` to Arrow? `NullBuffer::from_iter`?
+Let's look at how Arrow expects it.
+Ah, `StreamingBuilder` could keep a pool of buffers? No.
+What if we use a scratch vector to compute something, and then copy it? No, that's double copy.
+Ah! The issue says:
+`vec![0i64; num_rows]` per column per batch -> Reusable scratch buffers in StreamingBuilder
+Wait, if `vec![0i64; num_rows]` is used, maybe it's *not* given to Arrow?
+Let's check `finish.rs`:
+`let mut values = vec![0i64; num_rows];`
+`let array = Int64Array::new(values.into(), Some(nulls));`
+Here `values.into()` consumes `values` into a `ScalarBuffer`.
+If we use `arrow::array::Int64Builder`, it has a `values_slice()` but we can't reuse its allocation after `finish()`.
+BUT wait, what if we reuse a single scratch buffer to hold `values` and `valid`, and then use `Buffer::from_slice_ref`? No, `Buffer::from_slice_ref` copies the data, so it still allocates, but Arrow allocates.
+Wait, Arrow's `MutableBuffer` can be reused? No.
+Let's read the issue: "vec![0i64; num_rows] per column per batch | perf | Reusable scratch buffers in StreamingBuilder".
+How can we reuse a scratch buffer if Arrow takes ownership?
+If we use `MutableBuffer` or `Vec`, we can't reuse it once Arrow takes ownership.
+Wait, maybe we CAN avoid allocating a new `Vec` if we use a scratch buffer to build the boolean array?
+If we use `BooleanBufferBuilder` for the nulls?
+Actually, what if we have `scratch_i64: Vec<Vec<i64>>` in `StreamingBuilder`? We take one out, use it, give it to Arrow... wait, Arrow drops it when the batch is dropped. We can't reuse it.
+Wait! Arrow `Int64Array` can be created from `Vec` but Arrow owns it. Is there a way to reuse? No, unless we use `ffi` or custom allocation.
+Is it possible the issue means: "Instead of allocating `vec![0i64; num_rows]` for EVERY column, we allocate a scratch buffer, populate it, and then build the Arrow array by slicing or copying? No, copying allocates.
+Ah, what if we populate the `Vec` directly by `Vec::with_capacity(num_rows)` and we don't zero-initialize it?
+`vec![0i64; num_rows]` zero-initializes the whole vector! If we use `let mut values = Vec::with_capacity(num_rows); values.resize(num_rows, 0i64);` it also zero-initializes. But Arrow arrays don't need to be initialized for null slots!
+Actually, wait. The issue says "vec![0i64; num_rows] per column per batch | perf | Reusable scratch buffers in StreamingBuilder".
+Maybe it's talking about a scratch buffer *inside* `StreamingBuilder` that we use to collect the active rows, and then we build the Arrow array?
+Wait, if we use `Int64Builder`, we can do `builder.append_option(...)`. But `Int64Builder` allocates.
+What if we use a scratch `Vec<i64>` and `Vec<bool>`, populate them, and then use `Int64Array::new(values.into(), Some(nulls))`? If we give `values` to Arrow, we *lose* the `Vec` and its capacity!
+Wait... What if we DON'T give the `Vec` to Arrow? What if we pass the scratch buffer to Arrow, and when the RecordBatch is dropped, it's freed? Yes, we can't reuse.
+Wait! Maybe the issue means we have a scratch buffer in `StreamingBuilder` for `valid` (the null buffer)? `NullBuffer::from` takes `Vec<bool>`. We can't reuse it either.
+Let's search the issue text carefully: "Reusable scratch buffers in StreamingBuilder" for "vec![0i64; num_rows] per column per batch".
+Maybe they mean we have `scratch_i64: Vec<i64>` and `scratch_valid: Vec<bool>` in `StreamingBuilder`. For each column, we `clear()`, then `resize(num_rows, 0)`, then populate it. Then we create an Arrow array by copying it? Arrow's `Buffer::from_slice_ref` copies it into a new Arrow-managed buffer. Yes! `Buffer::from_slice_ref(&scratch_i64)` allocates an Arrow buffer, but we reuse our `Vec`'s capacity! Wait, creating an Arrow buffer STILL allocates! So we trade one allocation (`vec![0; num_rows]`) for another (`Buffer::from_slice_ref`). BUT `vec![0; num_rows]` allocates AND zero-initializes. And Arrow's buffer allocation might be faster?
+Actually, `Int64Array::from(Vec<Option<i64>>)` allocates.
+What if we use `arrow::array::Int64Builder`? We don't need a scratch buffer.
+Wait, if we use a scratch buffer, `let buffer = Buffer::from_iter(scratch_i64.iter().copied());`
+Let's see what happens if we use `arrow::buffer::Buffer` or `ScalarBuffer` from `scratch_i64`.
+If we use a scratch vector `values`, and we copy it to `Buffer`, we do an allocation.
+Wait, if we use `vec![0; num_rows]`, that is exactly one allocation. What is the problem? The problem is that it is allocated *per column per batch*. And it's zero-initialized.
+If we use `Int64Builder` with `with_capacity(num_rows)`, it allocates per column per batch.
+Wait! Can we keep `Int64Builder` inside `FieldColumns`?
+Yes! `FieldColumns` has `int_values: Vec<(u32, i64)>`. This is ALREADY a vector that grows and is reused!
+Wait, `int_values` is `Vec<(u32, i64)>`. It stores the sparse values! Then in `finish.rs` it does:
+```rust
+let mut values = vec![0i64; num_rows];
+let mut valid = vec![false; num_rows];
+for &(row, v) in &fc.int_values {
+    let r = row as usize;
+    if r < num_rows {
+        values[r] = v;
+        valid[r] = true;
+    }
+}
+```
+If we use `vec![...]`, we allocate 2 vecs per column per batch.
+If we add `scratch_i64: Vec<i64>` and `scratch_valid: Vec<bool>` to `StreamingBuilder`, and we use them as scratch:
+```rust
+self.scratch_i64.clear();
+self.scratch_i64.resize(num_rows, 0i64);
+// populate self.scratch_i64
+let array = Int64Array::new(ScalarBuffer::from(self.scratch_i64.clone()), ...);
+```
+Wait, `ScalarBuffer::from(Vec::clone())` allocates.
+Is there a way to create an Arrow array from an iterator without allocating twice? `Int64Array::from_iter` takes an iterator. But `from_iter` allocates inside Arrow.
+Wait! If we use a scratch buffer, maybe we can just do:
+`let mut values = std::mem::take(&mut self.scratch_i64);`
+But then `values` is given to Arrow, and `self.scratch_i64` becomes empty. So we only avoid allocation for the FIRST column! Wait, what if `StreamingBuilder` has a `Vec<Vec<i64>>` pool? "Reusable scratch buffers in StreamingBuilder". Yes, a `Vec<Vec<i64>>` pool! `self.i64_pool.pop().unwrap_or_default()`, and then we CAN'T get it back because it's given to Arrow! Arrow `ArrayData` takes ownership of the underlying buffer, and we don't get it back when it's dropped.
+So how can we reuse scratch buffers if we give them to Arrow?
+Wait... if we use `MutableBuffer`? Arrow's buffers are ref-counted. When the `RecordBatch` is dropped, the buffer is dropped. We can't hook into its drop to return it to the pool.
+Maybe we CAN use `Vec::with_capacity` to create the buffer, but the issue says "Reusable scratch buffers in StreamingBuilder".
+Could it be that we keep a scratch buffer, and we use `Buffer::from_slice_ref`?
+If we use `Buffer::from_slice_ref(&self.scratch_i64)`, Arrow allocates a new buffer and copies the data. So we avoid allocating a `Vec` and then giving it to Arrow, but Arrow still allocates a `Buffer`. Wait, `Buffer::from_slice_ref` allocates an uninitialized Arrow buffer and copies. `vec![0i64; num_rows]` allocates a zero-initialized vector, then `into()` converts it to a `Buffer` without reallocation. So `vec!` + `into()` is 1 allocation + zero-initialization. `Buffer::from_slice_ref` is 1 allocation (uninitialized) + copy from scratch buffer. So the number of allocations is the same! But Arrow's allocation is uninitialized, so it's faster than `vec!`, AND we reuse the scratch buffer's capacity so we don't allocate the scratch buffer.
+Wait, `Buffer::from_slice_ref` creates a `Buffer`. `Int64Array::new` takes a `ScalarBuffer<i64>`. `ScalarBuffer::new(buffer, 0, len)`.
+Wait, for `valid`, `NullBuffer::new(BooleanBuffer::new(Buffer::from_slice_ref(...), 0, len))`. But wait, `BooleanBuffer` is a bit-packed buffer! `vec![false; num_rows]` is a byte per boolean! Arrow's `NullBuffer::from(Vec<bool>)` converts `Vec<bool>` (1 byte each) to a bit-packed `BooleanBuffer`. This conversion allocates a new `Buffer`!
+So `vec![false; num_rows]` allocates a `Vec<bool>`, and then `NullBuffer::from` allocates a `Buffer` and bit-packs it! That's 2 allocations!
+If we use a scratch buffer for `valid`, we can build the bit-packed buffer directly, or use Arrow's `BooleanBufferBuilder`!
+Ah! `BooleanBufferBuilder` is an Arrow builder. But it allocates.
+If we use `StreamingBuilder` scratch:
+```rust
+// In StreamingBuilder
+pub(crate) scratch_i64: Vec<i64>,
+pub(crate) scratch_f64: Vec<f64>,
+pub(crate) scratch_bool_valid: arrow::array::BooleanBufferBuilder,
+```
+If we use `BooleanBufferBuilder`, we can reuse its capacity! Wait, `BooleanBufferBuilder::finish()` returns a `BooleanBuffer` and RESETS the builder, but does it keep the capacity?
+Let's check arrow documentation: "BooleanBufferBuilder::finish() resets the builder and returns the buffer... but the capacity is NOT kept because it returns the underlying Buffer". No, `BufferBuilder::finish` extracts the buffer. The builder becomes empty. To reuse capacity, we'd need to keep the buffer. But Arrow takes ownership.
+So we CANNOT reuse the capacity of Arrow buffers.
+BUT we CAN reuse `scratch_i64: Vec<i64>` by NOT giving it to Arrow. Wait, if we don't give it to Arrow, we must copy it to Arrow. `ScalarBuffer::from(self.scratch_i64.as_slice())` copies the slice into a new Arrow buffer.
+Wait, if we use a scratch `Vec<i64>`, we copy it into `ScalarBuffer`. It's one allocation inside `ScalarBuffer`.
+If we use `vec![0; num_rows].into()`, it allocates a `Vec`, and `.into()` reuses the `Vec`'s allocation for `ScalarBuffer`. So it's ALSO one allocation.
+Why would "Reusable scratch buffers in StreamingBuilder" be better? Because it avoids the `vec![0; num_rows]` allocation and zero-initialization? No, `ScalarBuffer::from(slice)` allocates and copies, which is equivalent to allocating and initializing.
+Wait! What if we use a reusable scratch `Vec` of `i64` and `bool` for the whole builder, and we iterate over `num_rows` and append directly? No, `StreamingBuilder` can have `scratch_i64`, `scratch_f64`, `scratch_bool`, `scratch_valid`.
+Let's look at `append_value` loops in `finish.rs`:
+For `str`, it uses `arrow::array::StringBuilder::with_capacity(num_rows, total_bytes);` which allocates a new builder every time.
+Wait, `StringBuilder` can be reused if we use it across batches? No, `finish()` consumes it.
+
+Wait! What about the bitmasks in `json_scanner.rs`?
+"5 bitmask Vecs + line_ranges — use caller-held scratch buffers"
+I will add `ScanScratch` and pass it to `scan_streaming`.
+
+For `json_escape_bytes` byte-by-byte push:
+```rust
+pub fn json_escape_bytes(src: &[u8], dst: &mut Vec<u8>) {
+    let mut start = 0;
+    while start < src.len() {
+        let mut i = start;
+        while i < src.len() && !matches!(src[i], b'"' | b'\\' | 0x00..=0x1F | 0x7F) {
+            i += 1;
+        }
+        if i > start {
+            dst.extend_from_slice(&src[start..i]);
+        }
+        if i == src.len() {
+            break;
+        }
+        let b = src[i];
+        match b {
+            b'"' => dst.extend_from_slice(b"\\\""),
+            b'\\' => dst.extend_from_slice(b"\\\\"),
+            0x08 => dst.extend_from_slice(b"\\b"),
+            b'\t' => dst.extend_from_slice(b"\\t"),
+            b'\n' => dst.extend_from_slice(b"\\n"),
+            0x0C => dst.extend_from_slice(b"\\f"),
+            b'\r' => dst.extend_from_slice(b"\\r"),
+            0x00..=0x1F | 0x7F => {
+                dst.extend_from_slice(b"\\u00");
+                let hi = (b >> 4) & 0x0F;
+                let lo = b & 0x0F;
+                dst.push(if hi < 10 { b'0' + hi } else { b'a' + hi - 10 });
+                dst.push(if lo < 10 { b'0' + lo } else { b'a' + lo - 10 });
+            }
+            _ => unreachable!(),
+        }
+        start = i + 1;
+    }
+}
+```
+Wait, we can use `memchr` or just a simple loop like above. The issue specifically says "memchr-based bulk copy of unescaped runs". `logfwd-core` has `memchr`. `memchr::memchr` searches for ONE byte. We have multiple bytes to escape. Wait, we can use a lookup table or just a fast loop. Actually, `json_scanner.rs` uses `is_json_delimiter`. There's no `memchr` for 33 characters (control chars + quote + backslash). Wait, we can use `memchr::memchr2` for quote and backslash, but what about control chars? It's fine to just write a simple fast scalar loop or use `logfwd_core`'s existing escaping if there is any. But the issue explicitly says "memchr-based bulk copy of unescaped runs". `memchr` doesn't support 34 bytes. BUT `json_escape_bytes` is typically used for normal text where `"` and `\` are the main escapes, and control characters are rare. Still, we must check for control characters.
+Actually, if we look at `json_escape_bytes`, we can just do a scalar scan.
+```rust
+pub fn json_escape_bytes(src: &[u8], dst: &mut Vec<u8>) {
+    let mut start = 0;
+    for (i, &b) in src.iter().enumerate() {
+        if matches!(b, b'"' | b'\\' | 0x00..=0x1F | 0x7F) {
+            if i > start {
+                dst.extend_from_slice(&src[start..i]);
+            }
+            start = i + 1;
+            match b {
+                b'"' => dst.extend_from_slice(b"\\\""),
+                b'\\' => dst.extend_from_slice(b"\\\\"),
+                0x08 => dst.extend_from_slice(b"\\b"),
+                b'\t' => dst.extend_from_slice(b"\\t"),
+                b'\n' => dst.extend_from_slice(b"\\n"),
+                0x0C => dst.extend_from_slice(b"\\f"),
+                b'\r' => dst.extend_from_slice(b"\\r"),
+                0x00..=0x1F | 0x7F => {
+                    dst.extend_from_slice(b"\\u00");
+                    let hi = (b >> 4) & 0x0F;
+                    let lo = b & 0x0F;
+                    dst.push(if hi < 10 { b'0' + hi } else { b'a' + hi - 10 });
+                    dst.push(if lo < 10 { b'0' + lo } else { b'a' + lo - 10 });
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+    if start < src.len() {
+        dst.extend_from_slice(&src[start..]);
+    }
+}
+```
+This avoids byte-by-byte push for unescaped runs.
+
+Let's address `decoded_buf.clone()` in `finish_batch`:
+In `crates/logfwd-arrow/src/streaming_builder/finish.rs`:
+```rust
+        let decoded_arrow_buf = if self.decoded_buf.is_empty() {
+            None
+        } else {
+            let cap = self.decoded_buf.capacity();
+            let buf = std::mem::replace(&mut self.decoded_buf, Vec::with_capacity(cap));
+            Some(Buffer::from(buf))
+        };
+```
+This preserves capacity! Wait, `Buffer::from(Vec)` consumes the `Vec`, so the capacity goes into the `Buffer` and is managed by Arrow. The `self.decoded_buf` becomes a NEW `Vec` with the SAME capacity. So we allocate a new `Vec`, but it has the right capacity. "Use `std::mem::take` + capacity preservation". Yes, exactly!
+
+Next, `vec![0i64; num_rows]` per column per batch:
+In `finish.rs`:
+```rust
+                if fc.has_int {
+                    self.scratch_i64.clear();
+                    self.scratch_i64.resize(num_rows, 0i64);
+                    self.scratch_valid.clear();
+                    self.scratch_valid.resize(num_rows, false);
+                    for &(row, v) in &fc.int_values {
+                        let r = row as usize;
+                        if r < num_rows {
+                            self.scratch_i64[r] = v;
+                            self.scratch_valid[r] = true;
+                        }
+                    }
+                    let nulls = NullBuffer::from(self.scratch_valid.clone()); // wait, from(Vec) consumes. If we use from_iter or BooleanBuffer?
+```
+Wait, if we use `BooleanBuffer::from_iter(self.scratch_valid.iter().copied())` we avoid allocating a `Vec<bool>` inside Arrow? No, `from_iter` builds a `BooleanBuffer` directly.
+And for `i64`: `let array = Int64Array::new(ScalarBuffer::from(self.scratch_i64.clone()), Some(nulls));`
+Wait, `self.scratch_i64.clone()` allocates! If we don't give it to Arrow, we must allocate. But we allocate ONCE for the array, instead of `vec!` which allocates and then `.into()` reuses. Is `ScalarBuffer::from(slice)` better?
+Wait! "Reusable scratch buffers in StreamingBuilder". If we use `self.scratch_i64`, we only reuse the scratch buffer's capacity across columns and batches. BUT we still must allocate a new buffer for Arrow!
+Let's see: if we do `vec![0i64; num_rows]`, it allocates a new `Vec`, zero-initializes it, and gives it to Arrow. Arrow takes it. Total cost: 1 allocation + zero init.
+If we use `scratch_i64`: `scratch.resize(num_rows, 0)`, we fill it. Then we clone it or pass slice. `ScalarBuffer::from(&scratch[..])` allocates a new Arrow buffer and copies. Total cost: 1 Arrow allocation + copy + scratch vector resize.
+Is there a difference? The scratch vector avoids the OS allocator if it already has capacity. BUT Arrow still allocates! So there's 1 allocation either way.
+Wait! What if we use Arrow's builders? Arrow builders manage capacity.
+But wait! `Int64Array::from_iter(self.scratch_i64.iter().zip(self.scratch_valid.iter()).map(|(&v, &valid)| if valid { Some(v) } else { None }))` -> this does one Arrow allocation and builds the array. But it's slower than `Int64Array::new`.
+What if we use `MutableBuffer`?
+The issue explicitly asks for "Reusable scratch buffers in StreamingBuilder". So we should add `scratch_i64: Vec<i64>`, `scratch_f64: Vec<f64>`, `scratch_bool: Vec<bool>`, `scratch_valid: Vec<bool>` to `StreamingBuilder`.
+```rust
+// in StreamingBuilder
+pub(crate) scratch_i64: Vec<i64>,
+pub(crate) scratch_f64: Vec<f64>,
+pub(crate) scratch_bool: Vec<bool>,
+pub(crate) scratch_valid: Vec<bool>,
+```
+Then in `finish.rs`:
+```rust
+                if fc.has_int {
+                    reserve_name(name.as_ref())?;
+                    self.scratch_i64.clear();
+                    self.scratch_i64.resize(num_rows, 0i64);
+                    self.scratch_valid.clear();
+                    self.scratch_valid.resize(num_rows, false);
+                    for &(row, v) in &fc.int_values {
+                        let r = row as usize;
+                        if r < num_rows {
+                            self.scratch_i64[r] = v;
+                            self.scratch_valid[r] = true;
+                        }
+                    }
+                    let nulls = NullBuffer::from(self.scratch_valid.clone());
+                    let array = Int64Array::new(ScalarBuffer::from(self.scratch_i64.clone()), Some(nulls));
+                    schema_fields.push(Field::new(name.as_ref(), DataType::Int64, true));
+                    arrays.push(Arc::new(array) as ArrayRef);
+                }
+```
+Wait, `self.scratch_valid.clone()`? `NullBuffer::from` has a `Vec<bool>` implementation that consumes the `Vec`. So if we `clone()`, we allocate a `Vec<bool>`! Then Arrow allocates a bit-packed buffer! That's 2 allocations!
+If we do `NullBuffer::from_iter(self.scratch_valid.iter().copied())` it allocates only the bit-packed buffer!
+And for `i64`: `Int64Array::from_iter`? Or `Int64Array::new(ScalarBuffer::from_iter(self.scratch_i64.iter().copied()), ...)`?
+Wait, `ScalarBuffer` implements `FromIterator`. `ScalarBuffer::from_iter` will allocate exactly the right amount. But it might be slower than a straight copy. `Buffer::from_slice_ref` is fast and copies bytes directly. `ScalarBuffer::new(Buffer::from_slice_ref(&self.scratch_i64), 0, num_rows)`. This avoids `Vec::clone`!
+Yes! `Buffer::from_slice_ref` uses `MutableBuffer::from_len_zeroed` or similar, and copies. So it's 1 Arrow allocation, no `Vec` allocation!
+```rust
+let buffer = arrow::buffer::Buffer::from_slice_ref(&self.scratch_i64);
+let array = Int64Array::new(arrow::buffer::ScalarBuffer::new(buffer, 0, num_rows), Some(nulls));
+```
+And for `valid`:
+```rust
+let valid_buffer = arrow::buffer::BooleanBuffer::from(self.scratch_valid.as_slice());
+let nulls = NullBuffer::new(valid_buffer);
+```
+Wait, does `BooleanBuffer::from(&[bool])` exist? `BooleanBufferBuilder` exists. `BooleanBuffer::from_iter` exists.
+`BooleanBuffer::from_iter(self.scratch_valid.iter().copied())` builds the bitmask in one pass.
+Let's check if `BooleanBuffer::from_iter` is available. Yes, it should be. Or `arrow::array::BooleanBufferBuilder`.
+
+Let's test this in `test_scratch.rs`.

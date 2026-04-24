@@ -1,0 +1,146 @@
+   Compiling datafusion-physical-plan v53.0.0
+   Compiling datafusion-functions-aggregate v53.0.0
+   Compiling tonic v0.14.5
+   Compiling logfwd-arrow v0.1.0 (/app/crates/logfwd-arrow)
+   Compiling datafusion-functions-nested v53.0.0
+   Compiling hyper-rustls v0.27.8
+   Compiling digest v0.10.7
+   Compiling logfwd-otap-proto v0.1.0 (/app/crates/logfwd-otap-proto)
+   Compiling core-error v0.0.0
+   Compiling bigdecimal v0.4.10
+   Compiling datafusion-session v53.0.0
+   Compiling datafusion-datasource v53.0.0
+   Compiling datafusion-catalog v53.0.0
+   Compiling datafusion-pruning v53.0.0
+   Compiling object v0.36.7
+   Compiling debugid v0.8.0
+   Compiling findshlibs v0.10.2
+   Compiling ref-cast-impl v1.0.25
+   Compiling equator-macro v0.4.2
+   Compiling inotify-sys v0.1.5
+   Compiling memmap2 v0.9.10
+   Compiling mime v0.3.17
+   Compiling pathdiff v0.2.3
+   Compiling anstyle v1.0.14
+   Compiling arrayvec v0.7.6
+   Compiling gimli v0.32.3
+   Compiling unsafe-libyaml v0.2.11
+   Compiling plotters-backend v0.3.7
+   Compiling ciborium-io v0.2.2
+   Compiling rustc-demangle v0.1.27
+   Compiling winnow v1.0.1
+   Compiling clap_lex v1.1.0
+   Compiling snap v1.1.1
+   Compiling symbolic-demangle v12.17.4
+   Compiling clap_builder v4.6.0
+   Compiling datafusion-catalog-listing v53.0.0
+   Compiling datafusion-functions-table v53.0.0
+   Compiling config v0.15.22
+   Compiling ciborium-ll v0.2.2
+   Compiling plotters-svg v0.3.7
+   Compiling serde_yaml_ng v0.10.0
+   Compiling addr2line v0.25.1
+   Compiling num-format v0.4.4
+   Compiling axum-core v0.5.6
+   Compiling symbolic-common v12.17.4
+   Compiling inotify v0.11.1
+   Compiling equator v0.4.2
+   Compiling ref-cast v1.0.25
+   Compiling aya-obj v0.2.1
+   Compiling datafusion-physical-optimizer v53.0.0
+   Compiling datafusion-datasource-csv v53.0.0
+   Compiling datafusion-datasource-arrow v53.0.0
+   Compiling datafusion-datasource-json v53.0.0
+   Compiling datafusion-sql v53.0.0
+   Compiling reqwest v0.12.28
+   Compiling tonic-prost v0.14.5
+   Compiling rayon-core v1.13.0
+   Compiling grok v2.4.1
+   Compiling cpp_demangle v0.5.1
+   Compiling fancy-regex v0.14.0
+   Compiling object v0.37.3
+   Compiling const-hex v1.18.1
+   Compiling opentelemetry_sdk v0.31.0
+   Compiling rgb v0.8.53
+   Compiling ureq-proto v0.6.0
+   Compiling faststr v0.2.34
+   Compiling datafusion-functions-window v53.0.0
+   Compiling datafusion-optimizer v53.0.0
+   Compiling itertools v0.13.0
+   Compiling notify-types v2.1.0
+   Compiling serde_path_to_error v0.1.20
+   Compiling quick-xml v0.26.0
+   Compiling is-terminal v0.4.17
+   Compiling bstr v1.12.1
+   Compiling sonic-simd v0.1.4
+   Compiling sonic-number v0.1.2
+   Compiling pprof v0.15.0
+   Compiling utf8-zero v0.8.1
+   Compiling assert_matches v1.5.0
+   Compiling str_stack v0.1.0
+   Compiling matchit v0.8.4
+   Compiling varsubst v0.0.1
+   Compiling ipnetwork v0.21.1
+   Compiling cast v0.3.0
+   Compiling chunked_transfer v1.5.0
+   Compiling ascii v1.1.0
+   Compiling bitflags v1.3.2
+   Compiling bumpalo v3.20.2
+   Compiling sonic-rs v0.5.8
+   Compiling tiny_http v0.12.0
+   Compiling nix v0.26.4
+   Compiling criterion-plot v0.6.0
+   Compiling maxminddb v0.27.3
+   Compiling logfwd-config v0.1.0 (/app/crates/logfwd-config)
+   Compiling axum v0.8.8
+   Compiling inferno v0.11.21
+   Compiling aya v0.13.1
+   Compiling ureq v3.3.0
+   Compiling globset v0.4.18
+   Compiling notify v8.2.0
+   Compiling datafusion v53.0.0
+   Compiling backtrace v0.3.76
+   Compiling opentelemetry-proto v0.31.0
+   Compiling rayon v1.11.0
+   Compiling aligned-vec v0.6.4
+   Compiling plotters v0.3.7
+   Compiling ciborium v0.2.2
+   Compiling clap v4.6.0
+   Compiling sha2 v0.10.9
+   Compiling hmac v0.12.1
+   Compiling tinytemplate v1.2.1
+   Compiling quick-xml v0.37.5
+   Compiling gethostname v1.1.0
+   Compiling crossbeam-channel v0.5.15
+   Compiling spin v0.10.0
+   Compiling sysinfo v0.38.4
+   Compiling libloading v0.8.9
+   Compiling anes v0.1.6
+   Compiling oorandom v11.1.5
+   Compiling sensor-ebpf-common v0.1.0 (/app/crates/logfwd-ebpf-proto/sensor-ebpf/sensor-ebpf-common)
+   Compiling xxhash-rust v0.8.15
+   Compiling logfwd-io v0.1.0 (/app/crates/logfwd-io)
+   Compiling criterion v0.7.0
+   Compiling logfwd-output v0.1.0 (/app/crates/logfwd-output)
+   Compiling backon v1.6.0
+   Compiling stats_alloc v0.1.10
+   Compiling logfwd-transform v0.1.0 (/app/crates/logfwd-transform)
+   Compiling logfwd-bench v0.1.0 (/app/crates/logfwd-bench)
+error[E0061]: this function takes 5 arguments but 4 arguments were supplied
+   --> crates/logfwd-bench/benches/full_chain.rs:201:21
+    |
+201 | ...   logfwd_output::write_row_json(&result, row, &cols, &mut buf)
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^------------------------------- argument #5 of type `bool` is missing
+    |
+note: function defined here
+   --> crates/logfwd-output/src/row_json.rs:537:8
+    |
+537 | pub fn write_row_json(
+    |        ^^^^^^^^^^^^^^
+help: provide the argument
+    |
+201 |                     logfwd_output::write_row_json(&result, row, &cols, &mut buf, /* bool */)
+    |                                                                                ++++++++++++
+
+For more information about this error, try `rustc --explain E0061`.
+error: could not compile `logfwd-bench` (bench "full_chain") due to 1 previous error
