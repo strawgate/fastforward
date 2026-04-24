@@ -41,6 +41,7 @@ pub struct ElasticsearchSink {
     pub(super) client: reqwest::Client,
     pub(super) name: String,
     pub(crate) batch_buf: Vec<u8>,
+    pub(crate) compress_buf: Vec<u8>,
     pub(super) stats: Arc<ComponentStats>,
     pub(super) pending_retry_rows: Option<Vec<u32>>,
     pub(super) pending_rejections: Vec<String>,
@@ -61,6 +62,7 @@ impl ElasticsearchSink {
             // right size after the first batch and stay there (via reserve in
             // send_batch_inner after each send).
             batch_buf: Vec::with_capacity(64 * 1024),
+            compress_buf: Vec::with_capacity(64 * 1024),
             stats,
             pending_retry_rows: None,
             pending_rejections: Vec::new(),

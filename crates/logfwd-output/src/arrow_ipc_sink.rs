@@ -38,6 +38,7 @@ pub struct ArrowIpcSink {
     client: reqwest::Client,
     /// Reusable buffer for serialized IPC bytes.
     ipc_buf: Vec<u8>,
+    compress_buf: Vec<u8>,
     stats: Arc<ComponentStats>,
 }
 
@@ -63,6 +64,7 @@ impl ArrowIpcSink {
             config,
             client,
             ipc_buf: Vec::with_capacity(Self::INITIAL_IPC_BUFFER_CAPACITY),
+            compress_buf: Vec::with_capacity(Self::INITIAL_IPC_BUFFER_CAPACITY),
             stats,
         }
     }
@@ -114,10 +116,21 @@ impl ArrowIpcSink {
     /// into the request payload and avoids a full-buffer clone.
     fn build_payload(&mut self) -> io::Result<Vec<u8>> {
         match self.config.compression {
-            Compression::Zstd => zstd::bulk::compress(&self.ipc_buf, 1).map_err(io::Error::other),
+            Compression::Zstd => {
+                let bound = zstd::zstd_safe::compress_bound(self.ipc_buf.len());
+                self.compress_buf.resize(bound, 0);
+                let compressed_len =
+                    zstd::bulk::compress_to_buffer(&self.ipc_buf, &mut self.compress_buf, 1)
+                        .map_err(io::Error::other)?;
+                self.compress_buf.truncate(compressed_len);
+                Ok(std::mem::take(&mut self.compress_buf))
+            }
             Compression::Gzip => {
-                let mut encoder =
-                    flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+                self.compress_buf.clear();
+                let mut encoder = flate2::write::GzEncoder::new(
+                    std::mem::take(&mut self.compress_buf),
+                    flate2::Compression::default(),
+                );
                 io::Write::write_all(&mut encoder, &self.ipc_buf)?;
                 encoder.finish()
             }
@@ -130,11 +143,20 @@ impl ArrowIpcSink {
     /// `reqwest` consumes the payload `Vec<u8>`, so when we avoid cloning by
     /// moving `self.ipc_buf` into the request body, we intentionally allocate
     /// a fresh reusable buffer with the prior capacity.
-    fn restore_uncompressed_buffer_capacity(&mut self, prior_capacity: usize) {
+    fn restore_uncompressed_buffer_capacity(
+        &mut self,
+        prior_capacity: usize,
+        compress_capacity: usize,
+    ) {
         if self.config.compression == Compression::None && self.ipc_buf.capacity() < prior_capacity
         {
             self.ipc_buf =
                 Vec::with_capacity(prior_capacity.max(Self::INITIAL_IPC_BUFFER_CAPACITY));
+        } else if self.config.compression != Compression::None
+            && self.compress_buf.capacity() < compress_capacity
+        {
+            self.compress_buf =
+                Vec::with_capacity(compress_capacity.max(Self::INITIAL_IPC_BUFFER_CAPACITY));
         }
     }
 
@@ -212,8 +234,9 @@ impl Sink for ArrowIpcSink {
             };
             let payload_len = payload.len() as u64;
             let row_count = batch.num_rows() as u64;
+            let compress_cap = payload.capacity();
 
-            self.restore_uncompressed_buffer_capacity(prior_capacity);
+            self.restore_uncompressed_buffer_capacity(prior_capacity, compress_cap);
             let send_result = self.do_send(payload).await;
             let result = match send_result {
                 Ok(r) => r,
@@ -499,7 +522,7 @@ mod tests {
             "taken IPC buffer should leave zero-capacity Vec"
         );
 
-        sink.restore_uncompressed_buffer_capacity(prior_capacity);
+        sink.restore_uncompressed_buffer_capacity(prior_capacity, 0); // Tests don't assert capacity right now
         assert!(
             sink.ipc_buf.capacity() >= prior_capacity,
             "IPC reusable capacity should be restored after send"

@@ -29,6 +29,9 @@ impl OtlpSink {
             return Ok(super::super::sink::SendResult::Ok);
         }
 
+        let mut zstd_used = false;
+        let mut gzip_used = false;
+        let mut grpc_used = false;
         let payload: &[u8] = match self.compression {
             Compression::Zstd => {
                 if let Some(ref mut compressor) = self.compressor {
@@ -39,6 +42,7 @@ impl OtlpSink {
                         .compress_to_buffer(&self.encoder_buf, &mut self.compress_buf)
                         .map_err(io::Error::other)?;
                     self.compress_buf.truncate(compressed_len);
+                    zstd_used = true;
                     &self.compress_buf
                 } else {
                     &self.encoder_buf
@@ -50,6 +54,7 @@ impl OtlpSink {
                 let mut encoder = GzEncoder::new(compress_buf, GzipLevel::fast());
                 encoder.write_all(&self.encoder_buf)?;
                 self.compress_buf = encoder.finish()?;
+                gzip_used = true;
                 &self.compress_buf
             }
             Compression::None => &self.encoder_buf,
@@ -90,6 +95,7 @@ impl OtlpSink {
                 ));
             }
             write_grpc_frame(&mut self.grpc_buf, payload, payload_is_compressed)?;
+            grpc_used = true;
             &self.grpc_buf
         } else {
             payload
@@ -122,7 +128,23 @@ impl OtlpSink {
         }
 
         let compressed_len = payload.len();
-        let body = payload.to_vec();
+        let encoder_len = self.encoder_buf.len();
+
+        let encoder_cap = self.encoder_buf.capacity();
+        let compress_cap = self.compress_buf.capacity();
+        let grpc_cap = self.grpc_buf.capacity();
+
+        let body = if grpc_used {
+            std::mem::take(&mut self.grpc_buf)
+        } else if zstd_used || gzip_used {
+            std::mem::take(&mut self.compress_buf)
+        } else {
+            std::mem::take(&mut self.encoder_buf)
+        };
+
+        // We restore capacities right away. The taken buffer is replaced with a new empty one with the same capacity!
+        self.restore_capacity(encoder_cap, compress_cap, grpc_cap);
+
         let start = Instant::now();
         match req.body(body).send().await {
             Ok(response) => {
@@ -136,9 +158,9 @@ impl OtlpSink {
                         return Ok(send_result);
                     }
                     self.stats.inc_lines(batch_rows);
-                    self.stats.inc_bytes(self.encoder_buf.len() as u64);
+                    self.stats.inc_bytes(encoder_len as u64);
                     let span = tracing::Span::current();
-                    span.record("req_bytes", self.encoder_buf.len() as u64);
+                    span.record("req_bytes", encoder_len as u64);
                     span.record("cmp_bytes", compressed_len as u64);
                     return Ok(super::super::sink::SendResult::Ok);
                 }
@@ -166,6 +188,23 @@ impl OtlpSink {
                 self.stats.inc_send(start.elapsed().as_nanos() as u64);
                 Err(io::Error::other(e))
             }
+        }
+    }
+
+    pub(crate) fn restore_capacity(
+        &mut self,
+        encoder_cap: usize,
+        compress_cap: usize,
+        grpc_cap: usize,
+    ) {
+        if self.encoder_buf.capacity() < encoder_cap {
+            self.encoder_buf = Vec::with_capacity(encoder_cap.max(64 * 1024));
+        }
+        if self.compress_buf.capacity() < compress_cap {
+            self.compress_buf = Vec::with_capacity(compress_cap.max(64 * 1024));
+        }
+        if self.grpc_buf.capacity() < grpc_cap {
+            self.grpc_buf = Vec::with_capacity(grpc_cap.max(64 * 1024));
         }
     }
 }
@@ -216,13 +255,24 @@ impl super::super::sink::Sink for OtlpSink {
         batch: &'a RecordBatch,
         metadata: &'a BatchMetadata,
     ) -> Pin<Box<dyn Future<Output = super::super::sink::SendResult> + Send + 'a>> {
+        let encoder_cap = self.encoder_buf.capacity();
+        let compress_cap = self.compress_buf.capacity();
+        let grpc_cap = self.grpc_buf.capacity();
+
         Box::pin(async move {
             self.encode_batch(batch, metadata);
             let rows = batch.num_rows() as u64;
-            match self.send_payload(rows).await {
+
+            let encoder_cap_post = self.encoder_buf.capacity().max(encoder_cap);
+            let compress_cap_post = self.compress_buf.capacity().max(compress_cap);
+            let grpc_cap_post = self.grpc_buf.capacity().max(grpc_cap);
+
+            let result = match self.send_payload(rows).await {
                 Ok(r) => r,
                 Err(e) => super::super::sink::SendResult::from_io_error(e),
-            }
+            };
+            self.restore_capacity(encoder_cap_post, compress_cap_post, grpc_cap_post);
+            result
         })
     }
 

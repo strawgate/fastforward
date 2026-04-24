@@ -63,29 +63,8 @@ impl ElasticsearchSink {
 
         tracing::Span::current().record("req_bytes", body_len as u64);
         let req = if self.config.compress {
-            use flate2::Compression;
-            use flate2::write::GzEncoder;
-            use std::io::Write;
-            let mut enc = GzEncoder::new(Vec::new(), Compression::fast());
-            if let Err(error) = enc.write_all(&body).map_err(io::Error::other) {
-                return SendAttempt::IoError {
-                    pending_rows: row_ids,
-                    rejections: Vec::new(),
-                    error,
-                };
-            }
-            let compressed = match enc.finish().map_err(io::Error::other) {
-                Ok(compressed) => compressed,
-                Err(error) => {
-                    return SendAttempt::IoError {
-                        pending_rows: row_ids,
-                        rejections: Vec::new(),
-                        error,
-                    };
-                }
-            };
-            tracing::Span::current().record("cmp_bytes", compressed.len() as u64);
-            req.header("Content-Encoding", "gzip").body(compressed)
+            tracing::Span::current().record("cmp_bytes", body.len() as u64);
+            req.header("Content-Encoding", "gzip").body(body)
         } else {
             req.body(body)
         };
