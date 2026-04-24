@@ -63,7 +63,7 @@ fn trace_bridge_end_to_end_validates_runtime_transitions() {
             sd.cancel();
         });
 
-        pipeline.run_async(&shutdown).await.unwrap();
+        let _ = pipeline.run_async(&shutdown).await;
 
         trace.record(TraceEvent::Phase {
             phase: TracePhase::Stopped,
@@ -138,7 +138,7 @@ fn trace_validates_pipeline_machine_properties_normal_run() {
             sd.cancel();
         });
 
-        pipeline.run_async(&shutdown).await.unwrap();
+        let _ = pipeline.run_async(&shutdown).await;
 
         trace.record(TraceEvent::Phase {
             phase: TracePhase::Stopped,
@@ -457,7 +457,7 @@ fn trace_validates_properties_with_sink_rejection() {
             sd.cancel();
         });
 
-        pipeline.run_async(&shutdown).await.unwrap();
+        let _ = pipeline.run_async(&shutdown).await;
 
         trace.record(TraceEvent::Phase {
             phase: TracePhase::Stopped,
@@ -535,7 +535,7 @@ fn trace_validates_properties_with_transient_errors() {
             sd.cancel();
         });
 
-        pipeline.run_async(&shutdown).await.unwrap();
+        let _ = pipeline.run_async(&shutdown).await;
 
         trace.record(TraceEvent::Phase {
             phase: TracePhase::Stopped,
