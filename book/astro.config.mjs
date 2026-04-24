@@ -66,6 +66,10 @@ export default defineConfig({
           ],
         },
         {
+          label: "CLI Reference",
+          slug: "cli/reference",
+        },
+        {
           label: "Troubleshooting",
           slug: "troubleshooting",
         },
