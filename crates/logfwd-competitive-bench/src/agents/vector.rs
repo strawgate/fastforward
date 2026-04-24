@@ -71,8 +71,17 @@ transforms:
         };
 
         let cfg_path = ctx.bench_dir.join("vector.yaml");
+        // worker_threads: 1 matches the common 1-CPU limit used in Docker mode
+        // and keeps the comparison focused on core logic efficiency.
         let config = format!(
             r#"data_dir: "{data_dir}"
+
+# Maximize single-core efficiency
+worker_threads: 1
+
+acknowledgments:
+  enabled: false
+
 sources:
   bench_in:
     type: file
@@ -89,6 +98,7 @@ sources:
       codec: text
     framing:
       method: newline_delimited
+    compression: none
     method: post
     batch:
       max_bytes: 4194304
