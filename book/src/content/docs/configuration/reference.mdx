@@ -460,7 +460,7 @@ lands.
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `endpoint` | string | Yes | Full URL, e.g. `http://ingest.example.com/logs`. |
-| `compression` | enum | No | Reserved for future use. Recognized values are `zstd`, `gzip`, and `none`; the HTTP output itself is still not yet supported. |
+| `compression` | enum | No | `zstd`, `gzip`, or `none`. Invalid values are rejected while parsing config. |
 
 ```yaml
 output:

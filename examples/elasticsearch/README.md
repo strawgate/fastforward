@@ -73,8 +73,6 @@ input:
 
 transform: |
   SELECT
-    _timestamp,
-    _stream,
     level,
     message,
     status,
@@ -156,8 +154,6 @@ input:
 
 transform: |
   SELECT
-    _timestamp,
-    _stream,
     level,
     message,
     "file.path" AS source_file

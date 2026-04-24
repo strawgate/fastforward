@@ -1,0 +1,75 @@
+---
+title: 'CLI Commands'
+description: 'Reference for ff command-line utility'
+---
+
+The FastForward CLI binary is installed as `ff`. It provides several commands for running, testing, and debugging log pipelines.
+
+## ff run
+
+Starts the FastForward pipeline and runs continuously until stopped.
+
+```bash
+ff run --config pipeline.yaml
+```
+
+The `--config` flag is optional. FastForward will automatically discover configuration files in this order:
+1. `--config <path>`
+2. `$LOGFWD_CONFIG`
+3. `./logfwd.yaml`
+4. `~/.config/logfwd/config.yaml`
+5. `/etc/logfwd/config.yaml`
+
+## ff blast
+
+Blasts generated synthetic log data into a destination sink to test throughput and network performance. This command uses the same core pipeline runtime but bypasses reading from disk or the network.
+
+```bash
+ff blast --destination otlp --endpoint http://127.0.0.1:4318/v1/logs
+```
+
+| Option | Description |
+|--------|-------------|
+| `--destination` | The sink type (e.g., `otlp`, `elasticsearch_otlp`, `arrow_ipc`, `null`) |
+| `--endpoint` | Destination endpoint URL (required for network destinations) |
+| `--workers` | Number of worker threads (default: 4) |
+| `--batch-lines` | Lines generated per batch (default: 8192) |
+| `--duration` | Optional duration in seconds before stopping automatically |
+
+## ff devour
+
+Starts a built-in 'blackhole' receiver that accepts incoming log traffic and drops it. Used for isolating sender performance issues and testing upstream clients.
+
+```bash
+ff devour --mode otlp --listen 127.0.0.1:4318
+```
+
+| Option | Description |
+|--------|-------------|
+| `--mode` | The receiver type (e.g., `otlp`, `elasticsearch`) (default: `otlp`) |
+| `--listen` | Bind address (default: `127.0.0.1:4318` for OTLP) |
+| `--duration` | Optional duration in seconds before stopping automatically |
+
+## ff validate
+
+Parses and validates the YAML configuration file and its schema without starting any pipeline components.
+
+```bash
+ff validate --config pipeline.yaml
+```
+
+## ff dry-run
+
+Builds all pipeline objects (inputs, SQL transforms, and outputs) without starting active IO workers. This is stricter than `validate` because it compiles SQL queries against the Arrow schema, catching column name typos or type mismatches.
+
+```bash
+ff dry-run --config pipeline.yaml
+```
+
+## ff send
+
+Reads from standard input until EOF, processes it through the configured pipeline, drains the output buffers, and exits. Designed for piped shell workflows.
+
+```bash
+cat app.log | ff send --config destination.yaml --format json
+```

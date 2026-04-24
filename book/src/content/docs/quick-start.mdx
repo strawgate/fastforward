@@ -168,12 +168,12 @@ Full SQL works: `JOIN`, `GROUP BY`, `HAVING`, subqueries, window functions. Buil
 
 FastForward sends OTLP protobuf to an OpenTelemetry Collector, Grafana Alloy, or any OTLP-compatible backend.
 
-Test locally with FastForward's built-in blackhole receiver (`devour` mode):
+Test locally with FastForward's built-in devour receiver:
 
 ```bash
 ff devour --mode otlp --listen 127.0.0.1:4318 &
 ```
-*(The `ff blackhole` command is an alias for this.)*
+
 
 You can also blast generated data into a destination sink to test throughput:
 
