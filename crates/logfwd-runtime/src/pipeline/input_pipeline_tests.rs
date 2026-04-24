@@ -601,6 +601,7 @@ impl InputSource for LargeSharedBufferSource {
         let chunk = vec![b'x'; 80 * 1024];
         dst.extend_from_slice(&chunk);
         self.emitted = true;
+        self.finished = true;
         Ok(Some(vec![FramedReadEvent::Data {
             range: start..dst.len(),
             source_id: None,

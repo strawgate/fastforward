@@ -407,6 +407,15 @@ pub trait InputSource: Send {
     /// using the `poll()` path unchanged. Implementations that support shared
     /// buffering must append any produced data into `dst` and describe the
     /// appended ranges with [`FramedReadEvent::Data`].
+    ///
+    /// # Contract
+    ///
+    /// - On `Ok(Some(events))`, all returned ranges must reference bytes
+    ///   appended to `dst` during *this* call.
+    /// - On `Ok(None)`, `dst` must not be modified (caller falls back to
+    ///   `poll()`).
+    /// - On `Err(_)`, `dst` may contain partially appended bytes. The caller
+    ///   must not assume `dst` is unchanged after an error.
     fn poll_into(&mut self, _dst: &mut BytesMut) -> io::Result<Option<Vec<FramedReadEvent>>> {
         Ok(None)
     }

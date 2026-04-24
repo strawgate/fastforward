@@ -3,6 +3,9 @@
 //! This isolates the buffered shutdown/flush decision surface from the async
 //! I/O shell so it can be covered with Kani and proptest.
 
+/// Minimum single-chunk size (bytes) that triggers an immediate flush
+/// without waiting for the batch timeout, avoiding excessive buffering
+/// when a source emits large payloads in one poll.
 pub(super) const LARGE_SINGLE_CHUNK_DIRECT_FLUSH_BYTES: usize = 64 * 1024;
 
 /// Continue shutdown repolling when the shared-buffer path might still emit
