@@ -37,7 +37,7 @@
 //! The `Content-Type` must be `application/json`. Loki 2.x also accepts
 //! Protobuf (snappy-compressed), but JSON is used here for simplicity.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::io;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -63,7 +63,8 @@ type LokiEntry = (u64, String);
 type StreamLabels = Vec<(String, String)>;
 
 /// Collect entries per stream label set.
-type StreamMap = BTreeMap<StreamLabels, Vec<LokiEntry>>;
+/// The value tuple is `(rendered_labels_json, entries)`.
+type StreamMap = HashMap<StreamLabels, (String, Vec<LokiEntry>)>;
 
 type SharedTimestampState = Arc<Mutex<HashMap<StreamLabels, u64>>>;
 
@@ -309,7 +310,7 @@ impl LokiSink {
             }
         }
 
-        let mut stream_map: StreamMap = BTreeMap::new();
+        let mut stream_map: StreamMap = HashMap::new();
 
         for row in 0..num_rows {
             // --- Timestamp ---
@@ -402,7 +403,15 @@ impl LokiSink {
             let log_str = String::from_utf8(log_line)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
-            stream_map.entry(labels).or_default().push((ts_ns, log_str));
+            let (_, entries) = stream_map.entry(labels.clone()).or_insert_with(|| {
+                let s = labels
+                    .iter()
+                    .map(|(k, v)| format!("\"{}\":\"{}\"", escape_json(k), escape_json(v)))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                (s, Vec::new())
+            });
+            entries.push((ts_ns, log_str));
         }
 
         Ok(stream_map)
@@ -410,14 +419,10 @@ impl LokiSink {
 
     fn serialize_stream_chunks(
         labels: &StreamLabels,
+        labels_str: &str,
         entries: &[LokiEntry],
         max_payload_bytes: usize,
     ) -> Vec<PreparedPayload> {
-        let labels_str = labels
-            .iter()
-            .map(|(k, v)| format!("\"{}\":\"{}\"", escape_json(k), escape_json(v)))
-            .collect::<Vec<_>>()
-            .join(",");
         let prefix = format!("{{\"streams\":[{{\"stream\":{{{labels_str}}},\"values\":[");
         let suffix = "]}]}";
 
@@ -471,7 +476,7 @@ impl LokiSink {
     ) -> Vec<PreparedPayload> {
         let mut payloads = Vec::new();
 
-        for (labels, entries) in stream_map.iter_mut() {
+        for (labels, (labels_str, entries)) in stream_map.iter_mut() {
             let retained =
                 sort_and_dedup_timestamps(entries, last_timestamp_by_stream.get(labels).copied());
             if retained == 0 {
@@ -479,6 +484,7 @@ impl LokiSink {
             }
             payloads.extend(Self::serialize_stream_chunks(
                 labels,
+                labels_str,
                 entries,
                 max_payload_bytes,
             ));
@@ -790,12 +796,12 @@ fn escape_json_raw(s: &str) -> String {
     // Bug #1048: leading quote is not enough to guarantee valid JSON string.
     // Verify it actually parses as complete valid JSON before passthrough.
     if trimmed.starts_with('"') {
-        if let Ok(serde_json::Value::String(_)) = serde_json::from_str::<serde_json::Value>(trimmed)
-        {
-            // Already a valid JSON string — pass through as-is.
+        // A valid JSON string must start and end with quotes and be valid JSON.
+        // We use RawValue to do a zero-allocation syntax check.
+        if serde_json::from_str::<serde::de::IgnoredAny>(trimmed).is_ok() {
             return trimmed.to_string();
         }
-    } else if serde_json::from_str::<serde_json::Value>(trimmed).is_ok() {
+    } else if serde_json::from_str::<serde::de::IgnoredAny>(trimmed).is_ok() {
         // Valid JSON but not a string (object, array, number, bool, null).
         // Loki requires the log line to be a JSON string, so re-encode it.
         return format!("\"{}\"", escape_json(trimmed));
@@ -1002,7 +1008,10 @@ mod tests {
         let mut first_stream_map = StreamMap::new();
         first_stream_map.insert(
             labels.clone(),
-            vec![(100, "{\"message\":\"a\"}".to_string())],
+            (
+                "\"app\":\"logfwd\"".to_string(),
+                vec![(100, "{\"message\":\"a\"}".to_string())],
+            ),
         );
         let (first_payloads, _) = sink1
             .prepare_and_reserve_payloads(&mut first_stream_map)
@@ -1010,7 +1019,13 @@ mod tests {
         assert_eq!(first_payloads[0].last_timestamp_ns, 100);
 
         let mut second_stream_map = StreamMap::new();
-        second_stream_map.insert(labels, vec![(50, "{\"message\":\"b\"}".to_string())]);
+        second_stream_map.insert(
+            labels,
+            (
+                "\"app\":\"logfwd\"".to_string(),
+                vec![(50, "{\"message\":\"b\"}".to_string())],
+            ),
+        );
         let (second_payloads, _) = sink2
             .prepare_and_reserve_payloads(&mut second_stream_map)
             .expect("second payloads");
@@ -1031,10 +1046,7 @@ mod tests {
         ];
 
         let mut stream_map = StreamMap::new();
-        stream_map.insert(
-            labels.clone(),
-            vec![(1, "{\"message\":\"ok\"}".to_string())],
-        );
+        stream_map.insert(labels.clone(), ("\"env\":\"prod=us-east,eu-west\",\"app\":\"my\\\"app\",\"path\":\"C:\\\\Users\\\\log\",\"normal\":\"value\"".to_string(), vec![(1, "{\"message\":\"ok\"}".to_string())]));
 
         let payloads =
             LokiSink::prepare_payloads(&mut stream_map, &HashMap::new(), LOKI_MAX_PAYLOAD_BYTES);
@@ -1056,11 +1068,14 @@ mod tests {
         let mut stream_map = StreamMap::new();
         stream_map.insert(
             labels,
-            vec![
-                (1, "{\"message\":\"aaaaaaaaaaaaaaaaaaaaaaaa\"}".to_string()),
-                (2, "{\"message\":\"bbbbbbbbbbbbbbbbbbbbbbbb\"}".to_string()),
-                (3, "{\"message\":\"cccccccccccccccccccccccc\"}".to_string()),
-            ],
+            (
+                "\"app\":\"logfwd\"".to_string(),
+                vec![
+                    (1, "{\"message\":\"aaaaaaaaaaaaaaaaaaaaaaaa\"}".to_string()),
+                    (2, "{\"message\":\"bbbbbbbbbbbbbbbbbbbbbbbb\"}".to_string()),
+                    (3, "{\"message\":\"cccccccccccccccccccccccc\"}".to_string()),
+                ],
+            ),
         );
 
         let payloads = LokiSink::prepare_payloads(&mut stream_map, &HashMap::new(), 120);
@@ -1081,11 +1096,17 @@ mod tests {
         let mut stream_map = StreamMap::new();
         stream_map.insert(
             vec![("app".to_string(), "a".to_string())],
-            vec![(10, "{\"message\":\"one\"}".to_string())],
+            (
+                "\"app\":\"a\"".to_string(),
+                vec![(10, "{\"message\":\"one\"}".to_string())],
+            ),
         );
         stream_map.insert(
             vec![("app".to_string(), "b".to_string())],
-            vec![(11, "{\"message\":\"two\"}".to_string())],
+            (
+                "\"app\":\"b\"".to_string(),
+                vec![(11, "{\"message\":\"two\"}".to_string())],
+            ),
         );
 
         let payloads = LokiSink::prepare_payloads(&mut stream_map, &HashMap::new(), 1_024);
@@ -1278,7 +1299,11 @@ mod tests {
         };
 
         let stream_map = sink.build_stream_map(&batch, &metadata).unwrap();
-        let entries: Vec<LokiEntry> = stream_map.values().flatten().cloned().collect();
+        let entries: Vec<LokiEntry> = stream_map
+            .values()
+            .flat_map(|(_, entries)| entries)
+            .cloned()
+            .collect();
         assert_eq!(entries.len(), 1);
         assert_eq!(
             entries[0].0, 5_000,
@@ -1330,7 +1355,11 @@ mod tests {
         };
 
         let stream_map = sink.build_stream_map(&batch, &metadata).unwrap();
-        let entries: Vec<LokiEntry> = stream_map.values().flatten().cloned().collect();
+        let entries: Vec<LokiEntry> = stream_map
+            .values()
+            .flat_map(|(_, entries)| entries)
+            .cloned()
+            .collect();
         assert_eq!(entries.len(), 1);
         assert_eq!(
             entries[0].0, 1_000,
@@ -1386,7 +1415,11 @@ mod tests {
         };
 
         let stream_map = sink.build_stream_map(&batch, &metadata).unwrap();
-        let entries: Vec<LokiEntry> = stream_map.values().flatten().cloned().collect();
+        let entries: Vec<LokiEntry> = stream_map
+            .values()
+            .flat_map(|(_, entries)| entries)
+            .cloned()
+            .collect();
         assert_eq!(entries.len(), 1);
         assert_eq!(
             entries[0].0, expected_ns,
@@ -1559,7 +1592,11 @@ mod tests {
         };
 
         let stream_map = sink.build_stream_map(&batch, &metadata).unwrap();
-        let mut entries: Vec<LokiEntry> = stream_map.values().flatten().cloned().collect();
+        let mut entries: Vec<LokiEntry> = stream_map
+            .values()
+            .flat_map(|(_, entries)| entries)
+            .cloned()
+            .collect();
         entries.sort_by_key(|(ts, _)| *ts);
 
         // After sorting, the valid timestamp (100) comes first, then the fallback observed_time_ns (12345).
@@ -1614,7 +1651,11 @@ mod tests {
         };
 
         let stream_map = sink.build_stream_map(&batch, &metadata).unwrap();
-        let entries: Vec<LokiEntry> = stream_map.values().flatten().cloned().collect();
+        let entries: Vec<LokiEntry> = stream_map
+            .values()
+            .flat_map(|(_, entries)| entries)
+            .cloned()
+            .collect();
         assert_eq!(entries.len(), 1, "expected exactly one log entry");
         assert_eq!(
             entries[0].0, under_ts as u64,
@@ -1769,7 +1810,11 @@ mod tests {
         };
 
         let stream_map = sink.build_stream_map(&batch, &metadata).unwrap();
-        let mut entries: Vec<LokiEntry> = stream_map.values().flatten().cloned().collect();
+        let mut entries: Vec<LokiEntry> = stream_map
+            .values()
+            .flat_map(|(_, entries)| entries)
+            .cloned()
+            .collect();
         entries.sort_by_key(|(ts, _)| *ts);
 
         // Sorted by timestamp: the non-null row (100) comes before the
@@ -1826,7 +1871,11 @@ mod tests {
         };
 
         let stream_map = sink.build_stream_map(&batch, &metadata).unwrap();
-        let entries: Vec<LokiEntry> = stream_map.values().flatten().cloned().collect();
+        let entries: Vec<LokiEntry> = stream_map
+            .values()
+            .flat_map(|(_, entries)| entries)
+            .cloned()
+            .collect();
         assert_eq!(entries.len(), 1);
         assert_eq!(
             entries[0].0, expected_ns as u64,
@@ -1872,7 +1921,11 @@ mod tests {
         };
 
         let stream_map = sink.build_stream_map(&batch, &metadata).unwrap();
-        let entries: Vec<LokiEntry> = stream_map.values().flatten().cloned().collect();
+        let entries: Vec<LokiEntry> = stream_map
+            .values()
+            .flat_map(|(_, entries)| entries)
+            .cloned()
+            .collect();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].0, expected_ns);
     }
@@ -1914,7 +1967,11 @@ mod tests {
         };
 
         let stream_map = sink.build_stream_map(&batch, &metadata).unwrap();
-        let entries: Vec<LokiEntry> = stream_map.values().flatten().cloned().collect();
+        let entries: Vec<LokiEntry> = stream_map
+            .values()
+            .flat_map(|(_, entries)| entries)
+            .cloned()
+            .collect();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].0, expected_ns);
     }
@@ -1956,7 +2013,11 @@ mod tests {
         };
 
         let stream_map = sink.build_stream_map(&batch, &metadata).unwrap();
-        let entries: Vec<LokiEntry> = stream_map.values().flatten().cloned().collect();
+        let entries: Vec<LokiEntry> = stream_map
+            .values()
+            .flat_map(|(_, entries)| entries)
+            .cloned()
+            .collect();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].0, expected_ns);
     }
@@ -1996,7 +2057,11 @@ mod tests {
         };
 
         let stream_map = sink.build_stream_map(&batch, &metadata).unwrap();
-        let mut entries: Vec<LokiEntry> = stream_map.values().flatten().cloned().collect();
+        let mut entries: Vec<LokiEntry> = stream_map
+            .values()
+            .flat_map(|(_, entries)| entries)
+            .cloned()
+            .collect();
         entries.sort_by_key(|(ts, _)| *ts);
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].0, metadata.observed_time_ns);

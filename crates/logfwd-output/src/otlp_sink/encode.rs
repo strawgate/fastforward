@@ -162,7 +162,7 @@ impl OtlpSink {
         let mut grouped_resource_msgs: Vec<Vec<u8>> = Vec::with_capacity(grouped_ranges.len());
         let mut grouped_resource_inner_sizes: Vec<usize> = Vec::with_capacity(grouped_ranges.len());
         let mut grouped_scope_inner_sizes: Vec<usize> = Vec::with_capacity(grouped_ranges.len());
-        let mut grouped_scope_values: Vec<(Vec<u8>, Vec<u8>)> =
+        let mut grouped_scope_values: Vec<(&[u8], &[u8])> =
             Vec::with_capacity(grouped_ranges.len());
         let mut request_size = 0usize;
 
@@ -173,8 +173,8 @@ impl OtlpSink {
             let scope_version = scope_key
                 .1
                 .unwrap_or_else(|| std::str::from_utf8(SCOPE_VERSION).unwrap_or(""));
-            let scope_name_bytes = scope_name.as_bytes().to_vec();
-            let scope_version_bytes = scope_version.as_bytes().to_vec();
+            let scope_name_bytes = scope_name.as_bytes();
+            let scope_version_bytes = scope_version.as_bytes();
             let instrumentation_scope_inner_size =
                 bytes_field_size(otlp::INSTRUMENTATION_SCOPE_NAME, scope_name_bytes.len())
                     + bytes_field_size(

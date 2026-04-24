@@ -192,13 +192,45 @@ impl ElasticsearchSink {
                 };
             }
 
-            // Move the serialized payload out of batch_buf so we can pass it to
-            // do_send without copying.  `mem::take` leaves batch_buf as Vec::new()
-            // (zero capacity, no allocation).  After do_send we restore capacity so
-            // the next serialize_batch call doesn't have to grow from scratch.
-            let body = std::mem::take(&mut self.batch_buf);
+            // Apply compression if configured, avoiding per-batch fresh encoder allocations.
+            let body = if self.config.compress {
+                use flate2::Compression;
+                use flate2::write::GzEncoder;
+                use std::io::Write;
+
+                self.compress_buf.clear();
+                let mut enc =
+                    GzEncoder::new(std::mem::take(&mut self.compress_buf), Compression::fast());
+                if let Err(error) = enc.write_all(&self.batch_buf).map_err(io::Error::other) {
+                    return SendAttempt::IoError {
+                        pending_rows: row_ids,
+                        rejections: Vec::new(),
+                        error,
+                    };
+                }
+                match enc.finish().map_err(io::Error::other) {
+                    Ok(compressed) => compressed,
+                    Err(error) => {
+                        return SendAttempt::IoError {
+                            pending_rows: row_ids,
+                            rejections: Vec::new(),
+                            error,
+                        };
+                    }
+                }
+            } else {
+                std::mem::take(&mut self.batch_buf)
+            };
+
+            let compress_cap = body.capacity();
+
             let attempt = self.do_send(body, row_ids.clone()).await;
-            self.batch_buf.reserve(prev_cap);
+
+            if self.config.compress {
+                self.compress_buf.reserve(compress_cap);
+            } else {
+                self.batch_buf.reserve(prev_cap);
+            }
 
             match attempt {
                 SendAttempt::Ok => {
