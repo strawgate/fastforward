@@ -61,7 +61,7 @@ YAML-aware placeholder expansion.
 ### `config`
 
 `config` supports layered configuration and environment overlays. The POC
-confirms `Environment::with_prefix("LOGFWD").prefix_separator("_").separator("__")`
+confirms `Environment::with_prefix("FFWD").prefix_separator("_").separator("__")`
 can override nested typed fields such as `FFWD_PIPELINES__APP__WORKERS=9`.
 
 It does not solve `${VAR}` interpolation inside YAML values. Unlike Figment, its
