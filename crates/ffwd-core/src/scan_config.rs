@@ -2,7 +2,6 @@
 //
 // Defines ScanConfig and FieldSpec, used by the Scanner and the SQL
 // transform layer.
-#![allow(clippy::indexing_slicing)]
 
 use crate::scan_predicate::ScanPredicate;
 use alloc::{string::String, vec, vec::Vec};
@@ -85,6 +84,7 @@ impl ScanConfig {
 /// Parse a byte slice as a signed 64-bit integer.
 /// Returns None on overflow or non-digit bytes.
 #[inline(always)]
+#[allow(clippy::indexing_slicing)]
 pub fn parse_int_fast(bytes: &[u8]) -> Option<i64> {
     if bytes.is_empty() {
         return None;

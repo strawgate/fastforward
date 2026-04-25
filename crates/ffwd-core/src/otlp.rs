@@ -19,7 +19,6 @@
 //! Wire format: each field = tag_varint + value
 //!   tag = (field_number << 3) | wire_type
 //!   wire_type: 0=varint, 1=64-bit fixed, 2=length-delimited, 5=32-bit fixed
-#![allow(clippy::indexing_slicing)]
 
 // --- Protobuf field number constants ---
 //
@@ -210,6 +209,7 @@ pub fn encode_fixed32(buf: &mut Vec<u8>, field_number: u32, value: u32) {
 /// or the varint exceeds 10 bytes.
 #[allow_unproven]
 #[trust_boundary]
+#[allow(clippy::indexing_slicing)]
 pub fn decode_varint(buf: &[u8], pos: usize) -> Result<(u64, usize), &'static str> {
     let mut value: u64 = 0;
     let mut shift: u32 = 0;
@@ -234,6 +234,7 @@ pub fn decode_varint(buf: &[u8], pos: usize) -> Result<(u64, usize), &'static st
 /// Decode a protobuf tag into `(field_number, wire_type, new_pos)`.
 #[allow_unproven]
 #[trust_boundary]
+#[allow(clippy::indexing_slicing)]
 pub fn decode_tag(buf: &[u8], pos: usize) -> Result<(u32, u8, usize), &'static str> {
     let (tag, new_pos) = decode_varint(buf, pos)?;
     let field_number = (tag >> 3) as u32;
@@ -245,6 +246,7 @@ pub fn decode_tag(buf: &[u8], pos: usize) -> Result<(u32, u8, usize), &'static s
 /// position after the field value.
 #[allow_unproven]
 #[trust_boundary]
+#[allow(clippy::indexing_slicing)]
 pub fn skip_field(buf: &[u8], wire_type: u8, pos: usize) -> Result<usize, &'static str> {
     match wire_type {
         0 => {
