@@ -30,6 +30,7 @@ use alloc::vec::Vec;
 /// quotes, never add them).
 #[inline]
 #[cfg_attr(kani, kani::ensures(|result: &u64| *result & !quote_bits == 0))]
+#[verified(kani = "verify_compute_real_quotes_vs_oracle")]
 pub fn compute_real_quotes(quote_bits: u64, bs_bits: u64, prev_odd_backslash: &mut u64) -> u64 {
     if bs_bits == 0 && *prev_odd_backslash == 0 {
         return quote_bits;
@@ -63,6 +64,7 @@ pub fn compute_real_quotes(quote_bits: u64, bs_bits: u64, prev_odd_backslash: &m
 /// Running XOR that toggles at each set bit. Used to compute string
 /// interior mask from quote positions.
 #[inline(always)]
+#[verified(kani = "verify_prefix_xor_vs_oracle")]
 pub fn prefix_xor(mut bitmask: u64) -> u64 {
     bitmask ^= bitmask << 1;
     bitmask ^= bitmask << 2;
@@ -269,6 +271,7 @@ pub fn find_char_mask(block: &[u8; 64], needle: u8) -> u64 {
 // SIMD detection via `wide` — portable across NEON, AVX2, SSE2, WASM
 // ---------------------------------------------------------------------------
 
+use ffwd_lint_attrs::verified;
 use wide::u8x16;
 
 /// Compare one needle against 4 pre-loaded SIMD chunks, return u64 bitmask.
@@ -702,6 +705,7 @@ mod tests {
 #[cfg(kani)]
 mod verification {
     use super::*;
+    use ffwd_kani::bytes::{compute_real_quotes_oracle, prefix_xor_oracle};
 
     /// Oracle proof: prefix_xor matches naive bit-by-bit running XOR
     /// for ALL u64 inputs. Exhaustive — no gap.
@@ -779,6 +783,50 @@ mod verification {
         kani::cover!(carry == 1, "carry-out active");
         kani::cover!(result != quote_bits, "some quotes escaped");
         kani::cover!(result == 0 && quote_bits != 0, "all quotes escaped");
+    }
+
+    /// Oracle equivalence: `compute_real_quotes` matches `ffwd_kani::bytes::compute_real_quotes_oracle`
+    /// for ALL (quote_bits, bs_bits, carry) triples.
+    ///
+    /// This formally links the production function to the canonical oracle in ffwd-kani,
+    /// enabling downstream consumers of `#[verified(kani = "verify_compute_real_quotes_vs_oracle")]`
+    /// to inherit the proof without re-verification.
+    #[kani::proof]
+    #[kani::unwind(65)]
+    #[kani::solver(kissat)]
+    pub(super) fn verify_compute_real_quotes_vs_oracle() {
+        let quote_bits: u64 = kani::any();
+        let bs_bits: u64 = kani::any();
+        let prev_carry: u64 = kani::any();
+        kani::assume(prev_carry <= 1);
+
+        let mut carry_prod = prev_carry;
+        let mut carry_ora = prev_carry;
+        let result_prod = compute_real_quotes(quote_bits, bs_bits, &mut carry_prod);
+        let result_ora = compute_real_quotes_oracle(quote_bits, bs_bits, &mut carry_ora);
+
+        assert!(
+            result_prod == result_ora,
+            "compute_real_quotes disagrees with oracle"
+        );
+        assert!(carry_prod == carry_ora, "carry mismatch with oracle");
+    }
+
+    /// Oracle equivalence: `prefix_xor` matches `ffwd_kani::bytes::prefix_xor_oracle`
+    /// for ALL u64 inputs.
+    ///
+    /// This formally links the production function to the canonical oracle in ffwd-kani.
+    #[kani::proof]
+    #[kani::unwind(65)]
+    #[kani::solver(kissat)]
+    pub(super) fn verify_prefix_xor_vs_oracle() {
+        let input: u64 = kani::any();
+        let result_prod = prefix_xor(input);
+        let result_ora = prefix_xor_oracle(input);
+        assert!(
+            result_prod == result_ora,
+            "prefix_xor disagrees with oracle"
+        );
     }
 
     /// Correctness: bit i is set iff block[i] == needle, for any
