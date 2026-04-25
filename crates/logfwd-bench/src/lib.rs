@@ -130,3 +130,41 @@ pub fn generate_narrow(n: usize) -> Vec<u8> {
     }
     buf
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{generate_narrow, generate_simple, generate_wide};
+
+    #[test]
+    fn simple_is_deterministic() {
+        assert_eq!(generate_simple(100), generate_simple(100));
+    }
+
+    #[test]
+    fn simple_line_count_matches_n() {
+        let out = generate_simple(50);
+        assert_eq!(out.iter().filter(|&&b| b == b'\n').count(), 50);
+    }
+
+    #[test]
+    fn wide_is_deterministic() {
+        assert_eq!(generate_wide(100), generate_wide(100));
+    }
+
+    #[test]
+    fn wide_line_count_matches_n() {
+        let out = generate_wide(50);
+        assert_eq!(out.iter().filter(|&&b| b == b'\n').count(), 50);
+    }
+
+    #[test]
+    fn narrow_is_deterministic() {
+        assert_eq!(generate_narrow(100), generate_narrow(100));
+    }
+
+    #[test]
+    fn narrow_line_count_matches_n() {
+        let out = generate_narrow(50);
+        assert_eq!(out.iter().filter(|&&b| b == b'\n').count(), 50);
+    }
+}
