@@ -600,8 +600,7 @@ pub fn parse_timestamp_nanos(ts: &[u8]) -> Option<u64> {
 }
 
 /// Parse 4 ASCII digits at offset. Returns 0 on non-digit.
-// Only used by Kani proof harnesses; production paths use parse_4digits_checked.
-#[allow(dead_code)]
+#[cfg(kani)]
 #[inline(always)]
 #[cfg_attr(kani, kani::ensures(|result: &u16| *result <= 9999))]
 #[verified(kani = "verify_parse_4digits_contract")]
@@ -617,8 +616,7 @@ fn parse_4digits(s: &[u8], off: usize) -> u16 {
 }
 
 /// Parse 2 ASCII digits at offset. Returns 0 on non-digit.
-// Only used by Kani proof harnesses; production paths use parse_2digits_checked.
-#[allow(dead_code)]
+#[cfg(kani)]
 #[inline(always)]
 #[cfg_attr(kani, kani::ensures(|result: &u8| *result <= 99))]
 #[verified(kani = "verify_parse_2digits_contract")]

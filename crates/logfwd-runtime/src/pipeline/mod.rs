@@ -98,14 +98,7 @@ fn scan_maybe_blocking(
     scanner: &mut Scanner,
     buf: Bytes,
 ) -> Result<RecordBatch, arrow::error::ArrowError> {
-    #[cfg(feature = "turmoil")]
-    {
-        scanner.scan(buf)
-    }
-    #[cfg(not(feature = "turmoil"))]
-    {
-        tokio::task::block_in_place(|| scanner.scan(buf))
-    }
+    scanner.scan(buf)
 }
 
 // ---------------------------------------------------------------------------

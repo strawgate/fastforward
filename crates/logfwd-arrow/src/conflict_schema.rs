@@ -126,11 +126,7 @@ pub fn normalize_conflict_columns(batch: RecordBatch) -> RecordBatch {
     let schema = batch.schema();
 
     // Fast path: no struct columns at all.
-    let has_conflict_struct = schema
-        .fields()
-        .iter()
-        .any(|f| matches!(f.data_type(), DataType::Struct(cf) if is_conflict_struct(cf)));
-    if !has_conflict_struct {
+    if !has_conflict_struct_columns(&schema) {
         return batch;
     }
 
@@ -352,7 +348,6 @@ mod tests {
             str_vals.len(),
             "int_vals and str_vals must have the same length"
         );
-        let _num_rows = int_vals.len();
 
         let int_arr: Arc<dyn Array> = Arc::new(Int64Array::from(int_vals));
 
