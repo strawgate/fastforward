@@ -417,6 +417,9 @@ pub(super) fn validate_output_config(
 }
 
 pub(super) fn es_illegal_index_char(index: &str) -> Option<char> {
+    if matches!(index, "." | "..") {
+        return Some('.');
+    }
     if let Some(c) = index.chars().next()
         && matches!(c, '-' | '_' | '+')
     {

@@ -35,7 +35,8 @@ struct PodEbpfConfig(EbpfConfig);
 // SAFETY: EbpfConfig is repr(C), Copy, and contains only primitive types (u32).
 unsafe impl aya::Pod for PodEbpfConfig {}
 
-/// Tracefs paths to probe for the sched_process_exit format file.
+/// Runs the Linux eBPF sensor loader and streams events until the configured
+/// duration elapses or the process is interrupted.
 pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     let json_mode = args.iter().any(|a| a == "--json");

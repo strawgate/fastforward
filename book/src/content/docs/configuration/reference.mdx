@@ -455,10 +455,15 @@ compression and auth headers.
 | `auth` | object | No | Optional bearer token or custom headers for HTTP auth. |
 
 ```yaml
-output:
-  type: http
-  endpoint: https://ingest.example.com/logs
-  compression: zstd
+pipelines:
+  default:
+    inputs:
+      - type: stdin
+        format: json
+    outputs:
+      - type: http
+        endpoint: https://ingest.example.com/logs
+        compression: zstd
 ```
 
 ### `stdout` output

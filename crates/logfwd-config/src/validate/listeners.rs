@@ -5,6 +5,7 @@ use super::common::{validation_error, validation_message};
 use super::endpoints::{canonical_listen_host_key, validate_host_port};
 use super::sensors::sensor_supported_families;
 
+/// Ensures a systemd unit name has a suffix, appending `.service` when absent.
 pub(super) fn normalize_unit_name(name: &str) -> String {
     if name.contains('.') {
         name.to_string()

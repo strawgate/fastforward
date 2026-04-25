@@ -641,21 +641,20 @@ pub(super) fn build_input_state(
 
             #[cfg(feature = "s3")]
             {
+                use logfwd_config::S3CompressionConfig;
                 use logfwd_io::s3_input::decompress::Compression;
                 use logfwd_io::s3_input::{S3Input, S3InputSettings};
 
-                let compression_override: Option<Compression> = match s3_cfg.compression.as_deref()
-                {
+                let compression_override: Option<Compression> = match s3_cfg.compression {
                     None => None,
-                    Some(s) if s.eq_ignore_ascii_case("auto") => None,
-                    Some(s) => match Compression::from_config_str(s) {
-                        Some(c) => Some(c),
-                        None => {
-                            return Err(format!(
-                                "input '{name}': unknown S3 compression value '{s}'"
-                            ));
-                        }
-                    },
+                    Some(S3CompressionConfig::Auto) => None,
+                    Some(S3CompressionConfig::Gzip) => Some(Compression::Gzip),
+                    Some(S3CompressionConfig::Zstd) => Some(Compression::Zstd),
+                    Some(S3CompressionConfig::Snappy) => Some(Compression::Snappy),
+                    Some(S3CompressionConfig::None) => Some(Compression::None),
+                    Some(_) => {
+                        return Err(format!("input '{name}': unsupported S3 compression value"));
+                    }
                 };
 
                 let settings = S3InputSettings::from_fields(

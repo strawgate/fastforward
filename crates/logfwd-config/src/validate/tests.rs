@@ -308,6 +308,30 @@ pipelines:
 }
 
 #[test]
+fn elasticsearch_reserved_dot_indexes_rejected() {
+    for index in [".", ".."] {
+        let yaml = format!(
+            r#"
+pipelines:
+  test:
+    inputs:
+      - type: file
+        path: /tmp/test.log
+    outputs:
+      - type: elasticsearch
+        endpoint: http://localhost:9200
+        index: "{index}"
+"#
+        );
+        let err = Config::load_str(&yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("contains illegal character '.'"),
+            "expected reserved dot index rejection for {index}: {err}"
+        );
+    }
+}
+
+#[test]
 fn http_response_body_with_204_is_rejected() {
     let yaml = r#"
 pipelines:
