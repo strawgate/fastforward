@@ -74,7 +74,7 @@ pub(super) fn sample_metrics(
     let mut pts = Vec::with_capacity(32);
 
     pts.push(MetricPoint {
-        name: "logfwd.uptime_seconds",
+        name: "ffwd.uptime_seconds",
         value: MetricValue::Gauge(uptime.as_secs_f64()),
         attributes: vec![],
     });
@@ -119,87 +119,87 @@ pub(super) fn sample_metrics(
         };
 
         pts.push(MetricPoint {
-            name: "logfwd.input_lines",
+            name: "ffwd.input_lines",
             value: MetricValue::Sum(pipe_in_lines),
             attributes: attr(""),
         });
         pts.push(MetricPoint {
-            name: "logfwd.input_bytes",
+            name: "ffwd.input_bytes",
             value: MetricValue::Sum(pipe_in_bytes),
             attributes: attr(""),
         });
         pts.push(MetricPoint {
-            name: "logfwd.output_lines",
+            name: "ffwd.output_lines",
             value: MetricValue::Sum(pipe_out_lines),
             attributes: attr(""),
         });
         pts.push(MetricPoint {
-            name: "logfwd.output_bytes",
+            name: "ffwd.output_bytes",
             value: MetricValue::Sum(pipe_out_bytes),
             attributes: attr(""),
         });
         pts.push(MetricPoint {
-            name: "logfwd.output_errors",
+            name: "ffwd.output_errors",
             value: MetricValue::Sum(pipe_out_errors),
             attributes: attr(""),
         });
         pts.push(MetricPoint {
-            name: "logfwd.batches",
+            name: "ffwd.batches",
             value: MetricValue::Sum(p_batches),
             attributes: attr(""),
         });
         pts.push(MetricPoint {
-            name: "logfwd.batch_rows",
+            name: "ffwd.batch_rows",
             value: MetricValue::Sum(p_batch_rows),
             attributes: attr(""),
         });
         pts.push(MetricPoint {
-            name: "logfwd.stage_nanos",
+            name: "ffwd.stage_nanos",
             value: MetricValue::Sum(p_scan_ns),
             attributes: attr("scan"),
         });
         pts.push(MetricPoint {
-            name: "logfwd.stage_nanos",
+            name: "ffwd.stage_nanos",
             value: MetricValue::Sum(p_transform_ns),
             attributes: attr("transform"),
         });
         pts.push(MetricPoint {
-            name: "logfwd.stage_nanos",
+            name: "ffwd.stage_nanos",
             value: MetricValue::Sum(p_output_ns),
             attributes: attr("output"),
         });
         pts.push(MetricPoint {
-            name: "logfwd.queue_wait_nanos",
+            name: "ffwd.queue_wait_nanos",
             value: MetricValue::Sum(p_queue_ns),
             attributes: attr(""),
         });
         pts.push(MetricPoint {
-            name: "logfwd.send_nanos",
+            name: "ffwd.send_nanos",
             value: MetricValue::Sum(p_send_ns),
             attributes: attr(""),
         });
         pts.push(MetricPoint {
-            name: "logfwd.inflight_batches",
+            name: "ffwd.inflight_batches",
             value: MetricValue::Gauge(p_inflight as f64),
             attributes: attr(""),
         });
         pts.push(MetricPoint {
-            name: "logfwd.backpressure_stalls",
+            name: "ffwd.backpressure_stalls",
             value: MetricValue::Sum(p_backpressure),
             attributes: attr(""),
         });
         pts.push(MetricPoint {
-            name: "logfwd.dropped_batches",
+            name: "ffwd.dropped_batches",
             value: MetricValue::Sum(p_dropped),
             attributes: attr(""),
         });
         pts.push(MetricPoint {
-            name: "logfwd.scan_errors",
+            name: "ffwd.scan_errors",
             value: MetricValue::Sum(p_scan_errors),
             attributes: attr(""),
         });
         pts.push(MetricPoint {
-            name: "logfwd.parse_errors",
+            name: "ffwd.parse_errors",
             value: MetricValue::Sum(p_parse_errors),
             attributes: attr(""),
         });
@@ -248,14 +248,14 @@ pub(super) fn sample_metrics(
 // Rate gauge definitions: (counter_name, rate_gauge_name, multiplier).
 // multiplier converts from "per second" to the desired unit (e.g. 60 for per minute).
 const RATE_DEFS: &[(&str, &str, f64)] = &[
-    ("logfwd.input_lines", "logfwd.input_lines_per_sec", 1.0),
-    ("logfwd.input_bytes", "logfwd.input_bytes_per_sec", 1.0),
-    ("logfwd.output_bytes", "logfwd.output_bytes_per_sec", 1.0),
-    ("logfwd.output_errors", "logfwd.output_errors_per_sec", 1.0),
-    ("logfwd.batches", "logfwd.batches_per_min", 60.0),
+    ("ffwd.input_lines", "ffwd.input_lines_per_sec", 1.0),
+    ("ffwd.input_bytes", "ffwd.input_bytes_per_sec", 1.0),
+    ("ffwd.output_bytes", "ffwd.output_bytes_per_sec", 1.0),
+    ("ffwd.output_errors", "ffwd.output_errors_per_sec", 1.0),
+    ("ffwd.batches", "ffwd.batches_per_min", 60.0),
     (
-        "logfwd.backpressure_stalls",
-        "logfwd.backpressure_stalls_per_sec",
+        "ffwd.backpressure_stalls",
+        "ffwd.backpressure_stalls_per_sec",
         1.0,
     ),
 ];
@@ -344,7 +344,7 @@ pub(super) fn compute_rate_gauges(
         let delta_ms = (cu.saturating_sub(pu) + cs.saturating_sub(ps)) as f64;
         let cpu_pct = delta_ms / (dt * 1000.0) * 100.0;
         out.push(MetricPoint {
-            name: "logfwd.cpu_percent",
+            name: "ffwd.cpu_percent",
             value: MetricValue::Gauge(cpu_pct),
             attributes: vec![],
         });
@@ -483,7 +483,7 @@ pub(super) fn collect_new_logs(
 pub(super) fn metrics_to_otlp_json(points: &[MetricPoint]) -> String {
     let now = now_nanos();
     let mut out = String::with_capacity(4096);
-    out.push_str(r#"{"resourceMetrics":[{"resource":{"attributes":[]},"scopeMetrics":[{"scope":{"name":"logfwd.diagnostics"},"metrics":["#);
+    out.push_str(r#"{"resourceMetrics":[{"resource":{"attributes":[]},"scopeMetrics":[{"scope":{"name":"ffwd.diagnostics"},"metrics":["#);
 
     for (i, pt) in points.iter().enumerate() {
         if i > 0 {
@@ -530,7 +530,7 @@ pub(super) fn metrics_to_otlp_json(points: &[MetricPoint]) -> String {
 /// Serialize span records into an OTLP JSON `ExportTraceServiceRequest`.
 pub(super) fn spans_to_otlp_json(spans: &[SpanRecord]) -> String {
     let mut out = String::with_capacity(8192);
-    out.push_str(r#"{"resourceSpans":[{"resource":{"attributes":[]},"scopeSpans":[{"scope":{"name":"logfwd.diagnostics"},"spans":["#);
+    out.push_str(r#"{"resourceSpans":[{"resource":{"attributes":[]},"scopeSpans":[{"scope":{"name":"ffwd.diagnostics"},"spans":["#);
 
     for (i, s) in spans.iter().enumerate() {
         if i > 0 {
@@ -586,7 +586,7 @@ pub(super) fn spans_to_otlp_json(spans: &[SpanRecord]) -> String {
 /// Serialize log records into an OTLP JSON `ExportLogsServiceRequest`.
 pub(super) fn logs_to_otlp_json(logs: &[LogRecord]) -> String {
     let mut out = String::with_capacity(2048);
-    out.push_str(r#"{"resourceLogs":[{"resource":{"attributes":[]},"scopeLogs":[{"scope":{"name":"logfwd.diagnostics"},"logRecords":["#);
+    out.push_str(r#"{"resourceLogs":[{"resource":{"attributes":[]},"scopeLogs":[{"scope":{"name":"ffwd.diagnostics"},"logRecords":["#);
 
     for (i, log) in logs.iter().enumerate() {
         if i > 0 {

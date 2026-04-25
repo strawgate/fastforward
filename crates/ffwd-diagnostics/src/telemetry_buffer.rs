@@ -191,7 +191,7 @@ fn now_nanos() -> u64 {
 
 /// Serialize metric points as an OTLP JSON `ExportMetricsServiceRequest`.
 ///
-/// Groups all points under a single resource with `service.name = "logfwd"`.
+/// Groups all points under a single resource with `service.name = "ffwd"`.
 /// Each unique metric name becomes one Gauge metric with all its data points.
 pub fn metrics_to_otlp_json(points: &[MetricPoint]) -> String {
     if points.is_empty() {
@@ -243,7 +243,7 @@ pub fn metrics_to_otlp_json(points: &[MetricPoint]) -> String {
 
     let version = env!("CARGO_PKG_VERSION");
     format!(
-        "{{\"resourceMetrics\":[{{\"resource\":{{\"attributes\":[{{\"key\":\"service.name\",\"value\":{{\"stringValue\":\"logfwd\"}}}},{{\"key\":\"service.version\",\"value\":{{\"stringValue\":\"{version}\"}}}}]}},\"scopeMetrics\":[{{\"scope\":{{\"name\":\"logfwd.diagnostics\",\"version\":\"{version}\"}},\"metrics\":[{metrics}]}}]}}]}}",
+        "{{\"resourceMetrics\":[{{\"resource\":{{\"attributes\":[{{\"key\":\"service.name\",\"value\":{{\"stringValue\":\"ffwd\"}}}},{{\"key\":\"service.version\",\"value\":{{\"stringValue\":\"{version}\"}}}}]}},\"scopeMetrics\":[{{\"scope\":{{\"name\":\"ffwd.diagnostics\",\"version\":\"{version}\"}},\"metrics\":[{metrics}]}}]}}]}}",
         metrics = metrics_json.join(",")
     )
 }
@@ -281,7 +281,7 @@ pub fn traces_to_otlp_json(spans: &[SpanPoint]) -> String {
 
     let version = env!("CARGO_PKG_VERSION");
     format!(
-        "{{\"resourceSpans\":[{{\"resource\":{{\"attributes\":[{{\"key\":\"service.name\",\"value\":{{\"stringValue\":\"logfwd\"}}}},{{\"key\":\"service.version\",\"value\":{{\"stringValue\":\"{version}\"}}}}]}},\"scopeSpans\":[{{\"scope\":{{\"name\":\"logfwd.diagnostics\",\"version\":\"{version}\"}},\"spans\":[{spans}]}}]}}]}}",
+        "{{\"resourceSpans\":[{{\"resource\":{{\"attributes\":[{{\"key\":\"service.name\",\"value\":{{\"stringValue\":\"ffwd\"}}}},{{\"key\":\"service.version\",\"value\":{{\"stringValue\":\"{version}\"}}}}]}},\"scopeSpans\":[{{\"scope\":{{\"name\":\"ffwd.diagnostics\",\"version\":\"{version}\"}},\"spans\":[{spans}]}}]}}]}}",
         spans = spans_json.join(",")
     )
 }
@@ -305,7 +305,7 @@ pub fn logs_to_otlp_json(logs: &[LogPoint]) -> String {
 
     let version = env!("CARGO_PKG_VERSION");
     format!(
-        "{{\"resourceLogs\":[{{\"resource\":{{\"attributes\":[{{\"key\":\"service.name\",\"value\":{{\"stringValue\":\"logfwd\"}}}},{{\"key\":\"service.version\",\"value\":{{\"stringValue\":\"{version}\"}}}}]}},\"scopeLogs\":[{{\"scope\":{{\"name\":\"logfwd.diagnostics\",\"version\":\"{version}\"}},\"logRecords\":[{logs}]}}]}}]}}",
+        "{{\"resourceLogs\":[{{\"resource\":{{\"attributes\":[{{\"key\":\"service.name\",\"value\":{{\"stringValue\":\"ffwd\"}}}},{{\"key\":\"service.version\",\"value\":{{\"stringValue\":\"{version}\"}}}}]}},\"scopeLogs\":[{{\"scope\":{{\"name\":\"ffwd.diagnostics\",\"version\":\"{version}\"}},\"logRecords\":[{logs}]}}]}}]}}",
         logs = logs_json.join(",")
     )
 }
@@ -359,7 +359,7 @@ pub fn sample_pipeline_metrics(pipelines: &[Arc<PipelineMetrics>], buf: &RingBuf
                 ("component.type", typ.clone()),
             ];
             buf.push(MetricPoint {
-                name: "logfwd.component.input.lines",
+                name: "ffwd.component.input.lines",
                 description: "Lines read by input component",
                 unit: "1",
                 value: MetricValue::U64(lines),
@@ -367,7 +367,7 @@ pub fn sample_pipeline_metrics(pipelines: &[Arc<PipelineMetrics>], buf: &RingBuf
                 time_unix_nano: now,
             });
             buf.push(MetricPoint {
-                name: "logfwd.component.input.bytes",
+                name: "ffwd.component.input.bytes",
                 description: "Bytes read by input component",
                 unit: "By",
                 value: MetricValue::U64(bytes),
@@ -376,8 +376,8 @@ pub fn sample_pipeline_metrics(pipelines: &[Arc<PipelineMetrics>], buf: &RingBuf
             });
         }
 
-        gauge!("logfwd.input.lines", "Total lines read", "1", input_lines);
-        gauge!("logfwd.input.bytes", "Total bytes read", "By", input_bytes);
+        gauge!("ffwd.input.lines", "Total lines read", "1", input_lines);
+        gauge!("ffwd.input.bytes", "Total bytes read", "By", input_bytes);
 
         // Output aggregates
         let mut output_lines: u64 = 0;
@@ -397,7 +397,7 @@ pub fn sample_pipeline_metrics(pipelines: &[Arc<PipelineMetrics>], buf: &RingBuf
                 ("component.type", typ.clone()),
             ];
             buf.push(MetricPoint {
-                name: "logfwd.component.output.lines",
+                name: "ffwd.component.output.lines",
                 description: "Lines written by output component",
                 unit: "1",
                 value: MetricValue::U64(lines),
@@ -405,7 +405,7 @@ pub fn sample_pipeline_metrics(pipelines: &[Arc<PipelineMetrics>], buf: &RingBuf
                 time_unix_nano: now,
             });
             buf.push(MetricPoint {
-                name: "logfwd.component.output.bytes",
+                name: "ffwd.component.output.bytes",
                 description: "Bytes written by output component",
                 unit: "By",
                 value: MetricValue::U64(bytes),
@@ -413,7 +413,7 @@ pub fn sample_pipeline_metrics(pipelines: &[Arc<PipelineMetrics>], buf: &RingBuf
                 time_unix_nano: now,
             });
             buf.push(MetricPoint {
-                name: "logfwd.component.output.errors",
+                name: "ffwd.component.output.errors",
                 description: "Output component errors",
                 unit: "1",
                 value: MetricValue::U64(errors),
@@ -423,19 +423,19 @@ pub fn sample_pipeline_metrics(pipelines: &[Arc<PipelineMetrics>], buf: &RingBuf
         }
 
         gauge!(
-            "logfwd.output.lines",
+            "ffwd.output.lines",
             "Total lines written",
             "1",
             output_lines
         );
         gauge!(
-            "logfwd.output.bytes",
+            "ffwd.output.bytes",
             "Total bytes written",
             "By",
             output_bytes
         );
         gauge!(
-            "logfwd.output.errors",
+            "ffwd.output.errors",
             "Total output errors",
             "1",
             output_errors
@@ -443,49 +443,49 @@ pub fn sample_pipeline_metrics(pipelines: &[Arc<PipelineMetrics>], buf: &RingBuf
 
         // Batch metrics
         gauge!(
-            "logfwd.batch.total",
+            "ffwd.batch.total",
             "Total batches processed",
             "1",
             pm.batches_total.load(Ordering::Relaxed)
         );
         gauge!(
-            "logfwd.batch.inflight",
+            "ffwd.batch.inflight",
             "Currently processing batches",
             "1",
             pm.inflight_batches.load(Ordering::Relaxed)
         );
         gauge!(
-            "logfwd.batch.rows",
+            "ffwd.batch.rows",
             "Total rows across all batches",
             "1",
             pm.batch_rows_total.load(Ordering::Relaxed)
         );
         gauge!(
-            "logfwd.batch.flush.by_size",
+            "ffwd.batch.flush.by_size",
             "Batches flushed by size",
             "1",
             pm.flush_by_size.load(Ordering::Relaxed)
         );
         gauge!(
-            "logfwd.batch.flush.by_timeout",
+            "ffwd.batch.flush.by_timeout",
             "Batches flushed by timeout",
             "1",
             pm.flush_by_timeout.load(Ordering::Relaxed)
         );
         gauge!(
-            "logfwd.input.poll_cadence.fast_repolls",
+            "ffwd.input.poll_cadence.fast_repolls",
             "Idle polls that bypassed baseline sleep due to adaptive cadence",
             "1",
             pm.cadence_fast_repolls.load(Ordering::Relaxed)
         );
         gauge!(
-            "logfwd.input.poll_cadence.idle_sleeps",
+            "ffwd.input.poll_cadence.idle_sleeps",
             "Idle polls that slept for baseline poll interval",
             "1",
             pm.cadence_idle_sleeps.load(Ordering::Relaxed)
         );
         gauge!(
-            "logfwd.batch.dropped",
+            "ffwd.batch.dropped",
             "Dropped batches",
             "1",
             pm.dropped_batches_total.load(Ordering::Relaxed)
@@ -493,7 +493,7 @@ pub fn sample_pipeline_metrics(pipelines: &[Arc<PipelineMetrics>], buf: &RingBuf
         let avg_latency = pm.batch_latency_nanos_total.load(Ordering::Relaxed)
             / pm.batches_total.load(Ordering::Relaxed).max(1);
         gauge!(
-            "logfwd.batch.latency.avg_ns",
+            "ffwd.batch.latency.avg_ns",
             "Average batch latency",
             "ns",
             avg_latency
@@ -501,31 +501,31 @@ pub fn sample_pipeline_metrics(pipelines: &[Arc<PipelineMetrics>], buf: &RingBuf
 
         // Stage timing
         gauge!(
-            "logfwd.stage.scan.nanos",
+            "ffwd.stage.scan.nanos",
             "Cumulative scan time",
             "ns",
             pm.scan_nanos_total.load(Ordering::Relaxed)
         );
         gauge!(
-            "logfwd.stage.transform.nanos",
+            "ffwd.stage.transform.nanos",
             "Cumulative transform time",
             "ns",
             pm.transform_nanos_total.load(Ordering::Relaxed)
         );
         gauge!(
-            "logfwd.stage.output.nanos",
+            "ffwd.stage.output.nanos",
             "Cumulative output time",
             "ns",
             pm.output_nanos_total.load(Ordering::Relaxed)
         );
         gauge!(
-            "logfwd.stage.queue_wait.nanos",
+            "ffwd.stage.queue_wait.nanos",
             "Cumulative queue wait",
             "ns",
             pm.queue_wait_nanos_total.load(Ordering::Relaxed)
         );
         gauge!(
-            "logfwd.stage.send.nanos",
+            "ffwd.stage.send.nanos",
             "Cumulative send time",
             "ns",
             pm.send_nanos_total.load(Ordering::Relaxed)
@@ -533,7 +533,7 @@ pub fn sample_pipeline_metrics(pipelines: &[Arc<PipelineMetrics>], buf: &RingBuf
 
         // Backpressure
         gauge!(
-            "logfwd.backpressure.stalls",
+            "ffwd.backpressure.stalls",
             "Input backpressure stalls",
             "1",
             pm.backpressure_stalls.load(Ordering::Relaxed)
@@ -572,16 +572,16 @@ pub fn sample_all_metrics(
 
         for (metric_name, desc, val) in [
             (
-                "logfwd.pipeline.transform_errors",
+                "ffwd.pipeline.transform_errors",
                 "Transform SQL errors",
                 transform_errors,
             ),
             (
-                "logfwd.pipeline.scan_errors",
+                "ffwd.pipeline.scan_errors",
                 "Scan stage errors",
                 scan_errors,
             ),
-            ("logfwd.pipeline.parse_errors", "Parse errors", parse_errors),
+            ("ffwd.pipeline.parse_errors", "Parse errors", parse_errors),
         ] {
             buf.push(MetricPoint {
                 name: metric_name,
@@ -603,7 +603,7 @@ pub fn sample_all_metrics(
                 ("role", "input".to_string()),
             ];
             buf.push(MetricPoint {
-                name: "logfwd.component.health",
+                name: "ffwd.component.health",
                 description: "Component health state (0=healthy, 5=failed)",
                 unit: "1",
                 value: MetricValue::U64(health as u64),
@@ -611,7 +611,7 @@ pub fn sample_all_metrics(
                 time_unix_nano: now,
             });
             buf.push(MetricPoint {
-                name: "logfwd.component.input.parse_errors",
+                name: "ffwd.component.input.parse_errors",
                 description: "Input parse errors",
                 unit: "1",
                 value: MetricValue::U64(stats.parse_errors()),
@@ -624,7 +624,7 @@ pub fn sample_all_metrics(
         for (name, typ, stats) in &pm.outputs {
             let health = stats.health();
             buf.push(MetricPoint {
-                name: "logfwd.component.health",
+                name: "ffwd.component.health",
                 description: "Component health state (0=healthy, 5=failed)",
                 unit: "1",
                 value: MetricValue::U64(health as u64),
@@ -663,7 +663,7 @@ pub fn sample_all_metrics(
             };
 
             buf.push(MetricPoint {
-                name: "logfwd.pipeline.bottleneck",
+                name: "ffwd.pipeline.bottleneck",
                 description: "Current bottleneck stage",
                 unit: "1",
                 value: MetricValue::U64(1),
@@ -676,19 +676,9 @@ pub fn sample_all_metrics(
     // Process-level metrics (RSS, CPU).
     if let Some((rss, cpu_user, cpu_sys)) = crate::diagnostics::process_metrics() {
         for (name, desc, unit, val) in [
-            ("logfwd.process.rss_bytes", "Resident set size", "By", rss),
-            (
-                "logfwd.process.cpu_user_ms",
-                "User CPU time",
-                "ms",
-                cpu_user,
-            ),
-            (
-                "logfwd.process.cpu_sys_ms",
-                "System CPU time",
-                "ms",
-                cpu_sys,
-            ),
+            ("ffwd.process.rss_bytes", "Resident set size", "By", rss),
+            ("ffwd.process.cpu_user_ms", "User CPU time", "ms", cpu_user),
+            ("ffwd.process.cpu_sys_ms", "System CPU time", "ms", cpu_sys),
         ] {
             buf.push(MetricPoint {
                 name,
@@ -705,17 +695,17 @@ pub fn sample_all_metrics(
     if let Some(mem) = memory_fn.and_then(|f| f()) {
         for (name, desc, val) in [
             (
-                "logfwd.memory.resident",
+                "ffwd.memory.resident",
                 "Allocator resident memory",
                 mem.resident as u64,
             ),
             (
-                "logfwd.memory.allocated",
+                "ffwd.memory.allocated",
                 "Allocator allocated memory",
                 mem.allocated as u64,
             ),
             (
-                "logfwd.memory.active",
+                "ffwd.memory.active",
                 "Allocator active memory",
                 mem.active as u64,
             ),
@@ -1004,7 +994,7 @@ mod tests {
     #[test]
     fn metrics_to_otlp_json_single_gauge() {
         let points = vec![MetricPoint {
-            name: "logfwd.input.lines",
+            name: "ffwd.input.lines",
             description: "Total lines read",
             unit: "1",
             value: MetricValue::U64(42),
@@ -1022,11 +1012,11 @@ mod tests {
         assert_eq!(rm["resource"]["attributes"][0]["key"], "service.name");
         assert_eq!(
             rm["resource"]["attributes"][0]["value"]["stringValue"],
-            "logfwd"
+            "ffwd"
         );
 
         let metric = &rm["scopeMetrics"][0]["metrics"][0];
-        assert_eq!(metric["name"], "logfwd.input.lines");
+        assert_eq!(metric["name"], "ffwd.input.lines");
         assert_eq!(metric["unit"], "1");
 
         let dp = &metric["gauge"]["dataPoints"][0];
@@ -1040,7 +1030,7 @@ mod tests {
     fn metrics_to_otlp_json_multiple_metrics_grouped() {
         let points = vec![
             MetricPoint {
-                name: "logfwd.input.lines",
+                name: "ffwd.input.lines",
                 description: "Lines",
                 unit: "1",
                 value: MetricValue::U64(100),
@@ -1048,7 +1038,7 @@ mod tests {
                 time_unix_nano: 1_000,
             },
             MetricPoint {
-                name: "logfwd.input.bytes",
+                name: "ffwd.input.bytes",
                 description: "Bytes",
                 unit: "By",
                 value: MetricValue::U64(5000),
@@ -1056,7 +1046,7 @@ mod tests {
                 time_unix_nano: 1_000,
             },
             MetricPoint {
-                name: "logfwd.input.lines",
+                name: "ffwd.input.lines",
                 description: "Lines",
                 unit: "1",
                 value: MetricValue::U64(200),
@@ -1072,12 +1062,12 @@ mod tests {
             .unwrap();
         // Two unique metric names: input.lines (2 data points) and input.bytes (1 data point)
         assert_eq!(metrics.len(), 2);
-        assert_eq!(metrics[0]["name"], "logfwd.input.lines");
+        assert_eq!(metrics[0]["name"], "ffwd.input.lines");
         assert_eq!(
             metrics[0]["gauge"]["dataPoints"].as_array().unwrap().len(),
             2
         );
-        assert_eq!(metrics[1]["name"], "logfwd.input.bytes");
+        assert_eq!(metrics[1]["name"], "ffwd.input.bytes");
         assert_eq!(
             metrics[1]["gauge"]["dataPoints"].as_array().unwrap().len(),
             1
@@ -1171,8 +1161,8 @@ mod tests {
         // Verify a specific metric exists
         let batch_total = points
             .iter()
-            .find(|p| p.name == "logfwd.batch.total")
-            .expect("logfwd.batch.total must be sampled");
+            .find(|p| p.name == "ffwd.batch.total")
+            .expect("ffwd.batch.total must be sampled");
         match batch_total.value {
             MetricValue::U64(v) => assert_eq!(v, 10),
             _ => panic!("expected U64"),
@@ -1181,8 +1171,8 @@ mod tests {
         // Verify backpressure is included
         let bp = points
             .iter()
-            .find(|p| p.name == "logfwd.backpressure.stalls")
-            .expect("logfwd.backpressure.stalls must be sampled");
+            .find(|p| p.name == "ffwd.backpressure.stalls")
+            .expect("ffwd.backpressure.stalls must be sampled");
         match bp.value {
             MetricValue::U64(v) => assert_eq!(v, 3),
             _ => panic!("expected U64"),
@@ -1190,8 +1180,8 @@ mod tests {
 
         let fast_repolls = points
             .iter()
-            .find(|p| p.name == "logfwd.input.poll_cadence.fast_repolls")
-            .expect("logfwd.input.poll_cadence.fast_repolls must be sampled");
+            .find(|p| p.name == "ffwd.input.poll_cadence.fast_repolls")
+            .expect("ffwd.input.poll_cadence.fast_repolls must be sampled");
         match fast_repolls.value {
             MetricValue::U64(v) => assert_eq!(v, 5),
             _ => panic!("expected U64"),
@@ -1199,8 +1189,8 @@ mod tests {
 
         let idle_sleeps = points
             .iter()
-            .find(|p| p.name == "logfwd.input.poll_cadence.idle_sleeps")
-            .expect("logfwd.input.poll_cadence.idle_sleeps must be sampled");
+            .find(|p| p.name == "ffwd.input.poll_cadence.idle_sleeps")
+            .expect("ffwd.input.poll_cadence.idle_sleeps must be sampled");
         match idle_sleeps.value {
             MetricValue::U64(v) => assert_eq!(v, 2),
             _ => panic!("expected U64"),
@@ -1242,22 +1232,22 @@ mod tests {
 
         // Memory stats should be present.
         assert!(
-            points.iter().any(|p| p.name == "logfwd.memory.resident"),
-            "expected logfwd.memory.resident metric"
+            points.iter().any(|p| p.name == "ffwd.memory.resident"),
+            "expected ffwd.memory.resident metric"
         );
         assert!(
-            points.iter().any(|p| p.name == "logfwd.memory.allocated"),
-            "expected logfwd.memory.allocated metric"
+            points.iter().any(|p| p.name == "ffwd.memory.allocated"),
+            "expected ffwd.memory.allocated metric"
         );
         assert!(
-            points.iter().any(|p| p.name == "logfwd.memory.active"),
-            "expected logfwd.memory.active metric"
+            points.iter().any(|p| p.name == "ffwd.memory.active"),
+            "expected ffwd.memory.active metric"
         );
 
         // Verify memory values.
         let resident = points
             .iter()
-            .find(|p| p.name == "logfwd.memory.resident")
+            .find(|p| p.name == "ffwd.memory.resident")
             .unwrap();
         match resident.value {
             MetricValue::U64(v) => assert_eq!(v, 1_000_000),
@@ -1268,8 +1258,8 @@ mod tests {
         assert!(
             points
                 .iter()
-                .any(|p| p.name == "logfwd.pipeline.transform_errors"),
-            "expected logfwd.pipeline.transform_errors"
+                .any(|p| p.name == "ffwd.pipeline.transform_errors"),
+            "expected ffwd.pipeline.transform_errors"
         );
 
         // The full roundtrip produces valid OTLP JSON.
@@ -1295,7 +1285,7 @@ mod tests {
 
         let health_points: Vec<_> = points
             .iter()
-            .filter(|p| p.name == "logfwd.component.health")
+            .filter(|p| p.name == "ffwd.component.health")
             .collect();
 
         // Should have 2 health gauges (one per component).
@@ -1336,8 +1326,8 @@ mod tests {
 
         let bottleneck = points
             .iter()
-            .find(|p| p.name == "logfwd.pipeline.bottleneck")
-            .expect("expected logfwd.pipeline.bottleneck gauge");
+            .find(|p| p.name == "ffwd.pipeline.bottleneck")
+            .expect("expected ffwd.pipeline.bottleneck gauge");
 
         let stage_attr = bottleneck
             .attributes
@@ -1495,7 +1485,7 @@ mod tests {
     #[test]
     fn otlp_json_64bit_integers_as_strings() {
         let points = vec![MetricPoint {
-            name: "logfwd.big_value",
+            name: "ffwd.big_value",
             description: "big",
             unit: "1",
             value: MetricValue::U64(u64::MAX),

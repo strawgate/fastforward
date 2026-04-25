@@ -127,13 +127,28 @@ Pipelines are returned as an array. Use `jq '.pipelines[0]'` to access the first
 
 ## Key metrics
 
+The diagnostics WebSocket and JSON endpoints use the metric names below
+(dot-separated prefix, underscore-separated suffix). The OTLP push path
+(`metrics_endpoint`) uses fully underscore-separated names (e.g.
+`ffwd_input_lines`). See [What gets pushed](#what-gets-pushed) for details.
+
 | Metric | Description |
 |--------|-------------|
-| `logfwd_input_lines_total` | Lines read per input |
-| `logfwd_transform_lines_in` | Lines entering SQL transform |
-| `logfwd_transform_lines_out` | Lines after filtering |
-| `logfwd_stage_seconds_total` | Time per stage (scan, transform, output) |
-| `logfwd_flush_reason_total` | Flush triggers (size vs timeout) |
+| `ffwd.input_lines` | Total lines read across all inputs |
+| `ffwd.input_bytes` | Total bytes read across all inputs |
+| `ffwd.output_lines` | Total lines delivered to outputs |
+| `ffwd.output_bytes` | Total bytes delivered to outputs |
+| `ffwd.output_errors` | Cumulative output delivery errors |
+| `ffwd.stage_nanos` | Time spent in the scan/parse stage (ns) |
+| `ffwd.stage_nanos` (transform) | Time spent in the SQL transform stage (ns) |
+| `ffwd.stage_nanos` (output) | Time spent serializing output batches (ns) |
+| `ffwd.send_nanos` | Time spent transmitting batches to the destination (ns) |
+| `ffwd.queue_wait_nanos` | Time a batch waited in the channel before processing (ns) |
+| `ffwd.batches` | Total batches flushed |
+| `ffwd.batch_rows` | Total rows across all flushed batches |
+| `ffwd.dropped_batches` | Batches discarded due to scan, transform, or output errors |
+| `ffwd.backpressure_stalls` | Times input stalled on a full channel |
+| `ffwd.inflight_batches` | Batches currently in-flight |
 
 ## Transport Observability
 
@@ -163,7 +178,7 @@ alerts you always act on than twenty you learn to ignore.
 | Input errors | `input.errors_total` rate | > 0 sustained for 5 min | Warning |
 | High drop rate | `transform.filter_drop_rate` | > 0.99 (dropping >99% of lines) | Info |
 | Memory pressure | Container memory usage | > 85 % of limit | Warning |
-| CPU saturation | `logfwd_stage_seconds_total` rate | Approaching `--cpus` limit | Warning |
+| CPU saturation | `ffwd.stage_nanos` rate | Approaching `--cpus` limit | Warning |
 | UDP drops | `transport.drops_detected` rate | > 0 sustained for 2 min | Warning |
 
 :::caution
@@ -190,10 +205,18 @@ server:
 
 ### What gets pushed
 
-All of the counters and histograms listed in the Key metrics table above are
-exported as OTLP metrics, using the `logfwd_` prefix (metric prefix will change to `ffwd_` in a future release). Each metric includes
-resource attributes identifying the host and FastForward instance. The payload uses
-OTLP protobuf encoding over HTTP.
+The counters and histograms listed in the Key metrics table above are exported as
+OTLP metrics over HTTP. The push path uses the OpenTelemetry SDK, which registers
+instruments with underscore-separated names (e.g. `ffwd_input_lines`,
+`ffwd_output_bytes`). Each metric carries `pipeline`, `input`, or `output`
+metric attributes so you can filter by component. The payload uses OTLP
+protobuf encoding.
+
+:::note
+The diagnostics JSON endpoint (`/admin/v1/status`) uses dot-separated names
+(e.g. `ffwd.input_lines`). The OTLP push path uses underscore-only names
+(e.g. `ffwd_input_lines`). Keep this distinction in mind when building alerts.
+:::
 
 ### Verifying the push path
 

@@ -26,7 +26,7 @@ const POLL_OPTIONS = [
 /** Always-visible primary charts. */
 const PRIMARY_CHARTS: ChartConfig[] = [
   {
-    metricName: "logfwd.input_lines_per_sec",
+    metricName: "ffwd.input_lines_per_sec",
     label: "Lines / sec",
     color: "#3b82f6",
     unit: "/s",
@@ -35,7 +35,7 @@ const PRIMARY_CHARTS: ChartConfig[] = [
     splitBy: "pipeline",
   },
   {
-    metricName: "logfwd.input_bytes_per_sec",
+    metricName: "ffwd.input_bytes_per_sec",
     label: "Input Bytes/s",
     color: "#8b5cf6",
     unit: "/s",
@@ -44,7 +44,7 @@ const PRIMARY_CHARTS: ChartConfig[] = [
     splitBy: "pipeline",
   },
   {
-    metricName: "logfwd.output_bytes_per_sec",
+    metricName: "ffwd.output_bytes_per_sec",
     label: "Output Bytes/s",
     color: "#22c55e",
     unit: "/s",
@@ -57,7 +57,7 @@ const PRIMARY_CHARTS: ChartConfig[] = [
 /** Charts shown only when "Show More" is toggled or they have non-zero values. */
 const EXTRA_CHARTS: ChartConfig[] = [
   {
-    metricName: "logfwd.output_errors_per_sec",
+    metricName: "ffwd.output_errors_per_sec",
     label: "Errors / sec",
     color: "#ef4444",
     unit: "/s",
@@ -66,7 +66,7 @@ const EXTRA_CHARTS: ChartConfig[] = [
     splitBy: "pipeline",
   },
   {
-    metricName: "logfwd.batches_per_min",
+    metricName: "ffwd.batches_per_min",
     label: "Batch Rate",
     color: "#a78bfa",
     unit: "/min",
@@ -75,7 +75,7 @@ const EXTRA_CHARTS: ChartConfig[] = [
     splitBy: "pipeline",
   },
   {
-    metricName: "logfwd.backpressure_stalls_per_sec",
+    metricName: "ffwd.backpressure_stalls_per_sec",
     label: "Scan Stalls",
     color: "#fb7185",
     unit: "/s",
@@ -87,7 +87,7 @@ const EXTRA_CHARTS: ChartConfig[] = [
 
 const SYSTEM_CHARTS: ChartConfig[] = [
   {
-    metricName: "logfwd.cpu_percent",
+    metricName: "ffwd.cpu_percent",
     label: "Process CPU",
     color: "#f59e0b",
     unit: "%",
@@ -103,7 +103,7 @@ const SYSTEM_CHARTS: ChartConfig[] = [
     yRange: [0, 67108864],
   },
   {
-    metricName: "logfwd.inflight_batches",
+    metricName: "ffwd.inflight_batches",
     label: "Inflight Batches",
     color: "#f97316",
     unit: "",
@@ -132,29 +132,36 @@ export function App() {
       return frame.rows[0]?.value ?? 0;
     };
 
+    // Like val(), but returns undefined when the metric is absent so optional
+    // StatsResponse fields stay undefined instead of masking missing data as 0.
+    const optVal = (name: string): number | undefined => {
+      const frame = store.selectLatestValues({ metricName: name });
+      return frame.rows[0]?.value;
+    };
+
     setStats({
-      uptime_sec: val("logfwd.uptime_seconds"),
+      uptime_sec: val("ffwd.uptime_seconds"),
       rss_bytes: val("process.memory.rss"),
       cpu_user_ms: null,
       cpu_sys_ms: null,
-      input_lines: val("logfwd.input_lines"),
-      input_bytes: val("logfwd.input_bytes"),
+      input_lines: val("ffwd.input_lines"),
+      input_bytes: val("ffwd.input_bytes"),
       output_lines: 0,
-      output_bytes: val("logfwd.output_bytes"),
-      output_errors: val("logfwd.output_errors"),
-      batches: val("logfwd.batches"),
-      scan_sec: val("logfwd.stage_nanos") / 1e9,
+      output_bytes: val("ffwd.output_bytes"),
+      output_errors: val("ffwd.output_errors"),
+      batches: val("ffwd.batches"),
+      scan_sec: val("ffwd.stage_nanos") / 1e9,
       transform_sec: 0,
       output_sec: 0,
-      backpressure_stalls: val("logfwd.backpressure_stalls"),
-      inflight_batches: val("logfwd.inflight_batches"),
-      channel_depth: val("logfwd.channel_depth") ?? undefined,
-      channel_capacity: val("logfwd.channel_capacity") ?? undefined,
-      mem_resident: val("process.memory.resident") ?? undefined,
-      mem_allocated: val("process.memory.allocated") ?? undefined,
-      mem_active: val("process.memory.active") ?? undefined,
+      backpressure_stalls: val("ffwd.backpressure_stalls"),
+      inflight_batches: val("ffwd.inflight_batches"),
+      channel_depth: optVal("ffwd.channel_depth"),
+      channel_capacity: optVal("ffwd.channel_capacity"),
+      mem_resident: optVal("process.memory.resident"),
+      mem_allocated: optVal("process.memory.allocated"),
+      mem_active: optVal("process.memory.active"),
     });
-    setTotalErrors(val("logfwd.output_errors"));
+    setTotalErrors(val("ffwd.output_errors"));
   }, [store]);
 
   // Max traces to retain in the dashboard (prevents unbounded growth).

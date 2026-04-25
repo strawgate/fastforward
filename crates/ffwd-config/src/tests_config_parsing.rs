@@ -25,7 +25,7 @@ mod tests {
             "type: otlp\nendpoint: http://otel-collector:4317\ncompression: zstd",
         );
         yaml.push_str("\nserver:\n  diagnostics: 0.0.0.0:9090\n  log_level: info\n");
-        yaml.push_str("\nstorage:\n  data_dir: /var/lib/logfwd\n");
+        yaml.push_str("\nstorage:\n  data_dir: /var/lib/ffwd\n");
         let cfg = Config::load_str(yaml).expect("should parse simple config");
         assert_eq!(cfg.pipelines.len(), 1);
         let pipe = &cfg.pipelines["default"];
@@ -43,7 +43,7 @@ mod tests {
             Some("http://otel-collector:4317")
         );
         assert_eq!(cfg.server.diagnostics.as_deref(), Some("0.0.0.0:9090"));
-        assert_eq!(cfg.storage.data_dir.as_deref(), Some("/var/lib/logfwd"));
+        assert_eq!(cfg.storage.data_dir.as_deref(), Some("/var/lib/ffwd"));
     }
 
     #[test]
