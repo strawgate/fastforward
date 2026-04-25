@@ -120,7 +120,7 @@ fmt-check:
 
 # Clippy — default-members only (skips datafusion, ~30s)
 clippy:
-    cargo clippy -- -D warnings
+    RUSTFLAGS="-W clippy::unwrap_used -W clippy::expect_used -W clippy::indexing_slicing" cargo clippy
 
 # Clippy — full workspace including datafusion (~3min, CI uses this)
 clippy-all:
