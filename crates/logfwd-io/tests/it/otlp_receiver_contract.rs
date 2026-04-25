@@ -14,7 +14,7 @@ use logfwd_types::diagnostics::ComponentStats;
 use logfwd_types::field_names;
 use opentelemetry_proto::tonic::{
     collector::logs::v1::ExportLogsServiceRequest,
-    common::v1::{AnyValue, KeyValue, any_value::Value},
+    common::v1::{any_value::Value, AnyValue, KeyValue},
     logs::v1::{LogRecord, ResourceLogs, ScopeLogs},
     resource::v1::Resource,
 };
@@ -100,12 +100,26 @@ fn assert_accounted_bytes_for_payload(
         !events.is_empty(),
         "receiver should emit at least one event"
     );
+
+    let mut total_accounted: u64 = 0;
+    let mut total_rows: u64 = 0;
+    for event in &events {
+        if let InputEvent::Batch {
+            batch,
+            accounted_bytes,
+            ..
+        } = event
+        {
+            total_accounted += accounted_bytes;
+            total_rows += batch.num_rows() as u64;
+        }
+    }
     assert_eq!(
-        stats.bytes(),
+        total_accounted,
         body.len() as u64,
         "receiver should charge the accepted request-body size at the input boundary"
     );
-    assert_eq!(stats.lines(), 1, "one OTLP request should yield one row");
+    assert_eq!(total_rows, 1, "one OTLP request should yield one row");
 }
 
 fn semantic_request() -> ExportLogsServiceRequest {
