@@ -3,7 +3,6 @@
 //! These use plain byte loops instead of memchr so Kani can formally
 //! verify them. LLVM auto-vectorizes the loops, so runtime performance
 //! is comparable to hand-written SIMD.
-#![allow(clippy::indexing_slicing)]
 
 /// Find the first occurrence of `needle` in `haystack` starting at `from`.
 ///
@@ -12,6 +11,7 @@
 ///
 /// Formally verified by Kani for all 16-byte inputs (see proof below).
 #[inline]
+#[allow(clippy::indexing_slicing)]
 pub fn find_byte(haystack: &[u8], needle: u8, from: usize) -> Option<usize> {
     let mut i = from;
     while i < haystack.len() {
@@ -26,8 +26,9 @@ pub fn find_byte(haystack: &[u8], needle: u8, from: usize) -> Option<usize> {
 /// Find the last occurrence of `needle` in `haystack[..end]`.
 ///
 /// Returns the index of the last match, or None if not found.
-/// Equivalent to `memchr::memrchr(needle, &haystack[..end])`.
+/// Equivalent to `memchr::memchr(needle, &haystack[..end])`.
 #[inline]
+#[allow(clippy::indexing_slicing)]
 pub fn rfind_byte(haystack: &[u8], needle: u8, end: usize) -> Option<usize> {
     if end == 0 || haystack.is_empty() {
         return None;

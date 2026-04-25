@@ -13,7 +13,6 @@
 //! The framer uses plain byte loops (no memchr, no Vec) so Kani can prove
 //! it correct. LLVM auto-vectorizes the byte scan loop, so performance is
 //! comparable to hand-written SIMD.
-#![allow(clippy::indexing_slicing)]
 
 /// Maximum number of lines per frame operation.
 ///
@@ -56,6 +55,7 @@ impl FrameOutput {
 
     /// Get the byte range of line `i`. Panics if `i >= len()`.
     #[inline]
+    #[allow(clippy::indexing_slicing)]
     pub fn line_range(&self, i: usize) -> (usize, usize) {
         assert!(i < self.count, "line index out of bounds");
         self.line_ranges[i]
@@ -80,6 +80,7 @@ impl NewlineFramer {
     ///
     /// Returns a `FrameOutput` with ranges of complete lines and the
     /// offset of any partial remainder.
+    #[allow(clippy::indexing_slicing)]
     pub fn frame(&self, input: &[u8]) -> FrameOutput {
         let mut output = FrameOutput {
             line_ranges: [(0, 0); MAX_LINES_PER_FRAME],

@@ -11,7 +11,6 @@
 //!
 //! Partial lines (flag "P") must be reassembled: concatenate all "P" chunks
 //! until an "F" chunk arrives, then emit the combined line.
-#![allow(clippy::indexing_slicing)]
 
 // Re-export reassembler types so bench/fuzz targets can reach them via
 // `ffwd_core::cri::CriReassembler` and `ffwd_core::cri::AggregateResult`.
@@ -36,6 +35,7 @@ pub struct CriLine<'a> {
 /// This is zero-copy — all returned slices point into the input `line`.
 /// Uses `byte_search::find_byte` (Kani-proven) instead of memchr.
 #[inline]
+#[allow(clippy::indexing_slicing)]
 pub fn parse_cri_line(line: &[u8]) -> Option<CriLine<'_>> {
     use crate::byte_search::find_byte;
 
@@ -205,6 +205,7 @@ pub fn process_cri_to_buf_with_plain_text_field(
 }
 
 #[inline]
+#[allow(clippy::indexing_slicing)]
 fn process_cri_chunk_lines<F>(
     chunk: &[u8],
     reassembler: &mut CriReassembler,
@@ -269,6 +270,7 @@ fn write_json_line_for_plain_text_field(
 /// Handles all characters that must be escaped in a JSON string value:
 /// double-quote, backslash, and ASCII control characters (U+0000–U+001F, U+007F).
 #[inline]
+#[allow(clippy::indexing_slicing)]
 pub fn json_escape_bytes(src: &[u8], dst: &mut Vec<u8>) {
     for &b in src {
         match b {
@@ -304,6 +306,7 @@ fn write_json_line(msg: &[u8], out: &mut Vec<u8>) {
 }
 
 #[inline]
+#[allow(clippy::indexing_slicing)]
 fn write_json_line_with_plain_text_field(
     msg: &[u8],
     plain_text_field_name: &str,
