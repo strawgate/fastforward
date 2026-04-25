@@ -129,16 +129,21 @@ Pipelines are returned as an array. Use `jq '.pipelines[0]'` to access the first
 
 | Metric | Description |
 |--------|-------------|
-| `ffwd_input` | Lines read per input |
-| `ffwd_transform_in` | Lines entering SQL transform |
-| `ffwd_transform_out` | Lines after filtering |
-| `ffwd_stage_scan_nanos` | Time in scan stage (nanoseconds) |
-| `ffwd_stage_transform_nanos` | Time in transform stage (nanoseconds) |
-| `ffwd_stage_send_nanos` | Time in output stage (nanoseconds) |
-| `ffwd_flush_by_size` | Flushes triggered by batch size |
-| `ffwd_flush_by_timeout` | Flushes triggered by timeout |
-| `ffwd_backpressure_stalls` | Times input stalled on full channel |
-| `ffwd_dropped_batches` | Batches dropped under pressure |
+| `ffwd.input.lines` | Total lines read across all inputs |
+| `ffwd.input.bytes` | Total bytes read across all inputs |
+| `ffwd.output.lines` | Total lines delivered to outputs |
+| `ffwd.output.bytes` | Total bytes delivered to outputs |
+| `ffwd.output.errors` | Cumulative output delivery errors |
+| `ffwd.stage.scan.nanos` | Time spent in the scan/parse stage (ns) |
+| `ffwd.stage.transform.nanos` | Time spent in the SQL transform stage (ns) |
+| `ffwd.stage.output.nanos` | Time spent serializing output batches (ns) |
+| `ffwd.stage.send.nanos` | Time spent transmitting batches to the destination (ns) |
+| `ffwd.stage.queue_wait.nanos` | Time a batch waited in the channel before processing (ns) |
+| `ffwd.batch.flush.by_size` | Flushes triggered by batch size threshold |
+| `ffwd.batch.flush.by_timeout` | Flushes triggered by timeout |
+| `ffwd.batch.dropped` | Batches dropped under backpressure |
+| `ffwd.backpressure.stalls` | Times input stalled on a full channel |
+| `ffwd.batch.latency.avg_ns` | Average end-to-end batch latency (ns) |
 
 ## Transport Observability
 
@@ -168,7 +173,7 @@ alerts you always act on than twenty you learn to ignore.
 | Input errors | `input.errors_total` rate | > 0 sustained for 5 min | Warning |
 | High drop rate | `transform.filter_drop_rate` | > 0.99 (dropping >99% of lines) | Info |
 | Memory pressure | Container memory usage | > 85 % of limit | Warning |
-| CPU saturation | `ffwd_stage_seconds_total` rate | Approaching `--cpus` limit | Warning |
+| CPU saturation | `ffwd.stage.scan.nanos` rate | Approaching `--cpus` limit | Warning |
 | UDP drops | `transport.drops_detected` rate | > 0 sustained for 2 min | Warning |
 
 :::caution
@@ -196,7 +201,7 @@ server:
 ### What gets pushed
 
 All of the counters and histograms listed in the Key metrics table above are
-exported as OTLP metrics, using the `ffwd_` prefix. Each metric includes
+exported as OTLP metrics using dot-separated names (e.g. `ffwd.input.lines`). Each metric includes
 resource attributes identifying the host and FastForward instance. The payload uses
 OTLP protobuf encoding over HTTP.
 

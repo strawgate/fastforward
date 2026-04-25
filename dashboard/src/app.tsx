@@ -132,6 +132,13 @@ export function App() {
       return frame.rows[0]?.value ?? 0;
     };
 
+    // Like val(), but returns undefined when the metric is absent so optional
+    // StatsResponse fields stay undefined instead of masking missing data as 0.
+    const optVal = (name: string): number | undefined => {
+      const frame = store.selectLatestValues({ metricName: name });
+      return frame.rows[0]?.value;
+    };
+
     setStats({
       uptime_sec: val("ffwd.uptime_seconds"),
       rss_bytes: val("process.memory.rss"),
@@ -148,11 +155,11 @@ export function App() {
       output_sec: 0,
       backpressure_stalls: val("ffwd.backpressure_stalls"),
       inflight_batches: val("ffwd.inflight_batches"),
-      channel_depth: val("ffwd.channel_depth") ?? undefined,
-      channel_capacity: val("ffwd.channel_capacity") ?? undefined,
-      mem_resident: val("process.memory.resident") ?? undefined,
-      mem_allocated: val("process.memory.allocated") ?? undefined,
-      mem_active: val("process.memory.active") ?? undefined,
+      channel_depth: optVal("ffwd.channel_depth"),
+      channel_capacity: optVal("ffwd.channel_capacity"),
+      mem_resident: optVal("process.memory.resident"),
+      mem_allocated: optVal("process.memory.allocated"),
+      mem_active: optVal("process.memory.active"),
     });
     setTotalErrors(val("ffwd.output_errors"));
   }, [store]);

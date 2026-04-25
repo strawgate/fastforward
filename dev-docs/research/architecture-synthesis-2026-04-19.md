@@ -27,7 +27,7 @@ All analysis attempts identified the same core bug: `AsyncFanoutSink::finalize_f
 
 **Recommendation:** Introduce a `ContractOutcome` enum preserving per-sink evidence (`Ok`, `Rejected`, `RetryAfter`, `IoError`) until checkpoint policy is applied.
 
-**Verification:** `SendResult` enum exists in `ffwd-output/src/sink.rs` — bug is code-grounded.
+**Verification:** `SendResult` enum exists in `crates/ffwd-output/src/sink.rs` — bug is code-grounded.
 
 ### 2. Processor Chain
 
