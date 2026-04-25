@@ -531,7 +531,7 @@ output:
   endpoint: http://loki:3100
   tenant_id: team-a
   static_labels:
-    app: logfwd
+    app: ffwd
     env: prod
   label_columns: [service, level]
   auth:
@@ -556,7 +556,7 @@ Write records to a file.
 ```yaml
 output:
   type: file
-  path: /var/log/logfwd/capture.ndjson
+  path: /var/log/ffwd/capture.ndjson
   format: json
 ```
 
@@ -736,10 +736,10 @@ enrichment:
     prefix: LOGFWD_META_
   - type: csv
     table_name: assets
-    path: /etc/logfwd/assets.csv
+    path: /etc/ffwd/assets.csv
   - type: jsonl
     table_name: ip_owners
-    path: /etc/logfwd/ip-owners.jsonl
+    path: /etc/ffwd/ip-owners.jsonl
   - type: geo_database
     format: mmdb
     path: /data/GeoLite2-City.mmdb
@@ -788,7 +788,7 @@ Agent self-metadata, resolved once at startup. Fixed table name: `process_info`.
 
 | Column | Description |
 |--------|-------------|
-| `agent_name` | Always `logfwd`. |
+| `agent_name` | Always `ffwd`. |
 | `agent_version` | Semantic version of the running binary. |
 | `pid` | Process ID (as string). |
 | `start_time` | ISO 8601 UTC timestamp captured when the `process_info` enrichment table is constructed during pipeline startup. |
@@ -953,7 +953,7 @@ trailing cells are `NULL`.
 enrichment:
   - type: csv
     table_name: assets
-    path: /etc/logfwd/assets.csv
+    path: /etc/ffwd/assets.csv
     refresh_interval: 3600   # optional: reload every N seconds; must be >= 1 when set
 ```
 
@@ -971,7 +971,7 @@ Columns are the union of all keys across all rows.
 enrichment:
   - type: jsonl
     table_name: ip_owners
-    path: /etc/logfwd/ip-owners.jsonl
+    path: /etc/ffwd/ip-owners.jsonl
     refresh_interval: 1800   # optional: reload every N seconds; must be >= 1 when set
 ```
 
@@ -1079,7 +1079,7 @@ queue).
 
 ```yaml
 storage:
-  data_dir: /var/lib/logfwd
+  data_dir: /var/lib/ffwd
 ```
 
 ---
@@ -1187,5 +1187,5 @@ server:
   metrics_interval_secs: 60
 
 storage:
-  data_dir: /var/lib/logfwd
+  data_dir: /var/lib/ffwd
 ```

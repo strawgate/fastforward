@@ -1,18 +1,18 @@
 # Architecture
 
-How data flows through logfwd, from bytes on disk to serialized output.
+How data flows through ffwd, from bytes on disk to serialized output.
 
 ## Layers
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│  logfwd (binary)                                        │
+│  ffwd (binary)                                        │
 │  CLI entrypoints, config loading, signal handling       │
 └─────────────────────────────────────────────────────────┘
                           │
                           ▼
 ┌─────────────────────────────────────────────────────────┐
-│  logfwd-runtime                                          │
+│  ffwd-runtime                                          │
 │  Async orchestration, worker pool, processor chain       │
 │                                                         │
 │  ┌──────────┐   ┌───────────┐   ┌───────────────────┐  │
@@ -23,27 +23,27 @@ How data flows through logfwd, from bytes on disk to serialized output.
        │              │                    │
        ▼              ▼                    ▼
 ┌──────────────────────────────────────────────────┐
-│  logfwd-arrow                                    │
+│  ffwd-arrow                                    │
 │  ScanBuilder impls, SIMD backends, RecordBatch   │
 └──────────────────────────────────────────────────┘
        │
        ▼
 ┌──────────────────────────────────────────────────┐
-│  logfwd-core                                     │
+│  ffwd-core                                     │
 │  Pure logic, proven, no_std, forbid(unsafe)      │
 └──────────────────────────────────────────────────┘
 ```
 
-Dependencies flow downward. logfwd-core knows nothing about Arrow,
-IO, or async. logfwd-arrow bridges core's parsing to Arrow types.
-`logfwd-runtime` owns the long-lived async runtime, and the binary crate
+Dependencies flow downward. ffwd-core knows nothing about Arrow,
+IO, or async. ffwd-arrow bridges core's parsing to Arrow types.
+`ffwd-runtime` owns the long-lived async runtime, and the binary crate
 now stays focused on startup/CLI/bootstrap concerns.
 
-`logfwd-diagnostics` owns the diagnostics control-plane surface (diagnostics
+`ffwd-diagnostics` owns the diagnostics control-plane surface (diagnostics
 HTTP endpoints, readiness/status shaping, stderr/span buffering, and the
 generated `dashboard.html` asset served by diagnostics).
 
-`logfwd-bench` is not in the production data path. It owns Criterion benchmarks
+`ffwd-bench` is not in the production data path. It owns Criterion benchmarks
 and profiling binaries used to measure scanner, pipeline, output, and source
 metadata behavior under representative cardinality and allocation pressure.
 
@@ -74,15 +74,15 @@ Ownership boundaries cut across those semantic layers:
 Disk → FileReader (`BytesMut`) → InputEvent::Data { bytes: Bytes }
 ```
 
-**FileTailer** (`logfwd-io/src/tail.rs`) is composed of two internal layers:
+**FileTailer** (`ffwd-io/src/tail.rs`) is composed of two internal layers:
 - **FileDiscovery**: path watching via notify (kqueue/inotify), glob evaluation,
   rotation detection, deleted-file cleanup, LRU eviction.
 - **FileReader**: open file descriptors, per-file `BytesMut` read buffers, byte reading.
 
 File-discovery reliability notes: `dev-docs/references/file-discovery.md`.
 
-> **Note:** the `Bytes` boundary is now inside `logfwd-io`, not only in
-> `logfwd-runtime`. The tailer owns mutable per-source `BytesMut` read buffers,
+> **Note:** the `Bytes` boundary is now inside `ffwd-io`, not only in
+> `ffwd-runtime`. The tailer owns mutable per-source `BytesMut` read buffers,
 > `InputEvent::Data` carries immutable `Bytes`, and `FramedInput` keeps only
 > small per-source `Vec<u8>` remainders where a line is incomplete or tainted.
 
@@ -97,7 +97,7 @@ channel.
 Bytes → FramedInput::poll() → scanner-ready `InputEvent::Data { bytes: Bytes }`
 ```
 
-**FramedInput** (`logfwd-io/src/framed.rs`) combines format detection
+**FramedInput** (`ffwd-io/src/framed.rs`) combines format detection
 with per-source remainder tracking. It handles three formats:
 
 - **Json**: Lines are already JSON. Splits on `\n`, carries
@@ -118,11 +118,11 @@ buffer, including CRI/Auto normalization and CRI sidecar metadata collection.
 The remaining complexity in this area is about when the runtime chooses that
 path, not about changing the scanner contract away from contiguous `Bytes`.
 
-**NewlineFramer** (`logfwd-core/src/framer.rs`): fixed-size
+**NewlineFramer** (`ffwd-core/src/framer.rs`): fixed-size
 output (4096 lines, 64KB stack), no heap, Kani-proven. It returns byte
 ranges into the input buffer — zero-copy.
 
-**CriReassembler** (`logfwd-core/src/reassembler.rs`):
+**CriReassembler** (`ffwd-core/src/reassembler.rs`):
 zero-copy for F-only lines (99% of traffic), copies only for P+F
 reassembly. Kani-proven.
 
@@ -131,7 +131,7 @@ buffer per scan. Upstream work may reduce or relocate copies, but default scan
 entry remains `Scanner::scan(Bytes)`.
 
 **Current transition state:** the shared-buffer `FramedInput` path exists, but
-`logfwd-runtime` still keeps the legacy `InputEvent::Data { bytes: Bytes }`
+`ffwd-runtime` still keeps the legacy `InputEvent::Data { bytes: Bytes }`
 route for fresh-buffer scans. The runtime currently switches to
 `FramedInput::poll_into()` once a batch already has buffered bytes, preserving
 the old single-chunk direct-flush behavior while removing the extra append on
@@ -143,7 +143,7 @@ continuation polls (#2539).
 &[u8] → find_structural_chars(block) → StreamingClassifier → processed bitmasks
 ```
 
-**StreamingClassifier** (`logfwd-core/src/structural.rs`) is the
+**StreamingClassifier** (`ffwd-core/src/structural.rs`) is the
 simdjson-inspired stage-1 algorithm. It processes 64-byte blocks,
 producing bitmasks for structural character positions. From quote and
 backslash positions it computes:
@@ -170,7 +170,7 @@ enables bitmask-based JSON field extraction.
 &[u8] + streaming structural bitmasks → ScanBuilder callbacks → typed column values
 ```
 
-**scan_streaming** (`logfwd-core/src/json_scanner.rs`) walks each line
+**scan_streaming** (`ffwd-core/src/json_scanner.rs`) walks each line
 left-to-right, extracting key-value pairs. It uses streaming structural
 bitmasks for string boundary detection and the **ScanBuilder** trait for
 output:
@@ -189,9 +189,9 @@ pub trait ScanBuilder {
 ```
 
 This is the **key abstraction boundary**. The scanner lives in the system's pure
-logic kernel (`logfwd-core` and `logfwd-kani`, both proven, no_std). It doesn't
-know about Arrow: it calls trait methods from `logfwd-core/src/scanner.rs` that
-logfwd-arrow implements.
+logic kernel (`ffwd-core` and `ffwd-kani`, both proven, no_std). It doesn't
+know about Arrow: it calls trait methods from `ffwd-core/src/scanner.rs` that
+ffwd-arrow implements.
 
 **ScanConfig** controls which fields to extract (field pushdown from
 SQL analysis) and type detection. Fields are typed per-value: when a
@@ -205,12 +205,12 @@ a `StructArray` conflict column (`status: Struct { int, str }`).
 ScanBuilder callbacks → StreamingBuilder → RecordBatch
 ```
 
-**StreamingBuilder** (`logfwd-arrow/src/streaming_builder.rs`):
+**StreamingBuilder** (`ffwd-arrow/src/streaming_builder.rs`):
 Implements `ScanBuilder`. Stores `(offset, len)` views into the input
 `bytes::Bytes` buffer. Produces `StringViewArray` (zero-copy) via
 `finish_batch()` or `StringArray` (detached) via `finish_batch_detached()`.
 
-**Scanner** (`logfwd-arrow/src/scanner.rs`) wraps StreamingBuilder:
+**Scanner** (`ffwd-arrow/src/scanner.rs`) wraps StreamingBuilder:
 
 - `Scanner::scan(Bytes) → RecordBatch` — zero-copy `StringViewArray`,
   buffer must stay alive
@@ -230,7 +230,7 @@ appended or replaced from the CRI sidecar; rows without CRI values preserve any
 existing payload columns and otherwise materialize as nulls. This stage is the
 only place CRI metadata becomes columns.
 
-**SqlTransform** (`logfwd-transform/src/lib.rs`) runs user SQL via
+**SqlTransform** (`ffwd-transform/src/lib.rs`) runs user SQL via
 DataFusion. Each batch is registered as a `"logs"` MemTable, the SQL
 executes, and the result is collected.
 
@@ -241,10 +241,10 @@ scanner only extracts fields the SQL actually uses.
 Custom UDFs: `int()`, `float()`, `regexp_extract()`, `grok()`,
 `geo_lookup()`.
 
-CSV enrichment tables are parsed in `logfwd-transform` and materialized through
+CSV enrichment tables are parsed in `ffwd-transform` and materialized through
 `ColumnarBatchBuilder` as nullable `Utf8View` columns. Delimiter, quote, header,
 duplicate-header, and row-alignment semantics remain local to the transform
-crate; `logfwd-arrow` only owns the shared columnar builder and Arrow
+crate; `ffwd-arrow` only owns the shared columnar builder and Arrow
 finalization mechanics.
 
 ### 7. Output: RecordBatch → wire format
@@ -253,7 +253,7 @@ finalization mechanics.
 RecordBatch → OutputSink::send_batch() → HTTP/stdout/file
 ```
 
-**OutputSink** (`logfwd-output/src/lib.rs`) implementations:
+**OutputSink** (`ffwd-output/src/lib.rs`) implementations:
 
 - **OtlpSink**: Encodes RecordBatch → OTLP protobuf, sends via HTTP.
   Handles resource attributes, observed timestamps, DataType-based dispatch.
@@ -266,29 +266,29 @@ RecordBatch → OutputSink::send_batch() → HTTP/stdout/file
 
 ## Crate boundaries
 
-Each boundary is a trait that logfwd-core defines and other crates
+Each boundary is a trait that ffwd-core defines and other crates
 implement:
 
 ```
-logfwd-core defines          logfwd-arrow implements
+ffwd-core defines          ffwd-arrow implements
 ──────────────────────────    ──────────────────────────
 ScanBuilder                   StreamingBuilder
                               Scanner (wrapper)
 
-logfwd-io defines + implements
+ffwd-io defines + implements
 ──────────────────────────────────────────
 InputSource trait              FileInput, TcpInput, UdpInput,
                                OtlpReceiverInput
 
-logfwd-output defines + implements
+ffwd-output defines + implements
 ──────────────────────────────────────────
 OutputSink / Sink traits       OtlpSink, ElasticsearchSink,
                                LokiSink, JsonLinesSink, StdoutSink
 ```
 
-`logfwd-runtime` wires these together in `pipeline.rs`.
+`ffwd-runtime` wires these together in `pipeline.rs`.
 
-`logfwd-diagnostics` provides the diagnostics server and telemetry-facing
+`ffwd-diagnostics` provides the diagnostics server and telemetry-facing
 snapshot types consumed by runtime/bootstrap wiring.
 
 ## Pipeline loop
@@ -376,8 +376,8 @@ architectural commitment.
 - **Arena allocation at boundaries where it helps.** Short-lived
   per-batch object graphs (parse nodes, intermediate Arrow builders)
   that currently allocate per-record are candidates for arena or bump
-  allocation. See `logfwd-arrow/src/columnar/` for the existing pattern.
-- **No raw payload injection (see `CRATE_RULES.md` → `logfwd-io`).** The
+  allocation. See `ffwd-arrow/src/columnar/` for the existing pattern.
+- **No raw payload injection (see `CRATE_RULES.md` → `ffwd-io`).** The
   no-raw-injection rule is a data-layout rule: source metadata travels
   in a sidecar, not in the payload buffer. This is the architectural
   manifestation of SoA.
@@ -401,7 +401,7 @@ Practical rules:
   compile-time cost is observable.
 - **Gate heavy dependencies behind Cargo features.** DataFusion,
   reqwest, large proc-macro crates. The `datafusion` feature on
-  `logfwd-runtime` and the `logfwd-transform` default-members exclusion
+  `ffwd-runtime` and the `ffwd-transform` default-members exclusion
   exist for this reason — replicate the pattern for future heavy
   dependencies.
 - **Split crates along natural seams.** Parallel compilation is cheap;
@@ -415,7 +415,7 @@ Practical rules:
 - **Use `cargo --timings` when investigating slow builds.** Find the
   actual long pole before refactoring.
 
-The WASM build target (`logfwd-config-wasm`) makes this discipline
+The WASM build target (`ffwd-config-wasm`) makes this discipline
 non-optional: heavy dependencies leak across the boundary and inflate
 the WASM artifact.
 
