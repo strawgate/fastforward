@@ -11,6 +11,7 @@ use super::common::{
     Format, HttpMethodConfig, InputType, OtlpProtobufDecodeModeConfig, SourceMetadataStyle,
 };
 
+/// Built-in generator profile used by the synthetic input.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -30,6 +31,7 @@ pub enum GeneratorProfileConfig {
     CloudTrail,
 }
 
+/// Complexity level for generated synthetic records.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -39,6 +41,7 @@ pub enum GeneratorComplexityConfig {
     Complex,
 }
 
+/// Scalar YAML value accepted for generator static attributes.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(untagged)]
@@ -51,6 +54,7 @@ pub enum GeneratorAttributeValueConfig {
     Unsupported(serde_yaml_ng::Value),
 }
 
+/// Monotonic numeric field emitted by the generator.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GeneratorSequenceConfig {
@@ -151,6 +155,7 @@ pub struct HostMetricsInputConfig {
     /// Upper bound on process rows emitted per collection cycle.
     ///
     /// Defaults to 1024. Set to 0 or omit for the default.
+    #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
     pub max_process_rows_per_poll: Option<usize>,
     /// Path to the compiled eBPF kernel binary (required for `linux_ebpf_sensor`).
     #[serde(default, deserialize_with = "deserialize_option_strict_string")]

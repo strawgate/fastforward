@@ -34,6 +34,7 @@ mod tests {
             ("macos_es_sensor", ""),
             ("windows_ebpf_sensor", ""),
             ("journald", ""),
+            ("host_metrics", ""),
         ] {
             let input = if extra.is_empty() {
                 format!("type: {itype}")
@@ -485,6 +486,26 @@ mod tests {
                 "sensor.include_event_types and sensor.exclude_event_types are only supported for linux_ebpf_sensor inputs"
             ),
             "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn host_metrics_accepts_string_max_process_rows_per_poll() {
+        let yaml = single_pipeline_yaml(
+            "type: host_metrics\nsensor:\n  max_process_rows_per_poll: \"1024\"",
+            "type: stdout",
+        );
+        let cfg = Config::load_str(yaml).expect("string max_process_rows_per_poll should parse");
+        let InputTypeConfig::HostMetrics(config) = &cfg.pipelines["default"].inputs[0].type_config
+        else {
+            panic!("expected host_metrics input");
+        };
+        assert_eq!(
+            config
+                .sensor
+                .as_ref()
+                .and_then(|sensor| sensor.max_process_rows_per_poll),
+            Some(1024)
         );
     }
 
