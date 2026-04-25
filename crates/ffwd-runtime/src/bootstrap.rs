@@ -175,11 +175,11 @@ pub async fn run_pipelines(
     }
 
     let meter_provider = build_meter_provider(&config, use_color)?;
-    let meter = meter_provider.meter("ffwd");
+    let meter = meter_provider.meter("logfwd");
 
     let trace_buf = ffwd_diagnostics::span_exporter::SpanBuffer::new();
     let tracer_provider = build_tracer_provider(trace_buf.clone(), &config, use_color)?;
-    let tracer = tracer_provider.tracer("ffwd");
+    let tracer = tracer_provider.tracer("logfwd");
     let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
 
     let env_filter = tracing_subscriber::EnvFilter::try_from_env("LOGFWD_LOG")

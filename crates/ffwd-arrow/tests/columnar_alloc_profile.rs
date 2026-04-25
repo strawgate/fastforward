@@ -1,7 +1,7 @@
 //! Allocation profiling: ColumnarBatchBuilder vs StreamingBuilder.
 //!
-//! Run with: cargo test -p ffwd-arrow --features _test-internals \
-//!           --test columnar_alloc_profile -- --nocapture
+//! Run with: just test (or: cargo test -p ffwd-arrow --features _test-internals \
+//!           --test columnar_alloc_profile -- --nocapture)
 #![cfg(feature = "_test-internals")]
 //!
 //! Uses `stats_alloc` global allocator to count every heap allocation.
