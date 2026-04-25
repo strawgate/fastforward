@@ -100,7 +100,7 @@ fn roundtrip_encode_decode_via_prost() {
         .scope
         .as_ref()
         .expect("InstrumentationScope must be present");
-    assert_eq!(scope.name, "ffwd", "scope name must be 'ffwd'");
+    assert_eq!(scope.name, "ff", "scope name must be 'ff'");
     assert_eq!(
         scope.version,
         env!("CARGO_PKG_VERSION"),
@@ -405,7 +405,7 @@ fn unsupported_well_known_types_fall_back_to_attributes() {
     assert_eq!(lr.severity_number, 17);
     assert_eq!(lr.observed_time_unix_nano, metadata.observed_time_ns);
     let scope = sl.scope.as_ref().expect("scope must exist");
-    assert_eq!(scope.name, "ffwd");
+    assert_eq!(scope.name, "ff");
 
     let find_attr = |name: &str| lr.attributes.iter().find(|kv| kv.key == name);
 
