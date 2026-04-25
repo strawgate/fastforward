@@ -98,7 +98,7 @@ pub fn compute_real_quotes_oracle(
 ///
 /// Used to compute string interior mask from quote positions.
 #[inline(always)]
-#[cfg_attr(kani, kani::ensures(|result: &u64| { *result == (*result) }))]
+#[cfg_attr(kani, kani::ensures(|result: &u64| { *result & 1 == bitmask & 1 }))]
 pub fn prefix_xor_oracle(mut bitmask: u64) -> u64 {
     bitmask ^= bitmask << 1;
     bitmask ^= bitmask << 2;
