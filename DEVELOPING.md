@@ -78,7 +78,6 @@ crates/
   logfwd-transform/    DataFusion SQL transforms, UDFs (grok, regexp_extract, geo_lookup).
   logfwd-output/       Output sinks (OTLP, Elasticsearch, Loki, JSON lines, stdout).
   logfwd-bench/        Criterion benchmarks for the scanner pipeline.
-  logfwd-competitive-bench/  Comparative benchmarks vs other log agents.
   logfwd-test-utils/   Shared test utilities.
   logfwd-ebpf-proto/   eBPF log capture protocol definitions (experimental).
 ```
@@ -101,23 +100,7 @@ cargo test -p logfwd-core    # single crate (fastest iteration)
 just fuzz scanner 300        # fuzz a target for 300s (nightly)
 ```
 
-## Benchmark suites
 
-Use the smallest benchmark surface that answers the question:
-
-```bash
-just bench                         # Tier 1 Criterion suite
-just bench-competitive --lines 1000000 --scenarios passthrough,json_parse,filter
-just profile-otlp-local            # end-to-end CPU flamegraph on macOS
-just bench-framed-input -- --lines 200000 --iterations 5
-just bench-framed-input-alloc -- --lines 200000
-```
-
-- `just bench` is the default regression net for performance-sensitive PRs.
-- `just bench-competitive` is for product-level comparisons against other agents.
-- `profile-*` and `bench-framed-input*` are for hotspot analysis, not headline numbers.
-- Nightly benchmark reports land as GitHub issues with the `benchmark` label.
-  Use `gh issue list --label benchmark --state open` to inspect the current reports.
 
 > **Why two tiers?** The workspace `default-members` excludes `logfwd-transform`
 > (datafusion) and `logfwd` (binary). Bare `cargo check` / `just clippy` skip
