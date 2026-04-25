@@ -3,43 +3,28 @@
 
 #[cfg(test)]
 mod tests {
+    use crate::test_yaml::{append_root_sections, single_pipeline_yaml};
     use crate::*;
     use std::fs;
 
     #[test]
     fn validation_missing_input_path() {
-        let yaml = r"
-input:
-  type: file
-output:
-  type: stdout
-";
+        let yaml = single_pipeline_yaml("type: file", "type: stdout");
         assert_config_err!(yaml, "path");
     }
 
     #[test]
     fn validation_missing_output_endpoint() {
-        let yaml = r"
-input:
-  type: file
-  path: /var/log/test.log
-output:
-  type: otlp
-";
+        let yaml = single_pipeline_yaml("type: file\npath: /var/log/test.log", "type: otlp");
         assert_config_err!(yaml, "endpoint");
     }
 
     #[test]
     fn validation_otlp_gzip_is_allowed() {
-        let yaml = r"
-input:
-  type: file
-  path: /var/log/test.log
-output:
-  type: otlp
-  endpoint: http://collector:4318
-  compression: gzip
-";
+        let yaml = single_pipeline_yaml(
+            "type: file\npath: /var/log/test.log",
+            "type: otlp\nendpoint: http://collector:4318\ncompression: gzip",
+        );
         Config::load_str(yaml).expect("gzip OTLP compression should validate");
     }
 
@@ -55,20 +40,12 @@ output:
         ));
         fs::write(&path, b"not-a-directory").expect("write temp file");
 
-        let yaml = format!(
-            r"
-input:
-  type: file
-  path: /var/log/test.log
-output:
-  type: stdout
-storage:
-  data_dir: {}
-",
-            path.display()
+        let yaml = append_root_sections(
+            single_pipeline_yaml("type: file\npath: /var/log/test.log", "type: stdout"),
+            &format!("storage:\n  data_dir: {}\n", path.display()),
         );
 
-        let err = Config::load_str(&yaml).expect_err("non-directory storage.data_dir must fail");
+        let err = Config::load_str(yaml).expect_err("non-directory storage.data_dir must fail");
         assert!(
             err.to_string().contains("exists but is not a directory"),
             "expected non-directory storage.data_dir rejection, got: {err}"
@@ -78,34 +55,19 @@ storage:
 
     #[test]
     fn validation_udp_requires_listen() {
-        let yaml = r"
-input:
-  type: udp
-output:
-  type: stdout
-";
+        let yaml = single_pipeline_yaml("type: udp", "type: stdout");
         assert_config_err!(yaml, "listen");
     }
 
     #[test]
     fn validation_otlp_requires_listen() {
-        let yaml = r"
-input:
-  type: otlp
-output:
-  type: stdout
-";
+        let yaml = single_pipeline_yaml("type: otlp", "type: stdout");
         assert_config_err!(yaml, "listen");
     }
 
     #[test]
     fn validation_arrow_ipc_requires_listen() {
-        let yaml = r"
-input:
-  type: arrow_ipc
-output:
-  type: stdout
-";
+        let yaml = single_pipeline_yaml("type: arrow_ipc", "type: stdout");
         assert_config_err!(yaml, "listen");
     }
 
@@ -125,7 +87,7 @@ pipelines:
     outputs:
       - type: stdout
 ";
-        assert_config_err!(yaml, "mix");
+        assert_config_err!(yaml, "unknown field");
     }
 
     #[test]
@@ -138,28 +100,19 @@ server:
     }
 
     #[test]
-    fn validation_unimplemented_output_type() {
-        // Each placeholder type should be caught by Config::validate() before
-        // pipeline construction, not silently accepted.
-        for (otype, extra) in [("parquet", "path: /tmp/x"), ("http", "endpoint: http://x")] {
-            let yaml = format!(
-                "input:\n  type: file\n  path: /tmp/x.log\noutput:\n  type: {otype}\n  {extra}\n"
-            );
-            let result = Config::load_str(&yaml);
-            assert!(
-                result.is_err(),
-                "validation should reject unimplemented type '{otype}'"
-            );
-            let msg = result.unwrap_err().to_string();
-            assert!(
-                msg.contains("not yet implemented"),
-                "error message should mention 'not yet implemented' for '{otype}': {msg}"
-            );
-            assert!(
-                msg.contains(otype),
-                "error message should include the type name '{otype}': {msg}"
-            );
-        }
+    fn removed_output_type_is_rejected_at_parse_time() {
+        let yaml = single_pipeline_yaml(
+            "type: file\npath: /tmp/x.log",
+            "type: parquet\npath: /tmp/x",
+        );
+        let err = Config::load_str(yaml).expect_err("removed output type should fail to parse");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("parquet")
+                && (msg.contains("unknown variant")
+                    || msg.contains("does not have variant constructor")),
+            "expected parse rejection for removed parquet output: {msg}"
+        );
     }
 
     #[test]
@@ -167,10 +120,11 @@ server:
         // Unimplemented input formats must be rejected at config validation time,
         // not silently treated as JSON which would corrupt data.
         for format in ["logfmt", "syslog"] {
-            let yaml = format!(
-                "input:\n  type: file\n  path: /tmp/x.log\n  format: {format}\noutput:\n  type: stdout\n"
+            let yaml = single_pipeline_yaml(
+                &format!("type: file\npath: /tmp/x.log\nformat: {format}"),
+                "type: stdout",
             );
-            let result = Config::load_str(&yaml);
+            let result = Config::load_str(yaml);
             assert!(
                 result.is_err(),
                 "validation should reject unimplemented format '{format}'"
@@ -195,20 +149,18 @@ pipelines:
     outputs:
       - type: stdout
 ";
-        assert_config_err!(
-            yaml,
-            "top-level `transform` cannot be used with `pipelines:`"
-        );
+        assert_config_err!(yaml, "unknown field `transform`");
     }
 
     #[test]
     fn validation_endpoint_missing_scheme() {
         // Scheme-less endpoints must be rejected for supported URL-based outputs.
         for otype in ["otlp", "elasticsearch"] {
-            let yaml = format!(
-                "input:\n  type: file\n  path: /tmp/x.log\noutput:\n  type: {otype}\n  endpoint: collector:4317\n"
+            let yaml = single_pipeline_yaml(
+                "type: file\npath: /tmp/x.log",
+                &format!("type: {otype}\nendpoint: collector:4317"),
             );
-            let result = Config::load_str(&yaml);
+            let result = Config::load_str(yaml);
             assert!(
                 result.is_err(),
                 "expected error for scheme-less endpoint with type '{otype}'"
@@ -230,10 +182,11 @@ pipelines:
             ("elasticsearch", "http://"),
             ("elasticsearch", "https://"),
         ] {
-            let yaml = format!(
-                "input:\n  type: file\n  path: /tmp/x.log\noutput:\n  type: {otype}\n  endpoint: {scheme}collector:4317\n"
+            let yaml = single_pipeline_yaml(
+                "type: file\npath: /tmp/x.log",
+                &format!("type: {otype}\nendpoint: {scheme}collector:4317"),
             );
-            Config::load_str(&yaml)
+            Config::load_str(yaml)
                 .unwrap_or_else(|e| panic!("scheme '{scheme}' should be valid for '{otype}': {e}"));
         }
     }
@@ -291,7 +244,7 @@ pipelines:
 resource_attrs:
   service.name: my-service
 ";
-        assert_config_err!(yaml, "top-level `resource_attrs`", "pipelines");
+        assert_config_err!(yaml, "unknown field `resource_attrs`");
     }
 
     #[test]
@@ -309,7 +262,7 @@ enrichment:
     format: mmdb
     path: /tmp/geo.mmdb
 ";
-        assert_config_err!(yaml, "top-level `enrichment`", "pipelines");
+        assert_config_err!(yaml, "unknown field `enrichment`");
     }
 
     #[test]

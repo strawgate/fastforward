@@ -378,6 +378,7 @@ impl Pipeline {
                             Arc::new(crate::transform::enrichment::K8sClusterInfoTable::new());
                         enrichment_tables.push(table);
                     }
+                    _ => return Err("unsupported enrichment type".to_owned()),
                 }
             }
 
@@ -909,7 +910,7 @@ mod tests {
                         max_concurrent_fetches: None,
                         max_concurrent_objects: None,
                         visibility_timeout_secs: None,
-                        compression: Some("invalid-test-compression".to_string()),
+                        compression: Some(logfwd_config::S3CompressionConfig::Gzip),
                         poll_interval_ms: None,
                     },
                 }),
@@ -924,14 +925,20 @@ mod tests {
             poll_interval_ms: None,
         };
 
-        let err = Pipeline::from_config("default", &config, &logfwd_test_utils::test_meter(), None)
-            .err()
-            .expect("S3 public source path style should reach S3 build validation");
-        assert!(
-            err.contains("S3 input requires the 's3' feature")
-                || err.contains("unknown S3 compression value 'invalid-test-compression'"),
-            "unexpected error: {err}"
-        );
+        let result =
+            Pipeline::from_config("default", &config, &logfwd_test_utils::test_meter(), None);
+        #[cfg(feature = "s3")]
+        result.expect("S3 public source path style should build when S3 is enabled");
+        #[cfg(not(feature = "s3"))]
+        {
+            let err = result
+                .err()
+                .expect("S3 public source path style should reach S3 build validation");
+            assert!(
+                err.contains("S3 input requires the 's3' feature"),
+                "unexpected error: {err}"
+            );
+        }
     }
 
     #[test]
