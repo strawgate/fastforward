@@ -11,6 +11,7 @@
 ///
 /// Formally verified by Kani for all 16-byte inputs (see proof below).
 #[inline]
+#[cfg_attr(kani, kani::requires(from <= haystack.len()))]
 pub fn find_byte(haystack: &[u8], needle: u8, from: usize) -> Option<usize> {
     let mut i = from;
     while i < haystack.len() {
@@ -27,6 +28,7 @@ pub fn find_byte(haystack: &[u8], needle: u8, from: usize) -> Option<usize> {
 /// Returns the index of the last match, or None if not found.
 /// Equivalent to `memchr::memrchr(needle, &haystack[..end])`.
 #[inline]
+#[cfg_attr(kani, kani::requires(end <= haystack.len()))]
 pub fn rfind_byte(haystack: &[u8], needle: u8, end: usize) -> Option<usize> {
     if end == 0 || haystack.is_empty() {
         return None;
@@ -124,7 +126,7 @@ mod verification {
     /// Prove find_byte returns the FIRST match and never panics.
     /// Tested on 16-byte inputs — function is a trivial loop, so
     /// correctness does not depend on buffer size.
-    #[kani::proof]
+    #[kani::proof_for_contract(find_byte)]
     #[kani::unwind(18)]
     fn verify_find_byte_correct() {
         let haystack: [u8; 16] = kani::any();
@@ -163,7 +165,7 @@ mod verification {
 
     /// Prove rfind_byte returns the LAST match and never panics.
     /// Tested on 16-byte inputs — same trivial loop, size-independent.
-    #[kani::proof]
+    #[kani::proof_for_contract(rfind_byte)]
     #[kani::unwind(18)]
     fn verify_rfind_byte_correct() {
         let haystack: [u8; 16] = kani::any();

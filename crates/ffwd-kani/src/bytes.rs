@@ -98,6 +98,7 @@ pub fn compute_real_quotes_oracle(
 ///
 /// Used to compute string interior mask from quote positions.
 #[inline(always)]
+#[cfg_attr(kani, kani::ensures(|result: &u64| { *result & 1 == bitmask & 1 }))]
 pub fn prefix_xor_oracle(mut bitmask: u64) -> u64 {
     bitmask ^= bitmask << 1;
     bitmask ^= bitmask << 2;
@@ -178,6 +179,16 @@ mod verification {
         let res = compute_real_quotes_oracle(quote_bits, bs_bits, &mut carry);
         kani::cover!(res != quote_bits, "escaped quotes masked");
         kani::cover!(res == quote_bits && quote_bits != 0, "no quotes masked");
+    }
+
+    #[kani::proof_for_contract(prefix_xor_oracle)]
+    #[kani::unwind(65)]
+    #[kani::solver(kissat)]
+    fn verify_prefix_xor_oracle_contract() {
+        let bitmask: u64 = kani::any();
+        let res = prefix_xor_oracle(bitmask);
+        kani::cover!(res != 0 && bitmask != 0, "non-zero result");
+        kani::cover!(res == 0 && bitmask == 0, "zero result");
     }
 
     #[kani::proof]
