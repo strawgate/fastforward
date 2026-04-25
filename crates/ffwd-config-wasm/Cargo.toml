@@ -10,8 +10,8 @@ crate-type = ["cdylib", "rlib"]
 doctest = false
 
 [dependencies]
-js-sys = { workspace = true }
 ffwd-config = { version = "0.1.0", path = "../ffwd-config" }
+js-sys = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 wasm-bindgen = { workspace = true }

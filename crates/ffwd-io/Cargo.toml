@@ -42,6 +42,10 @@ axum = { version = "0.8", default-features = false, features = [
 base64 = { workspace = true }
 bytes = "1"
 crossbeam-channel = "0.5"
+ffwd-arrow = { version = "0.1.0", path = "../ffwd-arrow" }
+ffwd-core = { version = "0.1.0", path = "../ffwd-core" }
+ffwd-otap-proto = { version = "0.1.0", path = "../ffwd-otap-proto" }
+ffwd-types = { version = "0.1.0", path = "../ffwd-types" }
 flate2 = "1"
 futures-util = { version = "0.3", optional = true }
 globset = { workspace = true }
@@ -51,10 +55,6 @@ http-body-util = "0.1"
 itoa = "1"
 libc = "0.2"
 libloading = "0.8"
-ffwd-arrow = { version = "0.1.0", path = "../ffwd-arrow" }
-ffwd-core = { version = "0.1.0", path = "../ffwd-core" }
-ffwd-otap-proto = { version = "0.1.0", path = "../ffwd-otap-proto" }
-ffwd-types = { version = "0.1.0", path = "../ffwd-types" }
 lz4_flex = "0.13"
 memchr = "2"
 notify = "8"

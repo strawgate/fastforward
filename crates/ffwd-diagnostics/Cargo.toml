@@ -10,8 +10,8 @@ doctest = false
 
 [dependencies]
 axum = { workspace = true, features = ["http1", "json", "tokio", "ws"] }
-libc = { workspace = true }
 ffwd-types = { version = "0.1.0", path = "../ffwd-types" }
+libc = { workspace = true }
 opentelemetry = { workspace = true }
 opentelemetry_sdk = { workspace = true }
 serde = { workspace = true }

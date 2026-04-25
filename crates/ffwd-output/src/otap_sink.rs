@@ -49,13 +49,13 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
 
 use arrow::record_batch::RecordBatch;
-use flate2::Compression as GzipLevel;
-use flate2::write::GzEncoder;
 use ffwd_otap_proto::otap::{
     ArrowPayload as ProtoArrowPayload, ArrowPayloadType as ProtoArrowPayloadType,
     BatchArrowRecords as ProtoBatchArrowRecords, BatchStatus as ProtoBatchStatus,
     StatusCode as ProtoStatusCode,
 };
+use flate2::Compression as GzipLevel;
+use flate2::write::GzEncoder;
 use prost::Message;
 
 use ffwd_arrow::conflict_schema::{has_conflict_struct_columns, normalize_conflict_columns};

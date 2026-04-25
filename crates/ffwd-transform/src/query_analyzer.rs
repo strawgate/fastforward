@@ -399,10 +399,7 @@ fn walk_set_expr(
 
 /// Walk a WHERE clause AST and extract predicates that can be pushed down.
 /// Only extracts from top-level AND chains (not OR branches).
-fn extract_pushable_predicates(
-    expr: &SqlExpr,
-    hints: &mut ffwd_types::filter_hints::FilterHints,
-) {
+fn extract_pushable_predicates(expr: &SqlExpr, hints: &mut ffwd_types::filter_hints::FilterHints) {
     match expr {
         // AND: recurse into both sides
         SqlExpr::BinaryOp {

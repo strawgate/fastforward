@@ -1,8 +1,8 @@
 //! Agent trait and registry.
 
+mod ffwd;
 mod filebeat;
 mod fluent_bit;
-mod ffwd;
 mod otelcol;
 mod vector;
 mod vlagent;

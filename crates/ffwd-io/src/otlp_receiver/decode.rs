@@ -5,10 +5,10 @@ use std::sync::Arc;
 
 use arrow::record_batch::RecordBatch;
 use bytes::Bytes;
-use flate2::read::GzDecoder;
 use ffwd_arrow::Scanner;
 use ffwd_core::scan_config::ScanConfig;
 use ffwd_types::field_names;
+use flate2::read::GzDecoder;
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use prost::Message;
 

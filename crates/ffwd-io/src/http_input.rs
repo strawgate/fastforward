@@ -16,8 +16,8 @@ use axum::http::{HeaderMap, Method, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
 use bytes::Bytes;
-use flate2::read::GzDecoder;
 use ffwd_types::diagnostics::ComponentHealth;
+use flate2::read::GzDecoder;
 use tokio::sync::oneshot;
 
 use crate::InputError;

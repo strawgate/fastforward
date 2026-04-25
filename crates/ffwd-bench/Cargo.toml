@@ -24,10 +24,6 @@ criterion = { version = "0.7", features = ["html_reports", "async_tokio"] }
 datafusion = { workspace = true }
 dhat = { version = "0.3", optional = true }
 fastrand = "2"
-flate2 = "1"
-http-body-util = "0.1"
-hyper = { version = "1", features = ["http1", "server"] }
-hyper-util = { version = "0.1", features = ["server", "http1", "tokio"] }
 ffwd-arrow = { version = "0.1.0", path = "../ffwd-arrow" }
 ffwd-core = { version = "0.1.0", path = "../ffwd-core" }
 ffwd-io = { version = "0.1.0", path = "../ffwd-io", features = [
@@ -37,6 +33,10 @@ ffwd-io = { version = "0.1.0", path = "../ffwd-io", features = [
 ffwd-output = { version = "0.1.0", path = "../ffwd-output" }
 ffwd-transform = { version = "0.1.0", path = "../ffwd-transform" }
 ffwd-types = { version = "0.1.0", path = "../ffwd-types" }
+flate2 = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["server", "http1", "tokio"] }
 memchr = "2"
 pprof = { version = "0.15", features = ["flamegraph"] }
 reqwest = { version = "0.12", default-features = false, features = [

@@ -10,14 +10,14 @@ doctest = false
 
 [dependencies]
 arrow = { workspace = true }
-flate2 = "1"
-httpdate = "1"
-itoa = "1"
 ffwd-arrow = { version = "0.1.0", path = "../ffwd-arrow" }
 ffwd-config = { version = "0.1.0", path = "../ffwd-config" }
 ffwd-core = { version = "0.1.0", path = "../ffwd-core" }
 ffwd-otap-proto = { version = "0.1.0", path = "../ffwd-otap-proto" }
 ffwd-types = { version = "0.1.0", path = "../ffwd-types" }
+flate2 = "1"
+httpdate = "1"
+itoa = "1"
 memchr = "2"
 prost = "0.14"
 reqwest = { version = "0.12", default-features = false, features = [

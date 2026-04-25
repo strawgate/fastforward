@@ -7,9 +7,9 @@ use std::pin::Pin;
 use std::time::{Duration, Instant};
 
 use arrow::record_batch::RecordBatch;
+use ffwd_config::OtlpProtocol;
 use flate2::Compression as GzipLevel;
 use flate2::write::GzEncoder;
-use ffwd_config::OtlpProtocol;
 
 use super::encode::write_grpc_frame;
 use super::types::{DEFAULT_GRPC_MAX_MESSAGE_BYTES, OtlpSink};

@@ -367,9 +367,7 @@ pub(super) fn build_input_state(
                         HttpMethodConfig::Delete => ffwd_io::http_input::HttpInputMethod::Delete,
                         HttpMethodConfig::Patch => ffwd_io::http_input::HttpInputMethod::Patch,
                         HttpMethodConfig::Head => ffwd_io::http_input::HttpInputMethod::Head,
-                        HttpMethodConfig::Options => {
-                            ffwd_io::http_input::HttpInputMethod::Options
-                        }
+                        HttpMethodConfig::Options => ffwd_io::http_input::HttpInputMethod::Options,
                     };
                 }
             }
@@ -397,13 +395,9 @@ pub(super) fn build_input_state(
             if let Some(v) = u.so_rcvbuf {
                 options.so_rcvbuf = v;
             }
-            let source = ffwd_io::udp_input::UdpInput::with_options(
-                name,
-                addr,
-                options,
-                Arc::clone(&stats),
-            )
-            .map_err(|e| format!("input '{name}': failed to bind UDP {addr}: {e}"))?;
+            let source =
+                ffwd_io::udp_input::UdpInput::with_options(name, addr, options, Arc::clone(&stats))
+                    .map_err(|e| format!("input '{name}': failed to bind UDP {addr}: {e}"))?;
             let format = cfg.format.clone().unwrap_or(Format::Json);
             validate_input_format(name, InputType::Udp, &format)?;
             (Box::new(source), format, 1024 * 1024)
@@ -457,13 +451,9 @@ pub(super) fn build_input_state(
                     require_client_auth: tls.require_client_auth,
                 });
             }
-            let source = ffwd_io::tcp_input::TcpInput::with_options(
-                name,
-                addr,
-                options,
-                Arc::clone(&stats),
-            )
-            .map_err(|e| format!("input '{name}': failed to bind TCP {addr}: {e}"))?;
+            let source =
+                ffwd_io::tcp_input::TcpInput::with_options(name, addr, options, Arc::clone(&stats))
+                    .map_err(|e| format!("input '{name}': failed to bind TCP {addr}: {e}"))?;
             let format = cfg.format.clone().unwrap_or(Format::Json);
             validate_input_format(name, InputType::Tcp, &format)?;
             (Box::new(source), format, 4 * 1024 * 1024)

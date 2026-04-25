@@ -28,9 +28,6 @@ backon = { workspace = true }
 bytes = { workspace = true }
 dhat = { version = "0.3", optional = true }
 fail = { workspace = true, optional = true }
-flate2 = { version = "1", optional = true }
-futures-util = { workspace = true }
-libc = "0.2"
 ffwd-arrow = { version = "0.1.0", path = "../ffwd-arrow" }
 ffwd-config = { version = "0.1.0", path = "../ffwd-config" }
 ffwd-core = { version = "0.1.0", path = "../ffwd-core" }
@@ -40,6 +37,9 @@ ffwd-lint-attrs = { version = "0.1.0", path = "../ffwd-lint-attrs" }
 ffwd-output = { version = "0.1.0", path = "../ffwd-output" }
 ffwd-transform = { version = "0.1.0", path = "../ffwd-transform", optional = true }
 ffwd-types = { version = "0.1.0", path = "../ffwd-types" }
+flate2 = { version = "1", optional = true }
+futures-util = { workspace = true }
+libc = "0.2"
 memchr = "2"
 opentelemetry = { workspace = true }
 opentelemetry-otlp = { workspace = true }

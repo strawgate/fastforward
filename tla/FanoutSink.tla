@@ -1,7 +1,7 @@
 ------------------------- MODULE FanoutSink -------------------------
 (*
  * Formal model of the AsyncFanoutSink delivery protocol from
- * crates/logfwd-output/src/sink.rs
+ * crates/ffwd-output/src/sink.rs
  *
  * Models:
  *   - Per-child state tracking: Pending → Ok | Rejected (terminal)

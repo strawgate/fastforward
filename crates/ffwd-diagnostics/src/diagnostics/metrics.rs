@@ -88,13 +88,13 @@ impl PipelineMetrics {
             transform_sql: transform_sql.into(),
             transform_in: Arc::new(ComponentStats::with_meter(
                 meter,
-                "ffwd_transform_in",
+                "logfwd_transform_in",
                 attrs.clone(),
                 ComponentHealth::Healthy,
             )),
             transform_out: Arc::new(ComponentStats::with_meter(
                 meter,
-                "ffwd_transform_out",
+                "logfwd_transform_out",
                 attrs.clone(),
                 ComponentHealth::Healthy,
             )),
@@ -123,27 +123,27 @@ impl PipelineMetrics {
             channel_capacity: AtomicU64::new(16),
             active_batches: std::sync::Mutex::new(HashMap::new()),
             next_batch_id: AtomicU64::new(0),
-            otel_transform_errors: meter.u64_counter("ffwd_transform_errors").build(),
-            otel_batches: meter.u64_counter("ffwd_batches").build(),
-            otel_batch_rows: meter.u64_counter("ffwd_batch_rows").build(),
-            otel_flush_by_size: meter.u64_counter("ffwd_flush_by_size").build(),
-            otel_flush_by_timeout: meter.u64_counter("ffwd_flush_by_timeout").build(),
+            otel_transform_errors: meter.u64_counter("logfwd_transform_errors").build(),
+            otel_batches: meter.u64_counter("logfwd_batches").build(),
+            otel_batch_rows: meter.u64_counter("logfwd_batch_rows").build(),
+            otel_flush_by_size: meter.u64_counter("logfwd_flush_by_size").build(),
+            otel_flush_by_timeout: meter.u64_counter("logfwd_flush_by_timeout").build(),
             otel_cadence_fast_repolls: meter
-                .u64_counter("ffwd_input_cadence_fast_repolls")
+                .u64_counter("logfwd_input_cadence_fast_repolls")
                 .build(),
             otel_cadence_idle_sleeps: meter
-                .u64_counter("ffwd_input_cadence_idle_sleeps")
+                .u64_counter("logfwd_input_cadence_idle_sleeps")
                 .build(),
-            otel_dropped_batches: meter.u64_counter("ffwd_dropped_batches").build(),
-            otel_scan_errors: meter.u64_counter("ffwd_scan_errors").build(),
-            otel_parse_errors: meter.u64_counter("ffwd_parse_errors").build(),
-            otel_scan_nanos: meter.u64_counter("ffwd_stage_scan_nanos").build(),
-            otel_transform_nanos: meter.u64_counter("ffwd_stage_transform_nanos").build(),
-            otel_output_nanos: meter.u64_counter("ffwd_stage_output_nanos").build(),
-            otel_queue_wait_nanos: meter.u64_counter("ffwd_stage_queue_wait_nanos").build(),
-            otel_send_nanos: meter.u64_counter("ffwd_stage_send_nanos").build(),
-            otel_batch_latency_nanos: meter.u64_counter("ffwd_batch_latency_nanos").build(),
-            otel_backpressure_stalls: meter.u64_counter("ffwd_backpressure_stalls").build(),
+            otel_dropped_batches: meter.u64_counter("logfwd_dropped_batches").build(),
+            otel_scan_errors: meter.u64_counter("logfwd_scan_errors").build(),
+            otel_parse_errors: meter.u64_counter("logfwd_parse_errors").build(),
+            otel_scan_nanos: meter.u64_counter("logfwd_stage_scan_nanos").build(),
+            otel_transform_nanos: meter.u64_counter("logfwd_stage_transform_nanos").build(),
+            otel_output_nanos: meter.u64_counter("logfwd_stage_output_nanos").build(),
+            otel_queue_wait_nanos: meter.u64_counter("logfwd_stage_queue_wait_nanos").build(),
+            otel_send_nanos: meter.u64_counter("logfwd_stage_send_nanos").build(),
+            otel_batch_latency_nanos: meter.u64_counter("logfwd_batch_latency_nanos").build(),
+            otel_backpressure_stalls: meter.u64_counter("logfwd_backpressure_stalls").build(),
             meter: meter.clone(),
             otel_attrs: attrs,
             name,
@@ -163,7 +163,7 @@ impl PipelineMetrics {
         ];
         let stats = Arc::new(ComponentStats::with_meter(
             &self.meter,
-            "ffwd_input",
+            "logfwd_input",
             attrs,
             ComponentHealth::Starting,
         ));
@@ -184,7 +184,7 @@ impl PipelineMetrics {
         ];
         let stats = Arc::new(ComponentStats::with_meter(
             &self.meter,
-            "ffwd_output",
+            "logfwd_output",
             attrs,
             ComponentHealth::Healthy,
         ));

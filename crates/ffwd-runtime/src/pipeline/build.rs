@@ -124,9 +124,8 @@ impl Pipeline {
                                 }
                             };
 
-                        if let Some(interval_secs) = geo_cfg
-                            .refresh_interval
-                            .map(ffwd_config::PositiveSecs::get)
+                        if let Some(interval_secs) =
+                            geo_cfg.refresh_interval.map(ffwd_config::PositiveSecs::get)
                         {
                             let reloadable = Arc::new(
                                 crate::transform::enrichment::ReloadableGeoDb::new(initial_db),

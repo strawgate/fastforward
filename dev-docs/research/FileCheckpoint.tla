@@ -1,6 +1,6 @@
 ------------------------- MODULE FileCheckpoint -------------------------
 (*
- * Formal model of logfwd's file tailing + framing + checkpoint + crash
+ * Formal model of ffwd's file tailing + framing + checkpoint + crash
  * recovery system.
  *
  * KEY DESIGN INSIGHT: Checkpoints are keyed by file identity (fingerprint),

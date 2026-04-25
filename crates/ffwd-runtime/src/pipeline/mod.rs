@@ -67,15 +67,14 @@ use ffwd_types::source_metadata::{SourceMetadataPlan, SourcePathColumn};
 #[cfg(test)]
 use tokio_util::sync::CancellationToken;
 
-fn source_metadata_style_source_path(
-    style: ffwd_config::SourceMetadataStyle,
-) -> SourcePathColumn {
+fn source_metadata_style_source_path(style: ffwd_config::SourceMetadataStyle) -> SourcePathColumn {
     match style {
         ffwd_config::SourceMetadataStyle::Ecs => SourcePathColumn::Ecs,
         ffwd_config::SourceMetadataStyle::Otel => SourcePathColumn::Otel,
         ffwd_config::SourceMetadataStyle::Vector => SourcePathColumn::Vector,
-        ffwd_config::SourceMetadataStyle::None
-        | ffwd_config::SourceMetadataStyle::Fastforward => SourcePathColumn::None,
+        ffwd_config::SourceMetadataStyle::None | ffwd_config::SourceMetadataStyle::Fastforward => {
+            SourcePathColumn::None
+        }
     }
 }
 

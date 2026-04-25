@@ -636,9 +636,9 @@ mod tests {
         UInt32Array,
     };
     use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+    use ffwd_types::diagnostics::ComponentStats;
     use flate2::Compression;
     use flate2::write::GzEncoder;
-    use ffwd_types::diagnostics::ComponentStats;
     use std::io::Seek as _;
     use std::io::Write as _;
     use std::sync::Arc;

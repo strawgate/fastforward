@@ -456,10 +456,8 @@ mod tests {
 
     #[test]
     fn loki_rejects_malformed_tls_ca_file() {
-        let path = std::env::temp_dir().join(format!(
-            "ffwd-output-invalid-ca-{}.pem",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("ffwd-output-invalid-ca-{}.pem", std::process::id()));
         fs::write(
             &path,
             b"-----BEGIN CERTIFICATE-----\nnot-valid-base64\n-----END CERTIFICATE-----\n",

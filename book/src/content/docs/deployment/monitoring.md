@@ -129,7 +129,7 @@ Pipelines are returned as an array. Use `jq '.pipelines[0]'` to access the first
 
 | Metric | Description |
 |--------|-------------|
-| `ffwd_input_lines_total` | Lines read per input |
+| `logfwd_input_lines_total` | Lines read per input |
 | `ffwd_transform_lines_in` | Lines entering SQL transform |
 | `ffwd_transform_lines_out` | Lines after filtering |
 | `ffwd_stage_seconds_total` | Time per stage (scan, transform, output) |
