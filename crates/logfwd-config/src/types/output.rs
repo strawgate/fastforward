@@ -11,6 +11,7 @@ use super::common::{
     AuthConfig, CompressionFormat, ElasticsearchRequestMode, Format, OtlpProtocol, OutputType,
 };
 
+/// Tagged output configuration for a pipeline sink.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[non_exhaustive]
@@ -91,6 +92,7 @@ impl OutputConfigV2 {
     }
 }
 
+/// OTLP output configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct OtlpOutputConfig {
@@ -125,6 +127,7 @@ pub struct OtlpOutputConfig {
     pub batch_timeout_ms: Option<PositiveMillis>,
 }
 
+/// Generic HTTP JSON-lines output configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct HttpOutputConfig {
@@ -139,6 +142,7 @@ pub struct HttpOutputConfig {
     pub auth: Option<AuthConfig>,
 }
 
+/// Elasticsearch bulk output configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct ElasticsearchOutputConfig {
@@ -164,6 +168,7 @@ pub struct ElasticsearchOutputConfig {
     pub request_timeout_ms: Option<PositiveMillis>,
 }
 
+/// Grafana Loki output configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct LokiOutputConfig {
@@ -194,6 +199,7 @@ pub struct LokiOutputConfig {
     pub request_timeout_ms: Option<PositiveMillis>,
 }
 
+/// Standard output sink configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct StdoutOutputConfig {
@@ -202,6 +208,7 @@ pub struct StdoutOutputConfig {
     pub format: Option<Format>,
 }
 
+/// Local file output configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct FileOutputConfig {
@@ -220,6 +227,7 @@ pub struct FileOutputConfig {
     pub format: Option<Format>,
 }
 
+/// Null output configuration for intentionally dropping records.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct NullOutputConfig {
@@ -227,6 +235,7 @@ pub struct NullOutputConfig {
     pub name: Option<String>,
 }
 
+/// TCP output configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct TcpOutputConfig {
@@ -248,6 +257,7 @@ pub struct TcpOutputConfig {
     pub batch: Option<BatchConfig>,
 }
 
+/// UDP output configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct UdpOutputConfig {
@@ -260,6 +270,7 @@ pub struct UdpOutputConfig {
     pub max_datagram_size_bytes: Option<usize>,
 }
 
+/// Arrow IPC HTTP output configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct ArrowIpcOutputConfig {

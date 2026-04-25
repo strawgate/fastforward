@@ -10,47 +10,11 @@ mod tests {
         transform: Option<&str>,
         output_body: &str,
     ) -> String {
-        let mut yaml = String::from("pipelines:\n  default:\n    inputs:\n");
-        for (idx, line) in input_body
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .enumerate()
-        {
-            if idx == 0 {
-                yaml.push_str("      - ");
-                yaml.push_str(line.trim_start());
-                yaml.push('\n');
-            } else {
-                yaml.push_str("        ");
-                yaml.push_str(line.trim_start());
-                yaml.push('\n');
-            }
-        }
         if let Some(transform) = transform {
-            yaml.push_str("    transform: |\n");
-            for line in transform.lines() {
-                yaml.push_str("      ");
-                yaml.push_str(line);
-                yaml.push('\n');
-            }
+            test_yaml::single_pipeline_yaml_with_transform(input_body, transform, output_body)
+        } else {
+            test_yaml::single_pipeline_yaml(input_body, output_body)
         }
-        yaml.push_str("    outputs:\n");
-        for (idx, line) in output_body
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .enumerate()
-        {
-            if idx == 0 {
-                yaml.push_str("      - ");
-                yaml.push_str(line.trim_start());
-                yaml.push('\n');
-            } else {
-                yaml.push_str("        ");
-                yaml.push_str(line.trim_start());
-                yaml.push('\n');
-            }
-        }
-        yaml
     }
 
     #[test]

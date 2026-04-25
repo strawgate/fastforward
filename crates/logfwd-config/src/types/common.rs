@@ -18,6 +18,7 @@ pub struct AuthConfig {
     pub headers: HashMap<String, String>,
 }
 
+/// Error returned while loading, deserializing, or validating configuration.
 #[derive(Debug, thiserror::Error)]
 #[must_use]
 #[non_exhaustive]
@@ -30,6 +31,7 @@ pub enum ConfigError {
     Validation(String),
 }
 
+/// Canonical input type tags accepted in pipeline inputs.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -134,6 +136,7 @@ pub enum OtlpProtobufDecodeModeConfig {
     ProjectedOnly,
 }
 
+/// Canonical output type tags accepted in pipeline outputs.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]

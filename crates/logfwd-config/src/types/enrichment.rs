@@ -17,6 +17,7 @@ pub enum GeoDatabaseFormat {
     CsvRange,
 }
 
+/// GeoIP database enrichment source.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GeoDatabaseConfig {
@@ -27,6 +28,7 @@ pub struct GeoDatabaseConfig {
     pub refresh_interval: Option<PositiveSecs>,
 }
 
+/// Static labels exposed as a one-row enrichment table.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StaticEnrichmentConfig {
@@ -36,10 +38,12 @@ pub struct StaticEnrichmentConfig {
     pub labels: HashMap<String, String>,
 }
 
+/// Host metadata enrichment with built-in fields.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HostInfoConfig {}
 
+/// Kubernetes pod metadata parsed from container log paths.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct K8sPathConfig {
@@ -54,6 +58,7 @@ fn default_k8s_table_name() -> String {
     "k8s_pods".to_string()
 }
 
+/// CSV-backed enrichment table loaded from disk.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CsvEnrichmentConfig {
@@ -67,6 +72,7 @@ pub struct CsvEnrichmentConfig {
     pub refresh_interval: Option<PositiveSecs>,
 }
 
+/// JSON Lines-backed enrichment table loaded from disk.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct JsonlEnrichmentConfig {

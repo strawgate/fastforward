@@ -2,6 +2,14 @@ pub(crate) fn single_pipeline_yaml(input_body: &str, output_body: &str) -> Strin
     single_pipeline_yaml_with_sections(input_body, None, output_body, None)
 }
 
+pub(crate) fn single_pipeline_yaml_with_transform(
+    input_body: &str,
+    transform: &str,
+    output_body: &str,
+) -> String {
+    single_pipeline_yaml_with_sections(input_body, Some(transform), output_body, None)
+}
+
 pub(crate) fn single_pipeline_yaml_with_extra(
     input_body: &str,
     output_body: &str,
@@ -50,15 +58,21 @@ fn single_pipeline_yaml_with_sections(
 fn push_block_sequence(yaml: &mut String, indent: usize, body: &str) {
     let prefix = " ".repeat(indent);
     let rest_prefix = " ".repeat(indent + 2);
-    for (idx, line) in body
+    let lines: Vec<&str> = body
         .lines()
         .filter(|line| !line.trim().is_empty())
-        .enumerate()
-    {
+        .collect();
+    let base_indent = lines
+        .iter()
+        .map(|line| line.len() - line.trim_start().len())
+        .min()
+        .unwrap_or(0);
+    for (idx, line) in lines.iter().enumerate() {
+        let line = line.get(base_indent..).unwrap_or_else(|| line.trim_start());
         if idx == 0 {
             yaml.push_str(&prefix);
             yaml.push_str("- ");
-            yaml.push_str(line.trim_start());
+            yaml.push_str(line);
             yaml.push('\n');
         } else {
             yaml.push_str(&rest_prefix);
