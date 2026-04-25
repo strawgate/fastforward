@@ -59,7 +59,14 @@ fn rewrite_send_config_as_pipeline(
         mapping.remove(yaml_string("outputs")),
     ) {
         (Some(output), None) => serde_yaml_ng::Value::Sequence(vec![output]),
-        (None, Some(outputs)) => outputs,
+        (None, Some(outputs)) => {
+            if outputs.is_sequence() {
+                outputs
+            } else {
+                // Normalize mapping-form `outputs:` into a one-element sequence
+                serde_yaml_ng::Value::Sequence(vec![outputs])
+            }
+        }
         (Some(_), Some(_)) => {
             return Err(CliError::Config(
                 "`ff send` destination config must define only one of top-level `output` or `outputs`"
@@ -259,6 +266,20 @@ outputs:
             }
             other => panic!("expected one static enrichment config, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn stdin_send_config_normalizes_mapping_form_outputs() {
+        let yaml = r"
+outputs:
+  type: stdout
+";
+        let generated = build_stdin_send_config_yaml(yaml, None, None, &[])
+            .expect("mapping-form outputs should be accepted");
+        let config =
+            logfwd_config::Config::load_str(&generated).expect("generated config should parse");
+        let pipeline = &config.pipelines["default"];
+        assert_eq!(pipeline.outputs.len(), 1);
     }
 
     #[test]
