@@ -27,7 +27,7 @@ All analysis attempts identified the same core bug: `AsyncFanoutSink::finalize_f
 
 **Recommendation:** Introduce a `ContractOutcome` enum preserving per-sink evidence (`Ok`, `Rejected`, `RetryAfter`, `IoError`) until checkpoint policy is applied.
 
-**Verification:** `SendResult` enum exists in `logfwd-output/src/sink/mod.rs` — bug is code-grounded.
+**Verification:** `SendResult` enum exists in `ffwd-output/src/sink/mod.rs` — bug is code-grounded.
 
 ### 2. Processor Chain
 
@@ -47,7 +47,7 @@ Channel overhead analysis shows <2.6% of one core even at worst-case batch sizes
 
 ### 4. File Tailer Typestate
 
-`FileReader` in `crates/logfwd-io/src/tail/reader.rs` manages open/read/truncate/eof/evit/offset mutation in one large struct. `EofState` reducer exists but models only EOF + error backoff, not full per-file lifecycle.
+`FileReader` in `crates/ffwd-io/src/tail/reader.rs` manages open/read/truncate/eof/evit/offset mutation in one large struct. `EofState` reducer exists but models only EOF + error backoff, not full per-file lifecycle.
 
 **Recommendation:** Phased extraction — state types first (no behavior change), then consuming transition methods, then proofs. 15-state model is more granular than the 11-state alternative.
 
