@@ -129,11 +129,16 @@ Pipelines are returned as an array. Use `jq '.pipelines[0]'` to access the first
 
 | Metric | Description |
 |--------|-------------|
-| `ffwd_input_lines_total` | Lines read per input |
-| `ffwd_transform_lines_in` | Lines entering SQL transform |
-| `ffwd_transform_lines_out` | Lines after filtering |
-| `ffwd_stage_seconds_total` | Time per stage (scan, transform, output) |
-| `ffwd_flush_reason_total` | Flush triggers (size vs timeout) |
+| `ffwd_input` | Lines read per input |
+| `ffwd_transform_in` | Lines entering SQL transform |
+| `ffwd_transform_out` | Lines after filtering |
+| `ffwd_stage_scan_nanos` | Time in scan stage (nanoseconds) |
+| `ffwd_stage_transform_nanos` | Time in transform stage (nanoseconds) |
+| `ffwd_stage_send_nanos` | Time in output stage (nanoseconds) |
+| `ffwd_flush_by_size` | Flushes triggered by batch size |
+| `ffwd_flush_by_timeout` | Flushes triggered by timeout |
+| `ffwd_backpressure_stalls` | Times input stalled on full channel |
+| `ffwd_dropped_batches` | Batches dropped under pressure |
 
 ## Transport Observability
 
@@ -191,7 +196,7 @@ server:
 ### What gets pushed
 
 All of the counters and histograms listed in the Key metrics table above are
-exported as OTLP metrics, using the `ffwd_` prefix (metric prefix will change to `ffwd_` in a future release). Each metric includes
+exported as OTLP metrics, using the `ffwd_` prefix. Each metric includes
 resource attributes identifying the host and FastForward instance. The payload uses
 OTLP protobuf encoding over HTTP.
 
