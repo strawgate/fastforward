@@ -377,10 +377,22 @@ fn otlp_receiver_accounts_input_bytes() {
         "should emit one-row batch"
     );
 
-    assert_eq!(stats.lines(), 1, "should account one input row");
+    let mut total_accounted: u64 = 0;
+    let mut total_rows: u64 = 0;
+    for event in &events {
+        if let InputEvent::Batch {
+            batch,
+            accounted_bytes,
+            ..
+        } = event
+        {
+            total_accounted += accounted_bytes;
+            total_rows += batch.num_rows() as u64;
+        }
+    }
+    assert_eq!(total_rows, 1, "should account one input row");
     assert_eq!(
-        stats.bytes(),
-        expected_bytes,
+        total_accounted, expected_bytes,
         "should account the accepted protobuf payload bytes"
     );
     assert_eq!(
