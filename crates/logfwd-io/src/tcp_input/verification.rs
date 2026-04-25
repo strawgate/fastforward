@@ -1,5 +1,3 @@
-#![cfg(kani)]
-
 use super::{
     MAX_BYTES_PER_CLIENT_PER_POLL, MAX_READS_PER_CLIENT_PER_POLL, should_stop_client_read,
 };

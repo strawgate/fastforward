@@ -311,7 +311,14 @@ pub(super) fn build_input_state(
             .map_err(|e| format!("input '{name}': failed to start OTLP receiver: {e}"))?;
             #[cfg(not(feature = "otlp-research"))]
             let _ = protobuf_decode_mode;
-            (Box::new(source), format, 4 * 1024 * 1024)
+            return Ok(InputState {
+                source: Box::new(source),
+                buf: BytesMut::with_capacity(4 * 1024 * 1024),
+                row_origins: Vec::new(),
+                source_paths: HashMap::new(),
+                cri_metadata: logfwd_io::input::CriMetadata::default(),
+                stats,
+            });
         }
         InputTypeConfig::ArrowIpc(a) => {
             let addr = require_non_empty(name, "arrow_ipc", "listen", Some(&a.listen))?;
@@ -331,7 +338,14 @@ pub(super) fn build_input_state(
                 Arc::clone(&stats),
             )
             .map_err(|e| format!("input '{name}': failed to start Arrow IPC receiver: {e}"))?;
-            (Box::new(source), format, 4 * 1024 * 1024)
+            return Ok(InputState {
+                source: Box::new(source),
+                buf: BytesMut::with_capacity(4 * 1024 * 1024),
+                row_origins: Vec::new(),
+                source_paths: HashMap::new(),
+                cri_metadata: logfwd_io::input::CriMetadata::default(),
+                stats,
+            });
         }
         InputTypeConfig::Http(h) => {
             let addr = require_non_empty(name, "http", "listen", Some(&h.listen))?;
@@ -1055,6 +1069,53 @@ mod tests {
                     cfg.format
                 );
             }
+        }
+    }
+
+    #[test]
+    fn structured_batch_inputs_bypass_framed_poll_into_path() {
+        use logfwd_diagnostics::diagnostics::PipelineMetrics;
+
+        let meter = logfwd_test_utils::test_meter();
+        let mut pm = PipelineMetrics::new("p", "SELECT 1", &meter);
+
+        let configs = [
+            InputConfig {
+                name: Some("otlp-in".to_string()),
+                format: None,
+                sql: None,
+                source_metadata: SourceMetadataStyle::None,
+                type_config: InputTypeConfig::Otlp(logfwd_config::OtlpTypeConfig {
+                    listen: "127.0.0.1:0".to_string(),
+                    protobuf_decode_mode: None,
+                    max_recv_message_size_bytes: None,
+                    tls: None,
+                    grpc_keepalive_time_ms: None,
+                    grpc_max_concurrent_streams: None,
+                }),
+            },
+            InputConfig {
+                name: Some("arrow-in".to_string()),
+                format: None,
+                sql: None,
+                source_metadata: SourceMetadataStyle::None,
+                type_config: InputTypeConfig::ArrowIpc(logfwd_config::ArrowIpcTypeConfig {
+                    listen: "127.0.0.1:0".to_string(),
+                    max_connections: None,
+                    max_message_size_bytes: None,
+                }),
+            },
+        ];
+
+        for cfg in configs {
+            let name = cfg.name.as_deref().expect("test config has a name");
+            let stats = pm.add_input(name, "structured");
+            let mut state = build_input_state(name, &cfg, stats)
+                .unwrap_or_else(|err| panic!("{name} should build: {err}"));
+            assert!(
+                state.source.poll_into(&mut state.buf).unwrap().is_none(),
+                "{name} should use direct structured polling, not framed buffered polling"
+            );
         }
     }
 
