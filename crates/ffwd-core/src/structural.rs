@@ -171,6 +171,7 @@ impl StreamingClassifier {
     /// **Assumes NDJSON input**: newlines are not string-masked because NDJSON
     /// cannot contain literal newlines inside JSON strings (they must be `\n`
     /// escape sequences). Do not use this for pretty-printed/multiline JSON.
+    #[cfg_attr(kani, kani::requires(block_len <= 64))]
     pub fn process_block(&mut self, raw: &RawBlockMasks, block_len: usize) -> ProcessedBlock {
         let real_q = compute_real_quotes(raw.quote, raw.backslash, &mut self.prev_odd_backslash);
         let raw_string_bits = prefix_xor(real_q) ^ self.prev_in_string;
