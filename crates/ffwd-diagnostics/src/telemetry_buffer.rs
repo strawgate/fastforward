@@ -191,7 +191,7 @@ fn now_nanos() -> u64 {
 
 /// Serialize metric points as an OTLP JSON `ExportMetricsServiceRequest`.
 ///
-/// Groups all points under a single resource with `service.name = "ffwd"`.
+/// Groups all points under a single resource with `service.name = "ff"`.
 /// Each unique metric name becomes one Gauge metric with all its data points.
 pub fn metrics_to_otlp_json(points: &[MetricPoint]) -> String {
     if points.is_empty() {
@@ -243,7 +243,7 @@ pub fn metrics_to_otlp_json(points: &[MetricPoint]) -> String {
 
     let version = env!("CARGO_PKG_VERSION");
     format!(
-        "{{\"resourceMetrics\":[{{\"resource\":{{\"attributes\":[{{\"key\":\"service.name\",\"value\":{{\"stringValue\":\"ffwd\"}}}},{{\"key\":\"service.version\",\"value\":{{\"stringValue\":\"{version}\"}}}}]}},\"scopeMetrics\":[{{\"scope\":{{\"name\":\"ffwd.diagnostics\",\"version\":\"{version}\"}},\"metrics\":[{metrics}]}}]}}]}}",
+        "{{\"resourceMetrics\":[{{\"resource\":{{\"attributes\":[{{\"key\":\"service.name\",\"value\":{{\"stringValue\":\"ff\"}}}},{{\"key\":\"service.version\",\"value\":{{\"stringValue\":\"{version}\"}}}}]}},\"scopeMetrics\":[{{\"scope\":{{\"name\":\"ff.diagnostics\",\"version\":\"{version}\"}},\"metrics\":[{metrics}]}}]}}]}}",
         metrics = metrics_json.join(",")
     )
 }
@@ -281,7 +281,7 @@ pub fn traces_to_otlp_json(spans: &[SpanPoint]) -> String {
 
     let version = env!("CARGO_PKG_VERSION");
     format!(
-        "{{\"resourceSpans\":[{{\"resource\":{{\"attributes\":[{{\"key\":\"service.name\",\"value\":{{\"stringValue\":\"ffwd\"}}}},{{\"key\":\"service.version\",\"value\":{{\"stringValue\":\"{version}\"}}}}]}},\"scopeSpans\":[{{\"scope\":{{\"name\":\"ffwd.diagnostics\",\"version\":\"{version}\"}},\"spans\":[{spans}]}}]}}]}}",
+        "{{\"resourceSpans\":[{{\"resource\":{{\"attributes\":[{{\"key\":\"service.name\",\"value\":{{\"stringValue\":\"ff\"}}}},{{\"key\":\"service.version\",\"value\":{{\"stringValue\":\"{version}\"}}}}]}},\"scopeSpans\":[{{\"scope\":{{\"name\":\"ff.diagnostics\",\"version\":\"{version}\"}},\"spans\":[{spans}]}}]}}]}}",
         spans = spans_json.join(",")
     )
 }
@@ -305,7 +305,7 @@ pub fn logs_to_otlp_json(logs: &[LogPoint]) -> String {
 
     let version = env!("CARGO_PKG_VERSION");
     format!(
-        "{{\"resourceLogs\":[{{\"resource\":{{\"attributes\":[{{\"key\":\"service.name\",\"value\":{{\"stringValue\":\"ffwd\"}}}},{{\"key\":\"service.version\",\"value\":{{\"stringValue\":\"{version}\"}}}}]}},\"scopeLogs\":[{{\"scope\":{{\"name\":\"ffwd.diagnostics\",\"version\":\"{version}\"}},\"logRecords\":[{logs}]}}]}}]}}",
+        "{{\"resourceLogs\":[{{\"resource\":{{\"attributes\":[{{\"key\":\"service.name\",\"value\":{{\"stringValue\":\"ff\"}}}},{{\"key\":\"service.version\",\"value\":{{\"stringValue\":\"{version}\"}}}}]}},\"scopeLogs\":[{{\"scope\":{{\"name\":\"ff.diagnostics\",\"version\":\"{version}\"}},\"logRecords\":[{logs}]}}]}}]}}",
         logs = logs_json.join(",")
     )
 }
@@ -1012,7 +1012,7 @@ mod tests {
         assert_eq!(rm["resource"]["attributes"][0]["key"], "service.name");
         assert_eq!(
             rm["resource"]["attributes"][0]["value"]["stringValue"],
-            "ffwd"
+            "ff"
         );
 
         let metric = &rm["scopeMetrics"][0]["metrics"][0];
