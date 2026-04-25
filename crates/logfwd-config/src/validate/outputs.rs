@@ -238,6 +238,11 @@ pub(super) fn validate_output_config(
                 OutputType::Udp,
                 config.endpoint.as_deref(),
             )?;
+            if config.max_datagram_size_bytes == Some(0) {
+                return Err(ConfigError::Validation(format!(
+                    "pipeline '{pipeline_name}' output '{label}': udp.max_datagram_size_bytes must be at least 1"
+                )));
+            }
         }
         OutputConfigV2::ArrowIpc(config) => {
             validate_url_output_endpoint(

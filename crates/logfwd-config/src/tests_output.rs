@@ -62,6 +62,20 @@ mod tests {
     }
 
     #[test]
+    fn udp_output_rejects_zero_max_datagram_size() {
+        let yaml = single_pipeline_yaml(
+            "type: file\npath: /tmp/x.log",
+            "type: udp\nendpoint: 127.0.0.1:9001\nmax_datagram_size_bytes: 0",
+        );
+        let err = Config::load_str(yaml).expect_err("zero datagram size should fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("udp.max_datagram_size_bytes must be at least 1"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
     fn file_output_requires_path() {
         let yaml = single_pipeline_yaml("type: file\npath: /var/log/test.log", "type: file");
         let err = Config::load_str(yaml).unwrap_err();
