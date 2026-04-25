@@ -20,6 +20,7 @@ pub(crate) fn esc(s: &str) -> String {
     out
 }
 
+/// Returns the current wall-clock time as nanoseconds since the Unix epoch.
 pub(crate) fn now_nanos() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

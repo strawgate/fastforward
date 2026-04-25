@@ -1050,6 +1050,13 @@ fn test_query_analyzer_column_refs_expression_forms() {
                 a.referenced_columns
             );
         }
+        assert_eq!(
+            a.referenced_columns.len(),
+            expected_cols.len(),
+            "SQL: {sql}\nExpected exactly {:?}, got: {:?}",
+            expected_cols,
+            a.referenced_columns
+        );
     }
 }
 

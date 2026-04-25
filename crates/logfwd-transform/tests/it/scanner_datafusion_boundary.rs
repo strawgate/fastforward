@@ -176,13 +176,13 @@ fn collect_i64_col(batch: &RecordBatch, name: &str) -> Vec<Option<i64>> {
 // Helper: run a test closure against all three string-type batch variants
 // ===========================================================================
 
-fn for_all_string_types(test_fn: impl Fn(RecordBatch)) {
-    for batch in [
-        make_utf8view_batch(),
-        make_dict_utf8_batch(),
-        make_dict_utf8view_batch(),
+fn for_all_string_types(test_fn: impl Fn(RecordBatch, &str)) {
+    for (batch, label) in [
+        (make_utf8view_batch(), "Utf8View"),
+        (make_dict_utf8_batch(), "Dict<Utf8>"),
+        (make_dict_utf8view_batch(), "Dict<Utf8View>"),
     ] {
-        test_fn(batch);
+        test_fn(batch, label);
     }
 }
 
@@ -193,14 +193,14 @@ fn for_all_string_types(test_fn: impl Fn(RecordBatch)) {
 /// WHERE clause on a string column must filter rows correctly (all string types).
 #[test]
 fn all_string_types_where_equals() {
-    for_all_string_types(|batch| {
+    for_all_string_types(|batch, label| {
         let mut t = SqlTransform::new("SELECT * FROM logs WHERE level_str = 'ERROR'").unwrap();
         let result = t.execute_blocking(batch).unwrap();
-        assert_eq!(result.num_rows(), 2, "expected 2 ERROR rows");
+        assert_eq!(result.num_rows(), 2, "[{label}] expected 2 ERROR rows");
         let levels = collect_string_col(&result, "level_str");
         assert!(
             levels.iter().all(|v| v == "ERROR"),
-            "all rows must be ERROR"
+            "[{label}] all rows must be ERROR"
         );
     });
 }
@@ -208,29 +208,29 @@ fn all_string_types_where_equals() {
 /// GROUP BY on a string column must produce one row per distinct value (all string types).
 #[test]
 fn all_string_types_group_by_count() {
-    for_all_string_types(|batch| {
+    for_all_string_types(|batch, label| {
         let mut t = SqlTransform::new(
             "SELECT level_str, COUNT(*) AS cnt FROM logs GROUP BY level_str ORDER BY level_str",
         )
         .unwrap();
         let result = t.execute_blocking(batch).unwrap();
-        assert_eq!(result.num_rows(), 3, "three distinct levels");
+        assert_eq!(result.num_rows(), 3, "[{label}] three distinct levels");
         let levels = collect_string_col(&result, "level_str");
-        assert_eq!(levels, ["DEBUG", "ERROR", "INFO"]);
+        assert_eq!(levels, ["DEBUG", "ERROR", "INFO"], "[{label}]");
         let counts = collect_i64_col(&result, "cnt");
-        assert_eq!(counts, [Some(1), Some(2), Some(1)]);
+        assert_eq!(counts, [Some(1), Some(2), Some(1)], "[{label}]");
     });
 }
 
 /// ORDER BY ASC on a string column must sort lexicographically (all string types).
 #[test]
 fn all_string_types_order_by_asc() {
-    for_all_string_types(|batch| {
+    for_all_string_types(|batch, label| {
         let mut t = SqlTransform::new("SELECT level_str FROM logs ORDER BY level_str ASC").unwrap();
         let result = t.execute_blocking(batch).unwrap();
-        assert_eq!(result.num_rows(), 4);
+        assert_eq!(result.num_rows(), 4, "[{label}]");
         let levels = collect_string_col(&result, "level_str");
-        assert_eq!(levels, ["DEBUG", "ERROR", "ERROR", "INFO"]);
+        assert_eq!(levels, ["DEBUG", "ERROR", "ERROR", "INFO"], "[{label}]");
     });
 }
 

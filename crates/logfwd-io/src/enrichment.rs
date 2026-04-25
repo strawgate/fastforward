@@ -608,7 +608,7 @@ mod tests {
     use super::*;
     use arrow::array::Array;
 
-    fn str_col<'a>(batch: &'a RecordBatch, name: &str) -> &'a StringArray {
+    fn get_str_col<'a>(batch: &'a RecordBatch, name: &str) -> &'a StringArray {
         batch
             .column_by_name(name)
             .unwrap_or_else(|| panic!("missing column: {name}"))
@@ -684,7 +684,7 @@ mod tests {
         let batch = table.snapshot().unwrap();
         assert_eq!(batch.num_rows(), 1);
         assert_eq!(batch.num_columns(), 2);
-        let env = str_col(&batch, "environment");
+        let env = get_str_col(&batch, "environment");
         assert_eq!(env.value(0), "production");
     }
 
@@ -717,7 +717,7 @@ mod tests {
         assert_eq!(batch.num_rows(), 1);
         assert_eq!(batch.num_columns(), 3);
         for col_name in &["hostname", "os_type", "os_arch"] {
-            let col = str_col(&batch, col_name);
+            let col = get_str_col(&batch, col_name);
             assert!(!col.value(0).is_empty(), "{col_name} should be non-empty");
         }
     }
@@ -743,7 +743,7 @@ mod tests {
         ]);
         let batch = table.snapshot().expect("should have data");
         assert_eq!(batch.num_rows(), 2);
-        let ns = str_col(&batch, "namespace");
+        let ns = get_str_col(&batch, "namespace");
         assert_eq!(ns.value(0), "default");
         assert_eq!(ns.value(1), "monitoring");
     }
@@ -804,11 +804,11 @@ mod tests {
         assert_eq!(batch.num_rows(), 2);
         assert_eq!(batch.num_columns(), 3);
 
-        let hostname = str_col(&batch, "hostname");
+        let hostname = get_str_col(&batch, "hostname");
         assert_eq!(hostname.value(0), "web-1");
         assert_eq!(hostname.value(1), "api-2");
 
-        let team = str_col(&batch, "team");
+        let team = get_str_col(&batch, "team");
         assert_eq!(team.value(0), "platform");
         assert_eq!(team.value(1), "backend");
     }
@@ -820,7 +820,7 @@ mod tests {
         table.load_from_reader(&csv_data[..]).unwrap();
         let batch = table.snapshot().unwrap();
         assert_eq!(batch.num_rows(), 2);
-        let c = str_col(&batch, "c");
+        let c = get_str_col(&batch, "c");
         assert_eq!(c.value(0), "3");
         assert!(c.is_null(1)); // padded with NULL
     }
@@ -873,7 +873,7 @@ mod tests {
         assert_eq!(rows, 2);
 
         let batch = table.snapshot().unwrap();
-        let region = str_col(&batch, "region");
+        let region = get_str_col(&batch, "region");
         assert_eq!(region.value(0), "us-east");
         assert_eq!(region.value(1), "eu-west");
     }
@@ -891,7 +891,7 @@ mod tests {
         let batch = table.snapshot().unwrap();
         assert_eq!(batch.num_rows(), 2);
 
-        let ip = str_col(&batch, "ip");
+        let ip = get_str_col(&batch, "ip");
         assert_eq!(ip.value(0), "10.0.0.1");
         assert_eq!(ip.value(1), "10.0.0.2");
     }
@@ -907,11 +907,11 @@ mod tests {
         assert_eq!(batch.num_rows(), 2);
         assert_eq!(batch.num_columns(), 3);
 
-        let a = str_col(&batch, "a");
+        let a = get_str_col(&batch, "a");
         assert_eq!(a.value(0), "1");
         assert!(a.is_null(1)); // row 2 doesn't have "a"
 
-        let c = str_col(&batch, "c");
+        let c = get_str_col(&batch, "c");
         assert!(c.is_null(0)); // row 1 doesn't have "c"
         assert_eq!(c.value(1), "4");
     }
@@ -923,10 +923,10 @@ mod tests {
         table.load_from_reader(&data[..]).unwrap();
 
         let batch = table.snapshot().unwrap();
-        let port = str_col(&batch, "port");
+        let port = get_str_col(&batch, "port");
         assert_eq!(port.value(0), "8080");
 
-        let active = str_col(&batch, "active");
+        let active = get_str_col(&batch, "active");
         assert_eq!(active.value(0), "true");
     }
 
