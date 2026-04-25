@@ -1,5 +1,3 @@
-#![allow(clippy::indexing_slicing)]
-
 pub mod atomic_write;
 pub(crate) mod background_http_task;
 /// Fixed-worker blocking stages for crate-internal CPU work.
