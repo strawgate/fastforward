@@ -2,7 +2,6 @@
 //! Exploratory benchmark: scanner + SQL transform across many dimensions.
 //! Run with: cargo run -p logfwd-bench --release --bin explore
 
-use std::io::Write;
 use std::time::Instant;
 
 use logfwd_arrow::scanner::Scanner;

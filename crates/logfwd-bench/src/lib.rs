@@ -1,11 +1,11 @@
 //! Shared deterministic data generators and helpers for logfwd benchmarks.
 //!
-//! All generators accept a `seed` parameter for reproducible output. Given the
-//! same `(count, seed)` pair, every call returns byte-identical results.
+//! Generators are deterministic and index-based (no seed parameter). Given the
+//! same `count`, every call returns byte-identical results.
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 // Bench harnesses print reports to stdout/stderr.
 
-use std::fmt::Write;
+use std::io::Write;
 use std::sync::Arc;
 
 use logfwd_output::{BatchMetadata, Compression, OtlpProtocol, OtlpSink};
@@ -60,7 +60,7 @@ pub fn make_otlp_sink(compression: Compression) -> OtlpSink {
 // Inline JSON-line generators (non-seeded, index-based)
 // ---------------------------------------------------------------------------
 
-/// Generate `n` JSON log lines with 7 fields (timestamp, level, message,
+/// Generate `n` JSON log lines with 6 fields (timestamp, level, message,
 /// duration_ms, request_id, service).
 pub fn generate_simple(n: usize) -> Vec<u8> {
     let mut buf = Vec::with_capacity(n * 180);

@@ -2,8 +2,6 @@
 //! Measure actual RSS (resident set size) at each pipeline stage.
 //! Run with: cargo run -p logfwd-bench --release --features bench-tools --bin rss
 
-use std::io::Write;
-
 use logfwd_arrow::scanner::Scanner;
 use logfwd_bench::{generate_simple, generate_wide};
 use logfwd_core::scan_config::ScanConfig;

@@ -50,13 +50,16 @@ fn input_type_exposes_public_source_paths(type_config: &InputTypeConfig) -> bool
 /// Calls `table.reload()` on a blocking thread every `interval_secs`.
 /// `kind` is used for log messages (e.g. "CSV", "JSONL", "KV file").
 #[cfg(feature = "datafusion")]
-fn spawn_enrichment_reload<T: Send + Sync + 'static>(
+fn spawn_enrichment_reload<T, E>(
     table: &Arc<T>,
     table_name: &str,
     kind: &'static str,
     interval_secs: u64,
-    reload: fn(&T) -> Result<usize, logfwd_io::InputError>,
-) {
+    reload: fn(&T) -> Result<usize, E>,
+) where
+    T: Send + Sync + 'static,
+    E: std::fmt::Display + Send + 'static,
+{
     let t = Arc::clone(table);
     let name = table_name.to_string();
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
@@ -68,7 +71,7 @@ fn spawn_enrichment_reload<T: Send + Sync + 'static>(
                 let t2 = Arc::clone(&t);
                 match tokio::task::spawn_blocking(move || reload(&t2)).await {
                     Ok(Ok(n)) => tracing::debug!(
-                        table = %name, count = n,
+                        table = %name, rows = n,
                         "{kind} enrichment table reloaded"
                     ),
                     Ok(Err(e)) => tracing::warn!(

@@ -22,6 +22,7 @@ fn scatter_int64(entries: &[(u32, i64)], num_rows: usize) -> Int64Array {
     let mut valid = vec![false; num_rows];
     for &(row, v) in entries {
         let r = row as usize;
+        debug_assert!(r < num_rows, "row index out of bounds: {r} >= {num_rows}");
         if r < num_rows {
             values[r] = v;
             valid[r] = true;
@@ -37,6 +38,7 @@ fn scatter_float64(entries: &[(u32, f64)], num_rows: usize) -> Float64Array {
     let mut valid = vec![false; num_rows];
     for &(row, v) in entries {
         let r = row as usize;
+        debug_assert!(r < num_rows, "row index out of bounds: {r} >= {num_rows}");
         if r < num_rows {
             values[r] = v;
             valid[r] = true;
@@ -52,6 +54,7 @@ fn scatter_bool(entries: &[(u32, bool)], num_rows: usize) -> BooleanArray {
     let mut valid = vec![false; num_rows];
     for &(row, v) in entries {
         let r = row as usize;
+        debug_assert!(r < num_rows, "row index out of bounds: {r} >= {num_rows}");
         if r < num_rows {
             values[r] = v;
             valid[r] = true;

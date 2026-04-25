@@ -2,7 +2,6 @@
 //! Profile each stage of the full pipeline: read → scan → transform → encode → "send"
 //! Run with: cargo run -p logfwd-bench --release --features bench-tools --bin e2e_profile
 
-use std::io::Write;
 use std::sync::Arc;
 use std::time::Instant;
 

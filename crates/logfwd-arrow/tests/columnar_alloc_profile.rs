@@ -265,11 +265,9 @@ fn allocation_profile() {
 
     eprintln!("\n=== ColumnarBatchBuilder ({total_rows} rows, {NUM_BATCHES} batches) ===\n");
     eprintln!("  -- Cold start --");
-    print_stats("detached (cold)", &run_columnar(false), total_rows);
-    print_stats("view (cold)", &run_columnar(false), total_rows);
+    print_stats("finish_batch (cold)", &run_columnar(false), total_rows);
     eprintln!("\n  -- Steady state (warmed) --");
-    print_stats("detached (warm)", &run_columnar(true), total_rows);
-    print_stats("view (warm)", &run_columnar(true), total_rows);
+    print_stats("finish_batch (warm)", &run_columnar(true), total_rows);
     eprintln!();
 }
 

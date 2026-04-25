@@ -125,7 +125,7 @@ pub fn has_conflict_struct_columns(schema: &Schema) -> bool {
 pub fn normalize_conflict_columns(batch: RecordBatch) -> RecordBatch {
     let schema = batch.schema();
 
-    // Fast path: no struct columns at all.
+    // Fast path: no conflict-struct columns.
     if !has_conflict_struct_columns(&schema) {
         return batch;
     }
