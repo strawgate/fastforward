@@ -13,6 +13,13 @@ use bytes::{Bytes, BytesMut};
 
 use crate::filter_hints::FilterHints;
 use crate::format::{CRI_MAX_MESSAGE, FormatDecoder};
+
+/// Maximum bytes to buffer as a line remainder before discarding.
+///
+/// This equals [`CRI_MAX_MESSAGE`] so that a single complete CRI message
+/// can always be buffered when a newline arrives late — the CRI log format
+/// has no inherent framing of its own.
+const MAX_REMAINDER_BYTES: usize = CRI_MAX_MESSAGE;
 use crate::input::{CriMetadata, FramedReadEvent, InputCadence, InputSource, SourceEvent};
 #[cfg(test)]
 use crate::poll_cadence::PollCadenceSignal;
@@ -212,17 +219,17 @@ impl FramedInput {
                                 let complete = bytes.slice(0..=pos);
                                 state.tracker.apply_read(n_bytes, Some(pos as u64));
                                 let tail = &bytes[pos + 1..];
-                                if tail.len() > CRI_MAX_MESSAGE {
+                                if tail.len() > MAX_REMAINDER_BYTES {
                                     tracing::warn!(
                                         source_key = ?key,
                                         tail_bytes = tail.len(),
-                                        max_remainder_bytes = CRI_MAX_MESSAGE,
+                                        max_remainder_bytes = MAX_REMAINDER_BYTES,
                                         "framed.remainder_overflow — tail after newline \
-                                         exceeds CRI_MAX_MESSAGE; keeping last \
-                                         CRI_MAX_MESSAGE bytes"
+                                         exceeds MAX_REMAINDER_BYTES; keeping last \
+                                         MAX_REMAINDER_BYTES bytes"
                                     );
                                     self.stats.inc_parse_errors(1);
-                                    let start = tail.len() - CRI_MAX_MESSAGE;
+                                    let start = tail.len() - MAX_REMAINDER_BYTES;
                                     state.remainder = tail[start..].to_vec();
                                     state.format.reset();
                                     state.overflow_tainted = true;
@@ -245,17 +252,17 @@ impl FramedInput {
                             }
                             None => {
                                 state.tracker.apply_read(n_bytes, None);
-                                if bytes.len() > CRI_MAX_MESSAGE {
+                                if bytes.len() > MAX_REMAINDER_BYTES {
                                     tracing::warn!(
                                         source_key = ?key,
                                         chunk_bytes = bytes.len(),
-                                        max_remainder_bytes = CRI_MAX_MESSAGE,
+                                        max_remainder_bytes = MAX_REMAINDER_BYTES,
                                         "framed.remainder_overflow — partial line exceeds \
-                                         CRI_MAX_MESSAGE; keeping last CRI_MAX_MESSAGE \
+                                         MAX_REMAINDER_BYTES; keeping last MAX_REMAINDER_BYTES \
                                          bytes and resetting format state"
                                     );
                                     self.stats.inc_parse_errors(1);
-                                    let start = bytes.len() - CRI_MAX_MESSAGE;
+                                    let start = bytes.len() - MAX_REMAINDER_BYTES;
                                     state.remainder = bytes[start..].to_vec();
                                     state.format.reset();
                                     state.overflow_tainted = true;
@@ -280,19 +287,19 @@ impl FramedInput {
                         Some(pos) => {
                             if pos + 1 < chunk.len() {
                                 let mut tail = chunk.split_off(pos + 1);
-                                if tail.len() > CRI_MAX_MESSAGE {
+                                if tail.len() > MAX_REMAINDER_BYTES {
                                     tracing::warn!(
                                         source_key = ?key,
                                         tail_bytes = tail.len(),
-                                        max_remainder_bytes = CRI_MAX_MESSAGE,
+                                        max_remainder_bytes = MAX_REMAINDER_BYTES,
                                         "framed.remainder_overflow — partial line exceeds \
-                                         CRI_MAX_MESSAGE; keeping last CRI_MAX_MESSAGE \
+                                         MAX_REMAINDER_BYTES; keeping last MAX_REMAINDER_BYTES \
                                          bytes and resetting format state"
                                     );
                                     self.stats.inc_parse_errors(1);
                                     let state = self.sources.get_mut(&key).expect("just inserted");
                                     state.format.reset();
-                                    let start = tail.len() - CRI_MAX_MESSAGE;
+                                    let start = tail.len() - MAX_REMAINDER_BYTES;
                                     state.remainder = tail.split_off(start);
                                     state.overflow_tainted = true;
                                 } else {
@@ -303,19 +310,19 @@ impl FramedInput {
                             }
                         }
                         None => {
-                            if chunk.len() > CRI_MAX_MESSAGE {
+                            if chunk.len() > MAX_REMAINDER_BYTES {
                                 tracing::warn!(
                                     source_key = ?key,
                                     chunk_bytes = chunk.len(),
-                                    max_remainder_bytes = CRI_MAX_MESSAGE,
+                                    max_remainder_bytes = MAX_REMAINDER_BYTES,
                                     "framed.remainder_overflow — partial line exceeds \
-                                     CRI_MAX_MESSAGE; keeping last CRI_MAX_MESSAGE \
+                                     MAX_REMAINDER_BYTES; keeping last MAX_REMAINDER_BYTES \
                                      bytes and resetting format state"
                                 );
                                 self.stats.inc_parse_errors(1);
                                 let state = self.sources.get_mut(&key).expect("just inserted");
                                 state.format.reset();
-                                let start = chunk.len() - CRI_MAX_MESSAGE;
+                                let start = chunk.len() - MAX_REMAINDER_BYTES;
                                 state.remainder = chunk.split_off(start);
                                 state.overflow_tainted = true;
                             } else {
@@ -519,17 +526,17 @@ impl FramedInput {
                                 let complete = bytes.slice(0..=pos);
                                 state.tracker.apply_read(n_bytes, Some(pos as u64));
                                 let tail = &bytes[pos + 1..];
-                                if tail.len() > CRI_MAX_MESSAGE {
+                                if tail.len() > MAX_REMAINDER_BYTES {
                                     tracing::warn!(
                                         source_key = ?key,
                                         tail_bytes = tail.len(),
-                                        max_remainder_bytes = CRI_MAX_MESSAGE,
+                                        max_remainder_bytes = MAX_REMAINDER_BYTES,
                                         "framed.remainder_overflow — tail after newline \
-                                         exceeds CRI_MAX_MESSAGE; keeping last \
-                                         CRI_MAX_MESSAGE bytes"
+                                         exceeds MAX_REMAINDER_BYTES; keeping last \
+                                         MAX_REMAINDER_BYTES bytes"
                                     );
                                     self.stats.inc_parse_errors(1);
-                                    let start = tail.len() - CRI_MAX_MESSAGE;
+                                    let start = tail.len() - MAX_REMAINDER_BYTES;
                                     state.remainder = tail[start..].to_vec();
                                     state.format.reset();
                                     state.overflow_tainted = true;
@@ -553,17 +560,17 @@ impl FramedInput {
                             None => {
                                 // No newline — entire chunk is remainder.
                                 state.tracker.apply_read(n_bytes, None);
-                                if bytes.len() > CRI_MAX_MESSAGE {
+                                if bytes.len() > MAX_REMAINDER_BYTES {
                                     tracing::warn!(
                                         source_key = ?key,
                                         chunk_bytes = bytes.len(),
-                                        max_remainder_bytes = CRI_MAX_MESSAGE,
+                                        max_remainder_bytes = MAX_REMAINDER_BYTES,
                                         "framed.remainder_overflow — partial line exceeds \
-                                         CRI_MAX_MESSAGE; keeping last CRI_MAX_MESSAGE \
+                                         MAX_REMAINDER_BYTES; keeping last MAX_REMAINDER_BYTES \
                                          bytes and resetting format state"
                                     );
                                     self.stats.inc_parse_errors(1);
-                                    let start = bytes.len() - CRI_MAX_MESSAGE;
+                                    let start = bytes.len() - MAX_REMAINDER_BYTES;
                                     state.remainder = bytes[start..].to_vec();
                                     state.format.reset();
                                     state.overflow_tainted = true;
@@ -604,18 +611,18 @@ impl FramedInput {
                             if pos + 1 < chunk.len() {
                                 // Move tail to remainder without allocating.
                                 let mut tail = chunk.split_off(pos + 1);
-                                if tail.len() > CRI_MAX_MESSAGE {
+                                if tail.len() > MAX_REMAINDER_BYTES {
                                     // Tail exceeds the per-source cap. Discard the
                                     // oldest bytes and keep the most recent
-                                    // CRI_MAX_MESSAGE so the source can
+                                    // MAX_REMAINDER_BYTES so the source can
                                     // eventually emit a complete line. Emit a warning
                                     // so the data loss is not silent.
                                     tracing::warn!(
                                         source_key = ?key,
                                         tail_bytes = tail.len(),
-                                        max_remainder_bytes = CRI_MAX_MESSAGE,
+                                        max_remainder_bytes = MAX_REMAINDER_BYTES,
                                         "framed.remainder_overflow — partial line exceeds \
-                                         CRI_MAX_MESSAGE; keeping last CRI_MAX_MESSAGE \
+                                         MAX_REMAINDER_BYTES; keeping last MAX_REMAINDER_BYTES \
                                          bytes and resetting format state"
                                     );
                                     self.stats.inc_parse_errors(1);
@@ -628,7 +635,7 @@ impl FramedInput {
                                     // buffer so the next newline can complete it. Do NOT
                                     // call apply_remainder_consumed() — the data is still
                                     // pending and the checkpoint must not advance past it.
-                                    let start = tail.len() - CRI_MAX_MESSAGE;
+                                    let start = tail.len() - MAX_REMAINDER_BYTES;
                                     state.remainder = tail.split_off(start);
                                     state.overflow_tainted = true;
                                 } else {
@@ -640,21 +647,21 @@ impl FramedInput {
                         }
                         None => {
                             // No newline at all — entire chunk is remainder.
-                            if chunk.len() > CRI_MAX_MESSAGE {
+                            if chunk.len() > MAX_REMAINDER_BYTES {
                                 // Same overflow policy as the tail case: warn, reset
                                 // format state, and keep the most recent bytes.
                                 tracing::warn!(
                                     source_key = ?key,
                                     chunk_bytes = chunk.len(),
-                                    max_remainder_bytes = CRI_MAX_MESSAGE,
+                                    max_remainder_bytes = MAX_REMAINDER_BYTES,
                                     "framed.remainder_overflow — partial line exceeds \
-                                     CRI_MAX_MESSAGE; keeping last CRI_MAX_MESSAGE \
+                                     MAX_REMAINDER_BYTES; keeping last MAX_REMAINDER_BYTES \
                                      bytes and resetting format state"
                                 );
                                 self.stats.inc_parse_errors(1);
                                 let state = self.sources.get_mut(&key).expect("just inserted");
                                 state.format.reset();
-                                let start = chunk.len() - CRI_MAX_MESSAGE;
+                                let start = chunk.len() - MAX_REMAINDER_BYTES;
                                 state.remainder = chunk.split_off(start);
                                 state.overflow_tainted = true;
                                 // Do NOT call apply_remainder_consumed() — data is preserved.
@@ -1615,7 +1622,7 @@ mod tests {
     fn remainder_capped_at_max_and_tainted_line_is_dropped() {
         let stats = make_stats();
         // Send > 2 MiB without a newline.
-        let big = vec![b'x'; CRI_MAX_MESSAGE + 1];
+        let big = vec![b'x'; MAX_REMAINDER_BYTES + 1];
         let source = MockSource::from_chunks(vec![&big, b"\n"]);
         let mut framed = FramedInput::new(
             Box::new(source),
@@ -1636,8 +1643,8 @@ mod tests {
         let state = framed.sources.get(&None).unwrap();
         assert_eq!(
             state.remainder.len(),
-            CRI_MAX_MESSAGE,
-            "overflow remainder must be capped to CRI_MAX_MESSAGE, not dropped"
+            MAX_REMAINDER_BYTES,
+            "overflow remainder must be capped to MAX_REMAINDER_BYTES, not dropped"
         );
 
         // Second poll: newline completes only the tainted fragment; it must be dropped.
@@ -1653,7 +1660,7 @@ mod tests {
     fn tail_after_newline_is_capped_at_max_and_tainted_line_is_dropped() {
         let stats = make_stats();
         let mut chunk = b"ok\n".to_vec();
-        chunk.extend(vec![b'x'; CRI_MAX_MESSAGE + 1]);
+        chunk.extend(vec![b'x'; MAX_REMAINDER_BYTES + 1]);
         let source = MockSource::from_chunks(vec![&chunk, b"\n"]);
         let mut framed = FramedInput::new(
             Box::new(source),
@@ -1662,7 +1669,7 @@ mod tests {
         );
 
         // First poll: "ok\n" emitted; overflow tail triggers parse_error and
-        // is preserved as remainder (last CRI_MAX_MESSAGE bytes).
+        // is preserved as remainder (last MAX_REMAINDER_BYTES bytes).
         let events = framed.poll().unwrap();
         assert_eq!(collect_data(events), b"ok\n");
         assert_eq!(
@@ -1675,8 +1682,8 @@ mod tests {
         let state = framed.sources.get(&None).unwrap();
         assert_eq!(
             state.remainder.len(),
-            CRI_MAX_MESSAGE,
-            "overflow tail must be truncated to CRI_MAX_MESSAGE, not dropped"
+            MAX_REMAINDER_BYTES,
+            "overflow tail must be truncated to MAX_REMAINDER_BYTES, not dropped"
         );
 
         // Second poll: newline terminates only tainted overflow bytes; that
@@ -1694,7 +1701,7 @@ mod tests {
     #[test]
     fn overflow_fragment_is_discarded_when_newline_arrives() {
         let stats = make_stats();
-        let big = vec![b'x'; CRI_MAX_MESSAGE + 1];
+        let big = vec![b'x'; MAX_REMAINDER_BYTES + 1];
         let source = MockSource::from_chunks(vec![&big, b"\nreal-line\n"]);
         let mut framed = FramedInput::new(
             Box::new(source),
@@ -1716,7 +1723,7 @@ mod tests {
     fn checkpoint_advances_after_tainted_fragment_is_discarded() {
         let stats = make_stats();
         let sid = SourceId(9);
-        let big = vec![b'x'; CRI_MAX_MESSAGE + 1];
+        let big = vec![b'x'; MAX_REMAINDER_BYTES + 1];
         let first = big.len() as u64;
         let second_bytes = b"\nreal-line\n";
         let total = first + second_bytes.len() as u64;
@@ -1767,7 +1774,7 @@ mod tests {
         // The inner source claims it has read `big.len()` bytes.  We set the
         // reported offset to exactly that many bytes so the checkpoint must
         // subtract the remainder to be correct.
-        let big_len = CRI_MAX_MESSAGE + 1;
+        let big_len = MAX_REMAINDER_BYTES + 1;
         let big = vec![b'x'; big_len];
         // Reported offset equals the number of bytes the inner source has
         // "read" so far: big_len bytes with no newline.
@@ -1781,12 +1788,12 @@ mod tests {
         );
 
         // First poll: no newline — overflow triggers parse_error and remainder
-        // is capped to CRI_MAX_MESSAGE.
+        // is capped to MAX_REMAINDER_BYTES.
         let _ = framed.poll().unwrap();
 
         // The per-source state must be reachable under Some(sid).
         let state = framed.sources.get(&Some(sid)).unwrap();
-        assert_eq!(state.remainder.len(), CRI_MAX_MESSAGE);
+        assert_eq!(state.remainder.len(), MAX_REMAINDER_BYTES);
 
         // checkpoint_data() must subtract the remainder length from the raw
         // offset, not return the raw offset unchanged.
@@ -1812,7 +1819,7 @@ mod tests {
         let stats = make_stats();
         let sid = SourceId(1);
         let mut chunk = b"ok\n".to_vec();
-        chunk.extend(vec![b'x'; CRI_MAX_MESSAGE + 1]);
+        chunk.extend(vec![b'x'; MAX_REMAINDER_BYTES + 1]);
         let chunk_len = chunk.len() as u64;
         let source = MockSource::from_chunks_with_source(vec![&chunk, b"\n"], sid)
             .with_offsets(vec![(sid, ByteOffset(chunk_len))]);
@@ -1823,13 +1830,13 @@ mod tests {
         );
 
         // First poll: "ok\n" is emitted and the overflow tail becomes the
-        // remainder (capped to CRI_MAX_MESSAGE).
+        // remainder (capped to MAX_REMAINDER_BYTES).
         let events = framed.poll().unwrap();
         assert_eq!(collect_data(events), b"ok\n");
 
         // Per-source state is keyed under Some(sid).
         let state = framed.sources.get(&Some(sid)).unwrap();
-        assert_eq!(state.remainder.len(), CRI_MAX_MESSAGE);
+        assert_eq!(state.remainder.len(), MAX_REMAINDER_BYTES);
 
         // The checkpoint must be behind the raw offset because the remainder
         // has not yet been delivered as a complete line.
