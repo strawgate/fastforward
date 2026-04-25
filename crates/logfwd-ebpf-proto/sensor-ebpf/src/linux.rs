@@ -64,16 +64,19 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         found.unwrap_or("sensor-ebpf-kern/target/bpfel-unknown-none/release/sensor-ebpf")
     };
-    let duration_secs: u64 = args
-        .iter()
-        .position(|a| a == "--duration")
-        .and_then(|i| args.get(i + 1))
-        .map_or(10, |s| {
+    let duration_secs: u64 = match args.iter().position(|a| a == "--duration") {
+        Some(i) => {
+            let Some(s) = args.get(i + 1) else {
+                eprintln!("error: --duration requires a positive integer");
+                std::process::exit(1);
+            };
             s.parse().unwrap_or_else(|_| {
                 eprintln!("error: --duration requires a positive integer");
                 std::process::exit(1);
             })
-        });
+        }
+        None => 10,
+    };
 
     if duration_secs == 0 {
         eprintln!("error: --duration must be > 0");

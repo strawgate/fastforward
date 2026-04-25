@@ -807,9 +807,11 @@ const wasmBase = import.meta.env.BASE_URL.replace(/\/$/, '') + '/wasm/logfwd-con
       .filter((line) => line.trim() !== '');
     if (body.length === 0) return '';
 
-    const [first, ...rest] = body;
+    const baseIndent = Math.min(...body.map((line) => (line.match(/^\s*/) || [''])[0].length));
+    const normalized = body.map((line) => line.slice(baseIndent));
+    const [first, ...rest] = normalized;
     let yaml = `    ${sectionName}:\n`;
-    yaml += `      - ${first.trimStart()}\n`;
+    yaml += `      - ${first}\n`;
     for (const line of rest) yaml += `        ${line}\n`;
     return yaml;
   }

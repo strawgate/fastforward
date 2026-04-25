@@ -1000,6 +1000,30 @@ mod tests {
     }
 
     #[test]
+    fn wizard_loki_templates_preserve_nested_yaml() {
+        use crate::config_templates;
+
+        let input = &config_templates::INPUT_TEMPLATES[0];
+        let output = config_templates::OUTPUT_TEMPLATES
+            .iter()
+            .find(|template| template.id == "loki")
+            .expect("loki output template");
+        let cfg = config_templates::render_config(input, output, "SELECT * FROM logs");
+        assert!(cfg.contains("        static_labels:\n          service: myapp"));
+        assert!(cfg.contains("        label_columns:\n          - level"));
+        logfwd_config::Config::load_str(&cfg).expect("rendered loki template should parse");
+
+        let use_case = config_templates::USE_CASE_TEMPLATES
+            .iter()
+            .find(|template| template.id == "nginx_access_to_loki")
+            .expect("loki use-case template");
+        let cfg = config_templates::render_use_case(use_case, use_case.transform);
+        assert!(cfg.contains("        static_labels:\n          app: nginx"));
+        assert!(cfg.contains("        label_columns:\n          - status"));
+        logfwd_config::Config::load_str(&cfg).expect("rendered loki use case should parse");
+    }
+
+    #[test]
     fn format_duration_seconds() {
         assert_eq!(format_duration(Duration::from_secs(42)), "42s");
     }

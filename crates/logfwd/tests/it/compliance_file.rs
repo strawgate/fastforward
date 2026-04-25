@@ -135,19 +135,19 @@ fn wait_for_ready_lines(
 /// Uses a short `glob_rescan_interval_ms` so tests don't wait 5 seconds for
 /// the default rescan timer to fire.
 fn glob_pipeline_yaml(pattern: &str) -> String {
+    let pattern = pattern.replace('\'', "''");
     format!(
         r#"
 pipelines:
   default:
     inputs:
       - type: file
-        path: "{}"
+        path: '{pattern}'
         format: json
         glob_rescan_interval_ms: 50
     outputs:
       - type: "null"
-"#,
-        pattern
+"#
     )
 }
 

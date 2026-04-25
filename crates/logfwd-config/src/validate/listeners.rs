@@ -2,7 +2,7 @@ use crate::types::{ConfigError, InputType};
 use std::collections::HashMap;
 
 use super::common::{validation_error, validation_message};
-use super::endpoints::canonical_listen_host_key;
+use super::endpoints::{canonical_listen_host_key, validate_host_port};
 use super::sensors::sensor_supported_families;
 
 pub(super) fn normalize_unit_name(name: &str) -> String {
@@ -40,6 +40,7 @@ pub(super) fn track_listen_addr_uniqueness(
 }
 
 fn canonical_listen_addr_key(transport: &str, listen: &str) -> Result<Option<String>, ConfigError> {
+    validate_host_port(listen)?;
     let (host, port_str) = if listen.starts_with('[') {
         let close_bracket = listen
             .find(']')

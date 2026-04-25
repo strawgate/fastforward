@@ -191,14 +191,30 @@ pub(crate) const USE_CASE_TEMPLATES: &[UseCaseTemplate] = &[
 ];
 
 fn push_pipeline_list_item_body(out: &mut String, section_name: &str, snippet_body: &str) {
-    let mut lines = snippet_body.lines().filter(|line| !line.trim().is_empty());
-    if let Some(first) = lines.next() {
+    let lines = normalized_snippet_lines(snippet_body);
+    if let Some((first, rest)) = lines.split_first() {
         let _ = writeln!(out, "    {section_name}:");
-        let _ = writeln!(out, "      - {}", first.trim_start());
-        for line in lines {
+        let _ = writeln!(out, "      - {first}");
+        for line in rest {
             let _ = writeln!(out, "        {line}");
         }
     }
+}
+
+fn normalized_snippet_lines(snippet_body: &str) -> Vec<&str> {
+    let lines: Vec<&str> = snippet_body
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    let base_indent = lines
+        .iter()
+        .map(|line| line.len() - line.trim_start().len())
+        .min()
+        .unwrap_or(0);
+    lines
+        .into_iter()
+        .map(|line| line.get(base_indent..).unwrap_or_else(|| line.trim_start()))
+        .collect()
 }
 
 /// Render a complete config from an input/output template pair and SQL text.

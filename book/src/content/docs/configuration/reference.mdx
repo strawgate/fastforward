@@ -300,11 +300,16 @@ available on macOS and emits structured rows parsed from the command output.
 | `macos_log.process` | string | No | Optional process filter. Must not be empty when set. |
 
 ```yaml
-input:
-  type: macos_log
-  macos_log:
-    level: info
-    subsystem: com.example.app
+pipelines:
+  default:
+    inputs:
+      - type: macos_log
+        macos_log:
+          level: info
+          subsystem: com.example.app
+    outputs:
+      - type: stdout
+        format: json
 ```
 
 ### `host_metrics` input
@@ -425,11 +430,16 @@ Send log records as OTLP protobuf to an OpenTelemetry collector.
 | `compression` | enum | No | none | `zstd`, `gzip`, or `none` for the request body. Invalid values are rejected while parsing config. |
 
 ```yaml
-output:
-  type: otlp
-  endpoint: http://otel-collector:4317
-  protocol: grpc
-  compression: zstd
+pipelines:
+  default:
+    inputs:
+      - type: stdin
+        format: json
+    outputs:
+      - type: otlp
+        endpoint: http://otel-collector:4317
+        protocol: grpc
+        compression: zstd
 ```
 
 ### `http` output
