@@ -78,17 +78,17 @@ pub mod common;
 /// This is similar to how the file tailer watches for new log files, but
 /// instead of watching /var/log/pods/, we watch /sys/fs/cgroup/kubepods/.
 ///
-/// # Event to InputEvent conversion
+/// # Event to SourceEvent conversion
 ///
 /// ```rust,ignore
 /// impl InputSource for EbpfInput {
-///     fn poll(&mut self) -> io::Result<Vec<InputEvent>> {
+///     fn poll(&mut self) -> io::Result<Vec<SourceEvent>> {
 ///         let mut events = Vec::new();
 ///         // Drain available events from ring buffer (non-blocking)
 ///         while let Some(raw) = self.ring_buf.next() {
 ///             let event: &PipeWriteEvent = unsafe { &*(raw.as_ptr() as *const _) };
 ///             let data = event.data[..event.captured_len as usize].to_vec();
-///             events.push(InputEvent::Data { bytes: data, source_id: None });
+///             events.push(SourceEvent::Data { bytes: data, source_id: None });
 ///         }
 ///         Ok(events)
 ///     }

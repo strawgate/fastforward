@@ -125,7 +125,7 @@ IPC file reader.
 | Component | Current | Target |
 |-----------|---------|--------|
 | Tailer output | `Vec<u8>` per read | `Bytes` (reusable BytesMut) |
-| InputEvent | `Data { bytes: Vec<u8> }` | `Data { bytes: Bytes }` |
+| SourceEvent | `Data { bytes: Vec<u8> }` | `Data { bytes: Bytes }` |
 | FramedInput | `process(&[u8], &mut Vec<u8>)` | Replaced by Framer trait |
 | json_buf accumulation | `Vec<u8>` copy of all lines | Eliminated — scanner operates on original Bytes |
 | CRI reassembly | Copy every line | Zero-copy for F lines, copy only for P+F |

@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use logfwd_io::format::FormatDecoder;
 use logfwd_io::framed::FramedInput;
-use logfwd_io::input::{FileInput, InputEvent, InputSource};
+use logfwd_io::input::{FileInput, SourceEvent, InputSource};
 use logfwd_io::tail::{ByteOffset, TailConfig};
 use logfwd_types::diagnostics::ComponentStats;
 use logfwd_types::pipeline::SourceId;
@@ -80,7 +80,7 @@ fn poll_until_data(
 
     while Instant::now() < deadline {
         for event in input.poll().expect("poll file input") {
-            if let InputEvent::Data {
+            if let SourceEvent::Data {
                 bytes, source_id, ..
             } = event
             {
@@ -159,7 +159,7 @@ fn glob_sources_keep_partial_lines_and_checkpoints_isolated() {
     assert!(
         initial_events
             .iter()
-            .all(|event| !matches!(event, InputEvent::Data { .. })),
+            .all(|event| !matches!(event, SourceEvent::Data { .. })),
         "partial lines from different files must stay buffered, not emitted early"
     );
 
@@ -244,7 +244,7 @@ fn glob_sources_eof_flush_remainders_and_advance_checkpoints_independently() {
     assert!(
         initial_events
             .iter()
-            .all(|event| !matches!(event, InputEvent::Data { .. })),
+            .all(|event| !matches!(event, SourceEvent::Data { .. })),
         "partial lines should remain buffered until EOF flush"
     );
 

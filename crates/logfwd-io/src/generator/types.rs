@@ -4,7 +4,7 @@ use std::io::Write;
 
 use bytes::Bytes;
 
-use crate::input::{InputEvent, InputSource};
+use crate::input::{SourceEvent, InputSource};
 use logfwd_types::diagnostics::ComponentHealth;
 
 /// Controls the complexity/size of generated lines.

@@ -7,8 +7,8 @@
     /// Mock input source for testing.
     struct MockSource {
         name: String,
-        events: VecDeque<Vec<InputEvent>>,
-        shutdown_events: VecDeque<Vec<InputEvent>>,
+        events: VecDeque<Vec<SourceEvent>>,
+        shutdown_events: VecDeque<Vec<SourceEvent>>,
         offsets: Vec<(SourceId, ByteOffset)>,
         source_paths: Vec<(SourceId, std::path::PathBuf)>,
         health: ComponentHealth,
@@ -17,7 +17,7 @@
     }
 
     impl MockSource {
-        fn new(batches: Vec<Vec<InputEvent>>) -> Self {
+        fn new(batches: Vec<Vec<SourceEvent>>) -> Self {
             Self {
                 name: "mock".to_string(),
                 events: batches.into(),
@@ -35,7 +35,7 @@
                 chunks
                     .into_iter()
                     .map(|c| {
-                        vec![InputEvent::Data {
+                        vec![SourceEvent::Data {
                             bytes: Bytes::from(c.to_vec()),
                             source_id: None,
                             accounted_bytes: c.len() as u64,
@@ -55,7 +55,7 @@
                 chunks
                     .into_iter()
                     .map(|c| {
-                        vec![InputEvent::Data {
+                        vec![SourceEvent::Data {
                             bytes: Bytes::from(c.to_vec()),
                             source_id: Some(sid),
                             accounted_bytes: c.len() as u64,
@@ -71,7 +71,7 @@
             self
         }
 
-        fn with_shutdown_events(mut self, events: Vec<Vec<InputEvent>>) -> Self {
+        fn with_shutdown_events(mut self, events: Vec<Vec<SourceEvent>>) -> Self {
             self.shutdown_events = events.into();
             self
         }
@@ -94,11 +94,11 @@
     }
 
     impl InputSource for MockSource {
-        fn poll(&mut self) -> io::Result<Vec<InputEvent>> {
+        fn poll(&mut self) -> io::Result<Vec<SourceEvent>> {
             Ok(self.events.pop_front().unwrap_or_default())
         }
 
-        fn poll_shutdown(&mut self) -> io::Result<Vec<InputEvent>> {
+        fn poll_shutdown(&mut self) -> io::Result<Vec<SourceEvent>> {
             Ok(self.shutdown_events.pop_front().unwrap_or_default())
         }
 
@@ -140,10 +140,10 @@
         RecordBatch::try_new(schema, vec![Arc::new(msg), Arc::new(seq)]).expect("batch")
     }
 
-    fn collect_data(events: Vec<InputEvent>) -> Vec<u8> {
+    fn collect_data(events: Vec<SourceEvent>) -> Vec<u8> {
         let mut out = Vec::new();
         for e in events {
-            if let InputEvent::Data { bytes, .. } = e {
+            if let SourceEvent::Data { bytes, .. } = e {
                 out.extend_from_slice(&bytes);
             }
         }
@@ -209,7 +209,7 @@
     #[test]
     fn framed_input_reports_raw_shutdown_payload_when_output_is_empty() {
         let stats = make_stats();
-        let source = MockSource::new(vec![]).with_shutdown_events(vec![vec![InputEvent::Data {
+        let source = MockSource::new(vec![]).with_shutdown_events(vec![vec![SourceEvent::Data {
             bytes: Bytes::from_static(b"partial"),
             source_id: Some(SourceId(1)),
             accounted_bytes: 7,
@@ -272,7 +272,7 @@
         let batch = make_batch();
         let expected_rows = batch.num_rows() as u64;
         let expected_bytes = 1234;
-        let source = MockSource::new(vec![vec![InputEvent::Batch {
+        let source = MockSource::new(vec![vec![SourceEvent::Batch {
             batch,
             source_id: None,
             accounted_bytes: expected_bytes,
@@ -285,7 +285,7 @@
 
         let events = framed.poll().unwrap();
         assert_eq!(events.len(), 1);
-        assert!(matches!(events[0], InputEvent::Batch { .. }));
+        assert!(matches!(events[0], SourceEvent::Batch { .. }));
         assert_eq!(stats.lines(), expected_rows);
         assert_eq!(stats.bytes(), expected_bytes);
     }
@@ -293,7 +293,7 @@
     #[test]
     fn data_events_use_accounted_bytes_for_stats() {
         let stats = make_stats();
-        let source = MockSource::new(vec![vec![InputEvent::Data {
+        let source = MockSource::new(vec![vec![SourceEvent::Data {
             bytes: Bytes::from_static(b"line\n"),
             source_id: None,
             accounted_bytes: 99,

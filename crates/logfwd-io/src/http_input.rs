@@ -2,7 +2,7 @@
 //!
 //! Listens for requests on a configurable route (default `/ingest`), accepts
 //! optionally compressed request bodies, and forwards newline-delimited bytes
-//! to the pipeline scanner path as [`crate::input::InputEvent::Data`].
+//! to the pipeline scanner path as [`crate::input::SourceEvent::Data`].
 
 use std::io;
 use std::io::Read as _;
@@ -21,7 +21,7 @@ use logfwd_types::diagnostics::ComponentHealth;
 use tokio::sync::oneshot;
 
 use crate::InputError;
-use crate::input::{InputEvent, InputSource};
+use crate::input::{SourceEvent, InputSource};
 use crate::receiver_http::{parse_content_length, read_limited_body};
 
 /// Default max request body size (10 MiB).
@@ -283,7 +283,7 @@ impl Drop for HttpInput {
 }
 
 impl InputSource for HttpInput {
-    fn poll(&mut self) -> io::Result<Vec<InputEvent>> {
+    fn poll(&mut self) -> io::Result<Vec<SourceEvent>> {
         if self.rx.is_none() {
             return Ok(vec![]);
         }
@@ -294,7 +294,7 @@ impl InputSource for HttpInput {
             self.max_drained_bytes_per_poll,
             &mut self.deferred_bytes,
         ) {
-            return Ok(vec![InputEvent::Data {
+            return Ok(vec![SourceEvent::Data {
                 accounted_bytes: all.len() as u64,
                 bytes: Bytes::from(all),
                 source_id: None,
@@ -330,7 +330,7 @@ impl InputSource for HttpInput {
             return Ok(vec![]);
         }
         let accounted_bytes = all.len() as u64;
-        Ok(vec![InputEvent::Data {
+        Ok(vec![SourceEvent::Data {
             bytes: Bytes::from(all),
             source_id: None,
             accounted_bytes,
@@ -676,7 +676,7 @@ mod tests {
         while Instant::now() < deadline {
             let mut out = Vec::new();
             for event in input.poll().expect("poll should succeed") {
-                if let InputEvent::Data { bytes, .. } = event {
+                if let SourceEvent::Data { bytes, .. } = event {
                     out.extend_from_slice(&bytes);
                 }
             }
@@ -1178,7 +1178,7 @@ Connection: close\r\n\
 
                 if let Some(input) = maybe_input.as_mut() {
                     for event in input.poll().expect("poll should succeed") {
-                        if let InputEvent::Data { bytes, .. } = event {
+                        if let SourceEvent::Data { bytes, .. } = event {
                             observed_bytes.extend_from_slice(&bytes);
                         }
                     }
@@ -1199,7 +1199,7 @@ Connection: close\r\n\
                 while Instant::now() < drain_deadline {
                     let mut drained_any = false;
                     for event in input.poll().expect("poll should succeed") {
-                        if let InputEvent::Data { bytes, .. } = event {
+                        if let SourceEvent::Data { bytes, .. } = event {
                             observed_bytes.extend_from_slice(&bytes);
                             drained_any = true;
                         }

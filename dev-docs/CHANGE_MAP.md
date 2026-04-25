@@ -75,7 +75,7 @@ Link to canonical docs instead.
 For ingest-path docs, keep the architectural vocabulary stable by treating the
 [Ingest Glossary](ARCHITECTURE.md#ingest-glossary) as canonical. User-facing
 config still uses `inputs` / `outputs`, and implementation-local names
-(`InputEvent`, `FramedInput`, worker module names) should not leak into
+(`SourceEvent`, `FramedInput`, worker module names) should not leak into
 architecture diagrams unless the code name itself is the point of the
 explanation.
 

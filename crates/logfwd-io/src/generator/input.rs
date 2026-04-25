@@ -144,7 +144,7 @@ impl GeneratorInput {
 }
 
 impl InputSource for GeneratorInput {
-    fn poll(&mut self) -> io::Result<Vec<InputEvent>> {
+    fn poll(&mut self) -> io::Result<Vec<SourceEvent>> {
         if self.done {
             return Ok(vec![]);
         }
@@ -223,7 +223,7 @@ impl InputSource for GeneratorInput {
             let mut out = Vec::with_capacity(out_capacity);
             std::mem::swap(&mut self.buf, &mut out);
             let accounted_bytes = out.len() as u64;
-            out_events.push(InputEvent::Data {
+            out_events.push(SourceEvent::Data {
                 bytes: Bytes::from(out),
                 source_id: None,
                 accounted_bytes,

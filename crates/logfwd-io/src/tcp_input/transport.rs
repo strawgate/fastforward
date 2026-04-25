@@ -13,7 +13,7 @@ use rustls::server::WebPkiClientVerifier;
 use rustls::{ServerConfig, ServerConnection, StreamOwned};
 use socket2::SockRef;
 
-use crate::input::{InputEvent, InputSource};
+use crate::input::{SourceEvent, InputSource};
 use crate::polling_input_health::{PollingInputHealthEvent, reduce_polling_input_health};
 
 /// Extract the `io::ErrorKind` from a `rustls_pki_types::pem::Error`,

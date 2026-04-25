@@ -40,7 +40,7 @@ use tokio::sync::oneshot;
 
 use crate::InputError;
 use crate::background_http_task::BackgroundHttpTask;
-use crate::input::{InputEvent, InputSource};
+use crate::input::{SourceEvent, InputSource};
 
 #[cfg(fuzzing)]
 pub fn fuzz_decode_protojson_bytes(value: &str) -> Result<Vec<u8>, base64::DecodeError> {
@@ -358,7 +358,7 @@ impl Drop for OtlpReceiverInput {
 }
 
 impl InputSource for OtlpReceiverInput {
-    fn poll(&mut self) -> io::Result<Vec<InputEvent>> {
+    fn poll(&mut self) -> io::Result<Vec<SourceEvent>> {
         let Some(rx) = self.rx.as_ref() else {
             return Ok(vec![]);
         };
@@ -450,7 +450,7 @@ pub use projection::ProjectedOtlpDecoder;
 fn drain_receiver_payloads(
     rx: &mpsc::Receiver<ReceiverPayload>,
     max_drained_payloads: usize,
-) -> Vec<InputEvent> {
+) -> Vec<SourceEvent> {
     let mut events = Vec::with_capacity(max_drained_payloads);
     let mut drained_payloads = 0usize;
 
@@ -459,7 +459,7 @@ fn drain_receiver_payloads(
             break;
         };
         drained_payloads += 1;
-        events.push(InputEvent::Batch {
+        events.push(SourceEvent::Batch {
             batch: data.batch,
             source_id: None,
             accounted_bytes: data.accounted_bytes,
@@ -525,7 +525,7 @@ mod poll_tests {
         assert_eq!(events.len(), 2);
 
         match &events[0] {
-            InputEvent::Batch {
+            SourceEvent::Batch {
                 batch,
                 accounted_bytes,
                 ..
@@ -536,7 +536,7 @@ mod poll_tests {
             _ => panic!("expected first batch event"),
         }
         match &events[1] {
-            InputEvent::Batch {
+            SourceEvent::Batch {
                 batch,
                 accounted_bytes,
                 ..

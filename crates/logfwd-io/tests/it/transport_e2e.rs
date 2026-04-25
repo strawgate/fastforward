@@ -16,7 +16,7 @@ use logfwd_io::{
     format::FormatDecoder,
     framed::FramedInput,
     http_input::HttpInput,
-    input::{InputEvent, InputSource},
+    input::{SourceEvent, InputSource},
     otlp_receiver::OtlpReceiverInput,
     tcp_input::TcpInput,
     udp_input::UdpInput,
@@ -36,7 +36,7 @@ fn poll_until_data(input: &mut dyn InputSource, timeout: Duration) -> Vec<u8> {
 
     while std::time::Instant::now() < deadline {
         for event in input.poll().unwrap() {
-            if let InputEvent::Data { bytes, .. } = event {
+            if let SourceEvent::Data { bytes, .. } = event {
                 all.extend_from_slice(&bytes);
             }
         }
@@ -45,7 +45,7 @@ fn poll_until_data(input: &mut dyn InputSource, timeout: Duration) -> Vec<u8> {
             // between the last poll and now.
             thread::sleep(backoff);
             for event in input.poll().unwrap() {
-                if let InputEvent::Data { bytes, .. } = event {
+                if let SourceEvent::Data { bytes, .. } = event {
                     all.extend_from_slice(&bytes);
                 }
             }
@@ -70,7 +70,7 @@ where
 
     while std::time::Instant::now() < deadline {
         for event in input.poll().unwrap() {
-            if let InputEvent::Data { bytes, .. } = event {
+            if let SourceEvent::Data { bytes, .. } = event {
                 all.extend_from_slice(&bytes);
             }
         }
@@ -96,14 +96,14 @@ fn poll_until_batches(
 
     while std::time::Instant::now() < deadline {
         for event in input.poll().unwrap() {
-            if let InputEvent::Batch { batch, .. } = event {
+            if let SourceEvent::Batch { batch, .. } = event {
                 batches.push(batch);
             }
         }
         if !batches.is_empty() {
             thread::sleep(backoff);
             for event in input.poll().unwrap() {
-                if let InputEvent::Batch { batch, .. } = event {
+                if let SourceEvent::Batch { batch, .. } = event {
                     batches.push(batch);
                 }
             }
@@ -132,7 +132,7 @@ where
 
     while std::time::Instant::now() < deadline {
         for event in input.poll().unwrap() {
-            if let InputEvent::Batch { batch, .. } = event {
+            if let SourceEvent::Batch { batch, .. } = event {
                 batches.push(batch);
             }
         }
@@ -305,8 +305,8 @@ fn tcp_client_disconnect_mid_stream() {
     // detected in this poll) or no events at all are acceptable.
     assert!(
         events.iter().all(|e| match e {
-            InputEvent::Data { bytes, .. } => bytes.is_empty(),
-            InputEvent::EndOfFile { .. } => true,
+            SourceEvent::Data { bytes, .. } => bytes.is_empty(),
+            SourceEvent::EndOfFile { .. } => true,
             _ => false,
         }),
         "unexpected non-empty data after client disconnect"
@@ -334,7 +334,7 @@ fn tcp_partial_line_disconnect_emits_eof() {
 
     while std::time::Instant::now() < deadline {
         for event in input.poll().unwrap() {
-            if matches!(event, InputEvent::EndOfFile { source_id } if source_id.is_some()) {
+            if matches!(event, SourceEvent::EndOfFile { source_id } if source_id.is_some()) {
                 got_eof = true;
             }
         }

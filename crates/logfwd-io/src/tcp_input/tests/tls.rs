@@ -31,7 +31,7 @@
         let mut joined = Vec::new();
         while Instant::now() < deadline {
             for event in input.poll().expect("tcp poll should succeed") {
-                if let InputEvent::Data { bytes, .. } = event {
+                if let SourceEvent::Data { bytes, .. } = event {
                     joined.extend_from_slice(&bytes);
                 }
             }
@@ -152,7 +152,7 @@
         for _ in 0..rounds {
             let events = input.poll().expect("tcp poll should succeed");
             for event in events {
-                if let InputEvent::Data { bytes, .. } = event {
+                if let SourceEvent::Data { bytes, .. } = event {
                     records.push(bytes.to_vec());
                 }
             }

@@ -328,7 +328,7 @@ output:
     let mut bytes = Vec::new();
     for event in &events {
         match event {
-            InputEvent::Data {
+            SourceEvent::Data {
                 bytes: event_bytes, ..
             } => bytes.extend_from_slice(event_bytes),
             _ => panic!("expected generator data event"),

@@ -10,7 +10,7 @@ use arrow::array::{Array, BooleanArray, Float64Array, Int64Array, StringArray};
 use arrow::record_batch::RecordBatch;
 use logfwd_io::format::FormatDecoder;
 use logfwd_io::framed::FramedInput;
-use logfwd_io::input::{InputEvent, InputSource};
+use logfwd_io::input::{SourceEvent, InputSource};
 use logfwd_io::otlp_receiver::OtlpReceiverInput;
 use logfwd_types::diagnostics::ComponentStats;
 use logfwd_types::field_names;
@@ -28,7 +28,7 @@ fn poll_single_batch(input: &mut dyn InputSource, timeout: Duration) -> RecordBa
 
     while Instant::now() < deadline {
         for event in input.poll().expect("poll receiver") {
-            if let InputEvent::Batch { batch, .. } = event {
+            if let SourceEvent::Batch { batch, .. } = event {
                 batches.push(batch);
             }
         }
@@ -74,7 +74,7 @@ fn make_framed_otlp_input(stats: Arc<ComponentStats>) -> (FramedInput, String) {
     (framed, url)
 }
 
-fn poll_until_events(input: &mut dyn InputSource, timeout: Duration) -> Vec<InputEvent> {
+fn poll_until_events(input: &mut dyn InputSource, timeout: Duration) -> Vec<SourceEvent> {
     let deadline = Instant::now() + timeout;
 
     while Instant::now() < deadline {
@@ -363,7 +363,7 @@ fn otlp_receiver_accounts_input_bytes() {
     assert!(
         events
             .iter()
-            .any(|event| matches!(event, InputEvent::Batch { batch, .. } if batch.num_rows() == 1)),
+            .any(|event| matches!(event, SourceEvent::Batch { batch, .. } if batch.num_rows() == 1)),
         "should emit one-row batch"
     );
 

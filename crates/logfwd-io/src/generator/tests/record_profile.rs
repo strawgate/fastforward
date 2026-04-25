@@ -40,7 +40,7 @@ fn record_profile_emits_attributes_and_generated_fields() {
 
     let events = input.poll().unwrap();
     assert_eq!(events.len(), 1);
-    let InputEvent::Data { bytes, .. } = &events[0] else {
+    let SourceEvent::Data { bytes, .. } = &events[0] else {
         panic!("expected Data event");
     };
     let text = String::from_utf8_lossy(bytes);
@@ -74,7 +74,7 @@ fn record_profile_supports_custom_sequence_start() {
     );
 
     let events = input.poll().unwrap();
-    let InputEvent::Data { bytes, .. } = &events[0] else {
+    let SourceEvent::Data { bytes, .. } = &events[0] else {
         panic!("expected Data event");
     };
     let rows: Vec<serde_json::Value> = bytes
@@ -103,7 +103,7 @@ fn record_profile_stops_on_sequence_overflow() {
     );
 
     let events = input.poll().unwrap();
-    let InputEvent::Data { bytes, .. } = &events[0] else {
+    let SourceEvent::Data { bytes, .. } = &events[0] else {
         panic!("expected Data event");
     };
     let rows: Vec<serde_json::Value> = bytes
@@ -149,7 +149,7 @@ fn record_profile_escapes_string_fields() {
     );
 
     let events = input.poll().unwrap();
-    let InputEvent::Data { bytes, .. } = &events[0] else {
+    let SourceEvent::Data { bytes, .. } = &events[0] else {
         panic!("expected Data event");
     };
     let row: serde_json::Value =
@@ -327,7 +327,7 @@ fn timestamp_boundary_crossings() {
             },
         );
         let events = input.poll().unwrap();
-        let InputEvent::Data { bytes, .. } = &events[0] else {
+        let SourceEvent::Data { bytes, .. } = &events[0] else {
             panic!("{}: expected Data event", case.label);
         };
         let text = String::from_utf8_lossy(bytes);
@@ -380,7 +380,7 @@ fn prop_positive_step_always_monotonic() {
             },
         );
         let events = input.poll().unwrap();
-        let InputEvent::Data { bytes, .. } = &events[0] else { panic!("expected Data"); };
+        let SourceEvent::Data { bytes, .. } = &events[0] else { panic!("expected Data"); };
         let text = String::from_utf8_lossy(bytes);
         let lines: Vec<&str> = text.trim().lines().collect();
         let timestamps: Vec<&str> = lines.iter().map(|l| extract_timestamp(l)).collect();
@@ -408,7 +408,7 @@ fn prop_negative_step_always_decreasing() {
             },
         );
         let events = input.poll().unwrap();
-        let InputEvent::Data { bytes, .. } = &events[0] else { panic!("expected Data"); };
+        let SourceEvent::Data { bytes, .. } = &events[0] else { panic!("expected Data"); };
         let text = String::from_utf8_lossy(bytes);
         let lines: Vec<&str> = text.trim().lines().collect();
         let timestamps: Vec<&str> = lines.iter().map(|l| extract_timestamp(l)).collect();
@@ -439,7 +439,7 @@ fn prop_json_valid_with_any_timestamp_config() {
         );
         let events = generator.poll().unwrap();
         prop_assert_eq!(events.len(), 1);
-        let InputEvent::Data { bytes, .. } = &events[0] else { panic!("expected Data"); };
+        let SourceEvent::Data { bytes, .. } = &events[0] else { panic!("expected Data"); };
         let text = String::from_utf8(bytes.to_vec()).unwrap();
         for (i, line) in text.trim().lines().enumerate() {
             prop_assert!(

@@ -21,7 +21,7 @@ use std::time::Duration;
 use crossbeam_channel::{Receiver, TrySendError, bounded};
 use logfwd_types::diagnostics::{ComponentHealth, ComponentStats};
 
-use crate::input::{InputEvent, InputSource};
+use crate::input::{SourceEvent, InputSource};
 use crate::journal_ffi::{self, SD_JOURNAL_APPEND, SD_JOURNAL_INVALIDATE};
 
 /// Channel capacity between the reader thread and `poll()`.
@@ -254,7 +254,7 @@ impl Drop for JournaldInput {
 }
 
 impl InputSource for JournaldInput {
-    fn poll(&mut self) -> io::Result<Vec<InputEvent>> {
+    fn poll(&mut self) -> io::Result<Vec<SourceEvent>> {
         let mut events = Vec::new();
         let mut total_bytes: usize = 0;
         let mut lines_read: usize = 0;
@@ -267,7 +267,7 @@ impl InputSource for JournaldInput {
                     lines_read += 1;
                     // Note: do NOT call stats.inc_bytes() here — the downstream
                     // FramedInput already charges `accounted_bytes` to stats.
-                    events.push(InputEvent::Data {
+                    events.push(SourceEvent::Data {
                         bytes: Bytes::from(line),
                         source_id: None,
                         accounted_bytes: len as u64,

@@ -21,7 +21,7 @@ use tokio_util::sync::CancellationToken;
 #[cfg(not(feature = "turmoil"))]
 use logfwd_diagnostics::diagnostics::PipelineMetrics;
 #[cfg(not(feature = "turmoil"))]
-use logfwd_io::input::{CriMetadata, FramedReadEvent, InputEvent};
+use logfwd_io::input::{CriMetadata, FramedReadEvent, SourceEvent};
 #[cfg(not(feature = "turmoil"))]
 use logfwd_io::poll_cadence::AdaptivePollController;
 #[cfg(not(feature = "turmoil"))]
@@ -44,7 +44,7 @@ use super::health::{
     HealthTransitionEvent, reduce_component_health, reduce_component_health_after_poll_failure,
 };
 #[cfg(not(feature = "turmoil"))]
-use super::{InputState, RowOriginSpan};
+use super::{IngestState, RowOriginSpan};
 
 #[cfg(not(feature = "turmoil"))]
 const SHUTDOWN_DRAIN_PROGRESS_LOG_INTERVAL_ROUNDS: usize = 64;
@@ -53,7 +53,7 @@ const MAX_SHUTDOWN_POLL_ROUNDS: usize = 4096;
 
 #[cfg(not(feature = "turmoil"))]
 pub(crate) fn should_repoll_shutdown(
-    events: &[InputEvent],
+    events: &[SourceEvent],
     is_finished: bool,
     had_source_payload: bool,
 ) -> bool {
@@ -62,7 +62,7 @@ pub(crate) fn should_repoll_shutdown(
     }
     if events
         .iter()
-        .any(|event| matches!(event, InputEvent::EndOfFile { source_id: None }))
+        .any(|event| matches!(event, SourceEvent::EndOfFile { source_id: None }))
     {
         return false;
     }
@@ -72,23 +72,23 @@ pub(crate) fn should_repoll_shutdown(
     if had_source_payload
         && !events
             .iter()
-            .any(|event| matches!(event, InputEvent::Data { .. } | InputEvent::Batch { .. }))
+            .any(|event| matches!(event, SourceEvent::Data { .. } | SourceEvent::Batch { .. }))
     {
         return true;
     }
     events.iter().any(|event| {
         let payload_source_id = match event {
-            InputEvent::Data { source_id, .. } | InputEvent::Batch { source_id, .. } => *source_id,
-            InputEvent::Rotated { .. }
-            | InputEvent::Truncated { .. }
-            | InputEvent::EndOfFile { .. } => {
+            SourceEvent::Data { source_id, .. } | SourceEvent::Batch { source_id, .. } => *source_id,
+            SourceEvent::Rotated { .. }
+            | SourceEvent::Truncated { .. }
+            | SourceEvent::EndOfFile { .. } => {
                 return false;
             }
         };
         !events.iter().any(|event| {
             matches!(
                 event,
-                InputEvent::EndOfFile { source_id }
+                SourceEvent::EndOfFile { source_id }
                     if *source_id == payload_source_id
             )
         })
@@ -133,12 +133,12 @@ pub(crate) fn should_repoll_shutdown_buffered(
 }
 
 // ---------------------------------------------------------------------------
-// IoChunk / IoWorkItem types
+// RawBatch / IoWorkItem types
 // ---------------------------------------------------------------------------
 
 /// Chunk of accumulated bytes sent from I/O worker to CPU worker.
 #[cfg(not(feature = "turmoil"))]
-pub(crate) struct IoChunk {
+pub(crate) struct RawBatch {
     pub bytes: Bytes,
     pub checkpoints: Vec<(SourceId, ByteOffset)>,
     pub row_origins: Vec<RowOriginSpan>,
@@ -150,7 +150,7 @@ pub(crate) struct IoChunk {
 
 #[cfg(not(feature = "turmoil"))]
 pub(crate) enum IoWorkItem {
-    Bytes(IoChunk),
+    RawBatch(RawBatch),
     Batch {
         batch: RecordBatch,
         checkpoints: Vec<(SourceId, ByteOffset)>,
@@ -372,7 +372,7 @@ pub(super) fn finalize_pending_row_origin(
 // flush_buf
 // ---------------------------------------------------------------------------
 
-/// Flush `buf` to the channel as an `IoWorkItem::Bytes` chunk.
+/// Flush `buf` to the channel as an `IoWorkItem::RawBatch` chunk.
 ///
 /// Returns `false` if the channel is closed (caller should exit the I/O loop).
 /// On backpressure (channel full), logs a warning at most once per 5 s and
@@ -418,7 +418,7 @@ pub(super) fn flush_buf(
         buffered_source_paths.clear();
         HashMap::new()
     };
-    let chunk = IoWorkItem::Bytes(IoChunk {
+    let chunk = IoWorkItem::RawBatch(RawBatch {
         bytes: data,
         checkpoints,
         row_origins: std::mem::take(row_origins),
@@ -479,7 +479,7 @@ fn flush_bytes_direct(
         buffered_source_paths.clear();
         HashMap::new()
     };
-    let chunk = IoWorkItem::Bytes(IoChunk {
+    let chunk = IoWorkItem::RawBatch(RawBatch {
         bytes: data,
         checkpoints,
         row_origins: std::mem::take(row_origins),
@@ -503,15 +503,15 @@ fn flush_bytes_direct(
 }
 
 // ---------------------------------------------------------------------------
-// process_io_events
+// process_source_events
 // ---------------------------------------------------------------------------
 
 #[cfg(not(feature = "turmoil"))]
 #[allow(clippy::too_many_arguments)]
-pub(super) fn process_io_events(
-    input: &mut InputState,
+pub(super) fn process_source_events(
+    input: &mut IngestState,
     input_name: &Arc<str>,
-    events: Vec<InputEvent>,
+    events: Vec<SourceEvent>,
     tx: &mpsc::Sender<IoWorkItem>,
     metrics: &PipelineMetrics,
     last_bp_warn: &mut Option<Instant>,
@@ -529,7 +529,7 @@ pub(super) fn process_io_events(
 
     for event in events {
         match event {
-            InputEvent::Data {
+            SourceEvent::Data {
                 bytes,
                 source_id,
                 cri_metadata,
@@ -612,7 +612,7 @@ pub(super) fn process_io_events(
                     *buffered_since = None;
                 }
             }
-            InputEvent::Batch {
+            SourceEvent::Batch {
                 batch, source_id, ..
             } => {
                 if !flush_buf(
@@ -669,15 +669,15 @@ pub(super) fn process_io_events(
                     Err(mpsc::error::TrySendError::Closed(_)) => return false,
                 }
             }
-            InputEvent::Rotated { .. } => {
+            SourceEvent::Rotated { .. } => {
                 input.stats.inc_rotations();
                 tracing::info!(input = input.source.name(), "input.file_rotated");
             }
-            InputEvent::Truncated { .. } => {
+            SourceEvent::Truncated { .. } => {
                 input.stats.inc_rotations();
                 tracing::info!(input = input.source.name(), "input.file_truncated");
             }
-            InputEvent::EndOfFile { .. } => {}
+            SourceEvent::EndOfFile { .. } => {}
         }
     }
     if buffered_since.is_none() && !input.buf.is_empty() {
@@ -689,7 +689,7 @@ pub(super) fn process_io_events(
 #[cfg(not(feature = "turmoil"))]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn process_buffered_events(
-    input: &mut InputState,
+    input: &mut IngestState,
     input_name: &Arc<str>,
     events: Vec<FramedReadEvent>,
     tx: &mpsc::Sender<IoWorkItem>,
@@ -788,7 +788,7 @@ pub(super) fn process_buffered_events(
 #[cfg(not(feature = "turmoil"))]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn io_worker_loop(
-    mut input: InputState,
+    mut input: IngestState,
     input_name: Arc<str>,
     tx: mpsc::Sender<IoWorkItem>,
     metrics: Arc<PipelineMetrics>,
@@ -882,7 +882,7 @@ pub(super) fn io_worker_loop(
                                 input.source.is_finished(),
                                 cadence.signal.had_data,
                             );
-                            if !process_io_events(
+                            if !process_source_events(
                                 &mut input,
                                 &input_name,
                                 events,
@@ -1012,7 +1012,7 @@ pub(super) fn io_worker_loop(
                         metrics.inc_cadence_idle_sleep();
                         std::thread::sleep(poll_interval);
                     }
-                } else if !process_io_events(
+                } else if !process_source_events(
                     &mut input,
                     &input_name,
                     events,
@@ -1107,7 +1107,7 @@ pub(super) fn io_worker_loop(
             input.source_paths.clear();
             HashMap::new()
         };
-        let chunk = IoWorkItem::Bytes(IoChunk {
+        let chunk = IoWorkItem::RawBatch(RawBatch {
             bytes: data,
             checkpoints,
             row_origins: std::mem::take(&mut input.row_origins),

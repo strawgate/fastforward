@@ -27,7 +27,7 @@ fn rate_limited_can_emit_multiple_batches_per_poll() {
     let emitted_rows: usize = second
         .iter()
         .map(|event| match event {
-            InputEvent::Data { bytes, .. } => memchr::memchr_iter(b'\n', bytes).count(),
+            SourceEvent::Data { bytes, .. } => memchr::memchr_iter(b'\n', bytes).count(),
             _ => 0,
         })
         .sum();
@@ -95,7 +95,7 @@ fn rate_limited_discards_credit_beyond_burst_cap() {
     let emitted_rows: usize = second
         .iter()
         .map(|event| match event {
-            InputEvent::Data { bytes, .. } => memchr::memchr_iter(b'\n', bytes).count(),
+            SourceEvent::Data { bytes, .. } => memchr::memchr_iter(b'\n', bytes).count(),
             _ => 0,
         })
         .sum();
@@ -131,7 +131,7 @@ fn rate_limited_allows_final_partial_batch_for_finite_total_events() {
     let emitted_rows: usize = second
         .iter()
         .map(|event| match event {
-            InputEvent::Data { bytes, .. } => memchr::memchr_iter(b'\n', bytes).count(),
+            SourceEvent::Data { bytes, .. } => memchr::memchr_iter(b'\n', bytes).count(),
             _ => 0,
         })
         .sum();
@@ -169,7 +169,7 @@ fn timestamps_are_monotonically_increasing() {
     );
 
     let events = input.poll().unwrap();
-    let InputEvent::Data { bytes, .. } = &events[0] else {
+    let SourceEvent::Data { bytes, .. } = &events[0] else {
         panic!("expected Data event");
     };
     let text = String::from_utf8_lossy(bytes);
@@ -205,7 +205,7 @@ fn negative_step_produces_decreasing_timestamps() {
     );
 
     let events = input.poll().unwrap();
-    let InputEvent::Data { bytes, .. } = &events[0] else {
+    let SourceEvent::Data { bytes, .. } = &events[0] else {
         panic!("expected Data event");
     };
     let text = String::from_utf8_lossy(bytes);
@@ -235,7 +235,7 @@ fn custom_start_timestamp() {
     );
 
     let events = input.poll().unwrap();
-    let InputEvent::Data { bytes, .. } = &events[0] else {
+    let SourceEvent::Data { bytes, .. } = &events[0] else {
         panic!("expected Data event");
     };
     let text = String::from_utf8_lossy(bytes);
@@ -293,7 +293,7 @@ fn proptest_generated_json_always_valid() {
         let events = generator.poll().unwrap();
         assert_eq!(events.len(), 1, "poll() must produce exactly one Data event (offset={offset})");
         match &events[0] {
-            InputEvent::Data { bytes, .. } => {
+            SourceEvent::Data { bytes, .. } => {
                 assert!(!bytes.is_empty(), "generator produced empty data (offset={offset})");
                 let text = String::from_utf8(bytes.to_vec()).unwrap();
                 let line_count = text.trim().lines().count();
@@ -326,7 +326,7 @@ fn proptest_complex_json_always_valid() {
         let events = generator.poll().unwrap();
         assert_eq!(events.len(), 1, "poll() must produce exactly one Data event (offset={offset})");
         match &events[0] {
-            InputEvent::Data { bytes, .. } => {
+            SourceEvent::Data { bytes, .. } => {
                 assert!(!bytes.is_empty(), "generator produced empty data (offset={offset})");
                 let text = String::from_utf8(bytes.to_vec()).unwrap();
                 let line_count = text.trim().lines().count();
@@ -366,7 +366,7 @@ fn message_template_with_special_chars_produces_valid_json() {
                 },
             );
             let events = generator.poll().unwrap();
-            let InputEvent::Data { bytes, .. } = &events[0] else {
+            let SourceEvent::Data { bytes, .. } = &events[0] else {
                 panic!("expected Data event");
             };
             let text = String::from_utf8(bytes.to_vec()).unwrap();
@@ -424,7 +424,7 @@ fn generator_respects_total_events() {
             break;
         }
         for event in &events {
-            if let InputEvent::Data { bytes, .. } = event {
+            if let SourceEvent::Data { bytes, .. } = event {
                 let text = String::from_utf8_lossy(bytes);
                 total_lines += text.trim().lines().count() as u64;
             }

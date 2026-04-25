@@ -19,7 +19,7 @@ use logfwd_types::source_metadata::SourceMetadataPlan;
 use super::input_build::build_input_state;
 #[cfg(not(feature = "turmoil"))]
 use super::source_metadata_style_source_path;
-use super::{InputTransform, Pipeline, source_metadata_style_needs_source_paths};
+use super::{SourcePipeline, Pipeline, source_metadata_style_needs_source_paths};
 
 // ── Pipeline defaults ──────────────────────────────────────────────────
 /// Default output worker count when `pipelines.<name>.workers` is unset.
@@ -454,7 +454,7 @@ impl Pipeline {
             .map(|s| s.load_all())
             .unwrap_or_default();
 
-        // Build per-input InputTransform and InputState.
+        // Build per-input SourcePipeline and IngestState.
         let mut inputs = Vec::new();
         let mut input_transforms = Vec::new();
 
@@ -573,7 +573,7 @@ impl Pipeline {
                 source_path: source_metadata_style_source_path(input_cfg.source_metadata),
             };
 
-            input_transforms.push(InputTransform {
+            input_transforms.push(SourcePipeline {
                 scanner,
                 transform,
                 input_name: input_name.clone(),

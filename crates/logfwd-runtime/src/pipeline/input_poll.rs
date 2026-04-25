@@ -6,7 +6,7 @@ use std::time::Duration;
 #[cfg(feature = "turmoil")]
 use logfwd_diagnostics::diagnostics::PipelineMetrics;
 #[cfg(feature = "turmoil")]
-use logfwd_io::input::InputEvent;
+use logfwd_io::input::SourceEvent;
 #[cfg(feature = "turmoil")]
 use logfwd_io::poll_cadence::AdaptivePollController;
 #[cfg(feature = "turmoil")]
@@ -19,7 +19,7 @@ use super::health::{
 #[cfg(feature = "turmoil")]
 use super::submit::{scan_and_transform_for_send, transform_direct_batch_for_send};
 #[cfg(feature = "turmoil")]
-use super::{ChannelMsg, InputState, InputTransform};
+use super::{ProcessedBatch, IngestState, SourcePipeline};
 
 #[cfg(feature = "turmoil")]
 const SHUTDOWN_DRAIN_PROGRESS_LOG_INTERVAL_ROUNDS: usize = 64;
@@ -28,7 +28,7 @@ const MAX_SHUTDOWN_POLL_ROUNDS: usize = 4096;
 
 #[cfg(feature = "turmoil")]
 fn should_repoll_shutdown(
-    events: &[InputEvent],
+    events: &[SourceEvent],
     is_finished: bool,
     had_source_payload: bool,
 ) -> bool {
@@ -37,7 +37,7 @@ fn should_repoll_shutdown(
     }
     if events
         .iter()
-        .any(|event| matches!(event, InputEvent::EndOfFile { source_id: None }))
+        .any(|event| matches!(event, SourceEvent::EndOfFile { source_id: None }))
     {
         return false;
     }
@@ -47,23 +47,23 @@ fn should_repoll_shutdown(
     if had_source_payload
         && !events
             .iter()
-            .any(|event| matches!(event, InputEvent::Data { .. } | InputEvent::Batch { .. }))
+            .any(|event| matches!(event, SourceEvent::Data { .. } | SourceEvent::Batch { .. }))
     {
         return true;
     }
     events.iter().any(|event| {
         let payload_source_id = match event {
-            InputEvent::Data { source_id, .. } | InputEvent::Batch { source_id, .. } => *source_id,
-            InputEvent::Rotated { .. }
-            | InputEvent::Truncated { .. }
-            | InputEvent::EndOfFile { .. } => {
+            SourceEvent::Data { source_id, .. } | SourceEvent::Batch { source_id, .. } => *source_id,
+            SourceEvent::Rotated { .. }
+            | SourceEvent::Truncated { .. }
+            | SourceEvent::EndOfFile { .. } => {
                 return false;
             }
         };
         !events.iter().any(|event| {
             matches!(
                 event,
-                InputEvent::EndOfFile { source_id }
+                SourceEvent::EndOfFile { source_id }
                     if *source_id == payload_source_id
             )
         })
@@ -87,29 +87,29 @@ const fn should_flush_buffer(
 
 #[cfg(feature = "turmoil")]
 async fn send_channel_msg(
-    tx: &tokio::sync::mpsc::Sender<ChannelMsg>,
-    msg: ChannelMsg,
-) -> Result<(), tokio::sync::mpsc::error::SendError<ChannelMsg>> {
+    tx: &tokio::sync::mpsc::Sender<ProcessedBatch>,
+    msg: ProcessedBatch,
+) -> Result<(), tokio::sync::mpsc::error::SendError<ProcessedBatch>> {
     tx.send(msg).await
 }
 
 #[cfg(feature = "turmoil")]
 #[allow(clippy::too_many_arguments)]
 async fn process_input_events(
-    input: &mut InputState,
-    transform: &mut InputTransform,
-    tx: &tokio::sync::mpsc::Sender<ChannelMsg>,
+    input: &mut IngestState,
+    transform: &mut SourcePipeline,
+    tx: &tokio::sync::mpsc::Sender<ProcessedBatch>,
     metrics: &PipelineMetrics,
     input_index: usize,
-    events: Vec<InputEvent>,
+    events: Vec<SourceEvent>,
     buffered_since: &mut Option<tokio::time::Instant>,
 ) -> bool {
     for event in events {
         match event {
-            InputEvent::Data { bytes, .. } => {
+            SourceEvent::Data { bytes, .. } => {
                 input.buf.extend_from_slice(&bytes);
             }
-            InputEvent::Batch { batch, .. } => {
+            SourceEvent::Batch { batch, .. } => {
                 if !input.buf.is_empty() {
                     if let Some(msg) =
                         scan_and_transform_for_send(input, transform, metrics, input_index).await
@@ -132,15 +132,15 @@ async fn process_input_events(
                     metrics.inc_channel_depth();
                 }
             }
-            InputEvent::Rotated { .. } => {
+            SourceEvent::Rotated { .. } => {
                 input.stats.inc_rotations();
             }
-            InputEvent::Truncated { .. } => {
+            SourceEvent::Truncated { .. } => {
                 // Treat truncation as a rotation-equivalent rewind signal
                 // for existing dashboards that chart a single restart counter.
                 input.stats.inc_rotations();
             }
-            InputEvent::EndOfFile { .. } => {}
+            SourceEvent::EndOfFile { .. } => {}
         }
     }
     if buffered_since.is_none() && !input.buf.is_empty() {
@@ -152,14 +152,14 @@ async fn process_input_events(
 /// Async input loop for simulation testing.
 ///
 /// Polls source, accumulates bytes, scans + SQL transforms, and sends
-/// `ChannelMsg` — same output type as production CPU workers. Uses
+/// `ProcessedBatch` — same output type as production CPU workers. Uses
 /// `tokio::time::sleep` so Turmoil's simulated time advances deterministically.
 #[cfg(feature = "turmoil")]
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn async_input_poll_loop(
-    mut input: InputState,
-    mut transform: InputTransform,
-    tx: tokio::sync::mpsc::Sender<ChannelMsg>,
+    mut input: IngestState,
+    mut transform: SourcePipeline,
+    tx: tokio::sync::mpsc::Sender<ProcessedBatch>,
     metrics: Arc<PipelineMetrics>,
     shutdown: CancellationToken,
     batch_target_bytes: usize,

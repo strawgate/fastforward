@@ -227,7 +227,7 @@ path already on `main` and for the shared-buffer framing path now landing in
 Current boundary:
 
 - `logfwd-io` tailing uses per-source `BytesMut` read buffers.
-- `InputEvent::Data` already carries `Bytes`.
+- `SourceEvent::Data` already carries `Bytes`.
 - `FramedInput` may still keep small `Vec<u8>` remainders where a line is
   incomplete or overflow-tainted.
 - `logfwd-runtime` currently performs the remaining pre-scan accumulation into

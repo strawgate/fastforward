@@ -12,7 +12,7 @@
 //!
 //! ```text
 //! Per input:
-//! ┌──────────┐  bounded(4)  ┌──────────┐  ChannelMsg
+//! ┌──────────┐  bounded(4)  ┌──────────┐  ProcessedBatch
 //! │ I/O      │─────────────▶│ CPU      │──────────────────────▶ pipeline rx
 //! │ Worker   │              │ Worker   │
 //! │ poll()   │              │ scan()   │
@@ -39,7 +39,7 @@ use super::cpu_worker::cpu_worker_loop;
 #[cfg(not(feature = "turmoil"))]
 use super::io_worker::{IoWorkItem, io_worker_loop};
 #[cfg(not(feature = "turmoil"))]
-use super::{InputState, InputTransform};
+use super::{IngestState, SourcePipeline};
 
 /// Capacity of the bounded channel between I/O worker and CPU worker.
 #[cfg(not(feature = "turmoil"))]
@@ -52,8 +52,8 @@ const IO_CPU_CHANNEL_CAPACITY: usize = 4;
 /// Manages the I/O and CPU worker threads for all pipeline inputs.
 ///
 /// Each input gets two OS threads connected by a bounded channel:
-/// - I/O worker: polls source, accumulates bytes, sends `IoChunk`
-/// - CPU worker: scans, SQL transforms, sends `ChannelMsg`
+/// - I/O worker: polls source, accumulates bytes, sends `RawBatch`
+/// - CPU worker: scans, SQL transforms, sends `ProcessedBatch`
 ///
 /// Shutdown cascade: shutdown token → I/O workers exit → drop io_tx →
 /// CPU workers drain remaining chunks → CPU workers exit → drop pipeline_tx →
@@ -72,9 +72,9 @@ impl InputPipelineManager {
     /// respective worker threads.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn spawn(
-        inputs: Vec<InputState>,
-        transforms: Vec<InputTransform>,
-        pipeline_tx: mpsc::Sender<super::ChannelMsg>,
+        inputs: Vec<IngestState>,
+        transforms: Vec<SourcePipeline>,
+        pipeline_tx: mpsc::Sender<super::ProcessedBatch>,
         metrics: Arc<PipelineMetrics>,
         shutdown: CancellationToken,
         batch_target_bytes: usize,

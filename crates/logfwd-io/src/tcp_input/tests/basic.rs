@@ -187,7 +187,7 @@
         let mut consumed_delimiter = false;
         while Instant::now() < deadline {
             for event in input.poll().expect("tcp poll should succeed") {
-                if let InputEvent::Data { bytes, .. } = event {
+                if let SourceEvent::Data { bytes, .. } = event {
                     next.extend_from_slice(&bytes);
                 }
             }
@@ -228,7 +228,7 @@
 
         // Should have accepted the connection and read data.
         assert_eq!(events.len(), 1);
-        if let InputEvent::Data {
+        if let SourceEvent::Data {
             bytes,
             source_id,
             accounted_bytes,
@@ -271,11 +271,11 @@
         // partial-line remainder held for this SourceId.
         let data_count = events
             .iter()
-            .filter(|e| matches!(e, InputEvent::Data { .. }))
+            .filter(|e| matches!(e, SourceEvent::Data { .. }))
             .count();
         let eof_count = events
             .iter()
-            .filter(|e| matches!(e, InputEvent::EndOfFile { .. }))
+            .filter(|e| matches!(e, SourceEvent::EndOfFile { .. }))
             .count();
         assert_eq!(data_count, 1, "expected 1 data event");
         assert_eq!(eof_count, 1, "expected 1 EndOfFile event on disconnect");
@@ -327,7 +327,7 @@
 
         let has_eof = events
             .iter()
-            .any(|e| matches!(e, InputEvent::EndOfFile { source_id } if source_id.is_some()));
+            .any(|e| matches!(e, SourceEvent::EndOfFile { source_id } if source_id.is_some()));
 
         assert!(
             has_eof,
@@ -336,11 +336,11 @@
 
         // EndOfFile source_id must match any source id observed in this poll.
         let data_sid = events.iter().find_map(|e| match e {
-            InputEvent::Data { source_id, .. } => *source_id,
+            SourceEvent::Data { source_id, .. } => *source_id,
             _ => None,
         });
         let eof_sid = events.iter().find_map(|e| {
-            if let InputEvent::EndOfFile { source_id } = e {
+            if let SourceEvent::EndOfFile { source_id } = e {
                 *source_id
             } else {
                 None

@@ -243,7 +243,7 @@ fn arrow_matches_real_generator_oracle() {
                 break;
             }
             for event in events {
-                if let InputEvent::Data { bytes, .. } = event {
+                if let SourceEvent::Data { bytes, .. } = event {
                     all_json.extend_from_slice(&bytes);
                 }
             }
@@ -340,7 +340,7 @@ fn generates_valid_json_lines() {
     let events = input.poll().unwrap();
     assert_eq!(events.len(), 1);
 
-    if let InputEvent::Data { bytes, .. } = &events[0] {
+    if let SourceEvent::Data { bytes, .. } = &events[0] {
         let text = String::from_utf8_lossy(bytes);
         let lines: Vec<&str> = text.trim().lines().collect();
         assert_eq!(lines.len(), 20);
@@ -377,7 +377,7 @@ fn complex_generates_valid_json_lines() {
     let events = input.poll().unwrap();
     assert_eq!(events.len(), 1);
 
-    if let InputEvent::Data { bytes, .. } = &events[0] {
+    if let SourceEvent::Data { bytes, .. } = &events[0] {
         let text = String::from_utf8_lossy(bytes);
         let lines: Vec<&str> = text.trim().lines().collect();
         assert_eq!(lines.len(), 50);

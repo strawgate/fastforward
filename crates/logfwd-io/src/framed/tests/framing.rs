@@ -7,13 +7,13 @@
         let second_bytes = b"\nreal-line\n";
         let total = first + second_bytes.len() as u64;
         let source = MockSource::new(vec![
-            vec![InputEvent::Data {
+            vec![SourceEvent::Data {
                 bytes: Bytes::from(big),
                 source_id: Some(sid),
                 accounted_bytes: 0,
                 cri_metadata: None,
             }],
-            vec![InputEvent::Data {
+            vec![SourceEvent::Data {
                 bytes: Bytes::from(second_bytes.to_vec()),
                 source_id: Some(sid),
                 accounted_bytes: 0,
@@ -135,14 +135,14 @@
     fn rotated_clears_remainder_and_format() {
         let stats = make_stats();
         let source = MockSource::new(vec![
-            vec![InputEvent::Data {
+            vec![SourceEvent::Data {
                 bytes: Bytes::from_static(b"partial"),
                 source_id: None,
                 accounted_bytes: 7,
                 cri_metadata: None,
             }],
-            vec![InputEvent::Rotated { source_id: None }],
-            vec![InputEvent::Data {
+            vec![SourceEvent::Rotated { source_id: None }],
+            vec![SourceEvent::Data {
                 bytes: Bytes::from_static(b"fresh\n"),
                 source_id: None,
                 accounted_bytes: 6,
@@ -163,7 +163,7 @@
         assert!(
             events2
                 .iter()
-                .any(|e| matches!(e, InputEvent::Rotated { .. }))
+                .any(|e| matches!(e, SourceEvent::Rotated { .. }))
         );
 
         // Fresh data starts clean (no stale "partial" prefix)
@@ -198,7 +198,7 @@
         );
 
         let events = framed.poll().unwrap();
-        let InputEvent::Data {
+        let SourceEvent::Data {
             bytes,
             cri_metadata: Some(metadata),
             ..
@@ -256,13 +256,13 @@
     fn eof_flushes_remainder() {
         let stats = make_stats();
         let source = MockSource::new(vec![
-            vec![InputEvent::Data {
+            vec![SourceEvent::Data {
                 bytes: Bytes::from_static(b"no-newline"),
                 source_id: None,
                 accounted_bytes: 10,
                 cri_metadata: None,
             }],
-            vec![InputEvent::EndOfFile { source_id: None }],
+            vec![SourceEvent::EndOfFile { source_id: None }],
         ]);
         let mut framed = FramedInput::new(
             Box::new(source),
@@ -278,7 +278,7 @@
         let events2 = framed.poll().unwrap();
         let saw_eof = events2
             .iter()
-            .any(|event| matches!(event, InputEvent::EndOfFile { source_id: None }));
+            .any(|event| matches!(event, SourceEvent::EndOfFile { source_id: None }));
         assert_eq!(collect_data(events2), b"no-newline\n");
         assert!(
             saw_eof,
@@ -292,13 +292,13 @@
     #[test]
     fn poll_shutdown_flushes_existing_remainder() {
         let stats = make_stats();
-        let source = MockSource::new(vec![vec![InputEvent::Data {
+        let source = MockSource::new(vec![vec![SourceEvent::Data {
             bytes: Bytes::from_static(b"no-newline"),
             source_id: None,
             accounted_bytes: 10,
             cri_metadata: None,
         }]])
-        .with_shutdown_events(vec![vec![InputEvent::EndOfFile { source_id: None }]]);
+        .with_shutdown_events(vec![vec![SourceEvent::EndOfFile { source_id: None }]]);
         let mut framed = FramedInput::new(
             Box::new(source),
             FormatDecoder::passthrough(stats.clone()),
@@ -311,7 +311,7 @@
         let events2 = framed.poll_shutdown().unwrap();
         let saw_eof = events2
             .iter()
-            .any(|event| matches!(event, InputEvent::EndOfFile { source_id: None }));
+            .any(|event| matches!(event, SourceEvent::EndOfFile { source_id: None }));
         assert_eq!(collect_data(events2), b"no-newline\n");
         assert!(
             saw_eof,
@@ -325,13 +325,13 @@
     fn eof_flushes_only_partial_remainder() {
         let stats = make_stats();
         let source = MockSource::new(vec![
-            vec![InputEvent::Data {
+            vec![SourceEvent::Data {
                 bytes: Bytes::from_static(b"complete\npartial"),
                 source_id: None,
                 accounted_bytes: 16,
                 cri_metadata: None,
             }],
-            vec![InputEvent::EndOfFile { source_id: None }],
+            vec![SourceEvent::EndOfFile { source_id: None }],
         ]);
         let mut framed = FramedInput::new(
             Box::new(source),
@@ -353,13 +353,13 @@
     fn eof_with_empty_remainder_is_noop() {
         let stats = make_stats();
         let source = MockSource::new(vec![
-            vec![InputEvent::Data {
+            vec![SourceEvent::Data {
                 bytes: Bytes::from_static(b"line\n"),
                 source_id: None,
                 accounted_bytes: 5,
                 cri_metadata: None,
             }],
-            vec![InputEvent::EndOfFile { source_id: None }],
+            vec![SourceEvent::EndOfFile { source_id: None }],
         ]);
         let mut framed = FramedInput::new(
             Box::new(source),
@@ -380,13 +380,13 @@
         let sid = SourceId(42);
         let chunk = b"partial-line";
         let source = MockSource::new(vec![
-            vec![InputEvent::Data {
+            vec![SourceEvent::Data {
                 bytes: Bytes::from(chunk.to_vec()),
                 source_id: Some(sid),
                 accounted_bytes: chunk.len() as u64,
                 cri_metadata: None,
             }],
-            vec![InputEvent::EndOfFile {
+            vec![SourceEvent::EndOfFile {
                 source_id: Some(sid),
             }],
         ])
@@ -419,20 +419,20 @@
         let sid_b = SourceId(11);
         let source = MockSource::new(vec![
             vec![
-                InputEvent::Data {
+                SourceEvent::Data {
                     bytes: Bytes::from_static(b"alpha"),
                     source_id: Some(sid_a),
                     accounted_bytes: 5,
                     cri_metadata: None,
                 },
-                InputEvent::Data {
+                SourceEvent::Data {
                     bytes: Bytes::from_static(b"beta"),
                     source_id: Some(sid_b),
                     accounted_bytes: 4,
                     cri_metadata: None,
                 },
             ],
-            vec![InputEvent::EndOfFile {
+            vec![SourceEvent::EndOfFile {
                 source_id: Some(sid_a),
             }],
         ]);

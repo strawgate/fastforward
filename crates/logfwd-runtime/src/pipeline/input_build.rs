@@ -14,7 +14,7 @@ use logfwd_io::framed::FramedInput;
 use logfwd_io::input::{FileInput, InputSource, StdinInput};
 use logfwd_io::tail::TailConfig;
 
-use super::InputState;
+use super::IngestState;
 
 // ── File-input defaults ────────────────────────────────────────────────
 const DEFAULT_FILE_POLL_INTERVAL_MS: u64 = 50;
@@ -142,7 +142,7 @@ pub(super) fn build_input_state(
     name: &str,
     cfg: &InputConfig,
     stats: Arc<ComponentStats>,
-) -> Result<InputState, String> {
+) -> Result<IngestState, String> {
     let (raw_source, format, buf_cap): (Box<dyn InputSource>, Format, usize) = match &cfg
         .type_config
     {
@@ -546,7 +546,7 @@ pub(super) fn build_input_state(
                     .map_err(|e| {
                         format!("input '{name}': failed to initialize eBPF sensor: {e}")
                     })?;
-                return Ok(InputState {
+                return Ok(IngestState {
                     source: Box::new(source),
                     buf: BytesMut::with_capacity(64 * 1024),
                     row_origins: Vec::new(),
@@ -578,7 +578,7 @@ pub(super) fn build_input_state(
                     cfg.input_type()
                 )
             })?;
-            return Ok(InputState {
+            return Ok(IngestState {
                 source: Box::new(source),
                 buf: BytesMut::with_capacity(64 * 1024),
                 row_origins: Vec::new(),
@@ -611,7 +611,7 @@ pub(super) fn build_input_state(
             let source = HostMetricsInput::new(name, target, metrics_cfg).map_err(|e| {
                 format!("input '{name}': failed to initialize host_metrics input: {e}")
             })?;
-            return Ok(InputState {
+            return Ok(IngestState {
                 source: Box::new(source),
                 buf: BytesMut::with_capacity(64 * 1024),
                 row_origins: Vec::new(),
@@ -681,7 +681,7 @@ pub(super) fn build_input_state(
                 let format = cfg.format.clone().unwrap_or(Format::Auto);
                 let format_proc = make_format(name, InputType::S3, &format, &stats)?;
                 let framed = FramedInput::new(Box::new(source), format_proc, Arc::clone(&stats));
-                return Ok(InputState {
+                return Ok(IngestState {
                     source: Box::new(framed),
                     buf: BytesMut::with_capacity(4 * 1024 * 1024),
                     row_origins: Vec::new(),
@@ -753,7 +753,7 @@ pub(super) fn build_input_state(
     let format_proc = make_format(name, cfg.input_type(), &format, &stats)?;
     let framed = FramedInput::new(raw_source, format_proc, Arc::clone(&stats));
 
-    Ok(InputState {
+    Ok(IngestState {
         source: Box::new(framed),
         buf: BytesMut::with_capacity(buf_cap),
         row_origins: Vec::new(),
@@ -957,7 +957,7 @@ mod tests {
         };
 
         // Note: build_input_state doesn't return the raw TailConfig directly in
-        // InputState, so we just run it to ensure it successfully builds without
+        // IngestState, so we just run it to ensure it successfully builds without
         // error. A more involved test requires exposing or inspecting the internal
         // file tailer state, but here we at least verify it parses and maps defaults
         // cleanly for a valid file input configuration.

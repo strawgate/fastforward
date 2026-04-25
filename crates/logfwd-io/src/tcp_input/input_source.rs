@@ -1,5 +1,5 @@
 impl InputSource for TcpInput {
-    fn poll(&mut self) -> io::Result<Vec<InputEvent>> {
+    fn poll(&mut self) -> io::Result<Vec<SourceEvent>> {
         let mut under_pressure = false;
 
         // Accept new connections up to the limit.
@@ -229,7 +229,7 @@ impl InputSource for TcpInput {
                 // without producing a complete record are included here because
                 // unaccounted_bytes is persistent on the Client struct.
                 let accounted_bytes = std::mem::take(&mut self.clients[i].unaccounted_bytes);
-                InputEvent::Data {
+                SourceEvent::Data {
                     bytes: Bytes::from(bytes),
                     source_id: Some(self.clients[i].source_id),
                     accounted_bytes,
@@ -271,14 +271,14 @@ impl InputSource for TcpInput {
                     // a Data event was already emitted earlier in this same poll
                     // for this client.
                     let accounted_bytes = std::mem::replace(&mut client.unaccounted_bytes, 0);
-                    events.push(InputEvent::Data {
+                    events.push(SourceEvent::Data {
                         bytes: Bytes::from(tail),
                         source_id: Some(client.source_id),
                         accounted_bytes,
                         cri_metadata: None,
                     });
                 }
-                events.push(InputEvent::EndOfFile {
+                events.push(SourceEvent::EndOfFile {
                     source_id: Some(self.clients[i].source_id),
                 });
             }

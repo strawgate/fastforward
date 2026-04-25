@@ -17,9 +17,9 @@ use super::internal_faults;
 use super::processor_stage::{ProcessorStageResult, run_processor_stage};
 #[cfg(feature = "turmoil")]
 use super::scan_maybe_blocking;
-use super::{ChannelMsg, Pipeline, now_nanos};
+use super::{ProcessedBatch, Pipeline, now_nanos};
 #[cfg(feature = "turmoil")]
-use super::{InputState, InputTransform};
+use super::{IngestState, SourcePipeline};
 
 impl Pipeline {
     /// Submit a scanned and SQL-transformed batch to the processor chain and output pool.
@@ -35,10 +35,10 @@ impl Pipeline {
     /// 4. Concatenate outputs, submit to pool
     pub(super) async fn submit_batch(
         &mut self,
-        msg: ChannelMsg,
+        msg: ProcessedBatch,
         shutdown: &CancellationToken,
     ) -> bool {
-        let ChannelMsg {
+        let ProcessedBatch {
             batch,
             checkpoints,
             queued_at,
@@ -186,18 +186,18 @@ impl Pipeline {
     }
 }
 
-/// Scan + SQL transform accumulated bytes into a `ChannelMsg`.
+/// Scan + SQL transform accumulated bytes into a `ProcessedBatch`.
 ///
 /// Used by the turmoil async input loop. On scan/transform error,
 /// returns a sentinel empty-batch message carrying the checkpoints
 /// so the pipeline can reject those offsets.
 #[cfg(feature = "turmoil")]
 pub(super) async fn scan_and_transform_for_send(
-    input: &mut InputState,
-    transform: &mut InputTransform,
+    input: &mut IngestState,
+    transform: &mut SourcePipeline,
     metrics: &PipelineMetrics,
     input_index: usize,
-) -> Option<ChannelMsg> {
+) -> Option<ProcessedBatch> {
     let data = input.buf.split().freeze();
     let checkpoints: HashMap<SourceId, ByteOffset> =
         input.source.checkpoint_data().into_iter().collect();
@@ -235,7 +235,7 @@ pub(super) async fn scan_and_transform_for_send(
     };
     let transform_ns = t1.elapsed().as_nanos() as u64;
 
-    Some(ChannelMsg {
+    Some(ProcessedBatch {
         batch: result,
         checkpoints,
         queued_at: Some(queued_at),
@@ -248,12 +248,12 @@ pub(super) async fn scan_and_transform_for_send(
 #[allow(clippy::needless_pass_by_ref_mut)]
 #[cfg(feature = "turmoil")]
 pub(super) async fn transform_direct_batch_for_send(
-    input: &mut InputState,
-    transform: &mut InputTransform,
+    input: &mut IngestState,
+    transform: &mut SourcePipeline,
     metrics: &PipelineMetrics,
     input_index: usize,
     batch: RecordBatch,
-) -> Option<ChannelMsg> {
+) -> Option<ProcessedBatch> {
     let checkpoints: HashMap<SourceId, ByteOffset> =
         input.source.checkpoint_data().into_iter().collect();
     let queued_at = tokio::time::Instant::now();
@@ -279,7 +279,7 @@ pub(super) async fn transform_direct_batch_for_send(
     };
     let transform_ns = t0.elapsed().as_nanos() as u64;
 
-    Some(ChannelMsg {
+    Some(ProcessedBatch {
         batch: result,
         checkpoints,
         queued_at: Some(queued_at),

@@ -319,7 +319,7 @@ mod verification {
 }
 
 /// Events produced by an input source.
-pub enum InputEvent {
+pub enum SourceEvent {
     /// New data read from the source.
     ///
     /// `source_id` identifies which logical source produced the data (e.g.,
@@ -399,7 +399,7 @@ pub struct TlsInputConfig {
 
 pub trait InputSource: Send {
     /// Poll for new events. Returns empty vec if no new data.
-    fn poll(&mut self) -> io::Result<Vec<InputEvent>>;
+    fn poll(&mut self) -> io::Result<Vec<SourceEvent>>;
 
     /// Poll and append scanner-ready bytes directly into `dst` when supported.
     ///
@@ -433,7 +433,7 @@ pub trait InputSource: Send {
     /// should snapshot their terminal drain boundary internally rather than
     /// returning payload forever; the runtime only keeps an emergency hard cap
     /// to avoid hanging process shutdown on a misbehaving source.
-    fn poll_shutdown(&mut self) -> io::Result<Vec<InputEvent>> {
+    fn poll_shutdown(&mut self) -> io::Result<Vec<SourceEvent>> {
         Ok(Vec::new())
     }
 
@@ -531,7 +531,7 @@ enum StdinMessage {
 }
 
 struct StdinPollOutcome {
-    events: Vec<InputEvent>,
+    events: Vec<SourceEvent>,
     is_drained: bool,
 }
 
@@ -599,23 +599,23 @@ impl StdinInput {
 }
 
 impl InputSource for StdinInput {
-    fn poll(&mut self) -> io::Result<Vec<InputEvent>> {
+    fn poll(&mut self) -> io::Result<Vec<SourceEvent>> {
         Ok(self
             .poll_with_event_limit(STDIN_MAX_EVENTS_PER_POLL, false)?
             .events)
     }
 
-    fn poll_shutdown(&mut self) -> io::Result<Vec<InputEvent>> {
+    fn poll_shutdown(&mut self) -> io::Result<Vec<SourceEvent>> {
         let outcome = self.poll_with_event_limit(STDIN_MAX_SHUTDOWN_EVENTS, true)?;
         let mut events = outcome.events;
         if self.pending_error.is_none()
             && outcome.is_drained
             && !events
                 .iter()
-                .any(|event| matches!(event, InputEvent::EndOfFile { .. }))
+                .any(|event| matches!(event, SourceEvent::EndOfFile { .. }))
         {
             self.is_finished = true;
-            events.push(InputEvent::EndOfFile { source_id: None });
+            events.push(SourceEvent::EndOfFile { source_id: None });
         }
         Ok(events)
     }
@@ -660,7 +660,7 @@ impl StdinInput {
             match self.rx.try_recv() {
                 Ok(StdinMessage::Data(bytes)) => {
                     let accounted_bytes = bytes.len() as u64;
-                    events.push(InputEvent::Data {
+                    events.push(SourceEvent::Data {
                         bytes: Bytes::from(bytes),
                         source_id: None,
                         accounted_bytes,
@@ -670,7 +670,7 @@ impl StdinInput {
                 Ok(StdinMessage::EndOfFile) => {
                     self.is_finished = true;
                     is_drained = true;
-                    events.push(InputEvent::EndOfFile { source_id: None });
+                    events.push(SourceEvent::EndOfFile { source_id: None });
                     break;
                 }
                 Ok(StdinMessage::Error(kind, message)) => {
@@ -688,7 +688,7 @@ impl StdinInput {
                 Err(mpsc::TryRecvError::Disconnected) => {
                     self.is_finished = true;
                     is_drained = true;
-                    events.push(InputEvent::EndOfFile { source_id: None });
+                    events.push(SourceEvent::EndOfFile { source_id: None });
                     break;
                 }
             }
@@ -697,7 +697,7 @@ impl StdinInput {
             match self.rx.try_recv() {
                 Ok(StdinMessage::Data(bytes)) => {
                     let accounted_bytes = bytes.len() as u64;
-                    events.push(InputEvent::Data {
+                    events.push(SourceEvent::Data {
                         bytes: Bytes::from(bytes),
                         source_id: None,
                         accounted_bytes,
@@ -710,7 +710,7 @@ impl StdinInput {
                 Ok(StdinMessage::EndOfFile) => {
                     self.is_finished = true;
                     is_drained = true;
-                    events.push(InputEvent::EndOfFile { source_id: None });
+                    events.push(SourceEvent::EndOfFile { source_id: None });
                 }
                 Ok(StdinMessage::Error(kind, message)) => {
                     self.pending_error = Some((kind, message));
@@ -721,7 +721,7 @@ impl StdinInput {
                 Err(mpsc::TryRecvError::Disconnected) => {
                     self.is_finished = true;
                     is_drained = true;
-                    events.push(InputEvent::EndOfFile { source_id: None });
+                    events.push(SourceEvent::EndOfFile { source_id: None });
                 }
             }
         }
@@ -729,11 +729,11 @@ impl StdinInput {
         Ok(StdinPollOutcome { events, is_drained })
     }
 
-    fn probe_stdin_terminal_after_data(&mut self, events: &mut Vec<InputEvent>) -> bool {
+    fn probe_stdin_terminal_after_data(&mut self, events: &mut Vec<SourceEvent>) -> bool {
         match self.rx.try_recv() {
             Ok(StdinMessage::Data(bytes)) => {
                 let accounted_bytes = bytes.len() as u64;
-                events.push(InputEvent::Data {
+                events.push(SourceEvent::Data {
                     bytes: Bytes::from(bytes),
                     source_id: None,
                     accounted_bytes,
@@ -746,7 +746,7 @@ impl StdinInput {
             }
             Ok(StdinMessage::EndOfFile) => {
                 self.is_finished = true;
-                events.push(InputEvent::EndOfFile { source_id: None });
+                events.push(SourceEvent::EndOfFile { source_id: None });
                 true
             }
             Ok(StdinMessage::Error(kind, message)) => {
@@ -756,7 +756,7 @@ impl StdinInput {
             Err(mpsc::TryRecvError::Empty) => true,
             Err(mpsc::TryRecvError::Disconnected) => {
                 self.is_finished = true;
-                events.push(InputEvent::EndOfFile { source_id: None });
+                events.push(SourceEvent::EndOfFile { source_id: None });
                 true
             }
         }
@@ -766,11 +766,11 @@ impl StdinInput {
     /// additional data.  If the next message is `Data`, it is pushed to
     /// `events` but the channel is **not** probed further — the caller should
     /// treat the result as "not drained" because more items may remain.
-    fn is_stdin_terminal(&mut self, events: &mut Vec<InputEvent>) -> bool {
+    fn is_stdin_terminal(&mut self, events: &mut Vec<SourceEvent>) -> bool {
         match self.rx.try_recv() {
             Ok(StdinMessage::Data(bytes)) => {
                 let accounted_bytes = bytes.len() as u64;
-                events.push(InputEvent::Data {
+                events.push(SourceEvent::Data {
                     bytes: Bytes::from(bytes),
                     source_id: None,
                     accounted_bytes,
@@ -780,7 +780,7 @@ impl StdinInput {
             }
             Ok(StdinMessage::EndOfFile) => {
                 self.is_finished = true;
-                events.push(InputEvent::EndOfFile { source_id: None });
+                events.push(SourceEvent::EndOfFile { source_id: None });
                 true
             }
             Ok(StdinMessage::Error(kind, message)) => {
@@ -790,7 +790,7 @@ impl StdinInput {
             Err(mpsc::TryRecvError::Empty) => true,
             Err(mpsc::TryRecvError::Disconnected) => {
                 self.is_finished = true;
-                events.push(InputEvent::EndOfFile { source_id: None });
+                events.push(SourceEvent::EndOfFile { source_id: None });
                 true
             }
         }
@@ -831,11 +831,11 @@ impl FileInput {
 }
 
 impl InputSource for FileInput {
-    fn poll(&mut self) -> io::Result<Vec<InputEvent>> {
+    fn poll(&mut self) -> io::Result<Vec<SourceEvent>> {
         Ok(tail_events_to_input_events(self.tailer.poll()?))
     }
 
-    fn poll_shutdown(&mut self) -> io::Result<Vec<InputEvent>> {
+    fn poll_shutdown(&mut self) -> io::Result<Vec<SourceEvent>> {
         Ok(tail_events_to_input_events(self.tailer.poll_shutdown()?))
     }
 
@@ -874,7 +874,7 @@ impl InputSource for FileInput {
     }
 }
 
-fn tail_events_to_input_events(tail_events: Vec<TailEvent>) -> Vec<InputEvent> {
+fn tail_events_to_input_events(tail_events: Vec<TailEvent>) -> Vec<SourceEvent> {
     // source_id is embedded in each TailEvent at the time of creation
     // inside FileTailer::poll(), before any rotation mutates internal
     // state. No snapshot HashMap is needed here.
@@ -885,7 +885,7 @@ fn tail_events_to_input_events(tail_events: Vec<TailEvent>) -> Vec<InputEvent> {
                 bytes, source_id, ..
             } => {
                 let accounted_bytes = bytes.len() as u64;
-                events.push(InputEvent::Data {
+                events.push(SourceEvent::Data {
                     bytes: Bytes::from(bytes),
                     source_id,
                     accounted_bytes,
@@ -893,13 +893,13 @@ fn tail_events_to_input_events(tail_events: Vec<TailEvent>) -> Vec<InputEvent> {
                 });
             }
             TailEvent::Rotated { source_id, .. } => {
-                events.push(InputEvent::Rotated { source_id });
+                events.push(SourceEvent::Rotated { source_id });
             }
             TailEvent::Truncated { source_id, .. } => {
-                events.push(InputEvent::Truncated { source_id });
+                events.push(SourceEvent::Truncated { source_id });
             }
             TailEvent::EndOfFile { source_id, .. } => {
-                events.push(InputEvent::EndOfFile { source_id });
+                events.push(SourceEvent::EndOfFile { source_id });
             }
         }
     }
@@ -954,14 +954,14 @@ mod tests {
         )
     }
 
-    fn count_stdin_shutdown_events(events: &[InputEvent]) -> (usize, usize) {
+    fn count_stdin_shutdown_events(events: &[SourceEvent]) -> (usize, usize) {
         let data_events = events
             .iter()
-            .filter(|event| matches!(event, InputEvent::Data { .. }))
+            .filter(|event| matches!(event, SourceEvent::Data { .. }))
             .count();
         let eof_events = events
             .iter()
-            .filter(|event| matches!(event, InputEvent::EndOfFile { source_id: None }))
+            .filter(|event| matches!(event, SourceEvent::EndOfFile { source_id: None }))
             .count();
         (data_events, eof_events)
     }
@@ -975,7 +975,7 @@ mod tests {
 
         let events = input.poll().expect("data should be returned before error");
         assert_eq!(events.len(), 1);
-        assert!(matches!(events[0], InputEvent::Data { .. }));
+        assert!(matches!(events[0], SourceEvent::Data { .. }));
         assert!(!input.is_finished());
 
         let err = match input.poll() {

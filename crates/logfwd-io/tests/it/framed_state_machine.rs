@@ -25,7 +25,7 @@ use proptest_state_machine::{ReferenceStateMachine, StateMachineTest, prop_state
 
 use bytes::Bytes;
 use logfwd_io::format::FormatDecoder;
-use logfwd_io::input::{InputEvent, InputSource};
+use logfwd_io::input::{SourceEvent, InputSource};
 use logfwd_types::diagnostics::{ComponentHealth, ComponentStats};
 use logfwd_types::pipeline::SourceId;
 
@@ -159,7 +159,7 @@ impl ReferenceStateMachine for FramedMachine {
 /// A mock `InputSource` that replays one event at a time, pushed
 /// dynamically by the state machine test.
 struct ReplaySource {
-    pending: Option<Vec<InputEvent>>,
+    pending: Option<Vec<SourceEvent>>,
 }
 
 impl ReplaySource {
@@ -167,13 +167,13 @@ impl ReplaySource {
         Self { pending: None }
     }
 
-    fn push_event(&mut self, event: InputEvent) {
+    fn push_event(&mut self, event: SourceEvent) {
         self.pending.get_or_insert_with(Vec::new).push(event);
     }
 }
 
 impl InputSource for ReplaySource {
-    fn poll(&mut self) -> io::Result<Vec<InputEvent>> {
+    fn poll(&mut self) -> io::Result<Vec<SourceEvent>> {
         Ok(self.pending.take().unwrap_or_default())
     }
 
@@ -251,7 +251,7 @@ impl Sut {
         }
     }
 
-    fn push_and_poll(&mut self, event: InputEvent) -> Vec<InputEvent> {
+    fn push_and_poll(&mut self, event: SourceEvent) -> Vec<SourceEvent> {
         // SAFETY: we hold the only reference to the FramedInput which owns
         // the ReplaySource. We push the event before polling, and never
         // access the pointer concurrently.
@@ -261,11 +261,11 @@ impl Sut {
         self.framed.poll().expect("poll must not fail")
     }
 
-    fn count_output_bytes(events: &[InputEvent]) -> usize {
+    fn count_output_bytes(events: &[SourceEvent]) -> usize {
         events
             .iter()
             .filter_map(|e| {
-                if let InputEvent::Data { bytes, .. } = e {
+                if let SourceEvent::Data { bytes, .. } = e {
                     Some(bytes.len())
                 } else {
                     None
@@ -309,7 +309,7 @@ impl StateMachineTest for FramedTest {
                     }
                 }
 
-                let events = sut.push_and_poll(InputEvent::Data {
+                let events = sut.push_and_poll(SourceEvent::Data {
                     bytes: Bytes::from(bytes),
                     source_id: Some(source),
                     accounted_bytes: n as u64,
@@ -318,7 +318,7 @@ impl StateMachineTest for FramedTest {
 
                 // INVARIANT: every emitted Data event ends with newline.
                 for event in &events {
-                    if let InputEvent::Data {
+                    if let SourceEvent::Data {
                         bytes: out_bytes, ..
                     } = event
                     {
@@ -369,14 +369,14 @@ impl StateMachineTest for FramedTest {
             }
 
             Transition::Rotated { source } => {
-                let events = sut.push_and_poll(InputEvent::Rotated {
+                let events = sut.push_and_poll(SourceEvent::Rotated {
                     source_id: Some(source),
                 });
                 // Rotation event must be forwarded.
                 assert!(
                     events
                         .iter()
-                        .any(|e| matches!(e, InputEvent::Rotated { .. })),
+                        .any(|e| matches!(e, SourceEvent::Rotated { .. })),
                     "Rotated event must be forwarded downstream"
                 );
                 // Mark this source as recently reset.
@@ -384,14 +384,14 @@ impl StateMachineTest for FramedTest {
             }
 
             Transition::Truncated { source } => {
-                let events = sut.push_and_poll(InputEvent::Truncated {
+                let events = sut.push_and_poll(SourceEvent::Truncated {
                     source_id: Some(source),
                 });
                 // Truncation event must be forwarded.
                 assert!(
                     events
                         .iter()
-                        .any(|e| matches!(e, InputEvent::Truncated { .. })),
+                        .any(|e| matches!(e, SourceEvent::Truncated { .. })),
                     "Truncated event must be forwarded downstream"
                 );
                 // Mark this source as recently reset.
@@ -401,13 +401,13 @@ impl StateMachineTest for FramedTest {
             Transition::EndOfFile { source } => {
                 let before = sut.total_bytes_out;
 
-                let events = sut.push_and_poll(InputEvent::EndOfFile {
+                let events = sut.push_and_poll(SourceEvent::EndOfFile {
                     source_id: Some(source),
                 });
 
                 // INVARIANT: EOF-flushed data also ends with newline.
                 for event in &events {
-                    if let InputEvent::Data {
+                    if let SourceEvent::Data {
                         bytes: out_bytes, ..
                     } = event
                     {
