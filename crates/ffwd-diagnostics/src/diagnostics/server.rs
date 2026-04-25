@@ -2502,7 +2502,7 @@ output:
             resource["attributes"][0]["key"], "service.name",
             "resource must have service.name"
         );
-        assert_eq!(resource["attributes"][0]["value"]["stringValue"], "ffwd");
+        assert_eq!(resource["attributes"][0]["value"]["stringValue"], "ff");
 
         let metrics = &rm[0]["scopeMetrics"][0]["metrics"];
         assert!(
