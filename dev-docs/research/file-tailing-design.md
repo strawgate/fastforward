@@ -29,7 +29,7 @@
                         │  └────────────┘     └──────┬────────┘  │
                         └────────────────────────────┼───────────┘
                                                      │
-                                              InputEvent::Data
+                                              SourceEvent::Data
                                               (complete lines)
                                                      │
                         ┌────────────────────────────▼───────────┐
@@ -165,7 +165,7 @@ writes interleave.
 - Store `HashMap<SourceId, Vec<u8>>` for remainders
 - Requires `TailEvent::Data` to carry source identity (it already has `path`)
 - Pro: Correct, matches every other collector
-- Con: Needs `InputEvent::Data` to carry `SourceId` through the stack
+- Con: Needs `SourceEvent::Data` to carry `SourceId` through the stack
 
 **B. Per-file FramedInput (one per file)**
 - Each file gets its own `FramedInput` with own remainder, format state

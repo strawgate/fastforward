@@ -35,7 +35,7 @@ struct PodEbpfConfig(EbpfConfig);
 // SAFETY: EbpfConfig is repr(C), Copy, and contains only primitive types (u32).
 unsafe impl aya::Pod for PodEbpfConfig {}
 
-use crate::input::{InputEvent, InputSource};
+use crate::input::{InputSource, SourceEvent};
 use crate::platform_sensor_filter::is_event_type_enabled;
 
 // Tracefs paths to probe for the sched_process_exit format file.
@@ -512,7 +512,7 @@ impl PlatformSensorInput {
         filter_self: bool,
         include_event_types: Option<&[String]>,
         exclude_event_types: Option<&[String]>,
-    ) -> io::Result<Option<InputEvent>> {
+    ) -> io::Result<Option<SourceEvent>> {
         let events_map = ebpf.map_mut("EVENTS").ok_or_else(|| {
             io::Error::new(io::ErrorKind::NotFound, "EVENTS ring buffer map not found")
         })?;
@@ -570,7 +570,7 @@ impl PlatformSensorInput {
         let batch = build_record_batch(schema, &rows)?;
         let accounted_bytes = rows.len() as u64 * 64; // approximate per-event cost
 
-        Ok(Some(InputEvent::Batch {
+        Ok(Some(SourceEvent::Batch {
             batch,
             source_id: None,
             accounted_bytes,
@@ -812,7 +812,7 @@ fn build_record_batch(schema: &Arc<Schema>, rows: &[EventRow]) -> io::Result<Rec
 // ── InputSource implementation ─────────────────────────────────────────
 
 impl InputSource for PlatformSensorInput {
-    fn poll(&mut self) -> io::Result<Vec<InputEvent>> {
+    fn poll(&mut self) -> io::Result<Vec<SourceEvent>> {
         let state = std::mem::replace(&mut self.state, SensorState::Poisoned);
 
         match state {

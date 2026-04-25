@@ -289,7 +289,7 @@ fn experimental_projection_decode_mode_controls_http_protobuf_path() {
             events
                 .iter()
                 .filter(|event| {
-                    matches!(event, InputEvent::Batch { batch, .. } if batch.num_rows() == 1)
+                    matches!(event, SourceEvent::Batch { batch, .. } if batch.num_rows() == 1)
                 })
                 .count()
                 == 2
@@ -300,7 +300,7 @@ fn experimental_projection_decode_mode_controls_http_protobuf_path() {
         events
             .iter()
             .filter(|event| {
-                matches!(event, InputEvent::Batch { batch, .. } if batch.num_rows() == 1)
+                matches!(event, SourceEvent::Batch { batch, .. } if batch.num_rows() == 1)
             })
             .count(),
         2

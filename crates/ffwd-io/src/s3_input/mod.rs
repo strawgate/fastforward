@@ -48,7 +48,7 @@ use tracing::{debug, error, warn};
 
 use bytes::Bytes;
 
-use crate::input::{InputEvent, InputSource};
+use crate::input::{InputSource, SourceEvent};
 use client::S3Client;
 use decompress::{Compression, detect_compression};
 use sqs::SqsClient;
@@ -490,7 +490,7 @@ impl S3Input {
 // ── InputSource implementation ─────────────────────────────────────────────
 
 impl InputSource for S3Input {
-    fn poll(&mut self) -> io::Result<Vec<InputEvent>> {
+    fn poll(&mut self) -> io::Result<Vec<SourceEvent>> {
         let mut events = Vec::with_capacity(MAX_DRAIN_PER_POLL);
         let mut drained = 0usize;
         self.poll_source_paths.clear();
@@ -520,7 +520,7 @@ impl InputSource for S3Input {
             // carry empty bytes and sending them would cause the checkpoint
             // tracker to panic on `n_bytes == 0`.
             if !payload.bytes.is_empty() {
-                events.push(InputEvent::Data {
+                events.push(SourceEvent::Data {
                     bytes: Bytes::from(payload.bytes),
                     source_id: Some(payload.source_id),
                     accounted_bytes: payload.accounted_bytes,
@@ -528,7 +528,7 @@ impl InputSource for S3Input {
                 });
             }
             if payload.is_eof {
-                events.push(InputEvent::EndOfFile {
+                events.push(SourceEvent::EndOfFile {
                     source_id: Some(payload.source_id),
                 });
                 self.active_source_paths.remove(&payload.source_id);
@@ -1488,7 +1488,7 @@ mod tests {
         let mut input = test_input(rx, true);
         let events = input.poll().expect("poll");
         assert_eq!(events.len(), 1);
-        let InputEvent::Data {
+        let SourceEvent::Data {
             source_id: event_source_id,
             ..
         } = &events[0]
@@ -1561,7 +1561,7 @@ mod tests {
             .insert(source_id, PathBuf::from(key));
         let events = input.poll().expect("poll eof");
         assert_eq!(events.len(), 1);
-        let InputEvent::EndOfFile {
+        let SourceEvent::EndOfFile {
             source_id: eof_source_id,
         } = events[0]
         else {

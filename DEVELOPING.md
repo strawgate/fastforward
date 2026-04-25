@@ -369,7 +369,7 @@ If an input mutates payloads before framing or scanning, diagnostics must still
 charge bytes from the original source payload, not the normalized buffer. Two
 easy ways to get this wrong are synthetic newline insertion and compressed
 request decoding. Capture source bytes at the receiver boundary first, then
-carry them explicitly through `InputEvent::Data` or `InputEvent::Batch`.
+carry them explicitly through `SourceEvent::Data` or `SourceEvent::Batch`.
 
 ### TLS client CA settings must not silently downgrade mTLS
 

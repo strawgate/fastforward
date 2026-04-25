@@ -32,7 +32,7 @@ use tokio::sync::oneshot;
 
 use crate::InputError;
 use crate::background_http_task::BackgroundHttpTask;
-use crate::input::{InputEvent, InputSource};
+use crate::input::{InputSource, SourceEvent};
 use crate::receiver_health::{ReceiverHealthEvent, reduce_receiver_health};
 use crate::receiver_http::{MAX_REQUEST_BODY_SIZE, parse_content_length, read_limited_body};
 
@@ -736,14 +736,14 @@ impl Drop for ArrowIpcReceiver {
 }
 
 impl InputSource for ArrowIpcReceiver {
-    fn poll(&mut self) -> io::Result<Vec<InputEvent>> {
+    fn poll(&mut self) -> io::Result<Vec<SourceEvent>> {
         let Some(rx) = self.rx.as_ref() else {
             return Ok(vec![]);
         };
         let mut events = Vec::new();
         loop {
             match try_recv_accounted(rx, &self.in_flight_batches, &self.slot_accounting) {
-                Ok(Some(decoded)) => events.push(InputEvent::Batch {
+                Ok(Some(decoded)) => events.push(SourceEvent::Batch {
                     batch: decoded.batch,
                     source_id: None,
                     accounted_bytes: decoded.accounted_bytes,
@@ -1001,7 +1001,7 @@ mod tests {
         let events = receiver.poll().expect("poll should succeed");
         assert_eq!(events.len(), 1, "poll should emit one batch event");
         match &events[0] {
-            InputEvent::Batch {
+            SourceEvent::Batch {
                 batch,
                 source_id,
                 accounted_bytes,
@@ -1010,7 +1010,7 @@ mod tests {
                 assert_eq!(*source_id, None);
                 assert_eq!(*accounted_bytes, ipc_bytes.len() as u64);
             }
-            _ => panic!("expected InputEvent::Batch"),
+            _ => panic!("expected SourceEvent::Batch"),
         }
     }
 

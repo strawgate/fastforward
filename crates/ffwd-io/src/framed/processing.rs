@@ -41,19 +41,19 @@ impl FramedInput {
         Some(metadata)
     }
 
-    fn process_raw_events(&mut self, raw_events: Vec<InputEvent>) -> Vec<InputEvent> {
+    fn process_raw_events(&mut self, raw_events: Vec<SourceEvent>) -> Vec<SourceEvent> {
         self.last_raw_had_payload = raw_events
             .iter()
-            .any(|event| matches!(event, InputEvent::Data { .. } | InputEvent::Batch { .. }));
+            .any(|event| matches!(event, SourceEvent::Data { .. } | SourceEvent::Batch { .. }));
         if raw_events.is_empty() {
             return vec![];
         }
 
-        let mut result_events: Vec<InputEvent> = Vec::new();
+        let mut result_events: Vec<SourceEvent> = Vec::new();
 
         for event in raw_events {
             match event {
-                InputEvent::Data {
+                SourceEvent::Data {
                     bytes,
                     source_id,
                     accounted_bytes,
@@ -94,7 +94,7 @@ impl FramedInput {
                                 {
                                     crate::format::count_json_parse_errors(&bytes, stats);
                                 }
-                                result_events.push(InputEvent::Data {
+                                result_events.push(SourceEvent::Data {
                                     bytes,
                                     source_id,
                                     accounted_bytes: 0,
@@ -139,7 +139,7 @@ impl FramedInput {
                                 {
                                     crate::format::count_json_parse_errors(&complete, stats);
                                 }
-                                result_events.push(InputEvent::Data {
+                                result_events.push(SourceEvent::Data {
                                     bytes: complete,
                                     source_id,
                                     accounted_bytes: 0,
@@ -301,7 +301,7 @@ impl FramedInput {
                         let data = std::mem::take(&mut self.out_buf);
                         let cri_metadata = self.cri_metadata_for_emitted_data();
                         std::mem::swap(&mut self.out_buf, &mut self.spare_buf);
-                        result_events.push(InputEvent::Data {
+                        result_events.push(SourceEvent::Data {
                             bytes: Bytes::from(data),
                             source_id,
                             accounted_bytes: 0,
@@ -319,14 +319,14 @@ impl FramedInput {
                         self.sources.remove(&key);
                     }
                 }
-                InputEvent::Batch {
+                SourceEvent::Batch {
                     batch,
                     source_id,
                     accounted_bytes,
                 } => {
                     self.stats.inc_lines(batch.num_rows() as u64);
                     self.stats.inc_bytes(accounted_bytes);
-                    result_events.push(InputEvent::Batch {
+                    result_events.push(SourceEvent::Batch {
                         batch,
                         source_id,
                         accounted_bytes: 0,
@@ -337,8 +337,8 @@ impl FramedInput {
                 // When source_id is known, clear only the affected source's
                 // state. When unknown (None), clear all sources as a
                 // conservative fallback.
-                event @ (InputEvent::Rotated { source_id }
-                | InputEvent::Truncated { source_id }) => {
+                event @ (SourceEvent::Rotated { source_id }
+                | SourceEvent::Truncated { source_id }) => {
                     match source_id {
                         Some(_) => {
                             self.sources.remove(&source_id);
@@ -359,7 +359,7 @@ impl FramedInput {
                 // When source_id is known, flush only the affected source's
                 // remainder. When unknown (None), flush all remainders as a
                 // conservative fallback.
-                InputEvent::EndOfFile { source_id } => {
+                SourceEvent::EndOfFile { source_id } => {
                     let keys_to_flush: Vec<Option<SourceId>> = match source_id {
                         Some(_) => vec![source_id],
                         None => self.sources.keys().copied().collect(),
@@ -410,7 +410,7 @@ impl FramedInput {
                                 let data = std::mem::take(&mut self.out_buf);
                                 let cri_metadata = self.cri_metadata_for_emitted_data();
                                 std::mem::swap(&mut self.out_buf, &mut self.spare_buf);
-                                result_events.push(InputEvent::Data {
+                                result_events.push(SourceEvent::Data {
                                     bytes: Bytes::from(data),
                                     source_id: key,
                                     accounted_bytes: 0,
@@ -430,7 +430,7 @@ impl FramedInput {
                             self.sources.remove(&key);
                         }
                     }
-                    result_events.push(InputEvent::EndOfFile { source_id });
+                    result_events.push(SourceEvent::EndOfFile { source_id });
                 }
             }
         }

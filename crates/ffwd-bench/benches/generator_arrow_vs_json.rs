@@ -9,7 +9,7 @@ use ffwd_io::generator::{
     GeneratorComplexity, GeneratorConfig, GeneratorInput, GeneratorProfile, GeneratorTimestamp,
     generate_arrow_batch,
 };
-use ffwd_io::input::{InputEvent, InputSource};
+use ffwd_io::input::{InputSource, SourceEvent};
 
 fn bench_generator_arrow_vs_json(c: &mut Criterion) {
     let mut group = c.benchmark_group("generator_arrow_vs_json");
@@ -38,7 +38,7 @@ fn bench_generator_arrow_vs_json(c: &mut Criterion) {
                     },
                 );
                 let events = generator.poll().expect("generator poll should succeed");
-                let InputEvent::Data { bytes, .. } = events
+                let SourceEvent::Data { bytes, .. } = events
                     .into_iter()
                     .next()
                     .expect("finite generator should emit one batch")

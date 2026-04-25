@@ -145,7 +145,7 @@ impl HostMetricsCommon {
         emitted
     }
 
-    fn build_batch_event(&self, rows: Vec<SensorRow>) -> io::Result<InputEvent> {
+    fn build_batch_event(&self, rows: Vec<SensorRow>) -> io::Result<SourceEvent> {
         if rows.is_empty() {
             return Err(io::Error::other("cannot build sensor batch from zero rows"));
         }
@@ -161,7 +161,7 @@ impl HostMetricsCommon {
         let batch = RecordBatch::try_new(Arc::clone(&self.schema), columns.into_arrays())
             .map_err(|e| io::Error::other(format!("build sensor batch: {e}")))?;
 
-        Ok(InputEvent::Batch {
+        Ok(SourceEvent::Batch {
             batch,
             source_id: None,
             accounted_bytes,

@@ -16,7 +16,7 @@ use ffwd_types::diagnostics::ComponentHealth;
 use serde::Deserialize;
 use sysinfo::{Networks, Process, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
-use crate::input::{InputEvent, InputSource};
+use crate::input::{SourceEvent, InputSource};
 
 macro_rules! sensor_row_columns {
     ($callback:ident) => {
@@ -315,7 +315,7 @@ struct ControlState {
     emit_signal_rows: bool,
 }
 
-type InitStartOk = (HostMetricsState<RunningState>, Vec<InputEvent>);
+type InitStartOk = (HostMetricsState<RunningState>, Vec<SourceEvent>);
 type InitStartErr = Box<(HostMetricsState<InitState>, io::Error)>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

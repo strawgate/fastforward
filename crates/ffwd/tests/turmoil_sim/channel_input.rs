@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 use std::io;
 
 use bytes::Bytes;
-use ffwd_io::input::{InputEvent, InputSource};
+use ffwd_io::input::{InputSource, SourceEvent};
 use ffwd_io::tail::ByteOffset;
 use ffwd_types::diagnostics::ComponentHealth;
 use ffwd_types::pipeline::SourceId;
@@ -29,12 +29,12 @@ impl ChannelInputSource {
 }
 
 impl InputSource for ChannelInputSource {
-    fn poll(&mut self) -> io::Result<Vec<InputEvent>> {
+    fn poll(&mut self) -> io::Result<Vec<SourceEvent>> {
         match self.chunks.pop_front() {
             Some(data) => {
                 let accounted_bytes = data.len() as u64;
                 self.offset += data.len() as u64;
-                Ok(vec![InputEvent::Data {
+                Ok(vec![SourceEvent::Data {
                     bytes: Bytes::from(data),
                     source_id: Some(self.source_id),
                     accounted_bytes,

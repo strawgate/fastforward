@@ -106,9 +106,9 @@ fn poll_receiver_until<F>(
     timeout: Duration,
     mut predicate: F,
     failure_message: &str,
-) -> Vec<InputEvent>
+) -> Vec<SourceEvent>
 where
-    F: FnMut(&[InputEvent]) -> bool,
+    F: FnMut(&[SourceEvent]) -> bool,
 {
     let deadline = Instant::now() + timeout;
     loop {

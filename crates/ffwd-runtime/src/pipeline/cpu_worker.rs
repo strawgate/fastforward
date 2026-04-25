@@ -18,7 +18,7 @@ use ffwd_io::tail::ByteOffset;
 use ffwd_types::pipeline::SourceId;
 
 #[cfg(not(feature = "turmoil"))]
-use super::InputTransform;
+use super::SourcePipeline;
 #[cfg(not(feature = "turmoil"))]
 use super::io_worker::IoWorkItem;
 #[cfg(not(feature = "turmoil"))]
@@ -27,7 +27,7 @@ use super::source_metadata::{cri_metadata_for_batch, source_metadata_for_batch};
 /// Run the CPU worker loop for one input.
 ///
 /// Receives raw bytes from the I/O worker, scans them into Arrow RecordBatches,
-/// runs the per-input SQL transform, and sends `ChannelMsg` to the
+/// runs the per-input SQL transform, and sends `ProcessedBatch` to the
 /// pipeline's main select loop.
 ///
 /// Creates a lightweight tokio current-thread runtime for DataFusion SQL
@@ -36,8 +36,8 @@ use super::source_metadata::{cri_metadata_for_batch, source_metadata_for_batch};
 #[cfg(not(feature = "turmoil"))]
 pub(super) fn cpu_worker_loop(
     mut rx: mpsc::Receiver<IoWorkItem>,
-    tx: mpsc::Sender<super::ChannelMsg>,
-    mut transform: InputTransform,
+    tx: mpsc::Sender<super::ProcessedBatch>,
+    mut transform: SourcePipeline,
     metrics: Arc<PipelineMetrics>,
 ) {
     let rt = match tokio::runtime::Builder::new_current_thread()
@@ -63,7 +63,7 @@ pub(super) fn cpu_worker_loop(
 
     while let Some(item) = rx.blocking_recv() {
         let (batch, checkpoints, queued_at, input_index, scan_ns) = match item {
-            IoWorkItem::Bytes(chunk) => {
+            IoWorkItem::RawBatch(chunk) => {
                 let t0 = Instant::now();
                 let batch = match transform.scanner.scan(chunk.bytes) {
                     Ok(b) => b,
@@ -187,7 +187,7 @@ pub(super) fn cpu_worker_loop(
         let transform_ns = t1.elapsed().as_nanos() as u64;
         let checkpoint_map: HashMap<SourceId, ByteOffset> = checkpoints.into_iter().collect();
 
-        let msg = super::ChannelMsg {
+        let msg = super::ProcessedBatch {
             batch: result,
             checkpoints: checkpoint_map,
             queued_at: Some(queued_at),

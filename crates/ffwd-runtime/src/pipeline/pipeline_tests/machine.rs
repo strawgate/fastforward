@@ -377,12 +377,12 @@ fn test_flush_batch_output_error_machine_still_drains() {
 
 #[test]
 fn test_channel_msg_carries_checkpoints() {
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<ChannelMsg>(4);
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<ProcessedBatch>(4);
 
     let empty = RecordBatch::new_empty(Arc::new(arrow::datatypes::Schema::empty()));
     let mut checkpoints = HashMap::new();
     checkpoints.insert(SourceId(42), ByteOffset(1000));
-    tx.try_send(ChannelMsg {
+    tx.try_send(ProcessedBatch {
         batch: empty,
         checkpoints,
         queued_at: Some(tokio::time::Instant::now()),

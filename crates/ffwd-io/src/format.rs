@@ -485,7 +485,7 @@ fn write_cri_message<O: ScannerReadyOutput>(msg: &[u8], plain_text_field_name: &
 mod tests {
     use super::*;
     use crate::framed::FramedInput;
-    use crate::input::{FileInput, InputEvent, InputSource};
+    use crate::input::{FileInput, InputSource, SourceEvent};
     use crate::tail::TailConfig;
     use bytes::BytesMut;
     use proptest::prelude::*;
@@ -547,7 +547,7 @@ mod tests {
             let data: Vec<u8> = events
                 .into_iter()
                 .filter_map(|event| match event {
-                    InputEvent::Data { bytes, .. } => Some(bytes),
+                    SourceEvent::Data { bytes, .. } => Some(bytes),
                     _ => None,
                 })
                 .flatten()

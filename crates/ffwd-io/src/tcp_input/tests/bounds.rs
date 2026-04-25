@@ -121,7 +121,7 @@
         while Instant::now() < deadline {
             let events = input.poll().unwrap();
             if events.iter().any(|e| match e {
-                InputEvent::Data { bytes, .. } => bytes.windows(3).any(|w| w == b"ok\n"),
+                SourceEvent::Data { bytes, .. } => bytes.windows(3).any(|w| w == b"ok\n"),
                 _ => false,
             }) {
                 has_ok = true;
@@ -173,7 +173,7 @@
         while Instant::now() < deadline {
             let events = input.poll().unwrap();
             if events.into_iter().any(|e| match e {
-                InputEvent::Data { bytes, .. } => {
+                SourceEvent::Data { bytes, .. } => {
                     bytes.len() == (MAX_LINE_LENGTH + 1) && bytes.ends_with(b"\n")
                 }
                 _ => false,
@@ -205,7 +205,7 @@
         let joined = events
             .into_iter()
             .filter_map(|e| match e {
-                InputEvent::Data { bytes, .. } => Some(bytes),
+                SourceEvent::Data { bytes, .. } => Some(bytes),
                 _ => None,
             })
             .flatten()
@@ -230,7 +230,7 @@
         let mut got = Vec::new();
         while Instant::now() < deadline {
             for event in input.poll().unwrap() {
-                if let InputEvent::Data { bytes, .. } = event {
+                if let SourceEvent::Data { bytes, .. } = event {
                     got.extend_from_slice(&bytes);
                 }
             }
@@ -304,7 +304,7 @@
         let data_bytes: Vec<u8> = events
             .iter()
             .filter_map(|e| match e {
-                InputEvent::Data { bytes, .. } => Some(bytes.clone()),
+                SourceEvent::Data { bytes, .. } => Some(bytes.clone()),
                 _ => None,
             })
             .flatten()
@@ -325,7 +325,7 @@
         // The flushed tail must be followed by EndOfFile for the same source.
         let has_eof = events
             .iter()
-            .any(|e| matches!(e, InputEvent::EndOfFile { source_id } if source_id.is_some()));
+            .any(|e| matches!(e, SourceEvent::EndOfFile { source_id } if source_id.is_some()));
         assert!(
             has_eof,
             "EndOfFile must still be emitted after the pending Data"
@@ -355,7 +355,7 @@
         let data_bytes: Vec<u8> = events
             .iter()
             .filter_map(|e| match e {
-                InputEvent::Data { bytes, .. } => Some(bytes.clone()),
+                SourceEvent::Data { bytes, .. } => Some(bytes.clone()),
                 _ => None,
             })
             .flatten()
@@ -416,7 +416,7 @@
         let source_ids: Vec<SourceId> = events
             .iter()
             .filter_map(|e| match e {
-                InputEvent::Data { source_id, .. } => *source_id,
+                SourceEvent::Data { source_id, .. } => *source_id,
                 _ => None,
             })
             .collect();
@@ -497,7 +497,7 @@
         let mut saw_quiet = false;
 
         for event in events {
-            if let InputEvent::Data {
+            if let SourceEvent::Data {
                 bytes, source_id, ..
             } = event
                 && let Some(source_id) = source_id

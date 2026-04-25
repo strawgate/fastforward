@@ -23,7 +23,7 @@ use ffwd_bench::{generators, make_otlp_sink};
 use ffwd_core::scan_config::ScanConfig;
 use ffwd_io::format::FormatDecoder;
 use ffwd_io::framed::FramedInput;
-use ffwd_io::input::{InputEvent, InputSource};
+use ffwd_io::input::{InputSource, SourceEvent};
 use ffwd_output::{BatchMetadata, Compression};
 use ffwd_types::diagnostics::{ComponentHealth, ComponentStats};
 use ffwd_types::pipeline::SourceId;
@@ -121,7 +121,7 @@ fn main() {
         "- `crates/ffwd-io/src/format.rs` — passthrough and passthrough-json extend `out` from `chunk`, creating a second full-buffer copy."
     );
     println!(
-        "- `crates/ffwd-runtime/src/pipeline/input_pipeline.rs` — `InputState.buf.extend_from_slice(&bytes)` copies FramedInput output into the async `BytesMut` batch buffer."
+        "- `crates/ffwd-runtime/src/pipeline/input_pipeline.rs` — `IngestState.buf.extend_from_slice(&bytes)` copies FramedInput output into the async `BytesMut` batch buffer."
     );
     println!();
     println!("## Recommendations\n");
@@ -341,17 +341,17 @@ impl Scenario {
 }
 
 struct MockSource {
-    events: VecDeque<Vec<InputEvent>>,
+    events: VecDeque<Vec<SourceEvent>>,
     source_path: Option<PathBuf>,
 }
 
 impl MockSource {
     fn new(chunks: &[Vec<u8>], source_path: Option<&'static str>) -> Self {
         let source_id = source_path.map(|_| SourceId(1));
-        let mut events: VecDeque<Vec<InputEvent>> = chunks
+        let mut events: VecDeque<Vec<SourceEvent>> = chunks
             .iter()
             .map(|chunk| {
-                vec![InputEvent::Data {
+                vec![SourceEvent::Data {
                     bytes: Bytes::from(chunk.clone()),
                     source_id,
                     accounted_bytes: chunk.len() as u64,
@@ -359,7 +359,7 @@ impl MockSource {
                 }]
             })
             .collect();
-        events.push_back(vec![InputEvent::EndOfFile { source_id }]);
+        events.push_back(vec![SourceEvent::EndOfFile { source_id }]);
         Self {
             events,
             source_path: source_path.map(PathBuf::from),
@@ -368,7 +368,7 @@ impl MockSource {
 }
 
 impl InputSource for MockSource {
-    fn poll(&mut self) -> io::Result<Vec<InputEvent>> {
+    fn poll(&mut self) -> io::Result<Vec<SourceEvent>> {
         Ok(self.events.pop_front().unwrap_or_default())
     }
 
@@ -451,7 +451,7 @@ fn run_pipeline_once(scenario: &Scenario) -> StageSample {
     for _ in 0..=scenario.chunks.len() {
         let events = framed.poll().expect("FramedInput poll should succeed");
         for event in events {
-            if let InputEvent::Data { bytes, .. } = event {
+            if let SourceEvent::Data { bytes, .. } = event {
                 framed_bytes.extend_from_slice(&bytes);
             }
         }

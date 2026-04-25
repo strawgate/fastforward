@@ -54,7 +54,7 @@ impl HostMetricsInput {
 }
 
 impl InputSource for HostMetricsInput {
-    fn poll(&mut self) -> io::Result<Vec<InputEvent>> {
+    fn poll(&mut self) -> io::Result<Vec<SourceEvent>> {
         let machine = self
             .machine
             .take()

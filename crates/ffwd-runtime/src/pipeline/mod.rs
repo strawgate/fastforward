@@ -53,9 +53,9 @@ use ffwd_io::checkpoint::CheckpointStore;
 use ffwd_io::checkpoint::FileCheckpointStore;
 #[cfg(test)]
 use ffwd_io::format::FormatDecoder;
-#[cfg(test)]
-use ffwd_io::input::InputEvent;
 use ffwd_io::input::InputSource;
+#[cfg(test)]
+use ffwd_io::input::SourceEvent;
 use ffwd_io::tail::ByteOffset;
 use ffwd_output::OnceAsyncFactory;
 #[cfg(feature = "turmoil")]
@@ -110,7 +110,7 @@ fn scan_maybe_blocking(
 /// Contains a scanned and SQL-transformed RecordBatch, ready for
 /// the processor chain and output pool. Both production (CPU worker)
 /// and simulation (turmoil async loop) produce this same message type.
-pub(crate) struct ChannelMsg {
+pub(crate) struct ProcessedBatch {
     pub batch: RecordBatch,
     pub checkpoints: HashMap<SourceId, ByteOffset>,
     pub queued_at: Option<tokio::time::Instant>,
@@ -129,7 +129,7 @@ pub(crate) struct ChannelMsg {
 /// Each input gets its own `Scanner` (driven by `ScanConfig` derived from
 /// its SQL) and `SqlTransform`. This enables per-input field extraction,
 /// filtering, and schema reshaping with natural predicate pushdown.
-struct InputTransform {
+struct SourcePipeline {
     scanner: Scanner,
     transform: SqlTransform,
     input_name: String,
@@ -145,7 +145,7 @@ pub(crate) struct RowOriginSpan {
     pub rows: usize,
 }
 
-struct InputState {
+struct IngestState {
     /// The input source, wrapped in FramedInput for line framing + format processing.
     /// The pipeline receives scanner-ready bytes — it doesn't know about formats.
     source: Box<dyn InputSource>,
@@ -171,10 +171,10 @@ struct InputState {
 /// A single pipeline: inputs → per-input Scanner + SQL transform → async output pool.
 pub struct Pipeline {
     name: String,
-    inputs: Vec<InputState>,
+    inputs: Vec<IngestState>,
     /// Per-input Scanner + SqlTransform pairs. One per input config,
     /// indexed by the same order as `inputs`.
-    input_transforms: Vec<InputTransform>,
+    input_transforms: Vec<SourcePipeline>,
     /// Optional post-transform processor chain (e.g., tail-based sampling).
     /// Batches flow through each processor in order. Empty vec = no processors.
     processors: Vec<Box<dyn Processor>>,
@@ -227,7 +227,7 @@ impl Pipeline {
     #[must_use]
     pub fn with_input(mut self, name: &str, source: Box<dyn InputSource>) -> Self {
         let stats = Arc::new(ComponentStats::new_with_health(ComponentHealth::Starting));
-        self.inputs.push(InputState {
+        self.inputs.push(IngestState {
             source,
             buf: BytesMut::with_capacity(self.batch_target_bytes),
             row_origins: Vec::new(),
@@ -240,7 +240,7 @@ impl Pipeline {
             let transform =
                 SqlTransform::new("SELECT * FROM logs").expect("default passthrough SQL");
             let scanner = Scanner::new(transform.scan_config());
-            self.input_transforms.push(InputTransform {
+            self.input_transforms.push(SourcePipeline {
                 scanner,
                 transform,
                 input_name: name.to_string(),

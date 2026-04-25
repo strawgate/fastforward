@@ -28,10 +28,10 @@ The default rule remains:
 
 PR #2317 landed the sidecar spine:
 
-- `InputEvent::Data` and `InputEvent::Batch` carry `Option<SourceId>`.
+- `SourceEvent::Data` and `SourceEvent::Batch` carry `Option<SourceId>`.
 - Runtime I/O workers coalesce scanner-ready row spans in
   `RowOriginSpan { source_id, input_name, rows }`.
-- `IoChunk` carries `row_origins` and a filtered `SourceId -> path` map.
+- `IoWorkItem::RawBatch` carries `row_origins` and a filtered `SourceId -> path` map.
 - The CPU worker scans unchanged bytes, attaches requested metadata columns,
   and then runs SQL.
 - `source_metadata: fastforward` materializes `__source_id` as nullable

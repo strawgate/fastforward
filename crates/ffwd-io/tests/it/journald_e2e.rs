@@ -15,7 +15,7 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ffwd_io::input::{InputEvent, InputSource};
+use ffwd_io::input::{InputSource, SourceEvent};
 use ffwd_io::journal_ffi;
 use ffwd_io::journald_input::{
     JournaldBackend, JournaldBackendPref, JournaldConfig, JournaldInput,
@@ -65,7 +65,7 @@ fn poll_until_bytes(input: &mut dyn InputSource, expected: usize, timeout: Durat
 
     while std::time::Instant::now() < deadline {
         for event in input.poll().unwrap() {
-            if let InputEvent::Data { bytes, .. } = event {
+            if let SourceEvent::Data { bytes, .. } = event {
                 all.extend_from_slice(&bytes);
             }
         }
@@ -73,7 +73,7 @@ fn poll_until_bytes(input: &mut dyn InputSource, expected: usize, timeout: Durat
             // One more drain pass.
             std::thread::sleep(Duration::from_millis(50));
             for event in input.poll().unwrap() {
-                if let InputEvent::Data { bytes, .. } = event {
+                if let SourceEvent::Data { bytes, .. } = event {
                     all.extend_from_slice(&bytes);
                 }
             }
@@ -108,7 +108,7 @@ fn poll_until_match(input: &mut dyn InputSource, needle: &str, timeout: Duration
 
     while std::time::Instant::now() < deadline {
         for event in input.poll().unwrap() {
-            if let InputEvent::Data { bytes, .. } = event {
+            if let SourceEvent::Data { bytes, .. } = event {
                 all_bytes.extend_from_slice(&bytes);
             }
         }
@@ -117,7 +117,7 @@ fn poll_until_match(input: &mut dyn InputSource, needle: &str, timeout: Duration
             // Drain once more to collect any trailing entries.
             std::thread::sleep(Duration::from_millis(100));
             for event in input.poll().unwrap() {
-                if let InputEvent::Data { bytes, .. } = event {
+                if let SourceEvent::Data { bytes, .. } = event {
                     all_bytes.extend_from_slice(&bytes);
                 }
             }

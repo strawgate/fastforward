@@ -1,4 +1,4 @@
-//! UDP input source. Listens on a UDP socket and produces one InputEvent
+//! UDP input source. Listens on a UDP socket and produces one SourceEvent
 //! per received datagram (or batch of datagrams).
 
 use std::io;
@@ -11,7 +11,7 @@ use ffwd_types::diagnostics::ComponentHealth;
 use ffwd_types::pipeline::SourceId;
 use socket2::{Domain, Protocol, Socket, Type};
 
-use crate::input::{InputEvent, InputSource};
+use crate::input::{InputSource, SourceEvent};
 use crate::polling_input_health::{PollingInputHealthEvent, reduce_polling_input_health};
 
 /// Maximum UDP payload based on UDP length field: 65535 - 8-byte UDP header.
@@ -64,13 +64,13 @@ fn source_id_for_sender(addr: SocketAddr) -> SourceId {
 }
 
 fn flush_current_sender(
-    events: &mut Vec<InputEvent>,
+    events: &mut Vec<SourceEvent>,
     current: &mut Option<(SourceId, Vec<u8>, u64)>,
 ) {
     if let Some((source_id, bytes, accounted_bytes)) = current.take()
         && !bytes.is_empty()
     {
-        events.push(InputEvent::Data {
+        events.push(SourceEvent::Data {
             bytes: Bytes::from(bytes),
             source_id: Some(source_id),
             accounted_bytes,
@@ -191,7 +191,7 @@ impl UdpInput {
 }
 
 impl InputSource for UdpInput {
-    fn poll(&mut self) -> io::Result<Vec<InputEvent>> {
+    fn poll(&mut self) -> io::Result<Vec<SourceEvent>> {
         let mut under_pressure = false;
         let mut datagrams_read = 0usize;
 
@@ -311,7 +311,7 @@ mod tests {
         assert!(!events.is_empty());
         let mut text = String::new();
         for event in &events {
-            if let InputEvent::Data { bytes, .. } = event {
+            if let SourceEvent::Data { bytes, .. } = event {
                 text.push_str(&String::from_utf8_lossy(bytes));
             }
         }
@@ -337,7 +337,7 @@ mod tests {
 
         let events = input.poll().unwrap();
         assert_eq!(events.len(), 1);
-        if let InputEvent::Data { bytes, .. } = &events[0] {
+        if let SourceEvent::Data { bytes, .. } = &events[0] {
             assert!(bytes.ends_with(b"\n"), "expected trailing newline");
         }
     }
@@ -359,7 +359,7 @@ mod tests {
 
         let events = input.poll().unwrap();
         assert_eq!(events.len(), 1);
-        if let InputEvent::Data {
+        if let SourceEvent::Data {
             bytes,
             accounted_bytes,
             ..
@@ -369,7 +369,7 @@ mod tests {
             assert_eq!(bytes.len(), 11);
             assert!(bytes.ends_with(b"\n"), "expected trailing newline");
         } else {
-            panic!("expected InputEvent::Data variant");
+            panic!("expected SourceEvent::Data variant");
         }
     }
 
@@ -394,7 +394,7 @@ mod tests {
         let source_ids = events
             .iter()
             .filter_map(|event| match event {
-                InputEvent::Data { source_id, .. } => *source_id,
+                SourceEvent::Data { source_id, .. } => *source_id,
                 _ => None,
             })
             .collect::<std::collections::HashSet<_>>();
@@ -453,7 +453,7 @@ mod tests {
 
         let events = input.poll().unwrap();
         assert_eq!(events.len(), 1);
-        if let InputEvent::Data { bytes, .. } = &events[0] {
+        if let SourceEvent::Data { bytes, .. } = &events[0] {
             let text = String::from_utf8_lossy(bytes);
             assert_eq!(text.matches('\n').count(), 3);
         }
@@ -550,7 +550,7 @@ mod tests {
         let mut all_bytes = Vec::new();
         for _ in 0..50 {
             for event in input.poll().unwrap() {
-                if let InputEvent::Data { bytes, .. } = event {
+                if let SourceEvent::Data { bytes, .. } = event {
                     all_bytes.extend_from_slice(&bytes);
                 }
             }
@@ -591,7 +591,7 @@ mod tests {
         // but the "after" datagram should arrive.
         let mut all = Vec::new();
         for event in events {
-            if let InputEvent::Data { bytes, .. } = event {
+            if let SourceEvent::Data { bytes, .. } = event {
                 all.extend_from_slice(&bytes);
             }
         }
@@ -694,7 +694,7 @@ mod tests {
         let first_lines = first
             .iter()
             .filter_map(|event| match event {
-                InputEvent::Data { bytes, .. } => Some(memchr::memchr_iter(b'\n', bytes).count()),
+                SourceEvent::Data { bytes, .. } => Some(memchr::memchr_iter(b'\n', bytes).count()),
                 _ => None,
             })
             .sum::<usize>();
@@ -706,7 +706,7 @@ mod tests {
         let mut seen: Vec<u8> = first
             .into_iter()
             .filter_map(|event| match event {
-                InputEvent::Data { bytes, .. } => Some(bytes),
+                SourceEvent::Data { bytes, .. } => Some(bytes),
                 _ => None,
             })
             .flatten()
@@ -720,7 +720,7 @@ mod tests {
                 events
                     .into_iter()
                     .filter_map(|event| match event {
-                        InputEvent::Data { bytes, .. } => Some(bytes),
+                        SourceEvent::Data { bytes, .. } => Some(bytes),
                         _ => None,
                     })
                     .flatten(),
@@ -750,7 +750,7 @@ mod tests {
         let events = input.poll().unwrap();
         assert_eq!(events.len(), 1);
         match &events[0] {
-            InputEvent::Data {
+            SourceEvent::Data {
                 source_id: Some(_), ..
             } => {}
             _ => panic!("expected UDP data to carry a source_id"),
@@ -772,7 +772,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(25));
         let first_events = input.poll().unwrap();
         let first = match &first_events[0] {
-            InputEvent::Data {
+            SourceEvent::Data {
                 source_id: Some(id),
                 ..
             } => *id,
@@ -783,7 +783,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(25));
         let second_events = input.poll().unwrap();
         let second = match &second_events[0] {
-            InputEvent::Data {
+            SourceEvent::Data {
                 source_id: Some(id),
                 ..
             } => *id,
@@ -809,7 +809,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(25));
         let event_a = input.poll().unwrap();
         let source_a = match &event_a[0] {
-            InputEvent::Data {
+            SourceEvent::Data {
                 source_id: Some(id),
                 ..
             } => *id,
@@ -820,7 +820,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(25));
         let event_b = input.poll().unwrap();
         let source_b = match &event_b[0] {
-            InputEvent::Data {
+            SourceEvent::Data {
                 source_id: Some(id),
                 ..
             } => *id,

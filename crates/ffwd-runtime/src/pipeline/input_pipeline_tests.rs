@@ -8,7 +8,7 @@ use arrow::array::{Array, StringArray, StringViewArray, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use bytes::{Bytes, BytesMut};
 use ffwd_arrow::Scanner;
-use ffwd_io::input::{CriMetadata, FramedReadEvent, InputEvent};
+use ffwd_io::input::{CriMetadata, FramedReadEvent, SourceEvent};
 use ffwd_types::source_metadata::{SourceMetadataPlan, SourcePathColumn};
 use proptest::prelude::*;
 use std::collections::HashMap;
@@ -30,13 +30,13 @@ use ffwd_types::pipeline::SourceId;
 #[test]
 fn shutdown_repoll_continues_for_payload_without_matching_eof() {
     let events = vec![
-        InputEvent::Data {
+        SourceEvent::Data {
             bytes: Bytes::from_static(b"a\n"),
             source_id: Some(SourceId(1)),
             accounted_bytes: 2,
             cri_metadata: None,
         },
-        InputEvent::EndOfFile {
+        SourceEvent::EndOfFile {
             source_id: Some(SourceId(2)),
         },
     ];
@@ -47,13 +47,13 @@ fn shutdown_repoll_continues_for_payload_without_matching_eof() {
 #[test]
 fn shutdown_repoll_stops_when_payload_source_reaches_eof() {
     let events = vec![
-        InputEvent::Data {
+        SourceEvent::Data {
             bytes: Bytes::from_static(b"a\n"),
             source_id: Some(SourceId(1)),
             accounted_bytes: 2,
             cri_metadata: None,
         },
-        InputEvent::EndOfFile {
+        SourceEvent::EndOfFile {
             source_id: Some(SourceId(1)),
         },
     ];
@@ -64,13 +64,13 @@ fn shutdown_repoll_stops_when_payload_source_reaches_eof() {
 #[test]
 fn shutdown_repoll_stops_on_global_eof() {
     let events = vec![
-        InputEvent::Data {
+        SourceEvent::Data {
             bytes: Bytes::from_static(b"a\n"),
             source_id: Some(SourceId(1)),
             accounted_bytes: 2,
             cri_metadata: None,
         },
-        InputEvent::EndOfFile { source_id: None },
+        SourceEvent::EndOfFile { source_id: None },
     ];
 
     assert!(!should_repoll_shutdown(&events, false, true));
@@ -83,7 +83,7 @@ fn shutdown_repoll_continues_for_empty_framed_output_after_source_payload() {
 
 #[test]
 fn shutdown_repoll_continues_for_eof_only_output_after_source_payload() {
-    let events = vec![InputEvent::EndOfFile {
+    let events = vec![SourceEvent::EndOfFile {
         source_id: Some(SourceId(2)),
     }];
 
@@ -476,12 +476,12 @@ struct SingleDataSource {
 }
 
 impl InputSource for SingleDataSource {
-    fn poll(&mut self) -> io::Result<Vec<InputEvent>> {
+    fn poll(&mut self) -> io::Result<Vec<SourceEvent>> {
         if self.emitted {
             return Ok(Vec::new());
         }
         self.emitted = true;
-        Ok(vec![InputEvent::Data {
+        Ok(vec![SourceEvent::Data {
             bytes: Bytes::from_static(b"{\"msg\":\"x\"}\n"),
             source_id: Some(SourceId(7)),
             accounted_bytes: 12,
@@ -510,19 +510,19 @@ struct SplitLineSource {
 }
 
 impl InputSource for SplitLineSource {
-    fn poll(&mut self) -> io::Result<Vec<InputEvent>> {
+    fn poll(&mut self) -> io::Result<Vec<SourceEvent>> {
         if self.emitted {
             return Ok(Vec::new());
         }
         self.emitted = true;
         Ok(vec![
-            InputEvent::Data {
+            SourceEvent::Data {
                 bytes: Bytes::from_static(b"{\"msg\":\"hel"),
                 source_id: Some(SourceId(7)),
                 accounted_bytes: 11,
                 cri_metadata: None,
             },
-            InputEvent::Data {
+            SourceEvent::Data {
                 bytes: Bytes::from_static(b"lo\"}\n{\"msg\":\"next\"}\n"),
                 source_id: Some(SourceId(7)),
                 accounted_bytes: 21,
@@ -550,7 +550,7 @@ struct SharedBufferSource {
 }
 
 impl InputSource for SharedBufferSource {
-    fn poll(&mut self) -> io::Result<Vec<InputEvent>> {
+    fn poll(&mut self) -> io::Result<Vec<SourceEvent>> {
         panic!("poll() should not be used when poll_into() is available"); // ALLOW-PANIC: test-only InputSource that deliberately never uses poll()
     }
 
@@ -589,7 +589,7 @@ struct LargeSharedBufferSource {
 }
 
 impl InputSource for LargeSharedBufferSource {
-    fn poll(&mut self) -> io::Result<Vec<InputEvent>> {
+    fn poll(&mut self) -> io::Result<Vec<SourceEvent>> {
         panic!("poll() should not be used when poll_into() is available"); // ALLOW-PANIC: test-only InputSource that deliberately never uses poll()
     }
 
@@ -627,7 +627,7 @@ struct BatchSource {
 }
 
 impl InputSource for BatchSource {
-    fn poll(&mut self) -> io::Result<Vec<InputEvent>> {
+    fn poll(&mut self) -> io::Result<Vec<SourceEvent>> {
         if self.emitted {
             return Ok(Vec::new());
         }
@@ -635,7 +635,7 @@ impl InputSource for BatchSource {
         let schema = Arc::new(Schema::new(vec![Field::new("msg", DataType::Utf8, true)]));
         let batch = RecordBatch::try_new(schema, vec![Arc::new(StringArray::from(vec!["a", "b"]))])
             .expect("batch");
-        Ok(vec![InputEvent::Batch {
+        Ok(vec![SourceEvent::Batch {
             batch,
             source_id: Some(SourceId(12)),
             accounted_bytes: 2,
@@ -660,12 +660,12 @@ struct ShutdownDrainSource {
 }
 
 impl InputSource for ShutdownDrainSource {
-    fn poll(&mut self) -> io::Result<Vec<InputEvent>> {
+    fn poll(&mut self) -> io::Result<Vec<SourceEvent>> {
         if self.emitted {
             return Ok(Vec::new());
         }
         self.emitted = true;
-        Ok(vec![InputEvent::Data {
+        Ok(vec![SourceEvent::Data {
             bytes: Bytes::from_static(b"{\"msg\":\"drain\"}\n"),
             source_id: Some(SourceId(13)),
             accounted_bytes: 16,
@@ -693,17 +693,17 @@ struct MultiShutdownPollSource {
 }
 
 impl InputSource for MultiShutdownPollSource {
-    fn poll(&mut self) -> io::Result<Vec<InputEvent>> {
+    fn poll(&mut self) -> io::Result<Vec<SourceEvent>> {
         Ok(Vec::new())
     }
 
-    fn poll_shutdown(&mut self) -> io::Result<Vec<InputEvent>> {
+    fn poll_shutdown(&mut self) -> io::Result<Vec<SourceEvent>> {
         if self.remaining == 0 {
             if self.finished {
                 return Ok(Vec::new());
             }
             self.finished = true;
-            return Ok(vec![InputEvent::EndOfFile {
+            return Ok(vec![SourceEvent::EndOfFile {
                 source_id: Some(SourceId(14)),
             }]);
         }
@@ -713,7 +713,7 @@ impl InputSource for MultiShutdownPollSource {
         let bytes =
             Bytes::from(format!("{{\"msg\":\"shutdown-{}\"}}\n", self.emitted).into_bytes());
         let accounted_bytes = bytes.len() as u64;
-        Ok(vec![InputEvent::Data {
+        Ok(vec![SourceEvent::Data {
             bytes,
             source_id: Some(SourceId(14)),
             accounted_bytes,
@@ -753,7 +753,7 @@ fn io_worker_uses_configured_input_name_for_source_metadata() {
     let (tx, mut rx) = mpsc::channel(IO_CPU_CHANNEL_CAPACITY);
     let shutdown = CancellationToken::new();
     let stats = Arc::new(ComponentStats::new_with_health(ComponentHealth::Starting));
-    let input = InputState {
+    let input = IngestState {
         source: Box::new(SingleDataSource { emitted: false }),
         buf: BytesMut::new(),
         row_origins: Vec::new(),
@@ -788,7 +788,7 @@ fn io_worker_uses_configured_input_name_for_source_metadata() {
     drop(rx);
     handle.join().expect("io worker exits");
 
-    let IoWorkItem::Bytes(chunk) = item else {
+    let IoWorkItem::RawBatch(chunk) = item else {
         panic!("expected byte chunk");
     };
     assert_eq!(chunk.row_origins.len(), 1);
@@ -807,7 +807,7 @@ fn io_worker_counts_split_line_origin_once() {
     let (tx, mut rx) = mpsc::channel(IO_CPU_CHANNEL_CAPACITY);
     let shutdown = CancellationToken::new();
     let stats = Arc::new(ComponentStats::new_with_health(ComponentHealth::Starting));
-    let input = InputState {
+    let input = IngestState {
         source: Box::new(SplitLineSource { emitted: false }),
         buf: BytesMut::new(),
         row_origins: Vec::new(),
@@ -842,7 +842,7 @@ fn io_worker_counts_split_line_origin_once() {
     drop(rx);
     handle.join().expect("io worker exits");
 
-    let IoWorkItem::Bytes(chunk) = item else {
+    let IoWorkItem::RawBatch(chunk) = item else {
         panic!("expected byte chunk");
     };
     assert_eq!(
@@ -863,7 +863,7 @@ fn io_worker_attaches_source_metadata_to_batch_event() {
     let (tx, mut rx) = mpsc::channel(IO_CPU_CHANNEL_CAPACITY);
     let shutdown = CancellationToken::new();
     let stats = Arc::new(ComponentStats::new_with_health(ComponentHealth::Starting));
-    let input = InputState {
+    let input = IngestState {
         source: Box::new(BatchSource { emitted: false }),
         buf: BytesMut::new(),
         row_origins: Vec::new(),
@@ -922,7 +922,7 @@ fn io_worker_shutdown_drains_buffered_source_metadata() {
     let (tx, mut rx) = mpsc::channel(IO_CPU_CHANNEL_CAPACITY);
     let shutdown = CancellationToken::new();
     let stats = Arc::new(ComponentStats::new_with_health(ComponentHealth::Starting));
-    let input = InputState {
+    let input = IngestState {
         source: Box::new(ShutdownDrainSource { emitted: false }),
         buf: BytesMut::new(),
         row_origins: Vec::new(),
@@ -958,7 +958,7 @@ fn io_worker_shutdown_drains_buffered_source_metadata() {
     drop(rx);
     handle.join().expect("io worker exits");
 
-    let IoWorkItem::Bytes(chunk) = item else {
+    let IoWorkItem::RawBatch(chunk) = item else {
         panic!("expected byte chunk");
     };
     assert_eq!(chunk.bytes.as_ref(), b"{\"msg\":\"drain\"}\n");
@@ -976,7 +976,7 @@ fn io_worker_shutdown_repolls_until_source_finishes() {
     let (tx, mut rx) = mpsc::channel(IO_CPU_CHANNEL_CAPACITY);
     let shutdown = CancellationToken::new();
     let stats = Arc::new(ComponentStats::new_with_health(ComponentHealth::Starting));
-    let input = InputState {
+    let input = IngestState {
         source: Box::new(MultiShutdownPollSource {
             remaining: SHUTDOWN_DRAIN_PROGRESS_LOG_INTERVAL_ROUNDS + 2,
             emitted: 0,
@@ -1016,7 +1016,7 @@ fn io_worker_shutdown_repolls_until_source_finishes() {
     drop(rx);
     handle.join().expect("io worker exits");
 
-    let IoWorkItem::Bytes(chunk) = item else {
+    let IoWorkItem::RawBatch(chunk) = item else {
         panic!("expected byte chunk");
     };
     let expected = (1..=SHUTDOWN_DRAIN_PROGRESS_LOG_INTERVAL_ROUNDS + 2)
@@ -1040,7 +1040,7 @@ fn io_worker_extends_existing_buffer_via_poll_into_path() {
     let (tx, mut rx) = mpsc::channel(IO_CPU_CHANNEL_CAPACITY);
     let shutdown = CancellationToken::new();
     let stats = Arc::new(ComponentStats::new_with_health(ComponentHealth::Starting));
-    let input = InputState {
+    let input = IngestState {
         source: Box::new(SharedBufferSource {
             emitted: false,
             finished: false,
@@ -1073,7 +1073,7 @@ fn io_worker_extends_existing_buffer_via_poll_into_path() {
     drop(rx);
     handle.join().expect("io worker exits");
 
-    let IoWorkItem::Bytes(chunk) = item else {
+    let IoWorkItem::RawBatch(chunk) = item else {
         panic!("expected byte chunk");
     };
     assert_eq!(
@@ -1087,7 +1087,7 @@ fn io_worker_uses_poll_into_path_with_empty_buffer() {
     let (tx, mut rx) = mpsc::channel(IO_CPU_CHANNEL_CAPACITY);
     let shutdown = CancellationToken::new();
     let stats = Arc::new(ComponentStats::new_with_health(ComponentHealth::Starting));
-    let input = InputState {
+    let input = IngestState {
         source: Box::new(SharedBufferSource {
             emitted: false,
             finished: false,
@@ -1120,7 +1120,7 @@ fn io_worker_uses_poll_into_path_with_empty_buffer() {
     drop(rx);
     handle.join().expect("io worker exits");
 
-    let IoWorkItem::Bytes(chunk) = item else {
+    let IoWorkItem::RawBatch(chunk) = item else {
         panic!("expected byte chunk");
     };
     assert_eq!(chunk.bytes.as_ref(), b"{\"msg\":\"shared\"}\n");
@@ -1131,7 +1131,7 @@ fn io_worker_flushes_large_shared_buffer_chunk_without_waiting_for_timeout() {
     let (tx, mut rx) = mpsc::channel(IO_CPU_CHANNEL_CAPACITY);
     let shutdown = CancellationToken::new();
     let stats = Arc::new(ComponentStats::new_with_health(ComponentHealth::Starting));
-    let input = InputState {
+    let input = IngestState {
         source: Box::new(LargeSharedBufferSource {
             emitted: false,
             finished: false,
@@ -1166,7 +1166,7 @@ fn io_worker_flushes_large_shared_buffer_chunk_without_waiting_for_timeout() {
     drop(rx);
     handle.join().expect("io worker exits");
 
-    let IoWorkItem::Bytes(chunk) = item else {
+    let IoWorkItem::RawBatch(chunk) = item else {
         panic!("expected byte chunk");
     };
     assert_eq!(chunk.bytes.len(), 80 * 1024);
@@ -1180,7 +1180,7 @@ proptest! {
     ) {
         let (tx, mut rx) = mpsc::channel(64);
         let stats = Arc::new(ComponentStats::new_with_health(ComponentHealth::Starting));
-        let mut input = InputState {
+        let mut input = IngestState {
             source: Box::new(SingleDataSource { emitted: false }),
             buf: BytesMut::new(),
             row_origins: Vec::new(),
@@ -1227,7 +1227,7 @@ proptest! {
         prop_assert!(ok);
         prop_assert!(input.buf.is_empty());
         let item = rx.try_recv().expect("one emitted bytes chunk");
-        let IoWorkItem::Bytes(chunk) = item else {
+        let IoWorkItem::RawBatch(chunk) = item else {
             panic!("expected bytes chunk");
         };
         prop_assert_eq!(chunk.bytes.as_ref(), expected.as_slice());

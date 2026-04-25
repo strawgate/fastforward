@@ -8,7 +8,7 @@
 use std::time::Duration;
 
 use bytes::Bytes;
-use ffwd_io::input::{InputEvent, InputSource};
+use ffwd_io::input::{InputSource, SourceEvent};
 use ffwd_io::s3_input::{S3Input, S3InputSettings};
 
 /// Helper: create an `S3Input` pointed at `endpoint` using list-mode discovery.
@@ -50,10 +50,10 @@ fn poll_until_bytes(
         if let Ok(events) = input.poll() {
             for event in events {
                 match event {
-                    InputEvent::Data { bytes, .. } => {
+                    SourceEvent::Data { bytes, .. } => {
                         all_bytes.extend_from_slice(&bytes);
                     }
-                    InputEvent::EndOfFile { .. } => {
+                    SourceEvent::EndOfFile { .. } => {
                         got_eof = true;
                     }
                     _ => {}
@@ -256,7 +256,7 @@ fn parallel_fetch_preserves_byte_order() {
     });
 }
 
-/// Empty-bytes EOF markers must not produce `InputEvent::Data` with 0 bytes
+/// Empty-bytes EOF markers must not produce `SourceEvent::Data` with 0 bytes
 /// (which would panic in CheckpointTracker::apply_read).
 #[test]
 fn eof_markers_do_not_emit_zero_byte_data_events() {
@@ -317,14 +317,14 @@ fn eof_markers_do_not_emit_zero_byte_data_events() {
             if let Ok(events) = input.poll() {
                 for event in events {
                     match event {
-                        InputEvent::Data { bytes, .. } => {
+                        SourceEvent::Data { bytes, .. } => {
                             assert!(
                                 !bytes.is_empty(),
-                                "InputEvent::Data emitted with 0 bytes — would panic in CheckpointTracker"
+                                "SourceEvent::Data emitted with 0 bytes — would panic in CheckpointTracker"
                             );
                             data_events.push(bytes);
                         }
-                        InputEvent::EndOfFile { .. } => {
+                        SourceEvent::EndOfFile { .. } => {
                             eof_count += 1;
                         }
                         _ => {}
@@ -408,12 +408,12 @@ fn accounted_bytes_set_only_on_first_chunk() {
             if let Ok(events) = input.poll() {
                 for event in events {
                     match event {
-                        InputEvent::Data {
+                        SourceEvent::Data {
                             accounted_bytes, ..
                         } => {
                             accounted_values.push(accounted_bytes);
                         }
-                        InputEvent::EndOfFile { .. } => {
+                        SourceEvent::EndOfFile { .. } => {
                             got_eof = true;
                         }
                         _ => {}
@@ -497,10 +497,10 @@ fn empty_object_produces_eof_without_panic() {
             if let Ok(events) = input.poll() {
                 for event in events {
                     match event {
-                        InputEvent::Data { bytes, .. } => {
+                        SourceEvent::Data { bytes, .. } => {
                             data_bytes += bytes.len();
                         }
-                        InputEvent::EndOfFile { .. } => {
+                        SourceEvent::EndOfFile { .. } => {
                             got_eof = true;
                         }
                         _ => {}

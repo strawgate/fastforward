@@ -227,17 +227,17 @@ path already on `main` and for the shared-buffer framing path now landing in
 Current boundary:
 
 - `ffwd-io` tailing uses per-source `BytesMut` read buffers.
-- `InputEvent::Data` already carries `Bytes`.
+- `SourceEvent::Data` already carries `Bytes`.
 - `FramedInput` may still keep small `Vec<u8>` remainders where a line is
   incomplete or overflow-tainted.
 - `ffwd-runtime` currently performs the remaining pre-scan accumulation into
-  `InputState.buf: BytesMut`.
+  `IngestState.buf: BytesMut`.
 - `ffwd-core` is untouched by this ownership shift; the scanner still takes
   contiguous `Bytes` via `Bytes::Deref`.
 
 Current implication: the remaining hot-path copy on `main` is not “tailer to
 event” anymore. It is the runtime reassembly step that appends scanner-ready
-`Bytes` into `InputState.buf` before scan on the legacy event route. The next
+`Bytes` into `IngestState.buf` before scan on the legacy event route. The next
 architecture slice should widen the shared-buffer path so more polls append
 directly into that final batch buffer before scan, targeting that seam
 directly rather than reintroducing divergent source-side batching paths.

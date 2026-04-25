@@ -2,7 +2,7 @@ use bytes::Bytes;
 
 use crate::filter_hints::FilterHints;
 use crate::format::FormatDecoder;
-use crate::input::{CriMetadata, InputCadence, InputEvent, InputSource};
+use crate::input::{CriMetadata, InputCadence, SourceEvent, InputSource};
 #[cfg(test)]
 use crate::poll_cadence::PollCadenceSignal;
 use crate::tail::ByteOffset;

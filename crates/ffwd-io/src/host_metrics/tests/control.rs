@@ -61,9 +61,9 @@
         }
     }
 
-    fn first_batch(events: &[InputEvent]) -> &RecordBatch {
+    fn first_batch(events: &[SourceEvent]) -> &RecordBatch {
         match &events[0] {
-            InputEvent::Batch { batch, .. } => batch,
+            SourceEvent::Batch { batch, .. } => batch,
             _ => panic!("expected batch event"),
         }
     }
@@ -99,8 +99,8 @@
     fn poll_until(
         input: &mut HostMetricsInput,
         timeout: Duration,
-        predicate: impl Fn(&[InputEvent]) -> bool,
-    ) -> Vec<InputEvent> {
+        predicate: impl Fn(&[SourceEvent]) -> bool,
+    ) -> Vec<SourceEvent> {
         let start = Instant::now();
         loop {
             let events = input.poll().expect("poll should succeed");

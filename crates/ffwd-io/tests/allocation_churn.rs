@@ -11,7 +11,7 @@ use serial_test::serial;
 use bytes::Bytes;
 use ffwd_io::format::FormatDecoder;
 use ffwd_io::framed::FramedInput;
-use ffwd_io::input::{InputEvent, InputSource};
+use ffwd_io::input::{InputSource, SourceEvent};
 use ffwd_types::diagnostics::{ComponentHealth, ComponentStats};
 use std::collections::VecDeque;
 use std::io;
@@ -19,14 +19,14 @@ use std::sync::Arc;
 
 struct MockSource {
     name: String,
-    events: VecDeque<Vec<InputEvent>>,
+    events: VecDeque<Vec<SourceEvent>>,
 }
 
 impl MockSource {
     fn repeating(chunk: &[u8], count: usize) -> Self {
-        let events: VecDeque<Vec<InputEvent>> = (0..count)
+        let events: VecDeque<Vec<SourceEvent>> = (0..count)
             .map(|_| {
-                vec![InputEvent::Data {
+                vec![SourceEvent::Data {
                     bytes: Bytes::from(chunk.to_vec()),
                     source_id: None,
                     accounted_bytes: chunk.len() as u64,
@@ -42,7 +42,7 @@ impl MockSource {
 }
 
 impl InputSource for MockSource {
-    fn poll(&mut self) -> io::Result<Vec<InputEvent>> {
+    fn poll(&mut self) -> io::Result<Vec<SourceEvent>> {
         Ok(self.events.pop_front().unwrap_or_default())
     }
 

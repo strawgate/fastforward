@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use ffwd_bench::{generators, make_otlp_sink};
-use ffwd_io::input::{InputEvent, InputSource};
+use ffwd_io::input::{InputSource, SourceEvent};
 use ffwd_io::otlp_receiver::{OtlpReceiverInput, decode_protobuf_to_batch};
 use ffwd_output::Compression;
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
@@ -318,7 +318,7 @@ fn poll_until_batch(
 
     while Instant::now() < deadline {
         for event in input.poll().expect("input poll must succeed") {
-            if let InputEvent::Batch { batch, .. } = event {
+            if let SourceEvent::Batch { batch, .. } = event {
                 total_batch_rows += batch.num_rows();
                 all_batches.push(batch);
                 if total_batch_rows >= expected_rows {

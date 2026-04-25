@@ -12,7 +12,7 @@ use bytes::Bytes;
 use crossbeam_channel::{Receiver, bounded};
 use ffwd_types::diagnostics::{ComponentHealth, ComponentStats};
 
-use crate::input::{InputEvent, InputSource};
+use crate::input::{InputSource, SourceEvent};
 
 #[cfg(target_os = "macos")]
 const CHANNEL_CAPACITY: usize = 4096;
@@ -29,7 +29,7 @@ pub struct MacosLogInput {
     name: String,
     stats: Arc<ComponentStats>,
     is_finished: Arc<AtomicBool>,
-    rx: Receiver<InputEvent>,
+    rx: Receiver<SourceEvent>,
     #[allow(dead_code)]
     thread: Option<thread::JoinHandle<()>>,
     #[cfg(target_os = "macos")]
@@ -115,7 +115,7 @@ impl MacosLogInput {
                             }
 
                             let len = line.len();
-                            let event = InputEvent::Data {
+                            let event = SourceEvent::Data {
                                 bytes: Bytes::from(line.clone()),
                                 source_id: None,
                                 accounted_bytes: len as u64,
@@ -196,7 +196,7 @@ impl InputSource for MacosLogInput {
         self.is_finished.load(Ordering::Acquire)
     }
 
-    fn poll(&mut self) -> io::Result<Vec<InputEvent>> {
+    fn poll(&mut self) -> io::Result<Vec<SourceEvent>> {
         let mut events = Vec::new();
         let mut lines_read = 0;
         let mut total_bytes = 0;
@@ -204,7 +204,7 @@ impl InputSource for MacosLogInput {
         loop {
             match self.rx.try_recv() {
                 Ok(event) => {
-                    if let InputEvent::Data {
+                    if let SourceEvent::Data {
                         accounted_bytes, ..
                     } = &event
                     {

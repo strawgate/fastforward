@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use arrow::array::{Array, BooleanArray, Float64Array, Int64Array, StringArray};
 use arrow::record_batch::RecordBatch;
-use ffwd_io::input::{InputEvent, InputSource};
+use ffwd_io::input::{InputSource, SourceEvent};
 use ffwd_io::otlp_receiver::OtlpReceiverInput;
 use ffwd_types::diagnostics::ComponentStats;
 use ffwd_types::field_names;
@@ -26,7 +26,7 @@ fn poll_single_batch(input: &mut dyn InputSource, timeout: Duration) -> RecordBa
 
     while Instant::now() < deadline {
         for event in input.poll().expect("poll receiver") {
-            if let InputEvent::Batch { batch, .. } = event {
+            if let SourceEvent::Batch { batch, .. } = event {
                 batches.push(batch);
             }
         }
@@ -67,7 +67,7 @@ fn make_otlp_input(stats: Arc<ComponentStats>) -> (OtlpReceiverInput, String) {
     (receiver, url)
 }
 
-fn poll_until_events(input: &mut dyn InputSource, timeout: Duration) -> Vec<InputEvent> {
+fn poll_until_events(input: &mut dyn InputSource, timeout: Duration) -> Vec<SourceEvent> {
     let deadline = Instant::now() + timeout;
 
     while Instant::now() < deadline {
@@ -104,7 +104,7 @@ fn assert_accounted_bytes_for_payload(
     let mut total_accounted: u64 = 0;
     let mut total_rows: u64 = 0;
     for event in &events {
-        if let InputEvent::Batch {
+        if let SourceEvent::Batch {
             batch,
             accounted_bytes,
             ..
@@ -371,16 +371,16 @@ fn otlp_receiver_accounts_input_bytes() {
 
     let events = poll_until_events(&mut input, Duration::from_secs(2));
     assert!(
-        events
-            .iter()
-            .any(|event| matches!(event, InputEvent::Batch { batch, .. } if batch.num_rows() == 1)),
+        events.iter().any(
+            |event| matches!(event, SourceEvent::Batch { batch, .. } if batch.num_rows() == 1)
+        ),
         "should emit one-row batch"
     );
 
     let mut total_accounted: u64 = 0;
     let mut total_rows: u64 = 0;
     for event in &events {
-        if let InputEvent::Batch {
+        if let SourceEvent::Batch {
             batch,
             accounted_bytes,
             ..

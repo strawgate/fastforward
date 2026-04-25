@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use bytes::{Bytes, BytesMut};
 use ffwd_io::format::FormatDecoder;
 use ffwd_io::framed::FramedInput;
-use ffwd_io::input::{CriMetadata, FramedReadEvent, InputEvent, InputSource};
+use ffwd_io::input::{CriMetadata, FramedReadEvent, InputSource, SourceEvent};
 use ffwd_io::tail::ByteOffset;
 use ffwd_types::diagnostics::{ComponentHealth, ComponentStats};
 use ffwd_types::pipeline::SourceId;
@@ -46,8 +46,8 @@ enum Transition {
 
 #[derive(Default)]
 struct ReplayState {
-    poll_events: VecDeque<Vec<InputEvent>>,
-    shutdown_events: VecDeque<Vec<InputEvent>>,
+    poll_events: VecDeque<Vec<SourceEvent>>,
+    shutdown_events: VecDeque<Vec<SourceEvent>>,
     offsets: HashMap<SourceId, ByteOffset>,
 }
 
@@ -64,7 +64,7 @@ impl ReplaySource {
 }
 
 impl InputSource for ReplaySource {
-    fn poll(&mut self) -> io::Result<Vec<InputEvent>> {
+    fn poll(&mut self) -> io::Result<Vec<SourceEvent>> {
         Ok(self
             .shared
             .lock()
@@ -74,7 +74,7 @@ impl InputSource for ReplaySource {
             .unwrap_or_default())
     }
 
-    fn poll_shutdown(&mut self) -> io::Result<Vec<InputEvent>> {
+    fn poll_shutdown(&mut self) -> io::Result<Vec<SourceEvent>> {
         Ok(self
             .shared
             .lock()
@@ -146,21 +146,21 @@ fn transition_strategy() -> impl Strategy<Value = Transition> {
     ]
 }
 
-fn to_input_event(transition: &Transition) -> InputEvent {
+fn to_input_event(transition: &Transition) -> SourceEvent {
     match transition {
-        Transition::Data { source, bytes } => InputEvent::Data {
+        Transition::Data { source, bytes } => SourceEvent::Data {
             bytes: Bytes::from(bytes.clone()),
             source_id: Some(*source),
             accounted_bytes: bytes.len() as u64,
             cri_metadata: None,
         },
-        Transition::Rotated { source } => InputEvent::Rotated {
+        Transition::Rotated { source } => SourceEvent::Rotated {
             source_id: Some(*source),
         },
-        Transition::Truncated { source } => InputEvent::Truncated {
+        Transition::Truncated { source } => SourceEvent::Truncated {
             source_id: Some(*source),
         },
-        Transition::EndOfFile { source } => InputEvent::EndOfFile {
+        Transition::EndOfFile { source } => SourceEvent::EndOfFile {
             source_id: Some(*source),
         },
     }
@@ -186,11 +186,11 @@ fn push_shutdown_transition(shared: &Arc<Mutex<ReplayState>>, transition: &Trans
     guard.shutdown_events.push_back(vec![event]);
 }
 
-fn normalize_legacy(events: Vec<InputEvent>) -> Vec<NormalizedEvent> {
+fn normalize_legacy(events: Vec<SourceEvent>) -> Vec<NormalizedEvent> {
     events
         .into_iter()
         .filter_map(|event| match event {
-            InputEvent::Data {
+            SourceEvent::Data {
                 bytes,
                 source_id,
                 cri_metadata,
@@ -200,9 +200,9 @@ fn normalize_legacy(events: Vec<InputEvent>) -> Vec<NormalizedEvent> {
                 source_id,
                 cri_metadata,
             }),
-            InputEvent::Rotated { source_id } => Some(NormalizedEvent::Rotated { source_id }),
-            InputEvent::Truncated { source_id } => Some(NormalizedEvent::Truncated { source_id }),
-            InputEvent::Batch { .. } | InputEvent::EndOfFile { .. } => None,
+            SourceEvent::Rotated { source_id } => Some(NormalizedEvent::Rotated { source_id }),
+            SourceEvent::Truncated { source_id } => Some(NormalizedEvent::Truncated { source_id }),
+            SourceEvent::Batch { .. } | SourceEvent::EndOfFile { .. } => None,
         })
         .collect()
 }

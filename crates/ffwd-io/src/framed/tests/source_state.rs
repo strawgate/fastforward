@@ -7,13 +7,13 @@
         let source = MockSource::new(vec![
             // Poll 1: partial lines from both sources in one batch
             vec![
-                InputEvent::Data {
+                SourceEvent::Data {
                     bytes: Bytes::from_static(b"hello-from-A"),
                     source_id: Some(sid_a),
                     accounted_bytes: 12,
                     cri_metadata: None,
                 },
-                InputEvent::Data {
+                SourceEvent::Data {
                     bytes: Bytes::from_static(b"hello-from-B"),
                     source_id: Some(sid_b),
                     accounted_bytes: 12,
@@ -22,13 +22,13 @@
             ],
             // Poll 2: complete the lines from each source
             vec![
-                InputEvent::Data {
+                SourceEvent::Data {
                     bytes: Bytes::from_static(b"-done\n"),
                     source_id: Some(sid_a),
                     accounted_bytes: 6,
                     cri_metadata: None,
                 },
-                InputEvent::Data {
+                SourceEvent::Data {
                     bytes: Bytes::from_static(b"-done\n"),
                     source_id: Some(sid_b),
                     accounted_bytes: 6,
@@ -52,7 +52,7 @@
         let mut output_a = Vec::new();
         let mut output_b = Vec::new();
         for e in events2 {
-            if let InputEvent::Data {
+            if let SourceEvent::Data {
                 bytes, source_id, ..
             } = e
             {
@@ -77,13 +77,13 @@
         let source = MockSource::new(vec![
             // Partial lines from two sources
             vec![
-                InputEvent::Data {
+                SourceEvent::Data {
                     bytes: Bytes::from_static(b"partial-A"),
                     source_id: Some(sid_a),
                     accounted_bytes: 9,
                     cri_metadata: None,
                 },
-                InputEvent::Data {
+                SourceEvent::Data {
                     bytes: Bytes::from_static(b"partial-B"),
                     source_id: Some(sid_b),
                     accounted_bytes: 9,
@@ -91,9 +91,9 @@
                 },
             ],
             // Truncation
-            vec![InputEvent::Truncated { source_id: None }],
+            vec![SourceEvent::Truncated { source_id: None }],
             // Fresh data from source A
-            vec![InputEvent::Data {
+            vec![SourceEvent::Data {
                 bytes: Bytes::from_static(b"fresh-A\n"),
                 source_id: Some(sid_a),
                 accounted_bytes: 8,
@@ -123,13 +123,13 @@
         let stats = make_stats();
         let sid = SourceId(7);
         let source = MockSource::new(vec![
-            vec![InputEvent::Data {
+            vec![SourceEvent::Data {
                 bytes: Bytes::from_static(b"partial"),
                 source_id: Some(sid),
                 accounted_bytes: 7,
                 cri_metadata: None,
             }],
-            vec![InputEvent::Data {
+            vec![SourceEvent::Data {
                 bytes: Bytes::from_static(b"fresh\n"),
                 source_id: Some(sid),
                 accounted_bytes: 6,
@@ -164,7 +164,7 @@
         let sid = SourceId(42);
 
         // The inner source reports offset 1000 for our source.
-        let source = MockSource::new(vec![vec![InputEvent::Data {
+        let source = MockSource::new(vec![vec![SourceEvent::Data {
             bytes: Bytes::from_static(b"hello\nwor"),
             source_id: Some(sid),
             accounted_bytes: 9,
@@ -194,7 +194,7 @@
         let stats = make_stats();
         let sid = SourceId(42);
 
-        let source = MockSource::new(vec![vec![InputEvent::Data {
+        let source = MockSource::new(vec![vec![SourceEvent::Data {
             bytes: Bytes::from_static(b"complete\n"),
             source_id: Some(sid),
             accounted_bytes: 9,
@@ -232,21 +232,21 @@
 
         let source = MockSource::new(vec![
             // Source A: CRI partial line
-            vec![InputEvent::Data {
+            vec![SourceEvent::Data {
                 bytes: Bytes::from_static(b"2024-01-15T10:30:00Z stdout P hello \n"),
                 source_id: Some(sid_a),
                 accounted_bytes: 38,
                 cri_metadata: None,
             }],
             // Source B: CRI full line (must NOT merge with A's partial)
-            vec![InputEvent::Data {
+            vec![SourceEvent::Data {
                 bytes: Bytes::from_static(b"2024-01-15T10:30:01Z stderr F {\"msg\":\"world\"}\n"),
                 source_id: Some(sid_b),
                 accounted_bytes: 50,
                 cri_metadata: None,
             }],
             // Source A: CRI full line (completes A's partial)
-            vec![InputEvent::Data {
+            vec![SourceEvent::Data {
                 bytes: Bytes::from_static(b"2024-01-15T10:30:02Z stdout F from-A\n"),
                 source_id: Some(sid_a),
                 accounted_bytes: 39,
@@ -290,14 +290,14 @@
 
         let source = MockSource::new(vec![
             // First read: 9 bytes, newline at position 5
-            vec![InputEvent::Data {
+            vec![SourceEvent::Data {
                 bytes: Bytes::from_static(b"hello\nwor"),
                 source_id: Some(sid),
                 accounted_bytes: 9,
                 cri_metadata: None,
             }],
             // Second read: 3 bytes, newline at position 1 (the 'd\n')
-            vec![InputEvent::Data {
+            vec![SourceEvent::Data {
                 bytes: Bytes::from_static(b"ld\n"),
                 source_id: Some(sid),
                 accounted_bytes: 3,
@@ -334,7 +334,7 @@
     fn file_json_does_not_inject_source_path_column() {
         let stats = make_stats();
         let sid = SourceId(7);
-        let source = MockSource::new(vec![vec![InputEvent::Data {
+        let source = MockSource::new(vec![vec![SourceEvent::Data {
             bytes: Bytes::from_static(b"{\"msg\":\"hello\"}\n"),
             source_id: Some(sid),
             accounted_bytes: 0,
@@ -356,7 +356,7 @@
     fn file_json_preserves_source_id_without_rewriting_payload() {
         let stats = make_stats();
         let sid = SourceId(17);
-        let source = MockSource::new(vec![vec![InputEvent::Data {
+        let source = MockSource::new(vec![vec![SourceEvent::Data {
             bytes: Bytes::from_static(b"{\"msg\":\"hello\"}\n"),
             source_id: Some(sid),
             accounted_bytes: 0,
@@ -373,7 +373,7 @@
         let events = framed.poll().unwrap();
         assert_eq!(events.len(), 1);
         match &events[0] {
-            InputEvent::Data {
+            SourceEvent::Data {
                 bytes,
                 source_id: Some(actual_sid),
                 ..
@@ -389,7 +389,7 @@
     fn file_cri_does_not_inject_source_path_alongside_cri_metadata() {
         let stats = make_stats();
         let sid = SourceId(8);
-        let source = MockSource::new(vec![vec![InputEvent::Data {
+        let source = MockSource::new(vec![vec![SourceEvent::Data {
             bytes: Bytes::from_static(b"2024-01-15T10:30:00Z stdout F {\"msg\":\"hello\"}\n"),
             source_id: Some(sid),
             accounted_bytes: 0,
@@ -411,7 +411,7 @@
     fn file_json_preserves_leading_whitespace_without_source_path_rewrite() {
         let stats = make_stats();
         let sid = SourceId(9);
-        let source = MockSource::new(vec![vec![InputEvent::Data {
+        let source = MockSource::new(vec![vec![SourceEvent::Data {
             bytes: Bytes::from_static(b"  \t{\"msg\":\"hello\"}\n"),
             source_id: Some(sid),
             accounted_bytes: 0,
@@ -433,7 +433,7 @@
     fn file_json_empty_object_is_not_rewritten_for_source_path() {
         let stats = make_stats();
         let sid = SourceId(11);
-        let source = MockSource::new(vec![vec![InputEvent::Data {
+        let source = MockSource::new(vec![vec![SourceEvent::Data {
             bytes: Bytes::from_static(b"{}\n"),
             source_id: Some(sid),
             accounted_bytes: 0,
@@ -455,7 +455,7 @@
     fn file_raw_passthrough_does_not_inject_source_path() {
         let stats = make_stats();
         let sid = SourceId(10);
-        let source = MockSource::new(vec![vec![InputEvent::Data {
+        let source = MockSource::new(vec![vec![SourceEvent::Data {
             bytes: Bytes::from_static(b"{\"msg\":\"hello\"}\n"),
             source_id: Some(sid),
             accounted_bytes: 0,
@@ -480,17 +480,17 @@
         let stats = make_stats();
         let sid = SourceId(42);
         let source = MockSource::new(vec![
-            vec![InputEvent::Data {
+            vec![SourceEvent::Data {
                 bytes: Bytes::from_static(b"hello\npartial"),
                 source_id: Some(sid),
                 accounted_bytes: 13,
                 cri_metadata: None,
             }],
-            vec![InputEvent::EndOfFile {
+            vec![SourceEvent::EndOfFile {
                 source_id: Some(sid),
             }],
             // New data for the same SourceId after EOF — must work.
-            vec![InputEvent::Data {
+            vec![SourceEvent::Data {
                 bytes: Bytes::from_static(b"world\n"),
                 source_id: Some(sid),
                 accounted_bytes: 6,
@@ -525,7 +525,7 @@
     fn complete_source_state_is_reclaimed_without_eof() {
         let stats = make_stats();
         let sid = SourceId(42);
-        let source = MockSource::new(vec![vec![InputEvent::Data {
+        let source = MockSource::new(vec![vec![SourceEvent::Data {
             bytes: Bytes::from_static(b"{\"msg\":\"done\"}\n"),
             source_id: Some(sid),
             accounted_bytes: 15,
@@ -551,7 +551,7 @@
         let stats = make_stats();
         let sid = SourceId(42);
         let source = MockSource::new(vec![
-            vec![InputEvent::Data {
+            vec![SourceEvent::Data {
                 bytes: Bytes::from_static(
                     b"2024-01-01T00:00:00.000000000Z stdout P {\"msg\":\"part",
                 ),
@@ -559,7 +559,7 @@
                 accounted_bytes: 57,
                 cri_metadata: None,
             }],
-            vec![InputEvent::Data {
+            vec![SourceEvent::Data {
                 bytes: Bytes::from_static(b"ial\"}\n2024-01-01T00:00:00.000000000Z stdout F \n"),
                 source_id: Some(sid),
                 accounted_bytes: 54,
@@ -597,7 +597,7 @@
         let stats = make_stats();
         let sid = SourceId(43);
         let source = MockSource::new(vec![
-            vec![InputEvent::Data {
+            vec![SourceEvent::Data {
                 bytes: Bytes::from_static(
                     b"2024-01-01T00:00:00.000000000Z stdout P {\"msg\":\"part\n",
                 ),
@@ -605,10 +605,10 @@
                 accounted_bytes: 58,
                 cri_metadata: None,
             }],
-            vec![InputEvent::EndOfFile {
+            vec![SourceEvent::EndOfFile {
                 source_id: Some(sid),
             }],
-            vec![InputEvent::Data {
+            vec![SourceEvent::Data {
                 bytes: Bytes::from_static(b"2024-01-01T00:00:00.000000000Z stdout F ial\"}\n"),
                 source_id: Some(sid),
                 accounted_bytes: 53,
@@ -630,7 +630,7 @@
         let eof_events = framed.poll().unwrap();
         assert_eq!(eof_events.len(), 1);
         match &eof_events[0] {
-            InputEvent::EndOfFile { source_id } => assert_eq!(*source_id, Some(sid)),
+            SourceEvent::EndOfFile { source_id } => assert_eq!(*source_id, Some(sid)),
             _ => panic!("expected EOF event"),
         }
         assert!(

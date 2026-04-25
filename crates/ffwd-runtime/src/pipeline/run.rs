@@ -9,13 +9,13 @@ use tokio_util::sync::CancellationToken;
 use super::checkpoint_io::flush_checkpoint_with_retry;
 use super::checkpoint_policy::{TicketDisposition, default_ticket_disposition};
 use super::internal_faults;
-use super::{ChannelMsg, Pipeline, now_nanos};
+use super::{Pipeline, ProcessedBatch, now_nanos};
 use crate::worker_pool::AckItem;
 use ffwd_io::checkpoint::SourceCheckpoint;
 use ffwd_output::BatchMetadata;
 
 #[cfg(not(feature = "turmoil"))]
-use super::InputTransform;
+use super::SourcePipeline;
 
 #[cfg(feature = "turmoil")]
 use super::input_poll::async_input_poll_loop;
@@ -75,7 +75,7 @@ impl Pipeline {
         // sends accumulated JSON lines through a bounded channel.
         // Backpressure: when the channel is full, the input thread blocks.
         const CHANNEL_CAPACITY: usize = 16;
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<ChannelMsg>(CHANNEL_CAPACITY);
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<ProcessedBatch>(CHANNEL_CAPACITY);
         self.metrics.set_channel_capacity(CHANNEL_CAPACITY as u64);
 
         let batch_target = self.batch_target_bytes;
@@ -85,7 +85,7 @@ impl Pipeline {
         // Transforms are moved to CPU workers (scan + SQL happens there).
         #[cfg(not(feature = "turmoil"))]
         let manager = {
-            let transforms: Vec<InputTransform> = self.input_transforms.drain(..).collect();
+            let transforms: Vec<SourcePipeline> = self.input_transforms.drain(..).collect();
             super::input_pipeline::InputPipelineManager::spawn(
                 self.inputs.drain(..).collect(),
                 transforms,
@@ -98,7 +98,7 @@ impl Pipeline {
             )
         };
 
-        // Turmoil: async input tasks (scan + transform inline, same ChannelMsg output).
+        // Turmoil: async input tasks (scan + transform inline, same ProcessedBatch output).
         #[cfg(feature = "turmoil")]
         let mut input_tasks = tokio::task::JoinSet::<()>::new();
         #[cfg(feature = "turmoil")]

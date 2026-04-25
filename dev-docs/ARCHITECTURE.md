@@ -63,7 +63,7 @@ Use these terms consistently when discussing the raw-byte path:
 Ownership boundaries cut across those semantic layers:
 
 - The source side owns mutable read buffers (`BytesMut`) while bytes are still being filled.
-- `InputEvent::Data` carries immutable `Bytes` once ownership crosses a component boundary.
+- `SourceEvent::Data` carries immutable `Bytes` once ownership crosses a component boundary.
 - The scanner contract remains a contiguous `Bytes` buffer even when bytes arrived in fragments upstream.
 
 ## Data flow
@@ -71,7 +71,7 @@ Ownership boundaries cut across those semantic layers:
 ### 1. Reading: bytes enter the system
 
 ```text
-Disk → FileReader (`BytesMut`) → InputEvent::Data { bytes: Bytes }
+Disk → FileReader (`BytesMut`) → SourceEvent::Data { bytes: Bytes }
 ```
 
 **FileTailer** (`ffwd-io/src/tail.rs`) is composed of two internal layers:
@@ -83,7 +83,7 @@ File-discovery reliability notes: `dev-docs/references/file-discovery.md`.
 
 > **Note:** the `Bytes` boundary is now inside `ffwd-io`, not only in
 > `ffwd-runtime`. The tailer owns mutable per-source `BytesMut` read buffers,
-> `InputEvent::Data` carries immutable `Bytes`, and `FramedInput` keeps only
+> `SourceEvent::Data` carries immutable `Bytes`, and `FramedInput` keeps only
 > small per-source `Vec<u8>` remainders where a line is incomplete or tainted.
 
 Each input source is polled on its own input-side worker thread. That thread
@@ -94,7 +94,7 @@ channel.
 ### 2. Framing: input bytes → complete lines
 
 ```text
-Bytes → FramedInput::poll() → scanner-ready `InputEvent::Data { bytes: Bytes }`
+Bytes → FramedInput::poll() → scanner-ready `SourceEvent::Data { bytes: Bytes }`
 ```
 
 **FramedInput** (`ffwd-io/src/framed.rs`) combines format detection
@@ -131,7 +131,7 @@ buffer per scan. Upstream work may reduce or relocate copies, but default scan
 entry remains `Scanner::scan(Bytes)`.
 
 **Current transition state:** the shared-buffer `FramedInput` path exists, but
-`ffwd-runtime` still keeps the legacy `InputEvent::Data { bytes: Bytes }`
+`ffwd-runtime` still keeps the legacy `SourceEvent::Data { bytes: Bytes }`
 route for fresh-buffer scans. The runtime currently switches to
 `FramedInput::poll_into()` once a batch already has buffered bytes, preserving
 the old single-chunk direct-flush behavior while removing the extra append on
@@ -298,16 +298,16 @@ The runtime path is split into three stages:
 ```text
 1. Input-side worker thread (`io_worker.rs`)
    - polls `InputSource`
-   - receives `InputEvent`s from `FramedInput`
-   - accumulates scanner-ready bytes in `InputState.buf: BytesMut`
+   - receives `SourceEvent`s from `FramedInput`
+   - accumulates scanner-ready bytes in `IngestState.buf: BytesMut`
    - direct-flushes large solitary chunks when possible
-   - emits `IoWorkItem::Bytes { bytes: Bytes, ... }`
+   - emits `IoWorkItem::RawBatch { bytes: Bytes, ... }`
 
 2. Per-input CPU worker (`cpu_worker.rs`)
    - calls `Scanner::scan(Bytes)`
    - attaches source metadata and CRI sidecars
    - runs the per-input SQL transform
-   - emits `ChannelMsg { batch, checkpoints, ... }`
+   - emits `ProcessedBatch { batch, checkpoints, ... }`
 
 3. Async pipeline (`run_async()`)
    - receives already scanned + transformed batches
@@ -318,7 +318,7 @@ The runtime path is split into three stages:
 
 This separation matters for batching work:
 
-- **Current pre-scan batching seam** is in the input-side worker (`InputState.buf`).
+- **Current pre-scan batching seam** is in the input-side worker (`IngestState.buf`).
 - **Scanner boundary** is in the CPU worker and remains contiguous `Bytes`.
 - **Pipeline async loop** no longer owns raw-byte accumulation.
 
@@ -329,7 +329,7 @@ Understanding who owns what and when copies happen:
 ```text
 Current on `main`:
   tailer reads → per-file BytesMut                       [kernel → userspace]
-  tailer emits InputEvent::Data { bytes: Bytes }         (ownership transfer)
+  tailer emits SourceEvent::Data { bytes: Bytes }         (ownership transfer)
   FramedInput passthrough fast path                      (zero-copy when no remainder/taint)
   FramedInput shared-buffer path via poll_into()         (direct append for buffered continuation polls)
   FramedInput legacy event path                          (still used for fresh-buffer scans)
@@ -342,12 +342,12 @@ Current on `main`:
 
 Current ownership boundary:
   source/framing side: per-source BytesMut + small Vec remainders
-  runtime batching boundary: InputState.buf as contiguous BytesMut
+  runtime batching boundary: IngestState.buf as contiguous BytesMut
   scanner boundary: contiguous Bytes
 
 Next target in this seam:
   use the shared-buffer path for more of the runtime batching lifecycle, not only buffered continuation polls
-  remove more legacy `InputEvent::Data` reassembly from the pre-scan hot path
+  remove more legacy `SourceEvent::Data` reassembly from the pre-scan hot path
   keep the scanner contract as `Scanner::scan(Bytes)`
   benchmark the wider enablement before deleting the fallback route
 ```

@@ -1,10 +1,10 @@
 impl InputSource for FramedInput {
-    fn poll(&mut self) -> io::Result<Vec<InputEvent>> {
+    fn poll(&mut self) -> io::Result<Vec<SourceEvent>> {
         let raw_events = self.inner.poll()?;
         Ok(self.process_raw_events(raw_events))
     }
 
-    fn poll_shutdown(&mut self) -> io::Result<Vec<InputEvent>> {
+    fn poll_shutdown(&mut self) -> io::Result<Vec<SourceEvent>> {
         let raw_events = self.inner.poll_shutdown()?;
         Ok(self.process_raw_events(raw_events))
     }

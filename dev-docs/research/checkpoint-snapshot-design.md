@@ -130,7 +130,7 @@ since the last send. Since we swap the entire buffer, snapshot == sent data.
 
 **Problem:** `FramedInput` holds a `remainder` buffer (partial lines from the
 last poll). FileTailer's `offset` includes bytes that are in the remainder.
-Those bytes are NOT in the emitted `InputEvent::Data` — they're held back
+Those bytes are NOT in the emitted `SourceEvent::Data` — they're held back
 until a newline completes them.
 
 **Impact:** The snapshotted offset is AHEAD of the bytes actually in
@@ -325,7 +325,7 @@ The `source` is a `FramedInput` wrapping the real source. We need
 
 ```rust
 pub trait InputSource: Send {
-    fn poll(&mut self) -> io::Result<Vec<InputEvent>>;
+    fn poll(&mut self) -> io::Result<Vec<SourceEvent>>;
     fn name(&self) -> &str;
     fn apply_hints(&mut self, _hints: &FilterHints) {}
     

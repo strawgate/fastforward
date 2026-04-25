@@ -12,7 +12,7 @@ reaches the scanner and after data leaves the `RecordBatch` pipeline.
 This document uses the architectural names **Source**, **Framing**,
 **Normalization**, **Batching**, **Enrichment**, and **Sink** when describing
 responsibilities. Current code still uses implementation names such as
-`InputSource`, `InputEvent`, and `FramedInput`.
+`InputSource`, `SourceEvent`, and `FramedInput`.
 
 ## Scope
 
@@ -180,7 +180,7 @@ Source metadata belongs to the table assembly boundary, not to transport bytes.
 - Inputs that can distinguish logical row sources must carry `SourceId` beside
   the data, not by writing identity fields into the payload.
 - UDP inputs derive a stable sender-scoped `SourceId` from the `recv_from()`
-  sender address and attach it to `InputEvent::Data.source_id`. They must not
+  sender address and attach it to `SourceEvent::Data.source_id`. They must not
   inject cleartext peer-address fields into the payload.
 - `FramedInput` may reclaim per-source state once newline remainder and
   stateful format decoders are idle. It must retain state while a source has
@@ -232,7 +232,7 @@ The file path is:
 - Bytes from one source must never complete or corrupt a partial line from a
   different source.
 - UDP datagrams must preserve sender-scoped source identity at the input-event
-  boundary (`recv_from` sender -> `InputEvent::Data.source_id`) so framing
+  boundary (`recv_from` sender -> `SourceEvent::Data.source_id`) so framing
   state is isolated by sender instead of co-mingling all datagrams under
   `None`.
 

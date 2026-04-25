@@ -177,7 +177,7 @@ not push it (would miss matching rows).
 
 ```rust
 pub trait InputSource: Send {
-    fn poll(&mut self) -> io::Result<Vec<InputEvent>>;
+    fn poll(&mut self) -> io::Result<Vec<SourceEvent>>;
     fn name(&self) -> &str;
 
     /// Apply filter hints for predicate pushdown. Inputs that support
