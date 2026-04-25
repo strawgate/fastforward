@@ -294,8 +294,9 @@ fn parse_os_release(content: &str) -> Vec<(String, String)> {
             continue;
         };
         let val = val.trim();
-        let val = if (val.starts_with('"') && val.ends_with('"'))
-            || (val.starts_with('\'') && val.ends_with('\''))
+        let val = if val.len() >= 2
+            && ((val.starts_with('"') && val.ends_with('"'))
+                || (val.starts_with('\'') && val.ends_with('\'')))
         {
             &val[1..val.len() - 1]
         } else {
