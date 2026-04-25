@@ -69,21 +69,6 @@ fn canonical_listen_addr_key(transport: &str, listen: &str) -> Result<Option<Str
     )))
 }
 
-pub(super) fn sensor_supported_families_csv(input_type: &InputType) -> &'static str {
-    match sensor_supported_families(input_type) {
-        ["process", "file", "network", "dns", "authz"] => "process,file,network,dns,authz",
-        ["process", "file", "network", "dns", "module", "authz"] => {
-            "process,file,network,dns,module,authz"
-        }
-        [
-            "process",
-            "file",
-            "network",
-            "dns",
-            "module",
-            "registry",
-            "authz",
-        ] => "process,file,network,dns,module,registry,authz",
-        _ => "",
-    }
+pub(super) fn sensor_supported_families_csv(input_type: &InputType) -> String {
+    sensor_supported_families(input_type).join(",")
 }

@@ -515,6 +515,11 @@ pub const INPUT_TYPE_DOCS: &[ComponentTypeDoc] = &[
         description: "macOS EndpointSecurity sensor input (Arrow-native control + signal rows).",
     },
     ComponentTypeDoc {
+        type_tag: "macos_log",
+        support: SupportLevel::Stable,
+        description: "Read macOS unified log entries from the `log stream` command.",
+    },
+    ComponentTypeDoc {
         type_tag: "windows_ebpf_sensor",
         support: SupportLevel::Stable,
         description: "Windows eBPF sensor input (Arrow-native control + signal rows).",

@@ -235,7 +235,6 @@ pub struct TcpOutputConfig {
     #[serde(default, deserialize_with = "deserialize_option_strict_string")]
     pub endpoint: Option<String>,
     pub encoding: Option<Format>,
-    #[serde(alias = "format")]
     pub framing: Option<Format>,
     #[serde(default)]
     pub tls: Option<TlsClientConfig>,
@@ -272,10 +271,6 @@ pub struct ArrowIpcOutputConfig {
     pub compression: Option<CompressionFormat>,
     #[serde(default)]
     pub auth: Option<AuthConfig>,
-    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
-    pub host: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
-    pub port: Option<u16>,
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
     pub buffer_size_bytes: Option<usize>,
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]

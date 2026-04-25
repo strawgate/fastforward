@@ -7,6 +7,7 @@ mod sensors;
 #[cfg(test)]
 mod tests;
 
+use crate::shared::TlsServerConfig;
 use crate::types::{
     Config, ConfigError, EnrichmentConfig, Format, GeneratorAttributeValueConfig,
     GeneratorProfileConfig, InputConfig, InputType, InputTypeConfig, JournaldBackendConfig,
@@ -232,6 +233,55 @@ fn validate_pipeline_names(name: &str, pipe: &PipelineConfig) -> Result<(), Conf
     Ok(())
 }
 
+fn validate_tls_server_config(
+    pipeline_name: &str,
+    input_label: &str,
+    input_type: &str,
+    tls: &TlsServerConfig,
+) -> Result<(), ConfigError> {
+    let cert_file = tls
+        .cert_file
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
+    let key_file = tls
+        .key_file
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
+    let client_ca_file = match tls.client_ca_file.as_deref() {
+        Some(path) => {
+            let path = path.trim();
+            if path.is_empty() {
+                return Err(ConfigError::Validation(format!(
+                    "pipeline '{pipeline_name}' input '{input_label}': {input_type} tls client_ca_file must not be empty"
+                )));
+            }
+            Some(path)
+        }
+        None => None,
+    };
+
+    if tls.require_client_auth && client_ca_file.is_none() {
+        return Err(ConfigError::Validation(format!(
+            "pipeline '{pipeline_name}' input '{input_label}': {input_type} tls require_client_auth requires tls.client_ca_file"
+        )));
+    }
+    if client_ca_file.is_some() && !tls.require_client_auth {
+        return Err(ConfigError::Validation(format!(
+            "pipeline '{pipeline_name}' input '{input_label}': {input_type} tls client_ca_file requires tls.require_client_auth: true"
+        )));
+    }
+
+    if cert_file.is_none() || key_file.is_none() {
+        return Err(ConfigError::Validation(format!(
+            "pipeline '{pipeline_name}' input '{input_label}': {input_type} tls requires both tls.cert_file and tls.key_file"
+        )));
+    }
+
+    Ok(())
+}
+
 fn validate_pipeline_input(
     pipeline_name: &str,
     input_label: &str,
@@ -302,45 +352,7 @@ fn validate_pipeline_input(
                 )));
             }
             if let Some(tls) = &t.tls {
-                let cert_file = tls
-                    .cert_file
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|v| !v.is_empty());
-                let key_file = tls
-                    .key_file
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|v| !v.is_empty());
-                let client_ca_file = match tls.client_ca_file.as_deref() {
-                    Some(path) => {
-                        let path = path.trim();
-                        if path.is_empty() {
-                            return Err(ConfigError::Validation(format!(
-                                "pipeline '{pipeline_name}' input '{input_label}': tcp tls client_ca_file must not be empty"
-                            )));
-                        }
-                        Some(path)
-                    }
-                    None => None,
-                };
-
-                if tls.require_client_auth && client_ca_file.is_none() {
-                    return Err(ConfigError::Validation(format!(
-                        "pipeline '{pipeline_name}' input '{input_label}': tcp tls require_client_auth requires tls.client_ca_file"
-                    )));
-                }
-                if client_ca_file.is_some() && !tls.require_client_auth {
-                    return Err(ConfigError::Validation(format!(
-                        "pipeline '{pipeline_name}' input '{input_label}': tcp tls client_ca_file requires tls.require_client_auth: true"
-                    )));
-                }
-
-                if cert_file.is_none() || key_file.is_none() {
-                    return Err(ConfigError::Validation(format!(
-                        "pipeline '{pipeline_name}' input '{input_label}': tcp tls requires both tls.cert_file and tls.key_file"
-                    )));
-                }
+                validate_tls_server_config(pipeline_name, input_label, "tcp", tls)?;
             }
             if t.max_clients == Some(0) {
                 return Err(ConfigError::Validation(format!(
@@ -366,6 +378,9 @@ fn validate_pipeline_input(
                 return Err(ConfigError::Validation(format!(
                     "pipeline '{pipeline_name}' input '{input_label}': otlp.max_recv_message_size_bytes must be at least 1"
                 )));
+            }
+            if let Some(tls) = &o.tls {
+                validate_tls_server_config(pipeline_name, input_label, "otlp", tls)?;
             }
 
             track_listen_addr_uniqueness(
@@ -755,17 +770,6 @@ fn validate_pipeline_input(
                 if !ep.starts_with("http://") && !ep.starts_with("https://") {
                     return Err(ConfigError::Validation(format!(
                         "pipeline '{pipeline_name}' input '{input_label}': s3.endpoint must start with http:// or https://"
-                    )));
-                }
-            }
-            if let Some(ref comp) = s3_cfg.compression {
-                let valid = [
-                    "auto", "gzip", "gz", "zstd", "zst", "snappy", "sz", "none", "identity",
-                ];
-                if !valid.iter().any(|v| v.eq_ignore_ascii_case(comp)) {
-                    return Err(ConfigError::Validation(format!(
-                        "pipeline '{pipeline_name}' input '{input_label}': unknown s3.compression value '{comp}' \
-                         (valid: auto, gzip, gz, zstd, zst, snappy, sz, none, identity)"
                     )));
                 }
             }

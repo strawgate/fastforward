@@ -82,6 +82,21 @@ pub(super) fn validate_bind_addr(addr: &str) -> Result<(), ConfigError> {
     validate_host_port(addr)
 }
 
+/// Validate a `host:port` endpoint without a URL scheme.
+///
+/// Accepts DNS names, IPv4 addresses, and bracketed IPv6 addresses. URL-style
+/// values are rejected so callers can distinguish bind addresses from HTTP
+/// endpoints.
+///
+/// # Examples
+///
+/// ```
+/// use logfwd_config::validate_host_port;
+///
+/// assert!(validate_host_port("localhost:4317").is_ok());
+/// assert!(validate_host_port("[::1]:4317").is_ok());
+/// assert!(validate_host_port("http://localhost:4317").is_err());
+/// ```
 pub fn validate_host_port(addr: &str) -> Result<(), ConfigError> {
     if addr.starts_with("http://") || addr.starts_with("https://") {
         return Err(validation_error(format!(

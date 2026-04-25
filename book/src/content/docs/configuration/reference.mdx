@@ -107,7 +107,7 @@ Read objects from AWS S3 or an S3-compatible endpoint. The S3 input can poll
 | `s3.max_concurrent_fetches` | integer | No | Maximum concurrent range GETs per object. Defaults to 16. |
 | `s3.max_concurrent_objects` | integer | No | Maximum objects fetched at once. Defaults to 4. |
 | `s3.visibility_timeout_secs` | integer | No | SQS visibility timeout. Defaults to 300 and must be at least 30. |
-| `s3.compression` | string | No | Compression override: `auto`, `gzip`, `zstd`, `snappy`, or `none`. Defaults to `auto`. |
+| `s3.compression` | enum | No | Compression override: `auto`, `gzip`, `zstd`, `snappy`, or `none`. Defaults to `auto`. |
 | `s3.poll_interval_ms` | integer | No | Prefix polling interval in milliseconds. Defaults to 5000. |
 
 When `source_metadata` is `ecs`, `otel`, or `vector`, S3 exposes the
@@ -288,6 +288,25 @@ input:
   type: windows_ebpf_sensor
 ```
 
+### `macos_log` input
+
+Read macOS unified log entries by running `log stream`. This input is only
+available on macOS and emits structured rows parsed from the command output.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `macos_log.level` | string | No | Optional log level filter. Must not be empty when set. |
+| `macos_log.subsystem` | string | No | Optional subsystem filter. Must not be empty when set. |
+| `macos_log.process` | string | No | Optional process filter. Must not be empty when set. |
+
+```yaml
+input:
+  type: macos_log
+  macos_log:
+    level: info
+    subsystem: com.example.app
+```
+
 ### `host_metrics` input
 
 Host metrics input that collects process snapshots, CPU, memory, and network
@@ -358,6 +377,7 @@ Behavior:
 | `http` | Implemented | Receive newline-delimited payloads via HTTP `POST`. |
 | `linux_ebpf_sensor` | Implemented | Linux eBPF sensor input (Arrow-native control + signal rows). |
 | `macos_es_sensor` | Implemented | macOS EndpointSecurity sensor input (Arrow-native control + signal rows). |
+| `macos_log` | Implemented | Read macOS unified log entries from the `log stream` command. |
 | `windows_ebpf_sensor` | Implemented | Windows eBPF sensor input (Arrow-native control + signal rows). |
 | `journald` | Beta | Read structured journal entries from systemd journald. |
 | `host_metrics` | Implemented | Host metrics input — process snapshots, CPU, memory, network stats via sysinfo (Arrow-native). |
@@ -412,21 +432,23 @@ output:
   compression: zstd
 ```
 
-### `http` output *(not yet supported)*
+### `http` output
 
-Reserved for newline-delimited JSON over HTTP POST. Config parsing recognizes
-the type, but config validation currently rejects it until runtime support
-lands.
+Send newline-delimited JSON rows to an HTTP endpoint with optional request-body
+compression and auth headers.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `endpoint` | string | Yes | Full URL, e.g. `http://ingest.example.com/logs`. |
-| `compression` | enum | No | Reserved for future use. Recognized values are `zstd`, `gzip`, and `none`; the HTTP output itself is still not yet supported. |
+| `format` | enum | No | Must be `json` when set. |
+| `compression` | enum | No | `zstd`, `gzip`, or `none`. |
+| `auth` | object | No | Optional bearer token or custom headers for HTTP auth. |
 
 ```yaml
 output:
   type: http
-  endpoint: http://ingest.example.com/logs
+  endpoint: https://ingest.example.com/logs
+  compression: zstd
 ```
 
 ### `stdout` output
@@ -530,8 +552,13 @@ Send newline-delimited JSON records to a TCP endpoint.
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `endpoint` | string | Yes | Host:port destination (for example `tcp.example.com:9000`). |
-
-`format`, `compression`, `tls`, retry, and batch controls are currently rejected for TCP outputs.
+| `encoding` | enum | No | Row encoding (`json`, `raw`, `text`, or `console`). |
+| `framing` | enum | No | Stream framing format. |
+| `tls` | object | No | Optional TLS client options (`ca_file`, `cert_file`, `key_file`, `insecure_skip_verify`). |
+| `keepalive` | object | No | Optional TCP keepalive settings. |
+| `timeout_secs` | integer | No | Optional connection timeout in seconds. |
+| `retry` | object | No | Optional retry settings. |
+| `batch` | object | No | Optional batch settings. |
 
 ### `udp` output
 
@@ -540,8 +567,8 @@ Send newline-delimited JSON records as UDP datagrams.
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `endpoint` | string | Yes | Host:port destination (for example `udp.example.com:514`). |
-
-`format`, `compression`, `tls`, retry, and batch controls are currently rejected for UDP outputs.
+| `encoding` | enum | No | Datagram row encoding (`json`, `raw`, `text`, or `console`). |
+| `max_datagram_size_bytes` | integer | No | Optional maximum datagram payload size. |
 
 ### `null` output
 

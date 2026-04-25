@@ -522,6 +522,23 @@ pub struct S3TypeConfig {
     pub s3: S3InputConfig,
 }
 
+/// Compression override for S3 object reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum S3CompressionConfig {
+    /// Infer compression from object metadata and key suffix.
+    Auto,
+    /// Force gzip decompression.
+    Gzip,
+    /// Force zstd decompression.
+    Zstd,
+    /// Force snappy decompression.
+    Snappy,
+    /// Treat objects as uncompressed.
+    None,
+}
+
 /// Configuration for the S3 (and S3-compatible) object storage input.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -566,11 +583,10 @@ pub struct S3InputConfig {
     /// SQS visibility timeout in seconds. Default: 300.
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
     pub visibility_timeout_secs: Option<u32>,
-    /// Compression override: `"auto"`, `"gzip"` (or `"gz"`), `"zstd"` (or
-    /// `"zst"`), `"snappy"` (or `"sz"`), `"none"` (or `"identity"`).
-    /// Default: `"auto"` (detect from key extension or Content-Encoding).
-    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
-    pub compression: Option<String>,
+    /// Compression override. Default: `auto` (detect from key extension or
+    /// Content-Encoding).
+    #[serde(default)]
+    pub compression: Option<S3CompressionConfig>,
     /// Polling interval for `ListObjectsV2` mode in milliseconds. Default: 5000.
     #[serde(default, deserialize_with = "deserialize_option_from_string_or_value")]
     pub poll_interval_ms: Option<PositiveMillis>,

@@ -33,9 +33,10 @@ fn measure_pipeline(row_count: usize) -> (u64, usize, usize) {
     let dir = tempfile::tempdir().unwrap();
     let log_path = dir.path().join("test.log");
     logfwd_test_utils::generate_json_lines(&log_path, row_count, "scale-test");
+    let log_path = log_path.display().to_string().replace('\'', "''");
 
     let yaml = single_pipeline_yaml(
-        &format!("type: file\npath: {}\nformat: json", log_path.display()),
+        &format!("type: file\npath: '{log_path}'\nformat: json"),
         "type: \"null\"",
     );
 

@@ -27,6 +27,7 @@ mod tests {
             ("otlp", "listen: 0.0.0.0:4317"),
             ("arrow_ipc", "listen: 0.0.0.0:4319"),
             ("http", "listen: 0.0.0.0:8080"),
+            ("s3", "s3:\n  bucket: log-bucket"),
             ("stdin", ""),
             ("generator", ""),
             ("linux_ebpf_sensor", ""),
@@ -96,6 +97,60 @@ mod tests {
         assert!(
             msg.contains("resource_prefix") || msg.contains("unknown field"),
             "expected serde rejection of resource_prefix, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn otlp_tls_requires_cert_and_key_together() {
+        let yaml = single_pipeline_yaml(
+            "type: otlp\nlisten: 127.0.0.1:4318\ntls:\n  cert_file: /tmp/server.pem",
+            "type: stdout",
+        );
+        let err = Config::load_str(yaml).expect_err("partial otlp TLS config must fail");
+        assert!(
+            err.to_string()
+                .contains("otlp tls requires both tls.cert_file and tls.key_file"),
+            "expected OTLP cert/key pairing validation: {err}"
+        );
+    }
+
+    #[test]
+    fn otlp_mtls_requires_client_ca() {
+        let yaml = single_pipeline_yaml(
+            "type: otlp\nlisten: 127.0.0.1:4318\ntls:\n  cert_file: /tmp/server.pem\n  key_file: /tmp/server.key\n  require_client_auth: true",
+            "type: stdout",
+        );
+        let err = Config::load_str(yaml).expect_err("otlp mTLS without client CA must fail");
+        assert!(
+            err.to_string()
+                .contains("otlp tls require_client_auth requires tls.client_ca_file"),
+            "expected OTLP mTLS client CA validation failure: {err}"
+        );
+    }
+
+    #[test]
+    fn s3_compression_uses_typed_values() {
+        let yaml = single_pipeline_yaml(
+            "type: s3\ns3:\n  bucket: log-bucket\n  compression: zstd",
+            "type: stdout",
+        );
+        let cfg = Config::load_str(yaml).expect("typed s3 compression should parse");
+        let InputTypeConfig::S3(config) = &cfg.pipelines["default"].inputs[0].type_config else {
+            panic!("expected s3 input");
+        };
+        assert_eq!(config.s3.compression, Some(S3CompressionConfig::Zstd));
+    }
+
+    #[test]
+    fn s3_compression_rejects_aliases() {
+        let yaml = single_pipeline_yaml(
+            "type: s3\ns3:\n  bucket: log-bucket\n  compression: zst",
+            "type: stdout",
+        );
+        let err = Config::load_str(yaml).expect_err("s3 compression aliases are not accepted");
+        assert!(
+            err.to_string().contains("unknown variant `zst`"),
+            "expected typed s3 compression parse failure: {err}"
         );
     }
 

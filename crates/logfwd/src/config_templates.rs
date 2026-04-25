@@ -196,7 +196,7 @@ fn push_pipeline_list_item_body(out: &mut String, section_name: &str, snippet_bo
         let _ = writeln!(out, "    {section_name}:");
         let _ = writeln!(out, "      - {}", first.trim_start());
         for line in lines {
-            let _ = writeln!(out, "        {}", line);
+            let _ = writeln!(out, "        {line}");
         }
     }
 }

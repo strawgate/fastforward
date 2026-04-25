@@ -42,18 +42,18 @@ fn build_pipeline(yaml: &str) -> Pipeline {
 
 /// Build a simple pipeline config YAML for a single file input.
 fn file_pipeline_yaml(log_path: &std::path::Path) -> String {
+    let log_path = log_path.display().to_string().replace('\'', "''");
     format!(
         r#"
 pipelines:
   default:
     inputs:
       - type: file
-        path: {}
+        path: '{log_path}'
         format: json
     outputs:
       - type: "null"
-"#,
-        log_path.display()
+"#
     )
 }
 

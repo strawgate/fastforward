@@ -6,6 +6,11 @@ fn host_port_error(addr: &str) -> String {
     validate_host_port(addr).unwrap_err().to_string()
 }
 
+fn yaml_quote_path(path: impl AsRef<std::path::Path>) -> String {
+    let path = path.as_ref().display().to_string().replace('\'', "''");
+    format!("'{path}'")
+}
+
 #[test]
 fn validate_host_port_works() {
     assert!(validate_host_port("127.0.0.1:4317").is_ok());
@@ -70,18 +75,21 @@ fn endpoint_url_redacts_userinfo_for_malformed_urls() {
 
 #[test]
 fn file_output_same_as_input_rejected() {
-    let yaml = r"
+    let path = yaml_quote_path(std::env::temp_dir().join("logfwd-feedback-test.log"));
+    let yaml = format!(
+        r"
 pipelines:
   looping:
     inputs:
       - type: file
-        path: /tmp/logfwd-feedback-test.log
+        path: {path}
     outputs:
       - type: file
-        path: /tmp/logfwd-feedback-test.log
+        path: {path}
         format: json
-";
-    let err = Config::load_str(yaml).unwrap_err();
+"
+    );
+    let err = Config::load_str(&yaml).unwrap_err();
     let msg = err.to_string();
     assert!(
         msg.contains("feedback loop") || msg.contains("same as file input"),
@@ -91,34 +99,49 @@ pipelines:
 
 #[test]
 fn file_output_different_from_input_allowed() {
-    let yaml = r"
+    let input_path = yaml_quote_path(std::env::temp_dir().join("logfwd-input.log"));
+    let output_path = yaml_quote_path(std::env::temp_dir().join("logfwd-output.log"));
+    let yaml = format!(
+        r"
 pipelines:
   ok:
     inputs:
       - type: file
-        path: /tmp/logfwd-input.log
+        path: {input_path}
     outputs:
       - type: file
-        path: /tmp/logfwd-output.log
+        path: {output_path}
         format: json
-";
-    Config::load_str(yaml).expect("different input/output paths should be allowed");
+"
+    );
+    Config::load_str(&yaml).expect("different input/output paths should be allowed");
 }
 
 #[test]
 fn file_output_same_as_input_rejected_after_lexical_normalization() {
-    let yaml = r"
+    let temp_dir = std::env::temp_dir();
+    let input_path = yaml_quote_path(
+        temp_dir
+            .join("logfwd-feedback")
+            .join("logs")
+            .join("..")
+            .join("app.log"),
+    );
+    let output_path = yaml_quote_path(temp_dir.join("logfwd-feedback").join(".").join("app.log"));
+    let yaml = format!(
+        r"
 pipelines:
   looping:
     inputs:
       - type: file
-        path: ./tmp/logs/../app.log
+        path: {input_path}
     outputs:
       - type: file
-        path: tmp/./app.log
+        path: {output_path}
         format: json
-";
-    let err = Config::load_str(yaml).unwrap_err();
+"
+    );
+    let err = Config::load_str(&yaml).unwrap_err();
     let msg = err.to_string();
     assert!(
         msg.contains("feedback loop") || msg.contains("same as file input"),
