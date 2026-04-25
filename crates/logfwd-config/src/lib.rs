@@ -39,7 +39,8 @@ pub use types::{
     LokiOutputConfig, NullOutputConfig, OtlpOutputConfig, OtlpProtobufDecodeModeConfig,
     OtlpProtocol, OtlpTypeConfig, OutputConfigV2, OutputType, PipelineConfig, S3InputConfig,
     S3TypeConfig, SensorTypeConfig, ServerConfig, SocketOutputConfig, SourceMetadataStyle,
-    StaticEnrichmentConfig, StdoutOutputConfig, StorageConfig, TcpTypeConfig, UdpTypeConfig,
+    StaticEnrichmentConfig, StdoutOutputConfig, StorageConfig, TcpOutputConfig, TcpTypeConfig,
+    UdpOutputConfig, UdpTypeConfig,
 };
 pub use validate::validate_host_port;
 

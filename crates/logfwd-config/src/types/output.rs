@@ -221,6 +221,9 @@ pub struct SocketOutputConfig {
     pub endpoint: Option<String>,
 }
 
+pub type TcpOutputConfig = SocketOutputConfig;
+pub type UdpOutputConfig = SocketOutputConfig;
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct ArrowIpcOutputConfig {

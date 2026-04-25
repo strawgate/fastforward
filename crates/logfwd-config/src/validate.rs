@@ -533,6 +533,31 @@ fn validate_pipeline_input(
                 }
             }
         }
+        InputTypeConfig::MacosLog(s) => {
+            if let Some(config) = &s.macos_log {
+                if let Some(level) = &config.level
+                    && level.trim().is_empty()
+                {
+                    return Err(ConfigError::Validation(format!(
+                        "pipeline '{pipeline_name}' input '{input_label}': macos_log 'level' cannot be empty"
+                    )));
+                }
+                if let Some(subsystem) = &config.subsystem
+                    && subsystem.trim().is_empty()
+                {
+                    return Err(ConfigError::Validation(format!(
+                        "pipeline '{pipeline_name}' input '{input_label}': macos_log 'subsystem' cannot be empty"
+                    )));
+                }
+                if let Some(process) = &config.process
+                    && process.trim().is_empty()
+                {
+                    return Err(ConfigError::Validation(format!(
+                        "pipeline '{pipeline_name}' input '{input_label}': macos_log 'process' cannot be empty"
+                    )));
+                }
+            }
+        }
         InputTypeConfig::LinuxEbpfSensor(s)
         | InputTypeConfig::MacosEsSensor(s)
         | InputTypeConfig::WindowsEbpfSensor(s)

@@ -334,6 +334,8 @@ pub enum InputTypeConfig {
     MacosEsSensor(SensorTypeConfig),
     #[serde(rename = "windows_ebpf_sensor")]
     WindowsEbpfSensor(SensorTypeConfig),
+    #[serde(rename = "macos_log")]
+    MacosLog(MacosLogTypeConfig),
     ArrowIpc(ArrowIpcTypeConfig),
     Journald(JournaldTypeConfig),
     /// Host metrics input (process snapshots, CPU, memory, network stats via sysinfo).
@@ -357,6 +359,7 @@ impl InputTypeConfig {
             Self::LinuxEbpfSensor(_) => InputType::LinuxEbpfSensor,
             Self::MacosEsSensor(_) => InputType::MacosEsSensor,
             Self::WindowsEbpfSensor(_) => InputType::WindowsEbpfSensor,
+            Self::MacosLog(_) => InputType::MacosLog,
             Self::ArrowIpc(_) => InputType::ArrowIpc,
             Self::Journald(_) => InputType::Journald,
             Self::HostMetrics(_) => InputType::HostMetrics,
@@ -461,6 +464,25 @@ pub struct GeneratorTypeConfig {
 pub struct SensorTypeConfig {
     #[serde(default)]
     pub sensor: Option<HostMetricsInputConfig>,
+}
+
+/// Tagged-union wrapper for macOS OSLog input configuration.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MacosLogTypeConfig {
+    #[serde(default)]
+    pub macos_log: Option<MacosLogInputConfig>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MacosLogInputConfig {
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
+    pub level: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
+    pub subsystem: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_option_strict_string")]
+    pub process: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

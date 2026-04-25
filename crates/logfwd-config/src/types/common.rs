@@ -51,6 +51,8 @@ pub enum InputType {
     /// Windows eBPF sensor input.
     #[serde(rename = "windows_ebpf_sensor")]
     WindowsEbpfSensor,
+    #[serde(rename = "macos_log")]
+    MacosLog,
     ArrowIpc,
     /// Journald (systemd journal) input via native `sd_journal` API or
     /// `journalctl` subprocess fallback.
@@ -75,6 +77,7 @@ impl fmt::Display for InputType {
             InputType::LinuxEbpfSensor => f.write_str("linux_ebpf_sensor"),
             InputType::MacosEsSensor => f.write_str("macos_es_sensor"),
             InputType::WindowsEbpfSensor => f.write_str("windows_ebpf_sensor"),
+            InputType::MacosLog => f.write_str("macos_log"),
             InputType::ArrowIpc => f.write_str("arrow_ipc"),
             InputType::Journald => f.write_str("journald"),
             InputType::HostMetrics => f.write_str("host_metrics"),
