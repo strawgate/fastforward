@@ -1,6 +1,6 @@
 # TLA+ Formal Specifications
 
-Formal models for the logfwd pipeline design. These specs capture
+Formal models for the ffwd pipeline design. These specs capture
 properties that Kani (bounded model checker) cannot express — temporal
 logic, liveness, and protocol-level design invariants.
 
@@ -26,7 +26,7 @@ java -cp /path/to/tla2tools.jar tlc2.TLC tla/MCFanoutSink.tla -config tla/Fanout
 ## PipelineMachine.tla
 
 Models `PipelineMachine<S, C>` from
-`crates/logfwd-core/src/pipeline/lifecycle.rs`.
+`crates/ffwd-core/src/pipeline/lifecycle.rs`.
 
 ### What it proves
 
@@ -301,7 +301,7 @@ java -cp /path/to/tla2tools.jar tlc2.TLC tla/MCPipelineBatch.tla -config tla/Pip
 ## DeliveryRetry.tla
 
 Models the worker delivery retry loop from
-`crates/logfwd-runtime/src/worker_pool/worker.rs` (`process_item`). This is the
+`crates/ffwd-runtime/src/worker_pool/worker.rs` (`process_item`). This is the
 highest-priority spec because PipelineMachine.tla assumes `WF(AckBatch)` (batches
 eventually terminalize) but nothing formally verified that assumption until now.
 
@@ -382,7 +382,7 @@ under weak fairness (with sink recovery or shutdown cancellation).
 
 ## TailLifecycle.tla
 
-Models the pure tail reducer behavior extracted in `crates/logfwd-io/src/tail/state.rs`:
+Models the pure tail reducer behavior extracted in `crates/ffwd-io/src/tail/state.rs`:
 
 - EOF emission thresholding (`eof_emitted` + idle streak)
 - graceful-shutdown EOF gating (`fileOffset >= fileSize`)
@@ -411,7 +411,7 @@ just tlc-tail
 ## WorkerPoolDispatch.tla
 
 Models the MRU worker dispatch algorithm from
-`crates/logfwd-runtime/src/worker_pool/pool.rs`.
+`crates/ffwd-runtime/src/worker_pool/pool.rs`.
 
 ### Model parameters
 
@@ -479,7 +479,7 @@ remaining in-flight items are force-rejected after the timeout.
 ## FanoutSink.tla
 
 Models the `AsyncFanoutSink` delivery protocol from
-`crates/logfwd-output/src/sink.rs`. The fanout sends every batch to N child
+`crates/ffwd-output/src/sink.rs`. The fanout sends every batch to N child
 sinks, tracks per-child completion state, and prevents duplicate delivery when
 the worker pool retries a partially-failed batch.
 

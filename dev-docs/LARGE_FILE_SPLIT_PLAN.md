@@ -12,16 +12,16 @@ python scripts/audit_large_rust_files.py --root . --threshold 1000 --target 600 
 
 | Rank | File | Lines | Suggested parts | Estimated max lines/part |
 |---|---|---:|---:|---:|
-| 1 | `crates/logfwd-core/src/json_scanner.rs` | 2797 | 5 | 560 |
-| 2 | `crates/logfwd-config/src/validate.rs` | 2794 | 5 | 559 |
-| 3 | `crates/logfwd-transform/src/query_analyzer.rs` | 2694 | 5 | 539 |
-| 4 | `crates/logfwd-diagnostics/src/diagnostics/server.rs` | 2648 | 5 | 530 |
-| 5 | `crates/logfwd-transform/src/enrichment.rs` | 2543 | 5 | 509 |
-| 6 | `crates/logfwd-io/src/host_metrics.rs` | 2402 | 5 | 481 |
-| 7 | `crates/logfwd-io/src/generator.rs` | 2386 | 4 | 597 |
-| 8 | `crates/logfwd-io/src/otlp_receiver/projection/tests.rs` | 2288 | 4 | 572 |
-| 9 | `crates/logfwd-io/src/tcp_input.rs` | 2276 | 4 | 569 |
-| 10 | `crates/logfwd-io/src/otlp_receiver/projection/generated.rs` | 2272 | 4 | 568 |
+| 1 | `crates/ffwd-core/src/json_scanner.rs` | 2797 | 5 | 560 |
+| 2 | `crates/ffwd-config/src/validate.rs` | 2794 | 5 | 559 |
+| 3 | `crates/ffwd-transform/src/query_analyzer.rs` | 2694 | 5 | 539 |
+| 4 | `crates/ffwd-diagnostics/src/diagnostics/server.rs` | 2648 | 5 | 530 |
+| 5 | `crates/ffwd-transform/src/enrichment.rs` | 2543 | 5 | 509 |
+| 6 | `crates/ffwd-io/src/host_metrics.rs` | 2402 | 5 | 481 |
+| 7 | `crates/ffwd-io/src/generator.rs` | 2386 | 4 | 597 |
+| 8 | `crates/ffwd-io/src/otlp_receiver/projection/tests.rs` | 2288 | 4 | 572 |
+| 9 | `crates/ffwd-io/src/tcp_input.rs` | 2276 | 4 | 569 |
+| 10 | `crates/ffwd-io/src/otlp_receiver/projection/generated.rs` | 2272 | 4 | 568 |
 
 ## Refactor pattern to apply per file
 

@@ -42,7 +42,7 @@ env:
 
 jobs:
   # -------------------------------------------------------------------
-  # Build logfwd (release + dhat) and bench harness — unblocks matrix
+  # Build ffwd (release + dhat) and bench harness — unblocks matrix
   # -------------------------------------------------------------------
   build:
     runs-on: ubuntu-latest
@@ -68,15 +68,15 @@ jobs:
         env:
           RUSTFLAGS: ${{ env.BENCH_RUSTFLAGS }}
         run: |
-          cargo build --release -p logfwd
-          cargo build --release -p logfwd-competitive-bench
-          cargo build --release --features dhat-heap -p logfwd
+          cargo build --release -p ffwd
+          cargo build --release -p ffwd-competitive-bench
+          cargo build --release --features dhat-heap -p ffwd
           cp target/release/ff target/release/ff-dhat
-          cargo build --release -p logfwd
+          cargo build --release -p ffwd
           mkdir -p cached-binaries
           cp target/release/ff cached-binaries/
           cp target/release/ff-dhat cached-binaries/
-          cp target/release/logfwd-competitive-bench cached-binaries/
+          cp target/release/ffwd-competitive-bench cached-binaries/
 
       - name: Upload binaries
         uses: actions/upload-artifact@v7
@@ -96,24 +96,24 @@ jobs:
       - uses: ./.github/actions/setup-rust
       - name: Build + benchmark PGO variant
         run: |
-          RUSTFLAGS="${BENCH_RUSTFLAGS}" cargo build --release -p logfwd -p logfwd-competitive-bench
+          RUSTFLAGS="${BENCH_RUSTFLAGS}" cargo build --release -p ffwd -p ffwd-competitive-bench
 
           rustup component add llvm-tools
           RUSTFLAGS="${BENCH_RUSTFLAGS} -Cprofile-generate=/tmp/pgo-data" \
-            cargo build --release -p logfwd
+            cargo build --release -p ffwd
 
-          FF=./target/release/ff ./target/release/logfwd-competitive-bench \
+          FF=./target/release/ff ./target/release/ffwd-competitive-bench \
             --lines 500000 --agents ff --scenarios passthrough --no-download
 
           PROFDATA=$(find "$(rustc --print sysroot)" -name llvm-profdata -type f | head -1)
           if [ -n "$PROFDATA" ] && "$PROFDATA" merge -output=/tmp/pgo-data/merged.profdata /tmp/pgo-data/*.profraw 2>/dev/null; then
             RUSTFLAGS="${BENCH_RUSTFLAGS} -Cprofile-use=/tmp/pgo-data/merged.profdata" \
-              cargo build --release -p logfwd
+              cargo build --release -p ffwd
           else
             echo "::warning::PGO profile merge failed; using standard release build"
           fi
 
-          FF=./target/release/ff ./target/release/logfwd-competitive-bench \
+          FF=./target/release/ff ./target/release/ffwd-competitive-bench \
             --lines ${{ env.LINES }} --agents ff \
             --scenarios ${{ env.SCENARIOS }} --iterations ${{ env.ITERATIONS }} \
             --results-file pgo-results.jsonl --no-download
@@ -166,7 +166,7 @@ jobs:
       - name: Run benchmark cell
         continue-on-error: true
         run: |
-          bin/logfwd-competitive-bench \
+          bin/ffwd-competitive-bench \
             --lines ${{ env.LINES }} \
             --iterations ${{ env.ITERATIONS }} \
             --scenarios ${{ matrix.scenario }} \
@@ -200,7 +200,7 @@ jobs:
 
       - name: Run rate-ingest benchmark
         run: |
-          bin/logfwd-competitive-bench \
+          bin/ffwd-competitive-bench \
             --rate-bench \
             --json-file rate-bench-result.json \
             --gh-bench-file rate-gh-bench.json
@@ -228,7 +228,7 @@ jobs:
         env:
           RUSTFLAGS: ${{ env.BENCH_RUSTFLAGS }}
         run: |
-          cargo bench -p logfwd-bench 2>&1 \
+          cargo bench -p ffwd-bench 2>&1 \
             | sed 's/\x1b\[[0-9;]*m//g' \
             | grep -E '(^[a-z_/]+.*$|^\s+time:|^\s+thrpt:)' \
             > micro_raw.txt || true
@@ -313,12 +313,12 @@ jobs:
         env:
           RUSTFLAGS: ${{ env.BENCH_RUSTFLAGS }}
         run: |
-          cargo build --release --features cpu-profiling -p logfwd
+          cargo build --release --features cpu-profiling -p ffwd
           cp target/release/ff bin/ff-prof
 
       - name: Run profiling pass
         run: |
-          bin/logfwd-competitive-bench \
+          bin/ffwd-competitive-bench \
             --lines ${{ env.LINES }} \
             --agents ff \
             --scenarios passthrough \
@@ -376,7 +376,7 @@ jobs:
       # Summarize competitive results (includes PGO if available).
       - name: Summarize competitive results
         run: |
-          bin/logfwd-competitive-bench summarize \
+          bin/ffwd-competitive-bench summarize \
             --results-dir all-results \
             --markdown \
             --gh-bench-file gh-bench.json \

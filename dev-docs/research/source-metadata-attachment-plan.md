@@ -78,7 +78,7 @@ still thin. The hot path currently pays for:
 
 ## Benchmark Coverage Added
 
-`crates/logfwd-bench/benches/source_metadata.rs` adds four groups:
+`crates/ffwd-bench/benches/source_metadata.rs` adds four groups:
 
 - `source_metadata_attach`: isolated column attachment for 50k rows, 1/30/300
   sources, and contiguous/32-row/round-robin spans.
@@ -104,7 +104,7 @@ For quick CPU/allocation iteration without Criterion's full bench-package
 linking cost, use:
 
 ```bash
-cargo run -p logfwd-bench --release --features bench-tools --bin source_metadata_profile -- \
+cargo run -p ffwd-bench --release --features bench-tools --bin source_metadata_profile -- \
   --rows 50000 --sources 300 --iterations 200
 ```
 
@@ -232,7 +232,7 @@ discovery and network source lifecycle events.
 ## Implementation Backlog
 
 1. Run and commit source metadata Criterion baselines on current `main`.
-2. Extract the production attach helper from runtime into `logfwd-arrow` or a
+2. Extract the production attach helper from runtime into `ffwd-arrow` or a
    small shared module so benchmarks can call the real implementation instead
    of mirroring the algorithm.
 3. Add `SourceMetadataEntry` and `InputSource::source_metadata_snapshot()`.

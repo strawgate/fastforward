@@ -3,6 +3,6 @@ input:
 output:
   type: elasticsearch
   endpoint: http://127.0.0.1:9200
-  index: logfwd-bench
+  index: ffwd-bench
 server:
   diagnostics: 127.0.0.1:9090

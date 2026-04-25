@@ -129,11 +129,11 @@ Pipelines are returned as an array. Use `jq '.pipelines[0]'` to access the first
 
 | Metric | Description |
 |--------|-------------|
-| `logfwd_input_lines_total` | Lines read per input |
-| `logfwd_transform_lines_in` | Lines entering SQL transform |
-| `logfwd_transform_lines_out` | Lines after filtering |
-| `logfwd_stage_seconds_total` | Time per stage (scan, transform, output) |
-| `logfwd_flush_reason_total` | Flush triggers (size vs timeout) |
+| `ffwd_input_lines_total` | Lines read per input |
+| `ffwd_transform_lines_in` | Lines entering SQL transform |
+| `ffwd_transform_lines_out` | Lines after filtering |
+| `ffwd_stage_seconds_total` | Time per stage (scan, transform, output) |
+| `ffwd_flush_reason_total` | Flush triggers (size vs timeout) |
 
 ## Transport Observability
 
@@ -163,7 +163,7 @@ alerts you always act on than twenty you learn to ignore.
 | Input errors | `input.errors_total` rate | > 0 sustained for 5 min | Warning |
 | High drop rate | `transform.filter_drop_rate` | > 0.99 (dropping >99% of lines) | Info |
 | Memory pressure | Container memory usage | > 85 % of limit | Warning |
-| CPU saturation | `logfwd_stage_seconds_total` rate | Approaching `--cpus` limit | Warning |
+| CPU saturation | `ffwd_stage_seconds_total` rate | Approaching `--cpus` limit | Warning |
 | UDP drops | `transport.drops_detected` rate | > 0 sustained for 2 min | Warning |
 
 :::caution
@@ -191,7 +191,7 @@ server:
 ### What gets pushed
 
 All of the counters and histograms listed in the Key metrics table above are
-exported as OTLP metrics, using the `logfwd_` prefix (metric prefix will change in a future release). Each metric includes
+exported as OTLP metrics, using the `ffwd_` prefix (metric prefix will change in a future release). Each metric includes
 resource attributes identifying the host and FastForward instance. The payload uses
 OTLP protobuf encoding over HTTP.
 
@@ -199,7 +199,7 @@ OTLP protobuf encoding over HTTP.
 
 ```bash
 # 1. Confirm FastForward is sending metrics (look for export lines in debug logs)
-docker logs logfwd 2>&1 | grep -i "metrics export"
+docker logs ffwd 2>&1 | grep -i "metrics export"
 
 # 2. Query the collector's own metrics to see ingest counts
 curl -s http://otel-collector:8888/metrics | grep otelcol_receiver_accepted_metric_points

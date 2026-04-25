@@ -57,7 +57,7 @@ Minor divergences, none changing the direction:
 Cross-checked each deliverable against actual source:
 
 ### Delivery contract
-- **Verified**: `SendResult` enum exists in `logfwd-output/src/sink/mod.rs` — `Ok`, `Rejected(String)`, `RetryAfter(Duration)`, `IoError(anyhow::Error)`.
+- **Verified**: `SendResult` enum exists in `ffwd-output/src/sink/mod.rs` — `Ok`, `Rejected(String)`, `RetryAfter(Duration)`, `IoError(anyhow::Error)`.
 - **Verified**: `AsyncFanoutSink` reduces per-child outcomes to single `SendResult` via `finalize_fanout_outcome` — collapse logic confirmed.
 - **Verified**: `default_ticket_disposition` in pipeline maps `is_delivered()` → Ack, `is_permanent_reject()` → Reject, else → Hold.
 - **Gap confirmed**: mixed `Ok + Rejected` returns `Ok`. This is a real correctness bug for multi-output configs.
@@ -75,7 +75,7 @@ Cross-checked each deliverable against actual source:
 - **Fit**: Dual-parse is the right call; hard cutover would break existing user configs.
 
 ### File tailer typestate
-- **Verified**: `FileReader` in `crates/logfwd-io/src/tail/reader.rs` manages open/read/truncate/eof/evict/offset mutation in one large struct.
+- **Verified**: `FileReader` in `crates/ffwd-io/src/tail/reader.rs` manages open/read/truncate/eof/evict/offset mutation in one large struct.
 - **Verified**: `EofState` reducer exists with `idle_since` + `emitted` + `idle_polls`.
 - **Verified**: `TailLifecycle.tla` models only EOF + error backoff reducers, not per-file lifecycle.
 - **Gap confirmed**: 5 TLA+ divergences identified are real — the TLA+ spec needs extension.
