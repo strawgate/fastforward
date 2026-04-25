@@ -39,6 +39,8 @@ env:
   AGENTS_INPUT: ${{ inputs.agents || '' }}
   # All bench builds target x86-64-v3 (AVX2+BMI2) for consistent results.
   BENCH_RUSTFLAGS: "-Ctarget-cpu=x86-64-v3"
+  # Disable sccache in CI — config.toml enables it for local dev builds.
+  RUSTC_WRAPPER: ""
 
 jobs:
   # -------------------------------------------------------------------
