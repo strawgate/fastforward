@@ -770,6 +770,7 @@ fn scan_line_with_predicate<B: ScanBuilder>(
 /// Find the next unescaped quote at or after `from`, bounded by `end`.
 /// Uses per-block real_quotes bitmask for O(1) per-block lookup.
 #[inline]
+#[allow(clippy::indexing_slicing)]
 fn next_quote(from: usize, end: usize, blocks: &StoredBitmasks<'_>) -> Option<usize> {
     let mut pos = from;
     while pos < end {

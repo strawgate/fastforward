@@ -293,6 +293,7 @@ pub fn skip_field(buf: &[u8], wire_type: u8, pos: usize) -> Result<usize, &'stat
 /// Designed for zero-allocation decoding of `trace_id` (32 hex chars → 16 bytes)
 /// and `span_id` (16 hex chars → 8 bytes) on the hot encoding path.
 #[verified(kani = "verify_hex_decode_roundtrip")]
+#[allow(clippy::indexing_slicing)]
 pub fn hex_decode(hex_bytes: &[u8], out: &mut [u8]) -> bool {
     if hex_bytes.len() != out.len() * 2 {
         return false;
@@ -323,6 +324,7 @@ pub fn hex_decode(hex_bytes: &[u8], out: &mut [u8]) -> bool {
 /// to the sentinel 0xFF used by callers to signal an invalid character.
 /// Using a LUT replaces the three-branch match with a single indexed load.
 /// The table is 256 bytes and stays hot in L1 cache during batch decode loops.
+#[allow(clippy::indexing_slicing)]
 const HEX_NIBBLE_LUT: [u8; 256] = {
     let mut lut = [0xFF_u8; 256];
     let mut i = 0u16;
@@ -400,6 +402,7 @@ fn eq_ignore_case_match(a: &[u8], b: &[u8]) -> bool {
 
 /// Case-insensitive 3-byte comparison.
 #[inline(always)]
+#[allow(clippy::indexing_slicing)]
 #[allow_unproven]
 fn eq_ignore_case_3(a: &[u8], b: &[u8]) -> bool {
     a[0] | 0x20 == b[0] | 0x20 && a[1] | 0x20 == b[1] | 0x20 && a[2] | 0x20 == b[2] | 0x20
@@ -410,6 +413,7 @@ fn eq_ignore_case_3(a: &[u8], b: &[u8]) -> bool {
 /// collisions for non-letters (e.g., `@` |0x20 = `` ` ``). Safe here because
 /// the comparison targets ("INFO", "WARN") are all ASCII letters.
 #[inline(always)]
+#[allow(clippy::indexing_slicing)]
 #[verified(kani = "verify_eq_ignore_case_4_no_false_positives_info")]
 fn eq_ignore_case_4(a: &[u8], b: &[u8]) -> bool {
     a[0] | 0x20 == b[0] | 0x20
@@ -420,6 +424,7 @@ fn eq_ignore_case_4(a: &[u8], b: &[u8]) -> bool {
 
 /// Case-insensitive 5-byte comparison.
 #[inline(always)]
+#[allow(clippy::indexing_slicing)]
 #[verified(kani = "verify_eq_ignore_case_5_no_false_positives_error")]
 fn eq_ignore_case_5(a: &[u8], b: &[u8]) -> bool {
     a[0] | 0x20 == b[0] | 0x20
@@ -431,6 +436,7 @@ fn eq_ignore_case_5(a: &[u8], b: &[u8]) -> bool {
 
 /// Case-insensitive 6-byte comparison.
 #[inline(always)]
+#[allow(clippy::indexing_slicing)]
 #[allow_unproven]
 fn eq_ignore_case_6(a: &[u8], b: &[u8]) -> bool {
     a[0] | 0x20 == b[0] | 0x20
@@ -443,6 +449,7 @@ fn eq_ignore_case_6(a: &[u8], b: &[u8]) -> bool {
 
 /// Case-insensitive 7-byte comparison.
 #[inline(always)]
+#[allow(clippy::indexing_slicing)]
 #[allow_unproven]
 fn eq_ignore_case_7(a: &[u8], b: &[u8]) -> bool {
     a[0] | 0x20 == b[0] | 0x20
@@ -456,6 +463,7 @@ fn eq_ignore_case_7(a: &[u8], b: &[u8]) -> bool {
 
 /// Case-insensitive 8-byte comparison.
 #[inline(always)]
+#[allow(clippy::indexing_slicing)]
 #[allow_unproven]
 fn eq_ignore_case_8(a: &[u8], b: &[u8]) -> bool {
     a[0] | 0x20 == b[0] | 0x20
@@ -488,6 +496,7 @@ fn eq_ignore_case_8(a: &[u8], b: &[u8]) -> bool {
 /// Fractional seconds beyond 9 digits (nanosecond precision) are
 /// truncated — this is intentional as OTLP uses nanoseconds.
 #[verified(kani = "verify_parse_timestamp_compositional")]
+#[allow(clippy::indexing_slicing)]
 pub fn parse_timestamp_nanos(ts: &[u8]) -> Option<u64> {
     if ts.len() < 19 {
         return None;
@@ -606,6 +615,7 @@ pub fn parse_timestamp_nanos(ts: &[u8]) -> Option<u64> {
 // Only used by Kani proof harnesses; production paths use parse_4digits_checked.
 #[allow(dead_code)]
 #[inline(always)]
+#[allow(clippy::indexing_slicing)]
 #[cfg_attr(kani, kani::ensures(|result: &u16| *result <= 9999))]
 #[verified(kani = "verify_parse_4digits_contract")]
 fn parse_4digits(s: &[u8], off: usize) -> u16 {
@@ -623,6 +633,7 @@ fn parse_4digits(s: &[u8], off: usize) -> u16 {
 // Only used by Kani proof harnesses; production paths use parse_2digits_checked.
 #[allow(dead_code)]
 #[inline(always)]
+#[allow(clippy::indexing_slicing)]
 #[cfg_attr(kani, kani::ensures(|result: &u8| *result <= 99))]
 #[verified(kani = "verify_parse_2digits_contract")]
 fn parse_2digits(s: &[u8], off: usize) -> u8 {
@@ -641,6 +652,7 @@ fn parse_2digits(s: &[u8], off: usize) -> u8 {
 /// avoids the double-check that `parse_4digits` + external `is_ascii_digit`
 /// calls would perform.
 #[inline(always)]
+#[allow(clippy::indexing_slicing)]
 #[allow_unproven]
 fn parse_4digits_checked(s: &[u8], off: usize) -> Option<u16> {
     let (a, b, c, d) = (
@@ -659,6 +671,7 @@ fn parse_4digits_checked(s: &[u8], off: usize) -> Option<u16> {
 /// not a digit. Single-pass: one `wrapping_sub` + compare per digit instead of
 /// a `is_ascii_digit` check followed by a separate subtraction.
 #[inline(always)]
+#[allow(clippy::indexing_slicing)]
 #[allow_unproven]
 fn parse_2digits_checked(s: &[u8], off: usize) -> Option<u8> {
     let a = s[off].wrapping_sub(b'0');

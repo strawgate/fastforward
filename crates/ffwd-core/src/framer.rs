@@ -63,6 +63,7 @@ impl FrameOutput {
 
     /// Iterate over line ranges.
     #[inline]
+    #[allow(clippy::indexing_slicing)]
     pub fn iter(&self) -> impl Iterator<Item = (usize, usize)> + '_ {
         self.line_ranges[..self.count].iter().copied()
     }
