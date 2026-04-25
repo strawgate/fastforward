@@ -258,6 +258,7 @@ impl fmt::Display for ElasticsearchRequestMode {
     }
 }
 
+/// Record serialization formats accepted by inputs and outputs.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -294,6 +295,7 @@ impl fmt::Display for Format {
     }
 }
 
+/// HTTP methods accepted by HTTP input/output configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum HttpMethodConfig {

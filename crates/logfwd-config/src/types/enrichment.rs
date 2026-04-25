@@ -5,6 +5,7 @@ use crate::serde_helpers::{
 use serde::Deserialize;
 use std::collections::HashMap;
 
+/// Supported on-disk GeoIP database formats.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -132,6 +133,7 @@ pub struct ContainerInfoConfig {}
 #[serde(deny_unknown_fields)]
 pub struct K8sClusterInfoConfig {}
 
+/// Tagged enrichment configuration for pipeline lookup tables.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EnrichmentConfig {
