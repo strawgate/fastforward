@@ -126,7 +126,7 @@ pub fn parse_int_fast(bytes: &[u8]) -> Option<i64> {
 
 /// Parse a byte slice as f64 using the standard library.
 ///
-/// No Kani contract needed: returns None on invalid UTF-8 or unparseable content.
+/// No Kani contract needed: returns None on invalid UTF-8 or unparsable content.
 /// The function is total over byte slices (always produces a result) — no
 /// meaningful precondition exists that would reduce proof burden.
 #[inline(always)]
