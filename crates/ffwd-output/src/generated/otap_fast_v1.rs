@@ -4,8 +4,8 @@
 use std::io;
 
 use ffwd_core::otlp::{
-    decode_tag, decode_varint, encode_bytes_field, encode_tag, encode_varint,
-    encode_varint_field, skip_field, varint_len,
+    decode_tag, decode_varint, encode_bytes_field, encode_tag, encode_varint, encode_varint_field,
+    skip_field, varint_len,
 };
 
 use super::{ArrowPayloadType, BatchStatus, DecodedPayload, StatusCode};
@@ -16,6 +16,19 @@ fn len_delimited_field_len(field_number: u32, data_len: usize) -> usize {
 
 fn varint_field_len(field_number: u32, value: u64) -> usize {
     varint_len((field_number as u64) << 3) + varint_len(value)
+}
+
+/// Compute `next_pos + len` with overflow and bounds checks.
+fn checked_end(next_pos: usize, len: u64, data_len: usize) -> io::Result<usize> {
+    let len = usize::try_from(len)
+        .map_err(|_e| io::Error::new(io::ErrorKind::InvalidData, "field length exceeds address space"))?;
+    let end = next_pos
+        .checked_add(len)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "field length overflow"))?;
+    if end > data_len {
+        return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "truncated field"));
+    }
+    Ok(end)
 }
 
 fn arrow_payload_len(schema_id: &str, payload_type: ArrowPayloadType, record: &[u8]) -> usize {
@@ -129,13 +142,7 @@ pub fn decode_batch_status_generated_fast(data: &[u8]) -> io::Result<BatchStatus
             (3, 2) => {
                 let (len, next_pos) = decode_varint(data, pos)
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-                let end = next_pos + len as usize;
-                if end > data.len() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::UnexpectedEof,
-                        "truncated status_message",
-                    ));
-                }
+                let end = checked_end(next_pos, len, data.len())?;
                 status_message = String::from_utf8_lossy(&data[next_pos..end]).into_owned();
                 pos = end;
             }
@@ -167,10 +174,7 @@ fn decode_arrow_payload_generated_fast(data: &[u8]) -> io::Result<DecodedPayload
             (1, 2) => {
                 let (len, next_pos) = decode_varint(data, pos)
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-                let end = next_pos + len as usize;
-                if end > data.len() {
-                    return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "truncated schema_id"));
-                }
+                let end = checked_end(next_pos, len, data.len())?;
                 schema_id = String::from_utf8_lossy(&data[next_pos..end]).into_owned();
                 pos = end;
             }
@@ -183,10 +187,7 @@ fn decode_arrow_payload_generated_fast(data: &[u8]) -> io::Result<DecodedPayload
             (3, 2) => {
                 let (len, next_pos) = decode_varint(data, pos)
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-                let end = next_pos + len as usize;
-                if end > data.len() {
-                    return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "truncated record"));
-                }
+                let end = checked_end(next_pos, len, data.len())?;
                 record = data[next_pos..end].to_vec();
                 pos = end;
             }
@@ -222,23 +223,14 @@ pub fn decode_batch_arrow_records_generated_fast(
             (2, 2) => {
                 let (len, next_pos) = decode_varint(data, pos)
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-                let end = next_pos + len as usize;
-                if end > data.len() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::UnexpectedEof,
-                        "truncated ArrowPayload",
-                    ));
-                }
+                let end = checked_end(next_pos, len, data.len())?;
                 payloads.push(decode_arrow_payload_generated_fast(&data[next_pos..end])?);
                 pos = end;
             }
             (3, 2) => {
                 let (len, next_pos) = decode_varint(data, pos)
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-                let end = next_pos + len as usize;
-                if end > data.len() {
-                    return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "truncated headers"));
-                }
+                let end = checked_end(next_pos, len, data.len())?;
                 headers = data[next_pos..end].to_vec();
                 pos = end;
             }
