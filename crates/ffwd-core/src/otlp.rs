@@ -211,7 +211,7 @@ pub const fn bytes_field_size(field_number: u32, data_len: usize) -> usize {
 /// Write a fixed32 field (tag + 4 bytes little-endian).
 /// Used for LogRecord field 8 (`flags`), wire type 5.
 #[inline(always)]
-#[allow_unproven]
+#[verified(kani = "verify_encode_fixed32")]
 pub fn encode_fixed32(buf: &mut Vec<u8>, field_number: u32, value: u32) {
     encode_tag(buf, field_number, 5); // wire type 5 = 32-bit fixed
     buf.extend_from_slice(&value.to_le_bytes());
@@ -414,7 +414,7 @@ fn eq_ignore_case_match(a: &[u8], b: &[u8]) -> bool {
 
 /// Case-insensitive 3-byte comparison.
 #[inline(always)]
-#[allow_unproven]
+#[verified(kani = "verify_eq_ignore_case_3_no_false_positives_err")]
 fn eq_ignore_case_3(a: &[u8], b: &[u8]) -> bool {
     a[0] | 0x20 == b[0] | 0x20 && a[1] | 0x20 == b[1] | 0x20 && a[2] | 0x20 == b[2] | 0x20
 }
@@ -1623,6 +1623,37 @@ mod verification {
         assert!(decoded == value, "fixed64 value mismatch");
     }
 
+    /// Prove encode_fixed32 produces exactly tag + 4 LE bytes.
+    #[kani::proof]
+    #[kani::unwind(12)]
+    pub(super) fn verify_encode_fixed32() {
+        let field_number: u32 = kani::any();
+        let value: u32 = kani::any();
+        kani::assume(field_number > 0 && field_number <= 1000);
+
+        let mut buf = Vec::new();
+        encode_fixed32(&mut buf, field_number, value);
+
+        // Tag + 4 bytes
+        let tag_val = ((field_number as u64) << 3) | 5;
+        let tag_len = varint_len(tag_val);
+        assert!(buf.len() == tag_len + 4, "fixed32 size wrong");
+
+        // Verify tag bytes encode correct field_number + wire_type
+        let mut tag_buf = Vec::new();
+        encode_varint(&mut tag_buf, tag_val);
+        let mut i = 0;
+        while i < tag_len {
+            assert!(buf[i] == tag_buf[i], "tag byte mismatch");
+            i += 1;
+        }
+
+        // Last 4 bytes are the value in little-endian
+        let val_bytes = &buf[tag_len..];
+        let decoded = u32::from_le_bytes(val_bytes.try_into().unwrap());
+        assert!(decoded == value, "fixed32 value mismatch");
+    }
+
     /// Prove encode_varint_field produces tag + varint value of the predicted size.
     ///
     /// Byte-level correctness of the individual tag and value encodings is already
@@ -1781,6 +1812,17 @@ mod verification {
         // Day 32
         let ts = b"2024-01-32T10:30:00Z";
         assert!(parse_timestamp_nanos(ts) == None);
+    }
+
+    /// Prove eq_ignore_case_3 agrees with eq_ignore_case_match for ERR.
+    #[kani::proof]
+    #[kani::unwind(4)] // eq_ignore_case_match: Zip over 3-byte slice + 1 terminator
+    pub(super) fn verify_eq_ignore_case_3_no_false_positives_err() {
+        let input: [u8; 3] = kani::any();
+        let target = b"ERR";
+        if eq_ignore_case_3(&input, target) {
+            assert!(eq_ignore_case_match(&input, target));
+        }
     }
 
     /// Prove eq_ignore_case_4 agrees with eq_ignore_case_match for INFO.
