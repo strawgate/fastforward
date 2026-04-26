@@ -267,3 +267,73 @@ impl Transform for SqlTransform {
 
 #[cfg(not(feature = "datafusion"))]
 pub use passthrough::PassthroughTransform;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transform_error_new_creates_message_variant() {
+        let err = TransformError::new("something went wrong");
+        assert_eq!(err.to_string(), "transform error: something went wrong");
+    }
+
+    #[test]
+    fn transform_error_display_formats_correctly() {
+        let err = TransformError::Message("test error".to_string());
+        assert!(err.to_string().contains("test error"));
+    }
+
+    /// Tests for the `PassthroughTransform` — only compiled when DataFusion is absent.
+    #[cfg(not(feature = "datafusion"))]
+    mod passthrough_tests {
+        use super::*;
+
+        #[test]
+        fn passthrough_accepts_select_star() {
+            assert!(PassthroughTransform::new("SELECT * FROM logs").is_ok());
+        }
+
+        #[test]
+        fn passthrough_accepts_empty_sql() {
+            assert!(PassthroughTransform::new("").is_ok());
+        }
+
+        #[test]
+        fn passthrough_accepts_select_star_with_semicolon() {
+            assert!(PassthroughTransform::new("SELECT * FROM logs;").is_ok());
+        }
+
+        #[test]
+        fn passthrough_rejects_non_passthrough_sql() {
+            let err = PassthroughTransform::new("SELECT id FROM logs").unwrap_err();
+            assert!(err.to_string().contains("DataFusion"));
+        }
+
+        #[test]
+        fn passthrough_execute_blocking_passes_batch_through() {
+            use arrow::array::Int32Array;
+            use arrow::datatypes::{DataType, Field, Schema};
+            use std::sync::Arc;
+
+            let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
+            let batch = arrow::record_batch::RecordBatch::try_new(
+                schema,
+                vec![Arc::new(Int32Array::from(vec![1, 2, 3]))],
+            )
+            .expect("valid test batch");
+
+            let mut transform =
+                PassthroughTransform::new("SELECT * FROM logs").expect("passthrough sql");
+            let result = transform.execute_blocking(batch).expect("execute");
+            assert_eq!(result.num_rows(), 3);
+        }
+
+        #[test]
+        fn passthrough_validate_plan_succeeds() {
+            let mut transform =
+                PassthroughTransform::new("SELECT * FROM logs").expect("passthrough sql");
+            assert!(transform.validate_plan().is_ok());
+        }
+    }
+}
