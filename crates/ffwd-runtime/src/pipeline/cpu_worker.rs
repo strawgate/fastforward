@@ -27,8 +27,8 @@ use super::source_metadata::{cri_metadata_for_batch, source_metadata_for_batch};
 /// Run the CPU worker loop for one input.
 ///
 /// Receives raw bytes from the I/O worker, scans them into Arrow RecordBatches,
-/// runs the per-input SQL transform via `execute_blocking`, and sends
-/// `ProcessedBatch` to the pipeline's main select loop.
+/// runs the per-input SQL transform via `execute_async` with a reused runtime,
+/// and sends `ProcessedBatch` to the pipeline's main select loop.
 #[cfg(not(feature = "turmoil"))]
 pub(super) fn cpu_worker_loop(
     mut rx: mpsc::Receiver<IoWorkItem>,
@@ -36,6 +36,21 @@ pub(super) fn cpu_worker_loop(
     mut transform: SourcePipeline,
     metrics: Arc<PipelineMetrics>,
 ) {
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            tracing::error!(
+                input = transform.input_name.as_str(),
+                error = %e,
+                "cpu_worker: failed to create tokio runtime — input disabled"
+            );
+            return;
+        }
+    };
+
     /// After this many consecutive transform errors with no successes, escalate
     /// to ERROR with guidance — the SQL likely references columns the input
     /// format does not produce.
@@ -135,7 +150,7 @@ pub(super) fn cpu_worker_loop(
         }
 
         let t1 = Instant::now();
-        let result = match transform.transform.execute_blocking(batch) {
+        let result = match rt.block_on(transform.transform.execute_async(batch)) {
             Ok(r) => {
                 consecutive_transform_errors = 0;
                 r
