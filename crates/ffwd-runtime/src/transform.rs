@@ -28,31 +28,25 @@ pub mod udf {
 }
 
 /// Unified error type for transform operations.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum TransformError {
+    #[error("transform error: {0}")]
     Message(String),
     #[cfg(feature = "datafusion")]
+    #[error("datafusion error: {0}")]
     DataFusion(String),
 }
 
-impl std::fmt::Display for TransformError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            TransformError::Message(msg) => write!(f, "{msg}"),
-            #[cfg(feature = "datafusion")]
-            TransformError::DataFusion(msg) => write!(f, "datafusion error: {msg}"),
-        }
-    }
-}
-
-impl std::error::Error for TransformError {}
-
 impl TransformError {
+    /// Creates a new error with a message.
+    #[must_use]
     pub fn new(message: impl Into<String>) -> Self {
         TransformError::Message(message.into())
     }
 
+    /// Creates an error from a DataFusion transform error.
     #[cfg(feature = "datafusion")]
+    #[must_use]
     pub fn from_df_error(e: ffwd_transform::TransformError) -> Self {
         TransformError::DataFusion(e.to_string())
     }
@@ -72,6 +66,9 @@ pub trait Transform: Send {
     ) -> Pin<Box<dyn futures_util::Future<Output = Result<RecordBatch, TransformError>> + Send + '_>>;
 
     /// Execute the transform on a record batch synchronously.
+    ///
+    /// For callers that cannot use async (e.g., plain thread context),
+    /// this delegates to [`execute_async`](Self::execute_async) via a runtime.
     fn execute_blocking(&mut self, batch: RecordBatch) -> Result<RecordBatch, TransformError>;
 
     /// Return the scan configuration for field pushdown.
@@ -96,6 +93,10 @@ pub fn create_transform(sql: &str) -> Result<Box<dyn Transform>, TransformError>
     ConfiguredSqlTransform::new(sql)?.build()
 }
 
+/// Create a new transform based on the datafusion feature flag.
+///
+/// When datafusion is enabled, delegates to DataFusion SqlTransform.
+/// When disabled, creates a passthrough transform that only accepts `SELECT * FROM logs`.
 #[cfg(not(feature = "datafusion"))]
 pub fn create_transform(sql: &str) -> Result<Box<dyn Transform>, TransformError> {
     PassthroughTransform::new(sql).map(|t| Box::new(t) as Box<dyn Transform>)
