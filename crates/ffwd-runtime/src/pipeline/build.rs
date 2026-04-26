@@ -502,14 +502,12 @@ impl Pipeline {
             let transform = crate::transform::create_transform(input_sql)
                 .map_err(|e| e.to_string())?;
 
+            // Build the transform into a trait object.
             #[cfg(feature = "datafusion")]
-            let explicit_source_metadata_plan = transform.explicit_source_metadata_plan();
-            #[cfg(not(feature = "datafusion"))]
-            let explicit_source_metadata_plan = transform.explicit_source_metadata_plan();
+            let transform = transform.build().map_err(|e| e.to_string())?;
 
-            #[cfg(feature = "datafusion")]
-            let mut scan_config = transform.scan_config();
-            #[cfg(not(feature = "datafusion"))]
+            // Get config and metadata plan from the unified transform type.
+            let explicit_source_metadata_plan = transform.explicit_source_metadata_plan();
             let mut scan_config = transform.scan_config();
 
             // Raw format sends plain text directly to the scanner, so capture
@@ -519,9 +517,6 @@ impl Pipeline {
                 scan_config.line_field_name = Some(field_names::BODY.to_string());
             }
             let scanner = ffwd_arrow::scanner::Scanner::new(scan_config);
-
-            #[cfg(feature = "datafusion")]
-            let transform = transform.build().map_err(|e| e.to_string())?;
             if explicit_source_metadata_plan.has_any()
                 && input_cfg.source_metadata == SourceMetadataStyle::None
             {

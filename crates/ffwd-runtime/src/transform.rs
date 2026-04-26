@@ -4,6 +4,7 @@
 //! Implementations are DataFusion-based SQL transforms and a passthrough stub.
 
 use arrow::record_batch::RecordBatch;
+
 use ffwd_core::scan_config::ScanConfig;
 use ffwd_types::source_metadata::SourceMetadataPlan;
 
@@ -25,43 +26,52 @@ pub mod udf {
 
 /// Unified error type for transform operations.
 #[derive(Debug, Clone)]
-pub struct TransformError {
-    message: String,
-}
-
-impl TransformError {
-    pub fn new(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-        }
-    }
-
+pub enum TransformError {
+    Message(String),
     #[cfg(feature = "datafusion")]
-    pub fn from_df_error(e: ffwd_transform::TransformError) -> Self {
-        Self::new(e.to_string())
-    }
+    DataFusion(String),
 }
 
 impl std::fmt::Display for TransformError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.message)
+        match self {
+            TransformError::Message(msg) => write!(f, "{msg}"),
+            #[cfg(feature = "datafusion")]
+            TransformError::DataFusion(msg) => write!(f, "datafusion error: {msg}"),
+        }
     }
 }
 
 impl std::error::Error for TransformError {}
 
+impl TransformError {
+    pub fn new(message: impl Into<String>) -> Self {
+        TransformError::Message(message.into())
+    }
+
+    #[cfg(feature = "datafusion")]
+    pub fn from_df_error(e: ffwd_transform::TransformError) -> Self {
+        TransformError::DataFusion(e.to_string())
+    }
+}
+
 /// Transform trait for pipeline batch processing.
 ///
 /// Implementations handle SQL transform execution against Arrow RecordBatches.
 pub trait Transform: Send {
+    /// Execute the transform on a record batch.
     fn execute_blocking(&mut self, batch: RecordBatch) -> Result<RecordBatch, TransformError>;
 
+    /// Return the scan configuration for field pushdown.
     fn scan_config(&self) -> ScanConfig;
 
+    /// Return the source metadata columns required by this transform.
     fn source_metadata_plan(&self) -> SourceMetadataPlan;
 
+    /// Return source metadata columns explicitly referenced in the SQL.
     fn explicit_source_metadata_plan(&self) -> SourceMetadataPlan;
 
+    /// Validate the transform plan by executing against a dummy batch.
     fn validate_plan(&mut self) -> Result<(), TransformError>;
 }
 
@@ -90,16 +100,19 @@ pub struct ConfiguredSqlTransform {
 
 #[cfg(feature = "datafusion")]
 impl ConfiguredSqlTransform {
+    /// Create a new configured transform from SQL.
     pub fn new(sql: &str) -> Result<Self, TransformError> {
         SqlTransform::new(sql)
             .map(|inner| Self { inner })
             .map_err(TransformError::from_df_error)
     }
 
+    /// Set the geo-IP database for the `geo_lookup()` UDF.
     pub fn set_geo_database(&mut self, db: std::sync::Arc<dyn enrichment::GeoDatabase>) {
         self.inner.set_geo_database(db);
     }
 
+    /// Add an enrichment table to be registered alongside `logs`.
     pub fn add_enrichment_table(
         &mut self,
         table: std::sync::Arc<dyn enrichment::EnrichmentTable>,
@@ -109,14 +122,17 @@ impl ConfiguredSqlTransform {
             .map_err(TransformError::from_df_error)
     }
 
+    /// Return the scan configuration for field pushdown.
     pub fn scan_config(&self) -> ScanConfig {
         self.inner.scan_config()
     }
 
+    /// Return source metadata columns explicitly referenced in the SQL.
     pub fn explicit_source_metadata_plan(&self) -> SourceMetadataPlan {
         self.inner.analyzer().explicit_source_metadata_plan()
     }
 
+    /// Build into a `Box<dyn Transform>`.
     pub fn build(self) -> Result<Box<dyn Transform>, TransformError> {
         Ok(Box::new(self.inner) as Box<dyn Transform>)
     }
@@ -126,9 +142,15 @@ impl ConfiguredSqlTransform {
 mod passthrough {
     use super::*;
 
+    /// Passthrough transform that returns batches unchanged.
+    ///
+    /// Used when datafusion is disabled; only accepts `SELECT * FROM logs`.
     pub struct PassthroughTransform;
 
     impl PassthroughTransform {
+        /// Create a new passthrough transform.
+        ///
+        /// Returns an error if the SQL is not `SELECT * FROM logs`.
         pub fn new(sql: &str) -> Result<Self, TransformError> {
             if !is_passthrough_sql(sql) {
                 let preview = sql.trim().lines().next().unwrap_or("").trim();
