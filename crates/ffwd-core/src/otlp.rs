@@ -1264,6 +1264,11 @@ mod verification {
     pub(super) fn verify_tag_size_vs_oracle() {
         let field_number: u32 = kani::any();
         kani::assume(field_number > 0 && field_number <= 0x1FFFFFFF);
+        kani::cover!(field_number == 1, "min valid protobuf field number");
+        kani::cover!(
+            field_number == 0x1FFFFFFF,
+            "max valid protobuf field number"
+        );
         assert_eq!(
             tag_size(field_number),
             ffwd_kani::proto::tag_size_oracle(field_number),
@@ -1279,6 +1284,8 @@ mod verification {
         let field_number: u32 = kani::any();
         let data_len: usize = kani::any();
         kani::assume(field_number > 0 && field_number <= 0x1FFFFFFF);
+        kani::cover!(data_len == 0, "empty payload reachable");
+        kani::cover!(data_len > 0, "non-empty payload reachable");
         assert_eq!(
             bytes_field_total_size(field_number, data_len),
             ffwd_kani::proto::bytes_field_total_size_oracle(field_number, data_len),

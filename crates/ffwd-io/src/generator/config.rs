@@ -79,6 +79,7 @@ impl Default for GeneratorTimestamp {
 }
 
 /// Configuration for the generator input.
+#[derive(Debug)]
 pub struct GeneratorConfig {
     /// Target events per second. 0 = unlimited (as fast as possible).
     pub events_per_sec: u64,

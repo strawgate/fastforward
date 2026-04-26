@@ -28,11 +28,14 @@ pub fn os_to_string(value: &OsStr) -> String {
 
 /// Convert a slice of `OsString` values to a single space-separated `String`.
 pub fn os_vec_to_string(values: &[std::ffi::OsString]) -> String {
-    values
-        .iter()
-        .map(|v| v.to_string_lossy())
-        .collect::<Vec<_>>()
-        .join(" ")
+    let mut out = String::new();
+    for (index, value) in values.iter().enumerate() {
+        if index > 0 {
+            out.push(' ');
+        }
+        out.push_str(&value.to_string_lossy());
+    }
+    out
 }
 
 /// Return the current wall-clock time as nanoseconds since the Unix epoch.

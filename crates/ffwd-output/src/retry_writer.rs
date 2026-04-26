@@ -1,6 +1,9 @@
 //! Async write combinator that provides at-least-once semantics by reconnecting
 //! on failure.
 //!
+//! This module is infrastructure introduced for use in upcoming output sink
+//! reconnection work; it is not yet wired into any sink.
+//!
 //! # Overview
 //!
 //! Many network protocols need at-least-once delivery: if a write fails after the
@@ -8,8 +11,9 @@
 //! `RetryWriter` encapsulates this pattern:
 //!
 //! - On the first attempt, use the existing connection if present, otherwise connect.
-//! - If the write fails and we haven't retied yet, reconnect and retry once.
-//! - After the retry, the last error encountered is propagated.
+//! - If the write fails and we haven't retried yet, reconnect and retry once.
+//! - After the retry, the last error encountered (which may be a connect error or a
+//!   write error from the retry attempt) is propagated to the caller.
 //!
 //! # At-least-once semantics
 //!
@@ -27,6 +31,10 @@
 //! trigger a retry with a fresh deadline. If the second attempt also times out,
 //! the timeout error is propagated to the caller.
 
+// This module is not yet wired into any sink; suppress dead_code for the entire
+// module until it is integrated into output sink reconnection work.
+#![allow(dead_code)]
+
 use std::future::Future;
 use std::io;
 use std::time::Duration;
@@ -35,7 +43,6 @@ use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio::time::Instant;
 
 /// Default timeout for a single write attempt.
-#[allow(dead_code)]
 const DEFAULT_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// A wrapper that provides at-least-once write semantics by reconnecting on failure.
@@ -44,13 +51,11 @@ const DEFAULT_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 /// call will connect before writing. If the write fails, a new connection is
 /// established and the write is retried once. If the retry also fails, the second
 /// error is propagated.
-#[allow(dead_code)]
 pub struct RetryWriter<W, C> {
     inner: Option<W>,
     connect: C,
 }
 
-#[allow(dead_code)]
 impl<W, C> RetryWriter<W, C> {
     /// Create a new `RetryWriter` with no active connection.
     ///
@@ -64,7 +69,6 @@ impl<W, C> RetryWriter<W, C> {
     }
 }
 
-#[allow(dead_code)]
 impl<W, C, F> RetryWriter<W, C>
 where
     W: AsyncWrite + Unpin + Send,
@@ -79,14 +83,17 @@ where
     ///
     /// The write timeout is `DEFAULT_WRITE_TIMEOUT` (10 seconds).
     pub async fn write_all_with_retry(&mut self, buf: &[u8]) -> io::Result<()> {
-        self.write_all_with_retry_deadline(buf, DEFAULT_WRITE_TIMEOUT)
+        self.write_all_with_retry_timeout(buf, DEFAULT_WRITE_TIMEOUT)
             .await
     }
 
     /// Write the entire buffer with at-least-once semantics and a custom timeout.
     ///
+    /// The `timeout` is applied **per attempt**: each attempt (including the
+    /// connect step) must complete within `timeout` of that attempt starting.
+    ///
     /// See [`write_all_with_retry`](Self::write_all_with_retry) for semantics.
-    pub async fn write_all_with_retry_deadline(
+    pub async fn write_all_with_retry_timeout(
         &mut self,
         buf: &[u8],
         timeout: Duration,
@@ -98,12 +105,19 @@ where
         let mut last_error = None;
 
         for attempt in 0..=1 {
+            let deadline = Instant::now() + timeout;
+
             if self.inner.is_none() {
-                self.inner = Some((self.connect)().await?);
+                let writer = tokio::time::timeout_at(deadline, (self.connect)())
+                    .await
+                    .map_err(|_elapsed| {
+                        io::Error::new(io::ErrorKind::TimedOut, "connect deadline exceeded")
+                    })??;
+                self.inner = Some(writer);
             }
 
             if let Some(inner) = self.inner.as_mut() {
-                match write_all_deadline(inner, buf, timeout).await {
+                match write_all_deadline(inner, buf, deadline).await {
                     Ok(()) => return Ok(()),
                     Err(e) => {
                         // Discard the broken connection. On the next attempt
@@ -127,12 +141,10 @@ where
 /// On success, returns `Ok(())` only when all bytes are written.
 /// On timeout, returns an error with [`io::ErrorKind::TimedOut`].
 /// On other errors, propagates them directly.
-#[allow(dead_code)]
-async fn write_all_deadline<W>(stream: &mut W, buf: &[u8], timeout: Duration) -> io::Result<()>
+async fn write_all_deadline<W>(stream: &mut W, buf: &[u8], deadline: Instant) -> io::Result<()>
 where
     W: AsyncWrite + Unpin + Send,
 {
-    let deadline = Instant::now() + timeout;
     let mut written = 0usize;
 
     while written < buf.len() {
