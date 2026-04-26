@@ -237,8 +237,8 @@ impl Pipeline {
         });
         // Keep input_transforms in sync: one transform per input.
         while self.input_transforms.len() < self.inputs.len() {
-            let transform =
-                create_transform("SELECT * FROM logs").expect("default passthrough SQL");
+            let transform = create_transform("SELECT * FROM logs")
+                .expect("hardcoded passthrough 'SELECT * FROM logs' is always valid");
             let scanner = Scanner::new(transform.scan_config());
             self.input_transforms.push(SourcePipeline {
                 scanner,
