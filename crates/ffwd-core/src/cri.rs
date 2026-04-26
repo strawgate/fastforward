@@ -1228,9 +1228,9 @@ mod verification {
     }
 
     /// Oracle equivalence: `json_escape_bytes` matches `ffwd_kani::bytes::json_escape_oracle`
-    /// for ALL byte-slice inputs.
+    /// for all byte-slice inputs of length at most 16.
     #[kani::proof]
-    #[kani::unwind(22)]
+    #[kani::unwind(100)]
     pub(super) fn verify_json_escape_bytes_vs_oracle() {
         let src: [u8; 16] = kani::any();
         let len: usize = kani::any_where(|&l| l <= 16);

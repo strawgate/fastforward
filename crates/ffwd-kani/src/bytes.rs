@@ -120,10 +120,10 @@ pub fn prefix_xor_oracle(mut bitmask: u64) -> u64 {
 /// Contract: output length is bounded by input length times 6 (worst case:
 /// each byte becomes \u00XX = 6 bytes).
 #[cfg_attr(kani, kani::ensures(|result: &Vec<u8>| {
-    result.capacity() <= src.len().saturating_mul(6)
+    result.len() <= src.len().saturating_mul(6)
 }))]
 pub fn json_escape_oracle(src: &[u8]) -> Vec<u8> {
-    let mut dst = Vec::with_capacity(src.len());
+    let mut dst = Vec::with_capacity(src.len().saturating_mul(6));
     for &b in src {
         match b {
             b'"' => dst.extend_from_slice(b"\\\""),
@@ -246,8 +246,8 @@ mod verification {
         let len: usize = kani::any_where(|&l| l <= 16);
         let _result = json_escape_oracle(&src[..len]);
         kani::cover!(
-            _result.capacity() <= len.saturating_mul(6),
-            "capacity bound"
+            _result.len() <= len.saturating_mul(6),
+            "length bound"
         );
     }
 

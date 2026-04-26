@@ -2053,7 +2053,8 @@ mod verification {
                 assert!(prod_result.is_ok(), "oracle Some → prod Ok");
                 let (prod_val, prod_pos) = prod_result.unwrap();
                 assert_eq!(prod_val, ora_val, "value mismatch");
-                assert_eq!(prod_pos, ora_pos, "pos mismatch");
+                // prod_pos is absolute (from original data), ora_pos is relative to sliced data
+                assert_eq!(prod_pos, pos + ora_pos, "pos mismatch");
                 kani::cover!(ora_val < 128, "single-byte result");
                 kani::cover!(ora_val >= 128, "multi-byte result");
             }

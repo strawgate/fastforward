@@ -112,6 +112,18 @@ mod tests {
     fn decode_varint_empty() {
         assert_eq!(decode_varint_oracle(&[]), None);
     }
+
+    #[test]
+    fn decode_varint_truncated_continuation() {
+        // 0x80 indicates continuation but no byte follows
+        assert_eq!(decode_varint_oracle(&[0x80]), None);
+    }
+
+    #[test]
+    fn decode_varint_overlong() {
+        // 11 bytes of continuation (would exceed u64::MAX)
+        assert_eq!(decode_varint_oracle(&[0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80]), None);
+    }
 }
 #[cfg(kani)]
 mod verification {
@@ -140,8 +152,7 @@ mod verification {
     #[kani::unwind(22)]
     fn verify_decode_varint_oracle_no_panic() {
         let data: [u8; 10] = kani::any();
-        let len: usize = kani::any();
-        kani::assume(len <= 10);
+        let len: usize = kani::any_where(|&l| l <= 10);
         let res = decode_varint_oracle(&data[..len]);
         kani::cover!(res.is_some(), "successful decode reachable");
         kani::cover!(res.is_none(), "error decode reachable");
