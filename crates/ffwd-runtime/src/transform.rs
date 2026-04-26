@@ -232,8 +232,9 @@ impl Transform for SqlTransform {
         &mut self,
         batch: RecordBatch,
     ) -> Pin<Box<dyn Future<Output = Result<RecordBatch, TransformError>> + Send + '_>> {
+        use ffwd_transform::SqlTransform as DfSqlTransform;
         let fut = async move {
-            let result = SqlTransform::execute(self, batch).await;
+            let result = DfSqlTransform::execute(self, batch).await;
             result.map_err(TransformError::from_df_error)
         };
         Box::pin(fut)
