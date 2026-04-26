@@ -78,10 +78,11 @@ pub fn decode_varint_oracle(data: &[u8]) -> Option<(u64, usize)> {
     }
 }))]
 pub fn decode_tag_oracle(buf: &[u8], pos: usize) -> Option<(u32, u8, usize)> {
-    let (tag, new_pos) = decode_varint_oracle(&buf[pos..])?;
+    let (tag, rel_pos) = decode_varint_oracle(&buf[pos..])?;
     let field_number = (tag >> 3) as u32;
     let wire_type = (tag & 0x07) as u8;
-    Some((field_number, wire_type, new_pos))
+    let abs_pos = pos.checked_add(rel_pos)?;
+    Some((field_number, wire_type, abs_pos))
 }
 
 /// Oracle for `skip_field`: skips a protobuf field value based on its wire type.
@@ -98,8 +99,9 @@ pub fn skip_field_oracle(buf: &[u8], wire_type: u8, pos: usize) -> Option<usize>
     match wire_type {
         0 => {
             // Varint.
-            let (_, new_pos) = decode_varint_oracle(&buf[pos..])?;
-            Some(new_pos)
+            let (_, rel_pos) = decode_varint_oracle(&buf[pos..])?;
+            let abs_pos = pos.checked_add(rel_pos)?;
+            Some(abs_pos)
         }
         1 => {
             // 64-bit fixed.
@@ -111,9 +113,10 @@ pub fn skip_field_oracle(buf: &[u8], wire_type: u8, pos: usize) -> Option<usize>
         }
         2 => {
             // Length-delimited.
-            let (len, new_pos) = decode_varint_oracle(&buf[pos..])?;
+            let (len, rel_pos) = decode_varint_oracle(&buf[pos..])?;
             let len_usize = usize::try_from(len).ok()?;
-            let end = new_pos.checked_add(len_usize)?;
+            let abs_after_varint = pos.checked_add(rel_pos)?;
+            let end = abs_after_varint.checked_add(len_usize)?;
             if end > buf.len() {
                 return None;
             }
@@ -271,6 +274,66 @@ mod tests {
         assert_eq!(skip_field_oracle(&[0x00; 3], 5, 0), None);
         // Length-delimited truncated
         assert_eq!(skip_field_oracle(&[0x05], 2, 0), None);
+    }
+
+    // Non-zero pos tests for decode_tag_oracle
+
+    #[test]
+    fn decode_tag_oracle_nonzero_pos_single_byte() {
+        // Two prefix bytes then: field 1, wire type 2 (0x0A) at pos=2
+        // Expected new_pos = 2 + 1 = 3
+        assert_eq!(decode_tag_oracle(&[0xFF, 0xFF, 0x0A], 2), Some((1, 2, 3)));
+    }
+
+    #[test]
+    fn decode_tag_oracle_nonzero_pos_multi_byte() {
+        // Three prefix bytes then: field 16, wire type 0 (0x80 0x01) at pos=3
+        // Expected new_pos = 3 + 2 = 5
+        assert_eq!(
+            decode_tag_oracle(&[0x00, 0x00, 0x00, 0x80, 0x01], 3),
+            Some((16, 0, 5))
+        );
+    }
+
+    #[test]
+    fn decode_tag_oracle_nonzero_pos_truncated() {
+        // pos points past the end of the buffer → None
+        assert_eq!(decode_tag_oracle(&[0x0A], 1), None);
+    }
+
+    // Non-zero pos tests for skip_field_oracle
+
+    #[test]
+    fn skip_field_varint_nonzero_pos() {
+        // Two prefix bytes, then varint 300 (0xAC 0x02) at pos=2
+        // Expected absolute end = 2 + 2 = 4
+        assert_eq!(skip_field_oracle(&[0x00, 0x00, 0xAC, 0x02], 0, 2), Some(4));
+    }
+
+    #[test]
+    fn skip_field_fixed64_nonzero_pos() {
+        // Three prefix bytes, then 8-byte fixed64 field at pos=3
+        // Expected end = 3 + 8 = 11
+        let buf = [0u8; 20];
+        assert_eq!(skip_field_oracle(&buf, 1, 3), Some(11));
+    }
+
+    #[test]
+    fn skip_field_length_delimited_nonzero_pos() {
+        // One prefix byte, then length=3 varint (0x03) + 3 data bytes at pos=1
+        // varint new_rel_pos=1, abs_after_varint=2, end=2+3=5
+        assert_eq!(
+            skip_field_oracle(&[0xFF, 0x03, 0x41, 0x42, 0x43], 2, 1),
+            Some(5)
+        );
+    }
+
+    #[test]
+    fn skip_field_fixed32_nonzero_pos() {
+        // Four prefix bytes, then 4-byte fixed32 field at pos=4
+        // Expected end = 4 + 4 = 8
+        let buf = [0u8; 16];
+        assert_eq!(skip_field_oracle(&buf, 5, 4), Some(8));
     }
 }
 #[cfg(kani)]

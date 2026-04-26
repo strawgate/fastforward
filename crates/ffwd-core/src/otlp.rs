@@ -1213,7 +1213,7 @@ mod tests {
 mod verification {
     use super::*;
     use alloc::{vec, vec::Vec};
-    use ffwd_kani::proto::{decode_varint_oracle, decode_tag_oracle, skip_field_oracle};
+    use ffwd_kani::proto::{decode_tag_oracle, decode_varint_oracle, skip_field_oracle};
 
     // NOTE: encode_varint and encode_tag take `&mut Vec<u8>` and return `()`.
     // In our current Kani version/configuration used in CI, the contract system
