@@ -372,4 +372,60 @@ mod tests {
             .await
             .expect("empty write should succeed");
     }
+
+    #[tokio::test]
+    async fn retry_writer_propagates_connect_failure() {
+        let mut retry: RetryWriter<ScriptedWriter, _> = RetryWriter::new(|| {
+            std::future::ready::<io::Result<ScriptedWriter>>(Err(io::Error::new(
+                io::ErrorKind::ConnectionRefused,
+                "connect failed",
+            )))
+        });
+        let err = retry
+            .write_all_with_retry(b"test")
+            .await
+            .expect_err("should propagate connect failure");
+        assert_eq!(err.kind(), io::ErrorKind::ConnectionRefused);
+    }
+
+    #[tokio::test]
+    async fn retry_writer_propagates_connect_failure_on_retry() {
+        // First write succeeds partially, then fails; on retry the connect also fails.
+        // The connect error should be propagated.
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let first_writer = ScriptedWriter::new(
+            vec![
+                ScriptStep::Write(3),
+                ScriptStep::Error(io::ErrorKind::BrokenPipe),
+            ],
+            Arc::clone(&received),
+        );
+
+        let connect_calls = Arc::new(Mutex::new(0u32));
+        let connect_calls_clone = Arc::clone(&connect_calls);
+        let first_writer = Arc::new(Mutex::new(Some(first_writer)));
+
+        let mut retry: RetryWriter<ScriptedWriter, _> = RetryWriter::new(move || {
+            let mut calls = connect_calls_clone.lock().unwrap();
+            *calls += 1;
+            let call = *calls;
+            let first_writer = Arc::clone(&first_writer);
+            async move {
+                if call == 1 {
+                    Ok(first_writer.lock().unwrap().take().unwrap())
+                } else {
+                    Err(io::Error::new(
+                        io::ErrorKind::ConnectionRefused,
+                        "reconnect failed",
+                    ))
+                }
+            }
+        });
+
+        let err = retry
+            .write_all_with_retry(b"test")
+            .await
+            .expect_err("should fail when retry connect fails");
+        assert_eq!(err.kind(), io::ErrorKind::ConnectionRefused);
+    }
 }
