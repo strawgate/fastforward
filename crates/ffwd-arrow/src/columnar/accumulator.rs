@@ -503,7 +503,10 @@ pub struct FinalizationMode {
 fn is_dense<T>(facts: &[(u32, T)], num_rows: usize, dedup: bool) -> bool {
     dedup
         && facts.len() == num_rows
-        && (num_rows == 0 || facts.get(num_rows - 1).is_some_and(|f| f.0 as usize == num_rows - 1))
+        && (num_rows == 0
+            || facts
+                .get(num_rows - 1)
+                .is_some_and(|f| f.0 as usize == num_rows - 1))
 }
 
 // ---------------------------------------------------------------------------
@@ -556,7 +559,9 @@ fn validity_bitmap_bits<T>(facts: &[(u32, T)], num_rows: usize) -> Vec<u8> {
     let mut bits = vec![0u8; byte_len];
     for &(row, _) in facts {
         let r = row as usize;
-        if r < num_rows && let Some(byte) = bits.get_mut(r >> 3) {
+        if r < num_rows
+            && let Some(byte) = bits.get_mut(r >> 3)
+        {
             *byte |= 1 << (r & 7);
         }
     }

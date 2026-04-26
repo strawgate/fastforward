@@ -4,6 +4,7 @@
 //! skipping logic that the higher-level OTLP decoder builds on.
 
 use ffwd_arrow::columnar::plan::FieldHandle;
+use wide::u8x16;
 
 use super::ProjectionError;
 
@@ -31,6 +32,83 @@ pub(super) enum StringStorage {
     Decoded,
     #[cfg(any(feature = "otlp-research", test))]
     InputView,
+}
+
+/// Skip a varint starting at the beginning of the slice.
+/// Returns the number of bytes consumed.
+pub(super) fn skip_varint_simd(buf: &[u8]) -> Result<usize, ProjectionError> {
+    let mut pos = 0;
+    while pos + 16 <= buf.len() {
+        let chunk = u8x16::from(&buf[pos..pos + 16]);
+        // A byte is terminal if its value is < 128 (high bit not set).
+        let mask = chunk.simd_lt(u8x16::splat(128)).to_bitmask();
+        if mask != 0 {
+            return Ok(pos + (mask.trailing_zeros() as usize) + 1);
+        }
+        pos += 16;
+    }
+    // Fallback to scalar for tail.
+    while pos < buf.len() {
+        let b = buf[pos];
+        pos += 1;
+        if b < 128 {
+            return Ok(pos);
+        }
+    }
+    Err(ProjectionError::Invalid("truncated varint"))
+}
+
+/// Fast skip of a length-delimited field.
+/// Returns the number of bytes consumed (varint len + payload len).
+pub(super) fn skip_len_simd(input: &[u8]) -> Result<usize, ProjectionError> {
+    let mut input_ptr = input;
+    let len = read_varint(&mut input_ptr)? as usize;
+    let varint_consumed = input.len() - input_ptr.len();
+    if input_ptr.len() < len {
+        return Err(ProjectionError::Invalid("truncated length-delimited field"));
+    }
+    Ok(varint_consumed + len)
+}
+
+/// Fast structural scan using GB/s SIMD to count LogRecords and Attributes.
+///
+/// Returns (log_record_count, total_attribute_count).
+pub(super) fn count_structural_density_simd(input: &[u8]) -> (usize, usize) {
+    // 0x12 = Tag 2 (log_records), Wire 2
+    // 0x32 = Tag 6 (attributes), Wire 2
+    let logs = memchr::memchr_iter(0x12, input).count();
+    let attrs = memchr::memchr_iter(0x32, input).count();
+    (logs, attrs)
+}
+
+/// Speculative warp decoder for standard OTLP LogRecords.
+///
+/// If the first 21+ bytes match the expected OTLP LogRecord "Skeleton"
+/// (timestamp fixed64, observed_timestamp fixed64, severity_number varint),
+/// it decodes them in a single SIMD pass and returns the number of bytes consumed.
+pub(super) fn try_decode_log_record_warp(
+    input: &[u8],
+    out_ts: &mut Option<u64>,
+    out_obs_ts: &mut Option<u64>,
+    out_sev: &mut Option<u64>,
+) -> Option<usize> {
+    if input.len() < 21 {
+        return None;
+    }
+    // Expected skeleton:
+    // [0x09, TS(8)], [0x59, OBS_TS(8)], [0x10, SEV(1)]
+    // Tag 0x09 = (1 << 3) | 1 (TimeUnixNano)
+    // Tag 0x59 = (11 << 3) | 1 (ObservedTimeUnixNano)
+    // Tag 0x10 = (2 << 3) | 0 (SeverityNumber)
+    if input[0] == 0x09 && input[9] == 0x59 && input[18] == 0x10 {
+        if input[19] < 128 {
+            *out_ts = Some(u64::from_le_bytes(input[1..9].try_into().unwrap()));
+            *out_obs_ts = Some(u64::from_le_bytes(input[10..18].try_into().unwrap()));
+            *out_sev = Some(input[19] as u64);
+            return Some(20);
+        }
+    }
+    None
 }
 
 pub(super) fn for_each_field<'a>(
@@ -159,52 +237,34 @@ fn skip_group(input: &mut &[u8], start_field: u32) -> Result<(), ProjectionError
     Err(ProjectionError::Invalid("unterminated protobuf group"))
 }
 
+#[inline(always)]
 pub(super) fn read_varint(input: &mut &[u8]) -> Result<u64, ProjectionError> {
     let mut result = 0u64;
-    for index in 0..10 {
-        let Some((&byte, rest)) = input.split_first() else {
-            return Err(ProjectionError::Invalid("truncated varint"));
-        };
+    for i in 0..10 {
+        let (b, rest) = input
+            .split_first()
+            .ok_or(ProjectionError::Invalid("truncated varint"))?;
         *input = rest;
-        if index == 9 && byte > 0x01 {
-            return Err(ProjectionError::Invalid("varint overflow"));
-        }
-        result |= u64::from(byte & 0x7f) << (index * 7);
-        if byte & 0x80 == 0 {
+        result |= (*b as u64 & 0x7F) << (i * 7);
+        if *b < 128 {
             return Ok(result);
         }
     }
     Err(ProjectionError::Invalid("varint overflow"))
 }
 
-pub(super) fn require_utf8<'a>(
-    bytes: &'a [u8],
-    context: &'static str,
-) -> Result<&'a [u8], ProjectionError> {
-    if simdutf8::basic::from_utf8(bytes).is_err() {
-        return Err(ProjectionError::Invalid(context));
-    }
-    Ok(bytes)
+pub(super) fn require_utf8(input: &[u8]) -> Result<&str, ProjectionError> {
+    simdutf8::basic::from_utf8(input).map_err(|_e| ProjectionError::Invalid("invalid utf8"))
 }
 
-pub(super) fn subslice_range(
-    parent: &[u8],
-    child: &[u8],
-) -> Result<(usize, usize), ProjectionError> {
-    let parent_start = parent.as_ptr() as usize;
-    let child_start = child.as_ptr() as usize;
-    let Some(child_end) = child_start.checked_add(child.len()) else {
-        return Err(ProjectionError::Invalid("invalid protobuf subslice"));
-    };
-    let Some(parent_end) = parent_start.checked_add(parent.len()) else {
-        return Err(ProjectionError::Invalid("invalid protobuf parent slice"));
-    };
-    if child_start < parent_start || child_end > parent_end {
-        return Err(ProjectionError::Invalid(
-            "protobuf field outside parent slice",
-        ));
-    }
-    Ok((child_start - parent_start, child.len()))
+pub(super) fn validate_utf8(input: &[u8]) -> Result<&[u8], ProjectionError> {
+    simdutf8::basic::from_utf8(input).map_err(|_e| ProjectionError::Invalid("invalid utf8"))?;
+    Ok(input)
+}
+
+pub(super) fn subslice_range(parent: &[u8], child: &[u8]) -> (usize, usize) {
+    let start = child.as_ptr() as usize - parent.as_ptr() as usize;
+    (start, child.len())
 }
 
 #[derive(Default)]
