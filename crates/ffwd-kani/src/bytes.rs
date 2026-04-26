@@ -112,10 +112,11 @@ pub fn prefix_xor_oracle(mut bitmask: u64) -> u64 {
     bitmask
 }
 
-/// Oracle for `json_escape_bytes`: appends JSON-escaped `src` to `dst`.
+/// Oracle for `json_escape_bytes`: returns JSON-escaped bytes for `src`.
 ///
 /// RFC 8259 §7 mandates escaping: " (U+0022), \ (U+005C),
-/// and control characters (U+0000–U+001F, U+007F).
+/// and control characters (U+0000–U+001F).
+/// This oracle also escapes U+007F to match `json_escape_bytes`.
 ///
 /// Contract: output length is bounded by input length times 6 (worst case:
 /// each byte becomes \u00XX = 6 bytes).

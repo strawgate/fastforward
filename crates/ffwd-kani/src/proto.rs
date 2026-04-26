@@ -48,6 +48,9 @@ pub fn decode_varint_oracle(data: &[u8]) -> Option<(u64, usize)> {
         }
         let byte = data[i];
         i += 1;
+        if shift == 63 && (byte & 0x7F) > 1 {
+            return None;
+        }
         value |= ((byte & 0x7F) as u64) << shift;
         if byte & 0x80 == 0 {
             return Some((value, i));
@@ -126,6 +129,15 @@ mod tests {
             decode_varint_oracle(&[
                 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80
             ]),
+            None
+        );
+    }
+
+    #[test]
+    fn decode_varint_tenth_byte_overflow_rejected() {
+        // 10th byte carries payload 0x02 > 1 → exceeds u64 range
+        assert_eq!(
+            decode_varint_oracle(&[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x02]),
             None
         );
     }

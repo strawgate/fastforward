@@ -1240,7 +1240,7 @@ mod verification {
         let src: [u8; 16] = kani::any();
         let len: usize = kani::any_where(|&l| l <= 16);
 
-        let mut prod_dst = Vec::new();
+        let mut prod_dst = Vec::with_capacity(16 * 6);
         let ora_result = json_escape_oracle(&src[..len]);
         json_escape_bytes(&src[..len], &mut prod_dst);
 
