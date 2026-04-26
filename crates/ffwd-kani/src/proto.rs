@@ -384,7 +384,7 @@ mod verification {
     #[kani::unwind(22)]
     fn verify_decode_tag_oracle_contract() {
         let buf: [u8; 20] = kani::any();
-        let pos: usize = kani::any_where(|&p| p < buf.len());
+        let pos: usize = kani::any_where(|&p| p <= buf.len());
         let res = decode_tag_oracle(&buf, pos);
         kani::cover!(res.is_some(), "successful decode reachable");
         kani::cover!(res.is_none(), "decode error reachable");
@@ -395,7 +395,7 @@ mod verification {
     fn verify_skip_field_oracle_contract() {
         let buf: [u8; 20] = kani::any();
         let wire_type: u8 = kani::any();
-        let pos: usize = kani::any_where(|&p| p < buf.len());
+        let pos: usize = kani::any_where(|&p| p <= buf.len());
         let res = skip_field_oracle(&buf, wire_type, pos);
         kani::cover!(res.is_some(), "successful skip reachable");
         kani::cover!(res.is_none(), "skip error reachable");

@@ -270,10 +270,11 @@ pub fn skip_field(buf: &[u8], wire_type: u8, pos: usize) -> Result<usize, &'stat
         }
         1 => {
             // 64-bit fixed.
-            if pos + 8 > buf.len() {
+            let end = pos.checked_add(8).ok_or("skip: truncated fixed64")?;
+            if end > buf.len() {
                 return Err("skip: truncated fixed64");
             }
-            Ok(pos + 8)
+            Ok(end)
         }
         2 => {
             // Length-delimited.
@@ -289,10 +290,11 @@ pub fn skip_field(buf: &[u8], wire_type: u8, pos: usize) -> Result<usize, &'stat
         }
         5 => {
             // 32-bit fixed.
-            if pos + 4 > buf.len() {
+            let end = pos.checked_add(4).ok_or("skip: truncated fixed32")?;
+            if end > buf.len() {
                 return Err("skip: truncated fixed32");
             }
-            Ok(pos + 4)
+            Ok(end)
         }
         _ => Err("skip: unsupported wire type"),
     }
@@ -1631,7 +1633,7 @@ mod verification {
         let value: u32 = kani::any();
         kani::assume(field_number > 0 && field_number <= 1000);
 
-        let mut buf = Vec::new();
+        let mut buf = Vec::with_capacity(14);
         encode_fixed32(&mut buf, field_number, value);
 
         // Tag + 4 bytes
