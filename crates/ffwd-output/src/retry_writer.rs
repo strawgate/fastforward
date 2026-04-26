@@ -157,7 +157,18 @@ where
             ));
         }
 
-        let n = tokio::time::timeout_at(deadline, stream.write(&buf[written..])).await??;
+        let n = match tokio::time::timeout_at(deadline, stream.write(&buf[written..])).await {
+            Ok(Ok(n)) => n,
+            // Interrupted means "retry the same operation" — not a connection failure.
+            Ok(Err(e)) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Ok(Err(e)) => return Err(e),
+            Err(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "write deadline exceeded",
+                ));
+            }
+        };
 
         match n {
             0 => {
