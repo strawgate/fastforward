@@ -833,6 +833,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(feature = "turmoil"))]
     #[test]
     fn source_metadata_enabled_allows_explicit_source_column() {
         let dir = tempfile::tempdir().unwrap();
@@ -872,6 +873,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(feature = "turmoil"))]
     #[test]
     fn public_source_path_style_rejects_inputs_without_source_paths() {
         let mut config = PipelineConfig {
@@ -909,6 +911,7 @@ mod tests {
             .expect("fastforward source id style does not require source paths");
     }
 
+    #[cfg(not(feature = "turmoil"))]
     #[test]
     fn public_source_path_style_allows_s3_key_snapshots() {
         let config = PipelineConfig {
@@ -963,6 +966,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(feature = "turmoil"))]
     #[test]
     fn fastforward_source_metadata_attaches_source_id_for_select_star() {
         let dir = tempfile::tempdir().unwrap();

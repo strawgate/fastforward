@@ -15,6 +15,7 @@ pub fn varint_len_oracle(mut value: u64) -> usize {
 }
 
 /// Predict the size of a protobuf tag (`field_number << 3 | wire_type`).
+#[cfg_attr(kani, kani::ensures(|result: &usize| *result >= 1 && *result <= 10))]
 pub fn tag_size_oracle(field_number: u32) -> usize {
     let tag = (field_number as u64) << 3;
     varint_len_oracle(tag)
@@ -25,10 +26,45 @@ pub fn tag_size_oracle(field_number: u32) -> usize {
 ///
 /// Uses plain addition to match production semantics (overflow wraps in
 /// release mode, same as `ffwd-core::otlp::bytes_field_size`).
+#[cfg_attr(kani, kani::ensures(|result: &usize|
+    // tag + len varints each contribute 1-10 bytes
+    *result >= data_len + 2 && *result <= data_len + 20
+))]
 pub fn bytes_field_total_size_oracle(field_number: u32, data_len: usize) -> usize {
     let tag_size = tag_size_oracle(field_number);
     let len_size = varint_len_oracle(data_len as u64);
     tag_size + len_size + data_len
+}
+
+/// Oracle for `decode_varint`: decodes a protobuf varint from `data`.
+///
+/// Protobuf varint: each byte uses 7 bits for value, MSB as continuation flag.
+/// Returns `None` if data is empty/too short or if varint exceeds 10 bytes.
+pub fn decode_varint_oracle(data: &[u8]) -> Option<(u64, usize)> {
+    if data.is_empty() {
+        return None;
+    }
+    let mut value: u64 = 0;
+    let mut shift: u32 = 0;
+    let mut i = 0;
+    loop {
+        if i >= data.len() {
+            return None;
+        }
+        let byte = data[i];
+        i += 1;
+        if shift == 63 && (byte & 0x7F) > 1 {
+            return None;
+        }
+        value |= ((byte & 0x7F) as u64) << shift;
+        if byte & 0x80 == 0 {
+            return Some((value, i));
+        }
+        shift += 7;
+        if shift >= 64 {
+            return None;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -65,8 +101,52 @@ mod tests {
         // field 1, 5 bytes data: tag(1) + len_varint(1) + data(5) = 7
         assert_eq!(bytes_field_total_size_oracle(1, 5), 7);
     }
-}
 
+    #[test]
+    fn decode_varint_single_byte() {
+        assert_eq!(decode_varint_oracle(&[0x00]), Some((0, 1)));
+        assert_eq!(decode_varint_oracle(&[0x7F]), Some((127, 1)));
+    }
+
+    #[test]
+    fn decode_varint_multi_byte() {
+        // 128 = 0x80 → continuation byte needed
+        assert_eq!(decode_varint_oracle(&[0x80, 0x01]), Some((128, 2)));
+        // 300 = 0xAC 0x02
+        assert_eq!(decode_varint_oracle(&[0xAC, 0x02]), Some((300, 2)));
+    }
+
+    #[test]
+    fn decode_varint_empty() {
+        assert_eq!(decode_varint_oracle(&[]), None);
+    }
+
+    #[test]
+    fn decode_varint_truncated_continuation() {
+        // 0x80 indicates continuation but no byte follows
+        assert_eq!(decode_varint_oracle(&[0x80]), None);
+    }
+
+    #[test]
+    fn decode_varint_overlong() {
+        // 11 bytes of continuation (would exceed u64::MAX)
+        assert_eq!(
+            decode_varint_oracle(&[
+                0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80
+            ]),
+            None
+        );
+    }
+
+    #[test]
+    fn decode_varint_tenth_byte_overflow_rejected() {
+        // 10th byte carries payload 0x02 > 1 → exceeds u64 range
+        assert_eq!(
+            decode_varint_oracle(&[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x02]),
+            None
+        );
+    }
+}
 #[cfg(kani)]
 mod verification {
     use super::*;
@@ -80,13 +160,34 @@ mod verification {
         kani::cover!(res == 10, "max-byte varint reachable");
     }
 
-    #[kani::proof]
+    #[kani::proof_for_contract(tag_size_oracle)]
     #[kani::unwind(12)]
-    fn verify_bytes_field_total_size_oracle_no_panic() {
+    fn verify_tag_size_oracle_contract() {
+        let field_number: u32 = kani::any();
+        kani::assume(field_number > 0 && field_number <= 0x1FFFFFFF);
+        let res = tag_size_oracle(field_number);
+        kani::cover!(res == 1, "single-byte tag reachable");
+        kani::cover!(res > 1, "multi-byte tag reachable");
+    }
+
+    #[kani::proof_for_contract(bytes_field_total_size_oracle)]
+    #[kani::unwind(12)]
+    fn verify_bytes_field_total_size_oracle_contract() {
         let field_number: u32 = kani::any();
         let data_len: usize = kani::any();
         kani::assume(field_number > 0 && field_number <= 0x1FFFFFFF);
         let res = bytes_field_total_size_oracle(field_number, data_len);
-        kani::cover!(res > data_len, "total size includes overhead");
+        kani::cover!(data_len == 0, "empty data reachable");
+        kani::cover!(data_len > 0, "non-empty data reachable");
+    }
+
+    #[kani::proof]
+    #[kani::unwind(22)]
+    fn verify_decode_varint_oracle_no_panic() {
+        let data: [u8; 10] = kani::any();
+        let len: usize = kani::any_where(|&l| l <= 10);
+        let res = decode_varint_oracle(&data[..len]);
+        kani::cover!(res.is_some(), "successful decode reachable");
+        kani::cover!(res.is_none(), "error decode reachable");
     }
 }
