@@ -180,7 +180,8 @@ mod passthrough {
         fn execute_async(
             &mut self,
             batch: RecordBatch,
-        ) -> Pin<Box<dyn Future<Output = Result<RecordBatch, TransformError>> + Send + '_>> {
+        ) -> Pin<Box<dyn Future<Output = Result<RecordBatch, TransformError>> + Send + '_>>
+        {
             Box::pin(std::future::ready(Ok(batch)))
         }
 
