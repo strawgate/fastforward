@@ -122,7 +122,12 @@ mod tests {
     #[test]
     fn decode_varint_overlong() {
         // 11 bytes of continuation (would exceed u64::MAX)
-        assert_eq!(decode_varint_oracle(&[0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80]), None);
+        assert_eq!(
+            decode_varint_oracle(&[
+                0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80
+            ]),
+            None
+        );
     }
 }
 #[cfg(kani)]

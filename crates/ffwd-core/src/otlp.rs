@@ -429,6 +429,7 @@ fn eq_ignore_case_5(a: &[u8], b: &[u8]) -> bool {
 /// Case-insensitive 6-byte comparison.
 #[inline(always)]
 #[allow_unproven]
+#[verified(kani = "verify_eq_ignore_case_6_no_false_positives_notice")]
 fn eq_ignore_case_6(a: &[u8], b: &[u8]) -> bool {
     a[0] | 0x20 == b[0] | 0x20
         && a[1] | 0x20 == b[1] | 0x20
@@ -441,6 +442,7 @@ fn eq_ignore_case_6(a: &[u8], b: &[u8]) -> bool {
 /// Case-insensitive 7-byte comparison.
 #[inline(always)]
 #[allow_unproven]
+#[verified(kani = "verify_eq_ignore_case_7_no_false_positives_warning")]
 fn eq_ignore_case_7(a: &[u8], b: &[u8]) -> bool {
     a[0] | 0x20 == b[0] | 0x20
         && a[1] | 0x20 == b[1] | 0x20
@@ -454,6 +456,7 @@ fn eq_ignore_case_7(a: &[u8], b: &[u8]) -> bool {
 /// Case-insensitive 8-byte comparison.
 #[inline(always)]
 #[allow_unproven]
+#[verified(kani = "verify_eq_ignore_case_8_no_false_positives_critical")]
 fn eq_ignore_case_8(a: &[u8], b: &[u8]) -> bool {
     a[0] | 0x20 == b[0] | 0x20
         && a[1] | 0x20 == b[1] | 0x20
@@ -1750,6 +1753,39 @@ mod verification {
         let input: [u8; 5] = kani::any();
         let target = b"ERROR";
         if eq_ignore_case_5(&input, target) {
+            assert!(eq_ignore_case_match(&input, target));
+        }
+    }
+
+    /// Prove eq_ignore_case_6 agrees with eq_ignore_case_match for NOTICE.
+    #[kani::proof]
+    #[kani::unwind(7)] // eq_ignore_case_match: Zip over 6-byte slice + 1 terminator
+    pub(super) fn verify_eq_ignore_case_6_no_false_positives_notice() {
+        let input: [u8; 6] = kani::any();
+        let target = b"NOTICE";
+        if eq_ignore_case_6(&input, target) {
+            assert!(eq_ignore_case_match(&input, target));
+        }
+    }
+
+    /// Prove eq_ignore_case_7 agrees with eq_ignore_case_match for WARNING.
+    #[kani::proof]
+    #[kani::unwind(8)] // eq_ignore_case_match: Zip over 7-byte slice + 1 terminator
+    pub(super) fn verify_eq_ignore_case_7_no_false_positives_warning() {
+        let input: [u8; 7] = kani::any();
+        let target = b"WARNING";
+        if eq_ignore_case_7(&input, target) {
+            assert!(eq_ignore_case_match(&input, target));
+        }
+    }
+
+    /// Prove eq_ignore_case_8 agrees with eq_ignore_case_match for CRITICAL.
+    #[kani::proof]
+    #[kani::unwind(9)] // eq_ignore_case_match: Zip over 8-byte slice + 1 terminator
+    pub(super) fn verify_eq_ignore_case_8_no_false_positives_critical() {
+        let input: [u8; 8] = kani::any();
+        let target = b"CRITICAL";
+        if eq_ignore_case_8(&input, target) {
             assert!(eq_ignore_case_match(&input, target));
         }
     }

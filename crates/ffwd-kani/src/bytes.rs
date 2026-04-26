@@ -245,10 +245,7 @@ mod verification {
         let src: [u8; 16] = kani::any();
         let len: usize = kani::any_where(|&l| l <= 16);
         let _result = json_escape_oracle(&src[..len]);
-        kani::cover!(
-            _result.len() <= len.saturating_mul(6),
-            "length bound"
-        );
+        kani::cover!(_result.len() <= len.saturating_mul(6), "length bound");
     }
 
     #[kani::proof]
