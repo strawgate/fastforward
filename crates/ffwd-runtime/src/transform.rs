@@ -3,6 +3,9 @@
 //! Defines the `Transform` trait that abstracts SQL transform execution.
 //! Implementations are DataFusion-based SQL transforms and a passthrough stub.
 
+use std::future::Future;
+use std::pin::Pin;
+
 use arrow::record_batch::RecordBatch;
 
 use ffwd_core::scan_config::ScanConfig;
@@ -59,7 +62,16 @@ impl TransformError {
 ///
 /// Implementations handle SQL transform execution against Arrow RecordBatches.
 pub trait Transform: Send {
-    /// Execute the transform on a record batch.
+    /// Execute the transform on a record batch asynchronously.
+    ///
+    /// This method enables direct `.await` usage in async contexts, avoiding
+    /// the overhead of creating a runtime per call in turmoil/simulation.
+    fn execute_async(
+        &mut self,
+        batch: RecordBatch,
+    ) -> Pin<Box<dyn futures_util::Future<Output = Result<RecordBatch, TransformError>> + Send + '_>>;
+
+    /// Execute the transform on a record batch synchronously.
     fn execute_blocking(&mut self, batch: RecordBatch) -> Result<RecordBatch, TransformError>;
 
     /// Return the scan configuration for field pushdown.
@@ -164,6 +176,13 @@ mod passthrough {
     }
 
     impl Transform for PassthroughTransform {
+        fn execute_async(
+            &mut self,
+            batch: RecordBatch,
+        ) -> Pin<Box<dyn Future<Output = Result<RecordBatch, TransformError>> + Send + '_>> {
+            Box::pin(std::future::ready(Ok(batch)))
+        }
+
         fn execute_blocking(&mut self, batch: RecordBatch) -> Result<RecordBatch, TransformError> {
             Ok(batch)
         }
@@ -208,6 +227,17 @@ mod passthrough {
 
 #[cfg(feature = "datafusion")]
 impl Transform for SqlTransform {
+    fn execute_async(
+        &mut self,
+        batch: RecordBatch,
+    ) -> Pin<Box<dyn Future<Output = Result<RecordBatch, TransformError>> + Send + '_>> {
+        let fut = async move {
+            let result = SqlTransform::execute(self, batch).await;
+            result.map_err(TransformError::from_df_error)
+        };
+        Box::pin(fut)
+    }
+
     fn execute_blocking(&mut self, batch: RecordBatch) -> Result<RecordBatch, TransformError> {
         use ffwd_transform::SqlTransform as DfSqlTransform;
         DfSqlTransform::execute_blocking(self, batch).map_err(TransformError::from_df_error)
