@@ -204,10 +204,10 @@ pub fn encode_fixed32(buf: &mut Vec<u8>, field_number: u32, value: u32) {
 // --- Protobuf wire format decode helpers ---
 
 /// Decode a varint from `buf` starting at `pos`.
-    ///
-    /// Returns `(value, new_pos)` or an error string if the input is truncated
-    /// or the varint exceeds 10 bytes. The 10th byte must carry a payload
-    /// of at most 1 to avoid u64 overflow.
+///
+/// Returns `(value, new_pos)` or an error string if the input is truncated
+/// or the varint exceeds 10 bytes. The 10th byte must carry a payload
+/// of at most 1 to avoid u64 overflow.
 #[verified(kani = "verify_decode_varint_vs_oracle")]
 #[trust_boundary]
 pub fn decode_varint(buf: &[u8], pos: usize) -> Result<(u64, usize), &'static str> {
