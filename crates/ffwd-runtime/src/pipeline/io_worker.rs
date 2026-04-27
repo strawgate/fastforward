@@ -317,6 +317,8 @@ pub(super) fn append_data_row_origins(
 
     let mut line_start = 0usize;
     for newline in memchr::memchr_iter(b'\n', bytes) {
+        // line_start <= newline: memchr returns ascending positions.
+        #[allow(clippy::indexing_slicing)]
         let segment_has_content = scanner_line_has_content(&bytes[line_start..newline]);
         if let Some(pending) = pending_row_origin
             && pending.source_id != source_id
@@ -340,6 +342,8 @@ pub(super) fn append_data_row_origins(
         line_start = newline + 1;
     }
 
+    // line_start <= bytes.len() after loop; empty slice when line_start == len.
+    #[allow(clippy::indexing_slicing)]
     let tail = &bytes[line_start..];
     if !tail.is_empty() {
         let tail_has_content = scanner_line_has_content(tail);
@@ -736,13 +740,18 @@ pub(super) fn process_buffered_events(
                         pending_row_origin,
                         source_id,
                         input_name,
+                        // range bounds are from memchr positions within buf.
+                        #[allow(clippy::indexing_slicing)]
                         &input.buf[range.clone()],
                     );
                 }
                 append_cri_metadata_for_data(
                     &mut input.cri_metadata,
                     cri_metadata,
+                    // range.start <= buf.len() by memchr construction.
+                    #[allow(clippy::indexing_slicing)]
                     &input.buf[..range.start],
+                    #[allow(clippy::indexing_slicing)]
                     &input.buf[range],
                 );
             }

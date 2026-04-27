@@ -20,6 +20,8 @@ impl OutputHealthTracker {
     }
 
     fn insert_worker(&self, worker_id: usize, initial: ComponentHealth) -> ComponentHealth {
+        // Mutex poisoning is unrecoverable — last-resort panic.
+        #[allow(clippy::expect_used)]
         let mut state = self
             .state
             .lock()
@@ -36,6 +38,8 @@ impl OutputHealthTracker {
         worker_id: usize,
         event: OutputHealthEvent,
     ) -> ComponentHealth {
+        // Mutex poisoning is unrecoverable — last-resort panic.
+        #[allow(clippy::expect_used)]
         let mut state = self
             .state
             .lock()
@@ -57,6 +61,8 @@ impl OutputHealthTracker {
     }
 
     pub(super) fn remove_worker(&self, worker_id: usize) -> ComponentHealth {
+        // Mutex poisoning is unrecoverable — last-resort panic.
+        #[allow(clippy::expect_used)]
         let mut state = self
             .state
             .lock()
@@ -68,6 +74,8 @@ impl OutputHealthTracker {
     }
 
     fn has_active_workers(&self) -> bool {
+        // Mutex poisoning is unrecoverable — last-resort panic.
+        #[allow(clippy::expect_used)]
         !self
             .state
             .lock()
@@ -77,6 +85,8 @@ impl OutputHealthTracker {
     }
 
     fn set_pool_health(&self, health: ComponentHealth) {
+        // Mutex poisoning is unrecoverable — last-resort panic.
+        #[allow(clippy::expect_used)]
         let mut state = self
             .state
             .lock()
@@ -87,6 +97,8 @@ impl OutputHealthTracker {
     }
 
     fn clear_workers_and_set_pool_health(&self, health: ComponentHealth) -> ComponentHealth {
+        // Mutex poisoning is unrecoverable — last-resort panic.
+        #[allow(clippy::expect_used)]
         let mut state = self
             .state
             .lock()

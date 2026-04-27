@@ -5,7 +5,6 @@
 //! entrypoints and compatibility re-exports.
 
 // Runtime orchestration: provably-bounded indexing in pipeline wiring and worker pools.
-#![allow(clippy::indexing_slicing, clippy::expect_used)]
 
 pub mod bootstrap;
 pub mod generated_cli;

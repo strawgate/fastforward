@@ -87,6 +87,8 @@ impl OutputWorkerPool {
         let mut i = 0;
         while i < self.workers.len() {
             // Try to send without blocking.
+            // i < self.workers.len() by while loop guard.
+            #[allow(clippy::indexing_slicing)]
             match self.workers[i].tx.try_send(msg) {
                 Ok(()) => {
                     // Promote this worker to front (MRU).

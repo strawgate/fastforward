@@ -180,8 +180,12 @@ impl HttpEnrichProcessor {
 
         // If more cacheable results than capacity, only keep the newest ones.
         let cacheable = if cacheable.len() > self.config.max_entries {
+            // cacheable.len() > max_entries guard above; valid offset into cacheable.
+            #[allow(clippy::indexing_slicing)]
             &cacheable[cacheable.len() - self.config.max_entries..]
         } else {
+            // Full slice, always valid.
+            #[allow(clippy::indexing_slicing)]
             &cacheable[..]
         };
 
@@ -315,6 +319,8 @@ impl HttpEnrichProcessor {
                 }
 
                 // Check this chunk's results only for missing keys (panicked threads).
+                // results_before <= all_results.len() by construction.
+                #[allow(clippy::indexing_slicing)]
                 let chunk_result_keys: HashSet<&str> = all_results[results_before..]
                     .iter()
                     .map(|(k, _)| k.as_str())

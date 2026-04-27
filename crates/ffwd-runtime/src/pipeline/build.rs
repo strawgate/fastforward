@@ -584,6 +584,8 @@ impl Pipeline {
 
         // Build output sink factory → pool.
         let factory: Arc<dyn SinkFactory> = if config.outputs.len() == 1 {
+            // outputs.len() == 1 guard above ensures index 0 is present.
+            #[allow(clippy::indexing_slicing)]
             let output_cfg = &config.outputs[0];
             build_output_factory_from_config(0, output_cfg, base_path, &mut metrics)?
         } else {

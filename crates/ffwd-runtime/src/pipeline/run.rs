@@ -36,6 +36,9 @@ impl Pipeline {
         {
             builder.worker_threads(threads);
         }
+        // Config validation ensures valid builder parameters. Panicking here means
+        // the process is in an unrecoverable state.
+        #[allow(clippy::expect_used)]
         builder
             .build()
             .expect("failed to create tokio runtime")

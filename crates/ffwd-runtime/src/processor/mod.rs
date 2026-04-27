@@ -105,9 +105,13 @@ pub fn cascading_flush(
     let mut all_output = SmallVec::new();
 
     for i in 0..processors.len() {
+        // i < processors.len() by for loop range.
+        #[allow(clippy::indexing_slicing)]
         let mut emitted = processors[i].flush();
 
         // Cascade through remaining processors
+        // i + 1 <= processors.len() by loop bound.
+        #[allow(clippy::indexing_slicing)]
         for processor in &mut processors[(i + 1)..] {
             let mut next = SmallVec::new();
             for b in emitted {

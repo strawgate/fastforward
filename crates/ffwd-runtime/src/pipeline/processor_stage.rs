@@ -56,8 +56,12 @@ pub(super) fn run_processor_stage(
     }
 
     let batch = if results.len() == 1 {
+        // results.len() == 1 guard on line 58 guarantees Some.
+        #[allow(clippy::expect_used)]
         results.into_iter().next().expect("checked len == 1")
     } else {
+        // results.len() >= 1 in this branch (len == 1 is handled above).
+        #[allow(clippy::indexing_slicing)]
         match arrow::compute::concat_batches(&results[0].schema(), results.iter()) {
             Ok(batch) => batch,
             Err(e) => {

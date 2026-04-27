@@ -267,6 +267,8 @@ impl Pipeline {
         });
         // Keep input_transforms in sync: one transform per input.
         while self.input_transforms.len() < self.inputs.len() {
+            // Hardcoded SQL literal, always parses successfully.
+            #[allow(clippy::expect_used)]
             let transform = create_transform("SELECT * FROM logs")
                 .expect("hardcoded passthrough 'SELECT * FROM logs' is always valid");
             let scanner = Scanner::new(transform.scan_config());
