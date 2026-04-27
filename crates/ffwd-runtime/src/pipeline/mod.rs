@@ -439,6 +439,19 @@ impl Pipeline {
         self.machine.as_ref().map_or(0, |m| m.in_flight_count())
     }
 
+    /// Returns a clone of the control channel sender.
+    ///
+    /// External callers can use this to send [`ControlMessage`]s to the pipeline's
+    /// control loop. The pipeline loop prioritizes control messages over data,
+    /// ensuring shutdown and drain commands are processed promptly.
+    ///
+    /// Note: Only [`ControlMessage::Shutdown`] is currently functional;
+    /// [`ControlMessage::DrainIngress`], [`ControlMessage::Flush`], and
+    /// [`ControlMessage::Reconfigure`] log only and do not trigger pipeline actions.
+    pub fn control_tx(&self) -> tokio::sync::mpsc::UnboundedSender<ControlMessage> {
+        self.control_tx.clone()
+    }
+
     /// Override the checkpoint flush interval (default 5s). For testing
     /// checkpoint persistence timing without waiting real seconds.
     pub fn set_checkpoint_flush_interval(&mut self, interval: Duration) {
