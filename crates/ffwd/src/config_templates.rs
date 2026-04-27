@@ -158,7 +158,7 @@ pub(crate) const USE_CASE_TEMPLATES: &[UseCaseTemplate] = &[
     },
     UseCaseTemplate {
         id: "otlp_in_to_loki",
-        title: "OTLP in to Loki",
+        title: "OTLP to Loki",
         description: "Receives OTLP logs and forwards to Loki.",
         input_snippet: "type: otlp\nlisten: 0.0.0.0:4318\n",
         output_snippet: "type: loki\nendpoint: https://loki:3100\nstatic_labels:\n  source: otlp\n",
@@ -166,7 +166,7 @@ pub(crate) const USE_CASE_TEMPLATES: &[UseCaseTemplate] = &[
     },
     UseCaseTemplate {
         id: "otlp_in_to_elasticsearch",
-        title: "OTLP in to Elasticsearch",
+        title: "OTLP to Elasticsearch",
         description: "Receives OTLP logs and indexes in Elasticsearch.",
         input_snippet: "type: otlp\nlisten: 0.0.0.0:4318\n",
         output_snippet: "type: elasticsearch\nendpoint: https://elasticsearch:9200\nindex: otlp-logs\n",
