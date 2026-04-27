@@ -264,6 +264,7 @@ fn run_with_flamegraph(
     let frequency: i32 = std::env::var("FFWD_PPROF_HZ")
         .ok()
         .and_then(|v| v.parse().ok())
+        .filter(|hz| *hz > 0)
         .unwrap_or(5_000);
     let guard = pprof::ProfilerGuardBuilder::default()
         .frequency(frequency)

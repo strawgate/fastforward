@@ -113,7 +113,7 @@ fn bench_trace_id_storage(c: &mut Criterion) {
         });
     });
 
-    // Candidate benchmark: FixedSizeBinaryBuilder as motivation for TODO #1844.
+    // Benchmark: FixedSizeBinaryBuilder throughput for trace/span ID columns (see TODO #1844).
     group.bench_function("fixed_size_binary_builder", |b| {
         b.iter(|| {
             let mut builder = FixedSizeBinaryBuilder::with_capacity(n, 16);
@@ -317,6 +317,7 @@ fn bench_column_writer(c: &mut Criterion) {
                 tid.append_value(unsafe { std::str::from_utf8_unchecked(&scratch_tid) });
                 scratch_sid.clear();
                 hex_encode_into(&mut scratch_sid, &span_ids[i]);
+                // SAFETY: hex_encode_into produces only ASCII hex digits.
                 sid.append_value(unsafe { std::str::from_utf8_unchecked(&scratch_sid) });
             }
             black_box((
