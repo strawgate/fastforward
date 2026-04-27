@@ -264,7 +264,7 @@ RecordBatch → OutputSink::send_batch() → HTTP/stdout/file
 - **JsonLinesSink**: Converts RecordBatch → newline-delimited JSON,
   sends via HTTP with zstd compression.
 - **StdoutSink**: Renders to terminal (JSON, console, or text format).
-- **FanoutSink**: Sends to multiple sinks.
+- **AsyncFanoutSink**: Sends to multiple sinks.
 
 ## Crate boundaries
 

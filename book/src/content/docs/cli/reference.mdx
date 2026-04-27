@@ -96,13 +96,14 @@ In non-interactive mode `--destination` is required. In an interactive terminal,
 
 | Option | Description |
 |--------|-------------|
-| `--destination` | Sink type (required in non-interactive mode, prompted otherwise): `otlp`, `elasticsearch` (aliases: `elasticsearch_otlp`, `elasticsearch_bulk`), `loki`, `arrow_ipc`, `udp`, `tcp`, `null` |
+| `--destination` | Sink type (required in non-interactive mode, prompted otherwise): `otlp` (alias: `elasticsearch_otlp`), `elasticsearch` (alias: `elasticsearch_bulk`), `loki`, `arrow_ipc`, `udp`, `tcp`, `null` |
 | `--endpoint` | Destination URL/address (required for all destinations except `null`) |
 | `--workers` | Worker threads (default: `2`) |
 | `--batch-lines` | Lines per batch (default: `5000`) |
 | `--duration-secs` | Stop automatically after N seconds (default: run until stopped) |
 | `--auth-bearer-token` | Bearer token auth header |
 | `--auth-header` | Extra header, repeatable: `--auth-header 'Authorization=ApiKey xyz'` |
+| `--diagnostics-addr` | Diagnostics server bind address (default: `127.0.0.1:0`) |
 
 ## ff devour
 
@@ -121,6 +122,7 @@ Unlike `blast`, `devour` does **not** require `--destination` — it accepts mul
 | `--mode` | Receiver type: `otlp` (default), `http`, `elasticsearch_bulk`, `tcp`, `udp` |
 | `--listen` | Bind address (default depends on mode: OTLP → `127.0.0.1:4318`) |
 | `--duration-secs` | Stop automatically after N seconds (default: run until stopped) |
+| `--diagnostics-addr` | Diagnostics server bind address (default: `127.0.0.1:0`) |
 
 ## ff blackhole
 
@@ -169,6 +171,7 @@ Print shell completion scripts.
 ff completions bash
 ff completions zsh
 ff completions fish
+ff completions elvish
 ff completions powershell
 ff completions nushell
 ```
