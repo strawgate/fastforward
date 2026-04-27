@@ -1207,7 +1207,10 @@ mod tests {
             .values
             .as_ref()
             .expect("non-null span values");
-        assert_eq!(metadata.timestamp(values), Some(b"2024-01-15T10:30:00Z".as_slice()));
+        assert_eq!(
+            metadata.timestamp(values),
+            Some(b"2024-01-15T10:30:00Z".as_slice())
+        );
         assert_eq!(values.stream.as_str(), "stdout");
     }
 
@@ -1933,7 +1936,10 @@ mod tests {
         assert_eq!(bytes.as_ref(), b"{\"msg\":\"hello\"}\n");
         assert_eq!(metadata.rows, 1);
         let values = metadata.spans[0].values.as_ref().expect("metadata values");
-        assert_eq!(metadata.timestamp(values), Some(b"2024-01-15T10:30:00Z".as_slice()));
+        assert_eq!(
+            metadata.timestamp(values),
+            Some(b"2024-01-15T10:30:00Z".as_slice())
+        );
         assert_eq!(values.stream.as_str(), "stdout");
     }
 
