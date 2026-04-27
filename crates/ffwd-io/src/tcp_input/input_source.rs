@@ -9,6 +9,7 @@ impl InputSource for TcpInput {
             {
                     // Drain (and drop) any pending connections beyond the limit so
                     // the kernel accept queue does not fill up and stall.
+                    #[allow(clippy::indexing_slicing)]
                     match self.listener.accept() {
                         Ok((_stream, _addr)) => {
                             self.connections_accepted += 1;

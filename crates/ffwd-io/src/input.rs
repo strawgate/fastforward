@@ -188,6 +188,7 @@ impl CriMetadata {
         }
         if let Some(last) = self.spans.last()
             && let Some(values) = &last.values
+            && values.stream == stream
             && self.timestamp(values) == Some(timestamp)
         {
             if let Some(last_mut) = self.spans.last_mut() {
@@ -245,7 +246,8 @@ impl CriMetadata {
         }
         if merge_first {
             let mut other_spans = other.spans.into_iter();
-            if let Some(first_rows) = other_spans.next().map(|span| span.rows) {
+            if let Some(first) = other_spans.next() {
+                let first_rows = first.rows;
                 if let Some(last) = self.spans.last_mut() {
                     last.rows += first_rows;
                 }

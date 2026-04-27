@@ -1,3 +1,5 @@
+#![allow(clippy::indexing_slicing)]
+
 use std::io;
 #[cfg(target_os = "macos")]
 use std::io::{BufRead, BufReader};

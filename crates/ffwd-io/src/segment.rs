@@ -6,6 +6,8 @@
 //! ```text
 //! HEADER (32 bytes) | Arrow IPC Stream (N bytes) | FOOTER (32 bytes)
 //! ```
+
+#![allow(clippy::indexing_slicing)]
 //!
 //! The footer contains a checksum (xxh32) over all preceding bytes.
 //! Missing footer = incomplete segment (crashed mid-write). Invalid footer

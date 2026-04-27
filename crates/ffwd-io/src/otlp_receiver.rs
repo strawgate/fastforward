@@ -5,6 +5,8 @@
 //!
 //! Endpoint: POST /v1/logs (protobuf or JSON)
 
+#![allow(clippy::indexing_slicing)]
+
 mod convert;
 mod decode;
 mod decode_stage;

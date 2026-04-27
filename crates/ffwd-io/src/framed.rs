@@ -9,6 +9,9 @@
 //! interleaved data from multiple files (or TCP connections) never
 //! cross-contaminates partial lines or CRI P/F aggregation state.
 
+#![allow(clippy::indexing_slicing)]
+#![allow(clippy::expect_used)]
+
 use bytes::{Bytes, BytesMut};
 
 use crate::filter_hints::FilterHints;
@@ -1204,7 +1207,7 @@ mod tests {
             .values
             .as_ref()
             .expect("non-null span values");
-        assert_eq!(metadata.timestamp(values), b"2024-01-15T10:30:00Z");
+        assert_eq!(metadata.timestamp(values), Some(b"2024-01-15T10:30:00Z".as_slice()));
         assert_eq!(values.stream.as_str(), "stdout");
     }
 
@@ -1272,7 +1275,7 @@ mod tests {
         assert_eq!(second_values.stream.as_str(), "stderr");
         assert_eq!(
             second_metadata.timestamp(second_values),
-            b"2024-01-15T10:30:01Z"
+            Some(b"2024-01-15T10:30:01Z".as_slice())
         );
     }
 
@@ -1930,7 +1933,7 @@ mod tests {
         assert_eq!(bytes.as_ref(), b"{\"msg\":\"hello\"}\n");
         assert_eq!(metadata.rows, 1);
         let values = metadata.spans[0].values.as_ref().expect("metadata values");
-        assert_eq!(metadata.timestamp(values), b"2024-01-15T10:30:00Z");
+        assert_eq!(metadata.timestamp(values), Some(b"2024-01-15T10:30:00Z".as_slice()));
         assert_eq!(values.stream.as_str(), "stdout");
     }
 

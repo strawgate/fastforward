@@ -6,6 +6,8 @@
 //! object model: unsupported semantic cases return [`ProjectionError::Unsupported`]
 //! so the receiver can fall back to the prost decoder.
 
+#![allow(clippy::indexing_slicing)]
+
 use std::fmt;
 
 use arrow::record_batch::RecordBatch;

@@ -5,6 +5,8 @@
 //! and framing, allowing any transport (file, TCP, UDP) to use any format
 //! (JSON, CRI, Raw) via composition.
 
+#![allow(clippy::indexing_slicing)]
+
 use crate::input::CriMetadata;
 use bytes::{BufMut, BytesMut};
 use ffwd_core::cri::parse_cri_line;
@@ -786,10 +788,10 @@ mod tests {
         assert!(metadata.has_values);
         assert_eq!(metadata.spans.len(), 2);
         let first = metadata.spans[0].values.as_ref().unwrap();
-        assert_eq!(metadata.timestamp(first), b"2024-01-15T10:30:00Z");
+        assert_eq!(metadata.timestamp(first), Some(b"2024-01-15T10:30:00Z".as_slice()));
         assert_eq!(first.stream.as_str(), "stderr");
         let second = metadata.spans[1].values.as_ref().unwrap();
-        assert_eq!(metadata.timestamp(second), b"2024-01-15T10:30:01Z");
+        assert_eq!(metadata.timestamp(second), Some(b"2024-01-15T10:30:01Z".as_slice()));
         assert_eq!(second.stream.as_str(), "stdout");
     }
 

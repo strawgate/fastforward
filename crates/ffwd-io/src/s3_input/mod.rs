@@ -13,6 +13,8 @@
 //! # Streaming pipeline
 //!
 //! Data flows through the pipeline without buffering entire objects:
+
+#![allow(clippy::indexing_slicing)]
 //!
 //! - **Uncompressed objects**: parallel range-GET fetches (default 1 MiB parts,
 //!   16 concurrent). Each part is fully downloaded inside a

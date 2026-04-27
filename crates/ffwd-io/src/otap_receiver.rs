@@ -6,6 +6,8 @@
 //! Content-Type: `application/x-protobuf`
 //!
 //! The protobuf is hand-decoded (no tonic codegen) following the same pattern
+
+#![allow(clippy::indexing_slicing)]
 //! as `otlp_receiver.rs`. Responds with a hand-encoded `BatchStatus` protobuf.
 
 use std::io;
