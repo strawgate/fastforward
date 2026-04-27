@@ -336,4 +336,32 @@ mod tests {
             assert!(transform.validate_plan().is_ok());
         }
     }
+
+    /// Test that `create_transform` returns a `Box<dyn Transform>` and that
+    /// calling trait methods through the vtable works correctly.
+    #[test]
+    fn create_transform_returns_usable_trait_object() {
+        use arrow::array::Int32Array;
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+
+        let transform: Box<dyn Transform> =
+            create_transform("SELECT * FROM logs").expect("create_transform should succeed");
+
+        // Verify trait methods are callable through the vtable.
+        let _config = transform.scan_config();
+
+        // Verify execute_blocking works through dynamic dispatch.
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
+        let batch = arrow::record_batch::RecordBatch::try_new(
+            schema,
+            vec![Arc::new(Int32Array::from(vec![1, 2, 3]))],
+        )
+        .expect("valid test batch");
+
+        let mut transform = create_transform("SELECT * FROM logs").expect("create_transform");
+        let result = transform.execute_blocking(batch);
+        assert!(result.is_ok(), "execute_blocking through dyn Transform should work");
+        assert_eq!(result.unwrap().num_rows(), 3);
+    }
 }

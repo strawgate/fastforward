@@ -175,13 +175,13 @@ pub enum ControlMessage {
     /// Graceful shutdown: stop accepting new data, cancel workers, drain processors.
     Shutdown,
     /// Intended to stop new ingress while allowing in-flight data to finish.
-    /// Current status: staged placeholder (logs only).
+    /// Current status: staged placeholder — broadcasts to workers but takes no pipeline action.
     DrainIngress,
     /// Trigger checkpoint persistence via the pipeline's [`flush_checkpoints()`][Pipeline::flush_checkpoints] method.
     /// Current status: flushes checkpoint store only; does not evacuate I/O or worker buffers.
     Flush,
     /// Intended hot-reload hook.
-    /// Current status: staged placeholder (logs only).
+    /// Current status: staged placeholder — broadcasts to workers but takes no pipeline action.
     Reconfigure,
 }
 
