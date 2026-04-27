@@ -98,8 +98,14 @@ pub fn validate_host_port(addr: &str) -> Result<(), ConfigError> {
         })?
     };
 
-    if host.is_empty() {
+if host.is_empty() {
         return Err(validation_error(format!("'{addr}' has an empty host")));
+    }
+
+    if host.trim() != host {
+        return Err(validation_error(format!(
+            "'{addr}' host must not contain whitespace"
+        )));
     }
 
     if host.contains('/') {

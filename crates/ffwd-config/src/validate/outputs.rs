@@ -4,9 +4,9 @@ use crate::types::{
 use std::collections::HashMap;
 
 use super::common::sanitize_identifier;
+use super::common::validate_host_port;
 use super::common::validation_message;
 use super::endpoints::validate_endpoint_url;
-use super::common::validate_host_port;
 
 fn validate_url_output_endpoint(
     pipeline_name: &str,

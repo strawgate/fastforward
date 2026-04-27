@@ -1,7 +1,7 @@
 use crate::types::{ConfigError, InputType};
 use std::collections::HashMap;
 
-use super::common::{validation_error, validation_message, validate_host_port};
+use super::common::{validate_host_port, validation_error, validation_message};
 use super::endpoints::canonical_listen_host_key;
 use super::sensors::sensor_supported_families;
 
