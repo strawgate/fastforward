@@ -12,7 +12,7 @@
 
 use std::io::{self, BufRead, BufReader, Read};
 use std::process::{Child, Command, Stdio};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
@@ -180,6 +180,9 @@ impl JournaldInput {
             tracing::info!("journald input '{thread_name}': {reason}");
         }
 
+        let last_cursor = Arc::new(Mutex::new(None));
+        let thread_cursor = Arc::clone(&last_cursor);
+
         std::thread::Builder::new()
             .name(format!("journald-{thread_name}"))
             .spawn(move || {
@@ -202,6 +205,7 @@ impl JournaldInput {
                             thread_running,
                             thread_health,
                             thread_child_pid,
+                            thread_cursor,
                         );
                     }
                 } else {
@@ -211,6 +215,7 @@ impl JournaldInput {
                         thread_running,
                         thread_health,
                         thread_child_pid,
+                        thread_cursor,
                     );
                 }
             })
@@ -769,7 +774,10 @@ const HEX: &[u8; 16] = b"0123456789abcdef";
 /// Uses `--output=export` for machine-optimized binary-safe output
 /// (faster than `--output=json`). Each entry is a block of `FIELD=value\n`
 /// lines separated by blank lines.
-fn build_command(config: &JournaldConfig) -> Command {
+///
+/// If `cursor` is provided, uses `--cursor=` to resume from the last position
+/// instead of `--since=` to avoid replaying or skipping entries.
+fn build_command(config: &JournaldConfig, cursor: Option<&str>) -> Command {
     let mut cmd = Command::new(&config.journalctl_path);
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
@@ -789,7 +797,9 @@ fn build_command(config: &JournaldConfig) -> Command {
         cmd.arg("--boot");
     }
 
-    if config.since_now {
+    if let Some(cursor) = cursor {
+        cmd.arg(format!("--cursor={cursor}"));
+    } else if config.since_now {
         cmd.arg("--since=now");
     } else {
         cmd.arg("--since=2000-01-01");
@@ -820,11 +830,16 @@ fn subprocess_reader_loop(
     running: Arc<AtomicBool>,
     health: Arc<AtomicU8>,
     child_pid: Arc<AtomicU32>,
+    last_cursor: Arc<Mutex<Option<String>>>,
 ) {
     while running.load(Ordering::Acquire) {
         health.store(HEALTH_STARTING, Ordering::Release);
 
-        let mut child = match spawn_journalctl(&config) {
+        let restart_cursor = {
+            let guard = last_cursor.lock().unwrap();
+            guard.clone()
+        };
+        let mut child = match spawn_journalctl(&config, restart_cursor.as_deref()) {
             Ok(child) => child,
             Err(e) => {
                 tracing::error!(error = %e, "failed to spawn journalctl");
@@ -864,7 +879,14 @@ fn subprocess_reader_loop(
         });
 
         let reader = BufReader::with_capacity(256 * 1024, stdout);
-        let exited_cleanly = read_export_entries(reader, &tx, &running, &config.exclude_units);
+        let exited_cleanly = read_export_entries(
+            reader,
+            &tx,
+            &running,
+            &config.exclude_units,
+            &last_cursor,
+            restart_cursor,
+        );
 
         // Atomically take the PID before kill+wait so Drop cannot race.
         child_pid.swap(0, Ordering::AcqRel);
@@ -895,6 +917,8 @@ fn read_export_entries<R: Read>(
     tx: &crossbeam_channel::Sender<Vec<u8>>,
     running: &Arc<AtomicBool>,
     exclude_units: &[String],
+    last_cursor: &Arc<Mutex<Option<String>>>,
+    restart_cursor: Option<String>,
 ) -> bool {
     // Pre-normalize exclude units once to avoid per-entry allocations.
     let exclude_units: Vec<String> = exclude_units.iter().map(|u| fixup_unit(u)).collect();
@@ -902,6 +926,8 @@ fn read_export_entries<R: Read>(
     // Accumulate fields for the current entry.
     let mut fields: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(32);
     let mut line_buf = Vec::with_capacity(1024);
+    // Tracks whether we need to skip the first entry matching restart_cursor.
+    let mut skip_cursor = restart_cursor;
 
     loop {
         if !running.load(Ordering::Acquire) {
@@ -942,14 +968,42 @@ fn read_export_entries<R: Read>(
         if line.is_empty() {
             // Blank line = end of entry.
             if !fields.is_empty() {
+                // Extract __CURSOR before it gets dropped by normalize_fields.
+                let cursor_str = fields
+                    .iter()
+                    .find(|(name, _)| name == b"__CURSOR")
+                    .map(|(_, value)| value.clone())
+                    .and_then(|v| String::from_utf8(v).ok());
+
+                // Check if this entry matches the restart cursor (skip duplicate).
+                if let (Some(skip), Some(cursor)) = (&skip_cursor, &cursor_str)
+                    && skip == cursor
+                {
+                    skip_cursor = None;
+                    fields.clear();
+                    continue;
+                }
+
                 // Check exclude filter before serializing.
                 if should_emit_export_entry(&fields, &exclude_units) {
                     let json = export_fields_to_json(&mut fields);
                     match tx.try_send(json) {
-                        Ok(()) => {}
+                        Ok(()) => {
+                            // Save cursor AFTER successful send to avoid duplicates
+                            // on restart (if we crash after send but before saving,
+                            // we'd restart with the old cursor and skip this entry
+                            // rather than replaying it).
+                            if let Some(c) = cursor_str {
+                                *last_cursor.lock().unwrap() = Some(c);
+                            }
+                        }
                         Err(TrySendError::Full(json)) => {
                             if tx.send(json).is_err() {
                                 return true;
+                            }
+                            // Save cursor after successful blocking send.
+                            if let Some(c) = cursor_str {
+                                *last_cursor.lock().unwrap() = Some(c);
                             }
                         }
                         Err(TrySendError::Disconnected(_)) => return true,
@@ -1072,8 +1126,8 @@ fn fixup_unit(unit: &str) -> String {
 }
 
 /// Spawn `journalctl` with the configured arguments.
-fn spawn_journalctl(config: &JournaldConfig) -> io::Result<Child> {
-    build_command(config).spawn()
+fn spawn_journalctl(config: &JournaldConfig, cursor: Option<&str>) -> io::Result<Child> {
+    build_command(config, cursor).spawn()
 }
 
 /// Convert a `_SOURCE_REALTIME_TIMESTAMP` (microseconds since Unix epoch)
@@ -1240,8 +1294,14 @@ mod tests {
         let (tx, rx) = bounded(4);
         let running = Arc::new(AtomicBool::new(true));
 
-        let exited_cleanly =
-            read_export_entries(reader, &tx, &running, &["sshd.service".to_string()]);
+        let exited_cleanly = read_export_entries(
+            reader,
+            &tx,
+            &running,
+            &["sshd.service".to_string()],
+            &Arc::new(Mutex::new(None)),
+            None,
+        );
         assert!(
             !exited_cleanly,
             "cursor EOF should be treated as subprocess exit"
@@ -1271,7 +1331,14 @@ mod tests {
         let (tx, rx) = bounded(1);
         let running = Arc::new(AtomicBool::new(true));
 
-        let exited_cleanly = read_export_entries(reader, &tx, &running, &[]);
+        let exited_cleanly = read_export_entries(
+            reader,
+            &tx,
+            &running,
+            &[],
+            &Arc::new(Mutex::new(None)),
+            None,
+        );
         assert!(!exited_cleanly, "short stream should fail without panic");
         assert!(
             rx.try_recv().is_err(),
@@ -1311,7 +1378,7 @@ mod tests {
     #[test]
     fn build_command_basic() {
         let config = JournaldConfig::default();
-        let cmd = build_command(&config);
+        let cmd = build_command(&config, None);
         let args: Vec<_> = cmd
             .get_args()
             .map(|a| a.to_string_lossy().to_string())
@@ -1328,7 +1395,7 @@ mod tests {
             since_now: true,
             ..Default::default()
         };
-        let cmd = build_command(&config);
+        let cmd = build_command(&config, None);
         let args: Vec<_> = cmd
             .get_args()
             .map(|a| a.to_string_lossy().to_string())
@@ -1343,7 +1410,7 @@ mod tests {
             include_units: vec!["sshd".to_string(), "docker.service".to_string()],
             ..Default::default()
         };
-        let cmd = build_command(&config);
+        let cmd = build_command(&config, None);
         let args: Vec<_> = cmd
             .get_args()
             .map(|a| a.to_string_lossy().to_string())
@@ -1358,7 +1425,7 @@ mod tests {
             current_boot_only: false,
             ..Default::default()
         };
-        let cmd = build_command(&config);
+        let cmd = build_command(&config, None);
         let args: Vec<_> = cmd
             .get_args()
             .map(|a| a.to_string_lossy().to_string())
@@ -1373,13 +1440,29 @@ mod tests {
             journal_namespace: Some("myapp".to_string()),
             ..Default::default()
         };
-        let cmd = build_command(&config);
+        let cmd = build_command(&config, None);
         let args: Vec<_> = cmd
             .get_args()
             .map(|a| a.to_string_lossy().to_string())
             .collect();
         assert!(args.contains(&"--directory=/var/log/journal".to_string()));
         assert!(args.contains(&"--namespace=myapp".to_string()));
+    }
+
+    #[test]
+    fn build_command_with_cursor_overrides_since() {
+        let config = JournaldConfig {
+            since_now: true,
+            ..Default::default()
+        };
+        let cmd = build_command(&config, Some("s=abc;i=1"));
+        let args: Vec<_> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        assert!(args.contains(&"--cursor=s=abc;i=1".to_string()));
+        assert!(!args.contains(&"--since=now".to_string()));
+        assert!(!args.contains(&"--since=2000-01-01".to_string()));
     }
 
     // ── json_escape_into ──────────────────────────────────────────────

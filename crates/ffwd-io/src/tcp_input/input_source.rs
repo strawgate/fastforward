@@ -316,4 +316,33 @@ impl InputSource for TcpInput {
     fn health(&self) -> ComponentHealth {
         self.health
     }
+
+    fn poll_shutdown(&mut self) -> io::Result<Vec<SourceEvent>> {
+        let mut events = Vec::new();
+
+        for client in &mut self.clients[..] {
+            let has_pending = !client.pending.is_empty();
+            let mid_discard = client.discard_octet_bytes > 0 || client.discard_until_newline;
+            let incomplete_octet_tail =
+                client.octet_counting_mode && has_incomplete_octet_frame_tail(&client.pending);
+
+            if has_pending && !mid_discard && !incomplete_octet_tail {
+                let mut tail = std::mem::take(&mut client.pending);
+                tail.push(b'\n');
+                let accounted_bytes = std::mem::replace(&mut client.unaccounted_bytes, 0);
+                events.push(SourceEvent::Data {
+                    bytes: Bytes::from(tail),
+                    source_id: Some(client.source_id),
+                    accounted_bytes,
+                    cri_metadata: None,
+                });
+            }
+
+            events.push(SourceEvent::EndOfFile {
+                source_id: Some(client.source_id),
+            });
+        }
+
+        Ok(events)
+    }
 }

@@ -408,3 +408,46 @@
         assert_eq!(input.idle_timeout.as_millis(), 1000);
         assert_eq!(input.read_timeout.unwrap().as_millis(), 500);
     }
+
+    #[test]
+    fn tcp_poll_shutdown_flushes_partial_line_on_live_connection() {
+        let mut input = TcpInput::new(
+            "test",
+            "127.0.0.1:0",
+            std::sync::Arc::new(ffwd_types::diagnostics::ComponentStats::new()),
+        )
+        .unwrap();
+        let addr = input.local_addr().unwrap();
+
+        let mut client = StdTcpStream::connect(addr).unwrap();
+        client.write_all(b"partial line without newline").unwrap();
+        client.flush().unwrap();
+
+        std::thread::sleep(Duration::from_millis(50));
+
+        let events = input.poll().unwrap();
+
+        assert!(
+            input.client_count() > 0,
+            "client should be accepted and alive before shutdown"
+        );
+
+        let mut input = input;
+        let shutdown_events = input.poll_shutdown().unwrap();
+
+        let has_data = shutdown_events
+            .iter()
+            .any(|e| matches!(e, SourceEvent::Data { .. }));
+        let has_eof = shutdown_events
+            .iter()
+            .any(|e| matches!(e, SourceEvent::EndOfFile { .. }));
+
+        assert!(
+            has_data,
+            "poll_shutdown should emit Data for pending partial line"
+        );
+        assert!(
+            has_eof,
+            "poll_shutdown should emit EndOfFile for live connection"
+        );
+    }
