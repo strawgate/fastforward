@@ -114,15 +114,16 @@ fn validate_loki_labels(
         // Use deterministic order: collect keys and sort to avoid HashMap nondeterminism.
         let mut keys: Vec<String> = static_labels.keys().cloned().collect();
         keys.sort();
-        let mut seen: HashMap<String, &str> = HashMap::new();
-        for key in keys {
-            let sanitized = sanitize_identifier(&key);
+        // Store original keys by value to avoid lifetime issues with &str from local vec.
+        let mut seen: HashMap<String, String> = HashMap::new();
+        for key in keys.iter() {
+            let sanitized = sanitize_identifier(key);
             if let Some(existing) = seen.get(&sanitized) {
                 return Err(ConfigError::Validation(format!(
                     "pipeline '{pipeline_name}' output '{label}': loki static_labels key '{key}' sanitizes to '{sanitized}' which collides with existing key '{existing}'"
                 )));
             }
-            seen.insert(sanitized, key.as_str());
+            seen.insert(sanitized, key.clone());
         }
     }
 
