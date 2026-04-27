@@ -147,11 +147,10 @@ impl CriMetadata {
 
     /// Resolve the timestamp bytes for a `CriMetadataValues` descriptor.
     ///
-    /// The descriptor must have come from this `CriMetadata`; otherwise the
-    /// byte range may be out of bounds and this method will panic.
-    pub fn timestamp(&self, values: &CriMetadataValues) -> &[u8] {
+    /// Returns `None` if the byte range is out of bounds.
+    pub fn timestamp(&self, values: &CriMetadataValues) -> Option<&[u8]> {
         let end = values.timestamp_start + values.timestamp_len;
-        &self.timestamp_bytes[values.timestamp_start..end]
+        self.timestamp_bytes.get(values.timestamp_start..end)
     }
 
     /// Append `rows` null CRI metadata rows.
@@ -189,11 +188,11 @@ impl CriMetadata {
         }
         if let Some(last) = self.spans.last()
             && let Some(values) = &last.values
-            && values.stream == stream
-            && self.timestamp(values) == timestamp
+            && self.timestamp(values) == Some(timestamp)
         {
-            let last = self.spans.last_mut().expect("last span exists");
-            last.rows += 1;
+            if let Some(last_mut) = self.spans.last_mut() {
+                last_mut.rows += 1;
+            }
             self.rows += 1;
             return true;
         }
@@ -246,12 +245,11 @@ impl CriMetadata {
         }
         if merge_first {
             let mut other_spans = other.spans.into_iter();
-            let first_rows = other_spans
-                .next()
-                .expect("first span exists for metadata merge")
-                .rows;
-            let last = self.spans.last_mut().expect("last span exists");
-            last.rows += first_rows;
+            if let Some(first_rows) = other_spans.next().map(|span| span.rows) {
+                if let Some(last) = self.spans.last_mut() {
+                    last.rows += first_rows;
+                }
+            }
             self.rows += other.rows;
             self.has_values |= other.has_values;
             self.spans.extend(other_spans);
@@ -274,8 +272,13 @@ fn metadata_values_equal(
         (Some(left), Some(right)) if left.stream == right.stream => {
             let left_end = left.timestamp_start + left.timestamp_len;
             let right_end = right.timestamp_start + right.timestamp_len;
-            left_timestamps[left.timestamp_start..left_end]
-                == right_timestamps[right.timestamp_start..right_end]
+            left_timestamps
+                .get(left.timestamp_start..left_end)
+                .is_some_and(|l| {
+                    right_timestamps
+                        .get(right.timestamp_start..right_end)
+                        .is_some_and(|r| l == r)
+                })
         }
         _ => false,
     }
@@ -564,10 +567,12 @@ impl StdinInput {
                 loop {
                     match stdin.read(&mut buf) {
                         Ok(0) => {
+                            #[allow(clippy::indexing_slicing)]
                             let _ = thread_tx.send(StdinMessage::EndOfFile);
                             break;
                         }
                         Ok(n) => {
+                            #[allow(clippy::indexing_slicing)]
                             if thread_tx
                                 .send(StdinMessage::Data(buf[..n].to_vec()))
                                 .is_err()
