@@ -211,11 +211,11 @@ just tlc <model_file> <config_file>        # General form (from tla/ directory)
 just tla-setup                            # download jar without running a model
 ```
 
-Raw form (for Toolbox or CI script usage). Run from the repo root:
+Raw form (for Toolbox or CI script usage):
 
 ```bash
 cd tla
-java -cp .tools/tla2tools.jar tlc2.TLC <model_file> -config <config_file>
+java -cp ../.tools/tla2tools.jar tlc2.TLC <model_file> -config <config_file>
 ```
 
 Coverage (run from repo root, paths are relative to repo root):
