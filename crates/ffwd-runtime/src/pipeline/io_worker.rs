@@ -827,12 +827,15 @@ pub(super) fn io_worker_loop(
                         }
                         super::ControlMessage::DrainIngress => {
                             tracing::debug!(input = %input_name, "io_worker: received drain ingress control");
+                            // TODO(#233): stop reading new data from source.
                         }
                         super::ControlMessage::Flush => {
                             tracing::debug!(input = %input_name, "io_worker: received flush control");
+                            // TODO(#233): flush buffered data through pipeline.
                         }
                         super::ControlMessage::Reconfigure => {
                             tracing::debug!(input = %input_name, "io_worker: received reconfigure control");
+                            // TODO(#233): apply config changes to input source.
                         }
                     },
                     Err(tokio::sync::broadcast::error::TryRecvError::Lagged(n)) => {

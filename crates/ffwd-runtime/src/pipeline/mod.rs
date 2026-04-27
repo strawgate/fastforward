@@ -478,7 +478,7 @@ impl Pipeline {
     ///
     /// It does NOT flush in-flight pipeline batches or evacuate buffers.
     /// Callers should not rely on this for durability guarantees or synchronous confirmation.
-    pub async fn flush(&mut self) {
+    pub async fn flush_checkpoints(&mut self) {
         if let Some(ref mut store) = self.checkpoint_store {
             flush_checkpoint_with_retry(store.as_mut()).await;
         }

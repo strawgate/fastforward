@@ -160,22 +160,25 @@ impl Pipeline {
                             tracing::debug!("received shutdown control message");
                             let _ = self.worker_control_tx.send(ControlMessage::Shutdown);
                             shutdown.cancel();
+                            // Forced shutdown: skip channel drain, drop rx so producers unblock.
                             should_drain_input_channel = false;
                             break;
                         }
                         Some(ControlMessage::DrainIngress) => {
                             tracing::debug!("received drain ingress control message");
                             let _ = self.worker_control_tx.send(ControlMessage::DrainIngress);
+                            // TODO(#233): stop accepting new input but finish in-flight batches.
                             should_drain_input_channel = false;
                         }
                         Some(ControlMessage::Flush) => {
                             tracing::debug!("received flush control message");
                             let _ = self.worker_control_tx.send(ControlMessage::Flush);
-                            self.flush().await;
+                            self.flush_checkpoints().await;
                         }
                         Some(ControlMessage::Reconfigure) => {
                             tracing::debug!("received reconfigure control message");
                             let _ = self.worker_control_tx.send(ControlMessage::Reconfigure);
+                            // TODO(#233): reload config and apply changes without restart.
                         }
                         None => {
                             tracing::debug!("control channel closed");
