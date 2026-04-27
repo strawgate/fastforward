@@ -634,6 +634,8 @@ impl Pipeline {
             "inputs and input_transforms must have the same length"
         );
 
+        let (control_tx, control_rx) = tokio::sync::mpsc::unbounded_channel();
+
         Ok(Pipeline {
             name: name.to_string(),
             inputs,
@@ -657,6 +659,8 @@ impl Pipeline {
             last_checkpoint_flush: tokio::time::Instant::now(),
             checkpoint_flush_interval: DEFAULT_CHECKPOINT_FLUSH_INTERVAL,
             pool_drain_timeout: DEFAULT_POOL_DRAIN_TIMEOUT,
+            control_tx,
+            control_rx,
         })
     }
 }

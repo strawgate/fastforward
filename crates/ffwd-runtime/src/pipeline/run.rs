@@ -13,6 +13,7 @@ use super::{Pipeline, ProcessedBatch, now_nanos};
 use crate::worker_pool::AckItem;
 use ffwd_io::checkpoint::SourceCheckpoint;
 use ffwd_output::BatchMetadata;
+use crate::pipeline::ControlMessage;
 
 #[cfg(not(feature = "turmoil"))]
 use super::SourcePipeline;
@@ -148,6 +149,34 @@ impl Pipeline {
 
                 () = shutdown.cancelled() => {
                     break;
+                }
+
+                // Handle control messages: these are prioritized over data messages
+                // to ensure shutdown and drain commands are processed promptly.
+                msg = self.control_rx.recv() => {
+                    match msg {
+                        Some(ControlMessage::Shutdown) => {
+                            tracing::debug!("received shutdown control message");
+                            shutdown.cancel();
+                            should_drain_input_channel = false;
+                            break;
+                        }
+                        Some(ControlMessage::DrainIngress) => {
+                            tracing::debug!("received drain ingress control message");
+                            should_drain_input_channel = false;
+                        }
+                        Some(ControlMessage::Flush) => {
+                            tracing::debug!("received flush control message");
+                            self.flush().await;
+                        }
+                        Some(ControlMessage::Reconfigure) => {
+                            tracing::debug!("received reconfigure control message");
+                        }
+                        None => {
+                            tracing::debug!("control channel closed");
+                            break;
+                        }
+                    }
                 }
 
                 msg = rx.recv() => {

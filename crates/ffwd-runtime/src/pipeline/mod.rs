@@ -47,6 +47,7 @@ use crate::transform::{Transform, create_transform};
 #[cfg(test)]
 use crate::worker_pool::AckItem;
 use crate::worker_pool::OutputWorkerPool;
+use crate::pipeline::checkpoint_io::flush_checkpoint_with_retry;
 use ffwd_diagnostics::diagnostics::{ComponentHealth, ComponentStats, PipelineMetrics};
 use ffwd_io::checkpoint::CheckpointStore;
 #[cfg(test)]
@@ -164,6 +165,22 @@ struct IngestState {
     stats: Arc<ComponentStats>,
 }
 
+/// Control messages for coordinating pipeline shutdown and behavior.
+///
+/// Used by the control channel to send typed messages between pipeline components
+/// instead of relying on CancellationToken or implicit channel closure.
+#[derive(Debug)]
+pub enum ControlMessage {
+    /// Graceful shutdown: stop accepting new data, drain processors, close exporters.
+    Shutdown,
+    /// Stop receivers but let in-flight data finish processing.
+    DrainIngress,
+    /// Force flush all buffers now.
+    Flush,
+    /// Hot reload configuration (future feature).
+    Reconfigure,
+}
+
 // ---------------------------------------------------------------------------
 // Pipeline
 // ---------------------------------------------------------------------------
@@ -206,6 +223,11 @@ pub struct Pipeline {
     checkpoint_flush_interval: Duration,
     /// Maximum time to wait for worker-pool graceful drain during shutdown.
     pool_drain_timeout: Duration,
+    /// Control channel for sending shutdown and control messages to the pipeline.
+    /// Used for typed shutdown coordination instead of CancellationToken.
+    control_tx: tokio::sync::mpsc::UnboundedSender<ControlMessage>,
+    /// Control channel for receiving shutdown and control messages in the pipeline loop.
+    control_rx: tokio::sync::mpsc::UnboundedReceiver<ControlMessage>,
 }
 
 impl Pipeline {
@@ -411,6 +433,13 @@ impl Pipeline {
     /// checkpoint persistence timing without waiting real seconds.
     pub fn set_checkpoint_flush_interval(&mut self, interval: Duration) {
         self.checkpoint_flush_interval = interval;
+    }
+
+    /// Flush all buffered data through the pipeline.
+    pub async fn flush(&mut self) {
+        if let Some(ref mut store) = self.checkpoint_store {
+            flush_checkpoint_with_retry(store.as_mut()).await;
+        }
     }
 }
 
