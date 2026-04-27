@@ -1,5 +1,3 @@
-#![allow(clippy::indexing_slicing, clippy::expect_used)]
-
 pub(crate) mod background_http_task;
 /// Diagnostics HTTP server, readiness policy, and OTLP JSON telemetry shaping.
 pub mod diagnostics;

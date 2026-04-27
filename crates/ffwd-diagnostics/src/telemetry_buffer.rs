@@ -210,7 +210,11 @@ pub fn metrics_to_otlp_json(points: &[MetricPoint]) -> String {
 
     let mut metrics_json = Vec::new();
     for name in &metric_names {
+        // name ∈ metric_names = groups.keys(), so groups[name] is always present.
+        #[allow(clippy::indexing_slicing)]
         let pts = &groups[name];
+        // pts is always non-empty: each metric is pushed after or_default().
+        #[allow(clippy::indexing_slicing)]
         let first = pts[0];
 
         let mut data_points = Vec::new();

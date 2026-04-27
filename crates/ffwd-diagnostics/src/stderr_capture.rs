@@ -119,6 +119,8 @@ impl CaptureState {
                 let available = new_count.min(retained);
                 let lines = buf.get_lines();
                 let skip = lines.len().saturating_sub(available as usize);
+                // skip ∈ [0, lines.len()]: empty slice when skip == len.
+                #[allow(clippy::indexing_slicing)]
                 (lines[skip..].to_vec(), total)
             }
             Err(_) => (vec![], cursor),
@@ -279,6 +281,8 @@ fn reader_loop(read_fd: i32, orig_fd: i32, state: &CaptureState) {
             break;
         }
 
+        // n is the byte count read from the pipe, bounded by buf.len().
+        #[allow(clippy::indexing_slicing)]
         let bytes = &buf[..n as usize];
 
         // Tee to original stderr so terminal still works.
@@ -296,6 +300,8 @@ fn reader_loop(read_fd: i32, orig_fd: i32, state: &CaptureState) {
             partial.drain(..drop);
         }
         while let Some(pos) = partial.iter().position(|&b| b == b'\n') {
+            // pos ∈ [0, partial.len()) from position() return value.
+            #[allow(clippy::indexing_slicing)]
             let line_bytes = &partial[..pos];
             let line = String::from_utf8_lossy(line_bytes);
             let clean = strip_ansi(&line);
