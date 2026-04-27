@@ -203,6 +203,14 @@ mod tests {
 
     // Cross-map collision test removed to avoid brittle string-based assertions in CI.
 
+fn loki_collision_matches(msg: &str, sanitized: &str, candidates: &[&str]) -> bool {
+    if !msg.contains(&format!("sanitizes to '{}'", sanitized)) { return false; }
+    for c in candidates {
+        if msg.contains(&format!("collides with existing key '{}'", c)) { return true; }
+    }
+    false
+}
+
     #[test]
     fn loki_duplicate_static_labels_keys_collision() {
         // Two static_labels keys that sanitize to the same identifier
@@ -215,7 +223,10 @@ mod tests {
         let msg = err.to_string();
         assert!(
             msg.contains("sanitizes to 'foo_bar'")
-                && (msg.contains("collides with existing key 'foo-bar'") || msg.contains("collides with existing key 'foo_bar'")),
+                && (
+                    msg.contains("collides with existing key 'foo-bar'") ||
+                    msg.contains("collides with existing key 'foo_bar'")
+                ),
             "unexpected error: {msg}"
         );
     }
