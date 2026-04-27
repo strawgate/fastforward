@@ -169,7 +169,7 @@ fn validate_transform_probe_read_only(
     transform: &mut ffwd::transform::SqlTransform,
     source_metadata: ffwd_config::SourceMetadataStyle,
 ) -> Result<(), String> {
-    use arrow::array::{ArrayRef, StringArray, UInt64Array};
+    use arrow::array::{ArrayRef, StringArray, StringViewArray, UInt64Array};
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
     use ffwd_config::SourceMetadataStyle;
@@ -204,16 +204,16 @@ fn validate_transform_probe_read_only(
 
     match source_metadata {
         SourceMetadataStyle::Ecs => {
-            fields.push(Field::new(ECS_FILE_PATH, DataType::Utf8, true));
-            arrays.push(Arc::new(StringArray::from(vec![Some("/test/path.log")])) as ArrayRef);
+            fields.push(Field::new(ECS_FILE_PATH, DataType::Utf8View, true));
+            arrays.push(Arc::new(StringViewArray::from(vec![Some("/test/path.log")])) as ArrayRef);
         }
         SourceMetadataStyle::Otel => {
-            fields.push(Field::new(OTEL_LOG_FILE_PATH, DataType::Utf8, true));
-            arrays.push(Arc::new(StringArray::from(vec![Some("/test/path.log")])) as ArrayRef);
+            fields.push(Field::new(OTEL_LOG_FILE_PATH, DataType::Utf8View, true));
+            arrays.push(Arc::new(StringViewArray::from(vec![Some("/test/path.log")])) as ArrayRef);
         }
         SourceMetadataStyle::Vector => {
-            fields.push(Field::new(VECTOR_FILE, DataType::Utf8, true));
-            arrays.push(Arc::new(StringArray::from(vec![Some("/test/path.log")])) as ArrayRef);
+            fields.push(Field::new(VECTOR_FILE, DataType::Utf8View, true));
+            arrays.push(Arc::new(StringViewArray::from(vec![Some("/test/path.log")])) as ArrayRef);
         }
         SourceMetadataStyle::None | SourceMetadataStyle::Fastforward => {}
         _ => {}
