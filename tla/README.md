@@ -211,12 +211,17 @@ just tlc <model_file> <config_file>        # General form (from tla/ directory)
 just tla-setup                            # download jar without running a model
 ```
 
-Raw form (for Toolbox or CI script usage):
+Raw form (for Toolbox or CI script usage). Run from the repo root:
 
 ```bash
 cd tla
 java -cp .tools/tla2tools.jar tlc2.TLC <model_file> -config <config_file>
-python3 scripts/verify_tla_coverage.py --jar .tools/tla2tools.jar --tla-file <model_file> --config <config_file>
+```
+
+Coverage (run from repo root, paths are relative to repo root):
+
+```bash
+python3 scripts/verify_tla_coverage.py --jar .tools/tla2tools.jar --tla-file tla/<model_file> --config tla/<config_file>
 ```
 
 ## ShutdownProtocol.tla
@@ -469,7 +474,7 @@ algorithm is worker-count-independent so small values suffice.
 ```bash
 just tlc MCWorkerPoolDispatch.tla WorkerPoolDispatch.cfg
 just tlc MCWorkerPoolDispatch.tla WorkerPoolDispatch.liveness.cfg
-python3 scripts/verify_tla_coverage.py --jar .tools/tla2tools.jar --tla-file MCWorkerPoolDispatch.tla --config WorkerPoolDispatch.coverage.cfg
+python3 scripts/verify_tla_coverage.py --jar .tools/tla2tools.jar --tla-file tla/MCWorkerPoolDispatch.tla --config tla/WorkerPoolDispatch.coverage.cfg
 ```
 
 ### Key design: MRU dispatch with spawn-or-wait
@@ -538,7 +543,7 @@ when a retry re-sent data to children that had already accepted it.
 ```bash
 just tlc MCFanoutSink.tla FanoutSink.cfg
 just tlc MCFanoutSink.tla FanoutSink.liveness.cfg
-python3 scripts/verify_tla_coverage.py --jar .tools/tla2tools.jar --tla-file MCFanoutSink.tla --config FanoutSink.coverage.cfg
+python3 scripts/verify_tla_coverage.py --jar .tools/tla2tools.jar --tla-file tla/MCFanoutSink.tla --config tla/FanoutSink.coverage.cfg
 ```
 
 ### Key design: per-child state tracking across retries
