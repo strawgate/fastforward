@@ -650,8 +650,8 @@ pub const USE_CASE_TEMPLATES: &[UseCaseDoc] = &[
     },
     UseCaseDoc {
         id: "syslog_tcp_to_elasticsearch",
-        title: "Network raw logs (TCP) to Elasticsearch",
-        description: "Receives newline-delimited raw logs over TCP and indexes them in Elasticsearch.",
+        title: "Network JSON logs (TCP) to Elasticsearch",
+        description: "Receives newline-delimited JSON logs over TCP and indexes them in Elasticsearch.",
         input_id: "tcp_json",
         output_id: "elasticsearch",
         transform: "SELECT * FROM logs",
