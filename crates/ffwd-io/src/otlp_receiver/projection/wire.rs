@@ -223,8 +223,10 @@ pub(super) fn require_utf8<'a>(
     let n = bytes.len();
     // 8-byte chunks: a single u64 mask catches any non-ASCII byte.
     while i + 8 <= n {
-        // SAFETY: bounds-checked by the loop condition.
-        let chunk_bytes: [u8; 8] = bytes[i..i + 8].try_into().unwrap();
+        // The loop condition guarantees this slice has exactly 8 bytes.
+        let chunk_bytes: [u8; 8] = bytes[i..i + 8]
+            .try_into()
+            .expect("loop condition guarantees 8 bytes");
         let chunk = u64::from_ne_bytes(chunk_bytes);
         if chunk & HIGH_BITS != 0 {
             return require_utf8_full(bytes, context);

@@ -113,7 +113,7 @@ fn bench_trace_id_storage(c: &mut Criterion) {
         });
     });
 
-    // Proposed: FixedSizeBinaryBuilder (closes TODO #1844).
+    // Candidate benchmark: FixedSizeBinaryBuilder as motivation for TODO #1844.
     group.bench_function("fixed_size_binary_builder", |b| {
         b.iter(|| {
             let mut builder = FixedSizeBinaryBuilder::with_capacity(n, 16);
@@ -141,7 +141,7 @@ fn bench_trace_id_storage(c: &mut Criterion) {
 // ── K2: validity bitmap ────────────────────────────────────────────────────────
 
 /// Current implementation in `accumulator.rs:554-563` — writes one bit per fact.
-fn validity_byte_level(facts: &[u32], num_rows: usize) -> Vec<u8> {
+fn build_validity_bytes(facts: &[u32], num_rows: usize) -> Vec<u8> {
     let mut bits = vec![0u8; num_rows.div_ceil(8)];
     for &row in facts {
         let r = row as usize;
@@ -155,7 +155,7 @@ fn validity_byte_level(facts: &[u32], num_rows: usize) -> Vec<u8> {
 /// Proposed: write into u64 words first, transmute to bytes at the end.
 /// Same algorithmic complexity; smaller load/store width and fewer
 /// dependencies per inner iteration.
-fn validity_u64_chunked(facts: &[u32], num_rows: usize) -> Vec<u8> {
+fn build_validity_u64_chunked(facts: &[u32], num_rows: usize) -> Vec<u8> {
     let words_len = num_rows.div_ceil(64);
     let mut words = vec![0u64; words_len];
     for &row in facts {
@@ -204,10 +204,10 @@ fn bench_validity(c: &mut Criterion) {
         let id_byte = format!("byte_{name}");
         let id_u64 = format!("u64_{name}");
         group.bench_function(&id_byte, |b| {
-            b.iter(|| black_box(validity_byte_level(black_box(facts), num_rows)))
+            b.iter(|| black_box(build_validity_bytes(black_box(facts), num_rows)))
         });
         group.bench_function(&id_u64, |b| {
-            b.iter(|| black_box(validity_u64_chunked(black_box(facts), num_rows)))
+            b.iter(|| black_box(build_validity_u64_chunked(black_box(facts), num_rows)))
         });
     }
     group.finish();
@@ -295,9 +295,9 @@ fn bench_column_writer(c: &mut Criterion) {
     });
 
     // C: Same as B but trace_id/span_id as StringViewArray with hex encoding
-    //    using append_value(&str). Apples-to-apples-ish: same Arrow primitives
-    //    as B but keeping the trace_id schema as Utf8View like A.
-    //    Tells us how much of A vs B is the schema flip vs the builder bypass.
+    //    using the *same* byte-table encoder as production (hex_encode_into).
+    //    Apples-to-apples: isolates schema (FixedSizeBinary vs Utf8View) cost
+    //    without encoder algorithm confounds.
     group.bench_function("direct_arrow_hex_strings", |b| {
         b.iter(|| {
             let mut ts = Int64Builder::with_capacity(n);
@@ -305,25 +305,19 @@ fn bench_column_writer(c: &mut Criterion) {
             let mut body = StringViewBuilder::with_capacity(n);
             let mut tid = StringViewBuilder::with_capacity(n);
             let mut sid = StringViewBuilder::with_capacity(n);
-            // Per-row scratch — same as the builder's string_buf would do.
-            let mut scratch_tid = String::with_capacity(32);
-            let mut scratch_sid = String::with_capacity(16);
+            let mut scratch_tid: Vec<u8> = Vec::with_capacity(32);
+            let mut scratch_sid: Vec<u8> = Vec::with_capacity(16);
             for i in 0..n {
                 ts.append_value(i as i64);
                 sev.append_value(9);
                 body.append_value(&bodies[i]);
                 scratch_tid.clear();
-                for &b in &trace_ids[i] {
-                    scratch_tid.push(char::from_digit((b >> 4) as u32, 16).unwrap());
-                    scratch_tid.push(char::from_digit((b & 0xf) as u32, 16).unwrap());
-                }
-                tid.append_value(&scratch_tid);
+                hex_encode_into(&mut scratch_tid, &trace_ids[i]);
+                // SAFETY: hex_encode_into produces only ASCII hex digits.
+                tid.append_value(unsafe { std::str::from_utf8_unchecked(&scratch_tid) });
                 scratch_sid.clear();
-                for &b in &span_ids[i] {
-                    scratch_sid.push(char::from_digit((b >> 4) as u32, 16).unwrap());
-                    scratch_sid.push(char::from_digit((b & 0xf) as u32, 16).unwrap());
-                }
-                sid.append_value(&scratch_sid);
+                hex_encode_into(&mut scratch_sid, &span_ids[i]);
+                sid.append_value(unsafe { std::str::from_utf8_unchecked(&scratch_sid) });
             }
             black_box((
                 ts.finish(),
