@@ -2202,12 +2202,12 @@ mod verification {
     }
 
     /// Oracle equivalence: `decode_tag` matches `ffwd_kani::proto::decode_tag_oracle`
-    /// for all bounded byte inputs.
+    /// for all bounded byte inputs, including the EOF boundary (pos == len).
     #[kani::proof]
     #[kani::unwind(22)]
     pub(super) fn verify_decode_tag_vs_oracle() {
         let data: [u8; 20] = kani::any();
-        let pos: usize = kani::any_where(|&p| p < data.len());
+        let pos: usize = kani::any_where(|&p| p <= data.len());
 
         let ora_result = decode_tag_oracle(&data, pos);
         let prod_result = decode_tag(&data, pos);
@@ -2229,13 +2229,13 @@ mod verification {
     }
 
     /// Oracle equivalence: `skip_field` matches `ffwd_kani::proto::skip_field_oracle`
-    /// for all bounded byte inputs and valid wire types.
+    /// for all bounded byte inputs and valid wire types, including the EOF boundary.
     #[kani::proof]
     #[kani::unwind(22)]
     pub(super) fn verify_skip_field_vs_oracle() {
         let data: [u8; 32] = kani::any();
         let wire_type: u8 = kani::any();
-        let pos: usize = kani::any_where(|&p| p < data.len());
+        let pos: usize = kani::any_where(|&p| p <= data.len());
 
         // Only test supported wire types to avoid oracle/prod both returning None
         // for the same "unsupported wire type" reason
@@ -2257,5 +2257,25 @@ mod verification {
                 kani::cover!(wire_type == 5, "fixed32 wire type reachable");
             }
         }
+    }
+
+    /// No-panic proof: `decode_tag` never panics for any bounded input.
+    #[kani::proof]
+    #[kani::unwind(22)]
+    pub(super) fn verify_decode_tag_no_panic() {
+        let data: [u8; 20] = kani::any();
+        let pos: usize = kani::any_where(|&p| p <= data.len());
+        let _ = decode_tag(&data, pos);
+    }
+
+    /// No-panic proof: `skip_field` never panics for any bounded input and any wire type
+    /// (including unsupported values).
+    #[kani::proof]
+    #[kani::unwind(36)]
+    pub(super) fn verify_skip_field_no_panic() {
+        let data: [u8; 32] = kani::any();
+        let wire_type: u8 = kani::any();
+        let pos: usize = kani::any_where(|&p| p <= data.len());
+        let _ = skip_field(&data, wire_type, pos);
     }
 }
