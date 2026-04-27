@@ -201,6 +201,66 @@ mod tests {
         );
     }
 
+    #[test]
+    fn loki_cross_map_collision_with_label_columns() {
+        // static_labels key sanitizes to same identifier as a label_columns entry
+        let yaml = single_pipeline_yaml(
+            "type: file\npath: /tmp/x.log",
+            "type: loki\nendpoint: http://localhost:3100\nstatic_labels:\n  foo-bar: value1\nlabel_columns:\n  - foo_bar\n",
+        );
+        let err = Config::load_str(yaml).expect_err("cross-map collision with label_columns should fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("sanitizes to 'foo_bar'") && msg.contains("conflicts with 'static_labels' key 'foo-bar'"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn loki_duplicate_static_labels_keys_collision() {
+        // Two static_labels keys that sanitize to the same identifier
+        let yaml = single_pipeline_yaml(
+            "type: file\npath: /tmp/x.log",
+            "type: loki\nendpoint: http://localhost:3100\nstatic_labels:\n  foo-bar: v1\n  foo_bar: v2\n",
+        );
+        let err = Config::load_str(yaml).expect_err("duplicate static_labels keys collision should fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("sanitizes to 'foo_bar'") && msg.contains("collides with existing key 'foo_bar'"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn loki_empty_and_whitespace_static_label_keys_rejected() {
+        // Empty and whitespace-only keys should be rejected
+        let yaml_empty = single_pipeline_yaml(
+            "type: file\npath: /tmp/x.log",
+            "type: loki\nendpoint: http://localhost:3100\nstatic_labels:\n  \"\": value\n",
+        );
+        let err_empty = Config::load_str(yaml_empty).expect_err("empty static_labels key should be rejected");
+        assert!(err_empty.to_string().contains("static_labels' keys and values must not be empty"));
+
+        let yaml_space = single_pipeline_yaml(
+            "type: file\npath: /tmp/x.log",
+            "type: loki\nendpoint: http://localhost:3100\nstatic_labels:\n  \"   \": value\n",
+        );
+        let err_space = Config::load_str(yaml_space).expect_err("whitespace static_labels key should be rejected");
+        assert!(err_space.to_string().contains("static_labels' keys and values must not be empty"));
+    }
+
+    #[test]
+    fn loki_case_insensitive_collision() {
+        // Different-case keys that sanitize to same identifier should collide
+        let yaml = single_pipeline_yaml(
+            "type: file\npath: /tmp/x.log",
+            "type: loki\nendpoint: http://localhost:3100\nstatic_labels:\n  Foo-Bar: v1\n  foo_bar: v2\n",
+        );
+        let err = Config::load_str(yaml).expect_err("case-insensitive collision should fail");
+        let msg = err.to_string();
+        assert!(msg.contains("sanitizes to 'foo_bar'") && msg.contains("conflicts with existing key 'foo_bar'"));
+    }
+
     // -----------------------------------------------------------------------
     // Auth tests
     // -----------------------------------------------------------------------
