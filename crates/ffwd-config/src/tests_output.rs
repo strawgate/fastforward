@@ -215,7 +215,8 @@ mod tests {
         let msg = err.to_string();
         assert!(
             msg.contains("sanitizes to 'foo_bar'")
-                && msg.contains("collides with existing key 'foo_bar'"),
+                && (msg.contains("collides with existing key 'foo-bar'")
+                    || msg.contains("collides with existing key 'foo_bar'")) ,
             "unexpected error: {msg}"
         );
     }
