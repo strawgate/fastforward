@@ -37,7 +37,7 @@ config ok: 1 pipeline(s)
 
 ## ff dry-run
 
-Builds all pipeline objects (inputs, SQL transforms, and outputs) without starting active IO workers. This is stricter than `validate` because it compiles SQL queries against the Arrow schema, catching column name typos or type mismatches.
+Builds all pipeline objects (inputs, SQL transforms, and outputs) without starting active IO workers. `dry-run` runs the same validation path as `validate` — both build full pipelines and compile SQL queries against the Arrow schema to catch column name typos or type mismatches. The only difference is the success label: `dry run ok` instead of `config ok`.
 
 ```bash
 ff dry-run --config pipeline.yaml
@@ -91,7 +91,7 @@ ff blast --destination otlp --endpoint http://127.0.0.1:4318/v1/logs
 ```
 
 :::note
-`--destination` is required — it cannot be omitted.
+In non-interactive mode `--destination` is required. In an interactive terminal, `blast` prompts for the destination if omitted.
 :::
 
 | Option | Description |

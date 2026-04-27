@@ -1445,9 +1445,12 @@ pipelines:
 "#,
         );
         let result = Config::load_str(&yaml);
+        let err =
+            result.expect_err("elasticsearch with max_attempts={max_attempts} should be rejected");
+        let err_msg = err.to_string();
         assert!(
-            result.is_err(),
-            "elasticsearch with max_attempts={max_attempts} should be rejected, but got Ok"
+            err_msg.contains("max_attempts") || err_msg.contains("unsigned"),
+            "error should mention max_attempts/unsigned type, got: {err_msg}"
         );
     }
 }

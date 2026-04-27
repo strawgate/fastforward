@@ -96,10 +96,14 @@ curl -s http://localhost:9090/admin/v1/status | jq '.pipelines[0].transform'
 
 ```bash
 # HTTP OTLP health check (local)
-curl -v http://localhost:4318/v1/logs
+curl -X POST http://localhost:4318/v1/logs \
+  -H 'Content-Type: application/json' \
+  -d '{}'
 
 # HTTP OTLP health check (Kubernetes — replace otel-collector with your namespace/service)
-curl -v http://otel-collector:4318/v1/logs
+curl -X POST http://otel-collector:4318/v1/logs \
+  -H 'Content-Type: application/json' \
+  -d '{}'
 
 # Kubernetes DNS resolution check
 POD=$(kubectl -n collectors get pods -l app=ffwd -o jsonpath='{.items[0].metadata.name}')
