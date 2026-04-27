@@ -53,7 +53,10 @@ pub(crate) fn coalesce_as_str(batch: &RecordBatch, row: usize, col: &ColInfo) ->
     Some(s)
 }
 
-const NEEDS_ESCAPE: [bool; 256] = {
+// invariant: `i` iterates 0..0x1f and `b'"'`/`b'\\'` are < 256, all within the 256-element table.
+// We use a `const fn` with a loop (stable since Rust 1.79) so the table is truly const.
+#[allow(clippy::indexing_slicing)]
+const fn make_escape_table() -> [bool; 256] {
     let mut table = [false; 256];
     let mut i = 0;
     while i < 0x20 {
@@ -63,7 +66,8 @@ const NEEDS_ESCAPE: [bool; 256] = {
     table[b'"' as usize] = true;
     table[b'\\' as usize] = true;
     table
-};
+}
+const NEEDS_ESCAPE: [bool; 256] = make_escape_table();
 
 /// Return the index of the first byte in `bytes` that requires JSON escaping,
 /// or `bytes.len()` if there are none.
@@ -71,6 +75,7 @@ const NEEDS_ESCAPE: [bool; 256] = {
 /// Uses a 256-byte lookup table to quickly find `"` or `\` or control
 /// characters (< 0x20) in a single pass.
 #[inline]
+#[allow(clippy::indexing_slicing)]
 fn first_escape_pos(bytes: &[u8]) -> usize {
     for (i, &b) in bytes.iter().enumerate() {
         if NEEDS_ESCAPE[b as usize] {
@@ -97,30 +102,35 @@ pub(crate) fn write_json_string(out: &mut Vec<u8>, v: &str) -> io::Result<()> {
     let bytes = v.as_bytes();
     let mut start = 0;
 
-    while start < bytes.len() {
-        let remaining = &bytes[start..];
-        let rel_pos = first_escape_pos(remaining);
+    // invariant: `rel_pos` is in 0..=remaining.len() (returned by `first_escape_pos`).
+    #[allow(clippy::indexing_slicing)]
+    {
+        #[allow(clippy::indexing_slicing)]
+        while start < bytes.len() {
+            let remaining = &bytes[start..];
+            let rel_pos = first_escape_pos(remaining);
 
-        // Bulk-copy the safe prefix — compiles to a single `memcpy`.
-        if rel_pos > 0 {
-            out.extend_from_slice(&remaining[..rel_pos]);
-        }
+            // Bulk-copy the safe prefix — compiles to a single `memcpy`.
+            if rel_pos > 0 {
+                out.extend_from_slice(&remaining[..rel_pos]);
+            }
 
-        if rel_pos == remaining.len() {
-            // No more bytes needing escaping — we're done.
-            break;
-        }
+            if rel_pos == remaining.len() {
+                // No more bytes needing escaping — we're done.
+                break;
+            }
 
-        // Handle the one byte at `start + rel_pos` that needs escaping.
-        match remaining[rel_pos] {
-            b'"' => out.extend_from_slice(b"\\\""),
-            b'\\' => out.extend_from_slice(b"\\\\"),
-            b'\n' => out.extend_from_slice(b"\\n"),
-            b'\r' => out.extend_from_slice(b"\\r"),
-            b'\t' => out.extend_from_slice(b"\\t"),
-            b => Write::write_fmt(out, format_args!("\\u{b:04x}"))?,
+            // Handle the one byte at `start + rel_pos` that needs escaping.
+            match remaining[rel_pos] {
+                b'"' => out.extend_from_slice(b"\\\""),
+                b'\\' => out.extend_from_slice(b"\\\\"),
+                b'\n' => out.extend_from_slice(b"\\n"),
+                b'\r' => out.extend_from_slice(b"\\r"),
+                b'\t' => out.extend_from_slice(b"\\t"),
+                b => Write::write_fmt(out, format_args!("\\u{b:04x}"))?,
+            }
+            start += rel_pos + 1;
         }
-        start += rel_pos + 1;
     }
 
     out.push(b'"');
@@ -134,6 +144,8 @@ fn write_json_hex_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
     out.reserve(4 + bytes.len().saturating_mul(2));
     out.push(b'"');
     out.extend_from_slice(b"0x");
+    // invariant: `(b >> 4)` and `(b & 0x0f)` are both in 0..16, within the HEX table.
+    #[allow(clippy::indexing_slicing)]
     for &b in bytes {
         out.push(HEX[(b >> 4) as usize]);
         out.push(HEX[(b & 0x0f) as usize]);
@@ -303,6 +315,9 @@ pub(crate) fn write_json_value(arr: &dyn Array, row: usize, out: &mut Vec<u8>) -
             out.push(b'{');
             let num_fields = struct_arr.num_columns();
             let mut first = true;
+            // invariant: `field_idx < num_fields = schema_fields.len()` (loop range), so
+            // `schema_fields[field_idx]` is always in-bounds.
+            #[allow(clippy::indexing_slicing)]
             for field_idx in 0..num_fields {
                 if !first {
                     out.push(b',');
@@ -456,6 +471,9 @@ pub(crate) fn write_typed_json_value(
             out.push(b'{');
             let fields = a.fields();
             let mut first = true;
+            // invariant: `field_idx < a.num_columns() = fields.len()`, so `fields[field_idx]`
+            // is always in-bounds.
+            #[allow(clippy::indexing_slicing)]
             for field_idx in 0..a.num_columns() {
                 if !first {
                     out.push(b',');
@@ -510,6 +528,9 @@ pub fn write_row_json_resolved(
     // the leading comma (offset 1); for subsequent fields we include it (offset 0).
     // This replaces N separate `push(b',')` calls with one extend_from_slice.
     let mut sep_skip = 1usize;
+    // invariant: `sep_skip` is 1 (before first field) or 0 (after), always < `key_json.len()`
+    // because `key_json` always starts with `,`.
+    #[allow(clippy::indexing_slicing)]
     for col in cols {
         let Some((key_json, typed)) = col.resolve(row) else {
             continue;
@@ -548,6 +569,9 @@ pub fn write_row_json(
     );
     out.push(b'{');
     let mut sep_skip = 1usize;
+    // invariant: `sep_skip` is 1 (before first field) or 0 (after), always < `col.key_json.len()`
+    // because `col.key_json` always starts with `,`.
+    #[allow(clippy::indexing_slicing)]
     for col in cols {
         // Find the first non-null variant for this field (json ordering).
         let variant = col.json_variants.iter().find(|v| !is_null(batch, v, row));

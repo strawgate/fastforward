@@ -67,6 +67,7 @@ use super::sink::{SendResult, Sink, SinkFactory};
 use super::{BatchMetadata, Compression};
 use crate::http_classify::{self, DEFAULT_RETRY_AFTER_SECS};
 
+#[allow(clippy::indexing_slicing)]
 mod generated_fast {
     include!("generated/otap_fast_v1.rs");
 }
@@ -179,6 +180,7 @@ pub fn encode_batch_arrow_records(
             .collect(),
         headers: headers.to_vec(),
     };
+    #[allow(clippy::expect_used)]
     message.encode(buf).expect("vec-backed encode cannot fail");
 }
 

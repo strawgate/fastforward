@@ -79,6 +79,7 @@ impl ElasticsearchSink {
         }
     }
 
+    #[allow(clippy::indexing_slicing)]
     pub(super) fn bulk_attempt_from_result(
         row_ids: Vec<u32>,
         result: BulkItemResult,
@@ -266,6 +267,7 @@ impl ElasticsearchSink {
     /// internally (up to `SPLIT_INTERNAL_RETRIES` times) rather than
     /// propagating a retryable result to the worker pool — which would
     /// retry the entire original batch and duplicate the successful half.
+    #[allow(clippy::indexing_slicing)]
     pub(super) async fn send_split_halves(
         &mut self,
         batch: &RecordBatch,

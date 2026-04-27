@@ -2,7 +2,6 @@
 //! to various formats: stdout JSON/text, JSON lines over HTTP, OTLP protobuf.
 
 // Serialization hot path: provably-bounded indexing in RecordBatch serializers.
-#![allow(clippy::indexing_slicing, clippy::expect_used)]
 
 mod arrow_ipc_sink;
 mod file_sink;

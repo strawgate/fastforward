@@ -157,6 +157,7 @@ where
             ));
         }
 
+        #[allow(clippy::indexing_slicing)]
         let n = match tokio::time::timeout_at(deadline, stream.write(&buf[written..])).await {
             Ok(Ok(n)) => n,
             // Interrupted means "retry the same operation" — not a connection failure.

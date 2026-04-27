@@ -102,11 +102,14 @@ pub(crate) fn write_ts_suffix(out: &mut [u8; 47], secs: u64, frac: u64) {
     out[0] = b',';
     out[1..15].copy_from_slice(b"\"@timestamp\":\"");
     let mut dt = [0u8; 19];
+    #[allow(clippy::indexing_slicing)]
     write_unix_timestamp_utc_into(&mut dt, secs);
     out[15..34].copy_from_slice(&dt);
     out[34] = b'.';
     // Write 9-digit zero-padded nanosecond fraction.
     let mut f = frac;
+    // invariant: `i` iterates exactly 35..=43, within the 47-byte `out` buffer.
+    #[allow(clippy::indexing_slicing)]
     for i in (35..44).rev() {
         out[i] = b'0' + (f % 10) as u8;
         f /= 10;

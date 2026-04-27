@@ -7,6 +7,7 @@ use super::types::{BulkItemResult, ElasticsearchSink};
 impl ElasticsearchSink {
     /// Extract the `took` field (milliseconds) from an ES bulk response body.
     /// Returns `None` if the field is absent or not parseable.
+    #[allow(clippy::indexing_slicing)]
     pub(super) fn extract_took(body: &[u8]) -> Option<u64> {
         const PREFIX: &[u8] = b"\"took\"";
         let pos = memchr::memmem::find(body, PREFIX)?;

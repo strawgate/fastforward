@@ -113,6 +113,9 @@ fn sanitize_static_labels(static_labels: &[(String, String)]) -> io::Result<Vec<
 /// After calling this function, `entries[i].0 > entries[i-1].0` for all `i > 0`.
 /// If `min_timestamp_exclusive` is provided, the first entry is additionally
 /// forced to be greater than that value.
+// invariant: `entries[i]` and `entries[i-1]` accesses are guarded by loop bounds
+// (i starts at 1, entries.len() ensures i-1 and i are valid).
+#[allow(clippy::indexing_slicing)]
 pub fn sort_and_dedup_timestamps(
     entries: &mut Vec<LokiEntry>,
     min_timestamp_exclusive: Option<u64>,

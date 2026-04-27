@@ -271,6 +271,7 @@ impl Sink for AsyncFanoutSink {
             let mut last_io_error: Option<io::Error> = None;
             let mut max_retry: Option<Duration> = None;
 
+            #[allow(clippy::indexing_slicing)]
             for (i, sink) in self.sinks.iter_mut().enumerate() {
                 if self.states[i] != ChildState::Pending {
                     continue;
@@ -282,7 +283,10 @@ impl Sink for AsyncFanoutSink {
                     &mut last_io_error,
                     &mut max_retry,
                 ) {
-                    self.states[i] = next_state;
+                    #[allow(clippy::indexing_slicing)]
+                    {
+                        self.states[i] = next_state;
+                    }
                 }
             }
 

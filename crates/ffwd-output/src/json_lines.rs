@@ -117,19 +117,22 @@ impl JsonLinesSink {
         let mut body_bytes = Vec::new();
         let mut truncated = false;
         let mut response = response;
-        while let Some(chunk) = response.chunk().await.map_err(io::Error::other)? {
-            if body_bytes.len() < MAX_ERROR_BODY_BYTES {
-                let remaining = MAX_ERROR_BODY_BYTES - body_bytes.len();
-                if chunk.len() <= remaining {
-                    body_bytes.extend_from_slice(&chunk);
+        #[allow(clippy::indexing_slicing)]
+        {
+            while let Some(chunk) = response.chunk().await.map_err(io::Error::other)? {
+                if body_bytes.len() < MAX_ERROR_BODY_BYTES {
+                    let remaining = MAX_ERROR_BODY_BYTES - body_bytes.len();
+                    if chunk.len() <= remaining {
+                        body_bytes.extend_from_slice(&chunk);
+                    } else {
+                        body_bytes.extend_from_slice(&chunk[..remaining]);
+                        truncated = true;
+                        break;
+                    }
                 } else {
-                    body_bytes.extend_from_slice(&chunk[..remaining]);
                     truncated = true;
                     break;
                 }
-            } else {
-                truncated = true;
-                break;
             }
         }
         let mut body = String::from_utf8_lossy(&body_bytes).into_owned();

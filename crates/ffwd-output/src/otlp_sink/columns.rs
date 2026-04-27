@@ -182,6 +182,10 @@ pub(super) fn resolve_otlp_str_col(col: &dyn Array) -> Option<OtlpStrCol<'_>> {
 }
 
 /// Scan the batch schema once and resolve column roles and downcast arrays.
+// invariant: all `excluded[idx]` and `batch.column(idx)` accesses are guarded by
+// `idx` from `schema.fields().iter().enumerate()`, so `0 <= idx < schema.fields().len()`
+// and `idx < batch.columns().len()` — both have equal length by RecordBatch invariant.
+#[allow(clippy::indexing_slicing)]
 pub(super) fn resolve_batch_columns<'a>(
     batch: &'a RecordBatch,
     message_field: &str,

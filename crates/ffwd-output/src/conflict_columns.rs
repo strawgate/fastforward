@@ -339,6 +339,7 @@ pub fn resolve_col_infos<'a>(batch: &'a RecordBatch, cols: &'a [ColInfo]) -> Vec
             let key_json: &'a [u8] = &col.key_json;
 
             // Fast path: single flat variant (no Vec, no iterator in hot loop)
+            #[allow(clippy::indexing_slicing)]
             if col.json_variants.len() == 1
                 && let ColVariant::Flat { col_idx, .. } = &col.json_variants[0]
             {
@@ -431,8 +432,9 @@ fn upsert_col_info(
 fn build_key_json(field_name: &str) -> Box<[u8]> {
     let mut buf = Vec::with_capacity(field_name.len() + 4); // , + " + name + " + :
     buf.push(b',');
-    write_json_string(&mut buf, field_name)
-        .expect("field name JSON serialization cannot fail for valid UTF-8 field names");
+    // infallible for valid UTF-8 field names (build-time invariant)
+    #[allow(clippy::unwrap_used)]
+    write_json_string(&mut buf, field_name).unwrap();
     buf.push(b':');
     buf.into_boxed_slice()
 }

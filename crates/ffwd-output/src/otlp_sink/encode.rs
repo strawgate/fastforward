@@ -62,6 +62,10 @@ impl OtlpSink {
         );
     }
 
+    // invariant: `records_buf[start..end]` slices are bounded by `encode_row` appending
+    // exactly the bytes written; `grouped_ranges/scope_values` indices are in-sync with
+    // `grouped_ranges` zip iteration.
+    #[allow(clippy::indexing_slicing)]
     fn encode_batch_with_row_encoder(
         &mut self,
         batch: &RecordBatch,
@@ -315,6 +319,9 @@ impl OtlpSink {
         }
     }
 
+    // invariant: `grouped_scope_values[group_idx]` and `grouped_resource_msgs[group_idx]`
+    // are in-sync with `grouped_ranges` zip iteration.
+    #[allow(clippy::indexing_slicing)]
     fn encode_rows_only_with_row_encoder(
         &mut self,
         batch: &RecordBatch,

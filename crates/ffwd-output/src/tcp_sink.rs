@@ -131,6 +131,7 @@ where
     // wall-clock time regardless of how many partial writes occur.
     let deadline = Instant::now() + WRITE_TIMEOUT;
 
+    #[allow(clippy::indexing_slicing)]
     while *written < buf.len() {
         let result = tokio::time::timeout_at(deadline, stream.write(&buf[*written..])).await;
         match result {
