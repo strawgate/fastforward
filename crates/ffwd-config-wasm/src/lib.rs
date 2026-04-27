@@ -1,6 +1,77 @@
 use ffwd_config::{Config, docspec};
 use wasm_bindgen::prelude::*;
 
+#[cfg(test)]
+mod tests {
+    use ffwd_config::docspec::{input_template, output_template, INPUT_TEMPLATES, OUTPUT_TEMPLATES};
+
+    #[test]
+    fn all_input_template_ids_return_some() {
+        for template in INPUT_TEMPLATES {
+            assert!(
+                input_template(template.id).is_some(),
+                "input_template({:?}) should return Some, but returned None",
+                template.id
+            );
+        }
+    }
+
+    #[test]
+    fn all_output_template_ids_return_some() {
+        for template in OUTPUT_TEMPLATES {
+            assert!(
+                output_template(template.id).is_some(),
+                "output_template({:?}) should return Some, but returned None",
+                template.id
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_input_template_id_returns_none() {
+        assert!(input_template("nonexistent_template_id").is_none());
+        assert!(input_template("").is_none());
+    }
+
+    #[test]
+    fn invalid_output_template_id_returns_none() {
+        assert!(output_template("nonexistent_template_id").is_none());
+        assert!(output_template("").is_none());
+    }
+
+    #[test]
+    fn known_input_templates_have_snippets() {
+        let known = ["file_json", "file_cri", "udp_raw", "tcp_json", "otlp_receiver"];
+        for id in known {
+            let template = input_template(id);
+            assert!(
+                template.is_some(),
+                "known input template {id} should exist"
+            );
+            assert!(
+                !template.unwrap().snippet.is_empty(),
+                "input template {id} should have a non-empty snippet"
+            );
+        }
+    }
+
+    #[test]
+    fn known_output_templates_have_snippets() {
+        let known = ["otlp", "loki", "elasticsearch", "stdout", "file", "null"];
+        for id in known {
+            let template = output_template(id);
+            assert!(
+                template.is_some(),
+                "known output template {id} should exist"
+            );
+            assert!(
+                !template.unwrap().snippet.is_empty(),
+                "output template {id} should have a non-empty snippet"
+            );
+        }
+    }
+}
+
 // ── Template data ──────────────────────────────────────────────────────────
 // Shared input/output templates live in `ffwd-config::docspec`.
 
