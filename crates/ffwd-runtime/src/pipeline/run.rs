@@ -192,7 +192,14 @@ impl Pipeline {
                         self.metrics.dec_channel_depth();
                         if self.submit_batch(msg, shutdown).await {
                             // Terminal processor/checkpoint paths stop accepting
-                            // additional channel messages.
+                            // additional channel messages: set the drain guard and
+                            // break. The drain loop below is skipped intentionally.
+                            //
+                            // Invariant: when this branch is taken, all batches
+                            // already in the channel behind this message are
+                            // abandoned — they will be dropped when `rx` is
+                            // dropped at the end of this scope. This is the
+                            // current design; see issue #2475 sub-item.
                             should_drain_input_channel = false;
                             break;
                         }
@@ -460,6 +467,12 @@ impl Pipeline {
                     // contract without acknowledging the batch. We
                     // intentionally do not re-dispatch yet; the machine keeps
                     // this batch in-flight so checkpoints do not advance.
+                    //
+                    // NOTE: held_tickets grows without bound. Each entry holds
+                    // a BatchTicket that is never freed until pipeline shutdown.
+                    // With sustained transient output failures, memory usage
+                    // grows linearly with the number of failed batches. This is
+                    // the current design; see issue #2475 sub-item.
                     self.held_tickets.push(ticket.fail());
                     held += 1;
                     None

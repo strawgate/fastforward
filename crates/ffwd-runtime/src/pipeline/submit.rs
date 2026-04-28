@@ -99,7 +99,7 @@ impl Pipeline {
             }
             ProcessorStageResult::PermanentError { reason } => {
                 tracing::warn!(reason = %reason, "processor stage permanent error; dropping batch");
-                self.ack_all_tickets(sending, super::checkpoint_policy::TicketDisposition::Ack);
+                self.ack_all_tickets(sending, super::checkpoint_policy::TicketDisposition::Reject);
                 self.metrics.inc_dropped_batch();
                 self.metrics.record_batch(0, scan_ns, transform_ns, 0);
                 self.metrics.finish_active_batch(batch_id);
@@ -151,6 +151,12 @@ impl Pipeline {
 
         // Track in-flight before yielding to pool submission so ack handling
         // cannot observe a finished batch without a corresponding increment.
+        //
+        // NOTE: inflight_batches is decremented in apply_pool_ack (run.rs:366).
+        // Early-return paths (Hold, PermanentError, ZeroRow, Reject, Fatal,
+        // failpoint) never call pool.submit, so apply_pool_ack is never reached
+        // for those batches and the counter is not decremented. This causes
+        // metric drift; see issue #2475 sub-item.
         self.metrics
             .inflight_batches
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
