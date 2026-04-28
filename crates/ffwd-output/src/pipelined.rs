@@ -84,8 +84,10 @@ pub trait BatchWriter: Send + 'static {
 
 /// Configuration for the pipelined sink.
 pub struct PipelineConfig {
-    /// Number of buffers in the pool (channel depth + 1 in-flight).
-    /// Default: 3 (triple-buffered).
+    /// Number of buffers in the pool. These are cycled between the serializer
+    /// and writer threads for zero-allocation steady-state operation.
+    /// Default: 3 (triple-buffered: one being serialized, one in flight, one
+    /// being written).
     pub num_buffers: usize,
 
     /// Initial capacity for each buffer in bytes.
