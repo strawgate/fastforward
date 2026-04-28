@@ -187,6 +187,34 @@ pub enum TypedArrayRef<'a> {
     Other(&'a dyn Array),
 }
 
+impl TypedArrayRef<'_> {
+    #[inline]
+    pub(crate) fn len(&self) -> usize {
+        match self {
+            TypedArrayRef::Null => usize::MAX,
+            TypedArrayRef::Int8(a) => a.len(),
+            TypedArrayRef::Int16(a) => a.len(),
+            TypedArrayRef::Int32(a) => a.len(),
+            TypedArrayRef::Int64(a) => a.len(),
+            TypedArrayRef::UInt8(a) => a.len(),
+            TypedArrayRef::UInt16(a) => a.len(),
+            TypedArrayRef::UInt32(a) => a.len(),
+            TypedArrayRef::UInt64(a) => a.len(),
+            TypedArrayRef::Float32(a) => a.len(),
+            TypedArrayRef::Float64(a) => a.len(),
+            TypedArrayRef::Boolean(a) => a.len(),
+            TypedArrayRef::Utf8(a) => a.len(),
+            TypedArrayRef::LargeUtf8(a) => a.len(),
+            TypedArrayRef::Utf8View(a) => a.len(),
+            TypedArrayRef::Struct(a) => a.len(),
+            TypedArrayRef::Binary(a) => a.len(),
+            TypedArrayRef::LargeBinary(a) => a.len(),
+            TypedArrayRef::FixedSizeBinary(a) => a.len(),
+            TypedArrayRef::Other(arr) => arr.len(),
+        }
+    }
+}
+
 /// Downcast a `&dyn Array` to the concrete typed reference once per batch.
 fn resolve_typed(arr: &dyn Array) -> TypedArrayRef<'_> {
     match arr.data_type() {
@@ -282,6 +310,13 @@ impl ResolvedVariant<'_> {
             || self.parent_nulls.is_some_and(|n| n.is_null(row))
             || self.nulls.is_some_and(|n| n.is_null(row))
     }
+
+    #[inline]
+    pub(crate) fn row_limit(&self) -> usize {
+        let len = self.typed.len();
+        let len = self.parent_nulls.map_or(len, |nulls| len.min(nulls.len()));
+        self.nulls.map_or(len, |nulls| len.min(nulls.len()))
+    }
 }
 
 /// Pre-resolved column info for the hot loop.
@@ -323,6 +358,21 @@ impl ResolvedCol<'_> {
                 let v = variants.iter().find(|v| !v.is_null(row))?;
                 Some((key_json, &v.typed))
             }
+        }
+    }
+
+    #[inline]
+    pub(crate) fn row_limit(&self) -> usize {
+        match self {
+            ResolvedCol::Single { typed, nulls, .. } => {
+                let len = typed.len();
+                nulls.map_or(len, |nulls| len.min(nulls.len()))
+            }
+            ResolvedCol::Multi { variants, .. } => variants
+                .iter()
+                .map(ResolvedVariant::row_limit)
+                .min()
+                .unwrap_or(0),
         }
     }
 }

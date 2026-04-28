@@ -65,6 +65,15 @@ const NEEDS_ESCAPE: [bool; 256] = {
     table
 };
 
+const SWAR_ONES: u64 = 0x0101_0101_0101_0101;
+const SWAR_HIGH_BITS: u64 = 0x8080_8080_8080_8080;
+const SWAR_TOP3_MASK: u64 = 0xE0E0_E0E0_E0E0_E0E0;
+
+#[inline]
+fn swar_zero_byte_mask(chunk: u64) -> u64 {
+    (chunk.wrapping_sub(SWAR_ONES)) & !chunk & SWAR_HIGH_BITS
+}
+
 /// Return the index of the first byte in `bytes` that requires JSON escaping,
 /// or `bytes.len()` if there are none.
 ///
@@ -83,28 +92,14 @@ fn first_escape_pos(bytes: &[u8]) -> usize {
     // SWAR: process 8 bytes per iteration on 64-bit platforms.
     // Detects bytes < 0x20 OR == 0x22 (") OR == 0x5C (\) in parallel.
     while i + 8 <= len {
-        let mut buf = [0u8; 8];
-        buf.copy_from_slice(&bytes[i..i + 8]);
-        let chunk = u64::from_le_bytes(buf);
+        let mut lane = [0u8; 8];
+        lane.copy_from_slice(&bytes[i..i + 8]);
+        let chunk = u64::from_le_bytes(lane);
 
-        // SWAR formulas used below:
-        //   has_byte_lt(v, N) = ((v - ones*N) & ~v & lo_mask) != 0
-        //   has_byte_eq(v, X) = has_zero_byte(v ^ ones*X)
-        //   has_zero_byte(v)  = ((v - ones) & ~v & lo_mask) != 0
-
-        let lo_mask = 0x8080_8080_8080_8080u64;
-        let ones = 0x0101_0101_0101_0101u64;
-
-        // Check for control chars (< 0x20): has_byte_lt(chunk, 0x20)
-        let ctrl = (chunk.wrapping_sub(ones.wrapping_mul(0x20))) & !chunk & lo_mask;
-
-        // Check for '"' (0x22): XOR with broadcast 0x22, detect zero bytes
-        let xor_quote = chunk ^ ones.wrapping_mul(0x22);
-        let has_quote = (xor_quote.wrapping_sub(ones)) & !xor_quote & lo_mask;
-
-        // Check for '\\' (0x5C): XOR with broadcast 0x5C, detect zero bytes
-        let xor_bslash = chunk ^ ones.wrapping_mul(0x5C);
-        let has_bslash = (xor_bslash.wrapping_sub(ones)) & !xor_bslash & lo_mask;
+        // Control characters are exactly the bytes whose top three bits are zero.
+        let ctrl = swar_zero_byte_mask(chunk & SWAR_TOP3_MASK);
+        let has_quote = swar_zero_byte_mask(chunk ^ SWAR_ONES.wrapping_mul(u64::from(b'"')));
+        let has_bslash = swar_zero_byte_mask(chunk ^ SWAR_ONES.wrapping_mul(u64::from(b'\\')));
 
         let mask = ctrl | has_quote | has_bslash;
         if mask != 0 {
@@ -610,9 +605,9 @@ pub fn write_row_json_resolved(
 /// Write an entire batch as newline-delimited JSON using pre-resolved columns.
 ///
 /// This is the highest-performance batch serialization path. Compared to calling
-/// [`write_row_json_resolved`] in a loop, this function:
+/// [`write_row_json_resolved`] in a loop manually, this function:
 /// - Pre-reserves the output buffer based on batch size estimation
-/// - Amortizes the column resolution cost across all rows
+/// - Provides a convenience batch-writing loop over the already-resolved columns
 ///
 /// Returns the number of rows written.
 pub fn write_batch_json_resolved(
@@ -620,13 +615,47 @@ pub fn write_batch_json_resolved(
     num_rows: usize,
     out: &mut Vec<u8>,
 ) -> io::Result<usize> {
+    const MAX_PREALLOC_BYTES: usize = 64 * 1024 * 1024;
+
     if num_rows == 0 {
         return Ok(0);
     }
+
+    if let Some(row_limit) = cols.iter().map(ResolvedCol::row_limit).min()
+        && num_rows > row_limit
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("requested {num_rows} rows but resolved columns only support {row_limit} rows"),
+        ));
+    }
+
     // Estimate ~200 bytes per row for narrow, ~600 for wide schemas.
     // Use column count as a heuristic: 5 cols ~ 200B, 20 cols ~ 600B.
-    let est_bytes_per_row = 40 + cols.len() * 30;
-    out.reserve(num_rows * est_bytes_per_row);
+    let est_bytes_per_row = 40usize
+        .checked_add(cols.len().checked_mul(30).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "column count is too large to estimate JSON row size",
+            )
+        })?)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "estimated JSON row size overflowed",
+            )
+        })?;
+    let reserve_bytes = num_rows
+        .checked_mul(est_bytes_per_row)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "batch is too large to estimate JSON output size",
+            )
+        })?
+        .min(MAX_PREALLOC_BYTES);
+    out.try_reserve(reserve_bytes)
+        .map_err(|e| io::Error::other(format!("failed to reserve JSON output buffer: {e}")))?;
 
     for row in 0..num_rows {
         write_row_json_resolved(row, cols, out, true)?;
@@ -748,6 +777,13 @@ mod tests {
         .expect("scalar batch must be valid")
     }
 
+    fn first_escape_pos_reference(bytes: &[u8]) -> usize {
+        bytes
+            .iter()
+            .position(|&byte| NEEDS_ESCAPE[byte as usize])
+            .unwrap_or(bytes.len())
+    }
+
     proptest! {
         #[test]
         fn row_json_produces_valid_json(batch in arrow_test_utils::arb_record_batch()) {
@@ -840,6 +876,11 @@ mod tests {
                 prop_assert_eq!(resolved, direct, "resolved and default row serializers diverged");
             }
         }
+
+        #[test]
+        fn first_escape_pos_matches_reference(bytes in proptest::collection::vec(any::<u8>(), 0..256)) {
+            prop_assert_eq!(first_escape_pos(&bytes), first_escape_pos_reference(&bytes));
+        }
     }
 
     #[test]
@@ -872,5 +913,38 @@ mod tests {
                 assert_eq!(ratio.as_f64(), Some(1.5));
             }
         }
+    }
+
+    #[test]
+    fn first_escape_pos_matches_reference_edge_cases() {
+        let cases: &[&[u8]] = &[
+            b"",
+            b"plain-ascii",
+            b"contains\"quote",
+            b"contains\\backslash",
+            b"line\nbreak",
+            b"\x1f\x20\x20\x20\x20\x20\x20\x20",
+            b"\x20\x20\x20\x20\x20\x20\x20\x1f",
+            b"\x00abcdefg",
+            b"abcdefg\x00",
+            b"\x80\x81\x82\x83\x84\x85\x86\x87",
+            b"\x1f\x20\x22\x5caaaa",
+            b"aaaaaaa\t",
+        ];
+
+        for &bytes in cases {
+            assert_eq!(first_escape_pos(bytes), first_escape_pos_reference(bytes));
+        }
+    }
+
+    #[test]
+    fn write_batch_json_resolved_rejects_oversized_num_rows() {
+        let batch = scalar_batch(vec![("ok".to_string(), 1, 1.5, true)]);
+        let cols = build_col_infos(&batch);
+        let resolved = resolve_col_infos(&batch, &cols);
+
+        let err = write_batch_json_resolved(&resolved, batch.num_rows() + 1, &mut Vec::new())
+            .expect_err("oversized row counts must be rejected");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
     }
 }
