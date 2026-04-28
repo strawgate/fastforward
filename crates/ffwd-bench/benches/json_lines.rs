@@ -6,6 +6,7 @@
 //! - **write_row_json/narrow/10k** — tight loop over 10K narrow rows (5 fields)
 //! - **write_row_json/wide/10k**   — tight loop over 10K wide rows (20 fields)
 //! - **write_row_json_resolved/narrow/10k** — pre-resolved columns, 10K narrow
+//! - **write_batch_json_resolved/narrow/10k** — batch-level with pre-reserve, 10K narrow
 //! - **write_batch_to/narrow/10k** — `StdoutSink::write_batch_to` JSON, 10K narrow rows
 //! - **write_batch_to/wide/10k**   — `StdoutSink::write_batch_to` JSON, 10K wide rows
 
