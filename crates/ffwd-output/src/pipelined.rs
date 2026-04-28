@@ -115,6 +115,9 @@ enum WriterMsg {
     Shutdown(SyncSender<io::Result<()>>),
 }
 
+/// Sent from writer thread to signal a write failure.
+struct WriteError(io::Error);
+
 // ---------------------------------------------------------------------------
 // PipelinedSink
 // ---------------------------------------------------------------------------
@@ -131,6 +134,10 @@ pub struct PipelinedSink<S: BatchSerializer> {
     /// Channel to receive empty (recycled) buffers back from the writer.
     empty_rx: mpsc::Receiver<Vec<u8>>,
 
+    /// Channel to receive write errors from the writer thread.
+    /// Non-blocking: checked before each send_batch to surface I/O failures.
+    error_rx: mpsc::Receiver<WriteError>,
+
     /// Handle to the writer thread (for join on shutdown).
     writer_handle: Option<JoinHandle<()>>,
 }
@@ -139,14 +146,16 @@ impl<S: BatchSerializer> PipelinedSink<S> {
     /// Create a new pipelined sink.
     ///
     /// Spawns a dedicated OS thread for the writer immediately.
+    /// Returns an error if the thread cannot be spawned.
     pub fn new(
         serializer: S,
         writer: impl BatchWriter,
         stats: Arc<ComponentStats>,
         config: PipelineConfig,
-    ) -> Self {
+    ) -> io::Result<Self> {
         let (filled_tx, filled_rx) = mpsc::sync_channel::<WriterMsg>(config.num_buffers);
         let (empty_tx, empty_rx) = mpsc::sync_channel::<Vec<u8>>(config.num_buffers);
+        let (error_tx, error_rx) = mpsc::sync_channel::<WriteError>(config.num_buffers);
 
         // Seed the empty buffer pool.
         for _ in 0..config.num_buffers {
@@ -156,16 +165,29 @@ impl<S: BatchSerializer> PipelinedSink<S> {
         let writer_handle = thread::Builder::new()
             .name(format!("ffwd-writer-{}", serializer.name()))
             .spawn(move || {
-                writer_thread_loop(writer, filled_rx, empty_tx);
+                writer_thread_loop(writer, filled_rx, empty_tx, error_tx);
             })
-            .expect("failed to spawn writer thread");
+            .map_err(io::Error::other)?;
 
-        Self {
+        Ok(Self {
             serializer,
             stats,
             filled_tx: Some(filled_tx),
             empty_rx,
+            error_rx,
             writer_handle: Some(writer_handle),
+        })
+    }
+
+    /// Check for write errors from the writer thread (non-blocking).
+    ///
+    /// Returns the first queued error, if any. This surfaces I/O failures
+    /// from previous batches — a write error on batch N is reported during
+    /// `send_batch` for batch N+1.
+    fn check_writer_error(&self) -> io::Result<()> {
+        match self.error_rx.try_recv() {
+            Ok(WriteError(e)) => Err(e),
+            Err(_) => Ok(()),
         }
     }
 
@@ -228,6 +250,11 @@ impl<S: BatchSerializer> Sink for PipelinedSink<S> {
         metadata: &'a BatchMetadata,
     ) -> Pin<Box<dyn Future<Output = SendResult> + Send + 'a>> {
         Box::pin(async move {
+            // Check for write errors from previous batches before accepting new work.
+            if let Err(e) = self.check_writer_error() {
+                return SendResult::from_io_error(e);
+            }
+
             // Acquire an empty buffer from the pool (blocks if writer is behind).
             let mut buf = match self.acquire_buffer() {
                 Ok(b) => b,
@@ -305,13 +332,15 @@ fn writer_thread_loop(
     mut writer: impl BatchWriter,
     filled_rx: mpsc::Receiver<WriterMsg>,
     empty_tx: SyncSender<Vec<u8>>,
+    error_tx: SyncSender<WriteError>,
 ) {
     while let Ok(msg) = filled_rx.recv() {
         match msg {
             WriterMsg::Data(buf) => {
                 if let Err(e) = writer.write(&buf) {
                     tracing::error!(error = %e, "pipelined writer: write failed");
-                    // Return the buffer anyway to avoid deadlock.
+                    // Notify the caller about the write failure.
+                    let _ = error_tx.try_send(WriteError(e));
                 }
                 // Recycle the buffer back to the pool.
                 let mut recycled = buf;
@@ -505,13 +534,6 @@ pub struct JsonBatchSerializer {
 }
 
 impl JsonBatchSerializer {
-    /// Create a new JSON batch serializer.
-    pub fn new(name: String, format: StdoutFormat, stats: Arc<ComponentStats>) -> Self {
-        Self {
-            inner: StdoutSink::new(name, format, stats),
-        }
-    }
-
     /// Create with a custom message field name.
     pub fn with_message_field(
         name: String,

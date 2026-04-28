@@ -32,7 +32,7 @@ impl FileSink {
         format: StdoutFormat,
         file: std::fs::File,
         stats: Arc<ComponentStats>,
-    ) -> Self {
+    ) -> io::Result<Self> {
         Self::with_message_field(name, format, field_names::BODY.to_string(), file, stats)
     }
 
@@ -43,7 +43,7 @@ impl FileSink {
         message_field: String,
         file: std::fs::File,
         stats: Arc<ComponentStats>,
-    ) -> Self {
+    ) -> io::Result<Self> {
         let serializer = JsonBatchSerializer::with_message_field(
             name,
             format,
@@ -52,9 +52,9 @@ impl FileSink {
         );
         let writer = FileWriter::new(file);
         let config = PipelineConfig::default();
-        Self {
-            inner: PipelinedSink::new(serializer, writer, stats, config),
-        }
+        Ok(Self {
+            inner: PipelinedSink::new(serializer, writer, stats, config)?,
+        })
     }
 }
 
@@ -133,7 +133,7 @@ impl SinkFactory for FileSinkFactory {
             self.message_field.clone(),
             file,
             Arc::clone(&self.stats),
-        )))
+        )?))
     }
 
     fn name(&self) -> &str {
