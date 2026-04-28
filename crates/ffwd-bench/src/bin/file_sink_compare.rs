@@ -557,10 +557,7 @@ fn run_multi_producer_threaded(
                         .map_err(|_| io::Error::other("mutex poisoned"))?
                         .recv()
                         .map_err(|_| {
-                            io::Error::new(
-                                io::ErrorKind::BrokenPipe,
-                                "empty buffer channel closed",
-                            )
+                            io::Error::new(io::ErrorKind::BrokenPipe, "empty buffer channel closed")
                         })?;
                     sink.write_batch_to(&batch, &meta, &mut buf)?;
                     filled_tx.send(buf).map_err(|_| {
@@ -757,7 +754,12 @@ fn main() -> io::Result<()> {
         results.push(run_serialize_only(&batch, &meta, num_batches)?);
         results.push(run_serialize_std_nosync(&batch, &meta, num_batches)?);
         results.push(run_serialize_tokio_nosync(&rt, &batch, &meta, num_batches)?);
-        results.push(run_serialize_tokio_mutex_nosync(&rt, &batch, &meta, num_batches)?);
+        results.push(run_serialize_tokio_mutex_nosync(
+            &rt,
+            &batch,
+            &meta,
+            num_batches,
+        )?);
         results.push(run_std_direct_nosync(&payload, num_batches)?);
         results.push(run_std_direct(&payload, num_batches)?);
         results.push(run_std_bufwriter(&payload, num_batches)?);
@@ -776,7 +778,11 @@ fn main() -> io::Result<()> {
         results.push(run_threaded_pipeline(&batch, &meta, num_batches, 0)?);
         results.push(run_threaded_bufwriter(&batch, &meta, num_batches, 0)?);
         results.push(run_file_sink_periodic_sync(
-            &rt, &batch, &meta, num_batches, 0,
+            &rt,
+            &batch,
+            &meta,
+            num_batches,
+            0,
         )?);
     }
 
@@ -793,7 +799,11 @@ fn main() -> io::Result<()> {
             results.push(run_threaded_pipeline(&batch, &meta, num_batches, *iv)?);
             results.push(run_threaded_bufwriter(&batch, &meta, num_batches, *iv)?);
             results.push(run_file_sink_periodic_sync(
-                &rt, &batch, &meta, num_batches, *iv,
+                &rt,
+                &batch,
+                &meta,
+                num_batches,
+                *iv,
             )?);
         }
     }
