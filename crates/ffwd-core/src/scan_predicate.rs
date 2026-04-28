@@ -132,7 +132,7 @@ impl ScanPredicate {
                     .collect();
                 match remaining.len() {
                     0 => None,
-                    1 => Some(remaining.into_iter().next().expect("len checked")),
+                    1 => remaining.into_iter().next(),
                     _ => Some(ScanPredicate::And(remaining)),
                 }
             }

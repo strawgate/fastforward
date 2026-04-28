@@ -348,6 +348,12 @@ impl FileReader {
             for (path, _) in by_age.into_iter().take(to_remove) {
                 if let Some(tailed) = self.files.remove(&path) {
                     let source_id = tailed.identity.source_id();
+                    // NOTE: evicted_offsets has no size bound. When log rotation
+                    // creates files faster than max_open can accommodate, each
+                    // evicted file's offset state is moved here and never freed
+                    // until explicit cleanup (cleanup_deleted_for_shutdown). With
+                    // high-frequency rotation this can grow unboundedly; see
+                    // issue #2475 sub-item.
                     self.evicted_offsets.insert(
                         path.clone(),
                         EvictedFile {
