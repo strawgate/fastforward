@@ -1,0 +1,29 @@
+[package]
+name = "ffwd-opamp"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+description = "OpAMP client integration for ffwd — enables remote config management and health reporting"
+
+[lib]
+doctest = false
+
+[dependencies]
+ffwd-config = { version = "0.1.0", path = "../ffwd-config" }
+log = "0.4"
+otel-opamp-rs = { version = "0.0.14", features = ["http"] }
+serde = { workspace = true }
+serde_yaml_ng = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["sync", "time", "rt"] }
+tokio-util = { version = "0.7" }
+tracing = { workspace = true }
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }
+
+[lints]
+workspace = true
