@@ -1,0 +1,189 @@
+//! Integration tests for the ffwd-opamp crate.
+//!
+//! These tests verify the OpAMP client's behavior in isolation (without a
+//! real server connection). For end-to-end tests with the Go reference server,
+//! see the e2e test suite.
+
+use std::time::Duration;
+
+use tempfile::TempDir;
+use tokio_util::sync::CancellationToken;
+
+use ffwd_opamp::{AgentIdentity, OpampClient, OpampConfig};
+
+#[tokio::test]
+async fn client_starts_and_shuts_down_cleanly() {
+    let (reload_tx, _reload_rx) = tokio::sync::mpsc::channel(1);
+    let config = OpampConfig {
+        // Point at a non-existent server — the client should still start
+        // and shut down gracefully without panicking.
+        endpoint: "http://127.0.0.1:19999/v1/opamp".to_string(),
+        poll_interval_secs: 1,
+        ..Default::default()
+    };
+    let identity = AgentIdentity::resolve(None, None, "ffwd-test", "0.1.0");
+    let client = OpampClient::new(config, identity, reload_tx);
+
+    let shutdown = CancellationToken::new();
+    let shutdown_clone = shutdown.clone();
+
+    let handle = tokio::spawn(async move {
+        client.run(shutdown_clone, None).await
+    });
+
+    // Let the client run briefly.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Signal shutdown.
+    shutdown.cancel();
+
+    // Client should exit cleanly.
+    let result = tokio::time::timeout(Duration::from_secs(5), handle)
+        .await
+        .expect("client should shut down within 5s")
+        .expect("task should not panic");
+
+    assert!(result.is_ok(), "client should exit without error");
+}
+
+#[tokio::test]
+async fn state_handle_survives_client_run() {
+    let (reload_tx, _reload_rx) = tokio::sync::mpsc::channel(1);
+    let config = OpampConfig {
+        endpoint: "http://127.0.0.1:19999/v1/opamp".to_string(),
+        poll_interval_secs: 1,
+        ..Default::default()
+    };
+    let identity = AgentIdentity::resolve(None, None, "ffwd-test", "0.1.0");
+    let client = OpampClient::new(config, identity, reload_tx);
+    let state_handle = client.state_handle();
+
+    let shutdown = CancellationToken::new();
+    let shutdown_clone = shutdown.clone();
+
+    tokio::spawn(async move {
+        let _ = client.run(shutdown_clone, None).await;
+    });
+
+    // Update effective config via the handle while client is running.
+    state_handle.set_effective_config("pipelines:\n  test:\n    inputs: []\n");
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn identity_persists_across_instances() {
+    let dir = TempDir::new().expect("create temp dir");
+
+    let id1 = AgentIdentity::resolve(Some("auto"), Some(dir.path()), "ffwd", "0.1.0");
+    let id2 = AgentIdentity::resolve(Some("auto"), Some(dir.path()), "ffwd", "0.1.0");
+
+    // Same data dir → same UID.
+    assert_eq!(id1.instance_uid, id2.instance_uid);
+    assert_eq!(id1.uid_hex(), id2.uid_hex());
+
+    // Hex should be 32 chars (16 bytes as hex).
+    assert_eq!(id1.uid_hex().len(), 32);
+}
+
+#[tokio::test]
+async fn explicit_uuid_overrides_auto() {
+    let dir = TempDir::new().expect("create temp dir");
+    let fixed_uid = "550e8400-e29b-41d4-a716-446655440000";
+
+    let id = AgentIdentity::resolve(Some(fixed_uid), Some(dir.path()), "ffwd", "0.1.0");
+    assert_eq!(id.uid_hex(), "550e8400e29b41d4a716446655440000");
+}
+
+#[tokio::test]
+async fn remote_config_path_uses_data_dir() {
+    let dir = TempDir::new().expect("create temp dir");
+    let path = OpampClient::remote_config_path(Some(dir.path()));
+    assert_eq!(path, dir.path().join("opamp_remote_config.yaml"));
+}
+
+#[tokio::test]
+async fn remote_config_path_fallback_to_temp() {
+    let path = OpampClient::remote_config_path(None);
+    // Should be in system temp dir.
+    assert!(
+        path.to_string_lossy().contains("ffwd_opamp_remote_config"),
+        "path should contain ffwd_opamp_remote_config: {path:?}"
+    );
+}
+
+/// Test that config with OpAMP section parses correctly.
+#[test]
+fn config_with_opamp_section_parses() {
+    let yaml = "\
+pipelines:
+  default:
+    inputs:
+      - type: file
+        path: /tmp/test.log
+        format: json
+    outputs:
+      - type: stdout
+        format: json
+opamp:
+  endpoint: http://localhost:4320/v1/opamp
+  api_key: secret123
+  instance_uid: auto
+  service_name: my-ffwd
+  poll_interval_secs: 15
+  accept_remote_config: true";
+
+    let config = ffwd_config::Config::load_str(yaml).expect("should parse");
+    let opamp = config.opamp.expect("opamp section should be present");
+    assert_eq!(opamp.endpoint, "http://localhost:4320/v1/opamp");
+    assert_eq!(opamp.api_key, Some("secret123".to_string()));
+    assert_eq!(opamp.instance_uid, "auto");
+    assert_eq!(opamp.service_name, "my-ffwd");
+    assert_eq!(opamp.poll_interval_secs, 15);
+    assert!(opamp.accept_remote_config);
+}
+
+/// Test that config without OpAMP section still parses (backward compatible).
+#[test]
+fn config_without_opamp_section_parses() {
+    let yaml = "\
+pipelines:
+  default:
+    inputs:
+      - type: file
+        path: /tmp/test.log
+        format: json
+    outputs:
+      - type: stdout
+        format: json";
+
+    let config = ffwd_config::Config::load_str(yaml).expect("should parse");
+    assert!(config.opamp.is_none());
+}
+
+/// Test OpAMP config defaults.
+#[test]
+fn opamp_config_defaults() {
+    let yaml = "\
+pipelines:
+  default:
+    inputs:
+      - type: file
+        path: /tmp/test.log
+        format: json
+    outputs:
+      - type: stdout
+        format: json
+opamp:
+  endpoint: http://localhost:4320/v1/opamp";
+
+    let config = ffwd_config::Config::load_str(yaml).expect("should parse");
+    let opamp = config.opamp.expect("opamp section should be present");
+    assert_eq!(opamp.endpoint, "http://localhost:4320/v1/opamp");
+    assert_eq!(opamp.api_key, None);
+    assert_eq!(opamp.instance_uid, "auto");
+    assert_eq!(opamp.service_name, "ffwd");
+    assert_eq!(opamp.poll_interval_secs, 30);
+    assert!(opamp.accept_remote_config);
+}
