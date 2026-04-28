@@ -273,6 +273,19 @@ pub async fn run_pipelines(
     opentelemetry::global::set_tracer_provider(tracer_provider.clone());
 
     // ══════════ RELOAD LOOP ══════════
+    let reload_total = meter
+        .u64_counter("ffwd.config.reload.total")
+        .with_description("Total number of config reload attempts")
+        .build();
+    let reload_success = meter
+        .u64_counter("ffwd.config.reload.success")
+        .with_description("Number of successful config reloads")
+        .build();
+    let reload_error = meter
+        .u64_counter("ffwd.config.reload.error")
+        .with_description("Number of failed config reload attempts")
+        .build();
+
     let mut current_config = config;
     let mut first_run = true;
     let mut pipeline_metrics: Vec<Arc<ffwd_diagnostics::diagnostics::PipelineMetrics>> = Vec::new();
@@ -477,10 +490,12 @@ pub async fn run_pipelines(
         }
 
         // ── Re-read and validate config ──
+        reload_total.add(1, &[]);
         tracing::info!(path = %options.config_path, "config reload: reading new config");
         let new_yaml = match std::fs::read_to_string(options.config_path) {
             Ok(y) => y,
             Err(e) => {
+                reload_error.add(1, &[]);
                 tracing::error!(error = %e, "config reload: failed to read config file");
                 // Wait for the next reload signal.
                 tokio::select! {
@@ -492,6 +507,7 @@ pub async fn run_pipelines(
         let new_config = match ffwd_config::Config::load_str_with_base_path(&new_yaml, base_path) {
             Ok(c) => c,
             Err(e) => {
+                reload_error.add(1, &[]);
                 tracing::error!(error = %e, "config reload: invalid config");
                 // Wait for the next reload signal.
                 tokio::select! {
@@ -514,6 +530,7 @@ pub async fn run_pipelines(
                 "config reload: diff computed"
             );
         }
+        reload_success.add(1, &[]);
 
         current_config = new_config;
         // Loop back to rebuild pipelines with new config.
