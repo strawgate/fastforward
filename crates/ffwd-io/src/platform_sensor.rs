@@ -497,7 +497,9 @@ impl PlatformSensorInput {
                 // Zero out the map to prevent overcounting on the next poll
                 use aya::maps::PerCpuValues;
                 let zero_vals: Vec<u64> = cpus.iter().map(|_| 0).collect();
-                let _ = drops_array.set(0, PerCpuValues::try_from(zero_vals).unwrap(), 0);
+                if let Ok(zero_per_cpu_values) = PerCpuValues::try_from(zero_vals) {
+                    let _ = drops_array.set(0, zero_per_cpu_values, 0);
+                }
             }
         }
 
