@@ -83,8 +83,9 @@ fn first_escape_pos(bytes: &[u8]) -> usize {
     // SWAR: process 8 bytes per iteration on 64-bit platforms.
     // Detects bytes < 0x20 OR == 0x22 (") OR == 0x5C (\) in parallel.
     while i + 8 <= len {
-        // SAFETY: i + 8 <= len guarantees the 8 bytes are in bounds.
-        let chunk = u64::from_le_bytes(unsafe { *bytes.as_ptr().add(i).cast::<[u8; 8]>() });
+        let mut buf = [0u8; 8];
+        buf.copy_from_slice(&bytes[i..i + 8]);
+        let chunk = u64::from_le_bytes(buf);
 
         // Detect bytes < 0x20 (control characters):
         // A byte < 0x20 means the high 3 bits of the byte are 000.
