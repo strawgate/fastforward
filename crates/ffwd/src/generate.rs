@@ -90,6 +90,7 @@ pub(crate) fn generate_json_log_file(num_lines: usize, output: &str) -> io::Resu
         "/health",
         "/api/v1/auth",
     ];
+    let statuses = [200, 201, 400, 404, 500, 503];
 
     for i in 0..num_lines {
         let seq = i as u64;
@@ -98,7 +99,6 @@ pub(crate) fn generate_json_log_file(num_lines: usize, output: &str) -> io::Resu
         let id = 10000 + (i * 7) % 90000;
         let dur = 1 + (i * 13) % 500;
         let rid = format!("{:016x}", seq.wrapping_mul(0x517cc1b727220a95));
-        let statuses = [200, 201, 400, 404, 500, 503];
         let status = statuses.get(i % statuses.len()).copied().unwrap_or(200);
         let ts = timestamp_parts_for_generated_log(seq);
 
