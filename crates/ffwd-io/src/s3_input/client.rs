@@ -777,9 +777,8 @@ fn parse_list_objects_response(data: &[u8]) -> io::Result<(Vec<S3Object>, Option
             }
             Ok(Event::End(e)) => match e.local_name().as_ref() {
                 b"Key" if capture == Some("key") => {
-                    current_key.clone_from(&current_text);
+                    current_key = std::mem::take(&mut current_text);
                     capture = None;
-                    current_text.clear();
                 }
                 b"Size" if capture == Some("size") => {
                     current_size = current_text.parse::<u64>().map_err(|e| {
@@ -791,13 +790,12 @@ fn parse_list_objects_response(data: &[u8]) -> io::Result<(Vec<S3Object>, Option
                     current_text.clear();
                 }
                 b"NextContinuationToken" if capture == Some("next_token") => {
-                    next_token = Some(current_text.clone());
+                    next_token = Some(std::mem::take(&mut current_text));
                     capture = None;
-                    current_text.clear();
                 }
                 b"Contents" if in_contents => {
                     objects.push(S3Object {
-                        key: current_key.clone(),
+                        key: std::mem::take(&mut current_key),
                         size: current_size,
                     });
                     in_contents = false;
