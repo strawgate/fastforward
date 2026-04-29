@@ -16,7 +16,7 @@ use clap::{CommandFactory, error::ErrorKind};
 
 mod cli;
 mod commands;
-#[allow(dead_code)]
+#[cfg(all(unix, feature = "opamp"))]
 mod config_flow;
 mod config_templates;
 mod generate;

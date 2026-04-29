@@ -18,7 +18,8 @@ use crate::{Config, ConfigError};
 #[derive(Debug, Clone)]
 pub struct ValidatedConfig {
     config: Config,
-    effective_yaml: String,
+    /// The original YAML source text that was parsed and validated.
+    source_yaml: String,
 }
 
 impl ValidatedConfig {
@@ -30,7 +31,7 @@ impl ValidatedConfig {
         let config = Config::load_str_with_base_path(yaml, base_path)?;
         Ok(Self {
             config,
-            effective_yaml: yaml.to_owned(),
+            source_yaml: yaml.to_owned(),
         })
     }
 
@@ -40,7 +41,7 @@ impl ValidatedConfig {
         let config = Config::load_str_with_base_path(&yaml, path.parent())?;
         Ok(Self {
             config,
-            effective_yaml: yaml,
+            source_yaml: yaml,
         })
     }
 
@@ -49,9 +50,11 @@ impl ValidatedConfig {
         &self.config
     }
 
-    /// The raw YAML that was validated.
+    /// The raw YAML source text that was validated.
+    ///
+    /// Note: this is the input as-provided, not a normalized/canonical form.
     pub fn effective_yaml(&self) -> &str {
-        &self.effective_yaml
+        &self.source_yaml
     }
 
     /// Consume this wrapper and return the inner config.
@@ -59,9 +62,9 @@ impl ValidatedConfig {
         self.config
     }
 
-    /// Consume this wrapper and return both the config and effective YAML.
+    /// Consume this wrapper and return both the config and source YAML.
     pub fn into_parts(self) -> (Config, String) {
-        (self.config, self.effective_yaml)
+        (self.config, self.source_yaml)
     }
 }
 

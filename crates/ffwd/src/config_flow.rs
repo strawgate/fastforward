@@ -160,6 +160,7 @@ impl ConfigFlow {
     }
 }
 
+#[cfg(test)]
 /// Pure transition function for property testing (no internal state).
 ///
 /// This is the simplified model used by proptests to verify state machine
@@ -177,6 +178,7 @@ pub(crate) fn transition(state: State, event: &SimpleEvent) -> State {
     }
 }
 
+#[cfg(test)]
 /// Simplified events for property testing (no payloads).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SimpleEvent {
