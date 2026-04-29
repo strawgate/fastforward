@@ -76,9 +76,14 @@ pub(crate) async fn cmd_supervised(config_path: &str) -> Result<(), CliError> {
     // Spawn OpAMP client task.
     let opamp_shutdown = shutdown.clone();
     let opamp_data_dir = data_dir.clone();
+    let opamp_config_target = config_path.clone();
     let opamp_handle = tokio::spawn(async move {
         if let Err(e) = opamp_client
-            .run(opamp_shutdown, opamp_data_dir.as_deref())
+            .run(
+                opamp_shutdown,
+                opamp_data_dir.as_deref(),
+                Some(opamp_config_target.as_path()),
+            )
             .await
         {
             tracing::error!(error = %e, "supervisor: opamp client exited with error");
@@ -405,5 +410,81 @@ pipelines:
         let status = std::process::ExitStatus::from_raw(libc::SIGTERM);
         assert!(was_terminated_by(status, libc::SIGTERM));
         assert!(!was_terminated_by(status, libc::SIGINT));
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    /// Backoff always stays within [INITIAL, MAX] bounds.
+    proptest! {
+        #[test]
+        fn backoff_stays_bounded(crash_count in 0u32..100) {
+            let mut backoff = RESTART_BACKOFF_INITIAL;
+            for _ in 0..crash_count {
+                backoff = (backoff * RESTART_BACKOFF_FACTOR).min(RESTART_BACKOFF_MAX);
+            }
+            prop_assert!(backoff >= RESTART_BACKOFF_INITIAL);
+            prop_assert!(backoff <= RESTART_BACKOFF_MAX);
+        }
+    }
+
+    /// Backoff is monotonically non-decreasing (without resets).
+    proptest! {
+        #[test]
+        fn backoff_is_monotonic(crash_count in 1u32..50) {
+            let mut backoff = RESTART_BACKOFF_INITIAL;
+            let mut prev = backoff;
+            for _ in 0..crash_count {
+                backoff = (backoff * RESTART_BACKOFF_FACTOR).min(RESTART_BACKOFF_MAX);
+                prop_assert!(backoff >= prev, "backoff must not decrease: {} < {}", backoff.as_millis(), prev.as_millis());
+                prev = backoff;
+            }
+        }
+    }
+
+    /// After enough crashes, backoff saturates at MAX.
+    proptest! {
+        #[test]
+        fn backoff_saturates_at_max(crash_count in 10u32..100) {
+            let mut backoff = RESTART_BACKOFF_INITIAL;
+            for _ in 0..crash_count {
+                backoff = (backoff * RESTART_BACKOFF_FACTOR).min(RESTART_BACKOFF_MAX);
+            }
+            prop_assert_eq!(backoff, RESTART_BACKOFF_MAX);
+        }
+    }
+
+    /// Atomic write is crash-safe: target always contains valid content.
+    proptest! {
+        #[test]
+        fn atomic_write_leaves_valid_content(content in "[a-zA-Z0-9\n ]{1,1000}") {
+            let dir = tempfile::tempdir().expect("create temp dir");
+            let target = dir.path().join("test.yaml");
+
+            // Pre-populate with known content.
+            std::fs::write(&target, "original").expect("write original");
+
+            atomic_write_config(&target, &content).expect("atomic write");
+
+            let read_back = std::fs::read_to_string(&target).expect("read back");
+            prop_assert_eq!(read_back, content);
+        }
+    }
+
+    /// Atomic write doesn't leave temp file behind on success.
+    proptest! {
+        #[test]
+        fn atomic_write_no_temp_residue(content in "[a-z]{1,100}") {
+            let dir = tempfile::tempdir().expect("create temp dir");
+            let target = dir.path().join("cfg.yaml");
+
+            atomic_write_config(&target, &content).expect("atomic write");
+
+            let tmp = target.with_extension("yaml.tmp");
+            prop_assert!(!tmp.exists(), "temp file should not remain");
+        }
     }
 }

@@ -115,11 +115,15 @@ impl OpampClient {
 
     /// Run the OpAMP client loop until shutdown is signalled.
     ///
-    /// This is the main entry point — spawn this as a background task.
+    /// - `shutdown`: Cancellation token to stop the client
+    /// - `data_dir`: Data directory for state persistence
+    /// - `config_path`: Path where accepted remote config is written (atomic rename).
+    ///   The bootstrap reload loop re-reads this path on reload signals.
     pub async fn run(
         self,
         shutdown: tokio_util::sync::CancellationToken,
         data_dir: Option<&Path>,
+        config_path: Option<&Path>,
     ) -> Result<(), OpampError> {
         tracing::info!(
             endpoint = %self.config.endpoint,
@@ -132,7 +136,9 @@ impl OpampClient {
         let state = Arc::clone(&self.state);
         let accept_remote_config = self.config.accept_remote_config;
         let reload_tx = self.reload_tx.clone();
-        let remote_config_path = Self::remote_config_path(data_dir);
+        let remote_config_path = config_path
+            .map(PathBuf::from)
+            .unwrap_or_else(|| Self::remote_config_path(data_dir));
 
         // Create the OpAMP API callbacks handler.
         let mut handler = OpampHandler {
@@ -200,8 +206,12 @@ impl ApiCallbacks for &mut OpampHandler {
     }
 
     fn get_features(&mut self) -> (u64, u64) {
-        // Report capabilities: AcceptsRemoteConfig | ReportsEffectiveConfig | ReportsHealth
-        let capabilities: u64 = 0x01 | 0x02 | 0x04;
+        // Report capabilities based on configuration.
+        // Bit 0x01 = ReportsStatus, 0x02 = AcceptsRemoteConfig, 0x04 = ReportsEffectiveConfig
+        let mut capabilities: u64 = 0x01 | 0x04; // Always report status + effective config
+        if self.accept_remote_config {
+            capabilities |= 0x02;
+        }
         let flags: u64 = 0;
         (capabilities, flags)
     }
@@ -264,7 +274,16 @@ impl ApiCallbacks for &mut OpampHandler {
             return Ok(None);
         };
 
-        let yaml = String::from_utf8_lossy(&body.body).to_string();
+        let yaml = match String::from_utf8(body.body.clone()) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "opamp: remote config is not valid UTF-8"
+                );
+                return Ok(None);
+            }
+        };
         tracing::info!(
             bytes = body.body.len(),
             "opamp: received remote configuration"
@@ -273,17 +292,29 @@ impl ApiCallbacks for &mut OpampHandler {
         // Validate before writing.
         match ffwd_config::Config::load_str(&yaml) {
             Ok(_) => {
-                // Write to disk so the bootstrap reload loop can pick it up.
-                if let Err(e) = std::fs::write(&self.remote_config_path, &yaml) {
+                // Atomic write: temp file → rename to target path so the bootstrap
+                // reload loop reads the new config when re-reading from disk.
+                let target = &self.remote_config_path;
+                let tmp_path = target.with_extension("yaml.tmp");
+                if let Err(e) = std::fs::write(&tmp_path, &yaml) {
                     tracing::error!(
                         error = %e,
-                        path = %self.remote_config_path.display(),
-                        "opamp: failed to write remote config"
+                        path = %tmp_path.display(),
+                        "opamp: failed to write temp config"
                     );
                     return Ok(None);
                 }
+                if let Err(e) = std::fs::rename(&tmp_path, target) {
+                    tracing::error!(
+                        error = %e,
+                        path = %target.display(),
+                        "opamp: failed to rename config into place"
+                    );
+                    let _ = std::fs::remove_file(&tmp_path);
+                    return Ok(None);
+                }
                 tracing::info!(
-                    path = %self.remote_config_path.display(),
+                    path = %target.display(),
                     "opamp: wrote remote config, triggering reload"
                 );
                 let _ = self.reload_tx.try_send(());

@@ -4,6 +4,7 @@
 //!
 //! Environment variables in values are expanded using `${VAR}` syntax.
 
+/// Configuration diffing for live reload — computes added/removed/changed pipelines.
 pub mod diff;
 /// Shared metadata for config starter templates and generated reference tables.
 ///

@@ -254,8 +254,16 @@ pub async fn run_pipelines(
         let shutdown_for_opamp = shutdown.clone();
         let data_dir = configured_data_dir.clone();
         let opamp_state = client.state_handle();
+        let opamp_config_path = PathBuf::from(options.config_path);
         tokio::spawn(async move {
-            if let Err(e) = client.run(shutdown_for_opamp, data_dir.as_deref()).await {
+            if let Err(e) = client
+                .run(
+                    shutdown_for_opamp,
+                    data_dir.as_deref(),
+                    Some(opamp_config_path.as_path()),
+                )
+                .await
+            {
                 tracing::error!(error = %e, "opamp: client exited with error");
             }
         });
@@ -472,6 +480,8 @@ pub async fn run_pipelines(
                 result = main_pipe.run_async(&pipeline_shutdown) => {
                     // Pipeline exited (natural completion or pipeline_shutdown was
                     // cancelled from process-level shutdown).
+                    // Cancel so sibling tasks also stop.
+                    pipeline_shutdown.cancel();
                     reload_requested = false;
                     if let Err(ref e) = result {
                         tracing::error!(error = %e, "main pipeline error");

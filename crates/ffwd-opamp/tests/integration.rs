@@ -27,7 +27,7 @@ async fn client_starts_and_shuts_down_cleanly() {
     let shutdown = CancellationToken::new();
     let shutdown_clone = shutdown.clone();
 
-    let handle = tokio::spawn(async move { client.run(shutdown_clone, None).await });
+    let handle = tokio::spawn(async move { client.run(shutdown_clone, None, None).await });
 
     // Let the client run briefly.
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -60,7 +60,7 @@ async fn state_handle_survives_client_run() {
     let shutdown_clone = shutdown.clone();
 
     tokio::spawn(async move {
-        let _ = client.run(shutdown_clone, None).await;
+        let _ = client.run(shutdown_clone, None, None).await;
     });
 
     // Update effective config via the handle while client is running.
@@ -184,4 +184,76 @@ opamp:
     assert_eq!(opamp.service_name, "ffwd");
     assert_eq!(opamp.poll_interval_secs, 30);
     assert!(opamp.accept_remote_config);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Property-based tests
+// ═══════════════════════════════════════════════════════════════
+
+mod proptests {
+    use proptest::prelude::*;
+
+    /// Identity is deterministic given the same data_dir.
+    proptest! {
+        #[test]
+        fn identity_deterministic_with_data_dir(
+            service_name in "[a-z]{1,20}",
+            version in "[0-9]+\\.[0-9]+\\.[0-9]+",
+        ) {
+            let dir = tempfile::tempdir().expect("create temp dir");
+            let id1 = ffwd_opamp::AgentIdentity::resolve(
+                Some("auto"), Some(dir.path()), &service_name, &version,
+            );
+            let id2 = ffwd_opamp::AgentIdentity::resolve(
+                Some("auto"), Some(dir.path()), &service_name, &version,
+            );
+            prop_assert_eq!(&id1.instance_uid, &id2.instance_uid);
+        }
+    }
+
+    /// Explicit UIDs are preserved exactly (after dash removal).
+    proptest! {
+        #[test]
+        fn explicit_uid_preserved(
+            hex_chars in "[0-9a-f]{32}",
+        ) {
+            // Format as UUID-style with dashes.
+            let uid = format!(
+                "{}-{}-{}-{}-{}",
+                &hex_chars[0..8], &hex_chars[8..12], &hex_chars[12..16],
+                &hex_chars[16..20], &hex_chars[20..32]
+            );
+            let id = ffwd_opamp::AgentIdentity::resolve(Some(&uid), None, "test", "1.0.0");
+            prop_assert_eq!(id.uid_hex(), hex_chars);
+        }
+    }
+
+    /// UID hex output is always 32 characters (16 bytes).
+    proptest! {
+        #[test]
+        fn uid_hex_always_32_chars(
+            service in "[a-z]{1,10}",
+        ) {
+            let dir = tempfile::tempdir().expect("create temp dir");
+            let id = ffwd_opamp::AgentIdentity::resolve(
+                Some("auto"), Some(dir.path()), &service, "0.1.0",
+            );
+            prop_assert_eq!(id.uid_hex().len(), 32);
+        }
+    }
+
+    /// Remote config path is always under data_dir when provided.
+    proptest! {
+        #[test]
+        fn remote_config_path_under_data_dir(
+            suffix in "[a-z]{1,10}",
+        ) {
+            let dir = tempfile::tempdir().expect("create temp dir");
+            let sub = dir.path().join(&suffix);
+            std::fs::create_dir_all(&sub).expect("create sub dir");
+            let path = ffwd_opamp::OpampClient::remote_config_path(Some(&sub));
+            prop_assert!(path.starts_with(&sub));
+            prop_assert!(path.to_string_lossy().contains("opamp_remote_config"));
+        }
+    }
 }

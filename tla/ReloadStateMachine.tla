@@ -26,7 +26,7 @@ VARIABLES
 vars == <<state, config, pending_config, reload_count, reload_pending, pipelines_running>>
 
 TypeOK ==
-    /\ state \in {"running", "draining", "building", "waiting"}
+    /\ state \in {"running", "draining", "building"}
     /\ config \in 0..MaxReloads
     /\ pending_config \in (0..MaxReloads) \cup {"invalid", "none"}
     /\ reload_count \in 0..MaxReloads
@@ -68,15 +68,17 @@ DrainComplete ==
 ReadConfig ==
     /\ state = "building"
     /\ pending_config = "none"
-    \* Non-deterministically choose valid or invalid new config
-    /\ \E v \in (config+1)..(config+2) \cup {"invalid"} :
-        pending_config' = v
+    \* Non-deterministically choose valid or invalid new config.
+    \* Valid config versions are strictly greater than current (monotonic).
+    /\ \E v \in {config + 1, "invalid"} :
+        /\ (v # "invalid") => (v \in 1..MaxReloads)
+        /\ pending_config' = v
     /\ UNCHANGED <<state, config, reload_count, reload_pending, pipelines_running>>
 
 (* --- Config is valid: apply it and rebuild pipelines --- *)
 ApplyValidConfig ==
     /\ state = "building"
-    /\ pending_config \in (0..MaxReloads) \ {"invalid", "none"}
+    /\ pending_config \in 1..MaxReloads
     /\ config' = pending_config
     /\ pending_config' = "none"
     /\ pipelines_running' = 1  \* Simplified: at least 1 pipeline rebuilt
@@ -84,29 +86,14 @@ ApplyValidConfig ==
     /\ reload_count' = reload_count + 1
     /\ UNCHANGED <<reload_pending>>
 
-(* --- Config is invalid: revert to old config and rebuild --- *)
+(* --- Config is invalid: keep old config version, rebuild with it --- *)
 RejectInvalidConfig ==
     /\ state = "building"
     /\ pending_config = "invalid"
     /\ pending_config' = "none"
     /\ pipelines_running' = 1  \* Rebuild with previous config
-    /\ state' = "waiting"      \* Wait for next reload signal
+    /\ state' = "running"      \* Return to running with old config
     /\ UNCHANGED <<config, reload_count, reload_pending>>
-
-(* --- Waiting state: resume on next reload signal --- *)
-ResumeFromWait ==
-    /\ state = "waiting"
-    /\ reload_pending
-    /\ state' = "running"
-    /\ reload_pending' = FALSE
-    /\ UNCHANGED <<config, pending_config, reload_count, pipelines_running>>
-
-(* When in waiting state but get a valid trigger, go back to running *)
-WaitToRunning ==
-    /\ state = "waiting"
-    /\ ~reload_pending
-    /\ state' = "running"
-    /\ UNCHANGED <<config, pending_config, reload_count, reload_pending, pipelines_running>>
 
 Next ==
     \/ TriggerReload
@@ -115,8 +102,6 @@ Next ==
     \/ ReadConfig
     \/ ApplyValidConfig
     \/ RejectInvalidConfig
-    \/ ResumeFromWait
-    \/ WaitToRunning
 
 Spec == Init /\ [][Next]_vars /\ WF_vars(Next)
 

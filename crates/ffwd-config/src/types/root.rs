@@ -58,6 +58,9 @@ pub struct Config {
     pub pipelines: HashMap<String, PipelineConfig>,
     pub server: ServerConfig,
     pub storage: StorageConfig,
+    /// Optional OpAMP configuration for central fleet management.
+    /// When set, the runtime connects to an OpAMP server for remote config
+    /// and health reporting.
     pub opamp: Option<OpampConfig>,
 }
 

@@ -556,5 +556,47 @@ outputs:
             prop_assert!(!diff.storage_changed);
             prop_assert!(!diff.opamp_changed);
         }
+
+        /// Swapping old and new mirrors added/removed.
+        #[test]
+        fn swap_mirrors_added_removed(
+            old_names in proptest::collection::vec(pipeline_name(), 1..5),
+            new_names in proptest::collection::vec(pipeline_name(), 1..5),
+        ) {
+            let old = config_with_pipelines(&old_names, "old");
+            let new = config_with_pipelines(&new_names, "new");
+            let forward = ConfigDiff::between(&old, &new);
+            let backward = ConfigDiff::between(&new, &old);
+
+            let mut forward_added = forward.added.clone();
+            forward_added.sort();
+            let mut backward_removed = backward.removed.clone();
+            backward_removed.sort();
+            prop_assert_eq!(forward_added, backward_removed,
+                "forward.added should equal backward.removed");
+
+            let mut forward_removed = forward.removed.clone();
+            forward_removed.sort();
+            let mut backward_added = backward.added.clone();
+            backward_added.sort();
+            prop_assert_eq!(forward_removed, backward_added,
+                "forward.removed should equal backward.added");
+        }
+
+        /// Diff with all-new pipelines has zero removed/changed/unchanged.
+        #[test]
+        fn all_new_means_no_overlap(
+            old_names in proptest::collection::vec("[a-e][0-9]{1,3}".prop_filter("non-empty", |s| !s.is_empty()), 1..4),
+            new_names in proptest::collection::vec("[f-j][0-9]{1,3}".prop_filter("non-empty", |s| !s.is_empty()), 1..4),
+        ) {
+            // Guarantee disjoint by using different character ranges.
+            let old = config_with_pipelines(&old_names, "old");
+            let new = config_with_pipelines(&new_names, "new");
+            let diff = ConfigDiff::between(&old, &new);
+
+            // All old pipelines should be removed, all new should be added.
+            prop_assert!(diff.changed.is_empty());
+            prop_assert!(diff.unchanged.is_empty());
+        }
     }
 }

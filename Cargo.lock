@@ -1973,6 +1973,7 @@ dependencies = [
  "libc",
  "opentelemetry",
  "opentelemetry_sdk",
+ "proptest",
  "serde_json",
  "serde_yaml_ng",
  "stats_alloc",
@@ -2189,6 +2190,7 @@ version = "0.1.0"
 dependencies = [
  "ffwd-config",
  "otel-opamp-rs",
+ "proptest",
  "serde",
  "serde_yaml_ng",
  "tempfile",
