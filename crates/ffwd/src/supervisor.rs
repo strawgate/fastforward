@@ -32,18 +32,14 @@ pub(crate) async fn cmd_supervised(config_path: &str) -> Result<(), CliError> {
     // Parse config to extract opamp section.
     let config_yaml = std::fs::read_to_string(&config_path)
         .map_err(|e| CliError::Config(format!("cannot read {}: {e}", config_path.display())))?;
-    let config = ffwd_config::Config::load_str(&config_yaml)
-        .map_err(|e| CliError::Config(e.to_string()))?;
+    let config =
+        ffwd_config::Config::load_str(&config_yaml).map_err(|e| CliError::Config(e.to_string()))?;
 
-    let opamp_config = config
-        .opamp
-        .ok_or_else(|| CliError::Config("supervised mode requires an `opamp:` section in config".to_string()))?;
+    let opamp_config = config.opamp.ok_or_else(|| {
+        CliError::Config("supervised mode requires an `opamp:` section in config".to_string())
+    })?;
 
-    let data_dir = config
-        .storage
-        .data_dir
-        .as_deref()
-        .map(PathBuf::from);
+    let data_dir = config.storage.data_dir.as_deref().map(PathBuf::from);
 
     tracing::info!(
         config = %config_path.display(),
@@ -71,11 +67,7 @@ pub(crate) async fn cmd_supervised(config_path: &str) -> Result<(), CliError> {
     );
 
     // Create OpAMP client.
-    let opamp_client = ffwd_opamp::OpampClient::new(
-        opamp_config.clone(),
-        identity,
-        reload_tx,
-    );
+    let opamp_client = ffwd_opamp::OpampClient::new(opamp_config.clone(), identity, reload_tx);
     let state_handle = opamp_client.state_handle();
 
     // Report initial effective config.
@@ -85,7 +77,10 @@ pub(crate) async fn cmd_supervised(config_path: &str) -> Result<(), CliError> {
     let opamp_shutdown = shutdown.clone();
     let opamp_data_dir = data_dir.clone();
     let opamp_handle = tokio::spawn(async move {
-        if let Err(e) = opamp_client.run(opamp_shutdown, opamp_data_dir.as_deref()).await {
+        if let Err(e) = opamp_client
+            .run(opamp_shutdown, opamp_data_dir.as_deref())
+            .await
+        {
             tracing::error!(error = %e, "supervisor: opamp client exited with error");
         }
     });
@@ -376,7 +371,10 @@ pipelines:
       - type: "null"
 "#;
         let result = ffwd_config::Config::load_str(yaml);
-        assert!(result.is_ok(), "minimal valid config should be accepted: {result:?}");
+        assert!(
+            result.is_ok(),
+            "minimal valid config should be accepted: {result:?}"
+        );
     }
 
     #[test]

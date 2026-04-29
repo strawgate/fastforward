@@ -250,8 +250,7 @@ pub async fn run_pipelines(
             &opamp_cfg.service_name,
             env!("CARGO_PKG_VERSION"),
         );
-        let client =
-            ffwd_opamp::OpampClient::new(opamp_cfg.clone(), identity, reload_tx.clone());
+        let client = ffwd_opamp::OpampClient::new(opamp_cfg.clone(), identity, reload_tx.clone());
         let shutdown_for_opamp = shutdown.clone();
         let data_dir = configured_data_dir.clone();
         let opamp_state = client.state_handle();

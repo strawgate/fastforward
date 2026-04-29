@@ -41,7 +41,10 @@ opamp:
         .join("ff");
 
     if !exe.exists() {
-        eprintln!("skipping supervisor test: ff binary not found at {}", exe.display());
+        eprintln!(
+            "skipping supervisor test: ff binary not found at {}",
+            exe.display()
+        );
         return;
     }
 
@@ -108,5 +111,8 @@ pipelines:
       - type: "null"
 "#;
     let result = ffwd_config::Config::load_str(yaml);
-    assert!(result.is_ok(), "valid config should be accepted: {result:?}");
+    assert!(
+        result.is_ok(),
+        "valid config should be accepted: {result:?}"
+    );
 }

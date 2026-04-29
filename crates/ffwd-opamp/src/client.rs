@@ -10,9 +10,9 @@ use std::time::Duration;
 use otel_opamp_rs::api::{Api, ApiCallbacks, ApiClientError, ConnectionSettings};
 use otel_opamp_rs::opamp::spec::{AgentConfigFile, AgentConfigMap, AgentToServer, ServerToAgent};
 
-use ffwd_config::OpampConfig;
 use crate::error::OpampError;
 use crate::identity::AgentIdentity;
+use ffwd_config::OpampConfig;
 
 /// Shared state between the OpAMP callbacks and the main client loop.
 struct SharedState {
