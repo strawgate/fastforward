@@ -316,7 +316,7 @@ pub async fn run_pipelines(
     // first loop iteration, but the binding must exist before the loop.
     let _ = &pipeline_metrics;
 
-    loop {
+    'reload: loop {
         // ── Build pipelines ──
         let mut pipelines = Vec::new();
         for (name, pipe_cfg) in &current_config.pipelines {
@@ -339,8 +339,8 @@ pub async fn run_pipelines(
                     );
                     // Wait for the next reload signal to try again.
                     tokio::select! {
-                        _ = shutdown.cancelled() => break,
-                        _ = reload_rx.recv() => continue,
+                        _ = shutdown.cancelled() => break 'reload,
+                        _ = reload_rx.recv() => continue 'reload,
                     }
                 }
             }

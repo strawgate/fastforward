@@ -97,6 +97,7 @@ pub(crate) async fn cmd_supervised(config_path: &str) -> Result<(), CliError> {
                 "failed to get child PID",
             ))
         })?;
+        let spawn_time = tokio::time::Instant::now();
         tracing::info!(pid = child_pid, "supervisor: child started");
 
         // Inner loop: monitor this child until it exits or we need to break.
@@ -116,8 +117,25 @@ pub(crate) async fn cmd_supervised(config_path: &str) -> Result<(), CliError> {
                     tracing::info!("supervisor: received SIGINT, forwarding to child");
                     ChildExit::Signal(libc::SIGINT)
                 }
-                _ = reload_rx.recv() => {
-                    ChildExit::Reload
+                result = reload_rx.recv() => {
+                    match result {
+                        Some(()) => ChildExit::Reload,
+                        None => {
+                            // Channel closed (all senders dropped, e.g. OpAMP task exited).
+                            // Wait for child or shutdown — no more reloads possible.
+                            tracing::warn!("supervisor: reload channel closed, waiting for child");
+                            tokio::select! {
+                                status = child.wait() => {
+                                    match status {
+                                        Ok(s) => ChildExit::Exited(s),
+                                        Err(e) => ChildExit::WaitError(e),
+                                    }
+                                }
+                                _ = sigterm.recv() => ChildExit::Signal(libc::SIGTERM),
+                                _ = sigint.recv() => ChildExit::Signal(libc::SIGINT),
+                            }
+                        }
+                    }
                 }
             };
 
@@ -144,6 +162,10 @@ pub(crate) async fn cmd_supervised(config_path: &str) -> Result<(), CliError> {
                         backoff_secs = backoff.as_secs(),
                         "supervisor: child exited unexpectedly, restarting after backoff"
                     );
+                    // Reset backoff if child ran for a substantial time (stable run).
+                    if spawn_time.elapsed() > RESTART_BACKOFF_MAX {
+                        backoff = RESTART_BACKOFF_INITIAL;
+                    }
                     tokio::select! {
                         () = tokio::time::sleep(backoff) => {}
                         _ = sigterm.recv() => {
