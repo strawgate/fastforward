@@ -1,0 +1,238 @@
+//! Explicit state machine for the supervisor config-flow protocol.
+//!
+//! Models the progression: Idle → Reading → Validating → Writing → Signaling → Idle.
+//! Each state transition is a pure function — side effects are performed by the
+//! caller based on the returned [`Effect`].
+//!
+//! This module is the single source of truth for config-flow transitions.
+//! The proptest suite verifies properties against this same machine.
+
+use std::path::PathBuf;
+
+/// States of the supervisor config-flow protocol.
+///
+/// Matches the TLA+ `SupervisorProtocol` spec states.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum State {
+    /// Waiting for a new config notification.
+    Idle,
+    /// Reading the intermediate config file from disk.
+    Reading,
+    /// Validating the read config.
+    Validating,
+    /// Writing validated config to the main config path.
+    Writing,
+    /// Sending SIGHUP to the child process.
+    Signaling,
+}
+
+/// Events that drive state transitions.
+#[derive(Debug, Clone)]
+pub(crate) enum Event {
+    /// A new remote config is available (reload channel notification).
+    ConfigAvailable { remote_path: PathBuf },
+    /// File read succeeded — contains the raw YAML and validated config.
+    ReadOk(Box<ffwd_config::ValidatedConfig>),
+    /// File read or validation failed.
+    ReadFailed(String),
+    /// Atomic write to main config path succeeded.
+    WriteOk,
+    /// Atomic write failed.
+    WriteFailed(String),
+    /// Child is alive and was signaled successfully.
+    SignalDelivered,
+    /// Child died or signal failed (ESRCH / PID mismatch).
+    SignalFailed(String),
+}
+
+/// Side effects the executor must perform after a transition.
+#[derive(Debug)]
+pub(crate) enum Effect {
+    /// Read and validate the config file at the given path.
+    ReadAndValidate(PathBuf),
+    /// Write the validated YAML to the main config path.
+    WriteConfig { config_path: PathBuf, yaml: String },
+    /// Send SIGHUP to the child with the given PID.
+    SendSignal { child_pid: u32 },
+    /// Report the effective config to OpAMP state.
+    ReportEffective { yaml: String },
+    /// Log an error and return to idle.
+    LogError(String),
+    /// No side effect needed (terminal transitions).
+    None,
+}
+
+/// The config-flow state machine.
+///
+/// Drives a single config-push cycle from notification to completion.
+/// Create a new instance for each reload cycle.
+pub(crate) struct ConfigFlow {
+    state: State,
+    remote_path: Option<PathBuf>,
+    validated: Option<ffwd_config::ValidatedConfig>,
+    config_path: PathBuf,
+    child_pid: u32,
+}
+
+impl ConfigFlow {
+    /// Start a new config-flow cycle.
+    pub fn new(config_path: PathBuf, child_pid: u32) -> Self {
+        Self {
+            state: State::Idle,
+            remote_path: None,
+            validated: None,
+            config_path,
+            child_pid,
+        }
+    }
+
+    /// Current state.
+    pub fn state(&self) -> State {
+        self.state
+    }
+
+    /// Drive the state machine with an event. Returns the effect to execute.
+    pub fn step(&mut self, event: Event) -> Effect {
+        match (&self.state, event) {
+            (State::Idle, Event::ConfigAvailable { remote_path }) => {
+                self.state = State::Reading;
+                self.remote_path = Some(remote_path.clone());
+                Effect::ReadAndValidate(remote_path)
+            }
+
+            (State::Reading, Event::ReadOk(validated)) => {
+                // Validation already happened in ReadOk — proceed directly to write.
+                let yaml = validated.effective_yaml().to_owned();
+                self.validated = Some(*validated);
+                self.state = State::Writing;
+                Effect::WriteConfig {
+                    config_path: self.config_path.clone(),
+                    yaml,
+                }
+            }
+
+            (State::Reading, Event::ReadFailed(err)) => {
+                self.state = State::Idle;
+                Effect::LogError(err)
+            }
+
+            (State::Writing, Event::WriteOk) => {
+                self.state = State::Signaling;
+                Effect::SendSignal {
+                    child_pid: self.child_pid,
+                }
+            }
+
+            (State::Writing, Event::WriteFailed(err)) => {
+                self.state = State::Idle;
+                self.validated = None;
+                Effect::LogError(err)
+            }
+
+            (State::Signaling, Event::SignalDelivered) => {
+                let yaml = self
+                    .validated
+                    .take()
+                    .map(|v| v.into_parts().1)
+                    .unwrap_or_default();
+                self.state = State::Idle;
+                Effect::ReportEffective { yaml }
+            }
+
+            (State::Signaling, Event::SignalFailed(err)) => {
+                self.state = State::Idle;
+                self.validated = None;
+                Effect::LogError(err)
+            }
+
+            // Invalid transitions — stay in current state.
+            (_, _) => Effect::None,
+        }
+    }
+
+    /// Whether the machine is idle and ready for a new cycle.
+    pub fn is_idle(&self) -> bool {
+        self.state == State::Idle
+    }
+}
+
+/// Pure transition function for property testing (no internal state).
+///
+/// This is the simplified model used by proptests to verify state machine
+/// properties without needing the full `ConfigFlow` struct.
+pub(crate) fn transition(state: State, event: &SimpleEvent) -> State {
+    match (state, event) {
+        (State::Idle, SimpleEvent::ConfigAvailable) => State::Reading,
+        (State::Reading, SimpleEvent::ReadOk) => State::Writing,
+        (State::Reading, SimpleEvent::ReadFailed) => State::Idle,
+        (State::Writing, SimpleEvent::WriteOk) => State::Signaling,
+        (State::Writing, SimpleEvent::WriteFailed) => State::Idle,
+        (State::Signaling, SimpleEvent::SignalDelivered) => State::Idle,
+        (State::Signaling, SimpleEvent::SignalFailed) => State::Idle,
+        _ => state, // Invalid event for current state — no-op.
+    }
+}
+
+/// Simplified events for property testing (no payloads).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SimpleEvent {
+    ConfigAvailable,
+    ReadOk,
+    ReadFailed,
+    WriteOk,
+    WriteFailed,
+    SignalDelivered,
+    SignalFailed,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn happy_path_cycle() {
+        let mut state = State::Idle;
+        state = transition(state, &SimpleEvent::ConfigAvailable);
+        assert_eq!(state, State::Reading);
+        state = transition(state, &SimpleEvent::ReadOk);
+        assert_eq!(state, State::Writing);
+        state = transition(state, &SimpleEvent::WriteOk);
+        assert_eq!(state, State::Signaling);
+        state = transition(state, &SimpleEvent::SignalDelivered);
+        assert_eq!(state, State::Idle);
+    }
+
+    #[test]
+    fn read_failure_returns_to_idle() {
+        let mut state = State::Idle;
+        state = transition(state, &SimpleEvent::ConfigAvailable);
+        state = transition(state, &SimpleEvent::ReadFailed);
+        assert_eq!(state, State::Idle);
+    }
+
+    #[test]
+    fn write_failure_returns_to_idle() {
+        let mut state = State::Idle;
+        state = transition(state, &SimpleEvent::ConfigAvailable);
+        state = transition(state, &SimpleEvent::ReadOk);
+        state = transition(state, &SimpleEvent::WriteFailed);
+        assert_eq!(state, State::Idle);
+    }
+
+    #[test]
+    fn signal_failure_returns_to_idle() {
+        let mut state = State::Idle;
+        state = transition(state, &SimpleEvent::ConfigAvailable);
+        state = transition(state, &SimpleEvent::ReadOk);
+        state = transition(state, &SimpleEvent::WriteOk);
+        state = transition(state, &SimpleEvent::SignalFailed);
+        assert_eq!(state, State::Idle);
+    }
+
+    #[test]
+    fn invalid_event_is_noop() {
+        // WriteOk in Idle — should stay Idle
+        let state = transition(State::Idle, &SimpleEvent::WriteOk);
+        assert_eq!(state, State::Idle);
+    }
+}

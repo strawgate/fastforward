@@ -16,6 +16,8 @@ use clap::{CommandFactory, error::ErrorKind};
 
 mod cli;
 mod commands;
+#[allow(dead_code)]
+mod config_flow;
 mod config_templates;
 mod generate;
 mod send;

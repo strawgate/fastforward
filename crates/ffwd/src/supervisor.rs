@@ -43,7 +43,12 @@ pub(crate) async fn cmd_supervised(config_path: &str) -> Result<(), CliError> {
         CliError::Config("supervised mode requires an `opamp:` section in config".to_string())
     })?;
 
-    let data_dir = validated.config().storage.data_dir.as_deref().map(PathBuf::from);
+    let data_dir = validated
+        .config()
+        .storage
+        .data_dir
+        .as_deref()
+        .map(PathBuf::from);
 
     tracing::info!(
         config = %config_path.display(),
@@ -322,10 +327,10 @@ fn was_terminated_by(status: std::process::ExitStatus, signal: i32) -> bool {
 // Config reload helpers
 // ---------------------------------------------------------------------------
 
-/// Handle a remote config push from OpAMP.
+/// Handle a remote config push from OpAMP using the config-flow state machine.
 ///
-/// Reads the remote config file written by the OpAMP client, validates it,
-/// atomically writes it to the main config path, and sends SIGHUP to the child.
+/// Drives a [`config_flow::ConfigFlow`] through its states, executing effects
+/// at each step. Each step is deterministic and individually testable.
 async fn handle_remote_config(
     config_path: &Path,
     state_handle: &ffwd_opamp::OpampStateHandle,
@@ -333,43 +338,67 @@ async fn handle_remote_config(
     child: &mut tokio::process::Child,
     child_pid: u32,
 ) {
-    // Read and validate the remote config in one step.
-    let validated = match ffwd_config::ValidatedConfig::from_file(remote_path) {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::error!(
-                error = %e,
-                path = %remote_path.display(),
-                "supervisor: remote config failed to load or validate, skipping reload"
-            );
-            return;
+    use crate::config_flow::{ConfigFlow, Effect, Event};
+
+    let mut flow = ConfigFlow::new(config_path.to_owned(), child_pid);
+
+    // Kick off the cycle.
+    let mut effect = flow.step(Event::ConfigAvailable {
+        remote_path: remote_path.to_owned(),
+    });
+
+    loop {
+        match effect {
+            Effect::ReadAndValidate(path) => {
+                let event = match ffwd_config::ValidatedConfig::from_file(&path) {
+                    Ok(v) => Event::ReadOk(Box::new(v)),
+                    Err(e) => Event::ReadFailed(format!(
+                        "failed to load or validate {}: {e}",
+                        path.display()
+                    )),
+                };
+                effect = flow.step(event);
+            }
+            Effect::WriteConfig { config_path, yaml } => {
+                let event = match atomic_write_config(&config_path, &yaml) {
+                    Ok(()) => {
+                        tracing::info!(
+                            path = %config_path.display(),
+                            "supervisor: wrote updated config, sending SIGHUP to child"
+                        );
+                        Event::WriteOk
+                    }
+                    Err(e) => Event::WriteFailed(format!(
+                        "failed to write {}: {e}",
+                        config_path.display()
+                    )),
+                };
+                effect = flow.step(event);
+            }
+            Effect::SendSignal { child_pid: pid } => {
+                let event = if forward_signal(pid, libc::SIGHUP) {
+                    if child_survives_reload_window(child).await {
+                        Event::SignalDelivered
+                    } else {
+                        Event::SignalFailed(
+                            "child exited during reload stability window".to_owned(),
+                        )
+                    }
+                } else {
+                    Event::SignalFailed("failed to send SIGHUP".to_owned())
+                };
+                effect = flow.step(event);
+            }
+            Effect::ReportEffective { yaml } => {
+                state_handle.set_effective_config(&yaml);
+                break;
+            }
+            Effect::LogError(msg) => {
+                tracing::error!("supervisor: {msg}");
+                break;
+            }
+            Effect::None => break,
         }
-    };
-
-    // Atomic write: write to temp file next to target, then rename.
-    if let Err(e) = atomic_write_config(config_path, validated.effective_yaml()) {
-        tracing::error!(
-            error = %e,
-            path = %config_path.display(),
-            "supervisor: failed to write config"
-        );
-        return;
-    }
-
-    tracing::info!(
-        path = %config_path.display(),
-        "supervisor: wrote updated config, sending SIGHUP to child"
-    );
-
-    // Send SIGHUP to trigger child reload.
-    if !forward_signal(child_pid, libc::SIGHUP) {
-        return;
-    }
-
-    if child_survives_reload_window(child).await {
-        state_handle.set_effective_config(validated.effective_yaml());
-    } else {
-        tracing::error!("supervisor: child exited during reload; effective config not updated");
     }
 }
 
@@ -629,46 +658,10 @@ mod proptests {
     }
 
     // ═══════════════════════════════════════════════════════════════
-    // State machine properties — model supervisor transitions
+    // State machine properties — uses production config_flow module
     // ═══════════════════════════════════════════════════════════════
 
-    /// Model the supervisor state machine: idle → detect_config → validate →
-    /// write → signal → idle. Every valid transition sequence ends in idle.
-    #[derive(Debug, Clone, Copy, PartialEq)]
-    enum SupervisorState {
-        Idle,
-        ReadingConfig,
-        Validating,
-        Writing,
-        Signaling,
-    }
-
-    #[derive(Debug, Clone, Copy)]
-    enum Event {
-        ConfigAvailable,
-        ReadSuccess,
-        ValidationOk,
-        ValidationFail,
-        WriteSuccess,
-        WriteFail,
-        ChildAlive,
-        ChildDead,
-    }
-
-    fn transition(state: SupervisorState, event: Event) -> SupervisorState {
-        match (state, event) {
-            (SupervisorState::Idle, Event::ConfigAvailable) => SupervisorState::ReadingConfig,
-            (SupervisorState::ReadingConfig, Event::ReadSuccess) => SupervisorState::Validating,
-            (SupervisorState::ReadingConfig, _) => SupervisorState::Idle, // Read failed
-            (SupervisorState::Validating, Event::ValidationOk) => SupervisorState::Writing,
-            (SupervisorState::Validating, Event::ValidationFail) => SupervisorState::Idle,
-            (SupervisorState::Writing, Event::WriteSuccess) => SupervisorState::Signaling,
-            (SupervisorState::Writing, Event::WriteFail) => SupervisorState::Idle,
-            (SupervisorState::Signaling, Event::ChildAlive) => SupervisorState::Idle,
-            (SupervisorState::Signaling, Event::ChildDead) => SupervisorState::Idle,
-            _ => state, // Invalid transition — stay in place.
-        }
-    }
+    use crate::config_flow::{self, SimpleEvent, State as CfState};
 
     proptest! {
         /// Any sequence of events always leaves the supervisor in a valid state.
@@ -676,30 +669,27 @@ mod proptests {
         fn supervisor_state_machine_always_valid(
             events in proptest::collection::vec(
                 prop_oneof![
-                    Just(Event::ConfigAvailable),
-                    Just(Event::ReadSuccess),
-                    Just(Event::ValidationOk),
-                    Just(Event::ValidationFail),
-                    Just(Event::WriteSuccess),
-                    Just(Event::WriteFail),
-                    Just(Event::ChildAlive),
-                    Just(Event::ChildDead),
+                    Just(SimpleEvent::ConfigAvailable),
+                    Just(SimpleEvent::ReadOk),
+                    Just(SimpleEvent::ReadFailed),
+                    Just(SimpleEvent::WriteOk),
+                    Just(SimpleEvent::WriteFailed),
+                    Just(SimpleEvent::SignalDelivered),
+                    Just(SimpleEvent::SignalFailed),
                 ],
                 1..50
             )
         ) {
-            let mut state = SupervisorState::Idle;
+            let mut state = CfState::Idle;
             for event in &events {
-                state = transition(state, *event);
-                // State is always one of the valid states (type system enforces this,
-                // but we also verify the machine doesn't get stuck in signaling forever).
+                state = config_flow::transition(state, event);
                 prop_assert!(matches!(
                     state,
-                    SupervisorState::Idle
-                        | SupervisorState::ReadingConfig
-                        | SupervisorState::Validating
-                        | SupervisorState::Writing
-                        | SupervisorState::Signaling
+                    CfState::Idle
+                        | CfState::Reading
+                        | CfState::Validating
+                        | CfState::Writing
+                        | CfState::Signaling
                 ));
             }
         }
@@ -707,51 +697,46 @@ mod proptests {
         /// A valid "happy path" sequence always ends in Idle.
         #[test]
         fn happy_path_returns_to_idle(iterations in 1u32..20) {
-            let mut state = SupervisorState::Idle;
+            let mut state = CfState::Idle;
             for _ in 0..iterations {
-                state = transition(state, Event::ConfigAvailable);
-                prop_assert_eq!(state, SupervisorState::ReadingConfig);
-                state = transition(state, Event::ReadSuccess);
-                prop_assert_eq!(state, SupervisorState::Validating);
-                state = transition(state, Event::ValidationOk);
-                prop_assert_eq!(state, SupervisorState::Writing);
-                state = transition(state, Event::WriteSuccess);
-                prop_assert_eq!(state, SupervisorState::Signaling);
-                state = transition(state, Event::ChildAlive);
-                prop_assert_eq!(state, SupervisorState::Idle);
+                state = config_flow::transition(state, &SimpleEvent::ConfigAvailable);
+                prop_assert_eq!(state, CfState::Reading);
+                state = config_flow::transition(state, &SimpleEvent::ReadOk);
+                prop_assert_eq!(state, CfState::Writing);
+                state = config_flow::transition(state, &SimpleEvent::WriteOk);
+                prop_assert_eq!(state, CfState::Signaling);
+                state = config_flow::transition(state, &SimpleEvent::SignalDelivered);
+                prop_assert_eq!(state, CfState::Idle);
             }
         }
 
-        /// Validation failure always returns to idle without signaling.
+        /// Read failure always returns to idle without writing.
         #[test]
-        fn invalid_config_never_signals(iterations in 1u32..20) {
-            let mut state = SupervisorState::Idle;
-            let mut ever_signaled = false;
+        fn invalid_config_never_writes(iterations in 1u32..20) {
+            let mut state = CfState::Idle;
+            let mut ever_writing = false;
             for _ in 0..iterations {
-                state = transition(state, Event::ConfigAvailable);
-                state = transition(state, Event::ReadSuccess);
-                state = transition(state, Event::ValidationFail);
-                if state == SupervisorState::Signaling {
-                    ever_signaled = true;
+                state = config_flow::transition(state, &SimpleEvent::ConfigAvailable);
+                state = config_flow::transition(state, &SimpleEvent::ReadFailed);
+                if state == CfState::Writing || state == CfState::Signaling {
+                    ever_writing = true;
                 }
-                prop_assert_eq!(state, SupervisorState::Idle);
+                prop_assert_eq!(state, CfState::Idle);
             }
-            prop_assert!(!ever_signaled, "validation failure must never reach signaling");
+            prop_assert!(!ever_writing, "read failure must never reach writing or signaling");
         }
 
-        /// Dead child check always returns to idle (PID race guard).
+        /// Signal failure always returns to idle (PID race guard).
         #[test]
         fn dead_child_never_gets_signaled(iterations in 1u32..10) {
             for _ in 0..iterations {
-                let mut state = SupervisorState::Idle;
-                state = transition(state, Event::ConfigAvailable);
-                state = transition(state, Event::ReadSuccess);
-                state = transition(state, Event::ValidationOk);
-                state = transition(state, Event::WriteSuccess);
-                // Child died before we could signal.
-                state = transition(state, Event::ChildDead);
-                prop_assert_eq!(state, SupervisorState::Idle,
-                    "dead child must return supervisor to idle");
+                let mut state = CfState::Idle;
+                state = config_flow::transition(state, &SimpleEvent::ConfigAvailable);
+                state = config_flow::transition(state, &SimpleEvent::ReadOk);
+                state = config_flow::transition(state, &SimpleEvent::WriteOk);
+                state = config_flow::transition(state, &SimpleEvent::SignalFailed);
+                prop_assert_eq!(state, CfState::Idle,
+                    "signal failure must return supervisor to idle");
             }
         }
     }
