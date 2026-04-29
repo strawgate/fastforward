@@ -68,6 +68,7 @@ tempfile = "3"
 turmoil = { workspace = true, features = ["unstable-barriers"] }
 
 [target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"
 turmoil = { workspace = true, features = ["unstable-barriers", "unstable-fs"] }
 
 [lints]

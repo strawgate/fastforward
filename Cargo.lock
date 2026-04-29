@@ -1969,6 +1969,7 @@ dependencies = [
  "ffwd-transform",
  "ffwd-types",
  "futures-util",
+ "libc",
  "opentelemetry",
  "opentelemetry_sdk",
  "serde_json",
