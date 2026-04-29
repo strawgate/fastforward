@@ -63,7 +63,7 @@ pub trait Transform: Send {
     fn execute_async(
         &mut self,
         batch: RecordBatch,
-    ) -> Pin<Box<dyn futures_util::Future<Output = Result<RecordBatch, TransformError>> + Send + '_>>;
+    ) -> Pin<Box<dyn Future<Output = Result<RecordBatch, TransformError>> + Send + '_>>;
 
     /// Execute the transform on a record batch synchronously.
     ///

@@ -4,6 +4,8 @@
 //!
 //! Environment variables in values are expanded using `${VAR}` syntax.
 
+/// Configuration diffing for live reload — computes added/removed/changed pipelines.
+pub mod diff;
 /// Shared metadata for config starter templates and generated reference tables.
 ///
 /// # Examples
@@ -24,6 +26,10 @@ pub mod validate;
 
 pub use serde_helpers::{PositiveMillis, PositiveSecs};
 
+/// Re-export of [`ConfigDiff`] for computing pipeline-level
+/// differences between two configurations during live reload.
+pub use diff::ConfigDiff;
+
 #[cfg(test)]
 pub(crate) use env::expand_env_vars;
 pub use shared::{
@@ -39,7 +45,7 @@ pub use types::{
     HostInfoConfig, HostInfoStyle, HostMetricsInputConfig, HttpInputConfig, HttpMethodConfig,
     HttpOutputConfig, HttpTypeConfig, InputConfig, InputType, InputTypeConfig,
     JournaldBackendConfig, JournaldInputConfig, JournaldTypeConfig, JsonlEnrichmentConfig,
-    K8sPathConfig, LokiOutputConfig, NullOutputConfig, OtlpOutputConfig,
+    K8sPathConfig, LokiOutputConfig, NullOutputConfig, OpampConfig, OtlpOutputConfig,
     OtlpProtobufDecodeModeConfig, OtlpProtocol, OtlpTypeConfig, OutputConfigV2, OutputType,
     PipelineConfig, S3CompressionConfig, S3InputConfig, S3TypeConfig, SensorTypeConfig,
     ServerConfig, SourceMetadataStyle, StaticEnrichmentConfig, StdoutOutputConfig, StorageConfig,

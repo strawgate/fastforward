@@ -11,7 +11,7 @@ use crate::shared::TlsServerConfig;
 use crate::types::{
     Config, ConfigError, EnrichmentConfig, Format, GeneratorAttributeValueConfig,
     GeneratorProfileConfig, InputConfig, InputType, InputTypeConfig, JournaldBackendConfig,
-    PIPELINE_WORKERS_MAX, PipelineConfig, ServerConfig, StorageConfig,
+    OpampConfig, PIPELINE_WORKERS_MAX, PipelineConfig, ServerConfig, StorageConfig,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -38,6 +38,9 @@ impl Config {
     pub fn validate_with_base_path(&self, base_path: Option<&Path>) -> Result<(), ConfigError> {
         validate_server_config(&self.server)?;
         validate_storage_config(&self.storage)?;
+        if let Some(opamp) = &self.opamp {
+            validate_opamp_config(opamp)?;
+        }
 
         if self.pipelines.is_empty() {
             return Err(ConfigError::Validation(
@@ -142,6 +145,16 @@ fn validate_storage_config(storage: &StorageConfig) -> Result<(), ConfigError> {
                 )));
             }
         }
+    }
+    Ok(())
+}
+
+fn validate_opamp_config(opamp: &OpampConfig) -> Result<(), ConfigError> {
+    if let Err(err) = validate_endpoint_url(&opamp.endpoint) {
+        return Err(ConfigError::Validation(format!(
+            "opamp.endpoint: {}",
+            validation_message(err)
+        )));
     }
     Ok(())
 }
