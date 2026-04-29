@@ -89,7 +89,8 @@ fn redact_yaml_value(value: &mut serde_yaml_ng::Value, in_auth_block: bool) {
                     continue;
                 };
 
-                let next_in_auth = in_auth_block || key_str == "auth";
+                let next_in_auth =
+                    in_auth_block || key_str == "auth" || key_str.eq_ignore_ascii_case("api_key");
 
                 if key_str == "endpoint"
                     && let serde_yaml_ng::Value::String(endpoint) = val
@@ -1368,9 +1369,12 @@ output:
         flag: true
         number: 42
         tagged_secret: !!str "tagged-secret-value"
-    aws:
-      access_key_id: "AKIAIOSFODNN7EXAMPLE"
-      secret_access_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+        aws:
+          access_key_id: "AKIAIOSFODNN7EXAMPLE"
+          secret_access_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+opamp:
+  endpoint: "https://opamp.example.com/v1/opamp"
+  api_key: "opamp-secret"
 "#;
         let redacted = redact_config_yaml(raw);
         assert!(
@@ -1396,6 +1400,10 @@ output:
         assert!(
             !redacted.contains("wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"),
             "aws secret key must not be exposed"
+        );
+        assert!(
+            !redacted.contains("opamp-secret"),
+            "OpAMP API key must not be exposed"
         );
         // Verify specific auth field values are redacted (not broad token absence,
         // which would be brittle if unrelated YAML happened to contain those tokens).

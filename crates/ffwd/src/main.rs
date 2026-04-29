@@ -19,7 +19,7 @@ mod commands;
 mod config_templates;
 mod generate;
 mod send;
-#[cfg(unix)]
+#[cfg(all(unix, feature = "opamp"))]
 mod supervisor;
 mod validate;
 

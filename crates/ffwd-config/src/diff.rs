@@ -73,10 +73,13 @@ impl ConfigDiff {
             && !self.opamp_changed
     }
 
-    /// Returns `true` if all changes can be applied via graceful reload
-    /// (currently: server bind address changes require a full restart).
+    /// Returns `true` if all changes can be applied via graceful reload.
+    ///
+    /// Server and OpAMP changes are process-lifetime settings and require a
+    /// restart so the diagnostics listener, exporters, and management session are
+    /// not silently left running with stale configuration.
     pub fn is_reloadable(&self) -> bool {
-        !self.server_changed
+        !self.server_changed && !self.opamp_changed
     }
 }
 
@@ -358,7 +361,7 @@ opamp:
         let new = load(new_yaml);
         let diff = ConfigDiff::between(&old, &new);
         assert!(diff.opamp_changed);
-        assert!(diff.is_reloadable());
+        assert!(!diff.is_reloadable());
         assert_eq!(diff.unchanged, vec!["default"]);
     }
 

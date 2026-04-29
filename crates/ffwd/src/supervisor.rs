@@ -21,6 +21,10 @@ use crate::cli::CliError;
 const RESTART_BACKOFF_INITIAL: Duration = Duration::from_secs(1);
 /// Maximum backoff delay.
 const RESTART_BACKOFF_MAX: Duration = Duration::from_secs(30);
+/// Run duration after which a child is considered stable for backoff reset.
+const STABLE_RUN_THRESHOLD: Duration = Duration::from_secs(30);
+/// Time a reloaded child must remain alive before reporting the pushed config as effective.
+const CHILD_RELOAD_STABILITY_WINDOW: Duration = Duration::from_secs(2);
 /// Backoff multiplier after each consecutive crash.
 const RESTART_BACKOFF_FACTOR: u32 = 2;
 
@@ -65,6 +69,8 @@ pub(crate) async fn cmd_supervised(config_path: &str) -> Result<(), CliError> {
         &opamp_config.service_name,
         crate::VERSION,
     );
+    let remote_config_path =
+        ffwd_opamp::OpampClient::remote_config_path_for_identity(data_dir.as_deref(), &identity);
 
     // Create OpAMP client.
     let opamp_client = ffwd_opamp::OpampClient::new(opamp_config.clone(), identity, reload_tx);
@@ -79,9 +85,14 @@ pub(crate) async fn cmd_supervised(config_path: &str) -> Result<(), CliError> {
     // from that file, validates, and does the atomic write + SIGHUP dance.
     let opamp_shutdown = shutdown.clone();
     let opamp_data_dir = data_dir.clone();
+    let opamp_remote_config_path = remote_config_path.clone();
     let opamp_handle = tokio::spawn(async move {
         if let Err(e) = opamp_client
-            .run(opamp_shutdown, opamp_data_dir.as_deref(), None)
+            .run(
+                opamp_shutdown,
+                opamp_data_dir.as_deref(),
+                Some(opamp_remote_config_path.as_path()),
+            )
             .await
         {
             tracing::error!(error = %e, "supervisor: opamp client exited with error");
@@ -163,7 +174,7 @@ pub(crate) async fn cmd_supervised(config_path: &str) -> Result<(), CliError> {
                         "supervisor: child exited unexpectedly, restarting after backoff"
                     );
                     // Reset backoff if child ran for a substantial time (stable run).
-                    if spawn_time.elapsed() > RESTART_BACKOFF_MAX {
+                    if spawn_time.elapsed() > STABLE_RUN_THRESHOLD {
                         backoff = RESTART_BACKOFF_INITIAL;
                     }
                     tokio::select! {
@@ -216,9 +227,11 @@ pub(crate) async fn cmd_supervised(config_path: &str) -> Result<(), CliError> {
                             handle_remote_config(
                                 &config_path,
                                 &state_handle,
-                                data_dir.as_deref(),
+                                &remote_config_path,
+                                &mut child,
                                 child_pid,
-                            );
+                            )
+                            .await;
                         }
                         Err(e) => {
                             tracing::error!(error = %e, "supervisor: failed to check child status");
@@ -268,13 +281,19 @@ fn spawn_child(config_path: &str) -> Result<tokio::process::Child, CliError> {
         })
 }
 
-fn forward_signal(pid: u32, signal: i32) {
-    // SAFETY: sending a signal to a known child PID that we verified is still alive via try_wait.
+fn forward_signal(pid: u32, signal: i32) -> bool {
+    // SAFETY: `pid` comes from `child.id()` for a process this supervisor
+    // spawned, and callers check child liveness before reload signals where it
+    // matters. `signal` is supplied from libc signal constants. `kill` takes
+    // integer values only, creates no Rust references, and any OS failure is
+    // handled via `last_os_error` below.
     let ret = unsafe { libc::kill(pid as libc::pid_t, signal) };
     if ret != 0 {
         let err = std::io::Error::last_os_error();
         tracing::warn!(pid, signal, error = %err, "supervisor: failed to send signal to child");
+        return false;
     }
+    true
 }
 
 /// Wait for a child to exit, escalating to SIGKILL after a timeout.
@@ -307,15 +326,14 @@ fn was_terminated_by(status: std::process::ExitStatus, signal: i32) -> bool {
 ///
 /// Reads the remote config file written by the OpAMP client, validates it,
 /// atomically writes it to the main config path, and sends SIGHUP to the child.
-fn handle_remote_config(
+async fn handle_remote_config(
     config_path: &Path,
     state_handle: &ffwd_opamp::OpampStateHandle,
-    data_dir: Option<&Path>,
+    remote_path: &Path,
+    child: &mut tokio::process::Child,
     child_pid: u32,
 ) {
-    let remote_path = ffwd_opamp::OpampClient::remote_config_path(data_dir);
-
-    let new_yaml = match std::fs::read_to_string(&remote_path) {
+    let new_yaml = match std::fs::read_to_string(remote_path) {
         Ok(yaml) => yaml,
         Err(e) => {
             tracing::error!(
@@ -328,7 +346,7 @@ fn handle_remote_config(
     };
 
     // Validate the config before writing.
-    if let Err(e) = ffwd_config::Config::load_str(&new_yaml) {
+    if let Err(e) = ffwd_config::Config::load_str_with_base_path(&new_yaml, config_path.parent()) {
         tracing::error!(
             error = %e,
             "supervisor: remote config failed validation, skipping reload"
@@ -351,16 +369,46 @@ fn handle_remote_config(
         "supervisor: wrote updated config, sending SIGHUP to child"
     );
 
-    // Update effective config in OpAMP state.
-    state_handle.set_effective_config(&new_yaml);
-
     // Send SIGHUP to trigger child reload.
-    forward_signal(child_pid, libc::SIGHUP);
+    if !forward_signal(child_pid, libc::SIGHUP) {
+        return;
+    }
+
+    if child_survives_reload_window(child).await {
+        state_handle.set_effective_config(&new_yaml);
+    } else {
+        tracing::error!("supervisor: child exited during reload; effective config not updated");
+    }
+}
+
+async fn child_survives_reload_window(child: &mut tokio::process::Child) -> bool {
+    let deadline = tokio::time::Instant::now() + CHILD_RELOAD_STABILITY_WINDOW;
+    loop {
+        match child.try_wait() {
+            Ok(None) => {}
+            Ok(Some(status)) => {
+                tracing::error!(?status, "supervisor: child exited after SIGHUP");
+                return false;
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "supervisor: failed to check child after SIGHUP");
+                return false;
+            }
+        }
+
+        if tokio::time::Instant::now() >= deadline {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 /// Atomically write config by writing to a `.tmp` sibling then renaming.
 fn atomic_write_config(target: &Path, content: &str) -> std::io::Result<()> {
-    let tmp_path = target.with_extension("yaml.tmp");
+    let file_name = target
+        .file_name()
+        .ok_or_else(|| std::io::Error::other("invalid config target"))?;
+    let tmp_path = target.with_file_name(format!("{}.tmp", file_name.to_string_lossy()));
     std::fs::write(&tmp_path, content)?;
     std::fs::rename(&tmp_path, target)?;
     Ok(())
@@ -381,7 +429,7 @@ mod tests {
         assert_eq!(read_back, content);
 
         // Temp file should not remain.
-        let tmp = target.with_extension("yaml.tmp");
+        let tmp = target.with_file_name("config.yaml.tmp");
         assert!(!tmp.exists(), "temp file should be removed by rename");
     }
 
@@ -426,6 +474,9 @@ pipelines:
     #[test]
     fn was_terminated_by_matches_signal() {
         use std::os::unix::process::ExitStatusExt;
+        // Unix `ExitStatus::from_raw(sig)` models the raw wait status used by
+        // `was_terminated_by`, where `ExitStatusExt::signal()` applies
+        // WIFSIGNALED/WTERMSIG semantics.
         let status = std::process::ExitStatus::from_raw(libc::SIGTERM);
         assert!(was_terminated_by(status, libc::SIGTERM));
         assert!(!was_terminated_by(status, libc::SIGINT));
@@ -437,7 +488,7 @@ mod proptests {
     use super::*;
     use proptest::prelude::*;
 
-    /// Backoff always stays within [INITIAL, MAX] bounds.
+    // Backoff always stays within [INITIAL, MAX] bounds.
     proptest! {
         #[test]
         fn backoff_stays_bounded(crash_count in 0u32..100) {
@@ -450,7 +501,7 @@ mod proptests {
         }
     }
 
-    /// Backoff is monotonically non-decreasing (without resets).
+    // Backoff is monotonically non-decreasing (without resets).
     proptest! {
         #[test]
         fn backoff_is_monotonic(crash_count in 1u32..50) {
@@ -464,7 +515,7 @@ mod proptests {
         }
     }
 
-    /// After enough crashes, backoff saturates at MAX.
+    // After enough crashes, backoff saturates at MAX.
     proptest! {
         #[test]
         fn backoff_saturates_at_max(crash_count in 10u32..100) {
@@ -476,7 +527,7 @@ mod proptests {
         }
     }
 
-    /// Atomic write is crash-safe: target always contains valid content.
+    // Atomic write is crash-safe: target always contains valid content.
     proptest! {
         #[test]
         fn atomic_write_leaves_valid_content(content in "[a-zA-Z0-9\n ]{1,1000}") {
@@ -493,7 +544,7 @@ mod proptests {
         }
     }
 
-    /// Atomic write doesn't leave temp file behind on success.
+    // Atomic write doesn't leave temp file behind on success.
     proptest! {
         #[test]
         fn atomic_write_no_temp_residue(content in "[a-z]{1,100}") {
@@ -502,7 +553,7 @@ mod proptests {
 
             atomic_write_config(&target, &content).expect("atomic write");
 
-            let tmp = target.with_extension("yaml.tmp");
+            let tmp = target.with_file_name("cfg.yaml.tmp");
             prop_assert!(!tmp.exists(), "temp file should not remain");
         }
     }
@@ -511,9 +562,9 @@ mod proptests {
     // Path contract properties — prevent the path mismatch bug
     // ═══════════════════════════════════════════════════════════════
 
-    /// OpAMP remote_config_path and handle_remote_config MUST read from the
-    /// same location. This property verifies the contract: both use
-    /// `OpampClient::remote_config_path(data_dir)`.
+    // OpAMP remote_config_path and handle_remote_config MUST read from the
+    // same location. This property verifies the contract: both use
+    // `OpampClient::remote_config_path(data_dir)`.
     proptest! {
         #[test]
         fn path_contract_opamp_writes_where_supervisor_reads(
@@ -536,8 +587,8 @@ mod proptests {
         }
     }
 
-    /// In supervisor mode (config_path=None), the remote config path must NOT
-    /// equal the main config path — they are intentionally different files.
+    // In supervisor mode (config_path=None), the remote config path must NOT
+    // equal the main config path — they are intentionally different files.
     proptest! {
         #[test]
         fn supervisor_intermediate_differs_from_main(
@@ -559,8 +610,8 @@ mod proptests {
     // Atomic write survives concurrent reads — simulates file watcher
     // ═══════════════════════════════════════════════════════════════
 
-    /// After atomic_write_config, the file is always readable and contains
-    /// the expected content (never partial or empty).
+    // After atomic_write_config, the file is always readable and contains
+    // the expected content (never partial or empty).
     proptest! {
         #[test]
         fn atomic_write_never_produces_partial_content(
@@ -717,8 +768,8 @@ mod proptests {
     // File watcher filtering property
     // ═══════════════════════════════════════════════════════════════
 
-    /// Parent directory watch with filename filtering correctly identifies
-    /// when our config file is involved in a filesystem event.
+    // Parent directory watch with filename filtering correctly identifies
+    // when our config file is involved in a filesystem event.
     proptest! {
         #[test]
         fn filename_filter_matches_target(

@@ -410,7 +410,7 @@ pub(crate) enum Commands {
     /// The supervisor starts `ff run` as a child process and communicates with
     /// an OpAMP server. When the server pushes new config, the supervisor
     /// writes it to disk and sends SIGHUP to reload the child.
-    #[cfg(unix)]
+    #[cfg(all(unix, feature = "opamp"))]
     Supervised {
         #[arg(
             short = 'c',

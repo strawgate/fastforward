@@ -22,7 +22,7 @@ NONE == -1       \* Sentinel: no pending config
 INVALID == -2    \* Sentinel: pending config failed validation
 
 VARIABLES
-    state,            \* Main state: "running" | "draining" | "building" | "waiting"
+    state,            \* Main state: "running" | "draining" | "building"
     config,           \* Current active config (a natural number representing version)
     pending_config,   \* Config read from disk after reload trigger (version, INVALID, or NONE)
     reload_count,     \* Number of completed reloads
@@ -51,7 +51,7 @@ Init ==
 TriggerReload ==
     /\ reload_count < MaxReloads
     /\ ~reload_pending
-    /\ state = "running"
+    /\ state \in {"running", "draining", "building"}
     /\ reload_pending' = TRUE
     /\ UNCHANGED <<state, config, pending_config, reload_count, pipelines_running>>
 

@@ -79,14 +79,16 @@ pub async fn run_pipelines(
     } else {
         None
     };
+    #[cfg(feature = "opamp")]
     let configured_data_dir = config.storage.data_dir.as_ref().map(PathBuf::from);
 
     // Process-level shutdown token — when cancelled the entire process exits.
     let shutdown = CancellationToken::new();
 
-    // Reload channel: multiple sources (SIGHUP, file watcher, OpAMP, HTTP) feed
-    // into this channel. Capacity 4 avoids dropping signals during pipeline drain.
-    let (reload_tx, mut reload_rx) = tokio::sync::mpsc::channel::<()>(4);
+    // Capacity 1 intentionally coalesces simultaneous SIGHUP/file-watcher/
+    // diagnostics/OpAMP reload signals into one pending reload. Increasing this
+    // changes behavior from debouncing to buffering distinct reload events.
+    let (reload_tx, mut reload_rx) = tokio::sync::mpsc::channel::<()>(1);
 
     #[cfg(unix)]
     let (mut sigterm, mut sighup, mut sigusr1, mut sigusr2) = {
@@ -211,9 +213,13 @@ pub async fn run_pipelines(
                 let watch_target = config_path
                     .parent()
                     .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
-                let config_filename = config_path
+                let Some(config_filename) = config_path
                     .file_name()
-                    .map(std::ffi::OsStr::to_os_string);
+                    .map(std::ffi::OsStr::to_os_string)
+                else {
+                    tracing::error!(path = %config_path.display(), "config watcher: path has no file name");
+                    return;
+                };
                 if let Err(e) = watcher.watch(&watch_target, RecursiveMode::NonRecursive) {
                     tracing::error!(error = %e, path = %watch_target.display(), "config watcher: failed to watch");
                     return;
@@ -223,14 +229,13 @@ pub async fn run_pipelines(
                     if shutdown_for_watcher.is_cancelled() {
                         break;
                     }
-                    match rx.recv_timeout(Duration::from_millis(500)) {
+                    match rx.recv_timeout(Duration::from_millis(100)) {
                         Ok(Ok(event)) => {
                             // Filter: only trigger if the event involves our config file.
-                            let involves_config = config_filename.as_ref().is_none_or(|name| {
-                                event.paths.iter().any(|p| {
-                                    p.file_name().is_some_and(|n| n == name)
-                                })
-                            });
+                            let involves_config = event
+                                .paths
+                                .iter()
+                                .any(|p| p.file_name().is_some_and(|n| n == config_filename));
                             if involves_config
                                 && (event.kind.is_modify() || event.kind.is_create())
                             {
@@ -282,6 +287,7 @@ pub async fn run_pipelines(
         let shutdown_for_opamp = shutdown.clone();
         let data_dir = configured_data_dir.clone();
         let opamp_state = client.state_handle();
+        opamp_state.set_effective_config(options.config_yaml);
         let opamp_config_path = PathBuf::from(options.config_path);
         tokio::spawn(async move {
             if let Err(e) = client
@@ -347,6 +353,8 @@ pub async fn run_pipelines(
 
     let mut current_config = config;
     let mut pending_config: Option<ffwd_config::Config> = None;
+    let mut pending_effective_yaml: Option<String> = None;
+    let mut pending_reload_attempt = false;
     let mut first_run = true;
     let mut pipeline_metrics: Vec<Arc<ffwd_diagnostics::diagnostics::PipelineMetrics>> = Vec::new();
     // Suppress unused_assignments: initial empty value is overwritten in the
@@ -358,6 +366,7 @@ pub async fn run_pipelines(
         // Use pending_config if available (from a successful reload validation),
         // otherwise use current_config (for first_run or retry after build failure).
         let build_config = pending_config.as_ref().unwrap_or(&current_config);
+        let build_data_dir = build_config.storage.data_dir.as_ref().map(PathBuf::from);
         let mut pipelines = Vec::new();
         for (name, pipe_cfg) in &build_config.pipelines {
             match Pipeline::from_config_with_data_dir(
@@ -365,7 +374,7 @@ pub async fn run_pipelines(
                 pipe_cfg,
                 &meter,
                 base_path,
-                configured_data_dir.as_deref(),
+                build_data_dir.as_deref(),
             ) {
                 Ok(pipeline) => pipelines.push(pipeline),
                 Err(e) => {
@@ -380,17 +389,28 @@ pub async fn run_pipelines(
                     // Discard the failed config and revert to current_config for
                     // the next attempt — ensures we can rebuild working pipelines.
                     pending_config = None;
-                    // Wait for the next reload signal to try again.
-                    tokio::select! {
-                        _ = shutdown.cancelled() => break 'reload,
-                        _ = reload_rx.recv() => continue 'reload,
-                    }
+                    pending_effective_yaml = None;
+                    pending_reload_attempt = false;
+                    reload_error.add(1, &[]);
+                    continue 'reload;
                 }
             }
         }
         // Pipeline build succeeded — commit the pending config.
         if let Some(committed) = pending_config.take() {
             current_config = committed;
+            if pending_reload_attempt {
+                reload_success.add(1, &[]);
+                #[cfg(feature = "opamp")]
+                if let Some(new_yaml) = pending_effective_yaml.take()
+                    && let Some(ref state) = opamp_client
+                {
+                    state.set_effective_config(&new_yaml);
+                }
+                #[cfg(not(feature = "opamp"))]
+                let _ = pending_effective_yaml.take();
+                pending_reload_attempt = false;
+            }
         }
 
         // ── Diagnostics server (first run only) ──
@@ -517,6 +537,7 @@ pub async fn run_pipelines(
         }
 
         let reload_requested;
+        let mut cycle_error: Option<io::Error> = None;
         if let Some(mut main_pipe) = main_pipeline {
             tokio::select! {
                 result = main_pipe.run_async(&pipeline_shutdown) => {
@@ -527,6 +548,7 @@ pub async fn run_pipelines(
                     reload_requested = false;
                     if let Err(ref e) = result {
                         tracing::error!(error = %e, "main pipeline error");
+                        cycle_error = Some(io::Error::new(e.kind(), e.to_string()));
                     }
                 }
                 _ = shutdown.cancelled() => {
@@ -554,9 +576,12 @@ pub async fn run_pipelines(
                     .await
                     .is_err()
                     {
-                        tracing::warn!(
-                            "main pipeline did not drain within 30s, proceeding with reload"
-                        );
+                        tracing::error!("main pipeline did not drain within 30s");
+                        reload_error.add(1, &[]);
+                        return Err(RuntimeError::Io(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            "main pipeline did not drain within 30s during reload",
+                        )));
                     }
                     reload_requested = true;
                 }
@@ -566,16 +591,38 @@ pub async fn run_pipelines(
         }
 
         // Join sibling pipeline tasks.
-        for h in handles {
-            match tokio::time::timeout(Duration::from_secs(30), h).await {
-                Ok(Ok(Err(e))) => tracing::error!(error = %e, "sibling pipeline error"),
-                Ok(Err(e)) => tracing::error!(error = %e, "pipeline task panicked"),
-                Err(_) => tracing::warn!("sibling pipeline did not drain within 30s"),
+        for mut h in handles {
+            match tokio::time::timeout(Duration::from_secs(30), &mut h).await {
+                Ok(Ok(Err(e))) => {
+                    tracing::error!(error = %e, "sibling pipeline error");
+                    if cycle_error.is_none() {
+                        cycle_error = Some(e);
+                    }
+                }
+                Ok(Err(e)) => {
+                    tracing::error!(error = %e, "pipeline task panicked");
+                    if cycle_error.is_none() {
+                        cycle_error = Some(io::Error::other(e.to_string()));
+                    }
+                }
+                Err(_) => {
+                    h.abort();
+                    let _ = h.await;
+                    tracing::error!("sibling pipeline did not drain within 30s");
+                    reload_error.add(1, &[]);
+                    return Err(RuntimeError::Io(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "sibling pipeline did not drain within 30s during reload",
+                    )));
+                }
                 Ok(Ok(Ok(()))) => {}
             }
         }
 
         if !reload_requested {
+            if let Some(err) = cycle_error {
+                return Err(RuntimeError::Io(err));
+            }
             break;
         }
 
@@ -587,11 +634,7 @@ pub async fn run_pipelines(
             Err(e) => {
                 reload_error.add(1, &[]);
                 tracing::error!(error = %e, "config reload: failed to read config file");
-                // Wait for the next reload signal.
-                tokio::select! {
-                    _ = shutdown.cancelled() => break,
-                    _ = reload_rx.recv() => continue,
-                }
+                continue;
             }
         };
         let new_config = match ffwd_config::Config::load_str_with_base_path(&new_yaml, base_path) {
@@ -599,11 +642,7 @@ pub async fn run_pipelines(
             Err(e) => {
                 reload_error.add(1, &[]);
                 tracing::error!(error = %e, "config reload: invalid config");
-                // Wait for the next reload signal.
-                tokio::select! {
-                    _ = shutdown.cancelled() => break,
-                    _ = reload_rx.recv() => continue,
-                }
+                continue;
             }
         };
 
@@ -620,20 +659,19 @@ pub async fn run_pipelines(
                 "config reload: diff computed"
             );
             if !diff.is_reloadable() {
-                tracing::warn!(
-                    "config reload: server bind address changed — this requires a full process restart to take effect"
+                reload_error.add(1, &[]);
+                tracing::error!(
+                    server_changed = diff.server_changed,
+                    opamp_changed = diff.opamp_changed,
+                    "config reload: process-lifetime setting changed; restart required"
                 );
+                continue;
             }
-        }
-        reload_success.add(1, &[]);
-
-        // Update OpAMP effective config after successful reload.
-        #[cfg(feature = "opamp")]
-        if let Some(ref state) = opamp_client {
-            state.set_effective_config(&new_yaml);
         }
 
         pending_config = Some(new_config);
+        pending_effective_yaml = Some(new_yaml);
+        pending_reload_attempt = true;
         // Loop back to rebuild pipelines with new config.
     }
 

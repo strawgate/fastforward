@@ -114,7 +114,32 @@ impl OpampClient {
     /// configured, or a temp file path otherwise.
     pub fn remote_config_path(data_dir: Option<&Path>) -> PathBuf {
         data_dir.map_or_else(
-            || std::env::temp_dir().join("ffwd_opamp_remote_config.yaml"),
+            || {
+                std::env::temp_dir().join(format!(
+                    "ffwd_opamp_remote_config_{}.yaml",
+                    std::process::id()
+                ))
+            },
+            |d| d.join("opamp_remote_config.yaml"),
+        )
+    }
+
+    /// Get the path where remote config should be staged for a specific agent.
+    ///
+    /// When no `data_dir` is configured, the fallback temp path includes the
+    /// OpAMP instance UID so multiple supervised agents on one host cannot share
+    /// a staging file by accident.
+    pub fn remote_config_path_for_identity(
+        data_dir: Option<&Path>,
+        identity: &AgentIdentity,
+    ) -> PathBuf {
+        data_dir.map_or_else(
+            || {
+                std::env::temp_dir().join(format!(
+                    "ffwd_opamp_remote_config_{}.yaml",
+                    identity.uid_hex()
+                ))
+            },
             |d| d.join("opamp_remote_config.yaml"),
         )
     }
@@ -138,12 +163,14 @@ impl OpampClient {
             "opamp: starting client"
         );
 
-        let poll_interval = Duration::from_secs(self.config.poll_interval_secs.max(1));
+        let poll_interval = Duration::from_secs(self.config.poll_interval_secs.get());
         let state = Arc::clone(&self.state);
         let accept_remote_config = self.config.accept_remote_config;
         let reload_tx = self.reload_tx.clone();
-        let remote_config_path =
-            config_path.map_or_else(|| Self::remote_config_path(data_dir), PathBuf::from);
+        let remote_config_path = config_path.map_or_else(
+            || Self::remote_config_path_for_identity(data_dir, &self.identity),
+            PathBuf::from,
+        );
 
         // Create the OpAMP API callbacks handler.
         let mut handler = OpampHandler {

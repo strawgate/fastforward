@@ -1,6 +1,7 @@
 use crate::serde_helpers::{
-    PositiveMillis, PositiveSecs, deserialize_option_from_string_or_value,
-    deserialize_option_strict_string, deserialize_string_map_strict_values,
+    PositiveMillis, PositiveSecs, deserialize_from_string_or_value,
+    deserialize_option_from_string_or_value, deserialize_option_strict_string,
+    deserialize_string_map_strict_values,
 };
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -80,8 +81,11 @@ pub struct OpampConfig {
     #[serde(default = "default_service_name")]
     pub service_name: String,
     /// Polling interval in seconds (default: 30).
-    #[serde(default = "default_poll_interval_secs")]
-    pub poll_interval_secs: u64,
+    #[serde(
+        default = "default_poll_interval_secs",
+        deserialize_with = "deserialize_from_string_or_value"
+    )]
+    pub poll_interval_secs: PositiveSecs,
     /// Whether to accept remote configuration from the server (default: true).
     #[serde(default = "default_accept_remote_config")]
     pub accept_remote_config: bool,
@@ -108,8 +112,11 @@ fn default_service_name() -> String {
     "ffwd".to_string()
 }
 
-fn default_poll_interval_secs() -> u64 {
-    30
+fn default_poll_interval_secs() -> PositiveSecs {
+    match PositiveSecs::new(30) {
+        Some(value) => value,
+        None => unreachable!("literal default OpAMP poll interval is non-zero"),
+    }
 }
 
 fn default_accept_remote_config() -> bool {

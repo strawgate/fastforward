@@ -11,6 +11,10 @@ use tokio_util::sync::CancellationToken;
 
 use ffwd_opamp::{AgentIdentity, OpampClient, OpampConfig};
 
+fn positive_secs(value: u64) -> ffwd_config::PositiveSecs {
+    ffwd_config::PositiveSecs::new(value).expect("test poll interval is non-zero")
+}
+
 #[tokio::test]
 async fn client_starts_and_shuts_down_cleanly() {
     let (reload_tx, _reload_rx) = tokio::sync::mpsc::channel(1);
@@ -18,7 +22,7 @@ async fn client_starts_and_shuts_down_cleanly() {
         // Point at a non-existent server — the client should still start
         // and shut down gracefully without panicking.
         endpoint: "http://127.0.0.1:19999/v1/opamp".to_string(),
-        poll_interval_secs: 1,
+        poll_interval_secs: positive_secs(1),
         ..Default::default()
     };
     let identity = AgentIdentity::resolve(None, None, "ffwd-test", "0.1.0");
@@ -49,7 +53,7 @@ async fn state_handle_survives_client_run() {
     let (reload_tx, _reload_rx) = tokio::sync::mpsc::channel(1);
     let config = OpampConfig {
         endpoint: "http://127.0.0.1:19999/v1/opamp".to_string(),
-        poll_interval_secs: 1,
+        poll_interval_secs: positive_secs(1),
         ..Default::default()
     };
     let identity = AgentIdentity::resolve(None, None, "ffwd-test", "0.1.0");
@@ -138,7 +142,7 @@ opamp:
     assert_eq!(opamp.api_key, Some("secret123".to_string()));
     assert_eq!(opamp.instance_uid, "auto");
     assert_eq!(opamp.service_name, "my-ffwd");
-    assert_eq!(opamp.poll_interval_secs, 15);
+    assert_eq!(opamp.poll_interval_secs.get(), 15);
     assert!(opamp.accept_remote_config);
 }
 
@@ -182,8 +186,53 @@ opamp:
     assert_eq!(opamp.api_key, None);
     assert_eq!(opamp.instance_uid, "auto");
     assert_eq!(opamp.service_name, "ffwd");
-    assert_eq!(opamp.poll_interval_secs, 30);
+    assert_eq!(opamp.poll_interval_secs.get(), 30);
     assert!(opamp.accept_remote_config);
+}
+
+#[test]
+fn opamp_config_rejects_zero_poll_interval() {
+    let yaml = "\
+pipelines:
+  default:
+    inputs:
+      - type: file
+        path: /tmp/test.log
+        format: json
+    outputs:
+      - type: stdout
+        format: json
+opamp:
+  endpoint: http://localhost:4320/v1/opamp
+  poll_interval_secs: 0";
+
+    let err = ffwd_config::Config::load_str(yaml).expect_err("zero poll interval must fail");
+    assert!(
+        err.to_string().contains("positive integer"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn opamp_config_rejects_invalid_endpoint() {
+    let yaml = "\
+pipelines:
+  default:
+    inputs:
+      - type: file
+        path: /tmp/test.log
+        format: json
+    outputs:
+      - type: stdout
+        format: json
+opamp:
+  endpoint: localhost:4320/v1/opamp";
+
+    let err = ffwd_config::Config::load_str(yaml).expect_err("invalid endpoint must fail");
+    assert!(
+        err.to_string().contains("opamp.endpoint"),
+        "unexpected error: {err}"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -193,7 +242,7 @@ opamp:
 mod proptests {
     use proptest::prelude::*;
 
-    /// Identity is deterministic given the same data_dir.
+    // Identity is deterministic given the same data_dir.
     proptest! {
         #[test]
         fn identity_deterministic_with_data_dir(
@@ -211,7 +260,7 @@ mod proptests {
         }
     }
 
-    /// Explicit UIDs are preserved exactly (after dash removal).
+    // Explicit UIDs are preserved exactly (after dash removal).
     proptest! {
         #[test]
         fn explicit_uid_preserved(
@@ -228,7 +277,7 @@ mod proptests {
         }
     }
 
-    /// UID hex output is always 32 characters (16 bytes).
+    // UID hex output is always 32 characters (16 bytes).
     proptest! {
         #[test]
         fn uid_hex_always_32_chars(
@@ -242,7 +291,7 @@ mod proptests {
         }
     }
 
-    /// Remote config path is always under data_dir when provided.
+    // Remote config path is always under data_dir when provided.
     proptest! {
         #[test]
         fn remote_config_path_under_data_dir(
@@ -257,7 +306,7 @@ mod proptests {
         }
     }
 
-    /// remote_config_path is always a YAML file (has .yaml extension).
+    // remote_config_path is always a YAML file (has .yaml extension).
     proptest! {
         #[test]
         fn remote_config_path_is_yaml(
@@ -274,7 +323,7 @@ mod proptests {
         }
     }
 
-    /// remote_config_path with None uses temp dir (never panics).
+    // remote_config_path with None uses temp dir (never panics).
     proptest! {
         #[test]
         fn remote_config_path_none_never_panics(
@@ -286,8 +335,8 @@ mod proptests {
         }
     }
 
-    /// Supervisor-mode contract: remote_config_path NEVER equals any plausible
-    /// main config path (they must be different files).
+    // Supervisor-mode contract: remote_config_path NEVER equals any plausible
+    // main config path (they must be different files).
     proptest! {
         #[test]
         fn remote_config_path_never_collides_with_main(

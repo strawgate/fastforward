@@ -18,7 +18,7 @@ dhat-heap = ["dhat", "ffwd-runtime/dhat-heap"]
 cpu-profiling = ["ffwd-runtime/cpu-profiling"]
 turmoil = ["ffwd-runtime/turmoil"]
 datafusion = ["dep:ffwd-transform", "ffwd-runtime/datafusion"]
-opamp = ["ffwd-runtime/opamp"]
+opamp = ["dep:ffwd-opamp", "ffwd-runtime/opamp"]
 otlp-research = [
     "ffwd-config/otlp-research",
     "ffwd-runtime/otlp-research",
@@ -35,7 +35,7 @@ clap_complete_nushell = { workspace = true }
 dhat = { version = "0.3", optional = true }
 ffwd-arrow = { version = "0.1.0", path = "../ffwd-arrow" }
 ffwd-config = { version = "0.1.0", path = "../ffwd-config" }
-ffwd-opamp = { version = "0.1.0", path = "../ffwd-opamp" }
+ffwd-opamp = { version = "0.1.0", path = "../ffwd-opamp", optional = true }
 ffwd-core = { version = "0.1.0", path = "../ffwd-core" }
 ffwd-diagnostics = { version = "0.1.0", path = "../ffwd-diagnostics" }
 ffwd-io = { version = "0.1.0", path = "../ffwd-io" }
