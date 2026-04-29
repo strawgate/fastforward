@@ -433,14 +433,12 @@ fn parse_receive_messages_response(data: &Bytes) -> io::Result<Vec<SqsMessage>> 
             }
             Ok(Event::End(e)) => match e.local_name().as_ref() {
                 b"ReceiptHandle" if capture == Some("receipt") => {
-                    receipt_handle.clone_from(&current_text);
+                    receipt_handle = std::mem::take(&mut current_text);
                     capture = None;
-                    current_text.clear();
                 }
                 b"Body" if capture == Some("body") => {
-                    body.clone_from(&current_text);
+                    body = std::mem::take(&mut current_text);
                     capture = None;
-                    current_text.clear();
                 }
                 b"Message" if in_message => {
                     in_message = false;
@@ -450,10 +448,9 @@ fn parse_receive_messages_response(data: &Bytes) -> io::Result<Vec<SqsMessage>> 
                     // (test notifications, non-ObjectCreated events) by
                     // checking `records.is_empty()`.
                     messages.push(SqsMessage {
-                        receipt_handle: receipt_handle.clone(),
+                        receipt_handle: std::mem::take(&mut receipt_handle),
                         records,
                     });
-                    receipt_handle.clear();
                     body.clear();
                     capture = None;
                     current_text.clear();
@@ -637,5 +634,26 @@ mod tests {
         assert_eq!(messages[0].records.len(), 1);
         assert_eq!(messages[0].records[0].key, "logs/app&x.log");
         assert_eq!(messages[0].records[0].size, 42);
+    }
+
+    #[test]
+    fn parse_receive_messages_response_preserves_cdata_fragments() {
+        let xml = Bytes::from_static(
+            br#"<ReceiveMessageResponse>
+  <ReceiveMessageResult>
+    <Message>
+      <ReceiptHandle><![CDATA[rh-cdata]]></ReceiptHandle>
+      <Body><![CDATA[{"Records":[{"eventName":"ObjectCreated:Put","s3":{"object":{"key":"logs%2Fcdata.log","size":7}}}]}]]></Body>
+    </Message>
+  </ReceiveMessageResult>
+</ReceiveMessageResponse>"#,
+        );
+
+        let messages = parse_receive_messages_response(&xml).expect("parse ok");
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].receipt_handle, "rh-cdata");
+        assert_eq!(messages[0].records.len(), 1);
+        assert_eq!(messages[0].records[0].key, "logs/cdata.log");
+        assert_eq!(messages[0].records[0].size, 7);
     }
 }
