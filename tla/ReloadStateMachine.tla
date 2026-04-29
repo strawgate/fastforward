@@ -28,7 +28,7 @@ vars == <<state, config, pending_config, reload_count, reload_pending, pipelines
 TypeOK ==
     /\ state \in {"running", "draining", "building"}
     /\ config \in 0..MaxReloads
-    /\ pending_config \in (0..MaxReloads) \cup {"invalid", "none"}
+    /\ pending_config \in {"invalid", "none"} \/ pending_config \in 0..MaxReloads
     /\ reload_count \in 0..MaxReloads
     /\ reload_pending \in BOOLEAN
     /\ pipelines_running \in 0..MaxPipelines

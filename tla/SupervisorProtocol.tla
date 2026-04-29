@@ -49,8 +49,8 @@ vars == <<opamp_write_path, opamp_pending, intermediate_file,
 
 TypeOK ==
     /\ opamp_write_path \in {"intermediate", "main"}
-    /\ opamp_pending \in (0..MaxConfigs) \cup {"none"}
-    /\ intermediate_file \in (0..MaxConfigs) \cup {"empty"}
+    /\ (opamp_pending = "none" \/ opamp_pending \in 0..MaxConfigs)
+    /\ (intermediate_file = "empty" \/ intermediate_file \in 0..MaxConfigs)
     /\ supervisor_read_path \in {"intermediate", "main"}
     /\ main_config_file \in 0..MaxConfigs
     /\ supervisor_state \in {"idle", "reading", "validating", "writing", "signaling"}
