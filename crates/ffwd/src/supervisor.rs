@@ -275,7 +275,7 @@ fn spawn_child(config_path: &str) -> Result<tokio::process::Child, CliError> {
 }
 
 fn forward_signal(pid: u32, signal: i32) {
-    // Safety: sending a signal to a known child PID.
+    // SAFETY: sending a signal to a known child PID that we verified is still alive via try_wait.
     let ret = unsafe { libc::kill(pid as libc::pid_t, signal) };
     if ret != 0 {
         let err = std::io::Error::last_os_error();
