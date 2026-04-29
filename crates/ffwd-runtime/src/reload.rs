@@ -1,0 +1,497 @@
+//! Reload coordinator state machine.
+//!
+//! Encodes the lifecycle of the pipeline reload loop as an explicit state machine.
+//! Each state transition is a pure function returning effects for the executor to
+//! perform. This makes the reload logic independently testable without standing up
+//! the full async runtime.
+//!
+//! # States
+//!
+//! ```text
+//! Starting → Running ↔ Draining → Validating → Building → Running
+//!                │                                    ↓
+//!                └──────────── ShuttingDown ←─────────┘ (on fatal)
+//! ```
+
+use std::io;
+use std::path::PathBuf;
+
+/// States of the reload coordinator.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum State {
+    /// Building initial pipelines (first run).
+    Starting,
+    /// Pipelines are running, awaiting events.
+    Running,
+    /// Received reload signal; pipelines are draining.
+    Draining,
+    /// Pipelines drained; validating new config.
+    Validating,
+    /// Config validated; building new pipelines.
+    Building,
+    /// Shutting down (terminal state).
+    ShuttingDown { error: Option<String> },
+}
+
+/// Events the executor feeds into the coordinator.
+#[derive(Debug)]
+pub(crate) enum Event {
+    /// Initial pipeline build succeeded.
+    PipelinesBuilt,
+    /// Initial or rebuild pipeline build failed.
+    BuildFailed { pipeline: String, error: String },
+    /// Pipeline completed normally or errored.
+    PipelineCompleted { error: Option<io::Error> },
+    /// Process-level shutdown requested (SIGTERM / Ctrl+C).
+    ShutdownRequested,
+    /// Reload signal received (SIGHUP / HTTP / watch).
+    ReloadRequested,
+    /// Pipelines finished draining after reload signal.
+    DrainCompleted,
+    /// Pipelines did not drain in time.
+    DrainTimedOut,
+    /// New config is valid.
+    ConfigValid(Box<ffwd_config::ValidatedConfig>),
+    /// New config failed to read or validate.
+    ConfigInvalid(String),
+    /// Config diff shows non-reloadable changes.
+    ConfigNotReloadable(String),
+    /// Config diff shows no changes (but pipelines still need rebuild after drain).
+    ConfigUnchanged,
+}
+
+/// Side effects the executor must perform.
+#[derive(Debug)]
+pub(crate) enum Effect {
+    /// Build pipelines from the given config.
+    BuildPipelines,
+    /// Start running the built pipelines (enter select! loop).
+    RunPipelines,
+    /// Drain running pipelines (cancel token + wait with timeout).
+    DrainPipelines,
+    /// Read and validate the config file.
+    ValidateConfig { path: PathBuf },
+    /// Commit the validated config as current (metrics, OpAMP reporting).
+    CommitConfig,
+    /// Report a reload error (metric + log).
+    ReportReloadError(String),
+    /// Report reload success (metric).
+    ReportReloadSuccess,
+    /// Shut down cleanly.
+    Shutdown,
+    /// Fatal error — shut down with error.
+    FatalShutdown(String),
+}
+
+/// The reload coordinator.
+///
+/// Tracks whether we're in the first run, have pending validated config, etc.
+/// The executor drives this by translating async operations into events.
+pub(crate) struct ReloadCoordinator {
+    state: State,
+    first_run: bool,
+    has_pending: bool,
+    config_path: PathBuf,
+}
+
+impl ReloadCoordinator {
+    /// Create a new coordinator for the given config path.
+    pub fn new(config_path: PathBuf) -> Self {
+        Self {
+            state: State::Starting,
+            first_run: true,
+            has_pending: false,
+            config_path,
+        }
+    }
+
+    /// Current state.
+    pub fn state(&self) -> &State {
+        &self.state
+    }
+
+    /// Whether this is the first pipeline build (for banner/diagnostics).
+    pub fn is_first_run(&self) -> bool {
+        self.first_run
+    }
+
+    /// Whether a pending config was committed in the last transition.
+    pub fn has_pending(&self) -> bool {
+        self.has_pending
+    }
+
+    /// Drive the state machine. Returns effects to execute.
+    pub fn step(&mut self, event: Event) -> Vec<Effect> {
+        match (&self.state, event) {
+            // ── Starting ──
+            (State::Starting, Event::PipelinesBuilt) => {
+                self.state = State::Running;
+                self.first_run = false;
+                vec![Effect::RunPipelines]
+            }
+            (State::Starting, Event::BuildFailed { pipeline, error }) => {
+                // First-run build failure is fatal.
+                self.state = State::ShuttingDown {
+                    error: Some(format!("pipeline '{pipeline}': {error}")),
+                };
+                vec![Effect::FatalShutdown(format!(
+                    "pipeline '{pipeline}': {error}"
+                ))]
+            }
+
+            // ── Running ──
+            (State::Running, Event::PipelineCompleted { error }) => {
+                let err_msg = error.map(|e| e.to_string());
+                self.state = State::ShuttingDown { error: err_msg };
+                vec![Effect::Shutdown]
+            }
+            (State::Running, Event::ShutdownRequested) => {
+                self.state = State::ShuttingDown { error: None };
+                vec![Effect::DrainPipelines, Effect::Shutdown]
+            }
+            (State::Running, Event::ReloadRequested) => {
+                self.state = State::Draining;
+                vec![Effect::DrainPipelines]
+            }
+
+            // ── Draining ──
+            (State::Draining, Event::DrainCompleted) => {
+                self.state = State::Validating;
+                vec![Effect::ValidateConfig {
+                    path: self.config_path.clone(),
+                }]
+            }
+            (State::Draining, Event::DrainTimedOut) => {
+                self.state = State::ShuttingDown {
+                    error: Some("pipeline did not drain within 30s during reload".to_owned()),
+                };
+                vec![Effect::FatalShutdown(
+                    "pipeline did not drain within 30s during reload".to_owned(),
+                )]
+            }
+
+            // ── Validating ──
+            (State::Validating, Event::ConfigValid(_validated)) => {
+                self.state = State::Building;
+                self.has_pending = true;
+                vec![Effect::BuildPipelines]
+            }
+            (State::Validating, Event::ConfigInvalid(reason)) => {
+                // Invalid config — stay alive, rebuild old pipelines.
+                self.state = State::Building;
+                self.has_pending = false;
+                vec![Effect::ReportReloadError(reason), Effect::BuildPipelines]
+            }
+            (State::Validating, Event::ConfigNotReloadable(reason)) => {
+                // Non-reloadable change — stay alive, rebuild old pipelines.
+                self.state = State::Building;
+                self.has_pending = false;
+                vec![Effect::ReportReloadError(reason), Effect::BuildPipelines]
+            }
+            (State::Validating, Event::ConfigUnchanged) => {
+                // No changes but pipelines were drained — rebuild them.
+                self.state = State::Building;
+                self.has_pending = false;
+                vec![Effect::BuildPipelines]
+            }
+
+            // ── Building (non-first-run rebuild) ──
+            (State::Building, Event::PipelinesBuilt) => {
+                let mut effects = Vec::new();
+                if self.has_pending {
+                    effects.push(Effect::CommitConfig);
+                    effects.push(Effect::ReportReloadSuccess);
+                    self.has_pending = false;
+                }
+                self.state = State::Running;
+                effects.push(Effect::RunPipelines);
+                effects
+            }
+            (State::Building, Event::BuildFailed { pipeline, error }) => {
+                // Non-first-run build failure: log error, rebuild from current config.
+                let msg = format!("pipeline '{pipeline}': {error}");
+                self.has_pending = false;
+                self.state = State::Building;
+                vec![Effect::ReportReloadError(msg), Effect::BuildPipelines]
+            }
+
+            // ── ShuttingDown (terminal — no transitions) ──
+            (State::ShuttingDown { .. }, _) => vec![],
+
+            // ── Invalid transitions ──
+            _ => vec![],
+        }
+    }
+
+    /// Whether the coordinator has reached a terminal state.
+    pub fn is_terminal(&self) -> bool {
+        matches!(self.state, State::ShuttingDown { .. })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn coord() -> ReloadCoordinator {
+        ReloadCoordinator::new(PathBuf::from("/tmp/ffwd.yaml"))
+    }
+
+    #[test]
+    fn startup_happy_path() {
+        let mut c = coord();
+        assert_eq!(c.state(), &State::Starting);
+        assert!(c.is_first_run());
+
+        let effects = c.step(Event::PipelinesBuilt);
+        assert_eq!(c.state(), &State::Running);
+        assert!(!c.is_first_run());
+        assert!(effects.iter().any(|e| matches!(e, Effect::RunPipelines)));
+    }
+
+    #[test]
+    fn startup_build_failure_is_fatal() {
+        let mut c = coord();
+        let effects = c.step(Event::BuildFailed {
+            pipeline: "test".to_owned(),
+            error: "bad input".to_owned(),
+        });
+        assert!(c.is_terminal());
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::FatalShutdown(_)))
+        );
+    }
+
+    #[test]
+    fn reload_happy_path() {
+        let mut c = coord();
+        c.step(Event::PipelinesBuilt);
+
+        // Reload signal
+        let effects = c.step(Event::ReloadRequested);
+        assert_eq!(c.state(), &State::Draining);
+        assert!(effects.iter().any(|e| matches!(e, Effect::DrainPipelines)));
+
+        // Drain done
+        let effects = c.step(Event::DrainCompleted);
+        assert_eq!(c.state(), &State::Validating);
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::ValidateConfig { .. }))
+        );
+
+        // Config valid
+        let effects = c.step(Event::ConfigValid(Box::new(make_validated())));
+        assert_eq!(c.state(), &State::Building);
+        assert!(c.has_pending());
+        assert!(effects.iter().any(|e| matches!(e, Effect::BuildPipelines)));
+
+        // Build succeeds
+        let effects = c.step(Event::PipelinesBuilt);
+        assert_eq!(c.state(), &State::Running);
+        assert!(effects.iter().any(|e| matches!(e, Effect::CommitConfig)));
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::ReportReloadSuccess))
+        );
+        assert!(effects.iter().any(|e| matches!(e, Effect::RunPipelines)));
+    }
+
+    #[test]
+    fn invalid_config_rebuilds_old_pipelines() {
+        let mut c = coord();
+        c.step(Event::PipelinesBuilt);
+        c.step(Event::ReloadRequested);
+        c.step(Event::DrainCompleted);
+
+        let effects = c.step(Event::ConfigInvalid("bad yaml".to_owned()));
+        assert_eq!(c.state(), &State::Building);
+        assert!(!c.has_pending());
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::ReportReloadError(_)))
+        );
+        assert!(effects.iter().any(|e| matches!(e, Effect::BuildPipelines)));
+
+        // Build old config succeeds — no commit
+        let effects = c.step(Event::PipelinesBuilt);
+        assert_eq!(c.state(), &State::Running);
+        assert!(!effects.iter().any(|e| matches!(e, Effect::CommitConfig)));
+    }
+
+    #[test]
+    fn drain_timeout_is_fatal() {
+        let mut c = coord();
+        c.step(Event::PipelinesBuilt);
+        c.step(Event::ReloadRequested);
+
+        let effects = c.step(Event::DrainTimedOut);
+        assert!(c.is_terminal());
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::FatalShutdown(_)))
+        );
+    }
+
+    #[test]
+    fn shutdown_from_running() {
+        let mut c = coord();
+        c.step(Event::PipelinesBuilt);
+
+        let effects = c.step(Event::ShutdownRequested);
+        assert!(c.is_terminal());
+        assert!(effects.iter().any(|e| matches!(e, Effect::DrainPipelines)));
+        assert!(effects.iter().any(|e| matches!(e, Effect::Shutdown)));
+    }
+
+    #[test]
+    fn pipeline_error_causes_shutdown() {
+        let mut c = coord();
+        c.step(Event::PipelinesBuilt);
+
+        let effects = c.step(Event::PipelineCompleted {
+            error: Some(io::Error::new(io::ErrorKind::Other, "pipe broke")),
+        });
+        assert!(c.is_terminal());
+        assert!(effects.iter().any(|e| matches!(e, Effect::Shutdown)));
+    }
+
+    #[test]
+    fn terminal_state_ignores_events() {
+        let mut c = coord();
+        c.step(Event::PipelinesBuilt);
+        c.step(Event::ShutdownRequested);
+        assert!(c.is_terminal());
+
+        // Any further events are no-ops
+        let effects = c.step(Event::ReloadRequested);
+        assert!(effects.is_empty());
+        assert!(c.is_terminal());
+    }
+
+    fn make_validated() -> ffwd_config::ValidatedConfig {
+        let yaml = "pipelines:\n  test:\n    inputs:\n      - type: stdin\n        format: json\n    outputs:\n      - type: stdout\n        format: json\n";
+        ffwd_config::ValidatedConfig::from_yaml(yaml, None).expect("valid yaml")
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    /// Generate a random event for property testing.
+    /// We use simplified events (no io::Error since it's not Clone).
+    fn arb_event() -> impl Strategy<Value = Event> {
+        prop_oneof![
+            Just(Event::PipelinesBuilt),
+            Just(Event::BuildFailed {
+                pipeline: "test".to_owned(),
+                error: "fail".to_owned(),
+            }),
+            Just(Event::PipelineCompleted { error: None }),
+            Just(Event::ShutdownRequested),
+            Just(Event::ReloadRequested),
+            Just(Event::DrainCompleted),
+            Just(Event::DrainTimedOut),
+            Just(Event::ConfigInvalid("bad".to_owned())),
+            Just(Event::ConfigNotReloadable("restart needed".to_owned())),
+            Just(Event::ConfigUnchanged),
+        ]
+    }
+
+    proptest! {
+        /// Any event sequence keeps the coordinator in a valid state (never panics).
+        #[test]
+        fn never_panics(events in proptest::collection::vec(arb_event(), 1..100)) {
+            let mut c = ReloadCoordinator::new(PathBuf::from("/tmp/test.yaml"));
+            for event in events {
+                let _effects = c.step(event);
+            }
+        }
+
+        /// Once terminal, the coordinator stays terminal forever.
+        #[test]
+        fn terminal_is_absorbing(
+            prefix in proptest::collection::vec(arb_event(), 0..30),
+            suffix in proptest::collection::vec(arb_event(), 1..30),
+        ) {
+            let mut c = ReloadCoordinator::new(PathBuf::from("/tmp/test.yaml"));
+            for event in &prefix {
+                c.step(event.clone());
+            }
+            if c.is_terminal() {
+                for event in suffix {
+                    let effects = c.step(event);
+                    prop_assert!(effects.is_empty());
+                    prop_assert!(c.is_terminal());
+                }
+            }
+        }
+
+        /// Shutdown from Running always reaches terminal.
+        #[test]
+        fn shutdown_always_terminal(_n in 0u32..10) {
+            let mut c = ReloadCoordinator::new(PathBuf::from("/tmp/test.yaml"));
+            c.step(Event::PipelinesBuilt);
+            prop_assert_eq!(c.state(), &State::Running);
+            c.step(Event::ShutdownRequested);
+            prop_assert!(c.is_terminal());
+        }
+
+        /// DrainTimedOut always produces a fatal shutdown.
+        #[test]
+        fn drain_timeout_always_fatal(_n in 0u32..10) {
+            let mut c = ReloadCoordinator::new(PathBuf::from("/tmp/test.yaml"));
+            c.step(Event::PipelinesBuilt);
+            c.step(Event::ReloadRequested);
+            prop_assert_eq!(c.state(), &State::Draining);
+            let effects = c.step(Event::DrainTimedOut);
+            prop_assert!(c.is_terminal());
+            prop_assert!(
+                effects
+                    .iter()
+                    .any(|e| matches!(e, Effect::FatalShutdown(_)))
+            );
+        }
+
+        /// A full reload cycle (drain → validate → build) returns to Running.
+        #[test]
+        fn reload_cycle_returns_to_running(_n in 0u32..10) {
+            let mut c = ReloadCoordinator::new(PathBuf::from("/tmp/test.yaml"));
+            c.step(Event::PipelinesBuilt);
+            c.step(Event::ReloadRequested);
+            c.step(Event::DrainCompleted);
+            c.step(Event::ConfigUnchanged);
+            c.step(Event::PipelinesBuilt);
+            prop_assert_eq!(c.state(), &State::Running);
+        }
+    }
+
+    impl Clone for Event {
+        fn clone(&self) -> Self {
+            match self {
+                Event::PipelinesBuilt => Event::PipelinesBuilt,
+                Event::BuildFailed { pipeline, error } => Event::BuildFailed {
+                    pipeline: pipeline.clone(),
+                    error: error.clone(),
+                },
+                Event::PipelineCompleted { error: _ } => Event::PipelineCompleted { error: None },
+                Event::ShutdownRequested => Event::ShutdownRequested,
+                Event::ReloadRequested => Event::ReloadRequested,
+                Event::DrainCompleted => Event::DrainCompleted,
+                Event::DrainTimedOut => Event::DrainTimedOut,
+                Event::ConfigValid(v) => Event::ConfigValid(v.clone()),
+                Event::ConfigInvalid(s) => Event::ConfigInvalid(s.clone()),
+                Event::ConfigNotReloadable(s) => Event::ConfigNotReloadable(s.clone()),
+                Event::ConfigUnchanged => Event::ConfigUnchanged,
+            }
+        }
+    }
+}
