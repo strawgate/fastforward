@@ -747,6 +747,26 @@ jobs:
         with:
           tla-file: tla/MCFanoutSink.tla
           config: tla/FanoutSink.liveness.cfg
+      - name: "TLC: SupervisorProtocol — safety"
+        uses: ./.github/actions/run-tlc
+        with:
+          tla-file: tla/MCSupervisorProtocol.tla
+          config: tla/SupervisorProtocol.cfg
+      - name: "TLC: SupervisorProtocol — liveness"
+        uses: ./.github/actions/run-tlc
+        with:
+          tla-file: tla/MCSupervisorProtocol.tla
+          config: tla/SupervisorProtocol.liveness.cfg
+      - name: "TLC: ReloadStateMachine — safety"
+        uses: ./.github/actions/run-tlc
+        with:
+          tla-file: tla/MCReloadStateMachine.tla
+          config: tla/ReloadStateMachine.cfg
+      - name: "TLC: ReloadStateMachine — liveness"
+        uses: ./.github/actions/run-tlc
+        with:
+          tla-file: tla/MCReloadStateMachine.tla
+          config: tla/ReloadStateMachine.liveness.cfg
 
   tlc-liveness-coverage:
     name: "TLA+ model checking (liveness + coverage)"
