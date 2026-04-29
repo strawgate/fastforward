@@ -168,7 +168,8 @@ impl Pipeline {
                             tracing::debug!("received drain ingress control message");
                             let _ = self.worker_control_tx.send(ControlMessage::DrainIngress);
                             // TODO(#233): stop accepting new input but finish in-flight batches.
-                            should_drain_input_channel = false;
+                            // Keep input-channel drain enabled so a later shutdown still
+                            // drains already-queued messages instead of dropping them.
                         }
                         Some(ControlMessage::Flush) => {
                             tracing::debug!("received flush control message");
