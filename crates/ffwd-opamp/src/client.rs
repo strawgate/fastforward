@@ -138,7 +138,7 @@ impl OpampClient {
             "opamp: starting client"
         );
 
-        let poll_interval = Duration::from_secs(self.config.poll_interval_secs);
+        let poll_interval = Duration::from_secs(self.config.poll_interval_secs.max(1));
         let state = Arc::clone(&self.state);
         let accept_remote_config = self.config.accept_remote_config;
         let reload_tx = self.reload_tx.clone();
@@ -299,7 +299,8 @@ impl ApiCallbacks for &mut OpampHandler {
         );
 
         // Validate before writing.
-        match ffwd_config::Config::load_str(&yaml) {
+        let base_path = self.remote_config_path.parent();
+        match ffwd_config::Config::load_str_with_base_path(&yaml, base_path) {
             Ok(_) => {
                 // Atomic write: temp file → rename to target path so the bootstrap
                 // reload loop reads the new config when re-reading from disk.

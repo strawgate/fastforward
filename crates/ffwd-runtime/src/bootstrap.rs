@@ -58,7 +58,7 @@ pub struct RunOptions<'a> {
     /// Optional auto-shutdown duration for benchmarking helpers.
     pub auto_shutdown_after: Option<Duration>,
     /// Watch config file for changes and auto-reload.
-    pub watch_config: bool,
+    pub should_watch_config: bool,
 }
 
 #[allow(clippy::ignored_unit_patterns, clippy::needless_continue)]
@@ -186,7 +186,7 @@ pub async fn run_pipelines(
     }
 
     // File watcher: monitor config file for changes and trigger reload.
-    if options.watch_config {
+    if options.should_watch_config {
         let config_path = PathBuf::from(options.config_path);
         let reload_tx_for_watcher = reload_tx.clone();
         let shutdown_for_watcher = shutdown.clone();
@@ -531,11 +531,17 @@ pub async fn run_pipelines(
                     // lifecycle management. The drain cost is ~200ms in practice.
                     tracing::info!("config reload: draining pipelines");
                     pipeline_shutdown.cancel();
-                    let _ = tokio::time::timeout(
+                    if tokio::time::timeout(
                         Duration::from_secs(30),
                         main_pipe.run_async(&pipeline_shutdown),
                     )
-                    .await;
+                    .await
+                    .is_err()
+                    {
+                        tracing::warn!(
+                            "main pipeline did not drain within 30s, proceeding with reload"
+                        );
+                    }
                     reload_requested = true;
                 }
             }
@@ -545,10 +551,11 @@ pub async fn run_pipelines(
 
         // Join sibling pipeline tasks.
         for h in handles {
-            match h.await {
-                Ok(Err(e)) => tracing::error!(error = %e, "sibling pipeline error"),
-                Err(e) => tracing::error!(error = %e, "pipeline task panicked"),
-                Ok(Ok(())) => {}
+            match tokio::time::timeout(Duration::from_secs(30), h).await {
+                Ok(Ok(Err(e))) => tracing::error!(error = %e, "sibling pipeline error"),
+                Ok(Err(e)) => tracing::error!(error = %e, "pipeline task panicked"),
+                Err(_) => tracing::warn!("sibling pipeline did not drain within 30s"),
+                Ok(Ok(Ok(()))) => {}
             }
         }
 

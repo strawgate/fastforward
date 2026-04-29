@@ -765,7 +765,7 @@ pub(crate) async fn run_pipelines(
             use_color: use_color(),
             json_logs_for_stderr: use_json_logs_for_stderr(io::stderr().is_terminal()),
             auto_shutdown_after,
-            watch_config,
+            should_watch_config: watch_config,
         },
     )
     .await
