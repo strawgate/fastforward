@@ -128,6 +128,7 @@ xxhash-rust = { version = "0.8.15", features = ["xxh32", "xxh64"] }
 rustls = { version = "0.23", default-features = false, features = [
     "aws_lc_rs",
 ] }
+rustix = { version = "1", features = ["fs"] }
 rcgen = "0.14"
 
 [workspace.lints.clippy]
