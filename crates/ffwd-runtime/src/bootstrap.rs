@@ -233,16 +233,18 @@ pub async fn run_pipelines(
                                 })
                             });
                             if involves_config
-                                && (event.kind.is_modify()
-                                    || event.kind.is_create()
-                                    || matches!(event.kind, notify::EventKind::Remove(_)))
+                                && (event.kind.is_modify() || event.kind.is_create())
                             {
                                 // Debounce: wait for writes to settle.
                                 std::thread::sleep(Duration::from_millis(500));
                                 // Drain any additional events that arrived during debounce.
                                 while rx.try_recv().is_ok() {}
-                                tracing::info!("config watcher: file changed, triggering reload");
-                                let _ = reload_tx_for_watcher.try_send(());
+                                // Post-debounce: verify file exists (atomic rename may have
+                                // emitted a transient event while the file was absent).
+                                if config_path.exists() {
+                                    tracing::info!("config watcher: file changed, triggering reload");
+                                    let _ = reload_tx_for_watcher.try_send(());
+                                }
                             }
                         }
                         Ok(Err(e)) => {
@@ -595,6 +597,11 @@ pub async fn run_pipelines(
                 unchanged = diff.unchanged.len(),
                 "config reload: diff computed"
             );
+            if !diff.is_reloadable() {
+                tracing::warn!(
+                    "config reload: server bind address changed — this requires a full process restart to take effect"
+                );
+            }
         }
         reload_success.add(1, &[]);
 

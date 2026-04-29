@@ -35,9 +35,14 @@ pub struct OpampStateHandle {
 impl OpampStateHandle {
     /// Update the effective configuration reported to the OpAMP server.
     pub fn set_effective_config(&self, yaml: &str) {
-        if let Ok(mut state) = self.state.lock() {
-            state.effective_config = yaml.to_string();
-            state.last_config_applied = true;
+        match self.state.lock() {
+            Ok(mut state) => {
+                state.effective_config = yaml.to_string();
+                state.last_config_applied = true;
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "opamp: state mutex poisoned, cannot update effective config");
+            }
         }
     }
 }
@@ -83,10 +88,11 @@ impl OpampClient {
         }
     }
 
-    /// Update the effective configuration reported to the OpAMP server.
+    /// Update the effective configuration (used internally and in tests).
     ///
-    /// Should be called after each successful reload with the new config YAML.
-    pub fn set_effective_config(&self, yaml: &str) {
+    /// Production callers should use [`OpampStateHandle::set_effective_config`] instead.
+    #[cfg(test)]
+    pub(crate) fn set_effective_config(&self, yaml: &str) {
         if let Ok(mut state) = self.state.lock() {
             state.effective_config = yaml.to_string();
             state.last_config_applied = true;
@@ -158,6 +164,10 @@ impl OpampClient {
         };
 
         let mut api = Api::new(connection_settings, Box::new(&mut handler));
+
+        // Initial poll: report identity/status to server immediately on connect
+        // rather than waiting for the first poll_interval to elapse.
+        api.poll().await;
 
         // Main polling loop.
         loop {
