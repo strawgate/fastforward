@@ -81,8 +81,8 @@ pub(crate) async fn cmd_supervised(config_path: &str) -> Result<(), CliError> {
     let opamp_client = ffwd_opamp::OpampClient::new(opamp_config.clone(), identity, reload_tx);
     let state_handle = opamp_client.state_handle();
 
-    // Report initial effective config.
-    state_handle.set_effective_config(&config_yaml);
+    // Report initial effective config (use validated YAML for consistency).
+    state_handle.set_effective_config(validated.effective_yaml());
 
     // Spawn OpAMP client task.
     // In supervisor mode, the OpAMP client writes to the intermediate remote
@@ -91,12 +91,14 @@ pub(crate) async fn cmd_supervised(config_path: &str) -> Result<(), CliError> {
     let opamp_shutdown = shutdown.clone();
     let opamp_data_dir = data_dir.clone();
     let opamp_remote_config_path = remote_config_path.clone();
+    let opamp_config_base = config_path.parent().map(PathBuf::from);
     let opamp_handle = tokio::spawn(async move {
         if let Err(e) = opamp_client
             .run(
                 opamp_shutdown,
                 opamp_data_dir.as_deref(),
                 Some(opamp_remote_config_path.as_path()),
+                opamp_config_base.as_deref(),
             )
             .await
         {
@@ -350,12 +352,20 @@ async fn handle_remote_config(
     loop {
         match effect {
             Effect::ReadAndValidate(path) => {
-                let event = match ffwd_config::ValidatedConfig::from_file(&path) {
-                    Ok(v) => Event::ReadOk(Box::new(v)),
-                    Err(e) => Event::ReadFailed(format!(
-                        "failed to load or validate {}: {e}",
-                        path.display()
-                    )),
+                // Read the staged config file, then validate with the child's
+                // config directory as base (not the staging dir) so relative
+                // paths resolve correctly against the child's real location.
+                let event = match std::fs::read_to_string(&path) {
+                    Ok(yaml) => {
+                        match ffwd_config::ValidatedConfig::from_yaml(&yaml, config_path.parent()) {
+                            Ok(v) => Event::ReadOk(Box::new(v)),
+                            Err(e) => Event::ReadFailed(format!(
+                                "validation failed for {}: {e}",
+                                path.display()
+                            )),
+                        }
+                    }
+                    Err(e) => Event::ReadFailed(format!("failed to read {}: {e}", path.display())),
                 };
                 effect = flow.step(event);
             }

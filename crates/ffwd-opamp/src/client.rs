@@ -54,7 +54,7 @@ impl OpampStateHandle {
 /// ```ignore
 /// let client = OpampClient::new(opamp_config, identity, reload_tx);
 /// // Spawn in a background task:
-/// tokio::spawn(async move { client.run(shutdown).await });
+/// tokio::spawn(async move { client.run(shutdown, data_dir, config_path, base_path).await });
 /// ```
 pub struct OpampClient {
     config: OpampConfig,
@@ -150,11 +150,15 @@ impl OpampClient {
     /// - `data_dir`: Data directory for state persistence
     /// - `config_path`: Path where accepted remote config is written (atomic rename).
     ///   The bootstrap reload loop re-reads this path on reload signals.
+    /// - `config_base_path`: Base directory for resolving relative paths during
+    ///   config validation. In supervised mode this should be the child's real
+    ///   config directory (not the staging file's parent).
     pub async fn run(
         self,
         shutdown: tokio_util::sync::CancellationToken,
         data_dir: Option<&Path>,
         config_path: Option<&Path>,
+        config_base_path: Option<&Path>,
     ) -> Result<(), OpampError> {
         tracing::info!(
             endpoint = %self.config.endpoint,
@@ -173,11 +177,15 @@ impl OpampClient {
         );
 
         // Create the OpAMP API callbacks handler.
+        let validation_base_path = config_base_path
+            .map(PathBuf::from)
+            .or_else(|| remote_config_path.parent().map(PathBuf::from));
         let mut handler = OpampHandler {
             state,
             accept_remote_config,
             reload_tx,
             remote_config_path,
+            validation_base_path,
         };
 
         let connection_settings = ConnectionSettings {
@@ -218,6 +226,9 @@ struct OpampHandler {
     accept_remote_config: bool,
     reload_tx: tokio::sync::mpsc::Sender<()>,
     remote_config_path: PathBuf,
+    /// Base directory for validating config (resolving relative paths).
+    /// In supervised mode this is the child's config dir, not the staging dir.
+    validation_base_path: Option<PathBuf>,
 }
 
 impl ApiCallbacks for &mut OpampHandler {
@@ -325,8 +336,9 @@ impl ApiCallbacks for &mut OpampHandler {
             "opamp: received remote configuration"
         );
 
-        // Validate before writing.
-        let base_path = self.remote_config_path.parent();
+        // Validate before writing. Use the config base path (child's config dir
+        // in supervised mode) rather than the staging file's parent directory.
+        let base_path = self.validation_base_path.as_deref();
         match ffwd_config::ValidatedConfig::from_yaml(&yaml, base_path) {
             Ok(validated) => {
                 // Atomic write: temp file → rename to target path so the bootstrap

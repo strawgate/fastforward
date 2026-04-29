@@ -102,7 +102,7 @@ pub(crate) enum Effect {
 /// The executor drives this by translating async operations into events.
 pub(crate) struct ReloadCoordinator {
     state: State,
-    first_run: bool,
+    is_first_run: bool,
     has_pending: bool,
     rebuild_attempts: u32,
     config_path: PathBuf,
@@ -116,7 +116,7 @@ impl ReloadCoordinator {
     pub fn new(config_path: PathBuf) -> Self {
         Self {
             state: State::Starting,
-            first_run: true,
+            is_first_run: true,
             has_pending: false,
             rebuild_attempts: 0,
             config_path,
@@ -130,7 +130,7 @@ impl ReloadCoordinator {
 
     /// Whether this is the first pipeline build (for banner/diagnostics).
     pub fn is_first_run(&self) -> bool {
-        self.first_run
+        self.is_first_run
     }
 
     /// Whether a validated config is pending commit.
@@ -161,7 +161,7 @@ impl ReloadCoordinator {
             // ── Starting ──
             (State::Starting, Event::PipelinesBuilt) => {
                 self.state = State::Running;
-                self.first_run = false;
+                self.is_first_run = false;
                 vec![Effect::RunPipelines]
             }
             (State::Starting, Event::BuildFailed { pipeline, error }) => {
@@ -236,9 +236,10 @@ impl ReloadCoordinator {
                 let mut effects = Vec::new();
                 if self.has_pending {
                     effects.push(Effect::CommitConfig);
-                    effects.push(Effect::ReportReloadSuccess);
                     self.has_pending = false;
                 }
+                // Always report reload success for a completed reload cycle.
+                effects.push(Effect::ReportReloadSuccess);
                 self.state = State::Running;
                 effects.push(Effect::RunPipelines);
                 effects
@@ -752,14 +753,14 @@ mod kani_proofs {
     /// Construct a coordinator with arbitrary internal state for single-step proofs.
     fn arb_coordinator(
         state_tag: u8,
-        first_run: bool,
+        is_first_run: bool,
         has_pending: bool,
         attempts: u32,
     ) -> ReloadCoordinator {
         let state = arb_state(state_tag);
         ReloadCoordinator {
             state,
-            first_run,
+            is_first_run,
             has_pending,
             rebuild_attempts: attempts % (MAX_REBUILD_ATTEMPTS + 1),
             config_path: PathBuf::from("/x"),
@@ -775,7 +776,7 @@ mod kani_proofs {
 
         let mut c = ReloadCoordinator {
             state: State::ShuttingDown { error: None },
-            first_run: kani::any(),
+            is_first_run: kani::any(),
             has_pending: kani::any(),
             rebuild_attempts: kani::any::<u32>() % (MAX_REBUILD_ATTEMPTS + 1),
             config_path: PathBuf::from("/x"),
@@ -818,7 +819,7 @@ mod kani_proofs {
     fn verify_first_run_build_failure_is_fatal() {
         let mut c = ReloadCoordinator {
             state: State::Starting,
-            first_run: true,
+            is_first_run: true,
             has_pending: false,
             rebuild_attempts: 0,
             config_path: PathBuf::from("/x"),
@@ -846,7 +847,7 @@ mod kani_proofs {
     fn verify_rebuild_attempts_bounded() {
         let mut c = ReloadCoordinator {
             state: State::Building,
-            first_run: false,
+            is_first_run: false,
             has_pending: kani::any(),
             rebuild_attempts: kani::any::<u32>() % (MAX_REBUILD_ATTEMPTS + 1),
             config_path: PathBuf::from("/x"),

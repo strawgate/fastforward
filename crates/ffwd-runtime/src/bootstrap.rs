@@ -289,12 +289,14 @@ pub async fn run_pipelines(
         let opamp_state = client.state_handle();
         opamp_state.set_effective_config(options.config_yaml);
         let opamp_config_path = PathBuf::from(options.config_path);
+        let opamp_base_path = opamp_config_path.parent().map(PathBuf::from);
         tokio::spawn(async move {
             if let Err(e) = client
                 .run(
                     shutdown_for_opamp,
                     data_dir.as_deref(),
                     Some(opamp_config_path.as_path()),
+                    opamp_base_path.as_deref(),
                 )
                 .await
             {
@@ -614,7 +616,9 @@ pub async fn run_pipelines(
                 }
 
                 if break_outer {
-                    break;
+                    // Coordinator is now in ShuttingDown — let the next
+                    // iteration handle error propagation via the ShuttingDown arm.
+                    continue;
                 }
             }
 

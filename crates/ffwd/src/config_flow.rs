@@ -6,6 +6,15 @@
 //!
 //! This module is the single source of truth for config-flow transitions.
 //! The proptest suite verifies properties against this same machine.
+//!
+//! # Why not typestate?
+//!
+//! This module uses a runtime enum (`State`) rather than compile-time typestate
+//! because: (1) the machine is cyclic (Idle returns to Idle) so typestate cannot
+//! express re-entry without recursive types; (2) transitions are driven by
+//! dynamic I/O results that arrive as runtime events; (3) the executor stores
+//! the `ConfigFlow` in a single binding across `await` points; (4) the 4-state
+//! space is already exhaustively covered by proptest and Kani proofs.
 
 use std::path::PathBuf;
 
