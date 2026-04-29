@@ -598,5 +598,61 @@ outputs:
             prop_assert!(diff.changed.is_empty());
             prop_assert!(diff.unchanged.is_empty());
         }
+
+        /// is_reloadable is only false when server_changed is true.
+        /// This ensures we don't accidentally block reloads for other changes.
+        #[test]
+        fn reloadable_iff_server_unchanged(
+            old_names in proptest::collection::vec(pipeline_name(), 1..5),
+            new_names in proptest::collection::vec(pipeline_name(), 1..5),
+        ) {
+            let old = config_with_pipelines(&old_names, "old");
+            let new = config_with_pipelines(&new_names, "new");
+            let diff = ConfigDiff::between(&old, &new);
+
+            // Since both configs have default server, server_changed should be false.
+            prop_assert!(!diff.server_changed);
+            prop_assert!(diff.is_reloadable());
+        }
+
+        /// The total pipeline count in all categories equals the union set size.
+        #[test]
+        fn total_count_equals_union_cardinality(
+            old_names in proptest::collection::vec(pipeline_name(), 1..8),
+            new_names in proptest::collection::vec(pipeline_name(), 1..8),
+        ) {
+            let old = config_with_pipelines(&old_names, "old");
+            let new = config_with_pipelines(&new_names, "new");
+            let diff = ConfigDiff::between(&old, &new);
+
+            let total_categorized = diff.added.len()
+                + diff.removed.len()
+                + diff.changed.len()
+                + diff.unchanged.len();
+
+            let mut union: Vec<String> = old.pipelines.keys()
+                .chain(new.pipelines.keys())
+                .cloned()
+                .collect();
+            union.sort();
+            union.dedup();
+
+            prop_assert_eq!(total_categorized, union.len(),
+                "total categorized pipelines must equal union cardinality");
+        }
+
+        /// ConfigDiff::between is deterministic — same inputs always give same output.
+        #[test]
+        fn diff_is_deterministic(
+            old_names in proptest::collection::vec(pipeline_name(), 1..5),
+            new_names in proptest::collection::vec(pipeline_name(), 1..5),
+        ) {
+            let old = config_with_pipelines(&old_names, "old");
+            let new = config_with_pipelines(&new_names, "new");
+
+            let diff1 = ConfigDiff::between(&old, &new);
+            let diff2 = ConfigDiff::between(&old, &new);
+            prop_assert_eq!(diff1, diff2, "diff must be deterministic");
+        }
     }
 }

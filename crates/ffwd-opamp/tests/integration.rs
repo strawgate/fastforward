@@ -256,4 +256,51 @@ mod proptests {
             prop_assert!(path.to_string_lossy().contains("opamp_remote_config"));
         }
     }
+
+    /// remote_config_path is always a YAML file (has .yaml extension).
+    proptest! {
+        #[test]
+        fn remote_config_path_is_yaml(
+            suffix in "[a-z]{1,10}",
+        ) {
+            let dir = tempfile::tempdir().expect("create temp dir");
+            let sub = dir.path().join(&suffix);
+            std::fs::create_dir_all(&sub).expect("create sub dir");
+            let path = ffwd_opamp::OpampClient::remote_config_path(Some(&sub));
+            prop_assert!(
+                path.extension().map_or(false, |ext| ext == "yaml"),
+                "remote config path must have .yaml extension: {path:?}"
+            );
+        }
+    }
+
+    /// remote_config_path with None uses temp dir (never panics).
+    proptest! {
+        #[test]
+        fn remote_config_path_none_never_panics(
+            _seed in 0u32..100,
+        ) {
+            let path = ffwd_opamp::OpampClient::remote_config_path(None);
+            prop_assert!(!path.as_os_str().is_empty());
+            prop_assert!(path.to_string_lossy().contains("ffwd_opamp_remote_config"));
+        }
+    }
+
+    /// Supervisor-mode contract: remote_config_path NEVER equals any plausible
+    /// main config path (they must be different files).
+    proptest! {
+        #[test]
+        fn remote_config_path_never_collides_with_main(
+            config_name in "(ffwd|config|pipeline)\\.ya?ml",
+        ) {
+            let dir = tempfile::tempdir().expect("create temp dir");
+            let main_config = dir.path().join(&config_name);
+            let remote = ffwd_opamp::OpampClient::remote_config_path(Some(dir.path()));
+
+            prop_assert_ne!(
+                main_config, remote,
+                "remote config path must never equal main config path"
+            );
+        }
+    }
 }

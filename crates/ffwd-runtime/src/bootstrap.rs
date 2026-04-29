@@ -84,8 +84,9 @@ pub async fn run_pipelines(
     // Process-level shutdown token — when cancelled the entire process exits.
     let shutdown = CancellationToken::new();
 
-    // Reload channel: SIGHUP → reload orchestrator.
-    let (reload_tx, mut reload_rx) = tokio::sync::mpsc::channel::<()>(1);
+    // Reload channel: multiple sources (SIGHUP, file watcher, OpAMP, HTTP) feed
+    // into this channel. Capacity 4 avoids dropping signals during pipeline drain.
+    let (reload_tx, mut reload_rx) = tokio::sync::mpsc::channel::<()>(4);
 
     #[cfg(unix)]
     let (mut sigterm, mut sighup, mut sigusr1, mut sigusr2) = {

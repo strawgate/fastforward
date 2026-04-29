@@ -681,6 +681,60 @@ model.
 
 ---
 
+## ReloadStateMachine.tla
+
+Models the ffwd config reload lifecycle triggered by SIGHUP, file watch,
+HTTP endpoint, or OpAMP remote config push.
+
+### What it proves
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `AlwaysProgress` | Safety | Running state always has ≥1 pipeline running |
+| `NoPipelinesDuringBuild` | Safety | No pipelines run during the building phase |
+| `ConfigMonotonic` | Safety | Config version never decreases |
+| `OnlyValidConfigsApplied` | Safety | Only validated configs replace the active config |
+| `ReloadEventuallyCompletes` | Liveness | Draining state eventually transitions to running |
+| `AlwaysReturnsToRunning` | Liveness | System always returns to running state |
+
+### How to run
+
+```bash
+just tlc MCReloadStateMachine.tla ReloadStateMachine.cfg          # safety
+just tlc MCReloadStateMachine.tla ReloadStateMachine.liveness.cfg # liveness
+```
+
+---
+
+## SupervisorProtocol.tla
+
+Models the supervisor mode interaction between OpAMP client, supervisor
+process, and child process. Verifies the critical path contract (OpAMP
+writes to intermediate file, supervisor reads from same file) and PID
+safety (never signals a dead/reused child PID).
+
+### What it proves
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `PathConsistency` | Safety | OpAMP write path always equals supervisor read path |
+| `NeverSignalDeadChild` | Safety | Signal only sent when child alive and same PID generation |
+| `ConfigMonotonic` | Safety | Main config version never decreases |
+| `OnlyValidatedConfigsReachMain` | Safety | Main config changes only via supervisor validation |
+| `ChildConfigBounded` | Safety | Child config ≤ main config version |
+| `ConfigEventuallyApplied` | Liveness | Every pushed config eventually reaches child |
+| `CrashEventuallyRecovered` | Liveness | Crashed child is eventually respawned |
+| `SupervisorAlwaysReturnsToIdle` | Liveness | Supervisor always returns to idle state |
+
+### How to run
+
+```bash
+just tlc MCSupervisorProtocol.tla SupervisorProtocol.cfg          # safety
+just tlc MCSupervisorProtocol.tla SupervisorProtocol.liveness.cfg # liveness
+```
+
+---
+
 ## Resources for learning TLA+
 
 - [Learn TLA+](https://learntla.com) — the best introductory resource
