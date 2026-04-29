@@ -49,19 +49,31 @@ pipelines:
     let config_v2 = Config::load_str(yaml_v2).expect("parse v2");
 
     // Build and run v1.
-    let mut pipeline_v1 =
-        Pipeline::from_config_with_data_dir("test", &config_v1.pipelines["test"], &meter, None, None)
-            .expect("build v1");
+    let mut pipeline_v1 = Pipeline::from_config_with_data_dir(
+        "test",
+        &config_v1.pipelines["test"],
+        &meter,
+        None,
+        None,
+    )
+    .expect("build v1");
     let shutdown = CancellationToken::new();
-    let result = tokio::time::timeout(Duration::from_secs(10), pipeline_v1.run_async(&shutdown)).await;
+    let result =
+        tokio::time::timeout(Duration::from_secs(10), pipeline_v1.run_async(&shutdown)).await;
     assert!(result.is_ok(), "v1 should finish");
 
     // Build and run v2 (simulating a reload).
-    let mut pipeline_v2 =
-        Pipeline::from_config_with_data_dir("test", &config_v2.pipelines["test"], &meter, None, None)
-            .expect("build v2");
+    let mut pipeline_v2 = Pipeline::from_config_with_data_dir(
+        "test",
+        &config_v2.pipelines["test"],
+        &meter,
+        None,
+        None,
+    )
+    .expect("build v2");
     let shutdown2 = CancellationToken::new();
-    let result = tokio::time::timeout(Duration::from_secs(10), pipeline_v2.run_async(&shutdown2)).await;
+    let result =
+        tokio::time::timeout(Duration::from_secs(10), pipeline_v2.run_async(&shutdown2)).await;
     assert!(result.is_ok(), "v2 should finish");
 }
 

@@ -27,9 +27,7 @@ async fn client_starts_and_shuts_down_cleanly() {
     let shutdown = CancellationToken::new();
     let shutdown_clone = shutdown.clone();
 
-    let handle = tokio::spawn(async move {
-        client.run(shutdown_clone, None).await
-    });
+    let handle = tokio::spawn(async move { client.run(shutdown_clone, None).await });
 
     // Let the client run briefly.
     tokio::time::sleep(Duration::from_millis(100)).await;
