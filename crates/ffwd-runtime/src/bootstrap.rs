@@ -341,6 +341,7 @@ pub async fn run_pipelines(
         .build();
 
     let mut current_config = config;
+    let mut pending_config: Option<ffwd_config::Config> = None;
     let mut first_run = true;
     let mut pipeline_metrics: Vec<Arc<ffwd_diagnostics::diagnostics::PipelineMetrics>> = Vec::new();
     // Suppress unused_assignments: initial empty value is overwritten in the
@@ -349,8 +350,11 @@ pub async fn run_pipelines(
 
     'reload: loop {
         // ── Build pipelines ──
+        // Use pending_config if available (from a successful reload validation),
+        // otherwise use current_config (for first_run or retry after build failure).
+        let build_config = pending_config.as_ref().unwrap_or(&current_config);
         let mut pipelines = Vec::new();
-        for (name, pipe_cfg) in &current_config.pipelines {
+        for (name, pipe_cfg) in &build_config.pipelines {
             match Pipeline::from_config_with_data_dir(
                 name,
                 pipe_cfg,
@@ -366,8 +370,11 @@ pub async fn run_pipelines(
                     tracing::error!(
                         pipeline = %name,
                         error = %e,
-                        "config reload failed: pipeline build error, keeping previous config"
+                        "config reload failed: pipeline build error"
                     );
+                    // Discard the failed config and revert to current_config for
+                    // the next attempt — ensures we can rebuild working pipelines.
+                    pending_config = None;
                     // Wait for the next reload signal to try again.
                     tokio::select! {
                         _ = shutdown.cancelled() => break 'reload,
@@ -375,6 +382,10 @@ pub async fn run_pipelines(
                     }
                 }
             }
+        }
+        // Pipeline build succeeded — commit the pending config.
+        if let Some(committed) = pending_config.take() {
+            current_config = committed;
         }
 
         // ── Diagnostics server (first run only) ──
@@ -617,7 +628,7 @@ pub async fn run_pipelines(
             state.set_effective_config(&new_yaml);
         }
 
-        current_config = new_config;
+        pending_config = Some(new_config);
         // Loop back to rebuild pipelines with new config.
     }
 

@@ -62,8 +62,10 @@ pipelines:
 
         let binary = ff_binary();
         if !binary.exists() {
-            eprintln!("skipping: ff binary not found at {}", binary.display());
-            return;
+            panic!(
+                "ff binary not found at {} — run `cargo build -p ffwd` first",
+                binary.display()
+            );
         }
 
         let child = Command::new(&binary)
@@ -112,8 +114,10 @@ pipelines:
 
         let binary = ff_binary();
         if !binary.exists() {
-            eprintln!("skipping: ff binary not found at {}", binary.display());
-            return;
+            panic!(
+                "ff binary not found at {} — run `cargo build -p ffwd` first",
+                binary.display()
+            );
         }
 
         let child = Command::new(&binary)
@@ -159,8 +163,10 @@ pipelines:
 
         let binary = ff_binary();
         if !binary.exists() {
-            eprintln!("skipping: ff binary not found at {}", binary.display());
-            return;
+            panic!(
+                "ff binary not found at {} — run `cargo build -p ffwd` first",
+                binary.display()
+            );
         }
 
         let child = Command::new(&binary)

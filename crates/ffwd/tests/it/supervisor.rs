@@ -41,11 +41,10 @@ opamp:
         .join("ff");
 
     if !exe.exists() {
-        eprintln!(
-            "skipping supervisor test: ff binary not found at {}",
+        panic!(
+            "ff binary not found at {} — run `cargo build -p ffwd` first",
             exe.display()
         );
-        return;
     }
 
     let mut child = tokio::process::Command::new(&exe)
