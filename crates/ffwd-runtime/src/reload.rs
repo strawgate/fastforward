@@ -5,12 +5,22 @@
 //! perform. This makes the reload logic independently testable without standing up
 //! the full async runtime.
 //!
+//! # Why not typestate?
+//!
+//! This module uses a runtime enum (`State`) rather than compile-time typestate
+//! because: (1) transitions are driven by dynamic `Event` values from multiple
+//! asynchronous sources (signals, timers, I/O); (2) the executor must store the
+//! coordinator in a single binding across a `loop`/`select!`; (3) the state space
+//! is already proven correct by proptest properties and unit tests covering every
+//! (state, event) pair. A typestate encoding would require existential types or
+//! boxing at every await boundary with no additional safety benefit here.
+//!
 //! # States
 //!
 //! ```text
 //! Starting → Running ↔ Draining → Validating → Building → Running
 //!                │                                    ↓
-//!                └──────────── ShuttingDown ←─────────┘ (on fatal)
+//!                └──────────── ShuttingDown ←─────────┘ (on fatal or SIGTERM)
 //! ```
 
 use std::io;
@@ -50,8 +60,8 @@ pub(crate) enum Event {
     DrainCompleted,
     /// Pipelines did not drain in time.
     DrainTimedOut,
-    /// New config is valid.
-    ConfigValid(Box<ffwd_config::ValidatedConfig>),
+    /// New config is valid (caller stores the validated config in pending).
+    ConfigValid,
     /// New config failed to read or validate.
     ConfigInvalid(String),
     /// Config diff shows non-reloadable changes.
@@ -94,8 +104,12 @@ pub(crate) struct ReloadCoordinator {
     state: State,
     first_run: bool,
     has_pending: bool,
+    rebuild_attempts: u32,
     config_path: PathBuf,
 }
+
+/// Maximum consecutive build failures before giving up.
+const MAX_REBUILD_ATTEMPTS: u32 = 3;
 
 impl ReloadCoordinator {
     /// Create a new coordinator for the given config path.
@@ -104,6 +118,7 @@ impl ReloadCoordinator {
             state: State::Starting,
             first_run: true,
             has_pending: false,
+            rebuild_attempts: 0,
             config_path,
         }
     }
@@ -119,7 +134,10 @@ impl ReloadCoordinator {
         self.first_run
     }
 
-    /// Whether a pending config was committed in the last transition.
+    /// Whether a validated config is pending commit.
+    ///
+    /// Returns `true` when a new config has been validated and is waiting to
+    /// be committed after a successful pipeline build.
     #[allow(dead_code)]
     pub fn has_pending(&self) -> bool {
         self.has_pending
@@ -127,6 +145,14 @@ impl ReloadCoordinator {
 
     /// Drive the state machine. Returns effects to execute.
     pub fn step(&mut self, event: Event) -> Vec<Effect> {
+        // ShutdownRequested is handled uniformly for all non-terminal states.
+        if matches!(event, Event::ShutdownRequested)
+            && !matches!(self.state, State::ShuttingDown { .. })
+        {
+            self.state = State::ShuttingDown { error: None };
+            return vec![Effect::DrainPipelines, Effect::Shutdown];
+        }
+
         match (&self.state, event) {
             // ── Starting ──
             (State::Starting, Event::PipelinesBuilt) => {
@@ -150,10 +176,6 @@ impl ReloadCoordinator {
                 self.state = State::ShuttingDown { error: err_msg };
                 vec![Effect::Shutdown]
             }
-            (State::Running, Event::ShutdownRequested) => {
-                self.state = State::ShuttingDown { error: None };
-                vec![Effect::DrainPipelines, Effect::Shutdown]
-            }
             (State::Running, Event::ReloadRequested) => {
                 self.state = State::Draining;
                 vec![Effect::DrainPipelines]
@@ -176,32 +198,37 @@ impl ReloadCoordinator {
             }
 
             // ── Validating ──
-            (State::Validating, Event::ConfigValid(_validated)) => {
+            (State::Validating, Event::ConfigValid) => {
                 self.state = State::Building;
                 self.has_pending = true;
+                self.rebuild_attempts = 0;
                 vec![Effect::BuildPipelines]
             }
             (State::Validating, Event::ConfigInvalid(reason)) => {
                 // Invalid config — stay alive, rebuild old pipelines.
                 self.state = State::Building;
                 self.has_pending = false;
+                self.rebuild_attempts = 0;
                 vec![Effect::ReportReloadError(reason), Effect::BuildPipelines]
             }
             (State::Validating, Event::ConfigNotReloadable(reason)) => {
                 // Non-reloadable change — stay alive, rebuild old pipelines.
                 self.state = State::Building;
                 self.has_pending = false;
+                self.rebuild_attempts = 0;
                 vec![Effect::ReportReloadError(reason), Effect::BuildPipelines]
             }
             (State::Validating, Event::ConfigUnchanged) => {
                 // No changes but pipelines were drained — rebuild them.
                 self.state = State::Building;
                 self.has_pending = false;
+                self.rebuild_attempts = 0;
                 vec![Effect::BuildPipelines]
             }
 
             // ── Building (non-first-run rebuild) ──
             (State::Building, Event::PipelinesBuilt) => {
+                self.rebuild_attempts = 0;
                 let mut effects = Vec::new();
                 if self.has_pending {
                     effects.push(Effect::CommitConfig);
@@ -213,17 +240,27 @@ impl ReloadCoordinator {
                 effects
             }
             (State::Building, Event::BuildFailed { pipeline, error }) => {
-                // Non-first-run build failure: log error, rebuild from current config.
+                self.rebuild_attempts += 1;
                 let msg = format!("pipeline '{pipeline}': {error}");
                 self.has_pending = false;
-                self.state = State::Building;
-                vec![Effect::ReportReloadError(msg), Effect::BuildPipelines]
+                if self.rebuild_attempts >= MAX_REBUILD_ATTEMPTS {
+                    self.state = State::ShuttingDown {
+                        error: Some(format!("build failed {MAX_REBUILD_ATTEMPTS} times: {msg}")),
+                    };
+                    vec![
+                        Effect::ReportReloadError(msg.clone()),
+                        Effect::FatalShutdown(msg),
+                    ]
+                } else {
+                    self.state = State::Building;
+                    vec![Effect::ReportReloadError(msg), Effect::BuildPipelines]
+                }
             }
 
             // ── ShuttingDown (terminal — no transitions) ──
             (State::ShuttingDown { .. }, _) => vec![],
 
-            // ── Invalid transitions ──
+            // ── Invalid transitions (no-op) ──
             _ => vec![],
         }
     }
@@ -289,8 +326,8 @@ mod tests {
                 .any(|e| matches!(e, Effect::ValidateConfig { .. }))
         );
 
-        // Config valid
-        let effects = c.step(Event::ConfigValid(Box::new(make_validated())));
+        // Config valid (caller stores validated config externally as pending)
+        let effects = c.step(Event::ConfigValid);
         assert_eq!(c.state(), &State::Building);
         assert!(c.has_pending());
         assert!(effects.iter().any(|e| matches!(e, Effect::BuildPipelines)));
@@ -381,9 +418,91 @@ mod tests {
         assert!(c.is_terminal());
     }
 
-    fn make_validated() -> ffwd_config::ValidatedConfig {
-        let yaml = "pipelines:\n  test:\n    inputs:\n      - type: stdin\n        format: json\n    outputs:\n      - type: stdout\n        format: json\n";
-        ffwd_config::ValidatedConfig::from_yaml(yaml, None).expect("valid yaml")
+    #[test]
+    fn shutdown_from_draining() {
+        let mut c = coord();
+        c.step(Event::PipelinesBuilt);
+        c.step(Event::ReloadRequested);
+        assert_eq!(c.state(), &State::Draining);
+
+        let effects = c.step(Event::ShutdownRequested);
+        assert!(c.is_terminal());
+        assert!(effects.iter().any(|e| matches!(e, Effect::DrainPipelines)));
+        assert!(effects.iter().any(|e| matches!(e, Effect::Shutdown)));
+    }
+
+    #[test]
+    fn shutdown_from_validating() {
+        let mut c = coord();
+        c.step(Event::PipelinesBuilt);
+        c.step(Event::ReloadRequested);
+        c.step(Event::DrainCompleted);
+        assert_eq!(c.state(), &State::Validating);
+
+        let effects = c.step(Event::ShutdownRequested);
+        assert!(c.is_terminal());
+        assert!(effects.iter().any(|e| matches!(e, Effect::Shutdown)));
+    }
+
+    #[test]
+    fn shutdown_from_building() {
+        let mut c = coord();
+        c.step(Event::PipelinesBuilt);
+        c.step(Event::ReloadRequested);
+        c.step(Event::DrainCompleted);
+        c.step(Event::ConfigValid);
+        assert_eq!(c.state(), &State::Building);
+
+        let effects = c.step(Event::ShutdownRequested);
+        assert!(c.is_terminal());
+        assert!(effects.iter().any(|e| matches!(e, Effect::Shutdown)));
+    }
+
+    #[test]
+    fn shutdown_from_starting() {
+        let mut c = coord();
+        assert_eq!(c.state(), &State::Starting);
+
+        let effects = c.step(Event::ShutdownRequested);
+        assert!(c.is_terminal());
+        assert!(effects.iter().any(|e| matches!(e, Effect::Shutdown)));
+    }
+
+    #[test]
+    fn bounded_retry_fatal_after_max_attempts() {
+        let mut c = coord();
+        c.step(Event::PipelinesBuilt);
+        c.step(Event::ReloadRequested);
+        c.step(Event::DrainCompleted);
+        c.step(Event::ConfigValid);
+        assert_eq!(c.state(), &State::Building);
+
+        // First two failures: retry
+        for _ in 0..2 {
+            let effects = c.step(Event::BuildFailed {
+                pipeline: "p".to_owned(),
+                error: "e".to_owned(),
+            });
+            assert_eq!(c.state(), &State::Building);
+            assert!(effects.iter().any(|e| matches!(e, Effect::BuildPipelines)));
+            assert!(
+                !effects
+                    .iter()
+                    .any(|e| matches!(e, Effect::FatalShutdown(_)))
+            );
+        }
+
+        // Third failure: fatal
+        let effects = c.step(Event::BuildFailed {
+            pipeline: "p".to_owned(),
+            error: "e".to_owned(),
+        });
+        assert!(c.is_terminal());
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::FatalShutdown(_)))
+        );
     }
 }
 
@@ -406,6 +525,7 @@ mod proptests {
             Just(Event::ReloadRequested),
             Just(Event::DrainCompleted),
             Just(Event::DrainTimedOut),
+            Just(Event::ConfigValid),
             Just(Event::ConfigInvalid("bad".to_owned())),
             Just(Event::ConfigNotReloadable("restart needed".to_owned())),
             Just(Event::ConfigUnchanged),
@@ -478,6 +598,19 @@ mod proptests {
             c.step(Event::PipelinesBuilt);
             prop_assert_eq!(c.state(), &State::Running);
         }
+
+        /// ShutdownRequested from ANY non-terminal state reaches terminal.
+        #[test]
+        fn shutdown_from_any_non_terminal_state(events in proptest::collection::vec(arb_event(), 0..30)) {
+            let mut c = ReloadCoordinator::new(PathBuf::from("/tmp/test.yaml"));
+            for event in events {
+                c.step(event);
+            }
+            if !c.is_terminal() {
+                c.step(Event::ShutdownRequested);
+                prop_assert!(c.is_terminal());
+            }
+        }
     }
 
     impl Clone for Event {
@@ -493,7 +626,7 @@ mod proptests {
                 Event::ReloadRequested => Event::ReloadRequested,
                 Event::DrainCompleted => Event::DrainCompleted,
                 Event::DrainTimedOut => Event::DrainTimedOut,
-                Event::ConfigValid(v) => Event::ConfigValid(v.clone()),
+                Event::ConfigValid => Event::ConfigValid,
                 Event::ConfigInvalid(s) => Event::ConfigInvalid(s.clone()),
                 Event::ConfigNotReloadable(s) => Event::ConfigNotReloadable(s.clone()),
                 Event::ConfigUnchanged => Event::ConfigUnchanged,

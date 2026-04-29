@@ -551,6 +551,7 @@ pub async fn run_pipelines(
                 }
 
                 let mut cycle_error: Option<io::Error> = None;
+                let mut break_outer = false;
                 if let Some(mut main_pipe) = main_pipeline {
                     tokio::select! {
                         result = main_pipe.run_async(&pipeline_shutdown) => {
@@ -561,13 +562,20 @@ pub async fn run_pipelines(
                             }
                             // Join siblings first, then report completion.
                             join_siblings(&mut handles, &reload_error).await?;
-                            coordinator.step(Event::PipelineCompleted { error: cycle_error });
+                            let effects = coordinator.step(Event::PipelineCompleted { error: cycle_error });
+                            for effect in &effects {
+                                if let Effect::Shutdown = effect {
+                                    break_outer = true;
+                                }
+                            }
                         }
                         _ = shutdown.cancelled() => {
                             pipeline_shutdown.cancel();
                             let _ = main_pipe.run_async(&pipeline_shutdown).await;
                             join_siblings(&mut handles, &reload_error).await?;
-                            coordinator.step(Event::ShutdownRequested);
+                            // ShutdownRequested is handled uniformly by the coordinator.
+                            let _effects = coordinator.step(Event::ShutdownRequested);
+                            break_outer = true;
                         }
                         _ = reload_rx.recv() => {
                             // Reload: drain pipelines.
@@ -599,7 +607,16 @@ pub async fn run_pipelines(
                         }
                     }
                 } else {
-                    coordinator.step(Event::PipelineCompleted { error: None });
+                    let effects = coordinator.step(Event::PipelineCompleted { error: None });
+                    for effect in &effects {
+                        if let Effect::Shutdown = effect {
+                            break_outer = true;
+                        }
+                    }
+                }
+
+                if break_outer {
+                    break;
                 }
             }
 
@@ -607,7 +624,8 @@ pub async fn run_pipelines(
                 // ── Re-read and validate config ──
                 reload_total.add(1, &[]);
                 tracing::info!(path = %options.config_path, "config reload: reading new config");
-                let new_yaml = match std::fs::read_to_string(options.config_path) {
+                let config_path = options.config_path.to_owned();
+                let new_yaml = match tokio::fs::read_to_string(&config_path).await {
                     Ok(y) => y,
                     Err(e) => {
                         tracing::error!(error = %e, "config reload: failed to read config file");
@@ -650,8 +668,8 @@ pub async fn run_pipelines(
                         "config reload: diff computed"
                     );
                     if diff.is_reloadable() {
-                        pending = Some(validated.clone());
-                        coordinator.step(Event::ConfigValid(Box::new(validated)));
+                        pending = Some(validated);
+                        coordinator.step(Event::ConfigValid);
                     } else {
                         tracing::error!(
                             server_changed = diff.server_changed,
@@ -672,15 +690,20 @@ pub async fn run_pipelines(
 
             State::Draining => {
                 // Draining is handled inline in the Running select! arm above.
-                // If we somehow reach this state in the loop, it means drain
-                // already completed and we should be in Validating.
-                unreachable!("drain is handled inside the Running select! block");
+                // If we reach this state in the outer loop, the executor stepped
+                // past drain without transitioning — this is a logic error.
+                debug_assert!(false, "drain is handled inside the Running select! block");
+                // In release: treat as if pipelines completed to unblock the loop.
+                coordinator.step(Event::DrainCompleted);
             }
 
             State::Running => {
-                // Running is also handled inside the Starting/Building arm
-                // because the pipeline select! happens there.
-                unreachable!("running is handled inside the build arm");
+                // Running is handled inside the Starting/Building arm because
+                // the pipeline select! happens there. Reaching here means the
+                // loop iterated without a state change — logic error.
+                debug_assert!(false, "running is handled inside the build arm");
+                // In release: break to avoid busy-looping.
+                break;
             }
 
             State::ShuttingDown { error } => {

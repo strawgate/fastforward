@@ -1,6 +1,6 @@
 //! Explicit state machine for the supervisor config-flow protocol.
 //!
-//! Models the progression: Idle → Reading → Validating → Writing → Signaling → Idle.
+//! Models the progression: Idle → Reading → Writing → Signaling → Idle.
 //! Each state transition is a pure function — side effects are performed by the
 //! caller based on the returned [`Effect`].
 //!
@@ -12,14 +12,14 @@ use std::path::PathBuf;
 /// States of the supervisor config-flow protocol.
 ///
 /// Matches the TLA+ `SupervisorProtocol` spec states.
+/// Note: validation is embedded in the Reading→Writing transition (ReadOk
+/// carries a `ValidatedConfig`), so there is no separate Validating state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum State {
     /// Waiting for a new config notification.
     Idle,
     /// Reading the intermediate config file from disk.
     Reading,
-    /// Validating the read config.
-    Validating,
     /// Writing validated config to the main config path.
     Writing,
     /// Sending SIGHUP to the child process.

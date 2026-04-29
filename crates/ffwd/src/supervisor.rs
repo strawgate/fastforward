@@ -687,7 +687,6 @@ mod proptests {
                     state,
                     CfState::Idle
                         | CfState::Reading
-                        | CfState::Validating
                         | CfState::Writing
                         | CfState::Signaling
                 ));
